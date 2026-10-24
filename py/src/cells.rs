@@ -10,6 +10,12 @@
 //! `set_cell`, the live `PyGraph`, bound through the same resolver
 //! (`glia_graph::cells`), so the in-memory graph equals the next build.
 //!
+//! A VECTOR is query-time (FB.3): it lands in `.glia/vectors.jsonl` only.
+//! No build applies it, so neither the layout (`write_through` reads
+//! `sidecar_only`) nor the live `PyGraph` gains a VECTOR cell: `set_cell`
+//! binds the qname for the report and leaves the graph as the next build
+//! has it, and `node_cell_bytes(id, "VECTOR")` is None on a built graph.
+//!
 //! `set_cell` finds the repo that owns the node in the graph itself and its
 //! root in the graph's `repo_roots` (a fresh build's paths, or the roots a
 //! loaded layout records); the stored row carries the node's move-stable hint.
@@ -228,7 +234,16 @@ pub(crate) fn set_cell_in(
     .with_kind(out.kind.clone())
     .with_hint(out.hint.clone());
     let idx = QnameIndex::build(merged, Some(repo));
-    let live = apply_cell_write(merged, &idx, &stored)?;
+    // A VECTOR binds for the report only: no build carries one (FB.3).
+    let live = if stored.cell == cell_type::VECTOR {
+        idx.resolve(
+            &stored.qname,
+            stored.kind.as_deref(),
+            stored.hint.as_deref(),
+        )
+    } else {
+        apply_cell_write(merged, &idx, &stored)?
+    };
     out.set_binding(merged, &live, caller.as_deref());
     eprintln!("{}", marker("write", &out));
     Ok(out)
@@ -251,7 +266,12 @@ pub(crate) fn remove_cell_in(
     };
     let live = r.with_kind(out.kind.clone()).with_hint(out.hint.clone());
     let idx = QnameIndex::build(merged, Some(repo));
-    out.set_target(&apply_cell_removal(merged, &idx, &live));
+    let target = if live.cell == cell_type::VECTOR {
+        idx.resolve(&live.qname, live.kind.as_deref(), live.hint.as_deref())
+    } else {
+        apply_cell_removal(merged, &idx, &live)
+    };
+    out.set_target(&target);
     eprintln!("{}", marker("remove", &out));
     Ok(Some(out))
 }
@@ -378,9 +398,11 @@ impl PyGraph {
         Ok(out.is_some())
     }
 
-    /// The raw bytes of a node's `cell_type` cell (a cell type NAME, e.g.
-    /// `"VECTOR"`), or None when the node, the cell or a bytes payload is
-    /// missing. `node_cells` keeps returning "" for a bytes payload.
+    /// The raw bytes of a node's `cell_type` cell (a cell type NAME), or None
+    /// when the node, the cell or a bytes payload is missing. `node_cells`
+    /// keeps returning "" for a bytes payload. A built graph holds no VECTOR
+    /// cell (vectors are query-time, FB.3: they live in
+    /// `.glia/vectors.jsonl`), so `"VECTOR"` reads None.
     fn node_cell_bytes(
         &self,
         py: Python<'_>,
@@ -455,6 +477,7 @@ inventory::submit! { ModuleFns { name: "cells", add: register } }
 mod tests {
     use std::path::PathBuf;
 
+    use glia_code_domain::external_inputs::{VectorRow, read_rows};
     use glia_store::{WriteThrough, is_gmap_stale, read_merged_sharded, write_merged_sharded};
 
     use super::*;
@@ -594,6 +617,62 @@ mod tests {
             ))
             .contains("not JSON")
         );
+    }
+
+    /// FB.3: `set_cell` of a VECTOR writes the sidecar only: it binds the live
+    /// node for the report, but neither the live graph nor the fresh layout
+    /// gains a cell, and the layout stays fresh.
+    #[test]
+    fn set_cell_vector_is_sidecar_only() {
+        let root = repo("vector");
+        let r = built(&root);
+        let dir = default_layout_dir(&root);
+        write_merged_sharded(&r.merged, &dir).expect("persist");
+        let mut live = r.merged.clone();
+        let v = cell_write(
+            "app::charge",
+            "VECTOR",
+            Payload::Vector(vec![0, 0, 128, 63]),
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .expect("a vector");
+        let out = set_cell_in(&mut live, &r.repo_roots, v).expect("write");
+        assert_eq!(
+            (out.write_through, out.target.as_str()),
+            (WriteThrough::SidecarOnly, "bound")
+        );
+        assert!(
+            marker("write", &out).ends_with("target=bound write_through=sidecar_only surface=pyo3"),
+            "{}",
+            marker("write", &out)
+        );
+        let cells = |m: &MergedGraph| -> Vec<Vec<glia_core::Cell>> {
+            m.graphs
+                .iter()
+                .flat_map(|g| g.nodes.iter().map(|n| n.cells.clone()))
+                .collect()
+        };
+        let before = cells(&r.merged);
+        assert_eq!(cells(&live), before, "the live graph is untouched");
+        assert_eq!(
+            cells(&read_merged_sharded(&dir).expect("layout")),
+            before,
+            "the layout is untouched"
+        );
+        assert!(!is_gmap_stale(&dir, &root));
+        let rm = removal("app::charge", "VECTOR", "", "api").expect("removal");
+        let gone = remove_cell_in(&mut live, &r.repo_roots, rm)
+            .expect("remove")
+            .expect("the row");
+        assert_eq!(
+            (gone.write_through, gone.target.as_str()),
+            (WriteThrough::SidecarOnly, "bound")
+        );
+        assert_eq!(cells(&live), before);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `set_cell` on a graph whose default layout is fresh: the sidecar, the
@@ -761,11 +840,21 @@ mod tests {
                 out.target.as_str(),
                 out.entry_id.as_deref()
             ),
-            (WriteThrough::NoGmap, "pending", None)
+            (WriteThrough::SidecarOnly, "pending", None)
         );
         assert_eq!(
             marker("write", &out),
-            "[cells] write qname=app::charge cell=VECTOR id=- rows=1 target=pending write_through=no_gmap surface=pyo3"
+            "[cells] write qname=app::charge cell=VECTOR id=- rows=1 target=pending write_through=sidecar_only surface=pyo3"
+        );
+        // FB.3: the row is in the sidecar, and the build applies none of it.
+        let (rows, errors) =
+            read_rows::<VectorRow>(&root.join(glia_code_domain::external_inputs::VECTORS_FILE));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.qname.as_str(), r.b64.as_str(), r.dims))
+                .collect::<Vec<_>>(),
+            [("app::charge", "AACAPw==", Some(1))]
         );
         let merged = built(&root).merged;
         let id = merged
@@ -775,14 +864,20 @@ mod tests {
             .find(|(_, q)| *q == "app::charge")
             .map(|(id, _)| id.0)
             .expect("app::charge");
-        assert_eq!(
-            node_cell_bytes_of(&merged, id, "VECTOR"),
-            Ok(Some(vec![0, 0, 128, 63]))
+        assert_eq!(node_cell_bytes_of(&merged, id, "VECTOR"), Ok(None));
+        assert!(
+            merged
+                .graphs
+                .iter()
+                .flat_map(|g| g.nodes.iter().flat_map(|n| n.cells.iter()))
+                .all(|c| c.kind != cell_type::VECTOR),
+            "the built graph holds no VECTOR cell"
         );
         assert_eq!(node_cell_bytes_of(&merged, id, "CONV"), Ok(None));
         assert!(node_cell_bytes_of(&merged, id, "NOPE").is_err());
         let rm = removal("app::charge", "VECTOR", "", "api").expect("removal");
-        assert!(remove_cell_at(path, &rm).expect("remove").is_some());
+        let gone = remove_cell_at(path, &rm).expect("remove").expect("the row");
+        assert_eq!(gone.write_through, WriteThrough::SidecarOnly);
         assert_eq!(
             node_cell_bytes_of(&built(&root).merged, id, "VECTOR"),
             Ok(None)

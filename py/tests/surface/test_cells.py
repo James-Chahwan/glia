@@ -83,9 +83,19 @@ def main() -> int:
         c.check("a warm load shows the CONV", cell(rg.load_from_gmap(d), "app::helper", CONV_ID) == live)
 
         vec = b"\x00\x00\x80\x3f"
-        out = g.set_cell("app::helper", "VECTOR", vec, dims=1)
+        out, err = stderr_of(lambda: g.set_cell("app::helper", "VECTOR", vec, dims=1))
         c.check("vector write", out.get("cell") == "VECTOR" and out.get("entry_id") is None, out)
-        c.check("node_cell_bytes", g.node_cell_bytes(node_id(g, "app::helper"), "VECTOR") == vec)
+        # FB.3: vectors are query-time: the sidecar only, never a cell.
+        c.check("vector write: sidecar only", out.get("write_through") == "sidecar_only", out)
+        c.check("vector write: bound", out.get("target") == "bound", out)
+        c.check("vector marker",
+                "[cells] write qname=app::helper cell=VECTOR id=- rows=1 target=bound "
+                "write_through=sidecar_only surface=pyo3" in err, err)
+        c.check("vector sidecar written", os.path.isfile(os.path.join(repo, ".glia", "vectors.jsonl")))
+        c.check("node_cell_bytes: no VECTOR cell", g.node_cell_bytes(node_id(g, "app::helper"), "VECTOR") is None)
+        c.check("a fresh generate() holds no VECTOR",
+                rg.generate(repo).node_cell_bytes(node_id(g, "app::helper"), "VECTOR") is None)
+        c.check("a vector write keeps the layout fresh", rg.is_stale(d, repo) is False)
         c.check("node_cell_bytes: none", g.node_cell_bytes(node_id(g, "app::helper"), "DECISION") is None)
 
         c.check("remove_cell", g.remove_cell("app::helper", "CONV", "000001") is True)

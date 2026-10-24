@@ -4,6 +4,15 @@
 //! write it through into a persisted layout when, and only when, that layout
 //! is fresh right now.
 //!
+//! A VECTOR is the exception (FB.3): vectors are query-time, so the build
+//! never applies `vectors.jsonl` and a layout holds no VECTOR cell. A VECTOR
+//! write or removal changes the sidecar only and reports
+//! [`WriteThrough::SidecarOnly`]; a fresh layout is still read to bind the
+//! qname for the report (`target` bound / ambiguous / orphaned as for any
+//! cell), but the gmap is never rewritten (a write-through would put back
+//! what the next rebuild drops). The vectors file is outside the layout
+//! fingerprint, so the layout stays fresh after the write.
+//!
 //! WHY FRESH-ONLY. Rewriting `manifest.json` moves its mtime, and
 //! `is_gmap_stale`'s scan compares every source against that mtime: a source
 //! edited between the build and the write would suddenly predate the manifest
@@ -118,6 +127,9 @@ pub enum WriteThrough {
     /// The layout holds several repos and the caller named none, so there is
     /// no one repo to bind in; the layout is left as is.
     MultiRepo,
+    /// A VECTOR write or removal (FB.3): the sidecar changed and the layout
+    /// was never written, since layouts hold no VECTOR cells.
+    SidecarOnly,
 }
 
 impl WriteThrough {
@@ -129,6 +141,7 @@ impl WriteThrough {
             WriteThrough::GmapStale => "gmap_stale",
             WriteThrough::NodeMissing => "node_missing",
             WriteThrough::MultiRepo => "multi_repo",
+            WriteThrough::SidecarOnly => "sidecar_only",
         }
     }
 }
@@ -387,7 +400,7 @@ pub fn write_cell(
 
     sidecar.upsert(&stored.with_hint(hint.clone()))?;
     let rows = sidecar.save()?;
-    let write_through = layout.finish(bound.as_ref())?;
+    let write_through = finish(layout, w.cell, bound.as_ref())?;
     let mut out = CellWriteOutcome {
         qname: w.qname.clone(),
         cell: cell_name(w.cell).to_string(),
@@ -444,7 +457,7 @@ pub fn remove_cell_entry(
         LayoutState::Skip(_) => None,
     };
     let rows = sidecar.save()?;
-    let write_through = layout.finish(bound.as_ref())?;
+    let write_through = finish(layout, removed.cell, bound.as_ref())?;
     let mut out = CellWriteOutcome {
         qname: removed.qname.clone(),
         cell: cell_name(removed.cell).to_string(),
@@ -522,6 +535,20 @@ pub fn apply_cell_removal(
 // ---------------------------------------------------------------------------
 // The layout side of one write
 // ---------------------------------------------------------------------------
+
+/// The write-through of one write of `cell`: a VECTOR never writes the
+/// layout (its in-memory copy only bound the qname, FB.3); any other cell
+/// goes through [`Layout::finish`].
+fn finish(
+    layout: Layout<'_>,
+    cell: CellTypeId,
+    bound: Option<&CellTarget>,
+) -> Result<WriteThrough, StoreError> {
+    if cell == cell_type::VECTOR {
+        return Ok(WriteThrough::SidecarOnly);
+    }
+    layout.finish(bound)
+}
 
 enum LayoutState {
     Fresh {
@@ -1068,6 +1095,7 @@ mod tests {
             WriteThrough::GmapStale,
             WriteThrough::NodeMissing,
             WriteThrough::MultiRepo,
+            WriteThrough::SidecarOnly,
         ] {
             assert_eq!(serde_json::to_value(w).unwrap(), json!(w.as_str()));
         }

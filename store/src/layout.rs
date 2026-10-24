@@ -1182,6 +1182,16 @@ fn is_store_output_name(name: &str) -> bool {
         || name.ends_with(".tmp")
 }
 
+/// Files under `.glia` read at query time only, never by a build (FB.3):
+/// `.glia/vectors.jsonl` (the semantic tier reads it itself, FB.4) and
+/// everything under `.glia/vocab-snapshot/` (the identifier vocabulary,
+/// FB.13a). Writing them must not stale a layout, so
+/// [`external_inputs_fingerprint`] leaves them out; `rel` is the
+/// repo-relative `/`-joined path.
+pub(crate) fn is_query_time_input(rel: &str) -> bool {
+    rel == ".glia/vectors.jsonl" || rel.starts_with(".glia/vocab-snapshot/")
+}
+
 /// Content fingerprint of the inputs under `<repo_root>/.glia`, glia's control
 /// directory (LF.1d): repo-relative `/`-joined path -> xxhash64 hex of the
 /// bytes, for every regular file (a symlink to one included) except the
@@ -1189,8 +1199,9 @@ fn is_store_output_name(name: &str) -> bool {
 /// `*.gmap`, `manifest.json`, `parse_cache.bin`, `*.lock`, `*.tmp` and
 /// `.gitignore` (so the flat 0.4.x `glia build` output and a custom layout dir
 /// inside `.glia` are excluded too). Gitignore-blind by design: a gitignored
-/// docs snapshot is an input all the same. Files are hashed in 1 MiB chunks,
-/// so a large `vectors.jsonl` is one streaming pass. An unreadable file is
+/// docs snapshot is an input all the same. The query-time inputs
+/// ([`is_query_time_input`]: `vectors.jsonl`, `vocab-snapshot/`) are left
+/// out too. Files are hashed in 1 MiB chunks. An unreadable file is
 /// left out (glia cannot read it either). Empty when there is no `.glia`.
 pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -1227,6 +1238,9 @@ pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String>
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
+            if is_query_time_input(&key) {
+                continue;
+            }
             if let Some(hash) = hash_file_streaming(&path) {
                 out.insert(key, hash);
             }
@@ -2405,6 +2419,29 @@ mod tests {
                 ".glia/history/2026/log.jsonl"
             ]
         );
+    }
+
+    /// FB.3: the query-time inputs never enter the fingerprint, so writing
+    /// them never stales a layout; a cells.jsonl write still does (control).
+    #[test]
+    fn fingerprint_skips_query_time_inputs() {
+        assert!(is_query_time_input(".glia/vectors.jsonl"));
+        assert!(is_query_time_input(".glia/vocab-snapshot/meta.json"));
+        assert!(!is_query_time_input(".glia/cells.jsonl"));
+        assert!(!is_query_time_input(".glia/vectors.jsonl.bak"));
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay\n");
+        let gmap_dir = default_gmap_dir(&repo_dir);
+        write_merged_sharded(&one_graph("test://qt"), &gmap_dir).unwrap();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        let before = external_inputs_fingerprint(&repo_dir);
+        write_file(&repo_dir.join(".glia/vectors.jsonl"), "{}\n");
+        write_file(&repo_dir.join(".glia/vocab-snapshot/terms.jsonl"), "{}\n");
+        assert_eq!(external_inputs_fingerprint(&repo_dir), before);
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        write_file(&repo_dir.join(".glia/cells.jsonl"), "{}\n");
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir));
     }
 
     /// The store's own writes under `.glia` never enter the fingerprint, or a

@@ -484,7 +484,8 @@ fn vector_set_ls_rm() {
     ]);
     assert_eq!(
         set.stdout.trim(),
-        "wrote VECTOR - for a::charge (write-through: no gmap)"
+        "wrote VECTOR - for a::charge (write-through: sidecar only)",
+        "FB.3: a VECTOR never writes the layout"
     );
     let ls = ok(&["cell", "ls", root]);
     assert!(

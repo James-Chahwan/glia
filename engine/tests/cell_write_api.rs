@@ -4,6 +4,10 @@
 //! only when that gmap is fresh right now, so a write never makes a stale
 //! layout look fresh and a warm load serves what a rebuild would build.
 //!
+//! FB.3: a VECTOR write (or removal) changes `vectors.jsonl` only and reports
+//! `write_through = sidecar_only`: vectors are query-time, so neither the
+//! layout nor a build ever holds a VECTOR cell, and the layout stays fresh.
+//!
 //! DT.12b: a caller's hint must be a v1 identity hint that agrees with the
 //! write's kind; the write binds by the qname as the build does, and a bound
 //! node whose own hint differs is reported `hint_differs` with the fields.
@@ -282,22 +286,50 @@ fn conv_appends_get_sequential_ids() {
     );
 }
 
-/// A VECTOR goes to vectors.jsonl as base64, writes through as bytes, and a
-/// rebuild decodes the same bytes.
+/// Every file's bytes in a layout dir, by name.
+fn layout_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// FB.3: a VECTOR goes to vectors.jsonl as base64 and nowhere else: the
+/// outcome is `sidecar_only` (still bound against the fresh layout), the
+/// layout's bytes are unchanged and stay fresh, and a rebuild holds no VECTOR
+/// cell. A removal is sidecar-only the same way.
 #[test]
-fn vector_roundtrip() {
+fn vector_writes_the_sidecar_only() {
     let tmp = tempfile::tempdir().unwrap();
     let root = repo(tmp.path(), "repo");
     let dir = persist(&root);
+    let before = layout_bytes(&dir);
     let w = CellWrite::vector("a::charge", VECTOR.to_vec(), Some("m1".into()), Some(2));
     let out = write_cell(&root, Some(&dir), None, &w).unwrap();
     assert_eq!(
         (
             out.write_through,
+            out.write_through.as_str(),
+            out.target.as_str(),
             out.entry_id.as_deref(),
             out.cell.as_str()
         ),
-        (WriteThrough::Applied, None, "VECTOR")
+        (
+            WriteThrough::SidecarOnly,
+            "sidecar_only",
+            "bound",
+            None,
+            "VECTOR"
+        )
     );
     let (rows, errors) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
     assert!(errors.is_empty());
@@ -309,20 +341,19 @@ fn vector_roundtrip() {
         !root.join(CELLS_FILE).exists(),
         "a vector never touches cells.jsonl"
     );
-    let bytes = Some(CellPayload::Bytes(VECTOR.to_vec()));
+    assert_eq!(layout_bytes(&dir), before, "the layout is never rewritten");
+    assert!(!is_gmap_stale(&dir, &root));
     assert_eq!(
         payload(
             &read_merged_sharded(&dir).unwrap(),
             "a::charge",
             cell_type::VECTOR
         ),
-        bytes
+        None
     );
-    assert_eq!(
-        payload(&build(&root), "a::charge", cell_type::VECTOR),
-        bytes
-    );
-    // A second vector for the qname replaces the row.
+    assert_eq!(payload(&build(&root), "a::charge", cell_type::VECTOR), None);
+    // A second vector for the qname replaces the row; an unknown qname is
+    // reported orphaned, sidecar-only too.
     write_cell(
         &root,
         Some(&dir),
@@ -332,6 +363,37 @@ fn vector_roundtrip() {
     .unwrap();
     let (rows, _) = read_rows::<VectorRow>(&root.join(VECTORS_FILE));
     assert_eq!(rows.len(), 1);
+    let gone = write_cell(
+        &root,
+        Some(&dir),
+        None,
+        &CellWrite::vector("a::gone", vec![1; 4], None, Some(1)),
+    )
+    .unwrap();
+    assert_eq!(
+        (gone.write_through, gone.target.as_str()),
+        (WriteThrough::SidecarOnly, "orphaned")
+    );
+    // No layout: still sidecar-only, the target pending.
+    let none = write_cell(
+        &root,
+        None,
+        None,
+        &CellWrite::vector("a::refund", vec![1; 4], None, Some(1)),
+    )
+    .unwrap();
+    assert_eq!(
+        (none.write_through, none.target.as_str()),
+        (WriteThrough::SidecarOnly, "pending")
+    );
+    let removed = remove_cell_entry(&root, Some(&dir), None, &CellRemoval::vector("a::charge"))
+        .unwrap()
+        .expect("the row exists");
+    assert_eq!(
+        (removed.write_through, removed.target.as_str()),
+        (WriteThrough::SidecarOnly, "bound")
+    );
+    assert_eq!(layout_bytes(&dir), before, "a removal never rewrites it");
     assert!(!is_gmap_stale(&dir, &root));
 }
 
@@ -774,14 +836,9 @@ fn twins_keep_their_own_vector_rows() {
             .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::VECTOR))
             .map(|c| c.payload.clone())
     };
-    assert_eq!(
-        vector_of(&m, node_kind::METHOD),
-        Some(CellPayload::Bytes(method_vec.clone()))
-    );
-    assert_eq!(
-        vector_of(&m, node_kind::ATTRIBUTE),
-        Some(CellPayload::Bytes(attr_vec.clone()))
-    );
+    // FB.3: the build applies neither row.
+    assert_eq!(vector_of(&m, node_kind::METHOD), None);
+    assert_eq!(vector_of(&m, node_kind::ATTRIBUTE), None);
 
     // A kind-less removal matches only a kind-less row: both stay.
     assert!(

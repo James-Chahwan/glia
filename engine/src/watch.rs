@@ -4,7 +4,7 @@
 //! DC.7c).
 //!
 //! A session is one repo's build kept open (DC.7a): the walk plan and its file
-//! table (every queued file's class, [`Read`] and stat stamp), the repo-level
+//! table (every queued file's class, `Read` and stat stamp), the repo-level
 //! inputs the build reads besides the walked files, one [`ParseCache`] with its
 //! DC.4 build memos, and the last [`GenerateResult`]. [`WatchSession::apply`]
 //! takes the paths the caller saw change and rebuilds through the same DC.2
@@ -15,8 +15,8 @@
 //!
 //! Group early cutoff (DC.7b): a language group's pre-pass graph is a pure
 //! function of its ordered post-graft parses, the repo id and the repo-level
-//! inputs its builder reads ([`hidden_fp`]). The session keeps every group's
-//! last build ([`CachedGroup`]) under a fingerprint of exactly those inputs
+//! inputs its builder reads (`hidden_fp`). The session keeps every group's
+//! last build (`CachedGroup`) under a fingerprint of exactly those inputs
 //! (each parse's canonical bincode through `cache::parse_fingerprint`, taken
 //! after the grafts, on the pool), plus the overlay and the proto service set
 //! (so a change of either rebuilds every group, as its `full_rebuild` reason
@@ -43,17 +43,17 @@
 //!
 //! Stat poll (DC.7c, no notify crate): [`WatchSession::changed_paths`] stats
 //! (a) every table entry (`len`, mtime), (b) re-reads under the racy rule
-//! ([`Window`]) each entry whose recorded mtime could hide a same-length
+//! (`Window`) each entry whose recorded mtime could hide a same-length
 //! rewrite inside one timestamp tick, (c) stats every walked directory and
 //! region root (an entry added, removed or renamed moves its directory's
 //! mtime, and a region root's entries are what `gate_dir` reads) and (d) the
-//! inputs a build reads besides the table ([`Input`]: the `.gitignore`s, the
+//! inputs a build reads besides the table (`Input`: the `.gitignore`s, the
 //! manifests root detection and a re-plan read that are no table entry, the
 //! `CMakeLists.txt` / `compile_commands.json` the include roots read, every
 //! file under `.glia/` but the layout, the git identity files). A directory
 //! or watched input inside the racy window is checked against a fingerprint
 //! of its listing or bytes taken right before the update that last read it
-//! ([`WatchSession::capture`]); one with none is reported, and the update it
+//! (`WatchSession::capture`); one with none is reported, and the update it
 //! triggers takes one. [`WatchSession::poll`] is the scan, then
 //! [`WatchSession::apply`] of what it found. The watermark the racy window
 //! hangs from moves only when a scan finds nothing, so a recorded value is
@@ -88,6 +88,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use glia_code_domain::FileParse;
+use glia_code_domain::external_inputs::VECTORS_FILE;
 use glia_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE};
 use glia_code_domain::project_roots::{self, ProjectRoot};
 use glia_code_domain::snapshots::scip_dir;
@@ -154,8 +155,10 @@ pub enum Durability {
 }
 
 /// The durability of the repo-relative path `rel` (`/`-separated):
-/// - `glia_inputs`: `.glia` and everything under it but `.glia/graph/**` and
-///   `.glia/calibration-snapshot/**`, which no build reads (the overlay, the
+/// - `glia_inputs`: `.glia` and everything under it but `.glia/graph/**`,
+///   `.glia/calibration-snapshot/**` and the query-time inputs
+///   `.glia/vectors.jsonl` / `.glia/vocab-snapshot/**` (FB.3), which no build
+///   reads (the overlay, the
 ///   `[walk]` / `[[project]]` config, the snapshots passes read);
 /// - `gitignore`: any `.gitignore`;
 /// - `go_mod`: any `go.mod` (the module set, so the parse cache's context);
@@ -186,6 +189,7 @@ pub fn durability(rel: &str) -> Durability {
             || rest
                 .strip_prefix(CALIBRATION_DIR)
                 .is_some_and(|r| r.starts_with('/'))
+            || is_query_time_rel(rest)
         {
             Durability::Low
         } else {
@@ -204,6 +208,27 @@ pub fn durability(rel: &str) -> Durability {
     };
     reason.map_or(Durability::Low, Durability::High)
 }
+
+/// `.glia`-relative `rest` is a query-time input no build reads (FB.3): the
+/// vectors sidecar (the semantic tier reads it, FB.4) or the identifier
+/// vocabulary snapshot (FB.13a), so a write to it is no re-plan and no input
+/// change (the layout fingerprint skips the same paths, `glia_store`'s
+/// `is_query_time_input`). The sidecar writer's `vectors.jsonl.tmp` (written,
+/// then renamed over the file) counts too, so a poll that catches it mid-write
+/// re-plans nothing (the fingerprint skips every `*.tmp` already).
+fn is_query_time_rel(rest: &str) -> bool {
+    let vectors = VECTORS_FILE
+        .strip_prefix(CONTROL_DIR)
+        .map(|r| r.trim_start_matches('/'));
+    vectors.is_some_and(|v| rest == v || rest.strip_prefix(v) == Some(".tmp"))
+        || rest == VOCAB_SNAPSHOT_DIR
+        || rest
+            .strip_prefix(VOCAB_SNAPSHOT_DIR)
+            .is_some_and(|r| r.starts_with('/'))
+}
+
+/// The identifier vocabulary snapshot's directory under `.glia` (FB.13a).
+const VOCAB_SNAPSHOT_DIR: &str = "vocab-snapshot";
 
 /// `base` names a project-root manifest the walk's root detection reads: a
 /// [`project_roots::MANIFESTS`] name, or a non-empty stem with a
@@ -999,7 +1024,8 @@ impl WatchSession {
     }
 
     /// Whether a changed `rel` cannot reach the graph: the layout dir, the
-    /// ranking calibration (`.glia/calibration-snapshot/`), a path
+    /// ranking calibration (`.glia/calibration-snapshot/`), the query-time
+    /// inputs (`.glia/vectors.jsonl`, `.glia/vocab-snapshot/`, FB.3), a path
     /// under a hard-skipped directory (the root's `.git/HEAD` / `.git/config`
     /// and `.glia/` inputs aside), the 0.4.x layout `.ai/repo-graph`, or a path
     /// two or more levels below a region root.
@@ -1009,7 +1035,10 @@ impl WatchSession {
         }
         let parts: Vec<&str> = rel.split('/').collect();
         if parts.first() == Some(&CONTROL_DIR) && parts.len() > 1 {
-            return matches!(parts.get(1), Some(&"graph") | Some(&CALIBRATION_DIR));
+            return matches!(parts.get(1), Some(&"graph") | Some(&CALIBRATION_DIR))
+                || rel
+                    .strip_prefix(CONTROL_DIR)
+                    .is_some_and(|r| is_query_time_rel(r.trim_start_matches('/')));
         }
         if rel == ".ai/repo-graph" || rel.starts_with(".ai/repo-graph/") {
             return true;
@@ -1885,8 +1914,9 @@ fn glia_inputs_fp(root: &Path) -> u64 {
     h.finish()
 }
 
-/// Every file under `<root>/.glia` but the layout dir `.glia/graph` and the
-/// ranking calibration `.glia/calibration-snapshot` (no build reads it), by
+/// Every file under `<root>/.glia` but the layout dir `.glia/graph`, the
+/// ranking calibration `.glia/calibration-snapshot` and the query-time inputs
+/// (`vectors.jsonl`, `vocab-snapshot`; no build reads any of them), by
 /// sorted path relative to `.glia`: what [`glia_inputs_fp`] hashes and the
 /// stat poll watches ([`Input::Glia`]).
 fn glia_files(root: &Path) -> Vec<(String, PathBuf)> {
@@ -1903,7 +1933,7 @@ fn glia_files(root: &Path) -> Vec<(String, PathBuf)> {
             } else {
                 format!("{rel}/{name}")
             };
-            if rel == "graph" || rel == CALIBRATION_DIR {
+            if rel == "graph" || rel == CALIBRATION_DIR || is_query_time_rel(&rel) {
                 continue;
             }
             let path = entry.path();
@@ -2384,11 +2414,49 @@ mod tests {
         assert_clean(&s, &dir, tmp.path(), "after_noops");
     }
 
+    /// FB.3: the vectors sidecar and the vocab snapshot are query-time: the
+    /// stat poll never lists them, and naming them (or the sidecar writer's
+    /// `.tmp`) is a noop, no re-plan.
+    #[test]
+    fn query_time_inputs_are_noops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        let mut s = WatchSession::open(dir.to_str().unwrap(), &BuildOptions::default()).unwrap();
+        let totals = (s.result().total_nodes, s.result().total_edges);
+        write(&dir, ".glia/vectors.jsonl", "{\"qname\":\"a::foo\"}\n");
+        write(&dir, ".glia/vocab-snapshot/terms.jsonl", "{}\n");
+        let listed = s.changed_paths();
+        assert!(
+            !listed.iter().any(|p| {
+                let p = p.to_string_lossy();
+                p.contains("vectors.jsonl") || p.contains("vocab-snapshot")
+            }),
+            "{listed:?}"
+        );
+        for paths in [
+            vec![PathBuf::from(".glia/vectors.jsonl")],
+            vec![PathBuf::from(".glia/vectors.jsonl.tmp")],
+            vec![
+                PathBuf::from(".glia/vocab-snapshot/terms.jsonl"),
+                PathBuf::from(".glia/vocab-snapshot"),
+            ],
+        ] {
+            let u = s.apply(&paths).unwrap();
+            assert_eq!(u.seq, 0, "{paths:?}: {u:?}");
+            assert!(u.full_rebuild.is_none(), "{paths:?}: {u:?}");
+            assert!(u.groups_rebuilt.is_empty(), "{paths:?}: {u:?}");
+            assert_eq!((u.total_nodes, u.total_edges), totals, "{paths:?}");
+        }
+        assert_clean(&s, &dir, tmp.path(), "query_time_inputs");
+    }
+
     #[test]
     fn durability_table() {
         let high = [
             (".glia/overlay.toml", "glia_inputs"),
             (".glia/scip-snapshot/index.json", "glia_inputs"),
+            (".glia/vectors.jsonl.bak", "glia_inputs"),
+            (".glia/vocab-snapshotx/a", "glia_inputs"),
             (".glia", "glia_inputs"),
             (".gitignore", "gitignore"),
             ("web/.gitignore", "gitignore"),
@@ -2417,6 +2485,10 @@ mod tests {
             "docs/guide.md",
             ".glia/graph/manifest.json",
             ".glia/calibration-snapshot/calibration.json",
+            ".glia/vectors.jsonl",
+            ".glia/vectors.jsonl.tmp",
+            ".glia/vocab-snapshot",
+            ".glia/vocab-snapshot/terms.jsonl",
             "report.sql",
         ] {
             assert_eq!(durability(rel), Durability::Low, "{rel}");

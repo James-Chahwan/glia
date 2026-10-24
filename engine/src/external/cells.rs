@@ -1,15 +1,20 @@
-//! The cell-sidecar stage (LF.1a): `.glia/cells.jsonl` (checked in) and
-//! `.glia/vectors.jsonl` (local) applied to their nodes at build, through the
-//! graph crate's one resolver and apply function (`glia_graph::cells`),
-//! so a build binds a row exactly as a live write and a persisted
-//! write-through do.
+//! The cell-sidecar stage (LF.1a): `.glia/cells.jsonl` (checked in) applied
+//! to its nodes at build, through the graph crate's one resolver and apply
+//! function (`glia_graph::cells`), so a build binds a row exactly as a live
+//! write and a persisted write-through do.
 //!
-//! Rows apply in file order, cells file first; writers keep the files sorted,
-//! so a node's cell order is stable. A row that does not parse, names an
+//! `.glia/vectors.jsonl` is NOT a build input (FB.3): vectors are query-time,
+//! read from the sidecar itself by the semantic tier (FB.4) with the model and
+//! text hash a cell would drop. A build never applies a VECTOR cell, so the
+//! marker's `VECTOR=` count is always 0, and editing the vectors file neither
+//! stales a layout (`glia_store` `is_query_time_input`) nor re-plans a watch.
+//!
+//! Rows apply in file order; writers keep the file sorted, so a node's cell
+//! order is stable. A row that does not parse, names an
 //! unknown cell type or fails its entry rules is counted `rejected` and never
 //! sinks the build.
 //!
-//! Marker, once per repo that has either file (the fired_on line):
+//! Marker, once per repo that has a cells file (the fired_on line):
 //!   `[cells] sidecar repo=<label> rows=<r> bound=<b> rekeyed=<k> ambiguous=<a> orphaned=<o> rejected=<x> (CONSTRAINT=<n> DECISION=<n> CONV=<n> VECTOR=<n>)`
 //! where the per-type counts are the rows applied (bound + rekeyed). Then one
 //! detail line per row that did not simply bind, at most
@@ -17,9 +22,7 @@
 //!   `[cells] rejected|orphaned|ambiguous|rekeyed <file> qname=<q> cell=<C> ...`.
 
 use glia_code_domain::cell_type;
-use glia_code_domain::external_inputs::{
-    CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, WRITABLE, read_rows,
-};
+use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, CellWrite, WRITABLE, read_rows};
 use glia_core::{CellTypeId, NodeId};
 use glia_graph::MergedGraph;
 use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
@@ -102,21 +105,20 @@ impl Tally {
     }
 }
 
-/// Apply `input`'s sidecars to `merged`. True when a cell was written.
+/// Apply `input`'s cells sidecar to `merged`. True when a cell was written.
+/// The vectors sidecar is never read here (query-time, FB.3).
 pub(super) fn apply_sidecar(merged: &mut MergedGraph, input: &RepoInputs) -> bool {
     let cells_path = input.root.join(CELLS_FILE);
-    let vectors_path = input.root.join(VECTORS_FILE);
-    if !cells_path.is_file() && !vectors_path.is_file() {
+    if !cells_path.is_file() {
         return false;
     }
     let (cell_rows, cell_errors) = read_rows::<CellRow>(&cells_path);
-    let (vector_rows, vector_errors) = read_rows::<VectorRow>(&vectors_path);
     let mut t = Tally::default();
-    for e in cell_errors.iter().chain(&vector_errors) {
+    for e in &cell_errors {
         t.rows += 1;
         t.reject(e);
     }
-    if !cell_rows.is_empty() || !vector_rows.is_empty() {
+    if !cell_rows.is_empty() {
         let idx = QnameIndex::build(merged, Some(input.repo));
         for row in &cell_rows {
             t.rows += 1;
@@ -128,12 +130,6 @@ pub(super) fn apply_sidecar(merged: &mut MergedGraph, input: &RepoInputs) -> boo
                 }
                 Err(e) => t.reject(&format!("{what}: {e}")),
             }
-        }
-        for row in &vector_rows {
-            t.rows += 1;
-            let what = format!("{VECTORS_FILE} qname={} cell=VECTOR", row.qname);
-            let target = CellWrite::try_from(row).and_then(|w| apply_cell_write(merged, &idx, &w));
-            t.count(merged, cell_type::VECTOR, &what, target);
         }
     }
     report(&input.label, &t);

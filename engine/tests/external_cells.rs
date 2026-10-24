@@ -1,6 +1,8 @@
-//! LF.1a: `.glia/cells.jsonl` and `.glia/vectors.jsonl` are applied to their
-//! nodes at build, through `glia_graph::cells`, and a build with a
-//! sidecar is as byte-reproducible as one without.
+//! LF.1a: `.glia/cells.jsonl` is applied to its nodes at build, through
+//! `glia_graph::cells`, and a build with a sidecar is as byte-reproducible as
+//! one without. FB.3: `.glia/vectors.jsonl` is query-time, never a build
+//! input: a build applies no VECTOR cell and rewriting the file leaves a
+//! persisted layout fresh.
 
 use std::path::Path;
 
@@ -99,22 +101,67 @@ fn orphaned_and_rejected_rows_change_nothing() {
     assert_eq!(code.len(), 1);
 }
 
+/// FB.3: a valid vectors row (and an invalid one) puts no VECTOR cell on its
+/// node; the build's cells are a bare build's.
 #[test]
-fn vector_row_decodes_to_bytes() {
-    let tmp = tempfile::tempdir().unwrap();
-    let ok = r#"{"qname":"a::charge","dims":2,"b64":"AACAPwAAAEA="}"#;
-    let r = generate_one(&repo(tmp.path(), None, Some(ok))).unwrap();
-    assert_eq!(
-        of_type(&cells_of(&r, "a::charge"), cell_type::VECTOR),
-        [&CellPayload::Bytes(vec![0, 0, 128, 63, 0, 0, 0, 64])]
-    );
+fn vectors_sidecar_is_not_a_build_input() {
+    let bare_tmp = tempfile::tempdir().unwrap();
+    let bare = generate_one(&repo(bare_tmp.path(), None, None)).unwrap();
+    for row in [
+        r#"{"qname":"a::charge","dims":2,"b64":"AACAPwAAAEA="}"#,
+        r#"{"qname":"a::charge","dims":3,"b64":"AACAPwAAAEA="}"#,
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = generate_one(&repo(tmp.path(), None, Some(row))).unwrap();
+        assert!(
+            r.merged
+                .graphs
+                .iter()
+                .flat_map(|g| g.nodes.iter().flat_map(|n| n.cells.iter()))
+                .all(|c| c.kind != cell_type::VECTOR),
+            "no VECTOR cell from {row}"
+        );
+        assert_eq!(cells_of(&r, "a::charge"), cells_of(&bare, "a::charge"));
+    }
+}
+
+/// FB.3: rewriting `.glia/vectors.jsonl` leaves a persisted layout fresh (no
+/// rebuild); rewriting `.glia/cells.jsonl` stales it (the control).
+#[test]
+fn vectors_rewrite_keeps_the_layout_fresh() {
+    use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild, persist_result};
 
     let tmp = tempfile::tempdir().unwrap();
-    let bad = r#"{"qname":"a::charge","dims":3,"b64":"AACAPwAAAEA="}"#;
-    let r = generate_one(&repo(tmp.path(), None, Some(bad))).unwrap();
+    let vec_row = r#"{"qname":"a::charge","dims":2,"b64":"AACAPwAAAEA="}"#;
+    let repo_s = repo(tmp.path(), Some(CONV_ROW), Some(vec_row));
+    let root = Path::new(&repo_s);
+    let dir = default_layout_dir(root);
+    persist_result(&generate_one(&repo_s).unwrap(), &dir, "test").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let (_, outcome) = load_or_rebuild(&dir, Some(root), false).unwrap();
+    assert!(matches!(outcome, LoadOutcome::Fresh), "{outcome:?}");
+
+    let two = format!(
+        "{vec_row}\n{}\n",
+        r#"{"qname":"a::other","dims":1,"b64":"AACAPw=="}"#
+    );
+    std::fs::write(root.join(".glia/vectors.jsonl"), two).unwrap();
+    let (r, outcome) = load_or_rebuild(&dir, Some(root), false).unwrap();
     assert!(
-        of_type(&cells_of(&r, "a::charge"), cell_type::VECTOR).is_empty(),
-        "dims=3 needs 12 bytes"
+        matches!(outcome, LoadOutcome::Fresh),
+        "a vectors rewrite must not stale the layout: {outcome:?}"
+    );
+    assert!(of_type(&cells_of(&r, "a::charge"), cell_type::VECTOR).is_empty());
+
+    std::fs::write(
+        root.join(".glia/cells.jsonl"),
+        CONV_ROW.replace("retries are safe", "retries are idempotent"),
+    )
+    .unwrap();
+    let (_, outcome) = load_or_rebuild(&dir, Some(root), true).unwrap();
+    assert!(
+        matches!(outcome, LoadOutcome::Rebuilt { .. }),
+        "a cells rewrite stales the layout: {outcome:?}"
     );
 }
 
@@ -136,7 +183,11 @@ fn sidecar_changes_only_its_node_cells() {
                 .get(&na.id)
                 .is_some_and(|q| q == "a::charge")
             {
-                assert_eq!(na.cells.len(), nb.cells.len() + 2, "CONV + VECTOR appended");
+                assert_eq!(
+                    na.cells.len(),
+                    nb.cells.len() + 1,
+                    "CONV appended, no VECTOR (FB.3)"
+                );
                 assert_eq!(na.cells[..nb.cells.len()], nb.cells[..]);
             } else {
                 assert_eq!(na.cells, nb.cells);
