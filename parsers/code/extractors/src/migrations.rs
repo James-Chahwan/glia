@@ -23,6 +23,7 @@
 
 use glia_core::{NodeId, RepoId};
 
+use crate::code_guard::LazyGuard;
 use crate::data_entities::{
     DataEntityFlavor, DataEntityNodes, EntitySink, blank_sql_noise, canonical_sql_name, in_spans,
     line_opens_with, literal_spans, scan_sql_ddl, sql_file_tables,
@@ -382,8 +383,13 @@ const KWARG_WINDOW: usize = 4096;
 /// model: it takes the spelling of a `CreateModel(name="Order")` in the same
 /// file when one matches, so both land on the model-keyed entity A13.17's
 /// Django models emit.
-pub fn scan_migration_dsl(source: &str) -> Vec<DslTable> {
+///
+/// FD.4b: `path` selects the CJ.1 code guard (`.rs` / `.py`; empty = none):
+/// a needle whose first byte sits in a literal or comment there is no call,
+/// refusals printing `[code-guard] migrations lang=<l> dropped=<n> path=<p>`.
+pub fn scan_migration_dsl(source: &str, path: &str) -> Vec<DslTable> {
     let mut out = Vec::new();
+    let mut guard = LazyGuard::new(path, source);
     // DH.11: string-literal spans, built once on the first Ecto hit.
     let mut literals = None;
     for dsl in DSLS {
@@ -396,7 +402,7 @@ pub fn scan_migration_dsl(source: &str) -> Vec<DslTable> {
             while let Some(rel) = source[from..].find(needle) {
                 let pos = from + rel;
                 from = pos + needle.len();
-                if !needle_boundary_ok(source.as_bytes(), pos, needle, arg) {
+                if !needle_boundary_ok(source.as_bytes(), pos, needle, arg) || !guard.admits(pos) {
                     continue;
                 }
                 // An Ecto needle in a string (an `@doc """` sample, glia's
@@ -429,6 +435,7 @@ pub fn scan_migration_dsl(source: &str) -> Vec<DslTable> {
             respell_django_models(source, &mut out[first..]);
         }
     }
+    guard.report("migrations");
     out
 }
 
@@ -678,7 +685,7 @@ mod tests {
     }
 
     fn tables(src: &str) -> Vec<(&'static str, String)> {
-        scan_migration_dsl(src)
+        scan_migration_dsl(src, "")
             .into_iter()
             .map(|h| (h.framework, h.table))
             .collect()
@@ -807,7 +814,7 @@ def downgrade():
             ]
         );
         assert_eq!(
-            dsl_markers(&scan_migration_dsl(src)),
+            dsl_markers(&scan_migration_dsl(src, "")),
             ["[migrations] dsl framework=alembic tables=2"]
         );
     }
@@ -992,7 +999,7 @@ x.createTable(name);
     fn ecto_create_table_atom() {
         assert_eq!(tables(ECTO_CREATE_USERS), [("ecto", "users".to_string())]);
         assert_eq!(
-            dsl_markers(&scan_migration_dsl(ECTO_CREATE_USERS)),
+            dsl_markers(&scan_migration_dsl(ECTO_CREATE_USERS, "")),
             ["[migrations] dsl framework=ecto tables=1"]
         );
         // Through the data-entity funnel: a declaration, so the edge stays
@@ -1000,6 +1007,7 @@ x.createTable(name);
         let repo = RepoId(1);
         let (out, access) = crate::data_entities::extract_data_entity_access(
             ECTO_CREATE_USERS,
+            "",
             module_id(repo),
             repo,
         );
@@ -1062,7 +1070,7 @@ end
             ]
         );
         assert_eq!(
-            dsl_markers(&scan_migration_dsl(src)),
+            dsl_markers(&scan_migration_dsl(src, "")),
             ["[migrations] dsl framework=ecto tables=8"]
         );
     }
@@ -1122,6 +1130,39 @@ end
                 ("ecto", "user_events".to_string()),
                 ("ecto", "users".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn dsl_needles_in_literals_and_comments_name_nothing() {
+        // FD.4b: a guarded (.py / .rs) file's needles read through the code
+        // guard; a .rb file has no lexer yet (FD.5a) and keeps its reading.
+        let py = r#"from alembic import op
+
+SAMPLE = 'op.create_table("ghosts")'
+# op.drop_table("phantoms")
+
+
+def upgrade():
+    op.create_table("users")
+"#;
+        let names =
+            |hits: Vec<DslTable>| -> Vec<String> { hits.into_iter().map(|h| h.table).collect() };
+        assert_eq!(
+            names(scan_migration_dsl(py, "migrations/versions/1.py")),
+            ["users"]
+        );
+        assert_eq!(
+            names(scan_migration_dsl(py, "")),
+            ["ghosts", "users", "phantoms"],
+            "no guard without a path"
+        );
+        let rs = "// op.create_table(\"ghosts\") with alembic\nconst S: &str = \"op.drop_table(\\\"t\\\")\";\n";
+        assert!(scan_migration_dsl(rs, "src/lib.rs").is_empty());
+        let rb = "class M < ActiveRecord::Migration[7.0]\n  def change\n    create_table :orders\n  end\nend\n";
+        assert_eq!(
+            names(scan_migration_dsl(rb, "db/migrate/1_m.rb")),
+            ["orders"]
         );
     }
 }

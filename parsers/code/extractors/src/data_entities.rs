@@ -65,12 +65,21 @@
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] cypher '` (LA.28)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] decl '` (LA.42)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] sqflite '` (DH.11)
+//!
+//! FD.4b, always on, once per .rs / .py file the code guard refused anything
+//! in (a statement literal that is no call argument, a needle in a literal or
+//! comment; `crate::code_guard`):
+//!   `... 2>&1 | grep '\[code-guard\] data-entities '`
+//!   `[code-guard] data-entities lang=<rust|python> dropped=<n> path=<p>`
+//!   and `[code-guard] migrations lang=<rust|python> dropped=<n> path=<p>`
 
 use std::ops::Range;
 use std::sync::OnceLock;
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+
+use crate::code_guard::LazyGuard;
 
 pub struct DataEntityNodes {
     pub nodes: Vec<Node>,
@@ -256,25 +265,40 @@ impl EntitySink {
 
 /// Every data entity `source` names, each hung off `module_id` by
 /// ACCESSES_DATA. [`extract_data_entity_access`] without the sites.
-pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) -> DataEntityNodes {
-    extract_data_entity_access(source, module_id, repo).0
+pub fn extract_data_entity_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> DataEntityNodes {
+    extract_data_entity_access(source, path, module_id, repo).0
 }
 
 /// [`extract_data_entity_nodes`] plus where each statement names its entity
 /// and which entities a declaration named (LE.4a). The nodes and edges are
 /// identical to [`extract_data_entity_nodes`]'s.
+///
+/// FD.4b: `path` selects the CJ.1 code guard (`.rs` / `.py`; an empty path or
+/// any other file has none). In a guarded file a SQL / Cypher statement
+/// literal counts only when it opens in code as a call argument
+/// (`LazyGuard::admits_argument`), and a declaration or driver needle only
+/// when its first byte is code (`LazyGuard::admits`); refusals print
+/// `[code-guard] data-entities lang=<l> dropped=<n> path=<p>`, and the
+/// migration DSL needles their own `[code-guard] migrations ..` line.
 pub fn extract_data_entity_access(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> (DataEntityNodes, DataAccess) {
     let mut sink = EntitySink::new(module_id, repo);
+    let mut guard = LazyGuard::new(path, source);
 
     // LG.3b: raw SQL is read only from string literals that ARE a SQL
     // statement, never from the whole file. A file-wide scan behind a
     // file-wide `select ` gate read comments, prose strings and Go's
     // `select {` statement as SQL (`copied from the pool` -> table `the`).
-    let lit = sql_statements(source);
+    let lit = sql_statements(source, &mut guard);
     let mut stats = ScanStats {
         literals: lit.literals,
         sql: lit.statements.len(),
@@ -308,41 +332,41 @@ pub fn extract_data_entity_access(
     // LA.42: the declaration scanners name an entity only from the literal
     // that starts the argument / assignment; `decl` feeds their marker.
     let mut decl = DeclStats::default();
-    for name in scan_orm_table_decls(source, &mut decl) {
+    for name in scan_orm_table_decls(source, &mut decl, &mut guard) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Sql, &name);
     }
     // DG.9: a Slick `extends Table[..](tag, <table>)` declares its table.
-    for name in scan_slick_tables(source, &mut decl) {
+    for name in scan_slick_tables(source, &mut decl, &mut guard) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Sql, &name);
     }
     // A13.9: a migration DSL call (`op.create_table("users")`, Rails
     // `create_table :users`) names the table it creates or alters, wherever it
     // appears. The scanner has no path, so the marker says which DSL fired.
-    let dsl = crate::migrations::scan_migration_dsl(source);
+    let dsl = crate::migrations::scan_migration_dsl(source, path);
     for hit in &dsl {
         sink.emit_declared(DataEntityFlavor::Sql, &hit.table);
     }
     for line in crate::migrations::dsl_markers(&dsl) {
         eprintln!("{line}");
     }
-    for name in scan_mongoose_models(source, &mut decl) {
+    for name in scan_mongoose_models(source, &mut decl, &mut guard) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
-    for name in scan_dynamodb_tables(source, &mut decl) {
+    for name in scan_dynamodb_tables(source, &mut decl, &mut guard) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
-    for hit in collection_calls(source) {
+    for hit in collection_calls(source, &mut guard) {
         stats.note_collection(&hit.name);
         sink.emit_site(DataEntityFlavor::Nosql, &hit.name, hit.pos, hit.verb);
     }
     // DH.11: a sqflite helper names its table with no SQL text. sqflite has
     // no model layer, so the table is the identity, and the helper's verb is
     // the access mode.
-    if let Some(hits) = sqflite_table_calls(source) {
+    if let Some(hits) = sqflite_table_calls(source, &mut guard) {
         for (table, at, verb) in &hits {
             sink.emit_site(DataEntityFlavor::Sql, table, *at, *verb);
         }
@@ -350,16 +374,17 @@ pub fn extract_data_entity_access(
             eprintln!("{}", sqflite_marker(&hits));
         }
     }
-    for name in scan_beanie_documents(source, &mut decl) {
+    for name in scan_beanie_documents(source, &mut decl, &mut guard) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
     if debug_enabled() && decl.needles > 0 {
         eprintln!("{}", decl.marker());
     }
-    for (label, at, verb) in cypher_label_sites(source) {
+    for (label, at, verb) in cypher_label_sites(source, &mut guard) {
         sink.emit_site(DataEntityFlavor::Graph, &label, at, verb);
     }
+    guard.report("data-entities");
 
     if debug_enabled() && stats.fired() {
         eprintln!("{}", stats.marker(source));
@@ -952,7 +977,10 @@ fn join_group(source: &str, group: &[Lit], joints: &[Joint]) -> (String, Vec<Pie
 /// opens a SQL statement ([`opens_sql_statement`]) or is a builder fragment
 /// holding a subquery ([`has_subquery`]), and is not a Go fmt message
 /// ([`has_go_fmt_verb`]).
-pub(crate) fn sql_statements(source: &str) -> LiteralSql {
+///
+/// FD.4b: a run whose first literal `guard` refuses as a call argument
+/// ([`LazyGuard::admits_argument`]) is no statement.
+pub(crate) fn sql_statements(source: &str, guard: &mut LazyGuard) -> LiteralSql {
     let joined = joined_literals(source);
     let b = source.as_bytes();
     let mut out = LiteralSql {
@@ -984,6 +1012,11 @@ pub(crate) fn sql_statements(source: &str) -> LiteralSql {
         }
         if has_go_fmt_verb(&scan) {
             out.rejected_fmt += 1;
+            continue;
+        }
+        if let Some(first) = group.first()
+            && !guard.admits_argument(first.outer.start, first.body.start)
+        {
             continue;
         }
         out.statements.push(SqlStmt { text, scan, pieces });
@@ -2103,13 +2136,16 @@ const SQL_NAME_KEYWORDS: &[&str] = &[
 // `db_table = 'users'` (Django Meta inner class).
 // ----------------------------------------------------------------------------
 
-fn scan_orm_table_decls(source: &str, stats: &mut DeclStats) -> Vec<String> {
+fn scan_orm_table_decls(source: &str, stats: &mut DeclStats, guard: &mut LazyGuard) -> Vec<String> {
     let mut out = Vec::new();
     for needle in ["__tablename__", "db_table"] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
             search_from = pos + needle.len();
+            if !guard.admits(pos) {
+                continue;
+            }
             stats.needles += 1;
             // `__tablename__ = 'users'`, `__tablename__: str = "users"`; a
             // `def __tablename__(cls):` or a later `=` names nothing.
@@ -2165,7 +2201,7 @@ const SLICK_SCAN_LIMIT: usize = 1024;
 /// so another library's `Table[..]` base is not Slick; a Slick table declared
 /// through an alias or a generic base (`extends BaseTable[T](tag, ..)`) is
 /// not read either.
-fn scan_slick_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
+fn scan_slick_tables(source: &str, stats: &mut DeclStats, guard: &mut LazyGuard) -> Vec<String> {
     let mut out = Vec::new();
     if !names_slick(source) {
         return out;
@@ -2185,6 +2221,9 @@ fn scan_slick_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
             k += 1;
         }
         if k == search_from || !b[k..].starts_with(b"Table[") {
+            continue;
+        }
+        if !guard.admits(pos) {
             continue;
         }
         stats.needles += 1;
@@ -2410,13 +2449,16 @@ impl DeclStats {
 // Mongoose: `mongoose.model('User', schema)` and `model('User', schema)`.
 // ----------------------------------------------------------------------------
 
-fn scan_mongoose_models(source: &str, stats: &mut DeclStats) -> Vec<String> {
+fn scan_mongoose_models(source: &str, stats: &mut DeclStats, guard: &mut LazyGuard) -> Vec<String> {
     let mut out = Vec::new();
     for needle in ["mongoose.model(", "models.model("] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
             search_from = pos + needle.len();
+            if !guard.admits(pos) {
+                continue;
+            }
             stats.needles += 1;
             // The model name is argument 1: `mongoose.model(modelName, s)`
             // names nothing, whatever string comes later.
@@ -2433,7 +2475,7 @@ fn scan_mongoose_models(source: &str, stats: &mut DeclStats) -> Vec<String> {
 // (Python boto3 kwargs), and `dynamodb.Table('users')` (boto3 resource API).
 // ----------------------------------------------------------------------------
 
-fn scan_dynamodb_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
+fn scan_dynamodb_tables(source: &str, stats: &mut DeclStats, guard: &mut LazyGuard) -> Vec<String> {
     let mut out = Vec::new();
 
     // Object-key / kwarg form: `TableName: '...'`, `TableName: "..."`,
@@ -2454,6 +2496,9 @@ fn scan_dynamodb_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
             if !prev_ok {
                 continue;
             }
+            if !guard.admits(pos) {
+                continue;
+            }
             stats.needles += 1;
             if let Some(name) = stats.take(inline_literal(&source[search_from..])) {
                 out.push(name.to_string());
@@ -2466,7 +2511,11 @@ fn scan_dynamodb_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
     let needle = "dynamodb.Table(";
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find(needle) {
-        search_from += rel + needle.len();
+        let pos = search_from + rel;
+        search_from = pos + needle.len();
+        if !guard.admits(pos) {
+            continue;
+        }
         stats.needles += 1;
         if let Some(name) = stats.take(leading_literal(&source[search_from..])) {
             out.push(name.to_string());
@@ -2498,7 +2547,7 @@ const COLLECTION_NEEDLES: &[&str] = &[
 /// ([`collection_calls`] without the offsets and verbs; the tests' reader).
 #[cfg(test)]
 fn scan_collection_calls(source: &str) -> Vec<String> {
-    collection_calls(source)
+    collection_calls(source, &mut LazyGuard::new("", source))
         .into_iter()
         .map(|hit| hit.name)
         .collect()
@@ -2515,10 +2564,12 @@ struct CollectionHit {
 /// Every driver collection call ([`COLLECTION_NEEDLES`]) whose first argument
 /// names a collection ([`collection_arg`]), in source order, with the verb of
 /// the call chained onto it ([`collection_verb`]).
-fn collection_calls(source: &str) -> Vec<CollectionHit> {
+/// FD.4b: a needle `guard` refuses (in a literal or comment) is no call.
+fn collection_calls(source: &str, guard: &mut LazyGuard) -> Vec<CollectionHit> {
     let bytes = source.as_bytes();
     let mut hits: Vec<CollectionHit> = collection_opens(source)
         .into_iter()
+        .filter(|&(pos, _)| guard.admits(pos))
         .filter_map(|(pos, open)| {
             let (name, delim) = collection_arg(source, open)?;
             let verb = collection_verb(bytes, delim);
@@ -2776,7 +2827,10 @@ const SQFLITE_HELPERS: &[(&str, AccessVerb)] = &[
 /// something no expression ends in, when its `.` sits in a string literal or
 /// on a comment line (glia's own sources hold Dart samples in Rust literals),
 /// and, for `.update(`, when argument #1 is a closure: that is `Map.update`.
-fn sqflite_table_calls(source: &str) -> Option<Vec<(String, usize, AccessVerb)>> {
+fn sqflite_table_calls(
+    source: &str,
+    guard: &mut LazyGuard,
+) -> Option<Vec<(String, usize, AccessVerb)>> {
     if !SQFLITE_IMPORTS.iter().any(|g| source.contains(g)) {
         return None;
     }
@@ -2800,7 +2854,10 @@ fn sqflite_table_calls(source: &str) -> Option<Vec<(String, usize, AccessVerb)>>
                 continue;
             };
             let lits = literals.get_or_insert_with(|| literal_spans(source));
-            if in_spans(lits, pos) || line_opens_with(b, pos, &[b"//", b"/*", b"*"]) {
+            if in_spans(lits, pos)
+                || line_opens_with(b, pos, &[b"//", b"/*", b"*"])
+                || !guard.admits(pos)
+            {
                 continue;
             }
             out.push((table, at, verb));
@@ -2908,7 +2965,11 @@ fn sqflite_marker(hits: &[(String, usize, AccessVerb)]) -> String {
 // next ~256 bytes.
 // ----------------------------------------------------------------------------
 
-fn scan_beanie_documents(source: &str, stats: &mut DeclStats) -> Vec<String> {
+fn scan_beanie_documents(
+    source: &str,
+    stats: &mut DeclStats,
+    guard: &mut LazyGuard,
+) -> Vec<String> {
     let mut out = Vec::new();
     let needle = "class Settings:";
     let mut search_from = 0;
@@ -2916,6 +2977,9 @@ fn scan_beanie_documents(source: &str, stats: &mut DeclStats) -> Vec<String> {
         let pos = search_from + rel;
         let after = pos + needle.len();
         search_from = after;
+        if !guard.admits(pos) {
+            continue;
+        }
         stats.needles += 1;
         // Snap DOWN: a multibyte char on the cut would panic the slice.
         let win_end = source.floor_char_boundary((after + 256).min(source.len()));
@@ -2973,7 +3037,7 @@ fn blank_prefix_len(s: &str) -> usize {
 /// The labels of [`cypher_label_sites`], names only (the tests' reader).
 #[cfg(test)]
 fn scan_cypher_labels(source: &str) -> Vec<String> {
-    cypher_label_sites(source)
+    cypher_label_sites(source, &mut LazyGuard::new("", source))
         .into_iter()
         .map(|(label, _, _)| label)
         .collect()
@@ -2983,8 +3047,8 @@ fn scan_cypher_labels(source: &str) -> Vec<String> {
 /// then label order, each with its source offset and the verb of the clause
 /// its pattern sits in (LE.4a, [`node_label_hits`]). Under `GLIA_DATA_DEBUG`
 /// prints the file's `[data-entity] cypher …` line ([`cypher_marker`]).
-fn cypher_label_sites(source: &str) -> Vec<(String, usize, AccessVerb)> {
-    let stmts = cypher_statements(source);
+fn cypher_label_sites(source: &str, guard: &mut LazyGuard) -> Vec<(String, usize, AccessVerb)> {
+    let stmts = cypher_statements(source, guard);
     let mut sites = Vec::new();
     for stmt in &stmts {
         for (label, pos, verb) in node_label_hits(&stmt.text) {
@@ -3023,8 +3087,9 @@ const CYPHER_OPENERS: &[&str] = &[
 const CYPHER_PATTERN_CLAUSES: &[&str] = &["MATCH", "MERGE", "CREATE"];
 
 /// The joined literals ([`joined_literals`]) of `source` that are Cypher
-/// statements, in source order.
-fn cypher_statements(source: &str) -> Vec<CypherStmt> {
+/// statements, in source order. FD.4b: a run whose first literal `guard`
+/// refuses as a call argument ([`LazyGuard::admits_argument`]) is none.
+fn cypher_statements(source: &str, guard: &mut LazyGuard) -> Vec<CypherStmt> {
     let joined = joined_literals(source);
     let mut out = Vec::new();
     for (group, joints) in joined.groups() {
@@ -3037,7 +3102,8 @@ fn cypher_statements(source: &str) -> Vec<CypherStmt> {
         };
         let (text, pieces) = join_group(source, group, joints);
         let text = blank_escapes(&text);
-        if is_cypher_statement(&text) {
+        if is_cypher_statement(&text) && guard.admits_argument(first.outer.start, first.body.start)
+        {
             out.push(CypherStmt {
                 text,
                 span: first.outer.start..last.outer.end,
@@ -3302,7 +3368,7 @@ mod tests {
     /// LE.4a: `(entity name, source text at the site, verb)` per site.
     fn sites_of(src: &str) -> Vec<(String, String, AccessVerb)> {
         let repo = RepoId(1);
-        let (out, access) = extract_data_entity_access(src, module_id(repo), repo);
+        let (out, access) = extract_data_entity_access(src, "", module_id(repo), repo);
         access
             .sites
             .iter()
@@ -3442,7 +3508,7 @@ def upgrade():
 def load(session):
     return session.execute("SELECT * FROM orders")
 "#;
-        let (out, access) = extract_data_entity_access(src, module_id(repo), repo);
+        let (out, access) = extract_data_entity_access(src, "", module_id(repo), repo);
         let name = |id: &NodeId| out.nav.name_by_id.get(id).cloned().unwrap_or_default();
         let mut declared: Vec<String> = access.declared.iter().map(name).collect();
         declared.sort();
@@ -3450,7 +3516,7 @@ def load(session):
         let sites: Vec<String> = access.sites.iter().map(|s| name(&s.entity)).collect();
         assert_eq!(sites, ["orders"]);
         // The nodes and edges are extract_data_entity_nodes' own.
-        let plain = extract_data_entity_nodes(src, module_id(repo), repo);
+        let plain = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert_eq!(plain.edges, out.edges);
         assert_eq!(plain.nodes.len(), out.nodes.len());
     }
@@ -3464,7 +3530,7 @@ const q2 = "INSERT INTO posts (title) VALUES (?)";
 const q3 = "UPDATE comments SET text = ? WHERE id = ?";
 const q4 = "SELECT u.* FROM users u JOIN orders o ON u.id = o.user_id";
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:users".to_string()));
         assert!(qnames.contains(&"data_entity:sql:posts".to_string()));
@@ -3484,7 +3550,7 @@ const fmt = new Intl.DateTimeFormat('en');
 const items = Array.from(callback(this));
 this.update(2);
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(
             qnames.iter().all(|q| !q.starts_with("data_entity:sql:")),
@@ -3503,7 +3569,7 @@ db.collection('callback');
 db.collection('2');
 db.collection('users');
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
         assert!(!qnames.contains(&"data_entity:nosql:callback".to_string()));
@@ -3515,7 +3581,7 @@ db.collection('users');
         let repo = RepoId(1);
         let src =
             "const q = \"SELECT * FROM public.users JOIN reporting.events e ON e.uid = users.id\";";
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:users".to_string()));
         assert!(qnames.contains(&"data_entity:sql:events".to_string()));
@@ -3530,7 +3596,7 @@ db.exec("create temporary table if not exists `tmp`.`sessions` (id int)");
 db.exec("CREATE OR REPLACE TABLE [dbo].[Invoices] (id INT)");
 db.exec("CREATE TABLE \"audit_log\" (id INT)");
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let mut qnames = entity_qnames(&out);
         qnames.sort();
         assert_eq!(
@@ -3557,7 +3623,7 @@ DROP TABLE IF EXISTS tmp_a, tmp_b CASCADE;
 TRUNCATE TABLE events;
 TRUNCATE carts;
 "#;
-        let code = extract_data_entity_nodes(src, module_id(repo), repo);
+        let code = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert!(
             entity_qnames(&code).is_empty(),
             "{:?}",
@@ -3624,7 +3690,7 @@ create index "ix_events" on events(created_at);
 const q = "SELECT id FROM users";
 const tpl = `<select class="truncate block"></select>`;
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert_eq!(entity_qnames(&out), ["data_entity:sql:users"]);
     }
 
@@ -3634,7 +3700,7 @@ const tpl = `<select class="truncate block"></select>`;
         // scan without letting the prose `from this` reach the FROM scan.
         let repo = RepoId(1);
         let src = "// adapted from somewhere\nconn.execute(\"DROP TABLE legacy_users\")\n";
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert_eq!(entity_qnames(&out), ["data_entity:sql:legacy_users"]);
     }
 
@@ -3643,7 +3709,7 @@ const tpl = `<select class="truncate block"></select>`;
         // word-boundary check: FROMUSERS shouldn't match.
         let repo = RepoId(1);
         let src = "const word = \"FROMUSERS is a column name\";";
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert!(
             out.nodes.is_empty(),
             "FROMUSERS must not match `FROM users`"
@@ -3661,7 +3727,7 @@ class User(db.Model):
 class Post(db.Model):
     __tablename__ = "posts"
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:users".to_string()));
         assert!(qnames.contains(&"data_entity:sql:posts".to_string()));
@@ -3676,7 +3742,7 @@ class User(models.Model):
     class Meta:
         db_table = 'auth_users'
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:auth_users".to_string()));
     }
@@ -3690,7 +3756,7 @@ const userSchema = new mongoose.Schema({ name: String });
 export const User = mongoose.model('User', userSchema);
 export const Post = mongoose.model('Post', postSchema);
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:User".to_string()));
         assert!(qnames.contains(&"data_entity:nosql:Post".to_string()));
@@ -3704,7 +3770,7 @@ const q1 = "MATCH (p:Person) RETURN p";
 const q2 = "MERGE (u:User {id: $id})";
 const q3 = "MATCH (a:Account)-[:OWNS]->(b:Wallet)";
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:graph:Person".to_string()));
         assert!(qnames.contains(&"data_entity:graph:User".to_string()));
@@ -3717,7 +3783,7 @@ const q3 = "MATCH (a:Account)-[:OWNS]->(b:Wallet)";
     /// The `data_entity:graph:*` labels of `src`, in emission order.
     fn graph_labels(src: &str) -> Vec<String> {
         let repo = RepoId(1);
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         out.nodes
             .iter()
             .filter_map(|n| out.nav.qname_by_id.get(&n.id))
@@ -3836,7 +3902,7 @@ public interface MovieRepository extends Neo4jRepository<Movie, Long> {
     #[test]
     fn cypher_marker_counts_rejected_keywords() {
         let people = "from neo4j import GraphDatabase\n\ndef find_person(tx, name):\n    return tx.run(\"MATCH (p:Person {name: $name}) RETURN p\", name=name).single()\n\ndef upsert_company(tx, cid):\n    tx.run(\n        \"MERGE (c:Company {id: $id}) \"\n        \"RETURN c\",\n        id=cid,\n    )\n";
-        let stmts = cypher_statements(people);
+        let stmts = cypher_statements(people, &mut LazyGuard::new("", people));
         let labels = scan_cypher_labels(people);
         assert_eq!(labels, strings(&["Person", "Company"]));
         assert_eq!(
@@ -3846,7 +3912,7 @@ public interface MovieRepository extends Neo4jRepository<Movie, Long> {
             )
         );
         let merged = "// Graph merge helpers. A Rust `match` is not Cypher, and neither is this\n// comment about the Cypher form MATCH (x:Label).\npub fn pick(kind: u32) -> u64 {\n    match kind {\n        _ => 0,\n    }\n}\n";
-        let stmts = cypher_statements(merged);
+        let stmts = cypher_statements(merged, &mut LazyGuard::new("", merged));
         assert_eq!(
             cypher_marker(merged, &stmts, &[]).as_deref(),
             Some("[data-entity] cypher statements=0 labels= rejected_outside_literal=3")
@@ -3866,7 +3932,7 @@ await client.send(new PutItemCommand({
 }));
 await client.send(new GetItemCommand({ TableName: "sessions", Key: {} }));
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
         assert!(qnames.contains(&"data_entity:nosql:sessions".to_string()));
@@ -3885,7 +3951,7 @@ result = table.get_item(Key={'id': '123'})
 client = boto3.client('dynamodb')
 client.put_item(TableName='audit_log', Item={})
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
         assert!(qnames.contains(&"data_entity:nosql:audit_log".to_string()));
@@ -3898,7 +3964,7 @@ client.put_item(TableName='audit_log', Item={})
         let src = r#"
 const config = { MyTableName: 'something', LegacyTableName: 'else' };
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert!(
             out.nodes.is_empty(),
             "suffix keys must not match TableName:"
@@ -3919,7 +3985,7 @@ const ordersRef = db.collection("orders");
 const conn = await MongoClient.connect(uri);
 const sessions = conn.db('app').collection('sessions');
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
         assert!(qnames.contains(&"data_entity:nosql:orders".to_string()));
@@ -3933,7 +3999,7 @@ const sessions = conn.db('app').collection('sessions');
         let src = r#"
 const x = collection('not-a-call');
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         assert!(out.nodes.is_empty(), "bare collection() must not match");
     }
 
@@ -3958,7 +4024,7 @@ class Post(Document):
         name = 'posts'
         use_revision = True
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
         assert!(qnames.contains(&"data_entity:nosql:posts".to_string()));
@@ -3975,7 +4041,7 @@ class User(models.Model):
     class Meta:
         name = "users"
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         // Django's `db_table` extractor catches its own shape; this fixture has
         // no `db_table`, so should be empty.
         assert!(
@@ -3992,7 +4058,7 @@ class User(models.Model):
 const q1 = "SELECT * FROM users";
 const q2 = "INSERT INTO users (name) VALUES (?)";
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(src, "", module_id(repo), repo);
         let users_count = out
             .nav
             .qname_by_id
@@ -4020,7 +4086,7 @@ const q2 = "INSERT INTO users (name) VALUES (?)";
             "class Order(Document):\n    class Settings:\n        name = 'orders'\n        # ";
         let after = head.find("class Settings:").unwrap() + "class Settings:".len();
         let src = cut_inside_char(head, after, 256, "\n");
-        let out = extract_data_entity_nodes(&src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(&src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(
             qnames.contains(&"data_entity:nosql:orders".to_string()),
@@ -4036,7 +4102,7 @@ const q2 = "INSERT INTO users (name) VALUES (?)";
         let head = "q = \"MATCH (p:Person) ";
         let pos = head.find("MATCH").unwrap();
         let src = cut_inside_char(head, pos, 256, " RETURN p\"\n");
-        let out = extract_data_entity_nodes(&src, module_id(repo), repo);
+        let out = extract_data_entity_nodes(&src, "", module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(
             qnames.contains(&"data_entity:graph:Person".to_string()),
@@ -4048,7 +4114,7 @@ const q2 = "INSERT INTO users (name) VALUES (?)";
 
     fn sorted_qnames(src: &str) -> Vec<String> {
         let repo = RepoId(1);
-        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, "", module_id(repo), repo));
         q.sort();
         q
     }
@@ -4164,7 +4230,10 @@ return fmt.Errorf("update from queue set failed: %v", err)
 rows, _ := db.Query("SELECT id FROM users WHERE name LIKE '%water%'")
 "#;
         assert_eq!(sorted_qnames(src), sql(&["users"]));
-        assert_eq!(sql_statements(src).rejected_fmt, 2);
+        assert_eq!(
+            sql_statements(src, &mut LazyGuard::new("", src)).rejected_fmt,
+            2
+        );
     }
 
     #[test]
@@ -4228,7 +4297,7 @@ coll := fs.Collection(name)
 MongoCollection<Document> c = database.getCollection("ledger");
 "#;
         let repo = RepoId(1);
-        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, "", module_id(repo), repo));
         q.sort();
         assert_eq!(q, ["data_entity:nosql:events", "data_entity:nosql:ledger"]);
     }
@@ -4242,7 +4311,7 @@ _nested = db.GetCollection<Dictionary<string, List<int>>>(nameof(Models.Snapshot
 _plain = db.GetCollection("plain_c");
 "#;
         let repo = RepoId(1);
-        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, "", module_id(repo), repo));
         q.sort();
         assert_eq!(
             q,
@@ -4392,7 +4461,7 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
     #[test]
     fn literal_hit_offsets_map_to_source() {
         let src = "q := \"SELECT o.id \" +\n\t\"FROM orders o\"\n";
-        let lit = sql_statements(src);
+        let lit = sql_statements(src, &mut LazyGuard::new("", src));
         assert_eq!(lit.literals, 2);
         let stmt = &lit.statements[0];
         assert_eq!(stmt.text, "SELECT o.id FROM orders o");
@@ -4408,7 +4477,7 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
         let src = "q := `WITH recent AS (SELECT id FROM orders) SELECT * FROM recent r JOIN payments p ON true`\n\
                    e := fmt.Errorf(\"delete from spaces key=%q: %w\", k, err)\n\
                    c := client.Database(\"shop\").Collection(\"events\")\n";
-        let lit = sql_statements(src);
+        let lit = sql_statements(src, &mut LazyGuard::new("", src));
         let mut stats = ScanStats {
             literals: lit.literals,
             sql: lit.statements.len(),
@@ -4583,7 +4652,7 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
     /// [`scan_slick_tables`] plus the funnel count, its names unsorted.
     fn slick_stats(src: &str) -> (Vec<String>, DeclStats) {
         let mut decl = DeclStats::default();
-        let names = scan_slick_tables(src, &mut decl);
+        let names = scan_slick_tables(src, &mut decl, &mut LazyGuard::new("", src));
         for name in &names {
             decl.funnel(name);
         }
@@ -4603,7 +4672,7 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
         );
         // A declaration: the module's ACCESSES_DATA edge stays (LE.4a).
         let repo = RepoId(1);
-        let (out, access) = extract_data_entity_access(SLICK_USERS, module_id(repo), repo);
+        let (out, access) = extract_data_entity_access(SLICK_USERS, "", module_id(repo), repo);
         assert!(access.sites.is_empty(), "{:?}", access.sites);
         assert_eq!(access.declared.len(), 1);
         assert_eq!(out.edges.len(), 1);
@@ -4687,11 +4756,11 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
     fn decl_stats(src: &str) -> DeclStats {
         let mut decl = DeclStats::default();
         let names = [
-            scan_orm_table_decls(src, &mut decl),
-            scan_slick_tables(src, &mut decl),
-            scan_mongoose_models(src, &mut decl),
-            scan_dynamodb_tables(src, &mut decl),
-            scan_beanie_documents(src, &mut decl),
+            scan_orm_table_decls(src, &mut decl, &mut LazyGuard::new("", src)),
+            scan_slick_tables(src, &mut decl, &mut LazyGuard::new("", src)),
+            scan_mongoose_models(src, &mut decl, &mut LazyGuard::new("", src)),
+            scan_dynamodb_tables(src, &mut decl, &mut LazyGuard::new("", src)),
+            scan_beanie_documents(src, &mut decl, &mut LazyGuard::new("", src)),
         ]
         .concat();
         for name in &names {
@@ -4747,10 +4816,11 @@ Future<int> addUser(Database db, String email) {
     fn sqflite_helpers_name_tables() {
         use AccessVerb::{Read, Write};
         let repo = RepoId(1);
-        let (out, access) = extract_data_entity_access(SQFLITE_REPO, module_id(repo), repo);
+        let (out, access) = extract_data_entity_access(SQFLITE_REPO, "", module_id(repo), repo);
         assert_eq!(entity_qnames(&out), ["data_entity:sql:users"]);
         assert!(access.declared.is_empty(), "a helper call is a site");
-        let hits = sqflite_table_calls(SQFLITE_REPO).unwrap_or_default();
+        let hits = sqflite_table_calls(SQFLITE_REPO, &mut LazyGuard::new("", SQFLITE_REPO))
+            .unwrap_or_default();
         assert_eq!(
             sqflite_marker(&hits),
             "[data-entity] sqflite tables=1 sites=2"
@@ -4791,13 +4861,17 @@ Future<int> addUser(Database db, String email) {
     fn sqflite_needs_its_import() {
         let src = SQFLITE_REPO.replace("package:sqflite/sqflite.dart", "package:app/db.dart");
         let repo = RepoId(1);
-        let (out, access) = extract_data_entity_access(&src, module_id(repo), repo);
+        let (out, access) = extract_data_entity_access(&src, "", module_id(repo), repo);
         assert!(entity_qnames(&out).is_empty(), "{:?}", entity_qnames(&out));
         assert!(access.sites.is_empty());
         // A look-alike package is not sqflite either.
         let src = SQFLITE_REPO.replace("package:sqflite/", "package:sqflite_wrapper/");
         assert!(named_sites(&src).is_empty());
-        assert_eq!(sqflite_table_calls(&src), None, "no import, no marker");
+        assert_eq!(
+            sqflite_table_calls(&src, &mut LazyGuard::new("", &src)),
+            None,
+            "no import, no marker"
+        );
     }
 
     #[test]
@@ -4822,7 +4896,7 @@ Future<void> f(Database db, String tableName, Map<String, int> counts, List<Stri
 "#;
         assert!(named_sites(src).is_empty(), "{:?}", named_sites(src));
         let repo = RepoId(1);
-        let (out, _) = extract_data_entity_access(src, module_id(repo), repo);
+        let (out, _) = extract_data_entity_access(src, "", module_id(repo), repo);
         assert!(entity_qnames(&out).is_empty(), "{:?}", entity_qnames(&out));
     }
 
@@ -4832,5 +4906,116 @@ Future<void> f(Database db, String tableName, Map<String, int> counts, List<Stri
         // embedded probe is no access.
         let rust = format!("const PROBE: &str = r#\"{SQFLITE_REPO}\"#;\n");
         assert!(named_sites(&rust).is_empty(), "{:?}", named_sites(&rust));
+    }
+
+    /// FD.4b: every entity a guarded file at `path` names, sorted.
+    fn qnames_at(path: &str, src: &str) -> Vec<String> {
+        let repo = RepoId(1);
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, path, module_id(repo), repo));
+        q.sort();
+        q
+    }
+
+    const RUST_SAMPLES: &str = r##"
+pub fn load(db: &Db, id: i64) {
+    db.query("SELECT * FROM users");
+    sqlx::query_as::<_, Row>("SELECT id FROM accounts").fetch_all(db);
+    conn.execute(&format!("DELETE FROM carts WHERE id = {id}"), []);
+    client.query(
+        // the statement
+        "SELECT * FROM invoices",
+        &[],
+    );
+    session.run("MATCH (p:Person) RETURN p");
+    db.collection("orders").find(None);
+}
+// SELECT * FROM ghosts
+/* MATCH (g:Ghost) RETURN g */
+#[cfg(test)]
+mod t {
+    const SRC: &str = "db.query(\"SELECT * FROM phantoms\")";
+    const GQL: &str = "MATCH (a:FUNCTION) RETURN a";
+    const RAW: &str = r#"db.collection("shadows").find(None)"#;
+    fn f() {
+        let src = r#"ALTER TABLE ONLY ledger ADD COLUMN v INT;"#;
+        let item = Item { sql: "SELECT * FROM refunds" };
+        let pairs = [("q.sql", "SELECT * FROM fixtures_only")];
+        if ("SELECT * FROM t2" == src) {}
+    }
+}
+"##;
+
+    #[test]
+    fn rust_statement_literals_count_only_as_call_arguments() {
+        let mut want = sql(&["accounts", "carts", "invoices", "users"]);
+        want.push("data_entity:graph:Person".into());
+        want.push("data_entity:nosql:orders".into());
+        want.sort();
+        assert_eq!(qnames_at("src/repo.rs", RUST_SAMPLES), want);
+    }
+
+    #[test]
+    fn an_unguarded_file_keeps_its_reading() {
+        // No path (and any language without a lexer) reads as before FD.4b:
+        // the test sample, the raw string and the field value all mint.
+        let unguarded = qnames_at("", RUST_SAMPLES);
+        for q in [
+            "data_entity:graph:FUNCTION",
+            "data_entity:sql:ledger",
+            "data_entity:sql:refunds",
+            "data_entity:sql:fixtures_only",
+            "data_entity:nosql:shadows",
+        ] {
+            assert!(unguarded.iter().any(|u| u == q), "{q} in {unguarded:?}");
+        }
+        assert_eq!(qnames_at("src/repo.go", RUST_SAMPLES), unguarded);
+    }
+
+    #[test]
+    fn python_statement_literals_count_only_as_call_arguments() {
+        let src = r#"
+"""Store module: cur.execute('SELECT * FROM docstrings')"""
+QUERY = "SELECT * FROM constants"
+
+
+def list_invoices(cur, t):
+    """cur.execute('SELECT * FROM shadows')"""
+    cur.execute("SELECT * FROM invoices")
+    cur.execute(sql="SELECT * FROM refunds")
+    cur.execute(f"SELECT * FROM {t} JOIN audit_log a ON a.id = t.id")
+    cur.execute(
+        "SELECT o.id "
+        "FROM orders o"
+    )
+    # cur.execute("SELECT * FROM comments")
+    tx.run("MATCH (p:Person) RETURN p")
+    db.collection("carts").get()
+    return cur.fetchall()
+
+
+class User(Base):
+    __tablename__ = "users"
+"#;
+        let mut want = sql(&["audit_log", "invoices", "orders", "refunds", "users"]);
+        want.push("data_entity:graph:Person".into());
+        want.push("data_entity:nosql:carts".into());
+        want.sort();
+        assert_eq!(qnames_at("app/store.py", src), want);
+    }
+
+    #[test]
+    fn python_needles_in_literals_and_comments_name_nothing() {
+        let src = r#"SAMPLE = """
+class User(Base):
+    __tablename__ = "ghosts"
+"""
+# db.collection("phantoms")
+DOC = "mongoose.model('Shadow', s)"
+
+
+class Order(Base):
+    __tablename__ = "orders"
+"#;
+        assert_eq!(qnames_at("app/models.py", src), sql(&["orders"]));
     }
 }

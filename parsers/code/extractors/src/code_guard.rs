@@ -46,6 +46,16 @@ fn lexer_for(path: &str) -> Option<(&'static str, Option<Script>)> {
     }
 }
 
+/// How far back [`CodeGuard::opens_argument`] looks for the `(` of the call
+/// a `,`-separated argument sits in.
+const ARG_WINDOW: usize = 8192;
+
+/// Keywords a `(` can follow that open no call (Rust and Python alike).
+const NOT_CALLEES: &[&str] = &[
+    "and", "assert", "await", "elif", "else", "for", "if", "in", "is", "let", "match", "mut",
+    "not", "or", "return", "while", "yield",
+];
+
 fn is_ident_byte(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
@@ -98,6 +108,133 @@ impl<'a> CodeGuard<'a> {
         match self.literal_start(pos) {
             None => true,
             Some(open) => self.lang == "python" && self.is_fstring(open),
+        }
+    }
+
+    /// FD.4b: true when the string literal a scanner's own lexer opened at
+    /// `open` (its delimiter; `body` is its first content byte) is a literal
+    /// this map also opens there, in code, and the literal is a call
+    /// argument: the code before it (blanks, comments and a Rust `&` skipped)
+    /// is the call's `(`, a `,` inside it, or (Python) a keyword argument's
+    /// `name=`, and the `(` follows a callee ([`CodeGuard::is_callee_paren`]).
+    /// Text nested in another literal or a comment fails the first test; a
+    /// `const` / `let` / field / tuple value fails the second.
+    pub(crate) fn opens_argument(&self, open: usize, body: usize) -> bool {
+        let Some(start) = self.literal_start(body) else {
+            return false;
+        };
+        // The map and the scanner may disagree on a string prefix (`r#`, `f`,
+        // `rb`): the two starts must differ only by prefix bytes.
+        let (lo, hi) = (start.min(open), start.max(open));
+        if start >= body
+            || hi - lo > 3
+            || !self.src[lo..hi]
+                .iter()
+                .all(|c| c.is_ascii_alphabetic() || *c == b'#')
+        {
+            return false;
+        }
+        // Any prefix letters glued to the literal belong to it.
+        let mut first = lo;
+        while first > 0 && lo - first < 3 && self.src[first - 1].is_ascii_alphabetic() {
+            first -= 1;
+        }
+        let Some(mut at) = self.prev_code(first) else {
+            return false;
+        };
+        if self.lang == "rust" && self.src[at] == b'&' {
+            let Some(p) = self.prev_code(at) else {
+                return false;
+            };
+            at = p;
+        }
+        match self.src[at] {
+            b'(' => self.is_callee_paren(at),
+            b',' => self
+                .enclosing_open(at)
+                .is_some_and(|p| self.is_callee_paren(p)),
+            b'=' if self.lang == "python" => {
+                // `name=` but not `==` / `<=` / `>=` / `!=` / `x = `'s
+                // statement form outside a call.
+                let Some(k) = self.prev_code(at) else {
+                    return false;
+                };
+                let kwarg = is_ident_byte(self.src[k])
+                    && self.src.get(at + 1) != Some(&b'=')
+                    && !matches!(
+                        self.src.get(at.wrapping_sub(1)),
+                        Some(b'=' | b'<' | b'>' | b'!')
+                    );
+                kwarg
+                    && self
+                        .enclosing_open(k)
+                        .is_some_and(|p| self.is_callee_paren(p))
+            }
+            _ => false,
+        }
+    }
+
+    /// The last code byte before `pos` that is not blank, stepping over
+    /// comments (and literals) whole; `None` at the file start.
+    fn prev_code(&self, pos: usize) -> Option<usize> {
+        let mut i = pos;
+        while i > 0 {
+            i -= 1;
+            if let Some(start) = self.literal_start(i) {
+                i = start;
+                continue;
+            }
+            if !self.src[i].is_ascii_whitespace() {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// The unmatched `(` holding byte `pos` (literals and comments skipped,
+    /// within [`ARG_WINDOW`] bytes); `None` when the nearest unmatched
+    /// bracket is a `[` / `{`, a Rust `;` ends the statement first, or
+    /// nothing opens in reach.
+    fn enclosing_open(&self, pos: usize) -> Option<usize> {
+        let floor = pos.saturating_sub(ARG_WINDOW);
+        let mut depth = 0usize;
+        let mut i = pos;
+        while i > floor {
+            i -= 1;
+            if let Some(start) = self.literal_start(i) {
+                i = start;
+                continue;
+            }
+            match self.src[i] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' if depth == 0 => return Some(i),
+                b'[' | b'{' if depth == 0 => return None,
+                b'(' | b'[' | b'{' => depth -= 1,
+                b';' if depth == 0 && self.lang == "rust" => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// True when the `(` at `paren` opens a call's argument list: it follows
+    /// a callee name that is no keyword (`return (`, `if (`), a Rust macro's
+    /// `!`, a generic / turbofish `>`, or a call / index result (`)`, `]`).
+    fn is_callee_paren(&self, paren: usize) -> bool {
+        let Some(k) = self.prev_code(paren) else {
+            return false;
+        };
+        match self.src[k] {
+            b'!' | b'>' | b')' | b']' => true,
+            c if is_ident_byte(c) => {
+                let mut s = k;
+                while s > 0 && is_ident_byte(self.src[s - 1]) {
+                    s -= 1;
+                }
+                let word = &self.src[s..=k];
+                !NOT_CALLEES.iter().any(|kw| kw.as_bytes() == word)
+            }
+            _ => false,
         }
     }
 
@@ -163,9 +300,19 @@ impl<'a> LazyGuard<'a> {
         self.check(pos, CodeGuard::opens_literal)
     }
 
+    /// FD.4b: true when the file has no guard, or the string literal whose
+    /// delimiter opens at `open` (a scanner's own lexer's reading) and whose
+    /// body starts at `body` opens in code AND stands as a call argument
+    /// ([`CodeGuard::opens_argument`]): a SQL / Cypher statement literal is a
+    /// data access only as the argument of the call that runs it. A refusal
+    /// is counted for [`LazyGuard::report`].
+    pub(crate) fn admits_argument(&mut self, open: usize, body: usize) -> bool {
+        self.check(open, |g, open| g.opens_argument(open, body))
+    }
+
     /// True when the file has no guard or `rule` accepts `pos`; builds the
     /// guard on first use and counts a refusal.
-    fn check(&mut self, pos: usize, rule: fn(&CodeGuard<'a>, usize) -> bool) -> bool {
+    fn check(&mut self, pos: usize, rule: impl FnOnce(&CodeGuard<'a>, usize) -> bool) -> bool {
         let (path, source) = (self.path, self.source);
         let guard = self
             .built
@@ -410,5 +557,55 @@ mod tests {
         assert!(!guard.admits(in_comment + 1));
         assert_eq!(guard.dropped, 2);
         assert!(matches!(guard.built, Some(Some(_))));
+    }
+
+    /// FD.4b: the first literal of `needle`'s occurrence in `src`, read the
+    /// way the data-entity lexer reports it (`open` the delimiter, `body`
+    /// the next byte).
+    fn argument_at(path: &str, src: &str, needle: &str) -> bool {
+        let open = src.find(needle).unwrap() + needle.find('"').unwrap();
+        let body = open + 1;
+        let mut guard = LazyGuard::new(path, src);
+        guard.admits_argument(open, body)
+    }
+
+    #[test]
+    fn statement_literal_must_open_as_a_call_argument() {
+        for (src, needle) in [
+            ("db.query(\"SELECT 1\");\n", "\"SELECT"),
+            ("q::<_, T>(\"SELECT 1\");\n", "\"SELECT"),
+            ("f(&format!(\"SELECT 1\"));\n", "\"SELECT"),
+            ("f(a,\n  // c\n  \"SELECT 1\");\n", "\"SELECT"),
+            ("f(a, g(b), \"SELECT 1\");\n", "\"SELECT"),
+        ] {
+            assert!(
+                argument_at("src/a.rs", src, needle),
+                "{src:?} is an argument"
+            );
+        }
+        for (src, needle) in [
+            ("let q = \"SELECT 1\";\n", "\"SELECT"),
+            ("const Q: &str = \"SELECT 1\";\n", "\"SELECT"),
+            ("let t = (\"a\", \"SELECT 1\");\n", "\"SELECT"),
+            ("let v = [f(x), \"SELECT 1\"];\n", "\"SELECT"),
+            ("if (\"SELECT 1\" == x) {}\n", "\"SELECT"),
+            ("let s = \"f(\\\"SELECT 1\\\")\";\n", "\\\"SELECT"),
+            ("// f(\"SELECT 1\")\n", "\"SELECT"),
+        ] {
+            assert!(
+                !argument_at("src/a.rs", src, needle),
+                "{src:?} is no argument"
+            );
+        }
+        assert!(argument_at(
+            "a.py",
+            "cur.execute(sql=\"SELECT 1\")\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at("a.py", "Q = \"SELECT 1\"\n", "\"SELECT"));
+        assert!(!argument_at("a.py", "f(a == \"SELECT 1\")\n", "\"SELECT"));
+        assert!(!argument_at("a.py", "return (\"SELECT 1\")\n", "\"SELECT"));
+        // A file without a lexer admits everything.
+        assert!(argument_at("a.go", "q := \"SELECT 1\"\n", "\"SELECT"));
     }
 }

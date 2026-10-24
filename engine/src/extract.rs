@@ -380,7 +380,8 @@ pub(crate) fn apply_cross_cutting_extractors(
     );
     // LE.4a: the extractor's statement sites (0-indexed lines here) and the
     // entities a declaration named, kept for the re-home below.
-    let (entities, access) = data_entities::extract_data_entity_access(source, module_id, repo);
+    let (entities, access) =
+        data_entities::extract_data_entity_access(source, path, module_id, repo);
     let access_sites = sites_at(
         source,
         access

@@ -1,0 +1,16 @@
+{
+  "framework": "self-scan-literal-sql",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "FD.4b. In a .rs / .py file a SQL / Cypher statement literal is a data access only when it opens in code as a call argument (CodeGuard::opens_argument), and SQL text nested in another literal, a comment or a docstring is none. Baseline HEAD ac467ab0: forbid violations 1 (data_entity:graph:FUNCTION, the `const GQL` test string); ghosts / phantoms / shadows were already refused by the data-entity lexer and stay as regression guards.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:accounts", "note": "db.query(\"SELECT id FROM accounts\") in Rust code"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:invoices", "note": "cur.execute(\"SELECT * FROM invoices\") in Python code"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:ghosts", "note": "a query call quoted inside a Rust test string"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:phantoms", "note": "SQL in a // comment"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:shadows", "note": "a query call quoted in a Python docstring"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:FUNCTION", "note": "a Cypher-shaped const in a #[cfg(test)] module: no call runs it"}
+  ]
+}
