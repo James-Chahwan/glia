@@ -1,0 +1,8 @@
+{
+ "snapshots": [
+  {"name": "glia", "source": "self", "rev": "HEAD", "public": true, "skips": ["bench/", "dev-notes/", "tests/", "engine/tests/data/"]},
+  {"name": "shell", "source": "rank-gate", "skips": []},
+  {"name": "websocket", "source": "rank-gate", "skips": []},
+  {"name": "samples", "source": "rank-gate", "skips": []}
+ ]
+}

@@ -1,0 +1,1 @@
+{"floors": {"fact": 0.95, "derived": 0.90, "heuristic": 0.70}, "n_per_stratum": 30, "n_structural": 10, "structural": ["DEFINES", "CONTAINS", "HAS_ATTRIBUTE"], "seed": "glia-edge-audit-0.5.4"}

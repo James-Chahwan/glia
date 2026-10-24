@@ -529,6 +529,16 @@ fn stage_tier(stage: &str) -> Option<&'static str> {
     }
 }
 
+/// `(tier, note)` for one edge: the tier word (`fact` / `derived` /
+/// `heuristic`) and its note, read from the edge's own EVIDENCE cell. It is
+/// the one reading `glia why`, `check` and `glia query` share (through
+/// `rules::facts`), exposed so the precision audit
+/// (`engine/examples/edge_audit.rs`, FD.2) samples edges by the same tier an
+/// answer prints.
+pub fn edge_tier(e: &Edge) -> (&'static str, Option<String>) {
+    tier_of(Evidence::of(e).as_ref(), e)
+}
+
 /// `(tier, note)` for an edge's evidence (module doc). `e` is the edge the
 /// evidence came from: its confidence tiers an inferred `graph` binding and
 /// its ORIGIN cell names who declared an overlay edge.
