@@ -200,8 +200,8 @@ glia serves . orders --json
 
 # java-iface-extends: interface Catalog extends Readable, class PgCatalog implements Catalog; --up walks to supertypes
 glia implementors . Readable --json
-{"results":[{"qname":"Catalog","kind":"INTERFACE","file":"Catalog.java","line":3,"relation":"INHERITS_FROM","depth":1,"via":null,"tier":"FACT",…},
-            {"qname":"PgCatalog","kind":"CLASS","file":"PgCatalog.java","line":3,"relation":"IMPLEMENTS","depth":2,"via":"Catalog","tier":"FACT",…}],"absence":null}
+{"results":[{"qname":"Catalog","kind":"INTERFACE","file":"Catalog.java","line":3,"relation":"INHERITS_FROM","depth":1,"via":null,"tier":"fact",…},
+            {"qname":"PgCatalog","kind":"CLASS","file":"PgCatalog.java","line":3,"relation":"IMPLEMENTS","depth":2,"via":"Catalog","tier":"fact",…}],"absence":null}
 
 # go-sql-call-args: store.Upsert runs INSERT INTO prefs … ON CONFLICT; --cross-service follows a send into its receiver
 glia effects . store::Upsert --json
@@ -227,7 +227,7 @@ glia delta . --json
 glia review . --base main --json
 {"base":"main","counts":{"nodes_changed":3,"seeds":2,"edges_added":2,"edges_removed":0,"impact":8,"tests":0,"untested_seeds":2,"new_violations":0,"resolved_violations":0,"model_breaks":0,"edges_by_tier":{"fact":2}},
  "changed":[{"qname":"billing::billing::audit","kind":"FUNCTION","file":"billing/billing.ts","line":5,"change":"added","seed":true},…],"impact":{"seeds":[…],…,"results":[…],…},
- "tests":{"seeds":[…],"tests":[],…,"untested":["billing::billing::audit","billing::billing::settle"],…,"absence":{"tier":"FACT","reason":"no_edges",…}},
+ "tests":{"seeds":[…],"tests":[],…,"untested":["billing::billing::audit","billing::billing::settle"],…,"absence":{"tier":"fact","reason":"no_edges",…}},
  "edges":[{"change":"added","from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","tier":"fact","site_file":"billing/billing.ts","site_line":4,…},…],
  "new_violations":[],"resolved_violations":[],"model_breaks":[],"check_errors":[],"blocking":false}
 
