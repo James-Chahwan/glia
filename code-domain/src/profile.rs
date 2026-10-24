@@ -1357,8 +1357,9 @@ mod tests {
     /// CD.1c: communities group by what code does to code. Structure
     /// (CONTAINS, DEPENDS_ON), docs, tests, git history and every SHARES_*
     /// pairing weigh 0 - each would glue unrelated code through one hub - and
-    /// exactly those: every other registered category is listed, so a new
-    /// category must be weighed or added here.
+    /// so does the goal layer (TRACES, F0.1), never a walk; exactly those:
+    /// every other registered category is listed, so a new category must be
+    /// weighed or added here.
     #[test]
     fn community_weights_exclude_structure_history_and_docs() {
         assert_eq!(CODE_TABLES.validate(), Ok(()));
@@ -1395,6 +1396,7 @@ mod tests {
                 "SHARES_DATA_SOURCE",
                 "CO_CHANGES",
                 "SAME_AS",
+                "TRACES",
             ]
         );
         assert_eq!(CODE_TABLES.community_weights.len() + left_out.len(), ec::ALL.len());

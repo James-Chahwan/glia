@@ -411,7 +411,8 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 ///     entity, config key, schedule, infra ref, package, data source, or
 ///     change together) → `Cooccurs`, `0.3`;
 ///   - documentation of a code element → `Documents`, `0.3` (v6; before v6
-///     DOCUMENTS fell through to `Cooccurs` beside the SHARES_* rows).
+///     DOCUMENTS fell through to `Cooccurs` beside the SHARES_* rows);
+///   - a goal-layer link (TRACES, 0.5.4) → `Cooccurs`, `None`.
 ///
 /// `USES` stays `Imports`: every USES edge is a static by-name reference from
 /// the code that names a thing to the thing named (a type, a constant, an enum
@@ -464,6 +465,10 @@ pub const CATEGORY_MAP: &[(EdgeCategoryId, EdgeKind, Option<f32>)] = &[
     (ec::TESTS, EdgeKind::Cooccurs, None),
     (ec::HAS_ATTRIBUTE, EdgeKind::Cooccurs, None),
     (ec::DEFINES_CONFIG, EdgeKind::Cooccurs, None),
+    // TRACES (0.5.4, F0.1; emitted by the goal join pass, FC.5b): a goal-layer
+    // link, not a code relation. glia weighs it 0 and walks it nowhere, so it
+    // gives engram no conductance opinion.
+    (ec::TRACES, EdgeKind::Cooccurs, None),
 ];
 
 /// The [`CATEGORY_MAP`] row for `cat`, `None` for an unregistered id.
@@ -1648,6 +1653,9 @@ mod tests {
         assert_eq!(edge_weight(ec::CO_CHANGES), Some(0.3));
         assert_eq!(edge_kind(ec::TESTS), EdgeKind::Cooccurs);
         assert_eq!(edge_weight(ec::TESTS), None);
+        // TRACES (0.5.4, F0.1): a goal-layer link, no conductance opinion.
+        assert_eq!(edge_kind(ec::TRACES), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(ec::TRACES), None);
         // G13 weights track the scale.
         assert_eq!(edge_weight(ec::CONTAINS), Some(1.0));
         assert_eq!(edge_weight(ec::CALLS), Some(0.8));

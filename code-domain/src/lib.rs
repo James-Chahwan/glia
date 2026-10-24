@@ -55,6 +55,12 @@ pub mod code_span;
 /// Identity rule names, keys and normalisers for SAME_AS classes. (DD.2)
 pub mod same_as;
 
+// 0.5.4 slot (F0.1): declared here so its owner edits only its own file.
+
+/// The goal-layer vocabulary: unit kinds, roles, key types, the UNIT cell
+/// payload and namespaced unit qnames. (FC.1)
+pub mod goal;
+
 /// The EVM contract vocabulary: procedure / client qnames, scopes, the name
 /// key, ABI entries and the procedure and client cells. (DT.10a)
 pub mod evm;
@@ -198,6 +204,8 @@ pub mod node_kind {
     //   47 GRPC_SERVER    — A5.3           (emitted since A5.3)
     //   48 RPC_PROCEDURE  — A10.9
     //   49 RPC_CALL       — A10.9
+    // 50 allocated centrally by F0.1, for the 0.5.4 release:
+    //   50 GOAL_UNIT      — F0.1 for FC (0.5.4): written by FC.4 / FC.5b
     // ------------------------------------------------------------------
 
     /// RESERVED (A8.4) — a build/workspace project unit: an MSBuild `.csproj`,
@@ -245,6 +253,14 @@ pub mod node_kind {
     /// RESERVED (A10.9) — a call site that invokes a remote procedure, the
     /// caller-side counterpart of `RPC_PROCEDURE`.
     pub const RPC_CALL: NodeKindId = NodeKindId(49);
+
+    /// RESERVED (F0.1, for FC in 0.5.4) — a goal-layer unit: a requirement,
+    /// task, decision, ruling, spec row, packet, instrument, milestone, PR or
+    /// issue, keyed and carrying a state in its `UNIT` cell
+    /// ([`crate::cell_type::UNIT`]). Vocabulary in [`crate::goal`] (FC.1);
+    /// written by `engine::build::goal` (FC.4) and the goal join pass (FC.5b).
+    /// Not an entry kind and never a `find` row.
+    pub const GOAL_UNIT: NodeKindId = NodeKindId(50);
 
     /// Canonical id→name for every node kind. Single source of truth for decode
     /// tables (pyo3 `kind_names`), the CLI, and projection-text's display
@@ -302,6 +318,8 @@ pub mod node_kind {
         (GRPC_SERVER, "GRPC_SERVER"),
         (RPC_PROCEDURE, "RPC_PROCEDURE"),
         (RPC_CALL, "RPC_CALL"),
+        // F0.1 0.5.4 reservations - no emitter until FC.4 / FC.5b / FA.21.
+        (GOAL_UNIT, "GOAL_UNIT"), // FC.4 / FC.5b (F0.1)
     ];
 
     /// Name for a node-kind id, or `"UNKNOWN"` if unregistered.
@@ -424,6 +442,8 @@ pub mod edge_category {
     //   36 CO_CHANGES         — LF.5b
     // 37 allocated centrally by D0.1, the 0.5.2 release's only allocation:
     //   37 SAME_AS            — D0.1 for DD (0.5.2): identity stars, IdentityResolver (DD.5)
+    // 38 allocated centrally by F0.1, for the 0.5.4 release:
+    //   38 TRACES             — F0.1 for FC (0.5.4): goal-layer links, the join pass (FC.5b)
     // ------------------------------------------------------------------
 
     /// Cross-repo pairing: two nodes reach the same external data source
@@ -473,6 +493,16 @@ pub mod edge_category {
     /// and the message half of SHARES_SCHEMA (Q16, DD.16).
     pub const SAME_AS: EdgeCategoryId = EdgeCategoryId(37);
 
+    /// RESERVED (F0.1, for FC in 0.5.4) — a vertical goal-layer link by role
+    /// (defines / cites / names_file / supersedes / implements / requires):
+    /// a `GOAL_UNIT` to another unit or to the code / doc it names. Vocabulary
+    /// in [`crate::goal`] (FC.1); written by the goal join pass (FC.5b). Weight
+    /// 0 in activation and community detection, NOT in
+    /// `CODE_TABLES.carry_edges`: the goal layer annotates, it is never walked.
+    /// Kept apart from DOCUMENTS so governing_docs / docs-for / the doc linker
+    /// never read it.
+    pub const TRACES: EdgeCategoryId = EdgeCategoryId(38);
+
     /// Canonical id→name for every edge category. Single source of truth for
     /// decode tables (pyo3 `category_names`) and the CLI. Keep in lockstep with
     /// the constants above.
@@ -517,6 +547,8 @@ pub mod edge_category {
         (CO_CHANGES, "CO_CHANGES"),     // LF.5b
         // D0.1 0.5.2 reservation — no emitter until DD.5.
         (SAME_AS, "SAME_AS"), // DD.5 (D0.1)
+        // F0.1 0.5.4 reservations - no emitter until FC.4 / FC.5b / FA.21.
+        (TRACES, "TRACES"), // FC.5b (F0.1)
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
@@ -616,6 +648,10 @@ pub mod cell_type {
     //   23 COVERAGE      — LF.6c
     //   24 ENTRYPOINT    — LF.3b
     //   25 ACCESS_MODE   — LE.4a
+    // 26-27 allocated centrally by F0.1, for the 0.5.4 release (FA.21 asked
+    // for 26 too; F0.1 ordered them):
+    //   26 UNIT            — F0.1 for FC (0.5.4): the goal-layer unit payload (FC.1)
+    //   27 IMPORT_BINDINGS — F0.1 for FA.21 (0.5.4): an import's bound names
     // ------------------------------------------------------------------
 
     /// RESERVED (A12.1) — the message / payload schema type a node sends or
@@ -670,6 +706,19 @@ pub mod cell_type {
     /// Emitter LE.4a (`anchor::rehome_to_owner`); readers LE.4d, LE.7a.
     pub const ACCESS_MODE: CellTypeId = CellTypeId(25);
 
+    /// RESERVED (F0.1, for FC in 0.5.4) — the structured payload of a
+    /// `GOAL_UNIT` node, a JSON `UnitCell` (unit kind, key, state, source;
+    /// schema and validation in [`crate::goal`], FC.1). Distinct from
+    /// `INTENT` (4), a free-text description. Written by FC.4 / FC.5b.
+    pub const UNIT: CellTypeId = CellTypeId(26);
+
+    /// RESERVED (F0.1, for FA.21 in 0.5.4) — the names each import of a
+    /// MODULE binds, JSON rows `{spec, name, alias, line}`, so a layout merge
+    /// can recompute cross-graph passes from persisted data. Kept apart from
+    /// `IMPORTS` (16), whose string-array payload engram-export reads.
+    /// Written by FA.21 (`[import-bindings]`).
+    pub const IMPORT_BINDINGS: CellTypeId = CellTypeId(27);
+
     /// Canonical id→name for every cell type. Backs the pyo3 `cell_type_names`
     /// decode table so consumers that read structured cells (WP-J) can label
     /// them without a local table. Keep in lockstep with the constants above.
@@ -701,6 +750,9 @@ pub mod cell_type {
         (COVERAGE, "COVERAGE"),           // LF.6c
         (ENTRYPOINT, "ENTRYPOINT"),       // LF.3b
         (ACCESS_MODE, "ACCESS_MODE"),     // LE.4a
+        // F0.1 0.5.4 reservations - no emitter until FC.4 / FC.5b / FA.21.
+        (UNIT, "UNIT"),                       // FC.1 / FC.4 (F0.1)
+        (IMPORT_BINDINGS, "IMPORT_BINDINGS"), // FA.21 (F0.1)
     ];
 
     /// Name for a cell-type id, or `"UNKNOWN"` if unregistered.
@@ -3766,19 +3818,19 @@ mod tests {
             "node_kind",
             node_kind::ALL.iter().map(|(id, _)| id.0).collect(),
             node_kind::ALL.iter().map(|(_, n)| *n).collect(),
-            49,
+            50,
         );
         check(
             "edge_category",
             edge_category::ALL.iter().map(|(id, _)| id.0).collect(),
             edge_category::ALL.iter().map(|(_, n)| *n).collect(),
-            37,
+            38,
         );
         check(
             "cell_type",
             cell_type::ALL.iter().map(|(id, _)| id.0).collect(),
             cell_type::ALL.iter().map(|(_, n)| *n).collect(),
-            25,
+            27,
         );
     }
 
@@ -4730,10 +4782,18 @@ mod tests {
         // D0.1 — the 0.5.2 allocation, locked at 37.
         assert_eq!(edge_category::name(edge_category::SAME_AS), "SAME_AS");
         assert_eq!(edge_category::SAME_AS.0, 37, "SAME_AS is locked at 37 (D0.1)");
+        // F0.1 — the 0.5.4 allocations (no emitter until FC.4 / FC.5b / FA.21).
+        assert_eq!(node_kind::name(node_kind::GOAL_UNIT), "GOAL_UNIT");
+        assert_eq!(edge_category::name(edge_category::TRACES), "TRACES");
+        assert_eq!(cell_type::name(cell_type::UNIT), "UNIT");
+        assert_eq!(
+            cell_type::name(cell_type::IMPORT_BINDINGS),
+            "IMPORT_BINDINGS"
+        );
         // Reserved, not emitted: the next free ids stay UNKNOWN.
-        assert_eq!(node_kind::name(NodeKindId(50)), "UNKNOWN");
-        assert_eq!(edge_category::name(EdgeCategoryId(38)), "UNKNOWN");
-        assert_eq!(cell_type::name(CellTypeId(26)), "UNKNOWN");
+        assert_eq!(node_kind::name(NodeKindId(51)), "UNKNOWN");
+        assert_eq!(edge_category::name(EdgeCategoryId(39)), "UNKNOWN");
+        assert_eq!(cell_type::name(CellTypeId(28)), "UNKNOWN");
     }
 
     /// L0.1 guard — `leap_ids_are_locked`. The 0.5.0 leap ids were allocated
@@ -4753,15 +4813,15 @@ mod tests {
         assert_eq!(cell_type::COVERAGE, CellTypeId(23));
         assert_eq!(cell_type::ENTRYPOINT, CellTypeId(24));
         assert_eq!(cell_type::ACCESS_MODE, CellTypeId(25));
+        // F0.1 — the 0.5.4 ids, locked from this commit.
+        assert_eq!(node_kind::GOAL_UNIT.0, 50);
+        assert_eq!(edge_category::TRACES.0, 38);
+        assert_eq!(cell_type::UNIT.0, 26);
+        assert_eq!(cell_type::IMPORT_BINDINGS.0, 27);
         // The stale proposed numbers decode UNKNOWN, never a registered cell.
-        for stale in [26, 27, 28] {
-            assert_eq!(
-                cell_type::name(CellTypeId(stale)),
-                "UNKNOWN",
-                "cell {stale}"
-            );
-        }
-        assert_eq!(edge_category::name(EdgeCategoryId(38)), "UNKNOWN");
+        // 26 / 27 are UNIT / IMPORT_BINDINGS since F0.1, so only 28 is left.
+        assert_eq!(cell_type::name(CellTypeId(28)), "UNKNOWN", "cell 28");
+        assert_eq!(edge_category::name(EdgeCategoryId(39)), "UNKNOWN");
     }
 
     #[test]
