@@ -10,7 +10,7 @@
 //! it won `module_symbols` and every INJECTS / heritage / bare-name reference
 //! bound to an edgeless, unlocatable marker instead of the class.
 //!
-//! [`fold_role_overlays`] runs inside `merge_parses`, before any builder's
+//! `fold_role_overlays` runs inside `merge_parses`, before any builder's
 //! symbol table, and folds each overlay into its declaration: the declaration
 //! keeps its kind and `NodeId` and gains ONE ROLE cell
 //! (`cell_type::ROLE`, `{"roles":["COMPONENT","SERVICE"]}`, names from

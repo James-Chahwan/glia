@@ -705,8 +705,8 @@ impl ParseCache {
     ///
     /// The frame header is read first, alone: a cache written under another
     /// stamp (every parser change moves it) costs one read of at most
-    /// [`HEADER_MAX`] bytes and no decompression. A discard of a file that
-    /// exists is never silent ([`Discard::line`]): a stamp mismatch is the
+    /// `HEADER_MAX` bytes and no decompression. A discard of a file that
+    /// exists is never silent (`Discard::line`): a stamp mismatch is the
     /// parse cache doing its job, and it explains a slow build.
     pub fn load(repo_path: &str) -> ParseCache {
         use std::io::Read;
@@ -747,7 +747,7 @@ impl ParseCache {
     }
 
     /// Persist atomically next to the `.gmap`, staging through a per-process
-    /// tmp file (see [`tmp_name`]). Best-effort: the cache is an optimization,
+    /// tmp file (see `tmp_name`). Best-effort: the cache is an optimization,
     /// never load-bearing.
     ///
     /// The directory gets its self-ignoring `.gitignore` here too (as from

@@ -5,13 +5,13 @@
 //! reached as `glia_engine::profile::<item>`, never flattened into the
 //! crate root.
 //!
-//! LD.13: [`CODE_PASSES`] is every build pass the code domain runs over an
+//! LD.13: `CODE_PASSES` is every build pass the code domain runs over an
 //! assembled [`MergedGraph`], in run order: the cross-graph resolvers
-//! (`Resolve`), the post-passes of [`crate::passes`] (`Post`), then the
+//! (`Resolve`), the post-passes of `crate::passes` (`Post`), then the
 //! evidence fill and the determinism sort (`Finalize`). Every build tail —
 //! `generate_one*` and `generate_many*` (given the build's [`CodeBuildCtx`])
-//! and a layout merge ([`crate::merge`], given [`CodeBuildCtx::for_merge`]) —
-//! is one [`run_code_passes_with`] call. A new resolver or build pass is one
+//! and a layout merge ([`crate::merge`], given `CodeBuildCtx::for_merge`) —
+//! is one `run_code_passes_with` call. A new resolver or build pass is one
 //! [`PassSpec`] here, never a new call in `build/`.
 //!
 //! The build context is [`CodeBuildCtx`] (LF.2b): every repo's external
@@ -24,7 +24,7 @@
 //! LD.14a: [`CODE_PROFILE`] is the code domain's whole
 //! [`DomainProfile`]: the data tables (`code_domain::profile::CODE_TABLES` —
 //! registries, entry rule, carry edges, effect sinks, activation weights and
-//! presets) plus [`CODE_PASSES`]. [`run_code_passes_with`] runs the passes
+//! presets) plus `CODE_PASSES`. `run_code_passes_with` runs the passes
 //! through it.
 //!
 //! LD.14b: its tables are the only source of the code domain's query dials.
@@ -69,13 +69,13 @@ use crate::{adr, passes};
 /// DC.5: `group_fills` holds each language graph's evidence fill, decided
 /// at its group build, aligned with the merged graphs (`None` for a region,
 /// project or docs graph); the Finalize `fill_evidence_sites` pass applies
-/// them. A context with none (a layout merge, [`Self::empty`]) fills every
+/// them. A context with none (a layout merge, `Self::empty`) fills every
 /// edge at Finalize, as before.
 ///
 /// DD.7: `scip_roots` are the `(repo, root, marker label)` whose
 /// `.glia/scip-snapshot/` the `identity` pass reads for its `scip_symbol`
-/// keys: a build's every repo ([`Self::new`]), a layout merge's every member
-/// root still on disk ([`Self::for_merge`]: the merge has no inputs, so its
+/// keys: a build's every repo (`Self::new`), a layout merge's every member
+/// root still on disk (`Self::for_merge`: the merge has no inputs, so its
 /// SCIP stage stays a no-op and the SCIP edges its members kept are not
 /// added twice, but its identity pass keys the union as a joint build does).
 pub struct CodeBuildCtx {
@@ -340,7 +340,7 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
 ]);
 
 /// The code domain's profile: [`CODE_TABLES`](glia_code_domain::profile::CODE_TABLES)
-/// plus [`CODE_PASSES`]. A `static` (a `const` would copy it at every use);
+/// plus `CODE_PASSES`. A `static` (a `const` would copy it at every use);
 /// its initializer reads only consts.
 pub static CODE_PROFILE: DomainProfile<MergedGraph, CodeBuildCtx> = DomainProfile {
     tables: glia_code_domain::profile::CODE_TABLES,

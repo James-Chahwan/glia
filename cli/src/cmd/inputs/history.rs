@@ -68,7 +68,7 @@ enum HistoryCmd {
         no_messages: bool,
     },
     /// Replay the history snapshot over the graph and write
-    /// <repo>/.glia/calibration-snapshot/: the per-repo ranking each answer picks.
+    /// `<repo>/.glia/calibration-snapshot/`: the per-repo ranking each answer picks.
     Calibrate {
         /// Repo to calibrate (run `glia history sync <repo>` first).
         repo: String,

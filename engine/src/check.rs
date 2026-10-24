@@ -5,7 +5,7 @@
 //! cycles` (LE.6b) is the report.
 //!
 //! The rules are LF.4a's `[[constraint]]` stanzas (and cell-API rules), read
-//! only through [`declared_constraints`]: its scopes are already
+//! only through `declared_constraints`: its scopes are already
 //! repo-relative paths (`.` = the root), so this module never re-resolves a
 //! label.
 //!
@@ -138,8 +138,8 @@
 //!
 //! Every [`Violation`] carries `blocking`: whether it fails CI. A rule's
 //! `min_tier` (DB.1: `fact` | `derived`, default [`DEFAULT_MIN_TIER`]) is the
-//! weakest tier that blocks: [`is_blocking`] is true when the violation's
-//! tier is at least as strong as its rule's [`min_tier_of`], and never for a
+//! weakest tier that blocks: `is_blocking` is true when the violation's
+//! tier is at least as strong as its rule's `min_tier_of`, and never for a
 //! [`HEURISTIC`] violation (0.5.2 Q2: an overlay edge, a co-change or a name
 //! guess is reported, never a CI failure). It applies to every kind:
 //! forbid_edge, no_cycle and rule alike; a reflexion divergence uses
@@ -167,7 +167,7 @@
 //! does not hold it (a layout older than the overlay), or a scope it names
 //! holds no located node. The build only says so on stderr (`[declared]
 //! orphaned ..`, `[overlay] error: ..`), and an orphaned or rejected stanza
-//! writes no cell, so [`declared_constraints`] never sees it.
+//! writes no cell, so `declared_constraints` never sees it.
 //!
 //! The loader's drops (DT.7c) come first per repo: a `[[constraint]]`,
 //! `[[component]]` or `[[layer]]` stanza `glia_config` dropped (a version-2
@@ -219,7 +219,7 @@
 //! declared ([`CheckReport::reflexion`] is `None` otherwise), as named
 //! stratified-negation Datalog relations, defined in
 //! `engine/src/rules/reflexion.dl` and evaluated by the rules layer
-//! (`rules::reflexion::derive`, DB.8b). [`ReflexionFacts`] holds them as read
+//! (`rules::reflexion::derive`, DB.8b). `ReflexionFacts` holds them as read
 //! back, one field per relation. The table is the spec and reflexion.dl its one
 //! implementation (renaming a relation is an edit there and in the read-back):
 //!
@@ -422,7 +422,7 @@ pub struct Violation {
     /// (Q3)").
     pub tier: &'static str,
     /// Whether it fails CI: `tier` is at least as strong as its rule's
-    /// `min_tier` and is not [`HEURISTIC`] ([`is_blocking`]; module doc
+    /// `min_tier` and is not [`HEURISTIC`] (`is_blocking`; module doc
     /// "Rule invariants and min_tier"). A non-blocking violation is advisory.
     pub blocking: bool,
     /// forbid_edge and divergence: the edges, all of them (the evidence lists
@@ -541,8 +541,8 @@ pub struct Unanchored {
     /// overlay loader's message for a stanza it dropped, `.. (stanza
     /// dropped)`; for a whole file it ignored, `rejected: <message> (rule
     /// stanzas not read: constraint=<c> component=<m> layer=<l>)`), `absent:
-    /// ..`, or an empty scope's `<role> scope `<s>` matches no located node
-    /// (..)`.
+    /// ..`, or an empty scope's ``<role> scope `<s>` matches no located node
+    /// (..)``.
     pub reason: String,
     /// What would make it check something: the nearest qname or path that
     /// anchors it, what to declare, or the validator's message to act on.
@@ -659,7 +659,7 @@ pub fn default_forbid_categories() -> Vec<EdgeCategoryId> {
     out
 }
 
-/// Evaluate every rule [`declared_constraints`] reads from `merged`. A scope
+/// Evaluate every rule `declared_constraints` reads from `merged`. A scope
 /// no node sits in is a [`CheckReport::errors`] row, and the overlay is not
 /// read: [`CheckReport::unanchored`] is empty (review judges through this
 /// form; the overlay loop through `check_rules_gated`).

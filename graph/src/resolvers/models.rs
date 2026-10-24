@@ -2047,8 +2047,8 @@ impl ResolvedShape {
     /// server value it meets at the root. For a union client root (and a
     /// server value that is no union, of kind object or array): the union
     /// with its members that name nothing dropped, then the one member of
-    /// the server's kind ([`union_member`]: several object members are
-    /// merged, as [`object_view`] merges an all-object union), else, for an
+    /// the server's kind (`union_member`: several object members are
+    /// merged, as `object_view` merges an all-object union), else, for an
     /// object server value, the union's merged object view. A merged view is
     /// an inline object: its names are the members' names, each required only
     /// when every member requires it, open when any member is. `self` when no
@@ -2391,7 +2391,7 @@ const PASS: &str = "models";
 
 /// The `models` Resolve pass (DT.1h): every confirmed client <-> server model
 /// pair [`wire_pairs`] finds becomes an `http_model` SAME_AS class, one star
-/// per server model (see [`model_stars`] for which pairs make a class).
+/// per server model (see `model_stars` for which pairs make a class).
 ///
 /// **Rule.** Which kinds a class pairs and how surely are the code domain's
 /// `http_model` row of `CODE_TABLES.identity_rules`, read by name: a client
@@ -2413,7 +2413,7 @@ const PASS: &str = "models";
 /// sorted by content, and maps are only probed.
 ///
 /// **DT.1k.** The pass also writes the `graphql_model` classes
-/// ([`graphql_model_identity_in`]): a GraphQL client call's result model and
+/// (`graphql_model_identity_in`): a GraphQL client call's result model and
 /// gqlgen's generated model joined with the schema type the call's root
 /// field returns, the type's MESSAGE_TYPE the center.
 ///
@@ -2426,7 +2426,7 @@ const PASS: &str = "models";
 /// `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a>
 /// ambiguous_project=<b> embed_reduced=<r>` (the `http_model` classes; `d`
 /// the classes with a diverged edge; `a`, `b` and `r` count client models,
-/// see [`model_stars`]).
+/// see `model_stars`).
 /// grep: `... 2>&1 | grep '^\[models\] \(classes\|graphql results\)='`
 pub struct ModelResolver;
 

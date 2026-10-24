@@ -22,20 +22,20 @@
 //! marker.
 //!
 //! LA.1b resolves the `use` trees the parser emits as raw Rust paths
-//! ([`resolve_imports_rust`]): workspace-crate uses, `pub use` re-exports
+//! (`resolve_imports_rust`): workspace-crate uses, `pub use` re-exports
 //! (chains followed), aliases, globs and `use`s inside fn bodies bind, in the
 //! scope that holds them. A file MODULE's or inline PACKAGE's bindings go in
 //! the persisted `module_import_bindings`; a fn's and every glob stay in the
-//! build-time [`RustBindings`] the call passes read.
+//! build-time `RustBindings` the call passes read.
 //!
 //! LA.35b binds the typed receivers the generic receiver pass (A6.2a /
-//! LA.35a) misses ([`RustIndex::resolve_call`]'s `ComplexReceiver` arm): a
+//! LA.35a) misses (`RustIndex::resolve_call`'s `ComplexReceiver` arm): a
 //! method from an `impl` in another file than its type, `self.f.m()` inside
 //! such an `impl`, and a receiver type only Rust scoping names (a fn-body
 //! `use`, a glob, an inline mod, the one crate-local type of that name).
 //!
-//! DG.13a binds the Rust type refs the parser cannot ([`TYPE_REF_CATEGORIES`],
-//! [`RustIndex::resolve_type_refs`]): `impl Trait for Type` whose trait is
+//! DG.13a binds the Rust type refs the parser cannot (`TYPE_REF_CATEGORIES`,
+//! `RustIndex::resolve_type_refs`): `impl Trait for Type` whose trait is
 //! declared in another file or module becomes IMPLEMENTS by Rust path rules
 //! (the scope's `use`, its own item, its globs, a `crate::` / `super::` /
 //! workspace-crate path), never by a repo-wide name, so `use

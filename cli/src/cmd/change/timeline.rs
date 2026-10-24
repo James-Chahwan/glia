@@ -85,7 +85,7 @@ enum TimelineCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Every edge span that ever touched the node <qname> names (the exact
+    /// Every edge span that ever touched the node `<qname>` names (the exact
     /// qname, else the one qname ending `::<qname>`), from the sidecar:
     /// since which rev, until which rev or still present.
     History {

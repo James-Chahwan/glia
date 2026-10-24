@@ -118,7 +118,7 @@ enum OverlayCmd {
     /// as it is (base), with every stanza merged in (with) and, per graph
     /// stanza, with all but that one, then report what moved and a keep /
     /// review / drop verdict per stanza. Every declared rule is checked on
-    /// each build: a [[constraint]] stanza is judged on with (holds /
+    /// each build: a `[[constraint]]` stanza is judged on with (holds /
     /// violated / error / orphaned / checks_nothing / duplicate, its
     /// violations located; a rule whose scope holds no located node checks
     /// nothing and is review, as `glia check` lists it), a
@@ -129,7 +129,7 @@ enum OverlayCmd {
         /// Path to the repo root whose `.glia/overlay.toml` the candidate
         /// would join.
         repo: String,
-        /// The candidate: overlay sections, entrypoints and [[constraint]]
+        /// The candidate: overlay sections, entrypoints and `[[constraint]]`
         /// rules only, each stanza under `# gap: <id>` comments naming the
         /// gaps it targets.
         #[arg(long)]
@@ -690,8 +690,8 @@ fn flat(message: &str) -> String {
         .join("; ")
 }
 
-/// One violation: `<rule_kind> [`<rule_id>`] `<key>` - <tier>[, advisory]
-/// at <file:line | file | —>`; the id is left out under its own rule.
+/// One violation: ``<rule_kind> [`<rule_id>`] `<key>` - <tier>[, advisory]
+/// at <file:line | file | —>``; the id is left out under its own rule.
 fn hit_line(h: &RuleHit, with_id: bool) -> String {
     let at = match (h.file.as_deref(), h.line) {
         (Some(f), Some(n)) => format!("{f}:{n}"),

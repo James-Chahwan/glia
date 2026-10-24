@@ -21,7 +21,7 @@
 //! `external`, no handlers, with the hosts its sites name in
 //! `external_hosts`; a channel asked as a full URL keeps only the external
 //! rows whose hosts include the URL's. A channel with only external rows is
-//! served, so it carries no absence. [`external_hosts`] is the one reader of
+//! served, so it carries no absence. `external_hosts` is the one reader of
 //! that verdict, shared with `effects`: an endpoint the build pairs (an alias
 //! host, an overlay `[constants]` pin) is in-repo here, as in `glia gaps` and
 //! engram-export. HTTP only: WS / gRPC / GraphQL clients are not marked.

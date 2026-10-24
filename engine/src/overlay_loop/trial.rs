@@ -348,8 +348,8 @@ pub struct RuleTrial {
     /// [`RULE_ERROR`]: check's message, newlines flattened to `; `.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// [`RULE_CHECKS_NOTHING`]: check's reason (`<role> scope `<s>` matches
-    /// no located node (..)`).
+    /// [`RULE_CHECKS_NOTHING`]: check's reason (``<role> scope `<s>` matches
+    /// no located node (..)``).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// [`RULE_CHECKS_NOTHING`]: check's suggested fix.

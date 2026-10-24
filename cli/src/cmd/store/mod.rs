@@ -31,7 +31,7 @@ pub(crate) enum StoreCmd {
     Cell(cell::Args),
     /// Shared parse cache (CE-2): push the parse cache of a built checkout to
     /// an object store, pull what another checkout is missing into
-    /// <repo>/.glia/graph/parse_cache.bin (the next build reuses it; the build
+    /// `<repo>/.glia/graph/parse_cache.bin` (the next build reuses it; the build
     /// itself never touches the network), gc a directory store. Objects are
     /// signed with GLIA_CACHE_KEY / --key-file; an unsigned store needs
     /// --unsigned and is re-parse-sampled on pull.

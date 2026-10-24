@@ -38,7 +38,7 @@ mod go_wire;
 /// Build a per-repo Python graph from a set of file-parse outputs.
 ///
 /// Every builder ends with the LC.3d `[evidence-graph]` marker
-/// ([`EvidenceTally::report`]): which branch of `resolve_calls` /
+/// (`EvidenceTally::report`): which branch of `resolve_calls` /
 /// `resolve_refs` bound how many edges of this graph.
 pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
@@ -59,58 +59,58 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// directory.
 ///
 /// LA.23d: a method declared in a different file from its receiver struct is
-/// re-parented under that struct first ([`bind_split_go_receivers`]), so
+/// re-parented under that struct first (`bind_split_go_receivers`), so
 /// `class_methods` holds it (SelfMethod and field-typed calls resolve) and
 /// its file's `module_symbols` no longer lists it as a top-level function.
 /// Its Bare / Attribute calls still resolve in its own file's scope
-/// ([`resolve_go_calls`]).
+/// (`resolve_go_calls`).
 ///
 /// LD.7b: an interface's embedded interfaces bind package-scoped and to an
-/// INTERFACE only ([`bind_go_embeds`]); then, Go interfaces being
-/// satisfied implicitly, [`emit_go_implicit_implements`] derives each type ->
+/// INTERFACE only (`bind_go_embeds`); then, Go interfaces being
+/// satisfied implicitly, `emit_go_implicit_implements` derives each type ->
 /// interface IMPLEMENTS edge from method names, signatures (CA.3b) and, for a
 /// one-method interface or a `_test.go` side, package reachability, before
 /// A6.6 pairs them method by method (at the type-level edge's Medium).
 ///
 /// LA.13b: a package is a directory, so an import binds the imported
 /// directory and a call every generic lookup missed resolves across the
-/// package's files ([`GoPackages`]), with no qname or persisted-table change.
+/// package's files (`GoPackages`), with no qname or persisted-table change.
 ///
 /// CA.2b: the same hook binds a method call whose receiver is a call chain,
 /// a local / parameter, a package var or a struct-field chain on that
-/// receiver's type ([`GoPackages::typed_receiver`]); `[go-receivers]` prints
+/// receiver's type (`GoPackages::typed_receiver`); `[go-receivers]` prints
 /// what it bound.
 ///
 /// CB.20: once calls are bound, every provisional mount ROUTE (a route on a
 /// parameter- or field-held router group) is re-keyed to each prefix its
 /// group receives through the resolved calls, one ROUTE per mount, before
-/// the refs resolve ([`crate::go_mounts::bind`]); `[go-mounts]` prints what
+/// the refs resolve (`crate::go_mounts::bind`); `[go-mounts]` prints what
 /// it did.
 ///
 /// CI.2a: a struct's embedded fields bind like an interface's embeds, to the
-/// in-repo STRUCT or INTERFACE they name ([`bind_go_embeds`]), and the call
+/// in-repo STRUCT or INTERFACE they name (`bind_go_embeds`), and the call
 /// hook follows them: a method or field the struct does not declare binds
-/// through Go's promotion rule ([`GoPromoted`]); `[go-embeds]` prints what
+/// through Go's promotion rule (`GoPromoted`); `[go-embeds]` prints what
 /// bound.
 ///
 /// CI.4: a receiver method value handler (`r.GET("/tokens", h.List)` in
 /// `func (h *TokensHandler) RegisterRoutes`) whose type is declared in another
 /// file of the package, or whose method is promoted from an embedded struct,
 /// is HANDLED_BY that type's method, found through the package
-/// ([`GoPackages::bind_type_handlers`]) before the refs resolve;
+/// (`GoPackages::bind_type_handlers`) before the refs resolve;
 /// `[go-handlers]` prints what bound.
 ///
 /// CI.6: a Go type alias declared in the repo (`type Chat_StreamServer =
 /// grpc.BidiStreamingServer[Msg, Reply]`, a parser `NavFact::TypeAlias`) is
 /// replaced by its target in every method signature before the
-/// implicit-IMPLEMENTS compare ([`resolve_go_alias_sigs`]); `[go-alias]`
+/// implicit-IMPLEMENTS compare (`resolve_go_alias_sigs`); `[go-alias]`
 /// prints what it rewrote.
 ///
 /// DT.1f: once the calls and refs are bound, every handler's JSON response /
 /// bind wire cell (DT.1e) is typed to its in-repo STRUCT through the same
 /// receiver facts, the model written into the cell, a handler -USES-> STRUCT
 /// edge drawn, and every Go STRUCT's SCHEMA_FIELDS field typed the same way
-/// ([`go_wire`]); `[go-wire] resolved` prints what it found.
+/// (`go_wire`); `[go-wire] resolved` prints what it found.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let GoPasses {
         g,
@@ -402,14 +402,14 @@ where
 /// merge, the symbol table, `resolve_imports_ts` with the caller's
 /// `resolve_source`, DF.4a's own-package URIs and DF.4b's plain-import
 /// names among them, `resolve_calls`, `resolve_refs`), then the Dart member
-/// reads ([`dart::resolve_member_reads`]: a `Type.member` / `x.member` read
+/// reads (`dart::resolve_member_reads`: a `Type.member` / `x.member` read
 /// no call follows, recorded by the parser as a `NavFact::MemberRead`,
 /// bound through the reader's own scope: a getter's CALLS, a tear-off's
 /// USES, a static field's USES of its CLASS), then the method-level
 /// IMPLEMENTS pairing. DT.5i: `resolve_calls`' extra hook is
-/// [`dart::provider_call`] (a call on a Riverpod provider read binds in the
+/// `dart::provider_call` (a call on a Riverpod provider read binds in the
 /// type the provider's declaration names) and the member reads' hook
-/// [`dart::provider_type`]. Prints `[dart-scope] provider receivers
+/// `dart::provider_type`. Prints `[dart-scope] provider receivers
 /// bound=<n>` when the hook bound a call, then `[reads] member reads
 /// accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` once, then
 /// the LC.3d `[evidence-graph]` line.
@@ -460,12 +460,12 @@ where
 }
 
 /// Build a per-repo Swift graph (CB.18): [`build_typescript`]'s passes plus
-/// Swift's call scope ([`crate::swift_scope`]). Before `resolve_calls`,
-/// [`implicit_self`] rewrites a bare call inside a type that names one of
+/// Swift's call scope (`crate::swift_scope`). Before `resolve_calls`,
+/// `implicit_self` rewrites a bare call inside a type that names one of
 /// the type's members (its own, or one an extension in another file adds)
 /// into a self call, so the member wins over a same-named free function the
 /// generic pass would bind through the caller file's symbols.
-/// `resolve_calls`' `extra_hook` is [`SwiftModuleTypes::resolve`]: every
+/// `resolve_calls`' `extra_hook` is `SwiftModuleTypes::resolve`: every
 /// file of a module sees every type of the module without an import, so
 /// `Formatter.money(n)` / `Formatter()` on a type declared in another file of
 /// the directory bind, and a self call reaches a member of the type's other
@@ -520,7 +520,7 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 }
 
 /// Build a per-repo Elixir graph (DH.17a): [`build_dotted`]'s passes, with
-/// `resolve_calls`' `extra_hook` = [`ElixirModules::resolve`]. Elixir module
+/// `resolve_calls`' `extra_hook` = `ElixirModules::resolve`. Elixir module
 /// names are global atoms, so a remote call needs no `alias`:
 /// `Shop.Cart.total(..)`, and `Cart.total(..)` on a top-level `defmodule
 /// Cart`, bind the module's FUNCTION once every generic lookup (an `alias`
@@ -572,15 +572,15 @@ fn elixir_passes(
 /// same-named file-level fn), and the enum-variant USES refs `resolve_refs`
 /// leaves are bound through the same path rules.
 ///
-/// LA.1b: `use` trees resolve as Rust paths ([`resolve_imports_rust`], in
+/// LA.1b: `use` trees resolve as Rust paths (`resolve_imports_rust`, in
 /// place of `resolve_imports_python`): workspace-crate uses, `pub use`
 /// re-exports, aliases, globs and fn-body uses bind. A fn's own `use`s and
 /// every glob stay in the returned bindings, which the pre-pass (a fn's
 /// `use`s shadow the file's) and the hook (the file's globs, last) read.
 ///
-/// DG.13a: every ref of a [`TYPE_REF_CATEGORIES`] category (the IMPLEMENTS
+/// DG.13a: every ref of a `TYPE_REF_CATEGORIES` category (the IMPLEMENTS
 /// of `impl Trait for Type` whose trait lives in another file or module) is
-/// bound by Rust path rules ([`RustIndex::resolve_type_refs`]) before, and
+/// bound by Rust path rules (`RustIndex::resolve_type_refs`) before, and
 /// instead of, `resolve_refs`; every other ref keeps the generic path.
 pub fn build_rust(
     repo: RepoId,
@@ -653,19 +653,19 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
 ///
 /// LB.10c: an out-of-line member defined in another file than its class
 /// (`void Widget::run() {}` in `Widget.cpp`) joins the class its header
-/// declares ([`bind_out_of_line`]): one METHOD under the header's CLASS /
+/// declares (`bind_out_of_line`): one METHOD under the header's CLASS /
 /// STRUCT, so `this->helper()` in the .cpp body resolves through the class.
 /// A qualified definition whose qualifier is a namespace (`void shop::init()
 /// {}`) becomes a FUNCTION of its file. `resolve_calls`' `extra_hook` is the
-/// definition's own file ([`CppCallScope`]): a Bare call of a bound member is
+/// definition's own file (`CppCallScope`): a Bare call of a bound member is
 /// looked up in the file that defines it, then every Bare call the generic
 /// pass missed in the headers its file directly `#include`s.
 ///
-/// CB.25 ([`crate::cpp_scope`]): before `resolve_calls`, [`implicit_this`]
+/// CB.25 (`crate::cpp_scope`): before `resolve_calls`, `implicit_this`
 /// rewrites a bare call inside a member that names a member of its class
 /// (or of a base) into a self call, so the member wins over a same-named
 /// free function (C++ class-scope lookup). The hook then tries
-/// [`CppScope::resolve`] after [`CppCallScope`]: `Type::m()` / `ns::f()`
+/// `CppScope::resolve` after `CppCallScope`: `Type::m()` / `ns::f()`
 /// through C++ name lookup, a typed receiver through `using`, a free
 /// function through a header prototype, a bare call through `using`.
 /// Prints the `[cpp-scope]` marker once.

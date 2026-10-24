@@ -1,5 +1,5 @@
 //! `glia docs-for` (tier-4 P3 payoff) — the doc sections that DOCUMENTS
-//! <qname>, located. An unknown qname is an absence answer (exit 0, with
+//! `<qname>`, located. An unknown qname is an absence answer (exit 0, with
 //! suggestions), not an error.
 
 use crate::cmd::resolve::{live_glyph, print_absence};

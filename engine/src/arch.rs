@@ -172,7 +172,7 @@ pub enum ServiceKeying {
     TopLevelDir,
     /// Explicit project roots, longest prefix wins. [`default_keying`] selects
     /// this for a single repo whose graph carries PROJECT anchors below its
-    /// root (A8.5). A file under none of them lands in [`OUTSIDE_PROJECTS`].
+    /// root (A8.5). A file under none of them lands in `OUTSIDE_PROJECTS`.
     ProjectRoots(Vec<String>),
 }
 

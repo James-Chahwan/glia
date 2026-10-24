@@ -5,7 +5,7 @@
 //! a runtime path:
 //!
 //! 1. **Node-level service loops** (kind `event`). The strongly-connected
-//!    components of the flow graph ([`FLOW_CAUSAL`]: the cross-service
+//!    components of the flow graph (`FLOW_CAUSAL`: the cross-service
 //!    mechanisms plus the HANDLED_BY / CALLS / USES / INJECTS glue that carries
 //!    a handler to the next publish). A component whose members sit in two or
 //!    more `glia arch` services is a loop. Its witness is the shortest cycle
@@ -21,7 +21,7 @@
 //!    `possible_loop`, tier `heuristic`: each service publishes to and
 //!    consumes from the others, but no handler-to-producer path is in the
 //!    graph. The witness is the service links, located at their producers.
-//! 3. **Import cycles** (kind `import`). [`module_import_graph`] projects every
+//! 3. **Import cycles** (kind `import`). `module_import_graph` projects every
 //!    IMPORTS edge onto the modules at its two ends; each component is an
 //!    `import_cycle` located at the import sites (the edge's EVIDENCE line,
 //!    LC.3b).

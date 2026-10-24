@@ -849,7 +849,7 @@ pub(crate) fn tracked_paths(repo: &Path) -> Result<BTreeSet<String>, String> {
 /// A tree whose files a query-time reader reads (EB.5a): the working tree under
 /// a root, or the tree of one commit (review: the base sha; rank_eval: a test
 /// commit's parent). Re-exported as `glia_engine::intent::defs::Tree`, the
-/// one public path; [`read_paths_at`] reads either the same way.
+/// one public path; `read_paths_at` reads either the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Tree<'a> {

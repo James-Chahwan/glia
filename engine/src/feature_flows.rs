@@ -3,7 +3,7 @@
 //! the located steps they reach with the confidence of each hop, and the data
 //! sources those steps touch with the evidence tier behind each — plus the
 //! deterministic writer of the `flows/<feature>.yaml` files the dogfood repos'
-//! agents read ("start from the feature — load flows/<feature>.yaml"), the
+//! agents read ("start from the feature — load `flows/<feature>.yaml`"), the
 //! surface `generate-repo-map.py` produced by regex.
 //!
 //! Module slot declared by L0.2, reached as

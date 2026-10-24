@@ -7,7 +7,7 @@
 //! downstream |` (`via` is the witness chain from the seed, `downstream` the
 //! receivers one flow hop past the sink), plus `| crossed |` with
 //! `--cross-service`. A sink whose server is outside the build (CG.4b's ORIGIN
-//! `external`, CJ.3) reads `external: `<host>`` in `downstream`. An empty
+//! `external`, CJ.3) reads ``external: `<host>` `` in `downstream`. An empty
 //! answer prints its LD.8a absence block. `--json` is the engine's whole
 //! `Effects` (each row's `external_hosts` included).
 //!

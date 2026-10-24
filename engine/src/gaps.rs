@@ -520,7 +520,7 @@ pub fn gaps_report(
 /// on — and measure what the overlay changed: each build's [`graph_counts`]
 /// (nodes by kind, edges by category, graph gaps by category), their
 /// per-kind / per-category deltas, the [`verdict`] on them, and the orphan
-/// count ([`ORPHAN_CATEGORIES`]) before and after. The `with` orphan count
+/// count (`ORPHAN_CATEGORIES`) before and after. The `with` orphan count
 /// reads the repos' `[[wrapper]]` stanzas, so a wrapper's `<unresolved>` sink
 /// is a `wrapped_sink` there and not an orphan; the `without` build applies
 /// no overlay, so it stays an `unresolved_endpoint`. One path builds

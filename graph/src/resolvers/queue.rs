@@ -49,7 +49,7 @@ impl CrossGraphResolver for QueueStackResolver {
     /// topic, so its consumer node can never equal a producer's topic. The
     /// binding is declared in Terraform (`google_pubsub_subscription { name,
     /// topic }`, recorded by the terraform parser as a JSON CODE cell on the
-    /// INFRA_RESOURCE; [`pubsub_bindings`]). A consumer of a bound
+    /// INFRA_RESOURCE; `pubsub_bindings`). A consumer of a bound
     /// subscription S whose families admit Pub/Sub is also indexed under its
     /// topic T, so a producer of T pairs with it: rule `binding`, at most
     /// `Medium` (a declared binding is DERIVED, never a literal identity).
@@ -57,7 +57,7 @@ impl CrossGraphResolver for QueueStackResolver {
     ///
     /// DT.2c: a NATS producer whose subject the extractor folded to a
     /// placeholder (`queue_producer:shop.shipments.*`, a runtime token read as
-    /// `*`, [`is_placeholder_topic`]) names a FAMILY of subjects, not one, so
+    /// `*`, `is_placeholder_topic`) names a FAMILY of subjects, not one, so
     /// it skips the exact pass (the exact index keys a wildcard consumer under
     /// its raw pattern, and string equality would pair it) and runs the
     /// wildcard walk with no `w.topic != topic` filter: it pairs only a

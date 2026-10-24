@@ -1,19 +1,19 @@
 //! The structure bank (EC.4, items 10 and 2): the replay's text-free file
 //! rankers, scored from the arithmetic the answers run (EA.4's
-//! [`rank::base_keys`]) so the calibration picks among exactly what an answer
+//! [`rank::base_keys`](crate::rank::base_keys)) so the calibration picks among exactly what an answer
 //! applies.
 //!
 //! - `P1`: undirected PPR at CODE_TABLES' damping (0.5), seeded uniformly over
 //!   every node of the seed files, node scores max-pooled per file
 //!   (rank_eval `run_query`'s `Ppr::uniform` + `file_pool(.., false)`), key
 //!   `[s, 0, 0]`.
-//! - `PT*`: the same at [`rank::WIDE_DAMPING`], sum-pooled (`base,d85`).
+//! - `PT*`: the same at [`rank::WIDE_DAMPING`](crate::rank::WIDE_DAMPING), sum-pooled (`base,d85`).
 //! - `B0`: carry-edge BFS both ways, unbounded depth, key `[-min depth (or
 //!   -1e9 unreached), file degree, 0]` (`bfs_key`).
 //! - `H10` / `H10[PT*]` / `H10[B0]`: co-change first, `[C0, P1, 0]`,
 //!   `[C0, PT*, 0]` (`lex2`), `[C0, -depth, degree]` (r3's `H10[B0]`), C0 the
 //!   query's prefix co-change (EC.2). The composition is
-//!   [`rank::rank_files_with_c0`]'s step d, built here from the memoised base
+//!   [`rank::rank_files_with_c0`](crate::rank::rank_files_with_c0)'s step d, built here from the memoised base
 //!   keys so one query pays one PPR per damping; the bank test pins the two
 //!   equal.
 //!

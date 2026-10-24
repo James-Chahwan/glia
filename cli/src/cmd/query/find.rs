@@ -11,14 +11,14 @@
 //! member.
 //!
 //! EB.8: `--files` is a separate answer over FILES (`find::find_files_with_ids`):
-//! the repo's files the query text is about, LX[IDR,T1s] (typed id links
+//! the repo's files the query text is about, `LX[IDR,T1s]` (typed id links
 //! first, then past commits whose messages match it, ties by degree then
 //! path). It prints the routed ids (when any) and the ranked files; `--json`
 //! is the `{results, absence}` envelope of the files. One repo only: with
 //! `--with` the engine refuses (exit 2).
 //!
 //! EC.13: the files follow the repo's calibrated `SELf2t` pick (`glia history
-//! calibrate`), else LX[IDR,T1s]; the table ends with `ranked by <pick>
+//! calibrate`), else `LX[IDR,T1s]`; the table ends with `ranked by <pick>
 //! (calibrated on <t> commits | fallback: <reason>)` and `--json` carries the
 //! `selection` (stderr: `[select] surface=find_files set=SELf2t ..`).
 

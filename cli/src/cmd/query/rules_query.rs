@@ -14,7 +14,7 @@
 //! budget stop names it); `--limit` cuts each output's rows after the sort, the
 //! totals kept.
 //!
-//! **Text.** `# glia query `<repo>` (datalog|gql)`, then per output
+//! **Text.** ``# glia query `<repo>` (datalog|gql)``, then per output
 //! `## <pred>/<arity> - <total> row(s)` (GQL: `## result - ...`) and a table
 //! `| # | <column>... | tier | at |`: a node value is `` `qname` ``, a string
 //! as is, an integer in decimal; `at` is the row's first node value's

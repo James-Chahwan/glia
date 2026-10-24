@@ -4,7 +4,7 @@
 //! the caveat rows, the near misses) under `_(nothing serves it)_`. A client
 //! ENDPOINT whose server is outside the build (CJ.3) is an `external (<confidence>)`
 //! row after the routes, its hosts in the handlers column as
-//! `external: `<host>``. An absence is an answer, so it exits 0; exit 2 is a
+//! ``external: `<host>` ``. An absence is an answer, so it exits 0; exit 2 is a
 //! build failure.
 //!
 //! DD.13: identity classes collapse (`serves::serves_with`, the build's repo

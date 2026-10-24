@@ -27,7 +27,7 @@ const MAX_SUBCOMMAND_ARGVS: usize = 8;
 ///    cells (`mytool migrate --yes` -> `cli:migrate`, `php bin/console
 ///    app:sync-orders` -> `cli:app:sync-orders`; DH.10: `mix shop.sync` ->
 ///    `cli:shop.sync`). A bare word like `migrate` is common, so this match
-///    is `Weak`, capped at [`MAX_SUBCOMMAND_ARGVS`] vectors, and never
+///    is `Weak`, capped at `MAX_SUBCOMMAND_ARGVS` vectors, and never
 ///    promoted.
 ///
 /// Edges are deduped on `(from, to)` — a pair both lookups find keeps the bin

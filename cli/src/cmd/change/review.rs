@@ -59,7 +59,7 @@
 //! route at the base through the repo's task / requirement rows (typed id
 //! routing) and its words rank past commit messages; the JSON gains `intent`
 //! and the markdown `### Intent` (the routed ids, the files ranked
-//! LX[IDR,P1]), and the impact rows in id-routed files move first (the rest
+//! `LX[IDR,P1]`), and the impact rows in id-routed files move first (the rest
 //! keep their order; text never moves a row). `[review-intent] base=<rev>
 //! title_source=<arg|commit|none> fusion=LX[IDR,P1] ..` after `[review]
 //! base=`.

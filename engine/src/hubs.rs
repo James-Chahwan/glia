@@ -33,7 +33,7 @@
 //! NON-ZERO fan-ins / fan-outs of the row candidates (a node with no counted
 //! edge is no evidence of what "high" means, and would lower the bar on a
 //! graph full of structure). A node joins the fan-in list at `fan_in >=
-//! max(min_degree, p99_in)` ([`utility_hubs`] is that set), the fan-out list
+//! max(min_degree, p99_in)` (`utility_hubs` is that set), the fan-out list
 //! likewise; `min_degree` floors the percentile on small graphs. The
 //! cross-service list holds nodes whose callers or callees sit in two or more
 //! `glia arch` services ([`default_keying`] + [`service_of`] of each

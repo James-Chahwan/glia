@@ -29,7 +29,7 @@
 //!   (the EVIDENCE site, 1-based). Sorted by (tier: fact, derived, heuristic;
 //!   change: added, removed, reconfidenced; category; from; to), so a
 //!   reviewer reads the observed facts first;
-//! - the rules: [`declared_constraints`] of the WORKING TREE (the rules as the
+//! - the rules: `declared_constraints` of the WORKING TREE (the rules as the
 //!   change leaves them) evaluated by `check::check_rules_gated` (DT.7c, gated
 //!   as `glia check` gates them, with no roots) over the working tree and over
 //!   the base. Taking the rules from one side on purpose: a change that
@@ -106,7 +106,7 @@
 //! rule the base already broke more than `MAX_EVIDENCE` times (the brownfield
 //! case a PR gate exists for) would misclass edges beyond the cut: one
 //! removed edge lets a hidden old one into the listed rows and it reads as
-//! new. So [`RuleIndex`] evaluates forbid_edge and no_cycle to identity level
+//! new. So `RuleIndex` evaluates forbid_edge and no_cycle to identity level
 //! over each side, uncapped, with check's rules (strict scope membership
 //! through one `Locator`, the rule's categories or
 //! `check::default_forbid_categories`, the module import graph for an
@@ -153,7 +153,7 @@
 //! `.glia/calibration-snapshot/` (`glia history calibrate`), ranked through
 //! the same bank the replay ranks (`calibrate::fusions::seeded_keys`, the
 //! extra signals PT*, C0, W5 / M computed only when the pick reads them),
-//! else LX[IDR,P1] ([`INTENT_FUSION_REVIEW`], byte-identical to EB.7) with
+//! else `LX[IDR,P1]` ([`INTENT_FUSION_REVIEW`], byte-identical to EB.7) with
 //! the reason; [`Review::selection_intent`] says which. The impact rows take
 //! LX[IDR, their existing order]: when some file has IDR > 0, rows in such
 //! files move first by the file's IDR descending, every other row keeps its
@@ -439,15 +439,15 @@ pub struct Review {
     pub intent: Option<ReviewIntent>,
     /// 0.5.3 (EC.11): the intent's ranking choice, set `SELt2` (EC.12) at the shape of
     /// the changed files: the repo's calibrated pick, else the fallback
-    /// LX[IDR,P1] with the reason. Present exactly when `intent` is.
+    /// `LX[IDR,P1]` with the reason. Present exactly when `intent` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_intent: Option<Selection>,
 }
 
 /// The review of the working tree's change against git rev `base` (module
 /// docs): one `graph_delta_vs_rev`, then [`review`]. `Err` on an unknown
-/// [`ReviewArgs::models_min_tier`] (`unknown models min tier `<x>`: expected
-/// one of fact, derived`, before anything is built), on the delta's errors
+/// [`ReviewArgs::models_min_tier`] (``unknown models min tier `<x>`: expected
+/// one of fact, derived``, before anything is built), on the delta's errors
 /// (not a directory, not a git work tree, an unknown rev, a failed build) and
 /// on `tests_for_delta`'s (more than `tests_for::MAX_SEEDS` seeds). Like the
 /// delta, it saves the working tree's parse-cache sidecar, never a layout.

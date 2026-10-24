@@ -1,4 +1,4 @@
-//! `glia trace` (P3 cross_stack_trace, LD.4a) — follow <feature> forward
+//! `glia trace` (P3 cross_stack_trace, LD.4a) — follow `<feature>` forward
 //! across service boundaries and print the ranked distinct paths it takes,
 //! each hop with its mechanism; `--to` asks for the paths between two nodes.
 //!
@@ -29,7 +29,7 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 6)]
     depth: usize,
     /// Trace to this node (qname or simple name): the ranked paths from
-    /// <FEATURE> to it, or the shortest undirected one when no directed
+    /// `<FEATURE>` to it, or the shortest undirected one when no directed
     /// path exists.
     #[arg(long)]
     to: Option<String>,

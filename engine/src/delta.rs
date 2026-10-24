@@ -22,15 +22,15 @@
 //! they sit on disk, which a materialised rev cannot reproduce (an untracked,
 //! gitignored `node_modules/` exists in the working tree only).
 //!
-//! A node's content is its [`CONTENT_CELLS`]: its CODE text and its declared
+//! A node's content is its `CONTENT_CELLS`: its CODE text and its declared
 //! SCHEMA_FIELDS (CC.8a), so a contract op or message type whose fields
 //! changed while its CODE line did not is a `modified` row. SCHEMA_FIELDS is
 //! canonical JSON (LE.10a / LE.10b); the domain-free LE.1a delta compares Text
 //! payloads only (it skips the positional JSON the queue and cron extractors
-//! keep under CODE), so [`side`] hands it each SCHEMA_FIELDS payload as Text.
+//! keep under CODE), so `side` hands it each SCHEMA_FIELDS payload as Text.
 //!
 //! A watch update (DC.7b) that rebuilt a few graphs takes the scoped variant,
-//! [`located_delta_scoped`] (DC.6): the same rows and counts, folding only the
+//! `located_delta_scoped` (DC.6): the same rows and counts, folding only the
 //! ids of the rebuilt graphs (every copy) and the keys of their intra edges
 //! plus every cross edge, with move detection only when the walked file set
 //! changed.

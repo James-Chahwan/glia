@@ -145,7 +145,7 @@ pub struct ModelBreaks {
     pub advisory: usize,
     pub compatible: usize,
     /// `Some` from [`model_breaks`] exactly when `rows` is empty; always
-    /// `None` from [`model_breaks_of`].
+    /// `None` from `model_breaks_of`.
     pub absence: Option<Absence>,
     /// The fired_on line this answer printed ([`ModelBreaks::marker`]).
     #[serde(skip)]
@@ -299,7 +299,7 @@ impl Dir {
 // ---- the answer -------------------------------------------------------------
 
 /// The inferred-model breaks of an already computed rev delta (module docs):
-/// [`model_breaks_of`] over `rev.before.merged`, `rev.after` and `rev.delta`,
+/// `model_breaks_of` over `rev.before.merged`, `rev.after` and `rev.delta`,
 /// plus the absence when no row is listed. Nothing is built.
 pub fn model_breaks(rev: &RevDelta, args: &ModelBreakArgs) -> ModelBreaks {
     let mut out = model_breaks_of(

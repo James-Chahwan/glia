@@ -164,7 +164,7 @@
 //!   stay out of it. Seeds go through [`IdentityView::walk_rep`]: two seeds
 //!   in one walk class are one seed, the first by (qname, id) kept.
 //! - **Cases**: a walk-class node is a test case when ANY member is one
-//!   ([`TestIndex::is_case`]); its row shows a member that is a case: the
+//!   (`TestIndex::is_case`); its row shows a member that is a case: the
 //!   class's display member ([`IdentityView::display`]) when it is one, else
 //!   the first case member by (file, line, qname), unlocated last. A class
 //!   mixing a case and a non-case (a function that is a test in one repo

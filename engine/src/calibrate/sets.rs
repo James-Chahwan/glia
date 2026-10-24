@@ -3,7 +3,7 @@
 //!
 //! Group `structure`, the text-free answers' two sets, on the seeded shapes
 //! k1 / k2 / k3 / half (rank_eval `r3_sets`):
-//! - `SELh0` = {H10, H10[PT*], H10[B0]}, fallback H10: the set an answer
+//! - `SELh0` = {H10, `H10[PT*]`, `H10[B0]`}, fallback H10: the set an answer
 //!   reads when co-change ranks first (the default);
 //! - `SELs0` = {P1, PT*, B0}, fallback P1: read only under `--no-cochange` /
 //!   `cochange=False`.

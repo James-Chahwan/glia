@@ -13,7 +13,7 @@ cost (usage_gate.py --end) and prints whether the next wave can start, folds fol
 leap-corrections.json (ids A*.* and L*.*), and records LANDED in leap_schedule.py.
 
 Steps (README order): commits + per-packet status from the workflow journal,
-workspace tests, byte_identical, the out-of-workspace engram-export check
+workspace tests, fmt (F0.5), rustdoc (FD.23b), byte_identical, the out-of-workspace engram-export check
 (scripts/check-engram-export.sh), wheel rebuild + staleness check, run.py,
 matrix --emit/--check, python suites, fold the wave's followups into every
 remaining packet's correction, update baseline.json (MEASURED) and LANDED,
@@ -70,6 +70,24 @@ def fmt_check():
     if paths:
         return False, f"[fmt] check: FAILED ({len(paths)} files)"
     return True, "[fmt] check: ok"
+
+
+def rustdoc_check():
+    """FD.23b's rustdoc gate: every workspace crate documents with warnings denied, in the
+    workspace's own target dir. `--keep-going` documents every crate a failure does not block,
+    so one bad link does not hide the rest. Returns (ok, marker); the marker is the stable
+    `[rustdoc] check:` line the close-out prints. `<n>` counts the located `error` lines (the
+    per-crate `could not document` / `could not compile` summaries are not errors of their
+    own), `<c>` the crates that failed."""
+    out, code = sh("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --keep-going 2>&1",
+                   timeout=2400)
+    if code == 0:
+        return True, "[rustdoc] check: ok"
+    crates = set(re.findall(r"^error: could not (?:document|compile) `([^`]+)`", out, re.M))
+    errors = [l for l in out.splitlines()
+              if re.match(r"^error(\[E\d+\])?:", l)
+              and not re.match(r"^error: (could not (document|compile)|aborting|build failed)", l)]
+    return False, f"[rustdoc] check: FAILED ({len(errors)} errors in {len(crates)} crates)"
 
 
 def journal_results(run):
@@ -210,6 +228,10 @@ def main():
     say(fmt_marker)
     if not fmt_ok:
         gates.append("fmt")
+    rustdoc_ok, rustdoc_marker = rustdoc_check()
+    say(rustdoc_marker)
+    if not rustdoc_ok:
+        gates.append("rustdoc")
     out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
     bi = "2 passed; 0 failed" in out
     say(f"== byte_identical: {'green' if bi else 'RED'}")

@@ -51,16 +51,16 @@ enum Cmd {
     /// with its mechanism (http/queue/grpc/ws/event/cli/graphql) and the
     /// channel it travels over.
     Arch(cmd::arch::Args),
-    /// Reachability walk: which entities does <qname> depend on / get hit by.
+    /// Reachability walk: which entities does `<qname>` depend on / get hit by.
     Impact(cmd::impact::Args),
     /// Blast radius (P3): the complete, edge-category-aware, PPR-ranked, located
-    /// closure around one or more <qname>s — what they affect / what affects
+    /// closure around one or more `<qname>`s — what they affect / what affects
     /// them, across service boundaries, in one call; many seeds are one walk
     /// and one ranking, each row naming its seed. Excludes structural
     /// import/contain edges so the radius doesn't fan out through shared
     /// containers.
     BlastRadius(cmd::blast_radius::Args),
-    /// Docs-for (tier-4 P3): the doc sections that DOCUMENTS <qname> — "what are
+    /// Docs-for (tier-4 P3): the doc sections that DOCUMENTS `<qname>` — "what are
     /// the rules for X?" — located.
     DocsFor(cmd::docs_for::Args),
     /// Coverage (P2): for the languages present in the repo, the known
@@ -75,7 +75,7 @@ enum Cmd {
     /// consumer's declared message type and whether they agree. Report-only —
     /// no SHARES_SCHEMA edge is emitted.
     Contracts(cmd::contracts::Args),
-    /// Cross-stack trace (P3): follow <feature> forward across service
+    /// Cross-stack trace (P3): follow `<feature>` forward across service
     /// boundaries and print the ranked distinct paths it takes, each hop
     /// labeled with its mechanism (http/queue/grpc/call) and whether it
     /// crossed a service; `--to` gives the paths between two nodes.

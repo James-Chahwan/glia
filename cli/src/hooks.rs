@@ -112,7 +112,7 @@ pub(crate) enum HooksCmd {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum HookCmd {
-    /// pre-commit: block unless <PAIR> has this repo's branch checked out.
+    /// pre-commit: block unless `<PAIR>` has this repo's branch checked out.
     PreCommit {
         /// The sibling repo, relative to this repo's top-level.
         #[arg(long)]

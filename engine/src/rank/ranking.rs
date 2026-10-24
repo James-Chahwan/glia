@@ -176,7 +176,7 @@ impl Ranking {
 
 /// Item 10's structure-only candidate set, in this order: SELs0 (rank_eval.rs
 /// `r3_sets`: P1, PT*, B0). With co-change first on top it is SELh0's set
-/// (H10, H10[PT*], H10[B0]).
+/// (H10, `H10[PT*]`, `H10[B0]`).
 pub const STRUCTURE_CANDIDATES: [RankBase; 3] = [RankBase::Ppr, RankBase::PprWide, RankBase::Bfs];
 
 #[cfg(test)]

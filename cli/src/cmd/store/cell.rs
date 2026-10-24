@@ -98,7 +98,7 @@ pub(crate) struct Args {
 enum Action {
     /// Write one CONSTRAINT / DECISION / CONV entry (`--json`, `--text` for a
     /// CONV note, or `--file`) or a VECTOR (`--file`, raw little-endian f32
-    /// bytes) on the node <qname> names. The entry's `source` defaults to
+    /// bytes) on the node `<qname>` names. The entry's `source` defaults to
     /// `api`; a CONV without an `id` gets the next one (000001, 000002, ...).
     Set(SetArgs),
     /// Remove one entry (`--id`, `--source`) or a node's VECTOR from the
@@ -143,8 +143,8 @@ struct SetArgs {
     dims: Option<u32>,
     /// The node's move-stable v1 identity hint
     /// (`v1|<kind id>|<file>|<body:016x>|<local>`, as `cell ls --json` and
-    /// glia-export-engram's <out>.hints.jsonl carry it): picks between nodes
-    /// sharing <qname>, re-binds a moved node, and is stored with the row;
+    /// glia-export-engram's `<out>.hints.jsonl` carry it): picks between nodes
+    /// sharing `<qname>`, re-binds a moved node, and is stored with the row;
     /// the target reads `hint_differs` when the qname's node has another
     /// hint.
     #[arg(long, value_name = "HINT")]

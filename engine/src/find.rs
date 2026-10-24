@@ -50,7 +50,7 @@
 //! uncollapsed one. HEURISTIC candidates (vendored copies) never fold.
 //! [`FindOptions::collapse`] `Collapse::off()` is the raw per-member answer
 //! (`glia find --no-collapse`). The seed resolvers (trace, tests-for,
-//! governing docs, absence suggestions) call [`search`], which never folds.
+//! governing docs, absence suggestions) call `search`, which never folds.
 //!
 //! # Files for a free-text query (EB.8)
 //!
@@ -70,7 +70,7 @@
 //! fusions of text, PPR from the text's top files, co-change from them, the
 //! work signals and IDR, rank_eval `r3_bank_find`), ranked through the same
 //! `calibrate::fusions::find_keys` the replay measured; the answer carries
-//! its `selection`. `FindFilesOptions::select = false` keeps LX[IDR,T1s].
+//! its `selection`. `FindFilesOptions::select = false` keeps `LX[IDR,T1s]`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;

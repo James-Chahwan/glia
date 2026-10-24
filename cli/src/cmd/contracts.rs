@@ -8,8 +8,10 @@
 //! DT.1i adds the model drift pairings: `http_model` (a client call site's
 //! model against the server model of each HTTP exchange it is paired with,
 //! response and request) and `client_contract` (a typed client against the
-//! OpenAPI / swagger op that DOCUMENTS the route it calls). Without `--fields`
-//! the output is exactly the topic table it always was.
+//! OpenAPI / swagger op that DOCUMENTS the route it calls); DT.1n adds
+//! `graphql_selection` (each GRAPHQL_CALLS operation's selection against the
+//! SDL type its root field returns). Without `--fields` the output is exactly
+//! the topic table it always was.
 
 use glia_engine::contract_fields::{FieldChange, FieldDiffRow, FieldSide};
 
@@ -28,9 +30,10 @@ pub(crate) struct Args {
     /// Also diff the declared fields of each contract pairing (schema copies,
     /// queue topics, AsyncAPI channels, OpenAPI routes vs Pact, and model
     /// drift: http_model, a client's model against the server's per HTTP
-    /// exchange, and client_contract, a typed client against the OpenAPI op
-    /// documenting its route): a second table after the topic table; with
-    /// --json, an object {topics, fields}.
+    /// exchange, client_contract, a typed client against the OpenAPI op
+    /// documenting its route, and graphql_selection, a GraphQL operation's
+    /// selection against the SDL type its root field returns): a second table
+    /// after the topic table; with --json, an object {topics, fields}.
     #[arg(long)]
     fields: bool,
     /// With --fields: keep only field rows whose status is `breaking`.

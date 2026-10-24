@@ -371,7 +371,7 @@ fn imports_library(cells: &[Cell], library: &str) -> bool {
 /// since the LB.3a fold an Angular `@Component` is a CLASS with ROLE
 /// COMPONENT, not a COMPONENT node (DT.5l: so is a Swift `@main` type and a
 /// Kotlin Flutter activity). Besides the table, any node carrying an
-/// ENTRYPOINT cell ([`is_declared_entry`]) is an entrypoint whatever its kind
+/// ENTRYPOINT cell (`is_declared_entry`) is an entrypoint whatever its kind
 /// (LF.3b): the user declared it in `.glia/overlay.toml` `[entrypoints]`, for
 /// code the graph cannot see a trigger for (a job a scheduler wires by a
 /// string, a plugin hook loaded by reflection, a library's public API), or
@@ -397,7 +397,7 @@ fn imports_library(cells: &[Cell], library: &str) -> bool {
 ///   make its subclasses live.
 /// - **Invoked member (DT.5d).** A live owner makes live each of its METHODs
 ///   a framework or the runtime calls on an instance of it, with no source
-///   line to read the call from ([`invoked_members`], the code domain's
+///   line to read the call from (`invoked_members`, the code domain's
 ///   `profile::INVOKED_MEMBERS` table): Angular lifecycle hooks of a
 ///   component / directive / pipe / service / guard, the ControlValueAccessor
 ///   / Validator members of a component or directive, a pipe's `transform`,
@@ -426,9 +426,9 @@ fn imports_library(cells: &[Cell], library: &str) -> bool {
 /// member a carry edge reached first counts in none), `N` the live set and
 /// `M` every node. Right after it (DT.5l), `[invoked] rows=<n>
 /// angular=<a> constructor=<c> flutter=<f> go_runtime=<g> apple_app=<p>
-/// transloco=<t> dio=<d> sig_rejected=<r>`: the [`invoked_members`] rows per
+/// transloco=<t> dio=<d> sig_rejected=<r>`: the `invoked_members` rows per
 /// framework tag, live owner or not, and the METHODs a signature-checked row
-/// refused ([`invoked_members_counted`]).
+/// refused (`invoked_members_counted`).
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
     let w = live_walk(merged);
     eprintln!(
@@ -732,8 +732,8 @@ pub struct BlastOptions {
     pub top_files: usize,
     /// 0.5.3 (EC.8, item 10): apply the repo's calibration record when
     /// `rank_cache` holds one. On (the default), the answer's ranking is the
-    /// record's pick for the seeds' shape from SELh0 (H10 / H10[PT*] /
-    /// H10[B0]) when `ranking.cochange_first`, else from SELs0 (P1 / PT* /
+    /// record's pick for the seeds' shape from SELh0 (H10 / `H10[PT*]` /
+    /// `H10[B0]`) when `ranking.cochange_first`, else from SELs0 (P1 / PT* /
     /// B0), with `ranking` itself the fallback when the record has no
     /// applicable row (so with no record the rows are EA's). Off, `ranking`
     /// is the caller's explicit choice and is never overridden. Either way
@@ -822,7 +822,7 @@ pub struct BlastRadius {
 /// then name; the scope a preference among ambiguous candidates, LA.14). A
 /// query that names no node goes to `unresolved` and the rest still answer;
 /// two queries naming one node are one seed, the first query kept. Then
-/// [`blast_radius_seeded`] runs ONE walk and ONE PPR over all the seeds:
+/// `blast_radius_seeded` runs ONE walk and ONE PPR over all the seeds:
 /// depths from the nearest seed, scores from one run so they compare, each
 /// row attributed to the seed whose wave reached it first (seeds expand in
 /// query order), no seed ever a row, and `linked_seeds` naming the seeds one
@@ -1855,7 +1855,7 @@ pub struct Located {
 ///
 /// Placement has three tiers, first hit wins:
 ///
-/// 1. the node's first POSITION cell ([`position_of`]) — every parsed entity,
+/// 1. the node's first POSITION cell (`position_of`) — every parsed entity,
 ///    and the go / ts_routes ROUTEs (a POSITION per registration);
 /// 2. ROUTE / ENDPOINT only (A3.6): the ENDPOINT_HIT cell or a JSON
 ///    ROUTE_METHOD cell ([`endpoint::http_node_span`]), which carry the call

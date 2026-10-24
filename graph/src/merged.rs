@@ -610,7 +610,7 @@ pub fn cross_links(
 /// - `collapse` (the FACT / DERIVED classes, the ones an answer folds): every
 ///   other edge buckets as before, but an edge with an end in one of its
 ///   classes counts once per distinct `(collapse.rep(from),
-///   collapse.rep(to))` pair in its bucket (unordered for a [`SYMMETRIC`]
+///   collapse.rep(to))` pair in its bucket (unordered for a `SYMMETRIC`
 ///   mechanism), so two copies of one contract op documenting one route are
 ///   one DOCUMENTS edge, not two. An edge between two nodes in no class is
 ///   +1 as in `cross_links`, so a bucket no class touches keeps its count.

@@ -1,4 +1,4 @@
-//! `glia impact` — reachability walk: which entities does <qname> depend on /
+//! `glia impact` — reachability walk: which entities does `<qname>` depend on /
 //! get hit by, over every edge category, as depth-tagged tables.
 
 use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
