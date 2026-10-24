@@ -5439,13 +5439,14 @@
     "docs/overlay.md - three short paragraphs (gaps' implied GraphQL transport exemption and the `graphql transport; ` detail prefix, DT.11c; unpaired_route withholding test-file routes, DT.6b; WS-served routes, DT.3c), each naming its `[gaps]` marker"
    ],
    "files_touched": [
-    "scripts/eval_substrate.py",
-    "bench/substrate-gap/matrix_vocab.py",
     "bench/substrate-gap/AUTHORING.md",
-    "bench/substrate-gap/grade.py",
-    "bench/substrate-gap/test_grade.py",
     "bench/substrate-gap/fixtures/models-go-wire/key.json",
-    "docs/overlay.md"
+    "bench/substrate-gap/grade.py",
+    "bench/substrate-gap/matrix_vocab.py",
+    "bench/substrate-gap/test_grade.py",
+    "docs/overlay.md",
+    "scripts/check-engram-export.sh",
+    "scripts/eval_substrate.py"
    ],
    "implementation": "1. Vocabulary edits; run test_matrix.py. 2. grade.py: add `rule` to FORBID_EDGE_FIELDS; in the forbid edge loop compare against the edge's EVIDENCE cell rule when the row has one. 3. Restore the models-go-wire guard; it must PASS at the base (DT.5j's composite_literal USES has rule composite_literal, not json_response). 4. overlay.md text (docs/overlay.md is dirty in the working tree at spec time: rebase on what landed).",
    "acceptance": "PRE-FIX: a forbid row with `rule` is rejected by grade.py as an unknown field. AFTER: (1) `python3 -I bench/substrate-gap/test_grade.py` and `test_matrix.py` green. (2) `~/.venvs/glia-leap/bin/python bench/substrate-gap/run.py --no-log` shows models-go-wire full with the restored row (a negative check in test_grade.py: a json_response USES edge to Problem fires it). (3) `grep -n SHARES_DEPENDENCY bench/substrate-gap/matrix_vocab.py scripts/eval_substrate.py` returns only the explanatory comment. (4) docs/overlay.md names the three `[gaps]` markers.",
