@@ -1,4 +1,5 @@
-//! Git-history, test-report and SCIP-index snapshot records, and their `data_hash`.
+//! Git-history, test-report, SCIP-index and identifier-vocabulary snapshot
+//! records, and their `data_hash`.
 //!
 //! External, HEAD-dependent inputs enter glia the way docs do: a separate
 //! snapshot step (the `glia-snapshots` crate — the only code that shells out)
@@ -66,6 +67,23 @@
 //! It holds indexer-generated symbol strings, identifier text sliced at
 //! definition ranges and line numbers: no free text and no values, so nothing
 //! in it is redacted.
+//!
+//! The identifier vocabulary snapshot (FB.13a) is `<repo>/.glia/vocab-snapshot/`,
+//! a query-time input no build reads (`glia_snapshots::vocab_sync` writes it):
+//! every `[A-Za-z_][A-Za-z0-9_]*` token of 3+ bytes in every tracked text file
+//! of one commit's tree ([`vocab_tokens`](crate::snapshots::vocab_tokens)).
+//! - `files.jsonl` — one [`VocabFile`](crate::snapshots::VocabFile) per file,
+//!   ids `0..n` in path order;
+//! - `vocab.jsonl` — one [`VocabToken`](crate::snapshots::VocabToken) per
+//!   token, sorted by token bytes, its files listed up to
+//!   [`VOCAB_FILES_CAP`](crate::snapshots::VOCAB_FILES_CAP), `"common": true` past it;
+//! - `meta.json` — the [`VocabMeta`](crate::snapshots::VocabMeta), written
+//!   LAST, `data_hash` over `files.jsonl` then `vocab.jsonl`
+//!   ([`read_vocab`](crate::snapshots::read_vocab) checks it).
+//!
+//! Its tokens and paths come from files the commit's tree already tracks, so
+//! it stores nothing the checkout does not hold; nothing is redacted (the
+//! reader wants every token, like-for-like with `git grep` at the commit).
 
 use std::path::{Path, PathBuf};
 
@@ -1479,6 +1497,351 @@ fn check_scip(
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// Identifier vocabulary snapshot (FB.13a)
+// ===========================================================================
+
+/// The identifier vocabulary snapshot's directory name under the `.glia`
+/// control dir. `glia_store`'s layout fingerprint and `glia watch` treat
+/// everything under it as a query-time input (FB.3): no build reads it.
+pub const VOCAB_DIR: &str = "vocab-snapshot";
+/// `files.jsonl`: one [`VocabFile`] per text file read, ids `0..n` in path order.
+pub const VOCAB_FILES_FILE: &str = "files.jsonl";
+/// `vocab.jsonl`: one [`VocabToken`] per distinct token, sorted by token bytes.
+pub const VOCAB_TOKENS_FILE: &str = "vocab.jsonl";
+/// [`VocabMeta::version`] this module writes and reads.
+pub const VOCAB_VERSION: u32 = 1;
+/// [`VocabMeta::generator`].
+pub const VOCAB_GENERATOR: &str = "glia vocab sync";
+/// A token found in more files than this is `"common": true` with no list.
+pub const VOCAB_FILES_CAP: usize = 16;
+/// The shortest token kept, in bytes.
+pub const VOCAB_MIN_TOKEN_LEN: usize = 3;
+
+/// `meta.json` of the vocabulary snapshot, written LAST: a directory without
+/// it is incomplete. It holds no path, clock or identity, so two syncs of one
+/// commit from two clones write identical bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VocabMeta {
+    /// [`VOCAB_VERSION`].
+    pub version: u32,
+    /// The full sha of the commit whose tree was read.
+    pub rev: String,
+    /// Rows of `files.jsonl`.
+    pub files: usize,
+    /// Rows of `vocab.jsonl`.
+    pub tokens: usize,
+    /// Tokens past [`VOCAB_FILES_CAP`] files (`"common": true`).
+    pub common: usize,
+    /// Tracked blobs skipped as binary (a NUL in their first 8000 bytes).
+    pub skipped_binary: usize,
+    /// Tracked blobs skipped as larger than the reader's size cap.
+    pub skipped_large: usize,
+    /// [`VOCAB_GENERATOR`].
+    pub generator: String,
+    /// [`data_hash`] over `files.jsonl` then `vocab.jsonl`.
+    pub data_hash: String,
+}
+
+impl VocabMeta {
+    /// A meta for commit `rev` with the skip counts the reader kept; the row
+    /// counts and `data_hash` are derived by [`write_vocab`].
+    pub fn new(rev: impl Into<String>, skipped_binary: usize, skipped_large: usize) -> Self {
+        Self {
+            version: VOCAB_VERSION,
+            rev: rev.into(),
+            files: 0,
+            tokens: 0,
+            common: 0,
+            skipped_binary,
+            skipped_large,
+            generator: VOCAB_GENERATOR.to_string(),
+            data_hash: String::new(),
+        }
+    }
+}
+
+/// One `files.jsonl` row: `{"f":<id>,"path":"<repo-relative>"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VocabFile {
+    /// The file id, its index in path order.
+    pub f: u32,
+    /// The repo-relative, `/`-separated path.
+    pub path: String,
+}
+
+impl VocabFile {
+    pub fn new(f: u32, path: impl Into<String>) -> Self {
+        Self {
+            f,
+            path: path.into(),
+        }
+    }
+}
+
+/// One `vocab.jsonl` row, keys in sorted order:
+/// `{"files":[<ids>],"n":<n>,"t":"<token>"}`, or past [`VOCAB_FILES_CAP`]
+/// files `{"common":true,"n":<n>,"t":"<token>"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct VocabToken {
+    /// More than [`VOCAB_FILES_CAP`] files hold the token; `files` is absent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub common: bool,
+    /// The ids of the files holding the token, ascending; `None` when common.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<u32>>,
+    /// Occurrences across every file.
+    pub n: u64,
+    /// The token.
+    pub t: String,
+}
+
+impl VocabToken {
+    /// The row for token `t` seen `n` times in the ascending file ids `files`:
+    /// common (no list) past [`VOCAB_FILES_CAP`] files.
+    pub fn new(t: impl Into<String>, n: u64, files: Vec<u32>) -> Self {
+        let common = files.len() > VOCAB_FILES_CAP;
+        Self {
+            common,
+            files: (!common).then_some(files),
+            n,
+            t: t.into(),
+        }
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Where a token occurs, as [`VocabSnapshot::files_of`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VocabHit {
+    /// Occurrences across every file.
+    pub n: u64,
+    /// The repo-relative paths holding it, in path order; empty when `common`.
+    pub files: Vec<String>,
+    /// More than [`VOCAB_FILES_CAP`] files hold it.
+    pub common: bool,
+}
+
+/// A complete vocabulary snapshot, as [`read_vocab`] returns it. Tokens are
+/// held sorted by their bytes and looked up by binary search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VocabSnapshot {
+    pub meta: VocabMeta,
+    /// Paths by file id.
+    pub files: Vec<String>,
+    /// Rows sorted by `t` (byte order), each `t` once.
+    pub tokens: Vec<VocabToken>,
+}
+
+impl VocabSnapshot {
+    /// Where `token` occurs, or `None` when no file holds it.
+    pub fn files_of(&self, token: &str) -> Option<VocabHit> {
+        let i = self
+            .tokens
+            .binary_search_by(|row| row.t.as_bytes().cmp(token.as_bytes()))
+            .ok()?;
+        let row = &self.tokens[i];
+        let files = row
+            .files
+            .iter()
+            .flatten()
+            .filter_map(|f| self.files.get(*f as usize).cloned())
+            .collect();
+        Some(VocabHit {
+            n: row.n,
+            files,
+            common: row.common,
+        })
+    }
+}
+
+/// The identifier-like tokens of `text` and their occurrence counts: every
+/// leftmost match of `[A-Za-z_][A-Za-z0-9_]*` of at least
+/// [`VOCAB_MIN_TOKEN_LEN`] bytes. ASCII only: a non-ASCII byte ends a token
+/// and never starts one, so the scan never splits a UTF-8 character into a
+/// token. A digit run before a letter is skipped, as the pattern reads it
+/// (`9abc` holds `abc`).
+pub fn vocab_tokens(text: &[u8]) -> std::collections::BTreeMap<String, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i < text.len() {
+        let c = text[i];
+        if !(c.is_ascii_alphabetic() || c == b'_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < text.len() && (text[i].is_ascii_alphanumeric() || text[i] == b'_') {
+            i += 1;
+        }
+        if i - start >= VOCAB_MIN_TOKEN_LEN {
+            // Every byte is ASCII, so the slice is valid UTF-8.
+            let token = String::from_utf8_lossy(&text[start..i]).into_owned();
+            *out.entry(token).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+/// `<root>/.glia/vocab-snapshot`.
+pub fn vocab_dir(root: &Path) -> PathBuf {
+    root.join(CONTROL_DIR).join(VOCAB_DIR)
+}
+
+/// Write the vocabulary snapshot under `<root>/.glia/vocab-snapshot/`:
+/// `files.jsonl`, `vocab.jsonl`, then `meta.json` LAST. An existing
+/// `meta.json` is removed first and every file is written `<file>.tmp` then
+/// renamed, so a write that stops part-way leaves a snapshot [`read_vocab`]
+/// rejects. (The files are renamed inside the snapshot dir rather than as one
+/// sibling tmp dir: a `.glia/vocab-snapshot.tmp/` would sit outside the
+/// query-time exclusions of `glia watch` and the layout fingerprint.)
+///
+/// `files` must hold ids `0..n` in strictly ascending path order and `tokens`
+/// strictly ascending tokens, each with ascending in-range file ids and, when
+/// not common, at most [`VOCAB_FILES_CAP`] of them; anything else is refused
+/// before a byte is written. `meta.files`, `meta.tokens`, `meta.common` and
+/// `meta.data_hash` are derived here. Returns the meta as written.
+pub fn write_vocab(
+    root: &Path,
+    mut meta: VocabMeta,
+    files: &[VocabFile],
+    tokens: &[VocabToken],
+) -> Result<VocabMeta, String> {
+    if meta.version != VOCAB_VERSION {
+        return Err(format!(
+            "{META_FILE}: version {} (this writer writes {VOCAB_VERSION})",
+            meta.version
+        ));
+    }
+    check_vocab(files, tokens)?;
+    let files_bytes = jsonl(files.iter())?;
+    let tokens_bytes = jsonl(tokens.iter())?;
+
+    let dir = vocab_dir(root);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let meta_path = dir.join(META_FILE);
+    remove_if_present(&meta_path)?;
+    write_atomic(&dir.join(VOCAB_FILES_FILE), &files_bytes)?;
+    write_atomic(&dir.join(VOCAB_TOKENS_FILE), &tokens_bytes)?;
+
+    meta.files = files.len();
+    meta.tokens = tokens.len();
+    meta.common = tokens.iter().filter(|t| t.common).count();
+    meta.data_hash = data_hash(&[&files_bytes, &tokens_bytes]);
+    write_atomic(&meta_path, &meta_bytes(&meta)?)?;
+    Ok(meta)
+}
+
+/// The order and id rules [`write_vocab`] writes and [`read_vocab`] checks.
+fn check_vocab(files: &[VocabFile], tokens: &[VocabToken]) -> Result<(), String> {
+    for (i, file) in files.iter().enumerate() {
+        if file.f as usize != i {
+            return Err(format!("file row {i} has id {}", file.f));
+        }
+        if i > 0 && files[i - 1].path.as_bytes() >= file.path.as_bytes() {
+            return Err(format!("file paths are not sorted at {:?}", file.path));
+        }
+    }
+    for (i, row) in tokens.iter().enumerate() {
+        if row.t.is_empty() {
+            return Err(format!("token row {i} is empty"));
+        }
+        if i > 0 && tokens[i - 1].t.as_bytes() >= row.t.as_bytes() {
+            return Err(format!("tokens are not sorted at {:?}", row.t));
+        }
+        match (&row.files, row.common) {
+            (None, true) => {}
+            (Some(ids), false) => {
+                if ids.is_empty() || ids.len() > VOCAB_FILES_CAP {
+                    return Err(format!("token {:?} lists {} files", row.t, ids.len()));
+                }
+                if ids.windows(2).any(|w| w[0] >= w[1]) {
+                    return Err(format!("file ids of {:?} are not ascending", row.t));
+                }
+                if ids.iter().any(|f| *f as usize >= files.len()) {
+                    return Err(format!("token {:?} names an unknown file id", row.t));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "token {:?} must be either common or list its files",
+                    row.t
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The vocabulary snapshot under `<root>/.glia/vocab-snapshot/`, or `None`.
+///
+/// No snapshot directory is the normal "never synced" case: `None`, silently.
+/// A directory whose `meta.json` is absent, unreadable or of another version,
+/// whose data does not hash to `meta.data_hash`, whose rows do not parse,
+/// whose row counts disagree with the meta or whose rows break
+/// [`write_vocab`]'s order and id rules is an incomplete snapshot: `None` and
+/// one `[vocab] snapshot incomplete` line on stderr naming the reason.
+pub fn read_vocab(root: &Path) -> Option<VocabSnapshot> {
+    let dir = vocab_dir(root);
+    if !dir.is_dir() {
+        return None;
+    }
+    match load_vocab(&dir) {
+        Ok(snapshot) => Some(snapshot),
+        Err(reason) => {
+            eprintln!(
+                "[vocab] snapshot incomplete dir={} reason={reason}",
+                dir.display()
+            );
+            None
+        }
+    }
+}
+
+fn load_vocab(dir: &Path) -> Result<VocabSnapshot, String> {
+    let meta: VocabMeta = serde_json::from_slice(&read_required(&dir.join(META_FILE))?)
+        .map_err(|e| format!("{META_FILE}: {e}"))?;
+    if meta.version != VOCAB_VERSION {
+        return Err(format!(
+            "{META_FILE}: version {} (reader wants {VOCAB_VERSION})",
+            meta.version
+        ));
+    }
+    let files_bytes = read_required(&dir.join(VOCAB_FILES_FILE))?;
+    let tokens_bytes = read_required(&dir.join(VOCAB_TOKENS_FILE))?;
+    let got = data_hash(&[&files_bytes, &tokens_bytes]);
+    if got != meta.data_hash {
+        return Err(format!("data_hash {got} != meta {}", meta.data_hash));
+    }
+    let files: Vec<VocabFile> = parse_jsonl(&files_bytes, VOCAB_FILES_FILE)?;
+    let tokens: Vec<VocabToken> = parse_jsonl(&tokens_bytes, VOCAB_TOKENS_FILE)?;
+    let common = tokens.iter().filter(|t| t.common).count();
+    if files.len() != meta.files || tokens.len() != meta.tokens || common != meta.common {
+        return Err(format!(
+            "row counts files={} tokens={} common={common} != meta files={} tokens={} common={}",
+            files.len(),
+            tokens.len(),
+            meta.files,
+            meta.tokens,
+            meta.common
+        ));
+    }
+    check_vocab(&files, &tokens)?;
+    Ok(VocabSnapshot {
+        meta,
+        files: files.into_iter().map(|f| f.path).collect(),
+        tokens,
+    })
 }
 
 // ===========================================================================
@@ -3084,6 +3447,89 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [SCIP_DOCUMENTS_FILE, META_FILE, SCIP_SYMBOLS_FILE]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn vocab_tokens_reads_the_identifier_pattern() {
+        let got = vocab_tokens(b"fooBar x_y abc 9ab ab _a1 0xdead caf\xc3\xa9s fooBar");
+        let want: Vec<(&str, u32)> = vec![
+            ("_a1", 1),
+            ("abc", 1),
+            ("caf", 1),
+            ("fooBar", 2),
+            ("x_y", 1),
+            ("xdead", 1),
+        ];
+        assert_eq!(
+            got.iter()
+                .map(|(t, n)| (t.as_str(), *n))
+                .collect::<Vec<_>>(),
+            want
+        );
+    }
+
+    #[test]
+    fn vocab_token_rows_cap_their_file_lists() {
+        let few = VocabToken::new("abc", 3, vec![0, 2]);
+        assert_eq!(
+            serde_json::to_string(&few).unwrap(),
+            r#"{"files":[0,2],"n":3,"t":"abc"}"#
+        );
+        let many = VocabToken::new("abc", 40, (0..=VOCAB_FILES_CAP as u32).collect());
+        assert_eq!(
+            serde_json::to_string(&many).unwrap(),
+            r#"{"common":true,"n":40,"t":"abc"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&VocabFile::new(1, "a/b.rs")).unwrap(),
+            r#"{"f":1,"path":"a/b.rs"}"#
+        );
+    }
+
+    #[test]
+    fn write_vocab_refuses_unsorted_rows_and_reads_back() {
+        let root = tmp_root("vocab-rules");
+        let files = vec![VocabFile::new(0, "a.rs"), VocabFile::new(1, "b.rs")];
+        let tokens = vec![
+            VocabToken::new("abc", 2, vec![0, 1]),
+            VocabToken::new("zed", 1, vec![1]),
+        ];
+        let meta = write_vocab(
+            &root,
+            VocabMeta::new("ab".repeat(20), 1, 0),
+            &files,
+            &tokens,
+        )
+        .unwrap();
+        assert_eq!((meta.files, meta.tokens, meta.common), (2, 2, 0));
+        let snap = read_vocab(&root).unwrap();
+        assert_eq!(snap.meta, meta);
+        let hit = snap.files_of("abc").unwrap();
+        assert_eq!(hit.files, ["a.rs", "b.rs"]);
+        assert_eq!((hit.n, hit.common), (2, false));
+        assert!(snap.files_of("abd").is_none());
+
+        let swapped = vec![tokens[1].clone(), tokens[0].clone()];
+        let err = write_vocab(
+            &root,
+            VocabMeta::new("ab".repeat(20), 0, 0),
+            &files,
+            &swapped,
+        )
+        .unwrap_err();
+        assert!(err.contains("not sorted"), "{err}");
+        let unknown = vec![VocabToken::new("abc", 1, vec![2])];
+        let err = write_vocab(
+            &root,
+            VocabMeta::new("ab".repeat(20), 0, 0),
+            &files,
+            &unknown,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown file id"), "{err}");
+        // A refused write leaves the old snapshot readable.
+        assert_eq!(read_vocab(&root).unwrap().meta, meta);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

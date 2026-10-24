@@ -22,12 +22,18 @@
 //! `<repo>/.glia/scip-snapshot/`: definition names, reference lines with a
 //! call flag, and symbol ids in string order. It spawns nothing and has no
 //! protobuf dependency.
+//!
+//! [`vocab_sync`] (FB.13a) reads every tracked text file of one commit's tree
+//! (`git ls-tree` + one `git cat-file --batch`) and writes the identifier
+//! vocabulary to `<repo>/.glia/vocab-snapshot/`, a query-time input no build
+//! reads (`glia_code_domain::snapshots::read_vocab` reads it back).
 
 mod ci_log;
 mod git_history;
 mod junit;
 mod lcov;
 mod scip;
+mod vocab;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -46,6 +52,7 @@ pub use scip::{
     PositionEncoding, ScipDocumentIn, ScipImportOptions, ScipImportSummary, ScipImporter,
     ScipIndexInfo, ScipOccurrenceIn, ScipSymbolIn, next_is_call, unit_offset_to_byte,
 };
+pub use vocab::{BINARY_PROBE, MAX_BLOB_BYTES, Vocab, capture_vocab, tokens_of};
 
 /// Largest report file read: CI XML and logs can be huge, and a report past
 /// this is skipped with an error rather than read into memory.
@@ -55,7 +62,9 @@ pub(crate) const MAX_REPORT_BYTES: usize = 50 << 20;
 /// regenerable inputs. The graph layout dir ignores itself (its own `*`), and
 /// the checked-in inputs (`overlay.toml`, `cells.jsonl`) are not listed. The
 /// SCIP snapshot dir also ignores itself, since a repo whose `.gitignore`
-/// predates it never gets this line.
+/// predates it never gets this line. An existing `.glia/.gitignore` is never
+/// rewritten, so a repo whose file predates FB.13a should add
+/// `vocab-snapshot/` to it by hand.
 const GLIA_GITIGNORE: &str = "\
 # Local, regenerable glia inputs (written by glia; safe to delete).
 vectors.jsonl
@@ -63,6 +72,7 @@ docs-snapshot/
 history-snapshot/
 test-snapshot/
 scip-snapshot/
+vocab-snapshot/
 ";
 
 /// Read the git history of the repo at `repo_root` and write it to
@@ -85,6 +95,83 @@ pub fn history_sync(repo_root: &Path, opts: &HistoryOptions) -> Result<HistorySu
     ensure_glia_gitignore(repo_root)?;
     eprintln!("{}", sync_marker(&repo_label(repo_root), &summary, opts));
     Ok(summary)
+}
+
+/// Options for [`vocab_sync`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VocabOptions {
+    /// The commit whose tree is read; `None` is `HEAD`.
+    pub rev: Option<String>,
+}
+
+impl VocabOptions {
+    /// Read commit `rev` instead of `HEAD`.
+    pub fn at(rev: impl Into<String>) -> Self {
+        Self {
+            rev: Some(rev.into()),
+        }
+    }
+}
+
+/// What a vocabulary sync wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct VocabSummary {
+    /// Full sha of the commit read.
+    pub rev: String,
+    /// Text files read.
+    pub files: usize,
+    /// Distinct tokens.
+    pub tokens: usize,
+    /// Tokens in more than [`VOCAB_FILES_CAP`](glia_code_domain::snapshots::VOCAB_FILES_CAP) files.
+    pub common: usize,
+    /// Blobs skipped as binary.
+    pub skipped_binary: usize,
+    /// Blobs skipped as larger than [`MAX_BLOB_BYTES`].
+    pub skipped_large: usize,
+    /// Wall time of the capture and write, milliseconds.
+    pub ms: u64,
+}
+
+/// Read the identifier vocabulary of commit `opts.rev` (default `HEAD`) of the
+/// repo at `repo_root` and write it to `<repo_root>/.glia/vocab-snapshot/`
+/// (files.jsonl, vocab.jsonl, then meta.json). Creates `.glia/.gitignore`
+/// when absent, never overwriting one. Capture errors come back before
+/// anything is written. On success prints, on stderr,
+/// `[vocab] sync rev=<12> files=<f> tokens=<t> common=<c> skipped_binary=<b>
+/// skipped_large=<l> ms=<ms>`.
+pub fn vocab_sync(repo_root: &Path, opts: &VocabOptions) -> Result<VocabSummary, String> {
+    let start = std::time::Instant::now();
+    let rev = opts.rev.as_deref().unwrap_or("HEAD");
+    let vocab = capture_vocab(repo_root, rev)?;
+    let meta = glia_code_domain::snapshots::write_vocab(
+        repo_root,
+        vocab.meta,
+        &vocab.files,
+        &vocab.tokens,
+    )?;
+    ensure_glia_gitignore(repo_root)?;
+    let summary = VocabSummary {
+        rev: meta.rev,
+        files: meta.files,
+        tokens: meta.tokens,
+        common: meta.common,
+        skipped_binary: meta.skipped_binary,
+        skipped_large: meta.skipped_large,
+        ms: start.elapsed().as_millis() as u64,
+    };
+    eprintln!("{}", vocab_marker(&summary));
+    Ok(summary)
+}
+
+/// The `[vocab] sync` marker line.
+fn vocab_marker(s: &VocabSummary) -> String {
+    let rev: String = s.rev.chars().take(12).collect();
+    format!(
+        "[vocab] sync rev={rev} files={} tokens={} common={} skipped_binary={} skipped_large={} ms={}",
+        s.files, s.tokens, s.common, s.skipped_binary, s.skipped_large, s.ms
+    )
 }
 
 /// The repo's project name (manifest label, else directory name).
@@ -462,6 +549,23 @@ mod tests {
     }
 
     #[test]
+    fn vocab_marker_is_the_specified_line() {
+        let summary = VocabSummary {
+            rev: "3bd47ffe34bc0123456789abcdef0123456789ab".into(),
+            files: 3,
+            tokens: 40,
+            common: 1,
+            skipped_binary: 2,
+            skipped_large: 0,
+            ms: 7,
+        };
+        assert_eq!(
+            vocab_marker(&summary),
+            "[vocab] sync rev=3bd47ffe34bc files=3 tokens=40 common=1 skipped_binary=2 skipped_large=0 ms=7"
+        );
+    }
+
+    #[test]
     fn gitignore_lists_only_regenerable_inputs() {
         let lines: Vec<&str> = GLIA_GITIGNORE
             .lines()
@@ -474,7 +578,8 @@ mod tests {
                 "docs-snapshot/",
                 "history-snapshot/",
                 "test-snapshot/",
-                "scip-snapshot/"
+                "scip-snapshot/",
+                "vocab-snapshot/"
             ]
         );
     }
