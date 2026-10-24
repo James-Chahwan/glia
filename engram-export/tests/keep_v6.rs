@@ -17,7 +17,14 @@
 //!    src/diff.rs `tests::mounted_routes_pair_by_path_not_ordinal`,
 //!    `tests::hint_pass_refuses_unalike_routes`,
 //!    `tests::ambiguous_route_tails_fall_back_to_the_guarded_hint` and
-//!    `tests::moved_file_with_an_insert_pairs_by_name`, and by
+//!    `tests::moved_file_with_an_insert_pairs_by_name`; DE.4's renames by
+//!    `tests::words_pass_pairs_an_in_place_rename_after_inserts` (an
+//!    in-place rename after inserts pairs by its name's words, not its
+//!    ordinal), `tests::hint_pass_refuses_a_rename_with_no_shared_word`,
+//!    `tests::hint_pass_keeps_a_shared_word_rename` and
+//!    `tests::hint_pass_keeps_members_of_a_moved_file` (the hint pass's
+//!    words guard, both ways); FD.34's `tests::hint_refusals_split_by_reason`
+//!    pins the refusal reasons the `v6 since refusals:` line prints; and by
 //!    tests/since_v6.rs `since_writes_the_diff_and_seeds_file_ids` (its
 //!    `B_COUNTS` added / removed / modified / moved counts and the exact
 //!    modified-key map).

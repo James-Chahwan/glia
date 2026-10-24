@@ -143,8 +143,115 @@ pub struct DiffStats {
     /// Unique hint pairs the hint pass refused: two ROUTEs or two ENDPOINTs
     /// of different verbs or of paths not alike, or (DE.4) two other facts
     /// whose names share no word. Each leaves one removed and one added
-    /// node.
+    /// node. Always `refused.total()`.
     pub hint_refused: usize,
+    /// [`hint_refused`](Self::hint_refused) by its reason (FD.34).
+    pub refused: HintRefusals,
+}
+
+/// The hint pass's refusals by reason (FD.34), in the order the guard tests
+/// them: the first failing test names the reason, so the counts sum to
+/// [`DiffStats::hint_refused`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HintRefusals {
+    /// Two ROUTEs or two ENDPOINTs whose verbs differ (`GET` vs `PUT`,
+    /// `page:` vs `route:`).
+    pub verb_mismatch: usize,
+    /// Two ROUTEs or two ENDPOINTs of one verb whose paths are not alike
+    /// (`alike_paths`).
+    pub path_unalike: usize,
+    /// A non-route pair of different content shapes (a Symbol and a
+    /// Proposition, or a Vector on either side).
+    pub shape_mismatch: usize,
+    /// A non-route pair one of whose names has no words (`_`, `$`) and the
+    /// names differ.
+    pub no_words: usize,
+    /// A non-route pair whose names both have words but do not fit
+    /// (`Words::fit`): no shared word, or Jaccard below 1/3 with neither
+    /// set holding the other.
+    pub words_unfit: usize,
+}
+
+/// A [`HintRefusals`] reason, as the marker names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    VerbMismatch,
+    PathUnalike,
+    ShapeMismatch,
+    NoWords,
+    WordsUnfit,
+}
+
+impl HintRefusals {
+    /// Every refusal, whatever its reason.
+    pub fn total(&self) -> usize {
+        self.verb_mismatch
+            + self.path_unalike
+            + self.shape_mismatch
+            + self.no_words
+            + self.words_unfit
+    }
+
+    /// `(reason, count)` in the marker's fixed order, zeros included.
+    pub fn rows(&self) -> [(&'static str, usize); 5] {
+        [
+            ("verb_mismatch", self.verb_mismatch),
+            ("path_unalike", self.path_unalike),
+            ("shape_mismatch", self.shape_mismatch),
+            ("no_words", self.no_words),
+            ("words_unfit", self.words_unfit),
+        ]
+    }
+
+    /// `verb_mismatch=<a> path_unalike=<b> ..`: the marker's parenthesis.
+    pub fn render(&self) -> String {
+        self.rows()
+            .iter()
+            .map(|(r, k)| format!("{r}={k}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn count(&mut self, r: Refusal) {
+        *match r {
+            Refusal::VerbMismatch => &mut self.verb_mismatch,
+            Refusal::PathUnalike => &mut self.path_unalike,
+            Refusal::ShapeMismatch => &mut self.shape_mismatch,
+            Refusal::NoWords => &mut self.no_words,
+            Refusal::WordsUnfit => &mut self.words_unfit,
+        } += 1;
+    }
+}
+
+/// Why the hint pass refuses the unique hint pair `(b, t)`, or `None` when
+/// it takes it, split by the test that fails. Two route-like facts
+/// ([`is_route_like`]; one hint names one kind, so two ROUTEs or two
+/// ENDPOINTs) whose keys parse ([`route_of`]) need the same verb and
+/// [`alike_paths`]; a key in no known shape keeps the plain hint pair. Any
+/// other pair needs [`words_fit`].
+fn hint_refusal(b: &GmapNode, t: &GmapNode) -> Option<Refusal> {
+    if is_route_like(b) && is_route_like(t) {
+        return match (route_of(&b.key), route_of(&t.key)) {
+            (Some((bv, _)), Some((tv, _))) if bv != tv => Some(Refusal::VerbMismatch),
+            (Some((_, bp)), Some((_, tp))) if !alike_paths(bp, tp) => Some(Refusal::PathUnalike),
+            _ => None,
+        };
+    }
+    if words_fit(b, t) {
+        return None;
+    }
+    let same_content = matches!(
+        (&b.content, &t.content),
+        (Content::Symbol { .. }, Content::Symbol { .. })
+            | (Content::Proposition { .. }, Content::Proposition { .. })
+    );
+    match (same_content, Words::of(b), Words::of(t)) {
+        (true, Some(bw), Some(tw)) if !bw.words.is_empty() && !tw.words.is_empty() => {
+            Some(Refusal::WordsUnfit)
+        }
+        (true, Some(_), Some(_)) => Some(Refusal::NoWords),
+        _ => Some(Refusal::ShapeMismatch),
+    }
 }
 
 /// An edge's identity: `(from, kind, to, weight bits)`.
@@ -209,8 +316,8 @@ pub fn diff_gmaps(
     for (hint, ts) in &target_hints {
         if let ([t], Some([b])) = (ts.as_slice(), base_hints.get(hint).map(Vec::as_slice)) {
             let (bn, tn) = (&base.nodes[*b], &target.nodes[*t]);
-            let routes = is_route_like(bn) && is_route_like(tn);
-            if !route_pair_ok(bn, tn) || !(routes || words_fit(bn, tn)) {
+            if let Some(r) = hint_refusal(bn, tn) {
+                stats.refused.count(r);
                 stats.hint_refused += 1;
                 continue;
             }
@@ -406,21 +513,6 @@ fn alike_paths(a: &str, b: &str) -> bool {
     }
     let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     short.starts_with('/') && short != "/" && long.ends_with(short)
-}
-
-/// Whether the hint pass may pair `b` with `t`: always, unless both are
-/// route-like ([`is_route_like`]; one hint names one kind, so two ROUTEs or
-/// two ENDPOINTs) and their keys parse ([`route_of`]); then only with the
-/// same verb and [`alike_paths`]. A key in no known shape keeps the plain
-/// hint pair.
-fn route_pair_ok(b: &GmapNode, t: &GmapNode) -> bool {
-    if !(is_route_like(b) && is_route_like(t)) {
-        return true;
-    }
-    match (route_of(&b.key), route_of(&t.key)) {
-        (Some((bv, bp)), Some((tv, tp))) => bv == tv && alike_paths(bp, tp),
-        _ => true,
-    }
 }
 
 /// `(file token, hint kind, verb, path)` of a ROUTE or ENDPOINT whose key
@@ -1106,6 +1198,7 @@ mod tests {
                 by_words: 0,
                 by_hint: 0,
                 hint_refused: 0,
+                refused: HintRefusals::default(),
             }
         );
     }
@@ -1501,6 +1594,12 @@ mod tests {
             (stats.hint_refused, stats.by_route, stats.by_hint),
             (4, 0, 0)
         );
+        // FD.34: POST -> PUT is the verb; the three others are paths.
+        assert_eq!(
+            (stats.refused.verb_mismatch, stats.refused.path_unalike),
+            (1, 3)
+        );
+        assert_eq!(stats.refused.total(), stats.hint_refused);
 
         assert_eq!(route_of("GET /a/b @svc"), Some(("GET", "/a/b")));
         assert_eq!(route_of("page:/kyc @web"), Some(("page:", "/kyc")));
@@ -1940,6 +2039,70 @@ mod tests {
             (stats.by_words, stats.by_hint, stats.hint_refused),
             (0, 0, 1)
         );
+        assert_eq!(stats.refused.words_unfit, 1);
+    }
+
+    #[test]
+    fn hint_refusals_split_by_reason() {
+        // FD.34: one unique hint pair per reason, plus a moved member the
+        // name pass keeps; the reasons sum to hint_refused and render in a
+        // fixed order.
+        let (f, m) = ("src/shop.go", node_kind::METHOD.0);
+        let base = gmap(
+            vec![
+                route("GET /carts @a", f, 0),
+                route("GET /orders @a", f, 1),
+                member("shop::Cart::_", f, m, 4),
+                member("shop::Cart::addItem", f, m, 5),
+                member("shop::Cart::checkoutTotal", f, m, 6),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                route("PUT /carts @a", f, 0),
+                route("GET /invoices @a", f, 1),
+                member("shop::Basket::$", f, m, 4),
+                member("shop::Basket::removeLine", f, m, 5),
+                member("shop::Basket::checkoutTotal", f, m, 6),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [("shop::Cart::checkoutTotal", "shop::Basket::checkoutTotal")]
+        );
+        assert_eq!(
+            stats.refused,
+            HintRefusals {
+                verb_mismatch: 1,
+                path_unalike: 1,
+                shape_mismatch: 0,
+                no_words: 1,
+                words_unfit: 1,
+            }
+        );
+        assert_eq!(
+            (stats.hint_refused, stats.by_name, stats.by_hint),
+            (4, 1, 0)
+        );
+        assert_eq!(stats.refused.total(), stats.hint_refused);
+        assert_eq!(
+            stats.refused.render(),
+            "verb_mismatch=1 path_unalike=1 shape_mismatch=0 no_words=1 words_unfit=1"
+        );
+
+        // A Symbol and a Proposition under one hint: the shapes differ.
+        let mut doc_sym = sym("docs::README::guide", 9, 7, "", "docs/README.md:section:7");
+        doc_sym.concept_hint = None;
+        let (_, stats) = diff_gmaps(
+            &gmap(vec![doc_sym], vec![]),
+            1,
+            &gmap(vec![prose("docs::README::setup", "Setup.", 7)], vec![]),
+            2,
+        );
+        assert_eq!((stats.refused.shape_mismatch, stats.hint_refused), (1, 1));
     }
 
     #[test]

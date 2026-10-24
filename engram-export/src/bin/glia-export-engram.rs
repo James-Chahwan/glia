@@ -489,6 +489,14 @@ fn run(args: &Args) -> i32 {
             "[engram-export] v6 since pairing: route={} endpoint={} name={} words={} hint={} hint_refused={}",
             ds.by_route, ds.by_endpoint, ds.by_name, ds.by_words, ds.by_hint, ds.hint_refused,
         );
+        // The hint pass's refusals by reason (FD.34), every reason in a fixed
+        // order, zeros included; the counts sum to `hint_refused`. Its own
+        // line, so the pairing line above keeps its shape.
+        eprintln!(
+            "[engram-export] v6 since refusals: hint_refused={} ({})",
+            ds.hint_refused,
+            ds.refused.render(),
+        );
     }
     // The v6 span marker (LG.10): how many positioned nodes got 1-based lines
     // and how many doc Propositions got a source anchor. A healthy export has
