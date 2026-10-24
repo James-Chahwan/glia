@@ -13,8 +13,15 @@
 //! Scope: Rust (`.rs`) and Python (`.py`, `.pyw`, `.pyi`), the languages glia
 //! and its tests are written in (CJ.1a), and since FD.5a Ruby (`.rb`, `.rake`,
 //! `.gemspec`), PHP (`.php`), Dart (`.dart`) and Elixir (`.ex`, `.exs`),
-//! lexed by [`CodeMap::script`] (DH.10). Every other file has no guard, so its
-//! scans are unchanged.
+//! lexed by [`CodeMap::script`] (DH.10). FD.5b adds the C family and the JVM /
+//! JS family: Go (`.go`), Kotlin (`.kt`, `.kts`), Scala (`.scala`, `.sc`),
+//! Swift (`.swift`) and JavaScript / TypeScript (`.js`, `.jsx`, `.mjs`,
+//! `.cjs`, `.ts`, `.tsx`, `.mts`, `.cts`) through their own
+//! [`CodeMap::script`] arms, and Java (`.java`), C# (`.cs`), C (`.c`, `.h`)
+//! and C++ (`.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh`) through [`CodeMap::new`].
+//! A `.vue` / `.svelte` / `.html` file has no guard: its text outside
+//! `<script>` is not JS, so its scans stay as they were. Every other file has
+//! no guard either.
 //!
 //! Interpolation. A Python f-string is read as code whole: its `{..}`
 //! replacement fields are expressions (`f"redis://{os.getenv('REDIS_HOST')}"`),
@@ -38,8 +45,20 @@
 //! Elixir sigils (`~s(..)`) are read as code by [`CodeMap::script`], so their
 //! content is still scanned.
 //!
+//! FD.5b interpolation: a JS template literal's `${..}`, a Kotlin string's
+//! `${..}` (every Kotlin string interpolates), a Scala interpolator's
+//! (`s".."`, `f".."`, any `id".."`) `${..}` and a Swift `\(..)` (`\#(..)` in
+//! a raw `#".."#`) are code, mapped as code by the lexer itself; the literal
+//! text around a span is text. A Kotlin / Scala `$name` holds a name only, so
+//! it is text, as in Dart. Go raw strings (backticks) and Java / C# / C / C++
+//! strings do not interpolate. A C# `$".."` string's `{..}` holes are text:
+//! [`CodeMap::new`] reads it as a plain string. JS regex literals are not
+//! lexed ([`Script::Js`]).
+//!
 //! Statement literals (FD.4b, [`CodeGuard::opens_argument`]): the call
-//! argument rule applies to Rust and Python only. In the FD.5a languages a
+//! argument rule applies to Rust and Python only. In the FD.5a and FD.5b
+//! languages (a Go `const q = "SELECT .."`, a JS ``const q = `SELECT ..` ``,
+//! a Kotlin `val q = """SELECT .."""` are as common as Ruby's) a
 //! SQL / Cypher statement literal is refused only when it does not open in
 //! code (it sits in a comment or another literal); a statement assigned to a
 //! constant (`SQL = "SELECT .."`, common in Ruby and PHP) keeps today's
@@ -47,7 +66,11 @@
 //!
 //! fired_on marker, once per scanner call that refused an occurrence:
 //!   `... 2>&1 | grep '\[code-guard\]'`
-//!   `[code-guard] <scanner> lang=<rust|python|ruby|php|dart|elixir> dropped=<n> path=<path>`
+//!   `[code-guard] <scanner> lang=<rust|python|ruby|php|dart|elixir|go|java|kotlin|scala|csharp|swift|c|cpp|javascript|typescript> dropped=<n> path=<path>`
+//!
+//! Library names (FD.5a, [`CodeGuard::is_code_or_script_string`]): in every
+//! guarded language but Rust and Python a name in a string literal is read
+//! (an import string, a connection URL); only a comment refuses one.
 
 use crate::cli::{CodeMap, Script};
 
@@ -71,6 +94,26 @@ fn lexer_for(path: &str) -> Option<(&'static str, Option<Script>)> {
         Some(("dart", Some(Script::Dart)))
     } else if is(&["ex", "exs"]) {
         Some(("elixir", Some(Script::Elixir)))
+    } else if is(&["go"]) {
+        Some(("go", Some(Script::Go)))
+    } else if is(&["java"]) {
+        Some(("java", None))
+    } else if is(&["kt", "kts"]) {
+        Some(("kotlin", Some(Script::Kotlin)))
+    } else if is(&["scala", "sc"]) {
+        Some(("scala", Some(Script::Scala)))
+    } else if is(&["cs"]) {
+        Some(("csharp", None))
+    } else if is(&["swift"]) {
+        Some(("swift", Some(Script::Swift)))
+    } else if is(&["c", "h"]) {
+        Some(("c", None))
+    } else if is(&["cc", "cpp", "cxx", "hpp", "hh"]) {
+        Some(("cpp", None))
+    } else if is(&["js", "jsx", "mjs", "cjs"]) {
+        Some(("javascript", Some(Script::Js)))
+    } else if is(&["ts", "tsx", "mts", "cts"]) {
+        Some(("typescript", Some(Script::Js)))
     } else {
         None
     }
@@ -127,7 +170,9 @@ impl<'a> CodeGuard<'a> {
         self.literal_start(pos) == Some(pos)
     }
 
-    /// `rust`, `python`, `ruby`, `php`, `dart` or `elixir`.
+    /// `rust`, `python`, `ruby`, `php`, `dart`, `elixir`, or (FD.5b) `go`,
+    /// `java`, `kotlin`, `scala`, `csharp`, `swift`, `c`, `cpp`,
+    /// `javascript`, `typescript`.
     pub(crate) fn lang(&self) -> &'static str {
         self.lang
     }
@@ -135,7 +180,9 @@ impl<'a> CodeGuard<'a> {
     /// True when byte `pos` may start a call site: it is code, (Python) it
     /// sits in an f-string, whose replacement fields are code, or (Ruby, PHP,
     /// Dart, Elixir) it sits inside an interpolation span of an
-    /// interpolating literal ([`CodeGuard::in_interpolation`]).
+    /// interpolating literal ([`CodeGuard::in_interpolation`]). FD.5b: the
+    /// JS, Go, Kotlin, Scala and Swift maps hold a literal's text pieces
+    /// only, so a `${..}` / `\(..)` span is code in the map itself.
     pub(crate) fn is_code(&self, pos: usize) -> bool {
         match self.literal_start(pos) {
             None => true,
@@ -145,7 +192,8 @@ impl<'a> CodeGuard<'a> {
     }
 
     /// FD.5a: true when byte `pos` is code ([`CodeGuard::is_code`]) or, in a
-    /// Ruby / PHP / Dart / Elixir file, sits in a string literal (not a
+    /// file of any guarded language but Rust and Python (FD.5b adds the
+    /// compiled and JS languages), sits in a string literal (not a
     /// comment). Those languages name a library in an import string
     /// (`require 'redis'`, `import 'package:redis/redis.dart'`, PHP
     /// `require_once 'redis.php'`), so a scanner that reads library
@@ -155,12 +203,20 @@ impl<'a> CodeGuard<'a> {
         if self.is_code(pos) {
             return true;
         }
-        if !matches!(self.lang, "ruby" | "php" | "dart" | "elixir") {
+        if matches!(self.lang, "rust" | "python") {
             return false;
         }
         let Some(open) = self.literal_start(pos) else {
             return false;
         };
+        if !matches!(self.lang, "ruby" | "php" | "dart" | "elixir") {
+            // FD.5b: the compiled and JS languages name libraries in strings
+            // too (JS `from 'ioredis'`, Go `import "github.com/go-redis/..."`,
+            // C `#include "hiredis.h"`), and connection URLs are strings;
+            // only a comment (`//`, `/*`) is refused.
+            return !(self.src[open] == b'/'
+                && matches!(self.src.get(open + 1), Some(b'/' | b'*')));
+        }
         if matches!(self.lang, "ruby" | "php") && self.heredoc_opened_before(open).is_some() {
             return true;
         }
@@ -275,7 +331,8 @@ impl<'a> CodeGuard<'a> {
     /// Text nested in another literal or a comment fails the first test; a
     /// `const` / `let` / field / tuple value fails the second. FD.5a: the
     /// second test is Rust's and Python's only (the module doc's "Statement
-    /// literals"); a Ruby / PHP / Dart / Elixir literal passes on the first.
+    /// literals"); a Ruby / PHP / Dart / Elixir literal passes on the first,
+    /// and so (FD.5b) does a Go / JVM / C-family / Swift / JS one.
     pub(crate) fn opens_argument(&self, open: usize, body: usize) -> bool {
         let Some(start) = self.literal_start(body) else {
             return false;
@@ -495,7 +552,8 @@ impl<'a> LazyGuard<'a> {
     }
 
     /// The fired_on marker, printed only when an occurrence was refused:
-    /// `[code-guard] <scanner> lang=<rust|python|ruby|php|dart|elixir> dropped=<n> path=<path>`.
+    /// `[code-guard] <scanner> lang=<l> dropped=<n> path=<path>`, `<l>` a
+    /// [`CodeGuard::lang`] tag.
     pub(crate) fn report(&self, scanner: &str) {
         if self.dropped == 0 {
             return;
@@ -645,14 +703,14 @@ mod tests {
     #[test]
     fn other_files_have_no_guard() {
         for path in [
-            "a.ts",
-            "a.go",
-            "a.java",
+            "a.vue",
+            "a.svelte",
+            "a.html",
             "a.erb",
             "",
             "src/rs",
             "a.rs.txt",
-            "dir.rs/a.go",
+            "dir.rs/a.vue",
         ] {
             assert!(
                 CodeGuard::for_path(path, "// x.send(\n").is_none(),
@@ -675,6 +733,29 @@ mod tests {
             ("lib/a.dart", "dart"),
             ("lib/a.ex", "elixir"),
             ("test/a_test.exs", "elixir"),
+            ("pkg/a.go", "go"),
+            ("src/A.java", "java"),
+            ("src/A.kt", "kotlin"),
+            ("build.gradle.kts", "kotlin"),
+            ("src/A.scala", "scala"),
+            ("w.sc", "scala"),
+            ("src/A.cs", "csharp"),
+            ("Sources/A.swift", "swift"),
+            ("src/a.c", "c"),
+            ("include/a.h", "c"),
+            ("src/a.cc", "cpp"),
+            ("src/a.CPP", "cpp"),
+            ("src/a.cxx", "cpp"),
+            ("include/a.hpp", "cpp"),
+            ("include/a.hh", "cpp"),
+            ("src/a.js", "javascript"),
+            ("src/a.jsx", "javascript"),
+            ("src/a.mjs", "javascript"),
+            ("src/a.cjs", "javascript"),
+            ("src/a.ts", "typescript"),
+            ("src/a.tsx", "typescript"),
+            ("src/a.mts", "typescript"),
+            ("src/a.cts", "typescript"),
         ] {
             assert_eq!(
                 CodeGuard::for_path(path, "").map(|g| g.lang()),
@@ -683,7 +764,7 @@ mod tests {
             );
         }
         let src = "// producer.send(\"x\")\n";
-        let mut guard = LazyGuard::new("src/a.ts", src);
+        let mut guard = LazyGuard::new("src/a.vue", src);
         assert!(guard.admits(3));
         assert_eq!(guard.dropped, 0);
         let mut none = LazyGuard::new("", src);
@@ -716,7 +797,7 @@ mod tests {
         );
         assert!(!g.opens_literal(sq[1]), "inside a string");
         // No guard admits every key; a refusal is counted.
-        let mut none = LazyGuard::new("app.ts", "x = \"{'schedule': 1}\"");
+        let mut none = LazyGuard::new("app.vue", "x = \"{'schedule': 1}\"");
         assert!(none.admits_key(6));
         assert_eq!(none.dropped, 0);
         let mut guard = LazyGuard::new("x.py", py);
@@ -790,7 +871,26 @@ mod tests {
         assert!(!argument_at("a.py", "f(a == \"SELECT 1\")\n", "\"SELECT"));
         assert!(!argument_at("a.py", "return (\"SELECT 1\")\n", "\"SELECT"));
         // A file without a lexer admits everything.
+        assert!(argument_at("a.vue", "q := \"SELECT 1\"\n", "\"SELECT"));
+        // FD.5b: the compiled / JS languages skip the argument rule (a
+        // statement opening in code passes), a commented one is refused.
         assert!(argument_at("a.go", "q := \"SELECT 1\"\n", "\"SELECT"));
+        assert!(argument_at("a.ts", "const q = \"SELECT 1\";\n", "\"SELECT"));
+        assert!(argument_at(
+            "A.java",
+            "String q = \"SELECT 1\";\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at(
+            "a.go",
+            "// db.Query(\"SELECT 1\")\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at(
+            "a.kt",
+            "/* db.query(\"SELECT 1\") */\n",
+            "\"SELECT"
+        ));
     }
 
     /// FD.5a: per language, `refused` sources hold the needle in a comment
@@ -969,6 +1069,249 @@ mod tests {
             ("src/a.php", "<?php /* redis.get */\n", "redis."),
             ("a.py", "S = 'redis.get'\n", "redis."),
             ("a.rs", "let s = \"redis.get\";\n", "redis."),
+        ] {
+            let at = src.find(needle).unwrap();
+            let mut guard = LazyGuard::new(path, src);
+            assert!(!guard.admits_name(at), "{path}: {src:?}");
+            assert_eq!(guard.dropped, 1);
+        }
+    }
+
+    #[test]
+    fn js_templates_strings_and_comments() {
+        for path in ["src/pub.ts", "src/pub.js", "src/pub.tsx"] {
+            assert_script(
+                path,
+                "nc.publish(",
+                &[
+                    "// nc.publish('ghost', m)\n",
+                    "/* nc.publish('ghost', m) */\n",
+                    "/** a\n * nc.publish('ghost', m)\n */\n",
+                    "const t = 'nc.publish(x)';\n",
+                    "const t = \"nc.publish(x)\";\n",
+                    "const t = `nc.publish('ghost.ts', m)`;\n",
+                    "const t = `\nline\nnc.publish(x)\n`;\n",
+                    "const t = `${a} nc.publish(x)`;\n",
+                    "const t = `${`inner`} nc.publish(x)`;\n",
+                    "const t = `${f(`${g} nc.publish(x)`)}`;\n",
+                    "const t = `\\${nc.publish(x)}`;\n",
+                    "const t = 'it\\'s nc.publish(x)';\n",
+                ],
+                &[
+                    "nc.publish('orders', m);\n",
+                    "const t = `x`; nc.publish('orders', m);\n",
+                    "const t = `a ${nc.publish('x', m)} b`;\n",
+                    "const t = `a ${`b ${nc.publish('x', m)}`}`;\n",
+                    "const t = `${ {k: 1}.k } ${nc.publish('x', m)}`;\n",
+                    "const t = `${'}'} ${nc.publish('x', m)}`;\n",
+                    "const s = \"unterminated\nnc.publish('orders', m);\n",
+                    "const t = `${a}`; // c\nnc.publish('orders', m);\n",
+                    "const u = `${base}/x`; nc.publish(u, m);\n",
+                ],
+            );
+        }
+        // The text after a nested template's span is text again, and a
+        // template's text piece after a span starts at the span's `}`.
+        let src = "const t = `a ${b} c nc.publish(x)`;\n";
+        let g = CodeGuard::for_path("a.ts", src).expect("a guard");
+        let at = src.find("nc.").unwrap();
+        assert_eq!(g.literal_start(at), src.find("} c"));
+        assert_eq!(g.literal_start(src.find("b}").unwrap()), None);
+    }
+
+    #[test]
+    fn go_raw_strings_runes_and_comments() {
+        assert_script(
+            "pkg/pub.go",
+            "nc.Publish(",
+            &[
+                "// js.Publish(x)\n// nc.Publish(\"ghost.go\", b)\n",
+                "/* nc.Publish(\"x\", b) */\n",
+                "const doc = `\nnc.Publish(\"ghost.raw\", b)\n`\n",
+                "s := \"nc.Publish(x)\"\n",
+                "s := \"a \\\" nc.Publish(x)\"\n",
+                "s := `${x} nc.Publish(x)`\n",
+            ],
+            &[
+                "func f() { nc.Publish(\"orders.go\", b) }\n",
+                // A raw string has no escapes: `a\` closes at its second backtick.
+                "const doc = `a\\`; nc.Publish(\"x\", b)\n",
+                "r := '\"'; nc.Publish(\"orders\", b)\n",
+                "r := '\\''; nc.Publish(\"orders\", b)\n",
+                "t := `json:\"x\"`; nc.Publish(\"orders\", b)\n",
+                "s := \"x\" // c\nnc.Publish(\"orders\", b)\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn kotlin_strings_templates_and_comments() {
+        assert_script(
+            "src/Pub.kt",
+            "kafkaTemplate.send(",
+            &[
+                "// kafkaTemplate.send(\"ghost.kt\", v)\n",
+                "/* a /* b */ kafkaTemplate.send(\"x\", v) */\n",
+                "val s = \"kafkaTemplate.send(x)\"\n",
+                "val s = \"\"\"\nkafkaTemplate.send(x)\n\"\"\"\n",
+                "val s = \"${a} kafkaTemplate.send(x)\"\n",
+                "val s = \"$kafkaTemplate.send(x)\"\n",
+                "val s = \"\"\"a\"\"\"\" + \"kafkaTemplate.send(x)\"\n",
+            ],
+            &[
+                "fun s() { kafkaTemplate.send(\"orders.kt\", v) }\n",
+                "val s = \"x ${kafkaTemplate.send(\"t\", v)}\"\n",
+                "val s = \"\"\"\n${kafkaTemplate.send(\"t\", v)}\n\"\"\"\n",
+                "val s = \"${\"${kafkaTemplate.send(\"t\", v)}\"}\"\n",
+                "val c = '\"'; kafkaTemplate.send(\"orders\", v)\n",
+                "val s = \"\"\"a\"\"\"\"; kafkaTemplate.send(\"orders\", v)\n",
+                "fun `a test`() { kafkaTemplate.send(\"orders\", v) }\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn scala_interpolators_and_plain_strings() {
+        assert_script(
+            "src/Pub.scala",
+            "producer.send(",
+            &[
+                "// producer.send(record)\n",
+                "/* a /* b */ producer.send(r) */\n",
+                "val s = \"producer.send(r)\"\n",
+                "val s = \"${producer.send(r)}\"\n",
+                "val s = \"\"\"\n${producer.send(r)}\n\"\"\"\n",
+                "val s = s\"$x producer.send(r)\"\n",
+                "val s = s\"$${producer.send(r)}\"\n",
+                "val s = f\"$x%d producer.send(r)\"\n",
+            ],
+            &[
+                "def p() = producer.send(new ProducerRecord(\"orders\", v))\n",
+                "val s = s\"a ${producer.send(r)}\"\n",
+                "val s = s\"\"\"\n${producer.send(r)}\n\"\"\"\n",
+                "val s = sql\"x ${producer.send(r)}\"\n",
+                "val q = 'sym; producer.send(r)\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn swift_raw_strings_and_interpolation() {
+        assert_script(
+            "Sources/Pub.swift",
+            "socket.emit(",
+            &[
+                "// socket.emit(\"ghost\")\n",
+                "/* a /* b */ socket.emit(\"x\") */\n",
+                "let s = \"socket.emit(x)\"\n",
+                "let s = \"\"\"\nsocket.emit(x)\n\"\"\"\n",
+                "let s = #\"socket.emit(x)\"#\n",
+                "let s = #\"a \" socket.emit(x)\"#\n",
+                "let s = ##\"a \"# socket.emit(x)\"##\n",
+                "let s = #\"\\(socket.emit(x))\"#\n",
+                "let s = \"\\(a) socket.emit(x)\"\n",
+            ],
+            &[
+                "func f() { socket.emit(\"orders\") }\n",
+                "let s = \"a \\(socket.emit(\"x\")) b\"\n",
+                "let s = \"a \\(f(g(1), socket.emit(\"x\")))\"\n",
+                "let s = #\"a \\#(socket.emit(\"x\"))\"#\n",
+                "let s = \"\"\"\n\\(socket.emit(\"x\"))\n\"\"\"\n",
+                "#if DEBUG\nsocket.emit(\"orders\")\n#endif\n",
+                "let s = \"\\(\"\\(socket.emit(\"x\"))\")\"\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn c_family_keeps_code_map_new() {
+        for (path, needle, refused, admitted) in [
+            (
+                "src/P.java",
+                "kafkaTemplate.send(",
+                "String s = \"\"\"\n  kafkaTemplate.send(x)\n  \"\"\";\n",
+                "void p() { kafkaTemplate.send(\"orders\", v); }\n",
+            ),
+            (
+                "src/P.cs",
+                "producer.ProduceAsync(",
+                "var s = @\"a \"\" producer.ProduceAsync(x)\";\n",
+                "await producer.ProduceAsync(\"orders\", m);\n",
+            ),
+            (
+                "src/p.c",
+                "redisCommand(",
+                "/* redisCommand(c, \"PUBLISH ghost x\") */\n",
+                "char q = '\"'; redisCommand(c, \"PUBLISH orders x\");\n",
+            ),
+            (
+                "src/p.cpp",
+                "redisCommand(",
+                "// redisCommand(c, \"PUBLISH ghost x\")\n",
+                "int n = 1'000; redisCommand(c, \"PUBLISH orders x\");\n",
+            ),
+        ] {
+            assert!(!code_at(path, refused, needle), "{path}: {refused:?}");
+            assert!(code_at(path, admitted, needle), "{path}: {admitted:?}");
+        }
+    }
+
+    #[test]
+    fn compiled_maps_are_ordered_and_never_panic() {
+        let samples = [
+            "const t = `a ${f(`b ${'}'} c`)} d`; // x\n/* y */ nc.publish('é', m);\n",
+            "s := `raw\n` + \"q\\\"\" + 'é' // c\n/* d */\n",
+            "val s = \"\"\"a ${b(\"${c}\")} \"\"\"\" + 'x' /* /* */ */\n",
+            "val s = s\"$$ ${a} $b\" + \"\"\"x\"\"\"\n",
+            "let s = ##\"a \\##(b(\"\\(c)\")) \"## + \"\\(d)\" /* /* */ */\n",
+        ];
+        for (path, src) in ["a.ts", "a.go", "a.kt", "a.scala", "a.swift"]
+            .iter()
+            .zip(samples)
+        {
+            for cut in 0..=src.len() {
+                let Some(prefix) = src.get(..cut) else {
+                    continue;
+                };
+                let g = CodeGuard::for_path(path, prefix).expect("a guard");
+                let skips = g.map.skips();
+                assert!(
+                    skips.windows(2).all(|w| w[0].1 <= w[1].0),
+                    "{path} {prefix:?}: {skips:?}"
+                );
+                assert!(skips.iter().all(|&(s, e)| s < e && e <= prefix.len()));
+                for pos in 0..prefix.len() {
+                    let _ = g.is_code(pos);
+                    let _ = g.is_code_or_script_string(pos);
+                }
+            }
+        }
+        // Deep nesting stops following spans, never recursing without bound.
+        let deep = "`${".repeat(200) + "nc.publish(x)" + &"}`".repeat(200);
+        assert!(CodeGuard::for_path("a.js", &deep).is_some());
+    }
+
+    #[test]
+    fn compiled_import_strings_are_admitted_comments_refused() {
+        for (path, src, needle) in [
+            ("src/a.ts", "import Redis from 'ioredis';\n", "redis"),
+            (
+                "pkg/a.go",
+                "import \"github.com/go-redis/redis/v9\"\n",
+                "redis",
+            ),
+            ("src/a.c", "#include \"hiredis.h\"\n", "redis"),
+            ("src/A.kt", "val u = \"redis://localhost\"\n", "redis"),
+            ("src/a.js", "const u = `redis://${host}`;\n", "redis"),
+        ] {
+            let at = src.find(needle).unwrap();
+            let mut guard = LazyGuard::new(path, src);
+            assert!(guard.admits_name(at), "{path}: {src:?}");
+        }
+        for (path, src, needle) in [
+            ("src/a.ts", "// import Redis from 'ioredis';\n", "redis"),
+            ("pkg/a.go", "/* redis.NewClient */\n", "redis"),
+            ("src/A.swift", "/// redis.get\n", "redis"),
         ] {
             let at = src.find(needle).unwrap();
             let mut guard = LazyGuard::new(path, src);

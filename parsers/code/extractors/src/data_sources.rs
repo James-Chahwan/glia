@@ -219,7 +219,7 @@ mod tests {
         assert!(providers(rs, "src/x.rs").is_empty());
         // The same Rust text read as TypeScript keeps the HEAD substring match.
         assert_eq!(
-            providers(rs, "src/x.ts"),
+            providers(rs, "src/x.vue"),
             [
                 "data_source:elasticsearch",
                 "data_source:mongodb",

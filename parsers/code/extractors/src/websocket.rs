@@ -3676,8 +3676,8 @@ mod tests {
         assert!(qnames(&rs_clients).is_empty(), "{:?}", qnames(&rs_clients));
         assert!(rs_clients.anchors.is_empty() && rs_handlers.anchors.is_empty());
 
-        let ts_handlers = extract_ws_handler_nodes(rust, "src/x.ts", module_id(), repo());
-        let ts_clients = extract_ws_client_nodes(rust, "src/x.ts", module_id(), repo());
+        let ts_handlers = extract_ws_handler_nodes(rust, "src/x.vue", module_id(), repo());
+        let ts_clients = extract_ws_client_nodes(rust, "src/x.vue", module_id(), repo());
         assert_eq!(qnames(&ts_handlers), vec!["ws:default"]);
         assert_eq!(qnames(&ts_clients), vec!["ws_client:/chat"]);
 

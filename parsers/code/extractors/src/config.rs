@@ -2842,8 +2842,8 @@ services:
                 .iter()
                 .all(|(k, _)| *k == env_id(repo, "APP_MODE"))
         );
-        // The same text read as TypeScript keeps every HEAD read.
-        let ts = extract_config_reads(rs, "src/x.ts", module_id(repo), repo);
+        // The same text read from a .vue file (no guard) keeps every HEAD read.
+        let ts = extract_config_reads(rs, "src/x.vue", module_id(repo), repo);
         assert_eq!(
             sorted_keys(&ts),
             [

@@ -7664,7 +7664,7 @@ mod tests {
         assert_eq!(qnames(&ts_doc), vec!["graphql_op:GetUsers"]);
         // The Rust file's text read as TypeScript still mints from its literals.
         assert!(
-            !extract_graphql_operation_nodes(&rust, "x.ts", module_id(), repo())
+            !extract_graphql_operation_nodes(&rust, "x.vue", module_id(), repo())
                 .nodes
                 .is_empty()
         );

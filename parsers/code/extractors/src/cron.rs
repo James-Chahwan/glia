@@ -4377,11 +4377,11 @@ cron.schedule('*/5 * * * *', cleanupSessions);
             "{:?}",
             sorted_qnames(&run(src, "src/x.rs"))
         );
-        // The same text in a JS / Java file reads as at HEAD.
-        let js = sorted_qnames(&run(src, "src/x.js"));
+        // The same text in a file with no guard reads as at HEAD.
+        let js = sorted_qnames(&run(src, "src/x.vue"));
         assert!(js.contains(&"cron:*/5 * * * *:tick".to_string()), "{js:?}");
         assert!(js.contains(&"cron:0 12 * * *:report".to_string()), "{js:?}");
-        let java = sorted_qnames(&run(src, "src/X.java"));
+        let java = sorted_qnames(&run(src, "src/X.vue"));
         assert!(
             java.contains(&"cron:0 4 * * * *:job".to_string()),
             "{java:?}"
@@ -4425,7 +4425,7 @@ cron.schedule('*/5 * * * *', cleanupSessions);
             "{:?}",
             sorted_qnames(&run(rs, "src/x.rs"))
         );
-        let ts = sorted_qnames(&run(rs, "src/x.ts"));
+        let ts = sorted_qnames(&run(rs, "src/x.vue"));
         assert!(
             ts.contains(&"cron:crontab():tasks.cleanup".to_string()),
             "{ts:?}"

@@ -4968,7 +4968,7 @@ mod t {
         ] {
             assert!(unguarded.iter().any(|u| u == q), "{q} in {unguarded:?}");
         }
-        assert_eq!(qnames_at("src/repo.go", RUST_SAMPLES), unguarded);
+        assert_eq!(qnames_at("src/repo.vue", RUST_SAMPLES), unguarded);
     }
 
     #[test]

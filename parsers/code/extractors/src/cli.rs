@@ -1403,6 +1403,31 @@ pub(crate) enum Script {
     /// DH.10: `#` comments, `"""` / `'''` heredocs and `?c` char literals
     /// (`?"`, `?\n`); a `?` after an identifier byte ends a name (`valid?`).
     Elixir,
+    /// FD.5b: JavaScript / TypeScript. `//` and (non-nesting) `/* */`
+    /// comments, `'..'` / `".."` strings (a line each), and backtick template
+    /// literals whose `${..}` spans are code, lexed recursively (a template
+    /// nested in a span is a literal again). Regex literals are not lexed:
+    /// a `/` is division or a comment opener, the one known gap (a regex
+    /// holding a quote opens a string that ends at its line).
+    Js,
+    /// FD.5b: Go. `//` and `/* */` comments, `".."` strings, `'x'` runes and
+    /// backtick raw strings (no escapes, no interpolation, any number of
+    /// lines).
+    Go,
+    /// FD.5b: Kotlin. `//` and nesting `/* */` comments, `'x'` chars, and
+    /// `".."` / `"""..."""` strings that all interpolate: `${..}` spans are
+    /// code; a `$name` holds a name only, never a call, so it is text.
+    Kotlin,
+    /// FD.5b: Scala. [`Script::Kotlin`]'s comments and chars; `".."` and
+    /// `"""..."""` strings interpolate only behind an interpolator
+    /// (`s"..${..}"`, `f".."`, `raw".."`, any `id".."`), whose `${..}` spans
+    /// are code (`$$` is a literal `$`).
+    Scala,
+    /// FD.5b: Swift. `//` and nesting `/* */` comments, `".."` and
+    /// `"""..."""` strings with `\(..)` interpolation spans (code), and raw
+    /// strings `#".."#` / `#"""..."""#` (any number of `#`), whose spans are
+    /// `\#(..)`.
+    Swift,
 }
 
 impl CodeMap {
@@ -1415,8 +1440,21 @@ impl CodeMap {
     /// `?c` char literals, and heredoc bodies (Ruby `<<~ID` / `<<-ID`, PHP
     /// `<<<ID`) through their terminator line. Ruby `%w()` literals and
     /// Elixir sigils are read as code.
+    ///
+    /// FD.5b: [`Script::Js`], [`Script::Go`], [`Script::Kotlin`],
+    /// [`Script::Scala`] and [`Script::Swift`] are lexed by [`lex_code`]: an
+    /// interpolating literal is mapped as its text pieces only, so the
+    /// bytes of a `${..}` / `\(..)` span are code in the map itself.
     pub(crate) fn script(source: &str, script: Script) -> Self {
         let b = source.as_bytes();
+        if matches!(
+            script,
+            Script::Js | Script::Go | Script::Kotlin | Script::Scala | Script::Swift
+        ) {
+            let mut skips = Vec::new();
+            lex_code(b, 0, script, &mut skips, None, 0);
+            return CodeMap { skips };
+        }
         let mut skips = Vec::new();
         let mut heredoc: Option<&[u8]> = None;
         let mut i = 0;
@@ -1488,6 +1526,12 @@ impl CodeMap {
         CodeMap { skips }
     }
 
+    /// The `[start, end)` literal / comment ranges, for tests of the lexers.
+    #[cfg(test)]
+    pub(crate) fn skips(&self) -> &[(usize, usize)] {
+        &self.skips
+    }
+
     /// `pos` when it is code, else the end of the literal or comment holding it.
     fn next_code(&self, pos: usize) -> usize {
         let i = self.skips.partition_point(|&(start, _)| start <= pos);
@@ -1496,6 +1540,283 @@ impl CodeMap {
             _ => pos,
         }
     }
+}
+
+/// FD.5b: deepest nesting of interpolation spans [`lex_code`] follows; a
+/// `${` / `\(` deeper than this is read as literal text.
+const MAX_INTERP_DEPTH: usize = 32;
+
+/// FD.5b: how an interpolating literal marks a code span.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Interp {
+    /// No span: the literal is text whole.
+    None,
+    /// `${..}` (JS templates, Kotlin, Scala interpolators); `scala` reads
+    /// `$$` as an escaped `$`.
+    Dollar { scala: bool },
+    /// Swift `\(..)`, or `\#(..)` in a raw string of `hashes` `#`s.
+    Paren { hashes: usize },
+}
+
+/// FD.5b: one literal's syntax for [`lex_literal`].
+#[derive(Clone, Copy)]
+struct LitSyntax<'c> {
+    /// The closing delimiter.
+    close: &'c [u8],
+    /// `\` escapes the next byte (Swift raw strings: `\` then `hashes` `#`).
+    escapes: bool,
+    hashes: usize,
+    interp: Interp,
+    /// The literal ends at its line (an unterminated `'..'` / `".."`).
+    single_line: bool,
+    /// Kotlin / Scala `"""..""""`: a run of extra quotes before the closer
+    /// belongs to the literal.
+    greedy_close: bool,
+}
+
+/// FD.5b: lex code from `i` for [`CodeMap::script`]'s compiled / JS arms,
+/// pushing each literal and comment to `skips` in source order. With a
+/// `closer` (`}` of a `${..}` span, `)` of a Swift `\(..)` span) it stops at
+/// the first unmatched closer and returns its index; else it runs to the end
+/// of input.
+fn lex_code(
+    b: &[u8],
+    mut i: usize,
+    script: Script,
+    skips: &mut Vec<(usize, usize)>,
+    closer: Option<u8>,
+    depth: usize,
+) -> usize {
+    let opener = closer.map(|c| if c == b')' { b'(' } else { b'{' });
+    let nesting = matches!(script, Script::Kotlin | Script::Scala | Script::Swift);
+    let mut nest = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if Some(c) == closer {
+            if nest == 0 {
+                return i;
+            }
+            nest -= 1;
+            i += 1;
+            continue;
+        }
+        if Some(c) == opener {
+            nest += 1;
+            i += 1;
+            continue;
+        }
+        let after_ident = i > 0 && is_ident_byte(b[i - 1]);
+        let plain = |close: &'static [u8], single_line: bool| LitSyntax {
+            close,
+            escapes: true,
+            hashes: 0,
+            interp: Interp::None,
+            single_line,
+            greedy_close: false,
+        };
+        let end = match c {
+            b'/' if b.get(i + 1) == Some(&b'/') => Some(line_end(b, i)),
+            b'/' if b.get(i + 1) == Some(&b'*') => Some(if nesting {
+                skip_nested_block_comment(b, i)
+            } else {
+                skip_comment(b, i)
+            }),
+            b'`' if script == Script::Js => {
+                let syntax = LitSyntax {
+                    interp: Interp::Dollar { scala: false },
+                    ..plain(b"`", false)
+                };
+                Some(lex_literal(b, i, i + 1, syntax, script, skips, depth))
+            }
+            b'`' if script == Script::Go => {
+                Some(find_bytes(b, i + 1, b"`").map_or(b.len(), |j| j + 1))
+            }
+            q @ (b'\'' | b'"') if script == Script::Js => {
+                let close: &'static [u8] = if q == b'\'' { b"'" } else { b"\"" };
+                Some(lex_literal(
+                    b,
+                    i,
+                    i + 1,
+                    plain(close, true),
+                    script,
+                    skips,
+                    depth,
+                ))
+            }
+            b'\'' if script != Script::Swift => char_literal_end(b, i),
+            b'"' if script == Script::Go => Some(lex_literal(
+                b,
+                i,
+                i + 1,
+                plain(b"\"", true),
+                script,
+                skips,
+                depth,
+            )),
+            b'"' if matches!(script, Script::Kotlin | Script::Scala) => {
+                let interp = if script == Script::Kotlin || after_ident {
+                    Interp::Dollar {
+                        scala: script == Script::Scala,
+                    }
+                } else {
+                    Interp::None
+                };
+                let syntax = if b[i..].starts_with(b"\"\"\"") {
+                    LitSyntax {
+                        escapes: false,
+                        interp,
+                        greedy_close: true,
+                        ..plain(b"\"\"\"", false)
+                    }
+                } else {
+                    LitSyntax {
+                        interp,
+                        ..plain(b"\"", true)
+                    }
+                };
+                let body = i + syntax.close.len();
+                Some(lex_literal(b, i, body, syntax, script, skips, depth))
+            }
+            b'"' | b'#' if script == Script::Swift => swift_literal(b, i, skips, depth),
+            _ => None,
+        };
+        match end {
+            Some(end) if end > i => {
+                if skips.last().is_none_or(|&(s, _)| s < i) {
+                    skips.push((i, end));
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// FD.5b: a Swift string literal at `at` (`".."`, `"""..."""`, or a raw
+/// `#".."#` / `#"""..."""#`), lexed by [`lex_literal`]; `None` when a `#`
+/// opens no raw string (`#if`, `#selector(`).
+fn swift_literal(
+    b: &[u8],
+    at: usize,
+    skips: &mut Vec<(usize, usize)>,
+    depth: usize,
+) -> Option<usize> {
+    let mut q = at;
+    while b.get(q) == Some(&b'#') {
+        q += 1;
+    }
+    if b.get(q) != Some(&b'"') {
+        return None;
+    }
+    let hashes = q - at;
+    let triple = b[q..].starts_with(b"\"\"\"");
+    let mut close = if triple {
+        b"\"\"\"".to_vec()
+    } else {
+        b"\"".to_vec()
+    };
+    close.extend(std::iter::repeat_n(b'#', hashes));
+    let syntax = LitSyntax {
+        close: &close,
+        escapes: true,
+        hashes,
+        interp: Interp::Paren { hashes },
+        single_line: !triple,
+        greedy_close: false,
+    };
+    let body = q + if triple { 3 } else { 1 };
+    Some(lex_literal(
+        b,
+        at,
+        body,
+        syntax,
+        Script::Swift,
+        skips,
+        depth,
+    ))
+}
+
+/// FD.5b: lex the literal opening at `open` (its first content byte at
+/// `body`) and return the index just past it. Its text is pushed to `skips`
+/// as one piece per run between interpolation spans; each span is lexed as
+/// code by [`lex_code`] (literals nested in it are pushed in order), so a
+/// span's bytes are code in the map. An unterminated literal ends at the end
+/// of input, or at its line when `single_line`.
+fn lex_literal(
+    b: &[u8],
+    open: usize,
+    body: usize,
+    syntax: LitSyntax<'_>,
+    script: Script,
+    skips: &mut Vec<(usize, usize)>,
+    depth: usize,
+) -> usize {
+    let push = |skips: &mut Vec<(usize, usize)>, s: usize, e: usize| {
+        if e > s {
+            skips.push((s, e));
+        }
+    };
+    let mut seg = open;
+    let mut j = body.min(b.len());
+    let spans = depth < MAX_INTERP_DEPTH;
+    while j < b.len() {
+        if syntax.single_line && b[j] == b'\n' {
+            push(skips, seg, j);
+            return j;
+        }
+        if b[j..].starts_with(syntax.close) {
+            let mut end = j + syntax.close.len();
+            if syntax.greedy_close {
+                while b.get(end) == Some(&b'"') {
+                    end += 1;
+                }
+            }
+            push(skips, seg, end);
+            return end;
+        }
+        if syntax.escapes
+            && b[j] == b'\\'
+            && b.get(j + 1..j + 1 + syntax.hashes)
+                .is_some_and(|h| h.iter().all(|&c| c == b'#'))
+        {
+            let after = j + 1 + syntax.hashes;
+            if spans && matches!(syntax.interp, Interp::Paren { .. }) && b.get(after) == Some(&b'(')
+            {
+                push(skips, seg, after + 1);
+                let k = lex_code(b, after + 1, script, skips, Some(b')'), depth + 1);
+                if k >= b.len() {
+                    return b.len();
+                }
+                seg = k;
+                j = k + 1;
+                continue;
+            }
+            j = after + 1;
+            continue;
+        }
+        if let Interp::Dollar { scala } = syntax.interp
+            && b[j] == b'$'
+        {
+            if scala && b.get(j + 1) == Some(&b'$') {
+                j += 2;
+                continue;
+            }
+            if spans && b.get(j + 1) == Some(&b'{') {
+                push(skips, seg, j + 2);
+                let k = lex_code(b, j + 2, script, skips, Some(b'}'), depth + 1);
+                if k >= b.len() {
+                    return b.len();
+                }
+                seg = k;
+                j = k + 1;
+                continue;
+            }
+        }
+        j += 1;
+    }
+    push(skips, seg, b.len());
+    b.len()
 }
 
 /// Index just past the Elixir char literal whose `?` is at `at` (`?a`,
@@ -3361,6 +3682,21 @@ fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
     out
 }
 
+/// FD.5b: true when the needle at `at` is the tail of a path through clap
+/// (`clap::Command::new(`, `clap::builder::Command::new(`): the `::`-joined
+/// identifier path ending at `at` starts with the `clap` segment.
+fn behind_clap_path(source: &str, at: usize) -> bool {
+    let b = source.as_bytes();
+    let mut s = at;
+    while s > 0 && (is_ident_byte(b[s - 1]) || b[s - 1] == b':') {
+        s -= 1;
+    }
+    while s < at && b[s] == b':' {
+        s += 1;
+    }
+    b[s..at].starts_with(b"clap::")
+}
+
 const INVOCATION_PATTERNS: &[&str] = &[
     "exec.Command(",
     "exec.CommandContext(",
@@ -3462,7 +3798,9 @@ pub fn extract_cli_invocation_nodes(
                 let tokens = scan_argv(&source[args_at..]);
                 // Only a hit that would mint a site is guarded (and counted):
                 // the needle table's own entries read no argv.
-                if !tokens.is_empty() {
+                // FD.5b (FD.4a's handoff): `clap::Command::new("x")` is a CLI
+                // declaration, not a launch.
+                if !tokens.is_empty() && !behind_clap_path(source, search_from + rel_idx) {
                     if guard.admits(search_from + rel_idx) {
                         e.insert(tokens);
                     } else {
@@ -3480,10 +3818,12 @@ pub fn extract_cli_invocation_nodes(
         if !scala.is_empty() {
             eprintln!("[cli-inv] scala=sys.process sites={}", scala.len());
         }
-        // The same guard: a Scala file has no lexer (every site is admitted),
-        // while a `Seq(..).!` held in a Rust / Python literal is refused.
+        // The same guard: since FD.5b a Scala file is lexed too, so a
+        // `Seq(..).!` held in a comment or a plain string is refused. `at` is
+        // the first argument byte (a quote, which opens a literal), so the
+        // byte before it, inside the call's parentheses, is what is checked.
         for (at, tokens) in scala {
-            if guard.admits(at) {
+            if guard.admits(at.saturating_sub(1)) {
                 sites.entry(at).or_insert(tokens);
             }
         }
@@ -4704,6 +5044,55 @@ def build():
     }
 
     #[test]
+    fn clap_command_paths_are_declarations_not_launches() {
+        // FD.5b (FD.4a's handoff): clap's builder is no launch.
+        let src = "fn p() { let c = clap::Command::new(\"tests\").no_binary_name(true); \
+                   let d = ::clap::builder::Command::new(\"x\"); \
+                   std::process::Command::new(\"git\").spawn(); }\n";
+        assert_eq!(invocation_qnames(src, "src/a.rs"), ["cli_invoke:git"]);
+        assert!(behind_clap_path("clap::Command::new(", 6));
+        assert!(!behind_clap_path("std::process::Command::new(", 15));
+        assert!(!behind_clap_path("myclap::Command::new(", 8));
+    }
+
+    #[test]
+    fn invocations_in_compiled_literals_and_comments_mint_nothing() {
+        // FD.5b: Go, JS / TS and the JVM languages are guarded too.
+        for (path, src) in [
+            (
+                "cmd/a.go",
+                "// exec.Command(\"ghost\")\nconst d = `exec.Command(\"ghost\")`\n",
+            ),
+            (
+                "src/a.ts",
+                "const t = `execSync('ghost')`; // spawnSync('ghost')\n",
+            ),
+            (
+                "src/A.kt",
+                "/* ProcessBuilder(\"ghost\") */ val s = \"ProcessBuilder(\\\"ghost\\\")\"\n",
+            ),
+            ("src/A.scala", "// Seq(\"ghost\", \"x\").!\n"),
+        ] {
+            assert!(invocation_qnames(src, path).is_empty(), "{path}: {src:?}");
+        }
+        assert_eq!(
+            invocation_qnames("cmd := exec.Command(\"git\", \"push\")\n", "cmd/a.go"),
+            ["cli_invoke:git"]
+        );
+        assert_eq!(
+            invocation_qnames("const t = `${execSync('git status')}`;\n", "src/a.ts"),
+            ["cli_invoke:git"]
+        );
+        // A Scala launch in code is read through the guard (DG.8's sites).
+        let scala =
+            "import scala.sys.process._\nobject E { def r() = Seq(\"invctl\", \"export\").! }\n";
+        assert_eq!(
+            invocation_qnames(scala, "src/E.scala"),
+            ["cli_invoke:invctl"]
+        );
+    }
+
+    #[test]
     fn invocations_in_rust_literals_and_comments_mint_nothing() {
         // FD.4a: a needle inside a string literal or a comment is no launch.
         for src in [
@@ -4717,9 +5106,9 @@ def build():
         // In code it is read, also after a refused one.
         let code = "// Command::new(\"ghost\")\nfn f() { Command::new(\"x\").spawn(); }\n";
         assert_eq!(invocation_qnames(code, "src/a.rs"), ["cli_invoke:x"]);
-        // The same literal in a Go file has no guard: read as before.
+        // The same literal in a file with no guard is read as before.
         let lit = "let t = r#\"fn real() { Command::new(\"x\"); }\"#;\n";
-        assert_eq!(invocation_qnames(lit, "src/a.go"), ["cli_invoke:x"]);
+        assert_eq!(invocation_qnames(lit, "src/a.vue"), ["cli_invoke:x"]);
     }
 
     #[test]

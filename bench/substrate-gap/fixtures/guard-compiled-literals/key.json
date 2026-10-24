@@ -1,0 +1,17 @@
+{
+  "framework": "guard-compiled-literals",
+  "language": "go",
+  "dirs": ["go", "ts", "kt"],
+  "note": "FD.5b: the code guard covers Go, the JVM languages, Swift, C / C++ and JS / TS. A queue needle inside a comment, a Go raw string or a JS template literal mints nothing; the real calls do. Baseline HEAD: ghost.* rows fire.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "orders.go", "note": "nats.go Publish in code (go/pub.go)"},
+    {"kind": "QUEUE_PRODUCER", "name": "orders.ts", "note": "nats publish in code (ts/pub.ts)"},
+    {"kind": "QUEUE_PRODUCER", "name": "orders.kt", "note": "KafkaTemplate send in code (kt/Pub.kt)"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "ghost.go", "note": "a // comment"},
+    {"kind": "QUEUE_PRODUCER", "name": "ghost.raw", "note": "a Go backtick raw string"},
+    {"kind": "QUEUE_PRODUCER", "name": "ghost.ts", "note": "a JS template literal"},
+    {"kind": "QUEUE_PRODUCER", "name": "ghost.kt", "note": "a // comment"}
+  ]
+}

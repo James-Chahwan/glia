@@ -1883,13 +1883,13 @@ mod tests {
         assert!(qnames(&rs_flags).is_empty(), "{:?}", qnames(&rs_flags));
         assert!(rs_flags.sites.is_empty());
         assert!(qnames(&extract_secret_refs(src, "src/x.rs", m, repo)).is_empty());
-        let ts_flags = extract_feature_flags(src, "src/x.ts", m, repo);
+        let ts_flags = extract_feature_flags(src, "src/x.vue", m, repo);
         assert_eq!(
             qnames(&ts_flags),
             ["config:flag:beta-search", "config:flag:doc-flag"]
         );
         assert_eq!(
-            qnames(&extract_secret_refs(src, "src/x.ts", m, repo)),
+            qnames(&extract_secret_refs(src, "src/x.vue", m, repo)),
             ["config:secret:vault/secret/data/api"]
         );
         // A real check in Python code stays, its site at the needle.

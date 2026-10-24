@@ -6880,7 +6880,7 @@ mod tests {
         );
         // Other languages have no guard: the same text read as TypeScript
         // mints exactly what an unguarded read mints, phantoms included.
-        let ts = both(NEEDLE_TABLE_RS, "scanner/src/table.ts");
+        let ts = both(NEEDLE_TABLE_RS, "scanner/src/table.vue");
         assert_eq!(ts, both(NEEDLE_TABLE_RS, ""));
         assert!(ts.contains(&"queue_producer:orders".to_string()), "{ts:?}");
 

@@ -4289,7 +4289,7 @@ let db = makeDbClient(uri);
         assert_eq!(
             client_qnames(&extract_grpc_client_nodes(
                 &rust,
-                "src/x.go",
+                "src/x.vue",
                 module_id(),
                 repo()
             )),
@@ -4307,7 +4307,7 @@ let db = makeDbClient(uri);
         assert_eq!(
             client_qnames(&extract_known_grpc_client_nodes(
                 known_rs,
-                "src/x.go",
+                "src/x.vue",
                 module_id(),
                 repo(),
                 &known
@@ -4330,7 +4330,7 @@ let db = makeDbClient(uri);
         };
         assert!(server("src/x.rs").nodes.is_empty());
         assert_eq!(
-            client_qnames(&server("src/x.go")),
+            client_qnames(&server("src/x.vue")),
             vec!["grpc_server:Greeter".to_string()]
         );
 

@@ -4024,7 +4024,7 @@ mod tests {
         assert_eq!(
             qn(extract_event_emitter_nodes(
                 src,
-                "x.ts",
+                "x.vue",
                 module_id(),
                 repo()
             )),
@@ -4033,7 +4033,7 @@ mod tests {
         assert_eq!(
             qn(extract_event_handler_nodes(
                 src,
-                "x.ts",
+                "x.vue",
                 module_id(),
                 repo()
             )),
