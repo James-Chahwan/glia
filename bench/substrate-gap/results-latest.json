@@ -8591,6 +8591,7 @@
     "fixtures/graphql-sdl-literal-scope",
     "fixtures/grpc-external-dial",
     "fixtures/grpc-host-narrowing",
+    "fixtures/guard-compiled-literals",
     "fixtures/guard-script-literals",
     "fixtures/history-cochange",
     "fixtures/http-absolute-url-client",
