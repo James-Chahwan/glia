@@ -312,6 +312,18 @@
 //! closed=<true|false> deps=<P> convergences=<V> divergences=<D>
 //! absences=<A> unmapped_files=<U>` (`P` counts dependent component pairs)
 //! — grep `^\[reflexion\]`.
+//!
+//! # Markdown (FD.69)
+//!
+//! [`render_rule_md`] is the one per-rule markdown block: `glia check`
+//! prints each rule section through it ([`RuleMdOptions::check`]) and `glia
+//! review` each violation section ([`RuleMdOptions::default`]), so a rule /
+//! forbid_path violation's subject line, witness table, caveat block and
+//! `(<shown> of <total> caveats)` footer, and the caveat fold both surfaces
+//! report (`[check] caveats ..`, `[review] caveats ..`), cannot drift. The
+//! options hold only what one surface needs that the other does not: check's
+//! group heading, detailed witness columns, kind lead lines, advisory marks
+//! and per-rule cap; review's per-violation headings and resolved rev.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -332,6 +344,7 @@ use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::{ModuleImports, module_import_graph};
 use crate::external::declared::{declared_constraints, declared_misses};
 use crate::profile::CODE_PROFILE;
+use crate::review::{self as md, CaveatFold};
 use crate::rules::facts::{edge_tier_of, located_edge};
 use crate::rules::{CodeFacts, evaluate_rule, reflexion};
 use crate::why::tier_of;
@@ -2310,6 +2323,335 @@ fn unmapped_summary(merged: &MergedGraph, facts: &ReflexionFacts<'_>) -> Unmappe
             .take(MAX_UNMAPPED_SAMPLE)
             .map(String::from)
             .collect(),
+    }
+}
+
+// ============================================================================
+// markdown (FD.69): the per-rule block `glia check` and `glia review` print
+// ============================================================================
+
+/// What a non-blocking violation's tier reads with
+/// [`RuleMdOptions::mark_advisory`].
+const ADVISORY_NOTE: &str = ", advisory (below this rule's min_tier; does not fail CI)";
+
+/// Caveat lines one rule's caveat block lists; `--json` carries them all.
+const MAX_CAVEAT_LINES: usize = 5;
+
+/// The line a group heading's caveat block opens with (DT.8a).
+const CAVEAT_BLOCK_INTRO: &str = "_coverage caveats (the categories this rule's negations read; a blind extraction looks like a missing edge):_";
+
+/// How [`render_rule_md`] lays out one rule's violations. `default()` is
+/// `glia review`'s form, [`RuleMdOptions::check`] `glia check`'s; both
+/// print a rule / forbid_path violation's subject line, witness table and
+/// caveat block alike, and differ only in the fields below.
+/// `#[non_exhaustive]`: start from one of the two and set fields.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct RuleMdOptions {
+    /// One `### <id> (<kind>, <decl>) - <n> violation(s)` heading for the
+    /// group (`cell API` for a rule with no stanza; `n` the edges of a
+    /// per-edge kind, else the violations), with the rule's caveat block,
+    /// opened by its intro line, right under it (check). `false`: a
+    /// `#### <id> (<kind>[, <decl>])` heading per violation, the caveat
+    /// block after the rule's first violation (review).
+    pub group_heading: bool,
+    /// The witness table's `#` and `emitter` columns, and the tier with
+    /// `why`'s note in parentheses (check, CC.3). `false`: `category | from
+    /// | to | at | tier`.
+    pub edge_detail: bool,
+    /// A lead line for each forbid_edge, divergence and no_cycle violation
+    /// naming its count and tier (check). `false`: a no_cycle's
+    /// `_(one shortest cycle through ..)_` note only (review).
+    pub kind_leads: bool,
+    /// A non-blocking violation's tier gains `, advisory (..)` (check,
+    /// whose sections mix blocking and advisory rows; review splits them).
+    pub mark_advisory: bool,
+    /// Witness rows kept per violation; a cut table is followed by
+    /// `_(<shown> of <total>)_`, `total` the violation's `count`.
+    pub max_rows: usize,
+    /// Violations printed per rule, then `_(showing <m> of <n>; --json
+    /// lists all)_`.
+    pub max_violations: usize,
+    /// The rev a resolved violation's subject and rows are located in:
+    /// ` (at <rev>)` after each location.
+    pub located_at: Option<String>,
+}
+
+impl Default for RuleMdOptions {
+    /// `glia review`'s form.
+    fn default() -> Self {
+        RuleMdOptions {
+            group_heading: false,
+            edge_detail: false,
+            kind_leads: false,
+            mark_advisory: false,
+            max_rows: crate::review::DEFAULT_MARKDOWN_ROWS,
+            max_violations: usize::MAX,
+            located_at: None,
+        }
+    }
+}
+
+impl RuleMdOptions {
+    /// `glia check`'s form: a group heading, detailed witness tables of at
+    /// most [`MAX_EVIDENCE`] rows, kind lead lines, advisory marks and at
+    /// most 50 violations per rule.
+    pub fn check() -> Self {
+        RuleMdOptions {
+            group_heading: true,
+            edge_detail: true,
+            kind_leads: true,
+            mark_advisory: true,
+            max_rows: MAX_EVIDENCE,
+            max_violations: 50,
+            located_at: None,
+        }
+    }
+}
+
+/// A rule or forbid_path violation: identified by its subject, and the
+/// kinds whose rows carry coverage caveats.
+pub(crate) fn by_subject(v: &Violation) -> bool {
+    v.rule_kind == RULE || v.rule_kind == FORBID_PATH
+}
+
+/// A forbid_edge rule and a reflexion divergence report edges.
+fn per_edge(rule_kind: &str) -> bool {
+    rule_kind == FORBID_EDGE || rule_kind == DIVERGENCE
+}
+
+/// One rule's violations (`group`, all of one `rule_id`, in report order)
+/// as markdown blocks one blank line apart: the heading(s) of
+/// [`RuleMdOptions::group_heading`], then per violation its lead (a rule /
+/// forbid_path violation: ``_subject: `<a>`, `<b>` - tier <t> at
+/// <file:line>_``, no ` at` when unlocated) and its witness table, and the
+/// rule's caveat block ONCE (DT.8a): the caveats of every rule /
+/// forbid_path violation of the group deduplicated by (category, language,
+/// note) in first-seen order, at most 5 `⚠ <category> (<language>): <note>`
+/// lines, a cut list followed by `_(<shown> of <total> caveats)_`. Adds the
+/// block to `fold`: one rule, its lines, and the lines one block per
+/// printed violation would have printed beyond them. Every cell is escaped
+/// as `glia review`'s markdown escapes it.
+pub fn render_rule_md(group: &[&Violation], fold: &mut CaveatFold, opts: &RuleMdOptions) -> String {
+    rule_md_blocks(group, fold, opts).join("\n\n")
+}
+
+/// [`render_rule_md`]'s blocks, for a caller that joins them with its own.
+pub(crate) fn rule_md_blocks(
+    group: &[&Violation],
+    fold: &mut CaveatFold,
+    opts: &RuleMdOptions,
+) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    let Some(first) = group.first() else {
+        return blocks;
+    };
+    let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
+    let caveats: Vec<&CoverageNote> = group
+        .iter()
+        .filter(|v| by_subject(v))
+        .flat_map(|v| v.caveats.iter())
+        .filter(|c| seen.insert((c.edge_category, c.language, c.note)))
+        .collect();
+    let printed = &group[..group.len().min(opts.max_violations)];
+    let lines = caveats.len().min(MAX_CAVEAT_LINES);
+    let per_row: usize = printed
+        .iter()
+        .filter(|v| by_subject(v))
+        .map(|v| v.caveats.len().min(MAX_CAVEAT_LINES))
+        .sum();
+    if lines > 0 {
+        fold.rules += 1;
+    }
+    fold.lines += lines;
+    fold.folded += per_row.saturating_sub(lines);
+
+    if opts.group_heading {
+        let decl = first.decl.as_deref().unwrap_or("cell API");
+        let n: usize = if per_edge(first.rule_kind) {
+            group.iter().map(|v| v.count).sum()
+        } else {
+            group.len()
+        };
+        blocks.push(format!(
+            "### {} ({}, {}) - {n} violation(s)",
+            md::text(&first.rule_id),
+            md::text(first.rule_kind),
+            md::text(decl)
+        ));
+        if !caveats.is_empty() {
+            blocks.push(CAVEAT_BLOCK_INTRO.to_string());
+            caveat_md(&mut blocks, &caveats);
+        }
+    }
+    for (i, v) in printed.iter().enumerate() {
+        if !opts.group_heading {
+            blocks.push(match v.decl.as_deref() {
+                Some(decl) => format!(
+                    "#### {} ({}, {})",
+                    md::text(&v.rule_id),
+                    md::text(v.rule_kind),
+                    md::text(decl)
+                ),
+                None => format!("#### {} ({})", md::text(&v.rule_id), md::text(v.rule_kind)),
+            });
+        }
+        violation_lead(&mut blocks, i + 1, v, opts);
+        let total = if v.rule_kind == NO_CYCLE {
+            v.evidence.len()
+        } else {
+            v.count.max(v.evidence.len())
+        };
+        witness_md(&mut blocks, v, total, opts);
+        if !opts.group_heading && i == 0 && !caveats.is_empty() {
+            caveat_md(&mut blocks, &caveats);
+        }
+    }
+    if group.len() > printed.len() {
+        blocks.push(format!(
+            "_(showing {} of {}; --json lists all)_",
+            printed.len(),
+            group.len()
+        ));
+    }
+    blocks
+}
+
+/// The caveat block's lines, then the footer when it cut the list.
+fn caveat_md(blocks: &mut Vec<String>, caveats: &[&CoverageNote]) {
+    let lines: Vec<String> = caveats
+        .iter()
+        .take(MAX_CAVEAT_LINES)
+        .map(|c| {
+            format!(
+                "⚠ {} ({}): {}",
+                md::text(c.edge_category),
+                md::text(c.language),
+                md::text(c.note)
+            )
+        })
+        .collect();
+    let shown = lines.len();
+    blocks.push(lines.join("\n"));
+    if shown < caveats.len() {
+        blocks.push(format!("_({shown} of {} caveats)_", caveats.len()));
+    }
+}
+
+/// A violation's lead line (module docs of [`render_rule_md`]).
+fn violation_lead(blocks: &mut Vec<String>, k: usize, v: &Violation, opts: &RuleMdOptions) {
+    let mark = if opts.mark_advisory && !v.blocking {
+        ADVISORY_NOTE
+    } else {
+        ""
+    };
+    let tier = format!("{}{mark}", md::text(v.tier));
+    if by_subject(v) {
+        let subject: Vec<String> = v.subject.iter().map(|s| md::code(s)).collect();
+        let mut line = format!(
+            "_subject: {} - tier {tier}",
+            if subject.is_empty() {
+                md::DASH.to_string()
+            } else {
+                subject.join(", ")
+            }
+        );
+        if v.file.is_some() {
+            line.push_str(&format!(" at {}", md::at(v.file.as_deref(), v.line)));
+            if let Some(rev) = &opts.located_at {
+                line.push_str(&format!(" (at {})", md::text(rev)));
+            }
+        }
+        line.push('_');
+        blocks.push(line);
+        return;
+    }
+    if !opts.kind_leads {
+        if v.rule_kind == NO_CYCLE {
+            blocks.push(format!(
+                "_(one shortest cycle through the {} members of its strongly-connected component)_",
+                v.count
+            ));
+        }
+        return;
+    }
+    blocks.push(match v.rule_kind {
+        FORBID_EDGE => format!("_{} forbidden edge(s), tier {tier}:_", v.count),
+        DIVERGENCE => format!(
+            "_{} edge(s) the model does not allow, tier {tier}:_",
+            v.count
+        ),
+        NO_CYCLE => format!(
+            "_cycle {k}: {} node(s) in the component, tier {tier}; a shortest cycle through it:_",
+            v.count
+        ),
+        // `rule_kind` is a string, not an enum: a kind with no arm above
+        // still prints its subject, count and tier, then its rows.
+        other => {
+            let subject: Vec<String> = v.subject.iter().map(|s| md::code(s)).collect();
+            format!(
+                "_{} {k}: {} - count {}, tier {tier}:_",
+                md::text(other),
+                if subject.is_empty() {
+                    md::DASH.to_string()
+                } else {
+                    subject.join(", ")
+                },
+                v.count
+            )
+        }
+    });
+}
+
+/// A violation's witness rows, at most [`RuleMdOptions::max_rows`].
+fn witness_md(blocks: &mut Vec<String>, v: &Violation, total: usize, opts: &RuleMdOptions) {
+    let loc = |e: &ViolationEdge| {
+        let mut loc = md::at(e.file.as_deref(), e.line);
+        if let Some(rev) = opts.located_at.as_deref().filter(|_| e.file.is_some()) {
+            loc.push_str(&format!(" (at {})", md::text(rev)));
+        }
+        loc
+    };
+    if opts.edge_detail {
+        md::push_table(
+            blocks,
+            &["#", "category", "from", "to", "at", "emitter", "tier"],
+            v.evidence.iter().enumerate().map(|(i, e)| {
+                let tier = match e.note.as_deref() {
+                    Some(n) => format!("{} ({n})", e.tier),
+                    None => e.tier.to_string(),
+                };
+                vec![
+                    (i + 1).to_string(),
+                    md::text(e.category),
+                    md::code(&e.from_qname),
+                    md::code(&e.to_qname),
+                    loc(e),
+                    e.emitter
+                        .as_deref()
+                        .map_or_else(|| md::DASH.to_string(), md::text),
+                    md::text(&tier),
+                ]
+            }),
+            total,
+            opts.max_rows,
+        );
+    } else {
+        md::push_table(
+            blocks,
+            &["category", "from", "to", "at", "tier"],
+            v.evidence.iter().map(|e| {
+                vec![
+                    md::text(e.category),
+                    md::code(&e.from_qname),
+                    md::code(&e.to_qname),
+                    loc(e),
+                    md::text(e.tier),
+                ]
+            }),
+            total,
+            opts.max_rows,
+        );
     }
 }
 

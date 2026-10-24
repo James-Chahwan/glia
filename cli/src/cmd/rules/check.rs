@@ -10,23 +10,29 @@
 //! The exit code reads only [`Violation::blocking`], which the engine sets
 //! from the violation's tier and its rule's `min_tier` (DB.3a; a heuristic
 //! violation never blocks, 0.5.2 Q2). A non-blocking violation is printed in
-//! full with [`ADVISORY`] on its tier line, and the summary splits the count
+//! full with `, advisory (..)` on its tier line, and the summary splits the count
 //! (`- violations: <V> (blocking <B>, advisory <A>)`).
 //!
-//! Per kind: a forbid_edge rule's and a reflexion divergence's edges in one
+//! Each rule section is the engine's `check::render_rule_md` in check's form
+//! (`RuleMdOptions::check`), the one renderer `glia review` prints its
+//! violations through too (FD.69), so the two surfaces cannot drift. Per
+//! kind: a forbid_edge rule's and a reflexion divergence's edges in one
 //! table; each cycle of a no_cycle rule with a shortest witness; each
-//! `violation` row of a rule invariant (DB.3a) with its subject, location
-//! and witness edges; each hit of a transitive forbid_edge (DB.3b) with its
-//! witness hops in path order. At most [`MAX_PRINTED_PER_RULE`] violations
-//! print per rule.
+//! `violation` row of a rule invariant (DB.3a) and each hit of a transitive
+//! forbid_edge (DB.3b) as review prints it, ``_subject: `<a>`, `<b>` - tier
+//! <t> at <file:line>_`` (no ` at` when unlocated), then its witness edges (a
+//! hit's hops in path order). At most 50 violations print per rule, and at
+//! most `check::MAX_EVIDENCE` rows per table, a cut one followed by
+//! `_(<shown> of <total>)_`.
 //!
 //! A rule's Q5 coverage caveats (the categories its negations read; a blind
 //! extraction looks like a missing edge) print once, in one block under the
 //! rule heading before its first row (DT.8a), deduplicated by (category,
-//! language, note) in first-seen order: one rule's negations are static, so
-//! every row carries the same list, and the per-row layout repeated it
-//! verbatim (Kina, 8 rows: 24 `⚠` lines for 3 caveats). `--json` keeps each
-//! violation's own list. fired_on, on stderr after the sections when a rule
+//! language, note) in first-seen order, at most 5 `⚠ <category>
+//! (<language>): <note>` lines, a cut list followed by `_(<shown> of <total>
+//! caveats)_`: one rule's negations are static, so every row carries the
+//! same list, and the per-row layout repeated it verbatim (Kina, 8 rows: 24
+//! `⚠` lines for 3 caveats). `--json` keeps each violation's own list. fired_on, on stderr after the sections when a rule
 //! printed a block: `[check] caveats rules=<r> lines=<l> folded=<f>`, `r` the
 //! rules printing a caveat block, `l` the `⚠` lines those blocks printed, `f`
 //! the lines the per-row layout would have printed beyond `l` over the
@@ -51,15 +57,14 @@
 //! not under the heading above), so it exits 2. The summary line gains `,
 //! checking nothing <n>` (the non-blocking ones) only when there is one.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use glia_engine::CoverageNote;
 use glia_engine::check::{
-    CONVERGENCE, CheckOptions, CheckReport, DIVERGENCE, FORBID_EDGE, FORBID_PATH, MAX_EVIDENCE,
-    MAX_UNMAPPED_SAMPLE, NO_CYCLE, RULE, Reflexion, Unanchored, Violation, ViolationEdge,
-    check_with_roots,
+    CONVERGENCE, CheckOptions, CheckReport, DIVERGENCE, MAX_UNMAPPED_SAMPLE, Reflexion,
+    RuleMdOptions, Unanchored, Violation, check_with_roots, render_rule_md,
 };
+use glia_engine::review::CaveatFold;
 
 use crate::common::generate_for;
 
@@ -95,65 +100,12 @@ fn exit_code(r: &CheckReport) -> i32 {
     }
 }
 
-/// Appended to a non-blocking violation's tier: its tier is below its rule's
-/// `min_tier`, or heuristic, which never blocks (0.5.2 Q2).
-const ADVISORY: &str = ", advisory (below this rule's min_tier; does not fail CI)";
-
-/// [`ADVISORY`] when `v` does not block, else nothing.
-fn advisory(v: &Violation) -> &'static str {
-    if v.blocking { "" } else { ADVISORY }
-}
-
-/// Violations printed per rule; `--json` lists all.
-const MAX_PRINTED_PER_RULE: usize = 50;
-
-/// `file:line`, `file`, or `—`.
-fn located(file: Option<&str>, line: Option<i64>) -> String {
-    match (file, line) {
-        (Some(f), Some(l)) => format!("{f}:{l}"),
-        (Some(f), None) => f.to_string(),
-        _ => "—".to_string(),
-    }
-}
-
-/// An evidence row's site, as [`located`].
-fn at(e: &ViolationEdge) -> String {
-    located(e.file.as_deref(), e.line)
-}
-
-/// The row's tier, with its note in parentheses when it has one.
-fn tier(e: &ViolationEdge) -> String {
-    match e.note.as_deref() {
-        Some(n) => format!("{} ({n})", e.tier),
-        None => e.tier.to_string(),
-    }
-}
-
-fn print_edges(rows: &[ViolationEdge]) {
-    println!("| # | category | from | to | at | emitter | tier |");
-    println!("|--:|---|---|---|---|---|---|");
-    for (i, e) in rows.iter().enumerate() {
-        println!(
-            "| {} | {} | `{}` | `{}` | {} | {} | {} |",
-            i + 1,
-            e.category,
-            e.from_qname,
-            e.to_qname,
-            at(e),
-            e.emitter.as_deref().unwrap_or("—"),
-            tier(e),
-        );
-    }
-    println!();
-}
-
-/// Caveat lines printed per absence (and per rule); `--json` carries them
-/// all.
+/// Caveat lines printed per reflexion absence; `--json` carries them all.
 const MAX_ABSENCE_CAVEATS: usize = 5;
 
 /// At most [`MAX_ABSENCE_CAVEATS`] `  ⚠ <category> (<language>): <note>`
-/// lines, then how many more `--json` lists. Returns the `⚠` lines printed.
-fn print_caveats(caveats: &[CoverageNote]) -> usize {
+/// lines, then how many more `--json` lists.
+fn print_caveats(caveats: &[CoverageNote]) {
     for c in caveats.iter().take(MAX_ABSENCE_CAVEATS) {
         println!("  ⚠ {} ({}): {}", c.edge_category, c.language, c.note);
     }
@@ -163,142 +115,18 @@ fn print_caveats(caveats: &[CoverageNote]) -> usize {
             caveats.len() - MAX_ABSENCE_CAVEATS
         );
     }
-    caveats.len().min(MAX_ABSENCE_CAVEATS)
 }
 
-/// The line a rule's caveat block opens with (DT.8a).
-const CAVEAT_BLOCK: &str = "_coverage caveats (the categories this rule's negations read; a blind extraction looks like a missing edge):_";
-
-/// Every violation's caveats in `group`, deduplicated by (category,
-/// language, note) in first-seen order (DT.8a).
-fn rule_caveats(group: &[&Violation]) -> Vec<CoverageNote> {
-    let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
-    let mut out = Vec::new();
-    for c in group.iter().flat_map(|v| &v.caveats) {
-        if seen.insert((c.edge_category, c.language, c.note)) {
-            out.push(c.clone());
-        }
+/// One section per violated rule, rendered by the engine's
+/// [`render_rule_md`] in check's form ([`RuleMdOptions::check`]): the one
+/// renderer `glia review` prints its violations through too (FD.69). Adds
+/// the rule's caveat block to `fold`.
+fn print_rule(group: &[&Violation], fold: &mut CaveatFold) {
+    if group.is_empty() {
+        return;
     }
-    out
-}
-
-/// One rule section's `⚠` lines (DT.8a): `lines` its caveat block printed,
-/// `per_row` the lines the per-violation layout printed over the same
-/// printed rows.
-#[derive(Default)]
-struct CaveatFold {
-    lines: usize,
-    per_row: usize,
-}
-
-/// A forbid_edge rule and a reflexion divergence report edges (`count` is the
-/// edges, the evidence at most [`MAX_EVIDENCE`] of them); a no_cycle rule
-/// reports cycles.
-fn per_edge(rule_kind: &str) -> bool {
-    rule_kind == FORBID_EDGE || rule_kind == DIVERGENCE
-}
-
-/// A rule row's subject: each head value in backticks, `, `-joined; `—` for
-/// a row with no head value.
-fn subject(v: &Violation) -> String {
-    if v.subject.is_empty() {
-        "—".to_string()
-    } else {
-        format!("`{}`", v.subject.join("`, `"))
-    }
-}
-
-/// One violation `k` (1-based within its rule): its heading line, its
-/// evidence table, and what the table leaves out.
-fn print_violation(k: usize, v: &Violation) {
-    let mark = advisory(v);
-    match v.rule_kind {
-        FORBID_EDGE => println!("_{} forbidden edge(s), tier {}{mark}:_", v.count, v.tier),
-        DIVERGENCE => println!(
-            "_{} edge(s) the model does not allow, tier {}{mark}:_",
-            v.count, v.tier
-        ),
-        NO_CYCLE => println!(
-            "_cycle {k}: {} node(s) in the component, tier {}{mark}; a shortest cycle through it:_",
-            v.count, v.tier
-        ),
-        RULE => println!(
-            "_violation {k}: {} - tier {}{mark} at {}_",
-            subject(v),
-            v.tier,
-            located(v.file.as_deref(), v.line)
-        ),
-        FORBID_PATH => println!(
-            "_path {k} into {} - {} hop(s), tier {}{mark}:_",
-            subject(v),
-            v.count,
-            v.tier
-        ),
-        // `rule_kind` is a string, not an enum: a kind with no arm above
-        // still prints its subject, count and tier, then its rows.
-        other => println!(
-            "_{other} {k}: {} - count {}, tier {}{mark}:_",
-            subject(v),
-            v.count,
-            v.tier
-        ),
-    }
+    println!("{}", render_rule_md(group, fold, &RuleMdOptions::check()));
     println!();
-    // A rule row no edge derives has no witness: its rule's caveat block,
-    // under the heading, says why "no edge" may be a blind extraction (Q5).
-    if v.rule_kind != RULE || !v.evidence.is_empty() {
-        print_edges(&v.evidence);
-    }
-    let capped = per_edge(v.rule_kind) || v.rule_kind == RULE;
-    if capped && v.count > v.evidence.len() {
-        println!(
-            "_(showing the first {} of {}; at most {MAX_EVIDENCE} are listed)_",
-            v.evidence.len(),
-            v.count
-        );
-        println!();
-    }
-}
-
-/// One section per violated rule: its caveat block (DT.8a), then a
-/// forbid_edge rule's edges, a reflexion divergence's edges, each cycle of a
-/// no_cycle rule with its witness, each row of a rule invariant, or each hit
-/// of a transitive forbid_edge; at most [`MAX_PRINTED_PER_RULE`] of them.
-fn print_rule(group: &[&Violation]) -> CaveatFold {
-    let Some(first) = group.first() else {
-        return CaveatFold::default();
-    };
-    let decl = first.decl.as_deref().unwrap_or("cell API");
-    let n: usize = if per_edge(first.rule_kind) {
-        group.iter().map(|v| v.count).sum()
-    } else {
-        group.len()
-    };
-    println!(
-        "### {} ({}, {decl}) - {n} violation(s)",
-        first.rule_id, first.rule_kind
-    );
-    println!();
-    let caveats = rule_caveats(group);
-    let mut fold = CaveatFold::default();
-    if !caveats.is_empty() {
-        println!("{CAVEAT_BLOCK}");
-        println!();
-        fold.lines = print_caveats(&caveats);
-        println!();
-    }
-    for (i, v) in group.iter().take(MAX_PRINTED_PER_RULE).enumerate() {
-        print_violation(i + 1, v);
-        fold.per_row += v.caveats.len().min(MAX_ABSENCE_CAVEATS);
-    }
-    if group.len() > MAX_PRINTED_PER_RULE {
-        println!(
-            "_(showing {MAX_PRINTED_PER_RULE} of {}; --json lists all)_",
-            group.len()
-        );
-        println!();
-    }
-    fold
 }
 
 /// The `## Rules that check nothing` section (DT.7b): every non-blocking
@@ -491,7 +319,7 @@ pub(crate) fn run(args: Args) -> i32 {
     }
     // Violations arrive sorted by rule id: group the runs.
     let mut i = 0;
-    let (mut caveat_rules, mut caveat_lines, mut folded) = (0usize, 0usize, 0usize);
+    let mut fold = CaveatFold::default();
     while i < report.violations.len() {
         let id = &report.violations[i].rule_id;
         let group: Vec<&Violation> = report.violations[i..]
@@ -499,12 +327,7 @@ pub(crate) fn run(args: Args) -> i32 {
             .take_while(|v| &v.rule_id == id)
             .collect();
         i += group.len();
-        let fold = print_rule(&group);
-        if fold.lines > 0 {
-            caveat_rules += 1;
-            caveat_lines += fold.lines;
-            folded += fold.per_row.saturating_sub(fold.lines);
-        }
+        print_rule(&group, &mut fold);
     }
     if !report.unchecked.is_empty() {
         println!("## unchecked (not machine-checkable)");
@@ -531,8 +354,11 @@ pub(crate) fn run(args: Args) -> i32 {
         }
         println!();
     }
-    if caveat_rules > 0 {
-        eprintln!("[check] caveats rules={caveat_rules} lines={caveat_lines} folded={folded}");
+    if fold.rules > 0 {
+        eprintln!(
+            "[check] caveats rules={} lines={} folded={}",
+            fold.rules, fold.lines, fold.folded
+        );
     }
     code
 }

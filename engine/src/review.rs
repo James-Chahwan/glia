@@ -290,14 +290,13 @@ use crate::calibrate::record::{Selection, Shape, explicit, log_selection, select
 use crate::calibrate::sets::{REVIEW_CANDIDATES, REVIEW_FALLBACK, REVIEW_SET};
 use crate::check::{
     self, CheckOptions, CheckReport, DEFAULT_MIN_TIER, EMPTY_SCOPE, FORBID_EDGE, FORBID_PATH,
-    NO_CYCLE, RULE, Unanchored, Violation, ViolationEdge, check_rules_gated,
+    NO_CYCLE, RULE, RuleMdOptions, Unanchored, Violation, ViolationEdge, check_rules_gated,
     default_forbid_categories,
 };
 use crate::contract_breaks::{
     MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier, model_breaks_of,
 };
 use crate::contract_fields::FieldSide;
-use crate::coverage::CoverageNote;
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
@@ -1795,64 +1794,46 @@ pub fn caveat_fold(r: &Review) -> CaveatFold {
         r.new_violations.iter().partition(|v| v.blocking);
     let resolved: Vec<&Violation> = r.resolved_violations.iter().collect();
     let mut fold = CaveatFold::default();
+    let mut sink: Vec<String> = Vec::new();
     for section in [&blocking, &advisory, &resolved] {
-        for (v, block) in section.iter().zip(caveat_plan(section)) {
-            let per_row = if by_subject(v) {
-                v.caveats.len().min(MAX_CAVEAT_LINES)
-            } else {
-                0
-            };
-            let lines = block.len().min(MAX_CAVEAT_LINES);
-            if lines > 0 {
-                fold.rules += 1;
-            }
-            fold.lines += lines;
-            fold.folded += per_row;
-        }
+        section_md(&mut sink, section, &mut fold, 0, None);
     }
-    fold.folded = fold.folded.saturating_sub(fold.lines);
     fold
 }
 
-/// A rule or forbid_path violation: identified by subject, and the kinds
-/// that carry coverage caveats.
-fn by_subject(v: &Violation) -> bool {
-    v.rule_kind == RULE || v.rule_kind == FORBID_PATH
+/// One section's violations, one `check::render_rule_md` block per run of
+/// one rule (the report sorts them by rule id, and a section keeps that
+/// order), in review's form ([`RuleMdOptions::default`]); its caveat fold
+/// added to `fold`.
+fn section_md(
+    blocks: &mut Vec<String>,
+    section: &[&Violation],
+    fold: &mut CaveatFold,
+    max: usize,
+    located_at: Option<&str>,
+) {
+    let opts = RuleMdOptions {
+        max_rows: max,
+        located_at: located_at.map(String::from),
+        ..RuleMdOptions::default()
+    };
+    let mut i = 0;
+    while i < section.len() {
+        let id = &section[i].rule_id;
+        let run = section[i..].iter().take_while(|v| &v.rule_id == id).count();
+        blocks.extend(check::rule_md_blocks(&section[i..i + run], fold, &opts));
+        i += run;
+    }
 }
 
-/// The caveat block each violation of one section prints (module docs
-/// "Markdown"): a rule's first violation there takes every caveat of the
-/// rule's violations in the section, deduplicated by (category, language,
-/// note) in first-seen order; every other violation takes none.
-fn caveat_plan<'v>(section: &[&'v Violation]) -> Vec<Vec<&'v CoverageNote>> {
-    let mut first: HashSet<&str> = HashSet::new();
-    section
-        .iter()
-        .map(|v| {
-            if !by_subject(v) || !first.insert(v.rule_id.as_str()) {
-                return Vec::new();
-            }
-            let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
-            section
-                .iter()
-                .filter(|o| o.rule_id == v.rule_id && by_subject(o))
-                .flat_map(|o| o.caveats.iter())
-                .filter(|c| seen.insert((c.edge_category, c.language, c.note)))
-                .collect()
-        })
-        .collect()
-}
-
-/// One section's violations, each with its [`caveat_plan`] block.
+/// One section's violations (module docs "Markdown").
 fn violations_md(
     blocks: &mut Vec<String>,
     section: &[&Violation],
     max: usize,
     located_at: Option<&str>,
 ) {
-    for (v, caveats) in section.iter().zip(caveat_plan(section)) {
-        violation_md(blocks, v, &caveats, max, located_at);
-    }
+    section_md(blocks, section, &mut CaveatFold::default(), max, located_at);
 }
 
 /// One model-break section (module docs "Markdown"): one table, a line per
@@ -1976,7 +1957,7 @@ fn finish(blocks: Vec<String>) -> String {
 }
 
 /// A missing cell.
-const DASH: &str = "—";
+pub(crate) const DASH: &str = "—";
 
 /// `_(<note>)_`, or `_(none)_` without one.
 fn none(note: Option<&str>) -> String {
@@ -2003,8 +1984,13 @@ fn yes_no(b: bool) -> String {
 
 /// A table of at most `max` of `rows` under `header`, then `_(<shown> of
 /// <total>)_` when it shows fewer than `total`. No row, no table.
-fn push_table<I>(blocks: &mut Vec<String>, header: &[&str], rows: I, total: usize, max: usize)
-where
+pub(crate) fn push_table<I>(
+    blocks: &mut Vec<String>,
+    header: &[&str],
+    rows: I,
+    total: usize,
+    max: usize,
+) where
     I: IntoIterator<Item = Vec<String>>,
 {
     let rows: Vec<Vec<String>> = rows.into_iter().take(max).collect();
@@ -2023,102 +2009,6 @@ where
     }
     if rows.len() < total {
         blocks.push(format!("_({} of {total})_", rows.len()));
-    }
-}
-
-/// Caveat lines one rule's caveat block lists in markdown.
-const MAX_CAVEAT_LINES: usize = 5;
-
-/// One violation: its heading and its evidence rows. A per-edge kind's total
-/// is its `count` (the rows beyond `check::MAX_EVIDENCE` included); a
-/// no_cycle's rows are one shortest cycle through its `count` members; a rule
-/// or forbid_path violation's identity line comes first, then its rows, then
-/// `caveats`, its [`caveat_plan`] block (empty for every violation of a rule
-/// but the section's first; module docs "Markdown"). `located_at`: the rev a
-/// resolved violation's rows are located in.
-fn violation_md(
-    blocks: &mut Vec<String>,
-    v: &Violation,
-    caveats: &[&CoverageNote],
-    max: usize,
-    located_at: Option<&str>,
-) {
-    blocks.push(match v.decl.as_deref() {
-        Some(decl) => format!(
-            "#### {} ({}, {})",
-            text(&v.rule_id),
-            text(v.rule_kind),
-            text(decl)
-        ),
-        None => format!("#### {} ({})", text(&v.rule_id), text(v.rule_kind)),
-    });
-    let subject_kind = by_subject(v);
-    if subject_kind {
-        let subject: Vec<String> = v.subject.iter().map(|s| code(s)).collect();
-        let mut line = format!(
-            "_subject: {} - tier {}",
-            if subject.is_empty() {
-                DASH.to_string()
-            } else {
-                subject.join(", ")
-            },
-            text(v.tier)
-        );
-        if v.file.is_some() {
-            line.push_str(&format!(" at {}", at(v.file.as_deref(), v.line)));
-            if let Some(rev) = located_at {
-                line.push_str(&format!(" (at {})", text(rev)));
-            }
-        }
-        line.push('_');
-        blocks.push(line);
-    }
-    let total = if v.rule_kind == NO_CYCLE {
-        blocks.push(format!(
-            "_(one shortest cycle through the {} members of its strongly-connected component)_",
-            v.count
-        ));
-        v.evidence.len()
-    } else {
-        v.count.max(v.evidence.len())
-    };
-    push_table(
-        blocks,
-        &["category", "from", "to", "at", "tier"],
-        v.evidence.iter().map(|e| {
-            let mut loc = at(e.file.as_deref(), e.line);
-            if let Some(rev) = located_at.filter(|_| e.file.is_some()) {
-                loc.push_str(&format!(" (at {})", text(rev)));
-            }
-            vec![
-                text(e.category),
-                code(&e.from_qname),
-                code(&e.to_qname),
-                loc,
-                text(e.tier),
-            ]
-        }),
-        total,
-        max,
-    );
-    if subject_kind && !caveats.is_empty() {
-        let lines: Vec<String> = caveats
-            .iter()
-            .take(MAX_CAVEAT_LINES)
-            .map(|c| {
-                format!(
-                    "⚠ {} ({}): {}",
-                    text(c.edge_category),
-                    text(c.language),
-                    text(c.note)
-                )
-            })
-            .collect();
-        let shown = lines.len();
-        blocks.push(lines.join("\n"));
-        if shown < caveats.len() {
-            blocks.push(format!("_({shown} of {} caveats)_", caveats.len()));
-        }
     }
 }
 
@@ -2194,7 +2084,7 @@ fn edges_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
 }
 
 /// `file:line`, `file`, or a dash, as table text.
-fn at(file: Option<&str>, line: Option<i64>) -> String {
+pub(crate) fn at(file: Option<&str>, line: Option<i64>) -> String {
     match (file, line) {
         (Some(f), Some(l)) => text(&format!("{f}:{l}")),
         (Some(f), None) => text(f),
@@ -2210,7 +2100,7 @@ fn flat(s: &str) -> String {
 /// A table cell's text (module docs "Markdown"): one line, with `\`, `|`,
 /// backticks, `*`, `<` and every `_` not inside a word backslash-escaped, so
 /// no character splits the row or opens a span.
-fn text(s: &str) -> String {
+pub(crate) fn text(s: &str) -> String {
     let chars: Vec<char> = flat(s).chars().collect();
     let word = |i: Option<usize>| {
         i.and_then(|i| chars.get(i))
@@ -2233,7 +2123,7 @@ fn text(s: &str) -> String {
 
 /// A code span holding `s` in a table cell (module docs "Markdown"): one
 /// line, `|` escaped, fenced by one backtick more than its longest run.
-fn code(s: &str) -> String {
+pub(crate) fn code(s: &str) -> String {
     if s.is_empty() {
         return DASH.to_string();
     }

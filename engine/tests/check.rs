@@ -518,3 +518,95 @@ fn no_rules_is_an_empty_report() {
         r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[],"reflexion":null}"#
     );
 }
+
+/// FD.69: one rule invariant whose negation reads CALLS (so its rows carry
+/// coverage caveats) and one transitive forbid_edge, both by subject.
+const SUBJECT_RULES: &str = "version = 2
+
+[[constraint]]
+id = \"api-called\"
+kind = \"invariant\"
+text = \"every api handler is called\"
+rule = \"violation(f) :- node(f, \\\"FUNCTION\\\"), in_scope(f, \\\"services/api/handlers.py\\\"), !called(f). called(f) :- edge(_, f, \\\"CALLS\\\").\"
+
+[[constraint]]
+id = \"web-no-api-path\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"services/api\"
+transitive = true
+";
+
+const HANDLERS: &str = "def unused_a():\n    return 1\n\n\ndef unused_b():\n    return 2\n";
+
+/// The lines both surfaces share for a rule / forbid_path violation: its
+/// subject line, its `⚠` caveat lines and the caveat footer, sorted (the
+/// caveat block sits under check's group heading and after review's first
+/// violation).
+fn shared_lines(md: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = md
+        .lines()
+        .filter(|l| l.starts_with("_subject: ") || l.starts_with("⚠ ") || l.ends_with(" caveats)_"))
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+/// (FD.69) `glia check` and `glia review` render a rule / forbid_path
+/// violation through one function, `check::render_rule_md`: rendered with
+/// check's options and review's (the default), the subject lines, the
+/// caveat lines and the fold are the same.
+#[test]
+fn rule_md_is_one_renderer_for_check_and_review() {
+    use glia_engine::check::{RuleMdOptions, render_rule_md};
+    use glia_engine::review::CaveatFold;
+    let (_tmp, merged) = build(&[
+        ("web/app.py", WEB_APP),
+        ("services/api/internal.py", INTERNAL),
+        ("services/api/handlers.py", HANDLERS),
+        (".glia/overlay.toml", SUBJECT_RULES),
+    ]);
+    let report = check(&merged);
+    assert!(report.errors.is_empty(), "{report:#?}");
+    for id in ["api-called", "web-no-api-path"] {
+        let group = rule(&report, id);
+        assert!(!group.is_empty(), "{id}: {report:#?}");
+        let (mut by_check, mut by_review) = (CaveatFold::default(), CaveatFold::default());
+        let check_md = render_rule_md(&group, &mut by_check, &RuleMdOptions::check());
+        let review_md = render_rule_md(&group, &mut by_review, &RuleMdOptions::default());
+        let shared = shared_lines(&check_md);
+        assert_eq!(
+            shared
+                .iter()
+                .filter(|l| l.starts_with("_subject: "))
+                .count(),
+            group.len(),
+            "{id}: one subject line per violation\n{check_md}"
+        );
+        assert_eq!(
+            shared,
+            shared_lines(&review_md),
+            "{id}\n{check_md}\n---\n{review_md}"
+        );
+        assert_eq!(by_check, by_review, "{id}: one fold");
+        assert!(
+            check_md.starts_with(&format!("### {id} (")),
+            "check: one group heading\n{check_md}"
+        );
+        assert_eq!(
+            review_md.matches(&format!("#### {id} (")).count(),
+            group.len(),
+            "review: a heading per violation\n{review_md}"
+        );
+    }
+    let called = rule(&report, "api-called");
+    let mut fold = CaveatFold::default();
+    let md = render_rule_md(&called, &mut fold, &RuleMdOptions::default());
+    let lines = md.lines().filter(|l| l.starts_with("⚠ ")).count();
+    assert!(lines > 0, "the negation reads CALLS: {md}");
+    assert_eq!(
+        (fold.rules, fold.lines, fold.folded),
+        (1, lines, lines),
+        "{md}"
+    );
+}

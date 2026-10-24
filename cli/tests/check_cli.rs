@@ -4,12 +4,14 @@
 //! holds, none is declared, or every violation is advisory), 2 when a rule
 //! cannot be evaluated.
 //!
-//! DB.3d renders DB.3a's rule-invariant rows (`_violation <k>: ..`, with the
-//! subject, its location and the witness edges; the rule's Q5 caveats print
-//! once under its heading, DT.8a) and DB.3b's transitive forbid_edge hits
-//! (`_path <k> into ..`, the witness in path order), marks an advisory
-//! violation on its tier line, and prints the summary `- violations: <V>
-//! (blocking <B>, advisory <A>)`.
+//! DB.3d renders DB.3a's rule-invariant rows and DB.3b's transitive
+//! forbid_edge hits through the engine's `check::render_rule_md`, the one
+//! renderer `glia review` prints them with too (FD.69): ``_subject: `<a>`,
+//! `<b>` - tier <t> at <file:line>_``, then the witness edges (a hit's in
+//! path order); the rule's Q5 caveats print once under its heading (DT.8a)
+//! as `⚠ <category> (<language>): <note>` lines, cell text escaped as review
+//! escapes it. It marks an advisory violation on its tier line, and prints
+//! the summary `- violations: <V> (blocking <B>, advisory <A>)`.
 //!
 //! DT.7b lists the declared rules that check nothing (a stanza the build
 //! anchored nowhere, rejected or does not hold; a rule whose scope no located
@@ -943,10 +945,10 @@ fn rule_violation_section_and_exit_1() {
     for want in [
         "- violations: 2 (blocking 2, advisory 0)",
         "### web-no-store (rule, .glia/overlay.toml:3) - 1 violation(s)",
-        "_violation 1: `web::admin::audit`, `store::db::load` - tier fact at web/admin.py:4_",
+        "_subject: `web::admin::audit`, `store::db::load` - tier fact at web/admin.py:4_",
         "| 1 | CALLS | `web::admin::audit` | `store::db::load` | web/admin.py:5 | graph:calls | fact |",
         "### api-called (rule, .glia/overlay.toml:9) - 1 violation(s)",
-        "_violation 1: `services::api::handlers::unused` - tier fact at services/api/handlers.py:8_",
+        "_subject: `services::api::handlers::unused` - tier fact at services/api/handlers.py:8_",
     ] {
         assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
     }
@@ -963,7 +965,7 @@ fn rule_violation_section_and_exit_1() {
         !section.contains("| # | category |"),
         "a row no edge derives has no witness table: {section}"
     );
-    let caveats = section.lines().filter(|l| l.starts_with("  ⚠ ")).count();
+    let caveats = section.lines().filter(|l| l.starts_with("⚠ ")).count();
     assert!(
         (1..=5).contains(&caveats),
         "the negation read CALLS: at most 5 caveats per row: {section}"
@@ -971,11 +973,9 @@ fn rule_violation_section_and_exit_1() {
     assert!(
         section
             .lines()
-            .filter(|l| l.starts_with("  ⚠ "))
-            .all(
-                |l| (l.starts_with("  ⚠ CALLS (") || l.starts_with("  ⚠ * (")) && l.contains("): ")
-            ),
-        "`  ⚠ <category> (<language>): <note>`, the rows for CALLS: {section}"
+            .filter(|l| l.starts_with("⚠ "))
+            .all(|l| (l.starts_with("⚠ CALLS (") || l.starts_with("⚠ \\* (")) && l.contains("): ")),
+        "`⚠ <category> (<language>): <note>`, the rows for CALLS: {section}"
     );
     // DT.8a: one rule printed a caveat block; its one row folds nothing.
     assert_eq!(
@@ -1011,7 +1011,7 @@ rule = \"violation(a, b) :- calls(a, b), in_scope(a, \\\"scripts\\\"), in_scope(
     for want in [
         "- violations: 1 (blocking 0, advisory 1)".to_string(),
         format!(
-            "_violation 1: `scripts::tool::run`, `store::db::load` - tier heuristic, {ADVISORY} at scripts/tool.py:1_"
+            "_subject: `scripts::tool::run`, `store::db::load` - tier heuristic, {ADVISORY} at scripts/tool.py:1_"
         ),
         "| 1 | CALLS | `scripts::tool::run` | `store::db::load` |".to_string(),
         "| overlay:edge | heuristic".to_string(),
@@ -1179,10 +1179,10 @@ via = [\"services/api/public\"]
         }
     };
     in_order(&[
-        "_path 1 into `services::api::internal::db` - 2 hop(s), tier fact:_",
+        "_subject: `services::api::internal::db` - tier fact at ",
         "| 1 | IMPORTS | `web::app` | `shared::util` | web/app.py:1 | graph:imports | fact |",
         "| 2 | IMPORTS | `shared::util` | `services::api::internal::db` | shared/util.py:1 | graph:imports | fact |",
-        "_path 2 into `services::api::internal::db::query` - 2 hop(s), tier fact:_",
+        "_subject: `services::api::internal::db::query` - tier fact at ",
         "| 1 | CALLS | `web::app::page` | `shared::util::helper` | web/app.py:6 | graph:calls | fact |",
         "| 2 | CALLS | `shared::util::helper` | `services::api::internal::db::query` | shared/util.py:5 | graph:calls | fact |",
     ]);
@@ -1194,6 +1194,29 @@ const THREE_UNCALLED: &str = "from store.db import load\n\n\ndef get_order(o):\n
 
 /// The line a rule's caveat block opens with (DT.8a).
 const CAVEAT_BLOCK: &str = "_coverage caveats (the categories this rule's negations read; a blind extraction looks like a missing edge):_";
+
+/// Cell text as `glia review`'s markdown escapes it (and so check's, FD.69):
+/// `\\`, `|`, backticks, `*`, `<` and a `_` not inside a word.
+fn md_text(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let word = |i: Option<usize>| {
+        i.and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let escape = match c {
+            '\\' | '|' | '`' | '*' | '<' => true,
+            '_' => !(word(i.checked_sub(1)) && word(Some(i + 1))),
+            _ => false,
+        };
+        if escape {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// (DT.8a) A rule's coverage caveats print once, in one block under its
 /// heading before its first row, never under each row; `--json` keeps every
@@ -1226,16 +1249,16 @@ rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handle
     let section = &stdout[stdout
         .find(heading)
         .unwrap_or_else(|| panic!("missing {heading:?}:\n{stdout}"))..];
-    for k in 1..=3 {
+    for c in ['a', 'b', 'c'] {
         assert!(
             section.contains(&format!(
-                "_violation {k}: `services::api::handlers::unused_"
+                "_subject: `services::api::handlers::unused_{c}` - tier fact at "
             )),
-            "row {k}: {section}"
+            "row {c}: {section}"
         );
     }
-    let first_row = section.find("_violation 1: ").expect("row 1");
-    let caveats: Vec<&str> = section.lines().filter(|l| l.starts_with("  ⚠ ")).collect();
+    let first_row = section.find("_subject: ").expect("row 1");
+    let caveats: Vec<&str> = section.lines().filter(|l| l.starts_with("⚠ ")).collect();
     assert!(!caveats.is_empty(), "the negation reads CALLS: {section}");
     for c in &caveats {
         assert_eq!(
@@ -1246,7 +1269,7 @@ rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handle
     }
     let head = &section[..first_row];
     assert_eq!(
-        head.lines().filter(|l| l.starts_with("  ⚠ ")).count(),
+        head.lines().filter(|l| l.starts_with("⚠ ")).count(),
         caveats.len(),
         "every caveat line under the heading, before the first row: {section}"
     );
@@ -1282,10 +1305,10 @@ rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handle
     let mut want: Vec<String> = Vec::new();
     for c in rows[0]["caveats"].as_array().expect("caveats") {
         let line = format!(
-            "  ⚠ {} ({}): {}",
-            c["edge_category"].as_str().unwrap_or_default(),
-            c["language"].as_str().unwrap_or_default(),
-            c["note"].as_str().unwrap_or_default()
+            "⚠ {} ({}): {}",
+            md_text(c["edge_category"].as_str().unwrap_or_default()),
+            md_text(c["language"].as_str().unwrap_or_default()),
+            md_text(c["note"].as_str().unwrap_or_default())
         );
         if !want.contains(&line) {
             want.push(line);
@@ -1327,13 +1350,9 @@ rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/many.p
     assert_eq!(
         stdout
             .lines()
-            .filter(|l| l.starts_with("_violation "))
+            .filter(|l| l.starts_with("_subject: `services::api::many::f"))
             .count(),
         50,
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("_violation 50: ") && !stdout.contains("_violation 51: "),
         "{stdout}"
     );
     assert!(
