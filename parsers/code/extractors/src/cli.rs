@@ -3426,7 +3426,22 @@ const MAX_ARGV_TOKENS: usize = 8;
 ///
 /// One node per binary per file: a second `exec.Command("docker", "push")`
 /// adds its argv vector to the cell instead of being lost to the dedupe.
-pub fn extract_cli_invocation_nodes(source: &str, module_id: NodeId, repo: RepoId) -> CliNodes {
+///
+/// FD.4a: in a Rust or Python file (`path`'s extension) a needle whose first
+/// byte sits in a string literal or comment is no call site (CJ.1's
+/// `crate::code_guard`), so a scanner's own needle table and test literals
+/// mint nothing; `[code-guard] cli-invocation lang=<l> dropped=<n> path=<p>`
+/// names a file that refused one. Every other file is scanned as before.
+pub fn extract_cli_invocation_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> CliNodes {
+    let mut guard = crate::code_guard::LazyGuard::new(path, source);
+    // Call-site offsets the guard refused, so two needles ending at one `(`
+    // (`os.system(` / `system(`) are one refusal, never two.
+    let mut refused: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     // Keyed by the byte offset the arguments start at: `os.system(` and
     // `system(` (or `Command::new(` inside `std::process::Command::new(`) end at
     // the same `(`, so overlapping needles collapse to one call site, and the
@@ -3439,10 +3454,20 @@ pub fn extract_cli_invocation_nodes(source: &str, module_id: NodeId, repo: RepoI
         let mut search_from = 0;
         while let Some(rel_idx) = source[search_from..].find(pattern) {
             let args_at = search_from + rel_idx + pattern.len();
+            if refused.contains(&args_at) {
+                search_from = args_at;
+                continue;
+            }
             if let std::collections::btree_map::Entry::Vacant(e) = sites.entry(args_at) {
                 let tokens = scan_argv(&source[args_at..]);
+                // Only a hit that would mint a site is guarded (and counted):
+                // the needle table's own entries read no argv.
                 if !tokens.is_empty() {
-                    e.insert(tokens);
+                    if guard.admits(search_from + rel_idx) {
+                        e.insert(tokens);
+                    } else {
+                        refused.insert(args_at);
+                    }
                 }
             }
             search_from = args_at;
@@ -3455,10 +3480,15 @@ pub fn extract_cli_invocation_nodes(source: &str, module_id: NodeId, repo: RepoI
         if !scala.is_empty() {
             eprintln!("[cli-inv] scala=sys.process sites={}", scala.len());
         }
+        // The same guard: a Scala file has no lexer (every site is admitted),
+        // while a `Seq(..).!` held in a Rust / Python literal is refused.
         for (at, tokens) in scala {
-            sites.entry(at).or_insert(tokens);
+            if guard.admits(at) {
+                sites.entry(at).or_insert(tokens);
+            }
         }
     }
+    guard.report("cli-invocation");
 
     // BTreeMap: nodes come out sorted by binary, whatever order the needles hit.
     let mut by_bin: std::collections::BTreeMap<String, Vec<Vec<String>>> =
@@ -4635,7 +4665,7 @@ def build():
     #[test]
     fn detects_exec_command_invocation() {
         let source = "cmd := exec.Command(\"docker\", \"build\", \".\")";
-        let result = extract_cli_invocation_nodes(source, module_id(), repo());
+        let result = extract_cli_invocation_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -4647,7 +4677,7 @@ def build():
 
     /// The single qname and the argv vectors of its cell(s).
     fn invocation(source: &str) -> (Vec<String>, Vec<Vec<String>>) {
-        let result = extract_cli_invocation_nodes(source, module_id(), repo());
+        let result = extract_cli_invocation_nodes(source, "", module_id(), repo());
         let qnames = result
             .nodes
             .iter()
@@ -4659,6 +4689,52 @@ def build():
             .flat_map(|n| n.cells.iter().flat_map(parse_argv_cell))
             .collect();
         (qnames, argv)
+    }
+
+    /// The sorted qnames a file at `path` mints.
+    fn invocation_qnames(source: &str, path: &str) -> Vec<String> {
+        let result = extract_cli_invocation_nodes(source, path, module_id(), repo());
+        let mut q: Vec<String> = result
+            .nodes
+            .iter()
+            .filter_map(|n| result.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        q.sort();
+        q
+    }
+
+    #[test]
+    fn invocations_in_rust_literals_and_comments_mint_nothing() {
+        // FD.4a: a needle inside a string literal or a comment is no launch.
+        for src in [
+            "let t = r#\"std::process::Command::new(\"x\")\"#;\n",
+            "let t = r#\"fn real() { Command::new(\"x\"); }\"#;\n",
+            "// Command::new(\"x\")\nfn f() {}\n",
+            "/// subprocess.run(['x', 'y'])\nfn f() {}\n",
+        ] {
+            assert!(invocation_qnames(src, "src/a.rs").is_empty(), "{src:?}");
+        }
+        // In code it is read, also after a refused one.
+        let code = "// Command::new(\"ghost\")\nfn f() { Command::new(\"x\").spawn(); }\n";
+        assert_eq!(invocation_qnames(code, "src/a.rs"), ["cli_invoke:x"]);
+        // The same literal in a Go file has no guard: read as before.
+        let lit = "let t = r#\"fn real() { Command::new(\"x\"); }\"#;\n";
+        assert_eq!(invocation_qnames(lit, "src/a.go"), ["cli_invoke:x"]);
+    }
+
+    #[test]
+    fn invocations_in_python_literals_and_comments_mint_nothing() {
+        for src in [
+            "S = \"subprocess.run(['x', 'y'])\"\n",
+            "# os.system('x')\n",
+            "'''\nsubprocess.Popen(['x'])\n'''\n",
+        ] {
+            assert!(invocation_qnames(src, "tools/a.py").is_empty(), "{src:?}");
+        }
+        assert_eq!(
+            invocation_qnames("subprocess.run(['x', 'y'])\n", "tools/a.py"),
+            ["cli_invoke:x"]
+        );
     }
 
     #[test]
@@ -4686,7 +4762,7 @@ def build():
     #[test]
     fn repeated_binary_accumulates_argv_in_one_node() {
         let source = "exec.Command(\"docker\", \"build\", \".\")\nexec.Command(\"docker\", \"push\", \"x\")\nexec.Command(\"docker\", \"build\", \".\")";
-        let result = extract_cli_invocation_nodes(source, module_id(), repo());
+        let result = extract_cli_invocation_nodes(source, "", module_id(), repo());
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].cells.len(), 1);
         let CellPayload::Json(json) = &result.nodes[0].cells[0].payload else {

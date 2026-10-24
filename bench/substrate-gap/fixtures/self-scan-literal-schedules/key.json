@@ -1,0 +1,16 @@
+{
+  "framework": "self-scan-literal-schedules",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "FD.4a. k8s CronJob text in a .rs literal, a Celery-looking dict key with a non-schedule value and a Command::new in a comment mint nothing; the manifest, the beat entry and the real launch do. Baseline HEAD: forbid violations 3 (cron:0 6 * * 1:report, cron:((\"a\", \"b\"),):app.tasks.nightly, cli_invoke:ghost).",
+  "expect_nodes": [
+    {"kind": "CRON_JOB", "name": "15 3 * * *", "note": "the CronJob manifest in deploy/cron.yaml"},
+    {"kind": "CRON_JOB", "name": "app.tasks.nightly", "note": "a real Celery beat entry: crontab(..) value"},
+    {"kind": "CLI_INVOCATION", "name": "deployer", "note": "Command::new in Rust code"}
+  ],
+  "forbid": [
+    {"kind": "CRON_JOB", "name": "0 6 * * 1", "note": "CronJob manifest text inside a Rust string literal"},
+    {"kind": "CRON_JOB", "name": "((\"a\", \"b\"),)", "note": "a \"schedule\": dict key whose value is a tuple, not a schedule"},
+    {"kind": "CLI_INVOCATION", "name": "ghost", "note": "Command::new inside a // comment"}
+  ]
+}

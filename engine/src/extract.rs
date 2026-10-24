@@ -325,7 +325,9 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.nodes.extend(decl.nodes);
         merge_nav(&mut fp.nav, decl.nav);
     }
-    run!(cli::extract_cli_invocation_nodes(source, module_id, repo));
+    run!(cli::extract_cli_invocation_nodes(
+        source, path, module_id, repo
+    ));
     run_marked!(websocket::extract_ws_handler_nodes(
         source, path, module_id, repo
     ));

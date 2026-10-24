@@ -210,27 +210,45 @@ pub fn extract_cron_nodes(source: &str, path: &str, module_id: NodeId, repo: Rep
     if is_github_actions_workflow(path) {
         jobs.extend(extract_github_actions(source, path));
     }
+    // The file's LAST extension, as written: the LA.19a gates below compare
+    // it case-sensitively, the k8s gate ignoring ASCII case.
+    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
     if looks_like_k8s_cronjob(source) {
         let scan = extract_k8s_cronjob(source);
-        // fired_on marker — only when at least one document really declared
-        // `kind: CronJob`, so it stays quiet on unrelated YAML that merely
-        // mentions the word.
-        if scan.cronjob_docs > 0 {
-            eprintln!("[cron] k8s docs={} jobs={}", scan.docs, scan.jobs.len());
+        // FD.4a: a CronJob is read from a manifest only (`.yaml` / `.yml` /
+        // `.json`). The same text in any other file (a scanner's own test
+        // literal, a doc sample) is no schedule; a file that would have
+        // minted one is named on stderr.
+        if is_manifest_ext(ext) {
+            // fired_on marker — only when at least one document really
+            // declared `kind: CronJob`, so it stays quiet on unrelated YAML
+            // that merely mentions the word.
+            if scan.cronjob_docs > 0 {
+                eprintln!("[cron] k8s docs={} jobs={}", scan.docs, scan.jobs.len());
+            }
+            jobs.extend(scan.jobs);
+        } else if !scan.jobs.is_empty() {
+            eprintln!("[cron] k8s gate skipped ext={ext} path={path}");
         }
-        jobs.extend(scan.jobs);
     }
     // CJ.1c: in a Rust or Python file a node-cron / `@Scheduled(` needle in
     // a string literal or comment is no job, and a Celery beat key counts
     // only when it opens its own literal (code_guard.rs).
     let mut guard = LazyGuard::new(path, source);
     jobs.extend(extract_node_cron(source, &mut guard));
-    jobs.extend(extract_celery_beat(source, &mut guard));
+    let mut celery_rejected = 0usize;
+    jobs.extend(extract_celery_beat(
+        source,
+        &mut guard,
+        &mut celery_rejected,
+    ));
+    if celery_rejected > 0 {
+        eprintln!("[cron] celery value rejected={celery_rejected} path={path}");
+    }
     jobs.extend(extract_scheduled_annotation(source, &mut guard));
     // LA.19a framework schedulers. Each is gated on the file's language AND
     // its library's import / namespace, so every other file costs one
     // extension test.
-    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
     // DG.7a: tokio-cron-scheduler reads Rust, so it shares the guard (glia's
     // own sources hold its needles in literals and comments) and runs before
     // the guard reports, so a refused needle is counted in `[code-guard]`.
@@ -410,6 +428,14 @@ fn workflow_target_from_path(path: &str) -> String {
 /// case-insensitive so `kind: "CronJob"`, `kind:  CronJob` and the like still
 /// reach `doc_is_cronjob`. A false hit costs one `split` and is then filtered
 /// out document by document.
+/// FD.4a: the extensions a k8s manifest is read from (ASCII
+/// case-insensitive). A Helm template (`.tpl`) is no manifest.
+fn is_manifest_ext(ext: &str) -> bool {
+    ["yaml", "yml", "json"]
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
+}
+
 fn looks_like_k8s_cronjob(source: &str) -> bool {
     source
         .as_bytes()
@@ -593,7 +619,14 @@ fn extract_node_cron(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
 // scanner's own test literal, a doc line) is no entry.
 // ----------------------------------------------------------------------------
 
-fn extract_celery_beat(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
+//
+// FD.4a: an admitted key counts only when its value reads as a schedule
+// ([`celery_schedule_value`]); `rejected` counts the keys that did not.
+fn extract_celery_beat(
+    source: &str,
+    guard: &mut LazyGuard<'_>,
+    rejected: &mut usize,
+) -> Vec<CronJob> {
     let mut out = Vec::new();
     // Single-quoted keys first, then the double-quoted variant.
     for needle in ["'schedule':", "\"schedule\":"] {
@@ -605,6 +638,10 @@ fn extract_celery_beat(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> 
                 continue;
             }
             let after = &source[pos + needle.len()..];
+            if !celery_schedule_value(after) {
+                *rejected += 1;
+                continue;
+            }
             let schedule = celery_schedule_expr(after);
             if !schedule.is_empty() && schedule.len() < 256 {
                 // Walk back ~256 bytes to find the sibling `'task':` value;
@@ -623,6 +660,44 @@ fn extract_celery_beat(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> 
         }
     }
     out
+}
+
+/// FD.4a: true when the text after a beat entry's `'schedule':` colon reads
+/// as a Celery schedule: a call of `crontab`, `solar`, `timedelta` or
+/// `schedule` (celery.schedules, bare or dotted: `schedules.crontab(`,
+/// `datetime.timedelta(`), a number literal (seconds), or a bare / dotted
+/// name with no call (a schedule held in a constant, `EVERY_MINUTE`).
+/// Anything else (a tuple, a list, a string, another call, `None`) is a dict
+/// key that merely shares the name.
+fn celery_schedule_value(after_colon: &str) -> bool {
+    let v = after_colon.trim_start();
+    let b = v.as_bytes();
+    match b.first() {
+        Some(c) if c.is_ascii_digit() => return true,
+        Some(b'.') => return b.get(1).is_some_and(u8::is_ascii_digit),
+        _ => {}
+    }
+    // The leading dotted name: `a.b.c`, each segment an identifier.
+    let mut end = 0;
+    let mut segs = 0;
+    let mut last = "";
+    while let Some(id) = leading_ident(&v[end..]) {
+        last = id;
+        segs += 1;
+        end += id.len();
+        if b.get(end) == Some(&b'.') && leading_ident(&v[end + 1..]).is_some() {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if segs == 0 {
+        return false;
+    }
+    if v[end..].trim_start().starts_with('(') {
+        return matches!(last, "crontab" | "solar" | "timedelta" | "schedule");
+    }
+    !(segs == 1 && matches!(last, "None" | "True" | "False"))
 }
 
 /// Read a Celery beat schedule expression — everything between the colon and
@@ -4355,6 +4430,73 @@ cron.schedule('*/5 * * * *', cleanupSessions);
             ts.contains(&"cron:crontab():tasks.cleanup".to_string()),
             "{ts:?}"
         );
+    }
+
+    // ---- FD.4a: manifests only, schedule values only ---------------------
+
+    const K8S_LITERAL_MANIFEST: &str = "apiVersion: batch/v1\nkind: CronJob\nspec:\n  schedule: '0 6 * * 1'\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n          - name: report\n            command: [report]\n";
+
+    #[test]
+    fn k8s_cronjob_read_from_manifests_only() {
+        // The manifest in a .rs file (a scanner's own test literal) is no job.
+        let rs = format!("const K8S: &str = \"{K8S_LITERAL_MANIFEST}\";\n");
+        assert!(
+            run(&rs, "src/cron.rs").nodes.is_empty(),
+            "{:?}",
+            sorted_qnames(&run(&rs, "src/cron.rs"))
+        );
+        // Nor in a Markdown doc or a Helm template.
+        for path in ["docs/cron.md", "chart/templates/_cron.tpl"] {
+            assert!(run(K8S_LITERAL_MANIFEST, path).nodes.is_empty(), "{path}");
+        }
+        // The same text in a manifest mints the job, any extension case.
+        for path in ["deploy/cron.yaml", "deploy/cron.yml", "deploy/CRON.YAML"] {
+            assert_eq!(
+                sorted_qnames(&run(K8S_LITERAL_MANIFEST, path)),
+                ["cron:0 6 * * 1:report"],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn celery_beat_value_must_be_a_schedule() {
+        // A dict key that shares the name, holding a tuple / string / other
+        // call / None, is no beat entry.
+        for value in [
+            "((\"a\", \"b\"),)",
+            "[1, 2]",
+            "\"* * * * *\"",
+            "make_layout()",
+            "None",
+        ] {
+            let src = format!("LAYOUT = {{\"task\": \"x.y\", \"schedule\": {value}}}\n");
+            assert!(run(&src, "app/x.py").nodes.is_empty(), "{value}");
+        }
+        // Schedules are kept: celery.schedules calls, bare or dotted, a
+        // number of seconds, a constant.
+        for (value, want) in [
+            ("crontab(minute=0, hour=2)", "crontab(minute=0, hour=2)"),
+            ("schedules.crontab(minute=0)", "schedules.crontab(minute=0)"),
+            ("timedelta(minutes=5)", "timedelta(minutes=5)"),
+            (
+                "solar('sunset', -37.81, 144.96)",
+                "solar('sunset', -37.81, 144.96)",
+            ),
+            ("schedule(run_every=60)", "schedule(run_every=60)"),
+            ("30.0", "30.0"),
+            ("EVERY_MINUTE", "EVERY_MINUTE"),
+        ] {
+            let src = format!("BEAT = {{\"t\": {{\"task\": \"x.y\", \"schedule\": {value}}}}}\n");
+            assert_eq!(
+                sorted_qnames(&run(&src, "app/x.py")),
+                [format!("cron:{want}:x.y")],
+                "{value}"
+            );
+        }
+        assert!(celery_schedule_value(" .5}"));
+        assert!(!celery_schedule_value(" .x"));
+        assert!(!celery_schedule_value(""));
     }
 
     // ---- LA.19a: framework schedulers ------------------------------------
