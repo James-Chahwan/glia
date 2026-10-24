@@ -1,0 +1,15 @@
+{
+ "model": "claude-opus-5-5",
+ "claude_version": "2.1.310 (Claude Code)",
+ "runs": 3,
+ "max_turns": 40,
+ "timeout_s": 1200,
+ "max_usd": 400,
+ "arms": {
+  "none": {},
+  "g052": {"rev": "v0.5.2"},
+  "g053": {"rev": "v0.5.3", "calibrate": true}
+ },
+ "disallowed_tools": ["Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit"],
+ "glia_threads": 4
+}

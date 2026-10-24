@@ -1,0 +1,5 @@
+You are working in a checkout of the {repo} repository. Make this change:
+
+{task}
+
+Edit the files that need to change. Do not commit, push, or reformat unrelated code, and do not run the full test suite. When you are done, reply with the list of files you changed.
