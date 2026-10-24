@@ -9556,7 +9556,10 @@
   "INT-6": "James 2026-10-24 (\"Yes to all\"): FD.2's audit population excludes 0.5.4's new layers (TRACES / GOAL_UNIT edges, resolver:org_packages), the 0.5.3-vocabulary baseline",
   "INT-7": "James 2026-10-24 (\"Yes to all\"): the scheduler orders ready packets by the longest chain of dependants first",
   "INT-8": "James 2026-10-24 (\"Yes to all\"): FE.4 is not an exclusive wave; its pilot runs beside other agents, its full run resumes after his approval",
-  "TRACKS": "James 2026-10-24 (\"yeah lets go option 2 to start off 0.5.4\"): 0.5.4 starts with tracks T0, T2, T5, T1, T11 (54 packets); the other tracks wait for a later pick"
+  "TRACKS": "James 2026-10-24 (\"yeah lets go option 2 to start off 0.5.4\"): 0.5.4 starts with tracks T0, T2, T5, T1, T11 (54 packets); the other tracks wait for a later pick",
+  "TZ": "James 2026-10-24 (\"yeah 0.5.4 only releases after total ship and test\"): option (a): FZ.1 / FZ.2 keep depends_on every track; 0.5.4 releases only once all of T1-T11 land and test; nothing moves to 0.5.5",
+  "HANDOFF-SPAN": "James 2026-10-24 (\"sinc 0.5.3 is released but repo-graph and nothing else will update til 0.5.4\"): no consumer applies the 0.5.3 handoffs; the 0.5.4 handoffs run repo-graph 0.5.2 -> 0.5.4, Engram 0.5.2 -> 0.5.4, neuropil 0.5.1 -> 0.5.4, each carrying its 0.5.3 handoff forward; 0.5.4 may break 0.5.3 surfaces freely, each break declared",
+  "DEPS-NCSA": "James 2026-10-24 (\"Accept NCSA\"): NCSA (UIUC / LLVM, permissive) joins the allowed dependency licences; first instance libfuzzer-sys 0.4.13 (rav1e cfg(fuzzing), via fastembed -> image), F0.2 50af6405"
  },
  "reverify": {
   "f7f9a495": {
