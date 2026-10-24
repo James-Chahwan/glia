@@ -7,6 +7,8 @@ T0 (wave 0: registry ids, crates, slots, rustfmt) runs before any track.
   python3 tracks_054.py            # the track table, cross-track deps, LOC
   python3 tracks_054.py --track T5 # that track's own wave schedule (assumes its prerequisite tracks landed)
   python3 tracks_054.py --json     # {track: [packet ids]} for gen_wave.py --only
+  python3 tracks_054.py --select T2 T5   # add tracks to schedule_054.SELECTED, print the waves
+                                         # gen_wave / closeout --release 054 then build
 """
 import json, re, sys
 from pathlib import Path
@@ -41,8 +43,8 @@ TRACKS = {
     "TZ": ("release docs and handoffs (after the tracks that ship)", "FZ.1 FZ.2"),
 }
 
-def main(argv):
-    P, claims, deps, serial = S.load(S.PACKETS)
+def track_of(P):
+    """{packet id: track}; refuses a packet in no track, in two, or a track naming no packet."""
     of = {}
     for t, (_, spec) in TRACKS.items():
         for i in ids(spec):
@@ -51,6 +53,31 @@ def main(argv):
             of[i] = t
     missing = sorted(set(P) - set(of), key=S.id_key)
     if missing: raise SystemExit(f"unassigned: {missing}")
+    return of
+
+
+def select(add):
+    """Append tracks to schedule_054.SELECTED (in file), then print the resulting waves."""
+    bad = [t for t in add if t not in TRACKS]
+    if bad: raise SystemExit(f"no such track: {bad}")
+    cur = S.SELECTED.split()
+    new = cur + [t for t in add if t not in cur]
+    path = HERE / "schedule_054.py"
+    src = path.read_text()
+    m = re.search(r'^SELECTED = "([^"]*)"$', src, re.M)
+    if not m: raise SystemExit("schedule_054.py has no SELECTED line")
+    S.SELECTED = " ".join(new)
+    S.waves()  # refuses a selection that needs an unselected track, before anything is written
+    path.write_text(src[:m.start()] + f'SELECTED = "{S.SELECTED}"' + src[m.end():])
+    print(f"SELECTED = {S.SELECTED}")
+    return S.main([])
+
+
+def main(argv):
+    if "--select" in argv:
+        return select(argv[argv.index("--select") + 1:])
+    P, claims, deps, serial = S.load(S.PACKETS)
+    of = track_of(P)
     if "--json" in argv:
         print(json.dumps({t: sorted([i for i in P if of[i] == t], key=S.id_key) for t in TRACKS}, indent=1)); return 0
     pre = defaultdict(lambda: defaultdict(set))

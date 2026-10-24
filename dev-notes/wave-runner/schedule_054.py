@@ -20,9 +20,17 @@ gen_wave.py / closeout.py `--release 054` read `waves()` (the 0.5.4 plan commit 
 A gated (b) packet whose eval (a) reported FAIL ends `not-needed`; it still counts as
 done, so nothing that depends on it stalls.
 
+Tracks (tracks_054.py): James builds 0.5.4 a track at a time. SELECTED names the tracks
+chosen so far (T0, wave 0, is always in); `tracks_054.py --select T2 T5` adds to it. waves()
+is then the LANDED waves verbatim, followed by the remaining packets of the selected tracks
+scheduled on top of them (landed packets count as done). Choosing another track later only
+schedules after the last landed wave, so history never moves. A selected track whose packet
+depends on a packet of an unselected, unlanded track is refused, naming the track to add.
+
 Usage:
-  python3 schedule_054.py                  # waves, sizes, critical path
-  python3 schedule_054.py --verify         # assert LANDED waves still match
+  python3 schedule_054.py                  # the selected tracks' waves (LANDED + scheduled), sizes
+  python3 schedule_054.py --all            # the whole 169-packet plan as one schedule (the spec run's view)
+  python3 schedule_054.py --verify         # LANDED waves: contiguous, file-disjoint, dependencies in earlier waves
   python3 schedule_054.py --wave N         # wave N's packets, one per line (W0 = the serial F0 packets)
   python3 schedule_054.py --priority       # also run 0.5.0's order (most-unblocking first)
   python3 schedule_054.py --json           # machine-readable waves
@@ -46,6 +54,8 @@ EXCLUSIVE = set()
 # Waves that have landed, by number; closeout.py --release 054 appends each one, and
 # --verify then guards that re-running the scheduler reproduces history.
 LANDED = {}
+# Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
+SELECTED = "T0"
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "Z": 9}
 
 # 0.5.3 (the ranking release, ids E*) lands before 0.5.4's W0: its packets are treated
@@ -163,14 +173,93 @@ def critical_path(P, deps, serial):
             memo[i] = (best[0] + 1, best[1] + [i])
         return memo[i]
 
-    return max((depth(i) for i in P if i not in serial), key=lambda t: (t[0], [id_key(x) for x in t[1]]))
+    return max((depth(i) for i in P if i not in serial), key=lambda t: (t[0], [id_key(x) for x in t[1]]), default=(0, []))
+
+
+def landed_waves():
+    """LANDED as a list of waves, W0 first; refuses a gap in the numbering."""
+    if sorted(LANDED) != list(range(len(LANDED))):
+        raise SystemExit(f"LANDED is not W0..W{len(LANDED) - 1} contiguous: {sorted(LANDED)}")
+    return [LANDED[n].split() for n in range(len(LANDED))]
+
+
+def selected(P, deps):
+    """The packets of the SELECTED tracks plus every landed packet; refuses a selection whose
+    packets depend on an unselected, unlanded track."""
+    import tracks_054
+    of = tracks_054.track_of(P)
+    tracks = set(SELECTED.split()) | {"T0"}
+    unknown = tracks - set(tracks_054.TRACKS)
+    if unknown:
+        raise SystemExit(f"SELECTED names no track: {sorted(unknown)}")
+    done = {i for w in landed_waves() for i in w}
+    sel = {i for i in P if of[i] in tracks} | done
+    need = defaultdict(set)
+    for i in sel - done:
+        for d in deps[i]:
+            if d not in sel:
+                need[of[d]].add(f"{i}<-{d}")
+    if need:
+        raise SystemExit("selected tracks need unselected ones: "
+                         + "; ".join(f"{t} ({' '.join(sorted(v))})" for t, v in sorted(need.items())))
+    return sel, done
+
+
+def schedule_rest(P, claims, deps, done, sel, cap=0):
+    """The waves after the landed ones: the selected packets not yet done, scheduled as
+    schedule() does with `done` already satisfied."""
+    tail = tail_depth({i: deps[i] & sel for i in sel})
+    done, left, out = set(done), set(sel) - set(done), []
+    while left:
+        ready = [i for i in left if deps[i] <= done]
+        if not ready:
+            raise SystemExit(f"deadlock: {sorted(left, key=id_key)[:12]}")
+        ready.sort(key=lambda i: (-tail[i], id_key(i)))
+        used, wave = set(), []
+        excl = [i for i in ready if i in EXCLUSIVE]
+        if excl:
+            ready = excl[:1]
+        for i in ready:
+            if claims[i] & used:
+                continue
+            if cap and len(wave) >= cap:
+                break
+            wave.append(i)
+            used |= claims[i]
+        out.append(sorted(wave, key=id_key))
+        done |= set(wave)
+        left -= set(wave)
+    return out
 
 
 def waves(path=PACKETS):
-    """(P, claims, waves) exactly as the runner schedules them."""
+    """(P, claims, waves) exactly as the runner schedules them: LANDED, then the selected
+    tracks' remaining packets. With nothing landed, W0 is the serial F0 wave."""
     P, claims, deps, serial = load(path)
     check_acyclic(deps)
-    return P, claims, schedule(P, claims, deps, serial, cap=CAP)
+    sel, done = selected(P, deps)
+    head = landed_waves()
+    if not head:
+        head, done = [list(serial)], set(serial)
+    return P, claims, head + schedule_rest(P, claims, deps, done, sel, cap=CAP)
+
+
+def verify_landed(P, claims, deps, serial):
+    """Each landed wave: its packets exist, their dependencies landed in an earlier wave (W0's
+    serial order excepted), and a parallel wave is file-disjoint."""
+    bad, before = 0, set()
+    for n, w in enumerate(landed_waves()):
+        probs = [i for i in w if i not in P]
+        if n:
+            probs += [f"{i}<-{d}" for i in w if i in P for d in sorted(deps[i] - before)]
+            hits = Counter(f for i in w if i in P for f in claims[i])
+            probs += [f"shared {f}" for f, k in hits.items() if k > 1]
+        elif w != list(serial):
+            probs.append(f"W0 is not wave0_serial {' '.join(serial)}")
+        print(f"W{n} " + ("ok" if not probs else "MISMATCH " + "; ".join(probs)) + f" ({len(w)} packets)")
+        bad += bool(probs)
+        before |= set(w)
+    return bad
 
 
 def main(argv):
@@ -179,17 +268,15 @@ def main(argv):
         path = Path(argv[argv.index("--file") + 1])
     P, claims, deps, serial = load(path)
     check_acyclic(deps)
-    waves = schedule(P, claims, deps, serial, cap=CAP)
     if "--verify" in argv:
-        bad = 0
-        for n, want in LANDED.items():
-            if waves[n] != want.split():
-                bad += 1
-                print(f"W{n} MISMATCH\n  landed:    {want}\n  scheduler: {' '.join(waves[n])}")
-            else:
-                print(f"W{n} ok ({len(waves[n])} packets)")
+        bad = verify_landed(P, claims, deps, serial)
         print("VERIFIED" if not bad else f"{bad} waves differ")
         return 1 if bad else 0
+    if "--all" in argv:
+        waves = schedule(P, claims, deps, serial, cap=CAP)
+    else:
+        _, _, waves = globals()["waves"](path)
+        P = {i: P[i] for w in waves for i in w}
     if "--wave" in argv:
         print("\n".join(waves[int(argv[argv.index("--wave") + 1])]))
         return 0

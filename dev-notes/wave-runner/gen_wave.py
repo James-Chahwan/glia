@@ -102,7 +102,7 @@ def leap_inputs(wave):
     return P, claims, waves, ids, corr, brief, serial_run
 
 
-RELEASES = ("051", "052", "053")
+RELEASES = ("051", "052", "053", "054")
 
 
 def release_inputs(release, wave):
