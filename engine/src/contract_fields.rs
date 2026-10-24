@@ -100,6 +100,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::CategorySet;
 use glia_activation::algo::classes::Classes;
+use glia_activation::profile::Tier;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::wire::{
@@ -399,7 +400,7 @@ fn row(
         producer,
         consumer,
         status,
-        tier: "derived",
+        tier: Tier::Derived.as_str(),
         note,
         changes,
     }

@@ -60,7 +60,7 @@
 //!   share, else the most frequent first two segments among them (ties to
 //!   the smaller string) - mechanical, never prose.
 //!
-//! Every summary is tier [`HEURISTIC`]: the grouping is an optimisation
+//! Every summary is tier `heuristic`: the grouping is an optimisation
 //! output, while every count under it is read off observed edges. `top` and
 //! `members` of 0 keep every community / member.
 //!
@@ -78,6 +78,7 @@ use glia_activation::algo::GraphSource;
 use glia_activation::algo::community::{
     self as algo, CommunityOptions, Partition, Resolution, WeightedGraph,
 };
+use glia_activation::profile::Tier;
 use glia_code_domain::profile::node_ext;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, NodeId, NodeKindId};
@@ -103,8 +104,6 @@ pub const DEFAULT_MIN_SIZE: usize = 2;
 pub const MAX_ENTRIES: usize = 10;
 /// Links listed per community at most.
 pub const MAX_LINKS: usize = 5;
-/// [`CommunitySummary::tier`] of every summary.
-pub const HEURISTIC: &str = "heuristic";
 /// [`CommunityArgs::surface`] when the engine is called directly.
 pub const SURFACE_ENGINE: &str = "engine";
 
@@ -191,7 +190,7 @@ pub struct CommunitySummary {
     pub size: usize,
     /// The top members' common qname prefix (see the module doc).
     pub label: String,
-    /// Always [`HEURISTIC`].
+    /// Always `heuristic`.
     pub tier: &'static str,
     /// Internal weight / (internal + boundary weight), in 0..=1.
     pub cohesion: f64,
@@ -683,7 +682,7 @@ impl<'s, 'g> Summariser<'s, 'g> {
             id: c,
             size: members.len(),
             label: label_of(&top_qnames),
-            tier: HEURISTIC,
+            tier: Tier::Heuristic.as_str(),
             cohesion,
             files: files.len(),
             kinds: by_count(kinds),

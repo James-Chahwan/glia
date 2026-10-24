@@ -15,13 +15,14 @@
 
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{cell_type, edge_category};
 use glia_core::{CellPayload, Confidence, Edge};
 use glia_engine::gaps::{DEAD_SYMBOL, GapsOptions, gaps_report};
 use glia_engine::merge::{MergeMember, merge_layouts, read_workspace};
 use glia_engine::persist::persist_result;
-use glia_engine::tests_for::{DERIVED, TestsForArgs, tests_for};
+use glia_engine::tests_for::{TestsForArgs, tests_for};
 use glia_engine::{GenerateResult, generate_one};
 use glia_graph::MergedGraph;
 
@@ -300,7 +301,10 @@ fn tests_for_does_not_promote_derived_fn_tests() {
         .iter()
         .find(|t| t.qname == "calc_test::TestAdd")
         .unwrap_or_else(|| panic!("TestAdd is a row: {:?}", a.tests));
-    assert_eq!((row.tier, row.reason, row.depth), (DERIVED, "reaches", 1));
+    assert_eq!(
+        (row.tier, row.reason, row.depth),
+        (Tier::Derived.as_str(), "reaches", 1)
+    );
     assert_eq!(row.path, [("calc::Add".to_string(), "CALLS")]);
     // The helper's case is a row too (through mustAdd), and still derived.
     let twice = a
@@ -310,7 +314,7 @@ fn tests_for_does_not_promote_derived_fn_tests() {
         .unwrap_or_else(|| panic!("TestAddTwice is a row: {:?}", a.tests));
     assert_eq!(
         (twice.tier, twice.reason, twice.depth),
-        (DERIVED, "reaches", 2)
+        (Tier::Derived.as_str(), "reaches", 2)
     );
     assert!(
         a.tests.iter().all(|t| t.reason != "tests_edge"),

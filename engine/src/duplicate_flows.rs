@@ -33,7 +33,7 @@
 //!
 //! EXACT groups: flows are bucketed by the xxhash64 of their id list and
 //! confirmed equal inside a bucket (a collision is never a group). A set two
-//! or more entries reach is a group, [`EXACT`] / [`DERIVED`], `jaccard` 1.0:
+//! or more entries reach is a group, [`EXACT`] / `derived`, `jaccard` 1.0:
 //! the equality is read off the built edges.
 //!
 //! NEAR groups: one representative per distinct set is signed with
@@ -46,7 +46,7 @@
 //! union-find (pairs in sorted order, the smaller index the root), so a group
 //! is single-linkage: `jaccard` is the group's WEAKEST kept pair, and two
 //! members joined only through a third may share less. [`NEAR`] /
-//! [`HEURISTIC`]: the banding may miss a pair (at Jaccard 0.5 a pair is a
+//! `heuristic`: the banding may miss a pair (at Jaccard 0.5 a pair is a
 //! candidate with probability 0.87, at 0.7 above 0.9999), and a band bucket
 //! over `MAX_BUCKET` members is skipped and counted in
 //! [`DuplicateFlows::oversized_buckets`]. A near group names every entry of
@@ -73,6 +73,7 @@ use std::hash::Hasher;
 
 use glia_activation::algo::minhash::{MinHasher, jaccard_sorted, lsh_candidates};
 use glia_activation::algo::{Adjacency, Walk, reach};
+use glia_activation::profile::Tier;
 use glia_code_domain::{cell_type, edge_category, endpoint};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -107,10 +108,6 @@ pub const DIFFERING_MAX: usize = 10;
 pub const EXACT: &str = "exact";
 /// [`DupFlowGroup::kind`]: sets joined by verified Jaccard pairs.
 pub const NEAR: &str = "near";
-/// [`DupFlowGroup::tier`] of an exact group.
-pub const DERIVED: &str = "derived";
-/// [`DupFlowGroup::tier`] of a near group.
-pub const HEURISTIC: &str = "heuristic";
 /// [`DupFlowArgs::surface`] when the engine is called directly.
 pub const SURFACE_ENGINE: &str = "engine";
 
@@ -160,7 +157,7 @@ impl Default for DupFlowArgs {
 pub struct DupFlowGroup {
     /// [`EXACT`] or [`NEAR`].
     pub kind: &'static str,
-    /// [`DERIVED`] (exact) or [`HEURISTIC`] (near).
+    /// `derived` (exact) or `heuristic` (near).
     pub tier: &'static str,
     /// The entries, located, by qname then id.
     pub entries: Vec<Located>,
@@ -295,7 +292,7 @@ pub fn duplicate_flows(
     for class in classes.iter().filter(|c| c.len() >= 2) {
         let set = &flows[class[0]].set;
         let ids: Vec<NodeId> = class.iter().map(|&f| flows[f].entry).collect();
-        out.push(groups.group(EXACT, DERIVED, &ids, 1.0, &[set.as_slice()]));
+        out.push(groups.group(EXACT, Tier::Derived.as_str(), &ids, 1.0, &[set.as_slice()]));
     }
     for (members, jac) in near_components(classes.len(), &kept_pairs) {
         let ids: Vec<NodeId> = members
@@ -303,7 +300,7 @@ pub fn duplicate_flows(
             .flat_map(|&c| classes[c].iter().map(|&f| flows[f].entry))
             .collect();
         let sets: Vec<&[u64]> = members.iter().map(|&c| set_of(c)).collect();
-        out.push(groups.group(NEAR, HEURISTIC, &ids, jac, &sets));
+        out.push(groups.group(NEAR, Tier::Heuristic.as_str(), &ids, jac, &sets));
     }
     out.sort_by(|a, b| {
         (a.kind != EXACT)

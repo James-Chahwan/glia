@@ -8,8 +8,8 @@
 //!
 //! [`gaps_report`] lists one [`GapRow`] per gap, in [`CATEGORIES`] order.
 //! Each row names the overlay section that could repair it (`suggest`) and
-//! how sure the report is (`tier`: [`FACT`] is read straight off the edges,
-//! [`HEURISTIC`] can be legitimate):
+//! how sure the report is (`tier`: `fact` is read straight off the edges,
+//! `heuristic` can be legitimate):
 //!
 //! | category | what | tier | suggest |
 //! |---|---|---|---|
@@ -132,6 +132,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use twox_hash::XxHash64;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
@@ -234,12 +235,6 @@ pub(crate) const DEAD_SYMBOL_KINDS: [NodeKindId; 3] =
 /// two out (DE.7).
 const GENERATED_PROVENANCE: [&str; 2] = ["generated", "generated_proto"];
 
-/// Read straight off the graph's edges.
-pub const FACT: &str = "fact";
-/// Likely a gap, but can be legitimate (an uncalled public API, a
-/// third-party host, a symbol called only from outside the build).
-pub const HEURISTIC: &str = "heuristic";
-
 /// Callers / owners named in one `detail` before the rest are counted.
 const MAX_NAMED: usize = 5;
 
@@ -260,7 +255,7 @@ pub struct GapRow {
     pub detail: String,
     /// The overlay section (or command) that could repair it.
     pub suggest: &'static str,
-    /// [`FACT`] or [`HEURISTIC`].
+    /// `fact` or `heuristic`.
     pub tier: &'static str,
     /// `suspected_edge` rows only (CD.3b): the paste-ready overlay stanza, a
     /// `# gap: <id>` comment then one `[[edge]]`. Left out of the JSON when
@@ -1142,7 +1137,7 @@ fn collect_rows(
                                 WRAPPED_SINK,
                                 format!("owner={owner}; wrapper={}", calls.join(", ")),
                                 "none",
-                                FACT,
+                                Tier::Fact.as_str(),
                             ));
                         }
                         Some(_) => {}
@@ -1151,7 +1146,7 @@ fn collect_rows(
                                 UNRESOLVED_ENDPOINT,
                                 format!("owner={owner}"),
                                 "wrapper",
-                                FACT,
+                                Tier::Fact.as_str(),
                             ));
                         }
                         None => {}
@@ -1235,7 +1230,11 @@ fn collect_rows(
                                 label_of(&labels, repo)
                             ));
                         }
-                        let tier = if host.is_some() { HEURISTIC } else { FACT };
+                        let tier = if host.is_some() {
+                            Tier::Heuristic.as_str()
+                        } else {
+                            Tier::Fact.as_str()
+                        };
                         rows.push(node_row(
                             UNPAIRED_ENDPOINT,
                             detail.join("; "),
@@ -1269,7 +1268,7 @@ fn collect_rows(
                             AMBIGUOUS_ENDPOINT,
                             detail,
                             "constants|route_prefix",
-                            FACT,
+                            Tier::Fact.as_str(),
                         ));
                     }
                 }
@@ -1301,7 +1300,7 @@ fn collect_rows(
                     UNPAIRED_ROUTE,
                     detail,
                     "route_prefix|edge",
-                    HEURISTIC,
+                    Tier::Heuristic.as_str(),
                 ));
             }
             k if k == node_kind::QUEUE_PRODUCER || k == node_kind::QUEUE_CONSUMER => {
@@ -1319,7 +1318,12 @@ fn collect_rows(
                     if let Some(o) = view.named(&owners) {
                         detail.push_str(&format!("; owner={o}"));
                     }
-                    rows.push(node_row(TAG_ONLY_QUEUE, detail, "constants|wrapper", FACT));
+                    rows.push(node_row(
+                        TAG_ONLY_QUEUE,
+                        detail,
+                        "constants|wrapper",
+                        Tier::Fact.as_str(),
+                    ));
                 }
             }
             k if DEAD_SYMBOL_KINDS.contains(&k) => {
@@ -1356,7 +1360,7 @@ fn collect_rows(
                         DEAD_SYMBOL,
                         "no entrypoint reaches it; no incoming call or use".to_string(),
                         "entrypoints",
-                        HEURISTIC,
+                        Tier::Heuristic.as_str(),
                     ));
                 }
             }
@@ -1392,7 +1396,7 @@ fn collect_rows(
                 detail: cochange_detail(&p.gap, view.qname(p.module_b)),
                 file: Some(p.gap.file_a),
                 suggest: "edge",
-                tier: HEURISTIC,
+                tier: Tier::Heuristic.as_str(),
                 draft: None,
             });
         }
@@ -1470,7 +1474,7 @@ pub struct CochangeGap {
     pub language_b: Option<&'static str>,
     /// The two languages differ (by extension when either is `None`).
     pub cross_language: bool,
-    /// Always [`HEURISTIC`].
+    /// Always `heuristic`.
     pub tier: &'static str,
 }
 
@@ -1763,7 +1767,7 @@ fn cochange_audit(merged: &MergedGraph, surface: &str) -> Vec<PairGap> {
                             language_a,
                             language_b,
                             cross_language,
-                            tier: HEURISTIC,
+                            tier: Tier::Heuristic.as_str(),
                         },
                         module_a: ma,
                         module_b: mb,
@@ -1845,7 +1849,7 @@ impl RootCtx<'_> {
                 line: Some(i64::from(line)),
                 detail: format!("repo={label} {detail}"),
                 suggest: "remove",
-                tier: FACT,
+                tier: Tier::Fact.as_str(),
                 draft: None,
             };
         let want_orphans = self.want.contains(&ORPHANED_RULE);
@@ -1877,7 +1881,7 @@ impl RootCtx<'_> {
                                 decl.from, decl.to, decl.category
                             ),
                             suggest: "remove",
-                            tier: FACT,
+                            tier: Tier::Fact.as_str(),
                             draft: None,
                         });
                     }
@@ -1922,7 +1926,7 @@ impl RootCtx<'_> {
                     line: Some(i64::from(cfg.line_of(s.span()))),
                     detail,
                     suggest: "remove",
-                    tier: FACT,
+                    tier: Tier::Fact.as_str(),
                     draft: None,
                 });
             }
@@ -2066,7 +2070,7 @@ impl RootCtx<'_> {
                 line: Some(i64::from(line)),
                 detail,
                 suggest: "glia cell ls --check --rekey",
-                tier: FACT,
+                tier: Tier::Fact.as_str(),
                 draft: None,
             });
         };
@@ -2627,7 +2631,7 @@ mod tests {
                     "endpoint:POST:/graphql @apps/web".to_string(),
                     "no HTTP_CALLS target; caller=apps::web::src::apollo::client; host=users-svc"
                         .to_string(),
-                    HEURISTIC
+                    Tier::Heuristic.as_str()
                 )],
                 (0, 0)
             )
@@ -2647,7 +2651,7 @@ mod tests {
                     "endpoint:POST:/graphql @apps/web".to_string(),
                     "graphql transport; no HTTP_CALLS target; caller=apps::web::src::apollo::client; host=users-svc"
                         .to_string(),
-                    HEURISTIC
+                    Tier::Heuristic.as_str()
                 )],
                 (0, 1)
             )
@@ -2740,7 +2744,7 @@ mod tests {
                 ),
                 "{rows:?}"
             );
-            assert_eq!(rows[0].2, HEURISTIC);
+            assert_eq!(rows[0].2, Tier::Heuristic.as_str());
         }
     }
 

@@ -273,9 +273,9 @@ use crate::calibrate::fusions::{
 use crate::calibrate::record::{Selection, Shape, explicit, log_selection, select};
 use crate::calibrate::sets::{REVIEW_CANDIDATES, REVIEW_FALLBACK, REVIEW_SET};
 use crate::check::{
-    self, CheckOptions, CheckReport, DEFAULT_MIN_TIER, DERIVED, EMPTY_SCOPE, FACT, FORBID_EDGE,
-    FORBID_PATH, HEURISTIC, NO_CYCLE, RULE, Unanchored, Violation, ViolationEdge,
-    check_rules_gated, default_forbid_categories,
+    self, CheckOptions, CheckReport, DEFAULT_MIN_TIER, EMPTY_SCOPE, FORBID_EDGE, FORBID_PATH,
+    NO_CYCLE, RULE, Unanchored, Violation, ViolationEdge, check_rules_gated,
+    default_forbid_categories,
 };
 use crate::contract_breaks::{
     MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier, model_breaks_of,
@@ -651,9 +651,9 @@ fn marker(r: &Review) {
         c.untested_seeds,
         c.edges_added,
         c.edges_removed,
-        tier(FACT),
-        tier(DERIVED),
-        tier(HEURISTIC),
+        tier(Tier::Fact.as_str()),
+        tier(Tier::Derived.as_str()),
+        tier(Tier::Heuristic.as_str()),
         c.new_violations,
         c.resolved_violations,
         r.blocking,
@@ -2136,12 +2136,10 @@ const RECONFIDENCED: &str = "reconfidenced";
 
 /// Sort rank of a tier, strongest first; an unknown spelling sorts last.
 fn tier_rank(t: &str) -> u8 {
-    match t {
-        FACT => 0,
-        DERIVED => 1,
-        HEURISTIC => 2,
-        _ => 3,
-    }
+    Tier::ALL
+        .into_iter()
+        .find(|x| x.as_str() == t)
+        .map_or(3, Tier::level)
 }
 
 fn change_rank(c: &str) -> u8 {

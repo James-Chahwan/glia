@@ -48,7 +48,7 @@
 //! [`ORCHESTRATOR`] qualifies on fan-out with fan-in <= [`SIDE_MAX`];
 //! [`BOTTLENECK`] every other qualifying node (both lists, or one list and
 //! more than [`SIDE_MAX`] edges the other way); [`CONNECTOR`] is in the
-//! cross-service list only. Every row is tier [`DERIVED`]: counted from
+//! cross-service list only. Every row is tier `derived`: counted from
 //! observed edges. Dominators stay out (the gated list): a hub is a count,
 //! not "every path passes through".
 //!
@@ -59,6 +59,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::hubs::{DegreeTable, degree_table, hits};
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
+use glia_activation::profile::Tier;
 use glia_code_domain::{cell_type, edge_category};
 use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -87,8 +88,6 @@ pub const ORCHESTRATOR: &str = "orchestrator";
 pub const BOTTLENECK: &str = "bottleneck";
 /// [`HubRow::label`]: joins services without a high degree.
 pub const CONNECTOR: &str = "connector";
-/// [`HubRow::tier`] of every row.
-pub const DERIVED: &str = "derived";
 /// [`HubArgs::surface`] when the engine is called directly.
 pub const SURFACE_ENGINE: &str = "engine";
 
@@ -161,7 +160,7 @@ pub struct HubRow {
     pub hub: f64,
     /// Reachable from an entrypoint.
     pub live: bool,
-    /// Always [`DERIVED`].
+    /// Always `derived`.
     pub tier: &'static str,
 }
 
@@ -270,7 +269,7 @@ pub fn hubs(
             authority: scores.authority[ix],
             hub: scores.hub[ix],
             live: live.contains(&id),
-            tier: DERIVED,
+            tier: Tier::Derived.as_str(),
         }
     };
     let fan_in: Vec<HubRow> = by_in.iter().map(|&ix| row(ix)).collect();

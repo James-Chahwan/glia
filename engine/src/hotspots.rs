@@ -48,6 +48,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use glia_activation::profile::Tier;
 use glia_activation::{Direction, Specificity};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::{cell_type, node_kind};
@@ -74,8 +75,6 @@ pub const DEFAULT_MIN_CHURN: u32 = 2;
 pub const CENTRALITY_PRESET: &str = "centrality";
 /// Classic PageRank's damping.
 pub const DAMPING: f64 = 0.85;
-/// The tier of every row.
-pub const HEURISTIC: &str = "heuristic";
 
 const PRIMITIVE: &str = "hotspots";
 const SYMBOL_KINDS: [NodeKindId; 3] = [node_kind::FUNCTION, node_kind::METHOD, node_kind::CLASS];
@@ -138,7 +137,7 @@ pub struct Hotspot {
     pub centrality_rank: usize,
     /// The population both ranks range over.
     pub ranked: usize,
-    /// Always [`HEURISTIC`].
+    /// Always `heuristic`.
     pub tier: &'static str,
 }
 
@@ -404,7 +403,7 @@ fn rank(
                 churn_rank: churn_rank[i],
                 centrality_rank: centrality_rank[i],
                 ranked: population.len(),
-                tier: HEURISTIC,
+                tier: Tier::Heuristic.as_str(),
             }
         })
         .collect();

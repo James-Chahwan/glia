@@ -46,6 +46,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, NodeId};
@@ -70,9 +71,6 @@ pub const STATUSES: [&str; 4] = [
     STATUS_SINGLE_SITE,
     STATUS_QUIET,
 ];
-pub const TIER_FACT: &str = "fact";
-pub const TIER_DERIVED: &str = "derived";
-pub const TIER_HEURISTIC: &str = "heuristic";
 
 const PRIMITIVE: &str = "flags";
 const DAY: i64 = 86_400;
@@ -120,7 +118,7 @@ pub struct FlagSite {
 pub struct FlagFinding {
     /// One of [`STATUSES`].
     pub status: &'static str,
-    /// [`TIER_FACT`], [`TIER_DERIVED`] or [`TIER_HEURISTIC`].
+    /// `fact`, `derived` or `heuristic`.
     pub tier: &'static str,
     pub note: String,
 }
@@ -229,13 +227,13 @@ pub fn flags(merged: &MergedGraph, args: &FlagArgs) -> FlagsReport {
             } else {
                 String::new()
             };
-            findings.push(finding(STATUS_DEAD, TIER_DERIVED, format!(
+            findings.push(finding(STATUS_DEAD, Tier::Derived.as_str(), format!(
                 "defined in {}{more}; no literal read of the key is extracted (a key built at runtime is not captured)",
                 site_ref(&first.at)
             )));
         }
         if !acc.reads.is_empty() && acc.definitions.is_empty() && definitions_in_graph > 0 {
-            findings.push(finding(STATUS_UNDEFINED, TIER_DERIVED, format!(
+            findings.push(finding(STATUS_UNDEFINED, Tier::Derived.as_str(), format!(
                 "read, but none of the {definitions_in_graph} flag definition file(s) in the graph defines it; a provider console keeps definitions outside the repo"
             )));
         }
@@ -249,7 +247,7 @@ pub fn flags(merged: &MergedGraph, args: &FlagArgs) -> FlagsReport {
             };
             findings.push(finding(
                 STATUS_SINGLE_SITE,
-                TIER_FACT,
+                Tier::Fact.as_str(),
                 format!("read only in {}{place}", first.at.qname),
             ));
         }
@@ -261,7 +259,7 @@ pub fn flags(merged: &MergedGraph, args: &FlagArgs) -> FlagsReport {
             } else {
                 "git blame"
             };
-            findings.push(finding(STATUS_QUIET, TIER_HEURISTIC, format!(
+            findings.push(finding(STATUS_QUIET, Tier::Heuristic.as_str(), format!(
                 "no reading line changed in {} days before the snapshot's newest change ({source}, not runtime use)",
                 (now - last) / DAY
             )));

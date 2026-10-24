@@ -42,6 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
 use glia_activation::algo::reach::bfs;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{edge_category, endpoint, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
@@ -68,11 +69,6 @@ pub const CALL_LOOP: &str = "call_loop";
 pub const POSSIBLE_LOOP: &str = "possible_loop";
 /// [`CycleRow::kind`]: modules that import each other.
 pub const IMPORT_CYCLE: &str = "import_cycle";
-
-/// [`CycleRow::tier`]: every hop is an observed edge.
-pub const DERIVED: &str = "derived";
-/// [`CycleRow::tier`]: inferred from service links, not from a node path.
-pub const HEURISTIC: &str = "heuristic";
 
 /// The categories a runtime loop can travel: the cross-service mechanisms and
 /// the in-service glue from a handler to the next publish or call.
@@ -170,7 +166,7 @@ pub struct CycleHop {
 pub struct CycleRow {
     /// [`EVENT_LOOP`], [`CALL_LOOP`], [`POSSIBLE_LOOP`] or [`IMPORT_CYCLE`].
     pub kind: &'static str,
-    /// [`DERIVED`] or [`HEURISTIC`].
+    /// `derived` or `heuristic`.
     pub tier: &'static str,
     /// The `glia arch` services the members sit in, sorted.
     pub services: Vec<String>,
@@ -478,7 +474,7 @@ fn flow_loops(ctx: &mut Ctx<'_>, stats: &mut (usize, usize)) -> Vec<Pending> {
         out.push(Pending {
             row: CycleRow {
                 kind: if is_async { EVENT_LOOP } else { CALL_LOOP },
-                tier: DERIVED,
+                tier: Tier::Derived.as_str(),
                 services,
                 mechanisms,
                 channels: channels.into_iter().collect(),
@@ -709,7 +705,7 @@ fn possible_loops(ctx: &Ctx<'_>, covered: &HashSet<Vec<String>>) -> Vec<Pending>
         out.push(Pending {
             row: CycleRow {
                 kind: POSSIBLE_LOOP,
-                tier: HEURISTIC,
+                tier: Tier::Heuristic.as_str(),
                 services: services.clone(),
                 mechanisms,
                 channels: channels.into_iter().collect(),
@@ -854,7 +850,7 @@ fn import_cycles(ctx: &mut Ctx<'_>, stats: &mut (usize, usize)) -> Vec<Pending> 
         out.push(Pending {
             row: CycleRow {
                 kind: IMPORT_CYCLE,
-                tier: DERIVED,
+                tier: Tier::Derived.as_str(),
                 services: ctx.services_of(&comp),
                 mechanisms: vec![edge_category::name(edge_category::IMPORTS)],
                 channels: Vec::new(),

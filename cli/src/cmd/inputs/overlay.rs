@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use clap::Subcommand;
-use glia_engine::check::{DERIVED, FACT, HEURISTIC};
+use glia_activation::profile::Tier;
 use glia_engine::gaps::{CATEGORIES, DROP, GapRow, KEEP, REVIEW, verdict};
 use glia_engine::overlay_loop::{
     AcceptOptions, AcceptSummary, DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, GraphDelta, MAX_RULE_HITS,
@@ -591,7 +591,7 @@ fn has_rule_part(r: &TryReport) -> bool {
 
 /// `fact <n>, derived <n>, heuristic <n>`, zero tiers left out.
 fn tiers(t: &BTreeMap<&'static str, usize>) -> String {
-    let known = [FACT, DERIVED, HEURISTIC];
+    let known = Tier::ALL.map(Tier::as_str);
     let rest = t.keys().copied().filter(|k| !known.contains(k));
     known
         .into_iter()

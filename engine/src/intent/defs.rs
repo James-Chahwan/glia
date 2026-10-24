@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use glia_activation::profile::Tier;
 use glia_code_domain::glia_config::TrackerDecl;
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{Cell, CellPayload, RepoId};
@@ -1181,7 +1182,7 @@ impl Namespaces {
         if let Some(p) = cx.own_page
             && let Some(n) = self.def.get(&(p.to_string(), id.to_string()))
         {
-            return ok(n.clone(), "fact", "own-page");
+            return ok(n.clone(), Tier::Fact.as_str(), "own-page");
         }
         let Some(all) = self.by_id.get(id) else {
             return Err("undefined");
@@ -1196,19 +1197,19 @@ impl Namespaces {
             .collect();
         match vis.len() {
             0 => return Err("local-only"),
-            1 => return ok(vis[0].ns.clone(), "derived", "unique"),
+            1 => return ok(vis[0].ns.clone(), Tier::Derived.as_str(), "unique"),
             _ => {}
         }
         let line: Vec<&str> = cx.line_scopes.iter().map(String::as_str).collect();
         if let Some(n) = self.pick(&vis, &line) {
-            return ok(n, "derived", "line-scope");
+            return ok(n, Tier::Derived.as_str(), "line-scope");
         }
         if let Some(n) = cx.own_scope.and_then(|s| self.pick(&vis, &[s])) {
-            return ok(n, "derived", "own-scope");
+            return ok(n, Tier::Derived.as_str(), "own-scope");
         }
         let global: Vec<&&Series> = vis.iter().filter(|x| x.scope.is_none()).collect();
         if global.len() == 1 {
-            return ok(global[0].ns.clone(), "derived", "global");
+            return ok(global[0].ns.clone(), Tier::Derived.as_str(), "global");
         }
         let pend: Vec<&Series> = vis
             .iter()
@@ -1226,7 +1227,7 @@ impl Namespaces {
             } else {
                 "one-left"
             };
-            return ok(pool[0].ns.clone(), "derived", route);
+            return ok(pool[0].ns.clone(), Tier::Derived.as_str(), route);
         }
         for r in cx.recent {
             let mut hit: Vec<&Series> = pool
@@ -1236,7 +1237,7 @@ impl Namespaces {
                 .collect();
             hit.sort_by(|a, b| (a.local, &a.ns).cmp(&(b.local, &b.ns)));
             if let Some(h) = hit.first() {
-                return ok(h.ns.clone(), "heuristic", "recent-scope");
+                return ok(h.ns.clone(), Tier::Heuristic.as_str(), "recent-scope");
             }
         }
         let newest = pool
@@ -1252,7 +1253,7 @@ impl Namespaces {
             Some((_, p)) => p.ns.clone(),
             None => pool.iter().map(|p| p.ns.clone()).min().unwrap_or_default(),
         };
-        ok(n, "heuristic", "newest-scope")
+        ok(n, Tier::Heuristic.as_str(), "newest-scope")
     }
 
     /// Resolve every mention of one line, then rank_eval `KNs::siblings`: a
@@ -1304,7 +1305,7 @@ impl Namespaces {
                 res[i] = Ok(Resolved {
                     id: id.clone(),
                     ns: n,
-                    tier: "derived",
+                    tier: Tier::Derived.as_str(),
                     route: "sibling",
                 });
             }

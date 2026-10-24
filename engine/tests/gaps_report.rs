@@ -13,11 +13,12 @@ use std::path::{Path, PathBuf};
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use glia_activation::profile::Tier;
 use glia_engine::gaps::{
-    AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, FACT, GapRow, GapsOptions,
-    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE,
-    SUSPECTED_EDGE, TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT,
-    WRAPPED_SINK, gaps_report, graph_counts, overlay_delta,
+    AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, GapRow, GapsOptions,
+    GapsReport, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE, SUSPECTED_EDGE,
+    TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK,
+    gaps_report, graph_counts, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
@@ -122,7 +123,10 @@ fn reports_the_probe_r1_shapes() {
     let u = unresolved[0];
     assert_eq!(u.qname, "endpoint:GET:<unresolved>");
     assert_eq!(u.detail, "owner=web::src::client::request");
-    assert_eq!((u.suggest, u.tier, u.kind), ("wrapper", FACT, "ENDPOINT"));
+    assert_eq!(
+        (u.suggest, u.tier, u.kind),
+        ("wrapper", Tier::Fact.as_str(), "ENDPOINT")
+    );
     assert_eq!(
         (u.file.as_deref(), u.line),
         (Some("web/src/client.ts"), Some(2)),
@@ -141,7 +145,7 @@ fn reports_the_probe_r1_shapes() {
     let users = rows(&rep, UNPAIRED_ROUTE)[0];
     assert_eq!(
         (users.suggest, users.tier),
-        ("route_prefix|edge", HEURISTIC)
+        ("route_prefix|edge", Tier::Heuristic.as_str())
     );
     assert!(
         users.detail.ends_with("handler=api::app::list_users"),
@@ -151,7 +155,10 @@ fn reports_the_probe_r1_shapes() {
 
     let dead = rows(&rep, DEAD_SYMBOL);
     assert_eq!(dead[0].qname, "web::src::client::loadUsers");
-    assert_eq!((dead[0].suggest, dead[0].tier), ("entrypoints", HEURISTIC));
+    assert_eq!(
+        (dead[0].suggest, dead[0].tier),
+        ("entrypoints", Tier::Heuristic.as_str())
+    );
 }
 
 #[test]
@@ -174,7 +181,7 @@ fn reports_the_probe_m1_fanout() {
     );
     assert_eq!(
         (amb[0].suggest, amb[0].tier),
-        ("constants|route_prefix", FACT)
+        ("constants|route_prefix", Tier::Fact.as_str())
     );
 
     let unpaired = rows(&rep, UNPAIRED_ENDPOINT);
@@ -186,7 +193,8 @@ fn reports_the_probe_m1_fanout() {
         "orders' GET /orders is a suffix of the path"
     );
     assert_eq!(
-        u.tier, FACT,
+        u.tier,
+        Tier::Fact.as_str(),
         "no host recorded: nothing says it is third-party"
     );
     assert_eq!(
@@ -473,7 +481,7 @@ fn orphaned_rule_is_reported() {
         o.detail,
         "repo=web edge#1 from=src::client::gone to=GET /users category=CALLS (no node: from)"
     );
-    assert_eq!((o.suggest, o.tier), ("remove", FACT));
+    assert_eq!((o.suggest, o.tier), ("remove", Tier::Fact.as_str()));
     assert_eq!(rep.count(REDUNDANT_RULE), 0);
 }
 
@@ -606,7 +614,11 @@ fn rotted_rule_names_the_bad_rule() {
         rotten.detail
     );
     for r in &rotted {
-        assert_eq!((r.suggest, r.tier), ("remove", FACT), "{r:#?}");
+        assert_eq!(
+            (r.suggest, r.tier),
+            ("remove", Tier::Fact.as_str()),
+            "{r:#?}"
+        );
     }
 
     // Orphaned and rotted are two gaps of one stanza, with two ids.
@@ -648,7 +660,10 @@ fn tag_only_queue_is_reported() {
         tags[0].detail,
         "topic=unresolved:kafka; owner=publish::publishTo"
     );
-    assert_eq!((tags[0].suggest, tags[0].tier), ("constants|wrapper", FACT));
+    assert_eq!(
+        (tags[0].suggest, tags[0].tier),
+        ("constants|wrapper", Tier::Fact.as_str())
+    );
 }
 
 /// `top_k_per_category` cuts rows after ranking, `category` keeps one

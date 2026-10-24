@@ -197,6 +197,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::reach;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
@@ -234,10 +235,6 @@ const MECHANISMS: &[&str] = &["TESTS", "CALLS", "HTTP_CALLS"];
 
 /// The primitive name in the `[absence]` marker.
 const PRIMITIVE: &str = "tests_for";
-
-pub const FACT: &str = "fact";
-pub const DERIVED: &str = "derived";
-pub const HEURISTIC: &str = "heuristic";
 
 /// A row signal (module docs): the test failed in the newest ingested run.
 pub const FAILED_LAST_RUN: &str = "failed_last_run";
@@ -901,9 +898,9 @@ fn answer_for(
         "[tests-for] seeds={} tests={} fact={} derived={} heuristic={} untested={} files={}",
         seeds.len(),
         tests.len(),
-        count(FACT),
-        count(DERIVED),
-        count(HEURISTIC),
+        count(Tier::Fact.as_str()),
+        count(Tier::Derived.as_str()),
+        count(Tier::Heuristic.as_str()),
         untested.len(),
         test_files.len()
     );
@@ -1163,19 +1160,14 @@ impl Signals {
 }
 
 fn tier_name(rank: u8) -> &'static str {
-    match rank {
-        0 => FACT,
-        1 => DERIVED,
-        _ => HEURISTIC,
-    }
+    Tier::from_level(rank).unwrap_or(Tier::Heuristic).as_str()
 }
 
 fn tier_rank(tier: &str) -> u8 {
-    match tier {
-        FACT => 0,
-        DERIVED => 1,
-        _ => 2,
-    }
+    Tier::ALL
+        .into_iter()
+        .find(|x| x.as_str() == tier)
+        .map_or(2, Tier::level)
 }
 
 /// What the test-case predicate and the heuristic tier read, built once per

@@ -12,12 +12,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
-use glia_engine::gaps::{
-    COCHANGE_NO_EDGE, CochangeGap, GapsOptions, HEURISTIC, cochange_gaps, gaps_report,
-};
+use glia_engine::gaps::{COCHANGE_NO_EDGE, CochangeGap, GapsOptions, cochange_gaps, gaps_report};
 use glia_engine::generate_one;
 use glia_graph::MergedGraph;
 
@@ -181,7 +180,7 @@ fn unlinked_pair_is_a_gap() {
         (g.language_a, g.language_b, g.cross_language),
         (Some("python"), Some("python"), false)
     );
-    assert_eq!(g.tier, HEURISTIC);
+    assert_eq!(g.tier, Tier::Heuristic.as_str());
     assert!(cochange_gaps(&m, Some(0)).is_empty(), "top_k cuts");
 }
 
@@ -416,7 +415,7 @@ fn gaps_category_matches() {
                     g.ratio_permille
                 ),
                 "MODULE",
-                HEURISTIC,
+                Tier::Heuristic.as_str(),
                 "edge",
                 Some(1),
             )

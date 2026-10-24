@@ -168,6 +168,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_activation::algo::delta::{EdgeKey, GraphDelta};
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_activation::profile::Tier;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
@@ -673,7 +674,7 @@ fn report(
             }));
             let d = Divergence {
                 verdict: "DIVERGENCE",
-                tier: "heuristic",
+                tier: Tier::Heuristic.as_str(),
                 service: service.clone(),
                 handler: at.qname,
                 file: at.file,

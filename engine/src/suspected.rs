@@ -69,6 +69,7 @@ use std::fmt;
 
 use glia_activation::algo::Adjacency;
 use glia_activation::algo::linkpred::{Neighbourhoods, PairScore, score_pairs};
+use glia_activation::profile::Tier;
 use glia_code_domain::{edge_category, node_kind};
 use glia_code_extractors::queues::is_framework_tag;
 use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId};
@@ -77,7 +78,7 @@ use glia_graph::{MergedGraph, channel_of};
 
 use crate::answers::Locator;
 use crate::arch::FLOW_MECHANISMS;
-use crate::gaps::{GapRow, HEURISTIC, Ids, SUSPECTED_EDGE};
+use crate::gaps::{GapRow, Ids, SUSPECTED_EDGE};
 use crate::profile::CODE_PROFILE;
 
 /// Cross edges a triple needs before it is learned.
@@ -421,7 +422,7 @@ fn compute(
                 line: at_o.line,
                 detail,
                 suggest: "edge",
-                tier: HEURISTIC,
+                tier: Tier::Heuristic.as_str(),
                 draft: Some(draft),
             });
         }

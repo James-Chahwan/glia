@@ -136,6 +136,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use glia_activation::profile::Tier;
 use glia_activation::{Direction, Specificity};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeId;
@@ -332,9 +333,9 @@ pub fn pack(merged: &MergedGraph, query: &str, args: &PackArgs) -> Pack {
         .map(|r| Seed {
             id: NodeId(r.id),
             tier: if FACT_TIERS.contains(&r.r#match) {
-                "fact"
+                Tier::Fact.as_str()
             } else {
-                "heuristic"
+                Tier::Heuristic.as_str()
             },
             matched: Some(r.r#match),
         })
@@ -379,7 +380,7 @@ pub fn pack_ids(merged: &MergedGraph, seeds: &[NodeId], args: &PackArgs) -> Pack
         .filter(|id| held.contains(id))
         .map(|id| Seed {
             id: *id,
-            tier: "fact",
+            tier: Tier::Fact.as_str(),
             matched: None,
         })
         .collect();
@@ -528,7 +529,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
                 id: *id,
                 w,
                 seed: false,
-                tier: "derived",
+                tier: Tier::Derived.as_str(),
                 matched: None,
                 cost,
             });

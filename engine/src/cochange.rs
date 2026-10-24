@@ -106,6 +106,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::snapshots::read_history;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Node, NodeId};
@@ -113,7 +114,7 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
 use crate::external::{self, MAX_COMMIT_FILES, signals};
-use crate::gaps::{HEURISTIC, Link, LinkIndex};
+use crate::gaps::{Link, LinkIndex};
 use crate::git_rev;
 
 /// The primitive name in the `[absence]` marker.
@@ -585,7 +586,7 @@ fn answer(
             confidence_permille: r.confidence_permille,
             link: link_name(link),
             source,
-            tier: HEURISTIC,
+            tier: Tier::Heuristic.as_str(),
             note: (link == Link::None).then(|| UNLINKED_NOTE.to_string()),
         });
     }

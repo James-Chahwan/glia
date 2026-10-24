@@ -62,7 +62,7 @@
 //! `aligned` (one service, found in no other part), `splits_service` (one
 //! service another part shares: the cut runs inside an existing service),
 //! `spans_services` (two or more), `unplaced` (no located member). Every part
-//! is tier [`HEURISTIC`]: a suggested cut, never a verdict.
+//! is tier `heuristic`: a suggested cut, never a verdict.
 //!
 //! ANCHORED (CD.2c). With [`SplitArgs::source`] or [`SplitArgs::sink`] set
 //! the mode is `st`: "separate this from that at the least coupling", a
@@ -90,8 +90,8 @@
 //!   read (read + unknown stays `unknown`; write + unknown is `write`, a
 //!   write is known). A part counts as writing when its mode is not `read`.
 //!   `writers` are the members whose access is not a known read, by part
-//!   then qname, the first [`MAX_WRITERS`]. Tier [`DERIVED`] when no part's
-//!   mode is `unknown`, else [`HEURISTIC`]. Rows sort by parts, then writers,
+//!   then qname, the first [`MAX_WRITERS`]. Tier `derived` when no part's
+//!   mode is `unknown`, else `heuristic`. Rows sort by parts, then writers,
 //!   descending, then entity qname. The SQL verb at the access site is all
 //!   that is read: nothing here follows a value.
 //! - `cycles`: the parts as a directed graph, one synthetic node per part
@@ -100,7 +100,7 @@
 //!   `algo::cycles::strongly_connected`. Each non-trivial component is a
 //!   [`PartCycle`]: its parts, and per direction inside it the heaviest such
 //!   edge (community weight, then the cut-edge order), located as a cut edge
-//!   is. Tier [`DERIVED`]: every witness is an edge the graph holds.
+//!   is. Tier `derived`: every witness is an edge the graph holds.
 //!
 //! EMPTY. An unknown quotient name, fewer than two units, or more than
 //! [`MAX_UNITS`] (Stoer-Wagner is O(V E log V) and its phase sides hold
@@ -120,6 +120,7 @@ use glia_activation::algo::community::{CommunityOptions, Resolution, WeightedGra
 use glia_activation::algo::cut::{min_st_cut, stoer_wagner};
 use glia_activation::algo::cycles::strongly_connected;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::profile::node_ext;
 use glia_code_domain::{cell_type, edge_category, node_kind};
@@ -149,10 +150,6 @@ pub const MAX_UNITS: usize = 5_000;
 pub const MAX_MODULES: usize = 20;
 /// Top members listed per part at most.
 pub const TOP_MEMBERS: usize = 10;
-/// [`SplitAnswer::tier`]; a [`SharedWrite`] with an `unknown` mode.
-pub const HEURISTIC: &str = "heuristic";
-/// A [`SharedWrite`] whose every mode is known; every [`PartCycle`].
-pub const DERIVED: &str = "derived";
 /// [`SharedWrite::writers`] listed at most.
 pub const MAX_WRITERS: usize = 5;
 /// [`SplitArgs::surface`] when the engine is called directly.
@@ -286,7 +283,7 @@ pub struct SharedWrite {
     pub writers: Vec<Located>,
     /// Members whose access is not a known read.
     pub writers_total: usize,
-    /// [`DERIVED`] when no mode is `unknown`, else [`HEURISTIC`].
+    /// `derived` when no mode is `unknown`, else `heuristic`.
     pub tier: &'static str,
 }
 
@@ -299,7 +296,7 @@ pub struct PartCycle {
     /// Per direction between two of `parts`, the heaviest carry edge that way,
     /// by (from part, to part).
     pub witness: Vec<CutEdge>,
-    /// Always [`DERIVED`].
+    /// Always `derived`.
     pub tier: &'static str,
 }
 
@@ -332,7 +329,7 @@ pub struct SplitAnswer {
     pub shared_writes: Vec<SharedWrite>,
     /// Parts that depend on each other both ways.
     pub cycles: Vec<PartCycle>,
-    /// Always [`HEURISTIC`].
+    /// Always `heuristic`.
     pub tier: &'static str,
     pub absence: Option<Absence>,
 }
@@ -437,7 +434,7 @@ pub fn splits(
             arch,
             shared_writes,
             cycles,
-            tier: HEURISTIC,
+            tier: Tier::Heuristic.as_str(),
             absence: None,
         },
         args,
@@ -1303,9 +1300,9 @@ fn shared_writes(
                 return None;
             }
             let tier = if modes.iter().any(|(_, m)| *m == UNKNOWN) {
-                HEURISTIC
+                Tier::Heuristic.as_str()
             } else {
-                DERIVED
+                Tier::Derived.as_str()
             };
             Some(SharedWrite {
                 entity: loc.locate(entity),
@@ -1429,7 +1426,7 @@ fn part_cycles(
             PartCycle {
                 parts: ps,
                 witness,
-                tier: DERIVED,
+                tier: Tier::Derived.as_str(),
             }
         })
         .collect()
@@ -1659,7 +1656,7 @@ fn empty(
         arch: Vec::new(),
         shared_writes: Vec::new(),
         cycles: Vec::new(),
-        tier: HEURISTIC,
+        tier: Tier::Heuristic.as_str(),
         absence: Some(absence),
     }
 }

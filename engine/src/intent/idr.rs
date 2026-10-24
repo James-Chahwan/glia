@@ -43,6 +43,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
+use glia_activation::profile::Tier;
 use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot};
 use serde::Serialize;
 
@@ -394,12 +395,12 @@ pub fn route(text: &str, side: &IdrSide, recent: &[String]) -> Idr {
                     counts.add(&Ok(Resolved {
                         id: m.id.clone(),
                         ns: String::new(),
-                        tier: "derived",
+                        tier: Tier::Derived.as_str(),
                         route: "family",
                     }));
                     resolved += 1;
                     for x in fam {
-                        push((x.ns, x.id, "derived", "family"), &mut got);
+                        push((x.ns, x.id, Tier::Derived.as_str(), "family"), &mut got);
                     }
                     slots.push(Ok(got));
                 }
@@ -622,7 +623,7 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
         counts.add(&Ok(Resolved {
             id: format!("scope:{s}"),
             ns: String::new(),
-            tier: "derived",
+            tier: Tier::Derived.as_str(),
             route: "scope-dir",
         }));
         for (&f, &w) in &named {
@@ -632,7 +633,7 @@ fn scope_route(text: &str, side: &IdrSide, out: &mut Idr, counts: &mut RouteCoun
         out.ids.push(RoutedId {
             id: format!("scope:{s}"),
             ns: None,
-            tier: Some("derived"),
+            tier: Some(Tier::Derived.as_str()),
             route: "scope-dir",
             defined_at: None,
             state: None,

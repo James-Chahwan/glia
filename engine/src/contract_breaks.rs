@@ -135,6 +135,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use glia_activation::algo::delta::GraphDelta;
+use glia_activation::profile::Tier;
 use glia_code_domain::{edge_category, same_as};
 use glia_core::{EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
@@ -496,7 +497,11 @@ fn breaks_of(
             after: Some(side(&now, a, n)),
             status,
             change: if through_move { "moved" } else { "modified" },
-            tier: if through_move { "derived" } else { "fact" },
+            tier: if through_move {
+                Tier::Derived.as_str()
+            } else {
+                Tier::Fact.as_str()
+            },
             note,
             changes,
         });
@@ -511,7 +516,7 @@ fn breaks_of(
             after: None,
             status: "breaking",
             change: "removed",
-            tier: "fact",
+            tier: Tier::Fact.as_str(),
             note: None,
             changes: Vec::new(),
         });
@@ -526,7 +531,7 @@ fn breaks_of(
             after: Some(side(&now, a, n)),
             status: "compatible",
             change: "added",
-            tier: "fact",
+            tier: Tier::Fact.as_str(),
             note: None,
             changes: Vec::new(),
         });
@@ -567,7 +572,11 @@ fn breaks_of(
                     category: edge_category::name(EdgeCategoryId(o.category)),
                     target_qname: then.locate(NodeId(o.target)).qname,
                     reason: o.reason,
-                    tier: if target_removed { "fact" } else { "derived" },
+                    tier: if target_removed {
+                        Tier::Fact.as_str()
+                    } else {
+                        Tier::Derived.as_str()
+                    },
                 }
             })
             .collect();

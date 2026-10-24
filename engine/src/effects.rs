@@ -107,6 +107,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
@@ -152,8 +153,6 @@ pub const DB: &str = "db";
 
 /// The primitive name in the `[absence]` marker.
 const PRIMITIVE: &str = "effects";
-
-const DERIVED: &str = "derived";
 
 /// A twin id is the real id XOR this, stepped until it is no id of the graph.
 const TWIN_SALT: u64 = 0x5eed_e44e_c75f_0a1d;
@@ -524,7 +523,7 @@ pub fn effects(
             services_crossed,
             downstream,
             path,
-            tier: DERIVED,
+            tier: Tier::Derived.as_str(),
             external_hosts: external.get(&h.real).cloned().unwrap_or_default(),
         };
         rows.push((h.sink.0, row));

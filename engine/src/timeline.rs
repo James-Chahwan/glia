@@ -60,6 +60,7 @@ use std::path::Path;
 
 use glia_activation::algo::GraphSource;
 use glia_activation::algo::timeline::TimelineBuilder;
+use glia_activation::profile::Tier;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -712,7 +713,7 @@ fn history_rows(
             until: e.until().and_then(|u| rev_ref(store, u as usize)),
             file: other.and_then(|n| store.node_file(n)).map(String::from),
             line: other.and_then(TimelineNode::line).map(i64::from),
-            tier: "derived",
+            tier: Tier::Derived.as_str(),
         });
     }
     rows.sort_by(|a, b| {

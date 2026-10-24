@@ -84,6 +84,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_activation::algo::delta::GraphDelta;
+use glia_activation::profile::Tier;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::wire::{ModelSchema, WireFormat};
@@ -103,7 +104,7 @@ use crate::delta::RevDelta;
 use crate::why::tier_of;
 
 /// The accepted [`ModelBreakArgs::min_tier`] values, default first.
-pub const MODEL_MIN_TIERS: &[&str] = &[check::FACT, check::DERIVED];
+pub const MODEL_MIN_TIERS: &[&str] = &[Tier::Fact.as_str(), Tier::Derived.as_str()];
 
 /// How [`model_breaks`] gates. Built outside the crate from `Default` plus
 /// field assignment.
@@ -355,10 +356,10 @@ pub(crate) fn model_breaks_of(
     delta: &GraphDelta,
     args: &ModelBreakArgs,
 ) -> ModelBreaks {
-    let min_tier = if args.min_tier == check::DERIVED {
-        check::DERIVED
+    let min_tier = if args.min_tier == Tier::Derived.as_str() {
+        Tier::Derived.as_str()
     } else {
-        check::FACT
+        Tier::Fact.as_str()
     };
     let now_m = &after.merged;
     let moved: HashMap<u64, u64> = delta.moved_nodes.iter().map(|&(b, a)| (b.0, a.0)).collect();
@@ -536,7 +537,7 @@ fn rows_of(
             .iter()
             .map(|j| j.tier)
             .min_by_key(|t| tier_rank(t))
-            .unwrap_or(check::DERIVED);
+            .unwrap_or(Tier::Derived.as_str());
         let first = &exchanges[members[0].ex];
         let client = now.side(client_root, first.client_format, first.pairing);
         let server = now.side(server_root, first.server_format, first.pairing);
@@ -572,12 +573,10 @@ fn rows_of(
 
 /// Sort rank of a tier, strongest first; an unknown spelling sorts last.
 fn tier_rank(t: &str) -> u8 {
-    match t {
-        check::FACT => 0,
-        check::DERIVED => 1,
-        check::HEURISTIC => 2,
-        _ => 3,
-    }
+    Tier::ALL
+        .into_iter()
+        .find(|x| x.as_str() == t)
+        .map_or(3, Tier::level)
 }
 
 // ---- one side's graph --------------------------------------------------------
@@ -957,7 +956,7 @@ impl<'m> EdgeIndex<'m> {
                 keep.then(|| tier_of(ev.as_ref(), e).0.as_str())
             })
             .min_by_key(|t| tier_rank(t))
-            .unwrap_or(check::DERIVED)
+            .unwrap_or(Tier::Derived.as_str())
     }
 }
 
@@ -985,7 +984,7 @@ fn exchange_tier(edges: &EdgeIndex<'_>, ex: &Exchange) -> &'static str {
     tiers
         .into_iter()
         .max_by_key(|t| tier_rank(t))
-        .unwrap_or(check::DERIVED)
+        .unwrap_or(Tier::Derived.as_str())
 }
 
 // ---- the rules ------------------------------------------------------------------

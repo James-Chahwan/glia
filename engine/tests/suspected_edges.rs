@@ -17,10 +17,11 @@
 
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::glia_config::parse_str;
 use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
 use glia_engine::gaps::{
-    GapRow, GapsOptions, GapsReport, HEURISTIC, SUSPECTED_EDGE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE,
+    GapRow, GapsOptions, GapsReport, SUSPECTED_EDGE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE,
     gaps_report, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_one};
@@ -164,7 +165,7 @@ fn proposes_the_read_all_pair() {
         (Some("web/src/notifications.service.ts"), Some(11)),
         "the post call, 1-based"
     );
-    assert_eq!((s.tier, s.suggest), (HEURISTIC, "edge"));
+    assert_eq!((s.tier, s.suggest), (Tier::Heuristic.as_str(), "edge"));
     assert_eq!(
         s.detail,
         format!(
