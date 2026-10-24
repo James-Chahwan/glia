@@ -28,7 +28,20 @@
 //! feature spec is no API: both are skipped. The rev is built under the
 //! working tree's identity, so an unchanged qname is the SAME NodeId: pairing
 //! by id is tier `fact`. A before id the delta moved (LB.6) pairs through the
-//! move: tier `derived`, change `moved`. A before-only holder is `removed`
+//! move: tier `derived`, change `moved`. So does a holder whose spec file git
+//! renamed (FD.25): a spec moved with `git mv` keeps its op qnames but not its
+//! ids, and its MODULE (named by file) never moves, so the delta pairs none
+//! of it. Before judging, a before-only holder and an after-only holder with
+//! one `(repo, kind, key)` (the key [`same_as::contract_op_key`]'s display
+//! for an op, the qualified name for a message), each the only one-sided
+//! holder of that identity, pair through the move when the before holder's
+//! file is a rename source (`git diff -M --name-status <base>`, git's default
+//! 50% similarity) whose target holds the after holder: tier `derived`,
+//! change `moved`, listed only when the payloads differ. A spec moved and
+//! rewritten past git's threshold stays `removed` + `added`. fired_on, once
+//! per [`contract_breaks_vs_rev`] / [`contract_breaks_vs_rev_with`] run:
+//! `[contract-breaks] moved_files=<renames read> paired_ops=<pairs made>`.
+//! A before-only holder is `removed`
 //! (breaking: whoever used it loses it), an after-only one `added`
 //! (compatible), both tier `fact`. A pair whose payloads are equal is
 //! `identical`: counted, never listed.
@@ -278,7 +291,16 @@ pub fn contract_breaks_vs_rev(
 ) -> Result<ContractBreaks, String> {
     check_mode(args)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
-    Ok(contract_breaks(&rev, args))
+    let repo = Path::new(repo_path);
+    let renames = git_rev::declared_renames(repo, &git_rev::resolve_rev(repo, base)?);
+    Ok(breaks_of(
+        &rev.answer.base,
+        &rev.before.merged,
+        &rev.after,
+        &rev.delta,
+        Some(&renames),
+        args,
+    ))
 }
 
 /// [`contract_breaks_vs_rev`] with the client repos at `clients` built beside
@@ -334,7 +356,14 @@ pub fn contract_breaks_vs_rev_with(
     drop(tree);
     let renames = git_rev::declared_renames(repo, &rev);
     let (delta, _, _) = located_delta_with(&before.merged, &after.merged, &renames);
-    let answer = breaks_of(&rev.given, &before.merged, &after, &delta, args);
+    let answer = breaks_of(
+        &rev.given,
+        &before.merged,
+        &after,
+        &delta,
+        Some(&renames),
+        args,
+    );
     marker();
     Ok(answer)
 }
@@ -398,6 +427,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
         &rev.before.merged,
         &rev.after,
         &rev.delta,
+        None,
         args,
     )
 }
@@ -405,11 +435,15 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
 /// The answer over a rev pair (module docs): `before` is the rev's graph,
 /// `after_build` the working tree's build, `delta` the id-level delta
 /// `after - before`. One body for the single-repo and the `--with` pair.
+/// `renames` is git's `(old path, new path)` list for the rev (module docs,
+/// FD.25); `None` pairs through the delta's moves only and prints no
+/// `moved_files=` marker.
 fn breaks_of(
     base: &str,
     before: &MergedGraph,
     after_build: &GenerateResult,
     delta: &GraphDelta,
+    renames: Option<&[(String, String)]>,
     args: &ContractBreakArgs,
 ) -> ContractBreaks {
     let after = &after_build.merged;
@@ -418,7 +452,24 @@ fn breaks_of(
     let moved: HashMap<u64, u64> = delta.moved_nodes.iter().map(|&(b, a)| (b.0, a.0)).collect();
     let old_ids: BTreeSet<u64> = old.keys().copied().collect();
     let new_ids: BTreeSet<u64> = new.keys().copied().collect();
-    let pairing = pair(&old_ids, &new_ids, &moved);
+    let mut through = moved.clone();
+    if let Some(renames) = renames {
+        let file_of = |loc: &Locator<'_>, id: u64| loc.locate(NodeId(id)).file;
+        let spec_moves = renamed_holders(
+            &one_sided(&old, &old_ids, &new_ids, &moved, |id| file_of(&then, id)),
+            &one_sided(&new, &new_ids, &old_ids, &invert(&moved), |id| {
+                file_of(&now, id)
+            }),
+            renames,
+        );
+        eprintln!(
+            "[contract-breaks] moved_files={} paired_ops={}",
+            renames.len(),
+            spec_moves.len()
+        );
+        through.extend(spec_moves);
+    }
+    let pairing = pair(&old_ids, &new_ids, &through);
     let mode = AvroMode::parse(args.avro_mode);
 
     let side = |loc: &Locator<'_>, id: u64, h: &Holder| {
@@ -692,6 +743,63 @@ struct Pairing {
     pairs: Vec<(u64, u64, bool)>,
     removed: Vec<u64>,
     added: Vec<u64>,
+}
+
+/// A one-sided holder's identity: `(repo, kind, key)` (module docs, FD.25).
+type HolderIdentity = (u64, &'static str, String);
+
+/// `other -> this` for a `this -> other` move map.
+fn invert(moved: &HashMap<u64, u64>) -> HashMap<u64, u64> {
+    moved.iter().map(|(&b, &a)| (a, b)).collect()
+}
+
+/// The holders of one side neither paired by id (`ids` absent from `other`)
+/// nor through a delta move (`moved`, keyed by this side's id), grouped by
+/// identity: `identity -> [(id, file)]`, ids ascending.
+fn one_sided(
+    holders: &BTreeMap<u64, Holder>,
+    ids: &BTreeSet<u64>,
+    other: &BTreeSet<u64>,
+    moved: &HashMap<u64, u64>,
+    file_of: impl Fn(u64) -> Option<String>,
+) -> BTreeMap<HolderIdentity, Vec<(u64, Option<String>)>> {
+    let mut out: BTreeMap<HolderIdentity, Vec<(u64, Option<String>)>> = BTreeMap::new();
+    for &id in ids {
+        if other.contains(&id) || moved.contains_key(&id) {
+            continue;
+        }
+        let h = &holders[&id];
+        out.entry((h.repo, kind_of(h), key_of(h)))
+            .or_default()
+            .push((id, file_of(id)));
+    }
+    out
+}
+
+/// `before id -> after id` for every identity held by exactly one removed and
+/// exactly one added holder whose files git paired as a rename (module docs,
+/// FD.25).
+fn renamed_holders(
+    removed: &BTreeMap<HolderIdentity, Vec<(u64, Option<String>)>>,
+    added: &BTreeMap<HolderIdentity, Vec<(u64, Option<String>)>>,
+    renames: &[(String, String)],
+) -> BTreeMap<u64, u64> {
+    let renamed: BTreeSet<(&str, &str)> = renames
+        .iter()
+        .map(|(o, n)| (o.as_str(), n.as_str()))
+        .collect();
+    let mut out = BTreeMap::new();
+    for (identity, olds) in removed {
+        let (Some([(a, Some(new_file))]), [(b, Some(old_file))]) =
+            (added.get(identity).map(Vec::as_slice), olds.as_slice())
+        else {
+            continue;
+        };
+        if renamed.contains(&(old_file.as_str(), new_file.as_str())) {
+            out.insert(*b, *a);
+        }
+    }
+    out
 }
 
 /// Moves first (a swap pairs each id with the other's), then the same id on
@@ -1271,6 +1379,35 @@ mod tests {
             .iter()
             .map(|c| (c.field.as_str(), c.change, c.rule, c.breaking))
             .collect()
+    }
+
+    #[test]
+    fn renamed_holders_pair_one_to_one_through_a_git_rename() {
+        type Side = BTreeMap<HolderIdentity, Vec<(u64, Option<String>)>>;
+        let id = |key: &str| (7u64, "operation", key.to_string());
+        let at = |f: &str| Some(f.to_string());
+        let removed: Side = [
+            (id("GET /a"), vec![(1, at("api/a.yaml"))]),
+            (id("GET /b"), vec![(2, at("api/a.yaml"))]),
+            // Two removed holders of one identity: never paired.
+            (
+                id("GET /c"),
+                vec![(3, at("api/a.yaml")), (4, at("api/a.yaml"))],
+            ),
+            // Its file was not renamed to the added holder's.
+            (id("GET /d"), vec![(5, at("api/d.yaml"))]),
+        ]
+        .into();
+        let added: Side = [
+            (id("GET /a"), vec![(11, at("spec/a.yaml"))]),
+            (id("GET /b"), vec![(12, at("spec/a.yaml"))]),
+            (id("GET /c"), vec![(13, at("spec/a.yaml"))]),
+            (id("GET /d"), vec![(15, at("spec/d.yaml"))]),
+        ]
+        .into();
+        let renames = vec![("api/a.yaml".to_string(), "spec/a.yaml".to_string())];
+        let got = renamed_holders(&removed, &added, &renames);
+        assert_eq!(got, [(1, 11), (2, 12)].into());
     }
 
     #[test]

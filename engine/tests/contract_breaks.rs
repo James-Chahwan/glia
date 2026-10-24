@@ -1037,3 +1037,72 @@ fn a_union_client_root_is_judged_by_its_member() {
     );
     assert_eq!((b.breaking, b.advisory), (0, 2));
 }
+
+// ---- FD.25: a spec file moved with `git mv` pairs through the move ----------
+
+/// `git mv from to`, creating `to`'s directory first.
+fn move_file(repo: &GitRepo, from: &str, to: &str) {
+    if let Some(dir) = Path::new(to).parent() {
+        std::fs::create_dir_all(repo.root().join(dir)).expect("create the move's directory");
+    }
+    repo.git_mv(from, to);
+}
+
+/// FD.25: an OpenAPI spec and a proto file moved with `git mv`, otherwise
+/// untouched, report no `removed` / `added` row: their ops and messages pair
+/// through the rename and are judged unchanged.
+#[test]
+fn spec_moved_untouched_reports_nothing() {
+    let repo = GitRepo::init();
+    repo.write("api/openapi.yaml", ORDERS_V1);
+    repo.write("proto/shop.proto", SHOP_PROTO);
+    repo.commit("v1");
+    move_file(&repo, "api/openapi.yaml", "spec/orders/openapi.yaml");
+    move_file(&repo, "proto/shop.proto", "schemas/shop/v1/shop.proto");
+    let b = breaks(&repo, &backward());
+    assert!(
+        b.schemas
+            .iter()
+            .all(|r| r.change != "removed" && r.change != "added"),
+        "a move is no removed + added pair:\n{}",
+        dump(&b)
+    );
+    assert_eq!(b.breaking, 0, "{}", dump(&b));
+    assert!(b.schemas.is_empty(), "nothing changed:\n{}", dump(&b));
+}
+
+/// FD.25: a spec moved AND edited (below git's rename threshold) reports only
+/// its field change, located at the new path.
+#[test]
+fn spec_moved_and_edited_reports_only_the_field_change() {
+    let repo = GitRepo::init();
+    repo.write("api/openapi.yaml", ORDERS_V1);
+    repo.commit("v1");
+    move_file(&repo, "api/openapi.yaml", "spec/orders/openapi.yaml");
+    repo.write(
+        "spec/orders/openapi.yaml",
+        &ORDERS_V1.replace(
+            "                  total:\n                    type: number\n",
+            "",
+        ),
+    );
+    let b = breaks(&repo, &backward());
+    let s = only(&b);
+    assert_eq!(s.key, "GET /orders/{id}", "{}", dump(&b));
+    assert_ne!(s.change, "removed", "{}", dump(&b));
+    assert_ne!(s.change, "added", "{}", dump(&b));
+    assert_eq!(s.status, "breaking", "{}", dump(&b));
+    assert_eq!(s.changes.len(), 1, "{}", dump(&b));
+    assert_eq!(
+        (s.changes[0].field.as_str(), s.changes[0].rule),
+        ("total", "response_field_removed")
+    );
+    assert_eq!(
+        s.after.as_ref().and_then(|a| a.file.as_deref()),
+        Some("spec/orders/openapi.yaml")
+    );
+    assert_eq!(
+        s.before.as_ref().and_then(|a| a.file.as_deref()),
+        Some("api/openapi.yaml")
+    );
+}
