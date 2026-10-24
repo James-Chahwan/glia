@@ -15,6 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::CellPayload;
 use glia_engine::check::{
     ABSENT, CheckOptions, CheckReport, EMPTY_SCOPE, ORPHANED, REJECTED, Unanchored, check,
     check_with_roots,
@@ -599,5 +601,143 @@ fn whole_file_rejection_is_one_row() {
     assert_eq!(
         serde_json::to_string(&edge_only).unwrap(),
         serde_json::to_string(&check(&r.merged)).unwrap()
+    );
+}
+
+/// FD.65's environment switch: set, [`child_build_for_stderr`] builds that
+/// directory so the parent reads its `[declared]` markers.
+const CHILD_ENV: &str = "GLIA_FD65_CHILD_BUILD";
+
+/// The child half of [`declared_lines`]: a no-op unless the parent set
+/// [`CHILD_ENV`].
+#[test]
+fn child_build_for_stderr() {
+    if let Ok(dir) = std::env::var(CHILD_ENV) {
+        build(Path::new(&dir));
+    }
+}
+
+/// The `[declared]` stderr lines of a build of `dir`, from a child run of
+/// this test binary.
+fn declared_lines(dir: &Path) -> Vec<String> {
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "child_build_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ENV, dir)
+        .output()
+        .expect("re-run the test binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "child build failed: {stderr}");
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("[declared]"))
+        .map(String::from)
+        .collect()
+}
+
+/// `(qname, payload)` of every DECISION cell, sorted by qname.
+fn decision_cells(r: &GenerateResult) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for g in &r.merged.graphs {
+        for n in &g.nodes {
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::DECISION) {
+                let CellPayload::Json(s) = &c.payload else {
+                    panic!("DECISION is JSON, got {:?}", c.payload)
+                };
+                let q = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                out.push((q, s.clone()));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The least qname of the MODULEs that carry a POSITION cell (DT.7a's
+/// fallback for a repo with no root manifest, `.` taking every file).
+fn least_located_module(r: &GenerateResult) -> String {
+    r.merged
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter().map(move |n| (g, n)))
+        .filter(|(g, n)| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+        .filter(|(_, n)| n.cells.iter().any(|c| c.kind == cell_type::POSITION))
+        .filter_map(|(g, n)| g.nav.qname_by_id.get(&n.id).cloned())
+        .min()
+        .expect("a located MODULE")
+}
+
+/// FD.65: a `[[decision]]` without `anchor` anchors like a constraint
+/// (DT.7a): the PROJECT at its scope, else the deepest PROJECT above it,
+/// else the least-qname MODULE under it; only a scope with none of the three
+/// orphans it. The marker counts the enclosing / module binds in
+/// `anchor_enclosing` / `anchor_module` and the records among them in
+/// `records`. Decisions are records, so `glia check` lists none of them.
+/// Pre-fix baseline (HEAD b7a71406): no DECISION cell anywhere, `orphaned=4`,
+/// `scope=backend/internal/handlers -> backend/internal/handlers (no PROJECT)`.
+#[test]
+fn sub_scoped_decision_anchors_like_a_constraint() {
+    let overlay = r#"version = 1
+
+[[decision]]
+id = "handlers-thin"
+scope = "backend/internal/handlers"
+title = "handlers stay thin"
+
+[[decision]]
+id = "frontend-signals"
+scope = "frontend/src/app"
+title = "signals over stores"
+status = "accepted"
+
+[[decision]]
+id = "monorepo"
+title = "one repo"
+
+[[decision]]
+id = "ghost"
+scope = "ghost/dir"
+title = "a path no code sits under"
+"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fixture(tmp.path(), Some(overlay));
+    let r = build(&dir);
+    let module = least_located_module(&r);
+    let mut want = vec![
+        (
+            "project:backend".to_string(),
+            r#"[{"decl":".glia/overlay.toml:3","id":"handlers-thin","source":"overlay","title":"handlers stay thin"}]"#.to_string(),
+        ),
+        (
+            "project:frontend".to_string(),
+            r#"[{"decl":".glia/overlay.toml:8","id":"frontend-signals","source":"overlay","status":"accepted","title":"signals over stores"}]"#.to_string(),
+        ),
+        (
+            module.clone(),
+            r#"[{"decl":".glia/overlay.toml:14","id":"monorepo","source":"overlay","title":"one repo"}]"#.to_string(),
+        ),
+    ];
+    want.sort();
+    assert_eq!(decision_cells(&r), want);
+
+    // Records are not rules: check lists none of them, bound or orphaned.
+    let lax = check_with_roots(&r.merged, &roots(&r), &strict());
+    assert!(lax.unanchored.is_empty(), "{:?}", lax.unanchored);
+
+    let label = dir.to_str().unwrap();
+    assert_eq!(
+        declared_lines(&dir),
+        [
+            format!(
+                "[declared] repo={label} constraint=0 decision=4 note=0 anchored=3 orphaned=1 (anchor_qname=0 anchor_project=0 anchor_enclosing=2 anchor_module=1 records=3)"
+            ),
+            "[declared] orphaned decision id=ghost .glia/overlay.toml:18 scope=ghost/dir -> ghost/dir (no PROJECT at or above it, no MODULE under it)".to_string(),
+        ]
     );
 }

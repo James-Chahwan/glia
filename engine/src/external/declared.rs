@@ -24,18 +24,19 @@
 //!    `scope` for no_cycle / invariant, a decision's `scope` - resolves
 //!    through `answers::resolve_scope` (a project path, label or qname ->
 //!    its path); an absent, `.` or empty scope is the repo root, `.`.
-//!    - A constraint (DT.7a) binds the PROJECT of this repo at that path,
+//!    - A constraint (DT.7a) and a decision (FD.65) bind the PROJECT of
+//!      this repo at that path,
 //!      else the deepest PROJECT of this repo above it (a root PROJECT
 //!      encloses every path: `backend/internal/handlers` hangs on
 //!      `project:backend`), else the least-qname MODULE of this repo whose
 //!      POSITION file lies under it (the CC.5a component fallback, for a repo
 //!      with no root manifest; `.` takes any file); with none of the three it
-//!      is orphaned. Only where the entry is STORED depends on this: the
-//!      entry carries its scopes resolved, and `glia check` reads those,
-//!      never the node.
-//!    - A decision binds the PROJECT node of this repo whose path it is; a
-//!      path no PROJECT sits at orphans it: declare a `[[project]]` (LF.3a)
-//!      to give it one.
+//!      is orphaned. Only where the entry is STORED depends on this: a
+//!      constraint's entry carries its scopes resolved, and `glia check`
+//!      reads those, never the node. A decision is a record: before FD.65
+//!      only an exact PROJECT held one, and a sub-scoped decision was dropped
+//!      `(no PROJECT)`.
+//!    - A note has no scope: its `anchor` is required (rule 1 only).
 //!
 //! THE MODEL'S ANCHORS (CC.5a), after rule 1 (`anchor`, on a component or an
 //! allow; a layer takes none):
@@ -89,17 +90,18 @@
 //! or note (an allow is a constraint):
 //!   `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
 //! with ` anchor_enclosing=<e>` inside the parentheses only when a constraint
-//! bound through a PROJECT above its scope, then ` anchor_module=<m>` only
-//! when a constraint bound through a MODULE under its scope or an allow
-//! through its component's MODULE, and a trailing ` rejected=<x>` only when an
+//! or a decision bound through a PROJECT above its scope, then
+//! ` anchor_module=<m>` only when one bound through a MODULE under its scope
+//! or an allow through its component's MODULE, then ` records=<r>` only when
+//! decisions / notes (records, not rules) are among those enclosing / module
+//! binds (FD.65), and a trailing ` rejected=<x>` only when an
 //! entry failed its rules or met a cell that is not an entry array. Once per
 //! repo whose file declares a model (a component, a layer or an allow):
 //!   `[declared] model repo=<label> components=<c> layers=<l> allows=<a> anchored=<n> orphaned=<o>`
 //! (+ ` rejected=<x>`), counting those three kinds. Then one detail line per
 //! stanza that did not anchor, at most [`MAX_DETAIL_LINES`] per repo:
 //!   `[declared] orphaned <section> id=<id> <decl> anchor=<qname>`,
-//!   `[declared] orphaned constraint id=<id> <decl> scope=<raw> -> <path> (no PROJECT at or above it, no MODULE under it)`,
-//!   `[declared] orphaned decision id=<id> <decl> scope=<raw> -> <path> (no PROJECT)`,
+//!   `[declared] orphaned <constraint|decision> id=<id> <decl> scope=<raw> -> <path> (no PROJECT at or above it, no MODULE under it)`,
 //!   `[declared] orphaned component id=<id> <decl> path=<raw> -> <path> (no PROJECT or MODULE)` or
 //!   `[declared] orphaned <layer|constraint> id=<id> <decl> component=<name> (no root PROJECT; the component did not anchor)`.
 //!
@@ -139,10 +141,11 @@ enum Via {
     /// The PROJECT at the scope (a component's: at its first path, else the
     /// repo root's).
     Project,
-    /// A constraint's deepest PROJECT above its scope (DT.7a).
+    /// A constraint's or decision's deepest PROJECT above its scope (DT.7a,
+    /// FD.65).
     Enclosing,
     /// The least-qname MODULE under a component's first path (CC.5a) or a
-    /// constraint's scope (DT.7a).
+    /// constraint's or decision's scope (DT.7a, FD.65).
     Module,
 }
 
@@ -158,6 +161,8 @@ struct Tally {
     anchor_project: usize,
     anchor_enclosing: usize,
     anchor_module: usize,
+    /// Decisions / notes among the enclosing and module binds (FD.65).
+    records: usize,
     orphaned: usize,
     rejected: usize,
     component: usize,
@@ -177,6 +182,9 @@ impl Tally {
                 Via::Project => self.anchor_project += 1,
                 Via::Enclosing => self.anchor_enclosing += 1,
                 Via::Module => self.anchor_module += 1,
+            }
+            if st.record && matches!(via, Via::Enclosing | Via::Module) {
+                self.records += 1;
             }
         }
         if st.model {
@@ -201,12 +209,11 @@ impl Tally {
 enum Target {
     /// `anchor = <qname>`: binds, or orphans the stanza (never a fallback).
     Qname(String),
-    /// A decision's scope: the PROJECT at it, `None` the repo root's.
-    Scope(Option<String>),
-    /// A `[[constraint]]` (not an allow) without `anchor`: forbid_edge's
-    /// `from`, no_cycle / invariant's `scope` (`None` is the repo root). The
-    /// PROJECT at it, else the deepest PROJECT above it, else the least-qname
-    /// MODULE under it (DT.7a).
+    /// A `[[constraint]]` (not an allow) or a `[[decision]]` without
+    /// `anchor`: forbid_edge's `from`, no_cycle / invariant's and a
+    /// decision's `scope` (`None` is the repo root). The PROJECT at it, else
+    /// the deepest PROJECT above it, else the least-qname MODULE under it
+    /// (DT.7a; decisions since FD.65).
     RuleScope(Option<String>),
     /// A component without `anchor`: the PROJECT at `path` (its first
     /// resolved path, `raw` as written), else the root PROJECT, else this
@@ -228,6 +235,8 @@ struct Stanza {
     declared: bool,
     /// Counted on the model line (component / layer / allow).
     model: bool,
+    /// A record (decision / note), not a rule: counted in `records=`.
+    record: bool,
     /// A component's name: where it anchors is recorded for its layer and
     /// its allows.
     component: Option<String>,
@@ -380,7 +389,8 @@ impl Anchors {
             .or_else(|| self.module_under(merged, path).map(|id| (id, Via::Module)))
     }
 
-    /// Where a `[[constraint]]` without `anchor` hangs, its scope resolved
+    /// Where a `[[constraint]]` or `[[decision]]` without `anchor` hangs, its
+    /// scope resolved
     /// to `path` (see the module docs, ANCHOR rule 2).
     fn rule_anchor(&mut self, merged: &MergedGraph, path: &str) -> Option<(NodeId, Via)> {
         self.project_at(path)
@@ -525,6 +535,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             target,
             declared: false,
             model: true,
+            record: false,
             component: Some(d.name.clone()),
             reject,
             entry,
@@ -557,6 +568,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             },
             declared: false,
             model: true,
+            record: false,
             component: None,
             reject: None,
             entry,
@@ -594,6 +606,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
                 target,
                 declared: true,
                 model: true,
+                record: false,
                 component: None,
                 reject: None,
                 entry,
@@ -656,6 +669,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
                 .map_or(Target::RuleScope(scope), Target::Qname),
             declared: true,
             model: false,
+            record: false,
             component: None,
             reject: None,
             entry,
@@ -680,9 +694,10 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             target: d
                 .anchor
                 .clone()
-                .map_or(Target::Scope(d.scope.clone()), Target::Qname),
+                .map_or(Target::RuleScope(d.scope.clone()), Target::Qname),
             declared: true,
             model: false,
+            record: true,
             component: None,
             reject: None,
             entry,
@@ -709,6 +724,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             target: Target::Qname(d.anchor.clone()),
             declared: true,
             model: false,
+            record: true,
             component: None,
             reject: None,
             entry,
@@ -722,9 +738,8 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
 enum Unbound {
     /// `anchor = <qname>` binds nothing in this repo.
     Anchor(String),
-    /// A decision's scope: no PROJECT of this repo at the path.
-    DecisionScope { raw: String, path: String },
-    /// A constraint's scope: no PROJECT at or above it, no MODULE under it.
+    /// A constraint's or decision's scope: no PROJECT at or above it, no
+    /// MODULE under it.
     RuleScope { raw: String, path: String },
     /// A component's first path: no PROJECT there or at the root, no MODULE
     /// under it.
@@ -739,7 +754,6 @@ impl Unbound {
     fn detail(&self) -> String {
         match self {
             Unbound::Anchor(q) => format!("anchor={q}"),
-            Unbound::DecisionScope { raw, path } => format!("scope={raw} -> {path} (no PROJECT)"),
             Unbound::RuleScope { raw, path } => {
                 format!("scope={raw} -> {path} (no PROJECT at or above it, no MODULE under it)")
             }
@@ -778,14 +792,6 @@ fn bind_stanza(
             .by_qname(q)
             .map(|id| (id, Via::Qname))
             .ok_or_else(|| Unbound::Anchor(q.clone())),
-        Target::Scope(scope) => {
-            let raw = scope.clone().unwrap_or_default();
-            let path = anchors.path_of(merged, &raw);
-            match anchors.project_at(&path) {
-                Some(id) => Ok((id, Via::Project)),
-                None => Err(Unbound::DecisionScope { raw, path }),
-            }
-        }
         Target::RuleScope(scope) => {
             let raw = scope.clone().unwrap_or_default();
             let path = anchors.path_of(merged, &raw);
@@ -927,7 +933,7 @@ fn report(label: &str, t: &Tally) {
     };
     if t.constraint + t.decision + t.note > 0 {
         eprintln!(
-            "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}){}",
+            "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}{}){}",
             t.constraint,
             t.decision,
             t.note,
@@ -937,6 +943,7 @@ fn report(label: &str, t: &Tally) {
             t.anchor_project,
             nonzero("anchor_enclosing", t.anchor_enclosing),
             nonzero("anchor_module", t.anchor_module),
+            nonzero("records", t.records),
             nonzero("rejected", t.rejected),
         );
     }
@@ -1403,9 +1410,6 @@ fn fix_for(
                     "this repo has no PROJECT and no located MODULE to hang a component on: declare a [[project]] at `{path}`"
                 ),
             }
-        }
-        Unbound::DecisionScope { path, .. } => {
-            format!("declare a [[project]] at `{path}`, or set `anchor`")
         }
         Unbound::Model { component } if !declared.contains(component.as_str()) => {
             format!(

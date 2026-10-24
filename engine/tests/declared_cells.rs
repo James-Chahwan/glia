@@ -1,8 +1,8 @@
 //! LF.4a: `.glia/overlay.toml` `[[constraint]]`, `[[decision]]` and
 //! `[[note]]` stanzas land as CONSTRAINT / DECISION / CONV entries on the node
 //! each anchors on - an `anchor` qname, else the PROJECT node its scope names
-//! (for a constraint, DT.7a: else the deepest PROJECT above its scope, else
-//! the least-qname MODULE under it) - and a build with them is as
+//! (for a constraint, DT.7a, and a decision, FD.65: else the deepest PROJECT
+//! above its scope, else the least-qname MODULE under it) - and a build with them is as
 //! byte-reproducible as one without.
 //!
 //! The layout and overlay file are the substrate-gap fixture
@@ -330,10 +330,12 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
     );
 }
 
-/// A constraint scope with no PROJECT at or above it and no MODULE under it,
-/// a decision scope no PROJECT sits at, and an anchor no node carries are
-/// orphaned; the unscoped rule in this repo without a root manifest is not
-/// (DT.7a: it hangs on the least-qname MODULE (FD.22), and is the one cell written).
+/// A constraint scope with no PROJECT at or above it and no MODULE under it
+/// and an anchor no node carries are orphaned; the unscoped rule in this repo
+/// without a root manifest is not (DT.7a: it hangs on the least-qname MODULE
+/// (FD.22), the one CONSTRAINT cell written), and neither is the decision
+/// scoped inside `web` (FD.65: it hangs on the enclosing `project:web`, where
+/// before it orphaned `scope=web/src -> web/src (no PROJECT)`).
 #[test]
 fn orphan_scope_is_counted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -360,13 +362,18 @@ text = \"stale anchor\"
 ";
     let dir = repo(tmp.path(), Some(overlay), None);
     let r = generate_one(&dir).unwrap();
-    for t in [cell_type::DECISION, cell_type::CONV] {
-        assert!(
-            all_of(&r, t).is_empty(),
-            "cell {t:?} was written: {:?}",
-            all_of(&r, t)
-        );
-    }
+    assert!(
+        all_of(&r, cell_type::CONV).is_empty(),
+        "cell CONV was written: {:?}",
+        all_of(&r, cell_type::CONV)
+    );
+    assert_eq!(
+        cell(&r, "project:web", cell_type::DECISION),
+        [
+            r#"[{"decl":".glia/overlay.toml:13","id":"d","source":"overlay","title":"a path that is not a project"}]"#
+        ]
+    );
+    assert_eq!(all_of(&r, cell_type::DECISION).len(), 1);
     let (_, module) = least_module_under(&r, ".");
     assert_eq!(
         cell(&r, &module, cell_type::CONSTRAINT),
@@ -382,9 +389,8 @@ text = \"stale anchor\"
     assert_eq!(
         declared_lines(&dir),
         [
-            format!("[declared] repo={dir} constraint=2 decision=1 note=1 anchored=1 orphaned=3 (anchor_qname=0 anchor_project=0 anchor_module=1)"),
+            format!("[declared] repo={dir} constraint=2 decision=1 note=1 anchored=2 orphaned=2 (anchor_qname=0 anchor_project=0 anchor_enclosing=1 anchor_module=1 records=1)"),
             "[declared] orphaned constraint id=nope-acyclic .glia/overlay.toml:3 scope=nope -> nope (no PROJECT at or above it, no MODULE under it)".to_string(),
-            "[declared] orphaned decision id=d .glia/overlay.toml:13 scope=web/src -> web/src (no PROJECT)".to_string(),
             "[declared] orphaned note id=note#1 .glia/overlay.toml:18 anchor=services::api::app::gone".to_string(),
             "[declared] rules=1 (forbid_edge=0 no_cycle=0 invariant=1)".to_string(),
         ]
