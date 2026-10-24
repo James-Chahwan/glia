@@ -625,6 +625,28 @@ the loop's commands and its rules.
    `[[wrapper]]`, `[[route_prefix]]` or constant is never a rule row: a person removes one that
    stopped doing anything.
 
+What `gaps` withholds. Three kinds of unpaired row are not blind spots, so `gaps` keeps them out
+and counts them on stderr instead; no stanza is needed for any of them:
+
+- **Implied GraphQL transports** (DT.11c). An `unpaired_endpoint` that is a GraphQL transport (an
+  ENDPOINT with `"via":"graphql"`, the URL an Apollo / urql / graphql-request client posts to) is no
+  row when its project's operations pair a resolver on a server that holds no route at the
+  transport's last path segment: the server is reached, glia just reads no route for its GraphQL
+  mount. Every other unpaired transport stays a row whose `detail` starts `graphql transport; `,
+  followed by `route_at_server=<qname> (<repo>)` when a paired server holds a route at that
+  segment (glia reads the mount, so the miss is a real path mismatch). Marker, once per report
+  that computes `unpaired_endpoint`, when either count is nonzero:
+  `[gaps] graphql transports implied=<n> unpaired=<m>`.
+- **Test-file routes** (DT.6b). A ROUTE only test code registers (ORIGIN `test_fixture`: a built-in
+  test path or a `[walk] tests` pattern) is no `unpaired_route` row, and `unpaired_endpoint`'s
+  `suffix_of` / `route_prefix|edge` candidates and `suspected_edge` skip it too. Marker, when any
+  is withheld: `[gaps] unpaired_route rows withheld: <n> (test-file routes)`; the `rows=` line's
+  `unpaired_route=` counts what is left.
+- **WS-served routes** (DT.3c). A ROUTE with no incoming HTTP_CALLS that a WebSocket client
+  connects through (an HTTP route that upgrades the connection) is served, so it is no
+  `unpaired_route` row. Marker, once per report before its `rows=` line, when any is withheld:
+  `[gaps] ws-served routes=<n>`.
+
 The verdict. `try` (per stanza and for the whole candidate) and `glia gaps <repo> --overlay-delta`
 (for the whole file) judge by one rule. The overlay *improved* the graph when some gap category
 fell, or some node kind or edge category other than `DEFINES` / `CONTAINS` rose; it *regressed* it

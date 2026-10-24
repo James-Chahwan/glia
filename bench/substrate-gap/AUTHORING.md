@@ -48,7 +48,7 @@ first four rows are pinned by `test_matrix.py`
 | `HTTP_CALLS` `GRPC_CALLS` `RPC_CALLS` | yes | `xstack-go-http`, `xcut-grpc-grpc_calls`, `xcut-trpc`: 1 → 1 |
 | `QUEUE_FLOWS` `WS_CONNECTS` `GRAPHQL_CALLS` `EVENT_FLOWS` | yes | `xcut-queue-queue_flows`, `xcut-websocket-ws_connects`, `xcut-graphql-graphql_calls`, `xcut-eventbus-spring`: 1 → 1 |
 | `CLI_INVOKES` | yes | `xcli-invokes`: 2 → 2 |
-| `SHARES_*` (all seven) | **no** — same-repo pairs are skipped | `xschema-csharp-namespace` `SHARES_SCHEMA`, `xdata-source-shares` `SHARES_DATA_SOURCE`, `xiac-terraform-k8s` `SHARES_INFRA_REF`, `xpoly-data-entity` `SHARES_DATA_ENTITY`: 1 → 0 |
+| `SHARES_*` (the six emitted; 31 `SHARES_DEPENDENCY` has had no emitter since DD.16) | **no** — same-repo pairs are skipped | `xschema-csharp-namespace` `SHARES_SCHEMA`, `xdata-source-shares` `SHARES_DATA_SOURCE`, `xiac-terraform-k8s` `SHARES_INFRA_REF`, `xpoly-data-entity` `SHARES_DATA_ENTITY`: 1 → 0 |
 | stack edge, different count | yes, but not the same edges | `matrix/python/amqp`, `matrix/csharp/amqp` `QUEUE_FLOWS` 2 → 1 (same-qname merge); `xstack-host-pairing` `HTTP_CALLS` 2 → 4 (host narrowing is per repo) |
 
 The scaffolder **refuses to overwrite** an existing cell without `--force`,
@@ -236,3 +236,10 @@ the intended queue path had.
   top-level field, and a raising fixture drops out of the matrix entirely. An
   `expect_nodes` / `expect_edges` entry may also carry `"exact": true` (a JSON
   boolean) for strict identity, when two nodes share a name prefix.
+  A `forbid` edge row may carry `"rule": "<evidence rule>"` (a non-empty
+  string, FD.24): it then fires only on a matching edge whose EVIDENCE cell's
+  rule equals it, read through `PyGraph.why`, so one mechanism's edge can be
+  forbidden while another mechanism's edge between the same two nodes stays
+  legal (`models-go-wire`: no `json_response` USES from `Fleet::Get` to the 404
+  `Problem`, while DT.5j's `composite_literal` USES to it is correct). Such a
+  row prints `forbid rule=<r>` in grade.py's verbose label.

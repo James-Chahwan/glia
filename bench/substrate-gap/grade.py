@@ -36,7 +36,9 @@ key.json schema:
     "forbid": [                            # PRECISION: must NOT be emitted
       {"kind": "ROUTE", "name": "/users"},                 # no such node
       {"kind": "ROUTE", "name": "/users", "max_nodes": 1}, # at most N such
-      {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}  # no edge
+      {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}, # no edge
+      {"from": "Get", "to": "Problem", "category": "USES",
+       "rule": "json_response"}         # no such edge WITH this EVIDENCE rule
     ],
     "expect_cells": [                      # cell-level ground truth
       {"kind": "ENDPOINT", "node": "GET /users", "cell": "POSITION",
@@ -109,7 +111,7 @@ TOP_FIELDS = {
 NODE_FIELDS = {"kind", "name", "exact", "note"}
 EDGE_FIELDS = {"from", "to", "category", "exact", "note"}
 FORBID_NODE_FIELDS = {"kind", "name", "max_nodes", "note"}
-FORBID_EDGE_FIELDS = {"from", "to", "category", "note"}
+FORBID_EDGE_FIELDS = {"from", "to", "category", "rule", "note"}
 CELL_FIELDS = {"kind", "node", "cell", "contains", "note"}
 
 
@@ -284,12 +286,28 @@ def _recall_edge_hit(fixture, where, edges, by_id, cat_id, exp):
     return False
 
 
-def _grade_forbid(fixture, key, nodes, edges, by_id):
+def _evidence_rules(g, fr, to, category):
+    """The EVIDENCE rule of every `category` edge fr -> to, as `why` reads it.
+
+    `edges_json()` carries no edge cells, so the rule comes from
+    `PyGraph.why(from_qname, to_qname, category)`, whose direct-edge rows hold
+    each edge's EVIDENCE emitter and rule. Rows are filtered back to the two
+    node ids, so a second node sharing a qname never lends its edge's rule.
+    """
+    ans = g.why(fr["qname"], to["qname"], category)
+    return [r.get("rule") for r in (ans or {}).get("edges", [])
+            if r.get("from_id") == fr["id"] and r.get("to_id") == to["id"]]
+
+
+def _grade_forbid(fixture, key, nodes, edges, by_id, g=None):
     """PRECISION gate: things that must NOT be emitted.
 
     Strict identity (`_node_matches_exact`), NOT the recall gates' substring
     matcher — see that function for why. Kind/category ids are strict here as
-    they are everywhere.
+    they are everywhere. An edge row with `rule` fires only on a matching edge
+    whose EVIDENCE cell's rule equals it (FD.24), read through `g.why`, so a
+    key can forbid one mechanism's edge while another mechanism's edge between
+    the same two nodes stays legal.
     """
     results = []
     for i, exp in enumerate(key.get("forbid", [])):
@@ -300,13 +318,25 @@ def _grade_forbid(fixture, key, nodes, edges, by_id):
             cat_id = _CAT_BY_NAME.get(exp["category"])
             if cat_id is None:
                 raise ValueError(f"{fixture}: unknown category {exp['category']!r}")
+            rule = exp.get("rule")
+            if "rule" in exp and (not isinstance(rule, str) or not rule):
+                raise ValueError(f"{fixture}: {where} field 'rule' must be a non-empty string, got {rule!r}")
+            if rule is not None and g is None:
+                raise ValueError(f"{fixture}: {where} filters by rule but no graph was given")
             count = 0
+            pairs = set()
             for e in edges:
                 if e["category"] != cat_id:
                     continue
                 fr, to = by_id.get(e["from"]), by_id.get(e["to"])
                 if fr and to and _node_matches_exact(fr, exp["from"]) and _node_matches_exact(to, exp["to"]):
-                    count += 1
+                    if rule is None:
+                        count += 1
+                    else:
+                        pairs.add((e["from"], e["to"]))
+            for f_id, t_id in sorted(pairs):
+                count += sum(1 for r in _evidence_rules(g, by_id[f_id], by_id[t_id], exp["category"])
+                             if r == rule)
             limit = 0
         else:  # --- node form ---
             _reject_unknown(fixture, exp, FORBID_NODE_FIELDS, f"key.json field in {where}")
@@ -416,7 +446,7 @@ def grade_fixture(fixture_dir):
         slot["recall"] = slot["found"] / slot["expected"] if slot["expected"] else None
 
     # ---- precision gate + cell-level recall (frozen vocabulary) ----
-    forbid_results = _grade_forbid(fixture, key, nodes, edges, by_id)
+    forbid_results = _grade_forbid(fixture, key, nodes, edges, by_id, g)
     cell_results = _grade_cells(fixture, key, g, nodes)
     per_cell = {}
     for r in cell_results:
@@ -490,6 +520,7 @@ def _print_verbose(res):
         for r in res["forbid_results"]:
             mark = "XX " if r["violated"] else "OK "
             what = (f"{r['category']:<14} {r['from']!r} -> {r['to']!r}"
+                    + (f" forbid rule={r['rule']}" if r.get("rule") else "")
                     if "category" in r else
                     f"{r['kind']:<14} {r.get('name', '*')!r}")
             print(f"    {mark} {what}  matched={r['matched']} "

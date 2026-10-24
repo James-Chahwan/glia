@@ -14,10 +14,17 @@ CA.8 added `"exact": true` on expect_nodes / expect_edges entries: the recall
 gate then uses the strict matcher, so `get_user -> helper` is no longer
 satisfied by `get_user_impl -> helper`. The checks below pin that over-match,
 its fix, and that an entry without `exact` grades as before.
+
+FD.24 added `rule` on forbid edge rows: the row fires only on an edge whose
+EVIDENCE rule equals it (read through `PyGraph.why`). The checks below pin that
+a json_response USES edge fires such a row while a composite_literal one between
+the same two nodes does not, and that models-go-wire's real build both holds the
+restored json_response guard and fires a composite_literal row.
 """
 import contextlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -26,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from grade import (  # noqa: E402
     _CAT_BY_NAME, _KIND_BY_NAME, CELL_FIELDS, EDGE_FIELDS, FORBID_EDGE_FIELDS,
     FORBID_NODE_FIELDS, NODE_FIELDS, _node_matches, _node_matches_exact,
-    _print_verbose, _recall_edge_hit, _recall_node_hit, grade_fixture,
+    _grade_forbid, _print_verbose, _recall_edge_hit, _recall_node_hit, grade_fixture,
 )
 
 FAILED = []
@@ -163,6 +170,82 @@ with tempfile.TemporaryDirectory(prefix="ca8-exact-") as tmp:
         _print_verbose(res)
     check("an exact row prints [exact] after the category",
           "CALLS          [exact] 'get_user'" in out.getvalue())
+
+# ---- FD.24: forbid edge rows filtered by EVIDENCE rule ---------------------
+class _FakeWhy:
+    """A graph stand-in: `why` answers one direct edge per (from, to) with a rule."""
+
+    def __init__(self, rules):
+        self.rules = rules  # (from_id, to_id) -> [rule, ..]
+        self.calls = []
+
+    def why(self, from_qname, to_qname, category):
+        self.calls.append((from_qname, to_qname, category))
+        return {"edges": [{"from_id": f, "to_id": t, "rule": r}
+                          for (f, t), rs in sorted(self.rules.items()) for r in rs]}
+
+
+GET = {"id": 1, "name": "Get", "qname": "web::fleet::Fleet::Get"}
+PROBLEM = {"id": 2, "name": "Problem", "qname": "models::vehicle::Problem"}
+USES = _CAT_BY_NAME["USES"]
+FD24_NODES = [GET, PROBLEM]
+FD24_EDGES = [{"from": 1, "to": 2, "category": USES}]
+FD24_BY_ID = {1: GET, 2: PROBLEM}
+RULE_ROW = {"from": "web::fleet::Fleet::Get", "to": "models::vehicle::Problem",
+            "category": "USES", "rule": "json_response"}
+
+check("FORBID_EDGE_FIELDS admits `rule`", "rule" in FORBID_EDGE_FIELDS)
+fired = _grade_forbid("fd24", {"forbid": [RULE_ROW]}, FD24_NODES, FD24_EDGES, FD24_BY_ID,
+                      _FakeWhy({(1, 2): ["json_response"]}))
+check("a json_response USES edge to Problem fires the rule row",
+      fired[0]["violated"] and fired[0]["matched"] == 1)
+held = _grade_forbid("fd24", {"forbid": [RULE_ROW]}, FD24_NODES, FD24_EDGES, FD24_BY_ID,
+                     _FakeWhy({(1, 2): ["composite_literal"]}))
+check("a composite_literal USES edge to Problem does not fire it",
+      not held[0]["violated"] and held[0]["matched"] == 0)
+other = _grade_forbid("fd24", {"forbid": [RULE_ROW]}, FD24_NODES, FD24_EDGES, FD24_BY_ID,
+                      _FakeWhy({(1, 3): ["json_response"]}))
+check("a same-qname edge to another node id lends no rule", not other[0]["violated"])
+plain = {k: v for k, v in RULE_ROW.items() if k != "rule"}
+no_rule = _grade_forbid("fd24", {"forbid": [plain]}, FD24_NODES, FD24_EDGES, FD24_BY_ID)
+check("a row without `rule` still fires on any matching edge, no graph needed",
+      no_rule[0]["violated"])
+for bad in ("", 1, None):
+    try:
+        _grade_forbid("fd24", {"forbid": [{**RULE_ROW, "rule": bad}]}, FD24_NODES,
+                      FD24_EDGES, FD24_BY_ID, _FakeWhy({}))
+        ok = False
+    except ValueError:
+        ok = True
+    check(f"forbid rule={bad!r} is rejected (a rule is a non-empty string)", ok)
+try:
+    _grade_forbid("fd24", {"forbid": [RULE_ROW]}, FD24_NODES, FD24_EDGES, FD24_BY_ID)
+    check("a rule row with no graph raises", False)
+except ValueError:
+    check("a rule row with no graph raises", True)
+# End to end on models-go-wire's real build: the restored guard holds, and the
+# same row with DT.5j's composite_literal rule fires on Get's real USES edge.
+with tempfile.TemporaryDirectory(prefix="fd24-rule-") as tmp:
+    fx = Path(tmp) / "models-go-wire"
+    shutil.copytree(Path(__file__).parent / "fixtures" / "models-go-wire", fx)
+    key = json.loads((fx / "key.json").read_text())
+    check("models-go-wire key carries the json_response forbid row",
+          any(r.get("rule") == "json_response" and r["to"] == "models::vehicle::Problem"
+              for r in key["forbid"]))
+    key["forbid"].append({**RULE_ROW, "rule": "composite_literal"})
+    (fx / "key.json").write_text(json.dumps(key))
+    with contextlib.redirect_stderr(io.StringIO()):
+        res = grade_fixture(fx)
+    by_rule = {r.get("rule"): r for r in res["forbid_results"] if r.get("rule")}
+    check("models-go-wire: no json_response USES Get -> Problem",
+          not by_rule["json_response"]["violated"])
+    check("models-go-wire: the composite_literal USES Get -> Problem fires a rule row",
+          by_rule["composite_literal"]["violated"] and by_rule["composite_literal"]["matched"] == 1)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        _print_verbose(res)
+    check("a rule row prints `forbid rule=<r>` in its label",
+          "'models::vehicle::Problem' forbid rule=json_response  matched=0" in out.getvalue())
 
 print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")
 sys.exit(1 if FAILED else 0)

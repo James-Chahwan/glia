@@ -95,12 +95,14 @@ EDGE_CATEGORIES = {
     28: "INFRA_REFERENCES",
     29: "SHARES_INFRA_REF",
     30: "DEPENDS_ON",
-    31: "SHARES_DEPENDENCY",
+    # 31 SHARES_DEPENDENCY stays a registered id (never reused) but no resolver
+    # emits it since 0.5.2 removed PackageResolver (DD.16): a shared package is
+    # a SAME_AS identity class now, so 31 is in none of these tables.
 }
 
 # Cross-graph categories — emitted by resolvers, never by per-file extractors.
 CROSS_EDGE_CATS = {
-    10, 11, 12, 13, 14, 15, 16, 17, 22, 24, 27, 29, 31,
+    10, 11, 12, 13, 14, 15, 16, 17, 22, 24, 27, 29,
 }
 
 # Categories specifically relevant to the v0.4.x new resolvers.
@@ -109,7 +111,6 @@ NEW_RESOLVER_CATS = {
     24: "SHARES_CRON_SCHEDULE",
     27: "SHARES_CONFIG",
     29: "SHARES_INFRA_REF",
-    31: "SHARES_DEPENDENCY",
 }
 
 # v0.4.x new node kinds — substrate the new resolvers depend on.
@@ -226,7 +227,6 @@ def report(results: list[dict], merged_summary: dict | None = None) -> str:
         ("CronResolver", 37, 24),
         ("ConfigResolver", 38, 27),
         ("IacResolver", 39, 29),
-        ("PackageResolver", 40, 31),
     ]
     for name, kind_id, cross_cat_id in rows:
         n = agg_kinds.get(kind_id, 0)

@@ -256,7 +256,7 @@ MECHANISMS = [
      "literal": "the service name in the node name/qname",
      "categories": ["HTTP_CALLS", "GRPC_CALLS", "QUEUE_FLOWS", "GRAPHQL_CALLS",
                     "WS_CONNECTS", "EVENT_FLOWS", "SHARES_SCHEMA", "SHARES_DATA_ENTITY",
-                    "SHARES_CONFIG", "SHARES_DEPENDENCY", "SHARES_INFRA_REF",
+                    "SHARES_CONFIG", "SHARES_INFRA_REF",
                     "SHARES_CRON_SCHEDULE"],
      "cross_repo": True,
      "note": "the roll-up column: any cross-service routing edge at all. Extraction "
@@ -278,13 +278,16 @@ MECHANISM_IDS = [m["id"] for m in MECHANISMS]
 # The cross-graph categories that appear ONLY when the build has two separate
 # RepoIds: their resolvers pair a shared name across repos and skip same-repo
 # pairs (graph/src/resolvers/mod.rs emit_cross_repo_pairs, and the equivalent
-# check in config / cron / iac / package / shared_schema / db). Every other
+# check in config / cron / iac / shared_schema / db). Every other
 # cross-graph category pairs inside one repo. Module level, NOT a MECHANISMS
 # field, so the vocabulary digest does not move. test_matrix.py
 # test_single_dir_pairing_matches_the_vocabulary holds real builds to it.
+# Edge category 31 SHARES_DEPENDENCY (registered, never reused) is in neither
+# list: no resolver emits it since 0.5.2 removed PackageResolver (DD.16); a
+# shared package is a SAME_AS identity class now.
 REPO_PAIRWISE_CATEGORIES = frozenset({
     "SHARES_SCHEMA", "SHARES_DATA_ENTITY", "SHARES_DATA_SOURCE", "SHARES_CONFIG",
-    "SHARES_INFRA_REF", "SHARES_DEPENDENCY", "SHARES_CRON_SCHEDULE",
+    "SHARES_INFRA_REF", "SHARES_CRON_SCHEDULE",
 })
 
 # The cell type a `role_cells` mechanism reads (LB.3a, cell_type ROLE). Module

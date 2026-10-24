@@ -51,7 +51,12 @@ exec 9>"$TARGET/.check.lock"
 command -v flock >/dev/null && flock 9   # one run at a time: the copy is rebuilt in place
 
 # Copy everything but target/ (src, examples, tests, Cargo.lock); tar keeps mtimes, so an
-# unchanged crate is not recompiled.
+# unchanged crate is not recompiled. A kept mtime can also hide an edit: a file written with an
+# older mtime (a `git archive` GLIA_ROOT, a checkout, `touch -d`) looks unchanged to cargo, which
+# then runs the last binary. So the copy's content hash (taken after the rewrites below) is
+# compared with the one the last green run recorded, and on any difference every copied file is
+# touched, so this run compiles what is on disk (FD.24). The hash is recorded only after a green
+# run: a failed build leaves no fingerprint, so the next run must not trust old mtimes either.
 rm -rf "$SRC" && mkdir -p "$SRC" || fail "reset $SRC"
 tar --exclude=./target -C "$CRATE" -cf - . | tar -C "$SRC" -xf - || fail "copy of $CRATE"
 
@@ -64,6 +69,14 @@ stray=$(grep -nE 'path[[:space:]]*=[[:space:]]*"[^/"]' "$SRC/Cargo.toml")
 [ -z "$stray" ] || fail "relative path dep left unrewritten: $stray"
 grep -q '^\[workspace\]' "$SRC/Cargo.toml" || printf '\n[workspace]\n' >> "$SRC/Cargo.toml"
 [ "$CANARY" = 1 ] && printf '\nconst _: () = assert!(false, "engram-export check canary");\n' >> "$SRC/src/lib.rs"
+
+STAMP=$TARGET/.check-src.sha256
+src_hash() { (cd "$SRC" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); }
+HASH=$(src_hash) || fail "hash of $SRC"
+if [ "$(cat "$STAMP" 2>/dev/null)" != "$HASH" ]; then
+  find "$SRC" -type f -exec touch {} + || fail "touch of $SRC"
+  say "sources changed since the last green check: recompiling the copy"
+fi
 
 eng_lock() { stat -c %Y "$ENGRAM/Cargo.lock" 2>/dev/null; sha256sum < "$ENGRAM/Cargo.lock" 2>/dev/null; }
 E0=$(eng_lock)
@@ -81,6 +94,7 @@ if [ "$rc" != 0 ]; then
   say "full cargo output: $TARGET/check-last.log"
   fail "$step rc=$rc"
 fi
+printf '%s\n' "$HASH" > "$STAMP" || fail "write of $STAMP"
 passed=$(printf '%s\n' "$out" | grep -oE 'test result: ok\. [0-9]+ passed' | awk '{s += $4} END {print s + 0}')
 
 # Drift: packages whose [[package]] entry (version, source, dependencies) differs between the
