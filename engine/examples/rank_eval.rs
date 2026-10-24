@@ -121,6 +121,17 @@
 //! `--gate-pair "<a>,<b>;.." --gate-new <run.json> [--gate-shape find]` prints each pair's paired
 //! r10 diff and bootstrap CI (`[rank-gate] pair label=<l> shape=find a=<a> b=<b> metric=r10
 //! diff=.. ci=[..]`); scripts/embedding-gate.sh runs both and judges.
+//!
+//! The fusion gate (0.5.4, FB.6b): `--sem on` also appends LX[IDR,FUSE[T1s,SEMp:t2]] (F2: the
+//! shipped find --files order LX[IDR,T1s] with its BM25 key replaced by FUSE[T1s,SEMp:t2], F1),
+//! after the FB.6 rows, so no FB.6 row moves. `--test-after <rev>` holds every commit reachable
+//! from <rev> (`git rev-list <rev>` in `--git`) out of the test window, so the test commits are
+//! the newest `--max-commits` test-eligible commits newer than <rev> (training still replays
+//! every strictly older commit): `[rank_eval] test-after label=<l> rev=<r12> held_out=<h>
+//! eligible=<e> test=<t>`. `--window-only on` prints the test window and stops after the history
+//! read (no ranker runs): `[rank_eval] window label=<l> rev=<r12> test=<t> first=<sha> last=<sha>`,
+//! its shas written to `--out`. Every run's JSON `stats` gains `test_shas` (oldest first).
+//! scripts/embedding-gate.sh `fusion-preview` / `fusion-verdict` run and judge it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -328,6 +339,10 @@ struct Args {
     gate_pair: String,
     /// `--gate-pair`'s shape (default `find`).
     gate_shape: String,
+    /// FB.6b: hold every commit reachable from this rev out of the test window (default: none).
+    test_after: String,
+    /// FB.6b: `on` prints the test window and stops before any ranker runs (default off).
+    window_only: String,
 }
 
 fn parse_args() -> Args {
@@ -383,6 +398,8 @@ fn parse_args() -> Args {
         sem_cache: "rank_eval_sem".into(),
         gate_pair: String::new(),
         gate_shape: "find".into(),
+        test_after: String::new(),
+        window_only: "off".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -440,6 +457,8 @@ fn parse_args() -> Args {
             "--sem-cache" => a.sem_cache = v,
             "--gate-pair" => a.gate_pair = v,
             "--gate-shape" => a.gate_shape = v,
+            "--test-after" => a.test_after = v,
+            "--window-only" => a.window_only = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -457,6 +476,10 @@ fn parse_args() -> Args {
         "--engine on needs --round1 on --round2 on"
     );
     assert!(a.sem == "on" || a.sem == "off", "--sem: expected on or off");
+    assert!(
+        a.window_only == "on" || a.window_only == "off",
+        "--window-only: expected on or off"
+    );
     assert!(
         a.sem == "off" || a.round3 == "on",
         "--sem on needs --round3 on (the find shape)"
@@ -2034,6 +2057,29 @@ impl SemCache {
     }
 }
 
+/// FB.6b `--test-after <rev>`: every commit reachable from <rev> in `--git` (`git rev-list`),
+/// held out of the test window; empty without the flag. Looked up only, never iterated.
+fn test_after_set(args: &Args) -> HashSet<String> {
+    if args.test_after.is_empty() {
+        return HashSet::new();
+    }
+    let out = Command::new("git")
+        .args(["-C", &args.git, "rev-list", &args.test_after])
+        .output()
+        .expect("git rev-list");
+    assert!(
+        out.status.success(),
+        "--test-after {}: git rev-list failed: {}",
+        args.test_after,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 /// Builds the semantic rankers' inputs (`--sem on`): the node texts of every candidate file's
 /// EMBED_KINDS nodes per recipe (`semantic::embed_text`, the shipped text), each embedded once
 /// into the cache (`--sem-cache`), the control vectors, and the test commits' subjects (raw and
@@ -2176,8 +2222,10 @@ fn sem_ctx(
 /// random node vectors) and FUSE[T1s,<sem>] = 0.5 minmax(T1s) + 0.5 minmax(<sem>) (`blend` over
 /// `mm_ex`, the find bank's own fusion; a file with no embedded node takes the lowest score
 /// present, so its min-max is 0; ties go to the file's degree, as the bank's scalar fusions'
-/// do). No seed is excluded: the find shape has none.
-fn sem_keys_find(ctx: &Ctx, sem: &SemCtx, tc: usize, t1s: &[f64]) -> NamedKeys {
+/// do). No seed is excluded: the find shape has none. Last, FB.6b's F2 =
+/// LX[IDR,FUSE[T1s,SEMp:t2]]: key `[IDR, FUSE[T1s,SEMp:t2], degree]`, the bank's LX[IDR,T1s]
+/// (`[IDR, T1s, degree]`) with its second key replaced by the blend, so ids still route first.
+fn sem_keys_find(ctx: &Ctx, sem: &SemCtx, tc: usize, t1s: &[f64], idr: &[f64]) -> NamedKeys {
     let g = ctx.g;
     let nf = g.paths.len();
     let none = vec![false; nf];
@@ -2216,7 +2264,20 @@ fn sem_keys_find(ctx: &Ctx, sem: &SemCtx, tc: usize, t1s: &[f64]) -> NamedKeys {
         fused.push((format!("FUSE[T1s,{name}]"), fuse(&s)));
     }
     out.push(("SEMrand:t1".to_string(), key(&sem.rand.file_max(g, qr))));
+    let f2 = fused
+        .iter()
+        .find(|(n, _)| n == "FUSE[T1s,SEMp:t2]")
+        .map(|(_, k)| {
+            k.iter()
+                .zip(idr)
+                .zip(&g.file_deg)
+                .map(|((v, &r), &dg)| [r, v[0], dg])
+                .collect::<Vec<Key>>()
+        });
     out.extend(fused);
+    if let Some(k) = f2 {
+        out.push(("LX[IDR,FUSE[T1s,SEMp:t2]]".to_string(), k));
+    }
     out
 }
 
@@ -4068,8 +4129,9 @@ fn main() {
     );
     let train_ok = |c: &Commit| !c.files.is_empty() && c.files.len() <= MAX_FILES;
     let test_ok = |c: &Commit| c.files.len() >= 2 && c.files.len() <= MAX_FILES;
+    let held_out = test_after_set(&args);
     let eligible: Vec<usize> = (0..commits.len())
-        .filter(|&k| test_ok(&commits[k]))
+        .filter(|&k| test_ok(&commits[k]) && !held_out.contains(commits[k].sha.as_str()))
         .collect();
     let mut warm_k: HashSet<usize> = HashSet::new();
     let test_idx: Vec<usize> = match &r3anc {
@@ -4087,6 +4149,36 @@ fn main() {
             v
         }
     };
+    let test_shas: Vec<String> = test_idx.iter().map(|&k| commits[k].sha.clone()).collect();
+    let rev12 = &args.rev[..args.rev.len().min(12)];
+    if !args.test_after.is_empty() {
+        eprintln!(
+            "[rank_eval] test-after label={} rev={} held_out={} eligible={} test={}",
+            args.label,
+            &args.test_after[..args.test_after.len().min(12)],
+            held_out.len(),
+            eligible.len(),
+            test_idx.len()
+        );
+    }
+    if args.window_only == "on" {
+        let edge = |s: Option<&String>| s.map_or("-", |x| x.as_str()).to_string();
+        eprintln!(
+            "[rank_eval] window label={} rev={rev12} test={} first={} last={}",
+            args.label,
+            test_shas.len(),
+            edge(test_shas.first()),
+            edge(test_shas.last())
+        );
+        let w = json!({"label": args.label, "rev": args.rev, "test_after": args.test_after,
+            "test_eligible_commits": eligible.len(), "test_shas": test_shas});
+        std::fs::write(
+            &args.out,
+            serde_json::to_string_pretty(&w).unwrap_or_default(),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", args.out));
+        return;
+    }
     let mut test_ord: HashMap<usize, usize> = HashMap::new();
     for (o, &k) in test_idx.iter().enumerate() {
         test_ord.insert(k, o);
@@ -4883,6 +4975,7 @@ fn main() {
         "train_commits": n_train,
         "test_eligible_commits": eligible.len(),
         "test_commits": tcs.len(),
+        "test_shas": test_shas,
         "queries": nq,
         "mean_targets": mean_targets,
         "mean_seed_nodes": mean_seed_nodes,
@@ -21178,7 +21271,7 @@ fn r3_transfer(
             }
             // FB.6: the semantic rankers after every other find-bank row (`--sem on` only).
             if find && let Some(sem) = sem {
-                bank.extend(sem_keys_find(ctx, sem, q.tc, &t1s));
+                bank.extend(sem_keys_find(ctx, sem, q.tc, &t1s, &idr));
             }
             let eng = r
                 .eng

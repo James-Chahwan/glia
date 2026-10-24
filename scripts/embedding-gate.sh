@@ -6,6 +6,12 @@
 #   bash scripts/embedding-gate.sh            fetch (rank-gate.sh fetch), build rank_eval --features sem-eval,
 #                                             run every snapshot with --sem on, pair, judge, write the report
 #   bash scripts/embedding-gate.sh judge      re-judge the last runs (no build, no run)
+#   bash scripts/embedding-gate.sh fusion-preview          FB.6b: the fusion gate's PREVIEW on the three unseen
+#                                             public repos of bench/rank-gate/fusion-preview.json ("preview")
+#   bash scripts/embedding-gate.sh fusion-verdict          FB.6b: the fusion gate's VERDICT on its "verdict" rows
+#                                             (the end-of-0.5.4 step), each test window newer than its `after`
+#   bash scripts/embedding-gate.sh fusion-preview-judge | fusion-verdict-judge    re-judge (no build, no run)
+#   Both fusion modes write their own section of dev-notes/fusion-gate-0.5.4.md (GLIA_FUSION_REPORT).
 #
 # Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the shared clones and copies; this script writes
 # only sem/ (the vector cache) and sem-run/ there), GLIA_SEM_TARGET (where rank_eval is built with the model;
@@ -39,6 +45,39 @@
 # and `[rank-gate] pair label=<l> shape=find a=<a> b=<b> metric=r10 diff=.. ci=[..]` (in sem-run/<label>.*.log),
 # then this script's last line:
 #   [embedding-gate] verdict=PASS|FAIL recipe=<r*> prefix=<raw|bge>
+#
+# THE FUSION RULE (FB.6b; committed before any held-out run; strictness as FB-5, James 2026-10-24 "Strict"):
+#   Fixed from FB.6's (seen) information rows, before any held-out run, and never tuned: recipe t2, the
+#   BGE-prefixed query (SEMp:t2), FUSE[X,Y] = 0.5 minmax(X) + 0.5 minmax(Y) exactly as FB.6 defines it.
+#   Candidates: F1 = FUSE[T1s,SEMp:t2]; F2 = LX[IDR,FUSE[T1s,SEMp:t2]] (the shipped find --files order
+#   LX[IDR,T1s] with its BM25 key replaced by F1: ids still route first). Baselines: T1s, LX[IDR,T1s]
+#   (shipped, EB.8), SELf2t (its calibrated pick, EC.13).
+#   Metric: recall@10 in rank_eval's find shape. Every a - b is rank_eval `--gate-pair`'s paired
+#   commit-cluster bootstrap 95% CI (B = 1000) on the panel's test commits only. n = the panel's repos.
+#   R1: F1 - T1s has CI lo > 0 on >= ceil(5n/6) repos and CI hi >= 0 on all n.
+#   R2: F2 - LX[IDR,T1s] has CI lo > 0 on >= ceil(n/2) repos and CI hi >= 0 on all n.
+#   (n = 6 reads exactly as the packet: R1 5 of 6, R2 3 of 6; the preview's n = 3: R1 3 of 3, R2 2 of 3;
+#   the verdict's n = 9: R1 8 of 9, R2 5 of 9.) PASS = R1 and R2; anything else is FAIL.
+#   Information rows only: F2 - SELf2t, F1 - SEMp:t2, F2 - F1, and every FB.6 pair re-run on these windows.
+#   PREVIEW (fusion-preview): the three public repos of bench/rank-gate/fusion-preview.json, never in any
+#   gate panel, each in a language no other panel repo is written in, test window rank_eval's default
+#   (the newest 300 test-eligible commits): its R1 / R2 lines are labelled PREVIEW and are never the verdict.
+#   VERDICT (fusion-verdict, the final step at the end of 0.5.4): the six snapshots of snapshots.json at
+#   newer pinned revs plus the three preview repos at newer revs than the preview's, each run with
+#   `--test-after <after>` (FB.6's rev, or the preview's rev): every test commit is newer than <after>, so
+#   no test commit of FB.6 or of the preview is scored again (the report lists each window's first / last
+#   sha and the intersection with the prior window, which must be 0, else the judge refuses).
+#   Device: the default (FB.14: the GPU worker, CPU fallback), recorded per repo from its `[embed] device=`
+#   line. FB.6's cached node vectors (CPU) are reused; vectors agree across devices to < 4e-7 and the
+#   spike's rankings matched exactly, so a mixed-device panel is valid.
+#   ON PASS the integrator re-specs FB.7a / FB.7b / FB.7c / FB.8 in fused form (find --files and find's file
+#   tier rank by F2; pack's fallback seeds from F2's files; the rank gate measures the shipped fused find)
+#   and schedules them. ON FAIL they stay out of 0.5.4 and glia embed ships as a sidecar no answer reads.
+#
+# Fusion fired_on: rank_eval's `[rank_eval] test-after label=<l> ..` / `[rank_eval] window label=<l> ..`, the
+# runs' `[embed] device=..`, then this script's last line:
+#   [fusion-gate] preview R1=<yes|no> (<k>/<n>) R2=<yes|no> (<k>/<n>) -> PASS|FAIL (preview, not the verdict)
+#   [fusion-gate] verdict R1=<yes|no> (<k>/<n>) R2=<yes|no> (<k>/<n>) -> PASS|FAIL
 set -uo pipefail
 unset GLIA_RANK_PRIVATE
 
@@ -305,8 +344,315 @@ print(f"[embedding-gate] verdict={verdict} recipe={recipe} prefix={prefix}")
 PY
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# FB.6b: the fusion gate (THE FUSION RULE above). Its own run dirs under $DIR, FB.6's vector cache ($SEM).
+# ---------------------------------------------------------------------------------------------------------
+# GLIA_FUSION_PANEL (a smoke run's own panel file) or GLIA_SEM_MODEL=test-hash make a smoke run: its own run
+# dir, and its report must be a copy named by GLIA_FUSION_REPORT, never dev-notes/fusion-gate-0.5.4.md.
+FPREVIEW=${GLIA_FUSION_PANEL:-$HERE/bench/rank-gate/fusion-preview.json}
+FREPORT=${GLIA_FUSION_REPORT:-$HERE/dev-notes/fusion-gate-0.5.4.md}
+FSMOKE=
+if [ -n "${GLIA_FUSION_PANEL:-}" ] || [ "$MODEL" != bge-small ] || [ -n "$ONLY" ]; then FSMOKE=-smoke; fi
+F1="FUSE[T1s,SEMp:t2]"
+F2="LX[IDR,FUSE[T1s,SEMp:t2]]"
+FPAIRS="$F1,T1s;$F2,LX[IDR,T1s];$F2,SELf2t;$F1,SEMp:t2;$F2,$F1;$PAIRS"
+
+# The fusion rows of one key (`preview` | `verdict`) as `name url rev label after flags..` lines (after = `-`
+# for a preview row), with rank-gate.sh's refusal rule; a verdict row also needs a 40-hex `after`.
+frows() {
+  python3 -I - "$FPREVIEW" "$1" <<'PY'
+import json, re, sys
+key = sys.argv[2]
+rows = json.load(open(sys.argv[1])).get(key, [])
+bad = 0
+hexrev = lambda x: re.fullmatch(r"[0-9a-f]{40}", str(x)) is not None
+for r in rows:
+    name = str(r.get("name", "?"))
+    ok = (r.get("public") is True and str(r.get("url", "")).startswith("https://") and hexrev(r.get("rev", ""))
+          and re.fullmatch(r"[A-Za-z0-9._-]+", name) is not None
+          and re.fullmatch(r"[A-Za-z0-9._-]+", str(r.get("label", ""))) is not None
+          and (key != "verdict" or hexrev(r.get("after", ""))))
+    if not ok:
+        print(f"[fusion-gate] refused {name}: not a public https snapshot", file=sys.stderr)
+        bad = 1
+if not rows:
+    print(f"[fusion-gate] no {key} rows pinned in {sys.argv[1]}", file=sys.stderr)
+    bad = 1
+for r in rows:
+    print(" ".join([r["name"], r["url"], r["rev"], r["label"], r.get("after", "-")] + list(r.get("flags", []))))
+sys.exit(2 if bad else 0)
+PY
+}
+
+# A bare clone per repo and a git-archive copy per pinned rev (and per `after` rev), under the rank gate's
+# fetch lock, exactly as rank-gate.sh fetch lays them out (`<name>.git`, `<name>@<rev12>`).
+ffetch() {
+  exec 8>"$DIR/.fetch.lock"
+  flock 8
+  local name url rev label after flags bare r copy tmp
+  while read -r name url rev label after flags; do
+    bare=$DIR/$name.git
+    if [ ! -d "$bare" ]; then
+      git clone --bare --quiet "$url" "$bare.part" && mv "$bare.part" "$bare" \
+        || { rm -rf "$bare.part"; fail "fetch $name"; }
+    fi
+    for r in $rev $( [ "$after" = - ] || echo "$after" ); do
+      if ! git -C "$bare" cat-file -e "$r^{commit}" 2>/dev/null; then
+        git -C "$bare" fetch --quiet origin || fail "fetch $name"
+        git -C "$bare" cat-file -e "$r^{commit}" 2>/dev/null || fail "fetch $name: no commit $r"
+      fi
+      copy=$DIR/$name@${r:0:12}
+      if [ ! -f "$copy/.complete" ]; then
+        tmp=$DIR/.tmp-$name-$$
+        rm -rf "$tmp" "$copy" && mkdir -p "$tmp" \
+          && git -C "$bare" archive "$r" | tar -x -C "$tmp" \
+          && touch "$tmp/.complete" && mv "$tmp" "$copy" \
+          || { rm -rf "$tmp"; fail "fetch $name: archive"; }
+      fi
+    done
+    say "fetch $name: $DIR/$name@${rev:0:12}"
+  done <<< "$1"
+  exec 8>&-
+}
+
+# rank_eval (--features sem-eval) and the GPU worker beside it (FB.14: rank_eval finds
+# target/<..>/release/glia-embed-worker one directory above the example; without it, the CPU).
+fbuild() {
+  mkdir -p "$SEM" "$2" || fail "mkdir $2"
+  say "build rank_eval (release, --features sem-eval) and glia-embed-worker (gpu-webgpu) in $TARGET"
+  (cd "$HERE" && CARGO_TARGET_DIR=$TARGET cargo build --release --quiet -p glia-engine --example rank_eval \
+      --features sem-eval > "$2/build.log" 2>&1 \
+    && CARGO_TARGET_DIR=$TARGET cargo build --release --quiet -p glia-embed --features gpu-webgpu \
+      --bin glia-embed-worker >> "$2/build.log" 2>&1) || { tail -20 "$2/build.log"; fail "build"; }
+}
+
+frun() {
+  local rows=$1 frun=$2 mode=$3 name url rev label after flags t0 extra common=()
+  mapfile -t common < <(bash "$HERE/scripts/rank-gate.sh" flags)
+  [ "${#common[@]}" -gt 0 ] || fail "rank-gate.sh flags printed nothing"
+  export GLIA_RANK_GATE_HEAD
+  GLIA_RANK_GATE_HEAD=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
+  while read -r name url rev label after flags; do
+    t0=$(date +%s)
+    extra=()
+    if [ "$mode" = verdict ]; then
+      # the prior window (what FB.6 / the preview scored at <after>), listed for the overlap check
+      # shellcheck disable=SC2086
+      (cd "$frun" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${after:0:12}" --git "$DIR/$name.git" \
+          --rev "$after" --label "$label" $flags "${common[@]}" --window-only on \
+          --out "$frun/$label.prior.json" 2> "$frun/$label.prior.log") \
+        || { tail -5 "$frun/$label.prior.log"; fail "prior window $label"; }
+      grep '^\[rank_eval\] window ' "$frun/$label.prior.log" || true
+      extra=(--test-after "$after")
+    fi
+    # shellcheck disable=SC2086
+    (cd "$frun" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${rev:0:12}" --git "$DIR/$name.git" --rev "$rev" \
+        --label "$label" $flags "${common[@]}" "${extra[@]}" --sem on --sem-model "$MODEL" --sem-cache "$SEM" \
+        --out "$frun/$label.json" --md "$frun/$label.md" --r1md "$frun/$label.r1.md" \
+        --r3md "$frun/$label.r3.md" 2> "$frun/$label.log") \
+      || { tail -5 "$frun/$label.log"; fail "run $label"; }
+    grep -E '^\[(sem-eval|embed)\] |^\[rank_eval\] test-after ' "$frun/$label.log" | grep -v ' progress ' || true
+    say "run label=$label s=$(( $(date +%s) - t0 ))"
+  done <<< "$rows"
+}
+
+fpairs() {
+  local label
+  while read -r _ _ _ label _; do
+    "$BIN" --gate-pair "$FPAIRS" --gate-new "$2/$label.json" --gate-shape find --boot 1000 \
+        2> "$2/$label.pairs.log" || { cat "$2/$label.pairs.log"; fail "pairs $label"; }
+  done <<< "$1"
+}
+
+fjudge() {
+  local labels
+  labels=$(while read -r _ _ _ label _; do echo "$label"; done <<< "$1")
+  python3 -I - "$2" "$FREPORT" "$3" "$HERE/scripts/embedding-gate.sh" "$FPREVIEW" $labels <<'PY'
+import json, math, os, re, sys
+
+frun, report, mode, script, preview_json = sys.argv[1:6]
+labels = sys.argv[6:]
+F1, F2 = "FUSE[T1s,SEMp:t2]", "LX[IDR,FUSE[T1s,SEMp:t2]]"
+pat = re.compile(r"^\[rank-gate\] pair label=(\S+) shape=find a=(\S+) b=(\S+) metric=r10 diff=(\S+) "
+                 r"ci=\[(\S+),(\S+)\] a_r10=(\S+) b_r10=(\S+) queries=(\d+) commits=(\d+)$")
+rows = {}
+for l in labels:
+    for line in open(os.path.join(frun, f"{l}.pairs.log")):
+        m = pat.match(line.strip())
+        if m:
+            rows[(m[1], m[2], m[3])] = tuple(float(m[i]) for i in range(4, 9)) + (int(m[9]), int(m[10]))
+n = len(labels)
+
+def row(l, a, b):
+    if (l, a, b) not in rows:
+        print(f"[fusion-gate] FAILED (no pair {a} - {b} for {l})")
+        sys.exit(2)
+    return rows[(l, a, b)]
+
+def count(a, b, side):
+    return sum(1 for l in labels if (row(l, a, b)[1] > 0 if side == "lo" else row(l, a, b)[2] >= 0))
+
+k1, k2 = math.ceil(5 * n / 6), math.ceil(n / 2)
+r1 = count(F1, "T1s", "lo") >= k1 and count(F1, "T1s", "hi") == n
+r2 = count(F2, "LX[IDR,T1s]", "lo") >= k2 and count(F2, "LX[IDR,T1s]", "hi") == n
+verdict = "PASS" if r1 and r2 else "FAIL"
+yn = lambda b: "yes" if b else "no"
+
+# per repo: the device line(s), the test window, the prior window (verdict only)
+def device(l):
+    seen = []
+    for line in open(os.path.join(frun, f"{l}.log")):
+        if line.startswith("[embed] device="):
+            d = line.strip()
+            if d not in seen:
+                seen.append(d)
+    return seen or ["(no [embed] device= line: every vector came from the cache)"]
+
+def shas(path):
+    d = json.load(open(path))
+    s = d.get("test_shas", d.get("stats", {}).get("test_shas"))
+    if s is None:
+        print(f"[fusion-gate] FAILED ({path} lists no test_shas)")
+        sys.exit(2)
+    return s
+
+win = {l: shas(os.path.join(frun, f"{l}.json")) for l in labels}
+prior = {}
+if mode == "verdict":
+    for l in labels:
+        prior[l] = shas(os.path.join(frun, f"{l}.prior.json"))
+        both = set(win[l]) & set(prior[l])
+        if both:
+            print(f"[fusion-gate] FAILED ({l}: {len(both)} test commits shared with the prior window)")
+            sys.exit(2)
+
+pins = {}
+pj = json.load(open(preview_json))
+for r in pj.get(mode, []):
+    pins[r["label"]] = r
+
+rule, on = [], False
+for line in open(script):
+    if line.startswith("# THE FUSION RULE"):
+        on = True
+    elif on and line.startswith("# Fusion fired_on"):
+        break
+    if on:
+        rule.append(line[2:].rstrip("\n") if line.startswith("# ") else line[1:].rstrip("\n"))
+
+f4 = lambda x: f"{x:+.4f}"
+ci = lambda r: f"[{r[1]:+.4f}, {r[2]:+.4f}]"
+title = "Preview" if mode == "preview" else "Verdict"
+sec = []
+sec.append(f"## {title} ({'three unseen public repos; never the verdict' if mode == 'preview' else 'the end-of-0.5.4 panel'})")
+sec.append("")
+sec.append("| repo | language | rev | test commits | queries | first test sha | last test sha | prior window | shared with prior |")
+sec.append("|---|---|---|---:|---:|---|---|---|---:|")
+for l in labels:
+    p = pins.get(l, {})
+    q = row(l, F1, "T1s")
+    w = win[l]
+    if mode == "verdict":
+        pw = prior[l]
+        pr = f"{len(pw)} commits, {pw[0][:12]} .. {pw[-1][:12]}" if pw else "0 commits"
+        shared = str(len(set(w) & set(pw)))
+    else:
+        pr, shared = "none (never in a panel)", "0"
+    sec.append(f"| {l} | {p.get('language', '-')} | {p.get('rev', '?')[:12]} | {q[6]} | {q[5]} | "
+               f"{w[0][:12] if w else '-'} | {w[-1][:12] if w else '-'} | {pr} | {shared} |")
+sec.append("")
+sec.append("Device per repo (FB.14's `[embed] device=` line of each run):")
+sec.append("")
+for l in labels:
+    for d in device(l):
+        sec.append(f"- {l}: `{d}`")
+sec.append("")
+
+def table(head, pairs, note=""):
+    sec.append(f"### {head}")
+    sec.append("")
+    if note:
+        sec.append(note)
+        sec.append("")
+    sec.append("| repo | a | b | a r@10 | b r@10 | a - b | 95% CI |")
+    sec.append("|---|---|---|---:|---:|---:|---|")
+    for a, b in pairs:
+        for l in labels:
+            r = row(l, a, b)
+            sec.append(f"| {l} | {a} | {b} | {r[3]:.4f} | {r[4]:.4f} | {f4(r[0])} | {ci(r)} |")
+    sec.append("")
+
+table("Rule rows", [(F1, "T1s"), (F2, "LX[IDR,T1s]")],
+      f"R1 ({F1} - T1s, lo > 0 on >= {k1} of {n}, hi >= 0 on all): lo > 0 on {count(F1, 'T1s', 'lo')}, "
+      f"hi >= 0 on {count(F1, 'T1s', 'hi')} -> {yn(r1)}. R2 ({F2} - LX[IDR,T1s], lo > 0 on >= {k2} of {n}, "
+      f"hi >= 0 on all): lo > 0 on {count(F2, 'LX[IDR,T1s]', 'lo')}, hi >= 0 on "
+      f"{count(F2, 'LX[IDR,T1s]', 'hi')} -> {yn(r2)}.")
+table("Information rows (never the verdict)", [(F2, "SELf2t"), (F1, "SEMp:t2"), (F2, F1)])
+fb6 = []
+sems = ("SEM:t1", "SEM:t2", "SEMp:t1", "SEMp:t2")
+fb6 += [("SEM:t2", "SEM:t1"), ("SEMp:t1", "SEM:t1")]
+for s in sems:
+    fb6 += [(s, "SEMrand:t1"), (s, "T1s"), (f"FUSE[T1s,{s}]", "T1s"), (s, "ANS:find"), (s, "LX[IDR,T1s]"),
+            (s, "SELf2t"), (s, "ANS:find_files"), (s, "ANS:find_files@sel")]
+table("Every FB.6 pair on these windows (information)", fb6)
+line = (f"R1={yn(r1)} ({count(F1, 'T1s', 'lo')}/{n}) R2={yn(r2)} ({count(F2, 'LX[IDR,T1s]', 'lo')}/{n}) -> {verdict}")
+if mode == "preview":
+    sec.append(f"PREVIEW (not the verdict): {line}")
+else:
+    sec.append(f"Verdict rows: {line}")
+sec.append("")
+
+text = open(report).read() if os.path.exists(report) else ""
+b, e = f"<!-- fusion-gate:{mode} -->", f"<!-- /fusion-gate:{mode} -->"
+if b not in text or e not in text:
+    print(f"[fusion-gate] FAILED ({report} has no {b} .. {e} section)")
+    sys.exit(2)
+pre, rest = text.split(b, 1)
+_, post = rest.split(e, 1)
+text = pre + b + "\n" + "\n".join(sec) + e + post
+# the last line: the verdict once the verdict section is filled, else pending
+body = text.rstrip("\n").split("\n")
+if body and body[-1].startswith("VERDICT: "):
+    body = body[:-1]
+if mode == "verdict":
+    body.append(f"VERDICT: {verdict}")
+elif "Verdict rows: " in text:
+    m = re.search(r"Verdict rows: .* -> (PASS|FAIL)", text)
+    body.append(f"VERDICT: {m[1]}" if m else "VERDICT: pending (the end-of-0.5.4 run; the PREVIEW is never a verdict)")
+else:
+    body.append("VERDICT: pending (the end-of-0.5.4 run; the PREVIEW is never a verdict)")
+with open(report, "w") as fh:
+    fh.write("\n".join(body) + "\n")
+print(f"[fusion-gate] report {report}")
+if mode == "preview":
+    print(f"[fusion-gate] preview {line} (preview, not the verdict)")
+else:
+    print(f"[fusion-gate] verdict {line}")
+PY
+}
+
+fusion() {   # fusion <preview|verdict> [judge]
+  local mode=$1 rows frun=$DIR/fusion-$1-run$FSMOKE
+  if [ -n "$FSMOKE" ] && [ "$FREPORT" = "$HERE/dev-notes/fusion-gate-0.5.4.md" ]; then
+    fail "a smoke run (GLIA_FUSION_PANEL / a model other than bge-small) needs its own GLIA_FUSION_REPORT"
+  fi
+  [ -z "$ONLY" ] || fail "the fusion gate runs its whole panel (GLIA_SEM_ONLY is FB.6's)"
+  rows=$(frows "$mode") || exit 2
+  if [ "${2:-}" != judge ]; then
+    ffetch "$rows"
+    fbuild "$rows" "$frun"
+    frun "$rows" "$frun" "$mode"
+  fi
+  fpairs "$rows" "$frun"
+  fjudge "$rows" "$frun" "$mode"
+}
+
 case "${1:-}" in
   "") do_run; do_pairs; do_judge ;;
   judge) do_pairs; do_judge ;;
-  *) echo "usage: $0 [judge]" >&2; exit 2 ;;
+  fusion-preview) fusion preview ;;
+  fusion-preview-judge) fusion preview judge ;;
+  fusion-verdict) fusion verdict ;;
+  fusion-verdict-judge) fusion verdict judge ;;
+  *) echo "usage: $0 [judge|fusion-preview|fusion-verdict|fusion-preview-judge|fusion-verdict-judge]" >&2; exit 2 ;;
 esac
