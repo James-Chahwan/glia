@@ -1,5 +1,5 @@
 //! `inputs` area: non-code inputs — gaps (LF.2c), history (LF.5d), tests (LF.6d),
-//! overlay (CE.3e), scip (CE.1c).
+//! overlay (CE.3e), scip (CE.1c), vocab (FB.13b).
 //!
 //! Each command is a variant of `InputsCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -13,6 +13,7 @@ mod history;
 mod overlay;
 mod scip;
 mod tests;
+mod vocab;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum InputsCmd {
@@ -47,6 +48,11 @@ pub(crate) enum InputsCmd {
     /// build itself never reads the index. Exits 1 when the index cannot be
     /// decoded (nothing written).
     Scip(scip::Args),
+    /// Identifier vocabulary snapshot (FB.13b): every identifier-like token in
+    /// the repo's tracked files at a commit, with the files it occurs in,
+    /// written to `<repo>/.glia/vocab-snapshot/`; find's absence and gaps
+    /// read it; the build never does. Exits 1 when the sync fails.
+    Vocab(vocab::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
@@ -56,5 +62,6 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::Tests(a) => tests::run(a),
         InputsCmd::Overlay(a) => overlay::run(a),
         InputsCmd::Scip(a) => scip::run(a),
+        InputsCmd::Vocab(a) => vocab::run(a),
     }
 }

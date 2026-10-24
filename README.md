@@ -502,6 +502,11 @@ glia scip import <REPO> <INDEX> [--prefix <PREFIX>]
     FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM edges and confirms name-only
     ones. --prefix: the directory the index's paths are relative to. Exits 1 when
     the index cannot be decoded (nothing written).
+glia vocab sync <REPO> [--json] [--rev <REV>]
+    Read one commit's tracked text files (default HEAD) into
+    <repo>/.glia/vocab-snapshot/: every identifier-like token with the files it
+    occurs in. find's absence and gaps read it; the build never does. Exits 1 when
+    the sync fails (nothing written).
 glia overlay propose <REPO> [--category <CATEGORY>]... [--json] [--snippet-lines <SNIPPET_LINES>] [--top-k <TOP_K>] [--with <WITH>]...
     The overlay loop's work list: the gaps an overlay stanza could close, per
     category, each with its gap id, location and source lines, and a suspected

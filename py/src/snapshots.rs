@@ -14,6 +14,9 @@
 //! snapshot over it, writing `<repo>/.glia/calibration-snapshot/`: the
 //! per-repo ranking each ranked answer picks (docs/overlay.md, "Calibration
 //! snapshot"). It never syncs; run `history_sync` first.
+//! `vocab_sync` (FB.13b) reads one commit's tracked text files and writes the
+//! identifier vocabulary to `<repo>/.glia/vocab-snapshot/` (FB.13a), which
+//! find's absence and gaps read at query time; no build reads it.
 //!
 //! Transport only: the capture, the parsing, the redaction, the snapshot
 //! formats and the `[history] sync` / `[tests] ingest` markers live in
@@ -25,7 +28,8 @@ use std::path::{Path, PathBuf};
 
 use glia_engine::calibrate::{CalibrateOptions, DEFAULT_GROUPS, ReplayParams, calibrate, specs};
 use glia_snapshots::{
-    HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, history_sync, tests_ingest,
+    HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, VocabOptions, VocabSummary,
+    history_sync, tests_ingest, vocab_sync,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -256,10 +260,48 @@ fn history_calibrate_py(
     to_py(py, Ok::<String, serde_json::Error>(text))
 }
 
+/// The sync behind [`vocab_sync_py`], minus pyo3: the library's sync, then
+/// this surface's `[vocab] surface=py rev=<12> files=<f> tokens=<t>` line on
+/// stderr. `Err` is the library's plain message (not a directory, not a git
+/// work tree, a revision that names no commit, git failing); nothing is
+/// written then and no surface line prints.
+fn vocab_of(repo_path: &str, rev: Option<String>) -> Result<VocabSummary, String> {
+    let opts = match rev {
+        Some(r) => VocabOptions::at(r),
+        None => VocabOptions::default(),
+    };
+    let summary = vocab_sync(Path::new(repo_path), &opts)?;
+    let rev12: String = summary.rev.chars().take(12).collect();
+    eprintln!(
+        "[vocab] surface=py rev={rev12} files={} tokens={}",
+        summary.files, summary.tokens
+    );
+    Ok(summary)
+}
+
+/// **vocab_sync** (FB.13b): read every tracked text file of commit `rev`
+/// (default `HEAD`) of the repo at `repo_path` and write the identifier
+/// vocabulary to `<repo>/.glia/vocab-snapshot/` (files.jsonl, vocab.jsonl,
+/// meta.json), replacing any earlier snapshot: every identifier-like token
+/// with the files it occurs in. find's absence and gaps read it at query
+/// time; `generate()` never does. Returns `{rev, files, tokens, common,
+/// skipped_binary, skipped_large, ms}` (`rev` the full sha). Raises
+/// `ValueError` when the sync fails, and writes nothing then. Prints
+/// `[vocab] sync rev=..` then `[vocab] surface=py ..` on stderr.
+#[pyfunction]
+#[pyo3(name = "vocab_sync", signature = (repo_path, rev=None))]
+fn vocab_sync_py(py: Python<'_>, repo_path: &str, rev: Option<String>) -> PyResult<Py<PyAny>> {
+    let summary = py
+        .detach(|| vocab_of(repo_path, rev))
+        .map_err(PyValueError::new_err)?;
+    to_py(py, serde_json::to_string(&summary))
+}
+
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(history_sync_py, m)?)?;
     m.add_function(wrap_pyfunction!(history_calibrate_py, m)?)?;
     m.add_function(wrap_pyfunction!(tests_ingest_py, m)?)?;
+    m.add_function(wrap_pyfunction!(vocab_sync_py, m)?)?;
     Ok(())
 }
 
@@ -396,6 +438,56 @@ mod tests {
             "a failed sync writes nothing"
         );
     }
+
+    /// FB.13b: `vocab_sync` is transport — the summary reaches the JSON in
+    /// field order, `rev` reads an older commit, and outside git is the
+    /// library's plain error with nothing written.
+    #[test]
+    fn vocab_sync_returns_the_summary_json_or_the_error() {
+        let (_scratch, top) = git_repo("vocab");
+        let repo = top.to_str().expect("utf-8 scratch path");
+        let summary = vocab_of(repo, None).expect("sync");
+        let json = serde_json::to_string(&summary).expect("json");
+        assert!(
+            json.starts_with(r#"{"rev":""#) && json.contains(r#"","files":1,"tokens":"#),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#","skipped_binary":0,"skipped_large":0,"ms":"#),
+            "{json}"
+        );
+        assert_eq!(
+            summary.rev.len(),
+            40,
+            "rev is the full sha: {}",
+            summary.rev
+        );
+        let dir = glia_code_domain::snapshots::vocab_dir(&top);
+        assert!(
+            dir.join("meta.json").is_file(),
+            "snapshot under {}",
+            dir.display()
+        );
+
+        let older = vocab_of(repo, Some("HEAD~1".into())).expect("sync HEAD~1");
+        assert_ne!(older.rev, summary.rev, "rev reaches the capture");
+
+        let err = vocab_of(repo, Some("no-such-branch".into())).expect_err("bad rev");
+        assert!(err.contains("does not name a commit"), "{err}");
+
+        let plain =
+            std::env::temp_dir().join(format!("glia-fb13b-py-{}-plain", std::process::id()));
+        let _ = std::fs::remove_dir_all(&plain);
+        std::fs::create_dir_all(&plain).expect("plain dir");
+        let _plain_guard = Scratch(plain.clone());
+        let err = vocab_of(plain.to_str().expect("utf-8"), None).expect_err("not a git repo");
+        assert!(err.contains("is not inside a git work tree"), "{err}");
+        assert!(
+            !plain.join(".glia").exists(),
+            "a failed sync writes nothing"
+        );
+    }
+
     const PYTEST_JUNIT: &str = r#"<testsuites><testsuite name="pytest" tests="3" failures="1"><testcase classname="tests.test_app" name="test_boom" file="tests/test_app.py" line="3"><failure message="ValueError: boom">E   ValueError: boom</failure></testcase><testcase classname="tests.test_app" name="test_ok"/><testcase classname="tests.test_app" name="test_add"/></testsuite></testsuites>"#;
     const LCOV: &str = "TN:\nSF:app.py\nDA:1,1\nDA:2,0\nend_of_record\n";
 

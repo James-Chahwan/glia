@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pyo3 surface, py/src/snapshots.rs (LF.5d, LF.6d).
+"""pyo3 surface, py/src/snapshots.rs (LF.5d, LF.6d, EC.6, FB.13b).
 
 `history_sync(repo_path, max_commits=2000, since=None, blame=False,
 blame_max_files=300, messages=True)` reads a repo's local git, writes
@@ -21,8 +21,13 @@ read or `window` is 0.
 builds the repo, replays its history snapshot over the graph and writes
 `<repo>/.glia/calibration-snapshot/`; it returns a native dict {dir,
 history_head, commits, test_commits, messages, ms, sets} and raises ValueError
-with no snapshot (naming `glia history sync`) or an unknown group. Shared
-helpers: test_build.py."""
+with no snapshot (naming `glia history sync`) or an unknown group.
+
+`vocab_sync(repo_path, rev=None)` (FB.13b) reads one commit's tracked text
+files (default HEAD) and writes `<repo>/.glia/vocab-snapshot/`; it returns a
+native dict {rev, files, tokens, common, skipped_binary, skipped_large, ms}
+and raises ValueError outside git or for a revision that names no commit.
+Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import json
@@ -190,6 +195,45 @@ def check_history_calibrate(c: Checks, top: pathlib.Path, tmp: str) -> None:
     c.check("a failed calibrate writes no record", not (bare / ".glia" / "calibration-snapshot").exists())
 
 
+VOCAB_KEYS = ["rev", "files", "tokens", "common", "skipped_binary", "skipped_large", "ms"]
+VOCAB_SNAPSHOT_FILES = ["files.jsonl", "vocab.jsonl", "meta.json"]
+
+
+def check_vocab_sync(c: Checks, top: pathlib.Path, tmp: str) -> None:
+    """FB.13b: vocab_sync over a committed scratch repo, at HEAD and HEAD~1."""
+    c.check("vocab_sync signature",
+            getattr(rg, "vocab_sync", None) is not None
+            and rg.vocab_sync.__text_signature__ == "(repo_path, rev=None)",
+            getattr(getattr(rg, "vocab_sync", None), "__text_signature__", "missing"))
+    if getattr(rg, "vocab_sync", None) is None:
+        return
+    head = git(top, "rev-parse", "HEAD")
+    snap = top / ".glia" / "vocab-snapshot"
+    s, err = stderr_of(lambda: rg.vocab_sync(str(top)))
+    c.check("vocab_sync -> dict", type(s) is dict, type(s))
+    c.check("vocab keys in field order", type(s) is dict and list(s) == VOCAB_KEYS,
+            type(s) is dict and list(s))
+    c.check("vocab summary", type(s) is dict and (s.get("rev"), s.get("files")) == (head, 3)
+            and s.get("tokens", 0) > 0, s)
+    c.check("vocab snapshot written", all((snap / f).is_file() for f in VOCAB_SNAPSHOT_FILES),
+            sorted(p.name for p in snap.glob("*")) if snap.is_dir() else "no snapshot dir")
+    c.check("library marker", f"[vocab] sync rev={head[:12]} files=3 " in err, err[-400:])
+    tokens = s.get("tokens") if type(s) is dict else None
+    c.check("surface marker", f"[vocab] surface=py rev={head[:12]} files=3 tokens={tokens}" in err,
+            err[-400:])
+    s, err = stderr_of(lambda: rg.vocab_sync(str(top), rev="HEAD~4"))
+    c.check("rev reaches the capture",
+            type(s) is dict and s.get("rev") == git(top, "rev-parse", "HEAD~4") and s.get("files") == 3, s)
+    c.raises("a rev that names no commit raises", ValueError,
+             lambda: rg.vocab_sync(str(top), rev="no-such-branch"), "does not name a commit")
+    plain = pathlib.Path(tmp) / "vocab-plain"
+    plain.mkdir()
+    (plain / "app.py").write_text("def f():\n    return 1\n")
+    c.raises("vocab outside git raises", ValueError, lambda: rg.vocab_sync(str(plain)),
+             "is not inside a git work tree")
+    c.check("a failed vocab sync writes nothing", not (plain / ".glia").exists())
+
+
 def main() -> int:
     c = Checks("snapshots")
     check_tests_ingest(c)
@@ -257,6 +301,7 @@ def main() -> int:
         c.check("CO_CHANGES for the co-changed pair", pairs == [("svc::a", "svc::b")], pairs)
 
         check_history_calibrate(c, top, tmp)
+        check_vocab_sync(c, top, tmp)
 
         plain = pathlib.Path(tmp) / "plain"
         plain.mkdir()
