@@ -3,27 +3,51 @@
 //! A needle scanner reads a call site off raw text, so a needle that sits in a
 //! string literal or a comment (a scanner's own needle table, a doc comment, a
 //! test's embedded sample source) used to mint a node as if it were a call.
-//! In a Rust or Python file this guard refuses an occurrence whose FIRST byte
-//! is inside a literal or comment, lexed by LA.20a's [`CodeMap`] (the CLI
-//! extractor's rule: "a needle in a doc comment or a string is not a
-//! declaration"). Only the needle's first byte is checked: every queue and
-//! event needle starts in code at a real site, while the topic literal it
-//! reads sits after it.
+//! In a file of a language [`lexer_for`] names this guard refuses an
+//! occurrence whose FIRST byte is inside a literal or comment, lexed by
+//! LA.20a's [`CodeMap`] (the CLI extractor's rule: "a needle in a doc comment
+//! or a string is not a declaration"). Only the needle's first byte is
+//! checked: every queue and event needle starts in code at a real site, while
+//! the topic literal it reads sits after it.
 //!
 //! Scope: Rust (`.rs`) and Python (`.py`, `.pyw`, `.pyi`), the languages glia
-//! and its tests are written in. Every other file has no guard, so its scans
-//! are unchanged.
+//! and its tests are written in (CJ.1a), and since FD.5a Ruby (`.rb`, `.rake`,
+//! `.gemspec`), PHP (`.php`), Dart (`.dart`) and Elixir (`.ex`, `.exs`),
+//! lexed by [`CodeMap::script`] (DH.10). Every other file has no guard, so its
+//! scans are unchanged.
 //!
-//! A Python f-string is read as code whole: its `{..}` replacement fields are
-//! expressions (`f"redis://{os.getenv('REDIS_HOST')}"`), so an f-string keeps
-//! the behaviour it had before the guard, while a plain, raw, byte or
-//! triple-quoted string and every comment are refused. Rust needs no such
-//! rule: `format!` arguments sit outside the literal and an inline `{x}` holds
-//! an identifier only.
+//! Interpolation. A Python f-string is read as code whole: its `{..}`
+//! replacement fields are expressions (`f"redis://{os.getenv('REDIS_HOST')}"`),
+//! so an f-string keeps the behaviour it had before the guard, while a plain,
+//! raw, byte or triple-quoted string and every comment are refused. Rust needs
+//! no such rule: `format!` arguments sit outside the literal and an inline
+//! `{x}` holds an identifier only. Ruby and Elixir `#{..}`, PHP `{$..}` /
+//! `${..}` and Dart `${..}` interpolations are code too, but in those
+//! languages only the interpolation span is: a needle whose first byte sits
+//! inside an interpolating literal (Ruby and PHP double-quoted strings and
+//! heredocs that are not `'ID'`-quoted, Elixir double- and single-quoted
+//! strings and `"""` / `'''` heredocs, Dart strings that are not raw `r'..'`)
+//! counts as code ONLY inside a `#{..}` / `${..}` / `{$..}` span. That is
+//! stricter than Python's whole-literal rule on purpose: these languages
+//! delimit their code spans, so the literal text around one is text (a
+//! channel name built as `"orders.#{region}"` keeps its reading: its needle,
+//! the call, starts in code before the literal). Python keeps the whole
+//! f-string rule because fixtures read through it and an f-string's field
+//! is not delimited by a sigil the old scans knew. A Dart `$name` or PHP
+//! `"$x"` simple interpolation holds a name only, never a call, so it is text.
+//! Elixir sigils (`~s(..)`) are read as code by [`CodeMap::script`], so their
+//! content is still scanned.
+//!
+//! Statement literals (FD.4b, [`CodeGuard::opens_argument`]): the call
+//! argument rule applies to Rust and Python only. In the FD.5a languages a
+//! SQL / Cypher statement literal is refused only when it does not open in
+//! code (it sits in a comment or another literal); a statement assigned to a
+//! constant (`SQL = "SELECT .."`, common in Ruby and PHP) keeps today's
+//! reading.
 //!
 //! fired_on marker, once per scanner call that refused an occurrence:
 //!   `... 2>&1 | grep '\[code-guard\]'`
-//!   `[code-guard] <scanner> lang=<rust|python> dropped=<n> path=<path>`
+//!   `[code-guard] <scanner> lang=<rust|python|ruby|php|dart|elixir> dropped=<n> path=<path>`
 
 use crate::cli::{CodeMap, Script};
 
@@ -34,13 +58,19 @@ use crate::cli::{CodeMap, Script};
 fn lexer_for(path: &str) -> Option<(&'static str, Option<Script>)> {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let (_, ext) = name.rsplit_once('.')?;
-    if ext.eq_ignore_ascii_case("rs") {
+    let is = |exts: &[&str]| exts.iter().any(|e| ext.eq_ignore_ascii_case(e));
+    if is(&["rs"]) {
         Some(("rust", None))
-    } else if ["py", "pyw", "pyi"]
-        .iter()
-        .any(|e| ext.eq_ignore_ascii_case(e))
-    {
+    } else if is(&["py", "pyw", "pyi"]) {
         Some(("python", Some(Script::Python)))
+    } else if is(&["rb", "rake", "gemspec"]) {
+        Some(("ruby", Some(Script::Ruby)))
+    } else if is(&["php"]) {
+        Some(("php", Some(Script::Php)))
+    } else if is(&["dart"]) {
+        Some(("dart", Some(Script::Dart)))
+    } else if is(&["ex", "exs"]) {
+        Some(("elixir", Some(Script::Elixir)))
     } else {
         None
     }
@@ -97,18 +127,143 @@ impl<'a> CodeGuard<'a> {
         self.literal_start(pos) == Some(pos)
     }
 
-    /// `rust` or `python`.
+    /// `rust`, `python`, `ruby`, `php`, `dart` or `elixir`.
     pub(crate) fn lang(&self) -> &'static str {
         self.lang
     }
 
-    /// True when byte `pos` may start a call site: it is code, or (Python
-    /// only) it sits in an f-string, whose replacement fields are code.
+    /// True when byte `pos` may start a call site: it is code, (Python) it
+    /// sits in an f-string, whose replacement fields are code, or (Ruby, PHP,
+    /// Dart, Elixir) it sits inside an interpolation span of an
+    /// interpolating literal ([`CodeGuard::in_interpolation`]).
     pub(crate) fn is_code(&self, pos: usize) -> bool {
         match self.literal_start(pos) {
             None => true,
-            Some(open) => self.lang == "python" && self.is_fstring(open),
+            Some(open) if self.lang == "python" => self.is_fstring(open),
+            Some(open) => self.in_interpolation(open, pos),
         }
+    }
+
+    /// FD.5a: true when byte `pos` is code ([`CodeGuard::is_code`]) or, in a
+    /// Ruby / PHP / Dart / Elixir file, sits in a string literal (not a
+    /// comment). Those languages name a library in an import string
+    /// (`require 'redis'`, `import 'package:redis/redis.dart'`, PHP
+    /// `require_once 'redis.php'`), so a scanner that reads library
+    /// names keeps those reads; Rust and Python import in code, so for them
+    /// this is [`CodeGuard::is_code`].
+    pub(crate) fn is_code_or_script_string(&self, pos: usize) -> bool {
+        if self.is_code(pos) {
+            return true;
+        }
+        if !matches!(self.lang, "ruby" | "php" | "dart" | "elixir") {
+            return false;
+        }
+        let Some(open) = self.literal_start(pos) else {
+            return false;
+        };
+        if matches!(self.lang, "ruby" | "php") && self.heredoc_opened_before(open).is_some() {
+            return true;
+        }
+        match self.src[open] {
+            b'"' | b'\'' => true,
+            // A Dart raw string opens at its `r`.
+            b'r' => self.lang == "dart",
+            _ => false,
+        }
+    }
+
+    /// FD.5a: the first content byte of the literal opening at `open` when
+    /// that literal interpolates in this file's language, else `None`: a Ruby
+    /// / PHP `".."` or an unquoted / `"ID"` heredoc (whose map entry starts
+    /// at its body, the line after the opener), a Dart `'..'` / `".."` /
+    /// triple string (a raw `r'..'` starts at its `r`), an Elixir `".."` /
+    /// `'..'` / triple string. Comments (`#`, `//`, `/*`, `=begin`), Ruby
+    /// and PHP `'..'` and Elixir `?c` char literals open none.
+    fn interpolation_body(&self, open: usize) -> Option<usize> {
+        let at = *self.src.get(open)?;
+        if matches!(self.lang, "ruby" | "php")
+            && let Some(quoted) = self.heredoc_opened_before(open)
+        {
+            return (!quoted).then_some(open);
+        }
+        let opens = match self.lang {
+            "ruby" | "php" => at == b'"',
+            "dart" | "elixir" => matches!(at, b'"' | b'\''),
+            _ => false,
+        };
+        opens.then_some(open + 1)
+    }
+
+    /// When the literal at `open` is a heredoc body (it starts a line and the
+    /// line before it holds a Ruby `<<~` / `<<-` or PHP `<<<` opener in
+    /// code), whether its identifier is `'`-quoted (Ruby `<<~'ID'`, a PHP
+    /// nowdoc `<<<'ID'`: no interpolation); `None` when it is no heredoc.
+    fn heredoc_opened_before(&self, open: usize) -> Option<bool> {
+        if open == 0 || self.src[open - 1] != b'\n' {
+            return None;
+        }
+        let line_end = open - 1;
+        let line_start = self.src[..line_end]
+            .iter()
+            .rposition(|&c| c == b'\n')
+            .map_or(0, |i| i + 1);
+        let line = &self.src[line_start..line_end];
+        let marks: &[&[u8]] = if self.lang == "ruby" {
+            &[b"<<~", b"<<-"]
+        } else {
+            &[b"<<<"]
+        };
+        (0..line.len()).rev().find_map(|k| {
+            let mark = marks.iter().find(|m| line[k..].starts_with(m))?;
+            if self.literal_start(line_start + k).is_some() {
+                return None;
+            }
+            let mut q = k + mark.len();
+            while line.get(q).is_some_and(|c| *c == b' ' || *c == b'\t') {
+                q += 1;
+            }
+            Some(line.get(q) == Some(&b'\''))
+        })
+    }
+
+    /// FD.5a: true when byte `pos`, inside the literal opening at `open`,
+    /// sits inside one of its interpolation spans: Ruby / Elixir `#{..}`,
+    /// Dart `${..}`, PHP `{$..}` / `${..}`, the span running to its balanced
+    /// `}`. Scans the literal from its first content byte to `pos`;
+    /// a `\` escapes the next byte outside a span (`"\#{x}"` is text).
+    fn in_interpolation(&self, open: usize, pos: usize) -> bool {
+        let Some(body) = self.interpolation_body(open) else {
+            return false;
+        };
+        let opener = |i: usize| -> bool {
+            let (a, b) = (self.src[i], self.src.get(i + 1).copied());
+            match self.lang {
+                "ruby" | "elixir" => a == b'#' && b == Some(b'{'),
+                "dart" => a == b'$' && b == Some(b'{'),
+                "php" => (a == b'{' && b == Some(b'$')) || (a == b'$' && b == Some(b'{')),
+                _ => false,
+            }
+        };
+        let mut depth = 0usize;
+        let mut i = body;
+        while i < pos.min(self.src.len()) {
+            match self.src[i] {
+                b'\\' if depth == 0 => {
+                    i += 2;
+                    continue;
+                }
+                _ if depth == 0 && opener(i) => {
+                    depth = 1;
+                    i += 2;
+                    continue;
+                }
+                b'{' if depth > 0 => depth += 1,
+                b'}' if depth > 0 => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        depth > 0
     }
 
     /// FD.4b: true when the string literal a scanner's own lexer opened at
@@ -118,7 +273,9 @@ impl<'a> CodeGuard<'a> {
     /// is the call's `(`, a `,` inside it, or (Python) a keyword argument's
     /// `name=`, and the `(` follows a callee ([`CodeGuard::is_callee_paren`]).
     /// Text nested in another literal or a comment fails the first test; a
-    /// `const` / `let` / field / tuple value fails the second.
+    /// `const` / `let` / field / tuple value fails the second. FD.5a: the
+    /// second test is Rust's and Python's only (the module doc's "Statement
+    /// literals"); a Ruby / PHP / Dart / Elixir literal passes on the first.
     pub(crate) fn opens_argument(&self, open: usize, body: usize) -> bool {
         let Some(start) = self.literal_start(body) else {
             return false;
@@ -133,6 +290,9 @@ impl<'a> CodeGuard<'a> {
                 .all(|c| c.is_ascii_alphabetic() || *c == b'#')
         {
             return false;
+        }
+        if !matches!(self.lang, "rust" | "python") {
+            return true;
         }
         // Any prefix letters glued to the literal belong to it.
         let mut first = lo;
@@ -300,6 +460,14 @@ impl<'a> LazyGuard<'a> {
         self.check(pos, CodeGuard::opens_literal)
     }
 
+    /// FD.5a: [`LazyGuard::admits`] for a scanner that reads library names
+    /// ([`CodeGuard::is_code_or_script_string`]): a comment is refused in
+    /// every guarded language, a Ruby / PHP / Dart / Elixir import string is
+    /// admitted. A refusal is counted for [`LazyGuard::report`].
+    pub(crate) fn admits_name(&mut self, pos: usize) -> bool {
+        self.check(pos, CodeGuard::is_code_or_script_string)
+    }
+
     /// FD.4b: true when the file has no guard, or the string literal whose
     /// delimiter opens at `open` (a scanner's own lexer's reading) and whose
     /// body starts at `body` opens in code AND stands as a call argument
@@ -327,7 +495,7 @@ impl<'a> LazyGuard<'a> {
     }
 
     /// The fired_on marker, printed only when an occurrence was refused:
-    /// `[code-guard] <scanner> lang=<rust|python> dropped=<n> path=<path>`.
+    /// `[code-guard] <scanner> lang=<rust|python|ruby|php|dart|elixir> dropped=<n> path=<path>`.
     pub(crate) fn report(&self, scanner: &str) {
         if self.dropped == 0 {
             return;
@@ -479,7 +647,8 @@ mod tests {
         for path in [
             "a.ts",
             "a.go",
-            "a.rb",
+            "a.java",
+            "a.erb",
             "",
             "src/rs",
             "a.rs.txt",
@@ -498,6 +667,21 @@ mod tests {
             CodeGuard::for_path("a.py", "").map(|g| g.lang()),
             Some("python")
         );
+        for (path, lang) in [
+            ("app/a.rb", "ruby"),
+            ("lib/tasks/x.RAKE", "ruby"),
+            ("x.gemspec", "ruby"),
+            ("src/a.php", "php"),
+            ("lib/a.dart", "dart"),
+            ("lib/a.ex", "elixir"),
+            ("test/a_test.exs", "elixir"),
+        ] {
+            assert_eq!(
+                CodeGuard::for_path(path, "").map(|g| g.lang()),
+                Some(lang),
+                "{path:?}"
+            );
+        }
         let src = "// producer.send(\"x\")\n";
         let mut guard = LazyGuard::new("src/a.ts", src);
         assert!(guard.admits(3));
@@ -607,5 +791,189 @@ mod tests {
         assert!(!argument_at("a.py", "return (\"SELECT 1\")\n", "\"SELECT"));
         // A file without a lexer admits everything.
         assert!(argument_at("a.go", "q := \"SELECT 1\"\n", "\"SELECT"));
+    }
+
+    /// FD.5a: per language, `refused` sources hold the needle in a comment
+    /// or a plain / non-interpolating literal; `admitted` ones in code or in
+    /// an interpolation span.
+    fn assert_script(path: &str, needle: &str, refused: &[&str], admitted: &[&str]) {
+        for src in refused {
+            assert!(!code_at(path, src, needle), "{path}: {src:?} is text");
+        }
+        for src in admitted {
+            assert!(code_at(path, src, needle), "{path}: {src:?} is code");
+        }
+    }
+
+    #[test]
+    fn ruby_comments_strings_and_interpolation() {
+        assert_script(
+            "app/consumers/karafka.rb",
+            "topic ",
+            &[
+                // The Karafka seed case (§E W2): a commented route.
+                "require 'karafka'\n# topic \"ghost_rb\"\nclass App; end\n",
+                "x = 1 # topic :ghost\n",
+                "S = 'topic :ghost'\n",
+                "S = \"topic :ghost\"\n",
+                "S = \"orders #{a} topic :ghost\"\n",
+                "S = \"\\#{topic :ghost}\"\n",
+                "=begin\ntopic :ghost\n=end\n",
+                "S = <<~SQL\n  topic :ghost\nSQL\n",
+                "S = <<~'SQL'\n  #{topic :ghost}\nSQL\n",
+            ],
+            &[
+                "routes.draw { topic :orders do end }\n",
+                "S = \"x\"; topic :orders\n",
+                "S = \"orders.#{topic :x}\"\n",
+                "S = \"a #{b} c #{ {k: 1}; topic :x}\"\n",
+                "S = <<~SQL\n  #{topic :x}\nSQL\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn php_comments_strings_and_interpolation() {
+        assert_script(
+            "src/pub.php",
+            "basic_publish(",
+            &[
+                "<?php // $channel->basic_publish($m, '', 'ghost_php');\n",
+                "<?php # basic_publish(1);\n",
+                "<?php /* basic_publish(1); */\n",
+                "<?php $s = 'basic_publish(1)';\n",
+                "<?php $s = \"x basic_publish(1)\";\n",
+                "<?php $s = \"$ch basic_publish(1)\";\n",
+                "<?php $s = \"{$a} basic_publish(1)\";\n",
+                "<?php $s = <<<'EOT'\n{$ch->basic_publish(1)}\nEOT;\n",
+                "<?php $s = <<<EOT\nbasic_publish(1)\nEOT;\n",
+            ],
+            &[
+                "<?php $channel->basic_publish($msg, '', 'invoices');\n",
+                "<?php $s = \"x {$ch->basic_publish(1)} y\";\n",
+                "<?php $s = \"x ${basic_publish(1)}\";\n",
+                "<?php $s = <<<EOT\n{$ch->basic_publish(1)}\nEOT;\n",
+                "<?php #[Attr] $ch->basic_publish(1);\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn dart_comments_strings_and_interpolation() {
+        assert_script(
+            "lib/bus.dart",
+            "bus.fire(",
+            &[
+                "// bus.fire(GhostEvent())\n",
+                "/// bus.fire(GhostEvent())\n",
+                "/* a /* b */ bus.fire(GhostEvent()) */\n",
+                "final s = 'bus.fire(x)';\n",
+                "final s = \"bus.fire(x)\";\n",
+                "final s = '''\nbus.fire(x)\n''';\n",
+                "final s = r'${bus.fire(x)}';\n",
+                "final s = '$bus bus.fire(x)';\n",
+            ],
+            &[
+                "void main() { bus.fire(OrderPlaced()); }\n",
+                "final s = 'x ${bus.fire(x)}';\n",
+                "final s = \"\"\"\n${bus.fire(x)}\n\"\"\";\n",
+                "final t = #sym; bus.fire(x);\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn elixir_comments_strings_and_interpolation() {
+        assert_script(
+            "lib/pub.ex",
+            "Phoenix.PubSub.broadcast(",
+            &[
+                "# Phoenix.PubSub.broadcast(P, \"ghost_ex\", m)\n",
+                "s = \"Phoenix.PubSub.broadcast(P)\"\n",
+                "s = 'Phoenix.PubSub.broadcast(P)'\n",
+                "@doc \"\"\"\nPhoenix.PubSub.broadcast(P)\n\"\"\"\n",
+                "s = \"#{a} Phoenix.PubSub.broadcast(P)\"\n",
+            ],
+            &[
+                "Phoenix.PubSub.broadcast(MyApp.PubSub, \"rooms\", msg)\n",
+                "s = \"x #{Phoenix.PubSub.broadcast(P, t, m)}\"\n",
+                "s = ~s(Phoenix.PubSub.broadcast(P))\n",
+                "x = valid?(a); Phoenix.PubSub.broadcast(P, t, m)\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn script_statements_skip_the_argument_rule() {
+        // FD.5a: a Ruby / PHP / Dart / Elixir statement literal passes when it
+        // opens in code, call argument or not; a commented one is refused.
+        assert!(argument_at("a.rb", "SQL = \"SELECT 1\"\n", "\"SELECT"));
+        assert!(argument_at(
+            "a.php",
+            "<?php $q = \"SELECT 1\";\n",
+            "\"SELECT"
+        ));
+        assert!(argument_at(
+            "a.dart",
+            "db.rawQuery(\"SELECT 1\");\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at(
+            "a.rb",
+            "# db.exec(\"SELECT 1\")\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at(
+            "a.ex",
+            "# Repo.query(\"SELECT 1\")\n",
+            "\"SELECT"
+        ));
+        assert!(!argument_at(
+            "a.php",
+            "<?php // $db->query(\"SELECT 1\");\n",
+            "\"SELECT"
+        ));
+    }
+
+    #[test]
+    fn library_names_in_script_import_strings_are_admitted() {
+        for (path, src, needle) in [
+            (
+                "lib/a.dart",
+                "import 'package:redis/redis.dart';\n",
+                "redis.",
+            ),
+            (
+                "lib/a.dart",
+                "import r'package:redis/redis.dart';\n",
+                "redis.",
+            ),
+            ("app/a.rb", "require \"redis\"\nRedis.new\n", "redis"),
+            ("src/a.php", "<?php require_once 'redis.php';\n", "redis."),
+            ("lib/a.ex", "x = \"Redis\"\n", "Redis"),
+            ("app/a.rb", "S = <<~X\n  redis.get\nX\n", "redis."),
+            ("app/a.rb", "Redis.new\n", "Redis"),
+        ] {
+            let at = src.find(needle).unwrap();
+            let mut guard = LazyGuard::new(path, src);
+            assert!(guard.admits_name(at), "{path}: {src:?}");
+        }
+        for (path, src, needle) in [
+            (
+                "lib/a.dart",
+                "// import 'package:redis/redis.dart';\n",
+                "redis.",
+            ),
+            ("app/a.rb", "# Redis.new\n", "Redis"),
+            ("lib/a.ex", "# Redis\n", "Redis"),
+            ("src/a.php", "<?php /* redis.get */\n", "redis."),
+            ("a.py", "S = 'redis.get'\n", "redis."),
+            ("a.rs", "let s = \"redis.get\";\n", "redis."),
+        ] {
+            let at = src.find(needle).unwrap();
+            let mut guard = LazyGuard::new(path, src);
+            assert!(!guard.admits_name(at), "{path}: {src:?}");
+            assert_eq!(guard.dropped, 1);
+        }
     }
 }

@@ -1,0 +1,18 @@
+{
+  "framework": "guard-script-literals",
+  "language": "ruby",
+  "dirs": ["rb", "php", "dart", "ex"],
+  "note": "FD.5a: the code guard covers Ruby, PHP, Dart and Elixir. Queue / event needles inside a comment or a plain string literal mint nothing; the real calls do. Baseline HEAD 6c1758b7 (glia merge rb php dart ex): every ghost_* / GhostEvent row fires (queue_consumer:ghost_rb, queue_producer:ghost_php, event_emit:GhostEvent, event_emit:ghost_ex), because LazyGuard lexed .rs / .py only.",
+  "expect_nodes": [
+    {"kind": "QUEUE_CONSUMER", "name": "orders", "note": "Karafka routes.draw topic :orders (rb/consumer.rb)"},
+    {"kind": "QUEUE_PRODUCER", "name": "invoices", "note": "php-amqplib basic_publish in code (php/pub.php)"},
+    {"kind": "EVENT_EMITTER", "name": "OrderPlaced", "note": "event_bus fire in code (dart/lib/bus.dart)"},
+    {"kind": "EVENT_EMITTER", "name": "rooms", "note": "Phoenix.PubSub.broadcast in code (ex/lib/pub.ex)"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_CONSUMER", "name": "ghost_rb", "note": "# topic comments (the Karafka seed case)"},
+    {"kind": "QUEUE_PRODUCER", "name": "ghost_php", "note": "a // comment and a single-quoted string"},
+    {"kind": "EVENT_EMITTER", "name": "GhostEvent", "note": "a // comment and a single-quoted string"},
+    {"kind": "EVENT_EMITTER", "name": "ghost_ex", "note": "a # comment and an @doc string"}
+  ]
+}

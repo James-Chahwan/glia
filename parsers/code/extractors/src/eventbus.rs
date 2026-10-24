@@ -6471,22 +6471,19 @@ mod tests {
     #[test]
     fn framework_sites_in_rust_literals_mint_nothing() {
         let src = "/// Phoenix.PubSub.broadcast(Shop.PubSub, \"order_placed\", m)\nfn f() {\n    let s = \"Phoenix.PubSub.subscribe(Shop.PubSub, 'order_placed')\";\n}\n";
+        // FD.5a: an Elixir file is guarded too, by its own syntax: `///` is
+        // code there (the broadcast mints), the `".."` string is not.
         assert_eq!(
             bus_qnames(src, "lib/a.ex"),
-            (
-                strs(&["event_emit:order_placed"]),
-                strs(&["event_handle:order_placed"])
-            )
+            (strs(&["event_emit:order_placed"]), vec![])
         );
         assert_eq!(bus_qnames(src, "src/a.rs"), (vec![], vec![]));
         let dart = format!(
             "{}\nfn f() {{ let s = \"eventBus.fire(OrderPlaced('o'))\"; }}\n",
             "import 'package:event_bus/event_bus.dart';"
         );
-        assert_eq!(
-            bus_qnames(&dart, "lib/a.dart").0,
-            strs(&["event_emit:OrderPlaced"])
-        );
+        // FD.5a: so is a Dart file: the string's fire mints nothing.
+        assert_eq!(bus_qnames(&dart, "lib/a.dart").0, Vec::<String>::new());
         assert_eq!(bus_qnames(&dart, "src/a.rs"), (vec![], vec![]));
     }
 

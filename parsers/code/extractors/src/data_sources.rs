@@ -72,9 +72,12 @@ pub fn extract_data_source_nodes(
             continue;
         }
         // The first occurrence the guard admits counts; the scan stops there.
+        // FD.5a: a library name in a Ruby / PHP / Dart / Elixir import
+        // string counts (`import 'package:redis/redis.dart'`), one in a
+        // comment does not.
         if !source
             .match_indices(pattern)
-            .any(|(at, _)| guard.admits(at))
+            .any(|(at, _)| guard.admits_name(at))
         {
             continue;
         }
