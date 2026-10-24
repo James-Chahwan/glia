@@ -54,8 +54,8 @@
 //! DH.9: Ratchet's `$app->route('/chat', new MyChat, ..)` is a PHP server
 //! (gated on `Ratchet\App`, a path literal or nothing). FD.4d: only a
 //! receiver assigned Ratchet's App reads, never in a Slim / Laravel router
-//! file ([`ratchet_receiver`]), and a double-quoted `"/ws/$x"` / `"/ws/{$x}"`
-//! reads `/ws/{x}` ([`php_route_path`]; single-quoted stays verbatim). Dart's
+//! file (`ratchet_receiver`), and a double-quoted `"/ws/$x"` / `"/ws/{$x}"`
+//! reads `/ws/{x}` (`php_route_path`; single-quoted stays verbatim). Dart's
 //! web_socket_channel (`WebSocketChannel` / `IOWebSocketChannel` /
 //! `HtmlWebSocketChannel.connect(..)`) and dart:io's `WebSocket.connect(..)`
 //! are clients whose URL may sit in a `Uri.parse(..)` / `Uri.tryParse(..)`
@@ -117,7 +117,7 @@
 //!   `[ws] clients framework=dart_io n=1 in bin/feed.dart`
 //! and (FD.4d) one per file whose needles hit inside an identifier
 //! (`io(` in `ratio(`) or named a local binding of a bare call (`let io =
-//! |..|` in Rust, [`SHADOWABLE`]), and one per file with a Ratchet row read:
+//! |..|` in Rust, `SHADOWABLE`), and one per file with a Ratchet row read:
 //!   `[ws] needle boundary rejected=1 path=src/layout.rs`
 //!   `[ws] ratchet routes=1 foreign_router_skipped=0 interpolations=1 path=server/server.php`
 //! and one per file whose client sites named a host (CB.21):
@@ -189,7 +189,7 @@ enum PathRead {
     /// FD.4d, Ratchet: positional argument 0 read as a PHP string
     /// ([`php_route_path`]: a double-quoted `$x` / `{$x}` / `${x}` is the
     /// `{x}` segment, a single-quoted literal verbatim), at a site whose
-    /// receiver is Ratchet's App ([`ratchet_receiver`]).
+    /// receiver is Ratchet's App (`ratchet_receiver`).
     RatchetRoute,
     /// DG.5, axum: the path of the first in-file `.route("/p", ..)` whose
     /// method router names the `fn` enclosing the needle
@@ -366,7 +366,7 @@ const HANDLER_ROWS: &[WsRow] = &[
     // ReadOnly: only a path literal mints. The handler object is an instance
     // (`new MyChat`), not a symbol a ref could bind, so no HANDLED_BY to it is
     // read. FD.4d: only a receiver assigned Ratchet's App reads, and never in
-    // a Slim / Laravel router file ([`ratchet_receiver`]).
+    // a Slim / Laravel router file (`ratchet_receiver`).
     keyed_row(
         "->route(",
         RATCHET,

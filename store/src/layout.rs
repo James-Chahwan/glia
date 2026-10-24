@@ -1200,7 +1200,7 @@ pub(crate) fn is_query_time_input(rel: &str) -> bool {
 /// `.gitignore` (so the flat 0.4.x `glia build` output and a custom layout dir
 /// inside `.glia` are excluded too). Gitignore-blind by design: a gitignored
 /// docs snapshot is an input all the same. The query-time inputs
-/// ([`is_query_time_input`]: `vectors.jsonl`, `vocab-snapshot/`) are left
+/// (`is_query_time_input`: `vectors.jsonl`, `vocab-snapshot/`) are left
 /// out too. Files are hashed in 1 MiB chunks. An unreadable file is
 /// left out (glia cannot read it either). Empty when there is no `.glia`.
 pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String> {
