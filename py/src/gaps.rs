@@ -133,7 +133,7 @@ mod tests {
             gaps_of(&MergedGraph::new(Vec::new()), &BTreeMap::new(), None, None).expect("report");
         assert_eq!(
             serde_json::to_string(&empty).expect("json"),
-            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"suspected_edge":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","rotted_rule","orphaned_cell"],"rows":[]}"#
+            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"suspected_edge":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","rotted_rule","orphaned_cell","named_not_modelled"],"rows":[]}"#
         );
         assert!(
             gaps_of(

@@ -56,7 +56,7 @@ pub(crate) enum InputsCmd {
     Vocab(vocab::Args),
     /// Embedding snapshot (FB.5b): embed each node's text (name, qname,
     /// leading doc, imports; code last under --recipe t2) with a local model
-    /// and write <repo>/.glia/vectors.jsonl, re-embedding only nodes whose
+    /// and write `<repo>/.glia/vectors.jsonl`, re-embedding only nodes whose
     /// text changed. Never part of a build; find, flows and pack read the
     /// sidecar. Exits 1 under --check when nodes need embedding, 2 on an
     /// error.

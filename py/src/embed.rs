@@ -113,6 +113,18 @@ fn with_embedder<T>(
         e.refuse_repo_dir(root)?;
         return f(e);
     }
+    // Without `embed` this wheel holds no bge-small session, even when
+    // feature unification (a workspace build with the CLI) turns
+    // glia-embed's `fastembed` on: refuse here, never load a model past the
+    // repo-cache check above.
+    #[cfg(not(feature = "embed"))]
+    if model == "bge-small" {
+        return Err(
+            "glia was built without the embedding model (glia-py feature embed): \
+                    use model=\"test-hash\" or a build with embeddings"
+                .to_string(),
+        );
+    }
     let _ = root;
     let e = glia_embed::named(model)?;
     f(e.as_ref())
