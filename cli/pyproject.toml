@@ -1,0 +1,41 @@
+# The `glia-cli` PyPI package: the `glia` binary as a wheel (maturin bindings = "bin"), so
+# `uvx --from glia-cli glia find <repo> X --json` and `pipx install glia-cli` need no Rust
+# toolchain (FE.5). No Python module ships: the wheel's only payload is the executable.
+# The version is cli/Cargo.toml's (`version.workspace = true`), read by maturin, so the
+# release bump touches only the workspace Cargo.toml. scripts/check-cli-wheel.sh builds the
+# wheel and the sdist from this file and installs both into fresh venvs.
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "glia-cli"
+dynamic = ["version"]
+description = "glia, the cross-language code-graph engine, as a command-line tool: find, blast-radius, trace, review and more over one graph of your repo."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [
+    {name = "James Chahwan"},
+]
+keywords = ["code-graph", "cli", "static-analysis", "llm", "agents"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/James-Chahwan/glia"
+Repository = "https://github.com/James-Chahwan/glia"
+Issues = "https://github.com/James-Chahwan/glia/issues"
+
+[tool.maturin]
+# A bin package: maturin compiles cli/Cargo.toml's [[bin]] `glia` and puts it in the
+# wheel's scripts. No `module-name` and no `features` (there is no Python module); the
+# binary's default features (the `embed` model path among them) are the CLI's own.
+bindings = "bin"
+strip = true

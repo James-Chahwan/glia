@@ -124,6 +124,10 @@ Opening the session (one full build) took 1.22-1.27 s on glia and 0.81 s on grpc
 ## Install
 
 ```
+# CLI, no build (Linux / macOS / Windows, x86_64 + arm64)
+uvx --from glia-cli glia --version     # run without installing: uvx --from glia-cli glia find <repo> X --json
+pipx install glia-cli                  # or install the `glia` command
+
 # CLI from source (Rust 1.95+)
 git clone https://github.com/James-Chahwan/glia
 cd glia
