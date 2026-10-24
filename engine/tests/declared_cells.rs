@@ -272,7 +272,7 @@ fn subdir_scope_anchors_on_the_enclosing_project() {
         declared_lines(&sub_dir),
         [
             format!(
-                "[declared] repo={sub_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1)"
+                "[declared] repo={sub_dir} constraint=1 decision=0 note=0 convention=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1)"
             ),
             "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
         ]
@@ -281,7 +281,7 @@ fn subdir_scope_anchors_on_the_enclosing_project() {
         declared_lines(&proj_dir),
         [
             format!(
-                "[declared] repo={proj_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"
+                "[declared] repo={proj_dir} constraint=1 decision=0 note=0 convention=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"
             ),
             "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
         ]
@@ -323,7 +323,7 @@ fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
         declared_lines(&dir),
         [
             format!(
-                "[declared] repo={dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1)"
+                "[declared] repo={dir} constraint=1 decision=0 note=0 convention=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1)"
             ),
             "[declared] rules=1 (forbid_edge=0 no_cycle=1 invariant=0)".to_string(),
         ]
@@ -389,7 +389,7 @@ text = \"stale anchor\"
     assert_eq!(
         declared_lines(&dir),
         [
-            format!("[declared] repo={dir} constraint=2 decision=1 note=1 anchored=2 orphaned=2 (anchor_qname=0 anchor_project=0 anchor_enclosing=1 anchor_module=1 records=1)"),
+            format!("[declared] repo={dir} constraint=2 decision=1 note=1 convention=0 anchored=2 orphaned=2 (anchor_qname=0 anchor_project=0 anchor_enclosing=1 anchor_module=1 records=1)"),
             "[declared] orphaned constraint id=nope-acyclic .glia/overlay.toml:3 scope=nope -> nope (no PROJECT at or above it, no MODULE under it)".to_string(),
             "[declared] orphaned note id=note#1 .glia/overlay.toml:18 anchor=services::api::app::gone".to_string(),
             "[declared] rules=1 (forbid_edge=0 no_cycle=0 invariant=1)".to_string(),
@@ -822,5 +822,189 @@ fn declared_builds_are_byte_identical() {
     assert_eq!(
         cell(&warm, "services::api::app::charge", cell_type::DECISION).len(),
         1
+    );
+}
+
+/// FB.12a: the fixture tree with `web/package.json` named `@shop/web` and
+/// `overlay` as its overlay file.
+fn convention_repo(tmp: &Path, overlay: &str) -> String {
+    let dir = repo(tmp, Some(overlay), None);
+    std::fs::write(
+        Path::new(&dir).join("web/package.json"),
+        "{\"name\": \"@shop/web\"}\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// FB.12a: a `[[convention]]` naming a project LABEL hangs on that PROJECT
+/// as a CONV entry of kind `convention`, its scope stored resolved beside the
+/// raw label; a version-1 file holding one loads (and a version-2 file too).
+#[test]
+fn convention_scope_label_anchors_on_project() {
+    for version in [1, 2] {
+        let overlay = format!(
+            "version = {version}\n\n[[convention]]\nscope = \"@shop/web\"\ntext = \"modals are centred, never bottom-anchored\"\nby = \"design\"\n"
+        );
+        let loaded = glia_config::parse_str(&overlay);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = convention_repo(tmp.path(), &overlay);
+        let r = generate_one(&dir).unwrap();
+        assert_eq!(
+            cell(&r, "project:web", cell_type::CONV),
+            [
+                r#"[{"by":"design","decl":".glia/overlay.toml:3","id":"convention#1","kind":"convention","paths":["web"],"scope":"web","scope_raw":"@shop/web","source":"overlay","text":"modals are centred, never bottom-anchored"}]"#
+            ],
+            "version {version}"
+        );
+        assert_eq!(all_of(&r, cell_type::CONV).len(), 1);
+        if version == 1 {
+            assert_eq!(
+                declared_lines(&dir),
+                [format!(
+                    "[declared] repo={dir} constraint=0 decision=0 note=0 convention=1 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"
+                )]
+            );
+        }
+    }
+}
+
+/// FB.12a: a convention scoped to a directory inside a project hangs on the
+/// enclosing PROJECT (DT.7a's rule_anchor), counted as anchor_enclosing and
+/// as a record; `glia check` lists nothing for it (a record, not a rule).
+#[test]
+fn convention_subdir_scope_anchors_on_the_enclosing_project() {
+    let overlay = "version = 1\n\n[[convention]]\nid = \"modal-centre\"\nscope = \"./web/src/\"\ntext = \"modals are centred\"\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = convention_repo(tmp.path(), overlay);
+    let r = generate_one(&dir).unwrap();
+    assert_eq!(
+        cell(&r, "project:web", cell_type::CONV),
+        [
+            r#"[{"decl":".glia/overlay.toml:3","id":"modal-centre","kind":"convention","paths":["web/src"],"scope":"web/src","scope_raw":"./web/src/","source":"overlay","text":"modals are centred"}]"#
+        ]
+    );
+    let roots: Vec<(u64, std::path::PathBuf)> = r
+        .repo_roots
+        .iter()
+        .map(|(id, root)| (*id, std::path::PathBuf::from(root)))
+        .collect();
+    let report = glia_engine::check::check_with_roots(
+        &r.merged,
+        &roots,
+        &glia_engine::check::CheckOptions::default(),
+    );
+    assert!(report.unanchored.is_empty(), "{:?}", report.unanchored);
+    assert_eq!(
+        declared_lines(&dir),
+        [format!(
+            "[declared] repo={dir} constraint=0 decision=0 note=0 convention=1 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1 records=1)"
+        )]
+    );
+}
+
+/// FB.12a: a convention naming a reflexion-model component hangs where the
+/// component anchored (here, with no root PROJECT and no PROJECT at its
+/// path, the least-qname MODULE under it), storing the component's name and
+/// every resolved path; an unknown component is rejected.
+#[test]
+fn convention_component_anchors_on_the_component_anchor() {
+    let overlay = "version = 1
+
+[[component]]
+name = \"ui\"
+paths = [\"web/src\", \"@shop/web\"]
+
+[[convention]]
+component = \"ui\"
+text = \"every modal is centred\"
+";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = convention_repo(tmp.path(), overlay);
+    let r = generate_one(&dir).unwrap();
+    let (_, module) = least_module_under(&r, "web/src");
+    assert_eq!(
+        cell(&r, &module, cell_type::CONV),
+        [
+            r#"[{"component":"ui","decl":".glia/overlay.toml:7","id":"convention#1","kind":"convention","paths":["web/src","web"],"scope":"web/src","scope_raw":"web/src","source":"overlay","text":"every modal is centred"}]"#
+        ]
+    );
+    let component_at: Vec<String> = cell(&r, &module, cell_type::CONSTRAINT);
+    assert!(
+        component_at
+            .first()
+            .is_some_and(|c| c.contains("\"id\":\"component:ui\"")),
+        "the convention sits beside its component: {component_at:?}"
+    );
+    assert_eq!(
+        declared_lines(&dir),
+        [
+            format!(
+                "[declared] repo={dir} constraint=0 decision=0 note=0 convention=1 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1 records=1)"
+            ),
+            format!(
+                "[declared] model repo={dir} components=1 layers=0 allows=0 anchored=1 orphaned=0"
+            ),
+        ]
+    );
+
+    let unknown = "version = 1\n\n[[convention]]\ncomponent = \"nope\"\ntext = \"t\"\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = convention_repo(tmp.path(), unknown);
+    let r = generate_one(&dir).unwrap();
+    assert!(all_of(&r, cell_type::CONV).is_empty());
+    assert_eq!(
+        declared_lines(&dir),
+        [
+            format!(
+                "[declared] repo={dir} constraint=0 decision=0 note=0 convention=1 anchored=0 orphaned=0 (anchor_qname=0 anchor_project=0) rejected=1"
+            ),
+            "[declared] rejected convention id=convention#1 .glia/overlay.toml:3: no [[component]] named nope".to_string(),
+        ]
+    );
+}
+
+/// FB.12a: a convention naming both a scope and a component is dropped by
+/// the loader with one errors line; the build writes no CONV entry.
+#[test]
+fn convention_with_scope_and_component_is_rejected() {
+    let overlay = "version = 1\n\n[[component]]\nname = \"ui\"\npaths = [\"web\"]\n\n[[convention]]\nscope = \"web\"\ncomponent = \"ui\"\ntext = \"t\"\n";
+    let loaded = glia_config::parse_str(overlay);
+    assert_eq!(
+        loaded.errors,
+        [
+            ".glia/overlay.toml:7: [[convention]] needs exactly one of scope or component (stanza dropped)"
+        ]
+    );
+    assert!(loaded.config.convention.is_empty());
+    let tmp = tempfile::tempdir().unwrap();
+    let r = generate_one(&convention_repo(tmp.path(), overlay)).unwrap();
+    assert!(all_of(&r, cell_type::CONV).is_empty());
+}
+
+/// FB.12a: a cell-API CONV row of kind `convention` needs a `scope`; one
+/// with a scope is applied as written (Engram's write path), and a CONV row
+/// of any other kind is refused.
+#[test]
+fn cell_api_convention_needs_a_scope() {
+    let row = |entry: &str| format!(r#"{{"qname":"project:web","cell":"CONV","entry":{entry}}}"#);
+    for bad in [
+        r#"{"source":"api","id":"engram:1","kind":"convention","text":"t"}"#,
+        r#"{"source":"api","id":"engram:1","kind":"convention","scope":" ","text":"t"}"#,
+        r#"{"source":"api","id":"engram:1","kind":"rule","scope":"web","text":"t"}"#,
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = generate_one(&repo(tmp.path(), None, Some(&row(bad)))).unwrap();
+        assert!(all_of(&r, cell_type::CONV).is_empty(), "{bad} is refused");
+    }
+    let good = r#"{"source":"api","id":"engram:1","kind":"convention","scope":"web/src","text":"modals are centred"}"#;
+    let tmp = tempfile::tempdir().unwrap();
+    let r = generate_one(&repo(tmp.path(), None, Some(&row(good)))).unwrap();
+    assert_eq!(
+        cell(&r, "project:web", cell_type::CONV),
+        [
+            r#"[{"id":"engram:1","kind":"convention","scope":"web/src","source":"api","text":"modals are centred"}]"#
+        ]
     );
 }

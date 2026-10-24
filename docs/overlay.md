@@ -17,7 +17,7 @@ Check the file in. It is an input, not a cache.
 |---|---|---|---|
 | `[walk]`, `[[project]]`, `[entrypoints]` | user config | always | still applied |
 | `[ids]` | user config, read at query time (no graph change) | always | still applied |
-| `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
+| `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[convention]]`, `[[component]]`, `[[layer]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
 | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay: inference written by a model or a person | by default | skipped |
 
 Provenance: every node, edge or cell the overlay creates carries an ORIGIN cell. An `origin = "llm"`
@@ -116,6 +116,11 @@ status = "accepted"
 anchor = "services::api::app::charge"
 text = "retries are safe"                 # 1..=4096 chars; id defaults to note#<n>
 by = "james"
+
+[[convention]]                            # governs every node under a scope: see "Conventions" below
+scope = "web/src/app/modals"              # a path or project label; or component = "<a [[component]]>": exactly one
+text = "modals are centred, never bottom-anchored"   # 1..=4096 chars; id defaults to convention#<n>
+by = "design"
 ```
 
 Anchors. A `[[constraint]]`, `[[decision]]` or `[[note]]` with `anchor = "<qname>"` hangs on that
@@ -166,6 +171,47 @@ A `[[project]]` path that a manifest already roots keeps the detected root (`sha
 root, or one named after its directory): then the root takes the declared label and keeps its
 ecosystem and manifest (`relabelled=`, DG.12). The PROJECT's ORIGIN cell records where its label
 came from as `label_source`: `manifest`, `dir`, `root` or `declared` (DD.4).
+
+## Conventions
+
+A `[[note]]` is free text on ONE node. A `[[convention]]` (legal in versions 1 and 2) is free text
+that governs a whole SCOPE: every node whose located file lies under it.
+
+```text
+[[convention]]
+id = "modal-centre"          # optional; defaults to convention#<n> (1-based), which a declared id may not use
+scope = "web/src/app/modals" # a repo-relative path or a project label, the [[constraint]] scope grammar
+text = "modals are centred, never bottom-anchored"
+by = "design"                # optional
+
+[[convention]]
+component = "ui"             # instead of scope: a [[component]] of the reflexion model (its paths)
+text = "forms validate on blur"
+```
+
+Exactly one of `scope` and `component` (`[[convention]] needs exactly one of scope or component
+(stanza dropped)` otherwise); `text` is 1..=4096 chars; ids are unique within the section. The
+build stores it as a CONV entry on the scope's anchor, where a scoped `[[constraint]]` hangs: the
+PROJECT at the scope, else the deepest PROJECT above it, else the least-qname MODULE under it. A
+`component` convention hangs where that component anchored, and one naming no declared component
+is rejected (`[declared] rejected convention id=<id> <decl>: no [[component]] named <c>`). The
+entry:
+
+`{"source":"overlay","id","kind":"convention","scope","scope_raw","component"?,"paths","text","by"?,"decl"}`
+
+`scope` is resolved to a repo-relative path (`.` = the repo root; a component's first path),
+`scope_raw` is as written, and `paths` is `[scope]` or the component's every resolved path. A
+convention is a record, not a rule: `glia check` never lists it, and `--no-overlay` keeps it. The
+build's `[declared] repo=<label> constraint=<c> decision=<d> note=<n> convention=<v> anchored=..`
+line counts it, and the `[overlay] loaded` line ends `convention=<n>`.
+
+Another writer (Engram) adds one through the cell API, on the scope's anchor qname: `glia cell set`
+or a `.glia/cells.jsonl` row such as
+`{"qname":"project:frontend","cell":"CONV","entry":{"source":"api","id":"engram:<hash>","kind":"convention","scope":"frontend/src/app/modals","text":".."}}`.
+A CONV entry of kind `convention` needs a non-empty `scope`, and may carry `scope_raw`, `component`
+and `paths`; a CONV entry of any other `kind` is refused (`CONV kind must be absent or
+"convention"`). A glia older than 0.5.4 ignores a whole overlay that holds a `[[convention]]` (an
+unknown section).
 
 ## `[walk]`: skips and declared test paths
 

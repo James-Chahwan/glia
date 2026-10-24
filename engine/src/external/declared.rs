@@ -1,6 +1,7 @@
 //! Declared knowledge (LF.4a): the `.glia/overlay.toml` `[[constraint]]`,
 //! `[[decision]]` and `[[note]]` stanzas become CONSTRAINT, DECISION and CONV
-//! entries on the node each one anchors on; the reflexion model's
+//! entries on the node each one anchors on, a `[[convention]]` (FB.12a) a
+//! CONV entry of kind `convention` on its scope's anchor; the reflexion model's
 //! `[[component]]` and `[[layer]]` stanzas (CC.5a) become CONSTRAINT entries
 //! of kind `component` / `layer`, and `[[constraint]] kind = "allow"` one of
 //! kind `allow`.
@@ -37,6 +38,12 @@
 //!      only an exact PROJECT held one, and a sub-scoped decision was dropped
 //!      `(no PROJECT)`.
 //!    - A note has no scope: its `anchor` is required (rule 1 only).
+//!    - A convention (FB.12a) has no `anchor`: its `scope` binds as a
+//!      constraint's does (the PROJECT at it, else the deepest PROJECT
+//!      above it, else the least-qname MODULE under it), and a `component`
+//!      convention hangs exactly where that component anchored (after the
+//!      components bound; a component that did not anchor orphans it, an
+//!      undeclared one rejects it `no [[component]] named <c>`).
 //!
 //! THE MODEL'S ANCHORS (CC.5a), after rule 1 (`anchor`, on a component or an
 //! allow; a layer takes none):
@@ -71,6 +78,14 @@
 //! - decision -> DECISION `{"source":"overlay","id","title"?,"status"?,"text"?,"decl"}`;
 //! - note -> CONV `{"source":"overlay","id","text","by"?,"decl"}`, `id`
 //!   defaulting to `note#<n>` (the note's 1-based position in the file);
+//! - convention -> CONV
+//!   `{"source":"overlay","id","kind":"convention","scope","scope_raw","component"?,"paths","text","by"?,"decl"}`,
+//!   `id` defaulting to `convention#<n>`; `scope` is the scope resolved to a
+//!   repo-relative path (a component's: its first resolved path) and
+//!   `scope_raw` as written (a component's first path as written); `paths`
+//!   is `[scope]`, or a component's every resolved path. Every node whose
+//!   located file lies under one of `paths` is governed by it. No text is
+//!   redacted: an overlay stanza is the repo's own declaration;
 //! - component -> CONSTRAINT
 //!   `{"source":"overlay","id":"component:<name>","kind":"component","name","paths":[resolved],"paths_raw":[..],"text"?,"origin","decl"}`;
 //! - layer -> CONSTRAINT
@@ -82,19 +97,20 @@
 //!
 //! `decl` is `.glia/overlay.toml:<line>` of the stanza's header. Stanzas apply
 //! in file order per section - components, then layers (their anchors can
-//! depend on a component's), then constraints, decisions and notes; every
+//! depend on a component's), then constraints, decisions, notes and
+//! conventions (a component convention reads its component's anchor); every
 //! instance of the anchor node (one id can sit in several language graphs)
 //! gets the entry.
 //!
-//! fired_on markers. Once per repo whose file declares a constraint, decision
-//! or note (an allow is a constraint):
-//!   `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
-//! with ` anchor_enclosing=<e>` inside the parentheses only when a constraint
-//! or a decision bound through a PROJECT above its scope, then
+//! fired_on markers. Once per repo whose file declares a constraint, decision,
+//! note or convention (an allow is a constraint):
+//!   `[declared] repo=<label> constraint=<c> decision=<d> note=<n> convention=<v> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
+//! with ` anchor_enclosing=<e>` inside the parentheses only when a constraint,
+//! a decision or a convention bound through a PROJECT above its scope, then
 //! ` anchor_module=<m>` only when one bound through a MODULE under its scope
 //! or an allow through its component's MODULE, then ` records=<r>` only when
 //! decisions / notes (records, not rules) are among those enclosing / module
-//! binds (FD.65), and a trailing ` rejected=<x>` only when an
+//! binds (FD.65; conventions too, FB.12a), and a trailing ` rejected=<x>` only when an
 //! entry failed its rules or met a cell that is not an entry array. Once per
 //! repo whose file declares a model (a component, a layer or an allow):
 //!   `[declared] model repo=<label> components=<c> layers=<l> allows=<a> anchored=<n> orphaned=<o>`
@@ -115,11 +131,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use glia_code_domain::external_inputs::CONVENTION_KIND;
 use glia_code_domain::external_inputs::{
     ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_declared_entry,
 };
 use glia_code_domain::glia_config::{
-    self, COMPONENT_ID_PREFIX, LAYER_ID_PREFIX, LoadedConfig, MODEL_KINDS, NOTE_ID_PREFIX, Origin,
+    self, COMPONENT_ID_PREFIX, CONVENTION_ID_PREFIX, LAYER_ID_PREFIX, LoadedConfig, MODEL_KINDS,
+    NOTE_ID_PREFIX, Origin,
 };
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{Cell, CellPayload, CellTypeId, NodeId, RepoId};
@@ -157,11 +175,13 @@ struct Tally {
     constraint: usize,
     decision: usize,
     note: usize,
+    convention: usize,
     anchor_qname: usize,
     anchor_project: usize,
     anchor_enclosing: usize,
     anchor_module: usize,
-    /// Decisions / notes among the enclosing and module binds (FD.65).
+    /// Decisions / notes / conventions among the enclosing and module binds
+    /// (FD.65, FB.12a).
     records: usize,
     orphaned: usize,
     rejected: usize,
@@ -222,6 +242,9 @@ enum Target {
     /// A layer, or an allow without `anchor`: the root PROJECT, else where
     /// component `component` anchored.
     Model { component: String },
+    /// A `[[convention]]` naming a component (FB.12a): exactly where that
+    /// component anchored.
+    ComponentOf { component: String },
 }
 
 /// One stanza's cell entry and where it asks to hang.
@@ -231,11 +254,12 @@ struct Stanza {
     id: String,
     decl: String,
     target: Target,
-    /// Counted on the LF.4a line (constraint / decision / note).
+    /// Counted on the LF.4a line (constraint / decision / note / convention).
     declared: bool,
     /// Counted on the model line (component / layer / allow).
     model: bool,
-    /// A record (decision / note), not a rule: counted in `records=`.
+    /// A record (decision / note / convention), not a rule: counted in
+    /// `records=`.
     record: bool,
     /// A component's name: where it anchors is recorded for its layer and
     /// its allows.
@@ -470,7 +494,12 @@ fn text(s: &Option<String>) -> Option<Value> {
 fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> Vec<Stanza> {
     let c = &cfg.config;
     let mut out = Vec::with_capacity(
-        c.component.len() + c.layer.len() + c.constraint.len() + c.decision.len() + c.note.len(),
+        c.component.len()
+            + c.layer.len()
+            + c.constraint.len()
+            + c.decision.len()
+            + c.note.len()
+            + c.convention.len(),
     );
     let s = |v: &str| Some(Value::String(v.to_string()));
     let strings = |v: &[String]| {
@@ -480,6 +509,9 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
     };
     // resolved path -> the component that claimed it first.
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+    // component name -> (its resolved paths, its paths as written): what a
+    // `[[convention]]` naming it stores (FB.12a).
+    let mut component_paths: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
     for spanned in &c.component {
         let d = spanned.get_ref();
         let decl = cfg.decl_of(spanned.span());
@@ -508,6 +540,9 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
                 claimed.insert(path.clone(), d.name.clone());
             }
         }
+        component_paths
+            .entry(d.name.clone())
+            .or_insert_with(|| (paths.clone(), d.paths.clone()));
         let id = format!("{COMPONENT_ID_PREFIX}{}", d.name);
         let entry = object(vec![
             ("source", s("overlay")),
@@ -730,6 +765,71 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             entry,
         });
     }
+    for (i, spanned) in c.convention.iter().enumerate() {
+        let d = spanned.get_ref();
+        let decl = cfg.decl_of(spanned.span());
+        let id =
+            d.id.clone()
+                .unwrap_or_else(|| format!("{CONVENTION_ID_PREFIX}{}", i + 1));
+        let (scope, scope_raw, paths, target, reject) = match (&d.component, &d.scope) {
+            (Some(name), _) => match component_paths.get(name) {
+                Some((resolved, raw)) => (
+                    resolved.first().cloned().unwrap_or_else(|| ".".to_string()),
+                    raw.first().cloned().unwrap_or_default(),
+                    resolved.clone(),
+                    Target::ComponentOf {
+                        component: name.clone(),
+                    },
+                    None,
+                ),
+                None => (
+                    ".".to_string(),
+                    String::new(),
+                    Vec::new(),
+                    Target::ComponentOf {
+                        component: name.clone(),
+                    },
+                    Some(format!("no [[component]] named {name}")),
+                ),
+            },
+            (None, raw) => {
+                let raw = raw.clone().unwrap_or_default();
+                let path = anchors.path_of(merged, &raw);
+                (
+                    path.clone(),
+                    raw.clone(),
+                    vec![path],
+                    Target::RuleScope(Some(raw)),
+                    None,
+                )
+            }
+        };
+        let entry = object(vec![
+            ("source", s("overlay")),
+            ("id", s(&id)),
+            ("kind", s(CONVENTION_KIND)),
+            ("scope", s(&scope)),
+            ("scope_raw", s(&scope_raw)),
+            ("component", d.component.as_deref().and_then(s)),
+            ("paths", strings(&paths)),
+            ("text", s(&d.text)),
+            ("by", text(&d.by)),
+            ("decl", s(&decl)),
+        ]);
+        out.push(Stanza {
+            section: "convention",
+            cell: cell_type::CONV,
+            id,
+            decl,
+            target,
+            declared: true,
+            model: false,
+            record: true,
+            component: None,
+            reject,
+            entry,
+        });
+    }
     out
 }
 
@@ -747,6 +847,8 @@ enum Unbound {
     /// A layer, or an allow without `anchor`: no root PROJECT, and its
     /// component did not anchor.
     Model { component: String },
+    /// A convention naming a component that did not anchor (FB.12a).
+    Component { component: String },
 }
 
 impl Unbound {
@@ -762,6 +864,9 @@ impl Unbound {
             }
             Unbound::Model { component } => {
                 format!("component={component} (no root PROJECT; the component did not anchor)")
+            }
+            Unbound::Component { component } => {
+                format!("component={component} (the component did not anchor)")
             }
         }
     }
@@ -815,6 +920,14 @@ fn bind_stanza(
             .ok_or_else(|| Unbound::Model {
                 component: component.clone(),
             }),
+        Target::ComponentOf { component } => {
+            components
+                .get(component)
+                .copied()
+                .ok_or_else(|| Unbound::Component {
+                    component: component.clone(),
+                })
+        }
     }
 }
 
@@ -828,6 +941,7 @@ pub(super) fn apply_declared_cells(
     if c.constraint.is_empty()
         && c.decision.is_empty()
         && c.note.is_empty()
+        && c.convention.is_empty()
         && c.component.is_empty()
         && c.layer.is_empty()
     {
@@ -837,6 +951,7 @@ pub(super) fn apply_declared_cells(
         constraint: c.constraint.len(),
         decision: c.decision.len(),
         note: c.note.len(),
+        convention: c.convention.len(),
         component: c.component.len(),
         layer: c.layer.len(),
         allow: c
@@ -931,12 +1046,13 @@ fn report(label: &str, t: &Tally) {
             String::new()
         }
     };
-    if t.constraint + t.decision + t.note > 0 {
+    if t.constraint + t.decision + t.note + t.convention > 0 {
         eprintln!(
-            "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}{}){}",
+            "[declared] repo={label} constraint={} decision={} note={} convention={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}{}){}",
             t.constraint,
             t.decision,
             t.note,
+            t.convention,
             t.anchor_qname + t.anchor_project + t.anchor_enclosing + t.anchor_module,
             t.orphaned,
             t.anchor_qname,
@@ -1416,6 +1532,9 @@ fn fix_for(
                 "declare a [[component]] named `{component}`, or name a declared component first"
             )
         }
+        Unbound::Component { component } => format!(
+            "anchor component `{component}` first (its own row says why), or name the convention's `scope` instead"
+        ),
         Unbound::Model { component } => {
             let anchor_too = if st.section == "constraint" {
                 ", or set `anchor` on this stanza"

@@ -27,7 +27,7 @@
 //! candidate builds) parses that text here instead, for its primary repo.
 //!
 //! Markers, once per repo that has the file (or is given a text):
-//! - `[overlay] loaded .glia/overlay.toml repo=<label> version=<v> (walk=<n> project=<n> ... note=<n>) errors=<e>`
+//! - `[overlay] loaded .glia/overlay.toml repo=<label> version=<v> (walk=<n> project=<n> ... note=<n> component=<n> layer=<n> ids=<n> convention=<n>) errors=<e>`
 //!   (`loaded overlay_text` for a given text) plus one
 //!   `[overlay] error: <loader error>` line per error;
 //! - `[cells] sidecar repo=<label> rows=<r> bound=<b> rekeyed=<k> ambiguous=<a> orphaned=<o> rejected=<x> (CONSTRAINT=<n> DECISION=<n> CONV=<n> VECTOR=<n>)`
@@ -48,7 +48,7 @@
 //!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]);
 //! - `[scip] ingest repo=<label> tool=<tool> documents=<d> stale=<s> defs=<n> bound=<b> unbound=<u> ambiguous=<a> refs=<r> imports=<i> unowned=<o> added=<e> (calls=<c> uses=<x>) confirmed=<f> category_differs=<k> self_refs=<z>`
 //!   once per repo with a complete `.glia/scip-snapshot/` (see [`scip`]);
-//! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
+//! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> convention=<v> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
 //!   (` anchor_enclosing=<e>` / ` anchor_module=<m>` inside the parentheses
 //!   when non-zero: a constraint hung on the deepest PROJECT above its scope,
 //!   or on a MODULE under it, DT.7a)

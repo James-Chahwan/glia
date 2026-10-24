@@ -735,7 +735,7 @@ title = "a path no code sits under"
         declared_lines(&dir),
         [
             format!(
-                "[declared] repo={label} constraint=0 decision=4 note=0 anchored=3 orphaned=1 (anchor_qname=0 anchor_project=0 anchor_enclosing=2 anchor_module=1 records=3)"
+                "[declared] repo={label} constraint=0 decision=4 note=0 convention=0 anchored=3 orphaned=1 (anchor_qname=0 anchor_project=0 anchor_enclosing=2 anchor_module=1 records=3)"
             ),
             "[declared] orphaned decision id=ghost .glia/overlay.toml:18 scope=ghost/dir -> ghost/dir (no PROJECT at or above it, no MODULE under it)".to_string(),
         ]

@@ -77,7 +77,7 @@ pub const MAX_ID_CHARS: usize = 128;
 /// `[[note]] text`: 1..=4096 chars (the CONV entry rule).
 pub const MAX_NOTE_CHARS: usize = 4096;
 /// Section names in `section_counts` / marker order.
-pub const SECTIONS: [&str; 13] = [
+pub const SECTIONS: [&str; 14] = [
     "walk",
     "project",
     "entrypoints",
@@ -91,6 +91,7 @@ pub const SECTIONS: [&str; 13] = [
     "component",
     "layer",
     "ids",
+    "convention",
 ];
 /// `[ids] patterns`: at most this many shapes (EB.4).
 pub const MAX_ID_PATTERNS: usize = 16;
@@ -131,6 +132,9 @@ pub const MAX_MODEL_NAME_CHARS: usize = MAX_ID_CHARS - COMPONENT_ID_PREFIX.len()
 pub const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 /// Generated `[[note]]` ids are `note#<n>`; a declared id may not use the prefix.
 pub const NOTE_ID_PREFIX: &str = "note#";
+/// Generated `[[convention]]` ids are `convention#<n>` (FB.12a); a declared
+/// id may not use the prefix.
+pub const CONVENTION_ID_PREFIX: &str = "convention#";
 
 /// The whole file. Each field names the packet that applies it.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -179,6 +183,10 @@ pub struct GliaConfig {
     /// `glia_engine::intent::ids`; it changes no graph.
     #[serde(default)]
     pub ids: IdsConfig,
+    /// Scope-level conventions -> CONV `convention` entries (FB.12a): legal in
+    /// versions 1 and 2.
+    #[serde(default)]
+    pub convention: Vec<Spanned<ConventionDecl>>,
 }
 
 /// `[walk]`: gitignore-syntax patterns anchored at the repo root. They only
@@ -492,6 +500,26 @@ pub struct NoteDecl {
     #[serde(default)]
     pub id: Option<String>,
     pub anchor: String,
+    pub text: String,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// `[[convention]]` (FB.12a): a convention that governs every node located
+/// under a scope - `scope`, a repo-relative path or project label (the
+/// `[[constraint]]` scope grammar), or `component`, a `[[component]]` of the
+/// reflexion model (its declared paths); exactly one of the two. `id`
+/// defaults to `convention#<n>` (1-based); `text` is 1..=[`MAX_NOTE_CHARS`]
+/// chars.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConventionDecl {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub component: Option<String>,
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
@@ -1041,7 +1069,7 @@ pub struct LoadedConfig {
     /// Each dropped `[[section]]` stanza and an ignored whole file, as
     /// [`Rejection`]s (DT.7c): the stanzas in the loader's order (project,
     /// route_prefix, wrapper, edge, component, layer, constraint, decision,
-    /// note; each in file order), or the one whole-file rejection.
+    /// note, convention; each in file order), or the one whole-file rejection.
     pub rejections: Vec<Rejection>,
     line_starts: Vec<usize>,
     /// `[ids]` entries the loader dropped (EB.4), read by [`Self::ids_rejected`].
@@ -1067,7 +1095,7 @@ impl LoadedConfig {
     /// plus tests patterns, `entrypoints` qname patterns, `constants` keys,
     /// `ids` its patterns, local words, markdown globs and trackers, every
     /// other section its stanzas. Feeds the `[overlay] loaded` marker.
-    pub fn section_counts(&self) -> [(&'static str, usize); 13] {
+    pub fn section_counts(&self) -> [(&'static str, usize); 14] {
         let c = &self.config;
         let n = [
             c.walk.skip.len() + c.walk.tests.len(),
@@ -1086,6 +1114,7 @@ impl LoadedConfig {
                 + c.ids.local_words.as_ref().map_or(0, Vec::len)
                 + c.ids.markdown.len()
                 + c.ids.tracker.len(),
+            c.convention.len(),
         ];
         std::array::from_fn(|i| (SECTIONS[i], n[i]))
     }
@@ -1545,6 +1574,39 @@ impl LoadedConfig {
                 match &n.id {
                     Some(id) if id.starts_with(NOTE_ID_PREFIX) => Err(format!(
                         "id {id:?} uses the reserved {NOTE_ID_PREFIX:?} prefix"
+                    )),
+                    Some(id) => {
+                        check_id(id)?;
+                        unique(&mut ids, id)
+                    }
+                    None => Ok(()),
+                }
+            },
+        );
+
+        let mut ids = BTreeSet::new();
+        cfg.convention = self.keep(
+            "convention",
+            cfg.convention,
+            &mut errors,
+            &mut rejections,
+            |c| c.id.as_deref().and_then(nonblank),
+            |c| {
+                if c.scope.is_some() == c.component.is_some() {
+                    return Err("needs exactly one of scope or component".into());
+                }
+                if c.component.as_deref().is_some_and(|n| n.trim().is_empty()) {
+                    return Err("component must name a [[component]]".into());
+                }
+                let chars = c.text.chars().count();
+                if c.text.trim().is_empty() || chars > MAX_NOTE_CHARS {
+                    return Err(format!(
+                        "text must be 1..={MAX_NOTE_CHARS} chars (got {chars})"
+                    ));
+                }
+                match &c.id {
+                    Some(id) if id.starts_with(CONVENTION_ID_PREFIX) => Err(format!(
+                        "id {id:?} uses the reserved {CONVENTION_ID_PREFIX:?} prefix"
                     )),
                     Some(id) => {
                         check_id(id)?;
@@ -2028,6 +2090,10 @@ components = ["api"]
 
 [ids]
 patterns = ["{U}.{N}{l?}"]
+
+[[convention]]
+scope = "web"
+text = "modals are centred"
 "#;
 
     fn edge_at_line(line: usize, category: &str) -> String {
@@ -2069,7 +2135,7 @@ patterns = ["{U}.{N}{l?}"]
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1, 0]);
+        assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1, 0, 1]);
         assert_eq!(
             l.config.walk.tests,
             ["playwright/", "qa/**/*.py"],
@@ -2077,13 +2143,90 @@ patterns = ["{U}.{N}{l?}"]
         );
     }
 
-    /// EB.4: SECTIONS names 13 sections, `ids` last.
+    /// EB.4: SECTIONS names `ids` 13th; FB.12a appends `convention` last.
     #[test]
-    fn sections_end_with_ids() {
-        assert_eq!(SECTIONS.len(), 13);
+    fn sections_end_with_ids_then_convention() {
+        assert_eq!(SECTIONS.len(), 14);
         assert_eq!(SECTIONS[12], "ids");
+        assert_eq!(SECTIONS[13], "convention");
         let l = parse_str(FULL);
         assert_eq!(l.section_counts()[12], ("ids", 1));
+        assert_eq!(l.section_counts()[13], ("convention", 1));
+    }
+
+    /// FB.12a: `[[convention]]` parses in versions 1 and 2; exactly one of
+    /// scope / component, a 1..=4096-char text, ids unique and never the
+    /// generated prefix.
+    #[test]
+    fn convention_section_parses_and_validates() {
+        for version in [1, 2] {
+            let l = parse_str(&format!(
+                "version = {version}\n[[convention]]\nscope = \"web/src/app/modals\"\ntext = \"modals are centred\"\nby = \"design\"\n[[convention]]\nid = \"ui-forms\"\ncomponent = \"ui\"\ntext = \"forms validate on blur\"\n"
+            ));
+            assert!(l.errors.is_empty(), "{version}: {:?}", l.errors);
+            assert_eq!(l.section_counts()[13], ("convention", 2));
+            let c = l.config.convention[0].get_ref();
+            assert_eq!(
+                (
+                    c.id.as_deref(),
+                    c.scope.as_deref(),
+                    c.component.as_deref(),
+                    c.by.as_deref()
+                ),
+                (None, Some("web/src/app/modals"), None, Some("design"))
+            );
+            let c = l.config.convention[1].get_ref();
+            assert_eq!(
+                (c.id.as_deref(), c.component.as_deref()),
+                (Some("ui-forms"), Some("ui"))
+            );
+        }
+        let long = "x".repeat(MAX_NOTE_CHARS + 1);
+        for (body, needle) in [
+            (
+                "scope = \"web\"\ncomponent = \"ui\"\ntext = \"t\"",
+                "needs exactly one of scope or component",
+            ),
+            ("text = \"t\"", "needs exactly one of scope or component"),
+            (
+                "component = \" \"\ntext = \"t\"",
+                "component must name a [[component]]",
+            ),
+            (
+                "scope = \"web\"\ntext = \"  \"",
+                "text must be 1..=4096 chars (got 2)",
+            ),
+            (
+                &format!("scope = \"web\"\ntext = \"{long}\"")[..],
+                "text must be 1..=4096 chars (got 4097)",
+            ),
+            (
+                "id = \"convention#3\"\nscope = \"web\"\ntext = \"t\"",
+                "uses the reserved \"convention#\" prefix",
+            ),
+        ] {
+            let l = parse_str(&format!("version = 1\n[[convention]]\n{body}\n"));
+            assert!(l.config.convention.is_empty(), "{body}");
+            assert_eq!(l.errors.len(), 1, "{body}: {:?}", l.errors);
+            assert!(
+                l.errors[0].starts_with(".glia/overlay.toml:2: [[convention]] ")
+                    && l.errors[0].contains(needle)
+                    && l.errors[0].ends_with("(stanza dropped)"),
+                "{}",
+                l.errors[0]
+            );
+            assert_eq!(l.rejections[0].section, Some("convention"));
+        }
+        let dup = parse_str(
+            "version = 1\n[[convention]]\nid = \"a\"\nscope = \"web\"\ntext = \"t\"\n[[convention]]\nid = \"a\"\nscope = \"api\"\ntext = \"u\"\n",
+        );
+        assert_eq!(dup.config.convention.len(), 1);
+        assert_eq!(dup.errors.len(), 1, "{:?}", dup.errors);
+        // An unknown key is a schema error, as in every section.
+        let l = parse_str(
+            "version = 1\n[[convention]]\nscope = \"web\"\ntext = \"t\"\nanchor = \"x\"\n",
+        );
+        assert!(l.config.convention.is_empty() && l.rejections[0].section.is_none());
     }
 
     /// EB.4: `[ids]` parses in versions 1 and 2, every key.
@@ -2799,7 +2942,7 @@ to = "ghost"
             .collect();
         assert_eq!(ids, ["web-uses-api"]);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1, 0]);
+        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1, 0, 0]);
 
         // One stanza at a time: each is dropped with one line at its header.
         let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\".\"]\n";

@@ -52,6 +52,18 @@
 //! crate (`glia_graph::cells`), so the build, a live in-memory write and
 //! a persisted write-through bind a row to the same node.
 //!
+//! CONVENTION ENTRIES (FB.12a). A CONV entry with `kind: "convention"` is a
+//! scope-level convention: it governs every node located under its `scope`
+//! (a repo-relative path, `.` = the repo root), not only the node it hangs
+//! on. The overlay's `[[convention]]` stanzas store
+//! `{"source":"overlay","id","kind":"convention","scope","scope_raw","component"?,"paths","text","by"?,"decl"}`
+//! on the scope's anchor; a writer such as Engram puts one on the scope's
+//! anchor qname through the cell API (`glia cell set`, a `.glia/cells.jsonl`
+//! row), e.g.
+//! `{"qname":"project:frontend","cell":"CONV","entry":{"source":"api","id":"engram:<hash>","kind":"convention","scope":"frontend/src/app/modals","text":".."}}`.
+//! [`validate_entry`](crate::external_inputs::validate_entry) requires the non-empty `scope`; a CONV entry of any
+//! other `kind` is refused.
+//!
 //! CONSTRAINT ENTRIES (the rule schema `glia check`, LE.8, reads through
 //! [`parse_constraints`](crate::external_inputs::parse_constraints) and nowhere else). The overlay's `[[constraint]]`
 //! stanzas (LF.4a) are stored as
@@ -567,7 +579,11 @@ pub const RULE_IS_OVERLAY_ONLY: &str = "`rule` (Datalog text) is declared only i
 ///   constants.)
 /// - DECISION: `title` or `text`; `status` optional (stored lowercased).
 /// - CONV: `text` of 1..=4096 chars; `by` and `at` optional strings (`at` is
-///   the caller's opaque timestamp: glia never reads the clock).
+///   the caller's opaque timestamp: glia never reads the clock). `kind` is
+///   absent (a note on one node) or [`CONVENTION_KIND`] (FB.12a: a
+///   scope-level convention, stored on its scope's anchor), which needs a
+///   non-empty `scope` path and may carry `scope_raw`, `component` and
+///   `paths`.
 pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
     check_entry(cell, v, false)
 }
@@ -625,11 +641,35 @@ fn check_entry(cell: CellTypeId, v: &Value, allow_rule: bool) -> Result<(), Stri
             }
             text("by")?;
             text("at")?;
-            Ok(())
+            match text("kind")? {
+                None => Ok(()),
+                Some(CONVENTION_KIND) => convention_checks(obj),
+                Some(_) => Err(format!("CONV kind must be absent or \"{CONVENTION_KIND}\"")),
+            }
         }
         c if c == cell_type::VECTOR => Err("VECTOR takes a vector payload, not an entry".into()),
         c => Err(format!("cell type {} takes no external entries", c.0)),
     }
+}
+
+/// A CONV entry's `kind` for a scope-level convention (FB.12a); a note's
+/// entry carries no `kind`.
+pub const CONVENTION_KIND: &str = "convention";
+
+/// A CONV `convention` entry's keys (see [`validate_entry`]): `scope` a
+/// non-empty string; `scope_raw` / `component` optional strings; `paths`,
+/// when present, a non-empty array of non-empty strings.
+fn convention_checks(obj: &Map<String, Value>) -> Result<(), String> {
+    if string_field(obj, "scope")?.is_none_or(|s| s.trim().is_empty()) {
+        return Err("a CONV convention needs `scope`: a non-empty path".into());
+    }
+    string_field(obj, "scope_raw")?;
+    string_field(obj, "component")?;
+    if !matches!(obj.get("paths"), None | Some(Value::Null)) && string_list(obj, "paths").is_none()
+    {
+        return Err("`paths` must be a non-empty array of non-empty strings".into());
+    }
+    Ok(())
 }
 
 /// A CONSTRAINT entry's rules (see [`validate_entry`]); `allow_rule` admits a
@@ -1100,6 +1140,33 @@ mod tests {
             json!({"source": "api", "id": "x".repeat(MAX_ID_CHARS + 1), "text": "t"})
         ));
         assert!(!ok(cell_type::CONV, json!(["not", "an", "object"])));
+        // FB.12a: a convention entry needs a scope; no other CONV kind exists.
+        assert!(ok(
+            cell_type::CONV,
+            json!({"source": "api", "id": "engram:1", "kind": "convention", "scope": "web/src", "text": "t"})
+        ));
+        assert!(ok(
+            cell_type::CONV,
+            json!({"source": "overlay", "id": "c", "kind": "convention", "scope": "web", "scope_raw": "@shop/web", "component": "ui", "paths": ["web", "web/src"], "text": "t"})
+        ));
+        for bad in [
+            json!({"source": "api", "id": "1", "kind": "convention", "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "convention", "scope": "", "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "convention", "scope": 3, "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "convention", "scope": "w", "paths": [], "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "convention", "scope": "w", "paths": [""], "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "convention", "scope": "w", "component": 1, "text": "t"}),
+            json!({"source": "api", "id": "1", "kind": "rule", "scope": "w", "text": "t"}),
+        ] {
+            assert!(!ok(cell_type::CONV, bad.clone()), "{bad}");
+        }
+        assert_eq!(
+            validate_entry(
+                cell_type::CONV,
+                &json!({"source": "api", "id": "1", "kind": "rule", "text": "t"})
+            ),
+            Err("CONV kind must be absent or \"convention\"".to_string())
+        );
         assert!(ok(
             cell_type::DECISION,
             json!({"source": "adr", "id": "d", "text": "t"})
