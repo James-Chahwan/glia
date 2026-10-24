@@ -53,3 +53,6 @@ bench/substrate-gap/results.jsonl
 
 # Gradle build caches, created when a fixture probe runs gradle
 .gradle/
+
+# Agent before / after bare clones, should GLIA_AGENT_AB_DIR point inside the tree (FE.1)
+bench/agent-ab/.cache/
