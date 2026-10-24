@@ -127,7 +127,7 @@ do_check() {
       (cd "$RUN" && "$BIN" --gate-check "$GATE" --gate-base "$GD/baseline/$base/$label.json" --gate-new "$RUN/$label.json" \
           --boot 1000 --out "$out.json" --md "$out.md" 2> "$out.log")
       rc=$?
-      grep -E '^\[rank-gate\] (verdict|drift|missing|new) ' "$out.log" | sed "s/^\[rank-gate\] /[rank-gate] base=$base /"
+      grep -E '^\[rank-gate\] (verdict|drift|missing|new|contrast drop|contrasts:) ' "$out.log" | sed "s/^\[rank-gate\] /[rank-gate] base=$base /"
       [ -f "$out.json" ] || { tail -5 "$out.log"; say "check: FAILED (check $label vs $base, exit $rc)"; exit 2; }
       verdicts+=("$base=$out.json:$rc")
     done

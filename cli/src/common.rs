@@ -3,9 +3,10 @@
 //! table and JSON dumps (`analyze`, `merge`), node lookups and pretty names,
 //! `ImpactDirection` (`impact`, `blast-radius`), and 0.5.3's `## files`
 //! table (EA.8: `blast-radius`, `diff-impact`, `review`); EC.8's
-//! `CalibratedRankingArgs`, the file-ranking flags of every ranked answer
-//! (no `--ranking` default: the repo's calibrated pick; `pack` since EC.9,
-//! which retired EA.8's `RankingArgs`) and the `ranking:` line for
+//! `CalibratedRankingArgs`, the file-ranking flags of the calibrated answers
+//! (no `--ranking` default: the repo's calibrated pick; EC.9 retired EA.8's
+//! `RankingArgs`, and since EC.9b `pack` takes its own `PackRankingArgs`,
+//! never calibrated) and the `ranking:` line for
 //! `blast-radius`, `diff-impact` and `review`.
 
 use std::collections::BTreeMap;
@@ -35,7 +36,7 @@ pub(crate) enum ImpactDirection {
 const RANKINGS: [&str; 3] = ["ppr", "ppr-wide", "bfs"];
 
 /// 0.5.3 (EC.8): the file-ranking flags of the calibrated answers,
-/// flattened into `blast-radius`, `diff-impact`, `review` and (EC.9) `pack`.
+/// flattened into `blast-radius`, `diff-impact` and `review` (not `pack`: EC.9b).
 /// `--ranking` has no default: absent, the answer applies the repo's
 /// calibrated pick (`glia history calibrate`), else `ppr`.
 #[derive(clap::Args, Debug, Clone)]
