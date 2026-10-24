@@ -81,17 +81,23 @@ jobs:
           # Build the Intel (x86_64) wheel by CROSS-COMPILING on the Apple Silicon
           # runner. Dedicated macos-13 (Intel) runners queue for hours / are being
           # retired; abi3 + maturin cross-compiles x86_64-apple-darwin fine on arm64
-          # (no target-Python needed), so both mac wheels build on macos-14.
+          # (no target-Python needed), so both mac wheels build on macos-15 (macos-14 is
+          # deprecated upstream). The deployment target is pinned so the wheel tags stay
+          # 0.5.2's (macosx_10_12_x86_64, macosx_11_0_arm64) whatever the runner's SDK.
           - target: x86_64
-            runner: macos-14
+            runner: macos-15
+            deployment_target: "10.12"
           - target: aarch64
-            runner: macos-14
+            runner: macos-15
+            deployment_target: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
