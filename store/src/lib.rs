@@ -45,7 +45,8 @@
 //!   decoded from its core and header registries alone, no domain crate.
 //! - `cells` — the cell write API (LF.1b): `write_cell` / `remove_cell_entry`
 //!   upsert the `.glia` cell sidecars under a lock and write through into a
-//!   layout only while it is fresh.
+//!   layout only while it is fresh; `write_vector_rows` / `VectorWriteMode`
+//!   (FB.5a) rewrite `.glia/vectors.jsonl` in one locked bulk write.
 //! - `timeline` — the timeline sidecar (CD.5b): `TimelineStore`, written as
 //!   `<layout>/timeline.gmap` by `write_timeline`, read back by
 //!   `read_timeline` / `decode_timeline` (FS-free).

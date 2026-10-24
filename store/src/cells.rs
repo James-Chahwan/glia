@@ -69,8 +69,8 @@ use std::time::{Duration, SystemTime};
 
 use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, ENTRY_SOURCES, VECTORS_FILE, VectorRow, WRITABLE, WritePayload,
-    b64_encode, canonical, check_vector, read_rows, remove_entry, validate_entry, vector_key,
-    write_rows,
+    b64_decode, b64_encode, canonical, check_vector, read_rows, remove_entry, text_hash_ok,
+    validate_entry, vector_key, write_rows,
 };
 use glia_code_domain::snapshots::redact_untrusted;
 use glia_code_domain::{cell_type, node_kind};
@@ -919,6 +919,101 @@ fn not_writable(c: CellTypeId) -> StoreError {
 }
 
 // ---------------------------------------------------------------------------
+// The bulk vector writer (FB.5a)
+// ---------------------------------------------------------------------------
+
+/// How [`write_vector_rows`] treats what `.glia/vectors.jsonl` already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VectorWriteMode {
+    /// The file must hold rows of the incoming rows' model only (re-read
+    /// under the lock): a row of another model, or one naming none, is an
+    /// Err and nothing is written. The incoming rows are then the file.
+    MergeSameModel,
+    /// Write the incoming rows whatever the file held.
+    Replace,
+}
+
+/// Rewrite `<repo_root>/.glia/vectors.jsonl` with `rows` in one write under
+/// `.glia/cells.lock` (the embed run's bulk writer; the cell API's
+/// [`write_cell`] takes the lock once per row). The rows are the caller's
+/// whole file: they must name one model, carry no two rows of one
+/// `vector_key`, hold a well-formed `text_hash` when they record one and a
+/// payload of `dims * 4` bytes. Under [`VectorWriteMode::MergeSameModel`] the
+/// file is re-read after the lock is taken, so a writer of another model that
+/// landed since the caller read it is refused rather than overwritten. Rows
+/// are written sorted by `vector_key` through `write_rows` (tmp + rename);
+/// `.glia/` is created when absent, its `.gitignore` never (history sync owns
+/// it, and it already lists `vectors.jsonl`). Returns the rows written.
+pub fn write_vector_rows(
+    repo_root: &Path,
+    mut rows: Vec<VectorRow>,
+    mode: VectorWriteMode,
+) -> Result<usize, StoreError> {
+    let model = check_vector_rows(&rows)?;
+    let _lock = CellsLock::take(repo_root)?;
+    let path = repo_root.join(VECTORS_FILE);
+    if mode == VectorWriteMode::MergeSameModel {
+        let on_disk: Vec<VectorRow> = readable_rows(&path)?;
+        if let Some(other) = on_disk
+            .iter()
+            .find(|r| model.is_some() && r.model.as_deref() != model)
+        {
+            return Err(invalid(format!(
+                "{} holds vectors of model {} (row {:?}); rewrite it with Replace",
+                path.display(),
+                other.model.as_deref().unwrap_or("<none>"),
+                other.qname
+            )));
+        }
+    }
+    rows.sort_by_key(vector_key);
+    write_rows(&path, &rows)?;
+    Ok(rows.len())
+}
+
+/// The one model `rows` name (None for no rows), or Err on a row that breaks
+/// [`write_vector_rows`]' contract.
+fn check_vector_rows(rows: &[VectorRow]) -> Result<Option<&str>, StoreError> {
+    let mut model: Option<&str> = None;
+    let mut keys: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::with_capacity(rows.len());
+    for r in rows {
+        let Some(m) = r.model.as_deref() else {
+            return Err(invalid(format!("vector row {:?} names no model", r.qname)));
+        };
+        match model {
+            Some(have) if have != m => {
+                return Err(invalid(format!(
+                    "vector rows name two models ({have} and {m}); one model per file"
+                )));
+            }
+            _ => model = Some(m),
+        }
+        if let Some(h) = &r.text_hash
+            && !text_hash_ok(h)
+        {
+            return Err(invalid(format!(
+                "vector row {:?} has a malformed text_hash {h:?}",
+                r.qname
+            )));
+        }
+        let bytes =
+            b64_decode(&r.b64).map_err(|e| invalid(format!("vector row {:?}: {e}", r.qname)))?;
+        check_vector(&bytes, r.dims)
+            .map_err(|e| invalid(format!("vector row {:?}: {e}", r.qname)))?;
+        if !keys.insert(vector_key(r)) {
+            return Err(invalid(format!(
+                "two vector rows for {:?} (kind {:?})",
+                r.qname,
+                r.kind.as_deref().unwrap_or("")
+            )));
+        }
+    }
+    Ok(model)
+}
+
+// ---------------------------------------------------------------------------
 // The sidecar lock
 // ---------------------------------------------------------------------------
 
@@ -1085,6 +1180,115 @@ mod tests {
             ..own.clone()
         };
         assert_eq!(differing_fields(&own, &body), ["body"]);
+    }
+
+    fn vrow(qname: &str, model: Option<&str>, text_hash: Option<&str>) -> VectorRow {
+        let v = [0.6f32, 0.8];
+        let bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        VectorRow {
+            qname: qname.into(),
+            kind: Some("FUNCTION".into()),
+            hint: None,
+            model: model.map(str::to_string),
+            dims: Some(2),
+            text_hash: text_hash.map(str::to_string),
+            b64: b64_encode(&bytes),
+        }
+    }
+
+    #[test]
+    fn write_vector_rows_sorts_and_writes_under_the_lock() {
+        let td = tempfile::tempdir().unwrap();
+        let rows = vec![
+            vrow("b::f", Some("m"), Some("t1:0123456789abcdef")),
+            vrow("a::f", Some("m"), None),
+        ];
+        let n = write_vector_rows(td.path(), rows, VectorWriteMode::MergeSameModel).unwrap();
+        assert_eq!(n, 2);
+        let path = td.path().join(VECTORS_FILE);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let qnames: Vec<String> = body
+            .lines()
+            .map(|l| serde_json::from_str::<VectorRow>(l).unwrap().qname)
+            .collect();
+        assert_eq!(qnames, ["a::f", "b::f"]);
+        assert!(!td.path().join(CELLS_LOCK).exists(), "lock released");
+        assert!(
+            !td.path().join(".glia/.gitignore").exists(),
+            "the writer never creates the gitignore"
+        );
+        // Same input, same bytes.
+        let again = vec![
+            vrow("a::f", Some("m"), None),
+            vrow("b::f", Some("m"), Some("t1:0123456789abcdef")),
+        ];
+        write_vector_rows(td.path(), again, VectorWriteMode::MergeSameModel).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    }
+
+    #[test]
+    fn write_vector_rows_refuses_another_model_unless_replace() {
+        let td = tempfile::tempdir().unwrap();
+        write_vector_rows(
+            td.path(),
+            vec![vrow("a::f", Some("old"), None)],
+            VectorWriteMode::Replace,
+        )
+        .unwrap();
+        let err = write_vector_rows(
+            td.path(),
+            vec![vrow("a::f", Some("new"), None)],
+            VectorWriteMode::MergeSameModel,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("model old"), "{err}");
+        let body = std::fs::read_to_string(td.path().join(VECTORS_FILE)).unwrap();
+        assert!(body.contains("\"old\""), "nothing written: {body}");
+        write_vector_rows(
+            td.path(),
+            vec![vrow("a::f", Some("new"), None)],
+            VectorWriteMode::Replace,
+        )
+        .unwrap();
+        let body = std::fs::read_to_string(td.path().join(VECTORS_FILE)).unwrap();
+        assert!(
+            body.contains("\"new\"") && !body.contains("\"old\""),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn write_vector_rows_checks_the_row_contract() {
+        let td = tempfile::tempdir().unwrap();
+        let cases: Vec<(Vec<VectorRow>, &str)> = vec![
+            (vec![vrow("a", None, None)], "names no model"),
+            (
+                vec![vrow("a", Some("m"), None), vrow("b", Some("n"), None)],
+                "two models",
+            ),
+            (
+                vec![vrow("a", Some("m"), Some("t1:XYZ"))],
+                "malformed text_hash",
+            ),
+            (
+                vec![vrow("a", Some("m"), None), vrow("a", Some("m"), None)],
+                "two vector rows",
+            ),
+        ];
+        for (rows, want) in cases {
+            let err = write_vector_rows(td.path(), rows, VectorWriteMode::Replace)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{want}: {err}");
+        }
+        let mut bad = vrow("a", Some("m"), None);
+        bad.dims = Some(3);
+        let err = write_vector_rows(td.path(), vec![bad], VectorWriteMode::Replace)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("dims=3"), "{err}");
+        assert!(!td.path().join(VECTORS_FILE).exists(), "nothing written");
     }
 
     #[test]
