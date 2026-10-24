@@ -114,8 +114,7 @@ when `end_rev` / `gate_rev` do not resolve. `GLIA_AGENT_AB_OFFLINE=1` makes no c
 `gh` call; `check` never calls `gh` (it carries the committed `issue` / `issue_fetch` over), so
 it runs offline once the clones exist. Each command prints, per repo,
 `[agent-ab] tasks repo=<label> rows=<n> issues=<k> after_gate=<g> sha256=<12 hex>` and then
-`[agent-ab] tasks total=<n> repos=<r>`. The scorer (`score.py`, FE.3) documents its own
-commands here when it lands.
+`[agent-ab] tasks total=<n> repos=<r>`. The scorer's commands are under Scoring below.
 
 ### The session driver (`run.py`, FE.2)
 
@@ -207,6 +206,76 @@ tree:
 `--permission-mode bypassPermissions` lets the agent run any shell command. The checkout is a
 disposable copy with no remote, but start a run only from an account with nothing sensitive in
 reach of a shell.
+
+### Scoring (`score.py`, FE.3)
+
+```
+python3 score.py score <run_id> [--out-md <f>] [--out-json <f>] [--out-sessions <f>]
+python3 score.py score --from-metrics <sessions metrics jsonl> [--out-md <f>] [--out-json <f>]
+python3 score.py compare <old baseline.json> <new baseline.json>
+python3 test_score.py                    # hermetic: a canned run under a temp DIR
+```
+
+`score <run_id>` reads `DIR/runs/<id>/meta.json` and `sessions.jsonl`, each session's patch
+under `DIR/patches/<id>/` (its sha256 checked against the row) and the task rows in `tasks/`
+(refused when a task file's sha256 is not the run's). It prints
+`[agent-ab] score sessions=<n> excluded=<k> tasks=<t>`.
+
+Per session, with T the truth's code paths (a rename's new path, a deletion's old path) and E
+the non-test code files the patch touches (`tasks.py`'s `CODE_EXTS` / `TEST_RES`; never under
+`.glia/` or `.claude/`; a path is its new name, a deleted file's its old one):
+
+- `file_recall` = |E n T| / |T|; `file_precision` = |E n T| / |E| (0 when E is empty);
+- `solved` = T is a subset of E and |E \ T| <= max(2, |T|);
+- `line_overlap` = over the truth hunks of M files, the fraction whose parent range
+  [s, s + max(l, 1)) meets an agent hunk's parent range (`@@ -s,l`) on that file widened by 3
+  lines each side; null when the task has no M file;
+- `first_truth_open` = the 1-based index in `files_opened` of the first T path (a rename's old
+  name counts too: the agent works at the parent), null when none; `opened` = len(files_opened);
+- `tokens_in` = input + cache creation + cache read; `tokens_out`; `usd` = total_cost_usd;
+  `turns`; `wall_s`; `glia_calls` (reported, never judged).
+
+Sessions terminated `contaminated`, `network`, `prep_failed` or `error` are excluded and
+counted by reason; `timeout` and `max_turns` are scored on the patch the agent left. A task's
+metric is the mean over its scored reps (`solved` a rate, nulls skipped); an arm's is the mean
+over tasks, each task weight 1. Pairs `g052-none`, `g053-none`, `g053-g052`: the paired per-task
+difference of task means, with a task-cluster bootstrap 95% percentile interval (2,000
+resamples of tasks with replacement, `random.Random(20261023)`), pooled, tuned / untuned, each
+after_gate_rev true / false when both sides hold >= 5 tasks (never on this task set: every
+tuned row is after its gate and every untuned row is null, so tuned / untuned carries that
+split), and per repo. Verdict: `better` / `worse` when the interval
+excludes 0 in the metric's good direction (higher: solved, file_recall, file_precision,
+line_overlap; lower: opened, first_truth_open, tokens_in, tokens_out, usd, turns, wall_s), else
+`n.s.`; a single shared task gives no interval and is `n.s.`.
+
+The reading rule, fixed before any number: an arm HELPS an agent when, pooled, `solved` or
+`file_recall` is `better` and no quality metric (`solved`, `file_recall`, `line_overlap`) is
+`worse`, or when every quality metric is `n.s.` and `tokens_in` or `usd` is `better`; it HURTS
+when a quality metric is `worse`; otherwise NO MEASURED EFFECT. `g053-g052` (0.5.3's rankings
+against 0.5.2's, the line that informs 0.5.4's ranking work) is read pooled and on the untuned
+subset; where they disagree the report says the pooled effect rests on the tuned repos.
+File-level success against one commit's diff undercounts a valid fix elsewhere; `line_overlap`
+and `file_recall` show partial credit. No test is executed.
+
+`--out-md` writes the report (header with the run's fingerprints and exclusions, the rule, the
+outcome per pair, an arm x metric table and a pair table per subset, cost, glia usage: the
+share of glia-arm sessions with a glia call and the subcommand histogram). `--out-json` writes
+`baseline.json`: `{schema: 1, run_id, fingerprints: {model, claude_version, glia: {arm: sha},
+tasks: {file: sha256}, prompt_sha256, config_sha256}, per_task: [{task_id, arm, n, metrics}],
+pooled: {arm: metrics}, pairs: {pair: {metric: {diff, lo, hi, verdict}}}, pairs_by_subset}`.
+`--out-sessions` writes the per-session metric rows: one `kind: meta` line (the fingerprints
+and the run's date), then one `kind: session` row per session sorted by (task_id, arm, rep)
+with its terminated reason, metrics, glia subcommands and patch sha256: no transcript, patch
+text or path outside the task repo. `--from-metrics` scores from that file alone, so a committed
+metrics file reproduces the committed baseline byte for byte. Both outputs are deterministic
+(rows sorted, floats at 3 decimals in the report and 6 in the JSON; the date is the run
+meta's mtime).
+
+`compare old new` refuses (exit 2, naming the field) unless `fingerprints.tasks` and
+`fingerprints.prompt_sha256` match, then prints, per arm in both and per judged metric measured
+on a shared task, new - old over the shared tasks with the same bootstrap:
+`[agent-ab] compare arm=<a> metric=<m> diff=<d> ci=[lo,hi] verdict=<v>`. This is the call
+0.5.5's proof makes against `results/0.5.4/baseline.json`.
 
 ## Cost
 
