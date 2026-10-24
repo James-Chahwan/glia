@@ -201,6 +201,10 @@ Adding a field to a public struct breaks every struct literal of it outside the 
 
 `cargo test -p glia-engine --test api_stability` enforces this. It prints `[api_stability] scan types=… offenders=…`, and on failure it lists each offender as `file:line`. It also fails loudly on a stale allowlist entry or on a facade shape it cannot follow. Four `compile_fail` doctests prove that the attribute refuses a literal: `GenerateResult`, `BlastAnswer`, `ServiceMap` and `BlastHit`. Each snippet is only the literal with every current field, because stable rustdoc does not check the error code. So when you add a field to one of those four types, add it to its snippet too.
 
+## 18. rustfmt (F0.5)
+
+Run `cargo fmt --all` (and, for the excluded crate, `cargo fmt --manifest-path engram-export/Cargo.toml`) before every commit. `rustfmt.toml` pins `style_edition = "2024"` and nothing else, so a rustfmt upgrade cannot silently reformat the tree. The wave close-out (`dev-notes/wave-runner/closeout.py`, `fmt_check`) runs both `--check`s and refuses drift: it prints `[fmt] check: ok` or `[fmt] check: FAILED (<n> files)` and fails the wave on the latter. Never add `#[rustfmt::skip]` without a comment naming the table it keeps aligned. The whole-tree formatting commit is listed in `.git-blame-ignore-revs` (`git config blame.ignoreRevsFile .git-blame-ignore-revs`).
+
 ---
 
 *Last updated: 2026-05-21, cycle 0.6 Rust session. Owners: glia engine + bench/{lens,latent,3d-viewer}.*

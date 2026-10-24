@@ -56,6 +56,22 @@ def sh(cmd, cwd=ROOT, timeout=1800):
     return r.stdout + r.stderr, r.returncode
 
 
+def fmt_check():
+    """F0.5's fmt gate: the workspace and the excluded engram-export, each by its own manifest.
+    Returns (ok, marker); the marker is the stable `[fmt] check:` line the close-out prints."""
+    paths = set()
+    for cmd in ("cargo fmt --all --check 2>&1",
+                "cargo fmt --manifest-path engram-export/Cargo.toml --check 2>&1"):
+        out, code = sh(cmd)
+        paths |= {l.split()[2].rsplit(':', 2)[0] for l in out.splitlines() if l.startswith('Diff in ')}
+        if code != 0 and not paths:
+            # a non-zero exit with no hunk (rustfmt itself failed) is drift we cannot count
+            paths.add(f"<{cmd.split(' 2>')[0]} exit {code}>")
+    if paths:
+        return False, f"[fmt] check: FAILED ({len(paths)} files)"
+    return True, "[fmt] check: ok"
+
+
 def journal_results(run):
     path = next(iter(glob.glob(str(JOURNALS / f"*/subagents/workflows/{run}/journal.jsonl"))), None)
     if not path:
@@ -190,6 +206,10 @@ def main():
     say(f"== cargo test --workspace: {passed} passed, {failed} failed, {comp} compile errors")
     if failed or comp:
         gates.append("workspace tests")
+    fmt_ok, fmt_marker = fmt_check()
+    say(fmt_marker)
+    if not fmt_ok:
+        gates.append("fmt")
     out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
     bi = "2 passed; 0 failed" in out
     say(f"== byte_identical: {'green' if bi else 'RED'}")
