@@ -8030,7 +8030,8 @@
     ]
    },
    "depends_on": [
-    "EG.5"
+    "EG.5",
+    "F0.6"
    ],
    "risks": "Name is James's to confirm (glia-cli vs another free name); changing it later is one line here and in FE.6 / FE.7 plus a new PyPI pending publisher. Licence: the wheel ships the PolyForm NC + overlay LICENSE; a PyPI page shows it as 'LicenseRef'/file - acceptable as glia-py does today. Wheel size: the binary links every tree-sitter grammar (expect tens of MB; reported by the script's size_mb). The local build tag may be a plain linux tag rather than manylinux (only the CI container guarantees manylinux_2_28); the acceptance accepts either locally. Step (h) is a second full release compile (minutes); it is the only check that a user building from the sdist gets the same BUILD_STAMP. No new Rust dependency, no Cargo.lock change, so no F0 is needed.",
    "spec_group": "FE"
@@ -8567,6 +8568,71 @@
    ],
    "risks": "Written after the last follow-up wave from landed results, never from packet text. The Engram ask (dev-notes/engram-ask-0.5.4.md) is James's to send: the handoff references it and changes nothing in it. Never write under another repo.",
    "spec_group": "FZ"
+  },
+  {
+   "id": "F0.6",
+   "title": "glia-stamp: one PARSER_STAMP per commit however the tree is checked out or packaged - `src` tested on the workspace-relative key, Cargo.lock hashed over the HASHED_ROOTS crates' dependency closure only (ruling STAMP-LOCK)",
+   "batch": "F0",
+   "area": "F0 - build stamp reproducibility (follow-up from FE.5, W1)",
+   "loc": 180,
+   "rationale": "FE.5 (W1) blocked on its step (h): an sdist build of glia-cli printed a different BUILD_STAMP from the wheel of the same commit. Two causes (FE.5's probes, /home/ivy/.cache/glia-FE.5/): (1) stamp/build.rs is_input tests for a `src` component on the ABSOLUTE path, so a tree under any directory named `src` (uv builds sdists in ~/.cache/uv/sdists-v9/.../src) hashes tests/, examples/ and benches/ too: 537 inputs instead of 304; (2) the stamp hashes the whole Cargo.lock, and `maturin sdist` trims workspace members to glia-cli's path deps, so cargo prunes glia-py / glia-toy-domain / pyo3* / inventory / target-lexicon from the lock and the stamp moves. James 2026-10-24 ruled STAMP-LOCK ('Hash only what glia uses'): same commit = same stamp however it is built. A calibration record is read only by the BUILD_STAMP that wrote it (EC.1), so a drifting stamp silently discards calibration.",
+   "entry_points": [
+    "stamp/build.rs - is_input / rel_key / main's HASHED_FILES handling"
+   ],
+   "files_touched": [
+    "stamp/build.rs",
+    "stamp/tests/stamp_inputs.rs"
+   ],
+   "implementation": "0. Read stamp/build.rs at HEAD (HASHED_ROOTS, HASHED_FILES, rel_key, is_input, visit, main) and FE.5's probes (/home/ivy/.cache/glia-FE.5/fnv.py, fnv_abs.py, inputs.py, run1.log). Write the tests first and record their failing baseline.\n1. is_input takes the workspace-relative key (rel_key's output) and tests for a `src` component there, never on the absolute path. Behaviour inside the workspace is unchanged: the input set at HEAD stays the same 304 files (pin the count as HEAD's, measured).\n2. Cargo.lock: instead of hashing the file's bytes, parse its [[package]] tables by hand (no new crate: F0.2 is the release's one lock move; a build-script dependency would move the lock) - name, version, source, checksum, dependencies. Seed the closure with the package names of the HASHED_ROOTS crates (read each root's Cargo.toml [package] name; a root without one is skipped), walk `dependencies` entries (`name`, `name version`, `name version (source)`: resolve by name, and by name + version when several versions are locked), and hash one line per closure package, `name version source checksum`, sorted. A grammar bump (tree-sitter-* version or checksum) moves the stamp; removing packages outside the closure (glia-py, glia-toy-domain, pyo3*, inventory, target-lexicon, glia-cli's own bin deps) does not. A lock the parser cannot read is a build failure via die(), never a silent fallback.\n3. stamp/tests/stamp_inputs.rs (or unit tests in the build script's testable helpers if the crate's layout needs it - say which): (a) the same tree copied under a directory named `src` gives the same input list and stamp; (b) a Cargo.lock with the py / toy-domain members and their exclusive deps removed gives the same lock digest; (c) a tree-sitter grammar version or checksum change moves it; (d) a closure package's dependency added moves it.\n4. Declare the one-off PARSER_STAMP move (the lock digest's input changes form) in the commit body: every parse cache and calibration record is rebuilt once.",
+   "acceptance": "`cargo test -p glia-stamp` green with tests (a)-(d), each failing at HEAD (paste the baseline); `cargo build -p glia-stamp` passes the MIN_INPUTS floor; `cargo test -p glia-engine --test parser_stamp` green; the HEAD input count is unchanged in the workspace; then FE.5's probe: `python3 /home/ivy/.cache/glia-FE.5/fnv_abs.py` style check or simply building glia-stamp in a copy under `.../src/` and in a lock-pruned copy prints the same GLIA_PARSER_STAMP as the main tree (paste all three). cargo clippy -p glia-stamp --all-targets -D warnings clean; cargo fmt --check clean.",
+   "fired_on_marker": "none at runtime (build script); the stamp line `glia 0.5.3 (build 0.5.3+p<stamp>)` from `glia --version` is identical across the three trees in the acceptance",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output"
+    ],
+    "what_changes": "PARSER_STAMP / BUILD_STAMP move once (the lock digest is computed over the dependency closure instead of the file bytes): every parse cache, layout and calibration record rebuilds once. After it, the stamp is the same for one commit across checkout paths and packagings.",
+    "in_repo_consumers": [
+     "engine/tests/parser_stamp.rs"
+    ],
+    "out_of_repo_consumers": [
+     "every consumer: one cache rebuild and one recalibration, listed in FZ.2"
+    ]
+   },
+   "depends_on": [
+    "F0.5"
+   ],
+   "risks": "Only F0 packets touch stamp/. Cargo.lock's format is v4 at HEAD; the hand parser reads [[package]] tables only and dies on anything it cannot parse. Keep the closure walk deterministic (sorted names).",
+   "spec_group": "F0"
+  },
+  {
+   "id": "FD.34b",
+   "title": "body_hash ASCII fast path in graph/src/identity.rs (follow-up from FD.34, W1): a byte loop exactly equal to split_whitespace + chars().count(), the old fn kept as the oracle of a 10,000-case property test, a debug timing over glia's own export",
+   "batch": "FD",
+   "area": "FD - self-graph hygiene (follow-up)",
+   "loc": 160,
+   "rationale": "FD.34 (W1, 68a91f76) found the spec's whitespace-collapsed FNV body hash lives in graph/src/identity.rs (glia_graph::identity::body_hash), not engram-export/src, so its acceptance (2) - the ASCII fast path, the property test, the timing - was not built inside its files. Followups finish inside 0.5.4.",
+   "entry_points": [
+    "graph/src/identity.rs - body_hash"
+   ],
+   "files_touched": [
+    "graph/src/identity.rs"
+   ],
+   "implementation": "0. Read body_hash at HEAD and its callers (identity pass body_hash rule, engram-export identities()).\n1. Add an ASCII fast path: a byte loop where ASCII-whitespace bytes split words; on the first non-ASCII byte fall back to the existing char path for the whole input (Unicode whitespace such as U+00A0 / U+2003 must still split exactly as split_whitespace does). Output must be bit-identical to the old fn on every input.\n2. Keep the old fn as a #[cfg(test)] oracle; a seeded 10,000-case property test (ASCII, mixed, Unicode-whitespace, empty, all-whitespace) asserts equality.\n3. Record a debug-build timing of body_hash over glia's own export before / after in the commit body.",
+   "acceptance": "cargo test -p glia-graph green including the property test (paste); cargo test -p glia-engine --test byte_identical green; bash scripts/check-engram-export.sh ends `check: ok` (determinism_v6 unchanged); no SAME_AS body_hash class changes on glia's own graph (glia identity --rule body_hash before / after diff empty); clippy / fmt clean.",
+   "fired_on_marker": "none (pure function); the property test name and the timing line in the commit body",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [],
+    "what_changes": "none (bit-identical output); PARSER_STAMP moves (graph/src is hashed)",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FD.34"
+   ],
+   "risks": "FD.23b also lists graph/src/ (doc comments); keep to body_hash and its tests.",
+   "spec_group": "FD"
   }
  ],
  "deps_patch": {
@@ -9559,7 +9625,8 @@
   "TRACKS": "James 2026-10-24 (\"yeah lets go option 2 to start off 0.5.4\"): 0.5.4 starts with tracks T0, T2, T5, T1, T11 (54 packets); the other tracks wait for a later pick",
   "TZ": "James 2026-10-24 (\"yeah 0.5.4 only releases after total ship and test\"): option (a): FZ.1 / FZ.2 keep depends_on every track; 0.5.4 releases only once all of T1-T11 land and test; nothing moves to 0.5.5",
   "HANDOFF-SPAN": "James 2026-10-24 (\"sinc 0.5.3 is released but repo-graph and nothing else will update til 0.5.4\"): no consumer applies the 0.5.3 handoffs; the 0.5.4 handoffs run repo-graph 0.5.2 -> 0.5.4, Engram 0.5.2 -> 0.5.4, neuropil 0.5.1 -> 0.5.4, each carrying its 0.5.3 handoff forward; 0.5.4 may break 0.5.3 surfaces freely, each break declared",
-  "DEPS-NCSA": "James 2026-10-24 (\"Accept NCSA\"): NCSA (UIUC / LLVM, permissive) joins the allowed dependency licences; first instance libfuzzer-sys 0.4.13 (rav1e cfg(fuzzing), via fastembed -> image), F0.2 50af6405"
+  "DEPS-NCSA": "James 2026-10-24 (\"Accept NCSA\"): NCSA (UIUC / LLVM, permissive) joins the allowed dependency licences; first instance libfuzzer-sys 0.4.13 (rav1e cfg(fuzzing), via fastembed -> image), F0.2 50af6405",
+  "STAMP-LOCK": "James 2026-10-24 (\"Hash only what glia uses\"): PARSER_STAMP hashes Cargo.lock over the HASHED_ROOTS crates' dependency closure only, so one commit has one stamp however it is checked out or packaged (F0.6); FE.5 keeps its step (h)"
  },
  "reverify": {
   "f7f9a495": {

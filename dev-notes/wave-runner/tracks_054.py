@@ -28,9 +28,9 @@ def ids(spec):
     return out
 
 TRACKS = {
-    "T0": ("wave 0: ids, crates, slots, rustfmt", "F0.1-5"),
+    "T0": ("wave 0: ids, crates, slots, rustfmt", "F0.1-6"),
     "T1": ("proof: agent before / after (item 11)", "FE.1-4 FE.8"),
-    "T2": ("self-graph hygiene, tier vocabulary, rules / docs hygiene, the audit tool", "FD.2 FD.4a FD.4b FD.4c FD.4d FD.5a FD.5b FD.6 FD.7a FD.7b FD.7c FD.7d FD.22 FD.23a FD.23b FD.24 FD.25 FD.27 FD.28 FD.34 FD.65 FD.69"),
+    "T2": ("self-graph hygiene, tier vocabulary, rules / docs hygiene, the audit tool", "FD.2 FD.4a FD.4b FD.4c FD.4d FD.5a FD.5b FD.6 FD.7a FD.7b FD.7c FD.7d FD.22 FD.23a FD.23b FD.24 FD.25 FD.27 FD.28 FD.34 FD.65 FD.69 FD.34b"),
     "T3": ("edge-precision audit, judging + report (item 12)", "FD.3a FD.3b FD.3c"),
     "T4": ("per-language precision and recall residuals", "FD.8 FD.9 FD.10a FD.10b FD.11-21 FD.29-32 FD.35-64 FD.68 FD.70 FD.72 FD.33 FD.71"),
     "T5": ("embeddings + the embedding gate (item 13) + Engram data", "FB.1 FB.2 FB.3 FB.4 FB.5a FB.5b FB.5c FB.6 FB.7a FB.7b FB.7c FB.8 FB.11 FB.12a FB.12b FB.13a FB.13b FB.13c FB.13d"),
