@@ -8634,6 +8634,73 @@
    ],
    "risks": "FD.23b also lists graph/src/ (doc comments); keep to body_hash and its tests.",
    "spec_group": "FD"
+  },
+  {
+   "id": "FB.14",
+   "title": "GPU embeddings by default: the ORT WebGPU execution provider (Dawn over Vulkan / Metal / D3D12) in a crash-isolated worker process, CPU fallback on any failure, CUDA as an opt-in build feature, the device on every vector row",
+   "area": "FB embeddings: GPU device",
+   "loc": 650,
+   "rationale": "James 2026-10-25 (\"it shouldn't be an optional tbf a default ... even a 1660 super can do it\"; \"Everything you mentioned seems reasonable for web gpu including child processes\"). bge-small at the 512-token cut is compute-bound on CPU (~8.5 texts/s on a Ryzen 3700X, batch size irrelevant 8..256), so a first `glia embed` of a glia-sized repo (~33k nodes) costs ~25 min per recipe. The 2026-10-25 spike (~/.cache/glia-gpu-spike (fe-bench/src/main.rs, ort-raw/src/main.rs, scripts/compare.py)) on a GTX 1660 Super, CPU shared with the FB.6 gate (lower bounds): CPU 5.4-6.3/s; ORT WebGPU EP (ort 2.0.0-rc.13, Dawn -> Vulkan) 30.4/s at batch 8, 0.57 GiB VRAM, throughput halves above 8 and the PROCESS ABORTS (free(): invalid pointer, core dump) at batch >= 64; ORT CUDA EP (fastembed 4.9.1 + ort/cuda, pip CUDA 12 / cuDNN 9 libs, 2.7 GB) 59.9-66.1/s at batch 8-64, OOM (clean Err) at 128/256 on 6 GB. Every route: max abs diff vs CPU fastembed < 4e-7, min cosine 0.99999988, top-10 overlap 10/10 on 10 queries.",
+   "entry_points": [
+    "embed/Cargo.toml - fastembed =4.9.1 -> =6.0.0 (pins ort =2.0.0-rc.13; confirm both are published >= 14 days before the commit and that their licences pass F0.2's dependency check); features `gpu-webgpu = [\"fastembed\", \"ort/webgpu\"]`, `gpu-cuda = [\"fastembed\", \"ort/cuda\"]`; the WebGPU feature is target-gated to the platforms ORT ships WebGPU binaries for (x86_64 Linux, x86_64 Windows, aarch64 macOS, which pairs coreml + webgpu); x86_64 macOS and aarch64 Linux build CPU-only",
+    "embed/src/device.rs (new) - `pub enum Device { Cpu, WebGpu, Cuda }`, `pub fn requested() -> Result<Option<Device>, String>` reading GLIA_EMBED_DEVICE (cpu | webgpu | cuda; unset = auto), `pub fn batch(d: Device) -> usize` (WebGpu 8, Cuda 32, Cpu CHUNK), the adapter name / driver probe (ORT does not report it: Vulkan `vkGetPhysicalDeviceProperties` through `ash` with `loaded`, else /proc/driver/nvidia/version, else `unknown`)",
+    "embed/src/worker.rs (new) - the crash-isolated worker: a parent `WorkerEmbedder` (an `Embedder`) spawns a child process that holds the GPU session and speaks a length-prefixed frame protocol on stdin / stdout (texts in, f32 vectors out, an error frame on a caught Err); `pub fn worker_main() -> i32`, the child's entry",
+    "embed/src/fast.rs - FastEmbedder::new takes a Device: `with_execution_providers([..].error_on_failure())`, sub-batches of `batch(device)` fed one at a time (fastembed's own batch split never runs two batches concurrently on the GPU)",
+    "cli: a hidden `glia embed-worker` subcommand calling glia_embed::worker_main (the CLI's worker binary is itself); py: the worker the wheel runs (see implementation 4)"
+   ],
+   "files_touched": [
+    "embed/Cargo.toml",
+    "embed/src/lib.rs",
+    "embed/src/fast.rs",
+    "embed/src/device.rs",
+    "embed/src/worker.rs",
+    "embed/tests/device.rs",
+    "embed/tests/worker.rs",
+    "Cargo.lock",
+    "cli/Cargo.toml",
+    "cli/src/main.rs",
+    "cli/src/cmd/mod.rs",
+    "cli/src/cmd/embed_worker.rs",
+    "py/Cargo.toml",
+    "py/pyproject.toml",
+    "cli/pyproject.toml",
+    ".github/workflows/wheels-py.yml",
+    ".github/workflows/wheels-cli.yml",
+    "scripts/check-cli-wheel.sh",
+    "code-domain/src/external_inputs.rs",
+    "docs/embeddings.md"
+   ],
+   "implementation": "Built on the spike's scratch code (read it first: ~/.cache/glia-gpu-spike (fe-bench/src/main.rs, ort-raw/src/main.rs, scripts/compare.py); it reimplements fastembed's pipeline over raw ort rc.13 and has the CPU / WebGPU / CUDA harness and the compare script).\n1. Bump fastembed to =6.0.0 / ort =2.0.0-rc.13; adapt FastEmbedder to the 6.0 API. Run the dependency + licence check; record the crate count delta in the commit body. The CPU vectors move ~3e-7 (ORT 1.20 -> 1.28): declared.\n2. device.rs as in entry_points. Selection order: GLIA_EMBED_DEVICE=cpu -> Cpu, fallback=override; =webgpu / =cuda -> that device, failure is a hard error naming it; unset -> WebGpu if built, else Cpu fallback=not_built; a WebGpu session that fails to commit (no adapter, no Vulkan ICD: the spike saw a clean Err from WebGpuContext::Initialize RequestAdapterStatus under error_on_failure) -> Cpu, fallback=no_adapter:<first line of the error>. Without error_on_failure ORT silently runs on CPU: never omit it. Cuda is only ever explicit (GLIA_EMBED_DEVICE=cuda) and only in a gpu-cuda build; a CUDA OOM (clean Err) halves the batch once, then falls back to Cpu, fallback=oom.\n3. worker.rs: the GPU session always runs in the child. The parent embeds through it; if the child exits abnormally (signal, abort, non-zero, broken pipe) the parent re-embeds the remaining texts on a CPU FastEmbedder in-process and reports fallback=gpu_crash:<signal or status>. A clean error frame is fallback=<reason>. The CPU path never spawns a child. One child per process (FB.4's one-FastEmbedder rule), started lazily, reused across calls, killed on drop.\n4. Surfaces: the CLI's worker is `glia embed-worker` (hidden from cli/surface: assert it is absent from `glia --help` and the surface files). glia-py: ship the worker in the wheel (a small binary target of glia-embed, `glia-embed-worker`, installed through maturin's data/scripts or bundled next to the extension and found by path relative to the module); if the worker binary is absent or unrunnable, CPU in-process with fallback=no_worker. Pick the mechanism that the wheel smoke tests can verify on Linux; record which in docs/embeddings.md.\n5. Packaging: the WebGPU build links ORT statically and NEEDS libwebgpu_dawn.so (~12 MB). A missing Dawn library stops the binary from starting at all, so it must be bundled with an $ORIGIN rpath (Linux: auditwheel or copy + patchelf; Windows: the DLL beside the exe / extension; macOS: @loader_path) in both wheels' workflows, and scripts/check-cli-wheel.sh must run the installed wheel in a clean venv with no Vulkan ICD (VK_DRIVER_FILES=/nonexistent.json) and see fallback=no_adapter, never a load failure. CUDA stays out of every published wheel (650 MB provider + user CUDA 12 / cuDNN 9).\n6. Rows: code-domain VectorRow gains an optional `device` field (cpu | webgpu | cuda; absent = cpu, so old rows read as before); embed_repo writes it. FB.4's index treats rows of another device as fresh (the vectors agree to 4e-7); a row's device never decides staleness.\n7. Marker beside the existing `[embed] model load` line, once per embedder: `[embed] device=<adapter name> backend=<cpu|webgpu|cuda> driver=<v> fallback=<reason|none> batch=<n>`. Dawn's `maxDynamic... artificially reduced` warning is filtered from the worker's stderr.\n8. Tests and gates stay CPU-pinned: every test that embeds with bge-small, and the FB.6 embedding gate harness, set GLIA_EMBED_DEVICE=cpu, so CI on hosted runners is unchanged. An `#[ignore]`d GPU test (run by hand on James's 1660 Super) embeds the spike's 256 texts on WebGPU and asserts max abs diff < 1e-5 vs CPU and top-10 overlap 10/10.\n9. docs/embeddings.md: devices, the override, the fallback reasons, the batch pins and why (the abort at >= 64), the per-platform support table, the issue template's ask (the marker line, OS, whether GLIA_EMBED_DEVICE=cpu works).\n10. Clean numbers: once no other CPU job runs, rerun the spike harness (CPU at batch 256, WebGPU at batch 8, CUDA at 32 if the pip libs are still in the spike venv) and put the table in the commit body and docs/embeddings.md.",
+   "acceptance": "(1) `cargo test -p glia-embed` and `cargo test -p glia-embed --features fastembed -- --ignored` green with GLIA_EMBED_DEVICE=cpu; (2) on this machine `glia embed` on a scratch copy prints `[embed] device=NVIDIA GeForce GTX 1660 SUPER backend=webgpu driver=580.. fallback=none batch=8` (adapter-name spelling as the probe reports it); (3) VK_DRIVER_FILES=/nonexistent.json -> fallback=no_adapter:.. and the run completes on CPU; GLIA_EMBED_DEVICE=cpu -> fallback=override; (4) a test that makes the worker abort mid-batch (a test-only env knob in the worker) ends with every text embedded and fallback=gpu_crash:..; (5) the #[ignore]d GPU parity test passes on James's machine (max abs diff < 1e-5, top-10 10/10); (6) both wheels build in CI; the installed CLI and py wheels start in a clean venv with and without a Vulkan ICD; (7) the dependency + licence check passes; (8) clippy -D warnings with and without each feature; the workspace close-out (byte_identical, rank gate, run.py, matrix) unchanged, since vectors are never a build input; (9) the clean-numbers table recorded.",
+   "fired_on_marker": "[embed] device=<name> backend=<cpu|webgpu|cuda> driver=<v> fallback=<reason|none> batch=<n>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "api_signature",
+     "cell_value",
+     "out_of_repo"
+    ],
+    "what_changes": "fastembed 4.9.1 -> 6.0.0 / ort rc.9 -> rc.13: bge-small vectors move ~3e-7 even on CPU (rankings unchanged in the spike); FastEmbedder::new takes a Device; vectors.jsonl rows gain an optional `device`; `glia embed` and pyo3 embedding default to the GPU when one is present; the wheels bundle the Dawn library.",
+    "in_repo_consumers": [
+     "engine semantic (FB.4 / FB.5a)",
+     "cli embed (FB.5b)",
+     "py embed (FB.5c)",
+     "FB.6 gate harness (CPU-pinned)"
+    ],
+    "out_of_repo_consumers": [
+     "Engram (reads vectors.jsonl: the new optional device field; vectors move ~3e-7, re-embed or treat as equal)",
+     "repo-graph (glia-py wheel grows ~16 MB; GPU used by default for embeddings)"
+    ]
+   },
+   "depends_on": [
+    "FB.5a",
+    "FB.5b",
+    "FB.5c"
+   ],
+   "risks": "WebGPU's per-GPU behaviour is only measured on one NVIDIA card: the batch pin of 8 and the crash isolation are the defence; an AMD / Intel / Apple adapter that commits but miscomputes is caught only by user reports (the marker + issue template). The fastembed 6.0 API may differ from 4.9.1 (TextInitOptions rename etc.). Wheel bundling of Dawn is the likeliest failure: test the installed wheel, not the build tree. FB.6 runs on fastembed 4.9.1; its decision stands (diff 3e-7, rankings equal), and its cached vectors stay fresh by text_hash.",
+   "batch": "FB",
+   "fixtures": [],
+   "spec_group": "FB"
   }
  ],
  "deps_patch": {
@@ -9628,7 +9695,8 @@
   "HANDOFF-SPAN": "James 2026-10-24 (\"sinc 0.5.3 is released but repo-graph and nothing else will update til 0.5.4\"): no consumer applies the 0.5.3 handoffs; the 0.5.4 handoffs run repo-graph 0.5.2 -> 0.5.4, Engram 0.5.2 -> 0.5.4, neuropil 0.5.1 -> 0.5.4, each carrying its 0.5.3 handoff forward; 0.5.4 may break 0.5.3 surfaces freely, each break declared",
   "DEPS-NCSA": "James 2026-10-24 (\"Accept NCSA\"): NCSA (UIUC / LLVM, permissive) joins the allowed dependency licences; first instance libfuzzer-sys 0.4.13 (rav1e cfg(fuzzing), via fastembed -> image), F0.2 50af6405",
   "STAMP-LOCK": "James 2026-10-24 (\"Hash only what glia uses\"): PARSER_STAMP hashes Cargo.lock over the HASHED_ROOTS crates' dependency closure only, so one commit has one stamp however it is checked out or packaged (F0.6); FE.5 keeps its step (h)",
-  "VECTORS-OUT": "James 2026-10-24 (FB.3's question): vectors leave the build. .glia/vectors.jsonl is a query-time sidecar; no layout or PyGraph holds a VECTOR cell, a VECTOR write is write_through=sidecar_only, and vectors.jsonl / vocab-snapshot/ are not build inputs. Checked first: repo-graph skips VECTOR cells (server.py _SKIP_CELL_TYPES), Engram reads the sidecar, the archived SWE-bench work used its own model vectors. \"okay it's fine then\"."
+  "VECTORS-OUT": "James 2026-10-24 (FB.3's question): vectors leave the build. .glia/vectors.jsonl is a query-time sidecar; no layout or PyGraph holds a VECTOR cell, a VECTOR write is write_through=sidecar_only, and vectors.jsonl / vocab-snapshot/ are not build inputs. Checked first: repo-graph skips VECTOR cells (server.py _SKIP_CELL_TYPES), Engram reads the sidecar, the archived SWE-bench work used its own model vectors. \"okay it's fine then\".",
+  "GPU-EMBED": "James 2026-10-25 (\"it shouldn't be an optional tbf a default\"; \"Everything you mentioned seems reasonable for web gpu including child processes\"): embeddings use the GPU by default through ORT's WebGPU EP in a crash-isolated worker, CPU fallback on any failure, CUDA an explicit opt-in build feature never in published wheels, device recorded per vector row, tests and the embedding gate CPU-pinned; FB.14, added to T5 after the 2026-10-25 spike."
  },
  "reverify": {
   "f7f9a495": {
