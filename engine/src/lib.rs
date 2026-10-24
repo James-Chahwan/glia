@@ -88,6 +88,13 @@ pub mod calibrate;
 pub mod intent;
 pub mod rank;
 
+// 0.5.4 public slots (F0.3): clarify (FC), goal (FC), semantic (FB), targets (FA).
+// Reached by module path (`glia_engine::goal::why`), never flattened.
+pub mod clarify;
+pub mod goal;
+pub mod semantic;
+pub mod targets;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
