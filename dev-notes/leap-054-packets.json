@@ -9544,7 +9544,20 @@
   },
   "open_questions_resolved": "none yet"
  },
- "rulings": {},
+ "rulings": {
+  "FE-3": "James 2026-10-24 (\"ahhh we only have subscription usage\"): the agent run (FE.4) uses a `claude setup-token` subscription token, never a metered ANTHROPIC_API_KEY; the pilot runs and reports its usage estimate, the full run waits for his go and is usage-gated (usage_gate.py, 5-hour and 7-day windows)",
+  "FB-5": "James 2026-10-24 (\"Strict: R1 5/6, R2 3/6\"): option (a) of the re-verify restatement on all six rank-gate repos: recipe t2 and the BGE query prefix win on >= 3 of 6 (CI hi >= 0 on all 6); R1 semantic beats the random-vector control on >= 5 of 6; R2 semantic alone beats BM25-alone T1s on >= 3 of 6 with no significant loss on any",
+  "FB-3": "James 2026-10-24 (\"Yes, in the wheel\"): the PyPI glia-py wheel ships the embedding runtime (py feature `embed` on in pyproject)",
+  "FE-2": "James 2026-10-24 (\"I gave repo-graph my own permission to use it as it sees fit ergo myself permission to use my own thing\"): no separate skills licence. James holds the copyright on both repos, so the six skills move under glia's LICENSE (the Glia Software License) like the rest of the tree; skills/LICENSE is not created; README says skills/ follows LICENSE; repo-graph's MIT plugin may keep shipping copies under his permission (no notice packet)",
+  "INT-2": "James 2026-10-24 (\"we probably need the embed as we keep going forward\"): keep the CLI feature `embed` in `default` (ORT fetched once at the first build)",
+  "FD-4": "James 2026-10-24 (\"lowercase\"): tier words on the wire are lowercase everywhere (FD.7d's default); labels like the CLI's `> FACT:` stay",
+  "FB-2": "James 2026-10-24 (\"Yes to all\"): vectors leave the layout; nothing at HEAD reads VECTOR cells",
+  "INT-1": "James 2026-10-24 (\"Yes to all\"): registry ids UNIT = 26, IMPORT_BINDINGS = 27 (F0.1)",
+  "INT-6": "James 2026-10-24 (\"Yes to all\"): FD.2's audit population excludes 0.5.4's new layers (TRACES / GOAL_UNIT edges, resolver:org_packages), the 0.5.3-vocabulary baseline",
+  "INT-7": "James 2026-10-24 (\"Yes to all\"): the scheduler orders ready packets by the longest chain of dependants first",
+  "INT-8": "James 2026-10-24 (\"Yes to all\"): FE.4 is not an exclusive wave; its pilot runs beside other agents, its full run resumes after his approval",
+  "TRACKS": "James 2026-10-24 (\"yeah lets go option 2 to start off 0.5.4\"): 0.5.4 starts with tracks T0, T2, T5, T1, T11 (54 packets); the other tracks wait for a later pick"
+ },
  "reverify": {
   "f7f9a495": {
    "by_group": {
