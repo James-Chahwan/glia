@@ -1,10 +1,13 @@
-//! LG.15 / CE.3f — every Claude Code skill under `skills/` (`skills/<name>/SKILL.md`:
-//! `glia`, using glia through its CLI without the MCP server, and `glia-overlay`,
-//! the overlay loop's model step) stays true to the CLI.
+//! LG.15 / CE.3f / FE.7 — every Claude Code skill under `skills/` (`skills/<name>/SKILL.md`:
+//! `glia`, using glia through its CLI without the MCP server, `glia-overlay`, the
+//! overlay loop's model step, and the six task skills that moved from repo-graph in
+//! 0.5.4, `glia-orient`, `glia-find`, `glia-debug`, `glia-impact`, `glia-trace` and
+//! `glia-init`) stays true to the CLI.
 //!
 //! Every `glia ...` invocation in a skill (a line of a fenced code block, or
 //! an inline code span, whose first word after any `VAR=value` prefix is
-//! `glia`; `|`, `&&`, `||` and `;` start a new command) is checked against the
+//! `glia`, or `uvx --from <pkg> glia` / `uvx --from=<pkg> glia`, the zero-install
+//! form; `|`, `&&`, `||` and `;` start a new command) is checked against the
 //! committed CLI surface snapshots in `cli/surface/` (LG.6a):
 //! - its command has a `cli/surface/<command>.txt`, and a subcommand is one
 //!   that snapshot declares (`cmd glia cell ls`);
@@ -21,6 +24,11 @@
 //! check from passing vacuously on a skill the parser reads no invocation
 //! from; a skill directory with no entry fails until one is added.
 //!
+//! The task skills also name two other transports, the repo-graph MCP tool calls
+//! (`find query=..`) and `uvx mcp-repo-graph <verb> ..`. Those are repo-graph's
+//! surface, not glia's CLI, and are not checked here: the parser reads neither as
+//! a glia invocation.
+//!
 //! fired_on: one stderr line per skill, in name order,
 //! `[skill] <name>: <n> invocations checked against cli/surface (<k> stale)`
 //! (`cargo test -p glia-cli --test skill_surface -- --nocapture`).
@@ -34,9 +42,11 @@ const SKILLS_REL: &str = "skills";
 /// Per skill directory, the commands its worked examples show with `--json`:
 /// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added, 0.5.2's `query` /
 /// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, and 0.5.3's
-/// `history calibrate`, EZ.1)
-/// and `glia-overlay` (CE.3f). A subcommand is its surface section path, `overlay propose`.
-const EXAMPLED: [(&str, &[&str]); 2] = [
+/// `history calibrate`, EZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
+/// A subcommand is its surface section path, `overlay propose`. glia-init's one
+/// `--json` command is `history calibrate`: `build`, `history sync`, `install-hooks`
+/// and `watch` take no `--json`, so they are checked for flags only.
+const EXAMPLED: [(&str, &[&str]); 8] = [
     (
         "glia",
         &[
@@ -88,6 +98,13 @@ const EXAMPLED: [(&str, &[&str]); 2] = [
             "find",
         ],
     ),
+    // 0.5.4 (FE.7): the task skills moved from repo-graph.
+    ("glia-orient", &["arch", "flows", "coverage", "gaps"]),
+    ("glia-find", &["find", "pack"]),
+    ("glia-debug", &["resolve", "diff-impact", "tests-for"]),
+    ("glia-impact", &["blast-radius", "diff-impact", "review"]),
+    ("glia-trace", &["trace", "why", "flows"]),
+    ("glia-init", &["history calibrate"]),
 ];
 
 struct ArgSpec {
@@ -264,20 +281,44 @@ fn code_texts(md: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// The words after `glia` when `cmd` (one command's words, any `VAR=value`
+/// prefix already skipped) runs glia: `glia ..` itself, or the zero-install
+/// `uvx --from <pkg> glia ..` / `uvx --from=<pkg> glia ..`. Any other command,
+/// `uvx mcp-repo-graph ..` among them, is `None`.
+fn glia_args<'a>(cmd: &'a [&'a String]) -> Option<&'a [&'a String]> {
+    match cmd {
+        [first, rest @ ..] if first.as_str() == "glia" => Some(rest),
+        [uvx, from, _pkg, glia, rest @ ..]
+            if uvx.as_str() == "uvx" && from.as_str() == "--from" && glia.as_str() == "glia" =>
+        {
+            Some(rest)
+        }
+        [uvx, from, glia, rest @ ..]
+            if uvx.as_str() == "uvx"
+                && from.strip_prefix("--from=").is_some_and(|p| !p.is_empty())
+                && glia.as_str() == "glia" =>
+        {
+            Some(rest)
+        }
+        _ => None,
+    }
+}
+
 /// Every `glia` invocation in `md`: its line and the words after `glia`.
 fn invocations(md: &str) -> Vec<(usize, Vec<String>)> {
     let mut out = Vec::new();
     for (line, text) in code_texts(md) {
         let all = words(&text);
         for segment in all.split(|w| matches!(w.as_str(), "|" | "&&" | "||" | ";")) {
-            let mut rest = segment.iter().skip_while(|w| {
+            let rest = segment.iter().skip_while(|w| {
                 !w.starts_with('-')
                     && w.split_once('=').is_some_and(|(k, _)| {
                         !k.is_empty() && k.chars().all(|c| c.is_ascii_uppercase() || c == '_')
                     })
             });
-            if rest.next().is_some_and(|w| w == "glia") {
-                out.push((line, rest.cloned().collect()));
+            let rest: Vec<&String> = rest.collect();
+            if let Some(args) = glia_args(&rest) {
+                out.push((line, args.iter().map(|w| (*w).clone()).collect()));
             }
         }
     }
@@ -509,11 +550,12 @@ fn skill_invocations_match_the_cli_surface() {
             ));
         }
     }
-    assert!(
-        reports.iter().any(|r| r.name == "glia")
-            && reports.iter().any(|r| r.name == "glia-overlay"),
-        "the glia and glia-overlay skills are both checked"
-    );
+    for (skill, _) in &EXAMPLED {
+        assert!(
+            reports.iter().any(|r| r.name == *skill),
+            "the {skill} skill is checked"
+        );
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -688,5 +730,45 @@ Bad: `glia <command> --json`.
         got[5].contains("unknown flag `--json` for the global options"),
         "{}",
         got[5]
+    );
+}
+
+/// FE.7: the zero-install `uvx --from <pkg> glia ..` form is a glia invocation
+/// (checked like `glia ..`); `uvx mcp-repo-graph ..`, repo-graph's transport, and
+/// a `uvx --from` running another tool are not.
+#[test]
+fn uvx_from_glia_cli_is_a_glia_invocation() {
+    let md = "\
+`uvx --from glia-cli glia find . x --json`
+```bash
+uvx --from=glia-cli glia blast-radius . UserService --json
+uvx mcp-repo-graph find x
+uvx --from glia-cli other find x
+uvx --from glia-cli glia fnd . x
+GLIA_THREADS=1 uvx --from glia-cli glia trace . checkout --json
+```
+";
+    let calls = invocations(md);
+    let got: Vec<(usize, String)> = calls
+        .iter()
+        .map(|(line, args)| (*line, args.join(" ")))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, "find . x --json".to_string()),
+            (3, "blast-radius . UserService --json".to_string()),
+            (6, "fnd . x".to_string()),
+            (7, "trace . checkout --json".to_string()),
+        ]
+    );
+    let surface = surface();
+    assert_eq!(check(&surface, &calls[0].1).0, ["find"]);
+    let stale = stale_mentions(&surface, md, "SKILL.md");
+    assert_eq!(stale.len(), 1, "{}", stale.join("\n"));
+    assert!(
+        stale[0].starts_with("SKILL.md:6:") && stale[0].contains("unknown command `fnd`"),
+        "{}",
+        stale[0]
     );
 }
