@@ -26,6 +26,7 @@
 //! | `redundant_rule` | an `[[edge]]` equal to an edge whose ORIGIN is not the overlay (the extractor caught up) | fact | `remove` |
 //! | `rotted_rule` | DB.4: a loader-kept `[[constraint]]` whose `rule` text this glia can no longer read (`RuleDiagnostic::validate_constraint`: a parse error, an unknown kind / category / predicate, a wrong arity, a reserved prelude name, or, FD.27, no `violation` output, which `glia check` refuses too); `detail` is the first diagnostic, `rule <line>:<col>: <message>` (+ how many more), or `rule: no violation output (..)` for an outputless rule; a fact about this glia, not the code | fact | `remove` |
 //! | `orphaned_cell` | a `.glia/cells.jsonl` / `.glia/vectors.jsonl` row whose qname + hint bind nothing | fact | `glia cell ls --check --rekey` |
+//! | `named_not_modelled` | FB.13c: an identifier a markdown DOC_SECTION of the repo cites in an inline code span (one line, an identifier, `Ident()` or a dotted `a.b` / `a::b`, read as its last segment), identifier-shaped (an underscore or a lower->Upper step: a plain word is prose, so a cited lowercase `render` is missed on purpose), that the repo's vocabulary snapshot (`glia vocab sync`) holds in at least one code file (an extension `extract::detect_language` routes; a token the snapshot marks common lists no files and is no row), but that no node of the repo is named; the row's `qname` is the identifier, `kind` `identifier`, at the first citing doc line (path, then line), `detail` `repo=<l> cited by <d> doc section(s); occurs in <k> code file(s) (<first 3>); no node named <X>`. No snapshot: no rows | fact | `check the parser for <language> covers this declaration, or [[edge]] / [[note]] it in the overlay` |
 //!
 //! `kind` is the node kind for a graph row, the overlay section for a rule
 //! row and the cell type for a cell row. `line` is 1-based (LD.1): through
@@ -44,6 +45,7 @@
 //! | `suspected_edge` | the orphan's NodeId `\x1f` the target's NodeId |
 //! | `orphaned_rule` / `redundant_rule` / `rotted_rule` | repo id `\x1f` section `\x1f` the stanza's identity: `[[edge]]` from `\x1f` to `\x1f` category; `[[constraint]]` / `[[decision]]` id; `[[note]]` id, else anchor `\x1f` text; `[entrypoints]` the pattern |
 //! | `orphaned_cell` | repo id `\x1f` sidecar file `\x1f` cell type `\x1f` qname `\x1f` kind `\x1f` hint |
+//! | `named_not_modelled` | repo id `\x1f` the identifier |
 //!
 //! `draft` (CD.3b) is set on `suspected_edge` rows only (left out of the
 //! JSON on every other row): a `# gap: <id>` comment line, then one
@@ -62,8 +64,8 @@
 //! the graph-category gaps) and [`verdict`] compares two counts; together
 //! they are how [`overlay_delta`] judges a candidate overlay.
 //!
-//! `wrapped_sink` and the last four categories read each repo's files (its
-//! `.glia/overlay.toml`, its sidecars), so they need its root: with no roots
+//! `wrapped_sink` and the last five categories read each repo's files (its
+//! `.glia/overlay.toml`, its sidecars, its vocabulary snapshot), so they need its root: with no roots
 //! they are not computed and are listed in [`GapsReport::skipped`] instead of
 //! `counts`, and an `<unresolved>` sink stays an `unresolved_endpoint`. Every qname binds through
 //! `graph::cells::QnameIndex`, as the stage that applies it binds it: an
@@ -121,6 +123,11 @@
 //!   when the DT.5d rules keep any row out: `g` generated-code candidates
 //!   (checked first), `i` invoked members of an owner with an incoming carry
 //!   edge (checked after dispatch);
+//! - `[gaps] named_not_modelled repo=<l> cited=<c> rows=<r>` once per repo
+//!   with a vocabulary snapshot, per report that computes
+//!   `named_not_modelled`: `c` distinct identifier-shaped tokens its docs
+//!   cite, `r` the rows; a repo without one prints `[gaps] named_not_modelled
+//!   skipped: no vocab snapshot (run glia vocab sync) repo=<l>` instead;
 //! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps <G0>→<G1>, verdict=<keep|review|drop>`
 //!   once per [`overlay_delta`], the review's accept-loop line; `G` is the
 //!   sum of [`GraphCounts::gaps_by_category`].
@@ -138,6 +145,7 @@ use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
 use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
+use glia_code_domain::snapshots::{VOCAB_MIN_TOKEN_LEN, read_vocab};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_code_extractors::queues::is_framework_tag;
 use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
@@ -164,9 +172,10 @@ pub const ORPHANED_RULE: &str = "orphaned_rule";
 pub const REDUNDANT_RULE: &str = "redundant_rule";
 pub const ROTTED_RULE: &str = "rotted_rule";
 pub const ORPHANED_CELL: &str = "orphaned_cell";
+pub const NAMED_NOT_MODELLED: &str = "named_not_modelled";
 
 /// Every category, in report order.
-pub const CATEGORIES: [&str; 13] = [
+pub const CATEGORIES: [&str; 14] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
@@ -180,15 +189,17 @@ pub const CATEGORIES: [&str; 13] = [
     REDUNDANT_RULE,
     ROTTED_RULE,
     ORPHANED_CELL,
+    NAMED_NOT_MODELLED,
 ];
 
 /// The categories that read a repo's files, so need its root.
-const ROOT_CATEGORIES: [&str; 5] = [
+const ROOT_CATEGORIES: [&str; 6] = [
     WRAPPED_SINK,
     ORPHANED_RULE,
     REDUNDANT_RULE,
     ROTTED_RULE,
     ORPHANED_CELL,
+    NAMED_NOT_MODELLED,
 ];
 
 /// The categories read off the graph alone: [`CATEGORIES`] minus
@@ -1429,12 +1440,323 @@ fn collect_rows(
             eprintln!("[gaps] rotted_rule no_violation={}", ctx.no_violation);
         }
     }
+
+    if want(NAMED_NOT_MODELLED) && !roots.is_empty() {
+        let names = repo_names(merged);
+        let docs = doc_sections(merged, &loc);
+        for (repo, root) in roots {
+            let label = label_of(&labels, *repo);
+            named_rows(
+                *repo,
+                root,
+                &label,
+                names.get(repo),
+                docs.get(repo).map(Vec::as_slice).unwrap_or_default(),
+                &mut ids,
+                &mut rows,
+            );
+        }
+    }
     Collected {
         rows,
         ws_served,
         gql_implied,
         gql_unpaired,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Named but not modelled (FB.13c): identifiers the docs cite, the code holds,
+// and no node names.
+// ---------------------------------------------------------------------------
+
+/// Code files named in one `named_not_modelled` detail.
+const NAMED_CODE_FILES: usize = 3;
+
+/// Per repo id, the names of its nodes (`nav.name_by_id`), built once per
+/// report. Looked up only, never iterated into an output.
+fn repo_names(merged: &MergedGraph) -> HashMap<u64, HashSet<&str>> {
+    let mut out: HashMap<u64, HashSet<&str>> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if let Some(name) = g.nav.name_by_id.get(&n.id) {
+                out.entry(n.repo.0).or_default().insert(name.as_str());
+            }
+        }
+    }
+    out
+}
+
+/// One markdown DOC_SECTION: its located file, its 1-based first line and
+/// its stored text (the CODE cell, CG.3's whole section).
+struct DocText<'a> {
+    file: String,
+    line: i64,
+    qname: &'a str,
+    text: &'a str,
+}
+
+/// Per repo id, its markdown DOC_SECTIONs sorted by (file, line, qname), each
+/// node once (the first graph holding it speaks for it).
+fn doc_sections<'a>(merged: &'a MergedGraph, loc: &Locator) -> BTreeMap<u64, Vec<DocText<'a>>> {
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut out: BTreeMap<u64, Vec<DocText<'a>>> = BTreeMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::DOC_SECTION) || !seen.insert(n.id) {
+                continue;
+            }
+            let Some(text) = n.cells.iter().find_map(|c| match &c.payload {
+                CellPayload::Text(t) if c.kind == cell_type::CODE => Some(t.as_str()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let at = loc.locate(n.id);
+            let (Some(file), Some(line)) = (at.file, at.line) else {
+                continue;
+            };
+            if !is_markdown(&file) {
+                continue;
+            }
+            let qname = g
+                .nav
+                .qname_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
+            out.entry(n.repo.0).or_default().push(DocText {
+                file,
+                line,
+                qname,
+                text,
+            });
+        }
+    }
+    for docs in out.values_mut() {
+        docs.sort_by(|a, b| (&a.file, a.line, a.qname).cmp(&(&b.file, b.line, b.qname)));
+    }
+    out
+}
+
+/// A markdown file by extension (ASCII case ignored).
+fn is_markdown(file: &str) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            ["md", "markdown", "mdx"]
+                .iter()
+                .any(|m| e.eq_ignore_ascii_case(m))
+        })
+}
+
+/// The identifiers `line`'s inline code spans name: each pair of backticks
+/// on the line, its content an identifier, `Ident()` or a dotted path
+/// (`a.b`, `a::b`), read as its last segment, kept when identifier-shaped
+/// ([`identifier_shaped`]).
+fn cited_identifiers(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('`') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('`') else {
+            break;
+        };
+        let span = after[..close].trim();
+        rest = &after[close + 1..];
+        if let Some(id) = span_identifier(span)
+            && identifier_shaped(id)
+        {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// A span's identifier: `Ident()` loses its `()`, a dotted or `::` path is
+/// its last segment, and every segment must be `[A-Za-z_][A-Za-z0-9_]*`.
+fn span_identifier(span: &str) -> Option<&str> {
+    let span = span.strip_suffix("()").unwrap_or(span);
+    if span.is_empty() {
+        return None;
+    }
+    let is_ident = |s: &str| {
+        let mut chars = s.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let segments: Vec<&str> = span.split("::").flat_map(|s| s.split('.')).collect();
+    if !segments.iter().all(|s| is_ident(s)) {
+        return None;
+    }
+    segments.last().copied()
+}
+
+/// Identifier-shaped, not prose: at least `VOCAB_MIN_TOKEN_LEN` bytes and
+/// an underscore or a lower->Upper step (camelCase, PascalCase with two
+/// humps). A plain word (`the`, `render`, `HTTP`) is skipped.
+fn identifier_shaped(id: &str) -> bool {
+    if id.len() < VOCAB_MIN_TOKEN_LEN || !id.chars().any(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let bytes = id.as_bytes();
+    id.contains('_')
+        || bytes
+            .windows(2)
+            .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase())
+}
+
+/// What a doc citation of one identifier was: its first citing line and how
+/// many sections cite it.
+struct Cited {
+    file: String,
+    line: i64,
+    sections: usize,
+    last_section: usize,
+}
+
+/// One repo's `named_not_modelled` rows (module table) and its marker.
+fn named_rows(
+    repo: u64,
+    root: &Path,
+    label: &str,
+    names: Option<&HashSet<&str>>,
+    docs: &[DocText],
+    ids: &mut Ids,
+    rows: &mut Vec<GapRow>,
+) {
+    let Some(snap) = read_vocab(root) else {
+        eprintln!(
+            "[gaps] named_not_modelled skipped: no vocab snapshot (run glia vocab sync) repo={label}"
+        );
+        return;
+    };
+    let mut cited: BTreeMap<&str, Cited> = BTreeMap::new();
+    for (si, doc) in docs.iter().enumerate() {
+        let mut fence: Option<&str> = None;
+        for (offset, line) in doc.text.lines().enumerate() {
+            let t = line.trim_start();
+            match fence {
+                Some(open) => {
+                    if t.starts_with(open) {
+                        fence = None;
+                    }
+                    continue;
+                }
+                None if t.starts_with("```") => {
+                    fence = Some("```");
+                    continue;
+                }
+                None if t.starts_with("~~~") => {
+                    fence = Some("~~~");
+                    continue;
+                }
+                None => {}
+            }
+            let at = doc
+                .line
+                .saturating_add(i64::try_from(offset).unwrap_or(i64::MAX));
+            for id in cited_identifiers(line) {
+                let c = cited.entry(id).or_insert_with(|| Cited {
+                    file: doc.file.clone(),
+                    line: at,
+                    sections: 0,
+                    last_section: usize::MAX,
+                });
+                if c.last_section != si {
+                    c.last_section = si;
+                    c.sections += 1;
+                }
+            }
+        }
+    }
+    let mut kept = 0usize;
+    for (token, c) in &cited {
+        if names.is_some_and(|n| n.contains(token)) {
+            continue;
+        }
+        let Some(hit) = snap.files_of(token) else {
+            continue;
+        };
+        let code: Vec<&String> = hit
+            .files
+            .iter()
+            .filter(|f| crate::extract::detect_language(f).is_some())
+            .collect();
+        let Some(first) = code.first() else {
+            continue;
+        };
+        let shown: Vec<&str> = code
+            .iter()
+            .take(NAMED_CODE_FILES)
+            .map(|f| f.as_str())
+            .collect();
+        rows.push(GapRow {
+            id: ids.id(NAMED_NOT_MODELLED, format!("{repo}\x1f{token}")),
+            category: NAMED_NOT_MODELLED,
+            qname: (*token).to_string(),
+            kind: "identifier",
+            file: Some(c.file.clone()),
+            line: Some(c.line),
+            detail: format!(
+                "repo={label} cited by {} doc section(s); occurs in {} code file(s) ({}); no node named {token}",
+                c.sections,
+                code.len(),
+                shown.join(", ")
+            ),
+            suggest: parser_suggest(crate::extract::detect_language(first).unwrap_or("")),
+            tier: Tier::Fact.as_str(),
+            draft: None,
+        });
+        kept += 1;
+    }
+    eprintln!(
+        "[gaps] named_not_modelled repo={label} cited={} rows={kept}",
+        cited.len()
+    );
+}
+
+/// The `suggest` of a `named_not_modelled` row whose first code file routes
+/// to language tag `lang` (`extract::detect_language`), as a static string.
+fn parser_suggest(lang: &str) -> &'static str {
+    macro_rules! suggest {
+        ($($tag:literal),* $(,)?) => {
+            match lang {
+                $($tag => concat!(
+                    "check the parser for ", $tag,
+                    " covers this declaration, or [[edge]] / [[note]] it in the overlay"
+                ),)*
+                _ => "check the parser covers this declaration, or [[edge]] / [[note]] it in the overlay",
+            }
+        };
+    }
+    suggest!(
+        "python",
+        "go",
+        "angular",
+        "typescript",
+        "vue",
+        "rust",
+        "java",
+        "kotlin",
+        "csharp",
+        "ruby",
+        "php",
+        "swift",
+        "c_cpp",
+        "scala",
+        "clojure",
+        "dart",
+        "elixir",
+        "solidity",
+        "terraform",
+        "proto",
+        "graphql",
+        "avro",
+    )
 }
 
 // ---------------------------------------------------------------------------

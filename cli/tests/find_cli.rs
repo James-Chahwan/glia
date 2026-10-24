@@ -457,3 +457,91 @@ fn files_refuses_with_and_node_flags() {
         );
     }
 }
+
+/// FB.13c: a committed repo whose README and TS file hold `retryBudget`, a
+/// key of an object literal no node is named, synced with `glia vocab sync`.
+/// Needs a `git` binary.
+fn named_repo(tag: &str, sync: bool) -> Fixture {
+    let fx = Fixture::new(tag);
+    let repo = fx.0.join("named");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("README.md"),
+        "# Service\n\nReads `retryBudget`.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src/config.ts"),
+        "export const config = { retryBudget: 3 };\n",
+    )
+    .unwrap();
+    let gitconfig = fx.0.join("gitconfig");
+    std::fs::write(&gitconfig, "").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &["commit", "-q", "-m", "probe"][..],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@fixture.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@fixture.invalid")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap_or_else(|e| panic!("FB.13c tests need a `git` binary on PATH: {e}"));
+        assert!(out.status.success(), "git {args:?}");
+    }
+    if sync {
+        ok(&["vocab", "sync", &fx.repo("named")]);
+    }
+    fx
+}
+
+#[test]
+fn absence_names_where_an_unmodelled_identifier_occurs() {
+    let fx = named_repo("named", true);
+    let out = ok(&["find", &fx.repo("named"), "retryBudget", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let a = &v["absence"];
+    assert_eq!(a["reason"], "no_match", "{v}");
+    assert_eq!(a["tier"], "fact");
+    assert_eq!(a["named_in"][0]["token"], "retryBudget", "{v}");
+    assert_eq!(
+        a["named_in"][0]["files"],
+        serde_json::json!(["README.md", "src/config.ts"])
+    );
+    assert_eq!(a["named_in"][0]["file_count"], 2);
+    assert!(
+        a["note"]
+            .as_str()
+            .expect("note")
+            .ends_with("; `retryBudget` occurs in 2 tracked file(s) (README.md, src/config.ts) but no node is named retryBudget"),
+        "{v}"
+    );
+    let table = text_of(&ok(&["find", &fx.repo("named"), "retryBudget"]));
+    assert!(table.contains("occurs in 2 tracked file(s)"), "{table}");
+}
+
+#[test]
+fn absence_without_a_snapshot_has_no_named_in() {
+    let fx = named_repo("unsynced", false);
+    let out = ok(&["find", &fx.repo("named"), "retryBudget", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert!(v["absence"].get("named_in").is_none(), "{v}");
+    assert_eq!(
+        v["absence"]["note"],
+        "no node matches `retryBudget` by name or qname in any find tier"
+    );
+}
+
+fn text_of(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}

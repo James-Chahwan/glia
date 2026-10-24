@@ -466,3 +466,104 @@ fn gaps_table_leads_with_the_id() {
         "{row}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FB.13c: named_not_modelled over a real `glia vocab sync` snapshot.
+// ---------------------------------------------------------------------------
+
+const NNM_README: &str =
+    "# Service\n\nThe client reads `retryBudget` and calls `parseTimeout()`; see `the` docs.\n";
+const NNM_CONFIG_TS: &str = "export const config = { retryBudget: 3 };\n\nexport function parseTimeout(ms: number) {\n  return ms * config.retryBudget;\n}\n";
+
+/// A committed git repo holding the FB.13c probe, under an empty global git
+/// config. Needs a `git` binary.
+fn nnm_repo(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("glia-fb13c-gaps-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let repo = root.join("repo");
+    write(&repo, "README.md", NNM_README);
+    write(&repo, "src/config.ts", NNM_CONFIG_TS);
+    let gitconfig = root.join("gitconfig");
+    std::fs::write(&gitconfig, "").expect("gitconfig");
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"][..],
+        &["commit", "-q", "-m", "probe"][..],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@fixture.invalid")
+            .env("GIT_COMMITTER_NAME", "Fixture")
+            .env("GIT_COMMITTER_EMAIL", "fixture@fixture.invalid")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap_or_else(|e| panic!("FB.13c tests need a `git` binary on PATH: {e}"));
+        assert!(out.status.success(), "git {args:?}: {}", text(&out.stderr));
+    }
+    repo
+}
+
+#[test]
+fn named_not_modelled_rows_need_a_vocab_snapshot() {
+    let repo = nnm_repo("rows");
+    // No snapshot yet: no rows, and the skip line names the step to run.
+    let before = glia(&[
+        "gaps",
+        s(&repo),
+        "--json",
+        "--category",
+        "named_not_modelled",
+    ]);
+    let synced = glia(&["vocab", "sync", s(&repo)]);
+    let after = glia(&[
+        "gaps",
+        s(&repo),
+        "--json",
+        "--category",
+        "named_not_modelled",
+    ]);
+    let table = glia(&["gaps", s(&repo)]);
+    std::fs::remove_dir_all(repo.parent().expect("root")).ok();
+
+    assert_eq!(before.status.code(), Some(0), "{}", text(&before.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&before.stdout).expect("json");
+    assert_eq!(v["counts"]["named_not_modelled"], 0);
+    assert!(
+        text(&before.stderr).lines().any(|l| l.starts_with(
+            "[gaps] named_not_modelled skipped: no vocab snapshot (run glia vocab sync) repo="
+        )),
+        "{}",
+        text(&before.stderr)
+    );
+
+    assert_eq!(synced.status.code(), Some(0), "{}", text(&synced.stderr));
+    assert_eq!(after.status.code(), Some(0), "{}", text(&after.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&after.stdout).expect("json");
+    assert_eq!(v["counts"]["named_not_modelled"], 1, "{v}");
+    let rows = v["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{v}");
+    assert_eq!(rows[0]["qname"], "retryBudget");
+    assert_eq!(rows[0]["kind"], "identifier");
+    assert_eq!(rows[0]["file"], "README.md");
+    assert_eq!(rows[0]["line"], 3);
+    assert_eq!(rows[0]["tier"], "fact");
+    let after_err = text(&after.stderr);
+    let marker: Vec<&str> = after_err
+        .lines()
+        .filter(|l| l.starts_with("[gaps] named_not_modelled repo="))
+        .map(|l| l.split_once(" cited=").map_or(l, |(_, r)| r))
+        .collect();
+    // `retryBudget` and `parseTimeout` are cited (`the` is prose).
+    assert_eq!(marker, ["2 rows=1"], "{after_err}");
+
+    let out = text(&table.stdout);
+    assert!(out.contains("## named_not_modelled — 1"), "{out}");
+    assert!(out.contains("named_not_modelled=1"), "{out}");
+}

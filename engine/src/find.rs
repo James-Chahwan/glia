@@ -71,9 +71,18 @@
 //! work signals and IDR, rank_eval `r3_bank_find`), ranked through the same
 //! `calibrate::fusions::find_keys` the replay measured; the answer carries
 //! its `selection`. `FindFilesOptions::select = false` keeps `LX[IDR,T1s]`.
+//!
+//! # Named but not modelled (FB.13c)
+//!
+//! With [`FindOptions::vocab_roots`] set (the CLI and pyo3 always pass the
+//! build's repo roots), a `no_match` absence reads each root's vocabulary
+//! snapshot (`glia vocab sync`): every identifier of the query that a tracked
+//! file holds and no node is named is one `Absence::named_in` row, and the
+//! note gains `; `X` occurs in <k> tracked file(s) (..) but no node is named
+//! X`. The tier stays FACT. Without a snapshot the absence is unchanged.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
@@ -145,6 +154,13 @@ pub struct FindOptions {
     /// `Collapse::off()` keeps one row per member. Set the build's repo
     /// labels (`Collapse::with_labels`) so `also_in` names repos by label.
     pub collapse: Collapse,
+    /// FB.13c: repo id -> repo root, whose vocabulary snapshots
+    /// (`<root>/.glia/vocab-snapshot/`, `glia vocab sync`) a `no_match`
+    /// absence reads: each identifier of the query a tracked file holds but
+    /// no node is named becomes an `Absence::named_in` row and an `occurs in`
+    /// clause of the note. `None` (the default), or no snapshot under any
+    /// root, leaves the absence as it was.
+    pub vocab_roots: Option<BTreeMap<u64, PathBuf>>,
 }
 
 impl Default for FindOptions {
@@ -154,6 +170,7 @@ impl Default for FindOptions {
             kinds: None,
             scope: None,
             collapse: Collapse::default(),
+            vocab_roots: None,
         }
     }
 }
@@ -220,7 +237,11 @@ pub fn find_nodes_with_live(
         } else {
             format!("{what} matches `{q}` by name or qname in any find tier")
         };
-        absence::empty(merged, "find", query, "no_match", note, &[], None)
+        let mut a = absence::empty(merged, "find", query, "no_match", note, &[], None);
+        if let Some(roots) = &opts.vocab_roots {
+            absence::fill_named_in(merged, &mut a, q, roots);
+        }
+        a
     })
 }
 

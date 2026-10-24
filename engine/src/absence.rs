@@ -26,11 +26,22 @@
 //! fired_on marker, one line per absence built:
 //! `[absence] primitive=<p> reason=<r> mechanisms=<a,b|-> caveats=<n> suggestions=<n>`
 //! — grep `^\[absence\] primitive=`.
+//!
+//! FB.13c, named but not modelled: a `find` `no_match` absence asked with the
+//! repo roots' vocabulary snapshots (`glia vocab sync`,
+//! `FindOptions::vocab_roots`) carries [`Absence::named_in`], one [`NamedIn`]
+//! per identifier of the query that a tracked file holds but no node is
+//! named, and its note gains `; `X` occurs in <k> tracked file(s) (a.ts,
+//! b.ts, +n) but no node is named X`. Still a FACT: read off the snapshot's
+//! index, never a guess. Without a snapshot `named_in` is empty, left out of
+//! the JSON, and the note is unchanged.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 
 use glia_activation::profile::Tier;
 use glia_code_domain::node_kind;
+use glia_code_domain::snapshots::{VOCAB_FILES_CAP, VocabSnapshot, read_vocab, vocab_tokens};
 use glia_core::NodeKindId;
 use glia_graph::MergedGraph;
 
@@ -68,7 +79,37 @@ pub struct Absence {
     /// Files that failed to parse. Filled by the surface from the build's
     /// `parse_errors` (the `MergedGraph` does not carry them); 0 otherwise.
     pub unparsed_files: usize,
+    /// FB.13c: the query's identifiers a tracked file holds but no node is
+    /// named, in query order, from the repo roots' vocabulary snapshots
+    /// (`find` only, with `FindOptions::vocab_roots`). Empty, and left out of
+    /// the JSON, without a snapshot.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub named_in: Vec<NamedIn>,
 }
+
+/// Where one identifier of a query occurs although no node is named it
+/// (FB.13c), read off the vocabulary snapshot (`glia vocab sync`): a FACT
+/// about the tracked files of the synced commit.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NamedIn {
+    /// The identifier, as the query spells it.
+    pub token: String,
+    /// Its occurrences across every tracked file of every snapshot.
+    pub occurrences: u64,
+    /// The first [`NAMED_IN_FILES`] repo-relative paths holding it, in path
+    /// order (empty when `common` and no snapshot listed its files).
+    pub files: Vec<String>,
+    /// Distinct listed files holding it. A snapshot that marks the token
+    /// `common` (past `VOCAB_FILES_CAP` files) lists none, so its files are
+    /// not counted here: read `common`.
+    pub file_count: usize,
+    /// Some snapshot holds it in more than `VOCAB_FILES_CAP` files.
+    pub common: bool,
+}
+
+/// How many paths one [`NamedIn`] shows.
+pub const NAMED_IN_FILES: usize = 5;
 
 /// A list answer: the rows, or — exactly when there are none — why not.
 #[derive(serde::Serialize, Debug, Clone)]
@@ -200,7 +241,103 @@ fn build(
         suggestions: Vec::new(),
         nodes_searched: distinct_nodes(merged),
         unparsed_files: 0,
+        named_in: Vec::new(),
     }
+}
+
+/// The identifiers of `query`, in query order, each once: every run of
+/// `[A-Za-z0-9_]` read through the vocabulary snapshot's own tokeniser
+/// (`vocab_tokens`: `[A-Za-z_][A-Za-z0-9_]*`, 3+ bytes), so a query token is
+/// exactly what the snapshot could hold.
+fn query_tokens(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for piece in query.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        for t in vocab_tokens(piece.as_bytes()).into_keys() {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// FB.13c: fill `a.named_in` from the vocabulary snapshots under `roots`
+/// (repo id -> root, read in id order), one [`NamedIn`] per identifier of
+/// `query` that some snapshot holds and no node of `merged` is named (any
+/// kind: a `--kind` filter does not make a name unmodelled), and append the
+/// `occurs in` clause per identifier to the note. No snapshot (or no
+/// identifier held) leaves `a` untouched.
+pub(crate) fn fill_named_in(
+    merged: &MergedGraph,
+    a: &mut Absence,
+    query: &str,
+    roots: &BTreeMap<u64, PathBuf>,
+) {
+    let tokens = query_tokens(query);
+    if tokens.is_empty() {
+        return;
+    }
+    let snapshots: Vec<VocabSnapshot> = roots.values().filter_map(|r| read_vocab(r)).collect();
+    if snapshots.is_empty() {
+        return;
+    }
+    let names: HashSet<&str> = merged
+        .graphs
+        .iter()
+        .flat_map(|g| g.nav.name_by_id.values().map(String::as_str))
+        .collect();
+    for token in tokens {
+        if names.contains(token.as_str()) {
+            continue;
+        }
+        let mut occurrences = 0u64;
+        let mut common = false;
+        let mut files: BTreeSet<String> = BTreeSet::new();
+        let mut held = false;
+        for snap in &snapshots {
+            let Some(hit) = snap.files_of(&token) else {
+                continue;
+            };
+            held = true;
+            occurrences += hit.n;
+            common |= hit.common;
+            files.extend(hit.files);
+        }
+        if !held {
+            continue;
+        }
+        let file_count = files.len();
+        let shown: Vec<String> = files.into_iter().take(NAMED_IN_FILES).collect();
+        a.note
+            .push_str(&occurs_clause(&token, &shown, file_count, common));
+        a.named_in.push(NamedIn {
+            token,
+            occurrences,
+            files: shown,
+            file_count,
+            common,
+        });
+    }
+}
+
+/// `; `X` occurs in <k> tracked file(s) (a.ts, b.ts, +n) but no node is named X`.
+fn occurs_clause(token: &str, shown: &[String], file_count: usize, common: bool) -> String {
+    let more = file_count.saturating_sub(shown.len());
+    let mut list = shown.join(", ");
+    if more > 0 {
+        list.push_str(&format!(", +{more}"));
+    }
+    let count = if common {
+        format!("more than {VOCAB_FILES_CAP} tracked files")
+    } else {
+        format!("{file_count} tracked file(s)")
+    };
+    let list = if list.is_empty() {
+        String::new()
+    } else {
+        format!(" ({list})")
+    };
+    format!("; `{token}` occurs in {count}{list} but no node is named {token}")
 }
 
 /// The LD.8a fired_on marker, once per absence built.
@@ -331,6 +468,29 @@ mod tests {
         assert_eq!(
             (a.caveats[0].language, a.caveats[0].edge_category),
             ("*", "CALLS")
+        );
+    }
+
+    #[test]
+    fn query_tokens_keep_query_order_once() {
+        assert_eq!(
+            query_tokens("retryBudget, ab 9xyz retryBudget a.b_c"),
+            ["retryBudget", "xyz", "b_c"]
+        );
+    }
+
+    #[test]
+    fn occurs_clause_counts_the_unshown_files() {
+        let shown: Vec<String> = ["a.ts", "b.ts"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            occurs_clause("X1x", &shown, 4, false),
+            "; `X1x` occurs in 4 tracked file(s) (a.ts, b.ts, +2) but no node is named X1x"
+        );
+        assert_eq!(
+            occurs_clause("X1x", &[], 0, true),
+            format!(
+                "; `X1x` occurs in more than {VOCAB_FILES_CAP} tracked files but no node is named X1x"
+            )
         );
     }
 

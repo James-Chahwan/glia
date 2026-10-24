@@ -16,9 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use glia_activation::profile::Tier;
 use glia_engine::gaps::{
     AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, GapRow, GapsOptions,
-    GapsReport, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE, SUSPECTED_EDGE,
-    TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK,
-    gaps_report, graph_counts, overlay_delta,
+    GapsReport, KEEP, NAMED_NOT_MODELLED, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE,
+    ROTTED_RULE, SUSPECTED_EDGE, TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE,
+    UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report, graph_counts, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
@@ -110,6 +110,7 @@ fn reports_the_probe_r1_shapes() {
             (REDUNDANT_RULE, 0),
             (ROTTED_RULE, 0),
             (ORPHANED_CELL, 0),
+            (NAMED_NOT_MODELLED, 0),
         ],
         "{rep:#?}"
     );
@@ -707,7 +708,8 @@ fn options_cut_rows_not_counts() {
             ORPHANED_RULE,
             REDUNDANT_RULE,
             ROTTED_RULE,
-            ORPHANED_CELL
+            ORPHANED_CELL,
+            NAMED_NOT_MODELLED
         ]
     );
     assert!(!bare.counts.contains_key(ORPHANED_RULE));

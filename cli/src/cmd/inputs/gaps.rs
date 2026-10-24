@@ -12,6 +12,12 @@
 //! paste-ready `[[edge]]` stanza, one fenced toml block per row (CD.3c):
 //! the text table shows `detail` only, and the stanza is the point of the
 //! row. Printed only — nothing here writes an overlay.
+//!
+//! FB.13c: `named_not_modelled` (a root category) lists identifiers the
+//! repo's markdown docs cite in inline code that a tracked code file holds but
+//! no node is named; it reads `glia vocab sync`'s snapshot, and without one
+//! it has no rows (stderr `[gaps] named_not_modelled skipped: no vocab
+//! snapshot (run glia vocab sync) repo=<l>`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

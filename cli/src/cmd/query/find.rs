@@ -21,6 +21,11 @@
 //! calibrate`), else `LX[IDR,T1s]`; the table ends with `ranked by <pick>
 //! (calibrated on <t> commits | fallback: <reason>)` and `--json` carries the
 //! `selection` (stderr: `[select] surface=find_files set=SELf2t ..`).
+//!
+//! FB.13c: the node answer always passes the build's repo roots as
+//! `FindOptions::vocab_roots`, so with a vocabulary snapshot (`glia vocab
+//! sync`) a no-match absence names where each identifier of the query occurs
+//! (`named_in` in `--json`, an `occurs in` clause in the note).
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
@@ -116,6 +121,13 @@ pub(crate) fn run(args: Args) -> i32 {
     } else {
         Collapse::with_labels(&result.repo_labels)
     };
+    opts.vocab_roots = Some(
+        result
+            .repo_roots
+            .iter()
+            .map(|(id, p)| (*id, std::path::PathBuf::from(p)))
+            .collect(),
+    );
     let mut answer = find_nodes(&result.merged, &args.query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();

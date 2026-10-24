@@ -50,7 +50,9 @@ fn kinds_by_name(names: &[String]) -> Result<Vec<NodeKindId>, String> {
 /// `kinds` list filters nothing, as `glia find` with no `--kind`. `live` is
 /// the graph's cached `entrypoint_reachable` set (`PyGraph::live`);
 /// `collapse` is `Collapse::with_labels(&PyGraph::repo_labels)` or
-/// `Collapse::off()` (DD.9).
+/// `Collapse::off()` (DD.9). `repo_roots` (`PyGraph::repo_roots`) are the
+/// roots whose vocabulary snapshots a no-match absence reads (FB.13c:
+/// `named_in`).
 #[allow(clippy::too_many_arguments)]
 fn find_answer(
     merged: &MergedGraph,
@@ -61,6 +63,7 @@ fn find_answer(
     scope: Option<String>,
     collapse: Collapse,
     unparsed_files: usize,
+    repo_roots: &BTreeMap<u64, String>,
 ) -> Result<Answer<FoundNode>, String> {
     let kinds = kinds_by_name(kinds)?;
     let mut opts = FindOptions::default();
@@ -68,6 +71,12 @@ fn find_answer(
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
     opts.scope = scope;
     opts.collapse = collapse;
+    opts.vocab_roots = Some(
+        repo_roots
+            .iter()
+            .map(|(id, p)| (*id, std::path::PathBuf::from(p)))
+            .collect(),
+    );
     let mut answer = find_nodes_with_live(merged, live, query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = unparsed_files;
@@ -142,7 +151,10 @@ impl PyGraph {
     /// `exact_name`, `exact_ci`, `qname_suffix`, `name_prefix`, `name_word`,
     /// `name_substring`, `qname_substring`, `subsequence`); `absence` is
     /// `None` when there are results, else a `no_match` dict with
-    /// `unparsed_files` set to `len(parse_errors)`.
+    /// `unparsed_files` set to `len(parse_errors)`; with a repo root's
+    /// vocabulary snapshot (`glia vocab sync`, FB.13c) it also carries
+    /// `named_in`, `[{token, occurrences, files, file_count, common}]`, one
+    /// per identifier of `query` a tracked file holds but no node is named.
     ///
     /// Rows rank by tier, then — inside `exact_qname` / `exact_name` — by the
     /// same key the seeded answers resolve a name with (a declaration before
@@ -188,6 +200,7 @@ impl PyGraph {
             scope,
             collapse,
             self.parse_errors.len(),
+            &self.repo_roots,
         )
         .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
@@ -274,6 +287,7 @@ mod tests {
             None,
             Collapse::default(),
             0,
+            &BTreeMap::new(),
         )
         .expect("answer");
         let engine = find_nodes(&merged, "helper", &FindOptions::default());
@@ -298,6 +312,7 @@ mod tests {
             None,
             Collapse::default(),
             0,
+            &BTreeMap::new(),
         )
         .expect("answer");
         assert!(!funcs.results.is_empty());
@@ -316,6 +331,7 @@ mod tests {
             None,
             Collapse::default(),
             0,
+            &BTreeMap::new(),
         );
         let err = bad.expect_err("an unknown kind name is an error");
         assert!(
@@ -332,6 +348,7 @@ mod tests {
             Some("svc".into()),
             Collapse::default(),
             0,
+            &BTreeMap::new(),
         )
         .expect("answer");
         assert!(!scoped.results.is_empty());
@@ -353,6 +370,7 @@ mod tests {
             None,
             Collapse::default(),
             7,
+            &BTreeMap::new(),
         )
         .expect("answer");
         assert!(none.results.is_empty());
@@ -388,7 +406,18 @@ mod tests {
         let q = "package:npm:react";
 
         let on = Collapse::with_labels(&built.repo_labels);
-        let one = find_answer(&built.merged, &live, q, 20, &[], None, on, 0).expect("answer");
+        let one = find_answer(
+            &built.merged,
+            &live,
+            q,
+            20,
+            &[],
+            None,
+            on,
+            0,
+            &BTreeMap::new(),
+        )
+        .expect("answer");
         assert_eq!(one.results.len(), 1, "{:?}", one.results);
         let id = one.results[0].identity.as_ref().expect("identity");
         assert_eq!(
@@ -405,8 +434,18 @@ mod tests {
         let text = serde_json::to_string(&one).expect("json");
         assert!(text.contains("\"identity\":{\"tier\":\"fact\""), "{text}");
 
-        let two = find_answer(&built.merged, &live, q, 20, &[], None, Collapse::off(), 0)
-            .expect("answer");
+        let two = find_answer(
+            &built.merged,
+            &live,
+            q,
+            20,
+            &[],
+            None,
+            Collapse::off(),
+            0,
+            &BTreeMap::new(),
+        )
+        .expect("answer");
         assert_eq!(two.results.len(), 2, "{:?}", two.results);
         assert!(
             !serde_json::to_string(&two)
