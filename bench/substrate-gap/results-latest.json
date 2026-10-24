@@ -8671,6 +8671,7 @@
     "fixtures/self-scan-literal-needles",
     "fixtures/self-scan-literal-routes",
     "fixtures/self-scan-literal-schedules",
+    "fixtures/self-scan-literal-sql",
     "fixtures/solidity-abi-procedures",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
@@ -8885,7 +8886,7 @@
     "unknown": 136
   },
   "vocabulary": {
-    "digest": "916e9fb659ff",
+    "digest": "f31e7dc48404",
     "languages": 17,
     "mechanisms": 30,
     "na_digest": "6e1c8eedbe15",

@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.3` · vocabulary digest `916e9fb659ff` · schema 2
+Engine `0.5.3` · vocabulary digest `f31e7dc48404` · schema 2
 
 Columns, left to right (the review's own abbreviations):
 
@@ -146,7 +146,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 346 full, 0 partial, 0 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 261
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 262
 
 ## Cells routed via an alternative mechanism
 
