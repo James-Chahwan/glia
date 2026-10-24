@@ -1,6 +1,6 @@
 {
-  "measured_at_head": "47bd5c69",
-  "after_wave": 17,
+  "measured_at_head": "2a3667ec",
+  "after_wave": 0,
   "cargo_test_workspace": {
     "passed": 6556,
     "failed": 0
