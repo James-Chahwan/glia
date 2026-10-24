@@ -497,7 +497,8 @@ source files
      invariants and reflexion model; identity collapse (engine::identity) on the answers
    → [query time] ranking (0.5.3, engine::rank / intent / calibrate over one holder's RankCache):
      the answer's seed files -> FileIndex -> co-change (the history snapshot) + PPR / BFS
-     (a cached PprIndex) -> the calibrated pick, else H10 -> row order and `files`; review's
+     (a cached PprIndex) -> the calibrated pick, else H10 (pack: its own ranking, never the
+     record, ruling EC-9b) -> row order and `files`; review's
      title and find --files' query -> IDR (ids routed at a revision) + BM25 over the stored
      messages -> LX[IDR, ..] or the calibrated pick
 
@@ -1196,7 +1197,9 @@ pick, source calibrated | fallback | explicit, reason, test_commits}. The set is
 H10[PT*], H10[B0]) when co-change ranks first, else SELs0 (P1, PT*, B0); the shape is the seeds'
 distinct files (k1 one, k2 two, k3 three, half more); the repo's calibration record picks within
 the set (one repo only: a merge reads `multi_repo`), and an explicit `--ranking` / `ranking=` is
-`source=explicit`. Text answers: `review` with a title (`--title`, else the newest non-merge
+`source=explicit`. pack never reads the record (ruling EC-9b, EC.9b: the impact replay's pick
+lowered pack's recall@10 on every gate snapshot): it ranks by `PackArgs.ranking` alone, its
+selection `fallback` with reason `pack_uncalibrated` for the default H10, else `explicit`. Text answers: `review` with a title (`--title`, else the newest non-merge
 subject of `<base>..HEAD`, redacted) gains `intent` {title, title_source, fusion, ids, files,
 text} and `selection_intent` (SELt2, the fallback LX[IDR,P1]); IDR is routed at the BASE tree,
 BM25 excludes the PR's own commits, and impact rows in id-routed files move first (text never
@@ -1389,9 +1392,10 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   config like `[walk] skip`: applied under `--no-overlay` and never a candidate section, so
   neither `overlay try` nor `--overlay-delta` measures it.
 - hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
-- 0.5.3 (ranking): `blast-radius`, `diff-impact`, `review` and `pack` take `--ranking
+- 0.5.3 (ranking): `blast-radius`, `diff-impact` and `review` take `--ranking
   ppr|ppr-wide|bfs` (no default: absent = the calibrated pick, else ppr) and `--no-cochange`
-  (common::CalibratedRankingArgs), `blast-radius` / `diff-impact` `--top-files <N>` (10) with a
+  (common::CalibratedRankingArgs); `pack` takes the same two flags as its own `PackRankingArgs`
+  (`--ranking` default ppr; pack never reads the calibration record, ruling EC-9b, EC.9b); `blast-radius` / `diff-impact` `--top-files <N>` (10) with a
   `## files` table after the rows; each table gains one `ranking: <pick> (<source>[: <reason>],
   shape <k>[, <t> commits])` line, and each command holds one RankCache (holder `cli`) built from
   the build's repo roots and labels, `--with` repos included (EA.8, EC.8, EC.9). `review --title
@@ -1640,7 +1644,7 @@ questions over one graph computes `entrypoint_reachable` once.
   `dev-notes/ranking-scoreboard.md` and the `dev-notes/ranking-eval-*.md` round reports, all from
   `engine/examples/rank_eval.rs`; packets in `dev-notes/leap-053-packets.json` (its `rulings`:
   James's 23), overrides in `dev-notes/leap-053-corrections.json`, schedule and LANDED waves in
-  `dev-notes/wave-runner/schedule_053.py` (runner `--release 053`, ids E*, waves W0-W16). Groups:
+  `dev-notes/wave-runner/schedule_053.py` (runner `--release 053`, ids E*, waves W0-W17). Groups:
   E0 the module slots (`algo::fuse`; the engine's `rank`, `intent`, `calibrate`); EA structural
   ranking (`PprIndex` and its `RankCache`, the FileIndex candidate space, co-change first from the
   history snapshot, PPR d0.85 + sum pooling and BFS as candidates, in blast-radius / diff-impact /
@@ -1648,9 +1652,12 @@ questions over one graph computes `entrypoint_reachable` once.
   BM25, the `[ids]` vocabulary, id definitions / namespaces / paths, IDR, `review --title`, `find
   --files`); EC per-repo calibrated selection (the `.glia/calibration-snapshot/` record, the
   leak-free online replay, `glia history calibrate`, SELh0 / SELs0 / SELt2 / SELf2t, `selection` on
-  every ranked answer, `--ranking` absent = calibrated); EG the rank gate (rank_eval's ANS rankers
+  every ranked answer, `--ranking` absent = calibrated, except pack: ruling EC-9b, EC.9b in W17,
+  pack ignores the record); EG the rank gate (rank_eval's ANS rankers
   over the shipped answers, `--gate-check` with Holm, `bench/rank-gate/` and `scripts/rank-gate.sh`
-  on six pinned public snapshots, against 0.5.2 and current; the close-out check reads `[rank-gate]
+  on six pinned public snapshots, against 0.5.2 and current, plus EC.9b's calibrated-vs-default
+  contrasts, gate.json `contrasts`, `[rank-gate] contrasts: ok - <n> pairs, 0 below default`;
+  the close-out check reads `[rank-gate]
   check: ok - 1176 rows, 47 gains, 0 drops on 6 snapshots` and `coverage: ok - 9 items measured, 2
   exempt`), the DE.5 side-file removal (EG.4) and the wheels workflow on Node 24 actions pinned by
   commit with pinned runner images (EG.5; macos-14 is deprecated upstream, a later move to macos-15

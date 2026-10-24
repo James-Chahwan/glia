@@ -95,7 +95,8 @@
 //! `--gate-check <gate.json> --gate-base <base.json> --gate-new <run.json> --out .. --md ..`
 //! judges every gated (shape, ranker, metric) row new - base with the commit-cluster bootstrap
 //! of `paired` and Holm over the changed rows (exit 1 on a drop, 2 on drift or a missing
-//! ranker); see `gate_check_main`.
+//! ranker), and (EC.9b) each gate.json `contrasts` pair, calibrated - default r10 over the new run,
+//! Holm over the snapshot's pairs (a pair wholly below 0 is a drop); see `gate_check_main`.
 //!
 //! Engine intent parity (0.5.3, EB.9): `--engine on` (with `--round1 on --round2 on`) adds the
 //! ENG-* rows, held apart and appended after every other row (selections and gates included),
@@ -1350,8 +1351,8 @@ fn rows_to_keys(g: &Graph, path_ix: &HashMap<String, u32>, files: impl Iterator<
 /// `tc`'s leak-free prefix co-change (`ans_cache`, EA.9), so the default Ranking (H10) reads C0.
 ///
 /// The second list is EG.6's, held apart by the callers (`Out::late`): `ANS:impact@sel` and
-/// `ANS:pack@sel`, the same two answers with `select = false` and the Ranking forced to
-/// `ctx.sel[tc][shape]` (the calibrated pick, `ans_picks`; `shape` 0 = k1, 1 = k2, 2 = k3, 3 =
+/// `ANS:pack@sel`, the same two answers with the Ranking forced to `ctx.sel[tc][shape]` (diff
+/// impact with `select = false`; pack never reads a record, ruling EC-9b) (the calibrated pick, `ans_picks`; `shape` 0 = k1, 1 = k2, 2 = k3, 3 =
 /// half), and `ANS:impact.files`, the default diff impact's file roll-up (`BlastRadius::files`
 /// with `top_files = usize::MAX`, rank 1 first) instead of its rows. `top_files` cuts only the
 /// roll-up, never the rows, so ANS:impact reads the same rows as before.
@@ -1385,7 +1386,6 @@ fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKey
         let mut ps = PackArgs::default();
         ps.rank_cache = cache;
         ps.ranking = pick;
-        ps.select = false;
         let mut p = glia_engine::pack::pack_ids(ctx.merged, &seed_ids, &ps);
         p.nodes.sort_by_key(|n| n.rank);
         let pack_sel = rows_to_keys(g, &ctx.path_ix, p.nodes.into_iter().map(|n| n.file));
@@ -15798,10 +15798,13 @@ const GATE_METRICS: [&str; 2] = ["r10", "mrr"];
 /// Holm over the changed rows of one check, one-sided, family alpha 0.05).
 const GATE_ALPHA: f64 = 0.05;
 
-/// A parsed gate.json: its metrics and, in gate order, each shape's gated rankers.
+/// A parsed gate.json: its metrics, in gate order each shape's gated rankers, and (EC.9b) the
+/// calibrated-vs-default contrasts: `contrasts` gated, `contrasts_info` reported only.
 struct Gate {
     metrics: Vec<String>,
     shapes: Vec<(String, Vec<String>)>,
+    contrasts: Vec<(String, String)>,
+    contrasts_info: Vec<(String, String)>,
 }
 
 fn gate_load(path: &str) -> Result<serde_json::Value, String> {
@@ -15809,8 +15812,10 @@ fn gate_load(path: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("[rank-gate] parse {path}: {e}"))
 }
 
-/// Reads gate.json: `{"gate":1, "metrics":[..], "rankers":{<shape>:[..]}, "items":{..}}`. Every
-/// ranker an `items` array names must be gated in some shape (an `{"exempt": ..}` item names none).
+/// Reads gate.json: `{"gate":1, "metrics":[..], "rankers":{<shape>:[..]}, "items":{..},
+/// "contrasts":[[a, b], ..], "contrasts_info":[[a, b], ..]}`. Every ranker an `items` array or a
+/// contrast pair names must be gated in some shape (an `{"exempt": ..}` item names none); the two
+/// contrast lists may be absent (none).
 fn gate_read(path: &str) -> Result<Gate, String> {
     let g = gate_load(path)?;
     if g["gate"].as_u64() != Some(1) {
@@ -15853,10 +15858,117 @@ fn gate_read(path: &str) -> Result<Gate, String> {
             }
         }
     }
+    let mut pairs = |key: &str| -> Result<Vec<(String, String)>, String> {
+        let mut out = Vec::new();
+        let Some(v) = g.get(key) else { return Ok(out) };
+        for pair in v.as_array().ok_or_else(|| format!("[rank-gate] gate {path}: {key} is not a list"))? {
+            let ab: Vec<&str> = pair.as_array().map(|x| x.iter().filter_map(serde_json::Value::as_str).collect()).unwrap_or_default();
+            let [a, b] = ab.as_slice() else {
+                return Err(format!("[rank-gate] gate {path}: {key} holds a non-pair {pair}"));
+            };
+            for r in [a, b] {
+                if !gated.contains(*r) {
+                    ungated.push(format!("[rank-gate] {key} name ungated ranker={r}"));
+                }
+            }
+            out.push((a.to_string(), b.to_string()));
+        }
+        Ok(out)
+    };
+    let contrasts = pairs("contrasts")?;
+    let contrasts_info = pairs("contrasts_info")?;
     if !ungated.is_empty() {
         return Err(ungated.join("\n"));
     }
-    Ok(Gate { metrics, shapes })
+    Ok(Gate { metrics, shapes, contrasts, contrasts_info })
+}
+
+/// One calibrated-vs-default contrast (EC.9b) of one snapshot: per shape both rankers are measured
+/// on, the paired commit-cluster bootstrap of recall@10 `a - b` over the run's own queries.
+struct ContrastRow {
+    shape: String,
+    a: String,
+    b: String,
+    /// Gated (`contrasts`) or informational (`contrasts_info`).
+    gated: bool,
+    p: Paired,
+    /// Sorted bootstrap means of `a - b`.
+    means: Vec<f64>,
+    /// Two-sided bootstrap p: twice the share of means >= 0, at most 1.
+    p_below: f64,
+    /// The Holm level this row is judged at (its CI's two-sided alpha); the gate alpha for an
+    /// informational row.
+    level: f64,
+    lo: f64,
+    hi: f64,
+    below: bool,
+}
+
+/// The `level` two-sided percentile CI of sorted bootstrap means (`paired_boot`'s index rule).
+fn boot_ci(means: &[f64], level: f64) -> (f64, f64) {
+    let n = means.len();
+    if n == 0 {
+        return (f64::NAN, f64::NAN);
+    }
+    let lo = means[(((n as f64) * level / 2.0) as usize).min(n - 1)];
+    let hi = means[(((n as f64) * (1.0 - level / 2.0)) as usize).min(n - 1)];
+    (lo, hi)
+}
+
+/// EC.9b (ruling EC-9b): every `gate.contrasts` pair on every shape of `run` that measures both,
+/// plus the `contrasts_info` rows. Holm's step-down over the gated rows of this snapshot (two-sided,
+/// family alpha [`GATE_ALPHA`]): a row is `below` when Holm rejects it and its mean is below 0, so
+/// its CI at its Holm level lies wholly below 0. Informational rows are never in the family.
+fn gate_contrasts(gate: &Gate, run: &serde_json::Value, boot: usize) -> Vec<ContrastRow> {
+    let mut rows = Vec::new();
+    for (list, gated) in [(&gate.contrasts, true), (&gate.contrasts_info, false)] {
+        for (a, b) in list {
+            for shape in GATE_SHAPES {
+                let Some(n) = gate_run_shape(run, shape) else { continue };
+                let (Some(xa), Some(xb)) = (n["r10"].get(a.as_str()), n["r10"].get(b.as_str())) else { continue };
+                let (xa, xb) = (json_col(xa), json_col(xb));
+                let commit_of: Vec<usize> = n["commit_of"].as_array().map(|v| v.iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect()).unwrap_or_default();
+                let nq = commit_of.len();
+                if nq == 0 || xa.len() != nq || xb.len() != nq {
+                    continue;
+                }
+                let nc = commit_of.iter().max().map_or(0, |m| m + 1);
+                let lf = ln_fact_table(nq + 1);
+                let (p, means) = paired_boot(&xa, &xb, &commit_of, nc, boot, &lf);
+                let at_or_above = means.iter().filter(|&&x| x >= 0.0).count() as f64 / means.len() as f64;
+                rows.push(ContrastRow {
+                    shape: shape.to_string(),
+                    a: a.clone(),
+                    b: b.clone(),
+                    gated,
+                    lo: p.lo,
+                    hi: p.hi,
+                    p,
+                    means,
+                    p_below: (2.0 * at_or_above).min(1.0),
+                    level: GATE_ALPHA,
+                    below: false,
+                });
+            }
+        }
+    }
+    // Holm's step-down over the gated rows: the i-th smallest p (ties by row index) is judged at
+    // alpha / (m - i); after the first row not rejected, none is.
+    let mut fam: Vec<(usize, f64)> = (0..rows.len()).filter(|&i| rows[i].gated).map(|i| (i, rows[i].p_below)).collect();
+    fam.sort_by(|x, y| x.1.total_cmp(&y.1).then(x.0.cmp(&y.0)));
+    let m = fam.len();
+    let mut open = true;
+    for (k, (i, p)) in fam.into_iter().enumerate() {
+        let level = GATE_ALPHA / (m - k) as f64;
+        let row = &mut rows[i];
+        row.level = level;
+        open = open && p <= level;
+        row.below = open && row.p.mean < 0.0;
+    }
+    for row in &mut rows {
+        (row.lo, row.hi) = boot_ci(&row.means, row.level);
+    }
+    rows
 }
 
 /// A run's (or a baseline's) per-query block for one gate shape.
@@ -15983,7 +16095,12 @@ fn holm(mut ps: Vec<(usize, f64)>, alpha: f64) -> BTreeSet<usize> {
 /// 0.05 decides `drop` / `gain`; every other row is `same` (an unchanged row diffs exactly 0).
 /// A shape whose ids or commit clusters moved is drift (exit 2, only a declared re-baseline fixes
 /// it); a gated ranker missing from the run exits 2; one in the run but not the baseline is
-/// `new`, unjudged. Exit 1 on any drop when nothing else failed, else 0.
+/// `new`, unjudged. EC.9b (ruling EC-9b): `gate_contrasts` then judges each `contrasts` pair
+/// (calibrated - default, r10, over the run alone) with Holm over this snapshot's pairs; a pair
+/// whose Holm-level CI lies wholly below 0 is a drop (`[rank-gate] contrast drop ..`), and one line
+/// `[rank-gate] contrasts: ok|FAILED - <n> pairs, <d> below default` sums them; `contrasts_info`
+/// rows (pack@sel - pack) are reported, never judged. Exit 1 on any drop when nothing else failed,
+/// else 0.
 fn gate_check_main(args: &Args) -> i32 {
     let loaded = gate_read(&args.gate_check).and_then(|g| {
         if args.gate_base.is_empty() || args.gate_new.is_empty() {
@@ -16104,11 +16221,49 @@ fn gate_check_main(args: &Args) -> i32 {
                 "p_drop": row.p_drop, "p_gain": row.p_gain, "wins": row.p.wins, "losses": row.p.losses, "verdict": row.verdict}),
         );
     }
-    let n_drop = rows.iter().filter(|r| r.verdict == "drop").count();
+    // EC.9b: the calibrated-vs-default contrasts, over the run alone. A gated contrast below its
+    // default is a drop row (`<shape>` / `<a> - <b>` / `r10`), so the script's drop list names it.
+    let contrasts = gate_contrasts(&gate, &run, args.boot);
+    let mut json_contrasts = Vec::new();
+    if !contrasts.is_empty() {
+        md.push_str("\n### contrasts (calibrated - default, r10)\n\n| shape | contrast | diff [Holm CI] | level | verdict |\n|---|---|---|---|---|\n");
+    }
+    for c in &contrasts {
+        let verdict = match (c.gated, c.below) {
+            (false, _) => "info",
+            (true, true) => "below",
+            (true, false) => "ok",
+        };
+        let pair = format!("{} - {}", c.a, c.b);
+        if c.below {
+            eprintln!("[rank-gate] contrast drop label={label} shape={} {pair} r10 {:+.4} [{:+.4}, {:+.4}]", c.shape, c.p.mean, c.lo, c.hi);
+        }
+        eprintln!(
+            "[rank-gate] contrast label={label} shape={} {pair} r10 {:+.4} [{:+.4}, {:+.4}] level={:.4} p={:.4} verdict={verdict}",
+            c.shape, c.p.mean, c.lo, c.hi, c.level, c.p_below
+        );
+        md.push_str(&format!("| {} | {pair} | {:+.4} [{:+.4}, {:+.4}] | {:.4} | {verdict} |\n", c.shape, c.p.mean, c.lo, c.hi, c.level));
+        json_contrasts.push(json!({"shape": c.shape, "a": c.a, "b": c.b, "gated": c.gated, "diff": c.p.mean, "lo": c.lo, "hi": c.hi,
+            "level": c.level, "p": c.p_below, "wins": c.p.wins, "losses": c.p.losses, "verdict": verdict}));
+        if c.below {
+            json_rows.entry(c.shape.clone()).or_default().entry(pair).or_default().insert(
+                "r10".to_string(),
+                json!({"diff": c.p.mean, "lo": c.lo, "hi": c.hi, "verdict": "drop", "contrast": true}),
+            );
+        }
+    }
+    let n_pairs = contrasts.iter().filter(|c| c.gated).count();
+    let n_below = contrasts.iter().filter(|c| c.below).count();
+    eprintln!(
+        "[rank-gate] contrasts: {} - {n_pairs} pairs, {n_below} below default",
+        if n_below == 0 { "ok" } else { "FAILED" }
+    );
+    let n_drop = rows.iter().filter(|r| r.verdict == "drop").count() + n_below;
     let n_gain = rows.iter().filter(|r| r.verdict == "gain").count();
     let doc = json!({"label": label, "base_head": base["glia_head"], "base_rev": base["rev"], "new_rev": run["stats"]["rev"],
         "boot": args.boot, "alpha": GATE_ALPHA, "correction": "holm", "rows": json_rows, "changed": changed.len(),
-        "drops": n_drop, "gains": n_gain, "new": fresh, "drift": drift, "missing": missing});
+        "drops": n_drop, "gains": n_gain, "new": fresh, "drift": drift, "missing": missing, "contrasts": json_contrasts,
+        "contrast_pairs": n_pairs, "contrasts_below": n_below});
     let wrote = serde_json::to_string_pretty(&doc)
         .map_err(|e| e.to_string())
         .and_then(|t| std::fs::write(&args.out, t).map_err(|e| e.to_string()))

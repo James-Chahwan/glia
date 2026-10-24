@@ -5,8 +5,8 @@ bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None)` and
 preset=None, scope=None)` return the whole context pack `{query, text,
 budget_tokens, used_tokens, bytes, bytes_per_token, candidates, nodes,
 dropped, rerenders, selection, absence}` as a native dict, keys in engine
-field order (`selection`, EC.9, only with a seed; `ranking=None` applies the
-repo's calibrated pick);
+field order (`selection`, EC.9, only with a seed; `ranking=None` is the
+default ranking: pack never reads the calibration record, ruling EC-9b);
 `bytes_per_token` outside 1.0..=20.0 raises ValueError. The fixture is CC.4b's
 acceptance tree (engine/tests/pack.rs): `shop/a.py` `price` and `place`
 (which calls it), `shop/b.py` `checkout` (which calls `place`), an unrelated
@@ -137,12 +137,14 @@ def main() -> int:
         c.check("[rank-cache] holder=pygraph .. index=hit",
                 cache_marks(err, "pygraph") and set(cache_marks(err, "pygraph")) == {"index=hit"},
                 cache_marks(err, "pygraph"))
-        # EC.9: ranking=None selects; no calibration record here, so the
-        # fallback (ppr, co-change first: H10); a named ranking is explicit.
+        # EC.9b: ranking=None is the default ranking (ppr, co-change first:
+        # H10), never a calibration record's pick (ruling EC-9b); any other
+        # ranking is explicit.
         sel = p.get("selection") or {}
-        c.check("selection: fallback H10 (no record)",
-                (sel.get("set"), sel.get("shape"), sel.get("pick"), sel.get("source"), sel.get("reason"))
-                == ("SELh0", "k1", "H10", "fallback", "absent"), sel)
+        c.check("selection: fallback H10 (pack_uncalibrated)",
+                (sel.get("set"), sel.get("shape"), sel.get("pick"), sel.get("source"), sel.get("reason"),
+                 sel.get("test_commits"))
+                == ("SELh0", "k1", "H10", "fallback", "pack_uncalibrated", 0), sel)
         exp = g.pack("price", budget=100000, ranking="bfs", cochange=False).get("selection") or {}
         c.check("selection: explicit B0", (exp.get("set"), exp.get("pick"), exp.get("source"))
                 == ("SELs0", "B0", "explicit"), exp)

@@ -17,7 +17,7 @@ use glia_engine::pack::{Pack, PackArgs, pack, pack_ids};
 use glia_engine::rank::RankCache;
 use glia_graph::MergedGraph;
 
-use crate::blast::ranking_selected;
+use crate::blast::ranking_named;
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
@@ -63,13 +63,11 @@ fn pack_args(
 /// `args` ranked by the `ranking` / `cochange` keywords over the PyGraph's
 /// held ranking cache (EA.7: the neighbours' file order, co-change first
 /// where a history snapshot exists; the PPR index reused across calls).
-/// EC.9: `ranking=None` applies the repo's calibrated pick through the cache
-/// (`PackArgs.select`), `ppr` the fallback; a name is explicit. `Err` names
-/// an unknown `ranking`.
+/// EC.9b (ruling EC-9b): pack never reads the calibration record, so
+/// `ranking=None` is `ppr`, the default ranking (H10 with `cochange`). `Err`
+/// names an unknown `ranking`.
 fn ranked(mut args: PackArgs, ranking: Option<&str>, cochange: bool, cache: Arc<RankCache>) -> Result<PackArgs, String> {
-    let (r, select) = ranking_selected(ranking, cochange)?;
-    args.ranking = r;
-    args.select = select;
+    args.ranking = ranking_named(ranking.unwrap_or("ppr"), cochange)?;
     args.rank_cache = Some(cache);
     Ok(args)
 }
@@ -120,12 +118,14 @@ impl PyGraph {
     /// `qname`. `absence` is `None` when a node is packed, else a dict whose
     /// `reason` is `no_match` or `budget_too_small`.
     ///
-    /// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`; default `None`, the
-    /// repo's calibrated pick from `glia history calibrate`, else `ppr`) and
-    /// `cochange` (default `True`: co-change from the history snapshot
+    /// `ranking` (0.5.3; `ppr`, `ppr-wide` or `bfs`; default `None`, `ppr`)
+    /// and `cochange` (default `True`: co-change from the history snapshot
     /// first) order the neighbours by their files; with no snapshot the
-    /// order is the structural one. `selection` names the ranking applied
-    /// `{set, shape, pick, source, reason, test_commits}`. Any other
+    /// order is the structural one. Pack never reads the calibration record
+    /// (ruling EC-9b: `history_calibrate` changes no pack). `selection` names
+    /// the ranking applied `{set, shape, pick, source, reason, test_commits}`:
+    /// source `fallback` with reason `pack_uncalibrated` for the default
+    /// ranking (`ppr` with co-change), else `explicit`. Any other
     /// `ranking` raises ValueError before any work. The PPR and file indexes are held by this PyGraph
     /// and reused by later calls.
     #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking=None, cochange=true))]
@@ -300,19 +300,20 @@ mod tests {
         let r = ranked(args.clone(), Some("bfs"), false, held.clone()).expect("bfs");
         assert_eq!(r.ranking.harness_name(), "B0");
         assert!(r.rank_cache.as_ref().is_some_and(|c| Arc::ptr_eq(c, &held)));
-        assert!(!r.select, "a named ranking is explicit");
         let d = ranked(args.clone(), Some("ppr"), true, held.clone()).expect("ppr");
         let first = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         let again = serde_json::to_string(&pack_query(m, "price", &d, 0)).expect("json");
         assert_eq!(first, again, "a warm cache packs what a cold one did");
         assert_eq!(first, ours, "no history snapshot: the held cache packs the 0.5.2 order");
-        // EC.9: no ranking selects (no record here: the fallback, the same
-        // pack as `ppr`, its selection naming the fallback).
+        // EC.9b: no ranking is the default ranking, never the record: the
+        // same pack as `ppr`, its selection the uncalibrated fallback.
         let sel = ranked(args.clone(), None, true, held.clone()).expect("None");
-        assert!(sel.select && sel.ranking == d.ranking);
+        assert_eq!(sel.ranking, d.ranking);
         let mut fell = pack_query(m, "price", &sel, 0);
         let why = fell.selection.take().expect("a selection");
-        assert_eq!((why.pick.as_str(), why.source), ("H10", "fallback"));
+        assert_eq!((why.pick.as_str(), why.source, why.reason), ("H10", "fallback", Some("pack_uncalibrated")));
+        let bfs = pack_query(m, "price", &r, 0).selection.expect("a selection");
+        assert_eq!((bfs.pick.as_str(), bfs.source), ("B0", "explicit"));
         let mut asked = pack_query(m, "price", &d, 0);
         asked.selection = None;
         assert_eq!(serde_json::to_string(&fell).expect("json"), serde_json::to_string(&asked).expect("json"));

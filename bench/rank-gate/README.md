@@ -39,7 +39,8 @@ Each is the engine's own answer, its node rows rolled up to files by first appea
 - **ANS:impact / ANS:pack** (EG.1, EA.9): `diff_impact_from_diff` over the seed files and `pack_ids`
   over their nodes, default options, the RankCache given test commit c's prefix co-change (training
   commits strictly older than c), so the default ranking H10 reads C0. Item 2 (co-change first).
-- **ANS:impact@sel / ANS:pack@sel** (EG.6): the same two answers with `select = false` and the ranking
+- **ANS:impact@sel / ANS:pack@sel** (EG.6): the same two answers with the calibration off (diff impact's
+  `select = false`; pack has no such switch since EC.9b: it never reads a record) and the ranking
   forced to the engine's own calibrated pick at c. Once per run, `calibrate::calibrate_snapshot`
   (EC.5, group `structure`; EG.7 adds `review` and `find`) replays a history snapshot built in memory from rank_eval's commit list:
   the newest 2000 non-merge commits (`history sync`'s window, ruling EA-1), candidate paths with no
@@ -179,6 +180,33 @@ The last line of `check` is exactly one of:
 distinct `<label>/<shape>/<ranker>/<metric>` rows over both baselines. Drift means a shape's queries
 or commit clusters moved: only a declared re-baseline fixes it. The harness is deterministic, so a
 rerun never clears a drop.
+
+### Calibrated against default (EC.9b, ruling EC-9b)
+
+Each row above is judged against its own baseline, never a calibrated answer against its default:
+EC.9's calibrated pack passed every check while lowering pack's recall@10 against the default pack
+(the selection sets are scored by the impact replay's file recall, not by pack's budget cut and file
+roll-up). So each check also judges gate.json's `contrasts`, over the new run alone:
+ANS:impact@sel - ANS:impact, ANS:review@sel - ANS:review and ANS:find_files@sel - ANS:find_files, on
+every shape that measures both (impact and review: single, k2, k3, half; find_files: find), 9 pairs
+per snapshot. Per pair the paired commit-cluster bootstrap of r10 `a - b` (B = 1000), two-sided
+p = twice the share of bootstrap means >= 0; Holm's step-down over the snapshot's pairs at family
+alpha 0.05 gives each pair its level, and a pair Holm rejects with a negative mean (its CI at its
+level wholly below 0) is a drop:
+
+    [rank-gate] contrast drop label=<l> shape=<s> <a> - <b> r10 <d> [<lo>, <hi>]
+
+which the verdict JSON carries as the row `<shape>` / `<a> - <b>` / `r10` with verdict `drop`, so the
+last line of `check` names it as `<label>/<shape>/<a> - <b>/r10`. Every pair prints one
+`[rank-gate] contrast label=.. shape=.. <a> - <b> r10 <d> [<lo>, <hi>] level=<l> p=<p> verdict=ok|below|info`
+line, and each check one summary, `[rank-gate] contrasts: ok|FAILED - <n> pairs, <d> below default`,
+in `run/<label>.<base>.verdict.log` (and the verdict `.md`'s contrasts table, the `.json`'s
+`contrasts`). `contrasts_info` (ANS:pack@sel - ANS:pack) is reported with `verdict=info` and never
+judged: pack no longer applies the pick (ruling EC-9b), and the ANS:pack@sel ranker stays as the
+harness's measurement of the pick applied to pack. At EC.9b, on the W16 runs: 0 of 9 pairs below
+default on each of the six snapshots, and pack@sel - pack r10 (single) glia -0.0021 [-0.0040,
+-0.0006], shell -0.0089 [-0.0167, -0.0029], samples -0.0211 [-0.0296, -0.0127], commons-io -0.0296
+[-0.0432, -0.0182], commons-lang -0.0033 [-0.0075, -0.0002], websocket -0.0109 [-0.0300, +0.0085].
 
 ## Running it
 

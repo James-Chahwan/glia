@@ -8,6 +8,8 @@
   "half": ["ANS:impact", "ANS:pack", "P1", "SELt2", "SELs0", "ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files", "ANS:review", "ANS:review@sel"],
   "find": ["ANS:find", "T1s", "SELf2t", "ANS:find_files", "ANS:find_files@sel"]
  },
+ "contrasts": [["ANS:impact@sel", "ANS:impact"], ["ANS:review@sel", "ANS:review"], ["ANS:find_files@sel", "ANS:find_files"]],
+ "contrasts_info": [["ANS:pack@sel", "ANS:pack"]],
  "items": {
   "1": ["ANS:impact@sel", "ANS:pack@sel", "ANS:impact.files"],
   "2": ["ANS:impact", "ANS:pack"],

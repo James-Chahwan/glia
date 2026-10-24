@@ -319,8 +319,9 @@ fn ranking_flags_reach_the_pack() {
     glia(&[root.path(), "price", "--ranking", "x"], 2);
 }
 
-/// EC.9: `--ranking` absent applies the repo's calibration (none here: the
-/// fallback, reason `absent`); given, it is explicit. One `[select]
+/// EC.9b (ruling EC-9b): pack never reads the calibration record. The default
+/// ranking (`--ranking` absent, or `ppr` with co-change) is the fallback with
+/// reason `pack_uncalibrated`; any other ranking is explicit. One `[select]
 /// surface=pack` line on stderr; stdout is the pack text alone; `--json`
 /// carries `selection`.
 #[test]
@@ -331,8 +332,11 @@ fn select_line_names_the_pick() {
     assert_eq!(sel.len(), 1, "{}", stderr(&dflt));
     assert_eq!(
         sel[0],
-        "[select] surface=pack set=SELh0 shape=k1 pick=H10 source=fallback reason=absent test_commits=0"
+        "[select] surface=pack set=SELh0 shape=k1 pick=H10 source=fallback reason=pack_uncalibrated test_commits=0"
     );
+    let named = glia(&[root.path(), "price", "--ranking", "ppr"], 0);
+    assert_eq!(lines_with(&named, "[select] surface=pack "), sel, "--ranking ppr is the default ranking");
+    assert_eq!(named.stdout, dflt.stdout);
     let text = String::from_utf8_lossy(&dflt.stdout);
     assert!(text.starts_with("# context for price\n") && !text.contains("[select]"), "{text}");
 
@@ -347,4 +351,5 @@ fn select_line_names_the_pick() {
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("--json parses");
     assert_eq!(json["selection"]["pick"], "H10", "{json}");
     assert_eq!(json["selection"]["source"], "fallback", "{json}");
+    assert_eq!(json["selection"]["reason"], "pack_uncalibrated", "{json}");
 }

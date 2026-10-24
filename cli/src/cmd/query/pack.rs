@@ -23,12 +23,15 @@
 //! surface=pack ranking=<r> .. max_file_share=<s>/<n>` carries the per-file
 //! share (ruling EA-2).
 //!
-//! 0.5.3 (EC.9): `--ranking` has no default: absent, the pack applies the
-//! repo's calibrated pick (`glia history calibrate`; `PackArgs.select`),
-//! else `ppr`; given, it is explicit. stdout stays the pack text alone; the
-//! engine's `[select] surface=pack set=<s> shape=<k> pick=<p> source=<c>
-//! ..` line names the pick on stderr, and `--json` carries it as the Pack's
-//! `selection`.
+//! 0.5.3 (EC.9b, ruling EC-9b "Pack ignores calibration"): pack never reads
+//! the repo's calibration record (`glia history calibrate` changes no pack):
+//! `--ranking` absent is the default ranking, `ppr` with co-change first
+//! (H10). stdout stays the pack text alone; the engine's `[select]
+//! surface=pack set=<s> shape=<k> pick=<p> source=<fallback|explicit> ..`
+//! line names the ranking on stderr (`fallback` with reason
+//! `pack_uncalibrated` for the default ranking, else `explicit`), and
+//! `--json` carries it as the Pack's `selection`. The flags are pack's own
+//! [`PackRankingArgs`], not the calibrated answers' `CalibratedRankingArgs`.
 
 use glia_code_domain::profile::CODE_TABLES;
 use glia_engine::absence::Absence;
@@ -36,11 +39,16 @@ use glia_engine::pack::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CANDIDATES, DEFAULT_SEEDS, Pack, PackArgs, pack,
 };
 
-use crate::common::{CalibratedRankingArgs, generate_for, rank_cache};
+use glia_engine::rank::{RankBase, Ranking};
+
+use crate::common::{generate_for, rank_cache};
 
 // `--bytes-per-token`'s default is the literal "3.7" (clap's `default_value`
 // is a `&'static str`); this keeps it the engine's default.
 const _: () = assert!(glia_engine::pack::DEFAULT_BYTES_PER_TOKEN_X10 == 37);
+
+/// The CLI names of the structural file rankings (`RankBase::name`).
+const RANKINGS: [&str; 3] = ["ppr", "ppr-wide", "bfs"];
 
 /// The `--bytes-per-token` range, in tenths: 1.0..=20.0.
 const MIN_X10: u32 = 10;
@@ -81,10 +89,41 @@ pub(crate) struct Args {
     #[arg(long)]
     scope: Option<String>,
     #[command(flatten)]
-    ranking: CalibratedRankingArgs,
+    ranking: PackRankingArgs,
     /// Emit the whole pack (text and manifest) as JSON.
     #[arg(long)]
     json: bool,
+}
+
+/// Pack's file-ranking flags (EC.9b): the calibrated answers' flags, minus
+/// the calibration (ruling EC-9b: pack never reads the record).
+#[derive(clap::Args, Debug, Clone)]
+pub(crate) struct PackRankingArgs {
+    /// The structural file ranking the neighbours are ordered by: ppr (PPR
+    /// damping 0.5, a file ranks by its best node), ppr-wide (damping 0.85, a
+    /// file ranks by the sum of its nodes) or bfs (carry-edge distance, then
+    /// file degree). Pack never reads the calibration record (glia history
+    /// calibrate changes no pack).
+    #[arg(
+        long,
+        value_name = "RANKING",
+        default_value = "ppr",
+        value_parser = clap::builder::PossibleValuesParser::new(RANKINGS),
+    )]
+    ranking: String,
+    /// Do not rank files that changed together with the seeds first (read
+    /// from .glia/history-snapshot, written by `glia history sync`).
+    #[arg(long)]
+    no_cochange: bool,
+}
+
+impl PackRankingArgs {
+    /// The engine's `Ranking`: the base `--ranking` names, co-change first
+    /// unless `--no-cochange`. clap has already refused any other name; one
+    /// that slipped through is the default base.
+    fn ranking(&self) -> Ranking {
+        Ranking::new(RankBase::parse(&self.ranking).unwrap_or(RankBase::Ppr), !self.no_cochange)
+    }
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -103,7 +142,6 @@ pub(crate) fn run(args: Args) -> i32 {
     query.preset = args.preset;
     query.scope = args.scope;
     query.ranking = args.ranking.ranking();
-    query.select = args.ranking.selects();
     query.rank_cache = Some(rank_cache(&result));
     let mut packed = pack(&result.merged, &args.query, &query);
     if let Some(a) = packed.absence.as_mut() {

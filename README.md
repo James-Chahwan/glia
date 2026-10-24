@@ -337,8 +337,11 @@ glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN
     outline line or a bare qname), located, with the links between them. stdout is
     the pack only, a summary goes to stderr; --json is the pack with its manifest.
     With a history snapshot each co-changed file's best candidate moves to the front
-    before the cut; --ranking / --no-cochange choose as blast-radius does, and --json
-    names the choice in `selection`. Exits 1 when the pack is empty (the absence says why).
+    before the cut; --ranking (default ppr) / --no-cochange choose the file ranking.
+    Pack never reads the calibration record (ruling EC-9b: `glia history calibrate`
+    changes no pack); --json names the ranking in `selection` (`fallback`, reason
+    `pack_uncalibrated`, for the default; `explicit` otherwise). Exits 1 when the pack
+    is empty (the absence says why).
 glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-rows <N>] [--output <PRED>]... [--with <WITH>]...
     A Datalog program from <FILE>, -e or stdin (with --gql, a GQL read query: MATCH ...
     WHERE ... RETURN) over the code graph, the predicate prelude merged in
@@ -476,8 +479,9 @@ glia history calibrate <REPO> [--json] [--max-commits <N>] [--max-seeds <N>] [--
     the per-repo ranking each ranked answer picks. Run after `glia history sync`; a
     build never calibrates. It scores each candidate ranking on the repo's own past
     commits, oldest first, picking with only the commits before each one (leak-free):
-    SELh0 / SELs0 for the text-free answers (blast-radius, diff-impact, review's impact,
-    pack; SELs0 under --no-cochange), SELt2 for review's intent, SELf2t for find --files.
+    SELh0 / SELs0 for the text-free answers (blast-radius, diff-impact, review's impact;
+    SELs0 under --no-cochange), SELt2 for review's intent, SELf2t for find --files. pack
+    never reads the record (ruling EC-9b).
     One line per (set, shape) with the pick, its online recall@10 against the fallback's
     and a bootstrap 95% CI. --max-commits (300) test commits, --max-seeds (5) queries
     each, --sets a subset of the groups structure, review, find. An answer ignores a
@@ -699,7 +703,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
   11. Find's selection set (`SELf2t`, find's fusions plus the text ranking): calibrated `find --files` over its fallback commons-lang +0.045 (CI above 0) and commons-io +0.042; no CI wholly below 0.
 - **A. Structural ranking.** `activation::PprIndex`, built once and run per seed set (EA.1); the `Ranking` names and the `RankCache` holder (EA.2); `rank::FileIndex`, the one candidate file space, and `CochangeIndex` from the history snapshot with no rename fold (EA.3); `rank_files` and `order_rows` (EA.4); the ranking in blast radius, diff-impact and review (EA.5) and pack (EA.6, EA.6b: one best row per co-changed file); one `RankCache` per `PyGraph` / `WatchSession` with the `ranking` / `cochange` / `top_files` kwargs (EA.7); `--ranking`, `--no-cochange`, `--top-files` (EA.8); engine parity rows in the harness (EA.9).
 - **B. Intent.** `glia history sync` keeps each commit's redacted, trailer-stripped message (EB.1); `activation::algo::fuse` (EB.2); `intent::text`, BM25 over the messages (EB.3); the `[ids]` vocabulary (EB.4); id definitions read at a revision (EB.5a), namespaces (EB.5b), the path resolver (EB.5c); IDR (EB.6); `review --title` (EB.7); `find --files` / `PyGraph.find_files` (EB.8); engine intent parity rows and glia's own `[ids]` (EB.9).
-- **C. Calibration.** The `.glia/calibration-snapshot/` record and `select()` (EC.1); the leak-free replay (EC.2) and online pick (EC.3); the structure bank and `SELh0` / `SELs0` (EC.4); the calibration step with its bootstrap CI (EC.5); `glia history calibrate` / `history_calibrate` (EC.6); calibrated selection in blast radius, diff-impact and review (EC.8) and pack (EC.9); the work signals (EC.10); review's text selection (EC.11) and `SELt2` (EC.12); `find --files`' `SELf2t` (EC.13); an `[ids]` override for the replay (EC.14).
+- **C. Calibration.** The `.glia/calibration-snapshot/` record and `select()` (EC.1); the leak-free replay (EC.2) and online pick (EC.3); the structure bank and `SELh0` / `SELs0` (EC.4); the calibration step with its bootstrap CI (EC.5); `glia history calibrate` / `history_calibrate` (EC.6); calibrated selection in blast radius, diff-impact and review (EC.8), and in pack (EC.9) until ruling EC-9b took it out again (EC.9b: the impact replay's pick lowered pack's recall@10, so pack ranks with `--ranking` alone and the rank gate judges each calibrated answer against its default); the work signals (EC.10); review's text selection (EC.11) and `SELt2` (EC.12); `find --files`' `SELf2t` (EC.13); an `[ids]` override for the replay (EC.14).
 - **G. The rank gate and hygiene.** The harness's ANS rankers over the shipped answers (EG.1), its fail rule (EG.2: Holm over the changed rows, one-sided, alpha 0.05), `bench/rank-gate/` with `scripts/rank-gate.sh` on six pinned public snapshots, judged against 0.5.2 and against the last close-out (EG.3), calibrated and intent answers in the gate (EG.6, EG.7): `[rank-gate] check: ok - 1176 rows, 47 gains, 0 drops on 6 snapshots`, every item measured but 5 and 9 (exempt: speed, link precision). engram-export's DE.5 PPR side file removed at Engram's request (EG.4); the wheels workflow on Node 24 actions pinned by commit, runner images pinned (EG.5).
 - **Z. This refresh.** README, CLAUDE.md, the two skills and the Python README (EZ.1); the handoffs (EZ.2).
 
