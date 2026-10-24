@@ -1028,13 +1028,11 @@ fn radius(
             .then(|| rank_files(merged, &cache, &seed_files, &extra, ranking));
         // A walk class is live when any member is: the live set mapped onto
         // the walk's nodes (the raw set itself when nothing is contracted).
-        let (walk_live, class_reps): (Cow<'_, HashSet<NodeId>>, HashSet<NodeId>) =
-            if quotient.is_some() {
-                let mapped = live.iter().map(|&n| view.walk_rep(n)).collect();
-                (Cow::Owned(mapped), walk_class_reps(merged, &view))
-            } else {
-                (Cow::Borrowed(&live), HashSet::new())
-            };
+        let walk_live: Cow<'_, HashSet<NodeId>> = if quotient.is_some() {
+            Cow::Owned(live.iter().map(|&n| view.walk_rep(n)).collect())
+        } else {
+            Cow::Borrowed(&live)
+        };
         // `live_only` is a filter on the ranking plan: it drops rows from the
         // ranked closure and keeps the rest in order, so scope and `top_k`
         // below see what the post-sort filter they replaced saw.
@@ -1080,7 +1078,7 @@ fn radius(
                 // A walk class is one node whose id is its representative,
                 // an internal handle: the row shows the class's display
                 // member. Any other hit is the node the walk reached.
-                let shown = if class_reps.contains(&h.id) {
+                let shown = if !view.walk_members(h.id).is_empty() {
                     view.display(h.id)
                 } else {
                     h.id
@@ -1292,23 +1290,6 @@ fn blast_walk<G: GraphSource + ?Sized>(
         &filters,
         Some(index),
     )
-}
-
-/// The representatives of `view`'s walk classes: the ids a walk over its
-/// quotient reaches for a class. Every member of a walk class is an endpoint
-/// of a SAME_AS cross edge (the view reads its classes from those), and each
-/// class has a member other than its representative, which maps to it.
-fn walk_class_reps(merged: &MergedGraph, view: &IdentityView) -> HashSet<NodeId> {
-    merged
-        .cross_edges
-        .iter()
-        .filter(|e| e.category == edge_category::SAME_AS)
-        .flat_map(|e| [e.from, e.to])
-        .filter_map(|id| {
-            let rep = view.walk_rep(id);
-            (rep != id).then_some(rep)
-        })
-        .collect()
 }
 
 /// Why a [`blast_radius`] came back empty. `reached` is the walk's closure,

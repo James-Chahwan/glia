@@ -464,6 +464,23 @@ impl IdentityView {
         self.walk.rep(id)
     }
 
+    /// The members of the walk class whose representative is `rep`, ascending
+    /// (`rep` among them): what the walk node `rep` stands for over
+    /// [`Self::quotient`]. Empty when `rep` is no walk class's representative:
+    /// a node in no walk class, or a member that is not its class's
+    /// representative (a walk over the quotient never reaches one).
+    pub fn walk_members(&self, rep: NodeId) -> &[NodeId] {
+        match self.walk.class_of(rep) {
+            Some(members) if self.walk.rep(rep) == rep => members,
+            _ => &[],
+        }
+    }
+
+    /// `id` is a member of a walk class (its representative or any other).
+    pub fn in_walk_class(&self, id: NodeId) -> bool {
+        self.walk.class_of(id).is_some()
+    }
+
     /// The node a row for `id` shows: its collapse class's display member, or
     /// `id` outside one. A walk representative is a member of its walk class,
     /// so it maps to that class's collapse display member.
@@ -862,4 +879,44 @@ fn query_text(q: &IdentityQuery) -> String {
         parts.push("diverged_only".to_string());
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A view whose only state is its walk classes: `walk_members` and
+    /// `in_walk_class` read nothing else.
+    fn walk_view(pairs: &[(u64, u64)]) -> IdentityView {
+        IdentityView {
+            walk: Classes::from_pairs(pairs.iter().map(|&(a, b)| (NodeId(a), NodeId(b)))),
+            ..IdentityView::empty()
+        }
+    }
+
+    #[test]
+    fn walk_members_at_the_representative_only() {
+        let view = walk_view(&[(7, 3), (3, 9), (20, 21)]);
+        let ids = |s: &[NodeId]| s.iter().map(|n| n.0).collect::<Vec<_>>();
+        assert_eq!(ids(view.walk_members(NodeId(3))), [3, 7, 9]);
+        assert_eq!(ids(view.walk_members(NodeId(20))), [20, 21]);
+        // A member that is not the representative stands for nothing.
+        assert!(view.walk_members(NodeId(7)).is_empty());
+        assert!(view.walk_members(NodeId(21)).is_empty());
+        // A node in no class.
+        assert!(view.walk_members(NodeId(5)).is_empty());
+        assert_eq!(view.walk_rep(NodeId(9)), NodeId(3));
+    }
+
+    #[test]
+    fn in_walk_class_is_any_member() {
+        let view = walk_view(&[(7, 3), (3, 9)]);
+        for id in [3, 7, 9] {
+            assert!(view.in_walk_class(NodeId(id)), "{id}");
+        }
+        assert!(!view.in_walk_class(NodeId(5)));
+        let empty = IdentityView::empty();
+        assert!(!empty.in_walk_class(NodeId(3)));
+        assert!(empty.walk_members(NodeId(3)).is_empty());
+    }
 }

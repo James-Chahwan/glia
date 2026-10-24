@@ -24,8 +24,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::BlastOptions;
-use glia_engine::delta::graph_delta_vs_rev;
-use glia_engine::diff_impact::{DiffImpact, diff_impact_from_delta, diff_impact_from_diff};
+use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
 use glia_engine::identity::Collapse;
 use glia_engine::rank::{RankCache, Ranking};
 use glia_graph::MergedGraph;
@@ -103,13 +102,6 @@ fn options(
     Ok(opts)
 }
 
-/// `opts` collapsing with the build's repo `labels`, so a collapsed row's
-/// `also_in` names each repo by its label, not `repo#<id % 1000>` (DD.10).
-fn labelled(mut opts: BlastOptions, labels: &BTreeMap<u64, String>) -> BlastOptions {
-    opts.collapse = Collapse::with_labels(labels);
-    opts
-}
-
 /// The body of [`PyGraph::diff_impact`], minus pyo3; `labels` are the
 /// graph's (`PyGraph::repo_labels`).
 #[allow(clippy::too_many_arguments)]
@@ -124,16 +116,16 @@ fn diff_answer(
     scope: Option<&str>,
     rank: &RankKw,
 ) -> Result<DiffImpact, String> {
-    let opts = labelled(
-        options(direction, depth, top_k, live_only, scope, rank)?,
-        labels,
-    );
+    // Collapsing with the graph's repo labels, so a collapsed row's `also_in`
+    // names each repo by its label, not `repo#<id % 1000>` (DD.10).
+    let mut opts = options(direction, depth, top_k, live_only, scope, rank)?;
+    opts.collapse = Collapse::with_labels(labels);
     Ok(diff_impact_from_diff(merged, diff_text, &opts))
 }
 
 /// The body of [`diff_impact_vs_rev_py`], minus pyo3: the engine's
-/// `diff_impact_vs_rev` in its two steps, so the radius gets the working
-/// tree's labels between them.
+/// `diff_impact_vs_rev`, which labels the collapse with the working tree's
+/// repo labels (FD.28).
 #[allow(clippy::too_many_arguments)]
 fn rev_answer(
     repo_path: &str,
@@ -146,11 +138,7 @@ fn rev_answer(
     rank: &RankKw,
 ) -> Result<DiffImpact, String> {
     let opts = options(direction, depth, top_k, live_only, scope, rank)?;
-    let rev = graph_delta_vs_rev(repo_path, base)?;
-    Ok(diff_impact_from_delta(
-        &rev,
-        &labelled(opts, &rev.after.repo_labels),
-    ))
+    diff_impact_vs_rev(repo_path, base, &opts)
 }
 
 #[pymethods]

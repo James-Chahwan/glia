@@ -81,6 +81,7 @@ use glia_graph::MergedGraph;
 use crate::absence;
 use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded_on};
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
+use crate::identity::Collapse;
 use crate::profile::CODE_PROFILE;
 use crate::rank::RankCache;
 use crate::tests_for::CodeText;
@@ -150,6 +151,9 @@ pub fn diff_impact_vs_rev(
 /// transient cache over the working tree's repo roots and labels, so its
 /// history snapshot (`glia history sync`) orders the impact rows and fills
 /// `impact.files` with no new parameter.
+///
+/// An enabled `opts.collapse` with no repo labels takes `rev.after`'s, so
+/// the `also_in` repos are labelled for every caller (FD.28).
 pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact {
     diff_impact_from_delta_on(rev, opts, "diff_impact")
 }
@@ -161,14 +165,24 @@ pub(crate) fn diff_impact_from_delta_on(
     opts: &BlastOptions,
     surface: &'static str,
 ) -> DiffImpact {
+    // An enabled collapse with no repo labels takes `rev.after`'s, so every
+    // caller's `also_in` rows name their repos (FD.28).
+    let unlabelled = opts.collapse.enabled
+        && opts.collapse.repo_labels.is_empty()
+        && !rev.after.repo_labels.is_empty();
     let opts_owned;
-    let opts = if opts.rank_cache.is_none() {
+    let opts = if opts.rank_cache.is_none() || unlabelled {
         let mut o = opts.clone();
-        o.rank_cache = Some(Arc::new(RankCache::new(
-            "answer",
-            &rev.after.repo_roots,
-            &rev.after.repo_labels,
-        )));
+        if o.rank_cache.is_none() {
+            o.rank_cache = Some(Arc::new(RankCache::new(
+                "answer",
+                &rev.after.repo_roots,
+                &rev.after.repo_labels,
+            )));
+        }
+        if unlabelled {
+            o.collapse = Collapse::with_labels(&rev.after.repo_labels);
+        }
         opts_owned = o;
         &opts_owned
     } else {

@@ -303,7 +303,6 @@ use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
 use crate::external::declared::{conventions, conventions_for, declared_constraints, node_repos};
 use crate::git_rev;
-use crate::identity::Collapse;
 use crate::intent::defs::{Tree, read_defs};
 use crate::intent::idr::{
     Idr, IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route,
@@ -576,27 +575,14 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
 fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Result<Review, String> {
     let (before, after) = (&rev.before.merged, &rev.after.merged);
 
-    // DD.10: an enabled collapse with no repo labels takes the working
-    // tree's, as `tests_for_delta` does (DD.12), so an impact row's
-    // `also_in` names the repo by its label, not `repo#<id % 1000>`.
-    let labelled;
-    let blast = if args.blast.collapse.enabled
-        && args.blast.collapse.repo_labels.is_empty()
-        && !rev.after.repo_labels.is_empty()
-    {
-        let mut with = args.blast.clone();
-        with.collapse = Collapse::with_labels(&rev.after.repo_labels);
-        labelled = with;
-        &labelled
-    } else {
-        &args.blast
-    };
     // EB.7: one RankCache for the impact walk and the intent's P1, built as
     // `diff_impact_from_delta_on` builds its transient one (so the impact
     // rows are unchanged by it).
+    // `diff_impact_from_delta_on` labels an unlabelled collapse with the
+    // working tree's repo labels (DD.10, FD.28).
     let cached;
-    let blast = if blast.rank_cache.is_none() {
-        let mut with = blast.clone();
+    let blast = if args.blast.rank_cache.is_none() {
+        let mut with = args.blast.clone();
         with.rank_cache = Some(Arc::new(RankCache::new(
             "answer",
             &rev.after.repo_roots,
@@ -605,7 +591,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         cached = with;
         &cached
     } else {
-        blast
+        &args.blast
     };
     let di = diff_impact_from_delta_on(rev, blast, "review");
     let mut impact = di.impact;

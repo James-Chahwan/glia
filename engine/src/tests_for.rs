@@ -711,7 +711,6 @@ fn answer_for(
         Some(q) => Adjacency::build(q, &categories),
         None => Adjacency::build(&source, &categories),
     };
-    let classes = WalkClasses::new(merged, &view, &idx, &loc, quotient.is_some());
 
     let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
     let mut untested: Vec<String> = Vec::new();
@@ -759,7 +758,7 @@ fn answer_for(
         for r in &walk.reached {
             // A walk node: a node, or a walk class's representative (DD.12),
             // which is a case when any member is and shows that member.
-            let Some(case) = classes.case(&idx, r.id) else {
+            let Some(case) = walk_case(&view, &idx, &loc, r.id) else {
                 continue;
             };
             // The walk runs backward, so each hop from the test toward the
@@ -775,7 +774,7 @@ fn answer_for(
                 let shown = if next == walk_seed {
                     *seed
                 } else {
-                    classes.show(&view, next)
+                    walk_show(&view, next)
                 };
                 path.push((shown, via));
                 at = next;
@@ -1318,105 +1317,58 @@ fn is_test_fixture(cells: &[glia_core::Cell]) -> bool {
         })
 }
 
-/// The walk classes a walk over the identity quotient (DD.12) meets: each
-/// representative (an internal handle, DD.1) with its members, and the case
-/// member its row shows (module docs "Identity"). Empty without walk classes,
-/// so every walk node is then a raw node.
-///
-/// Stopgap (DD.12 owns no `identity.rs`): the members are read off the
-/// SAME_AS cross-edge endpoints, as `answers::walk_class_reps` (DD.10) and
-/// `trace::WalkNodes` (DD.11) do: every member of a walk class is an endpoint
-/// of a SAME_AS cross edge (the view reads its classes from those), and
-/// [`IdentityView::walk_rep`] maps it onto its class. Remove it when
-/// `IdentityView` gains a crate-visible walk-class member lookup (DD.15 or
-/// DD.16, the next owner of `engine/src/identity.rs`).
-struct WalkClasses {
-    /// Representative -> the case member its row shows, `None` when no
-    /// member is a case.
-    classes: BTreeMap<u64, Option<NodeId>>,
+/// The test case walk node `id` shows over the identity quotient (DD.12):
+/// for a walk class's representative (an internal handle, DD.1) the class's
+/// case member (module docs "Identity": its display member when that is a
+/// case, else the first case by (file, line, qname, id)), `None` when no
+/// member is a case; for any other walk node `id` itself when it is a case.
+fn walk_case(
+    view: &IdentityView,
+    idx: &TestIndex,
+    loc: &Locator<'_>,
+    id: NodeId,
+) -> Option<NodeId> {
+    let members = view.walk_members(id);
+    if members.is_empty() {
+        return idx.is_case(id).then_some(id);
+    }
+    let display = view.display(id);
+    let cases: Vec<NodeId> = members
+        .iter()
+        .copied()
+        .filter(|&m| idx.is_case(m))
+        .collect();
+    if cases.contains(&display) {
+        return Some(display);
+    }
+    cases.into_iter().min_by(|&a, &b| {
+        let (la, lb) = (loc.locate(a), loc.locate(b));
+        (
+            la.file.is_none(),
+            &la.file,
+            la.line.is_none(),
+            la.line,
+            &la.qname,
+            a.0,
+        )
+            .cmp(&(
+                lb.file.is_none(),
+                &lb.file,
+                lb.line.is_none(),
+                lb.line,
+                &lb.qname,
+                b.0,
+            ))
+    })
 }
 
-impl WalkClasses {
-    /// `walking`: the answer walks `view`'s quotient.
-    fn new(
-        merged: &MergedGraph,
-        view: &IdentityView,
-        idx: &TestIndex,
-        loc: &Locator<'_>,
-        walking: bool,
-    ) -> Self {
-        let mut members: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
-        if walking {
-            for e in merged
-                .cross_edges
-                .iter()
-                .filter(|e| e.category == edge_category::SAME_AS)
-            {
-                for id in [e.from, e.to] {
-                    let rep = view.walk_rep(id);
-                    if rep != id {
-                        let m = members.entry(rep.0).or_default();
-                        m.insert(rep.0);
-                        m.insert(id.0);
-                    }
-                }
-            }
-        }
-        let classes = members
-            .into_iter()
-            .map(|(rep, ids)| {
-                let display = view.display(NodeId(rep));
-                let cases: Vec<NodeId> = ids
-                    .into_iter()
-                    .map(NodeId)
-                    .filter(|&m| idx.is_case(m))
-                    .collect();
-                let shown = if cases.contains(&display) {
-                    Some(display)
-                } else {
-                    cases.into_iter().min_by(|&a, &b| {
-                        let (la, lb) = (loc.locate(a), loc.locate(b));
-                        (
-                            la.file.is_none(),
-                            &la.file,
-                            la.line.is_none(),
-                            la.line,
-                            &la.qname,
-                            a.0,
-                        )
-                            .cmp(&(
-                                lb.file.is_none(),
-                                &lb.file,
-                                lb.line.is_none(),
-                                lb.line,
-                                &lb.qname,
-                                b.0,
-                            ))
-                    })
-                };
-                (rep, shown)
-            })
-            .collect();
-        WalkClasses { classes }
-    }
-
-    /// The test case walk node `id` shows: a walk class's case member, or
-    /// `id` itself when it is a case; `None` when it is none.
-    fn case(&self, idx: &TestIndex, id: NodeId) -> Option<NodeId> {
-        match self.classes.get(&id.0) {
-            Some(shown) => *shown,
-            None => idx.is_case(id).then_some(id),
-        }
-    }
-
-    /// The node a path hop onto walk node `id` shows: a walk class's display
-    /// member, or `id`.
-    fn show(&self, view: &IdentityView, id: NodeId) -> NodeId {
-        if self.classes.contains_key(&id.0) {
-            view.display(id)
-        } else {
-            id
-        }
+/// The node a path hop onto walk node `id` shows: a walk class's display
+/// member, or `id`.
+fn walk_show(view: &IdentityView, id: NodeId) -> NodeId {
+    if view.walk_members(id).is_empty() {
+        id
+    } else {
+        view.display(id)
     }
 }
 

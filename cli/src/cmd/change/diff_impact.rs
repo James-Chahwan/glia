@@ -45,7 +45,6 @@
 //! Fired-on marker: the engine's
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 
 use glia_engine::BlastOptions;
@@ -126,7 +125,13 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), Strin
         }
         let text = read_diff(src)?;
         let built = generate_for(&args.repo, &args.with)?;
-        let mut opts = labelled(opts, &built.repo_labels);
+        // Collapsing with the build's repo labels when the collapse is on and
+        // has none (DD.10, as `glia review` does), so a collapsed row's
+        // `also_in` names each repo by its label, not `repo#<id % 1000>`.
+        let mut opts = opts.clone();
+        if opts.collapse.enabled && opts.collapse.repo_labels.is_empty() {
+            opts.collapse = Collapse::with_labels(&built.repo_labels);
+        }
         opts.rank_cache = Some(rank_cache(&built));
         let mut a = diff_impact_from_diff(&built.merged, &text, &opts);
         if let Some(x) = a.impact.absence.as_mut() {
@@ -145,26 +150,16 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<(DiffImpact, usize), Strin
                 .to_string(),
         );
     }
-    // `diff_impact_vs_rev`'s two steps, so the radius gets the working
-    // tree's labels and a CLI-held rank cache over its roots between them.
+    // `diff_impact_vs_rev`'s two steps, so the radius gets a CLI-held rank
+    // cache over the working tree's roots between them (the engine labels
+    // the collapse with its repo labels, FD.28).
     let rev = graph_delta_vs_rev(&args.repo, args.base.as_deref().unwrap_or("HEAD"))?;
-    let mut opts = labelled(opts, &rev.after.repo_labels);
+    let mut opts = opts.clone();
     opts.rank_cache = Some(rank_cache(&rev.after));
     Ok((
         diff_impact_from_delta(&rev, &opts),
         rev.after.repo_labels.len(),
     ))
-}
-
-/// `opts` with the build's repo labels when its collapse is on and has none
-/// (DD.10, as `glia review` does), so a collapsed row's `also_in` names each
-/// repo by its label, not `repo#<id % 1000>`.
-fn labelled(opts: &BlastOptions, labels: &BTreeMap<u64, String>) -> BlastOptions {
-    let mut opts = opts.clone();
-    if opts.collapse.enabled && opts.collapse.repo_labels.is_empty() {
-        opts.collapse = Collapse::with_labels(labels);
-    }
-    opts
 }
 
 pub(crate) fn run(args: Args) -> i32 {

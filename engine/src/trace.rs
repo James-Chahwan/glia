@@ -322,7 +322,7 @@ pub fn cross_stack_trace_with_live(
     // walk classes (module doc "Identity").
     let view = IdentityView::new(merged, &opts.collapse);
     let quotient = view.quotient(merged);
-    let walk = WalkNodes::new(merged, &view, live, quotient.is_some());
+    let walk = walk_live(&view, live, quotient.is_some());
     let (adj, succ) = match &quotient {
         Some(q) => (
             Adjacency::carry(q, &CODE_PROFILE.tables),
@@ -377,7 +377,7 @@ pub fn cross_stack_trace_with_live(
         hops.len(),
         hops.iter().filter(|h| h.to_live).count(),
     );
-    let folded: usize = reached.iter().map(|r| walk.folded(r.id)).sum();
+    let folded: usize = reached.iter().map(|r| walk_folded(&view, r.id)).sum();
     let collapse_marker = || view.collapse_marker("trace", hops.len() + folded, hops.len());
 
     let seed_at = loc.locate(seed_id);
@@ -560,7 +560,7 @@ pub fn entry_flows_with_live(
     let entries = entries(merged);
     let view = IdentityView::new(merged, collapse);
     let quotient = view.quotient(merged);
-    let walk = WalkNodes::new(merged, &view, live, quotient.is_some());
+    let walk = walk_live(&view, live, quotient.is_some());
     let loc = Locator::new(merged);
     let mut sides = Sides::new(merged, &loc, &view, &walk);
     let adj = match &quotient {
@@ -591,13 +591,17 @@ pub fn entry_flows_with_live(
         // The row's entry: the class's display member when it is one of the
         // class's entries, else the first of them (any other walk node shows
         // itself, its one entry).
-        let display = walk.show(*w);
+        let display = show(&view, *w);
         let e = members
             .iter()
             .map(|&i| &entries[i])
             .find(|e| e.id == display)
             .unwrap_or(&entries[members[0]]);
-        folded += walk.folded(*w) + reached.iter().map(|r| walk.folded(r.id)).sum::<usize>();
+        folded += walk_folded(&view, *w)
+            + reached
+                .iter()
+                .map(|r| walk_folded(&view, r.id))
+                .sum::<usize>();
         let hops: Vec<TraceHop> = reached
             .iter()
             .map(|r| sides.hop(r.depth, r.parent, r.id, r.via))
@@ -609,7 +613,7 @@ pub fn entry_flows_with_live(
             }
         }
         let mut services: Vec<String> = Vec::new();
-        for id in std::iter::once(e.id).chain(reached.iter().map(|r| walk.show(r.id))) {
+        for id in std::iter::once(e.id).chain(reached.iter().map(|r| show(&view, r.id))) {
             if let Some(s) = sides.service_label(id, repo_labels)
                 && !services.contains(&s)
             {
@@ -841,78 +845,41 @@ fn leaves(succ: &Successors, id: NodeId) -> bool {
         .is_some_and(|&ix| !succ.out[ix as usize].is_empty())
 }
 
-/// How a walk over the identity quotient (DD.11) shows its nodes: each walk
-/// class's representative (an internal handle, DD.1) stands for the class,
-/// shown as the class's display member, and the live set is mapped onto walk
-/// nodes (a class is live when any member is). Without walk classes it is the
-/// identity map over the raw `live` set.
-///
-/// Stopgap (DD.11 owns no `identity.rs`): the representatives are derived
-/// from the SAME_AS endpoints, exactly as `answers::walk_class_reps` (DD.10)
-/// does. Remove both when `IdentityView` gains a crate-visible walk-class
-/// lookup (`in_walk_class` / class sizes; DD.15 or DD.16, the next owner of
-/// `engine/src/identity.rs`).
-struct WalkNodes<'a> {
-    /// Walk-class representative -> (display member, class size).
-    classes: HashMap<NodeId, (NodeId, usize)>,
-    live: Cow<'a, HashSet<NodeId>>,
+/// The live set mapped onto the walk's nodes (DD.11): a walk class is live
+/// when any member is. `walking`: the answer walks `view`'s quotient;
+/// otherwise the raw `live` set itself.
+fn walk_live<'a>(
+    view: &IdentityView,
+    live: &'a HashSet<NodeId>,
+    walking: bool,
+) -> Cow<'a, HashSet<NodeId>> {
+    if walking {
+        Cow::Owned(live.iter().map(|&n| view.walk_rep(n)).collect())
+    } else {
+        Cow::Borrowed(live)
+    }
 }
 
-impl<'a> WalkNodes<'a> {
-    /// `walking`: the answer walks `view`'s quotient. Every member of a walk
-    /// class is an endpoint of a SAME_AS cross edge (the view reads its
-    /// classes from those), and each class has a member other than its
-    /// representative, which maps to it.
-    fn new(
-        merged: &MergedGraph,
-        view: &IdentityView,
-        live: &'a HashSet<NodeId>,
-        walking: bool,
-    ) -> Self {
-        if !walking {
-            return WalkNodes {
-                classes: HashMap::new(),
-                live: Cow::Borrowed(live),
-            };
-        }
-        let mut others: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-        for e in merged
-            .cross_edges
-            .iter()
-            .filter(|e| e.category == edge_category::SAME_AS)
-        {
-            for id in [e.from, e.to] {
-                let rep = view.walk_rep(id);
-                if rep != id {
-                    others.entry(rep).or_default().insert(id);
-                }
-            }
-        }
-        let classes = others
-            .into_iter()
-            .map(|(rep, m)| (rep, (view.display(rep), m.len() + 1)))
-            .collect();
-        WalkNodes {
-            classes,
-            live: Cow::Owned(live.iter().map(|&n| view.walk_rep(n)).collect()),
-        }
+/// The node walk node `id` shows: a walk class's representative (an
+/// internal handle, DD.1) shows the class's display member, any other walk
+/// node itself.
+fn show(view: &IdentityView, id: NodeId) -> NodeId {
+    if view.walk_members(id).is_empty() {
+        id
+    } else {
+        view.display(id)
     }
+}
 
-    /// The node a walk node shows.
-    fn show(&self, id: NodeId) -> NodeId {
-        self.classes.get(&id).map_or(id, |c| c.0)
-    }
-
-    /// The class members walk node `id` stands for beyond the one it shows.
-    fn folded(&self, id: NodeId) -> usize {
-        self.classes.get(&id).map_or(0, |c| c.1 - 1)
-    }
+/// The class members walk node `id` stands for beyond the one it shows.
+fn walk_folded(view: &IdentityView, id: NodeId) -> usize {
+    view.walk_members(id).len().saturating_sub(1)
 }
 
 /// Per-node facts the hops need, computed once per node per call: the repo
 /// (the pre-LD.4a `repo_of` map, a later graph overwriting an earlier one),
 /// the qname, and the service key under `ProjectRoots` keying. Hops of a walk
-/// ([`Self::hop`]) show their ends through [`WalkNodes`]; the two-node
+/// ([`Self::hop`]) show their ends through [`show`]; the two-node
 /// fallback's ([`Self::raw_hop`]) are raw nodes.
 struct Sides<'a> {
     loc: &'a Locator<'a>,
@@ -923,7 +890,8 @@ struct Sides<'a> {
     no_labels: BTreeMap<u64, String>,
     service: HashMap<NodeId, Option<String>>,
     view: &'a IdentityView,
-    walk: &'a WalkNodes<'a>,
+    /// The walk's live set ([`walk_live`]).
+    walk_live: &'a HashSet<NodeId>,
 }
 
 impl<'a> Sides<'a> {
@@ -931,7 +899,7 @@ impl<'a> Sides<'a> {
         merged: &'a MergedGraph,
         loc: &'a Locator<'a>,
         view: &'a IdentityView,
-        walk: &'a WalkNodes<'a>,
+        walk_live: &'a HashSet<NodeId>,
     ) -> Self {
         let mut repo_of: HashMap<NodeId, u64> = HashMap::new();
         let mut qname_of: HashMap<NodeId, &'a str> = HashMap::new();
@@ -951,7 +919,7 @@ impl<'a> Sides<'a> {
             no_labels: BTreeMap::new(),
             service: HashMap::new(),
             view,
-            walk,
+            walk_live,
         }
     }
 
@@ -961,12 +929,12 @@ impl<'a> Sides<'a> {
 
     /// The qname walk node `id` shows (the rank key's).
     fn walk_qname(&self, id: NodeId) -> &'a str {
-        self.qname(self.walk.show(id))
+        self.qname(show(self.view, id))
     }
 
     /// [`Self::cross`] of a walk hop, over the shown ends.
     fn walk_cross(&mut self, from: NodeId, to: NodeId) -> (bool, bool) {
-        self.cross(self.walk.show(from), self.walk.show(to))
+        self.cross(show(self.view, from), show(self.view, to))
     }
 
     /// `(cross_service, cross_repo)` for a hop `from -> to`.
@@ -1011,10 +979,10 @@ impl<'a> Sides<'a> {
     }
 
     /// One located hop of a walk: `from` and `to` are walk nodes, shown
-    /// through [`WalkNodes::show`]; `to_live` is the walk's live set.
+    /// through [`show`]; `to_live` is the walk's live set.
     fn hop(&mut self, depth: usize, from: NodeId, to: NodeId, via: EdgeCategoryId) -> TraceHop {
-        let to_live = self.walk.live.contains(&to);
-        let (shown_from, shown_to) = (self.walk.show(from), self.walk.show(to));
+        let to_live = self.walk_live.contains(&to);
+        let (shown_from, shown_to) = (show(self.view, from), show(self.view, to));
         self.located(depth, shown_from, shown_to, to, via, to_live)
     }
 
