@@ -1,0 +1,282 @@
+name: build wheels - glia-cli
+
+# Builds the glia-cli bin wheels (PyPI dist glia-cli, cli/pyproject.toml, maturin
+# bindings = "bin"): glia_cli-<ver>-py3-none-<platform>.whl plus an sdist. The wheel's
+# only payload is the `glia` executable, so `pipx install glia-cli` / `uvx --from glia-cli
+# glia ..` need no Rust toolchain (0.5.4 FE.5, this workflow FE.6). A bin wheel's tag is
+# py3-none-<platform>, so there is no Python version matrix: one wheel per platform, on
+# glia-py's platform matrix (wheels-py.yml).
+#
+# Triggers: `v*` tag pushes (build, install-test, publish); workflow_dispatch (build and
+# install-test only, unless the `publish` input is ticked; unlike wheels-py.yml, so the
+# workflow can be proven on main without uploading); PRs that touch a crate the binary
+# links (never publish).
+#
+# Publishing is PyPI OIDC trusted publishing, NO stored secret, and binds one (project,
+# repository, workflow file) triple, which is why this is its own file: glia-py's
+# publisher (wheels-py.yml) stays untouched. glia-cli does not exist on PyPI before its
+# first upload, so the one-time setup is a PENDING publisher, added by James BEFORE the
+# first tag that publishes it (without it the `release` job fails; wheels-py.yml is
+# unaffected), on https://pypi.org/manage/account/publishing/ :
+#   PyPI project name: glia-cli
+#   Publisher: GitHub Actions
+#   Owner: James-Chahwan   Repository: glia
+#   Workflow: wheels-cli.yml   Environment: (leave blank)
+# Never dispatch with publish=true before that publisher exists.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the built wheels + sdist to PyPI (glia-cli)"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      # Every workspace path package the binary links, checked against
+      # `cargo tree -p glia-cli -e normal --prefix none` (its path packages' top
+      # directories; parsers/** covers parsers/code/* and parsers/build/bazel).
+      # `py` and `toy-domain` are NOT linked, so they stay out.
+      - "cli/**"
+      - "activation/**"
+      - "build-domain/**"
+      - "code-domain/**"
+      - "core/**"
+      - "doc-sources/**"
+      - "embed/**"
+      - "engine/**"
+      - "graph/**"
+      - "parsers/**"
+      - "projection-text/**"
+      - "rules/**"
+      - "snapshots/**"
+      - "stamp/**"
+      - "store/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/check-cli-wheel.sh"
+      - ".github/workflows/wheels-cli.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: cli
+
+# Runner images and actions are pinned (actions by full commit SHA, the version tag
+# in a trailing comment), the same pins as wheels-py.yml: bump them deliberately, in
+# both files together (0.5.3 EG.5, 0.5.4 FE.6). No setup-python in the build jobs: a
+# bin wheel needs no interpreter.
+jobs:
+  linux:
+    name: linux ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # manylinux 2_28 pins the published tag (a local build tags the host's glibc,
+      # manylinux_2_39). The container's C toolchain builds tree-sitter's C, ring and
+      # tokenizers' onig; aarch64 is cross-built in maturin-action's cross image.
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: cli
+          manylinux: "2_28"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-wheels-linux-${{ matrix.target }}
+          path: cli/dist
+
+  macos:
+    name: macos ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # As wheels-py.yml: the Intel (x86_64) wheel is CROSS-COMPILED on the Apple
+          # Silicon runner (Intel runners queue for hours / are being retired), both on
+          # macos-15. The deployment target is pinned so the bin wheels carry glia-py's
+          # tags (macosx_10_12_x86_64, macosx_11_0_arm64) whatever the runner's SDK.
+          - target: x86_64
+            runner: macos-15
+            deployment_target: "10.12"
+          - target: aarch64
+            runner: macos-15
+            deployment_target: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: cli
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-wheels-macos-${{ matrix.target }}
+          path: cli/dist
+
+  windows:
+    name: windows x86_64
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: x86_64
+          args: --release --out dist
+          working-directory: cli
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-wheels-windows-x86_64
+          path: cli/dist
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: cli
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-wheels-sdist
+          path: cli/dist
+
+  # Installs each built wheel on its own platform's runner, the way a user would, and
+  # asks the installed `glia` for a real answer. The macOS x86_64 wheel is cross-built
+  # and not executed here (no Intel runner, as wheels-py.yml's macos comment explains);
+  # the aarch64 Linux wheel runs on GitHub's native arm64 runner (ubuntu-24.04-arm).
+  # Every step echoes `[cli-wheel-ci] <runner> <step> ok`.
+  install-test:
+    name: install-test ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    needs: [linux, macos, windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            artifact: cli-wheels-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            artifact: cli-wheels-linux-aarch64
+          - runner: macos-15
+            artifact: cli-wheels-macos-aarch64
+          - runner: windows-2025-vs2026
+            artifact: cli-wheels-windows-x86_64
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    env:
+      RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      # The checkout supplies tests/go_smoke, the fixture `glia find` answers over.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: wheel
+      - name: wheel
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(wheel/glia_cli-*-py3-none-*.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "expected one glia_cli wheel, found: $(ls wheel)"; exit 1; }
+          name=$(basename "${wheels[0]}")
+          ver=$(echo "$name" | cut -d- -f2)
+          echo "WHEEL=$PWD/${wheels[0]}" >> "$GITHUB_ENV"
+          echo "WHEEL_VER=$ver" >> "$GITHUB_ENV"
+          echo "[cli-wheel-ci] $RUNNER_LABEL wheel ok ($name)"
+      - name: install
+        run: |
+          set -euo pipefail
+          python -m venv v
+          if [ -d v/Scripts ]; then bin=v/Scripts; else bin=v/bin; fi
+          "$bin/python" -m pip install -q "$WHEEL"
+          [ -e "$bin/glia" ] || [ -e "$bin/glia.exe" ] || { echo "no glia executable in $bin"; exit 1; }
+          echo "GLIA_BIN=$PWD/$bin/glia" >> "$GITHUB_ENV"
+          echo "VENV_PY=$PWD/$bin/python" >> "$GITHUB_ENV"
+          echo "[cli-wheel-ci] $RUNNER_LABEL install ok"
+      - name: version
+        run: |
+          set -euo pipefail
+          line=$("$GLIA_BIN" --version)
+          case "$line" in
+            "glia $WHEEL_VER"*) ;;
+            *) echo "glia --version printed '$line', expected 'glia $WHEEL_VER ..'"; exit 1 ;;
+          esac
+          echo "[cli-wheel-ci] $RUNNER_LABEL version ok ($line)"
+      - name: find
+        env:
+          GLIA_NO_PERSIST: "1"
+        run: |
+          set -euo pipefail
+          # A copy, so the answer writes nothing into the checkout.
+          cp -r tests/go_smoke "$RUNNER_TEMP/go_smoke"
+          "$GLIA_BIN" find "$RUNNER_TEMP/go_smoke" HashPassword --json > "$RUNNER_TEMP/find.json"
+          grep -q HashPassword "$RUNNER_TEMP/find.json" || { echo "glia find printed no HashPassword"; cat "$RUNNER_TEMP/find.json"; exit 1; }
+          "$VENV_PY" - "$RUNNER_TEMP/find.json" <<'PY'
+          import json, sys
+          rows = json.load(open(sys.argv[1])).get("results") or []
+          hits = [r["qname"] for r in rows if str(r.get("qname", "")).endswith("HashPassword")]
+          if not hits:
+              sys.exit("no row whose qname ends HashPassword")
+          print(f"rows={len(rows)} hit={hits[0]}")
+          PY
+          echo "[cli-wheel-ci] $RUNNER_LABEL find ok"
+      - name: pipx
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          set -euo pipefail
+          line=$(pipx run --spec "$WHEEL" glia --version)
+          case "$line" in
+            "glia $WHEEL_VER"*) ;;
+            *) echo "pipx run printed '$line', expected 'glia $WHEEL_VER ..'"; exit 1 ;;
+          esac
+          echo "[cli-wheel-ci] $RUNNER_LABEL pipx ok ($line)"
+
+  # Publishes the glia-cli wheels + sdist to PyPI.
+  #
+  # Triggers:
+  #   - on a `v*` tag push → normal release of the version in the workspace Cargo.toml
+  #   - on workflow_dispatch with publish=true → backfill missing-platform wheels for
+  #     the current version (skip-existing leaves already-uploaded files untouched)
+  # A PR run, or a dispatch with publish=false, skips this job.
+  #
+  # Artifacts are prefixed `cli-wheels-`, so this never picks up glia-py's `wheels-*`.
+  # After the first upload the publisher is managed at
+  # https://pypi.org/manage/project/glia-cli/settings/publishing/
+  release:
+    name: publish
+    runs-on: ubuntu-24.04
+    needs: [linux, macos, windows, sdist, install-test]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    permissions:
+      id-token: write    # required for PyPI OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3 (release/v1)
+        with:
+          packages-dir: dist
+          skip-existing: true
