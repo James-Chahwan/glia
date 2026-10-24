@@ -346,7 +346,7 @@ fn model_relations(
         .enumerate()
         .map(|(i, s)| BuiltinRow {
             values: vec![int(i), Value::Node(s.edge.from), Value::Node(s.edge.to)],
-            tier: Tier::parse(s.tier).unwrap_or(Tier::Derived),
+            tier: s.tier,
         })
         .collect();
     use ColType::{Int, Node, Str};

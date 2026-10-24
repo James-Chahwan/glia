@@ -327,7 +327,7 @@ use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::{ModuleImports, module_import_graph};
 use crate::external::declared::{declared_constraints, declared_misses};
 use crate::profile::CODE_PROFILE;
-use crate::rules::facts::{edge_tier_of, located_edge, tier_name};
+use crate::rules::facts::{edge_tier_of, located_edge};
 use crate::rules::{CodeFacts, evaluate_rule, reflexion};
 use crate::why::tier_of;
 
@@ -343,7 +343,7 @@ pub const RULE: &str = "rule";
 pub const FORBID_PATH: &str = "forbid_path";
 /// The `min_tier` of a rule that sets none, and of a reflexion divergence:
 /// a [`FACT`] or [`DERIVED`] violation blocks (0.5.2 Q2).
-pub const DEFAULT_MIN_TIER: &str = DERIVED;
+pub const DEFAULT_MIN_TIER: &str = Tier::Derived.as_str();
 /// The `output` a rule invariant's program defines: its violation rows.
 const RULE_OUTPUT: &str = "violation";
 /// The only `ConstraintRule::source` whose `rule` is evaluated: rule text is
@@ -353,13 +353,13 @@ const RULE_SOURCE: &str = "overlay";
 /// convention that is broken is a DIVERGENCE, LE.7's business).
 pub const VIOLATION: &str = "VIOLATION";
 /// A tier (module doc "Tiers"): read at a site the source spells out.
-pub const FACT: &str = "fact";
+pub const FACT: &str = Tier::Fact.as_str();
 /// A tier: paired or inferred by the build (a resolver, a pass, a graph
 /// binding below Strong confidence), or a computed cycle.
-pub const DERIVED: &str = "derived";
+pub const DERIVED: &str = Tier::Derived.as_str();
 /// A tier: declared by a person or a model, co-change in git, or a name-only
 /// guess.
-pub const HEURISTIC: &str = "heuristic";
+pub const HEURISTIC: &str = Tier::Heuristic.as_str();
 /// Evidence rows kept per [`Violation`]; `count` keeps the full number.
 pub const MAX_EVIDENCE: usize = 100;
 /// [`Violation::rule_kind`] of a reflexion-model divergence, and the
@@ -966,11 +966,10 @@ fn is_transitive(rule: &ConstraintRule) -> bool {
 /// [`DEFAULT_MIN_TIER`]. Any other spelling, possible only in a hand-edited
 /// cell, reads as the default.
 pub(crate) fn min_tier_of(rule: &ConstraintRule) -> &'static str {
-    match rule.min_tier.as_deref() {
-        Some(FACT) => FACT,
-        Some(DERIVED) => DERIVED,
-        _ => DEFAULT_MIN_TIER,
-    }
+    rule.min_tier
+        .as_deref()
+        .and_then(|s| Tier::parse(s).filter(|t| t.as_str() == s && *t != Tier::Heuristic))
+        .map_or(DEFAULT_MIN_TIER, Tier::as_str)
 }
 
 /// Whether a violation of `tier` fails CI under `min_tier`: the tier is at
@@ -982,12 +981,9 @@ pub(crate) fn is_blocking(tier: &str, min_tier: &str) -> bool {
 
 /// Sort rank of a tier, strongest first; an unknown spelling sorts last.
 fn tier_rank(t: &str) -> u8 {
-    match t {
-        FACT => 0,
-        DERIVED => 1,
-        HEURISTIC => 2,
-        _ => 3,
-    }
+    Tier::parse(t)
+        .filter(|tier| tier.as_str() == t)
+        .map_or(Tier::ALL.len() as u8, Tier::level)
 }
 
 enum Outcome {
@@ -1150,7 +1146,7 @@ impl<'a> Ctx<'a> {
         category: EdgeCategoryId,
         to: NodeId,
         ev: Option<&Evidence>,
-        tier: (&'static str, Option<String>),
+        tier: (Tier, Option<String>),
     ) -> ViolationEdge {
         located_edge(self.facts.locator(), from, category, to, ev, tier)
     }
@@ -1341,7 +1337,7 @@ trait PathGraph: GraphSource {
     fn level(&self, e: &Edge) -> u8;
     /// Where the edge is asserted and its `why` tier and note, for its
     /// witness row.
-    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>));
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (Tier, Option<String>));
 }
 
 /// The node graph: each edge tiered as the rules layer tiers it (DB.2a,
@@ -1351,7 +1347,7 @@ impl PathGraph for MergedGraph {
         edge_tier_of(e).level()
     }
 
-    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>)) {
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (Tier, Option<String>)) {
         let ev = Evidence::of(e);
         let tier = tier_of(ev.as_ref(), e);
         (ev, tier)
@@ -1363,23 +1359,13 @@ impl PathGraph for MergedGraph {
 /// "Tiers").
 impl PathGraph for ModuleImports {
     fn level(&self, e: &Edge) -> u8 {
-        word_level(tier_of(self.evidence(e.from, e.to), e).0)
+        tier_of(self.evidence(e.from, e.to), e).0.level()
     }
 
-    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>)) {
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (Tier, Option<String>)) {
         let ev = self.evidence(e.from, e.to);
         let tier = tier_of(ev, e);
         (ev.cloned(), tier)
-    }
-}
-
-/// A `why` tier word as a level: `why`'s own fallback (DERIVED) for any other
-/// word, as `rules::facts` reads it.
-fn word_level(word: &str) -> u8 {
-    match word {
-        FACT => Tier::Fact.level(),
-        HEURISTIC => Tier::Heuristic.level(),
-        _ => Tier::Derived.level(),
     }
 }
 
@@ -1520,7 +1506,9 @@ fn forbid_path(
     let mut out: Vec<(u64, Violation)> = Vec::with_capacity(best.len());
     for h in best.into_values() {
         ctx.path_hits[h.chain as usize] += 1;
-        let tier = tier_name(Tier::from_level(h.level).unwrap_or(Tier::Heuristic));
+        let tier = Tier::from_level(h.level)
+            .unwrap_or(Tier::Heuristic)
+            .as_str();
         let count = h.hops.len();
         let mut v = violation(id_decl(rule), FORBID_PATH, tier, count, h.hops);
         let at = ctx.facts.locator().locate(h.node);
@@ -1727,7 +1715,7 @@ impl GraphSource for Sub {
 
 /// Where a hop of a sub-graph edge was asserted, and its `why` tier and note,
 /// computed from the edge the hop stands for when it is recorded.
-type Sites = BTreeMap<(u64, u32, u64), (Option<Evidence>, &'static str, Option<String>)>;
+type Sites = BTreeMap<(u64, u32, u64), (Option<Evidence>, Tier, Option<String>)>;
 
 fn no_cycle(
     ctx: &mut Ctx<'_>,
@@ -1810,7 +1798,10 @@ fn no_cycle(
                 // fallback only keeps a missing one honest.
                 let (ev, tier) = match sites.get(&(f.0, c.0, t.0)) {
                     Some((ev, tier, note)) => (ev.as_ref(), (*tier, note.clone())),
-                    None => (None, (DERIVED, Some("no evidence recorded".to_string()))),
+                    None => (
+                        None,
+                        (Tier::Derived, Some("no evidence recorded".to_string())),
+                    ),
                 };
                 ctx.row(f, c, t, ev, tier)
             })
@@ -2062,7 +2053,7 @@ impl ModelEdb {
 pub(crate) struct DepEdge<'m> {
     pub(crate) edge: &'m Edge,
     pub(crate) ev: Option<Evidence>,
-    pub(crate) tier: &'static str,
+    pub(crate) tier: Tier,
     pub(crate) note: Option<String>,
 }
 
@@ -2139,8 +2130,8 @@ fn render_model(ctx: &Ctx<'_>, facts: ReflexionFacts<'_>) -> (Reflexion, Vec<Vio
         edges
             .iter()
             .map(|d| d.tier)
-            .min_by_key(|t| tier_rank(t))
-            .unwrap_or(FACT)
+            .min()
+            .map_or(FACT, Tier::as_str)
     };
     let matrix: Vec<MatrixCell> = facts
         .dep
@@ -2465,10 +2456,6 @@ rule = \"violation(r) :- unhandled_route(r).\"
         assert!(hit(0, 5, Chain::Symbols).rank() < hit(1, 1, Chain::Imports).rank());
         assert!(hit(1, 1, Chain::Symbols).rank() < hit(1, 2, Chain::Imports).rank());
         assert!(hit(1, 2, Chain::Imports).rank() < hit(1, 2, Chain::Symbols).rank());
-        assert_eq!(word_level(FACT), 0);
-        assert_eq!(word_level(DERIVED), 1);
-        assert_eq!(word_level(HEURISTIC), 2);
-        assert_eq!(word_level("other"), 1, "why's own fallback");
     }
 
     /// A barred view drops exactly the edges that leave a stop node (a node

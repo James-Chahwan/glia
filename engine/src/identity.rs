@@ -22,7 +22,7 @@
 //! edge's tier: emitter `resolver:identity` or `resolver:models`
 //! (`same_as::is_identity_emitter`) with a rule the code domain's table declares
 //! (`CODE_PROFILE.tables.identity_rules`, DD.3, the base rule read through
-//! `same_as::split_evidence_rule`) takes that rule's [`IdentityTier`]; any
+//! `same_as::split_evidence_rule`) takes that rule's [`Tier`]; any
 //! other edge (an overlay `[[edge]]` SAME_AS, a rule the table does not
 //! declare) takes `why::tier_of`'s tier, heuristic for overlay and history
 //! and names no rule. Three [`Classes`] (DD.1):
@@ -82,7 +82,7 @@ use std::collections::BTreeMap;
 
 use glia_activation::algo::GraphSource;
 use glia_activation::algo::classes::{Classes, Quotient};
-use glia_activation::profile::IdentityTier;
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{edge_category, same_as};
 use glia_core::{Edge, NodeId};
@@ -255,7 +255,7 @@ pub struct IdentityReport {
 struct Reading {
     from: NodeId,
     to: NodeId,
-    tier: IdentityTier,
+    tier: Tier,
     /// Index into the table's `identity_rules`, for an identity-resolver edge.
     rule: Option<usize>,
     walk: bool,
@@ -274,7 +274,7 @@ struct Member {
 
 /// One class's reading.
 struct ClassInfo {
-    tier: IdentityTier,
+    tier: Tier,
     /// Table indices, ascending, each once.
     rules: Vec<usize>,
     diverged: bool,
@@ -417,7 +417,7 @@ impl IdentityView {
                     .min_by(|&a, &b| display_order(&self.members[a], &self.members[b]))
                     .unwrap_or(0);
                 ClassInfo {
-                    tier: IdentityTier::Fact,
+                    tier: Tier::Fact,
                     rules: Vec::new(),
                     diverged: false,
                     sorted,
@@ -609,7 +609,7 @@ impl IdentityView {
 /// The report order: (tier, rules in table order, key), then the members.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct ClassKey {
-    tier: IdentityTier,
+    tier: Tier,
     rules: Vec<usize>,
     key: String,
     members: Vec<(String, String)>,
@@ -634,7 +634,7 @@ fn read_edge(e: &Edge) -> Reading {
             Some(i),
             rules[i].walk && rules[i].tier.collapses(),
         ),
-        None => (tier_named(why::tier_of(ev.as_ref(), e).0), None, false),
+        None => (why::tier_of(ev.as_ref(), e).0, None, false),
     };
     Reading {
         from: e.from,
@@ -643,15 +643,6 @@ fn read_edge(e: &Edge) -> Reading {
         rule,
         walk,
         diverged,
-    }
-}
-
-/// `why`'s tier string as an [`IdentityTier`].
-fn tier_named(tier: &str) -> IdentityTier {
-    match tier {
-        why::FACT => IdentityTier::Fact,
-        why::DERIVED => IdentityTier::Derived,
-        _ => IdentityTier::Heuristic,
     }
 }
 
@@ -767,13 +758,13 @@ pub fn identity_classes(merged: &MergedGraph, q: &IdentityQuery) -> Result<Ident
         .collect();
 
     let table = CODE_PROFILE.tables.identity_rules;
-    let count = |t: IdentityTier| kept.iter().filter(|(k, _)| k.tier == t).count();
+    let count = |t: Tier| kept.iter().filter(|(k, _)| k.tier == t).count();
     let counts = IdentityCounts {
         classes: kept.len(),
         members: kept.iter().map(|(_, c)| c.members.len()).sum(),
-        fact: count(IdentityTier::Fact),
-        derived: count(IdentityTier::Derived),
-        heuristic: count(IdentityTier::Heuristic),
+        fact: count(Tier::Fact),
+        derived: count(Tier::Derived),
+        heuristic: count(Tier::Heuristic),
         diverged: kept.iter().filter(|(_, c)| c.diverged).count(),
         by_rule: table
             .iter()
@@ -838,15 +829,9 @@ pub fn identity_classes(merged: &MergedGraph, q: &IdentityQuery) -> Result<Ident
     })
 }
 
-fn parse_tier(s: &str) -> Result<IdentityTier, String> {
-    [
-        IdentityTier::Fact,
-        IdentityTier::Derived,
-        IdentityTier::Heuristic,
-    ]
-    .into_iter()
-    .find(|t| t.as_str() == s.trim().to_ascii_lowercase())
-    .ok_or_else(|| format!("unknown identity tier `{s}`: expected fact, derived or heuristic"))
+fn parse_tier(s: &str) -> Result<Tier, String> {
+    Tier::parse(s.trim())
+        .ok_or_else(|| format!("unknown identity tier `{s}`: expected fact, derived or heuristic"))
 }
 
 /// The table index of rule `s`.

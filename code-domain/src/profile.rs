@@ -77,8 +77,8 @@
 //! row.
 
 use glia_activation::profile::{
-    ActivationPreset, DomainTables, EffectSink, EntryRule, IdentityRule, IdentityTier, NamedEntry,
-    Registries,
+    ActivationPreset, DomainTables, EffectSink, EntryRule, IdentityRule, NamedEntry, Registries,
+    Tier,
 };
 use glia_core::{Cell, NodeKindId};
 
@@ -383,7 +383,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::PACKAGE_DEP],
             to: &[nk::PACKAGE_DEP],
             key: "package:<eco>:<name>, ecosystem-normalised",
-            tier: IdentityTier::Fact,
+            tier: Tier::Fact,
             walk: false,
         },
         // A PROJECT has no edges, so contracting it with the dependencies
@@ -393,7 +393,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::PACKAGE_DEP],
             to: &[nk::PROJECT],
             key: "dependency name == manifest label (per ecosystem)",
-            tier: IdentityTier::Fact,
+            tier: Tier::Fact,
             walk: true,
         },
         IdentityRule {
@@ -401,7 +401,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::MESSAGE_TYPE],
             to: &[nk::MESSAGE_TYPE],
             key: "message:<flavor>:<fq name>",
-            tier: IdentityTier::Fact,
+            tier: Tier::Fact,
             walk: true,
         },
         // A contract op is paired from its ORIGIN by `same_as::contract_op_key`.
@@ -410,7 +410,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::DOC_SECTION],
             to: &[nk::DOC_SECTION],
             key: "METHOD + normalised path, or action + channel, under one project",
-            tier: IdentityTier::Derived,
+            tier: Tier::Derived,
             walk: true,
         },
         IdentityRule {
@@ -418,7 +418,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::DOC_SECTION],
             to: &[nk::DOC_SECTION],
             key: "the one ROUTE the op's path matches",
-            tier: IdentityTier::Derived,
+            tier: Tier::Derived,
             walk: true,
         },
         IdentityRule {
@@ -426,7 +426,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: SCIP_DEF_KINDS,
             to: SCIP_DEF_KINDS,
             key: "SCIP scheme manager package descriptor",
-            tier: IdentityTier::Fact,
+            tier: Tier::Fact,
             walk: true,
         },
         // Vendored copies are guesses: they never collapse and never walk.
@@ -435,7 +435,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: VENDORED_KINDS,
             to: VENDORED_KINDS,
             key: "path-suffix files, name chain, byte-identical body",
-            tier: IdentityTier::Heuristic,
+            tier: Tier::Heuristic,
             walk: false,
         },
         IdentityRule {
@@ -443,7 +443,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: VENDORED_KINDS,
             to: VENDORED_KINDS,
             key: "path-suffix files under a confirmed vendoring offset, body differs",
-            tier: IdentityTier::Heuristic,
+            tier: Tier::Heuristic,
             walk: false,
         },
         // DT.1h: written by the models resolver, not the identity one. A
@@ -456,7 +456,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::INTERFACE, nk::CLASS],
             to: &[nk::STRUCT],
             key: "one HTTP exchange's client and server models, JSON field names confirm",
-            tier: IdentityTier::Derived,
+            tier: Tier::Derived,
             walk: true,
         },
         // DT.1k: written by the models resolver. A GraphQL client call's TS
@@ -470,7 +470,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::INTERFACE, nk::CLASS, nk::STRUCT],
             to: &[nk::MESSAGE_TYPE],
             key: "a GraphQL result model or generated model and the schema type it returns",
-            tier: IdentityTier::Derived,
+            tier: Tier::Derived,
             walk: true,
         },
     ],
@@ -1702,12 +1702,12 @@ mod tests {
     /// vendored copies never walk, vendored copies are HEURISTIC.
     #[test]
     fn identity_rules_cover_every_rule() {
-        use IdentityTier::{Derived, Fact, Heuristic};
+        use Tier::{Derived, Fact, Heuristic};
         assert_eq!(CODE_TABLES.validate(), Ok(()));
         let rules = CODE_TABLES.identity_rules;
         let names: Vec<&str> = rules.iter().map(|r| r.name).collect();
         assert_eq!(names, same_as::ALL_RULES);
-        let table: Vec<(&str, IdentityTier, bool)> =
+        let table: Vec<(&str, Tier, bool)> =
             rules.iter().map(|r| (r.name, r.tier, r.walk)).collect();
         assert_eq!(
             table,

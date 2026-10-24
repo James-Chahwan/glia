@@ -56,7 +56,7 @@ use glia_rules::source::{Builtin, BuiltinRow, FactSource};
 use glia_rules::value::{Tier, Value, ValueRef};
 
 use crate::answers::{Locator, in_scope, project_roots, resolve_scope};
-use crate::check::{self, ViolationEdge};
+use crate::check::ViolationEdge;
 use crate::profile::CODE_PROFILE;
 use crate::why;
 
@@ -221,14 +221,14 @@ impl<'a> CodeFacts<'a> {
     /// and note `why` gives the edge.
     pub fn locate_edge(&self, e: &Edge) -> ViolationEdge {
         let ev = Evidence::of(e);
-        let (tier, note) = tier_and_note(ev.as_ref(), e);
+        let (tier, note) = why::tier_of(ev.as_ref(), e);
         located_edge(
             self.locator(),
             e.from,
             e.category,
             e.to,
             ev.as_ref(),
-            (tier_name(tier), note),
+            (tier, note),
         )
     }
 
@@ -503,33 +503,9 @@ impl FactSource for CodeFacts<'_> {
 // Tiers and located edges
 // ============================================================================
 
-/// The word `why` and `check` print for `t`.
-pub(crate) fn tier_name(t: Tier) -> &'static str {
-    match t {
-        Tier::Fact => check::FACT,
-        Tier::Derived => check::DERIVED,
-        Tier::Heuristic => check::HEURISTIC,
-    }
-}
-
-/// `why`'s word as a [`Tier`]; anything else is DERIVED, `why`'s own fallback.
-fn tier_of_name(word: &str) -> Tier {
-    match word {
-        why::FACT => Tier::Fact,
-        why::HEURISTIC => Tier::Heuristic,
-        _ => Tier::Derived,
-    }
-}
-
-/// `why::tier_of` over `e` and its evidence, as a [`Tier`] and the note.
-fn tier_and_note(ev: Option<&Evidence>, e: &Edge) -> (Tier, Option<String>) {
-    let (word, note) = why::tier_of(ev, e);
-    (tier_of_name(word), note)
-}
-
 /// The tier `why` gives `e`: one rule for `why`, `check` and the rules layer.
 pub(crate) fn edge_tier_of(e: &Edge) -> Tier {
-    tier_and_note(Evidence::of(e).as_ref(), e).0
+    why::edge_tier(e).0
 }
 
 /// One located evidence row: at the edge's EVIDENCE site (its 0-based line + 1)
@@ -541,7 +517,7 @@ pub(crate) fn located_edge(
     category: EdgeCategoryId,
     to: NodeId,
     ev: Option<&Evidence>,
-    (tier, note): (&'static str, Option<String>),
+    (tier, note): (Tier, Option<String>),
 ) -> ViolationEdge {
     let f = loc.locate(from);
     let site = ev.and_then(|e| {
@@ -557,7 +533,7 @@ pub(crate) fn located_edge(
         file,
         line,
         emitter: ev.map(|e| e.emitter.clone()),
-        tier,
+        tier: tier.as_str(),
         note,
     }
 }
@@ -716,14 +692,15 @@ impl Builtin for Under {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check;
 
     #[test]
-    fn tier_words_round_trip_and_match_the_rules_crate() {
-        for t in Tier::ALL {
-            assert_eq!(tier_of_name(tier_name(t)), t);
-            assert_eq!(tier_name(t), t.name(), "check's word is glia_rules' word");
-        }
-        assert_eq!(tier_of_name("no such tier"), Tier::Derived);
+    fn check_words_are_the_tier_words() {
+        // FD.7a: check's word consts are `Tier::as_str`, one source of truth.
+        assert_eq!(
+            [check::FACT, check::DERIVED, check::HEURISTIC],
+            Tier::ALL.map(Tier::as_str)
+        );
     }
 
     #[test]

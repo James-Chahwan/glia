@@ -430,7 +430,7 @@ fn explain_line(
     format!(
         "[rules] explain pred={pred} tier={} height={height} leaves={leaves} \
          candidates={candidates} truncated={truncated}",
-        tier.name()
+        tier.as_str()
     )
 }
 
@@ -961,7 +961,7 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 "no instantiation of the rule at {}:{} below height {height} at level {}",
                 at.source,
                 at.line,
-                level.name()
+                level.as_str()
             );
             return Err(self.internal(rule.head, message));
         };
@@ -1826,7 +1826,7 @@ r(z) :- r(y), edge(y, z, "CALLS").
                     "{}->{} {cat} {}",
                     src.render_node(h.from),
                     src.render_node(h.to),
-                    h.tier.name()
+                    h.tier.as_str()
                 )
             })
             .collect()
@@ -1838,7 +1838,7 @@ r(z) :- r(y), edge(y, z, "CALLS").
         let r = |id: &NodeId| ev.src.render_node(*id);
         let hop = |h: &EdgeHop| {
             let cat = reg.category_name(h.category).unwrap_or("?");
-            format!("{}->{} {cat} {}", r(&h.from), r(&h.to), h.tier.name())
+            format!("{}->{} {cat} {}", r(&h.from), r(&h.to), h.tier.as_str())
         };
         let mut out = Vec::new();
         let mut stack = vec![(w, 0usize)];
@@ -1850,7 +1850,7 @@ r(z) :- r(y), edge(y, z, "CALLS").
                 "  ".repeat(depth),
                 n.predicate,
                 vals.join(", "),
-                n.tier.name()
+                n.tier.as_str()
             );
             match &n.leaf {
                 Some(Leaf::Edge(h)) => line.push_str(&format!(" edge {}", hop(h))),

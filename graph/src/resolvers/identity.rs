@@ -113,7 +113,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::classes::Classes;
-use glia_activation::profile::{IdentityRule, IdentityTier};
+use glia_activation::profile::{IdentityRule, Tier};
 use glia_code_domain::evidence;
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::project_roots::LABEL_MANIFEST;
@@ -915,9 +915,9 @@ impl Stars<'_, '_> {
         classes: impl Iterator<Item = &'m Members>,
     ) {
         let confidence = match rule.tier {
-            IdentityTier::Fact => Confidence::Strong,
-            IdentityTier::Derived => Confidence::Medium,
-            IdentityTier::Heuristic => Confidence::Weak,
+            Tier::Fact => Confidence::Strong,
+            Tier::Derived => Confidence::Medium,
+            Tier::Heuristic => Confidence::Weak,
         };
         let cands = self.cands;
         let mut emitted = 0usize;

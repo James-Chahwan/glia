@@ -267,7 +267,7 @@ fn edge_tier_is_why() {
         let key = (facts.render_node(e.from), facts.render_node(e.to), cat);
         ours.entry(key.clone())
             .or_default()
-            .push(facts.edge_tier(i, e).name());
+            .push(facts.edge_tier(i, e).as_str());
         let row = facts.locate_edge(e);
         assert_eq!(
             (row.from_qname.as_str(), row.to_qname.as_str(), row.category),

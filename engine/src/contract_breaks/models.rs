@@ -954,7 +954,7 @@ impl<'m> EdgeIndex<'m> {
                 let ev = Evidence::of(e);
                 let keep =
                     rule.is_none_or(|r| ev.as_ref().and_then(|v| v.rule.as_deref()) == Some(r));
-                keep.then(|| tier_of(ev.as_ref(), e).0)
+                keep.then(|| tier_of(ev.as_ref(), e).0.as_str())
             })
             .min_by_key(|t| tier_rank(t))
             .unwrap_or(check::DERIVED)

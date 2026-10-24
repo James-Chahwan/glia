@@ -80,7 +80,7 @@
 use std::collections::{HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
-use glia_activation::profile::IdentityTier;
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{cell_type, edge_category, same_as};
 use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
@@ -95,10 +95,6 @@ use crate::profile::CODE_PROFILE;
 pub const MAX_ENDPOINTS: usize = 8;
 /// Longest witness path, in carry hops.
 pub const MAX_PATH_HOPS: usize = 6;
-
-pub(crate) const FACT: &str = "fact";
-pub(crate) const DERIVED: &str = "derived";
-pub(crate) const HEURISTIC: &str = "heuristic";
 
 /// `(emitter, rule)` pairs that bind by a name alone (LC.3d's handoff): the
 /// only candidate with that name, not a binding the source spells out.
@@ -272,9 +268,9 @@ pub fn why_edge(
 
     let (mut fact, mut derived, mut heuristic) = (0usize, 0usize, 0usize);
     for r in edges.iter().chain(&path) {
-        match r.tier {
-            FACT => fact += 1,
-            HEURISTIC => heuristic += 1,
+        match Tier::parse(r.tier) {
+            Some(Tier::Fact) => fact += 1,
+            Some(Tier::Heuristic) => heuristic += 1,
             _ => derived += 1,
         }
     }
@@ -484,7 +480,7 @@ fn explain_edge(
         to_qname: qname(e.to),
         category: edge_category::name(e.category),
         confidence: confidence_name(e.confidence),
-        tier,
+        tier: tier.as_str(),
         emitter: ev.as_ref().map(|ev| ev.emitter.clone()),
         rule: ev.as_ref().and_then(|ev| ev.rule.clone()),
         basis: ev.as_ref().map(|ev| basis_name(ev.basis)),
@@ -497,17 +493,13 @@ fn explain_edge(
 /// `(tier, note)` of an identity or models resolver edge, from its rule's
 /// `identity_rules` row (module doc); `None` for every other emitter and for
 /// a rule the table does not declare, which fall through to the stage tier.
-fn identity_tier(ev: &Evidence) -> Option<(&'static str, Option<String>)> {
+fn identity_tier(ev: &Evidence) -> Option<(Tier, Option<String>)> {
     if !same_as::is_identity_emitter(&ev.emitter) {
         return None;
     }
     let (base, diverged) = same_as::split_evidence_rule(ev.rule.as_deref()?);
     let rule = CODE_PROFILE.tables.identity_rule(base)?;
-    let tier = match rule.tier {
-        IdentityTier::Fact => FACT,
-        IdentityTier::Derived => DERIVED,
-        IdentityTier::Heuristic => HEURISTIC,
-    };
+    let tier = rule.tier;
     let note = if diverged {
         format!("identity class ({base}, diverged)")
     } else {
@@ -518,66 +510,72 @@ fn identity_tier(ev: &Evidence) -> Option<(&'static str, Option<String>)> {
 
 /// The plain tier of an emitter stage; `None` for a stage outside the
 /// documented vocabulary.
-fn stage_tier(stage: &str) -> Option<&'static str> {
+fn stage_tier(stage: &str) -> Option<Tier> {
     match stage {
         // `scip` (CE.1d): the target is bound by a type-aware indexer and the
         // call / non-call split is read at the site.
-        "parser" | "extractor" | "docs" | "graph" | "scip" => Some(FACT),
-        "resolver" | "pass" => Some(DERIVED),
-        "overlay" | "history" => Some(HEURISTIC),
+        "parser" | "extractor" | "docs" | "graph" | "scip" => Some(Tier::Fact),
+        "resolver" | "pass" => Some(Tier::Derived),
+        "overlay" | "history" => Some(Tier::Heuristic),
         _ => None,
     }
 }
 
-/// `(tier, note)` for one edge: the tier word (`fact` / `derived` /
+/// `(tier, note)` for one edge: the [`Tier`] (printed `fact` / `derived` /
 /// `heuristic`) and its note, read from the edge's own EVIDENCE cell. It is
 /// the one reading `glia why`, `check` and `glia query` share (through
 /// `rules::facts`), exposed so the precision audit
 /// (`engine/examples/edge_audit.rs`, FD.2) samples edges by the same tier an
 /// answer prints.
-pub fn edge_tier(e: &Edge) -> (&'static str, Option<String>) {
+pub fn edge_tier(e: &Edge) -> (Tier, Option<String>) {
     tier_of(Evidence::of(e).as_ref(), e)
 }
 
 /// `(tier, note)` for an edge's evidence (module doc). `e` is the edge the
 /// evidence came from: its confidence tiers an inferred `graph` binding and
 /// its ORIGIN cell names who declared an overlay edge.
-pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<String>) {
+pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (Tier, Option<String>) {
     let Some(ev) = ev else {
-        return (DERIVED, Some("no evidence recorded".to_string()));
+        return (Tier::Derived, Some("no evidence recorded".to_string()));
     };
     if let Some(identity) = identity_tier(ev) {
         return identity;
     }
     let stage = ev.emitter.split(':').next().unwrap_or("");
     let Some(tier) = stage_tier(stage) else {
-        return (DERIVED, Some(format!("unknown emitter stage `{stage}`")));
+        return (
+            Tier::Derived,
+            Some(format!("unknown emitter stage `{stage}`")),
+        );
     };
     let rule = ev.rule.as_deref();
-    if tier == FACT
+    if tier == Tier::Fact
         && let Some(rule) = rule
         && NAME_ONLY_RULES
             .iter()
             .any(|&(em, r)| em == ev.emitter && r == rule)
     {
-        return (HEURISTIC, Some(format!("name-only binding ({rule})")));
+        return (Tier::Heuristic, Some(format!("name-only binding ({rule})")));
     }
-    if tier == DERIVED
+    if tier == Tier::Derived
         && let Some(rule) = rule
         && HEURISTIC_PAIRING_RULES
             .iter()
             .any(|&(em, r)| em == ev.emitter && r == rule)
     {
-        return (HEURISTIC, Some(format!("name-matched contract ({rule})")));
+        return (
+            Tier::Heuristic,
+            Some(format!("name-matched contract ({rule})")),
+        );
     }
-    if tier == FACT && ev.basis == Basis::None {
-        return (DERIVED, Some("no location recorded".to_string()));
+    if tier == Tier::Fact && ev.basis == Basis::None {
+        return (Tier::Derived, Some("no location recorded".to_string()));
     }
     // Only the graph stage infers: parser / extractor / docs edges are read
     // at a site the source spells out, whatever confidence they carry.
-    if tier == FACT && stage == "graph" && e.confidence != Confidence::Strong {
+    if tier == Tier::Fact && stage == "graph" && e.confidence != Confidence::Strong {
         return (
-            DERIVED,
+            Tier::Derived,
             Some(format!(
                 "inferred binding ({}, {} confidence)",
                 rule.unwrap_or("-"),
@@ -696,7 +694,7 @@ mod tests {
     fn name_only_rules_belong_to_fact_stages() {
         for (emitter, _) in NAME_ONLY_RULES {
             let stage = emitter.split(':').next().unwrap_or("");
-            assert_eq!(stage_tier(stage), Some(FACT), "{emitter}");
+            assert_eq!(stage_tier(stage), Some(Tier::Fact), "{emitter}");
         }
     }
 
@@ -704,7 +702,7 @@ mod tests {
     fn heuristic_pairing_rules_belong_to_derived_stages() {
         for (emitter, _) in HEURISTIC_PAIRING_RULES {
             let stage = emitter.split(':').next().unwrap_or("");
-            assert_eq!(stage_tier(stage), Some(DERIVED), "{emitter}");
+            assert_eq!(stage_tier(stage), Some(Tier::Derived), "{emitter}");
         }
     }
 
@@ -723,13 +721,13 @@ mod tests {
             let bare = Evidence::emitter("resolver:evm").rule(rule);
             assert_eq!(
                 tier_of(Some(&bare), &edge),
-                (HEURISTIC, note.clone()),
+                (Tier::Heuristic, note.clone()),
                 "{rule}"
             );
             let placed = bare.at("web/src/pay.ts", 4);
             assert_eq!(
                 tier_of(Some(&placed), &edge),
-                (HEURISTIC, note),
+                (Tier::Heuristic, note),
                 "{rule} located"
             );
         }
@@ -740,7 +738,7 @@ mod tests {
             Confidence::Weak,
         );
         let ev = Evidence::emitter("resolver:evm").rule("name_hint");
-        assert_eq!(tier_of(Some(&ev), &flows).0, HEURISTIC);
+        assert_eq!(tier_of(Some(&ev), &flows).0, Tier::Heuristic);
     }
 
     /// DT.10b: a contract named at the site or the one covering an ABI stays
@@ -755,14 +753,14 @@ mod tests {
         );
         for rule in ["contract", "abi"] {
             let ev = Evidence::emitter("resolver:evm").rule(rule);
-            assert_eq!(tier_of(Some(&ev), &edge), (DERIVED, None), "{rule}");
+            assert_eq!(tier_of(Some(&ev), &edge), (Tier::Derived, None), "{rule}");
         }
         assert_eq!(
             tier_of(Some(&Evidence::emitter("resolver:evm")), &edge),
-            (DERIVED, None)
+            (Tier::Derived, None)
         );
         let other = Evidence::emitter("resolver:rpc").rule("name_hint");
-        assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
+        assert_eq!(tier_of(Some(&other), &edge), (Tier::Derived, None));
     }
 
     /// CC.3: confidence demotes only an inferred `graph` binding; a parser
@@ -784,33 +782,33 @@ mod tests {
         assert_eq!(
             tier(&iface, Confidence::Medium),
             (
-                DERIVED,
+                Tier::Derived,
                 Some("inferred binding (method_set, medium confidence)".to_string())
             )
         );
-        assert_eq!(tier(&iface, Confidence::Strong), (FACT, None));
+        assert_eq!(tier(&iface, Confidence::Strong), (Tier::Fact, None));
         assert_eq!(
             tier(&at("graph:nav", None), Confidence::Weak),
             (
-                DERIVED,
+                Tier::Derived,
                 Some("inferred binding (-, weak confidence)".to_string())
             )
         );
         assert_eq!(
             tier(&at("parser:python", None), Confidence::Weak),
-            (FACT, None)
+            (Tier::Fact, None)
         );
         assert_eq!(
             tier(&at("graph:refs", Some("global_unique")), Confidence::Weak),
             (
-                HEURISTIC,
+                Tier::Heuristic,
                 Some("name-only binding (global_unique)".to_string())
             )
         );
         let unplaced = Evidence::emitter("graph:calls").rule("import_binding");
         assert_eq!(
             tier(&unplaced, Confidence::Medium),
-            (DERIVED, Some("no location recorded".to_string()))
+            (Tier::Derived, Some("no location recorded".to_string()))
         );
     }
 
@@ -829,47 +827,47 @@ mod tests {
             let ev = Evidence::emitter("resolver:identity").rule(rule);
             tier_of(Some(&ev), &edge)
         };
-        let noted = |t: &'static str, n: &str| (t, Some(n.to_string()));
+        let noted = |t: Tier, n: &str| (t, Some(n.to_string()));
         assert_eq!(
             tier("package_name"),
-            noted(FACT, "identity class (package_name)")
+            noted(Tier::Fact, "identity class (package_name)")
         );
         assert_eq!(
             tier("manifest_name"),
-            noted(FACT, "identity class (manifest_name)")
+            noted(Tier::Fact, "identity class (manifest_name)")
         );
         assert_eq!(
             tier("contract_op"),
-            noted(DERIVED, "identity class (contract_op)")
+            noted(Tier::Derived, "identity class (contract_op)")
         );
         assert_eq!(
             tier("contract_route"),
-            noted(DERIVED, "identity class (contract_route)")
+            noted(Tier::Derived, "identity class (contract_route)")
         );
         assert_eq!(
             tier("message_fqname/diverged"),
-            noted(FACT, "identity class (message_fqname, diverged)")
+            noted(Tier::Fact, "identity class (message_fqname, diverged)")
         );
         assert_eq!(
             tier("body_hash"),
-            noted(HEURISTIC, "identity class (body_hash)")
+            noted(Tier::Heuristic, "identity class (body_hash)")
         );
         assert_eq!(
             tier("zzz"),
-            (DERIVED, None),
+            (Tier::Derived, None),
             "an undeclared rule is the stage's tier"
         );
         let bare = Evidence::emitter("resolver:identity");
-        assert_eq!(tier_of(Some(&bare), &edge), (DERIVED, None));
+        assert_eq!(tier_of(Some(&bare), &edge), (Tier::Derived, None));
         // DT.1h: the models resolver's rule reads the same table.
         let model = Evidence::emitter("resolver:models").rule("http_model/diverged");
         assert_eq!(
             tier_of(Some(&model), &edge),
-            noted(DERIVED, "identity class (http_model, diverged)")
+            noted(Tier::Derived, "identity class (http_model, diverged)")
         );
         // Only the two identity emitters read the table.
         let other = Evidence::emitter("resolver:package").rule("package_name");
-        assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
+        assert_eq!(tier_of(Some(&other), &edge), (Tier::Derived, None));
     }
 
     /// CE.1d: a SCIP edge is a located fact, noted with its indexer.
@@ -887,7 +885,7 @@ mod tests {
         assert_eq!(
             tier_of(Some(&ev), &edge),
             (
-                FACT,
+                Tier::Fact,
                 Some("resolved by a SCIP index (scip-python)".to_string())
             )
         );
@@ -909,7 +907,7 @@ mod tests {
         assert_eq!(
             tier_of(Some(&ev), &edge),
             (
-                FACT,
+                Tier::Fact,
                 Some(
                     "confirmed by a SCIP index (scip-python) at app/admin.py:4; first emitted by graph:refs (global_unique)"
                         .to_string()

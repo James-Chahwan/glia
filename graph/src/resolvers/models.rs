@@ -165,7 +165,7 @@ use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use glia_activation::profile::{IdentityRule, IdentityTier};
+use glia_activation::profile::{IdentityRule, Tier};
 use glia_code_domain::endpoint::{http_node_span, split_owner};
 use glia_code_domain::evidence::{Basis, Evidence, Location, locate};
 use glia_code_domain::profile::CODE_TABLES;
@@ -2660,11 +2660,11 @@ impl ModelReport {
 }
 
 /// The confidence a SAME_AS edge of an identity rule's tier carries.
-fn tier_confidence(tier: IdentityTier) -> Confidence {
+fn tier_confidence(tier: Tier) -> Confidence {
     match tier {
-        IdentityTier::Fact => Confidence::Strong,
-        IdentityTier::Derived => Confidence::Medium,
-        IdentityTier::Heuristic => Confidence::Weak,
+        Tier::Fact => Confidence::Strong,
+        Tier::Derived => Confidence::Medium,
+        Tier::Heuristic => Confidence::Weak,
     }
 }
 

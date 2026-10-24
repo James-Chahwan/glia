@@ -432,7 +432,7 @@ fn hops(g: &MemSource, hops: &[EdgeHop]) -> Vec<String> {
                 "{}->{} {}",
                 g.render_node(h.from),
                 g.render_node(h.to),
-                h.tier.name()
+                h.tier.as_str()
             )
         })
         .collect()

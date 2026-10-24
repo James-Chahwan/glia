@@ -127,7 +127,7 @@ use glia_rules::source::catalog_of;
 use glia_rules::value::{Tier, Value};
 use serde::Serialize;
 
-use super::facts::{CodeFacts, located_edge, tier_name};
+use super::facts::{CodeFacts, located_edge};
 use super::prelude::{self, PreludeFacts};
 use crate::absence::{self, Absence};
 use crate::check::{MAX_EVIDENCE, ViolationEdge};
@@ -468,7 +468,7 @@ pub fn evaluate_rule(
             let (file, line) = nodes.first_location(&r.values);
             RuleRow {
                 subject: r.values.iter().map(|v| nodes.render(v)).collect(),
-                tier: tier_name(r.tier),
+                tier: r.tier.as_str(),
                 file,
                 line,
                 caveats: caveats.get(&r.negated),
@@ -1078,14 +1078,7 @@ fn locate_witness(
                 let tn = why::tier_of(ev.as_ref(), e);
                 located_edge(loc, e.from, e.category, e.to, ev.as_ref(), tn)
             }
-            None => located_edge(
-                loc,
-                h.from,
-                h.category,
-                h.to,
-                None,
-                (tier_name(h.tier), None),
-            ),
+            None => located_edge(loc, h.from, h.category, h.to, None, (h.tier, None)),
         })
         .collect();
     (rows, hops.len())
@@ -1230,7 +1223,7 @@ fn answer(
             results.push(QueryRow {
                 predicate: o.name.clone(),
                 values: r.values.iter().map(|v| nodes.value(v)).collect(),
-                tier: tier_name(r.tier),
+                tier: r.tier.as_str(),
                 file,
                 line,
                 caveats: caveats.get(&r.negated),
@@ -1252,9 +1245,9 @@ fn answer(
          caveated={} surface={surface}",
         outputs.len(),
         results.len(),
-        tiers(tier_name(Tier::Fact)),
-        tiers(tier_name(Tier::Derived)),
-        tiers(tier_name(Tier::Heuristic)),
+        tiers(Tier::Fact.as_str()),
+        tiers(Tier::Derived.as_str()),
+        tiers(Tier::Heuristic.as_str()),
         results.iter().filter(|r| !r.caveats.is_empty()).count(),
     );
     QueryAnswer {

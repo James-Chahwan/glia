@@ -24,65 +24,9 @@ use glia_core::NodeId;
 /// The evidence tier, ordered by weakness: FACT (read at a site) < DERIVED (paired
 /// by a resolver or pass) < HEURISTIC (a guess). A conjunction is as weak as its
 /// weakest part ([`Tier::weakest`], max); of alternative derivations the best one
-/// counts ([`Tier::best`], min).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Tier {
-    #[default]
-    Fact,
-    Derived,
-    Heuristic,
-}
-
-impl Tier {
-    /// Every tier, strongest first (level order).
-    pub const ALL: [Tier; 3] = [Tier::Fact, Tier::Derived, Tier::Heuristic];
-
-    /// `"fact"` / `"derived"` / `"heuristic"`: the words engine `why` and `check`
-    /// print, so a tier maps onto them 1:1.
-    pub fn name(self) -> &'static str {
-        match self {
-            Tier::Fact => "fact",
-            Tier::Derived => "derived",
-            Tier::Heuristic => "heuristic",
-        }
-    }
-
-    /// `"FACT"` / `"DERIVED"` / `"HEURISTIC"`.
-    pub fn upper(self) -> &'static str {
-        match self {
-            Tier::Fact => "FACT",
-            Tier::Derived => "DERIVED",
-            Tier::Heuristic => "HEURISTIC",
-        }
-    }
-
-    /// The tier a name spells, in either case; `None` for any other text.
-    pub fn parse(s: &str) -> Option<Tier> {
-        Tier::ALL
-            .into_iter()
-            .find(|t| t.name().eq_ignore_ascii_case(s))
-    }
-
-    /// The tier of a conjunction: the weaker of the two (max).
-    pub fn weakest(self, o: Tier) -> Tier {
-        self.max(o)
-    }
-
-    /// The tier of two alternative derivations: the stronger of the two (min).
-    pub fn best(self, o: Tier) -> Tier {
-        self.min(o)
-    }
-
-    /// 0 (FACT), 1 (DERIVED) or 2 (HEURISTIC): the level a levelled walk carries.
-    pub fn level(self) -> u8 {
-        self as u8
-    }
-
-    /// The tier at `l`, the inverse of [`Tier::level`]; `None` past 2.
-    pub fn from_level(l: u8) -> Option<Tier> {
-        Tier::ALL.get(usize::from(l)).copied()
-    }
-}
+/// counts ([`Tier::best`], min). The one tier type every crate reads (FD.7a), from
+/// `glia_activation::profile`; re-exported here so rules code keeps its path.
+pub use glia_activation::profile::Tier;
 
 /// An owned value: a node, a string or an int. `Str("3")` and `Int(3)` are distinct.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -365,13 +309,13 @@ mod tests {
         assert_eq!(Tier::Heuristic.weakest(Tier::Fact), Tier::Heuristic);
         assert_eq!(Tier::Derived.best(Tier::Fact), Tier::Fact);
         assert_eq!(Tier::Fact.best(Tier::Derived), Tier::Fact);
-        let names: Vec<_> = Tier::ALL.iter().map(|t| t.name()).collect();
+        let names: Vec<_> = Tier::ALL.iter().map(|t| t.as_str()).collect();
         assert_eq!(names, ["fact", "derived", "heuristic"]);
         let upper: Vec<_> = Tier::ALL.iter().map(|t| t.upper()).collect();
         assert_eq!(upper, ["FACT", "DERIVED", "HEURISTIC"]);
         assert_eq!(Tier::parse("DERIVED"), Some(Tier::Derived));
         for t in Tier::ALL {
-            assert_eq!(Tier::parse(t.name()), Some(t));
+            assert_eq!(Tier::parse(t.as_str()), Some(t));
             assert_eq!(Tier::parse(t.upper()), Some(t));
         }
         assert_eq!(Tier::parse("strong"), None);

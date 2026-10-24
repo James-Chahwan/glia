@@ -251,6 +251,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use glia_activation::algo::fuse;
+use glia_activation::profile::Tier;
 use glia_code_domain::snapshots::{
     HistoryMessage, HistorySnapshot, read_history, read_history_messages, redact_untrusted,
 };
@@ -2210,8 +2211,9 @@ fn edge_row(
     // missing one honest, as `tier_of` does an edge with no evidence.
     let (tier, note) = match edge {
         Some(e) => tier_of(ev.as_ref(), e),
-        None => (DERIVED, Some("no evidence recorded".to_string())),
+        None => (Tier::Derived, Some("no evidence recorded".to_string())),
     };
+    let tier = tier.as_str();
     ReviewEdge {
         change,
         from_qname: loc.locate(key.from).qname,
@@ -2642,6 +2644,7 @@ fn violation_row(loc: &Locator<'_>, e: &Edge, ev: Option<&Evidence>) -> Violatio
     });
     let (file, line) = site.unwrap_or((f.file, f.line));
     let (tier, note) = tier_of(ev, e);
+    let tier = tier.as_str();
     ViolationEdge {
         from_qname: f.qname,
         to_qname: loc.locate(e.to).qname,

@@ -120,6 +120,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
 use glia_code_domain::same_as::scip_identity_key;
 use glia_code_domain::snapshots::{
@@ -729,7 +730,7 @@ impl Confirm<'_, '_> {
             return;
         }
         let settled = settle(&old, e, self.at);
-        if why::tier_of(Some(&settled), e).0 == why::FACT {
+        if why::tier_of(Some(&settled), e).0 == Tier::Fact {
             tally.confirmed_fact += 1;
             return;
         }
@@ -816,7 +817,7 @@ fn contradictions(
         }
         let Some(ev) = Evidence::of(e) else { continue };
         let ev = settle(&ev, e, at);
-        if why::tier_of(Some(&ev), e).0 != why::HEURISTIC {
+        if why::tier_of(Some(&ev), e).0 != Tier::Heuristic {
             continue;
         }
         let (Some(file), Some(line), Basis::Site) = (&ev.file, ev.line, ev.basis) else {

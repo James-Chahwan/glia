@@ -221,7 +221,7 @@ fn population(spec: &RepoSpec, seed: &str) -> Result<Population, String> {
         }
         let category = edge_category::name(e.category).to_string();
         let (tier, note) = why::edge_tier(e);
-        let stratum = stratum_key(&category, tier);
+        let stratum = stratum_key(&category, tier.as_str());
         let located = |l: &Located| l.file.is_some() && l.line.is_some();
         let ev_file = ev.as_ref().and_then(|ev| ev.file.clone());
         if !(located(&from) && located(&to)) && ev_file.is_none() {

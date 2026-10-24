@@ -317,11 +317,7 @@ fn strongest(f: &ReflexionFacts<'_>) -> BTreeMap<(usize, usize), Tier> {
     f.dep
         .iter()
         .map(|(pair, edges)| {
-            let t = edges
-                .iter()
-                .map(|d| Tier::parse(d.tier).unwrap_or(Tier::Derived))
-                .min()
-                .unwrap_or(Tier::Fact);
+            let t = edges.iter().map(|d| d.tier).min().unwrap_or(Tier::Fact);
             (*pair, t)
         })
         .collect()

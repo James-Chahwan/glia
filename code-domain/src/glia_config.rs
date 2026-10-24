@@ -48,6 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
 
+use glia_activation::profile::Tier;
 use glia_core::{Confidence, EdgeCategoryId};
 use serde::Deserialize;
 /// Re-exported so consumers can name the span wrapper without depending on `toml`.
@@ -66,7 +67,7 @@ pub const LATEST_VERSION: u32 = 2;
 pub const V2_CONSTRAINT_FIELDS: &[&str] = &["rule", "transitive", "via", "min_tier"];
 /// `min_tier` values: the weakest violation tier that fails CI. HEURISTIC is
 /// never one: a heuristic violation is reported and never fails CI (0.5.2 Q2).
-pub const MIN_TIERS: &[&str] = &["fact", "derived"];
+pub const MIN_TIERS: &[&str] = &[Tier::Fact.as_str(), Tier::Derived.as_str()];
 /// `[[constraint]] rule`: at most this many chars of Datalog text.
 pub const MAX_RULE_CHARS: usize = 16_384;
 /// Upper bound for every `*_arg` positional index.
@@ -1662,7 +1663,9 @@ pub(crate) fn check_rule_text(rule: &str) -> Result<(), String> {
 
 /// A `min_tier` value is one of [`MIN_TIERS`].
 pub(crate) fn check_min_tier(tier: &str) -> Result<(), String> {
-    if MIN_TIERS.contains(&tier) {
+    // The word exactly as `Tier::as_str` spells it (no case folding: a
+    // `min_tier = "FACT"` stays an error), and never heuristic.
+    if Tier::parse(tier).is_some_and(|t| t.as_str() == tier && t != Tier::Heuristic) {
         return Ok(());
     }
     Err(format!(

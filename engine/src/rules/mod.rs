@@ -8,8 +8,8 @@
 //! DB.8a.
 
 /// CodeFacts, the code domain's FactSource over a MergedGraph (DB.2a). The module
-/// is crate-visible so check reaches `rules::facts::{located_edge, tier_name,
-/// edge_tier_of}` by path.
+/// is crate-visible so check reaches `rules::facts::{located_edge, edge_tier_of}`
+/// by path.
 pub(crate) mod facts;
 
 pub use facts::{CODE_ATTRIBUTES, CodeFacts};

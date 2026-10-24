@@ -225,14 +225,6 @@ fn text(s: &str) -> Value {
     Value::Str(s.to_string())
 }
 
-/// `why`'s word as a [`Tier`]; anything else is DERIVED, `why`'s own fallback.
-fn tier_named(word: &str) -> Tier {
-    Tier::ALL
-        .into_iter()
-        .find(|t| t.name() == word)
-        .unwrap_or(Tier::Derived)
-}
-
 /// `effect_sink/3`: every (kind, category) pair a sink names, once, in table order,
 /// with the class the first matching sink gives it.
 fn effect_sink_rows(tables: &DomainTables) -> Vec<BuiltinRow> {
@@ -348,7 +340,7 @@ impl EngineRelation<'_, '_> {
                     .edges()
                     .map(|e| BuiltinRow {
                         values: vec![Value::Node(e.from), Value::Node(e.to)],
-                        tier: tier_named(why::tier_of(imports.evidence(e.from, e.to), e).0),
+                        tier: why::tier_of(imports.evidence(e.from, e.to), e).0,
                     })
                     .collect()
             }

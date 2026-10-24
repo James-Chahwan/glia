@@ -8,7 +8,7 @@
 //!   ([`EffectSink`](crate::profile::EffectSink)), the activation weights
 //!   with their named presets, the integer community weights (CD.1c) and the
 //!   identity rules ([`IdentityRule`](crate::profile::IdentityRule), each of
-//!   one [`IdentityTier`](crate::profile::IdentityTier), DD.3). Query
+//!   one [`Tier`](crate::profile::Tier), DD.3). Query
 //!   consumers (blast radius, liveness, PPR seeding, communities, identity
 //!   collapse) need only this, so a crate that cannot name the domain's graph
 //!   type still reads it.
@@ -25,6 +25,16 @@
 //! a domain builds the tables with a struct literal in a `const`. No struct
 //! here is `#[non_exhaustive]` on purpose: a new profile dimension must force
 //! every domain to fill it.
+//!
+//! # Tiers
+//!
+//! [`Tier`] is the three evidence tiers, strongest first: `fact` (read at a
+//! site), `derived` (paired by a resolver or pass) and `heuristic` (a guess:
+//! a name match, an overlay, git history, a clustering). It is the one tier
+//! type every crate reads (FD.7a): the identity rules here, the rules
+//! evaluator (`glia_rules::value::Tier` re-exports it) and every engine
+//! answer, which prints `as_str()`. The engine's `why` holds the one reading
+//! of an EDGE's tier from its evidence.
 
 use std::fmt;
 
@@ -256,12 +266,19 @@ pub struct ActivationPreset {
 // Identity rules
 // ============================================================================
 
-/// How surely an [`IdentityRule`]'s members are one thing (DD.3). Ordered
-/// strongest first, `Fact < Derived < Heuristic`, so the tier of a class its
-/// members joined through several rules is the weakest, the `max` of theirs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum IdentityTier {
+/// The evidence tier (FD.7a): FACT (read at a site), DERIVED (paired by a
+/// resolver, pass or rule over facts) or HEURISTIC (a guess). The one tier
+/// type every crate reads (module doc, `# Tiers`); an [`IdentityRule`]'s
+/// tier (DD.3) is one too.
+///
+/// Ordered strongest first, `Fact < Derived < Heuristic`: a conjunction is as
+/// weak as its weakest part ([`Tier::weakest`], the `max`; so the tier of a
+/// class its members joined through several rules is the weakest of theirs),
+/// and of alternative derivations the best counts ([`Tier::best`], the `min`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Tier {
     /// Read at a site: a manifest, a qname or an index names the one thing.
+    #[default]
     Fact,
     /// Paired by a rule over facts (a contract op and the route it matches).
     Derived,
@@ -269,9 +286,12 @@ pub enum IdentityTier {
     Heuristic,
 }
 
-impl IdentityTier {
+impl Tier {
+    /// Every tier, strongest first (level order).
+    pub const ALL: [Tier; 3] = [Tier::Fact, Tier::Derived, Tier::Heuristic];
+
     /// `fact`, `derived` or `heuristic`: the tier as answers print it.
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Fact => "fact",
             Self::Derived => "derived",
@@ -279,10 +299,53 @@ impl IdentityTier {
         }
     }
 
-    /// Does a class of this tier collapse to one row in an answer? FACT and
-    /// DERIVED classes do; a HEURISTIC class never does.
+    /// `FACT`, `DERIVED` or `HEURISTIC`.
+    pub const fn upper(self) -> &'static str {
+        match self {
+            Self::Fact => "FACT",
+            Self::Derived => "DERIVED",
+            Self::Heuristic => "HEURISTIC",
+        }
+    }
+
+    /// The tier a word spells, ASCII case ignored (`"FACT"` parses); `None`
+    /// for any other text.
+    pub fn parse(s: &str) -> Option<Tier> {
+        Tier::ALL
+            .into_iter()
+            .find(|t| t.as_str().eq_ignore_ascii_case(s))
+    }
+
+    /// The tier of a conjunction: the weaker of the two (max).
+    pub fn weakest(self, other: Tier) -> Tier {
+        self.max(other)
+    }
+
+    /// The tier of two alternative derivations: the stronger of the two (min).
+    pub fn best(self, other: Tier) -> Tier {
+        self.min(other)
+    }
+
+    /// 0 (FACT), 1 (DERIVED) or 2 (HEURISTIC): the level a levelled walk carries.
+    pub const fn level(self) -> u8 {
+        self as u8
+    }
+
+    /// The tier at `l`, the inverse of [`Tier::level`]; `None` past 2.
+    pub fn from_level(l: u8) -> Option<Tier> {
+        Tier::ALL.get(usize::from(l)).copied()
+    }
+
+    /// Does an identity class of this tier collapse to one row in an answer?
+    /// FACT and DERIVED classes do; a HEURISTIC class never does.
     pub fn collapses(self) -> bool {
         self != Self::Heuristic
+    }
+}
+
+impl fmt::Display for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -307,7 +370,7 @@ pub struct IdentityRule {
     pub to: &'static [NodeKindId],
     /// What the members share, one line for answers and docs.
     pub key: &'static str,
-    pub tier: IdentityTier,
+    pub tier: Tier,
     /// Contracted in walks; `false` for every HEURISTIC rule.
     pub walk: bool,
 }
@@ -612,7 +675,7 @@ impl DomainTables {
                 }
                 kinds(&format!("{field}.{side}"), list, &mut errors);
             }
-            if rule.tier == IdentityTier::Heuristic && rule.walk {
+            if rule.tier == Tier::Heuristic && rule.walk {
                 errors.push(format!(
                     "{field} ({:?}) is heuristic and walks: a heuristic class is never contracted in a walk",
                     rule.name
@@ -775,7 +838,7 @@ mod tests {
         from: &[FUNCTION, METHOD],
         to: &[FUNCTION, METHOD],
         key: "one qname",
-        tier: IdentityTier::Derived,
+        tier: Tier::Derived,
         walk: true,
     };
 
@@ -1233,7 +1296,7 @@ mod tests {
             ),
             (
                 &[IdentityRule {
-                    tier: IdentityTier::Heuristic,
+                    tier: Tier::Heuristic,
                     walk: true,
                     ..RULE_X
                 }],
@@ -1261,7 +1324,7 @@ mod tests {
                     from: &[CLASS, CLASS],
                     to: &[],
                     key: "",
-                    tier: IdentityTier::Heuristic,
+                    tier: Tier::Heuristic,
                     walk: true,
                 },
             ],
@@ -1282,7 +1345,7 @@ mod tests {
         let ok = DomainTables {
             identity_rules: &[
                 IdentityRule {
-                    tier: IdentityTier::Heuristic,
+                    tier: Tier::Heuristic,
                     walk: false,
                     ..RULE_X
                 },
@@ -1290,7 +1353,7 @@ mod tests {
                     name: "y",
                     from: &[CLASS],
                     to: &[COMPONENT],
-                    tier: IdentityTier::Fact,
+                    tier: Tier::Fact,
                     ..RULE_X
                 },
             ],
@@ -1309,7 +1372,7 @@ mod tests {
                 from: &[CLASS],
                 to: &[COMPONENT],
                 key: "one name",
-                tier: IdentityTier::Heuristic,
+                tier: Tier::Heuristic,
                 walk: false,
             },
         ];
@@ -1321,7 +1384,7 @@ mod tests {
         assert_eq!(tables.identity_rule("x"), Some(&RULE_X));
         assert_eq!(
             tables.identity_rule("y").map(|r| (r.tier, r.walk)),
-            Some((IdentityTier::Heuristic, false))
+            Some((Tier::Heuristic, false))
         );
         for unknown in ["z", "", "X", "x/diverged"] {
             assert!(tables.identity_rule(unknown).is_none(), "{unknown:?}");
@@ -1334,7 +1397,7 @@ mod tests {
 
     #[test]
     fn tier_order() {
-        use IdentityTier::{Derived, Fact, Heuristic};
+        use Tier::{Derived, Fact, Heuristic};
         assert!(Fact < Derived && Derived < Heuristic);
         // A class joined through rules of several tiers is the weakest.
         assert_eq!(
@@ -1342,10 +1405,36 @@ mod tests {
             Some(Heuristic)
         );
         assert_eq!([Fact, Derived, Fact].into_iter().max(), Some(Derived));
-        let names = [Fact, Derived, Heuristic].map(IdentityTier::as_str);
+        let names = [Fact, Derived, Heuristic].map(Tier::as_str);
         assert_eq!(names, ["fact", "derived", "heuristic"]);
         assert!(Fact.collapses() && Derived.collapses());
         assert!(!Heuristic.collapses());
+    }
+
+    /// FD.7a: the one tier type every crate reads.
+    #[test]
+    fn tier_vocabulary() {
+        use Tier::{Derived, Fact, Heuristic};
+        assert_eq!(Tier::ALL, [Fact, Derived, Heuristic]);
+        assert!(Fact < Derived && Derived < Heuristic, "strongest first");
+        assert_eq!(Fact.weakest(Heuristic), Heuristic);
+        assert_eq!(Derived.weakest(Fact), Derived);
+        assert_eq!(Heuristic.best(Derived), Derived);
+        assert_eq!(Tier::default(), Fact);
+        assert_eq!(Tier::parse("FACT"), Some(Fact));
+        assert_eq!(Tier::parse("Derived"), Some(Derived));
+        assert_eq!(Tier::parse("facts"), None);
+        assert_eq!(Tier::parse(""), None);
+        for t in Tier::ALL {
+            assert_eq!(Tier::parse(t.as_str()), Some(t));
+            assert_eq!(Tier::parse(t.upper()), Some(t));
+            assert_eq!(t.to_string(), t.as_str());
+            assert_eq!(Tier::from_level(t.level()), Some(t));
+        }
+        assert_eq!(Tier::from_level(3), None);
+        assert_eq!(Tier::ALL.map(Tier::upper), ["FACT", "DERIVED", "HEURISTIC"]);
+        const WORD: &str = Tier::Derived.as_str();
+        assert_eq!(WORD, "derived");
     }
 
     /// A toy graph: the passes that touched it, in order.
