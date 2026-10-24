@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/embed.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn embed(repo_path: &str, model: &str = "bge-small", recipe: Option<String> = None, replace: bool = false, limit: Option<usize> = None, check: bool = false) -> PyResult<Py<PyAny>>
