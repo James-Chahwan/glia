@@ -95,6 +95,9 @@ pub mod goal;
 pub mod semantic;
 pub mod targets;
 
+// 0.5.4 FH batch public slot (F0.7): health (FH.2a), reached by module path.
+pub mod health;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
