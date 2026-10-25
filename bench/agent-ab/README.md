@@ -62,9 +62,13 @@ commits per repo are taken. A commit C with parent P = C^1 is a task when:
 2. its subject, after stripping one conventional-commit prefix (`^[a-z]+(\([^)]*\))?!?: `), has
    at least 4 words and does not start with bump, release, merge, revert, update / upgrade
    dependenc, format, lint, typo, changelog, doc(s) or a version number (case-insensitive);
-3. `git diff -M P C` changes 1..=6 non-test code files (extension in `CODE_EXTS`), at least one
+3. `git diff -M P C` changes 3..=8 non-test code files (extension in `CODE_EXTS`), at least one
    of them modified or renamed (not only added / deleted); the added + deleted lines over all
-   code files (test code included) are 5..=300; renames are at most half of the changed files;
+   code files (test code included) are 5..=400; renames are at most half of the changed files;
+   neither the prompt subject nor a fetched issue's title names a changed code file (its stem,
+   4+ characters, as a word, case-insensitive). The task is structure-shaped: the first pilot
+   (2026-10-25, then 1..=6 files) drew 36 one-file tasks of 60, each a grep away, and no glia
+   arm session called glia once;
 4. a test file is one with a `test` / `tests` / `__tests__` / `testdata` directory component or
    a basename matching `TEST_RES` (`_test.go`, `test_*.py`, `*_test.py`, `Test*.java`,
    `*Test.java`, `_test.dart`, `*.spec|test.[jt]sx?`);

@@ -15,5 +15,6 @@
   "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree"],
  "disabled_plugins": ["cc-plugin-agents-md@builtin", "cc-plugin-telemetry@builtin",
   "cc-plugin-plugin-authoring@builtin"],
- "glia_threads": 4
+ "glia_threads": 4,
+ "glia_prompt": "A glia graph of this repository is already built. Start with the `glia` skill: use it to find where the change belongs and what it affects (definitions, callers, implementations, the files a task is about) before you read or edit code, and again whenever you need to know what else a change touches."
 }

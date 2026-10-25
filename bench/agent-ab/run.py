@@ -148,8 +148,11 @@ def task_text(row):
     return text
 
 
-def render_prompt(template, repo, row):
-    return template.replace("{repo}", repo_name(repo)).replace("{task}", task_text(row))
+def render_prompt(template, repo, row, glia_note=None):
+    """The session prompt; a glia arm's ends with the config's `glia_prompt` (the first
+    pilot's glia arms never called glia, so the arm is glia offered, not glia installed)."""
+    text = template.replace("{repo}", repo_name(repo)).replace("{task}", task_text(row))
+    return f"{text}\n\n{glia_note}" if glia_note else text
 
 
 def load_template():
@@ -743,7 +746,8 @@ def one_session(ctx, repo, task, arm, rep):
             if not ok:
                 row["terminated"] = "prep_failed"
                 return row
-        prompt = render_prompt(ctx["template"], repo, task)
+        prompt = render_prompt(ctx["template"], repo, task,
+                               cfg.get("glia_prompt") if glia_arm else None)
         out = d / "sessions" / run_id / task["id"] / arm / f"{rep}.jsonl"
         events, _, timed_out, wall_ms, attempts = run_with_waits(
             claude_cmd(cfg, prompt, cfg["max_turns"]), copy, env, out, cfg["timeout_s"],

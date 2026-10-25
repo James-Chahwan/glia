@@ -295,6 +295,7 @@ def test_prompt_with_issue():
     assert p.endswith("reply with the list of files you changed."), p
     row["issue_fetch"] = "unavailable"
     assert "Issue #7" not in run.render_prompt("{task}", repo, row)
+    assert run.render_prompt("{task}", repo, row, "Use glia.") == "Fix the thing\n\nUse glia."
 
 
 def test_checkout_is_leak_free():
@@ -376,6 +377,11 @@ def test_pilot_then_resume():
             else:
                 assert c["glia_rc"] == 127 and c["glia_err"] == "glia: command not found", c
             argv = c["argv"]
+            assert argv[argv.index("-p") + 1].endswith(
+                "\n\nA glia graph of this repository is already built. Start with the `glia` "
+                "skill: use it to find where the change belongs and what it affects (definitions, "
+                "callers, implementations, the files a task is about) before you read or edit "
+                "code, and again whenever you need to know what else a change touches.") == glia_arm
             cfg = json.loads((run.HERE / "config.json").read_text())
             assert argv[argv.index("--disallowedTools") + 1:] == cfg["disallowed_tools"], argv
             assert {"Agent", "Task", "Workflow", "WebFetch", "RemoteTrigger"} <= \

@@ -65,6 +65,7 @@ def scripted(root):
     s["fix"] = r.commit("fix(frames): handle empty frames in the reader\n\nFixes #12 by "
                         "skipping the zero-length payload.",
                         {"src/a.go": a, "src/b.go": TEN.replace("line1\n", "first\n"),
+                         "src/f0.go": TEN.replace("line2\n", "second\n"),
                          "src/a_test.go": TEN + "case\n"})
     s["bot"] = r.commit("Bump golang.org/x/net from 1.0.0 to 1.0.1 in the deps",
                         {"src/b.go": TEN.replace("line2\n", "two\n" * 6)},
@@ -84,7 +85,8 @@ def scripted(root):
     r.git("checkout", "-q", "-b", "x/y")
     c_now = (r.root / "src/c.go").read_text()
     s["branch"] = r.commit("wip", {"src/c.go": c_now.replace("line4\n", "four\n"),
-                                   "src/d.go": "package src\n" + "var X = 1\n" * 4})
+                                   "src/d.go": "package src\n" + "var X = 1\n" * 4,
+                                   "src/f1.go": TEN.replace("line5\n", "five\n").replace("line6\n", "six\n")})
     r.git("checkout", "-q", "main")
     r.t += 100
     when = f"@{r.t} +0000"
@@ -142,16 +144,18 @@ def test_selects_exactly_the_fix_and_the_merge():
         assert merge["issue"] is None and merge["issue_fetch"] == "none"
         assert merge["truth"]["code"] == [
             {"path": "src/c.go", "status": "M", "old_path": None, "hunks": [[9, 1]]},
-            {"path": "src/d.go", "status": "A", "old_path": None, "hunks": [[0, 0]]}]
+            {"path": "src/d.go", "status": "A", "old_path": None, "hunks": [[0, 0]]},
+            {"path": "src/f1.go", "status": "M", "old_path": None, "hunks": [[6, 1]]}]
         assert fix["parent"] == s["base"] and fix["pr"] is None
         assert fix["subject"] == "fix(frames): handle empty frames in the reader"
         assert fix["prompt_subject"] == "handle empty frames in the reader"
         assert fix["truth"] == {
             "code": [{"path": "src/a.go", "status": "M", "old_path": None,
                       "hunks": [[3, 1], [7, 0]]},
-                     {"path": "src/b.go", "status": "M", "old_path": None, "hunks": [[1, 1]]}],
+                     {"path": "src/b.go", "status": "M", "old_path": None, "hunks": [[1, 1]]},
+                     {"path": "src/f0.go", "status": "M", "old_path": None, "hunks": [[2, 1]]}],
             "tests": ["src/a_test.go"], "other": []}
-        assert fix["stats"] == {"code_files": 2, "code_lines": 9, "test_files": 1}
+        assert fix["stats"] == {"code_files": 3, "code_lines": 11, "test_files": 1}
         assert fix["id"] == "demo-" + s["fix"][:12] and fix["repo"] == "demo"
         assert "[agent-ab] tasks repo=demo rows=2 issues=0 after_gate=1 sha256=" in out
         assert out.rstrip().endswith("[agent-ab] tasks total=2 repos=1")
@@ -203,6 +207,14 @@ def test_refuses_non_https_and_non_public_rows():
             rc, _, err = run("build", "--repos", str(repos), "--out", str(tmp / "t"))
             assert rc == 2 and "refused" in err
             assert not (tmp / "t").exists()
+
+
+def test_a_subject_naming_a_changed_file_is_no_task():
+    truth = {"code": [{"path": "src/frame_reader.go"}, {"path": "lib/io.py"}]}
+    assert tasks.names_a_file("Fix Frame_Reader on empty input", truth)
+    assert not tasks.names_a_file("Fix the frame reader on empty input", truth)
+    assert not tasks.names_a_file("Handle io errors", truth)  # stem under 4 chars
+    assert not tasks.names_a_file("Fix frame_readers", truth)  # not a whole word
 
 
 def test_classifiers():

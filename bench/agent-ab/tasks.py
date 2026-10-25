@@ -44,7 +44,11 @@ REF_RE = re.compile(r"(?<![\w&])#(\d+)\b")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+")
 GITHUB_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
 HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
-MAX_FILES, MIN_LINES, MAX_LINES, MAX_ISSUE_BODY, MAX_ISSUE_TRIES = 6, 5, 300, 4000, 3
+# A task is structure-shaped (the pilot, 2026-10-25: 36 of 60 one-file tasks, a grep away,
+# and no agent ever reached for glia): 3..8 non-test code files whose names the prompt
+# subject does not give away.
+MIN_FILES, MAX_FILES, MIN_LINES, MAX_LINES = 3, 8, 5, 400
+MAX_ISSUE_BODY, MAX_ISSUE_TRIES, MIN_STEM = 4000, 3, 4
 
 
 class TaskError(Exception):
@@ -214,7 +218,7 @@ def diff_truth(gd, parent, commit):
     """The truth / stats of parent..commit when it is a task-sized change, else None."""
     files = changed_files(gd, parent, commit)
     code = [f for f in files if is_code(f[1]) and not is_test(f[1])]
-    if not 1 <= len(code) <= MAX_FILES or not any(f[0] in "MR" for f in code):
+    if not MIN_FILES <= len(code) <= MAX_FILES or not any(f[0] in "MR" for f in code):
         return None
     if not MIN_LINES <= sum(f[3] for f in files if is_code(f[1])) <= MAX_LINES:
         return None
@@ -229,6 +233,17 @@ def diff_truth(gd, parent, commit):
     stats = {"code_files": len(code), "code_lines": sum(f[3] for f in code),
              "test_files": len(tests)}
     return truth, stats
+
+
+def names_a_file(text, truth):
+    """Does text name a changed code file (its stem, at least MIN_STEM chars, as a word)?"""
+    low = text.lower()
+    for f in truth["code"]:
+        stem = os.path.splitext(os.path.basename(f["path"]))[0].lower()
+        if len(stem) >= MIN_STEM and re.search(rf"(?<![a-z0-9_]){re.escape(stem)}(?![a-z0-9_])",
+                                               low):
+            return True
+    return False
 
 
 def candidate(entry):
@@ -299,13 +314,15 @@ def select(repo, gd, n, carried=None):
             continue
         parent, subject, prompt, pr, ref_text = c
         got = diff_truth(gd, parent, entry["commit"])
-        if not got:
+        if not got or names_a_file(prompt, got[0]):
             continue
         rid = f"{repo['label']}-{entry['commit'][:12]}"
         if carried is not None:
             issue, fetched = carried.get(rid, (None, "none"))
         else:
             issue, fetched = fetch_issue(repo["url"], issue_refs(ref_text))
+        if issue and names_a_file(issue["title"], got[0]):
+            continue
         gate = repo["gate_rev"]
         after = None if gate is None else (entry["commit"] != gate and git(
             gd, "merge-base", "--is-ancestor", gate, entry["commit"], check=False).returncode == 0)
