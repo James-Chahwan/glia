@@ -9,10 +9,14 @@ a workspace SDK). The real-repo side is the cohort (`bench/cohort/`, FH.1) and i
 the coverage matrix (FH.10): the cohort says which combos occur, this matrix says which work.
 
 - `gen.py` - the axes, the unexpressible pairs, the cover, rendering (below).
-- `templates/` - one module per transport (`rest.py` places and assembles a case,
-  `rest_clients.py` / `rest_servers.py` hold one template function per client / server value,
-  `common.py` the exchange, the renamed field and `norm_path`). FH.11b adds gRPC, GraphQL,
-  queue and WebSocket modules and `run.py`, which builds each case with the glia under test.
+- `templates/` - one module per transport, registered in `templates/__init__.py`: `rest.py`
+  places and assembles a case (`rest_clients.py` / `rest_servers.py` hold one template function
+  per client / server value, `common.py` the renamed field and `norm_path`); `grpc.py`,
+  `graphql.py`, `queue.py` and `websocket.py` (FH.11b) hold their servers and share
+  `channel.py` (placement through rest.py's layout, the server manifests, the expected answer),
+  `payload.py` (the client's model per `contract`) and, for the two message transports,
+  `stream.py` (the receiving clients).
+- `run.py` - builds every case with the glia under test and grades it (`## Running`).
 - `test_gen.py` - hermetic tests: `python3 bench/sibyl/test_gen.py`.
 
 ## Axes
@@ -69,10 +73,14 @@ The cover never asks for these; each is a pair no stack of the matrix writes idi
 | `grpc` x `python-fastapi` | FastAPI serves HTTP routes; a Python gRPC server is grpcio, another stack |
 | `queue` x `dart` | a Flutter app does not hold a broker connection; it reaches queues through a server |
 | `queue` x `swift` | an iOS app does not hold a broker connection; it reaches queues through a server |
+| `websocket` x `generated-sdk` | WebSocket clients are hand-written; no generator writes a socket SDK for these stacks (websocket.py) |
+| `queue` x `generated-sdk` | Kafka consumers are hand-written; what a generator writes for a topic is its message model (`generated`), not the subscription (queue.py) |
 
-A transport module may add rows (`UNEXPRESSIBLE` in its module, merged by `gen.unexpressible()`).
-A pair that is allowed alone but that no full case can hold would be printed as
-`implied_unexpressible=<n>` on the marker line; the current table implies none.
+A transport module may add rows (`UNEXPRESSIBLE` in its module, merged by `gen.unexpressible()`);
+the last two rows are websocket.py's and queue.py's. A pair that is allowed alone but that no
+full case can hold is printed as `implied_unexpressible=<n>` on the marker line; the
+all-transport table implies none (a one-transport cover does: `transport=grpc` rules out every
+pair with `direct`, which the marker counts).
 
 ## The cover
 
@@ -83,12 +91,29 @@ pairs the cases hold, `t` all of them; the two are always equal). The algorithm 
 uncovered pairs, vertical growth for the rest, every step kept extendable to a full case with
 no unexpressible pair; ties go to a `random.Random(54)`, so the cover is a function of the
 axes, the table and the seed. A case id is `<transport>-<nnn>-<client>-<server>`. Over REST it
-is 37 cases holding 272 pairs (the floor is client x server = 35); over all five transports, 41.
+is 37 cases holding 272 pairs (the floor is client x server = 35); over all five transports,
+41 cases holding 361 pairs. A one-transport cover (`--transports grpc`) reaches every pair of
+that transport's variants: grpc 25 cases, graphql 36, queue 28, websocket 36.
 
 ## A case
 
-Each case has one exchange, `GET /api/v1/users/{id}` returning `{id, displayName, email}`, and
-one rename drift in three states:
+Each case has one exchange carrying `User {id, displayName, email}`, and one rename drift. The
+exchange per transport:
+
+| transport | exchange | servers | clients |
+|---|---|---|---|
+| `rest` | `GET /api/v1/users/{id}` | gin, Nest, Express, Spring, FastAPI, axum, ASP.NET controllers | fetch, package:http, OkHttp, URLSession, httpx; openapi-generator SDKs |
+| `grpc` | `users.v1.UserService/GetUser`, field `display_name` in the server's .proto | grpc-go, Nest `@GrpcMethod`, grpc-java behind a Spring bean, tonic, Grpc.AspNetCore | the protoc plugin's code for the language (ts-proto, protoc_plugin, grpc-kotlin, grpc-swift, grpcio-tools) under `generated/`, a stub built over a channel to `localhost:50051` |
+| `graphql` | `query GetUser($id) { user(id) { id displayName email } }` at `/graphql` | gqlgen, Nest code-first (+ its committed `schema.gql`), Apollo Server under Express, Spring for GraphQL, Strawberry, async-graphql, Hot Chocolate | Apollo Client, package:graphql, OkHttp, URLSession, httpx; graphql-codegen, graphql_codegen, Apollo Kotlin / iOS, ariadne-codegen |
+| `queue` | Kafka topic `users.updated`, the server producing, the client consuming | kafka-go, Nest `ClientKafka`, kafkajs, `KafkaTemplate`, aiokafka, rdkafka, Confluent.Kafka | kafkajs, kafka-clients, aiokafka |
+| `websocket` | `/ws/users`, the server pushing the user on connect | gorilla in gin, Nest gateway (ws adapter), `ws` beside Express, Spring `WebSocketConfigurer`, FastAPI `@router.websocket`, axum `WebSocketUpgrade`, an ASP.NET controller | WebSocket API, web_socket_channel, OkHttp, URLSessionWebSocketTask, `websockets` |
+
+`wiring_source` is a REST path prefix, a GraphQL endpoint path (Spring: the root field's name,
+its path being configuration), a gRPC dial address or listen address / port, a topic, or a
+WebSocket path prefix; `wiring_call=wrapper` is a hand-written `apiGet` / `gqlRequest` /
+`fetchUser` / `subscribe` / `openSocket` between the use site and the library. A gRPC
+`generated-sdk` hands the app the stub itself, a GraphQL one the generator's client. The drift
+has three states:
 
 - `P` - base: both sides use `displayName`.
 - `S` - the server renamed it to `fullName`; the client is stale (the drift).
@@ -103,10 +128,16 @@ cache directory, never the repo.
 
 `expected.json` is read off the renders, never written by hand:
 
-- `pair` - `HTTP_CALLS` from the client file naming the route (`pair.client.file`: the call
-  site, or the generated SDK file) to the server route (`route_file`, `handler`,
-  `handler_file`, `model_file`); `exchange.path_norm` is the path with every parameter segment
-  `{}` (`gen.norm_path` maps `{id}`, `:id`, `<int:id>`, `${…}`, `$id`, `\(id)` to it).
+- `pair` - the transport's category (`HTTP_CALLS`, `GRPC_CALLS`, `GRAPHQL_CALLS`,
+  `QUEUE_FLOWS`, `WS_CONNECTS`) from the client file naming the exchange (`pair.client.file`:
+  the call site, the generated SDK file holding the operation, or a gRPC stub's construction
+  site, since glia reads no client site inside generated code) to the server (`route_file`,
+  `handler`, `handler_file`, `model_file`; the non-REST transports list `pair_files`, the files
+  glia may locate the server end in: the .proto and the implementation, the SDL and the
+  resolver, the producer, the upgrade). REST's `exchange.path_norm` is the path with every
+  parameter segment `{}` (`gen.norm_path` maps `{id}`, `:id`, `<int:id>`, `${…}`, `$id`,
+  `\(id)` to it); the other transports' `exchange.match` are regexes one end's qname must
+  match (`\bUserService\b`, `\bGetUser\b` / `user`, `users\.updated`, `/ws/users\b`).
 - `reader` - the app file reading the field across the api layer.
 - `drift` - the field (`old` / `new`, a response field), `server_files` (what P..S changed) and
   `client_files` (what S..C changed: the truth a drift answer must name), flagged at `S`,
@@ -114,19 +145,59 @@ cache directory, never the repo.
 - `primary` / `with` - the repo whose change starts the drift is built, the others join with
   `--with`.
 
+## Running
+
+`python3 bench/sibyl/run.py [--glia BIN] [--transports ..] [--case ID].. [--jobs 4] [--work DIR]
+[--out DIR] [--keep]` renders the cover (all five transports by default) under `--work`
+(default `~/.cache/glia-sibyl/run/`, refused inside the glia tree), runs the glia under test
+(default `target/debug/glia`, or `$GLIA`) on each case with `GLIA_NO_PERSIST=1`, and grades:
+
+- `pair` - at S, `glia query <primary> --with <others>` for the edges of the case's category:
+  one joins the client's pair file to a server pair file (same repo, by merge order) and names
+  the channel. REST: an end's path, normalised, equals `path_norm` (`exact`) or is its tail on
+  a segment boundary with at least the resource and its parameter, when glia folded no prefix
+  (`suffix`: `/users/{}`); the evidence records which.
+- `drift_s` - at S, `glia contract-breaks <primary> --base HEAD~1 --with <others>` reports a
+  breaking change.
+- `clear_c` - at C, the same call reports no breaking change, S having broken.
+- `client` - the S answer names one of `drift.client_files` (any `file` in its rows): the
+  cohort's `gate` reading.
+
+A case passes when all four do. `<out>/results.json` (default `<work>/results/`; no times, so
+one glia on one cover writes the same bytes) holds `meta` (the glia version line, the seed, the
+transports, the marker, `rule`), one row per case (its axes, `chains`, `cells`, the checks and
+their evidence) and `summary`: `pairs` (every expressible axis pair the cases hold: cases,
+passed, `share`, per-check counts), `values` (per axis value), `chains` (FH.10's chain rows,
+`bench/substrate-gap/matrix_vocab.CHAINS`: `const_prefix` for a `const` / `enum-prefix` case,
+`client_wrapper_endpoint` for `wrapper`, `workspace_sdk_route` for `workspace`;
+`sfc_service_endpoint` holds no case) and `cells` (the coverage matrix's `<language>/<mech>`
+cells: the client's language x `http_client` / `grpc` / `graphql` / `kafka` / `ws`, the
+server's x its column), each with the cohort's level (`bench/cohort/cells.py`: full >= 0.8,
+partial >= 0.3, else none, `n/a` with no case): `level` grades the whole case, `check_levels`
+each check alone (a chain's `pair` level is how far glia reaches through it). `results.md` renders the same tables. On stderr:
+
+    [sibyl] cases=<n> pairs_covered=<p>/<t> pass=<k> fail=<f> (pair=<a> drift_s=<b> clear_c=<c> client=<d>)
+
+`p` the expressible pairs the run's cases hold, `t` all of them for the transports run. Exits 0
+when every glia call answered (whatever it scored), 2 when one did not.
+
 ## The tests
 
 `python3 bench/sibyl/test_gen.py` checks, with no glia and no network: the REST and the
 all-transport covers hold every pair a brute-force enumeration of the full product says is
 expressible, and none of the table; the cover is deterministic and moves with the seed; every
-axis value renders; the expected files exist in every state and the drift holds by
+transport has templates, and every axis value it can express renders (over the all-transport
+cover plus each transport's own); the expected files exist in every state and the drift holds by
 construction (S's server files spell only the new name, every S..C client file the old one at
 S and the new one at C); the layouts; the git form (three commits per repo, the refs, the same
-heads on two renders). Then every rendered file is parsed by a parse-only toolchain where one is
-present: TypeScript `transpileModule` diagnostics (a `typescript` package from `SIBYL_TYPESCRIPT`,
-`npm root -g` or the npx cache), `gofmt -e`, `rustfmt --emit stdout`, javac's parse phase,
-`dart format`, `swiftc -parse`, Python `ast`, and JSON / TOML / XML / YAML readers. Each checker
-first has to reject a broken file (the control). Kotlin and C# have no parse-only toolchain, and
+heads on two renders); users_pb2.py's serialized descriptor is byte for byte protoc's for the
+case's .proto; run.py grades a right answer from a canned glia as four passes on every
+transport, fails each check alone on the answer that breaks it, matches channels and sums the
+pairs and the marker as stated. Then every rendered file is parsed by a parse-only toolchain
+where one is present: TypeScript `transpileModule` diagnostics (a `typescript` package from
+`SIBYL_TYPESCRIPT`, `npm root -g` or the npx cache), `gofmt -e`, `rustfmt --emit stdout`,
+javac's parse phase, `dart format`, `swiftc -parse`, `protoc`, graphql-core, Python `ast`, and
+JSON / TOML / XML / YAML readers. Each checker first has to reject a broken file (the control). Kotlin and C# have no parse-only toolchain, and
 an absent one is skipped; skips are counted on
 `[sibyl] syntax checked=<n> skipped=<m> (<lang>:<files> <reason>, ..)`. Temporary trees go
 under `$SIBYL_TMP` (default `~/.cache/glia-sibyl-test/`).

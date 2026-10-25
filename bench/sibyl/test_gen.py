@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Hermetic tests for bench/sibyl/gen.py (FH.11a): the cover holds every expressible axis pair
-and no unexpressible one, the cases render deterministically with their drift by construction,
-the git form has P / S / C, and every rendered file parses where a parse-only toolchain is
-present (each checker first proven to reject a broken file). No glia, no network.
+"""Hermetic tests for bench/sibyl/gen.py (FH.11a) and run.py (FH.11b): the cover holds every
+expressible axis pair and no unexpressible one, every transport's cases render deterministically
+with their drift by construction, the git form has P / S / C, every rendered file parses where a
+parse-only toolchain is present (each checker first proven to reject a broken file), and run.py
+grades a case end to end against a canned glia. No real glia, no network.
 
   python3 bench/sibyl/test_gen.py
 
@@ -99,9 +100,12 @@ class CoverTest(unittest.TestCase):
         self.assertEqual(m.group(2), m.group(3))
         self.assertEqual(int(m.group(1)), len(gen.cover(["rest"], quiet=True)))
 
-    def test_unrendered_transport_is_refused(self):
+    def test_unknown_transport_is_refused(self):
         with self.assertRaises(SystemExit):
-            gen.render_case({"id": "x", "axes": {"transport": "grpc"}})
+            gen.render_case({"id": "x", "axes": {"transport": "carrier-pigeon"}})
+
+    def test_every_transport_has_templates(self):
+        self.assertEqual(sorted(gen.templates.TRANSPORTS), sorted(gen.AXES["transport"]))
 
     def test_readme_lists_axes_and_unexpressible_pairs(self):
         text = (HERE / "README.md").read_text()
@@ -116,34 +120,59 @@ class CoverTest(unittest.TestCase):
 
 SPELL_OLD = OLD.spellings()
 SPELL_NEW = NEW.spellings()
+# A bytes literal's escapes (protoc's serialized descriptor in users_pb2.py) read as a gap.
+ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{2}|[ntr'\"\\])")
 
 
 def holds(text, names):
-    return any(re.search(rf"\b{re.escape(n)}\b", text) for n in names)
+    """A name as a word, or after an accessor's get / set (protobuf-java's setFullName)."""
+    text = ESCAPE.sub(" ", text)
+    return any(re.search(rf"(?:\b|(?<=get)|(?<=set)){re.escape(n)}\b", text) for n in names)
+
+
+def every_case():
+    """The all-transport cover plus each transport's own (a pairwise cover inside one transport
+    reaches every pair of its template variants), deduplicated by id."""
+    out = {}
+    for ts in [gen.AXES["transport"]] + [[t] for t in gen.AXES["transport"]]:
+        for c in gen.cover(ts, quiet=True):
+            out.setdefault(c["id"] + ("" if len(ts) > 1 else "@" + ts[0]), c)
+    return list(out.values())
+
+
+# What a transport's call file must name: the exchange as that transport spells it.
+CALL_NAMES = {"grpc": "UserService", "graphql": "GetUser", "queue": "user",
+              "websocket": "users"}
 
 
 class RenderTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.cases = gen.cover(["rest"], quiet=True)
-        cls.renders = {c["id"]: gen.render_case(c) for c in cls.cases}
+        cls.cases = every_case()
+        cls.renders = [(c, gen.render_case(c)) for c in cls.cases]
 
     def test_every_value_renders(self):
-        seen = {k: set() for k in gen.AXES}
-        for c in self.cases:
-            for k, v in c["axes"].items():
-                seen[k].add(v)
-        for k, vs in gen.AXES.items():
-            if k != "transport":
-                self.assertEqual(seen[k], set(vs), k)
+        """Every axis value a transport can express appears in that transport's cover."""
+        for t in gen.AXES["transport"]:
+            axes = gen.axes_for([t])
+            forbid = [(a, b) for a, b, _ in gen.unexpressible()]
+            want = {p for p in brute_pairs(axes, forbid)}
+            seen = {k: set() for k in gen.AXES}
+            for c in self.cases:
+                if c["axes"]["transport"] == t:
+                    for k, v in c["axes"].items():
+                        seen[k].add(v)
+            for k, vs in gen.AXES.items():
+                held = {v for v in vs if any((k, v) in p for p in want)}
+                self.assertEqual(seen[k], held, (t, k))
 
     def test_render_is_deterministic(self):
-        c = self.cases[0]
-        self.assertEqual(gen.render_case(c), self.renders[c["id"]])
+        for t in gen.AXES["transport"]:
+            c, r = next((c, r) for c, r in self.renders if c["axes"]["transport"] == t)
+            self.assertEqual(gen.render_case(c), r, t)
 
     def test_expected_by_construction(self):
-        for c in self.cases:
-            states, exp = self.renders[c["id"]]
+        for c, (states, exp) in self.renders:
             cid = c["id"]
             for state in ("P", "S", "C"):
                 for key in ("client", "reader"):
@@ -153,6 +182,12 @@ class RenderTest(unittest.TestCase):
                 for f in ("route_file", "handler_file", "model_file"):
                     self.assertIn(srv[f], states[state][srv["repo"]], f"{cid} {f}")
                 self.assertIn(srv["handler"], states[state][srv["repo"]][srv["handler_file"]])
+                for pf in srv.get("pair_files", []):
+                    self.assertIn(pf, states[state][srv["repo"]], f"{cid} pair file")
+            self.assertEqual(exp["transport"], c["axes"]["transport"])
+            self.assertEqual(exp["pair"]["category"], {
+                "rest": "HTTP_CALLS", "grpc": "GRPC_CALLS", "graphql": "GRAPHQL_CALLS",
+                "queue": "QUEUE_FLOWS", "websocket": "WS_CONNECTS"}[exp["transport"]])
             drift = exp["drift"]
             self.assertTrue(drift["server_files"], cid)
             self.assertTrue(drift["client_files"], cid)
@@ -177,15 +212,18 @@ class RenderTest(unittest.TestCase):
                 cc = states["C"][ref["repo"]][ref["file"]]
                 self.assertTrue(holds(s, SPELL_OLD) and not holds(s, SPELL_NEW), (cid, ref))
                 self.assertTrue(holds(cc, SPELL_NEW), (cid, ref))
-            # The call file names the resource, and the whole path when it is a literal.
+            # The call file names the exchange; a literal REST path whole.
             call = states["P"][cli_repo][exp["pair"]["client"]["file"]]
-            self.assertIn("users", call.lower(), cid)
-            if c["axes"]["wiring_source"] == "literal":
-                self.assertIn("api/v1/users", call, cid)
+            if exp["transport"] == "rest":
+                self.assertIn("users", call.lower(), cid)
+                if c["axes"]["wiring_source"] == "literal":
+                    self.assertIn("api/v1/users", call, cid)
+            else:
+                self.assertIn(CALL_NAMES[exp["transport"]].lower(), call.lower(), cid)
+                self.assertTrue(exp["exchange"]["match"], cid)
 
     def test_layouts(self):
-        for c in self.cases:
-            states, exp = self.renders[c["id"]]
+        for c, (states, exp) in self.renders:
             pk = c["axes"]["packaging"]
             repos = sorted(states["P"])
             self.assertEqual(repos, ["client", "server"] if pk == "multi-repo" else ["repo"])
@@ -235,6 +273,142 @@ class GitTest(unittest.TestCase):
             finally:
                 shutil.rmtree(d)
         self.assertEqual(heads[0], heads[1], "git form is byte-identical across renders")
+
+
+# ------------------------------------------------------------------------------- run.py
+
+FAKE_GLIA = r"""#!/usr/bin/env python3
+# A canned glia for run.py's tests: answers from $FAKE_DIR, the state read off the commit.
+import json, os, subprocess, sys
+a = sys.argv[1:]
+if a == ["--version"]:
+    print("glia 0.0.0 (fake)")
+    sys.exit(0)
+d = os.environ["FAKE_DIR"]
+if a[0] == "query":
+    print(open(os.path.join(d, "query.json")).read())
+    sys.exit(0)
+if a[0] == "contract-breaks":
+    subj = subprocess.run(["git", "-C", a[1], "log", "-1", "--format=%s"], capture_output=True,
+                          text=True, check=True).stdout
+    print(open(os.path.join(d, "cb_" + subj.split()[1].rstrip(":") + ".json")).read())
+    sys.exit(1 if "sibyl S" in subj else 0)
+sys.exit(2)
+"""
+
+
+def node(qname, file):
+    return {"node": {"qname": qname, "kind": "X", "file": file, "line": 1}}
+
+
+class RunTest(unittest.TestCase):
+    """run.py's grading against a canned glia (no real build): every check passes on a right
+    answer, and each fails on the answer that breaks it."""
+
+    @classmethod
+    def setUpClass(cls):
+        import run
+        cls.R = run
+        cls.cases = gen.cover(gen.AXES["transport"], quiet=True)
+
+    def setUp(self):
+        self.tmp = tmpdir()
+        fake = self.tmp / "glia"
+        fake.write_text(FAKE_GLIA)
+        fake.chmod(0o755)
+        self.answers = self.tmp / "answers"
+        self.answers.mkdir()
+        os.environ["FAKE_DIR"] = str(self.answers)
+        self.glia = self.R.Glia(fake)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+        os.environ.pop("FAKE_DIR", None)
+
+    def answer(self, exp, edge=True, s_breaking=1, named=True, c_breaking=0):
+        cl, srv = exp["pair"]["client"], exp["pair"]["server"]
+        idx = {r: i for i, r in enumerate([exp["primary"], *exp["with"]])}
+        sfile = (srv.get("pair_files") or [srv["route_file"]])[0]
+        if exp["transport"] == "rest":
+            qa, qb = "endpoint:GET:/api/v1/users/${…} @c", "GET /api/v1/users/:id @s"
+        else:
+            qa, qb = "client_of " + exp["exchange"]["key"], "server_of " + exp["exchange"]["key"]
+        rows = [] if not edge else [{"values": [
+            node(qa, cl["file"]), node(qb, sfile), {"str": cl["file"]}, {"str": sfile},
+            {"str": f"repo#{idx[cl['repo']]}"}, {"str": f"repo#{idx[srv['repo']]}"}]}]
+        (self.answers / "query.json").write_text(json.dumps({"results": rows}))
+        client_file = exp["drift"]["client_files"][0]["file"]
+        for state, n in (("S", s_breaking), ("C", c_breaking)):
+            row = {"status": "breaking", "client": {"file": client_file if named else "x"}}
+            (self.answers / f"cb_{state}.json").write_text(json.dumps(
+                {"schemas": [], "models": [row] * n, "orphaned_clients": [], "breaking": n,
+                 "advisory": 0}))
+
+    def grade(self, case, **kw):
+        _, exp = gen.render_case(case)
+        self.answer(exp, **kw)
+        return self.R.run_case(self.glia, case, self.tmp / "work")
+
+    @unittest.skipUnless(shutil.which("git"), "git absent")
+    def test_right_answer_passes_every_transport(self):
+        for t in gen.AXES["transport"]:
+            for pack in ("single", "multi-repo"):
+                case = next((c for c in self.cases if c["axes"]["transport"] == t
+                             and c["axes"]["packaging"] == pack), None)
+                if case is None:
+                    continue
+                row = self.grade(case)
+                self.assertEqual(row["checks"], {c: True for c in self.R.CHECKS},
+                                 (case["id"], row["evidence"]))
+                self.assertTrue(row["pass"])
+                self.assertNotIn("errors", row)
+
+    @unittest.skipUnless(shutil.which("git"), "git absent")
+    def test_each_check_fails_alone(self):
+        case = next(c for c in self.cases if c["axes"]["transport"] == "rest")
+        bad = {"pair": {"edge": False}, "drift_s": {"s_breaking": 0},
+               "clear_c": {"c_breaking": 1}, "client": {"named": False}}
+        for check, kw in bad.items():
+            row = self.grade(case, **kw)
+            failed = sorted(k for k, v in row["checks"].items() if not v)
+            # a gate that never broke at S cannot clear at C, nor name a client
+            want = ["clear_c", "client", "drift_s"] if check == "drift_s" else [check]
+            self.assertEqual(failed, want, check)
+            self.assertFalse(row["pass"])
+
+    def test_channel_match(self):
+        exp = {"transport": "rest", "exchange": {"path_norm": "/api/v1/users/{}"}}
+        m = self.R.channel_match
+        self.assertEqual(m(exp, "endpoint:GET:/api/v1/users/${…} @c", "x"), "exact")
+        self.assertEqual(m(exp, "GET /api/v1/users/{id}", "x"), "exact")
+        self.assertEqual(m(exp, "endpoint:GET:/users/${…} @c", "GET /users/:id @s"), "suffix")
+        self.assertIsNone(m(exp, "endpoint:GET:/{id} @c", "GET /:id @s"))
+        self.assertIsNone(m(exp, "endpoint:GET:/api/v1/orders/${…}", "GET /orders/:id"))
+        g = {"transport": "graphql", "exchange": {"match": [r"\bGetUser\b"]}}
+        self.assertEqual(m(g, "graphql_op:GetUser", "graphql_resolver:user"), "exact")
+        self.assertIsNone(m(g, "graphql_op:GetUsers", "graphql_resolver:users"))
+
+    def test_summary_and_marker(self):
+        rows = []
+        for i, c in enumerate(self.cases):
+            ok = i % 2 == 0
+            rows.append({"id": c["id"], "axes": c["axes"], "chains": self.R.chains_of(c["axes"]),
+                         "cells": self.R.cells_of(c["axes"]), "pass": ok,
+                         "checks": {k: ok for k in self.R.CHECKS}})
+        s = self.R.summarise(rows, gen.AXES["transport"], gen.SEED)
+        self.assertEqual(s["pairs_covered"], s["pairs_total"])
+        self.assertEqual(sorted(s["chains"]), sorted(self.R.cells.CHAIN_IDS))
+        self.assertEqual(s["chains"]["sfc_service_endpoint"]["cases"], 0)
+        for p in s["pairs"]:
+            self.assertEqual(p["share"], round(p["passed"] / p["cases"], 3))
+        k = sum(1 for r in rows if r["pass"])
+        self.assertEqual(self.R.marker(rows, s),
+                         f"[sibyl] cases={len(rows)} pairs_covered={s['pairs_total']}/"
+                         f"{s['pairs_total']} pass={k} fail={len(rows) - k} (pair={k} "
+                         f"drift_s={k} clear_c={k} client={k})")
+        for cell in s["cells"]:
+            lang, mech = cell.split("/")
+            self.assertIn(mech, {"http_client", "http_server", "grpc", "graphql", "kafka", "ws"})
 
 
 # ---------------------------------------------------------------------------- syntax checks
@@ -333,7 +507,9 @@ class Checker:
                 "swift": None if shutil.which("swiftc") else "swiftc absent",
                 "kotlin": "no parse-only kotlin toolchain",
                 "csharp": "no parse-only C# toolchain",
-                "yaml": None if _has_yaml() else "PyYAML absent"}
+                "proto": None if shutil.which("protoc") else "protoc absent",
+                "graphql": None if _has_module("graphql") else "graphql-core absent",
+                "yaml": None if _has_module("yaml") else "PyYAML absent"}
         return need.get(lang)
 
     def check(self, lang, paths):
@@ -352,6 +528,14 @@ class Checker:
         if lang == "yaml":
             import yaml
             return self._each(paths, lambda p: yaml.safe_load(Path(p).read_text()))
+        if lang == "graphql":
+            import graphql
+            return self._each(paths, lambda p: graphql.parse(Path(p).read_text()))
+        if lang == "proto":  # each file alone: the cases' protos share one import path
+            return self._each(paths, lambda p: subprocess.run(
+                ["protoc", "--proto_path", str(Path(p).parent),
+                 f"--descriptor_set_out={os.devnull}", str(p)],
+                capture_output=True, check=True))
         cmd = {
             "ts": ["node", str(self.work / "tscheck.js"), str(self.ts or "")],
             "go": ["gofmt", "-e", "-l"],
@@ -377,9 +561,9 @@ class Checker:
         return not errs, "\n".join(errs)
 
 
-def _has_yaml():
+def _has_module(name):
     try:
-        import yaml  # noqa: F401
+        __import__(name)
     except ImportError:
         return False
     return True
@@ -392,7 +576,9 @@ def lang_of(path):
     ext = Path(path).suffix
     return {".ts": "ts", ".go": "go", ".rs": "rust", ".java": "java", ".dart": "dart",
             ".swift": "swift", ".py": "python", ".cs": "csharp", ".json": "json",
-            ".toml": "toml", ".csproj": "xml", ".yaml": "yaml", ".mod": "gomod"}.get(ext)
+            ".toml": "toml", ".csproj": "xml", ".yaml": "yaml", ".yml": "yaml",
+            ".mod": "gomod", ".proto": "proto", ".graphqls": "graphql", ".graphql": "graphql",
+            ".gql": "graphql"}.get(ext)
 
 
 # A file each checker must reject: the control that proves a check is not a pass-through.
@@ -409,6 +595,8 @@ BROKEN = {
     "toml": ("bad.toml", "a = \n"),
     "xml": ("bad.csproj", "<Project><a></Project>"),
     "yaml": ("bad.yaml", "a: [1,\n"),
+    "proto": ("bad.proto", 'syntax = "proto3";\nmessage M { string a = ; }\n'),
+    "graphql": ("bad.graphqls", "type Query {\n  user(id: ID!: User\n}\n"),
 }
 
 
@@ -418,11 +606,11 @@ class SyntaxTest(unittest.TestCase):
         try:
             chk = Checker(work)
             by_lang = {}
-            for c in gen.cover(["rest"], quiet=True):
+            for i, c in enumerate(every_case()):
                 states, _ = gen.render_case(c)
                 for state, by_repo in states.items():
                     for repo, files in by_repo.items():
-                        root = work / "cases" / c["id"] / state / repo
+                        root = work / "cases" / f"{i:03d}-{c['id']}" / state / repo
                         gen.write_tree(root, files)
                         for rel in files:
                             lang = lang_of(rel)
@@ -448,6 +636,31 @@ class SyntaxTest(unittest.TestCase):
             print(f"[sibyl] syntax checked={checked} skipped={skipped} ({', '.join(notes)})",
                   file=sys.stderr)
             self.assertGreater(checked, 0)
+        finally:
+            shutil.rmtree(work)
+
+
+class ProtoTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("protoc") and _has_module("google.protobuf"),
+                         "protoc or the protobuf runtime absent")
+    def test_pb2_descriptor_is_protocs(self):
+        """users_pb2.py's serialized descriptor is byte for byte the one protoc writes for the
+        case's .proto, in both field states."""
+        from google.protobuf import descriptor_pb2
+
+        from templates import grpc
+        work = tmpdir()
+        try:
+            for f in (OLD, NEW):
+                d = work / f.camel / "users" / "v1"
+                d.mkdir(parents=True)
+                (d / "users.proto").write_text(grpc.proto(f))
+                out = work / f"{f.camel}.pb"
+                subprocess.run(["protoc", "--proto_path", str(work / f.camel),
+                                f"--descriptor_set_out={out}", str(d / "users.proto")],
+                               check=True, capture_output=True)
+                real = descriptor_pb2.FileDescriptorSet.FromString(out.read_bytes()).file[0]
+                self.assertEqual(real.SerializeToString(), grpc._pb_bytes(f), f.camel)
         finally:
             shutil.rmtree(work)
 

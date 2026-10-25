@@ -912,6 +912,28 @@ DEP_VERSIONS = {
     "org.json": "org.json:json:20240303",
     "httpx": "httpx>=0.27",
     "pydantic": "pydantic>=2.8",
+    # gRPC / GraphQL / queue / WebSocket clients (FH.11b). A key is the package's name in its
+    # own ecosystem, so one name serves one ecosystem: TypeScript's GraphQL clients take
+    # `graphql` as a peer dependency, and the key is Dart's package:graphql.
+    "@apollo/client": "^3.11.8",
+    "graphql-request": "^7.1.0",
+    "graphql-tag": "^2.12.6",
+    "graphql": "^5.2.0",
+    "apollo-runtime": "com.apollographql.apollo:apollo-runtime:4.0.1",
+    "kafkajs": "^2.2.4",
+    "kafka-clients": "org.apache.kafka:kafka-clients:3.8.0",
+    "aiokafka": "aiokafka>=0.11",
+    "web_socket_channel": "^3.0.1",
+    "websockets": "websockets>=13.0",
+    "@grpc/grpc-js": "^1.12.2",
+    "@bufbuild/protobuf": "^2.2.0",
+    "grpc": "^4.0.1",
+    "protobuf": "^3.1.0",
+    "grpc-kotlin-stub": "io.grpc:grpc-kotlin-stub:1.4.1",
+    "grpc-okhttp": "io.grpc:grpc-okhttp:1.68.0",
+    "protobuf-kotlin": "com.google.protobuf:protobuf-kotlin:4.28.2",
+    "grpcio": "grpcio>=1.66",
+    "python-protobuf": "protobuf>=5.28",
 }
 
 
