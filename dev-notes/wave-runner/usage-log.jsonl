@@ -260,3 +260,6 @@
 {"wave": "R054-W11", "event": "end", "pct": 5, "resets_at": 1792929000, "ts": 1792917630}
 {"wave": "W12", "event": "start", "pct": 6, "resets_at": 1792929000, "ts": 1792918000}
 {"wave": "R054-W12", "event": "end", "pct": 10, "resets_at": 1792929000, "ts": 1792921033}
+{"wave": "R054-W13", "event": "end", "pct": 18, "resets_at": 1792947000, "ts": 1792941246}
+{"wave": "R054-W13", "event": "end", "pct": 18, "resets_at": 1792947000, "ts": 1792942414}
+{"wave": "R054-W13", "event": "end", "pct": 18, "resets_at": 1792947000, "ts": 1792943540}
