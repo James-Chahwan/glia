@@ -103,9 +103,23 @@ pub fn parse_file(
         );
     }
 
-    scan_ktor_routes(source, repo, &mut acc);
-    scan_webflux_routes(source, repo, &mut acc);
-    scan_javalin_routes(source, repo, &mut acc);
+    // FH.15: the text-scanned route shapes run only in a file importing their
+    // framework. fired_on: `glia analyze <repo> 2>&1 | grep '\[java-routes\] text
+    // scanners skipped'` — per file where a scanner's shape matched but the
+    // file imports no such framework (commons-text's `m.put("/", "\\/")`).
+    let (routes, skipped) = acc.route_frameworks.scan(source);
+    for (method, path) in &routes {
+        emit_ktor_route(method, path, repo, &mut acc);
+    }
+    if skipped.total() > 0 {
+        eprintln!(
+            "[java-routes] text scanners skipped={} (javalin={} ktor={} webflux={}) file={file_rel_path}",
+            skipped.total(),
+            skipped.javalin,
+            skipped.ktor,
+            skipped.webflux
+        );
+    }
 
     if acc.http_clients.any() {
         let c = acc.http_clients;
@@ -185,6 +199,9 @@ struct Acc {
     inject_seen: HashSet<(NodeId, String)>,
     /// LA.22a: the imperative HTTP client libraries this file imports.
     http_libs: JavaHttpLibs,
+    /// FH.15: the route frameworks whose text-scanned shapes this file may
+    /// mint, by its imports.
+    route_frameworks: RouteFrameworks,
     /// LA.22a: imperative-client call sites that became an ENDPOINT, per
     /// library, for the `[java-http] clients` marker.
     http_clients: JavaHttpClientCounts,
@@ -248,6 +265,78 @@ enum JavaHttpClient {
     /// Apache HttpClient 4 (`org.apache.http`) / 5 (`org.apache.hc`):
     /// `new HttpGet(url)` …, and 5's `SimpleRequestBuilder.get(url)` ….
     Apache,
+}
+
+/// FH.15: whether a package path names `root` itself or a package under it
+/// (`io.javalin`, `io.javalin.Javalin`, `io.javalin.*`; never `io.javalinx`).
+fn under_package(path: &str, root: &str) -> bool {
+    path.strip_prefix(root)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
+/// FH.15: one text-scanned route, `(METHOD, path)`.
+type ScannedRoute = (&'static str, String);
+
+/// FH.15: one text route scanner over a file's source.
+type RouteScanner = fn(&str) -> Vec<ScannedRoute>;
+
+/// FH.15: which HTTP server frameworks with a text-scanned route shape the
+/// file imports. `m.put("/", "\\/")` is the Javalin shape on any receiver, so
+/// each scanner runs only when its framework is imported: Javalin
+/// (`io.javalin`), Ktor (`io.ktor`), Spring WebFlux functional routes
+/// (`org.springframework.web.reactive.function.server`). Set by
+/// [`collect_import`] from every import line, wildcard and static included.
+#[derive(Default, Clone, Copy)]
+struct RouteFrameworks {
+    javalin: bool,
+    ktor: bool,
+    webflux: bool,
+}
+
+/// FH.15: per-scanner route candidates dropped because the file does not
+/// import that scanner's framework, for the `[java-routes]` marker.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+struct SkippedRoutes {
+    javalin: usize,
+    ktor: usize,
+    webflux: usize,
+}
+
+impl SkippedRoutes {
+    fn total(&self) -> usize {
+        self.javalin + self.ktor + self.webflux
+    }
+}
+
+impl RouteFrameworks {
+    fn note_import(&mut self, path: &str) {
+        self.javalin |= under_package(path, "io.javalin");
+        self.ktor |= under_package(path, "io.ktor");
+        self.webflux |= under_package(path, "org.springframework.web.reactive.function.server");
+    }
+
+    /// Runs the Ktor, WebFlux and Javalin scanners in that order and keeps the
+    /// routes of the imported frameworks (each scanner deduplicates its own by
+    /// `METHOD path`, as before FH.15); a non-imported scanner's candidates
+    /// are only counted.
+    fn scan(self, source: &str) -> (Vec<ScannedRoute>, SkippedRoutes) {
+        let mut skipped = SkippedRoutes::default();
+        let mut routes: Vec<ScannedRoute> = Vec::new();
+        let scanners: [(bool, RouteScanner, &mut usize); 3] = [
+            (self.ktor, scan_ktor_routes, &mut skipped.ktor),
+            (self.webflux, scan_webflux_routes, &mut skipped.webflux),
+            (self.javalin, scan_javalin_routes, &mut skipped.javalin),
+        ];
+        for (imported, scanner, skip) in scanners {
+            let found = scanner(source);
+            if imported {
+                routes.extend(found);
+            } else {
+                *skip += found.len();
+            }
+        }
+        (routes, skipped)
+    }
 }
 
 /// LA.22a: which [`JavaHttpClient`] libraries the file imports. Set by
@@ -2078,7 +2167,8 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
-fn scan_ktor_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_ktor_routes(source: &str) -> Vec<ScannedRoute> {
+    let mut out = Vec::new();
     // Ktor (Kotlin): `get("/path") { ... }`, `post("/path") { ... }`, etc.
     // File is Kotlin (tree-sitter-java rejects most of it so we rely on text).
     let methods: &[(&str, &str)] = &[
@@ -2133,16 +2223,17 @@ fn scan_ktor_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 search_from = j + 1;
                 continue;
             }
-            let key = format!("{method} {path}");
-            if seen.insert(key.clone()) {
-                emit_ktor_route(method, path, repo, acc);
+            if seen.insert(format!("{method} {path}")) {
+                out.push((*method, path.to_string()));
             }
             search_from = j + 1;
         }
     }
+    out
 }
 
-fn scan_webflux_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_webflux_routes(source: &str) -> Vec<ScannedRoute> {
+    let mut out = Vec::new();
     // Spring WebFlux functional DSL: RouterFunctions.route().GET("/path", h).POST(...)
     let methods: &[(&str, &str)] = &[
         (".GET(\"", "GET"),
@@ -2176,16 +2267,17 @@ fn scan_webflux_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 search_from = j + 1;
                 continue;
             }
-            let key = format!("{method} {path}");
-            if seen.insert(key.clone()) {
-                emit_ktor_route(method, path, repo, acc);
+            if seen.insert(format!("{method} {path}")) {
+                out.push((*method, path.to_string()));
             }
             search_from = j + 1;
         }
     }
+    out
 }
 
-fn scan_javalin_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_javalin_routes(source: &str) -> Vec<ScannedRoute> {
+    let mut out = Vec::new();
     // Javalin: `app.get("/path", handler)` / `app.post("/path", ctx -> {...})`.
     // Distinct from Ktor (top-level `get("/path") { ... }`): Javalin always has
     // a receiver (`app.` / `router.`) and never a trailing `{` block — both
@@ -2231,13 +2323,13 @@ fn scan_javalin_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 search_from = j + 1;
                 continue;
             }
-            let key = format!("{method} {path}");
-            if seen.insert(key.clone()) {
-                emit_ktor_route(method, path, repo, acc);
+            if seen.insert(format!("{method} {path}")) {
+                out.push((*method, path.to_string()));
             }
             search_from = j + 1;
         }
     }
+    out
 }
 
 fn emit_ktor_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
@@ -2275,6 +2367,7 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         .trim_end_matches(';')
         .trim();
     acc.http_libs.note_import(path);
+    acc.route_frameworks.note_import(path);
 
     if path.ends_with(".*") {
         // Wildcard import — module import
@@ -3952,6 +4045,8 @@ public class UserController {
     #[test]
     fn ktor_routes() {
         let source = r#"
+import io.ktor.server.routing.*
+
 fun Application.module() {
     routing {
         get("/users") {
@@ -3988,6 +4083,8 @@ fun Application.module() {
     #[test]
     fn webflux_functional_routes() {
         let source = r#"
+import org.springframework.web.reactive.function.server.RouterFunctions;
+
 @Configuration
 public class RouterConfig {
     @Bean
@@ -4079,6 +4176,91 @@ public class Svc {
         let fp = parse_file(source, "Svc.java", "com::example::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "non-`/` first arg must not emit a route");
+    }
+
+    #[test]
+    fn route_framework_counts_skipped_candidates() {
+        let source = r#"
+class Esc {
+    static {
+        m.put("/", "\\/");
+        m.put("/", "\\/");
+        r.GET("/x", h);
+    }
+}
+"#;
+        let mut fw = RouteFrameworks::default();
+        let (routes, s) = fw.scan(source);
+        assert!(routes.is_empty());
+        assert_eq!((s.javalin, s.ktor, s.webflux), (1, 0, 1));
+        fw.note_import("io.javalin.Javalin");
+        let (routes, s) = fw.scan(source);
+        assert_eq!(routes, vec![("PUT", "/".to_string())]);
+        assert_eq!((s.javalin, s.ktor, s.webflux), (0, 0, 1));
+    }
+
+    fn route_names(fp: &FileParse) -> Vec<String> {
+        let mut names: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn map_put_with_slash_key_outside_javalin_mints_no_route() {
+        // FH.15: commons-text's StringEscapeUtils builds its escape maps with
+        // `m.put("/", "\\/")`: the Javalin shape (receiver, `/` path, comma),
+        // but the file never imports io.javalin, so no `PUT /` ROUTE.
+        let source = r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class Esc {
+    static {
+        Map<String, String> m = new HashMap<>();
+        m.put("/", "\\/");
+        m.get("/a", "b");
+    }
+}
+"#;
+        let fp = parse_file(source, "Esc.java", "x::Esc", repo()).unwrap();
+        assert_eq!(route_names(&fp), Vec::<String>::new());
+    }
+
+    #[test]
+    fn route_scanners_need_their_framework_import() {
+        // FH.15: the same calls mint routes once the framework is imported,
+        // a wildcard import included, and only that framework's shape.
+        let body = r#"
+public class App {
+    void routes(Object app, Object r) {
+        app.put("/users/{id}", h);
+        r.GET("/items", h::list);
+    }
+}
+"#;
+        let none = parse_file(body, "App.java", "x::App", repo()).unwrap();
+        assert_eq!(route_names(&none), Vec::<String>::new());
+
+        let javalin = format!("import io.javalin.*;\n{body}");
+        let fp = parse_file(&javalin, "App.java", "x::App", repo()).unwrap();
+        assert_eq!(route_names(&fp), vec!["PUT /users/{id}".to_string()]);
+
+        let webflux = format!(
+            "import static org.springframework.web.reactive.function.server.RouterFunctions.route;\n{body}"
+        );
+        let fp = parse_file(&webflux, "App.java", "x::App", repo()).unwrap();
+        assert_eq!(route_names(&fp), vec!["GET /items".to_string()]);
+
+        // A look-alike package prefix is not the framework.
+        let lookalike = format!("import io.javalinx.Thing;\n{body}");
+        let fp = parse_file(&lookalike, "App.java", "x::App", repo()).unwrap();
+        assert_eq!(route_names(&fp), Vec::<String>::new());
     }
 
     #[test]

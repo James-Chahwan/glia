@@ -1,0 +1,12 @@
+{
+  "framework": "java-map-put-not-route",
+  "language": "java",
+  "dirs": ["."],
+  "note": "FH.15 (Java text-scanned routes need their framework): commons-text's StringEscapeUtils builds its escape maps with `m.put(\"/\", \"\\\\/\")`, the Javalin route shape (a receiver, a `/` first argument, a comma). parsers/code/java/src/lib.rs ran the Javalin / Ktor / WebFlux text scanners on every Java file, so this minted ROUTE `PUT /` (Medium, no HANDLED_BY) and a library read role=app. Each scanner now runs only in a file importing its framework (io.javalin, io.ktor, org.springframework.web.reactive.function.server); marker `[java-routes] text scanners skipped=1 (javalin=1 ktor=0 webflux=0) file=src/main/java/x/Esc.java`. Before FH.15: FORBID VIOLATIONS 1.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Esc", "note": "the file still parses: the class is found"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "note": "no ROUTE at all: the file imports no route framework"}
+  ]
+}
