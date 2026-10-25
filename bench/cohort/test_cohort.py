@@ -264,6 +264,262 @@ class CohortTest(unittest.TestCase):
                 C.validate(row)
 
 
+FAKE_GLIA = r'''#!{python}
+"""A fake glia (FH.1b tests): canned JSON per (HEAD sha, answer key) from $FAKE_GLIA_SPEC."""
+import json, os, subprocess, sys
+spec = json.load(open(os.environ["FAKE_GLIA_SPEC"]))
+args = sys.argv[1:]
+if args == ["--version"]:
+    print(spec["version"]); sys.exit(0)
+cmd = args[0]
+if cmd == "build":
+    os.makedirs(".glia/graph", exist_ok=True); sys.exit(0)
+if cmd == "history":
+    sys.exit(0)
+if cmd == "query" and "--gql" in args:
+    text = args[args.index("-e") + 1]
+    key = "gql:pairs" if "HTTP_CALLS" in text else "gql:endpoints" if "ENDPOINT" in text \
+        else "gql:routes"
+elif cmd == "query":
+    key = "dl:" + ",".join(args[i + 1] for i, a in enumerate(args) if a == "--output")
+elif cmd == "diff-impact":
+    key = "diff-impact:names" if "--depth" in args else "diff-impact"
+else:
+    key = cmd
+head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+ans = spec["by_head"].get(head, {{}}).get(key, spec["default"].get(key))
+if ans is None:
+    print(f"no canned answer for {{key}} at {{head}}", file=sys.stderr); sys.exit(1)
+if key.startswith("dl:"):
+    ans = {{"results": [{{"predicate": p, "values": [{{"int": v}} if isinstance(v, int)
+                                                  else {{"str": v}} for v in row]}}
+                        for p, rows in ans.items() for row in rows]}}
+print(json.dumps(ans))
+'''
+
+
+def impact(files=(), rows=()):
+    return {"impact": {"files": [{"file": f} for f in files],
+                       "results": [{"file": f} for f in rows]}}
+
+
+def cb(rows, breaking):
+    return {"schemas": rows, "models": [], "orphaned_clients": [], "breaking": breaking,
+            "advisory": 0}
+
+
+def strip_ms(obj):
+    if isinstance(obj, dict):
+        return {k: strip_ms(v) for k, v in obj.items() if not k.endswith("ms")}
+    if isinstance(obj, list):
+        return [strip_ms(v) for v in obj]
+    return obj
+
+
+class RunTest(unittest.TestCase):
+    """The no-model runner (FH.1b) over the scripted app and library with a fake glia: one
+    task per kind, each check's miss class, the report, determinism and check."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cohort-run-test-")
+        keys = ("GLIA_COHORT_DIR", "GLIA_COHORT_OFFLINE", "GLIA_AGENT_AB_DIR",
+                "FAKE_GLIA_SPEC")
+        self.env = {k: os.environ.get(k) for k in keys}
+        os.environ["GLIA_COHORT_DIR"] = str(Path(self.tmp) / "cohort")
+        os.environ["GLIA_AGENT_AB_DIR"] = str(Path(self.tmp) / "no-agent-ab")
+        os.environ["GLIA_COHORT_OFFLINE"] = "1"
+        self.app, self.shas = make_app(self.tmp)
+        self.lib, self.lib_shas = make_lib(self.tmp)
+        app_repo = repo_row("app", self.shas["docs"], "app", APP_SIDES)
+        lib_repo = repo_row("lib", self.lib_shas["ripple"], "library", {})
+        self.repos = Path(self.tmp) / "repos.json"
+        self.repos.write_text(json.dumps({"repos": [app_repo, lib_repo]}))
+        self.tasks = Path(self.tmp) / "tasks"
+        self.tasks.mkdir()
+        rows = C.mine(app_repo, self.app, fetch=fake_fetch([]))
+        (self.tasks / "app.jsonl").write_text(C.render(rows))
+        (self.tasks / "lib.jsonl").write_text("")
+        self.rows = {r["shape"]: r for r in rows}
+        self.start = C.checkout_rev(self.app, self.rows["drift"])
+        self.results = Path(self.tmp) / "results"
+        self.glia = Path(self.tmp) / "glia"
+        self.glia.write_text(FAKE_GLIA.format(python=sys.executable))
+        self.glia.chmod(0o755)
+        self.write_spec()
+
+    def tearDown(self):
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp)
+
+    def write_spec(self, version="glia 9.9.9 (build test)"):
+        same = [{"kind": "op", "key": "GET /widgets", "change": "removed",
+                 "file": "server/api.go"}]
+        drift_s = {
+            # 40 rows of one change, no client file: noisy
+            "contract-breaks": cb(same * 40, 40),
+            "review": {"counts": {"impact": 1}, "impact": [{"file": "server/api.go"}]},
+            "dl:parsed,cnode,paired": {"parsed": [["web/src/client.ts"]],
+                                       "cnode": [["web/src/client.ts", "ENDPOINT"]],
+                                       "paired": []},
+            # the client is reached, and holds no removed name: names glia_wrong
+            "diff-impact:names": impact(["web/src/client.ts"]),
+            "find": {"results": [{"file": "web/src/client.ts"}]},
+            # the client is in the rows, below 29 others: noisy
+            "diff-impact": impact([], ["web/src/client.ts"] + ["server/x.go"] * 29)}
+        five = [{"kind": "op", "key": f"k{i}", "change": "removed", "file": "server/api.go"}
+                for i in range(5)]
+        drift_c = {"contract-breaks": cb(five, 50), "review": {"counts": {}},
+                   "diff-impact:names": impact()}
+        ripple = {"dl:parsed,cnode,paired": {"parsed": [], "cnode": [], "paired": []},
+                  "find": {"results": []}, "diff-impact": impact()}
+        symptom = {"dl:parsed,cnode,paired": {
+                       "parsed": [["server/handler.go"]], "cnode": [], "paired": []},
+                   "find": {"results": [{"file": "server/other.go"}]},
+                   "diff-impact": impact(["server/x.go"])}
+        health = {"gaps": {"counts": {"unpaired_route": 1, "dead_symbol": 2}},
+                  "coverage": {"rows": [{}]},
+                  "gql:endpoints": {"results": [{"values": [{"str": "endpoint:GET:/w"}]}]},
+                  "gql:routes": {"results": [{"values": [{"str": "route:GET:/w"}]}]},
+                  "gql:pairs": {"results": []},
+                  "dl:boundary_nodes,boundary_pairs": {
+                      "boundary_nodes": [["ENDPOINT", 1]], "boundary_pairs": []}}
+        lib_health = dict(health, **{
+            "gaps": {"counts": {"unpaired_route": 2, "dead_symbol": 5}},
+            "gql:endpoints": {"results": []},
+            "gql:routes": {"results": [{"values": [{"str": "route:GET:/a"}]},
+                                       {"values": [{"str": "route:GET:/b"}]}]},
+            "dl:boundary_nodes,boundary_pairs": {"boundary_nodes": [],
+                                                 "boundary_pairs": []}})
+        spec = {"version": version, "default": health,
+                "by_head": {self.start: drift_s,
+                            self.shas["drift"]: {**drift_c, **ripple},
+                            self.shas["ripple"]: symptom,
+                            self.lib_shas["ripple"]: lib_health}}
+        path = Path(self.tmp) / "spec.json"
+        path.write_text(json.dumps(spec))
+        os.environ["FAKE_GLIA_SPEC"] = str(path)
+
+    def main(self, *args, release="t"):
+        argv = [*args, "--release", release, "--repos", str(self.repos), "--out",
+                str(self.tasks), "--results", str(self.results), "--glia", str(self.glia)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = C.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def read(self, name, release="t"):
+        return [json.loads(x) for x in
+                (self.results / release / name).read_text().splitlines()]
+
+    def test_run_classifies_each_miss_class(self):
+        rc, out, err = self.main("run", "--jobs", "3")
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"\[cohort\] run release=t repos=2 tasks=3 misses=9 "
+                              r"\(blind=4 wrong=3 noisy=2\) ms=\d+")
+        tasks = {t["shape"]: t for t in self.read("tasks.jsonl")}
+        got = {s: {c["check"]: c["class"] or c["status"] for c in t["checks"]}
+               for s, t in tasks.items()}
+        self.assertEqual(got["drift"], {"locate": "pass", "rest": "noisy", "gate": "noisy",
+                                        "clear": "glia_wrong", "names": "glia_wrong"})
+        self.assertEqual(got["ripple"], {"locate": "glia_blind", "rest": "glia_blind",
+                                         "gate": "n/a", "clear": "n/a", "names": "n/a"})
+        # the core is handler.go (a tie goes to the first path), the rest a file it adds
+        self.assertEqual(got["symptom"], {"locate": "glia_wrong", "rest": "n/a",
+                                          "gate": "n/a", "clear": "n/a", "names": "n/a"})
+        d = tasks["drift"]
+        # pager.ts is added by the change: it does not exist at S, so nothing can name it
+        self.assertEqual(d["S"]["evidence"]["web/src/pager.ts"]["exists"], False)
+        self.assertEqual(d["S"]["gate"]["cb"]["distinct_changes"], 1)
+        self.assertEqual(d["S"]["names"]["boundary_has_truth"], ["web/src/client.ts"])
+        ripple = {c["check"]: c for c in tasks["ripple"]["checks"]}
+        self.assertIn("server/a.go: unparsed", ripple["rest"]["why"])
+        sym = tasks["symptom"]
+        self.assertEqual(sym["R"]["rest_files"], ["server/tally.go"])
+        self.assertEqual(d["R"]["rest_in_answer"], ["web/src/client.ts"])
+        health = {h["repo"]: h for h in self.read("health.jsonl")}
+        self.assertEqual(health["app"]["blind"], ["routes_unreached", "clients_unpaired"])
+        self.assertEqual(health["app"]["boundary_nodes"], {"ENDPOINT": 1})
+        # a library is never judged on client reach
+        self.assertEqual(health["lib"]["flags"], ["routes_unreached", "no_client_endpoints"])
+        self.assertEqual(health["lib"]["blind"], [])
+        misses = self.read("misses.jsonl")
+        self.assertEqual(len(misses), 9)
+        self.assertEqual(misses[0], {"repo": "app", "task": None, "scope": "repo",
+                                     "check": "health", "class": "glia_blind",
+                                     "why": "clients_unpaired"})
+        self.assertFalse(list((Path(self.tmp) / "cohort" / "work").rglob("*.go")))
+
+    def test_report(self):
+        self.assertEqual(self.main("run")[0], 0)
+        rc, out, _ = self.main("report")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, (self.results / "t" / "report.md").read_text())
+        self.assertIn("| app | app | 1 | 1 | 0 | 0.0 | 0.0 | 2 | ENDPOINT 1 | - | "
+                      "routes_unreached, clients_unpaired |", out)
+        self.assertIn("| app | 3 | 1/3 | 0/2 | 0/1 | 0/1 | 0/1 | 4 | 3 | 2 |", out)
+        self.assertIn("| lib | 0 | - | - | - | - | - | 0 | 0 | 0 |", out)
+        self.assertIn("contract-breaks at S named a client truth file on 0 of 1 drift tasks",
+                      out)
+        for k, n in (("glia_blind", 4), ("glia_wrong", 3), ("noisy", 2)):
+            self.assertIn(f"### {k} ({n})", out)
+        self.assertIn("40 rows for 1 distinct changes", out)
+
+    def test_determinism_partial_and_check(self):
+        self.assertEqual(self.main("run", "--jobs", "1")[0], 0)
+        names = ("health.jsonl", "tasks.jsonl", "misses.jsonl", "summary.json", "report.md",
+                 "meta.json")
+        first = {n: (self.results / "t" / n).read_text() for n in names}
+        self.assertEqual(self.main("run", "--jobs", "4")[0], 0)
+        for n in names:
+            now = (self.results / "t" / n).read_text()
+            if n.endswith(".jsonl"):
+                self.assertEqual([strip_ms(json.loads(x)) for x in now.splitlines()],
+                                 [strip_ms(json.loads(x)) for x in first[n].splitlines()], n)
+            else:
+                self.assertEqual(now, first[n], n)
+        rc, out, _ = self.main("check")
+        self.assertEqual(rc, 0)
+        self.assertIn("[cohort] check release=t ok - repos=2 tasks=3 misses=9", out)
+        # a partial run replaces only its own rows
+        rid = self.rows["ripple"]["id"]
+        rc, out, _ = self.main("run", "--ids", f"^{rid}$")
+        self.assertEqual(rc, 0)
+        self.assertIn("tasks=3 misses=9", out)
+        self.assertEqual(self.main("check")[0], 0)
+        # a changed check is caught
+        rows = self.read("tasks.jsonl")
+        rows[0]["checks"][1]["status"] = "pass"  # the drift's rest was a noisy miss
+        (self.results / "t" / "tasks.jsonl").write_text(C.jsonl(rows))
+        rc, _, err = self.main("check")
+        self.assertEqual(rc, 1)
+        self.assertIn(f"checks differ: {rows[0]['task']}", err)
+        # one release's results come from one glia
+        self.write_spec(version="glia 0.0.1 (build other)")
+        rc, _, err = self.main("run")
+        self.assertEqual(rc, 2)
+        self.assertIn("one release's results come from one glia", err)
+
+    def test_classify_errors_and_added_files(self):
+        base = {"task": "x", "repo": "app", "shape": "ripple", "truth": ["a.go"]}
+        self.assertEqual({c["status"] for c in C.classify(dict(base, error="start: gone"))},
+                         {"error"})
+        row = dict(base, start={"error": "build rc=1 boom"})
+        got = {c["check"]: c["status"] for c in C.classify(row)}
+        self.assertEqual(got["locate"], "error")
+        self.assertEqual(got["gate"], "n/a")
+        ev = {"a.go": {"exists": False, "parsed": False, "boundary": [], "paired": []}}
+        row = dict(base, start={"evidence": ev},
+                   L={"glia": [0.0, None], "glia_err": None},
+                   R={"glia": [0.0, None], "rest": 1, "rest_files": ["a.go"],
+                      "rest_in_answer": [], "rows": 0})
+        got = {c["check"]: c["status"] for c in C.classify(row)}
+        self.assertEqual((got["locate"], got["rest"]), ("n/a", "n/a"))
+
+
 class CommittedTest(unittest.TestCase):
     """The committed corpus: repos.json and tasks/ are well formed (no clone needed)."""
 

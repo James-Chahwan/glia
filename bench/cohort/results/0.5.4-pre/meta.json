@@ -1,0 +1,7 @@
+{
+ "glia": "glia 0.5.3 (build 0.5.3+pdc42bbace0d19e35)",
+ "glia_threads": 4,
+ "noise_factor": 10,
+ "release": "0.5.4-pre",
+ "tasks_sha256": "810577329035"
+}

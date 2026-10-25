@@ -12,9 +12,13 @@ pinned by sha, and tasks whose answers are the authors' own commits. No model ru
 - `cohort.py` - `build-tasks` mines `tasks/<label>.jsonl` from each repo's history;
   `build-tasks --check` re-derives every row offline; `starts` rebuilds the synthetic drift
   starts (`--compare-agent-ab` compares them with `bench/agent-ab/probe/drift.py`'s refs).
-  FH.1b adds the no-model runner (`run`, `report`) and FH.12 the gate that reads its results.
+  `run` / `report` / `check` are the no-model runner (below); FH.12's gate reads its results.
 - `tasks/<label>.jsonl` - the task rows, in `bench/agent-ab/tasks.py`'s schema plus `shape`.
-- `test_cohort.py` - hermetic tests (two scripted git repos; no network, `gh` or glia).
+- `results/<release>/` - one runner pass with one glia: `meta.json` (the glia version line,
+  the corpus digest), `health.jsonl` (one row per repo), `tasks.jsonl` (one probe row per
+  task), `misses.jsonl`, `summary.json` (no times: what a gate compares) and `report.md`.
+- `test_cohort.py` - hermetic tests (two scripted git repos and a fake glia printing canned
+  JSON; no network, `gh` or real glia).
 
 ## Roles and sides
 
@@ -60,6 +64,57 @@ Bare clones live under `${GLIA_COHORT_DIR:-~/.cache/glia-cohort}/<label>.git`, n
 tree. A missing clone is made with `git clone --bare --local` from
 `${GLIA_AGENT_AB_DIR:-~/.cache/glia-agent-ab}/<label>.git` when that exists (the FE.1 and FE.4
 repos; twenty is 2.3 GB), else from the url. `GLIA_COHORT_OFFLINE=1`: no clone, fetch or `gh`.
+
+## The runner (no model)
+
+    python3 bench/cohort/cohort.py run --release <r> [--glia <bin>] [--jobs 4] [--only <label>,..]
+                                       [--ids <regex>] [--skip-health]
+    python3 bench/cohort/cohort.py report --release <r>
+    python3 bench/cohort/cohort.py check --release <r> [--json]
+
+`run` runs every probe of `bench/agent-ab/probe/` that needs no model, with their measured
+definitions, through one glia binary (default the tree's `target/release/glia`; build it with
+`cargo build --release -p glia-cli`), on a thread pool of `--jobs` workers interleaved over the
+repos. Each (task, state) gets its own checkout under `$GLIA_COHORT_DIR/work/<release>/` (a
+`git clone --shared` of the bare clone, so no history is copied, with the remote removed as the
+probes' `git init` + fetch had none), deleted when its probes are done; glia runs with
+`GLIA_THREADS=4`. Snapshot steps (`history sync`) run only in those checkouts.
+
+| probe | tasks | at | what is measured (from) |
+|---|---|---|---|
+| health | each repo | its pinned sha | `build`, `gaps` counts, `coverage` rows, ENDPOINT / ROUTE / HTTP_CALLS reads, client reach (paired endpoints / endpoints), route reach (1 - unpaired routes / routes), dead symbols, suspicious endpoints, unparsed `.svelte` / `.astro` / `.mdx` files, imported workspace packages, plus the boundary node and pair counts per kind (`health.py`) |
+| locate | every task | its start | `find --files <prompt>` (a drift task: its subject) recall@10 and the first truth rank, beside a scripted `git grep` of the prompt's words (`oracle.py` L) |
+| rest | every task | its start | given the core of the change (a drift task's server half, already HEAD; else the truth file with the most changed lines, applied to the work tree), `diff-impact` recall@10 over the other truth files, beside a grep of the diff's identifiers (`oracle.py` R) |
+| gate | drift | S | `contract-breaks --base HEAD~1` names a client truth file; breaking / rows / distinct changes; `review --base HEAD~1` the same (`gate.py`) |
+| clear | drift, S breaking | C | fewer breaking rows once the authors' client half is in (`gate.py`) |
+| names | drift | S and C | a file `diff-impact --base HEAD~1 --depth 6` reaches still holds a name the server change removed (case-normalised), and it is a client truth file; the no-graph control beside it (`names.py`) |
+| evidence | every task | its start | per truth file: exists, parsed (a MODULE is located in it), its boundary nodes (ENDPOINT, GRPC_CLIENT, GRAPHQL_OPERATION, WS_CLIENT, RPC_CALL, QUEUE_PRODUCER, EVENT_EMITTER) and their pair edges, one `glia query` program |
+
+At a drift task's S the build, the gate, the evidence and names run before `history sync`, then
+locate and rest (each probe sees the state it saw in `bench/agent-ab/probe/`).
+
+A check is `pass`, `miss`, `n/a` (it does not apply: a library has no drift task, a gate that
+does not break at S has nothing to clear, a truth file the change adds cannot be named before it
+exists) or `error`. A miss is classified:
+
+- `glia_blind` - the mechanism's node or edge is absent: the truth file is unparsed, or no answer
+  reaches it (the `why` says per file: unparsed, no boundary node, unpaired, no path). A repo's
+  health flag (routes unreached, clients unpaired, no client endpoints, unparsed single-file
+  components) is a `glia_blind` miss of scope `repo`; a library is never flagged on client reach.
+- `noisy` - the truth is reached, in an answer of more than 10x as many rows as distinct changes
+  (contract-breaks rows / distinct (section, field, change) triples; names flagged files / truth
+  files; diff-impact rows / rest files).
+- `glia_wrong` - reached, and still wrong: a 0-breaking gate on a breaking change, a gate that does
+  not clear after the fix, a truth file ranked out of the top 10, a reached client file holding no
+  removed name.
+
+`run` replaces only the rows it ran (`--only` / `--ids` re-run a part), refuses a results dir
+another glia or another corpus wrote, and prints, once per run,
+`[cohort] run release=<r> repos=<n> tasks=<t> misses=<m> (blind=<b> wrong=<w> noisy=<z>) ms=<ms>`.
+`report` prints `report.md`: boundary health per repo, the probes per repo (passed / judged), the
+drift gate per task and every miss by class. `check` re-derives every check, the miss list, the
+summary and the report from the stored probe rows, and exits 1 on a difference, a task with no
+probe row or a repo with no health row (`[cohort] check release=<r> ok - ..`).
 
 ## The repos
 
