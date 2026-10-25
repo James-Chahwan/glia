@@ -623,8 +623,10 @@ pub fn is_path_symbol(s: &str) -> bool {
 /// placeholder (any other hole is kept, so the registration is dropped as
 /// before); an identifier or member expression ending the argument is one
 /// placeholder. Anything else (an options object, no argument) falls back to
-/// [`extract_decorator_string`].
-fn nest_path_arg(line: &str) -> Option<String> {
+/// [`extract_decorator_string`]. FH.3b: `openapi_annot` keys a NestJS
+/// `@ApiOperation` through this same rule, so an op and its ROUTE share one
+/// placeholder path and the engine's path fold rewrites both.
+pub(crate) fn nest_path_arg(line: &str) -> Option<String> {
     let open = line.find('(')?;
     let arg = line.get(open + 1..)?.trim_start();
     match arg.as_bytes().first()? {

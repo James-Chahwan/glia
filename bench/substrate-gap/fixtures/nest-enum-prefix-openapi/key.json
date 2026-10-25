@@ -1,0 +1,22 @@
+{
+  "framework": "nest-enum-prefix-openapi",
+  "language": "typescript",
+  "dirs": ["server"],
+  "note": "FH.3b. An @nestjs/swagger `@ApiOperation` on a handler whose controller prefix is a TS enum member declared in another file (`@Controller(RouteKey.User)` + `@Put('me')`). FH.3 folds the ROUTE to `PUT /users/me`; openapi_annot now keys the op through the same `~const:<symbol>~` placeholder rule ts_routes uses, and the post-cache path fold rewrites the op's qname, name, CODE and ORIGIN path through the same const tables, so the op and its route meet. Baseline 2026-10-26 (HEAD 1589296e): ROUTE `PUT /users/me`, op `contract::server::user.controller::PUT:/me` (the prefix dropped), no DOCUMENTS edge. Deliberately not bound to a matrix cell: the contract-annotation row is already scored by contract-annot-nestjs.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "PUT /users/me", "exact": true, "note": "FH.3's folded route"},
+    {"kind": "DOC_SECTION", "name": "contract::server::user.controller::PUT:/users/me", "exact": true, "note": "the annotation op keyed on the folded path"}
+  ],
+  "expect_edges": [
+    {"from": "contract::server::user.controller::PUT:/users/me", "to": "PUT /users/me", "category": "DOCUMENTS", "exact": true, "note": "paired by the contract-link route matcher on the folded path"}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "contract::server::user.controller::PUT:/users/me", "cell": "ORIGIN", "contains": "\"path\":\"/users/me\",\"raw_path\":\"/users/me\"", "note": "the ORIGIN path the pairing pass reads is folded too"},
+    {"kind": "DOC_SECTION", "node": "contract::server::user.controller::PUT:/users/me", "cell": "ORIGIN", "contains": "\"operation_id\":\"updateMe\""}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "contract::server::user.controller::PUT:/me", "note": "PRECISION: the prefix-less op key extract_decorator_string composed"},
+    {"kind": "DOC_SECTION", "name": "contract::server::user.controller::PUT:/~const:RouteKey.User~/me", "note": "PRECISION: the placeholder must not survive once the symbol resolves"},
+    {"kind": "ROUTE", "name": "PUT /me", "note": "PRECISION: the prefix-less route"}
+  ]
+}

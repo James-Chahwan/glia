@@ -914,11 +914,22 @@ struct PathFoldStats {
     objects: usize,
     /// Of `folded`: bound by a plain constant (`USERS`).
     consts: usize,
+    /// FH.3b: placeholder segments read off contract-op paths (a NestJS
+    /// `@ApiOperation` keyed through ts_routes' placeholder rule), counted
+    /// apart from the ROUTE ones above.
+    op_symbols: usize,
+    /// FH.3b: of `op_symbols`, the placeholders the const tables resolved.
+    op_folded: usize,
+    /// FH.3b: of `op_symbols`, the placeholders kept on the op's key.
+    op_unresolved: usize,
 }
 
 impl PathFoldStats {
     /// fired_on marker, once per repo where any ROUTE path named a symbol:
     ///   `[path-fold] symbols=<s> folded=<f> unresolved=<u> (enum=<e> object=<o> const=<c>) repo=<label>`
+    ///
+    /// FH.3b, once per repo where any contract op's path named a symbol:
+    ///   `[path-fold] ops symbols=<s> folded=<f> unresolved=<u> repo=<label>`
     fn report(&self, repo_label: &str) {
         if self.symbols > 0 {
             eprintln!(
@@ -926,7 +937,70 @@ impl PathFoldStats {
                 self.symbols, self.folded, self.unresolved, self.enums, self.objects, self.consts
             );
         }
+        if self.op_symbols > 0 {
+            eprintln!(
+                "[path-fold] ops symbols={} folded={} unresolved={} repo={repo_label}",
+                self.op_symbols, self.op_folded, self.op_unresolved
+            );
+        }
     }
+}
+
+/// FH.3: one path's fold: the path with every placeholder the tables
+/// resolve spliced in (verbatim, untidied) and the tallies of that path.
+#[derive(Debug, Default)]
+struct SymbolPathFold {
+    path: String,
+    symbols: usize,
+    folded: usize,
+    unresolved: usize,
+    enums: usize,
+    objects: usize,
+    consts: usize,
+}
+
+/// FH.3: `path`'s placeholders resolved by [`resolve_path_symbol`]; `None`
+/// when `path` holds none. A placeholder nothing binds is kept verbatim.
+fn fold_symbol_path(
+    path: &str,
+    file: Option<usize>,
+    imports: &[glia_code_domain::ImportStmt],
+    inputs: &FoldInputs<'_>,
+    by_path: &BTreeMap<&str, usize>,
+) -> Option<SymbolPathFold> {
+    use glia_code_extractors::ts_routes::path_symbols;
+    let symbols = path_symbols(path);
+    if symbols.is_empty() {
+        return None;
+    }
+    let mut fold = SymbolPathFold {
+        path: String::with_capacity(path.len()),
+        ..SymbolPathFold::default()
+    };
+    let mut last = 0;
+    for (range, symbol) in symbols {
+        fold.symbols += 1;
+        fold.path
+            .push_str(path.get(last..range.start).unwrap_or(""));
+        match resolve_path_symbol(symbol, file, imports, inputs, by_path) {
+            Some((value, binding)) => {
+                fold.folded += 1;
+                match binding {
+                    SymbolBinding::Enum => fold.enums += 1,
+                    SymbolBinding::Object => fold.objects += 1,
+                    SymbolBinding::Const => fold.consts += 1,
+                }
+                fold.path.push_str(&value);
+            }
+            None => {
+                fold.unresolved += 1;
+                fold.path.push_str(path.get(range.clone()).unwrap_or(""));
+            }
+        }
+        last = range.end;
+    }
+    fold.path.push_str(path.get(last..).unwrap_or(""));
+    Some(fold)
 }
 
 /// What bound a folded symbol, for the `[path-fold]` breakdown.
@@ -956,11 +1030,16 @@ enum SymbolBinding {
 /// placeholder qname and every build re-folds against the current tables,
 /// so an edit to the enum's file alone moves a cache-served route. Per
 /// parse, through `rekey::rekey_node`, so no HashMap order reaches an id.
+///
+/// FH.3b: a contract op (a DOC_SECTION whose ORIGIN is `provenance:
+/// contract`) whose ORIGIN path holds a placeholder, which is how
+/// `openapi_annot` keys a NestJS `@ApiOperation` under a symbolic prefix, is
+/// folded the same way from the same file, so it keys on its ROUTE's folded
+/// path: see [`fold_contract_ops`].
 fn apply_path_symbol_fold(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     inputs: &FoldInputs<'_>,
 ) -> PathFoldStats {
-    use glia_code_extractors::ts_routes::path_symbols;
     let mut stats = PathFoldStats::default();
     let by_path: BTreeMap<&str, usize> = inputs
         .files
@@ -983,40 +1062,21 @@ fn apply_path_symbol_fold(
             else {
                 continue;
             };
-            let symbols = path_symbols(path);
-            if symbols.is_empty() {
-                continue;
-            }
             let file = route_file(node).and_then(|f| by_path.get(f.as_str()).copied());
-            let mut out = String::with_capacity(path.len());
-            let mut last = 0;
-            let mut any = false;
-            for (range, symbol) in symbols {
-                stats.symbols += 1;
-                out.push_str(path.get(last..range.start).unwrap_or(""));
-                match resolve_path_symbol(symbol, file, &fp.imports, inputs, &by_path) {
-                    Some((value, binding)) => {
-                        stats.folded += 1;
-                        match binding {
-                            SymbolBinding::Enum => stats.enums += 1,
-                            SymbolBinding::Object => stats.objects += 1,
-                            SymbolBinding::Const => stats.consts += 1,
-                        }
-                        out.push_str(&value);
-                        any = true;
-                    }
-                    None => {
-                        stats.unresolved += 1;
-                        out.push_str(path.get(range.clone()).unwrap_or(""));
-                    }
-                }
-                last = range.end;
-            }
-            out.push_str(path.get(last..).unwrap_or(""));
-            if !any {
+            let Some(fold) = fold_symbol_path(path, file, &fp.imports, inputs, &by_path) else {
+                continue;
+            };
+            stats.symbols += fold.symbols;
+            stats.folded += fold.folded;
+            stats.unresolved += fold.unresolved;
+            stats.enums += fold.enums;
+            stats.objects += fold.objects;
+            stats.consts += fold.consts;
+            if fold.folded == 0 {
                 continue;
             }
-            let qname = glia_code_domain::endpoint::route_qname(method, &tidy_route_path(&out));
+            let qname =
+                glia_code_domain::endpoint::route_qname(method, &tidy_route_path(&fold.path));
             let new = NodeId::from_parts(
                 glia_code_domain::GRAPH_TYPE,
                 inputs.repo,
@@ -1030,11 +1090,159 @@ fn apply_path_symbol_fold(
             // A ROUTE's display name is its qname (LB.11b).
             fp.nav.name_by_id.insert(new, qname);
         }
+        fold_contract_ops(fp, inputs, &by_path, &mut stats);
     }
     stats
 }
 
-/// FH.3: the file a ROUTE was read from, off its first POSITION cell.
+/// FH.3b: the HTTP key of a contract op, off its ORIGIN cell: (method,
+/// path, raw_path). `None` for any other node, an AsyncAPI channel op or an
+/// ORIGIN without both strings.
+fn contract_op_key(node: &glia_core::Node) -> Option<(String, String, Option<String>)> {
+    node.cells.iter().find_map(|c| match &c.payload {
+        CellPayload::Json(p) if c.kind == cell_type::ORIGIN => {
+            let v: serde_json::Value = serde_json::from_str(p).ok()?;
+            if v.get("provenance")?.as_str()? != "contract" {
+                return None;
+            }
+            let method = v.get("method")?.as_str()?.to_string();
+            let path = v.get("path")?.as_str()?.to_string();
+            let raw = v
+                .get("raw_path")
+                .and_then(|r| r.as_str())
+                .map(str::to_string);
+            Some((method, path, raw))
+        }
+        _ => None,
+    })
+}
+
+/// FH.3b: `"<key>":<value as a JSON string>`, the exact spelling the
+/// extractors write an ORIGIN string field in (`esc` and serde agree on
+/// every path character a placeholder or a folded value holds).
+fn json_field(key: &str, value: &str) -> String {
+    format!(
+        "\"{key}\":{}",
+        serde_json::to_string(value).unwrap_or_default()
+    )
+}
+
+/// FH.3b: every contract op of `fp` whose ORIGIN path holds a ts_routes
+/// placeholder is re-keyed onto the path its symbols hold, folded and tidied
+/// exactly as its ROUTE was: the op's qname (`contract::<dir>::<stem>::
+/// <METHOD>:<path>`, so its id), its name, the leading `<METHOD> <path>` of
+/// its CODE text and its ORIGIN `path` / `raw_path` all move, so
+/// `link_contract_routes` pairs it with the folded ROUTE. An op with no
+/// placeholder resolved keeps its key (counted unresolved; no op is ever
+/// dropped). An op that folds onto a key the file already holds leaves its
+/// cells to that op, which keeps its own, as `openapi_annot` merges two
+/// blocks on one key first-wins. Counted apart from the ROUTE tallies.
+fn fold_contract_ops(
+    fp: &mut FileParse,
+    inputs: &FoldInputs<'_>,
+    by_path: &BTreeMap<&str, usize>,
+    stats: &mut PathFoldStats,
+) {
+    struct OpMove {
+        old: NodeId,
+        new: NodeId,
+        qname: String,
+        name: String,
+        old_head: String,
+        new_head: String,
+        fields: Vec<(String, String)>,
+    }
+    let mut moves: Vec<OpMove> = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for node in &fp.nodes {
+        if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::DOC_SECTION) || !seen.insert(node.id)
+        {
+            continue;
+        }
+        let Some((method, path, raw)) = contract_op_key(node) else {
+            continue;
+        };
+        let file = route_file(node).and_then(|f| by_path.get(f.as_str()).copied());
+        let Some(fold) = fold_symbol_path(&path, file, &fp.imports, inputs, by_path) else {
+            continue;
+        };
+        stats.op_symbols += fold.symbols;
+        stats.op_folded += fold.folded;
+        stats.op_unresolved += fold.unresolved;
+        if fold.folded == 0 {
+            continue;
+        }
+        let new_path = tidy_route_path(&fold.path);
+        let Some(prefix) = fp
+            .nav
+            .qname_by_id
+            .get(&node.id)
+            .and_then(|q| q.strip_suffix(&format!("{method}:{path}")))
+        else {
+            continue;
+        };
+        let qname = format!("{prefix}{method}:{new_path}");
+        let mut fields = vec![(json_field("path", &path), json_field("path", &new_path))];
+        if let Some(raw) = raw {
+            let new_raw = if raw == path {
+                new_path.clone()
+            } else {
+                fold_symbol_path(&raw, file, &fp.imports, inputs, by_path)
+                    .filter(|f| f.folded > 0)
+                    .map_or_else(|| raw.clone(), |f| tidy_route_path(&f.path))
+            };
+            fields.push((
+                json_field("raw_path", &raw),
+                json_field("raw_path", &new_raw),
+            ));
+        }
+        moves.push(OpMove {
+            old: node.id,
+            new: NodeId::from_parts(
+                glia_code_domain::GRAPH_TYPE,
+                inputs.repo,
+                node_kind::DOC_SECTION,
+                &qname,
+            ),
+            qname,
+            name: format!("{method} {new_path}"),
+            old_head: format!("{method} {path}"),
+            new_head: format!("{method} {new_path}"),
+            fields,
+        });
+    }
+    for m in moves {
+        let taken = m.old != m.new && fp.nodes.iter().any(|n| n.id == m.new);
+        for n in fp.nodes.iter_mut().filter(|n| n.id == m.old) {
+            if taken {
+                n.cells.clear();
+                continue;
+            }
+            for c in &mut n.cells {
+                match &mut c.payload {
+                    CellPayload::Json(p) if c.kind == cell_type::ORIGIN => {
+                        for (from, to) in &m.fields {
+                            *p = p.replacen(from.as_str(), to, 1);
+                        }
+                    }
+                    CellPayload::Text(t) if c.kind == cell_type::CODE => {
+                        if let Some(rest) = t.strip_prefix(m.old_head.as_str()) {
+                            *t = format!("{}{rest}", m.new_head);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        crate::rekey::rekey_node(fp, m.old, m.new, &m.qname);
+        if !taken {
+            fp.nav.name_by_id.insert(m.new, m.name);
+        }
+    }
+}
+
+/// FH.3: the file a ROUTE (FH.3b: or a contract op) was read from, off its
+/// first POSITION cell.
 fn route_file(node: &glia_core::Node) -> Option<String> {
     node.cells.iter().find_map(|c| match &c.payload {
         CellPayload::Json(p) if c.kind == cell_type::POSITION => {
@@ -3552,6 +3760,108 @@ mod path_fold_tests {
         assert_eq!(
             routes,
             qnames(&clean.merged, glia_code_domain::node_kind::ROUTE)
+        );
+    }
+
+    fn origin_of(m: &MergedGraph, qname: &str) -> Option<String> {
+        m.graphs.iter().find_map(|g| {
+            g.nodes.iter().find_map(|n| {
+                (g.nav.qname_by_id.get(&n.id).map(String::as_str) == Some(qname))
+                    .then(|| {
+                        n.cells.iter().find_map(|c| match &c.payload {
+                            glia_core::CellPayload::Json(j)
+                                if c.kind == glia_code_domain::cell_type::ORIGIN =>
+                            {
+                                Some(j.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+            })
+        })
+    }
+
+    fn documents(m: &MergedGraph) -> Vec<(String, String)> {
+        let qname = |id| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
+        };
+        let mut out: Vec<(String, String)> = m
+            .all_edges()
+            .filter(|e| e.category == edge_category::DOCUMENTS)
+            .map(|e| (qname(e.from), qname(e.to)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// FH.3b: an `@ApiOperation` under a symbolic controller prefix keys on
+    /// the path its ROUTE folds to, and the contract-link pass pairs them; a
+    /// placeholder nothing binds keeps the op on its placeholder key, the
+    /// key its unfolded ROUTE kept too.
+    #[test]
+    fn nest_openapi_ops_fold_with_their_routes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write(&repo, "server/route-keys.ts", KEYS);
+        write(
+            &repo,
+            "server/user.controller.ts",
+            concat!(
+                "import { Controller, Get, Put } from '@nestjs/common';\n",
+                "import { ApiOperation } from '@nestjs/swagger';\n",
+                "import { RouteKey } from './route-keys';\n\n",
+                "@Controller(RouteKey.User)\n",
+                "export class UserController {\n",
+                "  @ApiOperation({ operationId: 'updateMe' })\n",
+                "  @Put('me')\n  update() {}\n\n",
+                "  @ApiOperation({ operationId: 'shared' })\n",
+                "  @Get(`${RouteKey.Album}/shared`)\n  shared() {}\n\n",
+                "  @ApiOperation({ operationId: 'missing' })\n",
+                "  @Get(Missing.Key)\n  missing() {}\n",
+                "}\n",
+            ),
+        );
+        let built = generate_one(repo.to_str().unwrap()).unwrap();
+        let ops = qnames(&built.merged, glia_code_domain::node_kind::DOC_SECTION);
+        assert_eq!(
+            ops,
+            vec![
+                "contract::server::user.controller::GET:/users/albums/shared",
+                "contract::server::user.controller::GET:/users/~const:Missing.Key~",
+                "contract::server::user.controller::PUT:/users/me",
+            ]
+        );
+        let origin = origin_of(
+            &built.merged,
+            "contract::server::user.controller::PUT:/users/me",
+        )
+        .unwrap();
+        assert!(
+            origin.contains(r#""method":"PUT","path":"/users/me","raw_path":"/users/me","operation_id":"updateMe""#),
+            "{origin}"
+        );
+        assert_eq!(
+            documents(&built.merged),
+            vec![
+                (
+                    "contract::server::user.controller::GET:/users/albums/shared".to_string(),
+                    "GET /users/albums/shared".to_string()
+                ),
+                // The unresolved op and its route kept one placeholder key
+                // (one decorator), so they still meet.
+                (
+                    "contract::server::user.controller::GET:/users/~const:Missing.Key~".to_string(),
+                    "GET /users/~const:Missing.Key~".to_string()
+                ),
+                (
+                    "contract::server::user.controller::PUT:/users/me".to_string(),
+                    "PUT /users/me".to_string()
+                ),
+            ]
         );
     }
 

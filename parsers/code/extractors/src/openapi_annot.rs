@@ -34,7 +34,7 @@ use crate::anchor;
 use crate::contracts::{
     ContractNodes, METHODS, contract_op_qname, esc, fold_server_base, operation_id_field, push_op,
 };
-use crate::ts_routes::{combine_nest_paths, extract_decorator_string};
+use crate::ts_routes::{combine_nest_paths, nest_path_arg};
 
 const SPRINGDOC: &str = "springdoc";
 const SPRINGFOX: &str = "springfox";
@@ -261,7 +261,7 @@ fn scan(
     for u in units {
         let annots = u.annots;
         if let Some(c) = annots.iter().find(|a| a.name == "Controller") {
-            nest_prefix = extract_decorator_string(c.whole).unwrap_or_default();
+            nest_prefix = nest_path_arg(c.whole).unwrap_or_default();
         }
         let Some((framework, decl)) = read_block(&annots, syn, g) else {
             continue;
@@ -447,13 +447,20 @@ fn route_methods(fp: &FileParse, route: NodeId) -> Vec<String> {
 
 /// NestJS: the block's own verb decorators joined onto the nearest preceding
 /// `@Controller(` prefix, by the helpers `nestjs_routes` composes with.
+///
+/// FH.3b: both the prefix and each verb's path are read by ts_routes'
+/// `nest_path_arg`, the rule its ROUTEs are read by, so a symbolic argument
+/// (`@Controller(RouteKey.User)`, `@Get(`${RouteKey.Album}/x`)`) keys the op
+/// on the same `~const:<symbol>~` placeholder path as its ROUTE. The
+/// engine's post-cache path fold then rewrites both through the const
+/// tables; a placeholder it cannot resolve keeps the op on that key.
 fn nest_keys(annots: &[Annot<'_>], prefix: &str) -> Vec<(String, String)> {
     let mut keys: Vec<(String, String)> = Vec::new();
     for a in annots {
         let Some((_, verb)) = NEST_VERBS.iter().find(|(d, _)| *d == a.name) else {
             continue;
         };
-        let suffix = extract_decorator_string(a.whole).unwrap_or_default();
+        let suffix = nest_path_arg(a.whole).unwrap_or_default();
         let key = (verb.to_string(), combine_nest_paths(prefix, &suffix));
         if !keys.contains(&key) {
             keys.push(key);
@@ -1638,6 +1645,57 @@ export class UsersController {
             vec![FwStat {
                 framework: "nestjs",
                 ops: 1,
+                unkeyed: 0
+            }]
+        );
+    }
+
+    /// FH.3b: a symbolic controller prefix and a template verb path key the
+    /// op on ts_routes' placeholder path, never the prefix-less `PUT /me`;
+    /// the engine's path fold resolves the placeholders.
+    #[test]
+    fn nestjs_symbolic_paths_key_on_the_route_placeholders() {
+        let src = r#"import { Controller, Get, Put } from '@nestjs/common';
+import { ApiOperation } from '@nestjs/swagger';
+import { RouteKey } from './route-keys';
+
+@Controller(RouteKey.User)
+export class UserController {
+  @ApiOperation({ operationId: 'updateMe' })
+  @Put('me')
+  update() {}
+
+  @ApiOperation({ operationId: 'shared' })
+  @Get(`${RouteKey.Album}/shared`)
+  shared() {}
+}
+"#;
+        let (ops, stats) = run(
+            src,
+            "server/user.controller.ts",
+            "typescript",
+            &FileParse::default(),
+        );
+        let qnames: Vec<&str> = ops.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            vec![
+                "contract::server::user.controller::PUT:/~const:RouteKey.User~/me",
+                "contract::server::user.controller::GET:/~const:RouteKey.User~/~const:RouteKey.Album~/shared",
+            ]
+        );
+        assert!(
+            ops[0].1.contains(
+                r#""path":"/~const:RouteKey.User~/me","raw_path":"/~const:RouteKey.User~/me""#
+            ),
+            "{}",
+            ops[0].1
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "nestjs",
+                ops: 2,
                 unkeyed: 0
             }]
         );
