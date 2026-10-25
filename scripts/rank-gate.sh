@@ -12,9 +12,19 @@
 #   bash scripts/rank-gate.sh flags               print the common rank_eval flags (COMMON), one per line (read-only;
 #                                                 scripts/embedding-gate.sh reads them, FB.6)
 #
-# Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the clones, the copies and run/), CARGO_TARGET_DIR
-# (where rank_eval is built; default <this checkout>/target). GLIA_RANK_PRIVATE is unset: the gate runs public
-# modes only, and only https snapshots marked `"public": true` are ever fetched.
+# Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the clones, the copies, run/ and sem/), CARGO_TARGET_DIR
+# (where rank_eval is built; default <this checkout>/target), FASTEMBED_CACHE_DIR (default ~/.cache/glia/fastembed;
+# never a repo dir). GLIA_RANK_PRIVATE is unset: the gate runs public modes only, and only https snapshots marked
+# `"public": true` are ever fetched.
+#
+# FB.7c: the gate measures the shipped fused `find --files` (ANS:find_files / @sel rank with the snapshot's t2
+# vectors, FIND_FILES_FUSED, and SELf2t's replay selects over the 13-list). rank_eval is built with
+# `--features sem-eval` and glia-embed-worker (gpu-webgpu) beside it, and every snapshot runs with SEMF: bge-small
+# vectors cached in $DIR/sem (one jsonl per snapshot; the model downloads once into FASTEMBED_CACHE_DIR, then
+# everything is offline and a snapshot embeds nothing it embedded before; the GPU when the worker finds one, else
+# the CPU) and `--engine-parity on`, so every check also pins the engine's fused keys to rank_eval's
+# (`[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] .. key_mismatch=0 order_mismatch=0`; a
+# mismatch fails the run). A missing model or cache dir makes the run, and so `check`, exit 2: never a silent skip.
 # Last line of `check`, gated on by dev-notes/wave-runner/closeout.py:
 #   [rank-gate] check: ok - <rows> rows, <gains> gains, 0 drops on <n> snapshots
 #   [rank-gate] check: FAILED (<k> drops: <label>/<shape>/<ranker>/<metric>, ..)      exit 1
@@ -33,13 +43,20 @@ TARGET=${CARGO_TARGET_DIR:-$HERE/target}
 BIN=$TARGET/release/examples/rank_eval
 COMMON=(--round1 on --tune on --pick base,d85 --round2 on --round3 on --r3-perq on --ans on
         --max-commits 300 --max-seeds 5 --boot 1000)
+# FB.7c: the vectors and the parity, kept out of COMMON: `flags` prints COMMON for scripts/embedding-gate.sh,
+# which passes its own --sem flags (its model may be a smoke run's).
+SEMF=(--sem on --sem-model bge-small --sem-cache "$DIR/sem" --engine-parity on)
+export FASTEMBED_CACHE_DIR=${FASTEMBED_CACHE_DIR:-$HOME/.cache/glia/fastembed}
 say() { echo "[rank-gate] $*"; }
 
 # `flags`: the one shared definition of the common flags, read by scripts/embedding-gate.sh. Read-only:
 # it touches no directory and fetches nothing.
 if [ "${1:-}" = flags ]; then printf '%s\n' "${COMMON[@]}"; exit 0; fi
 
-mkdir -p "$DIR" "$RUN" || { say "check: FAILED (mkdir $DIR)"; exit 2; }
+case "$FASTEMBED_CACHE_DIR" in
+  "$HERE"|"$HERE"/*) say "check: FAILED (FASTEMBED_CACHE_DIR is inside this checkout)"; exit 2 ;;
+esac
+mkdir -p "$DIR" "$RUN" "$DIR/sem" || { say "check: FAILED (mkdir $DIR)"; exit 2; }
 
 # The snapshot rows as `name url rev label flags..` lines; a row that is not a public https snapshot
 # is refused (exit 2), so no private repo or local path ever enters the gate.
@@ -99,8 +116,11 @@ do_fetch() {
 
 do_run() {
   local t0 name url rev label flags q
-  say "build rank_eval (release) in $TARGET"
-  (cd "$HERE" && cargo build --release --quiet -p glia-engine --example rank_eval > "$RUN/build.log" 2>&1) \
+  say "build rank_eval (release, --features sem-eval) and glia-embed-worker (gpu-webgpu) in $TARGET"
+  # The worker first: rank_eval finds <target>/release/glia-embed-worker one directory above the example.
+  (cd "$HERE" && cargo build --release --quiet -p glia-embed --features gpu-webgpu --bin glia-embed-worker \
+      > "$RUN/build.log" 2>&1 \
+    && cargo build --release --quiet -p glia-engine --example rank_eval --features sem-eval >> "$RUN/build.log" 2>&1) \
     || { tail -20 "$RUN/build.log"; say "check: FAILED (build rank_eval)"; exit 2; }
   export GLIA_RANK_GATE_HEAD
   GLIA_RANK_GATE_HEAD=$(git -C "$HERE" rev-parse HEAD)
@@ -109,9 +129,10 @@ do_run() {
     # cwd = run/: anything rank_eval writes by default lands there, never in the repo.
     # shellcheck disable=SC2086
     (cd "$RUN" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${rev:0:12}" --git "$DIR/$name.git" --rev "$rev" \
-        --label "$label" $flags "${COMMON[@]}" --out "$RUN/$label.json" --md "$RUN/$label.md" \
+        --label "$label" $flags "${COMMON[@]}" "${SEMF[@]}" --out "$RUN/$label.json" --md "$RUN/$label.md" \
         --r1md "$RUN/$label.r1.md" --r3md "$RUN/$label.r3.md" 2> "$RUN/$label.log") \
       || { tail -5 "$RUN/$label.log"; say "check: FAILED (run $label)"; exit 2; }
+    grep -E '^\[rank-parity\] label=[^ ]+ shape=find |^\[sem-eval\] label=[^ ]+ engine queries ' "$RUN/$label.log" || true
     (cd "$RUN" && "$BIN" --gate-trim "$GATE" --gate-new "$RUN/$label.json" --out "$RUN/$label.trim.json" 2> "$RUN/$label.trim.log") \
       || { cat "$RUN/$label.trim.log"; say "check: FAILED (trim $label)"; exit 2; }
     q=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"].get("queries", "?"))' "$RUN/$label.json")

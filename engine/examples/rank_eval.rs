@@ -90,6 +90,16 @@
 //! runs groups structure, review and find. Fired_on, once per run: `[rank_eval] ans intent
 //! review=<q> find=<f> idr_parent_reads=<p> idr_commits=<i> ms=<ms>`.
 //!
+//! FB.7c: with `--sem on` as well, the find answers rank with the run's t2 node vectors as the
+//! engine reads them (`VectorIndex::from_vectors` -> `SemanticSource::from_index`, the query
+//! embedder answering from `--sem-cache`): ANS:find_files is the shipped fused order
+//! LX[IDR,FUSE[T1s,SEMp:t2]] (`find::FIND_FILES_FUSED`), and the calibration's SELf2t replay
+//! selects over the 13-list, as `find --files` and `history calibrate` do for a repo with vectors.
+//! `--engine-parity on` then pins the engine's fused keys to `sem_keys_find`'s, per find query:
+//! `[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q>
+//! key_mismatch=<k> order_mismatch=<o>` (a mismatch fails the run), and one `[sem-eval]
+//! label=<l> engine queries hits=<h> embedded=<e> vectors=<v>` line counts the engine's queries.
+//!
 //! The rank gate (0.5.3, EG.2): `--gate-trim <gate.json> --gate-new <run.json> --out <base.json>`
 //! keeps only a gate's rankers of a `--r3-perq on` run (compact JSON, the committed baseline);
 //! `--gate-check <gate.json> --gate-base <base.json> --gate-new <run.json> --out .. --md ..`
@@ -135,8 +145,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use glia_activation::algo::community::{self as comm, CommunityOptions, WeightedGraph};
@@ -156,8 +166,13 @@ use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId};
 use glia_embed::Embedder;
 use glia_embed::codec::{cosine, from_le_bytes, l2_normalise, to_le_bytes};
-use glia_engine::calibrate::{CalibrateOptions, Calibration, calibrate_snapshot};
-use glia_engine::find::{FIND_FILES_FUSION, FindFilesOptions, FindOptions, find_files_with};
+use glia_engine::calibrate::fusions::sem_filled;
+use glia_engine::calibrate::{
+    CalibrateOptions, Calibration, FindSignals, calibrate_snapshot, find_keys, find_order,
+};
+use glia_engine::find::{
+    FIND_FILES_FUSED, FIND_FILES_FUSION, FindFilesOptions, FindOptions, find_files_with,
+};
 use glia_engine::intent::defs::{Tree, read_defs};
 use glia_engine::intent::idr as eidr;
 use glia_engine::intent::ids::IdVocab;
@@ -168,7 +183,9 @@ use glia_engine::rank::{
     CochangeIndex, FileIndex, NOT_CODE_EXTS, RankCache, Ranking, STRUCTURE_CANDIDATES,
 };
 use glia_engine::review::{INTENT_FUSION_REVIEW, IntentHistory, intent_files_with};
-use glia_engine::semantic::{EmbedRecipe, RECIPES, embed_text, text_hash};
+use glia_engine::semantic::{
+    EmbedRecipe, FUSED_RECIPE, RECIPES, SemanticSource, VectorIndex, embed_text, text_hash,
+};
 use glia_engine::{
     BlastOptions, GenerateResult, Locator, default_keying, entrypoint_reachable, generate_one,
     service_of,
@@ -1735,10 +1752,20 @@ fn ans_history(
 /// dropped from the snapshot (it then has no CommitScore, and `ans_picks` falls back to the pick
 /// made from the strictly older commits), so none of that commit's ANS:*@sel values may move.
 ///
+/// FB.7c: under `--sem on` the replay gets the run's t2 vectors (`CalibrateOptions.semantic`,
+/// [`SemCtx::source`]), so SELf2t is selected over the 13-list (`FIND_CANDIDATES_SEM`) as
+/// `history calibrate` selects it for a repo with vectors (FB.7d).
+///
 /// Fired_on, stderr, once: `[rank_eval] ans calibration sets=<n> test_commits=<t> ms=<ms>`.
-fn ans_calibration(args: &Args, merged: &MergedGraph, h: &AnsHistory) -> Option<Calibration> {
+fn ans_calibration(
+    args: &Args,
+    merged: &MergedGraph,
+    h: &AnsHistory,
+    semantic: Option<Arc<SemanticSource>>,
+) -> Option<Calibration> {
     let t0 = Instant::now();
     let mut opts = CalibrateOptions::default();
+    opts.semantic = semantic;
     opts.params.max_commits = args.max_commits;
     opts.params.max_seeds = args.max_seeds;
     opts.params.max_files = MAX_FILES;
@@ -1927,6 +1954,215 @@ struct SemCtx {
     rand: NodeVecs,
     q_raw: Vec<Vec<f32>>,
     q_pre: Vec<Vec<f32>>,
+    /// FB.7c: the engine's own source over the run's t2 node vectors (`VectorIndex::from_vectors`,
+    /// the shipped `FUSED_RECIPE`), its query embedder the run's model behind the vector cache
+    /// ([`SemQueryEmbedder`]); what ANS:find_files / @sel and the `--ans on` calibration's SELf2t
+    /// replay rank with. None when no node holds a t2 vector.
+    source: Option<Arc<SemanticSource>>,
+    /// `source`'s query embedder, for its counts (`SemCtx::log_queries`).
+    queries: Option<Arc<SemQueryEmbedder>>,
+    /// FB.7c `--engine-parity on`: the engine's fused find keys against `sem_keys_find`'s.
+    parity: Option<SemParity>,
+}
+
+impl SemCtx {
+    /// FB.7c, once after the answers: `[sem-eval] label=<l> engine queries hits=<h>
+    /// embedded=<e> vectors=<v>`, the engine source's query texts answered from the cache and
+    /// embedded by the model, and its fresh t2 vectors (`source=none` with no source).
+    fn log_queries(&self, label: &str) {
+        match (&self.source, &self.queries) {
+            (Some(src), Some(q)) => eprintln!(
+                "[sem-eval] label={label} engine queries hits={} embedded={} vectors={}",
+                q.hits.load(AtomicOrdering::Relaxed),
+                q.embedded.load(AtomicOrdering::Relaxed),
+                src.len()
+            ),
+            _ => eprintln!("[sem-eval] label={label} engine queries source=none"),
+        }
+    }
+}
+
+/// FB.7c: the query embedder the engine's [`SemanticSource`] is handed. A text whose vector the
+/// run's cache holds (`sem_query_key`; every test commit's `SEM_QUERY_PREFIX + subject` is filled
+/// by [`sem_ctx`], and the engine embeds `QUERY_PREFIX + subject` of the same subject, the same
+/// text) is answered from the cache, so ANS:find_files embeds nothing and its query vector is
+/// SEMp:t2's bit for bit. A text it lacks (the calibration's replay subjects outside the
+/// harness's test window) is embedded by the run's model once and appended to the cache file
+/// (`SemCache::fill`), so a later run answers it from the cache too. The cache is behind a mutex:
+/// the ANS answers query it from the pool, and only cached rows are read there.
+struct SemQueryEmbedder {
+    inner: Arc<dyn Embedder>,
+    cache: Mutex<SemCache>,
+    label: String,
+    hits: AtomicUsize,
+    embedded: AtomicUsize,
+}
+
+impl Embedder for SemQueryEmbedder {
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn dims(&self) -> u32 {
+        self.inner.dims()
+    }
+
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let keys: Vec<String> = texts.iter().map(|t| sem_query_key(t)).collect();
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| "the query cache lock is poisoned".to_string())?;
+        let mut want: BTreeMap<String, String> = BTreeMap::new();
+        for (k, t) in keys.iter().zip(texts) {
+            if !cache.rows.contains_key(k) {
+                want.entry(k.clone()).or_insert_with(|| t.clone());
+            }
+        }
+        let hits = keys.iter().filter(|k| cache.rows.contains_key(*k)).count();
+        let n = cache.fill(self.inner.as_ref(), &want, "engine-query", &self.label)?;
+        self.embedded.fetch_add(n, AtomicOrdering::Relaxed);
+        self.hits.fetch_add(hits, AtomicOrdering::Relaxed);
+        keys.iter()
+            .map(|k| {
+                cache
+                    .rows
+                    .get(k)
+                    .cloned()
+                    .ok_or_else(|| format!("no vector for {k} after embedding"))
+            })
+            .collect()
+    }
+}
+
+/// FB.7c `--engine-parity on`, the find shape: per find query, the engine's
+/// `LX[IDR,FUSE[T1s,SEMp:t2]]` keys (`calibrate::find_keys` over `FindSignals` whose `sem` is
+/// `SemanticSource::file_scores` of the engine's own query vector, filled by `sem_filled`, `deg`
+/// the engine's `Candidates`, `t1s` / `idr` the harness's: the lexical signals' parity is
+/// `--engine on`'s) against `sem_keys_find`'s key, f64 bits, and the engine's `find_order`
+/// against the harness's `better` order of the files whose first or second slot is positive
+/// (the rows `find --files` keeps). The engine's candidates are `FileIndex::of(merged, {})`'s one
+/// repo, index for index the harness's files (`file_space_parity`); a file space that differs
+/// counts every query a key mismatch.
+struct SemParity {
+    files: FileIndex,
+    cands: Candidates,
+    /// The engine's candidate paths equal the harness's, index for index.
+    same_space: bool,
+    queries: AtomicUsize,
+    key_mismatch: AtomicUsize,
+    order_mismatch: AtomicUsize,
+    /// The first key mismatch: (query, file, harness key, engine key).
+    first: Mutex<Option<String>>,
+}
+
+impl SemParity {
+    fn new(merged: &MergedGraph, g: &Graph) -> SemParity {
+        let files = FileIndex::of(merged, &BTreeMap::new());
+        let cands = if files.is_empty() {
+            Candidates::default()
+        } else {
+            Candidates::of(&files, files.repo(0))
+        };
+        let same_space = cands.paths.len() == g.paths.len()
+            && cands.paths.iter().zip(&g.paths).all(|(a, b)| a == b);
+        SemParity {
+            files,
+            cands,
+            same_space,
+            queries: AtomicUsize::new(0),
+            key_mismatch: AtomicUsize::new(0),
+            order_mismatch: AtomicUsize::new(0),
+            first: Mutex::new(None),
+        }
+    }
+
+    /// One find query (`id` names it): `hk` the harness's F2 key, `t1s` / `idr` its signals,
+    /// `subject` the test commit's subject.
+    fn check(
+        &self,
+        src: &SemanticSource,
+        id: &str,
+        subject: &str,
+        hk: &[Key],
+        t1s: &[f64],
+        idr: &[f64],
+    ) {
+        self.queries.fetch_add(1, AtomicOrdering::Relaxed);
+        let ek: Option<Vec<Key>> = self
+            .same_space
+            .then(|| src.query_vectors(&[subject]).ok())
+            .flatten()
+            .and_then(|mut v| v.pop())
+            .and_then(|qv| {
+                let scores = src.file_scores(&self.files, &self.cands, &qv);
+                let mut sig = FindSignals::default();
+                sig.t1s = t1s.to_vec();
+                sig.idr = idr.to_vec();
+                sig.deg = self.cands.deg.clone();
+                sig.sem = sem_filled(&scores);
+                find_keys(FIND_FILES_FUSED, &sig)
+            });
+        let Some(ek) = ek.filter(|k| k.len() == hk.len()) else {
+            self.key_mismatch.fetch_add(1, AtomicOrdering::Relaxed);
+            self.order_mismatch.fetch_add(1, AtomicOrdering::Relaxed);
+            self.note(format!(
+                "query {id}: the engine gave no key of the harness's length"
+            ));
+            return;
+        };
+        let bits = |k: &Key| k.map(f64::to_bits);
+        if let Some(f) = (0..hk.len()).find(|&f| bits(&hk[f]) != bits(&ek[f])) {
+            self.key_mismatch.fetch_add(1, AtomicOrdering::Relaxed);
+            self.note(format!(
+                "query {id} file {}: harness={:?} engine={:?}",
+                self.cands.paths[f], hk[f], ek[f]
+            ));
+        }
+        let none = vec![false; hk.len()];
+        let ho: Vec<usize> = order_ex(hk, &none)
+            .into_iter()
+            .filter(|&f| hk[f][0] > 0.0 || hk[f][1] > 0.0)
+            .collect();
+        if ho != find_order(&ek) {
+            self.order_mismatch.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    /// Prints `[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q>
+    /// key_mismatch=<k> order_mismatch=<o>` and adds the row to `rep` (json `find`, the md
+    /// table); a mismatch sets `rep.first_find`, which fails the run once the report is written.
+    fn report(&self, label: &str, rep: &mut ParityReport) {
+        let (n, k, o) = (
+            self.queries.load(AtomicOrdering::Relaxed),
+            self.key_mismatch.load(AtomicOrdering::Relaxed),
+            self.order_mismatch.load(AtomicOrdering::Relaxed),
+        );
+        eprintln!(
+            "[rank-parity] label={label} shape=find ranking={FIND_FILES_FUSED} queries={n} key_mismatch={k} order_mismatch={o}"
+        );
+        if let Some(js) = rep.json.as_object_mut() {
+            js.insert(
+                "find".into(),
+                json!({FIND_FILES_FUSED: {"queries": n, "key_mismatch": k, "order_mismatch": o}}),
+            );
+        }
+        rep.md.push_str(&format!(
+            "| find | {FIND_FILES_FUSED} | {n} | {k} | {o} |\n"
+        ));
+        if k > 0 || o > 0 {
+            let first = self.first.lock().ok().and_then(|f| f.clone());
+            rep.first_find = Some(first.unwrap_or_else(|| format!("{o} order mismatches")));
+        }
+    }
+
+    fn note(&self, what: String) {
+        if let Ok(mut first) = self.first.lock()
+            && first.is_none()
+        {
+            *first = Some(what);
+        }
+    }
 }
 
 /// One cached vector: `h` the text's key (a node's `semantic::text_hash`, a query's `q:<hex>`),
@@ -2094,8 +2330,10 @@ fn sem_ctx(
     subjects: &[String],
 ) -> Result<(SemCtx, serde_json::Value), String> {
     let t_load = Instant::now();
-    let emb = glia_embed::named(&args.sem_model)
-        .map_err(|e| format!("{e} (build rank_eval with `--features sem-eval` for bge-small)"))?;
+    let emb: Arc<dyn Embedder> =
+        Arc::from(glia_embed::named(&args.sem_model).map_err(|e| {
+            format!("{e} (build rank_eval with `--features sem-eval` for bge-small)")
+        })?);
     let model_load_ms = t_load.elapsed().as_millis();
     let dims = emb.dims();
     let d = dims as usize;
@@ -2204,12 +2442,36 @@ fn sem_ctx(
         json!({"subjects": subjects.len(), "texts": want.len(), "embedded": embedded,
             "cached": want.len() - embedded, "ms": ms}),
     );
+    // FB.7c: the engine's source over the t2 vectors; the cache keeps only the query rows (the
+    // node rows are in `by_recipe`), behind the engine's query embedder.
+    let mut queries: Option<Arc<SemQueryEmbedder>> = None;
+    let source = by_recipe.get(FUSED_RECIPE.as_str()).and_then(|nv| {
+        let us: Vec<usize> = (0..n).filter(|&u| nv.has[u]).collect();
+        let ids: Vec<NodeId> = us.iter().map(|&u| g.ids[u]).collect();
+        let vecs: Vec<&[f32]> = us.iter().map(|&u| &nv.v[u * d..(u + 1) * d]).collect();
+        let index = VectorIndex::from_vectors(merged, &ids, &vecs, emb.model(), FUSED_RECIPE);
+        cache.rows.retain(|k, _| k.starts_with("q:"));
+        let qe = Arc::new(SemQueryEmbedder {
+            inner: Arc::clone(&emb),
+            cache: Mutex::new(cache),
+            label: label.to_string(),
+            hits: AtomicUsize::new(0),
+            embedded: AtomicUsize::new(0),
+        });
+        queries = Some(Arc::clone(&qe));
+        SemanticSource::from_index(index, qe).map(Arc::new)
+    });
+    let parity =
+        (args.engine_parity == "on" && source.is_some()).then(|| SemParity::new(merged, g));
     Ok((
         SemCtx {
             by_recipe,
             rand,
             q_raw,
             q_pre,
+            source,
+            queries,
+            parity,
         },
         serde_json::Value::Object(info),
     ))
@@ -2298,6 +2560,9 @@ struct AnsIntentIn {
     hist: AnsHistory,
     review_sel: Vec<[String; 4]>,
     find_sel: Vec<String>,
+    /// FB.7c `--sem on`: the run's t2 vectors as the engine reads them (`FindFilesOptions.semantic`);
+    /// with them ANS:find_files is the shipped fused order, FIND_FILES_FUSED.
+    semantic: Option<Arc<SemanticSource>>,
 }
 
 impl AnsIntentIn {
@@ -2307,6 +2572,7 @@ impl AnsIntentIn {
         tc_sha: &[String],
         pos: &HashMap<&str, usize>,
         tc_pos: &[usize],
+        semantic: Option<Arc<SemanticSource>>,
     ) -> AnsIntentIn {
         let names = |set: &str, shape: &str, fallback: &str| -> Vec<String> {
             match ans_set_picks(cal, set, shape, pos, tc_pos) {
@@ -2327,7 +2593,18 @@ impl AnsIntentIn {
         AnsIntentIn {
             hist,
             review_sel,
-            find_sel: names("SELf2t", "find", FIND_FILES_FUSION),
+            find_sel: names("SELf2t", "find", Self::find_fallback(semantic.is_some())),
+            semantic,
+        }
+    }
+
+    /// find --files' uncalibrated order: FIND_FILES_FUSED with vectors (FB.7a), else
+    /// FIND_FILES_FUSION.
+    fn find_fallback(sem: bool) -> &'static str {
+        if sem {
+            FIND_FILES_FUSED
+        } else {
+            FIND_FILES_FUSION
         }
     }
 }
@@ -2355,7 +2632,8 @@ enum AnsSlot {
 /// ANS:review is `review::intent_files_with(title = c's subject, changed = the seeds, base = c's
 /// parent, pick = LX[IDR,P1])`, the shipped uncalibrated intent order; ANS:review@sel forces
 /// SELt2's online pick at (shape, c). ANS:find_files is `find::find_files_with(query = c's
-/// subject, pick = LX[IDR,T1s])` with every row kept; @sel forces SELf2t's pick at c. Ranked
+/// subject, pick = LX[IDR,T1s], or with `--sem on` FIND_FILES_FUSED over the run's t2 vectors,
+/// FB.7c)` with every row kept; @sel forces SELf2t's pick at c. Ranked
 /// files key by position (`rows_to_keys`); every other file keys -inf. A commit with no parent
 /// answers nothing (every file -inf).
 ///
@@ -2458,6 +2736,7 @@ fn ans_intent(
                     let mut fo = FindFilesOptions::default();
                     fo.top_k = 0;
                     fo.rank_cache = Some(Arc::clone(&cache));
+                    fo.semantic = ai.semantic.clone();
                     match find_files_with(
                         merged,
                         &res.repo_roots,
@@ -2486,10 +2765,11 @@ fn ans_intent(
                         AnsSlot::Transfer(s, _, ti) => (tqs[ti].seeds.clone(), s + 1),
                     };
                     if si == 4 {
-                        let (base, hit) = find(FIND_FILES_FUSION);
+                        let fallback = AnsIntentIn::find_fallback(ai.semantic.is_some());
+                        let (base, hit) = find(fallback);
                         idr_hit |= hit;
                         let pick = &ai.find_sel[o];
-                        let sel = if pick == FIND_FILES_FUSION {
+                        let sel = if pick == fallback {
                             base.clone()
                         } else {
                             find(pick).0
@@ -2779,6 +3059,8 @@ struct ParityReport {
     json: serde_json::Value,
     md: String,
     first_single: Option<String>,
+    /// FB.7c: the first fused find mismatch (`SemParity::report`).
+    first_find: Option<String>,
 }
 
 fn engine_parity(
@@ -2916,6 +3198,7 @@ fn engine_parity(
         json: serde_json::Value::Object(js),
         md,
         first_single,
+        first_find: None,
     }
 }
 
@@ -4417,6 +4700,25 @@ fn main() {
         None => Vec::new(),
     };
 
+    // FB.6: the vectors are embedded here, on the main thread, before any pool (`--sem on` needs
+    // `--round3 on`). FB.7c: before the EG.6 calibration, whose SELf2t replay ranks with them.
+    let subjects: Vec<String> = test_idx
+        .iter()
+        .map(|&k| subject(&commits[k].msg).to_string())
+        .collect();
+    let (sem, sem_info): (Option<SemCtx>, Option<serde_json::Value>) = if args.sem == "on" {
+        match sem_ctx(&args, merged, &g, &subjects) {
+            Ok((s, info)) => (Some(s), Some(info)),
+            Err(e) => {
+                eprintln!("[sem-eval] label={} error: {e}", args.label);
+                std::process::exit(2);
+            }
+        }
+    } else {
+        (None, None)
+    };
+    let sem_source = sem.as_ref().and_then(|s| s.source.clone());
+
     // EG.6: the engine's own calibration over the shipped history window, then each test commit's
     // SELh0 pick per seeded shape (`--ans on` only).
     let mut ans_intent_in: Option<AnsIntentIn> = None;
@@ -4426,7 +4728,7 @@ fn main() {
             .then(|| tc_sha.last().cloned())
             .flatten();
         let hist = ans_history(&args, &g.paths, &commits, leak.as_deref());
-        let cal = ans_calibration(&args, merged, &hist);
+        let cal = ans_calibration(&args, merged, &hist, sem_source.clone());
         let pos: HashMap<&str, usize> = commits
             .iter()
             .enumerate()
@@ -4439,6 +4741,7 @@ fn main() {
             &tc_sha,
             &pos,
             &test_idx,
+            sem_source.clone(),
         ));
         picks
     } else {
@@ -4518,7 +4821,6 @@ fn main() {
     let mut tc_sha: Vec<String> = test_idx.iter().map(|&k| commits[k].sha.clone()).collect();
     let mut tc_files: Vec<Vec<u32>> = test_idx.iter().map(|&k| commits[k].files.clone()).collect();
     let mut r3_info = serde_json::Map::new();
-    let mut sem_info: Option<serde_json::Value> = None;
     let mut transfer: Vec<(Vec<Out>, Vec<usize>)> = Vec::new();
     // per shape, each transfer query's id (`--r3-perq on`'s `perq_shapes`), aligned with `transfer`
     let mut transfer_ids: Vec<Vec<String>> = Vec::new();
@@ -4544,25 +4846,6 @@ fn main() {
                 &r3_cands_b,
             ),
         );
-        let subjects: Vec<String> = test_idx
-            .iter()
-            .map(|&k| subject(&commits[k].msg).to_string())
-            .collect();
-        // FB.6: the vectors are embedded here, on the main thread, before the query loop's pool.
-        let sem = if args.sem == "on" {
-            match sem_ctx(&args, merged, &g, &subjects) {
-                Ok((s, info)) => {
-                    sem_info = Some(info);
-                    Some(s)
-                }
-                Err(e) => {
-                    eprintln!("[sem-eval] label={} error: {e}", args.label);
-                    std::process::exit(2);
-                }
-            }
-        } else {
-            None
-        };
         transfer = r3_transfer(&ctx, &tqs, &r1s, &subjects, sem.as_ref());
         transfer_ids = vec![Vec::new(); R3_SHAPES.len()];
         for q in &tqs {
@@ -4630,7 +4913,13 @@ fn main() {
         );
     }
     // ---- engine parity (EA.9), on the queries as replayed (before any warm-up commit is dropped) ----
-    let parity = parity_on.then(|| engine_parity(&ctx, &queries, &tqs, &tc_sha, &args.label));
+    let mut parity = parity_on.then(|| engine_parity(&ctx, &queries, &tqs, &tc_sha, &args.label));
+    if let (Some(rep), Some(sp)) = (
+        parity.as_mut(),
+        sem.as_ref().and_then(|s| s.parity.as_ref()),
+    ) {
+        sp.report(&args.label, rep);
+    }
     if let Some(ai) = &ans_intent_in {
         ans_intent(
             &ctx,
@@ -4644,6 +4933,9 @@ fn main() {
             &tqs,
             &mut transfer,
         );
+    }
+    if let Some(sem) = &sem {
+        sem.log_queries(&args.label);
     }
     if ctx.ans {
         let n_transfer: usize = transfer.iter().take(3).map(|(o, _)| o.len()).sum();
@@ -5131,6 +5423,9 @@ fn main() {
         args.out,
         args.md
     );
+    if let Some(first) = parity.as_ref().and_then(|p| p.first_find.clone()) {
+        panic!("[rank-parity] fused find mismatch (the report is written): {first}");
+    }
     if let Some(first) = parity.and_then(|p| p.first_single) {
         panic!("[rank-parity] single-seed key mismatch (the report is written): {first}");
     }
@@ -21271,7 +21566,15 @@ fn r3_transfer(
             }
             // FB.6: the semantic rankers after every other find-bank row (`--sem on` only).
             if find && let Some(sem) = sem {
-                bank.extend(sem_keys_find(ctx, sem, q.tc, &t1s, &idr));
+                let sk = sem_keys_find(ctx, sem, q.tc, &t1s, &idr);
+                // FB.7c `--engine-parity on`: the engine's F2 keys against the harness's.
+                if let (Some(p), Some(src)) = (&sem.parity, &sem.source)
+                    && let Some((_, hk)) = sk.iter().find(|(n, _)| n == FIND_FILES_FUSED)
+                {
+                    let subj = subjects.get(q.tc).map_or("", String::as_str);
+                    p.check(src, &format!("tc{}", q.tc), subj, hk, &t1s, &idr);
+                }
+                bank.extend(sk);
             }
             let eng = r
                 .eng

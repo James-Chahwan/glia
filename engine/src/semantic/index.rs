@@ -11,7 +11,7 @@
 //! Vectors sit in one dense array sorted by (qname, NodeId), so every walk of
 //! the index is in a fixed order; a HashMap here is looked up, never iterated.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -174,9 +174,100 @@ impl VectorIndex {
             missing.append(&mut repo_missing);
         }
 
+        stats.dims = dims.unwrap_or(0);
+        Self::assemble(stats, kept, missing, t0, "")
+    }
+
+    /// An index over vectors already in memory (FB.7c: the rank gate's
+    /// harness hands the engine the node vectors it embedded, so the shipped
+    /// fused `find --files` is measured on the gate's own vectors): `ids[i]`'s
+    /// vector is `vecs[i]`, stored as given (the embedder's unit vectors). A
+    /// pair is kept when `ids[i]` is an embeddable node ([`EMBED_KINDS`], with
+    /// a qname) of `merged`, its vector is non-empty and of the first kept
+    /// vector's length, and the node holds no vector yet; else it counts in
+    /// `unbound` (no such node) or `bad`. Every kept pair is `fresh` (the
+    /// caller vouches for the text: no hash is read), `rows` is `ids.len()`,
+    /// `missing` the embeddable nodes left without one, `repos` the merge's
+    /// distinct repos. `vecs` shorter than `ids` leaves the tail `bad`. Prints
+    /// the `[semantic] index ..` line with ` source=memory`.
+    pub fn from_vectors(
+        merged: &MergedGraph,
+        ids: &[NodeId],
+        vecs: &[&[f32]],
+        model: &str,
+        recipe: EmbedRecipe,
+    ) -> VectorIndex {
+        let t0 = Instant::now();
+        let repos: BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
+        let mut stats = IndexStats {
+            model: model.to_string(),
+            recipe,
+            repos: repos.len(),
+            rows: ids.len(),
+            ..IndexStats::default()
+        };
+        // Every embeddable node, first instance in graph then node order.
+        let mut qname_of: HashMap<NodeId, String> = HashMap::new();
+        let mut order: Vec<NodeId> = Vec::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if qname_of.contains_key(&n.id)
+                    || !g
+                        .nav
+                        .kind_by_id
+                        .get(&n.id)
+                        .is_some_and(|k| EMBED_KINDS.contains(k))
+                {
+                    continue;
+                }
+                if let Some(q) = g.nav.qname_by_id.get(&n.id) {
+                    qname_of.insert(n.id, q.clone());
+                    order.push(n.id);
+                }
+            }
+        }
+        let mut dims: Option<usize> = None;
+        let mut held: HashSet<NodeId> = HashSet::new();
+        let mut kept: Vec<(String, NodeId, Vec<f32>)> = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let Some(qname) = qname_of.get(id) else {
+                stats.unbound += 1;
+                continue;
+            };
+            let Some(v) = vecs.get(i) else {
+                stats.bad += 1;
+                continue;
+            };
+            if v.is_empty() || dims.is_some_and(|d| d != v.len()) || held.contains(id) {
+                stats.bad += 1;
+                continue;
+            }
+            dims = Some(v.len());
+            held.insert(*id);
+            kept.push((qname.clone(), *id, v.to_vec()));
+        }
+        stats.fresh = kept.len();
+        stats.dims = dims.map_or(0, |d| d as u32);
+        let missing: Vec<(String, NodeId)> = order
+            .iter()
+            .filter(|id| !held.contains(id))
+            .filter_map(|id| qname_of.get(id).map(|q| (q.clone(), *id)))
+            .collect();
+        Self::assemble(stats, kept, missing, t0, " source=memory")
+    }
+
+    /// The index from its kept vectors and missing nodes (each sorted here by
+    /// (qname, NodeId)), with `stats.dims` set; prints the `[semantic] index`
+    /// line, `suffix` appended.
+    fn assemble(
+        mut stats: IndexStats,
+        mut kept: Vec<(String, NodeId, Vec<f32>)>,
+        mut missing: Vec<(String, NodeId)>,
+        t0: Instant,
+        suffix: &str,
+    ) -> VectorIndex {
         kept.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
         missing.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
-        stats.dims = dims.unwrap_or(0);
         stats.missing = missing.len();
         let mut index = VectorIndex {
             data: Vec::with_capacity(kept.len() * stats.dims as usize),
@@ -195,7 +286,7 @@ impl VectorIndex {
         let s = &index.stats;
         eprintln!(
             "[semantic] index repos={} model={} recipe={} dims={} rows={} fresh={} stale={} \
-             missing={} other_model={} unbound={} bad={} ms={}",
+             missing={} other_model={} unbound={} bad={} ms={}{suffix}",
             s.repos,
             s.model,
             s.recipe,
@@ -326,4 +417,119 @@ fn repo_texts(merged: &MergedGraph, repo: RepoId, recipe: EmbedRecipe) -> RepoTe
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glia_code_domain::external_inputs::{VectorRow, b64_encode};
+    use glia_embed::{HashEmbedder, MODEL_TEST_HASH};
+
+    use crate::semantic::embed_text;
+
+    const APP: &str = "def fetch_invoice(invoice_id):\n    \"\"\"Fetch one invoice.\"\"\"\n    return invoice_id\n\n\n\
+                       def render_chart(points):\n    \"\"\"Draw the chart.\"\"\"\n    return points\n\n\n\
+                       class Ledger:\n    def total(self):\n        return 0\n";
+
+    /// FB.7c: an index built in memory from the vectors a sidecar holds is the
+    /// loaded index: the same rows in the same (qname, NodeId) order, the same
+    /// bits, the same missing list and the same search order; an unknown id is
+    /// `unbound`, a second vector for a node and one of other dims are `bad`.
+    #[test]
+    fn from_vectors_is_the_loaded_index() {
+        let td = tempfile::tempdir().expect("tempdir");
+        std::fs::write(td.path().join("app.py"), APP).expect("write app.py");
+        let r = crate::generate_one(td.path().to_str().expect("utf-8")).expect("generate_one");
+        let m = &r.merged;
+        let recipe = EmbedRecipe::T2;
+        // Every embeddable node but the last gets a fresh test-hash row.
+        let mut nodes: Vec<(String, NodeId)> = Vec::new();
+        for g in &m.graphs {
+            for n in &g.nodes {
+                if embed_text(m, n.id, recipe).is_some()
+                    && let Some(q) = g.nav.qname_by_id.get(&n.id)
+                    && !nodes.iter().any(|(_, id)| *id == n.id)
+                {
+                    nodes.push((q.clone(), n.id));
+                }
+            }
+        }
+        assert!(nodes.len() >= 4, "{nodes:?}");
+        let left_out = nodes.pop().expect("a node");
+        let mut body = String::new();
+        let kind_of = |id: NodeId| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.kind_by_id.get(&id).copied())
+                .map(|k| glia_code_domain::node_kind::name(k).to_string())
+        };
+        for (q, id) in &nodes {
+            let text = embed_text(m, *id, recipe).expect("text");
+            let v = HashEmbedder::embed_one(&text);
+            let row = VectorRow {
+                qname: q.clone(),
+                kind: kind_of(*id),
+                hint: None,
+                model: Some(MODEL_TEST_HASH.to_string()),
+                dims: Some(v.len() as u32),
+                text_hash: Some(text_hash(recipe, &text)),
+                device: None,
+                b64: b64_encode(&codec::to_le_bytes(&v)),
+            };
+            body.push_str(&serde_json::to_string(&row).expect("json"));
+            body.push('\n');
+        }
+        let path = td.path().join(VECTORS_FILE);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, body).expect("write vectors");
+        let roots: BTreeMap<u64, PathBuf> = r
+            .repo_roots
+            .iter()
+            .map(|(k, v)| (*k, PathBuf::from(v)))
+            .collect();
+        let loaded = VectorIndex::load(m, &roots, MODEL_TEST_HASH, recipe);
+        assert_eq!(loaded.len(), nodes.len(), "{:?}", loaded.stats());
+
+        // The same vectors, newest node first, then an unknown id, a second
+        // vector for the first node and one of other dims.
+        let mut ids: Vec<NodeId> = loaded.ids.iter().rev().copied().collect();
+        let mut vecs: Vec<Vec<f32>> = ids
+            .iter()
+            .map(|id| loaded.vector(*id).expect("vector").to_vec())
+            .collect();
+        ids.push(NodeId(u64::MAX));
+        vecs.push(vecs[0].clone());
+        ids.push(ids[0]);
+        vecs.push(vecs[0].clone());
+        ids.push(left_out.1);
+        vecs.push(vec![1.0, 0.0]);
+        let refs: Vec<&[f32]> = vecs.iter().map(Vec::as_slice).collect();
+        let mem = VectorIndex::from_vectors(m, &ids, &refs, MODEL_TEST_HASH, recipe);
+
+        assert_eq!(mem.ids, loaded.ids);
+        assert_eq!(mem.qnames, loaded.qnames);
+        let bits = |x: &[f32]| x.iter().map(|f| f.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(bits(&mem.data), bits(&loaded.data));
+        assert_eq!(mem.missing_ids(), loaded.missing_ids());
+        assert_eq!(mem.missing_ids(), vec![left_out.1]);
+        let s = mem.stats();
+        assert_eq!(
+            (
+                s.rows, s.fresh, s.unbound, s.bad, s.stale, s.missing, s.repos
+            ),
+            (ids.len(), nodes.len(), 1, 2, 0, 1, 1)
+        );
+        assert_eq!(s.dims, loaded.stats().dims);
+        assert_eq!((s.model.as_str(), s.recipe), (MODEL_TEST_HASH, recipe));
+        let q = HashEmbedder::embed_one("chart of the points");
+        let none = HashSet::new();
+        assert_eq!(mem.search(&q, 10, &none), loaded.search(&q, 10, &none));
+        // An index of no vector at all holds nothing (a source over it is None).
+        let empty = VectorIndex::from_vectors(m, &[], &[], MODEL_TEST_HASH, recipe);
+        assert!(empty.is_empty());
+        assert_eq!(empty.stats().missing, nodes.len() + 1);
+        let emb: std::sync::Arc<dyn glia_embed::Embedder> = std::sync::Arc::new(HashEmbedder);
+        assert!(crate::semantic::SemanticSource::from_index(empty, emb.clone()).is_none());
+        assert!(crate::semantic::SemanticSource::from_index(mem, emb).is_some());
+    }
 }
