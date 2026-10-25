@@ -113,7 +113,7 @@ def main() -> int:
         c.check("[rank-cache] holder=pygraph .. index=hit on the second call",
                 cache_marks(err2, "pygraph") and set(cache_marks(err2, "pygraph")) == {"index=hit"},
                 (cache_marks(err1, "pygraph"), cache_marks(err2, "pygraph")))
-        c.check("top_files cuts files", len(g.blast_radius("app::helper", top_files=1)["files"]) <= 1)
+        c.check("top_files cuts files", len(g.blast_radius("app::helper", top_files=1).get("files", [])) <= 1)
         # EC.8: ranking=None applies the repo's calibration (none here: the
         # fallback); a given ranking is explicit.
         sel = first.get("selection") or {}

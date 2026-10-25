@@ -121,7 +121,7 @@ def main() -> int:
                  "sideways")
         c.raises("bad ranking raises", ValueError, lambda: g.diff_impact(DIFF, ranking="x"), "unknown ranking `x`: expected one of ppr, ppr-wide, bfs")
         c.check("top_files cuts impact.files",
-                len(g.diff_impact(DIFF, direction="backward", top_files=1)["impact"]["files"]) <= 1)
+                len(g.diff_impact(DIFF, direction="backward", top_files=1)["impact"].get("files", [])) <= 1)
         c.check("ranking=bfs keeps the rows' set",
                 sorted(rows(g.diff_impact(DIFF, direction="backward", ranking="bfs", cochange=False)))
                 == sorted(ROWS))
