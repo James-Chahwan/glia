@@ -41,12 +41,13 @@ use super::record::{
     Calibration, CalibrationMeta, CommitScore, ReplayParamsRecord, Shape, calibration_dir,
     write_calibration,
 };
-use super::replay::{ReplayParams, build_replay};
+use super::replay::{ReplayParams, SemState, build_replay};
 use super::select::run_sets;
-use super::sets::{log_hooks, register_hooks, specs};
+use super::sets::{log_hooks, register_hooks, specs, specs_with};
 use crate::intent::ids::IdVocab;
 use crate::intent::text::Candidates;
 use crate::rank::RankCache;
+use crate::semantic::SemanticSource;
 
 /// The candidate groups a default run replays: every group `sets::specs`
 /// registers (`sets::GROUPS`: `structure`, `review`, `find`).
@@ -71,6 +72,14 @@ pub struct CalibrateOptions {
     /// the caller with [`IdVocab`]'s constructors; `None` reads the root's
     /// `.glia/overlay.toml` ([`IdVocab::for_root`]), else the defaults.
     pub vocab: Option<IdVocab>,
+    /// The repo's t2 vectors and query embedder (FB.7d, ruling FB-7-FUSED;
+    /// `semantic::open_for_surface`): when set and the `find` group runs,
+    /// every find query is embedded (one batched call, [`SemState`]) and
+    /// SELf2t is calibrated over `sets::FIND_CANDIDATES_SEM`, so the fused
+    /// orders win the pick only where the replay measures them better. None
+    /// (the default) replays exactly the 0.5.3 candidates; an embedder error
+    /// prints a warning and replays as None.
+    pub semantic: Option<Arc<SemanticSource>>,
 }
 
 impl Default for CalibrateOptions {
@@ -80,6 +89,7 @@ impl Default for CalibrateOptions {
             groups: DEFAULT_GROUPS.to_vec(),
             surface: "lib",
             vocab: None,
+            semantic: None,
         }
     }
 }
@@ -207,7 +217,9 @@ pub fn calibrate_snapshot(
 ) -> Result<(Calibration, CalibrationSummary), String> {
     let started = Instant::now();
     let repo = one_repo(merged)?;
-    let set_specs = specs(&opts.groups)?;
+    // Validates the group names before any work; the shapes do not depend
+    // on the semantic candidates.
+    let lexical_specs = specs(&opts.groups)?;
     let label = root.file_name().map_or_else(
         || root.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -218,7 +230,7 @@ pub fn calibrate_snapshot(
     let cands = Candidates::of(&cache.files(merged), repo);
 
     let mut shapes: Vec<Shape> = Vec::new();
-    for s in &set_specs {
+    for s in &lexical_specs {
         for &sh in s.shapes {
             if !shapes.contains(&sh) {
                 shapes.push(sh);
@@ -226,6 +238,26 @@ pub fn calibrate_snapshot(
         }
     }
     let replay = build_replay(snapshot, messages, &cands, &opts.params, &shapes);
+    // FB.7d: the find queries' semantic scores, before the replay's pool runs.
+    let sem = match &opts.semantic {
+        Some(src) if opts.groups.contains(&"find") => {
+            match SemState::for_replay(src, &cache.files(merged), &cands, &replay) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!(
+                        "warning: the query embedder failed, calibrating without vectors: {e}"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let set_specs = if sem.is_some() {
+        specs_with(&opts.groups, true)?
+    } else {
+        lexical_specs
+    };
     let mut state = ReplayState::new(cands.len(), opts.params.max_files);
     state.register(Box::new(StructIndex::build(
         merged,
@@ -239,6 +271,9 @@ pub fn calibrate_snapshot(
         opts.params.max_files,
         &opts.groups,
     );
+    if let Some(s) = sem {
+        state.register(Box::new(s));
+    }
     if let (Some(v), Some(idr)) = (&opts.vocab, state.hook::<IdrState>()) {
         idr.set_vocab(v.clone());
     }

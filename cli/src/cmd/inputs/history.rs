@@ -22,20 +22,25 @@
 //! ranking each ranked answer then picks (docs/overlay.md, "Calibration
 //! snapshot"). A build never calibrates and calibrate never syncs. Transport
 //! only: the replay, the record and the `[calibrate] done ... surface=cli`
-//! marker live in the engine. Exits 0 on a written record, 1 when the step
+//! marker live in the engine. FB.7d: when the repo's `.glia/vectors.jsonl`
+//! holds vectors of the surface model (`semantic::open_for_surface`, the
+//! loader find --files uses), the find group also measures the blended orders;
+//! `--no-semantic` skips them. Exits 0 on a written record, 1 when the step
 //! fails (no snapshot: it names `glia history sync`; an unknown `--sets`
 //! group: it lists the known ones), 2 when the build fails.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::Subcommand;
 use glia_code_domain::snapshots::history_dir;
 use glia_engine::calibrate::{
     CalibrateOptions, CalibrationSummary, DEFAULT_GROUPS, ReplayParams, calibrate, specs,
 };
+use glia_engine::semantic::{open_for_surface, surface_model};
 use glia_snapshots::{HistoryOptions, history_sync};
 
-use crate::common::generate_for;
+use crate::common::{generate_for, load_embedder};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -82,6 +87,12 @@ enum HistoryCmd {
         /// registered group).
         #[arg(long, value_delimiter = ',')]
         sets: Vec<String>,
+        /// Calibrate without the repo's embeddings. By default a repo whose
+        /// `.glia/vectors.jsonl` (glia embed) holds vectors of the surface model
+        /// (GLIA_EMBED_MODEL, default bge-small) also measures find --files'
+        /// blended orders; find --files then reads the record only with vectors.
+        #[arg(long)]
+        no_semantic: bool,
         /// Print the summary as JSON.
         #[arg(long)]
         json: bool,
@@ -113,8 +124,9 @@ pub(crate) fn run(args: Args) -> i32 {
             max_commits,
             max_seeds,
             sets,
+            no_semantic,
             json,
-        } => run_calibrate(&repo, max_commits, max_seeds, &sets, json),
+        } => run_calibrate(&repo, max_commits, max_seeds, &sets, !no_semantic, json),
     }
 }
 
@@ -147,6 +159,7 @@ fn run_calibrate(
     max_commits: usize,
     max_seeds: usize,
     sets: &[String],
+    semantic: bool,
     json: bool,
 ) -> i32 {
     let groups = match groups_of(sets) {
@@ -170,6 +183,14 @@ fn run_calibrate(
             return 2;
         }
     };
+    // FB.7d: the find group's semantic candidates, through the one loader
+    // find --files uses (no vectors: nothing read, the 0.5.3 replay).
+    if semantic && opts.groups.contains(&"find") {
+        let surface = surface_model();
+        opts.semantic = open_for_surface(&built.merged, &built.repo_roots, surface, || {
+            load_embedder(surface).map(Arc::from)
+        });
+    }
     match calibrate(Path::new(repo), &built.merged, &opts) {
         Ok(summary) => {
             if json {

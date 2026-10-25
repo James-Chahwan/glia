@@ -27,6 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use glia_engine::calibrate::{CalibrateOptions, DEFAULT_GROUPS, ReplayParams, calibrate, specs};
+use glia_engine::semantic::{open_for_surface, surface_model};
 use glia_snapshots::{
     HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, VocabOptions, VocabSummary,
     history_sync, tests_ingest, vocab_sync,
@@ -35,6 +36,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::convert::to_py;
+use crate::embed::{surface_embedder, worker_dirs};
 use crate::registry::ModuleFns;
 
 /// The options [`history_sync_py`] passes, tagged `surface=pyo3` for the
@@ -206,11 +208,21 @@ fn calibrate_groups(sets: Option<&[String]>) -> Result<Vec<&'static str>, String
 /// surface `pyo3` and return the summary as JSON. `Err` is a bad group name,
 /// the build's error or the step's (no snapshot names `glia history sync`);
 /// nothing is written then.
+///
+/// FB.7d: `semantic` `None` (auto) and `Some(true)` read the repo's
+/// `.glia/vectors.jsonl` through the one loader find_files uses
+/// (`semantic::open_for_surface`, the query embedder from
+/// [`surface_embedder`] over the worker `dirs`) when the `find` group runs;
+/// with vectors SELf2t also measures the blended orders. `Some(true)` with no
+/// vector of the surface model prints a `warning:` line and calibrates
+/// without them; `Some(false)` never reads the sidecar.
 fn calibrate_json(
     repo_path: &str,
     max_commits: usize,
     max_seeds: usize,
     sets: Option<&[String]>,
+    semantic: Option<bool>,
+    dirs: &[PathBuf],
 ) -> Result<String, String> {
     let groups = calibrate_groups(sets)?;
     let mut params = ReplayParams::default();
@@ -221,6 +233,17 @@ fn calibrate_json(
     opts.groups = groups;
     opts.surface = "pyo3";
     let built = glia_engine::generate_one(repo_path)?;
+    if semantic != Some(false) && opts.groups.contains(&"find") {
+        opts.semantic = open_for_surface(&built.merged, &built.repo_roots, surface_model(), || {
+            surface_embedder(dirs)
+        });
+        if semantic == Some(true) && opts.semantic.is_none() {
+            eprintln!(
+                "warning: semantic=True but the repo holds no {} vectors; calibrating without them",
+                surface_model()
+            );
+        }
+    }
     let summary = calibrate(Path::new(repo_path), &built.merged, &opts)?;
     serde_json::to_string(&summary).map_err(|e| e.to_string())
 }
@@ -242,10 +265,20 @@ fn calibrate_json(
 /// (naming `glia history sync`), an unknown group or a build error. Prints
 /// `[calibrate] done surface=pyo3 sets=<n> test_commits=<t> ms=<ms>` on
 /// stderr.
+///
+/// FB.7d: `semantic` reads the repo's embeddings (`embed`): `None` (auto)
+/// and `True` use the repo's `.glia/vectors.jsonl` vectors of the surface
+/// model (env `GLIA_EMBED_MODEL`, default `bge-small`) when it holds some, so
+/// the `find` group's SELf2t also measures `FUSE[T1s,SEMp:t2]` and
+/// `LX[IDR,FUSE[T1s,SEMp:t2]]` (`[calibrate] semantic queries=<q>
+/// embedded=<e> ms=<t> model=<m>`); `find_files` then reads that record only
+/// with vectors. `True` with none prints a `warning:` line and calibrates
+/// without them; `False` never reads the sidecar. The GIL is released while
+/// the engine works.
 #[pyfunction]
 #[pyo3(
     name = "history_calibrate",
-    signature = (repo_path, max_commits=300, max_seeds=5, sets=None)
+    signature = (repo_path, max_commits=300, max_seeds=5, sets=None, semantic=None)
 )]
 fn history_calibrate_py(
     py: Python<'_>,
@@ -253,9 +286,24 @@ fn history_calibrate_py(
     max_commits: usize,
     max_seeds: usize,
     sets: Option<Vec<String>>,
+    semantic: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
+    let dirs = if semantic == Some(false) {
+        Vec::new()
+    } else {
+        worker_dirs(py)
+    };
     let text = py
-        .detach(|| calibrate_json(repo_path, max_commits, max_seeds, sets.as_deref()))
+        .detach(|| {
+            calibrate_json(
+                repo_path,
+                max_commits,
+                max_seeds,
+                sets.as_deref(),
+                semantic,
+                &dirs,
+            )
+        })
         .map_err(PyValueError::new_err)?;
     to_py(py, Ok::<String, serde_json::Error>(text))
 }
@@ -667,7 +715,7 @@ mod tests {
         );
         let (_scratch, top) = calibrate_repo("ok", true);
         let repo = top.to_str().expect("utf-8 scratch path");
-        let json = calibrate_json(repo, 10, 2, None).expect("calibrate");
+        let json = calibrate_json(repo, 10, 2, None, None, &[]).expect("calibrate");
         let v: serde_json::Value = serde_json::from_str(&json).expect("json");
         let keys: Vec<&str> = v
             .as_object()
@@ -713,14 +761,30 @@ mod tests {
         assert!(glia_engine::calibrate::record::calibration_dir(&top).is_dir());
 
         let structure = vec!["structure".to_string()];
-        assert!(calibrate_json(repo, 10, 2, Some(&structure)).is_ok());
+        assert!(calibrate_json(repo, 10, 2, Some(&structure), None, &[]).is_ok());
+        // FB.7d: a repo with no vectors calibrates SELf2t over the 11
+        // lexical candidates under every `semantic`.
+        let find = vec!["find".to_string()];
+        for sem in [None, Some(true), Some(false)] {
+            assert!(calibrate_json(repo, 10, 2, Some(&find), sem, &[]).is_ok());
+            let glia_engine::calibrate::record::CalibrationRead::Loaded(cal) =
+                glia_engine::calibrate::record::read_calibration(&top)
+            else {
+                panic!("record not loaded");
+            };
+            assert_eq!(
+                cal.sets[0].candidates,
+                glia_engine::calibrate::FIND_CANDIDATES,
+                "{sem:?}"
+            );
+        }
         let nope = vec!["nope".to_string()];
-        let err = calibrate_json(repo, 10, 2, Some(&nope)).expect_err("unknown group");
+        let err = calibrate_json(repo, 10, 2, Some(&nope), None, &[]).expect_err("unknown group");
         assert!(err.contains("nope") && err.contains("structure"), "{err}");
 
         let (_scratch, top) = calibrate_repo("nosnap", false);
-        let err =
-            calibrate_json(top.to_str().expect("utf-8"), 300, 5, None).expect_err("no snapshot");
+        let err = calibrate_json(top.to_str().expect("utf-8"), 300, 5, None, None, &[])
+            .expect_err("no snapshot");
         assert!(err.contains("glia history sync"), "{err}");
         assert!(!glia_engine::calibrate::record::calibration_dir(&top).exists());
     }

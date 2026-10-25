@@ -485,14 +485,17 @@ glia history sync <REPO> [--blame] [--blame-max-files <BLAME_MAX_FILES>] [--max-
     ATTN cells, CO_CHANGES edges, and messages.jsonl (each commit's redacted,
     trailer-stripped message, author time and merged-branch label, read only by
     query-time ranking; --no-messages keeps none). No author identities are stored.
-glia history calibrate <REPO> [--json] [--max-commits <N>] [--max-seeds <N>] [--sets <SETS>]
+glia history calibrate <REPO> [--json] [--max-commits <N>] [--max-seeds <N>] [--no-semantic] [--sets <SETS>]
     Replay the history snapshot over the graph and write <repo>/.glia/calibration-snapshot/:
     the per-repo ranking each ranked answer picks. Run after `glia history sync`; a
     build never calibrates. It scores each candidate ranking on the repo's own past
     commits, oldest first, picking with only the commits before each one (leak-free):
     SELh0 / SELs0 for the text-free answers (blast-radius, diff-impact, review's impact;
     SELs0 under --no-cochange), SELt2 for review's intent, SELf2t for find --files. pack
-    never reads the record (ruling EC-9b).
+    never reads the record (ruling EC-9b). When the repo's .glia/vectors.jsonl (glia embed)
+    holds vectors of the surface model, SELf2t also measures the blended orders
+    FUSE[T1s,SEMp:t2] and LX[IDR,FUSE[T1s,SEMp:t2]], and find --files reads that record
+    only with vectors; --no-semantic calibrates without them.
     One line per (set, shape) with the pick, its online recall@10 against the fallback's
     and a bootstrap 95% CI. --max-commits (300) test commits, --max-seeds (5) queries
     each, --sets a subset of the groups structure, review, find. An answer ignores a

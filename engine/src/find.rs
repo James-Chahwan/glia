@@ -80,7 +80,11 @@
 //! pick whose keys are unusable) is [`FIND_FILES_FUSED`] =
 //! `LX[IDR,FUSE[T1s,SEMp:t2]]`: ids first, then `blend(0.5, minmax(T1s),
 //! minmax(SEMp:t2))` (a file with no embedded node scored as the lowest
-//! present), then degree, then path. A calibrated pick still wins. Rows are
+//! present), then degree, then path. A calibrated pick still wins, read over
+//! `calibrate::sets::FIND_CANDIDATES_SEM` (FB.7d: a record calibrated with
+//! vectors, whose SELf2t row may pick a fused order; a record calibrated
+//! without them answers the fallback with reason `candidate_set`, as does a
+//! vector record read by a call with no source). Rows are
 //! still the files with a positive first or second key, so with vectors
 //! nearly every file is a row and `top_k` cuts them; each carries its raw
 //! `sem`. The similarity never decides presence: the empty answer's
@@ -115,7 +119,7 @@ use crate::answers::{
 use crate::arch::{repo_label_for, repo_label_map};
 use crate::calibrate::fusions::{FindHead, find_keys, find_order, find_signals_at_head};
 use crate::calibrate::record::{Shape, explicit, log_selection, select};
-use crate::calibrate::sets::{FIND_CANDIDATES, FIND_FALLBACK, FIND_SET};
+use crate::calibrate::sets::{FIND_CANDIDATES, FIND_CANDIDATES_SEM, FIND_FALLBACK, FIND_SET};
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::intent::defs::{Tree, read_defs};
 use crate::intent::idr::{IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route};
@@ -988,7 +992,14 @@ fn find_files_core(
     };
 
     // EC.13: SELf2t's calibrated pick, else LX[IDR,T1s]; the find shape's
-    // tie rule (the degree in an unused third key), then path.
+    // tie rule (the degree in an unused third key), then path. FB.7d: with
+    // vectors the record must have been calibrated with them (the 13-list's
+    // digest), without them over the 11 (else `candidate_set`).
+    let candidates: &[&str] = if sem_scores.is_some() {
+        &FIND_CANDIDATES_SEM
+    } else {
+        &FIND_CANDIDATES
+    };
     let selection = if let Some(name) = pick {
         explicit(FIND_SET, Shape::Find, name)
     } else if opts.select {
@@ -996,7 +1007,7 @@ fn find_files_core(
             cache.calibration().read(),
             FIND_SET,
             Shape::Find,
-            &FIND_CANDIDATES,
+            candidates,
             FIND_FALLBACK,
         )
     } else {

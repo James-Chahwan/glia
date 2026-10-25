@@ -25,13 +25,19 @@
 //! test_eligible=<e> test=<n> messages=<yes|no> queries k1=<a> k2=<b> k3=<c>
 //! half=<d> find=<f>`.
 
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::Instant;
 
 use glia_code_domain::snapshots::{HistoryMessage, HistorySnapshot};
 
+use super::candidate::StateHook;
+use super::fusions::sem_filled;
 use super::record::Shape;
-use crate::intent::text::Candidates;
-use crate::rank::{CochangeHistory, c0};
+use crate::intent::text::{Candidates, subject};
+use crate::rank::{CochangeHistory, FileIndex, c0};
+use crate::semantic::SemanticSource;
 
 /// rank_eval's `R3_FIND_TOP`: the text ranking's top files a find query seeds.
 pub const FIND_TOP: usize = 10;
@@ -375,6 +381,91 @@ pub fn build_replay(
         queries,
         messages: msgs.is_some(),
         test_eligible: eligible.len(),
+    }
+}
+
+/// The find shape's semantic scores (FB.7d, ruling FB-7-FUSED): per test
+/// commit with a find query, its subject's SEMp:t2 file scores over the
+/// candidates, FILLED (`fusions::sem_filled`), read by SELf2t's two fused
+/// candidates (`sets::FIND_CANDIDATES_SEM`). Built once before the replay:
+/// every distinct subject (`intent::text::subject` of the commit's message,
+/// the query T1s reads) is embedded BGE-prefixed in one
+/// [`SemanticSource::query_vectors`] call. Leak-free by construction, as
+/// rank_eval's gate: the vectors are the node texts of the built tree and the
+/// query is the test commit's own subject; no commit's files are read.
+///
+/// Fired_on, stderr, once when built: `[calibrate] semantic queries=<q>
+/// embedded=<e> ms=<t> model=<m>` (q find queries, e distinct texts).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default)]
+pub struct SemState {
+    /// Commit index (in [`Replay::commits`]) -> filled scores, one per
+    /// candidate.
+    scores: BTreeMap<usize, Arc<Vec<f64>>>,
+}
+
+impl SemState {
+    /// Embed every find query of `replay` and score it over `cands` (one
+    /// repo's slice of `files`). Err on an embedder error (the caller then
+    /// calibrates without the semantic candidates).
+    pub fn for_replay(
+        src: &SemanticSource,
+        files: &FileIndex,
+        cands: &Candidates,
+        replay: &Replay,
+    ) -> Result<SemState, String> {
+        let t0 = Instant::now();
+        let commits: BTreeSet<usize> = replay
+            .queries
+            .iter()
+            .filter(|q| q.shape == Shape::Find)
+            .map(|q| q.commit)
+            .collect();
+        // Distinct texts in first-appearance (oldest test commit first) order.
+        let mut texts: Vec<&str> = Vec::new();
+        let mut slot: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut of_commit: Vec<(usize, usize)> = Vec::with_capacity(commits.len());
+        for &k in &commits {
+            let Some(c) = replay.commits.get(k) else {
+                continue;
+            };
+            let text = subject(&c.message);
+            let i = *slot.entry(text).or_insert_with(|| {
+                texts.push(text);
+                texts.len() - 1
+            });
+            of_commit.push((k, i));
+        }
+        let vecs = src.query_vectors(&texts)?;
+        let per_text: Vec<Arc<Vec<f64>>> = vecs
+            .iter()
+            .map(|q| Arc::new(sem_filled(&src.file_scores(files, cands, q))))
+            .collect();
+        let mut scores = BTreeMap::new();
+        for (k, i) in of_commit {
+            if let Some(v) = per_text.get(i) {
+                scores.insert(k, Arc::clone(v));
+            }
+        }
+        eprintln!(
+            "[calibrate] semantic queries={} embedded={} ms={} model={}",
+            scores.len(),
+            texts.len(),
+            t0.elapsed().as_millis(),
+            src.stats().model
+        );
+        Ok(SemState { scores })
+    }
+
+    /// Commit `k`'s filled scores; None for a commit with no find query.
+    pub fn scores(&self, k: usize) -> Option<&[f64]> {
+        self.scores.get(&k).map(|v| v.as_slice())
+    }
+}
+
+impl StateHook for SemState {
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

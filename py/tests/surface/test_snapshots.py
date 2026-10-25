@@ -17,11 +17,13 @@ dict (the TestsSummary, `runs` / `seq` for the window, skipped reports in
 `report_errors`) and raises ValueError when no report is given, none could be
 read or `window` is 0.
 
-`history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None)` (EC.6)
-builds the repo, replays its history snapshot over the graph and writes
-`<repo>/.glia/calibration-snapshot/`; it returns a native dict {dir,
-history_head, commits, test_commits, messages, ms, sets} and raises ValueError
-with no snapshot (naming `glia history sync`) or an unknown group.
+`history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None,
+semantic=None)` (EC.6) builds the repo, replays its history snapshot over the
+graph and writes `<repo>/.glia/calibration-snapshot/`; it returns a native
+dict {dir, history_head, commits, test_commits, messages, ms, sets} and raises
+ValueError with no snapshot (naming `glia history sync`) or an unknown group.
+`semantic` (FB.7d): None / True let SELf2t also measure the blended orders when
+the repo holds vectors (`embed`); False never reads them.
 
 `vocab_sync(repo_path, rev=None)` (FB.13b) reads one commit's tracked text
 files (default HEAD) and writes `<repo>/.glia/vocab-snapshot/`; it returns a
@@ -171,7 +173,7 @@ def check_history_calibrate(c: Checks, top: pathlib.Path, tmp: str) -> None:
     c.check("history_calibrate signature",
             getattr(rg, "history_calibrate", None) is not None
             and rg.history_calibrate.__text_signature__
-            == "(repo_path, max_commits=300, max_seeds=5, sets=None)",
+            == "(repo_path, max_commits=300, max_seeds=5, sets=None, semantic=None)",
             getattr(getattr(rg, "history_calibrate", None), "__text_signature__", "missing"))
     if getattr(rg, "history_calibrate", None) is None:
         return
@@ -187,6 +189,14 @@ def check_history_calibrate(c: Checks, top: pathlib.Path, tmp: str) -> None:
     c.check("fired_on marker", "[calibrate] done surface=pyo3 sets=" in err, err[-400:])
     c.raises("unknown group raises", ValueError, lambda: rg.history_calibrate(str(top), sets=["nope"]),
              "structure")
+    # FB.7d: no vectors in the scratch repo, so SELf2t keeps its 11 lexical
+    # candidates under every `semantic`, and no semantic marker fires.
+    for sem in (None, True, False):
+        f, ferr = stderr_of(lambda: rg.history_calibrate(str(top), sets=["find"], semantic=sem))
+        c.check(f"semantic={sem} calibrates find", type(f) is dict
+                and [(r.get("set"), r.get("shape")) for r in f.get("sets", [])] == [("SELf2t", "find")], f)
+        c.check(f"semantic={sem}: no semantic marker without vectors",
+                "[calibrate] semantic queries=" not in ferr, ferr[-400:])
 
     bare = pathlib.Path(tmp) / "calibrate-bare"
     bare.mkdir()

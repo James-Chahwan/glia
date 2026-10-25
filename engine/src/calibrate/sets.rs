@@ -34,9 +34,11 @@
 
 use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, ReplayState};
-use super::fusions::{FindSeeded, IdrState, Seeded, TextState};
+use super::fusions::{
+    FIND_SEM_NAMES, FindSeeded, IdrState, Seeded, TextState, find_keys, replay_find_signals,
+};
 use super::record::Shape;
-use super::replay::Replay;
+use super::replay::{Replay, SemState};
 use super::select::SetSpec;
 use super::work::WorkState;
 
@@ -93,6 +95,27 @@ pub const FIND_CANDIDATES: [&str; 11] = [
     "T1s",
     "PXT",
 ];
+/// SELf2t's candidates when the repo's vectors are read (FB.7d, ruling
+/// FB-7-FUSED): [`FIND_CANDIDATES`], then FB.6b's F1 and F2
+/// (`fusions::FIND_SEM_NAMES`). The record's digest is over whichever list
+/// was calibrated, so a record written with vectors is refused
+/// (`candidate_set`) by an answer without them and the reverse; the 11-list's
+/// digest is unchanged, so RANKER_REVISION stays.
+pub const FIND_CANDIDATES_SEM: [&str; 13] = [
+    "H18x",
+    "H9x25T",
+    "H9x",
+    "H10x",
+    "ALL5x",
+    "LX[IDR,H18x]",
+    "LX[IDR,H9x25T]",
+    "H18xi",
+    "LX[IDR,C0x,PXT]",
+    "T1s",
+    "PXT",
+    "FUSE[T1s,SEMp:t2]",
+    "LX[IDR,FUSE[T1s,SEMp:t2]]",
+];
 /// SELf2t's fallback: EB.8's shipped `find --files` order (scored only).
 pub const FIND_FALLBACK: &str = crate::find::FIND_FILES_FUSION;
 /// The shape SELf2t is calibrated on.
@@ -125,10 +148,48 @@ fn seeded(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
         .collect()
 }
 
-fn find_seeded(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
+/// A fused find candidate of SELf2t (FB.7d): the replay's find signals of
+/// [`FindSeeded`] with `sem` filled from the registered [`SemState`] (the
+/// query commit's SEMp:t2 file scores). With no SemState, or no score for the
+/// commit, an empty vector: the driver then drops the set, never a fused
+/// name ranked as its lexical half.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
+pub struct FindSem(pub &'static str);
+
+impl Candidate for FindSem {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+
+    fn rank(&self, q: &QueryCtx<'_>) -> Vec<RankKey> {
+        let Some(sem) = q
+            .state
+            .hook::<SemState>()
+            .and_then(|s| s.scores(q.query.commit))
+        else {
+            return Vec::new();
+        };
+        let Some(mut s) = replay_find_signals(self.0, q) else {
+            return Vec::new();
+        };
+        s.sem = sem.to_vec();
+        find_keys(self.0, &s).unwrap_or_default()
+    }
+}
+
+/// SELf2t's candidates: [`FindSeeded`] for the lexical names, [`FindSem`]
+/// for the fused ones.
+fn find_candidates(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
     names
         .iter()
-        .map(|&n| Box::new(FindSeeded(n)) as Box<dyn Candidate>)
+        .map(|&n| {
+            if FIND_SEM_NAMES.contains(&n) {
+                Box::new(FindSem(n)) as Box<dyn Candidate>
+            } else {
+                Box::new(FindSeeded(n)) as Box<dyn Candidate>
+            }
+        })
         .collect()
 }
 
@@ -139,8 +200,9 @@ fn named(names: &[&'static str]) -> Vec<Box<dyn Candidate>> {
         .collect()
 }
 
-/// The sets of `group`, or None for an unknown group.
-fn group(name: &str) -> Option<Vec<SetSpec>> {
+/// The sets of `group`, or None for an unknown group; `semantic` makes
+/// SELf2t's candidates [`FIND_CANDIDATES_SEM`].
+fn group(name: &str, semantic: bool) -> Option<Vec<SetSpec>> {
     match name {
         "structure" => Some(vec![
             SetSpec::new(
@@ -170,7 +232,11 @@ fn group(name: &str) -> Option<Vec<SetSpec>> {
                 FIND_SET,
                 &FIND_SHAPES,
                 FIND_FALLBACK,
-                find_seeded(&FIND_CANDIDATES),
+                if semantic {
+                    find_candidates(&FIND_CANDIDATES_SEM)
+                } else {
+                    find_candidates(&FIND_CANDIDATES)
+                },
             )
             .with_fallback_candidate(Box::new(FindSeeded(FIND_FALLBACK))),
         ]),
@@ -216,9 +282,15 @@ pub fn log_hooks(state: &ReplayState) {
 /// group's registration order; an unknown group is an error naming the known
 /// ones.
 pub fn specs(groups: &[&str]) -> Result<Vec<SetSpec>, String> {
+    specs_with(groups, false)
+}
+
+/// [`specs`], SELf2t over [`FIND_CANDIDATES_SEM`] when `semantic` (the
+/// replay registered a [`SemState`], FB.7d).
+pub fn specs_with(groups: &[&str], semantic: bool) -> Result<Vec<SetSpec>, String> {
     let mut out = Vec::new();
     for g in groups {
-        match group(g) {
+        match group(g, semantic) {
             Some(sets) => out.extend(sets),
             None => {
                 return Err(format!(
@@ -277,6 +349,34 @@ mod tests {
         assert_eq!(set_digest(&STRUCTURE_CANDIDATES), "b8d25cb5c9150854");
         assert_eq!(set_digest(&REVIEW_CANDIDATES), "ca79a93f8e2d0576");
         assert_eq!(set_digest(&FIND_CANDIDATES), "e682add57de8c8cd");
+        assert_eq!(set_digest(&FIND_CANDIDATES_SEM), "72b1014ad4f3dbb2");
+    }
+
+    /// FB.7d: the semantic list is the 11 then FB.6b's F1, F2; with
+    /// `semantic` SELf2t is calibrated over it, the fused two as FindSem.
+    #[test]
+    fn find_group_with_vectors_is_the_thirteen() {
+        assert_eq!(FIND_CANDIDATES_SEM[..11], FIND_CANDIDATES);
+        assert_eq!(FIND_CANDIDATES_SEM[11..], FIND_SEM_NAMES);
+        let s = specs_with(&["find"], true).expect("find");
+        assert_eq!(
+            s[0].candidates.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            FIND_CANDIDATES_SEM
+        );
+        assert_eq!(s[0].fallback, FIND_FALLBACK);
+        for n in FIND_CANDIDATES_SEM {
+            assert!(crate::calibrate::fusions::find_needs(n).is_some(), "{n}");
+        }
+        // every other group is unchanged by the flag
+        let names = |v: Vec<SetSpec>| -> Vec<(&'static str, Vec<&'static str>)> {
+            v.iter()
+                .map(|x| (x.set, x.candidates.iter().map(|c| c.name()).collect()))
+                .collect()
+        };
+        assert_eq!(
+            names(specs_with(&["structure", "review"], true).expect("a")),
+            names(specs(&["structure", "review"]).expect("b"))
+        );
     }
 
     /// EC.13: SELf2t is rank_eval's `R3_SELF2` then `T1s`, `PXT` (main's

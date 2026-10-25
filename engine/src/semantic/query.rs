@@ -116,6 +116,38 @@ impl SemanticSource {
         Ok(v)
     }
 
+    /// [`Self::query_vector`] of every query in `queries`, in input order, in
+    /// ONE embedder call (the embedder batches it) and with no per-query
+    /// marker: the calibration replay's find queries (FB.7d), whose caller
+    /// prints one `[calibrate] semantic ..` line instead. Err on an embedder
+    /// error, a count other than the queries', or a vector whose length is
+    /// not the index's.
+    pub fn query_vectors(&self, queries: &[&str]) -> Result<Vec<Vec<f32>>, String> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let texts: Vec<String> = queries
+            .iter()
+            .map(|q| format!("{QUERY_PREFIX}{}", subject(q)))
+            .collect();
+        let out = self.embedder.embed(&texts)?;
+        if out.len() != texts.len() {
+            return Err(format!(
+                "the embedder returned {} vectors for {} queries",
+                out.len(),
+                texts.len()
+            ));
+        }
+        let dims = self.index.stats().dims as usize;
+        if let Some(v) = out.iter().find(|v| dims > 0 && v.len() != dims) {
+            return Err(format!(
+                "query vector has {} dims, the index {dims}",
+                v.len()
+            ));
+        }
+        Ok(out)
+    }
+
     /// Per candidate (in `cands` order), the max cosine of `qvec` over the
     /// candidate file's nodes ([`FileIndex::nodes`], rank_eval's
     /// `file_nodes`) that hold a fresh vector; None for a file with none.
