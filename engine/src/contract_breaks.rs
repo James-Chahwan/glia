@@ -120,6 +120,14 @@
 //! Language-level public API (cargo-semver-checks parity) stays out: the
 //! graph has no visibility or signature cell.
 //!
+//! BLIND (FH.9): `breaking = 0` over a mechanism that pairs few clients is
+//! no all-clear, so [`ContractBreaks::blind`] lists each client mechanism the
+//! orphan search reads (HTTP, gRPC, RPC, GraphQL, WebSocket) that
+//! `health::boundary_health` rates BLIND or DEGRADED on the working tree's
+//! graph, with its measure (`clients paired 7% of 14`); `[blind]
+//! surface=contract_breaks ..` once per answer, after the `[model-breaks]`
+//! line.
+//!
 //! Fired-on marker, one per answer:
 //! `[contract-breaks] base=<rev> pairs=<P> breaking=<B> compatible=<C> unknown=<U> removed=<R> added=<A> orphaned_clients=<O>`
 //! (`pairs` counts every paired contract, identical ones included; the
@@ -140,7 +148,7 @@ use glia_code_domain::{edge_category, same_as};
 use glia_core::{EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
-use crate::absence::{self, Absence};
+use crate::absence::{self, Absence, BlindCaveat};
 use crate::answers::Locator;
 use crate::build::{BuildOptions, GenerateResult, generate_many_as};
 use crate::contract_fields::{
@@ -149,6 +157,7 @@ use crate::contract_fields::{
 };
 use crate::delta::{RevDelta, graph_delta_vs_rev, located_delta_with};
 use crate::git_rev;
+use crate::health;
 
 mod models;
 
@@ -265,9 +274,17 @@ pub struct ContractBreaks {
     /// `Some` exactly when `schemas`, `models` and `orphaned_clients` are all
     /// empty.
     pub absence: Option<Absence>,
+    /// FH.9: the client mechanisms the answer reads (the orphan search's
+    /// HTTP, gRPC, RPC, GraphQL and WebSocket: the orphan search and the
+    /// model exchanges) that health rates BLIND or DEGRADED on the working
+    /// tree's graph: a `0 breaking` over a mechanism that pairs few clients
+    /// says so. Empty, and not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
-/// The client -> provider edge categories an orphan is looked for in.
+/// The client -> provider edge categories an orphan is looked for in (and
+/// the mechanisms [`ContractBreaks::blind`] judges).
 const CLIENT_CATEGORIES: [EdgeCategoryId; 5] = [
     edge_category::HTTP_CALLS,
     edge_category::GRPC_CALLS,
@@ -666,6 +683,10 @@ fn breaks_of(
         a.unparsed_files = after_build.parse_errors.len();
         a
     });
+    let read = health::mechanisms_read(
+        CLIENT_CATEGORIES.iter().map(|&c| edge_category::name(c)),
+        std::iter::empty::<&str>(),
+    );
     ContractBreaks {
         base,
         schemas: rows,
@@ -674,6 +695,7 @@ fn breaks_of(
         breaking,
         advisory: judged.advisory,
         absence,
+        blind: health::blind_caveats(after, PRIMITIVE, &read),
     }
 }
 

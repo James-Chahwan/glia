@@ -20,6 +20,15 @@
 //! `diff_impact_from_delta` and `tests_for::tests_for_delta`: one
 //! before + after build pair, one `[delta] base=` line, not two.
 //!
+//! # Blind (FH.9)
+//!
+//! `blind` holds the mechanisms the impact read (`health::blast_mechanisms`:
+//! the pair categories that put a row in scope and the boundary kinds among
+//! its rows and seeds) that `health::boundary_health` rates BLIND or DEGRADED
+//! on the working tree's graph (pasted mode: the given graph). One
+//! `[blind] surface=diff_impact ..` line per answer; review's impact prints
+//! review's own.
+//!
 //! # Seeds
 //!
 //! Rev mode seeds the added and moved nodes (their working-tree ids), the
@@ -78,9 +87,10 @@ use glia_code_domain::node_kind;
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
 
-use crate::absence;
+use crate::absence::{self, BlindCaveat};
 use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded_on};
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
+use crate::health;
 use crate::identity::Collapse;
 use crate::profile::CODE_PROFILE;
 use crate::rank::RankCache;
@@ -142,6 +152,11 @@ pub struct DiffImpact {
     /// Pasted mode: the files of the diff that place no node (module docs).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unresolved_diff_files: Vec<String>,
+    /// FH.9: the mechanisms the impact read ([`health::blast_mechanisms`])
+    /// that health rates BLIND or DEGRADED on the working tree's graph;
+    /// empty, and not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 /// The impact of the working tree's change against git rev `base` (module
@@ -171,7 +186,13 @@ pub fn diff_impact_vs_rev(
 /// An enabled `opts.collapse` with no repo labels takes `rev.after`'s, so
 /// the `also_in` repos are labelled for every caller (FD.28).
 pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact {
-    diff_impact_from_delta_on(rev, opts, "diff_impact")
+    let mut answer = diff_impact_from_delta_on(rev, opts, "diff_impact");
+    answer.blind = health::blind_caveats(
+        &rev.after.merged,
+        "diff_impact",
+        &health::blast_mechanisms(&answer.impact),
+    );
+    answer
 }
 
 /// [`diff_impact_from_delta`] for an outer answer: `surface` names it in the
@@ -272,6 +293,7 @@ pub(crate) fn diff_impact_from_delta_on(
         edges_removed,
         impact,
         unresolved_diff_files: Vec::new(),
+        blind: Vec::new(),
     };
     marker("rev", &answer, seeds.len());
     answer
@@ -350,6 +372,7 @@ pub fn diff_impact_from_diff(
         changed,
         edges_added: Vec::new(),
         edges_removed: Vec::new(),
+        blind: health::blind_caveats(merged, "diff_impact", &health::blast_mechanisms(&impact)),
         impact,
         unresolved_diff_files,
     };

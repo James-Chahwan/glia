@@ -177,6 +177,15 @@
 //! impact row. fired_on, after the `[review] base=` line, only when one is
 //! listed: `[review] conventions=<n>` - grep `^\[review\] conventions=`.
 //!
+//! # Blind (FH.9)
+//!
+//! `blind` lists the mechanisms the review read (its impact's, before the row
+//! cap, plus `http` / `graphql`, whose model exchanges it judges) that
+//! `health::boundary_health` rates BLIND or DEGRADED on the working tree's
+//! graph; the markdown prints `blind: http (clients paired 7% of 14)` as its
+//! own block under the headline, and `[blind] surface=review ..` fires once
+//! per review.
+//!
 //! # Markdown (CC.6b)
 //!
 //! [`render_markdown`] is the PR report `glia review` prints and pyo3
@@ -285,6 +294,7 @@ use glia_core::{Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 use glia_projection_text::ladder::note_tier;
 
+use crate::absence::BlindCaveat;
 use crate::answers::{
     BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_ROWS, Locator, in_scope, project_roots,
 };
@@ -307,6 +317,7 @@ use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
 use crate::external::declared::{conventions, conventions_for, declared_constraints, node_repos};
 use crate::git_rev;
+use crate::health;
 use crate::intent::defs::{Tree, read_defs};
 use crate::intent::idr::{
     Idr, IdrInputs, RoutedId, ids_by_file, recent_scopes, recent_subjects, route,
@@ -474,6 +485,14 @@ pub struct Review {
     /// `LX[IDR,P1]` with the reason. Present exactly when `intent` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_intent: Option<Selection>,
+    /// FH.9: the mechanisms the review read (its impact's,
+    /// `health::blast_mechanisms` before the row cap, plus `http` and
+    /// `graphql`, the model exchanges it judges) that health rates BLIND or
+    /// DEGRADED on the working tree's graph; the markdown prints them as one
+    /// `blind: ..` line under the headline. Empty, and not serialized,
+    /// otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 /// FB.12b: a convention governing at least one changed file (module docs
@@ -610,6 +629,14 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         Some(cache) => review_intent(rev, cache, &mut impact, args.max_impact, ask),
         None => (None, None),
     };
+    // FH.9: the impact's mechanisms plus the model exchanges', in health's
+    // order.
+    let impact_read = health::blast_mechanisms(&impact);
+    let read: Vec<&'static str> = health::all_mechanisms()
+        .into_iter()
+        .filter(|m| impact_read.contains(m) || MODEL_MECHANISMS.contains(m))
+        .collect();
+    let blind = health::blind_caveats(after, "review", &read);
     let impact_total = impact.rows_total();
     let seeds_total = impact.seeds.len() + impact.truncated.as_ref().map_or(0, |t| t.seeds);
     impact.cap(args.max_impact, args.max_seeds);
@@ -735,6 +762,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         conventions,
         selection_intent: intent.as_ref().map(|i| i.selection.clone()),
         intent,
+        blind,
     };
     marker(&answer);
     if let Some(line) = intent_line {
@@ -745,6 +773,9 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     }
     Ok(answer)
 }
+
+/// The mechanisms `model_breaks` judges exchanges of (FH.9).
+const MODEL_MECHANISMS: [&str; 2] = ["http", "graphql"];
 
 fn marker(r: &Review) {
     let c = &r.counts;
@@ -1663,6 +1694,9 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         c.edges_added,
         c.edges_removed,
     )];
+    if let Some(line) = health::blind_line(&r.blind) {
+        blocks.push(line);
+    }
     let unchanged = r.changed.is_empty()
         && r.edges.is_empty()
         && r.new_violations.is_empty()

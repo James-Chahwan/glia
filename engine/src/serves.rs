@@ -26,6 +26,10 @@
 //! host, an overlay `[constants]` pin) is in-repo here, as in `glia gaps` and
 //! engram-export. HTTP only: WS / gRPC / GraphQL clients are not marked.
 //!
+//! Blind (FH.9): when `health::boundary_health` rates the channel's
+//! mechanism BLIND or DEGRADED on the graph, the answer's `blind` holds that
+//! row (`[blind] surface=serves ..`), found or not.
+//!
 //! What it does not see, stated rather than guessed:
 //! - The client-only tiers 5-6 (base-URL fold, suffix) — the matcher does not
 //!   offer them to a caller holding a declared path.
@@ -300,6 +304,8 @@ fn answer(
         mech.name(),
         answer.results.len()
     );
+    // FH.9: the channel's mechanism, judged on the graph the answer read.
+    answer.blind = crate::health::blind_caveats(merged, "serves", &[mech.name()]);
     answer
 }
 

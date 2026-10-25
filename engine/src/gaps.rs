@@ -55,6 +55,12 @@
 //! [`verdict`] counts it: an accepted edge that teaches a new triple can raise
 //! it elsewhere (a `review`, not a `keep`).
 //!
+//! `blind` (FH.9): every health mechanism the report read (all six, or
+//! under `category` the ones it reads: the endpoint rows HTTP + GraphQL, the
+//! route rows HTTP + WebSocket, `tag_only_queue` the queue) that
+//! `health::boundary_health` rates BLIND or DEGRADED, beside the rows;
+//! `[blind] surface=gaps ..` once per report.
+//!
 //! Two rows with one key (two identical `[[edge]]` stanzas, two identical
 //! sidecar rows) are told apart by their rank among the rows sharing that key
 //! (`\x1f2`, `\x1f3`, ... on the second and later), which moves only when an
@@ -154,9 +160,11 @@ use glia_graph::cells::{CellTarget, QnameIndex};
 use glia_graph::nav::{is_nav_route, nav_route_path};
 use glia_graph::normalise_http_path;
 
+use crate::absence::BlindCaveat;
 use crate::answers::{Locator, entrypoint_reachable};
 use crate::build::{BuildOptions, generate_many_opts, generate_one_opts};
 use crate::external::signals;
+use crate::health;
 use crate::profile::{CODE_PROFILE, CodeBuildCtx};
 
 pub const UNPAIRED_ENDPOINT: &str = "unpaired_endpoint";
@@ -285,6 +293,12 @@ pub struct GapsReport {
     /// Categories not computed: the root-reading ones when no root was given.
     pub skipped: Vec<&'static str>,
     pub rows: Vec<GapRow>,
+    /// FH.9: the mechanisms the report read (every one; under `category`,
+    /// the ones that category reads) that health rates BLIND or DEGRADED:
+    /// few rows of a category over a mechanism glia barely sees is no
+    /// all-clear. Empty, and not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 impl GapsReport {
@@ -498,10 +512,15 @@ pub fn gaps_report(
         opts.top_k_per_category.is_none_or(|k| *n <= k)
     });
 
+    let read = match opts.category.as_deref() {
+        None => health::all_mechanisms(),
+        Some(c) => category_mechanisms(c).to_vec(),
+    };
     let report = GapsReport {
         counts,
         skipped,
         rows,
+        blind: health::blind_caveats(merged, "gaps", &read),
     };
     let per: Vec<String> = CATEGORIES
         .iter()
@@ -521,6 +540,20 @@ pub fn gaps_report(
         per.join(" ")
     );
     Ok(report)
+}
+
+/// The health mechanisms one gaps category reads (FH.9), in health's order:
+/// the client-side endpoint rows HTTP and GraphQL transports, the route rows
+/// HTTP and WebSocket, tag-only queues the queue; the rest read none.
+fn category_mechanisms(category: &str) -> &'static [&'static str] {
+    match category {
+        UNPAIRED_ENDPOINT | AMBIGUOUS_ENDPOINT | UNRESOLVED_ENDPOINT | WRAPPED_SINK => {
+            &["http", "graphql"]
+        }
+        UNPAIRED_ROUTE => &["http", "ws"],
+        TAG_ONLY_QUEUE => &["queue"],
+        _ => &[],
+    }
 }
 
 /// Build `repo_paths` twice through `generate_*_opts` — the overlay off, then

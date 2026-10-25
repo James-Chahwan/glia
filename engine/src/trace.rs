@@ -43,6 +43,14 @@
 //! `endpoint::split_owner`); an end with neither falls back to the repo
 //! comparison.
 //!
+//! # Blind (FH.9)
+//!
+//! A trace's `blind` and each entry flow's hold the mechanisms it read (pair
+//! categories and boundary kinds on its hops) that `health::boundary_health`
+//! rates BLIND or DEGRADED: a path that ends at an unpaired ENDPOINT says the
+//! HTTP pairing it could not cross reaches few clients here. One
+//! `[blind] surface=trace|flows ..` line per answer.
+//!
 //! # Bounds
 //!
 //! Path enumeration is exponential in the worst case, so the walk stops after
@@ -149,10 +157,11 @@ use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::roles::roles_in;
 use glia_graph::{MergedGraph, Reach};
 
-use crate::absence::{self, Absence};
+use crate::absence::{self, Absence, BlindCaveat};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
 use crate::arch::{ServiceKeying, default_keying, service_of};
 use crate::find::{self, FindOptions, FoundNode};
+use crate::health;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
 
@@ -266,6 +275,11 @@ pub struct TraceAnswer {
     /// paths found before it stopped.
     pub truncated: bool,
     pub absence: Option<Absence>,
+    /// FH.9: the mechanisms the trace read (the pair categories and boundary
+    /// kinds on its hops, paths, seed and target) that health rates BLIND or
+    /// DEGRADED; empty, and not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 /// One entry point's forward flow (LD.4b): what it reaches over the carry
@@ -292,6 +306,11 @@ pub struct EntryFlow {
     /// The entry's forward BFS tree, in discovery order: the hops a
     /// [`TraceAnswer::hops`] seeded at the entry would hold.
     pub hops: Vec<TraceHop>,
+    /// FH.9: the mechanisms this flow read (the entry's kind, its hops' pair
+    /// categories and boundary kinds) that health rates BLIND or DEGRADED;
+    /// empty, and not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 /// **cross_stack_trace** (P3): the ranked paths a feature takes across the
@@ -312,6 +331,36 @@ pub fn cross_stack_trace(merged: &MergedGraph, feature: &str, opts: &TraceOption
 /// `PyGraph` computes it once per graph): `live` must be
 /// [`entrypoint_reachable`] of `merged`.
 pub fn cross_stack_trace_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    feature: &str,
+    opts: &TraceOptions,
+) -> TraceAnswer {
+    let mut answer = trace_answer(merged, live, feature, opts);
+    answer.blind = health::blind_caveats(merged, "trace", &trace_mechanisms(&answer));
+    answer
+}
+
+/// FH.9: the mechanisms a trace read: every pair category on its hops and
+/// paths, and every boundary kind among their destinations, the seed and the
+/// target (a trace that stops at an unpaired ENDPOINT read HTTP).
+fn trace_mechanisms(a: &TraceAnswer) -> Vec<&'static str> {
+    let hops = || {
+        a.hops
+            .iter()
+            .chain(a.paths.iter().flat_map(|p| p.hops.iter()))
+    };
+    health::mechanisms_read(
+        hops().map(|h| h.mechanism),
+        hops()
+            .map(|h| h.to_kind)
+            .chain(a.seed.iter().map(|s| s.kind))
+            .chain(a.target.iter().map(|t| t.kind)),
+    )
+}
+
+/// [`cross_stack_trace_with_live`]'s answer before its `blind` rows.
+fn trace_answer(
     merged: &MergedGraph,
     live: &HashSet<NodeId>,
     feature: &str,
@@ -358,6 +407,7 @@ pub fn cross_stack_trace_with_live(
             paths: Vec::new(),
             truncated: false,
             absence: Some(absence),
+            blind: Vec::new(),
         };
     };
     let walk_seed = view.walk_rep(seed_id);
@@ -419,6 +469,7 @@ pub fn cross_stack_trace_with_live(
             paths,
             truncated: walked.truncated,
             absence,
+            blind: Vec::new(),
         };
     };
 
@@ -436,6 +487,7 @@ pub fn cross_stack_trace_with_live(
             paths: Vec::new(),
             truncated: false,
             absence: Some(absence),
+            blind: Vec::new(),
         };
     };
     let target_at = loc.locate(target_id);
@@ -516,6 +568,7 @@ pub fn cross_stack_trace_with_live(
         paths,
         truncated,
         absence,
+        blind: Vec::new(),
     }
 }
 
@@ -620,16 +673,42 @@ pub fn entry_flows_with_live(
                 services.push(s);
             }
         }
+        let entry = loc.locate(e.id);
         flows.push(EntryFlow {
             key: slug(e.name),
-            entry: loc.locate(e.id),
             reach: hops.len(),
             cross_service: services.len() > 1,
             mechanisms,
             services,
+            blind: Vec::new(),
             hops,
+            entry,
         });
     }
+    // FH.9: one health pass for every flow, run only when one read a
+    // mechanism; each flow's rows from its own mechanisms.
+    let read: Vec<Vec<&'static str>> = flows
+        .iter()
+        .map(|f| {
+            health::mechanisms_read(
+                f.hops.iter().map(|h| h.mechanism),
+                std::iter::once(f.entry.kind).chain(f.hops.iter().map(|h| h.to_kind)),
+            )
+        })
+        .collect();
+    let union: Vec<&'static str> = health::all_mechanisms()
+        .into_iter()
+        .filter(|m| read.iter().any(|r| r.contains(m)))
+        .collect();
+    let rows = if union.is_empty() {
+        Vec::new()
+    } else {
+        health::boundary_health(merged).mechanisms
+    };
+    for (f, mechs) in flows.iter_mut().zip(&read) {
+        f.blind = health::caveats_in(&rows, mechs);
+    }
+    health::blind_marker("flows", &union, &health::caveats_in(&rows, &union));
     flows.sort_by(|a, b| {
         a.key
             .cmp(&b.key)

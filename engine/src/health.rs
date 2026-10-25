@@ -58,6 +58,15 @@
 //! [`MECHANISMS`] order, extensions and packages by name); a HashMap or
 //! HashSet here is only probed, never iterated into an output.
 //!
+//! **Blind answers (FH.9).** An answer that reads a mechanism this module
+//! rates BLIND or DEGRADED carries a FACT [`BlindCaveat`] row naming it
+//! ([`blind_caveats`]): contract-breaks (every client mechanism its orphan
+//! search reads), review (its impact's mechanisms plus `http` / `graphql`,
+//! the model exchanges), serves (the channel's), trace and each entry flow
+//! (the pair categories and boundary kinds on its hops), diff-impact (its
+//! impact's, [`blast_mechanisms`]) and gaps (every mechanism, or the one its
+//! category reads). [`blind_line`] is the table form.
+//!
 //! fired_on marker, once per [`health_with`] / [`health`] call, on stderr:
 //!   `[health] repo=<label> role=<app|library> http=<OK|DEGRADED|BLIND>:<reach>
 //!   grpc=.. rpc=.. graphql=.. queue=.. ws=.. unparsed=<n> workspace_unresolved=<n>
@@ -78,6 +87,9 @@ use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 use glia_graph::nav::{is_nav_route, nav_route_path};
 
+use glia_activation::profile::Tier;
+
+use crate::absence::BlindCaveat;
 use crate::arch::node_file;
 use crate::extract::detect_language;
 use crate::gaps::{DEAD_SYMBOL, DEAD_SYMBOL_KINDS, GapsOptions, gaps_report};
@@ -107,8 +119,7 @@ pub const SUSPICIOUS_EXAMPLES: usize = 20;
 /// Code-looking extensions no parser reads: single-file components, server
 /// templates, module-flavoured JS / TS and a few languages glia does not
 /// parse. A file of one of these with no parser is an `unparsed` file.
-pub const CODE_LIKE_EXTS: [&str; 39] = [
-    "astro",
+pub const CODE_LIKE_EXTS: [&str; 37] = [
     "cjs",
     "coffee",
     "cr",
@@ -145,7 +156,6 @@ pub const CODE_LIKE_EXTS: [&str; 39] = [
     "pug",
     "razor",
     "slim",
-    "svelte",
     "twig",
 ];
 
@@ -987,6 +997,137 @@ fn dead_share(merged: &MergedGraph) -> DeadShare {
         symbols: seen.len(),
         share: share(dead_symbols, seen.len()),
     }
+}
+
+// ---- FH.9: the blind caveat on answers ---------------------------------------
+
+/// The [`MECHANISMS`] entry whose pair category is named `category` (an edge
+/// category's registry name: `HTTP_CALLS` -> `http`), if any.
+pub fn mechanism_of_category(category: &str) -> Option<&'static str> {
+    MECHANISMS
+        .iter()
+        .find(|m| edge_category::name(m.pair) == category)
+        .map(|m| m.name)
+}
+
+/// The [`MECHANISMS`] entry whose producer or consumer kind is named `kind`
+/// (a node kind's registry name: `ENDPOINT` / `ROUTE` -> `http`), if any.
+pub fn mechanism_of_kind(kind: &str) -> Option<&'static str> {
+    MECHANISMS
+        .iter()
+        .find(|m| node_kind::name(m.producer) == kind || node_kind::name(m.consumer) == kind)
+        .map(|m| m.name)
+}
+
+/// The mechanisms named by any of `categories` (edge category names) or
+/// `kinds` (node kind names), each once, in [`MECHANISMS`] order: what an
+/// answer that walked those edges and nodes read.
+pub fn mechanisms_read<'a>(
+    categories: impl IntoIterator<Item = &'a str>,
+    kinds: impl IntoIterator<Item = &'a str>,
+) -> Vec<&'static str> {
+    let named: HashSet<&'static str> = categories
+        .into_iter()
+        .filter_map(mechanism_of_category)
+        .chain(kinds.into_iter().filter_map(mechanism_of_kind))
+        .collect();
+    MECHANISMS
+        .iter()
+        .map(|m| m.name)
+        .filter(|n| named.contains(n))
+        .collect()
+}
+
+/// Every [`MECHANISMS`] name, in order: what an answer reading every
+/// boundary (gaps, contract-breaks' orphan search) depends on.
+pub fn all_mechanisms() -> Vec<&'static str> {
+    MECHANISMS.iter().map(|m| m.name).collect()
+}
+
+/// The mechanisms a blast radius read (FH.9, also diff-impact's and
+/// review's impact): a row put in scope by a mechanism's pair edge, or a
+/// seed or row of a mechanism's producer / consumer kind (a radius that
+/// stops at an unpaired ENDPOINT read HTTP as much as one that crossed it).
+/// Reads the rows the answer holds, so a `top_k` cut row is not counted.
+pub fn blast_mechanisms(b: &crate::answers::BlastRadius) -> Vec<&'static str> {
+    mechanisms_read(
+        b.results.iter().map(|r| r.reason),
+        b.results
+            .iter()
+            .map(|r| r.kind)
+            .chain(b.seeds.iter().map(|s| s.kind)),
+    )
+}
+
+/// The rows of `rows` (a [`Boundary`]'s) whose mechanism is in `mechanisms`
+/// and whose verdict is not OK, as caveats, in `rows`' order.
+pub(crate) fn caveats_in(
+    rows: &[MechanismHealth],
+    mechanisms: &[&'static str],
+) -> Vec<BlindCaveat> {
+    rows.iter()
+        .filter(|m| m.verdict != Verdict::Ok && mechanisms.contains(&m.mechanism))
+        .map(|m| BlindCaveat {
+            tier: Tier::Fact.as_str(),
+            mechanism: m.mechanism,
+            verdict: m.verdict,
+            reason: m.reason,
+            measure: m.measure.clone(),
+        })
+        .collect()
+}
+
+/// Prints the `[blind]` marker for one answer.
+pub(crate) fn blind_marker(surface: &str, mechanisms: &[&'static str], caveats: &[BlindCaveat]) {
+    let count = |v: Verdict| caveats.iter().filter(|c| c.verdict == v).count();
+    let named = if mechanisms.is_empty() {
+        "-".to_string()
+    } else {
+        mechanisms.join(",")
+    };
+    eprintln!(
+        "[blind] surface={surface} mechanisms={named} blind={} degraded={}",
+        count(Verdict::Blind),
+        count(Verdict::Degraded)
+    );
+}
+
+/// FH.9: the caveats of an answer on `surface` that read `mechanisms` over
+/// `merged`: one [`BlindCaveat`] per mechanism [`boundary_health`] rates
+/// BLIND or DEGRADED, in [`MECHANISMS`] order; empty when every one it read
+/// is OK (and no health pass runs when it read none).
+///
+/// fired_on marker, once per call, on stderr:
+/// `[blind] surface=<s> mechanisms=<m,..|-> blind=<b> degraded=<d>`.
+pub fn blind_caveats(
+    merged: &MergedGraph,
+    surface: &str,
+    mechanisms: &[&'static str],
+) -> Vec<BlindCaveat> {
+    let caveats = if mechanisms.is_empty() {
+        Vec::new()
+    } else {
+        caveats_in(&boundary_health(merged).mechanisms, mechanisms)
+    };
+    blind_marker(surface, mechanisms, &caveats);
+    caveats
+}
+
+/// The table form of `caveats`, one line (FH.9):
+/// `blind: http (clients paired 7% of 14), queue (degraded: clients paired 40% of 10)`;
+/// `None` when there is none.
+pub fn blind_line(caveats: &[BlindCaveat]) -> Option<String> {
+    if caveats.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = caveats
+        .iter()
+        .map(|c| match c.verdict {
+            Verdict::Degraded => format!("{} (degraded: {})", c.mechanism, c.measure),
+            _ => format!("{} ({})", c.mechanism, c.measure),
+        })
+        .collect();
+    Some(format!("blind: {}", parts.join(", ")))
 }
 
 #[cfg(test)]

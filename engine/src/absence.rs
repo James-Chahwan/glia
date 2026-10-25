@@ -23,6 +23,11 @@
 //! reached as `glia_engine::absence::<item>`, never flattened into the
 //! crate root.
 //!
+//! FH.9: [`BlindCaveat`] is the caveat row for a NON-empty answer (or a zero
+//! count): `serves` sets [`Answer::blind`], and contract-breaks, review,
+//! trace, flows, diff-impact and gaps carry their own `blind` lists, each
+//! from `health::blind_caveats`.
+//!
 //! fired_on marker, one line per absence built:
 //! `[absence] primitive=<p> reason=<r> mechanisms=<a,b|-> caveats=<n> suggestions=<n>`
 //! — grep `^\[absence\] primitive=`.
@@ -111,6 +116,26 @@ pub struct NamedIn {
 /// How many paths one [`NamedIn`] shows.
 pub const NAMED_IN_FILES: usize = 5;
 
+/// FH.9: a mechanism an answer read that `health::boundary_health` rates
+/// BLIND or DEGRADED on the answer's graph, beside a non-empty answer or a
+/// zero count as [`Absence::caveats`] sit beside an empty one. A FACT about
+/// the graph as built (the health row's counts), never a statement that the
+/// answer is wrong; built by `health::blind_caveats` only.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlindCaveat {
+    /// Always `"fact"` ([`Tier::Fact`]).
+    pub tier: &'static str,
+    /// The health mechanism (`http`, `grpc`, `rpc`, `graphql`, `queue`, `ws`).
+    pub mechanism: &'static str,
+    /// `BLIND` or `DEGRADED`, never `OK`.
+    pub verdict: crate::health::Verdict,
+    /// The health rule that decided (`clients_unpaired`, `no_servers`, ..).
+    pub reason: &'static str,
+    /// The health row's measure: `clients paired 7% of 14`.
+    pub measure: String,
+}
+
 /// A list answer: the rows, or — exactly when there are none — why not.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
@@ -122,6 +147,10 @@ pub struct Answer<T> {
     /// `find::find_files`; None, and never serialized, for every other answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<crate::calibrate::Selection>,
+    /// FH.9: the mechanisms this answer read that health rates BLIND or
+    /// DEGRADED (set by `serves`); empty, and never serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
 }
 
 impl<T> Answer<T> {
@@ -133,6 +162,7 @@ impl<T> Answer<T> {
             results,
             absence,
             selection: None,
+            blind: Vec::new(),
         }
     }
 }
