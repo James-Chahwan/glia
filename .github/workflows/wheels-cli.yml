@@ -130,13 +130,15 @@ jobs:
           # As wheels-py.yml: the Intel (x86_64) wheel is CROSS-COMPILED on the Apple
           # Silicon runner (Intel runners queue for hours / are being retired), both on
           # macos-15. The deployment target is pinned so the bin wheels carry glia-py's
-          # tags (macosx_10_12_x86_64, macosx_11_0_arm64) whatever the runner's SDK.
+          # tags (macosx_10_12_x86_64, macosx_13_4_arm64) whatever the runner's SDK.
+          # arm64 is 13.4 (ruling MAC-ARM-13.4): ORT 1.28's and Dawn's prebuilts are built
+          # for macOS 13.4, so an 11.0 tag would promise what the embed worker cannot run.
           - target: x86_64
             runner: macos-15
             deployment_target: "10.12"
           - target: aarch64
             runner: macos-15
-            deployment_target: "11.0"
+            deployment_target: "13.4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # FB.14: the WebGPU embedding worker (ORT's aarch64-apple-darwin coreml + webgpu
