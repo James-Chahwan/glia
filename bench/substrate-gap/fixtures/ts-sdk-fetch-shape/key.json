@@ -1,0 +1,22 @@
+{
+  "framework": "ts-sdk-fetch-shape",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "note": "FH.4a endpoints from the call's shape. A generated REST SDK calls its runtime's own helpers (`lib.fetchJson('/users/me', { ...opts, method: 'PUT' })`, `lib.fetchText(path, lib.json({ method }))`): no extractor names the library, so no named-client rule matched and no ENDPOINT existed. The shape rule mints one for a path-shaped first argument plus a method signal (an options object's `method`, here also inside a one-call wrapper, or a `fetch*` callee, which defaults to GET); EVIDENCE rule `call_shape`. A Python script over a generated SDK (`api.call_api(f'/activities/{id}', method='DELETE')`) is the Python form. Baseline: see the FH.4a commit. Deliberately not bound to a matrix cell: typescript/http_client is already scored.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/users/me", "exact": true, "note": "a fetch* callee with no method: GET"},
+    {"kind": "ENDPOINT", "name": "endpoint:PUT:/users/me", "exact": true, "note": "the options object's method"},
+    {"kind": "ENDPOINT", "name": "endpoint:DELETE:/activities/${…}", "exact": true, "note": "method inside a one-call wrapper of the options object; the Python call_api site joins it"},
+    {"kind": "ROUTE", "name": "PUT /users/me", "exact": true, "note": "Go chi route"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:PUT:/users/me", "to": "PUT /users/me", "category": "HTTP_CALLS", "exact": true, "note": "the SDK call pairs the Go route"},
+    {"from": "endpoint:GET:/users/me", "to": "GET /users/me", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:DELETE:/activities/${…}", "to": "DELETE /activities/{id}", "category": "HTTP_CALLS", "exact": true},
+    {"from": "updateMyUser", "to": "endpoint:PUT:/users/me", "category": "CALLS", "note": "the SDK function calls its ENDPOINT"},
+    {"from": "remove_activity", "to": "endpoint:DELETE:/activities/${…}", "category": "CALLS", "note": "Python: path literal plus a method= keyword"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api", "note": "PRECISION: the runtime's baseUrl option is no call"}
+  ]
+}

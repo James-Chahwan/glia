@@ -125,6 +125,19 @@ fn has_edge(r: &GenerateResult, from: &str, to: &str, category: EdgeCategoryId) 
     edges(r, category).iter().any(|(f, t)| f == from && t == to)
 }
 
+/// The EVIDENCE rule of the CALLS edge `from -> to` (by qname).
+fn calls_rule(r: &GenerateResult, from: &str, to: &str) -> Option<String> {
+    r.merged
+        .all_edges()
+        .find(|e| {
+            e.category == edge_category::CALLS
+                && qname_of(r, e.from) == from
+                && qname_of(r, e.to) == to
+        })
+        .and_then(Evidence::of)
+        .and_then(|ev| ev.rule)
+}
+
 fn json_cells(cells: &[Cell], kind: glia_core::CellTypeId) -> Vec<serde_json::Value> {
     cells
         .iter()
@@ -271,14 +284,29 @@ fn receiver_form_mints_verb_endpoints() {
     let client = "const api = makeClient();\nconst apiClient = makeClient();\n\nexport async function listOrders() {\n  return api.get('/orders');\n}\n\nexport async function dropOrder() {\n  return api.delete('/orders/1');\n}\n\nexport async function dropById(id: string) {\n  return api.Delete(`/orders/${id}`);\n}\n\nexport async function typed() {\n  return api.get<Order[]>(`/orders`);\n}\n\nexport async function other() {\n  return apiClient.get('/x');\n}\n";
     let overlay = "version = 1\n\n[[wrapper]]\ncall = \"api\"\nkind = \"http\"\nreceiver = true\n";
     let r = pair("recv", client, overlay);
+    // FH.4a: `apiClient` is no receiver of the stanza, but the parser's shape
+    // rule reads `apiClient.get('/x')` (a verb on a client-named receiver).
     assert_eq!(
         endpoints(&r),
         [
             "endpoint:DELETE:/orders/${…}",
             "endpoint:DELETE:/orders/1",
-            "endpoint:GET:/orders"
+            "endpoint:GET:/orders",
+            "endpoint:GET:/x"
         ],
         "apiClient is not api"
+    );
+    // FH.4a: the lower-case verb sites are the parser's now (EVIDENCE rule
+    // `call_shape`), so the stanza's are duplicates; it still mints the
+    // case-insensitive `api.Delete(..)`, which no parser rule reads.
+    let (n, _) = node(&r, "endpoint:DELETE:/orders/${…}").expect("node");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#1"})]
+    );
+    assert_eq!(
+        calls_rule(&r, "src::client::listOrders", "endpoint:GET:/orders").as_deref(),
+        Some("call_shape")
     );
     assert!(has_edge(
         &r,
@@ -629,11 +657,22 @@ fn fixture_key_holds() {
         "endpoint:GET:/orders",
         edge_category::CALLS
     ));
+    // FH.4a: `api.get('/orders')` is the parser's shape-rule site (a verb on
+    // a client-named receiver), so the receiver stanza's site is a duplicate
+    // and the node carries no ORIGIN; the request wrapper's still does.
     let (n, _) = node(&r, "endpoint:GET:/orders").expect("node");
     assert_eq!(
         json_cells(&n.cells, cell_type::ORIGIN),
-        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#2"})],
-        "the receiver stanza is the second"
+        Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(
+        calls_rule(&r, "src::client::listOrders", "endpoint:GET:/orders").as_deref(),
+        Some("call_shape")
+    );
+    let (n, _) = node(&r, "endpoint:GET:/users").expect("node");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#1"})]
     );
 }
 

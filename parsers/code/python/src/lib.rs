@@ -170,6 +170,19 @@ pub fn parse_file(
             acc.django_models, acc.django_implicit, acc.django_queries, file_rel_path
         );
     }
+    // FH.4a: the calls the shape rule read and minted, per file.
+    let sh = acc.shape_stats;
+    if sh.calls + sh.rejected_urls > 0 {
+        eprintln!(
+            "[endpoint-shape] calls={} minted={} (options_method={} verb_callee={} \
+             options_url=0) rejected_urls={} file={file_rel_path}",
+            sh.calls,
+            sh.options_method + sh.verb_callee,
+            sh.options_method,
+            sh.verb_callee,
+            sh.rejected_urls
+        );
+    }
 
     resolve_intra_file(acc, file_rel_path)
 }
@@ -307,8 +320,24 @@ fn split_decorated<'a>(n: TsNode<'a>) -> (Vec<TsNode<'a>>, Option<TsNode<'a>>) {
 // Internal accumulator
 // ============================================================================
 
+/// FH.4a: one file's shape-rule counters (the `[endpoint-shape]` marker; the
+/// Python call has no options-url form).
+#[derive(Default, Clone, Copy)]
+struct ShapeStats {
+    /// Calls the shape rule read: a path-shaped URL no named rule took.
+    calls: usize,
+    /// Minted with the method from a `method=` keyword.
+    options_method: usize,
+    /// Minted with the method from the callee's name.
+    verb_callee: usize,
+    /// URLs no rule makes an endpoint ([`rejected_url`]), any rule's.
+    rejected_urls: usize,
+}
+
 #[derive(Default)]
 struct Acc {
+    /// FH.4a: the `[endpoint-shape]` counters.
+    shape_stats: ShapeStats,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     imports: Vec<ImportStmt>,
@@ -1833,7 +1862,9 @@ fn py_string_path(node: TsNode, src: &[u8]) -> (String, bool) {
 /// Pattern A: detect a client HTTP call and emit a shared ENDPOINT node + CALLS
 /// edge from `from`. Covers `requests.get(url)` / `httpx.post(url)` /
 /// `self.session.get(url)` (verb from the attribute) and
-/// `requests.request("GET", url)` (verb from the first string arg).
+/// `requests.request("GET", url)` (verb from the first string arg). FH.4a: a
+/// call that named rule does not take goes to the shape rule
+/// ([`call_shape_hit`]).
 fn try_detect_py_endpoint(
     call: TsNode,
     src: &[u8],
@@ -1842,54 +1873,213 @@ fn try_detect_py_endpoint(
     file_rel: &str,
     acc: &mut Acc,
 ) {
-    let Some(func) = call.child_by_field_name("function") else {
-        return;
-    };
+    match named_py_endpoint(call, src) {
+        Some((verb, url_node)) => {
+            emit_py_endpoint(call, src, from, repo, file_rel, verb, url_node, None, acc);
+        }
+        None => {
+            if let Some((verb, url_node, signal)) = call_shape_hit(call, src, acc) {
+                emit_py_endpoint(
+                    call,
+                    src,
+                    from,
+                    repo,
+                    file_rel,
+                    verb,
+                    url_node,
+                    Some(signal),
+                    acc,
+                );
+            }
+        }
+    }
+}
+
+/// The named-client rule's `(verb, url argument)` for `call`, None when it
+/// is no `<client>.<verb>(url)` / `<client>.request("VERB", url)` call.
+fn named_py_endpoint<'a>(call: TsNode<'a>, src: &[u8]) -> Option<(String, TsNode<'a>)> {
+    let func = call.child_by_field_name("function")?;
     if func.kind() != "attribute" {
-        return;
+        return None;
     }
-    let Some(object) = func.child_by_field_name("object") else {
-        return;
-    };
-    let Some(attr) = func.child_by_field_name("attribute") else {
-        return;
-    };
-    let Some(recv) = http_receiver_simple(object, src) else {
-        return;
-    };
+    let object = func.child_by_field_name("object")?;
+    let attr = func.child_by_field_name("attribute")?;
+    let recv = http_receiver_simple(object, src)?;
     if !is_http_client_receiver(recv) {
-        return;
+        return None;
     }
-    let Some(arglist) = call.child_by_field_name("arguments") else {
-        return;
-    };
+    let arglist = call.child_by_field_name("arguments")?;
     let method_name = text(attr, src).to_ascii_lowercase();
     let args = positional_args(arglist);
 
     // Resolve (verb, url-arg-node).
-    let (verb, url_node) = if HTTP_VERBS.contains(&method_name.as_str()) {
-        let Some(url) = args.first().copied() else {
-            return;
-        };
-        (method_name.to_ascii_uppercase(), url)
+    if HTTP_VERBS.contains(&method_name.as_str()) {
+        let url = args.first().copied()?;
+        Some((method_name.to_ascii_uppercase(), url))
     } else if method_name == "request" {
         // requests.request("GET", url) — verb is the first string arg.
-        let Some(verb_node) = args.first().copied() else {
-            return;
-        };
+        let verb_node = args.first().copied()?;
         let (verb_raw, _) = py_string_path(verb_node, src);
         let verb = verb_raw.trim().to_ascii_uppercase();
         if !HTTP_VERBS.contains(&verb.to_ascii_lowercase().as_str()) {
-            return;
+            return None;
         }
-        let Some(url) = args.get(1).copied() else {
-            return;
-        };
-        (verb, url)
+        let url = args.get(1).copied()?;
+        Some((verb, url))
     } else {
-        return;
-    };
+        None
+    }
+}
 
+/// FH.4a: which method signal made a call an ENDPOINT under the shape rule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShapeSignal {
+    /// A `method="PUT"` keyword argument.
+    OptionsMethod,
+    /// The callee's name: a bare HTTP verb function (`get(url)`), or
+    /// `request` / `fetch*` / `http*` on any receiver (GET).
+    VerbCallee,
+}
+
+/// FH.4a: a data: / blob: / mailto: / javascript: URL (at the start or after
+/// a `/`) or a base64 payload anywhere: never an endpoint, under any rule.
+fn rejected_url(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains(";base64,")
+        || ["data:", "blob:", "mailto:", "javascript:"]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme) || lower.contains(&format!("/{scheme}")))
+}
+
+/// FH.4a: a URL the shape rule reads as a request path: `/`-led (not a
+/// protocol-relative `//host`) or an absolute http(s) URL, holding no
+/// whitespace and nothing [`rejected_url`] names.
+fn path_shaped(path: &str) -> bool {
+    !path.chars().any(char::is_whitespace)
+        && !rejected_url(path)
+        && ((path.starts_with('/') && !path.starts_with("//"))
+            || path.starts_with("http://")
+            || path.starts_with("https://"))
+}
+
+/// True when `call` sits in a decorator (`@app.get("/x")`): a route
+/// registration, never a request.
+fn in_decorator(call: TsNode) -> bool {
+    let mut cur = call.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "decorator" => return true,
+            "block" | "module" => return false,
+            _ => cur = n.parent(),
+        }
+    }
+    false
+}
+
+/// FH.4a: the shape rule (the TS parser's, Python's form). A call no named
+/// rule took is an HTTP call when its first positional argument is a
+/// path-shaped string ([`path_shaped`]) and it carries a method signal: a
+/// `method=` keyword naming an HTTP method, or a callee named for one (a
+/// bare `get(..)` / `post(..)` function, or `request` / `fetch*` / `http*`
+/// on any receiver, GET). A verb attribute on a receiver no client name marks
+/// (`cache.get('/k')`, a dict) is not one; nor is a call taking a `lambda`
+/// or sitting in a decorator. Counts a read call and a rejected URL.
+fn call_shape_hit<'a>(
+    call: TsNode<'a>,
+    src: &[u8],
+    acc: &mut Acc,
+) -> Option<(String, TsNode<'a>, ShapeSignal)> {
+    if in_decorator(call) {
+        return None;
+    }
+    let func = call.child_by_field_name("function")?;
+    let leaf = match func.kind() {
+        "identifier" => text(func, src),
+        "attribute" => text(func.child_by_field_name("attribute")?, src),
+        _ => return None,
+    };
+    let arglist = call.child_by_field_name("arguments")?;
+    let mut cursor = arglist.walk();
+    let all: Vec<TsNode> = arglist.named_children(&mut cursor).collect();
+    if all.iter().any(|a| {
+        a.kind() == "lambda"
+            || (a.kind() == "keyword_argument"
+                && a.child_by_field_name("value")
+                    .is_some_and(|v| v.kind() == "lambda"))
+    }) {
+        return None;
+    }
+    let url = positional_args(arglist).first().copied()?;
+    if url.kind() != "string" {
+        return None;
+    }
+    let name = leaf.trim_start_matches('_');
+    // A test double's or assertion's arguments describe a request, never
+    // send one (`mock_fetch("/x", method="POST")`,
+    // `assert_called_with("/x", method="GET")`).
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("assert")
+        || ["mock", "stub", "fake", "spy"]
+            .iter()
+            .any(|w| lower.contains(w))
+    {
+        return None;
+    }
+    let verb = func.kind() == "identifier" && HTTP_VERBS.contains(&name);
+    let fetch_like = name == "request" || name.starts_with("fetch") || name.starts_with("http");
+    let mut method_kw = None;
+    for a in &all {
+        if a.kind() == "keyword_argument"
+            && a.child_by_field_name("name")
+                .is_some_and(|n| text(n, src) == "method")
+        {
+            method_kw = a.child_by_field_name("value").map(|v| {
+                let (m, _) = py_string_path(v, src);
+                let m = m.trim().to_ascii_lowercase();
+                HTTP_VERBS
+                    .contains(&m.as_str())
+                    .then(|| m.to_ascii_uppercase())
+            });
+        }
+    }
+    let has_signal = verb || fetch_like || matches!(method_kw, Some(Some(_)));
+    let (path, _) = py_string_path(url, src);
+    if rejected_url(&path) {
+        if has_signal {
+            acc.shape_stats.rejected_urls += 1;
+        }
+        return None;
+    }
+    if !path_shaped(&path) {
+        return None;
+    }
+    acc.shape_stats.calls += 1;
+    match method_kw {
+        Some(Some(m)) => Some((m, url, ShapeSignal::OptionsMethod)),
+        // An opaque `method=` names a method this rule cannot read.
+        Some(None) => None,
+        None if verb => Some((name.to_ascii_uppercase(), url, ShapeSignal::VerbCallee)),
+        None if fetch_like => Some(("GET".to_string(), url, ShapeSignal::VerbCallee)),
+        None => None,
+    }
+}
+
+/// Emit the ENDPOINT of a client call read by the named rule (`shape`
+/// None) or the shape rule (FH.4a: one confidence tier lower, its CALLS edge
+/// EVIDENCE rule `call_shape`). A rejected URL ([`rejected_url`]) emits
+/// nothing under either.
+#[allow(clippy::too_many_arguments)]
+fn emit_py_endpoint(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    verb: String,
+    url_node: TsNode,
+    shape: Option<ShapeSignal>,
+    acc: &mut Acc,
+) {
     // Path must be a string literal; reconstruct interpolations, then split a
     // full URL into its path (the ENDPOINT's identity) and its authority (the
     // `host` on ENDPOINT_HIT, A11.5). Bail on a bare variable / non-path arg.
@@ -1897,14 +2087,18 @@ fn try_detect_py_endpoint(
     if raw_path.is_empty() {
         return;
     }
+    if rejected_url(&raw_path) {
+        acc.shape_stats.rejected_urls += 1;
+        return;
+    }
     let (host, path) = endpoint::client_url_split(&raw_path);
     let Some(path) = path else {
         return;
     };
-    let confidence = if interpolated {
-        Confidence::Medium
-    } else {
-        Confidence::Strong
+    let confidence = match (interpolated, shape) {
+        (false, None) => Confidence::Strong,
+        (true, None) | (false, Some(_)) => Confidence::Medium,
+        (true, Some(_)) => Confidence::Weak,
     };
     let pos = call.start_position();
     let ep = ClientEndpoint {
@@ -1929,6 +2123,21 @@ fn try_detect_py_endpoint(
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
+    if let Some(signal) = shape {
+        match signal {
+            ShapeSignal::OptionsMethod => acc.shape_stats.options_method += 1,
+            ShapeSignal::VerbCallee => acc.shape_stats.verb_callee += 1,
+        }
+        if let Some(edge) = acc.edges.last_mut() {
+            let row = u32::try_from(pos.row).unwrap_or(u32::MAX);
+            edge.cells.push(
+                evidence::Evidence::emitter("parser:python")
+                    .rule("call_shape")
+                    .line(row)
+                    .to_cell(),
+            );
+        }
+    }
 }
 
 /// v0.4.13a — walk a function/method definition's parameters and return-type
@@ -4819,5 +5028,102 @@ class Field:
         let src = "import trio\n\nclass Lock:\n    pass\n\nclass S:\n    a = Lock()\n    b: trio.Lock\n    def __init__(self):\n        self.a: trio.Lock = trio.Lock()\n        self.b = Lock()\n";
         let parse = parse_file(src, "m.py", "m", repo()).unwrap();
         assert_eq!(field_types(&parse, "m::S"), Vec::new());
+    }
+}
+
+/// FH.4a: endpoints from the call's shape, Python's form.
+#[cfg(test)]
+mod call_shape_tests {
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://py_call_shape")
+    }
+
+    fn endpoints(src: &str) -> (Vec<String>, FileParse) {
+        let p = parse_file(src, "tools/sync.py", "tools::sync", repo()).unwrap();
+        let mut out: Vec<String> = p
+            .nodes
+            .iter()
+            .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .filter_map(|n| p.nav.qname_by_id.get(&n.id))
+            .cloned()
+            .collect();
+        out.sort();
+        (out, p)
+    }
+
+    #[test]
+    fn a_method_keyword_or_a_fetch_callee_mints() {
+        let (eps, p) = endpoints(
+            r#"
+def remove(api_sdk, aid):
+    return api_sdk.call_api(f"/activities/{aid}", method="DELETE")
+
+def me(sdk):
+    return sdk.fetch_json("/users/me")
+
+def plain(x):
+    return get("/health")
+"#,
+        );
+        assert_eq!(
+            eps,
+            [
+                "endpoint:DELETE:/activities/${…}",
+                "endpoint:GET:/health",
+                "endpoint:GET:/users/me"
+            ]
+        );
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users/me",
+        );
+        let e = p
+            .edges
+            .iter()
+            .find(|e| e.to == id)
+            .expect("CALLS into the endpoint");
+        assert_eq!(
+            Evidence::of(e).and_then(|ev| ev.rule).as_deref(),
+            Some("call_shape")
+        );
+        assert_eq!(e.confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn negatives_mint_nothing() {
+        let (eps, _) = endpoints(
+            r#"
+import os
+
+def noise(cache, m):
+    os.makedirs("/tmp/x", exist_ok=True)
+    cache.get("/users/me")
+    fetch_url("data:text/plain;base64,aGVsbG8=", method="GET")
+    send("/x", method=m)
+    requests.get("data:image/png;base64,iV")
+    retry("/y", on_fail=lambda: None, method="POST")
+    session_mock.assert_called_with("/z", method="GET")
+    fake_request("/w", method="PUT")
+"#,
+        );
+        assert_eq!(eps, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_named_client_call_keeps_its_bytes() {
+        let (eps, p) =
+            endpoints("import requests\n\ndef f():\n    return requests.get('/users')\n");
+        assert_eq!(eps, ["endpoint:GET:/users"]);
+        assert!(
+            p.edges
+                .iter()
+                .filter(|e| e.category == edge_category::CALLS)
+                .all(|e| e.cells.is_empty())
+        );
     }
 }

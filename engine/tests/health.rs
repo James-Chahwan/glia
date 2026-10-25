@@ -334,12 +334,14 @@ fn suspicious_endpoint_qnames() {
     write(
         &root,
         "web/src/img.ts",
-        "export async function pixel() {\n  return fetch('data:image/png;base64,iVBORw0KGgo=');\n}\n\nexport async function users() {\n  return fetch('/api/users');\n}\n",
+        "export async function pixel() {\n  return fetch('data:image/png;base64,iVBORw0KGgo=');\n}\n\nexport async function spaced() {\n  return fetch('/api/a b');\n}\n\nexport async function users() {\n  return fetch('/api/users');\n}\n",
     );
     let (_, h) = build(&root);
+    // FH.4a: a data: URL mints no ENDPOINT at all, so the whitespace path is
+    // the one suspicious node.
     assert_eq!(h.suspicious.count, 1, "{:#?}", h.suspicious);
     assert!(
-        h.suspicious.examples[0].contains("data:"),
+        h.suspicious.examples[0].contains("a b"),
         "{:?}",
         h.suspicious
     );

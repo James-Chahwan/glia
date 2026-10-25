@@ -1,0 +1,20 @@
+{
+  "framework": "js-options-object-call",
+  "language": "javascript+go",
+  "dirs": ["web", "server"],
+  "note": "FH.4a endpoints from the call's shape, the options-object form: an axios instance called as `service({ url: '/base/login', method: 'post', data })`. The callee is a local default-imported instance, so no named-client rule matched and no ENDPOINT existed. The shape rule reads the path from the object's `url` / `path` / `endpoint` and the method from its `method`; EVIDENCE rule `call_shape`. Baseline: see the FH.4a commit. Deliberately not bound to a matrix cell: javascript is scored through typescript/http_client.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/base/login", "exact": true},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/user/getUserList", "exact": true},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/user/getUserInfo", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:POST:/base/login", "to": "POST /base/login", "category": "HTTP_CALLS", "exact": true, "note": "pairs the gin group route"},
+    {"from": "endpoint:POST:/user/getUserList", "to": "POST /user/getUserList", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:GET:/user/getUserInfo", "to": "GET /user/getUserInfo", "category": "HTTP_CALLS", "exact": true},
+    {"from": "login", "to": "endpoint:POST:/base/login", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:<unresolved>", "note": "PRECISION: the axios.create config is no call"}
+  ]
+}
