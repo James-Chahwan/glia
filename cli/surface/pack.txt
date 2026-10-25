@@ -7,6 +7,7 @@ cmd glia pack
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
   arg no_cochange pos=- long=no-cochange short=- required=false num_args=0 action=SetTrue default=false value_names=NO_COCHANGE global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg no_semantic pos=- long=no-semantic short=- required=false num_args=0 action=SetTrue default=false value_names=NO_SEMANTIC global=false hidden=false
   arg preset pos=- long=preset short=- required=false num_args=1 action=Set default=- value_names=PRESET global=false hidden=false values=repair,review,onboard,centrality
   arg query pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=QUERY global=false hidden=false
   arg ranking pos=- long=ranking short=- required=false num_args=1 action=Set default=ppr value_names=RANKING global=false hidden=false values=ppr,ppr-wide,bfs

@@ -17,6 +17,24 @@
 //!    pack carrying find's own absence (LD.8a). [`pack_ids`]
 //!    takes the seeds (a diff-impact's, a trace's) as ids: tier `fact`, no
 //!    `matched`.
+//!
+//!    **The fused fallback (FB.8, ruling FB-7-FUSED).** When find matches
+//!    nothing by name, [`PackArgs::semantic`] holds a [`SemanticSource`] and
+//!    the [`PackArgs::rank_cache`] knows exactly one repo root over a
+//!    one-repo merge, the seeds come from [`find_files`]' order instead
+//!    (`LX[IDR,FUSE[T1s,SEMp:t2]]`, or the repo's calibrated `SELf2t` pick:
+//!    `find --files`' order, the blend FB.6b's gate passed): the files in
+//!    that order, [`PackArgs::scope`] applied, each file's best-matching
+//!    node by cosine to the prefixed query (ties by qname, then NodeId; a
+//!    file with no embedded node is skipped), until [`PackArgs::seeds`]
+//!    seeds. Each is tier `heuristic`, `matched` `semantic`, with its
+//!    [`PackedNode::similarity`]; the pack keeps find's lexical absence as
+//!    [`Pack::seed_absence`] (`absence` stays None while a node is packed),
+//!    and the title reads `context for <q> (seeded by the fused file order:
+//!    nothing matches by name)`. No file or no seed: the empty pack with
+//!    find's absence, as without vectors. Similarity alone never orders a
+//!    seed, a name match never falls back, and [`pack_ids`] never does.
+//!    blast_radius has no semantic input at all: vectors never seed a walk.
 //! 2. **Candidates.** One personalised PageRank from the seeds with the code
 //!    domain's weights (`CODE_TABLES.activation_config(preset)`), walked
 //!    UNDIRECTED: a context is a node's callers and its callees, and the
@@ -124,7 +142,9 @@
 //! outline=<O> qname=<Q>) notes=<n> conventions=<c> tokens=<U>/<B> bytes=<N>
 //! bpt=<x.y> rerenders=<R>` (one line; `notes` the manifest's
 //! [`PackedNode::notes`] summed, FB.11; `conventions` the length of
-//! [`Pack::conventions`], FB.12b) — grep `^\[pack\] query=`.
+//! [`Pack::conventions`], FB.12b; then ` seeds_from=<find|semantic|ids|none>`,
+//! FB.8: find's name match, the fused fallback, [`pack_ids`]' explicit ids,
+//! or no seed) — grep `^\[pack\] query=`.
 //!
 //! # Notes (FB.11)
 //!
@@ -149,6 +169,7 @@
 //! the whole text). A convention never moves a rank or a rung's pick.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use glia_activation::profile::Tier;
@@ -165,9 +186,10 @@ use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::calibrate::{COCHANGE_SET, STRUCTURE_SET, Selection, Shape, explicit, log_selection};
 use crate::external::declared::{Convention, conventions, conventions_for, node_repos};
-use crate::find::{FindOptions, find_nodes};
+use crate::find::{FindFilesOptions, FindOptions, find_files, find_nodes};
 use crate::identity::Collapse;
 use crate::rank::{FileRanking, RankBase, RankCache, Ranking, SourceKey, order_rows, rank_files};
+use crate::semantic::{FUSED_RECIPE, SemanticSource, VectorIndex};
 
 /// `PackArgs::default().budget_tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8000;
@@ -194,6 +216,10 @@ const SCORE_SCALE: f64 = 1e9;
 const FACT_TIERS: [&str; 4] = ["exact_qname", "exact_name", "exact_ci", "qname_suffix"];
 /// How many seed qnames [`pack_ids`] names in its `query` before `+N more`.
 const QUERY_NAMES: usize = 3;
+/// A fused-fallback seed's `matched` (FB.8).
+const MATCHED_SEMANTIC: &str = "semantic";
+/// The title's note on a pack seeded by the fused fallback (FB.8).
+const SEMANTIC_TITLE_NOTE: &str = " (seeded by the fused file order: nothing matches by name)";
 
 /// How a pack is built. Start from `default()` and set fields:
 /// `#[non_exhaustive]` rules out a struct literal outside this crate.
@@ -224,6 +250,11 @@ pub struct PackArgs {
     /// cache that knows no repo root, so no co-change is read. Pack never
     /// reads the cache's calibration record (ruling EC-9b).
     pub rank_cache: Option<Arc<RankCache>>,
+    /// FB.8: the repo's t2 vectors and query embedder. Read only when find
+    /// matches nothing by name (module docs, step 1's fused fallback), and
+    /// only with a `rank_cache` holding exactly one repo root (the root
+    /// `find_files` ranks). `None`: the pack without vectors, byte for byte.
+    pub semantic: Option<Arc<SemanticSource>>,
 }
 
 impl Default for PackArgs {
@@ -237,6 +268,7 @@ impl Default for PackArgs {
             scope: None,
             ranking: Ranking::default(),
             rank_cache: None,
+            semantic: None,
         }
     }
 }
@@ -272,6 +304,10 @@ pub struct PackedNode {
     /// Skipped in JSON when 0.
     #[serde(skip_serializing_if = "is_zero")]
     pub notes: usize,
+    /// FB.8: a fused-fallback seed's cosine to the prefixed query, 4 dp
+    /// (`matched` `semantic`); None (not serialised) for every other node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -334,6 +370,11 @@ pub struct Pack {
     /// Why `nodes` is empty (`Some` exactly then): find's `no_match`, or
     /// `budget_too_small`.
     pub absence: Option<Absence>,
+    /// FB.8: find's lexical absence (`no_match`) when the seeds came from the
+    /// fused fallback: nothing matches the query by name, whatever the
+    /// vectors packed. None (not serialised) for any other pack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_absence: Option<Absence>,
 }
 
 /// Estimated tokens in `bytes` bytes at `bytes_per_token_x10` tenths of a byte
@@ -358,7 +399,11 @@ pub fn pack(merged: &MergedGraph, query: &str, args: &PackArgs) -> Pack {
     };
     let found = find_nodes(merged, query, &opts);
     if let Some(absence) = found.absence {
-        return empty(query.to_string(), args, 0, 0, absence);
+        if let Some(seeds) = semantic_seeds(merged, query, args) {
+            let from = SeedsFrom::Semantic(absence);
+            return run(merged, query.to_string(), seeds, args, from);
+        }
+        return empty(query.to_string(), args, 0, 0, absence, SeedsFrom::None);
     }
     // Find ranks tier first, so any fact rows lead; when there are some, the
     // fuzzier rows behind them are not seeds (a seed outweighs every
@@ -379,9 +424,10 @@ pub fn pack(merged: &MergedGraph, query: &str, args: &PackArgs) -> Pack {
                 Tier::Heuristic.as_str()
             },
             matched: Some(r.r#match),
+            similarity: None,
         })
         .collect();
-    run(merged, query.to_string(), seeds, args)
+    run(merged, query.to_string(), seeds, args, SeedsFrom::Find)
 }
 
 /// [`pack`] from explicit seeds (a diff-impact's, a trace's), each tier
@@ -423,6 +469,7 @@ pub fn pack_ids(merged: &MergedGraph, seeds: &[NodeId], args: &PackArgs) -> Pack
             id: *id,
             tier: Tier::Fact.as_str(),
             matched: None,
+            similarity: None,
         })
         .collect();
     if kept.is_empty() {
@@ -436,9 +483,32 @@ pub fn pack_ids(merged: &MergedGraph, seeds: &[NodeId], args: &PackArgs) -> Pack
             )
         };
         let absence = absence::empty(merged, "pack", &query, "no_match", note, &[], None);
-        return empty(query, args, 0, 0, absence);
+        return empty(query, args, 0, 0, absence, SeedsFrom::None);
     }
-    run(merged, query, kept, args)
+    run(merged, query, kept, args, SeedsFrom::Ids)
+}
+
+/// Where a pack's seeds came from (the marker's `seeds_from`, FB.8).
+enum SeedsFrom {
+    /// [`find_nodes`]' name match.
+    Find,
+    /// The fused fallback, holding find's lexical absence.
+    Semantic(Absence),
+    /// [`pack_ids`]' explicit ids.
+    Ids,
+    /// No seed: the pack is empty.
+    None,
+}
+
+impl SeedsFrom {
+    fn name(&self) -> &'static str {
+        match self {
+            SeedsFrom::Find => "find",
+            SeedsFrom::Semantic(_) => "semantic",
+            SeedsFrom::Ids => "ids",
+            SeedsFrom::None => "none",
+        }
+    }
 }
 
 /// A seed, before it becomes a candidate.
@@ -446,6 +516,75 @@ struct Seed {
     id: NodeId,
     tier: &'static str,
     matched: Option<&'static str>,
+    /// A fused-fallback seed's cosine, 4 dp (FB.8).
+    similarity: Option<f64>,
+}
+
+/// Step 1's fused fallback (FB.8, module docs): the seeds of a query find
+/// matched nothing for, from [`find_files`]' order over the one repo the
+/// [`PackArgs::rank_cache`] knows. None when there is no source, no cache,
+/// not exactly one repo (root and merge), an embedder error, or no seed.
+fn semantic_seeds(merged: &MergedGraph, query: &str, args: &PackArgs) -> Option<Vec<Seed>> {
+    let src = args.semantic.clone()?;
+    let cache = args.rank_cache.clone()?;
+    let roots = cache.repo_roots().clone();
+    let repos: BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
+    let (&repo, _) = roots.iter().next()?;
+    if roots.len() != 1 || repos.len() != 1 || !repos.contains(&repo) {
+        return None;
+    }
+    let opts = FindFilesOptions {
+        top_k: 0,
+        surface: "pack",
+        rank_cache: Some(cache.clone()),
+        select: true,
+        semantic: Some(src.clone()),
+    };
+    let answer = find_files(merged, &roots, query, &opts).ok()?;
+    let scope = args.scope.as_deref().map(|raw| resolve_scope(merged, raw));
+    let wanted: Vec<String> = answer
+        .results
+        .into_iter()
+        .filter(|r| r.sem.is_some())
+        .filter(|r| scope.as_deref().is_none_or(|s| in_scope(&r.file, s)))
+        .map(|r| r.file)
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let qvec = src.query_vector(query).ok()?;
+    // Stopgap (FB.8): SemanticSource exposes no per-node vector, so the
+    // fallback reads the same model's fused-recipe index once more for the
+    // per-node cosine. Removal: a `SemanticSource::search` / `vector`
+    // accessor in engine/src/semantic/query.rs, then search `src` directly.
+    let paths: BTreeMap<u64, PathBuf> = roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
+    let index = VectorIndex::load(merged, &paths, &src.stats().model, FUSED_RECIPE);
+    // Every vector by (similarity desc, qname, NodeId): a file's first hit
+    // is its best-matching node under the tie rule.
+    let hits = index.search(&qvec, index.len(), &HashSet::new());
+    let files = cache.files(merged);
+    let mut best: BTreeMap<u32, (NodeId, f64)> = BTreeMap::new();
+    for h in &hits {
+        if let Some(f) = files.file_of_node(h.id) {
+            best.entry(f).or_insert((h.id, h.similarity_rounded()));
+        }
+    }
+    let seeds: Vec<Seed> = wanted
+        .iter()
+        .filter_map(|p| files.index_of(repo, p))
+        .filter_map(|f| best.get(&f).copied())
+        .take(args.seeds.max(1))
+        .map(|(id, sim)| Seed {
+            id,
+            tier: Tier::Heuristic.as_str(),
+            matched: Some(MATCHED_SEMANTIC),
+            similarity: Some(sim),
+        })
+        .collect();
+    (!seeds.is_empty()).then_some(seeds)
 }
 
 /// One node the pack may take, with everything the climb and the manifest need.
@@ -456,6 +595,7 @@ struct Cand {
     seed: bool,
     tier: &'static str,
     matched: Option<&'static str>,
+    similarity: Option<f64>,
     /// Estimated tokens per rung, indexed like [`Fidelity::LADDER`]; `None`
     /// for a rung that renders as a lower one.
     cost: [Option<usize>; 4],
@@ -482,7 +622,13 @@ impl Cand {
 }
 
 /// The pipeline from step 2 on, over resolved seeds.
-fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -> Pack {
+fn run(
+    merged: &MergedGraph,
+    query: String,
+    seeds: Vec<Seed>,
+    args: &PackArgs,
+    from: SeedsFrom,
+) -> Pack {
     let x10 = args.bytes_per_token_x10.max(10);
     let loc = Locator::new(merged);
 
@@ -558,6 +704,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
                 seed: true,
                 tier: s.tier,
                 matched: s.matched,
+                similarity: s.similarity,
                 cost,
             });
         }
@@ -572,6 +719,7 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
                 seed: false,
                 tier: Tier::Derived.as_str(),
                 matched: None,
+                similarity: None,
                 cost,
             });
         }
@@ -580,7 +728,12 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
     // Step 3: the climb; step 4: render, and move picks down until it fits.
     let budget = args.budget_tokens;
     let mut level = climb(&cands, budget);
-    let title = format!("context for {query}");
+    let note = if matches!(from, SeedsFrom::Semantic(_)) {
+        SEMANTIC_TITLE_NOTE
+    } else {
+        ""
+    };
+    let title = format!("context for {query}{note}");
     let conv = ConvCtx::new(merged, &loc, &cands);
     let mut text = render(&view, &title, &cands, &level, &conv);
     let bound = 4 * level.iter().filter(|l| l.is_some()).count();
@@ -622,13 +775,14 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
                 reason: if c.seed { "seed" } else { "neighbour" },
                 matched: c.matched,
                 notes,
+                similarity: c.similarity,
             })
         })
         .collect();
 
     if nodes.is_empty() {
         let absence = too_small(merged, &view, &query, &title, &cands, args, x10);
-        return empty(query, args, seeds.len(), cands.len(), absence);
+        return empty(query, args, seeds.len(), cands.len(), absence, from);
     }
 
     let used = estimate_tokens(text.len(), x10);
@@ -647,9 +801,20 @@ fn run(merged: &MergedGraph, query: String, seeds: Vec<Seed>, args: &PackArgs) -
         rerenders,
         selection: Some(selection),
         absence: None,
+        seed_absence: None,
     };
-    marker(&pack, seeds.len());
-    pack
+    with_seed_absence(pack, seeds.len(), from)
+}
+
+/// `p` with its seeds' source: a fused-fallback pack keeps find's absence
+/// as `seed_absence`. Prints the marker.
+fn with_seed_absence(mut p: Pack, seeds: usize, from: SeedsFrom) -> Pack {
+    let name = from.name();
+    if let SeedsFrom::Semantic(a) = from {
+        p.seed_absence = Some(a);
+    }
+    marker(&p, seeds, name);
+    p
 }
 
 /// Step 2a (EC.9, ruling EC-9b): the set is SELh0 when `args.ranking` ranks
@@ -1115,6 +1280,7 @@ fn empty(
     seeds: usize,
     candidates: usize,
     absence: Absence,
+    from: SeedsFrom,
 ) -> Pack {
     let pack = Pack {
         query,
@@ -1130,9 +1296,9 @@ fn empty(
         rerenders: 0,
         selection: None,
         absence: Some(absence),
+        seed_absence: None,
     };
-    marker(&pack, seeds);
-    pack
+    with_seed_absence(pack, seeds, from)
 }
 
 /// `37` -> `"3.7"`.
@@ -1141,10 +1307,10 @@ fn rate(x10: u32) -> String {
 }
 
 /// The CC.4b fired_on marker, once per call.
-fn marker(p: &Pack, seeds: usize) {
+fn marker(p: &Pack, seeds: usize, seeds_from: &str) {
     let at = |f: Fidelity| p.nodes.iter().filter(|n| n.fidelity == f.name()).count();
     eprintln!(
-        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) notes={} conventions={} tokens={}/{} bytes={} bpt={} rerenders={}",
+        "[pack] query={} seeds={seeds} candidates={} packed={} (full={} preview={} outline={} qname={}) notes={} conventions={} tokens={}/{} bytes={} bpt={} rerenders={} seeds_from={seeds_from}",
         p.query.split_whitespace().collect::<Vec<_>>().join(" "),
         p.candidates,
         p.nodes.len(),
@@ -1173,6 +1339,7 @@ mod tests {
             seed,
             tier: "fact",
             matched: None,
+            similarity: None,
             cost,
         }
     }

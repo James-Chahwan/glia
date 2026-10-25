@@ -6,6 +6,12 @@
 //! [`pack_args`], [`pack_query`] and [`pack_seeds`], so `cargo test -p
 //! glia-py` covers them; the engine prints its `[pack] query=...` fired_on
 //! line once per call.
+//!
+//! FB.8: `PyGraph.pack(.., semantic=None)` hands the engine the PyGraph's
+//! held [`SemanticSource`] (FB.7b's `OnceLock`, loaded once by whichever of
+//! `find_files` / `pack` asks first) for the fused fallback: a query nothing
+//! matches by name seeds from `find_files`' blended file order. `pack_ids`
+//! never reads it.
 
 use std::sync::Arc;
 
@@ -15,10 +21,12 @@ use pyo3::prelude::*;
 use glia_core::NodeId;
 use glia_engine::pack::{Pack, PackArgs, pack, pack_ids};
 use glia_engine::rank::RankCache;
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
 use glia_graph::MergedGraph;
 
 use crate::blast::ranking_named;
 use crate::convert::to_py;
+use crate::embed::{surface_embedder, worker_dirs};
 use crate::graph::PyGraph;
 
 // The `budget=8000, bytes_per_token=3.7, seeds=5, candidates=200` below are
@@ -99,6 +107,30 @@ fn with_unparsed(mut p: Pack, unparsed_files: usize) -> Pack {
     p
 }
 
+impl PyGraph {
+    /// The held [`SemanticSource`] for `semantic` (FB.8): `Some(false)` none;
+    /// `None` / `Some(true)` the PyGraph's, loaded on first use (GIL
+    /// released) exactly as `find_files` loads it, and shared with it.
+    fn pack_semantic(&self, py: Python<'_>, semantic: Option<bool>) -> Option<Arc<SemanticSource>> {
+        if semantic == Some(false) {
+            return None;
+        }
+        if let Some(held) = self.semantic.get() {
+            return held.clone();
+        }
+        let dirs = worker_dirs(py);
+        py.detach(|| {
+            self.semantic
+                .get_or_init(|| {
+                    open_for_surface(&self.merged, &self.repo_roots, surface_model(), || {
+                        surface_embedder(&dirs)
+                    })
+                })
+                .clone()
+        })
+    }
+}
+
 #[pymethods]
 impl PyGraph {
     /// **pack** (CC.4b / CC.4c): the context for `query` packed to `budget`
@@ -133,7 +165,18 @@ impl PyGraph {
     /// ranking (`ppr` with co-change), else `explicit`. Any other
     /// `ranking` raises ValueError before any work. The PPR and file indexes are held by this PyGraph
     /// and reused by later calls.
-    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking=None, cochange=true))]
+    ///
+    /// `semantic` (FB.8; default `None`, auto): when nothing matches `query`
+    /// by name and the repo's `.glia/vectors.jsonl` (`embed`) holds vectors
+    /// of the surface model (env `GLIA_EMBED_MODEL`, default `bge-small`),
+    /// the seeds come from `find_files`' blended order instead of an empty
+    /// pack: each file's best match by similarity, tier `heuristic`,
+    /// `matched` `semantic`, the node dict gaining `similarity`; the dict
+    /// gains `seed_absence` (find's `no_match`) and the text's title notes
+    /// the fallback. A name match never falls back; a graph of several repos
+    /// never does. `False` never reads the vectors. The vectors are read once
+    /// per PyGraph, shared with `find_files`.
+    #[pyo3(signature = (query, budget=8000, bytes_per_token=3.7, seeds=5, candidates=200, preset=None, scope=None, ranking=None, cochange=true, semantic=None))]
     #[allow(clippy::too_many_arguments)]
     fn pack(
         &self,
@@ -147,10 +190,12 @@ impl PyGraph {
         scope: Option<String>,
         ranking: Option<&str>,
         cochange: bool,
+        semantic: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
-        let args = pack_args(budget, bytes_per_token, seeds, candidates, preset, scope)
+        let mut args = pack_args(budget, bytes_per_token, seeds, candidates, preset, scope)
             .and_then(|a| ranked(a, ranking, cochange, self.rank.clone()))
             .map_err(PyValueError::new_err)?;
+        args.semantic = self.pack_semantic(py, semantic);
         let p = pack_query(&self.merged, query, &args, self.parse_errors.len());
         to_py(py, serde_json::to_string(&p))
     }
@@ -341,6 +386,73 @@ mod tests {
         assert_eq!(
             err,
             "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
+    }
+
+    /// FB.8: with the held source the surface loads (test-hash vectors), a
+    /// query nothing matches by name seeds from the fused files, heuristic,
+    /// `semantic`, with a similarity and find's absence as `seed_absence`;
+    /// a name match packs as without the source.
+    #[test]
+    fn pack_falls_back_to_the_fused_files() {
+        let root = std::env::temp_dir().join(format!("glia-fb8-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(
+            root.join("ledger.py"),
+            "def export_ledger(rows):\n    \"\"\"Export the ledger rows.\"\"\"\n    return rows\n",
+        )
+        .expect("write fixture");
+        std::fs::write(root.join("cache.py"), "def warm_cache():\n    return 1\n")
+            .expect("write fixture");
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = built.expect("build");
+        let (&repo, _) = built.repo_roots.iter().next().expect("one repo");
+        let model = glia_embed::named("test-hash").expect("test model");
+        glia_engine::semantic::embed_repo(
+            &root,
+            &built.merged,
+            glia_core::RepoId(repo),
+            model.as_ref(),
+            &glia_engine::semantic::EmbedOptions::default(),
+        )
+        .expect("embed");
+        let src = open_for_surface(&built.merged, &built.repo_roots, "test-hash", || {
+            crate::embed::embedder_for("test-hash", &[])
+        })
+        .expect("a source over the test-hash vectors");
+        let held = || {
+            Arc::new(RankCache::new(
+                "pygraph",
+                &built.repo_roots,
+                &built.repo_labels,
+            ))
+        };
+        let base = pack_args(100_000, 3.7, 5, 200, None, None).expect("in range");
+        let plain = ranked(base, None, true, held()).expect("args");
+        let mut with = plain.clone();
+        with.semantic = Some(src);
+        let q = "export the rows of the ledger please";
+        let fused = pack_query(&built.merged, q, &with, 0);
+        let empty = pack_query(&built.merged, q, &plain, 0);
+        let named_with = pack_query(&built.merged, "warm_cache", &with, 0);
+        let named = pack_query(&built.merged, "warm_cache", &plain, 0);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(empty.absence.as_ref().map(|a| a.reason), Some("no_match"));
+        assert!(fused.absence.is_none());
+        assert_eq!(
+            fused.seed_absence.as_ref().map(|a| a.reason),
+            Some("no_match")
+        );
+        let seed = &fused.nodes[0];
+        assert_eq!(
+            (seed.reason, seed.tier, seed.matched),
+            ("seed", "heuristic", Some("semantic"))
+        );
+        assert!(seed.similarity.is_some());
+        assert_eq!(
+            serde_json::to_string(&named_with).expect("json"),
+            serde_json::to_string(&named).expect("json")
         );
     }
 }

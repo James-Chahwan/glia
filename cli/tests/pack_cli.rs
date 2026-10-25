@@ -153,7 +153,7 @@ fn text_to_stdout_summary_to_stderr() {
         marker[0].starts_with("[pack] query=price seeds=1 candidates=")
             && marker[0].contains(" (full=")
             && marker[0].contains("/100000 bytes=")
-            && marker[0].ends_with(" bpt=3.7 rerenders=0"),
+            && marker[0].ends_with(" bpt=3.7 rerenders=0 seeds_from=find"),
         "{}",
         marker[0]
     );
@@ -379,4 +379,78 @@ fn select_line_names_the_pick() {
     assert_eq!(json["selection"]["pick"], "H10", "{json}");
     assert_eq!(json["selection"]["source"], "fallback", "{json}");
     assert_eq!(json["selection"]["reason"], "pack_uncalibrated", "{json}");
+}
+
+/// `glia <args>` with the test model as the surface model, in memory.
+fn glia_test_model(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(args)
+        .env("GLIA_NO_PERSIST", "1")
+        .env("GLIA_EMBED_MODEL", "test-hash")
+        .output()
+        .expect("glia runs")
+}
+
+/// FB.8: a query no node is named for packs nothing without vectors
+/// (`seeds_from=none`, exit 1); after `glia embed` it seeds from `find
+/// --files`' fused file order (`seeds_from=semantic`, exit 0, the title's
+/// note, heuristic `semantic` seeds with a similarity, `seed_absence` in
+/// `--json`); `--no-semantic` is the empty pack again, and a name match
+/// never falls back.
+#[test]
+fn no_name_match_seeds_from_the_fused_files() {
+    let root = Root::new("semantic");
+    let q = "sums the line totals then takes the discount off";
+    let before = glia_test_model(&["pack", root.path(), q]);
+    assert_eq!(before.status.code(), Some(1), "{}", stderr(&before));
+    let m = lines_with(&before, "[pack] query=");
+    assert!(m.len() == 1 && m[0].ends_with(" seeds_from=none"), "{m:?}");
+
+    let embedded = glia_test_model(&["embed", root.path(), "--model", "test-hash"]);
+    assert_eq!(embedded.status.code(), Some(0), "{}", stderr(&embedded));
+    assert!(
+        root.0.join(".glia/vectors.jsonl").is_file(),
+        "{}",
+        stderr(&embedded)
+    );
+
+    let after = glia_test_model(&["pack", root.path(), q]);
+    assert_eq!(after.status.code(), Some(0), "{}", stderr(&after));
+    let m = lines_with(&after, "[pack] query=");
+    assert!(
+        m.len() == 1 && m[0].ends_with(" seeds_from=semantic"),
+        "{m:?}"
+    );
+    assert!(
+        stdout(&after).starts_with(&format!(
+            "# context for {q} (seeded by the fused file order: nothing matches by name)\n"
+        )),
+        "{}",
+        stdout(&after)
+    );
+    let json = glia_test_model(&["pack", root.path(), q, "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).expect("--json parses");
+    assert_eq!(v["seed_absence"]["reason"], "no_match", "{v}");
+    assert!(v["absence"].is_null(), "{v}");
+    let seed = &v["nodes"][0];
+    assert_eq!(
+        (&seed["tier"], &seed["matched"], &seed["reason"]),
+        (
+            &serde_json::json!("heuristic"),
+            &serde_json::json!("semantic"),
+            &serde_json::json!("seed")
+        ),
+        "{v}"
+    );
+    assert!(seed["similarity"].is_f64(), "{v}");
+
+    let off = glia_test_model(&["pack", root.path(), q, "--no-semantic"]);
+    assert_eq!(off.status.code(), Some(1), "{}", stderr(&off));
+    assert_eq!(stdout(&off), stdout(&before));
+
+    let named = glia_test_model(&["pack", root.path(), "price"]);
+    let m = lines_with(&named, "[pack] query=");
+    assert!(m.len() == 1 && m[0].ends_with(" seeds_from=find"), "{m:?}");
+    let plain = glia_test_model(&["pack", root.path(), "price", "--no-semantic"]);
+    assert_eq!(stdout(&named), stdout(&plain));
 }

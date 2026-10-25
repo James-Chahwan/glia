@@ -10,7 +10,10 @@ default ranking: pack never reads the calibration record, ruling EC-9b);
 `bytes_per_token` outside 1.0..=20.0 raises ValueError. The fixture is CC.4b's
 acceptance tree (engine/tests/pack.rs): `shop/a.py` `price` and `place`
 (which calls it), `shop/b.py` `checkout` (which calls `place`), an unrelated
-`shop/util.py`. Shared helpers: test_build.py."""
+`shop/util.py`. FB.8: `pack(.., semantic=None)` (the fused fallback over
+the repo's vectors; this fixture has none, so a no-match pack stays empty)
+and the marker's ` seeds_from=find|semantic|ids|none`. Shared helpers:
+test_build.py."""
 from __future__ import annotations
 
 import pathlib
@@ -81,7 +84,7 @@ def main() -> int:
             params(rg.PyGraph.pack)
             == [("query", None), ("budget", 8000), ("bytes_per_token", 3.7), ("seeds", 5),
                 ("candidates", 200), ("preset", None), ("scope", None), ("ranking", None),
-                ("cochange", True)],
+                ("cochange", True), ("semantic", None)],
             params(rg.PyGraph.pack))
     c.check("pack_ids signature",
             params(rg.PyGraph.pack_ids)
@@ -96,7 +99,8 @@ def main() -> int:
 
         p, err = stderr_of(lambda: g.pack("price", budget=100000))
         c.check("marker", "[pack] query=price seeds=1 candidates=" in err
-                and "/100000 bytes=" in err and " bpt=3.7 rerenders=0" in err, err[-400:])
+                and "/100000 bytes=" in err and " bpt=3.7 rerenders=0 seeds_from=find" in err,
+                err[-400:])
         c.check("pack -> dict in engine field order", type(p) is dict and list(p) == PACK_KEYS, p)
         nodes = p.get("nodes", [])
         first = nodes[0] if nodes else {}
@@ -126,7 +130,20 @@ def main() -> int:
                 (seed.get("id"), seed.get("reason"), seed.get("tier"), seed.get("matched"))
                 == (price, "seed", "fact", None), seed)
         c.check("pack_ids query is the seed qnames", by_id.get("query") == "shop::a::price", by_id.get("query"))
-        c.check("pack_ids marker", "[pack] query=shop::a::price seeds=1 " in err, err[-400:])
+        c.check("pack_ids marker", "[pack] query=shop::a::price seeds=1 " in err
+                and " seeds_from=ids" in err, err[-400:])
+
+        # FB.8: no vectors, so a query nothing matches by name is the empty
+        # pack (no `seed_absence`, `seeds_from=none`), with or without
+        # `semantic`; `semantic=False` packs a name match identically.
+        for sem in (None, True, False):
+            none, err = stderr_of(lambda: g.pack("zzz_nothing", semantic=sem))
+            c.check(f"no match, semantic={sem}",
+                    none.get("nodes") == [] and "seed_absence" not in none
+                    and (none.get("absence") or {}).get("reason") == "no_match", none)
+            c.check(f"no match marker, semantic={sem}", " seeds_from=none" in err, err[-400:])
+        off, _ = stderr_of(lambda: g.pack("price", budget=100000, semantic=False))
+        c.check("semantic=False packs a name match identically", off == p)
 
         # EA.7: the ranking keywords; the PyGraph's held PPR index serves
         # the second call, which packs what the first did.

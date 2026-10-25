@@ -337,7 +337,7 @@ glia docs-for <REPO> <QNAME> [--json] [--scope <SCOPE>] [--with <WITH>]...
     well-known files and docs/ trees at the repo root and every project root, .ai/,
     ADR dirs, SDD feature docs (features/<f>/*.md, spec-kit specs/<NNN-slug>/) and
     synced docs (`glia docs sync`).
-glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN>] [--candidates <CANDIDATES>] [--json] [--no-cochange] [--preset repair|review|onboard|centrality] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--seeds <SEEDS>] [--with <WITH>]...
+glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN>] [--candidates <CANDIDATES>] [--json] [--no-cochange] [--no-semantic] [--preset repair|review|onboard|centrality] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--seeds <SEEDS>] [--with <WITH>]...
     The context for a query packed to a token budget (default 8000), ready to paste:
     the seeds `glia find` matches, then their callers and callees by personalised
     PageRank, each at the most detail the budget buys (full source, a preview, an
@@ -347,8 +347,12 @@ glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN
     before the cut; --ranking (default ppr) / --no-cochange choose the file ranking.
     Pack never reads the calibration record (ruling EC-9b: `glia history calibrate`
     changes no pack); --json names the ranking in `selection` (`fallback`, reason
-    `pack_uncalibrated`, for the default; `explicit` otherwise). Exits 1 when the pack
-    is empty (the absence says why).
+    `pack_uncalibrated`, for the default; `explicit` otherwise). When nothing matches
+    the query by name and the repo's .glia/vectors.jsonl (glia embed) holds vectors of
+    the surface model, the seeds come from the files `find --files` ranks first (the
+    blended order), each the file's best match, marked heuristic, with find's absence
+    kept as `seed_absence`; --no-semantic never reads the vectors. Exits 1 when the
+    pack is empty (the absence says why).
 glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-rows <N>] [--output <PRED>]... [--with <WITH>]...
     A Datalog program from <FILE>, -e or stdin (with --gql, a GQL read query: MATCH ...
     WHERE ... RETURN) over the code graph, the predicate prelude merged in

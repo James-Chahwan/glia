@@ -32,6 +32,19 @@
 //! `pack_uncalibrated` for the default ranking, else `explicit`), and
 //! `--json` carries it as the Pack's `selection`. The flags are pack's own
 //! [`PackRankingArgs`], not the calibrated answers' `CalibratedRankingArgs`.
+//!
+//! 0.5.4 (FB.8, ruling FB-7-FUSED): when nothing matches the query by name
+//! and the repo has embeddings (fresh t2 vectors of the surface model,
+//! `GLIA_EMBED_MODEL`, default bge-small, in `<repo>/.glia/vectors.jsonl`,
+//! written by `glia embed`), the engine seeds from `find --files`' fused file
+//! order instead of packing nothing: each seed the file's best match by
+//! cosine, tier `heuristic`, `matched` `semantic` with its `similarity`; the
+//! title reads `context for <q> (seeded by the fused file order: nothing
+//! matches by name)` and `--json` carries find's absence as `seed_absence`.
+//! The source loads as `find --files` loads it (`semantic::open_for_surface`;
+//! one repo only, so `--with` never falls back; no sidecar: nothing read).
+//! `--no-semantic` never reads the sidecar. The `[pack] query=..` line ends
+//! ` seeds_from=find|semantic|none`.
 
 use glia_code_domain::profile::CODE_TABLES;
 use glia_engine::absence::Absence;
@@ -39,9 +52,12 @@ use glia_engine::pack::{
     DEFAULT_BUDGET_TOKENS, DEFAULT_CANDIDATES, DEFAULT_SEEDS, Pack, PackArgs, pack,
 };
 
+use glia_engine::GenerateResult;
 use glia_engine::rank::{RankBase, Ranking};
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
+use std::sync::Arc;
 
-use crate::common::{generate_for, rank_cache};
+use crate::common::{generate_for, load_embedder, rank_cache};
 
 // `--bytes-per-token`'s default is the literal "3.7" (clap's `default_value`
 // is a `&'static str`); this keeps it the engine's default.
@@ -90,6 +106,13 @@ pub(crate) struct Args {
     scope: Option<String>,
     #[command(flatten)]
     ranking: PackRankingArgs,
+    /// Never seed from the repo's embeddings. By default, when nothing
+    /// matches the query by name and the repo's `.glia/vectors.jsonl` (glia
+    /// embed) holds vectors of the surface model (GLIA_EMBED_MODEL, default
+    /// bge-small), the seeds come from the files `find --files` ranks first,
+    /// each marked heuristic.
+    #[arg(long)]
+    no_semantic: bool,
     /// Emit the whole pack (text and manifest) as JSON.
     #[arg(long)]
     json: bool,
@@ -146,6 +169,9 @@ pub(crate) fn run(args: Args) -> i32 {
     query.scope = args.scope;
     query.ranking = args.ranking.ranking();
     query.rank_cache = Some(rank_cache(&result));
+    if !args.no_semantic {
+        query.semantic = semantic_source(&result);
+    }
     let mut packed = pack(&result.merged, &args.query, &query);
     if let Some(a) = packed.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
@@ -167,6 +193,16 @@ pub(crate) fn run(args: Args) -> i32 {
         }
         None => 0,
     }
+}
+
+/// The repo's fused-recipe vectors and the surface model's query embedder
+/// (FB.7b's loader, `find --files`' own): None for several repos, no
+/// sidecar, no fresh vector of the model or an embedder that fails to load.
+fn semantic_source(result: &GenerateResult) -> Option<Arc<SemanticSource>> {
+    let surface = surface_model();
+    open_for_surface(&result.merged, &result.repo_roots, surface, || {
+        load_embedder(surface).map(Arc::from)
+    })
 }
 
 /// `N` or `N.D` (one decimal) as tenths, within [`MIN_X10`]..=[`MAX_X10`].
