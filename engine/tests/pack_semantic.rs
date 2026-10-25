@@ -251,3 +251,35 @@ fn a_multi_repo_merge_never_falls_back() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&other);
 }
+
+/// A pack whose find matches by name never builds the query embedder: the
+/// source opened for a surface defers it to the first query (FB.8's
+/// close-out), so a repo with vectors starts no model on such a pack. The
+/// fallback builds it once and embeds the query once.
+#[test]
+fn a_name_match_never_builds_the_query_embedder() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (root, b) = embedded("lazy");
+    let built = Arc::new(AtomicUsize::new(0));
+    let counter = built.clone();
+    let src = open_for_surface(&b.merged, &b.repo_roots, "test-hash", move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(Arc::new(HashEmbedder) as Arc<dyn Embedder>)
+    })
+    .expect("a source over the test-hash vectors");
+    let named = pack(
+        &b.merged,
+        "export_ledger_rows",
+        &args(&b, Some(src.clone())),
+    );
+    assert!(!named.nodes.is_empty());
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        0,
+        "a name match built the embedder"
+    );
+    let fallback = pack(&b.merged, NO_NAME, &args(&b, Some(src)));
+    assert!(fallback.seed_absence.is_some(), "{}", json(&fallback));
+    assert_eq!(built.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -21,14 +21,17 @@
 //! after the index's own `[semantic] index ..` line.
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use glia_embed::{Embedder, codec};
 use glia_graph::MergedGraph;
 
-use super::index::{IndexStats, VectorIndex};
+use glia_core::NodeId;
+
+use super::index::{IndexStats, SemanticHit, VectorIndex};
 use super::text::EmbedRecipe;
 use crate::intent::text::{Candidates, subject};
 use crate::rank::FileIndex;
@@ -45,14 +48,26 @@ pub const FUSED_RECIPE: EmbedRecipe = EmbedRecipe::T2;
 #[non_exhaustive]
 pub struct SemanticSource {
     index: VectorIndex,
-    embedder: Arc<dyn Embedder>,
+    /// The model the rows record: a query embedder of another model is refused.
+    model: String,
+    /// The query embedder, built on the first query ([`Self::lazy`]) so an
+    /// answer that never queries (a pack whose find matched by name) never
+    /// starts a model; its load error, once, for every later query.
+    embedder: OnceLock<Result<Arc<dyn Embedder>, String>>,
+    make: Mutex<Option<MakeEmbedder>>,
+    /// The last query and its vector: an answer that ranks files and then
+    /// seeds from them (pack's fallback) embeds the query once.
+    last: Mutex<Option<(String, Vec<f32>)>>,
 }
+
+/// What builds a [`SemanticSource`]'s query embedder on first use.
+type MakeEmbedder = Box<dyn FnOnce() -> Result<Arc<dyn Embedder>, String> + Send>;
 
 impl std::fmt::Debug for SemanticSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SemanticSource")
             .field("stats", self.index.stats())
-            .field("embedder", &self.embedder.model())
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -85,7 +100,67 @@ impl SemanticSource {
         if index.stats().rows == 0 {
             return None;
         }
-        Some(SemanticSource { index, embedder })
+        let model = embedder.model().to_string();
+        Some(SemanticSource {
+            index,
+            model,
+            embedder: OnceLock::from(Ok(embedder)),
+            make: Mutex::new(None),
+            last: Mutex::new(None),
+        })
+    }
+
+    /// A source over an index already loaded whose query embedder `make`
+    /// builds on the first query (None when the index read no row). An
+    /// embedder that fails to load, or embeds another model than `model`,
+    /// prints one `warning:` line and every query is then an Err, so the
+    /// answer ranks without vectors (`find --files`' `sem=error`).
+    pub fn lazy(
+        index: VectorIndex,
+        model: &str,
+        make: impl FnOnce() -> Result<Arc<dyn Embedder>, String> + Send + 'static,
+    ) -> Option<SemanticSource> {
+        if index.stats().rows == 0 {
+            return None;
+        }
+        Some(SemanticSource {
+            index,
+            model: model.to_string(),
+            embedder: OnceLock::new(),
+            make: Mutex::new(Some(Box::new(make))),
+            last: Mutex::new(None),
+        })
+    }
+
+    /// The query embedder, built now if [`Self::lazy`] deferred it.
+    fn embedder(&self) -> Result<&Arc<dyn Embedder>, String> {
+        self.embedder
+            .get_or_init(|| {
+                let make = self.make.lock().ok().and_then(|mut m| m.take());
+                let built = match make {
+                    Some(make) => make(),
+                    None => Err("no query embedder".to_string()),
+                };
+                let checked = built.and_then(|e| {
+                    if e.model() == self.model {
+                        Ok(e)
+                    } else {
+                        Err(format!(
+                            "the query embedder embeds {}, the vectors are {}",
+                            e.model(),
+                            self.model
+                        ))
+                    }
+                });
+                if let Err(e) = &checked {
+                    eprintln!(
+                        "warning: the query embedder did not load, ranking without vectors: {e}"
+                    );
+                }
+                checked
+            })
+            .as_ref()
+            .map_err(Clone::clone)
     }
 
     /// The query's vector: [`QUERY_PREFIX`] + `subject(query)`, embedded in
@@ -94,7 +169,13 @@ impl SemanticSource {
     pub fn query_vector(&self, query: &str) -> Result<Vec<f32>, String> {
         let t0 = Instant::now();
         let text = format!("{QUERY_PREFIX}{}", subject(query));
-        let mut out = self.embedder.embed(&[text])?;
+        if let Some((t, v)) = self.last.lock().ok().as_deref().and_then(Option::as_ref)
+            && *t == text
+        {
+            return Ok(v.clone());
+        }
+        let embedder = self.embedder()?;
+        let mut out = embedder.embed(std::slice::from_ref(&text))?;
         let v = match out.pop() {
             Some(v) if out.is_empty() => v,
             _ => return Err("the embedder returned no single vector for the query".into()),
@@ -108,11 +189,14 @@ impl SemanticSource {
         }
         eprintln!(
             "[semantic] query model={} recipe={} dims={} ms={}",
-            self.embedder.model(),
+            embedder.model(),
             FUSED_RECIPE,
             v.len(),
             t0.elapsed().as_millis()
         );
+        if let Ok(mut last) = self.last.lock() {
+            *last = Some((text, v.clone()));
+        }
         Ok(v)
     }
 
@@ -130,7 +214,7 @@ impl SemanticSource {
             .iter()
             .map(|q| format!("{QUERY_PREFIX}{}", subject(q)))
             .collect();
-        let out = self.embedder.embed(&texts)?;
+        let out = self.embedder()?.embed(&texts)?;
         if out.len() != texts.len() {
             return Err(format!(
                 "the embedder returned {} vectors for {} queries",
@@ -177,6 +261,28 @@ impl SemanticSource {
             .collect()
     }
 
+    /// The `top_k` nodes whose vectors are most similar to `qvec`
+    /// ([`VectorIndex::search`]'s order: similarity desc, qname, NodeId),
+    /// skipping `exclude`; `top_k` 0 keeps none.
+    pub fn search(
+        &self,
+        qvec: &[f32],
+        top_k: usize,
+        exclude: &HashSet<NodeId>,
+    ) -> Vec<SemanticHit> {
+        self.index.search(qvec, top_k, exclude)
+    }
+
+    /// How many fresh vectors the source holds.
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// True when the source holds no fresh vector.
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
     /// What the index read.
     pub fn stats(&self) -> &IndexStats {
         self.index.stats()
@@ -200,13 +306,15 @@ pub fn recorded_model(surface: &str) -> &'static str {
 /// `.glia/vectors.jsonl` under the root (nothing read, nothing printed), no
 /// fresh vector of the model, or an embedder that fails to load or embeds
 /// another model (a `warning:` stderr line; the answer is the unfused one).
-/// The embedder is built only once a fresh vector exists, so a repo without
-/// vectors never starts a model.
+/// The embedder is built on the first query ([`SemanticSource::lazy`]), so a
+/// repo without vectors, or an answer that never queries, never starts a
+/// model; a load error or a model mismatch is then a `warning:` and the
+/// answer ranks without vectors.
 pub fn open_for_surface(
     merged: &MergedGraph,
     repo_roots: &BTreeMap<u64, String>,
     surface: &str,
-    embedder: impl FnOnce() -> Result<Arc<dyn Embedder>, String>,
+    embedder: impl FnOnce() -> Result<Arc<dyn Embedder>, String> + Send + 'static,
 ) -> Option<Arc<SemanticSource>> {
     if repo_roots.len() != 1 {
         return None;
@@ -226,29 +334,15 @@ pub fn open_for_surface(
     if index.is_empty() {
         return None;
     }
-    let loaded = (|| {
-        if surface == "bge-small" {
-            for root in roots.values() {
-                glia_embed::refuse_repo_cache(root)?;
+    if surface == "bge-small" {
+        for root in roots.values() {
+            if let Err(e) = glia_embed::refuse_repo_cache(root) {
+                eprintln!(
+                    "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
+                );
+                return None;
             }
         }
-        embedder()
-    })();
-    let embedder = match loaded {
-        Ok(e) if e.model() == model => e,
-        Ok(e) => {
-            eprintln!(
-                "warning: the query embedder embeds {}, the vectors are {model}; ranking without vectors",
-                e.model()
-            );
-            return None;
-        }
-        Err(e) => {
-            eprintln!(
-                "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
-            );
-            return None;
-        }
-    };
-    SemanticSource::from_index(index, embedder).map(Arc::new)
+    }
+    SemanticSource::lazy(index, model, embedder).map(Arc::new)
 }

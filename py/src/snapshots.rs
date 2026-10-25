@@ -234,8 +234,9 @@ fn calibrate_json(
     opts.surface = "pyo3";
     let built = glia_engine::generate_one(repo_path)?;
     if semantic != Some(false) && opts.groups.contains(&"find") {
-        opts.semantic = open_for_surface(&built.merged, &built.repo_roots, surface_model(), || {
-            surface_embedder(dirs)
+        opts.semantic = open_for_surface(&built.merged, &built.repo_roots, surface_model(), {
+            let dirs = dirs.to_vec();
+            move || surface_embedder(&dirs)
         });
         if semantic == Some(true) && opts.semantic.is_none() {
             eprintln!(

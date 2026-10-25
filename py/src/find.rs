@@ -176,8 +176,9 @@ impl PyGraph {
             py.detach(|| {
                 self.semantic
                     .get_or_init(|| {
-                        open_for_surface(&self.merged, &self.repo_roots, surface_model(), || {
-                            surface_embedder(&dirs)
+                        open_for_surface(&self.merged, &self.repo_roots, surface_model(), {
+                            let dirs = dirs.clone();
+                            move || surface_embedder(&dirs)
                         })
                     })
                     .clone()

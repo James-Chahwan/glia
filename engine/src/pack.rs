@@ -169,7 +169,6 @@
 //! the whole text). A convention never moves a rank or a rung's pick.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use glia_activation::profile::Tier;
@@ -189,7 +188,7 @@ use crate::external::declared::{Convention, conventions, conventions_for, node_r
 use crate::find::{FindFilesOptions, FindOptions, find_files, find_nodes};
 use crate::identity::Collapse;
 use crate::rank::{FileRanking, RankBase, RankCache, Ranking, SourceKey, order_rows, rank_files};
-use crate::semantic::{FUSED_RECIPE, SemanticSource, VectorIndex};
+use crate::semantic::SemanticSource;
 
 /// `PackArgs::default().budget_tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8000;
@@ -553,18 +552,9 @@ fn semantic_seeds(merged: &MergedGraph, query: &str, args: &PackArgs) -> Option<
         return None;
     }
     let qvec = src.query_vector(query).ok()?;
-    // Stopgap (FB.8): SemanticSource exposes no per-node vector, so the
-    // fallback reads the same model's fused-recipe index once more for the
-    // per-node cosine. Removal: a `SemanticSource::search` / `vector`
-    // accessor in engine/src/semantic/query.rs, then search `src` directly.
-    let paths: BTreeMap<u64, PathBuf> = roots
-        .iter()
-        .map(|(id, p)| (*id, PathBuf::from(p)))
-        .collect();
-    let index = VectorIndex::load(merged, &paths, &src.stats().model, FUSED_RECIPE);
     // Every vector by (similarity desc, qname, NodeId): a file's first hit
     // is its best-matching node under the tie rule.
-    let hits = index.search(&qvec, index.len(), &HashSet::new());
+    let hits = src.search(&qvec, src.len(), &HashSet::new());
     let files = cache.files(merged);
     let mut best: BTreeMap<u32, (NodeId, f64)> = BTreeMap::new();
     for h in &hits {
