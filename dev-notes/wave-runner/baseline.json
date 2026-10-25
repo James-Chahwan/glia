@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "77141f1a",
-  "after_wave": 9,
+  "measured_at_head": "9626e53f",
+  "after_wave": 10,
   "cargo_test_workspace": {
-    "passed": 6765,
+    "passed": 6769,
     "failed": 0
   },
   "history_passed": [
@@ -147,7 +147,8 @@
     6729,
     6754,
     6754,
-    6765
+    6765,
+    6769
   ],
   "run_py": {
     "fixtures": 425,
