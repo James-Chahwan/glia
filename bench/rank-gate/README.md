@@ -157,6 +157,54 @@ Cost: the calibration now runs groups structure, review and find (glia 116.6 s, 
 reading 297 parent trees; samples 5.9 s, the rest under 5 s), and the intent pass answers 1942 review
 and 300 find queries on glia in 84 s (`[rank_eval] ans intent ..`). A whole `check` took 10 min 25 s
 with rank_eval built (glia's run 454 s), against 456 s unloaded at EG.6.
+### The fused find (FB.7c, ruling FB-7-FUSED)
+
+FB.6b's verdict (PASS, `dev-notes/fusion-gate-0.5.4.md`) shipped the blend: with a repo's t2 vectors,
+`find --files` ranks LX[IDR,FUSE[T1s,SEMp:t2]] (`find::FIND_FILES_FUSED`) and `history calibrate`
+selects SELf2t over the 13-list. Since FB.7c the gate measures that order, not the lexical one:
+
+- rank_eval is built with `--features sem-eval` (and `glia-embed-worker`, gpu-webgpu, beside it), and
+  every snapshot runs with `--sem on --sem-model bge-small --sem-cache $GLIA_RANK_GATE_DIR/sem
+  --engine-parity on` (`SEMF` in `scripts/rank-gate.sh`). The model downloads once into
+  `FASTEMBED_CACHE_DIR` (default `~/.cache/glia/fastembed`, refused inside the checkout); the vectors
+  are cached per snapshot in `sem/<label>-bge-small.jsonl`, so after the first run the gate is offline
+  and embeds nothing (glia's first FB.7c run embedded 61 calibration-replay subjects outside the
+  harness's window, appended to the cache; every other snapshot 0). The GPU when the worker finds
+  one, else the CPU. A missing model or cache makes the run, and `check`, exit 2.
+- **ANS:find_files**: `find_files_with` with `FindFilesOptions.semantic` = `SemanticSource::from_index(
+  VectorIndex::from_vectors(..the run's t2 node vectors..))`, whose query embedder answers from the
+  cache (the engine's `QUERY_PREFIX + subject` is the harness's SEMp text, the same key): the pick is
+  FIND_FILES_FUSED.
+- **ANS:find_files@sel**: SELf2t's online pick from the in-memory calibration, whose replay now gets
+  the same source (`CalibrateOptions.semantic`, FB.7d), so it picks among the 13 candidates.
+- **Parity**: `--engine-parity on` checks, per find query, the engine's FIND_FILES_FUSED keys
+  (`calibrate::find_keys` over the harness's T1s / IDR, the engine's candidate degree and
+  `sem_filled(SemanticSource::file_scores(..))` of the engine's own query vector) against
+  `sem_keys_find`'s F2 bit for bit, and `find_order` against the harness's order:
+  `[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q> key_mismatch=<k>
+  order_mismatch=<o>`; a mismatch fails the run.
+
+Measured at FB.7c (check at `b5af1c7c`; parity 0 / 0 on glia 300, shell 216, websocket 107, samples
+298, commons-lang 300, commons-io 300 find queries). Against `baseline/current` exactly 4 rows changed
+per snapshot, the two find_files rankers x {r10, mrr}; every other gated row's diff is 0. recall@10 /
+MRR, before -> after (diff [95% CI], verdict vs current):
+
+| snapshot | ANS:find_files r10 | ANS:find_files mrr | ANS:find_files@sel r10 | ANS:find_files@sel mrr |
+|---|---|---|---|---|
+| glia | 0.9298 -> 0.9373 (+0.0075 [+0.0025, +0.0140] gain) | 0.9801 -> 0.9820 (+0.0019 [+0.0004, +0.0039] gain) | 0.9263 -> 0.9333 (+0.0069 [+0.0022, +0.0133] gain) | 0.9785 -> 0.9787 (+0.0002 [-0.0041, +0.0034] same) |
+| shell | 0.7931 -> 0.8447 (+0.0515 [+0.0210, +0.0842] gain) | 0.7846 -> 0.8111 (+0.0265 [+0.0038, +0.0494] gain) | 0.7970 -> 0.8332 (+0.0362 [+0.0062, +0.0658] gain) | 0.7757 -> 0.8052 (+0.0295 [+0.0069, +0.0527] gain) |
+| websocket | 0.7221 -> 0.8205 (+0.0983 [+0.0291, +0.1722] gain) | 0.6411 -> 0.7626 (+0.1215 [+0.0563, +0.1890] gain) | 0.7294 -> 0.7921 (+0.0627 [+0.0055, +0.1207] gain) | 0.6637 -> 0.7306 (+0.0669 [+0.0258, +0.1110] gain) |
+| samples | 0.2973 -> 0.3874 (+0.0901 [+0.0678, +0.1127] gain) | 0.3729 -> 0.4482 (+0.0752 [+0.0502, +0.1010] gain) | 0.3074 -> 0.3849 (+0.0776 [+0.0510, +0.1031] gain) | 0.3739 -> 0.4448 (+0.0710 [+0.0407, +0.1024] gain) |
+| commons-lang | 0.5147 -> 0.6245 (+0.1098 [+0.0798, +0.1408] gain) | 0.5477 -> 0.6126 (+0.0648 [+0.0436, +0.0873] gain) | 0.5595 -> 0.6106 (+0.0511 [+0.0181, +0.0856] gain) | 0.5395 -> 0.6046 (+0.0651 [+0.0341, +0.0976] gain) |
+| commons-io | 0.3685 -> 0.5132 (+0.1447 [+0.1093, +0.1803] gain) | 0.4403 -> 0.5082 (+0.0679 [+0.0429, +0.0915] gain) | 0.4104 -> 0.5099 (+0.0995 [+0.0598, +0.1403] gain) | 0.4656 -> 0.5065 (+0.0409 [+0.0029, +0.0755] gain) |
+
+The "before" values equal `baseline/0.5.2`'s (find --files had not moved since 0.5.2), so against
+0.5.2 the same diffs hold; under that family's Holm correction some are `same` rather than `gain`, none
+is a drop. The check read `[rank-gate] check: ok - 1176 rows, 68 gains, 0 drops on 6 snapshots`, then
+`ratchet: ok - 6 of 6 baselines moved` and `coverage: ok - 9 items measured, 2 exempt`. Cost: glia's
+run 498 s (with the worker and the 61 embeds), shell 23 s, websocket 8 s, samples 82 s, commons-lang
+43 s, commons-io 28 s.
+
 - **Metrics**: recall@10 and MRR, per query, for every gated (shape, ranker).
 
 ## The fail rule
@@ -211,13 +259,14 @@ default on each of the six snapshots, and pack@sel - pack r10 (single) glia -0.0
 ## Running it
 
     bash scripts/rank-gate.sh fetch          # bare clones + git-archive copies (cached after the first)
-    bash scripts/rank-gate.sh run            # build rank_eval (release) and run + trim every snapshot
+    bash scripts/rank-gate.sh run            # build rank_eval (release, sem-eval) and run + trim every snapshot
     bash scripts/rank-gate.sh check          # fetch + run + judge; the close-out gates on its last line
     bash scripts/rank-gate.sh coverage       # every scope item measured or exempt
 
 Everything is written under `GLIA_RANK_GATE_DIR` (default `~/.cache/glia-rank-gate`): `<name>.git`
 (bare clones), `<name>@<rev12>/` (the copies; the directory name is part of the build identity, never
-rename it), and `run/` (runs, trims, verdicts, logs, `last-check.json`). Nothing lands in the repo.
+rename it), `run/` (runs, trims, verdicts, logs, `last-check.json`) and `sem/` (the bge-small vector
+cache, FB.7c: keep it, a cold cache re-embeds every snapshot). Nothing lands in the repo.
 rank_eval is built in `CARGO_TARGET_DIR` (default `target/`). The fetch is shared by every agent: never
 delete it. A second fetch performs no network operation (`[rank-gate] fetch <name>: cached`).
 
