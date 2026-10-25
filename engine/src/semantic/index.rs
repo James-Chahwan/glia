@@ -86,6 +86,8 @@ pub struct VectorIndex {
     qnames: Vec<String>,
     /// Embeddable nodes with no fresh vector, sorted by (qname, NodeId).
     missing: Vec<(String, NodeId)>,
+    /// NodeId -> its row in `ids` (looked up, never iterated).
+    by_id: HashMap<NodeId, usize>,
 }
 
 impl VectorIndex {
@@ -181,10 +183,12 @@ impl VectorIndex {
             ids: Vec::with_capacity(kept.len()),
             qnames: Vec::with_capacity(kept.len()),
             missing,
+            by_id: HashMap::with_capacity(kept.len()),
             stats,
         };
         for (q, id, v) in kept {
             index.data.extend_from_slice(&v);
+            index.by_id.insert(id, index.ids.len());
             index.ids.push(id);
             index.qnames.push(q);
         }
@@ -249,6 +253,14 @@ impl VectorIndex {
                 similarity: f64::from(sim),
             })
             .collect()
+    }
+
+    /// Node `id`'s fresh unit vector, else None (FB.7a: the fused find's
+    /// per-file max cosine reads it).
+    pub fn vector(&self, id: NodeId) -> Option<&[f32]> {
+        let dims = self.stats.dims as usize;
+        let row = *self.by_id.get(&id)?;
+        self.data.get(row * dims..(row + 1) * dims)
     }
 
     /// What the load read.

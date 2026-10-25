@@ -131,7 +131,7 @@ fn t1_and_t2_texts() {
     assert!(t2.contains("return requests.get(invoice_id)"), "{t2}");
     let code_at = t2.find("def fetch_invoice").expect("code in t2");
     assert!(code_at > t1.len(), "code goes last");
-    assert_eq!(DEFAULT_RECIPE, EmbedRecipe::T1);
+    assert_eq!(DEFAULT_RECIPE, EmbedRecipe::T2);
     assert_eq!(RECIPES, [EmbedRecipe::T1, EmbedRecipe::T2]);
 }
 

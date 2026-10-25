@@ -879,6 +879,12 @@ pub struct FindSignals {
     /// Per candidate, `FileIndex::degree` (rank_eval `file_deg`): every key
     /// whose third slot is unused gets it there.
     pub deg: Vec<f64>,
+    /// SEMp:t2 (FB.7a): per candidate the max cosine of the BGE-prefixed
+    /// query over its nodes' t2 vectors (`semantic::SemanticSource::
+    /// file_scores`), FILLED: a file with no embedded node takes the lowest
+    /// score present (0 when none is), so its min-max is 0. Empty without
+    /// vectors (it then reads 0).
+    pub sem: Vec<f64>,
 }
 
 /// What a find fusion reads beyond T1s and the degree.
@@ -891,6 +897,27 @@ pub struct FindNeeds {
     pub w5: bool,
     pub m: bool,
     pub idr: bool,
+    /// The semantic score (FB.7a's two fused names).
+    pub sem: bool,
+}
+
+/// FB.7a's fused find names (FB.6b's F1 and F2, ruling FB-7-FUSED): ranked
+/// by [`find_keys`] but in no calibrated set yet (FB.7d adds them to
+/// `SELf2t`); `LX[IDR,FUSE[T1s,SEMp:t2]]` is `find --files`' fallback when
+/// vectors are present (`crate::find::FIND_FILES_FUSED`).
+pub const FIND_SEM_NAMES: [&str; 2] = ["FUSE[T1s,SEMp:t2]", "LX[IDR,FUSE[T1s,SEMp:t2]]"];
+
+/// `scores` with each None replaced by the lowest Some present (0.0 when
+/// none is): rank_eval `sem_keys_find`'s `fuse` closure, so a file with no
+/// embedded node min-maxes to 0.
+pub fn sem_filled(scores: &[Option<f64>]) -> Vec<f64> {
+    let lo = scores
+        .iter()
+        .flatten()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let lo = if lo.is_finite() { lo } else { 0.0 };
+    scores.iter().map(|x| x.unwrap_or(lo)).collect()
 }
 
 /// What the find fusion `name` reads; None for a name [`find_keys`] does not
@@ -904,6 +931,14 @@ pub fn find_needs(name: &str) -> Option<FindNeeds> {
             w5: false,
             m: false,
             idr,
+            sem: false,
+        })
+    };
+    let sem = |idr| {
+        Some(FindNeeds {
+            idr,
+            sem: true,
+            ..FindNeeds::default()
         })
     };
     match name {
@@ -919,10 +954,13 @@ pub fn find_needs(name: &str) -> Option<FindNeeds> {
             w5: true,
             m: true,
             idr: false,
+            sem: false,
         }),
         "LX[IDR,T1s]" => n(false, false, false, true),
         "LX[IDR,H9x25T]" => n(false, true, false, true),
         "LX[IDR,H18x]" | "H18xi" | "LX[IDR,C0x,PXT]" => n(false, true, true, true),
+        "FUSE[T1s,SEMp:t2]" => sem(false),
+        "LX[IDR,FUSE[T1s,SEMp:t2]]" => sem(true),
         _ => None,
     }
 }
@@ -939,6 +977,10 @@ pub fn find_needs(name: &str) -> Option<FindNeeds> {
 /// - `LX[IDR,T1s]` = `[IDR, T1s, 0]`, `LX[IDR,H18x]` = `[IDR, H18x, 0]`,
 ///   `LX[IDR,H9x25T]` = `[IDR, H9x25T, 0]`, `H18xi` = `mean(mm(IDR),
 ///   mm(T1s), mm(C0x), mm(PXT))`, `LX[IDR,C0x,PXT]` = `[IDR, C0x, PXT]`;
+/// - FB.7a (rank_eval `sem_keys_find`): `FUSE[T1s,SEMp:t2]` = `blend(0.5,
+///   mm(T1s), mm(SEM))` over the filled [`FindSignals::sem`], and
+///   `LX[IDR,FUSE[T1s,SEMp:t2]]` = `[IDR, FUSE[T1s,SEMp:t2], 0]` (FB.6b's F2:
+///   `LX[IDR,T1s]` with its text key replaced by the blend, ids still first);
 ///
 /// then, when every key's third slot is 0, the file degree goes there ("ties
 /// in the first keys go to the file's degree"), so a query matching nothing
@@ -950,6 +992,7 @@ pub fn find_keys(name: &str, s: &FindSignals) -> Option<Vec<RankKey>> {
     let d = |v: &[f64]| dense(v, n);
     let mm = |v: &[f64]| fuse::minmax(&d(v), &none);
     let (t1s, px1, pxt, c0x, idr) = (d(&s.t1s), d(&s.px1), d(&s.pxt), d(&s.c0x), d(&s.idr));
+    let fuse_sem = || fuse::blend(0.5, &mm(&t1s), &mm(&s.sem));
     let h9x25 = || fuse::blend(0.25, &mm(&t1s), &mm(&pxt));
     let h18x = || fuse::mean(&[&mm(&t1s), &mm(&c0x), &mm(&pxt)]);
     let mut keys = match name {
@@ -973,6 +1016,8 @@ pub fn find_keys(name: &str, s: &FindSignals) -> Option<Vec<RankKey>> {
         "LX[IDR,H9x25T]" => lex2(&idr, &h9x25()),
         "H18xi" => scalar(&fuse::mean(&[&mm(&idr), &mm(&t1s), &mm(&c0x), &mm(&pxt)])),
         "LX[IDR,C0x,PXT]" => (0..n).map(|f| [idr[f], c0x[f], pxt[f]]).collect(),
+        "FUSE[T1s,SEMp:t2]" => scalar(&fuse_sem()),
+        "LX[IDR,FUSE[T1s,SEMp:t2]]" => lex2(&idr, &fuse_sem()),
         _ => return None,
     };
     if keys.iter().all(|k| k[2] == 0.0) {
@@ -1075,6 +1120,10 @@ pub struct FindHead<'a> {
     /// The history snapshot and its messages (`&[]` without the sidecar),
     /// for W5 / M; None without a snapshot.
     pub history: Option<(&'a HistorySnapshot, &'a [HistoryMessage])>,
+    /// FB.7a: per candidate the query's raw SEMp:t2 file score
+    /// (`semantic::SemanticSource::file_scores`), for the fused names; None
+    /// without vectors ([`FindHead::with_semantic`]).
+    pub semantic: Option<&'a [Option<f64>]>,
 }
 
 impl<'a> FindHead<'a> {
@@ -1089,7 +1138,15 @@ impl<'a> FindHead<'a> {
             cache,
             cands,
             history,
+            semantic: None,
         }
+    }
+
+    /// This head with the query's per-candidate semantic file scores (the
+    /// SemanticSource's `file_scores` over `cands`).
+    pub fn with_semantic(mut self, scores: &'a [Option<f64>]) -> FindHead<'a> {
+        self.semantic = Some(scores);
+        self
     }
 }
 
@@ -1102,7 +1159,9 @@ impl<'a> FindHead<'a> {
 /// rank cache's PPR (`rank::base_keys`) from the top files' nodes weighted
 /// `w / |nodes|` (an empty top scores 0), W5 / M [`work_at_head`] with
 /// nothing excluded, `now` the newest snapshot commit's author time (its
-/// committer time without the messages sidecar), surface `find_files`.
+/// committer time without the messages sidecar), surface `find_files`; and
+/// (FB.7a) `sem`, [`sem_filled`] of the head's semantic scores, when `name`
+/// reads it and the head carries them.
 pub fn find_signals_at_head(
     x: &FindHead<'_>,
     name: &str,
@@ -1198,6 +1257,11 @@ pub fn find_signals_at_head(
         );
         s.w5 = w5;
         s.m = m;
+    }
+    if need.sem
+        && let Some(scores) = x.semantic
+    {
+        s.sem = dense(&sem_filled(scores), n);
     }
     s.t1s = t1s;
     s
@@ -1385,6 +1449,7 @@ mod tests {
             m: vec![0.0, 0.0, 2.0, 1.0, 0.0, 1.0],
             idr: vec![0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
             deg: vec![4.0, 9.0, 1.0, 9.0, 2.0, 0.0],
+            sem: Vec::new(),
         }
     }
 
@@ -1443,6 +1508,85 @@ mod tests {
         assert_eq!(find_order(&k), [2, 4, 3, 1]);
         let k = find_keys("H10x", &s).expect("h10x");
         assert_eq!(find_order(&k), [2, 5, 0, 4, 1, 3]);
+    }
+
+    /// rank_eval `sem_keys_find`'s FUSE / F2 keys, verbatim over its own
+    /// `mm_ex` / `blend` (the harness's `fuse` closure and `f2` map).
+    fn sem_keys_find(
+        t1s: &[f64],
+        sem: &[Option<f64>],
+        idr: &[f64],
+        file_deg: &[f64],
+    ) -> (Vec<RankKey>, Vec<RankKey>) {
+        let none = vec![false; t1s.len()];
+        let mm_t1s = mm_ex(t1s, &none);
+        let lo = sem.iter().flatten().copied().fold(f64::INFINITY, f64::min);
+        let lo = if lo.is_finite() { lo } else { 0.0 };
+        let filled: Vec<f64> = sem.iter().map(|x| x.unwrap_or(lo)).collect();
+        let fused: Vec<RankKey> = blend(0.5, &mm_t1s, &mm_ex(&filled, &none))
+            .into_iter()
+            .zip(file_deg)
+            .map(|(b, &dg)| [b, 0.0, dg])
+            .collect();
+        let f2 = fused
+            .iter()
+            .zip(idr)
+            .zip(file_deg)
+            .map(|((v, &r), &dg)| [r, v[0], dg])
+            .collect();
+        (fused, f2)
+    }
+
+    /// FB.7a: the two fused names are rank_eval's keys bit for bit, the
+    /// filled semantic vector included, and the six-file bank is unchanged.
+    #[test]
+    fn fused_find_keys_are_the_harness_arithmetic() {
+        let mut s = find_sig();
+        let raw = [Some(0.41), None, Some(0.12), Some(0.77), None, Some(0.12)];
+        s.sem = sem_filled(&raw);
+        assert_eq!(s.sem, [0.41, 0.12, 0.12, 0.77, 0.12, 0.12]);
+        let (f1, f2) = sem_keys_find(&s.t1s, &raw, &s.idr, &s.deg);
+        let got1 = find_keys("FUSE[T1s,SEMp:t2]", &s).expect("f1");
+        let got2 = find_keys("LX[IDR,FUSE[T1s,SEMp:t2]]", &s).expect("f2");
+        assert_eq!(bits(&got1), bits(&f1));
+        assert_eq!(bits(&got2), bits(&f2));
+        for n in FIND_SEM_NAMES {
+            let need = find_needs(n).expect(n);
+            assert!(need.sem && !need.px1 && !need.pxt && !need.c0x, "{n}");
+            assert!(!FIND_NAMES.contains(&n), "{n}");
+            assert!(!crate::calibrate::sets::FIND_CANDIDATES.contains(&n), "{n}");
+        }
+        assert!(find_needs("LX[IDR,FUSE[T1s,SEMp:t2]]").is_some_and(|x| x.idr));
+        assert!(find_needs("FUSE[T1s,SEMp:t2]").is_some_and(|x| !x.idr));
+        // no sem at all: every None fills 0, the blend is half of mm(T1s)
+        assert_eq!(sem_filled(&[None, None]), [0.0, 0.0]);
+        let mut z = find_sig();
+        z.sem = Vec::new();
+        let k = find_keys("FUSE[T1s,SEMp:t2]", &z).expect("f1");
+        let t = find_keys("T1s", &z).expect("t1s");
+        assert_eq!(find_order(&k), find_order(&t));
+    }
+
+    /// FB.7a, by hand: 3 files, T1s [0, 2, 4], sem [0.9, None, 0.5].
+    /// mm(T1s) = [0, 0.5, 1]; sem filled [0.9, 0.5, 0.5], mm = [1, 0, 0];
+    /// FUSE = [0.5, 0.25, 0.5]: file 0 (no text, semantic match) ties file 2
+    /// and wins on degree; F2 with idr on file 1 puts it first.
+    #[test]
+    fn fused_keys_by_hand() {
+        let s = FindSignals {
+            t1s: vec![0.0, 2.0, 4.0],
+            idr: vec![0.0, 1.0, 0.0],
+            deg: vec![5.0, 1.0, 3.0],
+            sem: sem_filled(&[Some(0.9), None, Some(0.5)]),
+            ..FindSignals::default()
+        };
+        assert_eq!(s.sem, [0.9, 0.5, 0.5]);
+        let f1 = find_keys("FUSE[T1s,SEMp:t2]", &s).expect("f1");
+        assert_eq!(f1, [[0.5, 0.0, 5.0], [0.25, 0.0, 1.0], [0.5, 0.0, 3.0]]);
+        assert_eq!(find_order(&f1), [0, 2, 1]);
+        let f2 = find_keys("LX[IDR,FUSE[T1s,SEMp:t2]]", &s).expect("f2");
+        assert_eq!(f2, [[0.0, 0.5, 5.0], [1.0, 0.25, 1.0], [0.0, 0.5, 3.0]]);
+        assert_eq!(find_order(&f2), [1, 0, 2]);
     }
 
     #[test]

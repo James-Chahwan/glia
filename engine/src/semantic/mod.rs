@@ -7,10 +7,12 @@
 //! and adds its child `mod` lines and re-exports here (+FB.5a, FB.6, FB.7a, FB.8).
 
 mod index;
+mod query;
 mod run;
 mod text;
 
 pub use index::{IndexStats, SemanticHit, VECTORS_FILE, VectorIndex};
+pub use query::{FUSED_RECIPE, QUERY_PREFIX, SemanticSource};
 pub use run::{EMBED_MODEL_ENV, EmbedOptions, EmbedReport, embed_repo, surface_model};
 pub use text::{
     CODE_CHARS, DEFAULT_RECIPE, DOC_CHARS, EmbedRecipe, MAX_IMPORTS, RECIPES, embed_text, text_hash,

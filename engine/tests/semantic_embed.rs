@@ -56,6 +56,14 @@ impl Repo {
     fn run(&self) -> EmbedReport {
         self.embed(&EmbedOptions::default()).expect("embed_repo")
     }
+
+    /// A run under T1, whose text holds no code: an edit to one function's
+    /// doc or name moves that node's text only (under the default T2 the
+    /// MODULE's code moves too).
+    fn run_t1(&self) -> EmbedReport {
+        self.embed(&EmbedOptions::default().with_recipe(EmbedRecipe::T1))
+            .expect("embed_repo")
+    }
 }
 
 fn repo_of(r: &GenerateResult) -> RepoId {
@@ -90,7 +98,7 @@ fn first_run_embeds_every_node_and_a_second_embeds_none() {
     );
     assert_eq!(first.rows_written, first.nodes);
     assert_eq!(first.model, MODEL_TEST_HASH);
-    assert_eq!(first.recipe, EmbedRecipe::T1);
+    assert_eq!(first.recipe, EmbedRecipe::T2);
     let body = repo.body();
 
     // Every row is fresh to the index and carries its kind, hint and hash.
@@ -111,7 +119,7 @@ fn first_run_embeds_every_node_and_a_second_embeds_none() {
         .iter()
         .map(|(k, v)| (*k, PathBuf::from(v)))
         .collect();
-    let idx = VectorIndex::load(&r.merged, &roots, MODEL_TEST_HASH, EmbedRecipe::T1);
+    let idx = VectorIndex::load(&r.merged, &roots, MODEL_TEST_HASH, EmbedRecipe::T2);
     assert_eq!(idx.stats().missing, 0, "{:?}", idx.stats());
     assert_eq!(idx.stats().fresh, first.nodes);
 
@@ -127,13 +135,13 @@ fn first_run_embeds_every_node_and_a_second_embeds_none() {
 #[test]
 fn an_edited_docstring_embeds_one_node() {
     let repo = Repo::new("app.py", &app_py("Fetch one invoice.", "render_chart"));
-    let first = repo.run();
+    let first = repo.run_t1();
     std::fs::write(
         repo.root().join("app.py"),
         app_py("Fetch an invoice by id.", "render_chart"),
     )
     .expect("edit");
-    let second = repo.run();
+    let second = repo.run_t1();
     assert_eq!(
         (second.embedded, second.stale_dropped, second.cached),
         (1, 1, first.nodes - 1),
@@ -145,13 +153,13 @@ fn an_edited_docstring_embeds_one_node() {
 #[test]
 fn a_renamed_function_embeds_one_and_drops_its_old_row() {
     let repo = Repo::new("app.py", &app_py("Fetch one invoice.", "render_chart"));
-    let first = repo.run();
+    let first = repo.run_t1();
     std::fs::write(
         repo.root().join("app.py"),
         app_py("Fetch one invoice.", "draw_chart"),
     )
     .expect("rename");
-    let second = repo.run();
+    let second = repo.run_t1();
     assert_eq!(
         (second.embedded, second.stale_dropped),
         (1, 1),
@@ -345,7 +353,7 @@ fn the_rows_hash_the_recipe_text() {
         b64_encode(&codec::to_le_bytes(&HashEmbedder::embed_one(&text)))
     );
     // The other recipe sees every row as stale and re-embeds them all.
-    let back = repo.run();
+    let back = repo.run_t1();
     assert_eq!(
         (back.embedded, back.stale_dropped),
         (back.nodes, back.nodes),

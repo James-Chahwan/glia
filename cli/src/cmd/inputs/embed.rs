@@ -53,7 +53,7 @@ pub(crate) struct Args {
     #[arg(long, value_name = "MODEL", value_parser = PossibleValuesParser::new(glia_embed::MODEL_NAMES))]
     model: Option<String>,
     /// The text recipe: t1 (name, qname, leading doc, imports) or t2 (t1 then
-    /// the code). Default t1.
+    /// the code). Default t2.
     #[arg(long, value_name = "RECIPE", value_parser = PossibleValuesParser::new(["t1", "t2"]))]
     recipe: Option<String>,
     /// Rewrite a sidecar that holds another model's vectors, dropping them.

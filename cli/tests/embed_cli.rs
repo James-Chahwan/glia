@@ -93,11 +93,11 @@ fn embed_twice_embeds_nothing_the_second_time() {
     );
     assert!(
         out.contains("-> .glia/vectors.jsonl (")
-            && out.contains("model glia-test-hash-v1/64, recipe t1)"),
+            && out.contains("model glia-test-hash-v1/64, recipe t2)"),
         "{out}"
     );
     assert!(
-        err.contains("[embed] repo=repo model=glia-test-hash-v1/64 recipe=t1 nodes="),
+        err.contains("[embed] repo=repo model=glia-test-hash-v1/64 recipe=t2 nodes="),
         "{err}"
     );
     assert!(err.contains("[embed] cli repo=repo exit=0"), "{err}");
@@ -129,7 +129,7 @@ fn check_exits_one_after_an_edit_and_writes_nothing() {
     assert!(!s.vectors().exists(), "--check writes nothing");
     assert!(
         text(&missing.stdout)
-            .contains(" nodes need embedding (model glia-test-hash-v1/64, recipe t1)"),
+            .contains(" nodes need embedding (model glia-test-hash-v1/64, recipe t2)"),
         "{}",
         text(&missing.stdout)
     );
@@ -142,7 +142,7 @@ fn check_exits_one_after_an_edit_and_writes_nothing() {
     assert_eq!(fresh.status.code(), Some(0), "{}", text(&fresh.stderr));
     assert_eq!(
         text(&fresh.stdout).trim(),
-        "0 nodes need embedding (model glia-test-hash-v1/64, recipe t1)"
+        "0 nodes need embedding (model glia-test-hash-v1/64, recipe t2)"
     );
 
     let edited = APP.replace("Fetch one invoice.", "Fetch one unpaid invoice by id.");
@@ -152,7 +152,8 @@ fn check_exits_one_after_an_edit_and_writes_nothing() {
     assert_eq!(stale.status.code(), Some(1), "{err}");
     assert_eq!(
         text(&stale.stdout).trim(),
-        "1 nodes need embedding (model glia-test-hash-v1/64, recipe t1)"
+        // t2 (the default) embeds code: the function and its MODULE moved
+        "2 nodes need embedding (model glia-test-hash-v1/64, recipe t2)"
     );
     assert!(err.contains("[embed] cli repo=repo exit=1"), "{err}");
     assert_eq!(
@@ -168,9 +169,9 @@ fn check_exits_one_after_an_edit_and_writes_nothing() {
     );
     assert_eq!(json.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&json.stdout).expect("--json is JSON");
-    assert_eq!(v["recipe"], "t1");
+    assert_eq!(v["recipe"], "t2");
     assert_eq!(v["model"], "glia-test-hash-v1/64");
-    assert_eq!(v["embedded"], 1);
+    assert_eq!(v["embedded"], 2);
     assert_eq!(v["rows_written"], 0);
 }
 

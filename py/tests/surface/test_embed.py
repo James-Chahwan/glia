@@ -55,9 +55,9 @@ def main() -> int:
                                        vectors.read_text().splitlines()} == {"glia-test-hash-v1/64"})
         c.check("report names the model and recipe",
                 (first.get("model"), first.get("recipe"), first.get("dims"))
-                == ("glia-test-hash-v1/64", "t1", 64), first)
+                == ("glia-test-hash-v1/64", "t2", 64), first)
         c.check("marker names the surface",
-                "[embed] repo=fb5capp model=glia-test-hash-v1/64 recipe=t1 " in err
+                "[embed] repo=fb5capp model=glia-test-hash-v1/64 recipe=t2 " in err
                 and " surface=py" in err, err[-400:])
         body = vectors.read_text() if vectors.is_file() else ""
 
@@ -79,9 +79,9 @@ def main() -> int:
                  "is not a directory")
 
         other = fixture_repo(tmp, "fb5climit")
-        lim = rg.embed(other, model="test-hash", limit=1, recipe="t2")
+        lim = rg.embed(other, model="test-hash", limit=1, recipe="t1")
         c.check("limit defers the rest", lim.get("embedded") == 1 and lim.get("deferred", 0) > 0
-                and lim.get("recipe") == "t2", lim)
+                and lim.get("recipe") == "t1", lim)
     return c.done()
 
 

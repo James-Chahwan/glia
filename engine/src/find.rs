@@ -72,6 +72,22 @@
 //! `calibrate::fusions::find_keys` the replay measured; the answer carries
 //! its `selection`. `FindFilesOptions::select = false` keeps `LX[IDR,T1s]`.
 //!
+//! FB.7a (ruling FB-7-FUSED, FB.6b's PASS): with
+//! [`FindFilesOptions::semantic`] set (a [`SemanticSource`]: the repo's t2
+//! vectors from `glia embed` and the query embedder), each candidate file
+//! also scores SEMp:t2, the max cosine of the BGE-prefixed query over its
+//! embedded nodes, and the uncalibrated order (no record, `select` off, or a
+//! pick whose keys are unusable) is [`FIND_FILES_FUSED`] =
+//! `LX[IDR,FUSE[T1s,SEMp:t2]]`: ids first, then `blend(0.5, minmax(T1s),
+//! minmax(SEMp:t2))` (a file with no embedded node scored as the lowest
+//! present), then degree, then path. A calibrated pick still wins. Rows are
+//! still the files with a positive first or second key, so with vectors
+//! nearly every file is a row and `top_k` cuts them; each carries its raw
+//! `sem`. The similarity never decides presence: the empty answer's
+//! absence reads IDR and text only. An embedder error drops to the lexical
+//! order (`reason=semantic_error`). Without a source the answer and its
+//! markers are byte-identical to EC.13's.
+//!
 //! # Named but not modelled (FB.13c)
 //!
 //! With [`FindOptions::vocab_roots`] set (the CLI and pyo3 always pass the
@@ -107,6 +123,7 @@ use crate::intent::paths::{PathResolver, rename_pairs};
 use crate::intent::text::{Candidates, TextAbsent, TextIndex, subject};
 use crate::rank::RankCache;
 use crate::review::IntentHistory;
+use crate::semantic::SemanticSource;
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -664,6 +681,13 @@ fn log_marker(query: &str, cands: &[Candidate], top_k: usize) {
 /// degree, then path.
 pub const FIND_FILES_FUSION: &str = "LX[IDR,T1s]";
 
+/// The fusion [`find_files`] ranks by when vectors are present
+/// ([`FindFilesOptions::semantic`], FB.7a; FB.6b's F2, ruling FB-7-FUSED):
+/// [`FIND_FILES_FUSION`] with its BM25 key replaced by `FUSE[T1s,SEMp:t2]`
+/// = `blend(0.5, minmax(T1s), minmax(SEMp:t2))`, so typed ids still route
+/// first, then the degree, then path.
+pub const FIND_FILES_FUSED: &str = "LX[IDR,FUSE[T1s,SEMp:t2]]";
+
 /// What [`find_files`] keeps and how it reports. Start from `default()` and
 /// set fields: `#[non_exhaustive]` rules out a struct literal outside this
 /// crate.
@@ -682,6 +706,11 @@ pub struct FindFilesOptions {
     /// Rank by the repo's calibrated `SELf2t` pick (EC.13; the default);
     /// false ranks [`FIND_FILES_FUSION`] as an explicit choice.
     pub select: bool,
+    /// FB.7a: the t2 vectors and the query embedder
+    /// ([`crate::semantic::SemanticSource`]); with one, the uncalibrated
+    /// order is [`FIND_FILES_FUSED`]. None (the default) is the EB.8 /
+    /// EC.13 answer byte for byte.
+    pub semantic: Option<Arc<SemanticSource>>,
 }
 
 impl Default for FindFilesOptions {
@@ -691,6 +720,7 @@ impl Default for FindFilesOptions {
             surface: "lib",
             rank_cache: None,
             select: true,
+            semantic: None,
         }
     }
 }
@@ -712,6 +742,11 @@ pub struct FoundFile {
     pub degree: f64,
     /// The routed ids that reached the file, in query order.
     pub ids: Vec<String>,
+    /// FB.7a: the file's raw SEMp:t2 score (the max cosine of the prefixed
+    /// query over its embedded nodes), 4 dp; None (not serialised) without
+    /// a semantic source or for a file with no embedded node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sem: Option<f64>,
 }
 
 /// The files `query` is about, in one repo: [`FIND_FILES_FUSION`] (rank_eval's
@@ -774,7 +809,9 @@ pub fn find_files_with(
 /// `.glia/calibration-snapshot/`, writes nothing. Prints `[select]
 /// surface=find_files set=SELf2t shape=find pick=<name> source=<s> ..`, then
 /// `[find-files] repo=<label> surface=<s> fusion=<pick> ids=<n>
-/// idr_files=<i> text=<present|absent> text_files=<t> rows=<r>`, after the
+/// idr_files=<i> text=<present|absent> text_files=<t> rows=<r>` (FB.7a, with
+/// a semantic source: + ` sem=present sem_files=<f> sem_missing=<m>`, or
+/// ` sem=error sem_files=0 sem_missing=<m> reason=semantic_error`), after the
 /// `[intent] text`, `[ids] vocab`, `[id-defs]`, `[id-ns]`, `[id-paths]` and
 /// `[idr]` lines of the same surface.
 pub fn find_files_with_ids(
@@ -932,6 +969,24 @@ fn find_files_core(
         .map(|i| routed.idr.get(i).copied().unwrap_or(0.0))
         .collect();
 
+    // FB.7a: the query's SEMp:t2 file scores, when vectors are present; an
+    // embedder error drops to the lexical order.
+    let sem_scores: Option<Vec<Option<f64>>> =
+        opts.semantic
+            .as_ref()
+            .and_then(|src| match src.query_vector(query) {
+                Ok(q) => Some(src.file_scores(&files, &cands, &q)),
+                Err(e) => {
+                    eprintln!("[semantic] query error surface={surface}: {e}");
+                    None
+                }
+            });
+    let fallback = if sem_scores.is_some() {
+        FIND_FILES_FUSED
+    } else {
+        FIND_FILES_FUSION
+    };
+
     // EC.13: SELf2t's calibrated pick, else LX[IDR,T1s]; the find shape's
     // tie rule (the degree in an unused third key), then path.
     let selection = if let Some(name) = pick {
@@ -945,8 +1000,14 @@ fn find_files_core(
             FIND_FALLBACK,
         )
     } else {
-        explicit(FIND_SET, Shape::Find, FIND_FILES_FUSION)
+        explicit(FIND_SET, Shape::Find, fallback)
     };
+    // FB.7a: with vectors the fallback is the fused order (a calibrated pick
+    // stays the pick).
+    let mut selection = selection;
+    if sem_scores.is_some() && selection.source == "fallback" {
+        selection.pick = FIND_FILES_FUSED.to_string();
+    }
     log_selection("find_files", &selection);
     let head = FindHead::new(
         merged,
@@ -954,16 +1015,17 @@ fn find_files_core(
         &cands,
         snap.map(|s| (s, msgs.unwrap_or(&[]))),
     );
+    let head = match sem_scores.as_deref() {
+        Some(scores) => head.with_semantic(scores),
+        None => head,
+    };
     let keyed = |name: &str| {
         let sig = find_signals_at_head(&head, name, text.clone(), idr.clone());
         find_keys(name, &sig)
     };
     let (fusion, keys) = match keyed(&selection.pick) {
         Some(k) if k.len() == n => (selection.pick.clone(), k),
-        _ => (
-            FIND_FILES_FUSION.to_string(),
-            keyed(FIND_FILES_FUSION).unwrap_or_default(),
-        ),
+        _ => (fallback.to_string(), keyed(fallback).unwrap_or_default()),
     };
     let mut rows: Vec<FoundFile> = Vec::new();
     for i in find_order(&keys) {
@@ -977,12 +1039,28 @@ fn find_files_core(
             text: text[i],
             degree: cands.deg[i],
             ids: ids_of.get(i).cloned().unwrap_or_default(),
+            sem: sem_scores
+                .as_ref()
+                .and_then(|s| s.get(i).copied().flatten())
+                .map(|c| (c * 10_000.0).round() / 10_000.0),
         });
     }
     let nz = |v: &[f64]| v.iter().filter(|&&w| w > 0.0).count();
     let (idr_files, text_files) = (nz(&idr), nz(&text));
+    let sem_part = match (&opts.semantic, &sem_scores) {
+        (None, _) => String::new(),
+        (Some(src), Some(sc)) => format!(
+            " sem=present sem_files={} sem_missing={}",
+            sc.iter().flatten().count(),
+            src.stats().missing
+        ),
+        (Some(src), None) => format!(
+            " sem=error sem_files=0 sem_missing={} reason=semantic_error",
+            src.stats().missing
+        ),
+    };
     eprintln!(
-        "[find-files] repo={label} surface={surface} fusion={fusion} ids={} idr_files={idr_files} text={text_state} text_files={text_files} rows={}",
+        "[find-files] repo={label} surface={surface} fusion={fusion} ids={} idr_files={idr_files} text={text_state} text_files={text_files} rows={}{sem_part}",
         routed.ids.len(),
         rows.len()
     );

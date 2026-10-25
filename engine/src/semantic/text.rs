@@ -6,8 +6,9 @@
 //! imported libraries not already in the name or qname, never a code body.
 //! [`EmbedRecipe::T1`] is that text; [`EmbedRecipe::T2`] appends the node's
 //! code LAST, since a model truncates its input (fastembed at 512 tokens) and
-//! code must never push the name and doc out. FB.6's gate measures both and
-//! picks [`DEFAULT_RECIPE`]. The same functions serve the embed run, the
+//! code must never push the name and doc out. FB.6's gate measured both and
+//! picked T2, and FB.6b's fusion gate measured the blend over it, so it is
+//! [`DEFAULT_RECIPE`]. The same functions serve the embed run, the
 //! index's freshness check and the gate harness, so the measured text is the
 //! shipped text.
 
@@ -28,9 +29,10 @@ pub const CODE_CHARS: usize = 4000;
 #[non_exhaustive]
 pub enum EmbedRecipe {
     /// Name, qname, leading doc and imports (Engram's text).
-    #[default]
     T1,
-    /// [`EmbedRecipe::T1`] plus the node's code, last.
+    /// [`EmbedRecipe::T1`] plus the node's code, last: the default (FB.6b
+    /// gated it, ruling FB-7-FUSED).
+    #[default]
     T2,
 }
 
@@ -38,8 +40,10 @@ pub enum EmbedRecipe {
 pub const RECIPES: [EmbedRecipe; 2] = [EmbedRecipe::T1, EmbedRecipe::T2];
 
 /// The recipe an embed run and a semantic tier use unless told otherwise:
-/// T1 until FB.6's gate report picks.
-pub const DEFAULT_RECIPE: EmbedRecipe = EmbedRecipe::T1;
+/// T2, the recipe FB.6b's fusion gate measured (`FUSE[T1s,SEMp:t2]`, ruling
+/// FB-7-FUSED; FB.7a moved it from T1). A sidecar written under T1 holds
+/// rows stale to it, so the next `glia embed` re-embeds them.
+pub const DEFAULT_RECIPE: EmbedRecipe = EmbedRecipe::T2;
 
 impl EmbedRecipe {
     /// `t1` / `t2`: the spelling a CLI flag takes and a `text_hash` starts
