@@ -40,7 +40,7 @@ TRACKS = {
     "T9": ("build-target graphs (bazel, first non-code domain)", "FA.15-20"),
     "T10": ("org-internal package routing", "FA.21 FA.22 FA.23"),
     "T11": ("distribution: zero-install CLI, skills into glia", "FE.5 FE.6 FE.7"),
-    "TS": ("semantic answers in fused form, held until FB.6b (the fusion gate) PASSES", "FB.7a FB.7b FB.7c FB.8"),
+    "TS": ("semantic answers in fused form, held until FB.6b (the fusion gate) PASSES", "FB.7a FB.7b FB.7c FB.7d FB.8"),
     "TZ": ("release docs and handoffs (after the tracks that ship)", "FZ.1 FZ.2"),
 }
 

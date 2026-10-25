@@ -1674,55 +1674,62 @@
   },
   {
    "id": "FB.7a",
-   "title": "find's semantic tier (item 13 build (b), only on PASS): `find::find_nodes_semantic` returns the lexical Answer unchanged plus a `SemanticTier` of HEURISTIC rows (similarity, never mixed into the lexical order, lexical absence kept beside them), with inline embedding of at most 64 un-embedded nodes and an absence caveat past it",
-   "area": "FB embeddings: the semantic tier in find",
-   "loc": 380,
-   "rationale": "\u00a7B 'Semantic tier in find ... HEURISTIC, reported as its own match tier with its similarity, never mixed into the lexical order'; 'No cosine floor means no match ... the semantic tier never decides presence: find / the flow search / pack's fallback keep the lexical absence (nothing matches by name) beside any semantic rows'; 'When embeds run': a semantic query counts nodes whose text hash has no vector and embeds them inline under a small threshold, else answers from what it has with an absence caveat ('<n> nodes not embedded; run glia embed'). engine/src/absence.rs Answer keeps `absence` Some iff results is empty (its only constructor `from_results`), so the semantic rows travel beside the Answer, not inside it. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "title": "find --files ranks by the gated blend: a SemanticSource (the sidecar's t2 vectors + the surface embedder) gives each candidate file its max cosine to the BGE-prefixed query, FindSignals gains `sem`, find_keys gains FUSE[T1s,SEMp:t2] and LX[IDR,FUSE[T1s,SEMp:t2]], and with vectors present find_files' fallback is LX[IDR,FUSE[T1s,SEMp:t2]] (LX[IDR,T1s] without); `glia embed`'s default recipe becomes t2",
+   "area": "FB embeddings: the fused find --files (engine)",
+   "loc": 420,
+   "rationale": "Spec rewritten 2026-10-25 after FB.6b's VERDICT: PASS (dev-notes/fusion-gate-0.5.4.md: F1 = FUSE[T1s,SEMp:t2] - T1s lo > 0 on 8 of 9, F2 = LX[IDR,FUSE[T1s,SEMp:t2]] - LX[IDR,T1s] lo > 0 on 8 of 9) and ruling FB-7-FUSED. The gate proved the BLEND for ranking FILES in the find shape; the semantic tier alone failed (FB.6) and node-level semantic rows were never measured, so no answer shows semantic node rows or orders by similarity alone. find_files (engine/src/find.rs, EB.8 / EC.13) ranks by SELf2t's calibrated pick, else FIND_FILES_FUSION = LX[IDR,T1s]. FB.6b's F2 is that order with its BM25 key replaced by F1, so ids still route first. rank_eval's sem_keys_find (engine/examples/rank_eval.rs) is the oracle: per file the max cosine of the prefixed subject over its nodes' t2 vectors (`NodeVecs::file_max`), a file with no embedded node filled with the lowest score present, FUSE = blend(0.5, minmax(T1s), minmax(sem)), F2 key [IDR, FUSE, degree]. The gate used recipe t2, so glia embed must write t2 by default (DEFAULT_RECIPE is t1 today).",
    "entry_points": [
-    "engine/src/find.rs - new `pub fn find_nodes_semantic(merged, live, query, opts: &FindOptions, sem: &SemanticQuery<'_>) -> (Answer<FoundNode>, SemanticTier)`; `FoundNode` gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub similarity: Option<f64>`",
-    "engine/src/semantic/query.rs (new) - `pub struct SemanticQuery<'a> { pub index: &'a VectorIndex, pub embedder: Option<&'a dyn Embedder>, pub top_k: usize, pub inline_max: usize }`, `#[non_exhaustive] #[derive(Serialize)] pub struct SemanticTier { pub model, pub recipe, pub tier: &'static str /* \"heuristic\" */, pub rows: Vec<FoundNode>, pub not_embedded: usize, pub inline_embedded: usize, pub note: Option<String> }`, `pub const DEFAULT_SEMANTIC_TOP_K: usize = 10; pub const DEFAULT_INLINE_MAX: usize = 64;`"
+    "engine/src/semantic/query.rs (new) - `pub struct SemanticSource` (a VectorIndex of one model under recipe t2 plus a `Box<dyn glia_embed::Embedder>`; `load(merged, repo_roots, model, embedder) -> Option<SemanticSource>` (None when the index holds no row), `from_index(index, embedder)` for in-memory use, `query_vector(&self, query) -> Result<Vec<f32>, String>` embedding `QUERY_PREFIX + subject(query)`, `file_scores(&self, merged, cands, qvec) -> Vec<Option<f64>>` per candidate (max cosine over the candidate file's nodes), `stats()`); `pub const QUERY_PREFIX` = rank_eval's SEM_QUERY_PREFIX verbatim; `pub const FUSED_RECIPE: EmbedRecipe = EmbedRecipe::T2`",
+    "engine/src/calibrate/fusions.rs - FindSignals gains `pub sem: Vec<f64>` (filled), FindNeeds gains `sem`; find_keys gains `FUSE[T1s,SEMp:t2]` (scalar of blend(0.5, mm(t1s), mm(sem)), degree third) and `LX[IDR,FUSE[T1s,SEMp:t2]]` (lex2(idr, fuse) with the degree third, rank_eval's key); find_signals_at_head fills `sem` from a passed SemanticSource",
+    "engine/src/find.rs - FindFilesOptions gains `pub semantic: Option<Arc<SemanticSource>>` (None: today's answer byte for byte); `pub const FIND_FILES_FUSED: &str = \"LX[IDR,FUSE[T1s,SEMp:t2]]\"`; FoundFile gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub sem: Option<f64>` (the file's raw max cosine, 4 dp)"
    ],
    "files_touched": [
     "engine/src/find.rs",
     "engine/src/semantic/query.rs",
     "engine/src/semantic/mod.rs",
+    "engine/src/semantic/text.rs",
     "engine/src/semantic/index.rs",
-    "engine/tests/find_semantic.rs"
+    "engine/src/calibrate/fusions.rs",
+    "engine/tests/find_files_fused.rs"
    ],
-   "implementation": "Acceptance precondition: only if FB.6's report (dev-notes/embedding-gate-0.5.4.md) says `VERDICT: PASS`.\n1. find_nodes_semantic: (a) the lexical answer = find_nodes_with_live(merged, live, query, opts) exactly (byte-identical rows and absence). (b) The query vector: embedder (Some) embeds `QUERY_PREFIX + query` or the raw query per FB.6's const; None -> SemanticTier with no rows and note `no embedder in this build: semantic rows need glia embed's model`. (c) Inline: n = index.missing_ids().len(); if 0 < n <= inline_max and an embedder is present, embed those nodes' texts in one sequential call into an in-memory overlay of the index (`VectorIndex::with_extra(ids, vectors)`, added to index.rs; nothing is written: the sidecar has one writer path, FB.5a), inline_embedded = n; if n > inline_max, not_embedded = n and note = `<n> nodes not embedded (model <m>); run glia embed`. (d) exclude = the lexical rows' ids (a node appears once, in its lexical tier); hits = index.search(qvec, top_k, exclude), restricted by opts.kinds and opts.scope with find's own rules (kind filter before ranking; scope by located file, unlocated kept). (e) Each hit -> FoundNode with r#match = \"semantic\", similarity = Some(rounded 4 dp), live from `live`, located through find's Locator; identity fold through the same IdentityView as the lexical rows (opts.collapse): a semantic hit whose class already has a lexical row is dropped. (f) The semantic tier NEVER changes `absence`: when the lexical results are empty the Answer's absence is the lexical no_match, and the semantic rows sit beside it.\n2. find.rs module doc: a `# Semantic tier` section (the rules above, HEURISTIC, no floor, presence is lexical). find_nodes / find_nodes_with_live are unchanged (the seed resolvers and every existing caller keep the lexical-only search).\n3. Marker per call: `[find] semantic query=<q> model=<m> recipe=<t> rows=<r> top_sim=<s|-> not_embedded=<n> inline=<i> lexical_rows=<l>`.\n4. Tests (engine/tests/find_semantic.rs, HashEmbedder fixtures written by embed_repo): a query naming no node by name ('charge the customer card') gets the lexical absence AND semantic rows with the `charge_card` function first; a query that matches lexically keeps its lexical rows unchanged and its semantic rows exclude them; no sidecar + no embedder -> rows empty with the note; 3 missing nodes, inline_max 64 -> inline_embedded 3 and the sidecar file is byte-identical before / after; inline_max 1 -> not_embedded 3 and the note; kinds / scope filters apply; deterministic across two runs; FoundNode serialisation of a lexical row is byte-identical to HEAD (similarity None skipped).",
-   "acceptance": "Only if FB.6's report says PASS (`tail -1 dev-notes/embedding-gate-0.5.4.md` is `VERDICT: PASS`). `cargo test -p glia-engine --test find_semantic --test find_ranked --test identity_collapse_find` green; clippy clean; `bash scripts/rank-gate.sh check` passes (find's lexical answer is unchanged, so every ANS:find row diffs 0).",
-   "fired_on_marker": "[find] semantic query=<q> model=<m> recipe=<t> rows=<r> top_sim=<s> not_embedded=<n> inline=<i> lexical_rows=<l>",
+   "implementation": "1. RECIPE: DEFAULT_RECIPE = EmbedRecipe::T2 (engine/src/semantic/text.rs; ruling FB-7-FUSED: t2 is the gated recipe). A t1 sidecar's rows stop being fresh for the default recipe, so the next `glia embed` re-embeds; update every test that pins t1 as the default (grep DEFAULT_RECIPE / `recipe=t1`).\n2. SemanticSource (semantic/query.rs, declared in semantic/mod.rs with its re-exports): load() = VectorIndex::load(merged, roots, model, FUSED_RECIPE); None when stats().rows == 0. file_scores: the candidate files' node membership is the FileIndex's (crate::rank::FileIndex, rank_eval's index_graph: the same file_nodes rank_eval's file_max walks); per file the max cosine (glia_embed::codec::cosine on unit vectors) of qvec over the file's nodes that have a fresh vector, None for a file with none. Add `VectorIndex::vector(&self, id) -> Option<&[f32]>` (index.rs; a lookup by NodeId, built once at load). query_vector embeds one text through the embedder (one call; an embedder error is Err, never a panic).\n3. fusions.rs: `sem` is FindSignals' filled vector: each None replaced by the lowest Some present (0.0 when none is), exactly rank_eval's `fuse` closure; find_keys(\"FUSE[T1s,SEMp:t2]\") = scalar(blend(0.5, mm(t1s), mm(sem))); find_keys(\"LX[IDR,FUSE[T1s,SEMp:t2]]\") = per file [idr, fuse, deg] (rank_eval's f2 key, not lex2 if lex2 puts the degree elsewhere: match rank_eval's key exactly). find_needs marks both `sem`. Neither name joins FIND_CANDIDATES here (FB.7d does).\n4. find.rs find_files_core: when opts.semantic is Some: qvec = source.query_vector(query); scores = file_scores; FindSignals.sem filled; the fallback (uncalibrated, `select` off, or a calibrated pick whose keys are unusable) is FIND_FILES_FUSED; with None, FIND_FILES_FUSION exactly as today. An embedder error drops to the no-semantic path with `reason=semantic_error` in the [find-files] line, never an Err. Rows: the files with a positive first or second key, as today (the blend is >= 0, so with vectors a file with a positive fuse key is a row: cut at top_k). FoundFile.sem = Some(raw max cosine rounded 4 dp) for each row when the tier ran.\n5. Markers: `[find-files] .. sem=<present|absent|error> sem_files=<f> sem_missing=<m>` appended (m = the index's missing node count); `[semantic] query model=<m> recipe=t2 dims=<d> ms=<t>` once per query_vector.\n6. Module docs: find.rs's find_files section names the fused order and when it applies; semantic/query.rs states that similarity alone orders nothing and presence stays lexical.\n7. Tests (engine/tests/find_files_fused.rs, glia_embed's test-hash embedder and a sidecar written by embed_repo): no SemanticSource -> rows and markers byte-identical to HEAD; with one, the fusion is FIND_FILES_FUSED and a file whose nodes match the query semantically but whose commit messages never mention it ranks into the rows; a hand-computed 3-file case pins FUSE's arithmetic (minmax, 0.5 blend, None filled with the lowest); ids still route first (an id-routed file stays rank 1); deterministic across two runs; FoundFile JSON without semantic unchanged.",
+   "acceptance": "`cargo test -p glia-engine --test find_files_fused --test find_files` (and every test that pinned DEFAULT_RECIPE) green; `cargo test -p glia-engine --lib semantic calibrate::fusions` green; clippy -D warnings clean; `bash scripts/rank-gate.sh check` passes (no gated ranker reads a SemanticSource yet, so every row diffs 0).",
+   "fired_on_marker": "[find-files] repo=<l> surface=<s> fusion=LX[IDR,FUSE[T1s,SEMp:t2]] .. sem=present sem_files=<f> sem_missing=<m>",
    "breaking": {
     "is_breaking": true,
     "kind": [
      "api_signature"
     ],
-    "what_changes": "New glia_engine::find::find_nodes_semantic and semantic::{SemanticQuery, SemanticTier, DEFAULT_SEMANTIC_TOP_K, DEFAULT_INLINE_MAX}; FoundNode gains `similarity` (skipped when None, so existing JSON is unchanged; a struct literal is already impossible: #[non_exhaustive]).",
-    "in_repo_consumers": [],
+    "what_changes": "FindFilesOptions.semantic, FoundFile.sem (skipped when None), find::FIND_FILES_FUSED, semantic::{SemanticSource, QUERY_PREFIX, FUSED_RECIPE}, VectorIndex::vector; DEFAULT_RECIPE t1 -> t2 (an existing t1 sidecar re-embeds on the next glia embed).",
+    "in_repo_consumers": [
+     "engine/tests/*"
+    ],
     "out_of_repo_consumers": [
-     "repo-graph (pins glia-py / crates exactly; its 0.5.3 -> 0.5.4 handoff, written by 0.5.4's release docs packet)"
+     "repo-graph (pins exactly; the 0.5.4 handoff)"
     ]
    },
    "depends_on": [
-    "FB.6",
+    "FB.6b",
     "FB.5a",
+    "FB.5b",
+    "FB.14",
     "EB.8",
     "EC.13"
    ],
-   "risks": "find.rs is edited by 0.5.3 EB.8 / EC.13 (find --files): land after both. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "risks": "find.rs and calibrate/fusions.rs carry 0.5.3's EB.8 / EC.13 / EG.7 seams (find_files_with, IntentHistory): keep their signatures; rank_eval calls them (FB.7c moves its call). The query embedding costs one model load per CLI call (GPU worker spawn or CPU session): measured in the [semantic] query line.",
    "batch": "FB",
    "fixtures": [],
    "spec_group": "FB"
   },
   {
    "id": "FB.7b",
-   "title": "find's semantic tier on the surfaces (only on PASS): `glia find` prints a `## semantic (heuristic)` section after the lexical rows or absence and `--json` gains `semantic`, `--no-semantic` / `--semantic-top-k`; `PyGraph.find(.., semantic=None)` adds the `semantic` key; default on when the repo's sidecar holds vectors of the build's model",
-   "area": "FB embeddings: find surfaces",
-   "loc": 300,
-   "rationale": "\u00a73 ruling 2: the semantic tier feeds find. The CLI's find answer is `{results, absence}` (cli/src/cmd/query/find.rs, LD.8a envelope; exit 1 on the absence) and PyGraph.find returns the Answer dict (py/src/find.rs, LD.2). A repo without `.glia/vectors.jsonl` must keep byte-identical output: the tier is on by default only when the sidecar has rows of the surface's model, so nothing changes for a repo that never ran glia embed. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "title": "The fused find --files on the surfaces: `glia find --files` and `PyGraph.find_files` load a SemanticSource when the repo's sidecar holds vectors of the surface model (`--no-semantic` / `semantic=False` turn it off), print a `sem` column and the fused `ranked by` line; output for a repo without vectors is byte-identical",
+   "area": "FB embeddings: find --files surfaces",
+   "loc": 280,
+   "rationale": "Spec rewritten 2026-10-25 after FB.6b's VERDICT: PASS (dev-notes/fusion-gate-0.5.4.md: F1 = FUSE[T1s,SEMp:t2] - T1s lo > 0 on 8 of 9, F2 = LX[IDR,FUSE[T1s,SEMp:t2]] - LX[IDR,T1s] lo > 0 on 8 of 9) and ruling FB-7-FUSED. The gate proved the BLEND for ranking FILES in the find shape; the semantic tier alone failed (FB.6) and node-level semantic rows were never measured, so no answer shows semantic node rows or orders by similarity alone. The CLI's find --files (cli/src/cmd/query/find.rs, EB.8 / EC.13) prints the routed-id table then `| # | file | idr | text | ids |` and `ranked by <pick> (..)`; PyGraph.find_files (py/src/find.rs) returns the Answer dict. A repo that never ran glia embed must see nothing change.",
    "entry_points": [
-    "cli/src/cmd/query/find.rs - flags `--no-semantic`, `--semantic-top-k <n>` (default 10), both `conflicts_with = \"files\"` (EB.8's `--files` already conflicts with kind / no_collapse / scope); the semantic section and JSON key",
-    "py/src/find.rs - PyGraph.find gains `semantic: Option<bool> = None` and `semantic_top_k: usize = 10` keywords appended after every existing keyword (positional order of existing arguments unchanged); the PyGraph holds one lazily loaded VectorIndex + embedder (`std::sync::OnceLock`, like PyGraph's `live` field at BASE) per graph"
+    "cli/src/cmd/query/find.rs - with `--files`: unless `--no-semantic`, load SemanticSource::load(merged, roots, surface_model(), glia_embed::named(surface_model())) and pass it in FindFilesOptions.semantic; `--no-semantic` requires `--files`",
+    "py/src/find.rs + py/src/graph.rs - PyGraph gains `pub(crate) semantic: OnceLock<Option<Arc<SemanticSource>>>`, loaded on first use from repo_roots (reusing py/src/embed.rs's process-wide bge_small() session, routed note FB.5c); find_files(query, top_k=20, semantic=None)"
    ],
    "files_touched": [
     "cli/src/cmd/query/find.rs",
@@ -1730,20 +1737,21 @@
     "cli/tests/find_cli.rs",
     "py/src/find.rs",
     "py/src/graph.rs",
+    "py/src/embed.rs",
     "py/api_surface/find.txt",
     "py/tests/surface/test_find.py",
     "README.md"
    ],
-   "implementation": "Acceptance precondition: only if FB.6's report says `VERDICT: PASS`.\n1. CLI: after building / loading the graph, unless `--no-semantic` or `--files` (EB.8's mode, which ranks files, untouched: `glia find --files` with `--no-semantic` / `--semantic-top-k` is a clap conflict; `--kind` / `--scope` are honoured by FB.7a): index = VectorIndex::load(merged, roots, MODEL_BGE_SMALL, DEFAULT_RECIPE); if index.stats().rows == 0 (no sidecar or no row of the model) the semantic tier is skipped entirely (output byte-identical to before); else embedder = glia_embed::named(\"bge-small\").ok() and find_nodes_semantic. Text: the lexical table or absence exactly as today, then `## semantic (heuristic: similarity, never a name match)` with `| # | similarity | kind | qname | file:line |` rows and the note line when present. --json: the envelope gains `\"semantic\": SemanticTier` only when the tier ran. Exit codes unchanged (1 on the lexical absence even with semantic rows: presence is lexical). `--semantic-top-k 0` = no semantic rows. Regenerate cli/surface/find.txt; README find usage line.\n2. py: PyGraph gains `pub(crate) semantic: OnceLock<Option<(VectorIndex, Option<Box<dyn Embedder>>)>>` (std::sync::OnceLock, the type py/src/graph.rs already uses for `live`; PyGraph also holds EA.7's `rank: Arc<RankCache>`, untouched here) (in py/src/graph.rs, loaded on first use from the PyGraph's repo_roots; invalidated nowhere since a PyGraph is immutable; a long-lived holder re-creates the PyGraph to see new vectors, documented). `semantic=None` = auto (on when rows exist), True = on (a missing sidecar gives the empty tier with its note), False = off. The returned dict gains `\"semantic\"` only when the tier ran. GIL released while embedding. Regenerate py/api_surface/find.txt; test_find.py pins the new keywords and keys.\n3. Surface model: both surfaces read FB.5a's `semantic::surface_model()` (env GLIA_EMBED_MODEL, default bge-small), load the index for that model's id and build that embedder (so offline tests use test-hash); step 1's MODEL_BGE_SMALL / named(\"bge-small\") are that function's default, not literals. Tests: cli/tests/find_cli.rs - with GLIA_EMBED_MODEL=test-hash and a sidecar written by `glia embed --model test-hash`, find prints the semantic section and exits 1 for a query with no lexical match; without a sidecar the output equals HEAD byte for byte; --no-semantic suppresses it. test_find.py the same through PyGraph.",
-   "acceptance": "Only if FB.6's report says PASS. `cargo test -p glia-cli --test find_cli --test readme_surface` and cli_surface (regenerated) green; `cargo test -p glia-py`, api_surface and test_find.py against a rebuilt wheel green; clippy clean. Manual on a glia copy after `glia embed .`: `glia find . 'where is the parse cache written'` prints the semantic section and `[find] semantic ...`.",
-   "fired_on_marker": "[find] semantic query=<q> model=<m> ... (from FB.7a) on every surface call that ran the tier",
+   "implementation": "1. CLI: the source loads only when the index holds rows of surface_model() (env GLIA_EMBED_MODEL, default bge-small; FB.5a); no rows -> no source, output byte-identical. An embedder that fails to load is a stderr `warning:` and the unfused answer (never exit 2). Text: the files table gains a `sem` column (4 dp) after `text` only when the tier ran; `ranked by` names the pick as today (it reads LX[IDR,FUSE[T1s,SEMp:t2]] uncalibrated). --json: FoundFile carries `sem`. Exit codes unchanged. Regenerate cli/surface/find.txt; README's find --files line names --no-semantic and the vectors condition.\n2. py: `semantic=None` = auto (on when the sidecar has rows), True = on (no rows: the unfused answer and the dict's `selection` reason says so), False = off; appended after top_k. The OnceLock holds None when there are no rows (no retry: a PyGraph is immutable; a holder re-creates it to see new vectors, documented). GIL released while embedding the query. Regenerate py/api_surface/find.txt; test_find.py pins the keyword and the `sem` key.\n3. Tests: cli/tests/find_cli.rs with GLIA_EMBED_MODEL=test-hash and a sidecar from `glia embed --model test-hash`: `find --files` prints the sem column and `ranked by LX[IDR,FUSE[T1s,SEMp:t2]]`; without a sidecar the output equals HEAD byte for byte; --no-semantic suppresses it; --no-semantic without --files is a clap error. test_find.py the same through PyGraph.",
+   "acceptance": "`cargo test -p glia-cli --test find_cli --test readme_surface` and cli_surface (regenerated) green; `cargo test -p glia-py`, api_surface and test_find.py against a rebuilt wheel green; clippy clean. Manual on a glia copy after `glia embed .`: `glia find . --files 'where is the parse cache written'` prints the sem column and the fused ranked-by line.",
+   "fired_on_marker": "[find-files] repo=<l> surface=cli|py fusion=<pick> .. sem=present ..",
    "breaking": {
     "is_breaking": true,
     "kind": [
      "cli_output",
      "api_signature"
     ],
-    "what_changes": "glia find gains --no-semantic / --semantic-top-k and, for a repo with vectors, a semantic section and JSON key; PyGraph.find gains semantic / semantic_top_k keywords and a `semantic` dict key; env GLIA_EMBED_MODEL picks the surface model.",
+    "what_changes": "glia find --files gains --no-semantic and, for a repo with vectors, a sem column, the fused order and FoundFile.sem in --json; PyGraph.find_files gains semantic=; env GLIA_EMBED_MODEL picks the model.",
     "in_repo_consumers": [
      "cli/surface/find.txt",
      "py/api_surface/find.txt",
@@ -1752,7 +1760,7 @@
      "README.md"
     ],
     "out_of_repo_consumers": [
-     "repo-graph (pins glia-py / crates exactly; its 0.5.3 -> 0.5.4 handoff, written by 0.5.4's release docs packet): find dicts may carry `semantic`; the wrapper should render it as its own section"
+     "repo-graph (pins exactly; the 0.5.4 handoff): find_files dicts may carry `sem`"
     ]
    },
    "depends_on": [
@@ -1760,64 +1768,117 @@
     "FB.5b",
     "FB.5c"
    ],
-   "risks": "py/src/graph.rs is the PyGraph struct shared with EA.7 (RankCache): land after EA.7. A held PyGraph does not see vectors written after it was built (documented; WatchSession snapshots are new PyGraphs). PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "risks": "py/src/graph.rs is PyGraph's struct (EA.7's RankCache field, FB.5c's embed session): add the field only. The query embed spawns the GPU worker per CLI call; a missing worker falls back to the CPU (fallback=no_worker).",
    "batch": "FB",
    "fixtures": [],
    "spec_group": "FB"
   },
   {
    "id": "FB.7c",
-   "title": "The rank gate measures the shipped semantic find (only on PASS): rank_eval's ANS:find reads the lexical rows then the semantic rows when `--sem on`, rank-gate.sh's COMMON flags gain `--sem on --sem-cache`, and ANS:find (already gated) is judged by `check` against both baselines and then ratcheted into baseline/current",
-   "area": "FB embeddings: gate coverage of the semantic tier",
-   "loc": 160,
-   "rationale": "The 0.5.3 gate contract: 'every ranking-change packet depends on EG.3 and names bash scripts/rank-gate.sh check' and EG.1's rows_to_keys contract (a packet that changes an answer's order switches its ANS ranker in the same packet). find's consumer-visible order with the tier on is lexical rows then semantic rows; ANS:find (engine/examples/rank_eval.rs ans_keys_find, find_nodes_with_live) must read that. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "title": "The rank gate measures the shipped fused find --files: rank_eval's ANS:find_files / ANS:find_files@sel pass the engine a SemanticSource built from the run's own node vectors, a parity check pins the engine's LX[IDR,FUSE[T1s,SEMp:t2]] keys to sem_keys_find's, rank-gate.sh builds with `--features sem-eval` and passes `--sem on --sem-cache`, then check and ratchet",
+   "area": "FB embeddings: gate coverage of the fused find",
+   "loc": 180,
+   "rationale": "Spec rewritten 2026-10-25 after FB.6b's VERDICT: PASS (dev-notes/fusion-gate-0.5.4.md: F1 = FUSE[T1s,SEMp:t2] - T1s lo > 0 on 8 of 9, F2 = LX[IDR,FUSE[T1s,SEMp:t2]] - LX[IDR,T1s] lo > 0 on 8 of 9) and ruling FB-7-FUSED. The gate proved the BLEND for ranking FILES in the find shape; the semantic tier alone failed (FB.6) and node-level semantic rows were never measured, so no answer shows semantic node rows or orders by similarity alone. The 0.5.3 gate contract (EG.1): a packet that changes an answer's order switches its ANS ranker in the same packet. ANS:find_files (engine/examples/rank_eval.rs, find_files_with) and ANS:find_files@sel are gated in gate.json `rankers.find`; with vectors their order is now the blend.",
    "entry_points": [
-    "engine/examples/rank_eval.rs - ans_keys_find: with SemCtx present, call find_nodes_semantic and feed rows_to_keys the lexical results then tier.rows",
-    "scripts/rank-gate.sh - the COMMON array gains `--sem on --sem-cache $DIR/sem` and the rank_eval build line gains `--features sem-eval` (snapshots.json, whose per-row `flags` carry only `--pre glia`, is not edited)",
-    "bench/rank-gate/README.md - item 13's gated ranker (ANS:find) and the semantic ANS:find's diff vs baseline/0.5.2; gate.json is not edited (RE-VERIFY (f7f9a495): ANS:find is already in gate.json `rankers.find` = [ANS:find, T1s, SELf2t, ANS:find_files, ANS:find_files@sel] and in every baseline/{0.5.2,current}/<label>.json, so `baseline-add` - which only adds columns a baseline lacks - does not apply; `items` keys 1-11 and `contrasts` stay 0.5.3's)"
+    "engine/examples/rank_eval.rs - with --sem on, ANS:find_files / @sel call find_files_with with FindFilesOptions.semantic = SemanticSource::from_index(VectorIndex::from_vectors(..t2 node vectors of SemCtx..), the run's embedder); `--engine-parity on` adds `[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q> key_mismatch=<k> order_mismatch=<o>` against sem_keys_find's key",
+    "engine/src/semantic/index.rs - `VectorIndex::from_vectors(merged, ids, vecs, model, recipe)` for in-memory use",
+    "scripts/rank-gate.sh - build rank_eval with `--features sem-eval` and add `--sem on --sem-cache $DIR/sem` to the common flags",
+    "bench/rank-gate/README.md - the fused ANS:find_files and its diff vs baseline/0.5.2"
    ],
    "files_touched": [
     "engine/examples/rank_eval.rs",
+    "engine/src/semantic/index.rs",
     "scripts/rank-gate.sh",
-    "bench/rank-gate/README.md"
+    "bench/rank-gate/README.md",
+    "bench/rank-gate/baseline"
    ],
-   "implementation": "Acceptance precondition: only if FB.6's report says `VERDICT: PASS`.\n1. ans_keys_find(ctx, subject): when ctx.sem is Some (FB.6's SemCtx, its node vectors for DEFAULT_RECIPE turned into a VectorIndex via a `VectorIndex::from_vectors(merged, ids, vecs, model, recipe)` constructor added to engine/src/semantic/index.rs for in-memory use), call find_nodes_semantic with top_k 0 lexical (as today) and DEFAULT_SEMANTIC_TOP_K semantic... use semantic top_k = 50 so recall@10 is not cut by the tier's display default (documented), inline_max 0; keys = rows_to_keys over lexical files then semantic files. Without --sem, unchanged.\n2. rank-gate.sh: build rank_eval with `--features sem-eval` and add `--sem on --sem-cache $DIR/sem` to the common flags; the model is downloaded by the first `run` into ~/.cache/glia/fastembed (README: network once; later runs are offline).\n3. ANS:find is an existing gated ranker, so EG.3's `baseline-add` (new rankers only) does not apply: run `bash scripts/rank-gate.sh check` (ANS:find judged against baseline/0.5.2 and baseline/current: `gain` or `same`, never `drop`), then `bash scripts/rank-gate.sh ratchet` so baseline/current holds the semantic ANS:find (EG.3's ratchet: the last green check's trims), and record the diff vs baseline/0.5.2 in bench/rank-gate/README.md. gate.json `items` is keyed by 0.5.3's scope items and is not edited (a 0.5.4 key would collide with 0.5.3's numbering); the README names item 13's gated ranker (ANS:find) instead.",
-   "acceptance": "Only if FB.6's report says PASS. `bash scripts/rank-gate.sh check` exits 0 with every non-find row diff 0 and ANS:find judged against the 0.5.2 baseline not `drop`; `bash scripts/rank-gate.sh ratchet` succeeds after that check; `bash scripts/rank-gate.sh coverage` still passes (items unchanged); rank_eval builds warning-free.",
-   "fired_on_marker": "[rank-gate] label=<l> shape=find ranker=ANS:find metric=r10 ... verdict=gain|same; [sem-eval] label=<l> ...",
+   "implementation": "1. rank_eval: the run's SemCtx t2 node vectors -> VectorIndex::from_vectors -> SemanticSource::from_index with the run's embedder (queries: the engine embeds QUERY_PREFIX + subject itself; the SemCache already holds that text's vector under the same key, so cache it through the embedder wrapper rank_eval uses, or accept one embed per query: document which). Without --sem, unchanged. The parity check: per test query, the engine's FIND_FILES_FUSED keys over the replay candidates equal sem_keys_find's LX[IDR,FUSE[T1s,SEMp:t2]] key (key_mismatch 0, order_mismatch 0) on every gate snapshot; a mismatch fails `--engine-parity`.\n2. rank-gate.sh: `--features sem-eval` on the rank_eval build, and `--sem on --sem-cache $DIR/sem` in COMMON. The model downloads once into ~/.cache/glia/fastembed (README: network once, then offline); build glia-embed-worker as embedding-gate.sh's fbuild does so the gate embeds on the GPU, the CPU when absent.\n3. Run `bash scripts/rank-gate.sh check` (ANS:find_files / @sel judged against baseline/0.5.2 and baseline/current: gain or same, never drop; every other row diff 0), then `bash scripts/rank-gate.sh ratchet`; record the diff in bench/rank-gate/README.md. gate.json is not edited (the rankers already exist).",
+   "acceptance": "`bash scripts/rank-gate.sh check` exits 0 with every non-find_files row diff 0 and ANS:find_files not `drop`; parity 0 / 0 on all six snapshots; `ratchet` succeeds after it; `coverage` passes; rank_eval builds warning-free with and without --features sem-eval.",
+   "fired_on_marker": "[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q> key_mismatch=0 order_mismatch=0",
    "breaking": {
     "is_breaking": false,
     "kind": [
      "none"
     ],
-    "what_changes": "Gate inputs and baselines (bench files); no product surface.",
+    "what_changes": "Gate inputs and baselines (bench files); VectorIndex::from_vectors.",
     "in_repo_consumers": [],
     "out_of_repo_consumers": []
    },
    "depends_on": [
     "FB.7a",
-    "FB.6",
+    "FB.7d",
     "EG.3",
     "EG.7"
    ],
-   "risks": "Every gate run now embeds query subjects (cached) and needs the model once. RE-VERIFY (f7f9a495): dev-notes/wave-runner/closeout.py runs `bash scripts/rank-gate.sh check` for every wave whose commits touch RANKED_PATHS (core/, code-domain/, graph/, parsers/, engine/, activation/, bench/rank-gate/, scripts/rank-gate.sh), so after this packet each such close-out builds rank_eval with `--features sem-eval` (the ORT fetch) and reads the model cache: the close-out host needs ~/.cache/glia/fastembed populated once (network) and `$GLIA_RANK_GATE_DIR/sem` kept; a missing model makes check exit 2, never a silent skip. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "risks": "dev-notes/wave-runner/closeout.py runs rank-gate.sh check for every wave touching RANKED_PATHS, so after this packet each such close-out builds with sem-eval and reads the model cache: ~/.cache/glia/fastembed and $GLIA_RANK_GATE_DIR/sem must persist; a missing model makes check exit 2, never a silent skip. The six gate snapshots embed once (cached after).",
+   "batch": "FB",
+   "fixtures": [],
+   "spec_group": "FB"
+  },
+  {
+   "id": "FB.7d",
+   "title": "Calibration measures the blend: with a SemanticSource, `glia history calibrate`'s replay embeds each find query (BGE-prefixed subject, one batched call) and SELf2t's candidates gain FUSE[T1s,SEMp:t2] and LX[IDR,FUSE[T1s,SEMp:t2]], so a repo where the blend loses keeps its old pick; a record calibrated with vectors is read only with vectors",
+   "area": "FB embeddings: calibrated selection of the blend",
+   "loc": 260,
+   "rationale": "Spec rewritten 2026-10-25 after FB.6b's VERDICT: PASS (dev-notes/fusion-gate-0.5.4.md: F1 = FUSE[T1s,SEMp:t2] - T1s lo > 0 on 8 of 9, F2 = LX[IDR,FUSE[T1s,SEMp:t2]] - LX[IDR,T1s] lo > 0 on 8 of 9) and ruling FB-7-FUSED. The gate proved the BLEND for ranking FILES in the find shape; the semantic tier alone failed (FB.6) and node-level semantic rows were never measured, so no answer shows semantic node rows or orders by similarity alone. James 2026-10-25 (\"F2 joins calibration (Recommended)\"): F2 vs SELf2t on the verdict panel was lo > 0 on 6 of 9 but -0.052 on AutoMapper and -0.046 on Alamofire, so F2 must be a calibrated candidate, not an override (unlike pack's EC-9b). The replay (engine/src/calibrate/replay.rs, step.rs) already runs the find shape's T1s / IDR per test commit leak-free; the node vectors are the sidecar's at HEAD, as rank_eval's gate used the pinned rev's, so the replay matches the gate.",
+   "entry_points": [
+    "engine/src/calibrate/sets.rs - `pub const FIND_CANDIDATES_SEM: [&str; 13]` = FIND_CANDIDATES then FUSE[T1s,SEMp:t2], LX[IDR,FUSE[T1s,SEMp:t2]]; the set's candidate digest is computed over whichever list was calibrated",
+    "engine/src/calibrate/step.rs - CalibrateOptions gains `pub semantic: Option<Arc<SemanticSource>>`; the find group embeds every test commit's prefixed subject once (one embedder call, batched by the embedder), fills FindSignals.sem per query from SemanticSource::file_scores",
+    "engine/src/find.rs - find_files_core selects over FIND_CANDIDATES_SEM when opts.semantic is Some, FIND_CANDIDATES otherwise",
+    "cli/src/cmd/inputs/history.rs - `history calibrate` loads a SemanticSource (FB.7b's loader rule: only when the sidecar holds rows of the surface model; `--no-semantic`) and passes it; py `history_calibrate(.., semantic=None)`"
+   ],
+   "files_touched": [
+    "engine/src/calibrate/sets.rs",
+    "engine/src/calibrate/step.rs",
+    "engine/src/calibrate/replay.rs",
+    "engine/src/calibrate/record.rs",
+    "engine/src/find.rs",
+    "engine/tests/calibrate_fused.rs",
+    "cli/src/cmd/inputs/history.rs",
+    "cli/surface/history.txt",
+    "py/src/snapshots.rs",
+    "py/api_surface/snapshots.txt",
+    "py/tests/surface/test_snapshots.py"
+   ],
+   "implementation": "1. sets.rs: FIND_CANDIDATES_SEM as above. A record row for SELf2t stores its candidate digest as today; the digest of the 13-list differs from the 11-list's, so select() refuses a mismatched record with its existing reason (`candidates_changed` or whatever record.rs names it): a record calibrated with vectors read by a call without them, or the reverse, falls back with that reason, never a wrong pick. RANKER_REVISION is not bumped (the 11-list's digest is unchanged, so 0.5.3 records keep reading without vectors).\n2. step.rs / replay.rs: when CalibrateOptions.semantic is Some and the find group runs: before the query loop, embed `QUERY_PREFIX + subject` of every test commit in one call (texts deduplicated), then per query file_scores over the replay's candidates and FindSignals.sem filled as FB.7a does; candidates FIND_CANDIDATES_SEM. Training data never sees a test commit (the vectors are node texts at HEAD, the subject is the test commit's own: the gate's design). Without semantic: byte-identical to HEAD.\n3. Markers: `[calibrate] semantic queries=<q> embedded=<e> ms=<t> model=<m>` once when the tier runs; the per-row `[calibrate] set=SELf2t ..` line unchanged in form (its candidates count grows to 13).\n4. Surfaces: cli `history calibrate` gains `--no-semantic` and loads the source as FB.7b's find does (surface_model, the sidecar's rows); py history_calibrate gains `semantic: Option<bool> = None` (auto / on / off) appended last, the GIL released. Regenerate cli/surface/history.txt and py/api_surface/snapshots.txt (check which py module owns history_calibrate with grep; move the paths if it is another file).\n5. Tests (engine/tests/calibrate_fused.rs, test-hash embedder): a synthetic history where commit subjects never name the touched files but node texts do -> the SELf2t pick is one of the fused names; the same with semantic None -> HEAD's record byte for byte; a record written with vectors read without them falls back with the digest reason, and the reverse; determinism across two runs.",
+   "acceptance": "`cargo test -p glia-engine --test calibrate_fused` and the existing calibrate tests green; cli_surface and py api_surface regenerated and green; clippy clean; `bash scripts/rank-gate.sh check` passes (the gate's SELf2t replay gets no SemanticSource until FB.7c).",
+   "fired_on_marker": "[calibrate] semantic queries=<q> embedded=<e> ms=<t> model=<m>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "api_signature",
+     "cli_output"
+    ],
+    "what_changes": "CalibrateOptions.semantic; calibrate::FIND_CANDIDATES_SEM; `glia history calibrate --no-semantic`; py history_calibrate(.., semantic=None); a repo calibrated with vectors records a 13-candidate SELf2t row.",
+    "in_repo_consumers": [
+     "cli/surface/history.txt",
+     "py/api_surface"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph (pins exactly; the 0.5.4 handoff)"
+    ]
+   },
+   "depends_on": [
+    "FB.7a",
+    "FB.7b"
+   ],
+   "risks": "record.rs's digest check is the guard against reading a pick whose candidate is unavailable: read it before relying on the reason name. The replay embeds up to 300 queries per calibrate (one batched call; GPU ~30/s, CPU ~8/s at 512 tokens, but subjects are short). Depends on FB.7b for the py embedder handle (py/src/embed.rs) and the CLI loader shape: reuse both, never a second model session.",
    "batch": "FB",
    "fixtures": [],
    "spec_group": "FB"
   },
   {
    "id": "FB.8",
-   "title": "pack's semantic fallback (\u00a73 ruling 2, only on PASS): when find matches nothing by name, pack seeds from the top semantic hits, each seed tier `heuristic`, `matched = \"semantic\"` with its similarity, and the pack keeps find's lexical absence as `seed_absence`; never otherwise",
+   "title": "pack's fused fallback: when find matches nothing by name and a SemanticSource is present, pack seeds from the blend's top files (LX[IDR,FUSE[T1s,SEMp:t2]], find --files' order), each seed the file's best-matching node by cosine, tier `heuristic`, `matched = \"semantic\"` with its similarity, and the pack keeps find's lexical absence as `seed_absence`; never otherwise",
    "area": "FB embeddings: pack fallback",
-   "loc": 300,
-   "rationale": "\u00a73 ruling 2: 'pack as a fallback only (seeds only when nothing matches by name, each labelled HEURISTIC with its similarity). Blast-radius never seeds from vectors.' engine/src/pack.rs step 1: seeds come from find_nodes; 'No row: an empty pack carrying find's own absence (LD.8a)'. That empty case is the only one the fallback changes. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "loc": 280,
+   "rationale": "Spec rewritten 2026-10-25 after FB.6b's VERDICT: PASS (dev-notes/fusion-gate-0.5.4.md: F1 = FUSE[T1s,SEMp:t2] - T1s lo > 0 on 8 of 9, F2 = LX[IDR,FUSE[T1s,SEMp:t2]] - LX[IDR,T1s] lo > 0 on 8 of 9) and ruling FB-7-FUSED. The gate proved the BLEND for ranking FILES in the find shape; the semantic tier alone failed (FB.6) and node-level semantic rows were never measured, so no answer shows semantic node rows or orders by similarity alone. Section 3 ruling 2: pack uses vectors as a fallback only, when nothing matches by name, each seed HEURISTIC; blast-radius never seeds from vectors. engine/src/pack.rs step 1 seeds from find_nodes; its empty case returns an empty pack with find's absence (LD.8a). That case is the only one this changes, and it seeds through the gated file order rather than raw similarity.",
    "entry_points": [
-    "engine/src/pack.rs - PackArgs gains `pub semantic: Option<Arc<SemanticSource>>` (None default: HEAD behaviour); pack(): the empty-find branch",
-    "engine/src/semantic/query.rs - `pub struct SemanticSource { index: VectorIndex, embedder: Option<Box<dyn Embedder>> }` (shareable by CLI / py / watch)",
-    "cli/src/cmd/query/pack.rs - `--no-semantic`; py/src/pack.rs - `semantic=None`"
+    "engine/src/pack.rs - PackArgs gains `pub semantic: Option<Arc<SemanticSource>>` (None: HEAD behaviour); the empty-find branch",
+    "cli/src/cmd/query/pack.rs - `--no-semantic`, loading as FB.7b; py/src/pack.rs - `semantic=None` on pack only, reusing FB.7b's PyGraph OnceLock"
    ],
    "files_touched": [
     "engine/src/pack.rs",
-    "engine/src/semantic/query.rs",
     "engine/tests/pack_semantic.rs",
     "cli/src/cmd/query/pack.rs",
     "cli/surface/pack.txt",
@@ -1826,8 +1887,8 @@
     "py/api_surface/pack.txt",
     "py/tests/surface/test_pack.py"
    ],
-   "implementation": "Acceptance precondition: only if FB.6's report says `VERDICT: PASS`.\n1. pack(merged, query, args): unchanged when find returns any row. When it returns none and args.semantic is Some: run the semantic search (find_nodes_semantic's tier with top_k = args.seeds, inline as FB.7a) and, if it yields rows, use them as seeds in similarity order, each seed tier `heuristic`, PackedNode.matched = Some(\"semantic\"), PackedNode gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub similarity: Option<f64>`; Pack gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub seed_absence: Option<Absence>` = find's lexical absence (so the pack says nothing matched by name), while `absence` stays None because the pack has nodes. Everything after the seeds (PPR, climb, render) is unchanged, and so is `Pack.selection` (RE-VERIFY (f7f9a495): since EC.9b, 51663465, pack / pack_ids never read the calibration record: selection.source is `fallback` with reason `pack_uncalibrated` for the default ranking or `explicit` for a passed one, and PackArgs has no `select`; the semantic fallback picks seeds only and leaves that field as it is). pack_ids (explicit seeds) never uses the fallback. Module doc step 1 gains the fallback paragraph.\n2. Marker: the `[pack] query=..` line gains ` seeds_from=find|semantic|none` (always printed: `find` at HEAD's paths, so the line moves; declared).\n3. Surfaces: CLI pack loads a SemanticSource like find (FB.7b's rules: only when the sidecar holds rows of the surface model; `--no-semantic`); the rendered pack's title line notes `(seeded by similarity: nothing matches by name)` when seeds_from=semantic. py PyGraph.pack / pack_ids: `semantic: Option<bool> = None` keyword appended last on pack only, reusing FB.7b's PyGraph `semantic` OnceLock. Regenerate both surfaces.\n4. Tests (engine/tests/pack_semantic.rs, HashEmbedder fixture): a query with a name match packs exactly as without semantic (byte-identical Pack JSON); a query with none and a sidecar seeds by similarity (tier heuristic, matched semantic, similarity set, seed_absence = no_match); no sidecar -> the HEAD empty pack with its absence; pack_ids ignores semantic; blast_radius has no semantic input (assert BlastOptions has no such field - a compile-time fact, noted in the module doc instead of a test).",
-   "acceptance": "Only if FB.6's report says PASS. `cargo test -p glia-engine --test pack_semantic` plus the existing pack tests green; cli pack tests, cli_surface, py api_surface and test_pack.py green; `bash scripts/rank-gate.sh check` passes (ANS:pack seeds by ids: unchanged).",
+   "implementation": "1. pack(merged, query, args): unchanged when find returns any row. When it returns none and args.semantic is Some and the merge is one repo (find_files ranks one repo): run find::find_files with FindFilesOptions { semantic, top_k: args.seeds, rank_cache: args.rank_cache, select: true } over the pack's repo root; for each returned file in order, the seed is that file's node with the highest cosine to the query (SemanticSource's vectors; ties by qname, then NodeId), skipping files with no embedded node. Each seed: tier `heuristic`, PackedNode.matched = Some(\"semantic\"), PackedNode gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub similarity: Option<f64>`; Pack gains `#[serde(skip_serializing_if = \"Option::is_none\")] pub seed_absence: Option<Absence>` = find's lexical absence, while `absence` stays None because the pack has nodes. No files or no seeds -> the HEAD empty pack with its absence. Everything after the seeds (PPR, climb, render, Pack.selection: pack_uncalibrated / explicit since EC.9b) is unchanged. pack_ids never uses the fallback. Module doc step 1 gains the fallback paragraph (and states blast_radius has no semantic input).\n2. Marker: the `[pack] query=..` line gains ` seeds_from=find|semantic|none` (always printed: declared cli_output move).\n3. Surfaces: CLI pack loads a SemanticSource like FB.7b (only with sidecar rows; `--no-semantic`); the rendered title line notes `(seeded by the fused file order: nothing matches by name)` when seeds_from=semantic. py PyGraph.pack: `semantic: Option<bool> = None` appended last (not pack_ids). Regenerate both surfaces.\n4. Tests (engine/tests/pack_semantic.rs, test-hash embedder + sidecar): a query with a name match packs byte-identically with or without semantic; a query with none seeds from the fused files (tier heuristic, matched semantic, similarity set, seed_absence = no_match); no sidecar -> the HEAD empty pack; pack_ids ignores semantic; a multi-repo merge never falls back.",
+   "acceptance": "`cargo test -p glia-engine --test pack_semantic` plus the existing pack tests green; cli pack tests, cli_surface, py api_surface and test_pack.py green; clippy clean; `bash scripts/rank-gate.sh check` passes (ANS:pack seeds by ids: unchanged).",
    "fired_on_marker": "[pack] query=<q> seeds=<S> ... seeds_from=find|semantic|none",
    "breaking": {
     "is_breaking": true,
@@ -1835,7 +1896,7 @@
      "api_signature",
      "cli_output"
     ],
-    "what_changes": "PackArgs.semantic, PackedNode.similarity, Pack.seed_absence (skipped when None); the [pack] marker gains seeds_from; glia pack --no-semantic; PyGraph.pack semantic keyword; a pack for a query with no name match is no longer empty when the repo has vectors.",
+    "what_changes": "PackArgs.semantic, PackedNode.similarity, Pack.seed_absence (skipped when None); the [pack] marker gains seeds_from; glia pack --no-semantic; PyGraph.pack semantic=; a pack for a query with no name match is no longer empty when the repo has vectors.",
     "in_repo_consumers": [
      "cli/surface/pack.txt",
      "py/api_surface/pack.txt",
@@ -1843,7 +1904,7 @@
      "tests grepping `[pack] query=`"
     ],
     "out_of_repo_consumers": [
-     "repo-graph (pins glia-py / crates exactly; its 0.5.3 -> 0.5.4 handoff, written by 0.5.4's release docs packet)"
+     "repo-graph (pins exactly; the 0.5.4 handoff)"
     ]
    },
    "depends_on": [
@@ -1852,7 +1913,7 @@
     "EA.6",
     "EC.9"
    ],
-   "risks": "pack.rs is edited by 0.5.3 EA.6 / EA.6b / EC.9 / EC.9b (rank cache, co-changed file lift, then calibration removed from pack): all landed at f7f9a495; PackArgs at BASE is {budget_tokens, seeds, candidates, preset, scope, ranking, rank_cache: Option<Arc<RankCache>>}, so `semantic: Option<Arc<SemanticSource>>` follows rank_cache's form. PASS rule and report: FB.6. A (b) packet whose acceptance starts 'only if FB.6's report says PASS' is scheduled by the integrator after FB.6; on FAIL it does not land and FB.6's report records that `glia embed` ships as a sidecar no answer reads (item 13).",
+   "risks": "pack.rs carries FB.11's notes field and marker change (routed note: rebase on e6999de7's form). find_files errs on a multi-repo merge: guard before calling.",
    "batch": "FB",
    "fixtures": [],
    "spec_group": "FB"
@@ -9745,7 +9806,8 @@
   "MAC-10.15": "James 2026-10-25 (\"Raise to 10.15 (Recommended)\"): the x86_64 macOS glia-py wheel targets macOS 10.15 (was 10.12) so it ships embeddings like every wheel (FB-3); applied in FB.14.",
   "INTEL-MAC-NO-EMBED": "James 2026-10-25 (\"Intel Mac: no embed (Recommended)\"), after FB.14's first run found no ONNX Runtime >= 1.24 prebuilt for x86_64-apple-darwin (ort-sys rc.12 / rc.13 / rc.15 ship none; Microsoft stopped onnxruntime-osx-x86_64 after 1.23.2; fastembed 6 needs api-24): the GPU default (fastembed 6 / ort rc.13 WebGPU) ships everywhere else, and the Intel-Mac CLI and glia-py wheels ship without embeddings (`glia embed` / glia_py.embed refuse with 'not available on Intel macOS'). Supersedes MAC-10.15: the Intel-Mac wheel stays at MACOSX_DEPLOYMENT_TARGET 10.12.",
   "MAC-ARM-13.4": "James 2026-10-25 (\"Raise to macOS 13.4 (Recommended)\"): the aarch64 macOS glia-py and glia-cli wheels target MACOSX_DEPLOYMENT_TARGET 13.4 (was 11.0; tag macosx_13_4_arm64), because ORT 1.28's aarch64-apple-darwin prebuilts and libwebgpu_dawn.dylib are built for minos 13.4 (FB.14). Applied by the orchestrator in wheels-py.yml / wheels-cli.yml.",
-  "FB-6b-PANEL": "James 2026-10-25 (\"So go find the fusion gate repos to test on now\", then \"yes go for it\"): FB.6b's verdict runs now on nine repos, pinned in bench/rank-gate/fusion-preview.json before the run: commons-lang and commons-io forward windows (--test-after FB.6's rev; 1581 / 1465 test-eligible commits after it) and seven fresh public repos never in any panel (guzzle php, zod typescript, okhttp kotlin, sttp scala, AutoMapper csharp, jq c, Alamofire swift), each >= 300 test-eligible. glia, shell, websocket and samples (24..88 commits after FB.6's revs) and httpx / sinatra / plug (0 after the preview's) are out. The rule (R1 ceil(5n/6), R2 ceil(n/2), n = 9) is unchanged."
+  "FB-6b-PANEL": "James 2026-10-25 (\"So go find the fusion gate repos to test on now\", then \"yes go for it\"): FB.6b's verdict runs now on nine repos, pinned in bench/rank-gate/fusion-preview.json before the run: commons-lang and commons-io forward windows (--test-after FB.6's rev; 1581 / 1465 test-eligible commits after it) and seven fresh public repos never in any panel (guzzle php, zod typescript, okhttp kotlin, sttp scala, AutoMapper csharp, jq c, Alamofire swift), each >= 300 test-eligible. glia, shell, websocket and samples (24..88 commits after FB.6's revs) and httpx / sinatra / plug (0 after the preview's) are out. The rule (R1 ceil(5n/6), R2 ceil(n/2), n = 9) is unchanged.",
+  "FB-7-FUSED": "James 2026-10-25 (\"Nah let's do the 1140 stuff now it's a pre Friday work\"; \"F2 joins calibration (Recommended)\"): after FB.6b's PASS the held track TS is re-specced in fused form and built now: FB.7a the engine's fused find --files (DEFAULT_RECIPE t2), FB.7d the blend as two SELf2t candidates measured by calibration, FB.7b the CLI / py surfaces, FB.7c the rank gate on the fused order, FB.8 pack's fallback seeded from the fused files. No answer shows semantic node rows or orders by similarity alone; presence stays lexical; a repo without vectors answers exactly as 0.5.3."
  },
  "reverify": {
   "f7f9a495": {
