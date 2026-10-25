@@ -162,8 +162,9 @@ tree:
   `GLIA_RANK_PRIVATE` removed, `GLIA_THREADS` from the config, and PATH = (`DIR/bin/<arm>` for
   a glia arm) + `DIR/bin/deny` (shims `glia`, `mcp-repo-graph`, `repo-graph` that print
   `<name>: command not found` and exit 127) + the caller's PATH. Auth comes only from
-  `ANTHROPIC_API_KEY` (metered) or `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`,
-  subscription); run.py refuses to start without one and records which (`auth`), never the value.
+  `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`, subscription; ruling FE-3): run.py refuses to
+  start without it, and refuses when `ANTHROPIC_API_KEY` (metered) is set at all; it records
+  `auth=oauth_token`, never the value.
 - The session: `claude -p <prompt> --model <m> --output-format stream-json --verbose
   --mcp-config empty-mcp.json --strict-mcp-config --setting-sources project --permission-mode
   bypassPermissions --max-turns <n> --disallowedTools <each>`, cwd the copy, the stream in
@@ -199,7 +200,14 @@ tree:
   (`[agent-ab] budget stop spent=<usd>`), resumable with a raised `--max-usd`.
 - `pilot` runs the first task of each repo under every arm once, then prints
   `[agent-ab] pilot sessions=<n> usd=<sum> median_usd=<m> est_full_usd=<m x tasks x arms x runs>
-  est_hours=<median (wall + prep) x sessions>` and stops; the full run is `run.py run --run-id
+  est_hours=<median (wall + prep) x sessions> <usage>` and stops, where `<usage>` is the
+  subscription's window share read from `~/.claude/rate-limits.json` (`GLIA_RATE_LIMITS`
+  overrides the path) before and after: `five_hour_pct=<a>-><b> seven_day_pct=<a>-><b>
+  est_full_seven_day_pct=<7-day delta / sessions x full sessions> est_full_weeks=<that / 100>`.
+  The statusline rewrites that file only while an interactive session renders, so keep one open
+  during the pilot; a file not refreshed since the pilot began reads `usage=unknown
+  reason=rate_limits_not_refreshed` (`reason=no_rate_limits_file` when absent). usd is
+  `total_cost_usd`, the list-price equivalent, not a charge; the full run is `run.py run --run-id
   <the pilot's id>` (the pilot's sessions count as rep 1), started only after James approves the
   estimate.
 

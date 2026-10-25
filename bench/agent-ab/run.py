@@ -235,12 +235,43 @@ def arm_metas(cfg, d, glia_repo):
 
 # --- the environment ---------------------------------------------------------
 def auth_kind(environ):
+    """Ruling FE-3: subscription usage only. A set ANTHROPIC_API_KEY (metered billing)
+    refuses the run, even beside a token."""
     if environ.get("ANTHROPIC_API_KEY"):
-        return "api_key"
+        raise RunError("refused: ANTHROPIC_API_KEY is set; the agent A/B runs on the "
+                       "subscription only (ruling FE-3): unset it and set "
+                       "CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`)")
     if environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         return "oauth_token"
-    raise RunError("refused: set ANTHROPIC_API_KEY (metered) or CLAUDE_CODE_OAUTH_TOKEN "
-                   "(`claude setup-token`, subscription) in the environment")
+    raise RunError("refused: set CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`, "
+                   "subscription) in the environment")
+
+
+def usage_windows(environ):
+    """The subscription's window shares from the statusline's rate-limits file:
+    (updated, five_hour %, seven_day %), or None when it is absent or unreadable."""
+    path = Path(environ.get("GLIA_RATE_LIMITS")
+                or Path(environ.get("HOME", "~")).expanduser() / ".claude" / "rate-limits.json")
+    lim = read_json(path)
+    try:
+        return (lim["updated"], lim["five_hour"]["used_percentage"],
+                lim["seven_day"]["used_percentage"])
+    except (TypeError, KeyError):
+        return None
+
+
+def usage_line(before, after, sessions, total):
+    """The pilot's window share and its full-run estimate (ruling FE-3). The file is
+    rewritten only when an interactive session's statusline renders, so a file not
+    refreshed since the pilot started reads `unknown`."""
+    if before is None or after is None:
+        return "usage=unknown reason=no_rate_limits_file"
+    if after[0] <= before[0]:
+        return f"usage=unknown reason=rate_limits_not_refreshed updated={after[0]}"
+    d5, d7 = after[1] - before[1], after[2] - before[2]
+    per = d7 / sessions if sessions else 0.0
+    return (f"five_hour_pct={before[1]}->{after[1]} seven_day_pct={before[2]}->{after[2]} "
+            f"est_full_seven_day_pct={per * total:.0f} est_full_weeks={per * total / 100:.1f}")
 
 
 def check_claude_version(cfg):
@@ -796,6 +827,7 @@ def cmd_run(a, cfg, d, pilot=False):
                 only.add(task["id"])
     plan = schedule(task_list, arms, 1 if pilot else cfg["runs"], only)
     max_usd = cfg["max_usd"] if a.max_usd is None else a.max_usd
+    usage_before = usage_windows(os.environ)
     try:
         drive(ctx, plan, max_usd)
     except Stop as e:
@@ -809,7 +841,8 @@ def cmd_run(a, cfg, d, pilot=False):
         total = len(task_list) * len(arms) * cfg["runs"]
         hours = (statistics.median(walls) if walls else 0) * total / 3.6e6
         log(f"[agent-ab] pilot sessions={len(rows)} usd={sum(costs):.2f} median_usd={med:.4f} "
-            f"est_full_usd={med * total:.2f} est_hours={hours:.1f}")
+            f"est_full_usd={med * total:.2f} est_hours={hours:.1f} "
+            f"{usage_line(usage_before, usage_windows(os.environ), len(rows), total)}")
         log(f"[agent-ab] full run: python3 run.py run --run-id {run_id}")
     return 0
 

@@ -198,7 +198,7 @@ class World:
                     "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
                     "CLAUDE_CODE_OAUTH_TOKEN": "test-token", "CLAUDECODE": "1",
                     "FAKE_CLAUDE_SCENARIO": str(self.scenario), "FAKE_CLAUDE_LOG": str(self.log),
-                    "ANTHROPIC_API_KEY": None, "CLAUDE_CONFIG_DIR": None,
+                    "ANTHROPIC_API_KEY": None, "CLAUDE_CONFIG_DIR": None, "GLIA_RATE_LIMITS": None,
                     "FAKE_CLAUDE_VERSION": None, "FAKE_GLIA_FAIL": None}
 
     def set_scenario(self, scen):
@@ -313,7 +313,11 @@ def test_refusals():
     with world() as w:
         assert w.main("binaries")[0] == 0
         rc, out = w.main("isolation", CLAUDE_CODE_OAUTH_TOKEN=None)
-        assert rc == 2 and "refused: set ANTHROPIC_API_KEY" in out, out
+        assert rc == 2 and "refused: set CLAUDE_CODE_OAUTH_TOKEN" in out, out
+        rc, out = w.main("isolation", ANTHROPIC_API_KEY="sk-test")
+        assert rc == 2 and "ANTHROPIC_API_KEY is set" in out and "FE-3" in out, out
+        rc, out = w.main("isolation", ANTHROPIC_API_KEY="sk-test", CLAUDE_CODE_OAUTH_TOKEN=None)
+        assert rc == 2 and "ANTHROPIC_API_KEY is set" in out, out
         rc, out = w.main("isolation", FAKE_CLAUDE_VERSION="9.9.9 (Claude Code)")
         assert rc == 2 and "claude --version" in out, out
         rc, out = w.main("pilot")
@@ -357,6 +361,7 @@ def test_pilot_then_resume():
         assert [c["arm"] for c in calls] == ["none", "g052", "g053", "g053", "none", "g052"], calls
         assert ("[agent-ab] pilot sessions=6 usd=6.00 median_usd=1.0000 est_full_usd=9.00"
                 in out), out
+        assert "usage=unknown reason=no_rate_limits_file" in out, out
         first = calls[0]
         assert first["config_dir"] == str(w.cache / "claude-config" / "p1")
         assert first["config_entries"] == [], first
@@ -474,6 +479,34 @@ def test_timeout_and_prep_failed():
         assert {c["arm"] for c in w.calls()} == {"none", "g052"}
 
 
+
+def test_usage_windows_and_line():
+    with tempfile.TemporaryDirectory() as t:
+        f = Path(t) / "rl.json"
+        env = {"GLIA_RATE_LIMITS": str(f)}
+        assert run.usage_windows(env) is None
+        f.write_text(json.dumps({"updated": 100, "five_hour": {"used_percentage": 10},
+                                 "seven_day": {"used_percentage": 60}}))
+        before = run.usage_windows(env)
+        assert before == (100, 10, 60)
+        f.write_text("{not json")
+        assert run.usage_windows(env) is None
+        home = Path(t) / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "rate-limits.json").write_text(json.dumps(
+            {"updated": 200, "five_hour": {"used_percentage": 14},
+             "seven_day": {"used_percentage": 62}}))
+        after = run.usage_windows({"HOME": str(home)})
+        assert after == (200, 14, 62)
+    # 6 pilot sessions moved 7-day by 2 points; the full run is 180 sessions
+    assert run.usage_line(before, after, 6, 180) == (
+        "five_hour_pct=10->14 seven_day_pct=60->62 est_full_seven_day_pct=60 "
+        "est_full_weeks=0.6")
+    assert run.usage_line(before, before, 6, 180) == \
+        "usage=unknown reason=rate_limits_not_refreshed updated=100"
+    assert run.usage_line(None, after, 6, 180) == "usage=unknown reason=no_rate_limits_file"
+
+
 def main():
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -492,3 +525,4 @@ def main():
 if __name__ == "__main__":
     shutil.which("git") or sys.exit("git is required")
     sys.exit(main())
+
