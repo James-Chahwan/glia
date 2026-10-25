@@ -83,29 +83,18 @@ fn several_qnames_are_one_radius() {
         .filter_map(|s| s["qname"].as_str())
         .collect();
     assert_eq!(seeds, ["app::save", "app::publish"], "{v}");
-    assert_eq!(v["unresolved"], serde_json::json!([]), "{v}");
-    assert!(v["absence"].is_null(), "{v}");
     // EA.5: the answer's keys (sorted: serde_json without preserve_order)
     // gain `files`, the measured file ranking, and (EC.8) `selection`, the
     // ranking that ordered the rows; the seeds' own file is never listed.
+    // FH.8: the empty `unresolved` and `files`, the null `absence` and an
+    // uncut answer's `truncated` are left out.
     let keys: Vec<&str> = v
         .as_object()
         .expect("object")
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys,
-        [
-            "absence",
-            "files",
-            "results",
-            "seeds",
-            "selection",
-            "unresolved"
-        ],
-        "{v}"
-    );
+    assert_eq!(keys, ["results", "seeds", "selection"], "{v}");
     assert_eq!(
         v["selection"]["shape"], "k1",
         "both seeds are in app.py: {v}"
@@ -113,9 +102,7 @@ fn several_qnames_are_one_radius() {
     assert!(
         v["files"]
             .as_array()
-            .expect("files")
-            .iter()
-            .all(|f| f["file"] != "app.py"),
+            .is_none_or(|f| f.iter().all(|f| f["file"] != "app.py")),
         "{v}"
     );
     let rows = v["results"].as_array().expect("results");

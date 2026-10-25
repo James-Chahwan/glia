@@ -1,9 +1,9 @@
 //! **blast_radius** (P3, LD.5): the ranked, located closure around one or
 //! more nodes, as one walk and one ranking.
 
-use glia_engine::BlastOptions;
 use glia_engine::identity::Collapse;
 use glia_engine::rank::Ranking;
+use glia_engine::{BlastOptions, DEFAULT_ANSWER_ROWS, answer_json};
 use glia_graph::Reach;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -20,6 +20,18 @@ impl PyGraph {
     /// `str`) or a `list` of them: many seeds are ONE walk and ONE PPR, so
     /// every score comes from the same run, each node's `depth` counts from
     /// the nearest seed, and no seed is ever a row.
+    ///
+    /// FH.8, the row cap: `top_k` (default `None` = 200,
+    /// `glia_engine::DEFAULT_ANSWER_ROWS`) keeps the first K rows and the
+    /// first K seeds after the ranking, and a cut answer carries `truncated`
+    /// `{results, seeds}` (the rows and seeds left out); `full=True` keeps
+    /// every one (and refuses a `top_k` with ValueError). The dict leaves out
+    /// null, empty and default fields: `unresolved` / `files` when empty,
+    /// `absence` when `None` (so present exactly when `results` is empty),
+    /// `truncated` when nothing was cut, a row's `file` / `line` when null, a
+    /// seed's `query` when it equals its `qname`, its `file` / `line` when
+    /// null and `linked_seeds` when empty. stderr: `[answer-size]
+    /// surface=blast_radius rows=<r> shown=<k> bytes=<b>`.
     ///
     /// Returns a dict `{seeds, unresolved, results, absence}`:
     /// - `seeds`: one per distinct node, `{query, id, qname, kind, file,
@@ -77,7 +89,7 @@ impl PyGraph {
     /// never overridden. The dict gains `selection` `{set, shape, pick,
     /// source, reason, test_commits}` (`source` `calibrated`, `fallback` or
     /// `explicit`) whenever a seed resolved.
-    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking=None, cochange=true, top_files=10))]
+    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking=None, cochange=true, top_files=10, full=false))]
     #[allow(clippy::too_many_arguments)]
     fn blast_radius(
         &self,
@@ -92,7 +104,9 @@ impl PyGraph {
         ranking: Option<&str>,
         cochange: bool,
         top_files: usize,
+        full: bool,
     ) -> PyResult<Py<PyAny>> {
+        let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
         let (ranking, select) =
             ranking_selected(ranking, cochange).map_err(PyValueError::new_err)?;
         let queries = seed_queries(qnames)?;
@@ -113,7 +127,28 @@ impl PyGraph {
         };
         let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
         let answer = glia_engine::blast_radius(&self.merged, &queries, &opts);
-        to_py(py, serde_json::to_string(&answer))
+        to_py(
+            py,
+            answer_json(
+                "blast_radius",
+                &answer,
+                answer.rows_total(),
+                answer.results.len(),
+            ),
+        )
+    }
+}
+
+/// FH.8: the engine's `top_k` from the `top_k=` / `full=` keywords: `full`
+/// keeps every row (`None`), else `top_k` or [`DEFAULT_ANSWER_ROWS`]; both
+/// at once is an `Err` naming the conflict.
+pub(crate) fn row_cap(top_k: Option<usize>, full: bool) -> Result<Option<usize>, String> {
+    match (top_k, full) {
+        (Some(k), true) => Err(format!(
+            "top_k={k} and full=True conflict: full keeps every row"
+        )),
+        (None, true) => Ok(None),
+        (k, false) => Ok(Some(k.unwrap_or(DEFAULT_ANSWER_ROWS))),
     }
 }
 
@@ -185,6 +220,17 @@ mod tests {
         assert_eq!(
             ranking_named("x", true).expect_err("x is no ranking"),
             "unknown ranking `x`: expected one of ppr, ppr-wide, bfs"
+        );
+    }
+
+    #[test]
+    fn the_row_cap_defaults_to_200_and_full_lifts_it() {
+        assert_eq!(row_cap(None, false), Ok(Some(200)));
+        assert_eq!(row_cap(Some(7), false), Ok(Some(7)));
+        assert_eq!(row_cap(None, true), Ok(None));
+        assert_eq!(
+            row_cap(Some(7), true),
+            Err("top_k=7 and full=True conflict: full keeps every row".to_string())
         );
     }
 

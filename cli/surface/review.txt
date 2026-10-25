@@ -2,6 +2,7 @@
 cmd glia review
   arg base pos=- long=base short=- required=false num_args=1 action=Set default=HEAD value_names=REV global=false hidden=false
   arg depth pos=- long=depth short=- required=false num_args=1 action=Set default=4 value_names=N global=false hidden=false
+  arg full pos=- long=full short=- required=false num_args=0 action=SetTrue default=false value_names=FULL global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
   arg markdown_rows pos=- long=markdown-rows short=- required=false num_args=1 action=Set default=20 value_names=N global=false hidden=false

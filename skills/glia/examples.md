@@ -76,11 +76,11 @@ glia review . --title "SHOP-12 round order totals" --json
 # loop, with the audit() change uncommitted
 glia diff-impact . --json
 {"base":"HEAD","changed":[{"qname":"billing::billing::audit","file":"billing/billing.ts","line":5,"change":"added","seed":true},{"qname":"billing::billing::settle","change":"modified","seed":true,…},…],
- "edges_added":[{"from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","site_file":"billing/billing.ts","site_line":4,…},…],"edges_removed":[],
+ "edges_added":[{"from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","site_file":"billing/billing.ts","site_line":4,…},…],
  "impact":{"seeds":[…],"results":[{"qname":"event_emit:payment.settled","reason":"USES","depth":1,"seed":"billing::billing::settle",…},
-                                  {"qname":"event_handle:payment.settled","reason":"EVENT_FLOWS","depth":2,"file":"orders/orders.ts","line":4,…},…]},"unresolved_diff_files":[]}
+                                  {"qname":"event_handle:payment.settled","reason":"EVENT_FLOWS","depth":2,"file":"orders/orders.ts","line":4,…},…]}}
 git diff | glia diff-impact . --diff - --json
-{"base":null,"changed":[{"qname":"billing::billing::settle","change":"diff_hit","seed":true,…},…],…}
+{"changed":[{"qname":"billing::billing::settle","change":"diff_hit","seed":true,…},…],…}
 
 # xstack-go-http with client/ and server/ as two repos; the feature word is a name, a qname or a flows key
 glia trace client FetchUsers --with server --json

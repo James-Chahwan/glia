@@ -63,8 +63,11 @@ pub struct BlastAnswer {
     /// Reachable from an entrypoint (route/handler/main/test/component) — `false`
     /// = likely dead. Best-effort; annotated, not filtered, unless `live_only`.
     pub live: bool,
+    /// FH.8: absent from the JSON when the row has no file.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-    /// 1-based (see [`Located`]).
+    /// 1-based (see [`Located`]). FH.8: absent from the JSON when null.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
     /// The qname of the seed whose wave reached this node first (LD.5): with
     /// one seed, that seed; with several, the root of the node's parent chain
@@ -702,7 +705,10 @@ pub struct BlastOptions {
     pub direction: Reach,
     /// Maximum hops along carry edges, counted from the nearest seed.
     pub depth: usize,
-    /// Keep the first `top_k` rows, cut after `scope`; `None` keeps all.
+    /// Keep the first `top_k` rows, cut after `scope` and the ranking, and the
+    /// first `top_k` seeds; `None` keeps all. FH.8: what the cut drops is
+    /// [`BlastRadius::truncated`]. The CLI and pyo3 default it to
+    /// [`DEFAULT_ANSWER_ROWS`]; this default keeps all.
     pub top_k: Option<usize>,
     /// Drop the rows no entry point reaches ([`entrypoint_reachable`])
     /// instead of flagging them `live: false`.
@@ -764,7 +770,12 @@ impl Default for BlastOptions {
 /// `Backward` the seeds that reach it in one hop, with `Both` either. A seed
 /// is never a result row, so this is where "one changed symbol calls another"
 /// is kept — the fact a union of per-seed answers drops.
-#[derive(serde::Serialize, Debug, Clone)]
+///
+/// FH.8, the JSON (its `Serialize` is written out for the first rule): `query`
+/// is left out when it equals `qname` (an id-seeded caller such as diff
+/// impact passes the qname), `file` / `line` when null, `linked_seeds` when
+/// empty, `identity` outside a class.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastSeed {
     /// What the caller asked for: the query as given, or the display string
@@ -780,19 +791,98 @@ pub struct BlastSeed {
     /// DD.10: the seed's FACT / DERIVED identity class, when it is in one:
     /// its class-mates (`also_in`), which a walk class makes part of the seed
     /// itself (never rows). Absent from the JSON outside a class.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<RowIdentity>,
+}
+
+impl serde::Serialize for BlastSeed {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("BlastSeed", 8)?;
+        if self.query == self.qname {
+            st.skip_field("query")?;
+        } else {
+            st.serialize_field("query", &self.query)?;
+        }
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("qname", &self.qname)?;
+        st.serialize_field("kind", &self.kind)?;
+        match &self.file {
+            Some(f) => st.serialize_field("file", f)?,
+            None => st.skip_field("file")?,
+        }
+        match &self.line {
+            Some(l) => st.serialize_field("line", l)?,
+            None => st.skip_field("line")?,
+        }
+        if self.linked_seeds.is_empty() {
+            st.skip_field("linked_seeds")?;
+        } else {
+            st.serialize_field("linked_seeds", &self.linked_seeds)?;
+        }
+        match &self.identity {
+            Some(i) => st.serialize_field("identity", i)?,
+            None => st.skip_field("identity")?,
+        }
+        st.end()
+    }
+}
+
+/// FH.8: the rows an answer's row cap left out of each list. Absent from an
+/// answer that cut nothing ([`BlastRadius::truncated`]).
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Truncated {
+    /// Result rows past the cap.
+    pub results: usize,
+    /// Seeds past the cap.
+    pub seeds: usize,
+}
+
+/// FH.8: the row cap the CLI and pyo3 surfaces of `blast-radius`,
+/// `diff-impact` and `review` (its seeds) apply by default: their `--top-k` /
+/// `top_k=` default, lifted by `--full` / `full=True`. The engine's own
+/// [`BlastOptions::default`] cuts nothing.
+pub const DEFAULT_ANSWER_ROWS: usize = 200;
+
+/// FH.8: `answer`'s JSON text for an answer surface (`blast_radius`,
+/// `diff_impact`, `review`), the one serialisation the CLI's `--json` and the
+/// pyo3 dicts read. `rows` is the uncut result-row count, `shown` the rows the
+/// JSON holds. fired_on, stderr, once per call:
+/// `[answer-size] surface=<s> rows=<r> shown=<k> bytes=<b>`.
+pub fn answer_json<T: serde::Serialize>(
+    surface: &str,
+    answer: &T,
+    rows: usize,
+    shown: usize,
+) -> serde_json::Result<String> {
+    let text = serde_json::to_string(answer)?;
+    eprintln!(
+        "[answer-size] surface={surface} rows={rows} shown={shown} bytes={}",
+        text.len()
+    );
+    Ok(text)
 }
 
 /// A multi-seed blast radius (LD.5): the seeds, the queries that named no
 /// node, the ranked located rows (each with the `seed` whose wave reached it
 /// first), and — exactly when `results` is empty — why (LD.8a).
+///
+/// FH.8, compact JSON: a null, empty or default field is left out of the
+/// JSON (so of the pyo3 dict), never of the struct. The list: here
+/// `unresolved` and `files` when empty, `absence` when null (so present
+/// exactly when `results` is empty), `truncated` when nothing was cut,
+/// `selection` when null; a row ([`BlastAnswer`]) `file` / `line` when null
+/// and `identity` outside a class; a seed ([`BlastSeed`]) `query` when it
+/// equals `qname`, `file` / `line` when null, `linked_seeds` when empty.
+/// Every other field is always written: `live: false` is the dead flag and
+/// `score` is the closure's PPR score under every ranking.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastRadius {
-    /// One per distinct node, in query order.
+    /// One per distinct node, in query order, the first `top_k` kept (FH.8).
     pub seeds: Vec<BlastSeed>,
     /// Queries no node answers to, in query order, each once. Never an error.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<String>,
     pub results: Vec<BlastAnswer>,
     /// 0.5.3 (EA.5): the measured file ranking from the seeds' files
@@ -801,6 +891,7 @@ pub struct BlastRadius {
     /// whether or not the closure reached it (`rows` counts the answer's rows
     /// in it, 0 when none). Under `scope` only files under it are listed.
     /// Empty when no seed has a candidate file.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<RankedFile>,
     /// 0.5.3 (EC.8): which ranking ordered the rows and why: `{set, shape,
     /// pick, source, reason, test_commits}`, `source` `calibrated` (the
@@ -810,7 +901,39 @@ pub struct BlastRadius {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<Selection>,
     /// `Some` iff `results` is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub absence: Option<Absence>,
+    /// FH.8: what the row cap left out: `top_k` here, a review's
+    /// `max_impact` / `max_seeds` (`review::ReviewArgs`). `None` (absent from
+    /// the JSON) when nothing was cut. The rows a `scope` or `live_only`
+    /// filter drops are not counted: they were never in the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<Truncated>,
+}
+
+impl BlastRadius {
+    /// FH.8: keep the first `results` rows and the first `seeds` seeds,
+    /// adding what each cut drops to [`BlastRadius::truncated`] (set only
+    /// when something is dropped). The absence and every count are left as
+    /// they were: a cut never makes an answer empty-with-a-reason.
+    pub(crate) fn cap(&mut self, results: usize, seeds: usize) {
+        let cut_results = self.results.len().saturating_sub(results);
+        let cut_seeds = self.seeds.len().saturating_sub(seeds);
+        if cut_results == 0 && cut_seeds == 0 {
+            return;
+        }
+        self.results.truncate(results);
+        self.seeds.truncate(seeds);
+        let t = self.truncated.get_or_insert_with(Truncated::default);
+        t.results += cut_results;
+        t.seeds += cut_seeds;
+    }
+
+    /// FH.8: the result rows before any cap ([`BlastRadius::truncated`]
+    /// added back).
+    pub fn rows_total(&self) -> usize {
+        self.results.len() + self.truncated.as_ref().map_or(0, |t| t.results)
+    }
 }
 
 /// **blast_radius** (P3, LD.5): the complete, deduped, edge-category-aware,
@@ -978,6 +1101,7 @@ fn radius(
     let mut ranked_files: Vec<RankedFile> = Vec::new();
     let mut rank_line: Option<String> = None;
     let mut selection: Option<Selection> = None;
+    let mut cut_results = 0usize;
     if !ids.is_empty() {
         let loc = Locator::new(merged);
         // EC.8: the ranking this answer applies, chosen before the cache's
@@ -1145,6 +1269,7 @@ fn radius(
         );
         kept_in_scope = out.len();
         if let Some(k) = opts.top_k {
+            cut_results = out.len().saturating_sub(k);
             out.truncate(k);
         }
         // EA.5: the ranked file list, rows counted over the final rows.
@@ -1198,6 +1323,17 @@ fn radius(
             kept_in_scope,
         )
     });
+    // FH.8: seeds cap at the same K, after the walk, the links and the
+    // absence have read every seed.
+    let mut cut_seeds = 0usize;
+    if let Some(k) = opts.top_k {
+        cut_seeds = blast_seeds.len().saturating_sub(k);
+        blast_seeds.truncate(k);
+    }
+    let truncated = (cut_results > 0 || cut_seeds > 0).then_some(Truncated {
+        results: cut_results,
+        seeds: cut_seeds,
+    });
     BlastRadius {
         seeds: blast_seeds,
         unresolved,
@@ -1205,6 +1341,7 @@ fn radius(
         files: ranked_files,
         selection,
         absence,
+        truncated,
     }
 }
 
@@ -3773,5 +3910,160 @@ mod blast_seeded_tests {
         assert_eq!(json(&twice), json(&by_query));
         let none = blast_radius_seeded(&m, &[], &opts);
         assert!(none.results.is_empty() && none.absence.is_some());
+    }
+}
+
+#[cfg(test)]
+mod compact_tests {
+    //! FH.8: a capped answer says what it cut (`truncated`), and its JSON
+    //! leaves out the null / empty / default fields its docs list.
+
+    use super::{BlastOptions, blast_radius};
+    use crate::build::generate_many;
+    use serde_json::Value;
+
+    /// `core` and eight callers, two of which call each other's neighbour.
+    fn app() -> (tempfile::TempDir, glia_graph::MergedGraph) {
+        let mut src = String::from("def core(x):\n    return x\n\n\n");
+        for i in 1..=8 {
+            src.push_str(&format!("def a{i}():\n    return core({i})\n\n\n"));
+        }
+        src.push_str("def top():\n    return a1()\n");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("api dir");
+        std::fs::write(api.join("app.py"), src).expect("write app.py");
+        let m = generate_many(&[api.display().to_string()])
+            .expect("builds")
+            .merged;
+        (dir, m)
+    }
+
+    fn json<T: serde::Serialize>(v: &T) -> Value {
+        serde_json::to_value(v).expect("serialises")
+    }
+
+    #[test]
+    fn a_cut_answer_counts_what_it_cut() {
+        let (_dir, m) = app();
+        let all = blast_radius(&m, &["app::core"], &BlastOptions::default());
+        let n = all.results.len();
+        assert!(n > 3, "the fixture reaches more than 3 rows: {n}");
+        assert!(
+            json(&all).get("truncated").is_none(),
+            "an uncut answer has no `truncated`"
+        );
+        let opts = BlastOptions {
+            top_k: Some(3),
+            ..BlastOptions::default()
+        };
+        let cut = blast_radius(&m, &["app::core"], &opts);
+        assert_eq!(cut.results.len(), 3);
+        let v = json(&cut);
+        assert_eq!(
+            v["truncated"],
+            serde_json::json!({"results": n - 3, "seeds": 0}),
+            "{v}"
+        );
+
+        // Seeds cap at the same K, after the walk: the rows stay the
+        // three-seed walk's.
+        let three = ["app::a1", "app::a2", "app::a3"];
+        let opts = BlastOptions {
+            top_k: Some(2),
+            ..BlastOptions::default()
+        };
+        let cut = blast_radius(&m, &three, &opts);
+        assert_eq!(cut.seeds.len(), 2, "seeds cap at top_k");
+        let v = json(&cut);
+        assert_eq!(v["truncated"]["seeds"], 1, "{v}");
+        let all = blast_radius(&m, &three, &BlastOptions::default());
+        let firsts: Vec<&str> = all
+            .results
+            .iter()
+            .take(2)
+            .map(|r| r.qname.as_str())
+            .collect();
+        let kept: Vec<&str> = cut.results.iter().map(|r| r.qname.as_str()).collect();
+        assert_eq!(kept, firsts, "the cut keeps the uncut answer's first rows");
+    }
+
+    /// A review's cut (`max_impact` / `max_seeds`) adds to an earlier
+    /// `top_k` cut and never touches the absence.
+    #[test]
+    fn cap_adds_to_the_count_and_keeps_the_first_rows() {
+        let (_dir, m) = app();
+        let three = ["app::a1", "app::a2", "app::a3"];
+        let opts = BlastOptions {
+            top_k: Some(5),
+            ..BlastOptions::default()
+        };
+        let mut a = blast_radius(&m, &three, &opts);
+        let before = a.truncated.clone().unwrap_or_default();
+        let total = a.rows_total();
+        let firsts: Vec<String> = a.results.iter().take(2).map(|r| r.qname.clone()).collect();
+        a.cap(2, 1);
+        let t = a.truncated.clone().expect("cut");
+        assert_eq!((t.results, t.seeds), (before.results + 3, before.seeds + 2));
+        assert_eq!(a.rows_total(), total, "the uncut count survives the cut");
+        let kept: Vec<String> = a.results.iter().map(|r| r.qname.clone()).collect();
+        assert_eq!(kept, firsts);
+        assert_eq!(a.seeds.len(), 1);
+        assert!(a.absence.is_none());
+        let mut whole = blast_radius(&m, &["app::core"], &BlastOptions::default());
+        whole.cap(usize::MAX, usize::MAX);
+        assert!(
+            whole.truncated.is_none(),
+            "a cap that cuts nothing records nothing"
+        );
+    }
+
+    #[test]
+    fn json_leaves_out_null_empty_and_default_fields() {
+        let (_dir, m) = app();
+        let a = blast_radius(&m, &["app::core", "core", "nope"], &BlastOptions::default());
+        let v = json(&a);
+        assert!(v.get("absence").is_none(), "absence is null: {v}");
+        assert_eq!(v["unresolved"], serde_json::json!(["nope"]));
+        let seed = &v["seeds"][0];
+        assert!(
+            seed.get("query").is_none(),
+            "a query equal to the qname is left out: {seed}"
+        );
+        assert!(
+            seed.get("linked_seeds").is_none(),
+            "empty linked_seeds is left out: {seed}"
+        );
+        let row = &v["results"][0];
+        for key in [
+            "id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line",
+            "seed",
+        ] {
+            assert!(row.get(key).is_some(), "row keeps `{key}`: {row}");
+        }
+        let one = json(&blast_radius(&m, &["core"], &BlastOptions::default()));
+        assert_eq!(
+            one["seeds"][0]["query"], "core",
+            "a query naming a node by its simple name is kept"
+        );
+        assert!(
+            one.get("unresolved").is_none(),
+            "empty unresolved is left out: {one}"
+        );
+        let linked = json(&blast_radius(
+            &m,
+            &["app::top", "app::a1"],
+            &BlastOptions::default(),
+        ));
+        assert_eq!(
+            linked["seeds"][0]["linked_seeds"],
+            serde_json::json!(["app::a1"]),
+            "{linked}"
+        );
+        let miss = json(&blast_radius(&m, &["nope"], &BlastOptions::default()));
+        assert!(
+            miss["absence"].is_object() && miss.get("results").is_some(),
+            "{miss}"
+        );
     }
 }

@@ -207,18 +207,8 @@ fn diff_file_json() {
         .map(String::as_str)
         .collect();
     keys.sort_unstable();
-    assert_eq!(
-        keys,
-        [
-            "base",
-            "changed",
-            "edges_added",
-            "edges_removed",
-            "impact",
-            "unresolved_diff_files"
-        ]
-    );
-    assert!(v["base"].is_null());
+    // FH.8: pasted mode's null base and empty lists are left out.
+    assert_eq!(keys, ["changed", "impact"]);
     assert_eq!(v["changed"][0]["qname"], PRICE);
     assert_eq!(v["changed"][0]["change"], "diff_hit");
     assert_eq!(rows(&v), price_rows());
@@ -226,24 +216,15 @@ fn diff_file_json() {
         v["impact"]["results"][0]["line"].as_i64().map(|l| l >= 1),
         Some(true)
     );
-    assert!(v["impact"]["absence"].is_null());
     let impact_keys: Vec<&str> = v["impact"]
         .as_object()
         .expect("impact")
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        impact_keys,
-        [
-            "absence",
-            "files",
-            "results",
-            "seeds",
-            "selection",
-            "unresolved"
-        ]
-    );
+    // FH.8: the null absence, the empty unresolved and an uncut answer's
+    // `truncated` are left out.
+    assert_eq!(impact_keys, ["files", "results", "seeds", "selection"]);
     // EC.8: no record in the scratch repo: SELh0's fallback, logged once.
     assert_eq!(
         (
@@ -265,6 +246,48 @@ fn diff_file_json() {
         "{}",
         stderr(&out)
     );
+}
+
+/// FH.8: `--top-k` cuts the impact rows after the ranking and the JSON
+/// counts the cut under `impact.truncated`; the table ends with the cut line;
+/// `--full` keeps every row and conflicts with `--top-k`; `--json` prints
+/// its size on stderr.
+#[test]
+fn top_k_cuts_and_full_keeps_every_row() {
+    let s = Scratch::shop("cap");
+    s.write("shop/a.py", A_PY_EDITED);
+    let diff = s.outside("price.diff", PRICE_DIFF);
+    let base = ["--diff", diff.as_str(), "--direction", "backward"];
+    let run = |extra: &[&str]| s.diff_impact(&[&base[..], extra].concat());
+    let cut = run(&["--top-k", "1", "--json"]);
+    assert_eq!(cut.status.code(), Some(0), "{}", stderr(&cut));
+    let v: Value = serde_json::from_str(&stdout(&cut)).expect("valid JSON");
+    assert_eq!(rows(&v), price_rows()[..1], "{v}");
+    assert_eq!(
+        v["impact"]["truncated"],
+        serde_json::json!({"results": 1, "seeds": 0}),
+        "{v}"
+    );
+    let bytes = stdout(&cut).trim_end().len();
+    assert!(
+        stderr(&cut).lines().any(|l| l
+            == format!("[answer-size] surface=diff_impact rows=2 shown=1 bytes={bytes}")),
+        "{}",
+        stderr(&cut)
+    );
+    let full = run(&["--full", "--json"]);
+    assert_eq!(full.status.code(), Some(0), "{}", stderr(&full));
+    let v: Value = serde_json::from_str(&stdout(&full)).expect("valid JSON");
+    assert_eq!(rows(&v), price_rows());
+    assert!(v["impact"].get("truncated").is_none(), "{v}");
+    let table = run(&["--top-k", "1"]);
+    assert!(
+        stdout(&table).contains("_(1 of 2 rows; --full lists every row)_"),
+        "{}",
+        stdout(&table)
+    );
+    let both = run(&["--full", "--top-k", "1"]);
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
 }
 
 #[test]

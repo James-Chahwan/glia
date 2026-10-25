@@ -341,7 +341,8 @@ fn no_snapshot_default_is_head() {
     assert_eq!(paths(&none), paths(&r));
 }
 
-/// An empty answer has `files: []`.
+/// An empty answer has no files; FH.8 leaves the empty `files` out of the
+/// JSON.
 #[test]
 fn an_unresolved_seed_lists_no_files() {
     let (_d, b) = tree_with_snapshot();
@@ -352,7 +353,7 @@ fn an_unresolved_seed_lists_no_files() {
     );
     assert!(r.results.is_empty() && r.files.is_empty());
     let v: serde_json::Value = serde_json::from_str(&json(&r)).expect("json");
-    assert_eq!(v["files"], serde_json::json!([]));
+    assert!(v.get("files").is_none(), "{v}");
 }
 
 /// (6) diff_impact_vs_rev, no cache passed: the working tree's snapshot

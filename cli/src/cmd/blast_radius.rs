@@ -25,9 +25,18 @@
 //! (<source>[: <reason>], shape <k>)` line follows the table, `--json`
 //! carries `selection`, and stderr the engine's `[select]
 //! surface=blast_radius ..` line.
+//!
+//! FH.8: the rows and the seeds are cut to `--top-k` (default
+//! `DEFAULT_ANSWER_ROWS`, 200) after the ranking, in the table and the JSON;
+//! `--full` keeps every one. A cut answer's JSON carries `truncated:
+//! {results, seeds}` (the rows and seeds left out) and the table ends with a
+//! `_(<shown> of <total> rows ..)_` line. The JSON leaves out null, empty and
+//! default fields (the list is on the engine's `BlastRadius`). stderr, per
+//! `--json`: `[answer-size] surface=blast_radius rows=<r> shown=<k>
+//! bytes=<b>`.
 
 use glia_engine::identity::{Collapse, RowIdentity};
-use glia_engine::{BlastAnswer, BlastOptions, BlastRadius};
+use glia_engine::{BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_ROWS, answer_json};
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -53,9 +62,13 @@ pub(crate) struct Args {
     /// Maximum hops along carry edges.
     #[arg(long, default_value_t = 4)]
     depth: usize,
-    /// Keep only the top-K by PPR score.
-    #[arg(long)]
-    top_k: Option<usize>,
+    /// Keep the first K rows and the first K seeds of the ranked answer; a
+    /// cut answer says how many it left out (`truncated`).
+    #[arg(long, value_name = "K", default_value_t = DEFAULT_ANSWER_ROWS)]
+    top_k: usize,
+    /// Keep every row and seed: no `--top-k` cut.
+    #[arg(long, conflicts_with = "top_k")]
+    full: bool,
     /// Drop nodes not reachable from an entrypoint (likely-dead code).
     #[arg(long)]
     live_only: bool,
@@ -102,7 +115,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let mut opts = BlastOptions::default();
     opts.direction = direction;
     opts.depth = args.depth;
-    opts.top_k = args.top_k;
+    opts.top_k = (!args.full).then_some(args.top_k);
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
     opts.collapse = if args.no_collapse {
@@ -125,7 +138,13 @@ pub(crate) fn run(args: Args) -> i32 {
         0
     };
     if args.json {
-        println!("{}", serde_json::to_string(&answer).unwrap_or_default());
+        let text = answer_json(
+            "blast_radius",
+            &answer,
+            answer.rows_total(),
+            answer.results.len(),
+        );
+        println!("{}", text.unwrap_or_default());
         return code;
     }
     render(&answer, &queries, dir, args.depth);
@@ -191,6 +210,30 @@ fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
             location_cell(a)
         );
     }
+    if let Some(note) = truncated_note(answer) {
+        println!();
+        println!("{note}");
+    }
+}
+
+/// FH.8: the table's last line when the row cap cut the answer:
+/// `_(<shown> of <total> rows[, <shown> of <total> seeds]; --full lists
+/// every row)_`, or `None` when nothing was cut.
+pub(crate) fn truncated_note(answer: &BlastRadius) -> Option<String> {
+    let t = answer.truncated.as_ref()?;
+    let mut parts = vec![format!(
+        "{} of {} rows",
+        answer.results.len(),
+        answer.results.len() + t.results
+    )];
+    if t.seeds > 0 {
+        parts.push(format!(
+            "{} of {} seeds",
+            answer.seeds.len(),
+            answer.seeds.len() + t.seeds
+        ));
+    }
+    Some(format!("_({}; --full lists every row)_", parts.join(", ")))
 }
 
 /// `file:line`, `file` or `None`.

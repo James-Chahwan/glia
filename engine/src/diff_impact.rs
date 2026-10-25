@@ -97,34 +97,50 @@ const PRIMITIVE: &str = "diff_impact";
 /// gained or lost, whose own text did not change) or `diff_hit` (pasted
 /// mode). A `removed` row is located in the base rev's graph and is never a
 /// seed.
+///
+/// FH.8, the JSON leaves out `file` / `line` when null and `seed` when false.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct ChangedNode {
     pub id: u64,
     pub qname: String,
     pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /// 1-based.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
     pub change: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub seed: bool,
 }
 
 /// The answer (module docs): what changed, and the one radius around it.
+///
+/// FH.8, compact JSON: `base` is left out when null (pasted mode),
+/// `edges_added` / `edges_removed` / `unresolved_diff_files` when empty, and
+/// `impact` is [`BlastRadius`]'s compact form: its `results` and `seeds` cut
+/// to the caller's `top_k` (the CLI's and pyo3's default
+/// [`crate::answers::DEFAULT_ANSWER_ROWS`]) with `impact.truncated` counting
+/// the cut.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DiffImpact {
     /// The git rev the working tree was compared against (rev mode), as
     /// given; `None` in pasted mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     pub changed: Vec<ChangedNode>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges_added: Vec<DeltaEdge>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges_removed: Vec<DeltaEdge>,
     /// LD.5's multi-seed blast radius over the seeds: `seeds` (with
     /// `linked_seeds`), `results` (each with its `seed`), and `absence`
     /// exactly when `results` is empty.
     pub impact: BlastRadius,
     /// Pasted mode: the files of the diff that place no node (module docs).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unresolved_diff_files: Vec<String>,
 }
 
@@ -439,6 +455,7 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
             &[],
             None,
         )),
+        truncated: None,
     }
 }
 
@@ -555,6 +572,65 @@ diff --git a/shop/c.py b/shop/c.py\ndeleted file mode 100644\n--- a/shop/c.py\n+
         assert!(
             a.starts_with("+++ b/shop/a.py\n@@ -1,3 +1,3 @@\n") && a.contains("+    y\n"),
             "{a}"
+        );
+    }
+
+    /// FH.8: pasted mode's JSON leaves out the null base, the empty edge
+    /// lists and an empty `unresolved_diff_files`; `top_k` cuts the impact's
+    /// rows and seeds and `impact.truncated` counts them.
+    #[test]
+    fn pasted_json_is_compact_and_counts_its_cut() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("api dir");
+        let mut src = String::from("def core(x):\n    return x\n\n\n");
+        for i in 1..=6 {
+            src.push_str(&format!("def a{i}():\n    return core({i})\n\n\n"));
+        }
+        std::fs::write(api.join("app.py"), &src).expect("write app.py");
+        std::fs::write(api.join("other.py"), "def b():\n    return 1\n").expect("write");
+        let m = crate::build::generate_many(&[api.display().to_string()])
+            .expect("builds")
+            .merged;
+        let diff = "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def core(x):\n-    return x\n+    return x or 0\n";
+        let all = diff_impact_from_diff(&m, diff, &BlastOptions::default());
+        let v = serde_json::to_value(&all).expect("serialises");
+        for gone in [
+            "base",
+            "edges_added",
+            "edges_removed",
+            "unresolved_diff_files",
+        ] {
+            assert!(v.get(gone).is_none(), "`{gone}` is left out: {v}");
+        }
+        assert!(v["impact"].get("truncated").is_none(), "{v}");
+        assert!(
+            v["changed"]
+                .as_array()
+                .is_some_and(|c| c.iter().all(|r| r["seed"] == true)),
+            "a seed row keeps `seed`: {v}"
+        );
+        let n = all.impact.results.len();
+        assert!(n > 2, "{n}");
+        let opts = BlastOptions {
+            top_k: Some(2),
+            ..BlastOptions::default()
+        };
+        let cut = diff_impact_from_diff(&m, diff, &opts);
+        assert_eq!(cut.impact.results.len(), 2);
+        let v = serde_json::to_value(&cut).expect("serialises");
+        assert_eq!(
+            v["impact"]["truncated"],
+            serde_json::json!({"results": n - 2, "seeds": 0}),
+            "{v}"
+        );
+        assert_eq!(cut.impact.rows_total(), n);
+        let missing = diff_impact_from_diff(&m, "gone.py\n", &BlastOptions::default());
+        let v = serde_json::to_value(&missing).expect("serialises");
+        assert_eq!(
+            v["unresolved_diff_files"],
+            serde_json::json!(["gone.py"]),
+            "{v}"
         );
     }
 

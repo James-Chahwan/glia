@@ -42,17 +42,26 @@
 //! follows the impact table, `--json` carries `impact.selection`, and stderr
 //! the engine's `[select] surface=diff_impact ..` line.
 //!
+//! FH.8: the impact rows and seeds are cut to `--top-k` (default
+//! `DEFAULT_ANSWER_ROWS`, 200) after the ranking, in the table and the JSON;
+//! `--full` keeps every one. A cut answer's JSON carries `impact.truncated:
+//! {results, seeds}` and the table ends with a `_(<shown> of <total> rows
+//! ..)_` line. The JSON leaves out null, empty and default fields (the list is
+//! on the engine's `DiffImpact` and `BlastRadius`). stderr, per `--json`:
+//! `[answer-size] surface=diff_impact rows=<r> shown=<k> bytes=<b>`.
+//!
 //! Fired-on marker: the engine's
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`.
 
 use std::io::Read;
 
-use glia_engine::BlastOptions;
 use glia_engine::delta::{DeltaEdge, graph_delta_vs_rev};
 use glia_engine::diff_impact::{DiffImpact, diff_impact_from_delta, diff_impact_from_diff};
 use glia_engine::identity::Collapse;
+use glia_engine::{BlastOptions, DEFAULT_ANSWER_ROWS, answer_json};
 use glia_graph::Reach;
 
+use crate::cmd::blast_radius::truncated_note;
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{
     CalibratedRankingArgs, ImpactDirection, applied_ranking, build_options, generate_for,
@@ -77,9 +86,13 @@ pub(crate) struct Args {
     /// Maximum hops along carry edges, from the nearest seed.
     #[arg(long, default_value_t = 4)]
     depth: usize,
-    /// Keep only the top-K rows by PPR score.
-    #[arg(long)]
-    top_k: Option<usize>,
+    /// Keep the first K impact rows and the first K seeds of the ranked
+    /// answer; a cut answer says how many it left out (`impact.truncated`).
+    #[arg(long, value_name = "K", default_value_t = DEFAULT_ANSWER_ROWS)]
+    top_k: usize,
+    /// Keep every impact row and seed: no `--top-k` cut.
+    #[arg(long, conflicts_with = "top_k")]
+    full: bool,
     /// Drop rows not reachable from an entrypoint (likely-dead code).
     #[arg(long)]
     live_only: bool,
@@ -171,7 +184,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let mut opts = BlastOptions::default();
     opts.direction = direction;
     opts.depth = args.depth;
-    opts.top_k = args.top_k;
+    opts.top_k = (!args.full).then_some(args.top_k);
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
     args.ranking.apply(&mut opts);
@@ -184,7 +197,13 @@ pub(crate) fn run(args: Args) -> i32 {
         }
     };
     if args.json {
-        println!("{}", serde_json::to_string(&a).unwrap_or_default());
+        let text = answer_json(
+            "diff_impact",
+            &a,
+            a.impact.rows_total(),
+            a.impact.results.len(),
+        );
+        println!("{}", text.unwrap_or_default());
     } else {
         let source = match (&a.base, &args.diff) {
             (Some(b), _) => format!("vs `{b}`"),
@@ -239,7 +258,7 @@ fn render(repo: &str, source: &str, a: &DiffImpact, dir: &str, depth: usize) {
         a.changed.len(),
         a.edges_added.len(),
         a.edges_removed.len(),
-        a.impact.results.len()
+        a.impact.rows_total()
     );
     if !a.unresolved_diff_files.is_empty() {
         println!(
@@ -298,5 +317,9 @@ fn render(repo: &str, source: &str, a: &DiffImpact, dir: &str, depth: usize) {
             r.seed,
             at(r.file.as_deref(), r.line)
         );
+    }
+    if let Some(note) = truncated_note(&a.impact) {
+        println!();
+        println!("{note}");
     }
 }

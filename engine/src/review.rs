@@ -17,7 +17,10 @@
 //!   with [`ReviewArgs::blast`] (an enabled identity collapse with no repo
 //!   labels labelled with the working tree's, DD.10, as `tests_for_delta`
 //!   labels its own); the impact rows keep the engine's ranking and
-//!   are cut to `max_impact` (`counts.impact` is the uncut length);
+//!   are cut to `max_impact` (`counts.impact` is the uncut length), its seeds
+//!   to `max_seeds` (`counts.seeds` uncut), and `impact.truncated` counts
+//!   both cuts (FH.8; the JSON of `changed` and `impact` is compact, as
+//!   `diff_impact::DiffImpact` documents);
 //! - `tests`: `tests_for::tests_for_delta` (LE.3b / CC.1) with
 //!   [`ReviewArgs::tests`], cut to `max_tests` (`counts.tests` is the uncut
 //!   length; `test_files` is recomputed over the kept rows, so it stays "the
@@ -282,7 +285,9 @@ use glia_core::{Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 use glia_projection_text::ladder::note_tier;
 
-use crate::answers::{BlastAnswer, BlastOptions, BlastRadius, Locator, in_scope, project_roots};
+use crate::answers::{
+    BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_ROWS, Locator, in_scope, project_roots,
+};
 use crate::calibrate::fusions::{
     AnswerInputs, Signals, answer_signals, needs, seeded_keys, seeded_order,
 };
@@ -336,6 +341,11 @@ pub struct ReviewArgs {
     /// Test rows kept ([`DEFAULT_MAX_TESTS`]); `counts.tests` is uncut and
     /// `tests.absence` is the uncut answer's, as for `max_impact`.
     pub max_tests: usize,
+    /// FH.8: impact seeds kept ([`DEFAULT_ANSWER_ROWS`]); `counts.seeds` is
+    /// uncut. What this and `max_impact` cut is `impact.truncated`
+    /// (`{results, seeds}`, absent when nothing was cut); `usize::MAX` for
+    /// both (the CLI's `--full`) keeps every row.
+    pub max_seeds: usize,
     /// The weakest pairing tier at which a breaking inferred-model row blocks
     /// (`contract_breaks::MODEL_MIN_TIERS`; module docs "Model breaks"):
     /// `fact` (the default: every pairing glia 0.5.2 infers is derived, so
@@ -356,6 +366,7 @@ impl Default for ReviewArgs {
             tests: TestsForArgs::default(),
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
+            max_seeds: DEFAULT_ANSWER_ROWS,
             models_min_tier: MODEL_MIN_TIERS[0],
             title: None,
         }
@@ -417,7 +428,8 @@ pub struct Review {
     /// `diff_impact`'s changed rows: the delta's node rows, then the
     /// edge-endpoint seeds.
     pub changed: Vec<ChangedNode>,
-    /// The ranked impact of the changed nodes, `results` cut to `max_impact`.
+    /// The ranked impact of the changed nodes, `results` cut to `max_impact`
+    /// and `seeds` to `max_seeds`, `truncated` counting both cuts (FH.8).
     pub impact: BlastRadius,
     /// The tests to run, `tests` cut to `max_tests`.
     pub tests: TestsFor,
@@ -598,8 +610,9 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         Some(cache) => review_intent(rev, cache, &mut impact, args.max_impact, ask),
         None => (None, None),
     };
-    let impact_total = impact.results.len();
-    impact.results.truncate(args.max_impact);
+    let impact_total = impact.rows_total();
+    let seeds_total = impact.seeds.len() + impact.truncated.as_ref().map_or(0, |t| t.seeds);
+    impact.cap(args.max_impact, args.max_seeds);
 
     let mut tests = tests_for_delta(rev, &args.tests)?;
     // `omitted` is what a caller's `args.tests.limit` cut (CC.9a): the
@@ -694,7 +707,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     let conventions = review_conventions(before, after, &di.changed);
     let counts = ReviewCounts {
         nodes_changed: di.changed.len(),
-        seeds: impact.seeds.len(),
+        seeds: seeds_total,
         edges_added: edges.iter().filter(|e| e.change == ADDED).count(),
         edges_removed: edges.iter().filter(|e| e.change == REMOVED).count(),
         impact: impact_total,

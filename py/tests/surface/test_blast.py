@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/blast.rs (LD.2, many seeds LD.5): `blast_radius`
 takes one qname or a list of them and returns a native dict
-`{seeds, unresolved, results, absence}`. Shared helpers: test_build.py."""
+`{seeds, unresolved, results, absence}`, compact (FH.8: null, empty and
+default fields left out; rows and seeds cut to `top_k`, default 200, with
+`truncated`; `full=True` keeps every one). Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -9,9 +11,10 @@ import tempfile
 
 from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
-TOP = ["seeds", "unresolved", "results", "files", "selection", "absence"]
+TOP = ["seeds", "unresolved", "results", "files", "selection", "absence", "truncated"]
 KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line", "seed"]
-SEED_KEYS = ["query", "id", "qname", "kind", "file", "line", "linked_seeds"]
+# FH.8: `query` equal to the qname and an empty `linked_seeds` are left out.
+SEED_KEYS = ["id", "qname", "kind", "file", "line"]
 
 
 def cache_marks(err: str, holder: str) -> list[str]:
@@ -28,12 +31,13 @@ def main() -> int:
         c.check("signature", params(rg.PyGraph.blast_radius) == [
             ("qnames", None), ("direction", "both"), ("depth", 4), ("top_k", None),
             ("live_only", False), ("scope", None), ("collapse", True), ("ranking", None),
-            ("cochange", True), ("top_files", 10)], params(rg.PyGraph.blast_radius))
+            ("cochange", True), ("top_files", 10), ("full", False)], params(rg.PyGraph.blast_radius))
 
         a = g.blast_radius("app::helper")
         c.check("blast_radius -> dict", type(a) is dict, type(a))
         a = a if type(a) is dict else {}
-        c.check("answer keys in engine field order", list(a) == TOP, list(a))
+        c.check("answer keys in engine field order", list(a) == [k for k in TOP if k in a]
+                and {"seeds", "results", "selection"} <= set(a), list(a))
         b = a.get("results") or []
         c.check("blast_radius reaches the callers", any(r.get("qname") == "app::main" for r in b),
                 [r.get("qname") for r in b][:5])
@@ -47,8 +51,8 @@ def main() -> int:
         c.check("seed keys in engine field order", seeds and list(seeds[0]) == SEED_KEYS,
                 seeds and list(seeds[0]))
         c.check("the seed is located", seeds and seeds[0]["line"] == 4 and seeds[0]["id"] in ids, seeds)
-        c.check("a found answer: no absence, nothing unresolved",
-                a.get("absence") is None and a.get("unresolved") == [], (a.get("absence"), a.get("unresolved")))
+        c.check("a found answer: no absence, nothing unresolved (both left out)",
+                "absence" not in a and "unresolved" not in a, list(a))
         c.check("a str is a one-item list", g.blast_radius(["app::helper"]) == a)
 
         # Two seeds, backward: main calls helper, so helper's one-hop
@@ -57,7 +61,7 @@ def main() -> int:
         c.check("seeds in query order", [s["qname"] for s in m["seeds"]] == ["app::helper", "app::main"],
                 m["seeds"])
         c.check("linked_seeds", m["seeds"][0]["linked_seeds"] == ["app::main"]
-                and m["seeds"][1]["linked_seeds"] == [], m["seeds"])
+                and "linked_seeds" not in m["seeds"][1], m["seeds"])
         c.check("a seed is never a row", all(r["qname"] not in ("app::helper", "app::main")
                                              for r in m["results"]))
         c.check("rows attributed to their seed", m["results"]
@@ -71,7 +75,29 @@ def main() -> int:
                 and (u["absence"] or {}).get("reason") == "unknown_symbol", u)
         mixed = g.blast_radius(["app::helper", "nope"])
         c.check("mixed: the rest still answer", mixed["unresolved"] == ["nope"] and mixed["results"]
-                and mixed["absence"] is None, mixed["unresolved"])
+                and "absence" not in mixed, mixed["unresolved"])
+        c.check("a query that is not the qname is kept",
+                g.blast_radius("helper")["seeds"][0].get("query") == "helper")
+
+        # FH.8: the row cap. top_k cuts rows and seeds after the ranking and
+        # `truncated` counts the cut; full=True keeps every row and refuses a
+        # top_k; every call prints its size.
+        (whole, err) = stderr_of(lambda: g.blast_radius("app::helper", full=True))
+        n = len(whole["results"])
+        c.check("full keeps every row, nothing truncated", n == len(b) and "truncated" not in whole,
+                (n, len(b), list(whole)))
+        c.check("[answer-size] marker",
+                f"[answer-size] surface=blast_radius rows={n} shown={n} bytes=" in err, err[-400:])
+        one = g.blast_radius("app::helper", top_k=1)
+        c.check("top_k=1 keeps the first row", [r["qname"] for r in one["results"]]
+                == [r["qname"] for r in whole["results"][:1]], one["results"])
+        c.check("truncated counts the cut", one.get("truncated") == {"results": n - 1, "seeds": 0},
+                one.get("truncated"))
+        two = g.blast_radius(["app::helper", "app::main"], top_k=1)
+        c.check("seeds cap at top_k", len(two["seeds"]) == 1 and two["truncated"]["seeds"] == 1,
+                two.get("truncated"))
+        c.raises("top_k with full", ValueError, lambda: g.blast_radius("app::helper", top_k=3, full=True),
+                 "full keeps every row")
         c.raises("qnames of the wrong type", TypeError, lambda: g.blast_radius(5), "str or a list of str")
         c.raises("bad direction", ValueError, lambda: g.blast_radius("app::helper", "sideways"),
                  "forward|backward|both")

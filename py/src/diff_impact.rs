@@ -23,13 +23,13 @@ use std::sync::Arc;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use glia_engine::BlastOptions;
 use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
 use glia_engine::identity::Collapse;
 use glia_engine::rank::{RankCache, Ranking};
+use glia_engine::{BlastOptions, answer_json};
 use glia_graph::MergedGraph;
 
-use crate::blast::{ranking_selected, reach_named};
+use crate::blast::{ranking_selected, reach_named, row_cap};
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
@@ -148,8 +148,12 @@ impl PyGraph {
     /// spanning each added line (a changed-file list: every node of each
     /// file) seeds ONE blast radius, `blast_radius`'s walk and ranking over
     /// all the seeds at once. `direction` ∈ {`forward`, `backward`, `both`},
-    /// `depth` hops, `top_k` rows, `live_only` and `scope` as in
-    /// `blast_radius`.
+    /// `depth` hops, `top_k` rows (and seeds; default 200, `full=True` for
+    /// every one, FH.8), `live_only` and `scope` as in `blast_radius`. The
+    /// dict leaves out null, empty and default fields (FH.8): `base` when
+    /// `None`, the edge lists and `unresolved_diff_files` when empty, a
+    /// `changed` row's `file` / `line` when null and `seed` when false, and
+    /// `impact` as `blast_radius`'s dict (`impact.truncated` counting a cut).
     ///
     /// Returns a dict `{base, changed, edges_added, edges_removed, impact,
     /// unresolved_diff_files}`: `base` is `None` here; `changed` rows `{id,
@@ -164,7 +168,7 @@ impl PyGraph {
     /// PyGraph's held ranking indexes; `ranking=None` (the default, EC.8)
     /// applies the repo's calibrated pick, else `ppr`, and `impact` gains
     /// `selection`. Raises ValueError on a bad `direction` or `ranking`.
-    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10))]
+    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false))]
     #[allow(clippy::too_many_arguments)]
     fn diff_impact(
         &self,
@@ -177,7 +181,9 @@ impl PyGraph {
         ranking: Option<&str>,
         cochange: bool,
         top_files: usize,
+        full: bool,
     ) -> PyResult<Py<PyAny>> {
+        let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
         let rank = RankKw::named(ranking, cochange, top_files, Some(self.rank.clone()))
             .map_err(PyValueError::new_err)?;
         let answer = diff_answer(
@@ -194,8 +200,19 @@ impl PyGraph {
         .map_err(PyValueError::new_err)?;
         // The token comes from `attach` (the GIL is already held), not a
         // parameter: the keyword list is the Python surface.
-        Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
+        Python::attach(|py| to_py(py, sized(&answer)))
     }
+}
+
+/// FH.8: the answer's JSON through the engine's `answer_json` (the
+/// `[answer-size] surface=diff_impact ..` line).
+fn sized(answer: &DiffImpact) -> Result<String, serde_json::Error> {
+    answer_json(
+        "diff_impact",
+        answer,
+        answer.impact.rows_total(),
+        answer.impact.results.len(),
+    )
 }
 
 /// **diff_impact_vs_rev** (LE.2): `PyGraph.diff_impact` for the working
@@ -214,7 +231,7 @@ impl PyGraph {
 /// raises ValueError on a bad `direction` or `ranking` (before any build) or
 /// a git or build failure.
 #[pyfunction]
-#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10))]
+#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false))]
 #[allow(clippy::too_many_arguments)]
 fn diff_impact_vs_rev_py(
     repo_path: &str,
@@ -227,13 +244,15 @@ fn diff_impact_vs_rev_py(
     ranking: Option<&str>,
     cochange: bool,
     top_files: usize,
+    full: bool,
 ) -> PyResult<Py<PyAny>> {
+    let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
     let rank = RankKw::named(ranking, cochange, top_files, None).map_err(PyValueError::new_err)?;
     let answer = rev_answer(
         repo_path, base, direction, depth, top_k, live_only, scope, &rank,
     )
     .map_err(PyValueError::new_err)?;
-    Python::attach(|py| to_py(py, serde_json::to_string(&answer)))
+    Python::attach(|py| to_py(py, sized(&answer)))
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -352,21 +371,23 @@ mod tests {
             &RankKw::default(),
         )
         .expect("answer");
-        let text = serde_json::to_string(&a).expect("serialises");
-        let order: Vec<usize> = [
-            "\"base\":",
-            "\"changed\":",
-            "\"edges_added\":",
-            "\"edges_removed\":",
-            "\"impact\":",
-            "\"unresolved_diff_files\":",
-        ]
-        .iter()
-        .map(|k| text.find(k).unwrap_or(usize::MAX))
-        .collect();
+        let text = sized(&a).expect("serialises");
+        let order: Vec<usize> = ["\"changed\":", "\"impact\":"]
+            .iter()
+            .map(|k| text.find(k).unwrap_or(usize::MAX))
+            .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
+        // FH.8: pasted mode's null base and empty lists are left out.
         let v = value(&a);
-        assert!(v["base"].is_null());
+        for gone in [
+            "base",
+            "edges_added",
+            "edges_removed",
+            "unresolved_diff_files",
+        ] {
+            assert!(v.get(gone).is_none(), "`{gone}` left out: {text}");
+        }
+        assert!(v["impact"].get("truncated").is_none(), "{text}");
         assert_eq!(v["changed"][0]["qname"], "shop::a::price");
         assert_eq!(
             (

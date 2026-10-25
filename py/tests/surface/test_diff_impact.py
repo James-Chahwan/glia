@@ -6,7 +6,10 @@ a change affects as a native dict {base, changed, edges_added, edges_removed,
 impact, unresolved_diff_files}: the changed nodes, each marked as a seed or
 not, and ONE blast radius around the seeds whose rows each name the seed that
 reached them; lines are 1-based; a bad direction or an engine error raises
-ValueError. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
+ValueError. FH.8: the dicts are compact (a null `base`, empty edge lists and
+an empty `unresolved_diff_files` left out) and the impact's rows and seeds are
+cut to `top_k` (default 200) with `impact.truncated`; `full=True` keeps every
+one. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
 test_build.py."""
 from __future__ import annotations
 
@@ -25,9 +28,8 @@ B_PY = "from shop.a import place\n\n\ndef checkout(o):\n    return place(o)\n"
 PRICE = "shop::a::price"
 PLACE = "shop::a::place"
 CHECKOUT = "shop::b::checkout"
-KEYS = ["base", "changed", "edges_added", "edges_removed", "impact", "unresolved_diff_files"]
 CHANGED_KEYS = ["id", "qname", "kind", "file", "line", "change", "seed"]
-IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "selection", "absence"]
+IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "selection", "absence", "truncated"]
 ROWS = [(PLACE, 1, PRICE), (CHECKOUT, 2, PRICE)]
 DIFF = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,2 +1,2 @@\n"
         " def price(o):\n"
@@ -38,7 +40,7 @@ DELETION = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,3 +1,2 @@\n"
             "-    o = o\n"
             "     return o\n")
 KW = [("direction", "both"), ("depth", 4), ("top_k", None), ("live_only", False), ("scope", None),
-      ("ranking", None), ("cochange", True), ("top_files", 10)]
+      ("ranking", None), ("cochange", True), ("top_files", 10), ("full", False)]
 DIFF_MARKER = "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 REV_MARKER = "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 
@@ -81,8 +83,8 @@ def main() -> int:
         g = rg.generate(str(top))
 
         d, err = stderr_of(lambda: g.diff_impact(DIFF, direction="backward"))
-        c.check("diff_impact -> dict in field order", type(d) is dict and list(d) == KEYS,
-                type(d) is dict and list(d))
+        c.check("diff_impact -> dict in field order, pasted mode's empty fields left out",
+                type(d) is dict and list(d) == ["changed", "impact"], type(d) is dict and list(d))
         c.check("pasted mode has no base", type(d) is dict and d.get("base") is None, d)
         changed = d.get("changed", []) if type(d) is dict else []
         c.check("changed row keys in engine field order", bool(changed) and list(changed[0]) == CHANGED_KEYS,
@@ -92,14 +94,24 @@ def main() -> int:
                 (first.get("qname"), first.get("change"), first.get("seed"), first.get("line"))
                 == (PRICE, "diff_hit", True, 1), first)
         impact = d.get("impact", {}) if type(d) is dict else {}
-        c.check("impact is blast_radius's dict", list(impact) == IMPACT_KEYS, list(impact))
+        c.check("impact is blast_radius's dict", list(impact) == [k for k in IMPACT_KEYS if k in impact]
+                and {"seeds", "results", "selection"} <= set(impact), list(impact))
         c.check("rows attributed to the seed", rows(d) == ROWS, rows(d))
         ids = [r.get("id") for r in impact.get("results", [])]
         c.check("ids are ints", bool(ids) and all(type(i) is int for i in ids), ids)
         c.check("engine marker", DIFF_MARKER in err, err[-400:])
 
         c.check("depth bound", rows(g.diff_impact(DIFF, direction="backward", depth=1)) == ROWS[:1])
-        c.check("top_k", len(g.diff_impact(DIFF, direction="backward", top_k=1)["impact"]["results"]) == 1)
+        cut, err = stderr_of(lambda: g.diff_impact(DIFF, direction="backward", top_k=1))
+        c.check("top_k", len(cut["impact"]["results"]) == 1)
+        c.check("impact.truncated counts the cut", cut["impact"].get("truncated") == {"results": 1, "seeds": 0},
+                cut["impact"].get("truncated"))
+        c.check("[answer-size] marker", "[answer-size] surface=diff_impact rows=2 shown=1 bytes=" in err,
+                err[-400:])
+        whole = g.diff_impact(DIFF, direction="backward", full=True)
+        c.check("full keeps every row", rows(whole) == ROWS and "truncated" not in whole["impact"], rows(whole))
+        c.raises("top_k with full raises", ValueError,
+                 lambda: g.diff_impact(DIFF, top_k=1, full=True), "full keeps every row")
         c.check("scope", rows(g.diff_impact(DIFF, direction="backward", scope="shop/b.py")) == ROWS[1:])
         gone = g.diff_impact(DELETION)
         c.check("deletion-only hunk names its file",

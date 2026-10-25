@@ -64,6 +64,13 @@
 //! title_source=<arg|commit|none> fusion=LX[IDR,P1] ..` after `[review]
 //! base=`.
 //!
+//! FH.8: `--full` keeps every impact row, impact seed and test row (no
+//! `--max-impact` / `--max-tests` cut and no seed cap, whose default is
+//! `DEFAULT_ANSWER_ROWS`, 200); a cut impact carries `impact.truncated:
+//! {results, seeds}` in the JSON, which leaves out null, empty and default
+//! fields (the engine's `DiffImpact` / `BlastRadius` list). stderr, per
+//! `--json`: `[answer-size] surface=review rows=<r> shown=<k> bytes=<b>`.
+//!
 //! Fired-on markers: the engine's
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
 //! and
@@ -83,6 +90,8 @@ use glia_engine::review::{
 };
 
 use glia_engine::rank::Ranking;
+
+use glia_engine::answer_json;
 
 use crate::common::{CalibratedRankingArgs, build_options, render_selection};
 
@@ -112,6 +121,10 @@ pub(crate) struct Args {
     /// Impact rows the review keeps (`counts.impact` stays the uncut total).
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_IMPACT)]
     max_impact: usize,
+    /// Keep every impact row, impact seed and test row: no `--max-impact` /
+    /// `--max-tests` cut and no seed cap.
+    #[arg(long, conflicts_with_all = ["max_impact", "max_tests"])]
+    full: bool,
     /// The weakest pairing tier at which an inferred client <-> server model
     /// break fails the gate: fact (the default; every pairing glia 0.5.2
     /// infers is derived, so its rows are advisory) or derived; a heuristic
@@ -165,6 +178,14 @@ fn engine_args(
     Ok(args)
 }
 
+/// FH.8 `--full`: lift every row cap of `args` (impact rows, impact seeds,
+/// test rows).
+fn lift_caps(args: &mut ReviewArgs) {
+    args.max_impact = usize::MAX;
+    args.max_tests = usize::MAX;
+    args.max_seeds = usize::MAX;
+}
+
 pub(crate) fn run(args: Args) -> i32 {
     if !build_options().overlay {
         eprintln!(
@@ -173,7 +194,7 @@ pub(crate) fn run(args: Args) -> i32 {
         );
         return 2;
     }
-    let engine = match engine_args(
+    let mut engine = match engine_args(
         args.depth,
         args.max_tests,
         args.max_impact,
@@ -188,6 +209,9 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
+    if args.full {
+        lift_caps(&mut engine);
+    }
     let review = match review_vs_rev(&args.repo, &args.base, &engine) {
         Ok(r) => r,
         Err(e) => {
@@ -199,7 +223,12 @@ pub(crate) fn run(args: Args) -> i32 {
     let format = if args.json { "json" } else { "markdown" };
     eprintln!("[review] surface=cli format={format} exit={exit}");
     if args.json {
-        match serde_json::to_string(&review) {
+        match answer_json(
+            "review",
+            &review,
+            review.counts.impact,
+            review.impact.results.len(),
+        ) {
             Ok(text) => println!("{text}"),
             Err(e) => {
                 eprintln!("error: serialising the review: {e}");
@@ -283,6 +312,13 @@ mod tests {
             )
         );
         assert_eq!(e.models_min_tier, "fact", "the ruling's default");
+        assert_eq!(e.max_seeds, glia_engine::DEFAULT_ANSWER_ROWS);
+        let mut full = ReviewArgs::default();
+        lift_caps(&mut full);
+        assert_eq!(
+            (full.max_impact, full.max_tests, full.max_seeds),
+            (usize::MAX, usize::MAX, usize::MAX)
+        );
         let err = engine_args(4, 50, 50, "heuristic", Ranking::default(), true, None)
             .expect_err("no such gate");
         assert_eq!(
