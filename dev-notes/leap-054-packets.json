@@ -9604,6 +9604,159 @@
    "risks": "None beyond the facade: the slot must land before FH.2a in an earlier wave.",
    "spec_group": "F0",
    "fixtures": []
+  },
+  {
+   "id": "FH.3b",
+   "title": "NestJS OpenAPI op keys under a symbolic controller prefix: openapi_annot's nest_keys reads the same FH.3 path placeholders as ts_routes, and the post-cache path fold rewrites the op key, so an `@ApiOperation` under `@Controller(RouteKey.X)` keys on the folded path its ROUTE carries",
+   "area": "FH chain fix: contract annotations",
+   "loc": 220,
+   "rationale": "FH.3 folds `@Controller(RouteKey.User)` + `@Put('me')` into ROUTE `PUT /users/me`, but parsers/code/extractors/src/openapi_annot.rs still composes the NestJS op key through extract_decorator_string, so the op keys on the prefix-less `PUT /me`. The op and its route no longer meet: DOCUMENTS / contract_route identity and client_contract rows miss on every enum-prefixed controller (FH.3's handoff).",
+   "entry_points": [
+    "parsers/code/extractors/src/openapi_annot.rs nest_keys / scan",
+    "parsers/code/extractors/src/ts_routes.rs nest_path_arg (the placeholder form, read only)",
+    "engine/src/build/grafts.rs PathFoldStats / the FH.3 post-cache fold"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/openapi_annot.rs",
+    "engine/src/build/grafts.rs",
+    "bench/substrate-gap/fixtures/nest-enum-prefix-openapi/"
+   ],
+   "implementation": "1. nest_keys reads the controller prefix and each verb decorator's path through the same placeholder rule ts_routes' nest_path_arg uses (make that fn pub(crate) in a shared spot only if openapi_annot cannot reach it otherwise; never a second copy of the rule).\n2. The FH.3 post-cache fold in grafts.rs rewrites the placeholder segments of the annotation op keys (the node / cell the op key lives on) through the same const tables, counting them apart.\n3. An unresolved placeholder keeps today's key (no op is dropped).\nFixture bench/substrate-gap/fixtures/nest-enum-prefix-openapi/ (an @ApiOperation under @Controller(RouteKey.User) documents the folded route): server/route-keys.ts: export enum RouteKey { User = 'users' }; server/user.controller.ts: @Controller(RouteKey.User) class UserController { @ApiOperation({ operationId: 'updateMe' }) @Put('me') update() {} }. key.json (grade.py vocabulary): expect the ROUTE `PUT /users/me` and the annotation op keyed `PUT /users/me` with a DOCUMENTS edge between them; forbid an op keyed `PUT /me`.",
+   "fixtures": [],
+   "acceptance": "Fixture nest-enum-prefix-openapi grades full (op key and DOCUMENTS edge on the folded path); bench/substrate-gap/fixtures/nest-enum-prefix still grades full; on immich the [path-fold] ops count is > 0 and no op keys a prefix-less path whose ROUTE was folded.",
+   "fired_on_marker": "[path-fold] ops symbols=<s> folded=<f> unresolved=<u> repo=<label>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cell_value"
+    ],
+    "what_changes": "NestJS annotation op keys under a symbolic prefix move to the folded path",
+    "in_repo_consumers": [
+     "engine contract / identity readers"
+    ],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.3"
+   ],
+   "risks": "An op key moving changes identity contract_route classes on repos that had prefix-less keys; the rank gate and byte_identical cover the snapshots.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.8b",
+   "title": "Compact answers, part 2: diff-impact / blast-radius / review JSON under 64 KB on photoprism fd8448 - seeds' identity also_in folded to a count plus the first three, diff-impact `changed` rows that repeat a seed reduced to its id, RankedFile's default cochange / depth left out, and pyo3 review_vs_rev gains `full=`",
+   "area": "FH cockpit: compact answers",
+   "loc": 420,
+   "rationale": "FH.8 cut photoprism fd8448's diff-impact --json from 1,916,497 to 141,812 bytes, not under the 64 KB target: at the 200-row cap the rows are 59.7 KB, the 135 seeds 53.2 KB (29.0 KB of it their identity also_in) and `changed` 27.4 KB, much of it repeating impact.seeds. RankedFile writes cochange 0.0 / depth null on every row when co-change or BFS is off. pyo3 review_vs_rev has no `full=` (py/src/review.rs was outside FH.8's files).",
+   "entry_points": [
+    "engine/src/diff_impact.rs (changed / seeds rendering)",
+    "engine/src/answers.rs (seed rows, identity also_in)",
+    "engine/src/rank/order.rs RankedFile",
+    "py/src/review.rs review_vs_rev"
+   ],
+   "files_touched": [
+    "engine/src/diff_impact.rs",
+    "engine/src/answers.rs",
+    "engine/src/review.rs",
+    "engine/src/rank/order.rs",
+    "py/src/review.rs",
+    "py/api_surface/review.txt",
+    "py/tests/surface/test_review.py",
+    "cli/surface/diff-impact.txt"
+   ],
+   "implementation": "1. A seed's identity `also_in` is rendered as `also_in_count` plus the first three members (by the existing order) unless full; --full / full=True keeps the whole list.\n2. diff-impact's `changed` rows that are also impact seeds carry only their id (and the change kind); the full row stays under seeds.\n3. RankedFile serializes cochange only when co-change ranked and depth only when BFS ran (skip_serializing_if).\n4. pyo3 review_vs_rev(.., full=False) maps full=True to ReviewArgs max_impact / max_tests / max_seeds = usize::MAX, last keyword; api_surface and test_review.py regenerated.\n5. If photoprism fd8448 is still over 64 KB after 1-3, lower the default seed cap to 50 with truncated.seeds (rows stay 200) and say so in the result; never cut rows silently.",
+   "fixtures": [],
+   "acceptance": "`glia diff-impact <photoprism@fd8448's parent> --base HEAD^ --json` (the FH.8 measurement) is under 65,536 bytes with `truncated` set; --full returns every row and the full also_in lists byte for byte as today's --full; py/tests/surface/test_review.py covers full=; the rank gate stays 0 drops.",
+   "fired_on_marker": "[answer-size] surface=<s> rows=<n> shown=<k> bytes=<b> seeds=<s> seeds_shown=<t> also_in_folded=<f>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "api_signature"
+    ],
+    "what_changes": "seeds' also_in folded by default; changed rows that repeat a seed carry only the id; RankedFile drops default fields; review_vs_rev gains full=",
+    "in_repo_consumers": [
+     "engine/examples/rank_eval.rs (full)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph impact tool"
+    ]
+   },
+   "depends_on": [
+    "FH.8"
+   ],
+   "risks": "A consumer reading changed[*] fields for seeds must read seeds instead; FZ.2 lists it.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.14b",
+   "title": "Host-less clients and catch-all routes: a host-less client never pairs a catch-all route (`/*`, `/**`, `*`, `{*path}`, `:path*`) of another project when no concrete route matches; it stays unpaired (an unpaired_endpoint row), and a catch-all inside the client's own project still pairs",
+   "area": "FH precision: cross-service pairing",
+   "loc": 220,
+   "rationale": "FH.14's handoff: medusa's host-less `endpoint:GET:/* @packages/modules/caching` and `@packages/modules/event-bus-redis` pair to `GET /* @packages/admin/admin-bundler`, a dev-server catch-all of another package. FH.14 catches only pairs with gRPC evidence; a catch-all from another project is the same wrong pair with none.",
+   "entry_points": [
+    "graph/src/resolvers/http.rs - candidate ranking (FH.14's host-less branch)",
+    "graph/src/resolvers/host.rs narrow_by_host"
+   ],
+   "files_touched": [
+    "graph/src/resolvers/http.rs",
+    "graph/src/resolvers/host.rs",
+    "bench/substrate-gap/fixtures/hostless-catchall-other-project/"
+   ],
+   "implementation": "1. A route whose path is only a catch-all (any of the listed spellings) is a weak candidate for a host-less client: kept when it is the client's own PROJECT (the enclosing PROJECT node), dropped when another project's.\n2. A client left with no candidate is unpaired as today (gaps reads it); never a guess.\n3. Count it in FH.14's marker (`catchall_dropped=`).\nFixture bench/substrate-gap/fixtures/hostless-catchall-other-project/ (a host-less GET /* client in one package does not pair another package's catch-all route): packages/a/package.json + client.ts: fetch('/x'); packages/b/package.json + server.ts: app.get('/*', serveIndex); packages/a/server.ts: app.get('/x', h). key.json (grade.py vocabulary): expect HTTP_CALLS a/client -> GET /x (a); forbid HTTP_CALLS a/client -> GET /* (b).",
+   "fixtures": [],
+   "acceptance": "Fixture hostless-catchall-other-project grades full with 0 forbid violations; medusa's two wrong pairs above are gone; no cohort repo loses a pair that is not a cross-project catch-all (before / after list in the result).",
+   "fired_on_marker": "[http] hostless clients=<c> narrowed=<n> ambiguous=<a> catchall_dropped=<d> repo=<label>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "edge_removal"
+    ],
+    "what_changes": "host-less HTTP_CALLS to another project's catch-all route are no longer written",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.14"
+   ],
+   "risks": "A real SPA client calling a gateway's catch-all proxy in another package loses its pair; it stays an unpaired_endpoint row, not silence.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.15",
+   "title": "Java text-scanned routes need their framework: the Javalin / Ktor / WebFlux functional scanners run only in a file importing that framework, so `escapeEcmaScriptMap.put(\"/\", \"\\\\/\")` (commons-text StringEscapeUtils) mints no `PUT /` and a library reads role=library",
+   "area": "FH precision: phantom routes",
+   "loc": 160,
+   "rationale": "FH.2a found commons-text read role=app because parsers/code/java/src/lib.rs scan_javalin_routes matches `.put(\"/\", ..)` on any receiver: StringEscapeUtils' map setup mints ROUTE `PUT /` (Medium, no HANDLED_BY). A phantom route makes a library look like an app to health, and pairs host-less clients with nothing.",
+   "entry_points": [
+    "parsers/code/java/src/lib.rs scan_javalin_routes / scan_ktor_routes / scan_webflux_routes and their caller"
+   ],
+   "files_touched": [
+    "parsers/code/java/src/lib.rs",
+    "bench/substrate-gap/fixtures/java-map-put-not-route/"
+   ],
+   "implementation": "1. Each text scanner runs only when the file imports its framework (io.javalin for Javalin, io.ktor for Ktor, org.springframework.web.reactive.function.server for WebFlux functional routes), read from the file's import lines the parser already collects.\n2. Keep every existing Java route test green; add the negative.\nFixture bench/substrate-gap/fixtures/java-map-put-not-route/ (a Map.put(\"/\", ..) in a non-Javalin file mints no ROUTE): src/main/java/x/Esc.java: import java.util.HashMap; class Esc { static { Map<String,String> m = new HashMap<>(); m.put(\"/\", \"\\\\/\"); } }. key.json (grade.py vocabulary): forbid any ROUTE node.",
+   "fixtures": [],
+   "acceptance": "Fixture java-map-put-not-route grades full with 0 forbid violations; the Javalin / Ktor / WebFlux fixtures and java tests stay green; commons-text at its cohort sha has no ROUTE and glia_engine::health reads role=library.",
+   "fired_on_marker": "[java-routes] text scanners skipped=<s> (javalin=<j> ktor=<k> webflux=<w>) file=<p>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "edge_removal"
+    ],
+    "what_changes": "phantom Javalin-shaped ROUTEs in files that do not import Javalin are no longer minted",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.2a"
+   ],
+   "risks": "A Javalin app that reaches the framework through a wildcard re-export with no io.javalin import loses its routes; the import read covers `import io.javalin.*`.",
+   "batch": "FH",
+   "spec_group": "FH"
   }
  ],
  "deps_patch": {
