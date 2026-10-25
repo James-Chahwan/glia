@@ -283,7 +283,7 @@ glia identity <REPO> [--diverged-only] [--json] [--limit <N>] [--rule <RULE>] [-
     with none (the absence says why), 2 on an error.
 
 # One symbol, channel or signal
-glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
+glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [--no-semantic] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     The ranked, located nodes a symbol, qname or fragment names, with the match tier.
     One row per identity class, folded before the --top-k cut. --files ranks one repo's
     files for the query text instead: ids in the text first (through its task / requirement
@@ -291,7 +291,10 @@ glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [
     Ranked by the repo's calibrated pick (glia history calibrate), else ids first, then
     text; the table ends with `ranked by <pick> (..)`, --json adds `selection`. One repo
     (--with exits 2); a query that routes no id and matches no message is an absence
-    naming the missing input, exit 0.
+    naming the missing input, exit 0. When the repo holds vectors of the surface model
+    (glia embed; GLIA_EMBED_MODEL, default bge-small) the text key blends in their
+    similarity, LX[IDR,FUSE[T1s,SEMp:t2]], and the table gains a `sem` column (--json:
+    `sem`); --no-semantic (with --files) ranks without them.
 glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]

@@ -545,3 +545,129 @@ fn absence_without_a_snapshot_has_no_named_in() {
 fn text_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
+
+// ---- FB.7b: the fused `find --files` over `glia embed`'s vectors ----
+
+/// `glia <args>` with the test model as the surface model (`GLIA_EMBED_MODEL
+/// =test-hash`), relaying the marker lines as [`glia`] does.
+fn glia_test_hash(args: &[&str]) -> Output {
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(args)
+        .env("GLIA_NO_PERSIST", "1")
+        .env("GLIA_EMBED_MODEL", "test-hash")
+        .output()
+        .expect("glia runs");
+    for line in String::from_utf8_lossy(&out.stderr).lines() {
+        if line.starts_with("[find-files] ") || line.starts_with("[semantic] ") {
+            eprintln!("{line}");
+        }
+    }
+    assert!(
+        out.status.success(),
+        "glia {args:?} exited {:?}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+#[test]
+fn files_with_vectors_blend_the_similarity_and_print_sem() {
+    let fx = Fixture::new("files-sem");
+    let repo = files_fixture(&fx, true);
+    let query = ["find", repo.as_str(), "T012 order cache", "--files"];
+    // Before any `glia embed`: no sidecar, so no index is read at all.
+    let before = glia_test_hash(&query);
+    let before_err = String::from_utf8_lossy(&before.stderr);
+    assert!(!before_err.contains("[semantic] "), "{before_err}");
+    assert!(
+        before_err
+            .contains("fusion=LX[IDR,T1s] ids=1 idr_files=1 text=present text_files=1 rows=2\n"),
+        "{before_err}"
+    );
+    let before_json = glia_test_hash(&[&query[..], &["--json"]].concat()).stdout;
+
+    glia_test_hash(&["embed", &repo, "--model", "test-hash"]);
+    assert!(fx.0.join("files/.glia/vectors.jsonl").is_file());
+
+    let out = glia_test_hash(&query);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "[find-files] repo=files surface=cli fusion=LX[IDR,FUSE[T1s,SEMp:t2]] ids=1 idr_files=1 text=present text_files=1 "
+        ) && stderr.contains(" sem=present sem_files="),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains("| # | file | idr | text | sem | ids |\n|--:|---|--:|--:|--:|---|\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("\nranked by LX[IDR,FUSE[T1s,SEMp:t2]] (fallback: absent)\n"),
+        "{stdout}"
+    );
+    // the id-routed file still leads, its sem cell 4 dp
+    let first = stdout
+        .lines()
+        .find(|l| l.starts_with("| 1 | "))
+        .expect("row 1");
+    assert!(first.starts_with("| 1 | `users.py` | 1 | "), "{first}");
+    let sem = first.split(" | ").nth(4).expect("sem cell");
+    assert!(
+        sem == "—" || (sem.len() >= 6 && sem.split('.').nth(1).map(str::len) == Some(4)),
+        "{first}"
+    );
+
+    let json = glia_test_hash(&[&query[..], &["--json"]].concat()).stdout;
+    let v: serde_json::Value = serde_json::from_slice(&json).expect("json");
+    assert_eq!(v["selection"]["pick"], "LX[IDR,FUSE[T1s,SEMp:t2]]");
+    let rows = v["results"].as_array().expect("results");
+    assert!(rows.iter().any(|r| r["sem"].is_number()), "{v}");
+
+    // --no-semantic reads no sidecar: the answer before `glia embed`, byte for byte.
+    let off = glia_test_hash(&[&query[..], &["--no-semantic"]].concat());
+    assert_eq!(
+        String::from_utf8_lossy(&off.stdout),
+        String::from_utf8_lossy(&before.stdout)
+    );
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("[semantic] "));
+    let off_json = glia_test_hash(&[&query[..], &["--json", "--no-semantic"]].concat()).stdout;
+    assert_eq!(off_json, before_json);
+}
+
+#[test]
+fn files_ignore_vectors_of_another_model() {
+    let fx = Fixture::new("files-sem-other");
+    let repo = files_fixture(&fx, true);
+    let query = ["find", repo.as_str(), "T012 order cache", "--files"];
+    let before = glia_test_hash(&query).stdout;
+    glia_test_hash(&["embed", &repo, "--model", "test-hash"]);
+    // The surface model is bge-small here: the test-hash rows are not its.
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(query)
+        .env("GLIA_NO_PERSIST", "1")
+        .env("GLIA_EMBED_MODEL", "bge-small")
+        .output()
+        .expect("glia runs");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.stdout, before);
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("sem="),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn no_semantic_needs_files() {
+    let fx = Fixture::new("no-sem");
+    let out = glia(&["find", &fx.repo("api"), "user", "--no-semantic"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the following required arguments were not provided")
+            && stderr.contains("--files"),
+        "{stderr}"
+    );
+}

@@ -8,7 +8,10 @@ it, so only the first answer prints the `[live] profile=` walk line). DD.9:
 repos declare) to one row carrying `identity`; `collapse=False` is the raw rows.
 EB.8: `find_files(query, top_k=20)` is the files a free-text query is about
 (LX[IDR,T1s]), the same envelope over `{rank, file, idr, text, degree, ids}`
-rows. Shared helpers: test_build.py."""
+rows. FB.7b: `find_files(.., semantic=None)` blends the repo's embeddings
+(`embed`) in when it has vectors of the surface model (GLIA_EMBED_MODEL):
+rows gain `sem` and the fallback pick reads LX[IDR,FUSE[T1s,SEMp:t2]].
+Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -128,7 +131,8 @@ def main() -> int:
         c.check("the collapsed row is the best-ranked member", raw and row.get("id") == raw[0]["id"],
                 (row.get("id"), raw[:1]))
     # EB.8: find_files over one repo whose spec-kit task names app.py.
-    c.check("find_files signature", params(rg.PyGraph.find_files) == [("query", None), ("top_k", 20)],
+    c.check("find_files signature",
+            params(rg.PyGraph.find_files) == [("query", None), ("top_k", 20), ("semantic", None)],
             params(rg.PyGraph.find_files))
     with tempfile.TemporaryDirectory(prefix="glia-surface-find-files-") as tmp:
         root = pathlib.Path(tmp) / "shop"
@@ -164,6 +168,29 @@ def main() -> int:
         g2 = rg.generate_many([str(root), str(other)])
         c.raises("find_files refuses two repos", ValueError, lambda: g2.find_files("T012"),
                  "ranks one repo's files")
+        # FB.7b: no vectors -> the plain answer; semantic=True says so in the reason.
+        c.check("find_files semantic=True without vectors", g.find_files("T012 helper", semantic=True)
+                .get("selection", {}).get("reason") == "no_vectors", None)
+        c.check("find_files rows carry no sem without vectors", all("sem" not in r for r in rows), rows)
+        old_model = os.environ.get("GLIA_EMBED_MODEL")
+        os.environ["GLIA_EMBED_MODEL"] = "test-hash"
+        try:
+            rg.embed(str(root), model="test-hash")
+            ge = rg.generate(str(root))
+            fused, err = stderr_of(lambda: ge.find_files("T012 helper"))
+            c.check("find_files fused marker", "surface=py fusion=LX[IDR,FUSE[T1s,SEMp:t2]]" in err
+                    and " sem=present " in err, err[-600:])
+            c.check("find_files fused pick", fused.get("selection", {}).get("pick") == "LX[IDR,FUSE[T1s,SEMp:t2]]",
+                    fused.get("selection"))
+            frows = fused.get("results") or []
+            c.check("find_files fused rows carry sem", any(list(r) == FILE_KEYS + ["sem"] for r in frows), frows[:2])
+            c.check("find_files semantic=False is the plain answer",
+                    ge.find_files("T012 helper", semantic=False) == g.find_files("T012 helper"), None)
+        finally:
+            if old_model is None:
+                os.environ.pop("GLIA_EMBED_MODEL", None)
+            else:
+                os.environ["GLIA_EMBED_MODEL"] = old_model
     return c.done()
 
 

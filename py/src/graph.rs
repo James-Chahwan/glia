@@ -24,6 +24,7 @@ use glia_core::{CellPayload, NodeId};
 use glia_engine::GenerateResult;
 use glia_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
 use glia_engine::rank::RankCache;
+use glia_engine::semantic::SemanticSource;
 use glia_graph::MergedGraph;
 use glia_store::write_merged_sharded_for_repo;
 
@@ -66,6 +67,12 @@ pub(crate) struct PyGraph {
     /// which every ranked answer calls first, resets it if the graph's shape
     /// ever moves. A `WatchSession.snapshot()` shares the session's cache.
     pub(crate) rank: Arc<RankCache>,
+    /// 0.5.4 (FB.7b): the repo's fused-recipe vectors and the query embedder
+    /// `find_files` blends in (`crate::find`), loaded on the first call that
+    /// wants them; `None` inside when the sidecars hold no fresh vector of the
+    /// surface model. Never retried: a PyGraph is immutable, so a holder that
+    /// ran `embed` afterwards makes a new PyGraph to see the new vectors.
+    pub(crate) semantic: OnceLock<Option<Arc<SemanticSource>>>,
     /// Declared LAST: fields drop in declaration order, so this guard's drop
     /// runs once the graph above is freed and hands that memory back (DE.10).
     /// A field added to `PyGraph` goes above it.
@@ -120,6 +127,7 @@ impl PyGraph {
             overlay_applied: true,
             live: OnceLock::new(),
             rank,
+            semantic: OnceLock::new(),
             _trim: TrimOnDrop,
         }
     }

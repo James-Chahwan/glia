@@ -8,6 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
@@ -18,9 +19,13 @@ use glia_engine::find::{
 };
 use glia_engine::identity::Collapse;
 use glia_engine::rank::RankCache;
+use glia_engine::semantic::{
+    FUSED_RECIPE, SemanticSource, VECTORS_FILE, VectorIndex, surface_model,
+};
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
+use crate::embed::{surface_embedder, worker_dirs};
 use crate::graph::PyGraph;
 
 // `find`'s `top_k=20` below is a literal so `__text_signature__` shows it;
@@ -84,14 +89,88 @@ fn find_answer(
     Ok(answer)
 }
 
+/// The `selection.reason` of a `find_files(.., semantic=True)` answer whose
+/// repo holds no vector of the surface model (FB.7b): the fallback it ranks
+/// by is the unfused one.
+const NO_VECTORS: &str = "no_vectors";
+
+/// The vector model name a surface model name records on its rows.
+fn recorded_model(surface: &str) -> &'static str {
+    if surface == "test-hash" {
+        glia_embed::MODEL_TEST_HASH
+    } else {
+        glia_embed::MODEL_BGE_SMALL
+    }
+}
+
+/// FB.7b, minus pyo3: the fused-recipe vectors of `surface` (the caller
+/// passes `semantic::surface_model()`) under `repo_roots` and the query
+/// embedder (`embed::surface_embedder`'s, the
+/// process's one bge-small session; its worker looked for in `dirs`), or
+/// None: not one repo, no `.glia/vectors.jsonl` (nothing read), no fresh
+/// vector of the model, or an embedder that fails to load (a `warning:`
+/// stderr line).
+fn semantic_source(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    surface: &str,
+    embedder: impl FnOnce() -> Result<Arc<dyn glia_embed::Embedder>, String>,
+) -> Option<Arc<SemanticSource>> {
+    if repo_roots.len() != 1 {
+        return None;
+    }
+    let roots: BTreeMap<u64, PathBuf> = repo_roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
+    if !roots.values().any(|r| r.join(VECTORS_FILE).is_file()) {
+        return None;
+    }
+    let model = recorded_model(surface);
+    let index = VectorIndex::load(merged, &roots, model, FUSED_RECIPE);
+    if index.is_empty() {
+        return None;
+    }
+    let loaded = (|| {
+        if surface == "bge-small" {
+            for root in roots.values() {
+                glia_embed::refuse_repo_cache(root)?;
+            }
+        }
+        embedder()
+    })();
+    let embedder = match loaded {
+        Ok(e) if e.model() == model => e,
+        Ok(e) => {
+            eprintln!(
+                "warning: the query embedder embeds {}, the vectors are {model}; ranking without vectors",
+                e.model()
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
+            );
+            return None;
+        }
+    };
+    SemanticSource::from_index(index, embedder).map(Arc::new)
+}
+
 /// The whole body of [`PyGraph::find_files`], minus pyo3: the engine's
-/// `find_files` on surface `py` over the PyGraph's held [`RankCache`] (EA.7),
-/// the absence counting the build's parse errors. Err when the graph holds
-/// more than one repo.
+/// `find_files` on surface `py` over the PyGraph's held [`RankCache`] (EA.7)
+/// and, when given, its [`SemanticSource`] (FB.7b), the absence counting the
+/// build's parse errors. `wanted_semantic` (`semantic=True`) with no source
+/// marks a fallback selection's reason [`NO_VECTORS`]. Err when the graph
+/// holds more than one repo.
+#[allow(clippy::too_many_arguments)]
 fn find_files_answer(
     merged: &MergedGraph,
     repo_roots: &BTreeMap<u64, String>,
     cache: Arc<RankCache>,
+    semantic: Option<Arc<SemanticSource>>,
+    wanted_semantic: bool,
     query: &str,
     top_k: usize,
     unparsed_files: usize,
@@ -100,9 +179,18 @@ fn find_files_answer(
     opts.top_k = top_k;
     opts.surface = "py";
     opts.rank_cache = Some(cache);
+    let none = semantic.is_none();
+    opts.semantic = semantic;
     let mut answer = find_files(merged, repo_roots, query, &opts)?;
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = unparsed_files;
+    }
+    if wanted_semantic
+        && none
+        && let Some(s) = answer.selection.as_mut()
+        && s.source == "fallback"
+    {
+        s.reason = Some(NO_VECTORS);
     }
     Ok(answer)
 }
@@ -128,17 +216,54 @@ impl PyGraph {
     /// the dict gains `selection` `{set, shape, pick, source, reason,
     /// test_commits}` (`source` `calibrated` or `fallback` with its
     /// `reason`).
-    #[pyo3(signature = (query, top_k=20))]
-    fn find_files(&self, py: Python<'_>, query: &str, top_k: usize) -> PyResult<Py<PyAny>> {
-        let answer = find_files_answer(
-            &self.merged,
-            &self.repo_roots,
-            self.rank.clone(),
-            query,
-            top_k,
-            self.parse_errors.len(),
-        )
-        .map_err(PyValueError::new_err)?;
+    ///
+    /// FB.7b: `semantic` blends the repo's embeddings in. `None` (auto) and
+    /// `True` read the repo's `.glia/vectors.jsonl` (`embed`) for vectors of
+    /// the surface model (env `GLIA_EMBED_MODEL`, default `bge-small`); with
+    /// some, the uncalibrated order is `LX[IDR,FUSE[T1s,SEMp:t2]]` and each
+    /// row with an embedded node carries `sem` (its raw similarity, 4 dp).
+    /// With none the answer is the unfused one; under `True` its fallback
+    /// `selection.reason` reads `no_vectors`. `False` never reads the
+    /// sidecar. The vectors are read once per PyGraph (make a new PyGraph to
+    /// see a later `embed`); the GIL is released while the query embeds.
+    #[pyo3(signature = (query, top_k=20, semantic=None))]
+    fn find_files(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        top_k: usize,
+        semantic: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let source = if semantic == Some(false) {
+            None
+        } else if let Some(held) = self.semantic.get() {
+            held.clone()
+        } else {
+            let dirs = worker_dirs(py);
+            py.detach(|| {
+                self.semantic
+                    .get_or_init(|| {
+                        semantic_source(&self.merged, &self.repo_roots, surface_model(), || {
+                            surface_embedder(&dirs)
+                        })
+                    })
+                    .clone()
+            })
+        };
+        let answer = py
+            .detach(|| {
+                find_files_answer(
+                    &self.merged,
+                    &self.repo_roots,
+                    self.rank.clone(),
+                    source,
+                    semantic == Some(true),
+                    query,
+                    top_k,
+                    self.parse_errors.len(),
+                )
+            })
+            .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
     }
 
@@ -459,8 +584,17 @@ mod tests {
             &built.repo_roots,
             &built.repo_labels,
         ));
-        let err = find_files_answer(&built.merged, &built.repo_roots, cache, "T012", 20, 0)
-            .expect_err("two repos");
+        let err = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            cache,
+            None,
+            false,
+            "T012",
+            20,
+            0,
+        )
+        .expect_err("two repos");
         assert_eq!(err, "find --files ranks one repo's files; got 2 repos");
     }
 
@@ -496,6 +630,8 @@ mod tests {
             &built.merged,
             &built.repo_roots,
             held.clone(),
+            None,
+            false,
             "export the ledger",
             20,
             3,
@@ -520,6 +656,8 @@ mod tests {
             &built.merged,
             &built.repo_roots,
             held,
+            None,
+            false,
             "export the ledger",
             20,
             3,
@@ -528,6 +666,119 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&again).expect("json"),
             serde_json::to_string(&engine_with_errors(&built, 3)).expect("json")
+        );
+    }
+
+    fn test_hash() -> Result<Arc<dyn glia_embed::Embedder>, String> {
+        crate::embed::embedder_for("test-hash", &[])
+    }
+
+    /// FB.7b: no sidecar is no source (nothing read) and the plain answer;
+    /// `semantic=True` without vectors marks the fallback `no_vectors`; after
+    /// a test-hash embed the source loads, the order is the fused one and
+    /// rows carry `sem`; vectors of another model are no source.
+    #[test]
+    fn find_files_blends_the_vectors_when_the_repo_has_them() {
+        let root =
+            std::env::temp_dir().join(format!("glia-fb7b-find-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(
+            root.join("ledger.py"),
+            "def export_ledger(rows):\n    \"\"\"Export the ledger rows.\"\"\"\n    return rows\n",
+        )
+        .expect("write fixture");
+        std::fs::write(root.join("cache.py"), "def warm_cache():\n    return 1\n")
+            .expect("write fixture");
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = built.expect("build");
+        let held = || {
+            Arc::new(RankCache::new(
+                "pygraph",
+                &built.repo_roots,
+                &built.repo_labels,
+            ))
+        };
+        let q = "export the ledger";
+        assert!(
+            semantic_source(&built.merged, &built.repo_roots, "test-hash", test_hash).is_none()
+        );
+        let plain = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            held(),
+            None,
+            false,
+            q,
+            20,
+            0,
+        )
+        .expect("answer");
+        let wanted = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            held(),
+            None,
+            true,
+            q,
+            20,
+            0,
+        )
+        .expect("answer");
+        let sel = wanted.selection.as_ref().expect("selection");
+        assert_eq!(
+            (sel.pick.as_str(), sel.source, sel.reason),
+            ("LX[IDR,T1s]", "fallback", Some(NO_VECTORS))
+        );
+        assert_eq!(
+            plain.selection.as_ref().and_then(|s| s.reason),
+            Some("absent")
+        );
+
+        let (&repo, _) = built.repo_roots.iter().next().expect("one repo");
+        let model = glia_embed::named("test-hash").expect("test model");
+        glia_engine::semantic::embed_repo(
+            &root,
+            &built.merged,
+            glia_core::RepoId(repo),
+            model.as_ref(),
+            &glia_engine::semantic::EmbedOptions::default(),
+        )
+        .expect("embed");
+        // bge-small is the surface model: the test-hash rows are not its.
+        assert!(
+            semantic_source(&built.merged, &built.repo_roots, "bge-small", test_hash).is_none()
+        );
+        let src = semantic_source(&built.merged, &built.repo_roots, "test-hash", test_hash)
+            .expect("a source over the test-hash vectors");
+        let fused = find_files_answer(
+            &built.merged,
+            &built.repo_roots,
+            held(),
+            Some(src),
+            true,
+            q,
+            20,
+            0,
+        )
+        .expect("answer");
+        let _ = std::fs::remove_dir_all(&root);
+        let sel = fused.selection.as_ref().expect("selection");
+        assert_eq!(
+            (sel.pick.as_str(), sel.source, sel.reason),
+            ("LX[IDR,FUSE[T1s,SEMp:t2]]", "fallback", Some("absent"))
+        );
+        assert!(
+            fused.results.iter().any(|r| r.sem.is_some()),
+            "{:?}",
+            fused.results
+        );
+        let text = serde_json::to_string(&fused).expect("json");
+        assert!(text.contains(",\"sem\":"), "{text}");
+        assert!(
+            !serde_json::to_string(&plain)
+                .expect("json")
+                .contains("\"sem\"")
         );
     }
 }

@@ -26,12 +26,13 @@
 //! pyfunction delegates to is pyo3-free, so `cargo test -p glia-py` covers it.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use glia_core::RepoId;
 use glia_embed::Embedder;
 use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild};
 use glia_engine::semantic::{
-    DEFAULT_RECIPE, EmbedOptions, EmbedRecipe, EmbedReport, RECIPES, embed_repo,
+    DEFAULT_RECIPE, EmbedOptions, EmbedRecipe, EmbedReport, RECIPES, embed_repo, surface_model,
 };
 use glia_engine::{GenerateResult, generate_one};
 use pyo3::exceptions::PyValueError;
@@ -108,6 +109,58 @@ fn bge_small(dirs: &[PathBuf]) -> Result<&'static dyn Embedder, String> {
     }
     let loaded = glia_embed::bge_small(glia_embed::worker::WorkerProgram::locate(dirs))?;
     Ok(MODEL.get_or_init(|| loaded).as_ref())
+}
+
+/// An [`Embedder`] forwarding to the process's one bge-small session
+/// ([`bge_small`]), so a holder that needs an `Arc<dyn Embedder>` (a
+/// `SemanticSource`) shares it instead of starting a second one.
+#[cfg(feature = "embed")]
+struct Shared(&'static dyn Embedder);
+
+#[cfg(feature = "embed")]
+impl Embedder for Shared {
+    fn model(&self) -> &str {
+        self.0.model()
+    }
+    fn dims(&self) -> u32 {
+        self.0.dims()
+    }
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.0.embed(texts)
+    }
+    fn device(&self) -> Option<glia_embed::Device> {
+        self.0.device()
+    }
+    fn embed_tagged(&self, texts: &[String]) -> Result<Vec<glia_embed::Tagged>, String> {
+        self.0.embed_tagged(texts)
+    }
+}
+
+/// The query embedder of the surface model (`semantic::surface_model`:
+/// `GLIA_EMBED_MODEL`, default bge-small; FB.7b): `test-hash` a fresh test
+/// model, bge-small the process's one session ([`bge_small`], its worker
+/// looked for in `dirs`) behind a forwarding embedder. Err for bge-small in
+/// a wheel built without `embed`. The caller checks the model cache against
+/// its repo roots (`glia_embed::refuse_repo_cache`) before calling.
+pub(crate) fn surface_embedder(dirs: &[PathBuf]) -> Result<Arc<dyn Embedder>, String> {
+    embedder_for(surface_model(), dirs)
+}
+
+/// [`surface_embedder`] for a surface model named by the caller
+/// (`bge-small` | `test-hash`).
+pub(crate) fn embedder_for(model: &str, dirs: &[PathBuf]) -> Result<Arc<dyn Embedder>, String> {
+    #[cfg(feature = "embed")]
+    if model == "bge-small" {
+        return Ok(Arc::new(Shared(bge_small(dirs)?)));
+    }
+    #[cfg(not(feature = "embed"))]
+    if model == "bge-small" {
+        return Err(
+            "glia was built without the embedding model (glia-py feature embed)".to_string(),
+        );
+    }
+    let _ = dirs;
+    glia_embed::named(model).map(Arc::from)
 }
 
 /// Run `f` with the embedder `model` names, after checking (bge-small),
@@ -253,7 +306,7 @@ fn embed_py(
 /// Where this wheel's `glia-embed-worker` may be: the interpreter's
 /// directory, then the scripts directories above this module's `__file__`
 /// (read with the GIL held, before the run detaches).
-fn worker_dirs(py: Python<'_>) -> Vec<PathBuf> {
+pub(crate) fn worker_dirs(py: Python<'_>) -> Vec<PathBuf> {
     let attr = |module: &str, name: &str| -> Option<PathBuf> {
         py.import(module)
             .ok()?

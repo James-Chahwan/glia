@@ -22,6 +22,16 @@
 //! (calibrated on <t> commits | fallback: <reason>)` and `--json` carries the
 //! `selection` (stderr: `[select] surface=find_files set=SELf2t ..`).
 //!
+//! FB.7b: `--files` reads the repo's embeddings when it has them: with rows
+//! of the surface model (`GLIA_EMBED_MODEL`, default bge-small) under the
+//! fused recipe in `<repo>/.glia/vectors.jsonl` (`glia embed`), the files
+//! rank `LX[IDR,FUSE[T1s,SEMp:t2]]` uncalibrated (FB.7a) and the table gains
+//! a `sem` column (the file's raw SEMp:t2, 4 dp); `--json` rows carry `sem`.
+//! No sidecar, or none of that model: no index is read and the output is
+//! EC.13's byte for byte. An embedder that fails to load is a `warning:` and
+//! the unfused answer. `--no-semantic` (only with `--files`) never reads the
+//! sidecar.
+//!
 //! FB.13c: the node answer always passes the build's repo roots as
 //! `FindOptions::vocab_roots`, so with a vocabulary snapshot (`glia vocab
 //! sync`) a no-match absence names where each identifier of the query occurs
@@ -35,6 +45,12 @@ use glia_engine::find::{
     DEFAULT_TOP_K, FindFilesOptions, FindOptions, FoundNode, find_files_with_ids, find_nodes,
 };
 use glia_engine::identity::Collapse;
+use glia_engine::semantic::{
+    FUSED_RECIPE, SemanticSource, VECTORS_FILE, VectorIndex, surface_model,
+};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{generate_for, rank_cache};
@@ -71,6 +87,12 @@ pub(crate) struct Args {
     /// trackers), then past commits whose messages match it.
     #[arg(long, conflicts_with_all = ["kind", "no_collapse", "scope"])]
     files: bool,
+    /// With --files: rank without the repo's embeddings. By default a repo
+    /// whose `.glia/vectors.jsonl` (glia embed) holds vectors of the surface
+    /// model (GLIA_EMBED_MODEL, default bge-small) blends their similarity
+    /// into the text ranking and prints a `sem` column.
+    #[arg(long, requires = "files")]
+    no_semantic: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -165,6 +187,10 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
     opts.top_k = args.top_k;
     opts.surface = "cli";
     opts.rank_cache = Some(rank_cache(result));
+    if !args.no_semantic {
+        opts.semantic = semantic_source(result);
+    }
+    let sem_ran = opts.semantic.is_some();
     let (mut answer, ids) =
         match find_files_with_ids(&result.merged, &result.repo_roots, &args.query, &opts) {
             Ok(x) => x,
@@ -208,8 +234,15 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
         print_ranked_by(answer.selection.as_ref());
         return 0;
     }
-    println!("| # | file | idr | text | ids |");
-    println!("|--:|---|--:|--:|---|");
+    // The `sem` column only when the semantic tier scored the query.
+    let sem_col = sem_ran && answer.results.iter().any(|r| r.sem.is_some());
+    if sem_col {
+        println!("| # | file | idr | text | sem | ids |");
+        println!("|--:|---|--:|--:|--:|---|");
+    } else {
+        println!("| # | file | idr | text | ids |");
+        println!("|--:|---|--:|--:|---|");
+    }
     for r in &answer.results {
         let ids = if r.ids.is_empty() {
             "—".to_string()
@@ -220,13 +253,100 @@ fn run_files(args: &Args, result: &GenerateResult) -> i32 {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        println!(
-            "| {} | `{}` | {} | {:.3} | {ids} |",
-            r.rank, r.file, r.idr, r.text
-        );
+        if sem_col {
+            let sem = r.sem.map_or_else(|| "—".to_string(), |c| format!("{c:.4}"));
+            println!(
+                "| {} | `{}` | {} | {:.3} | {sem} | {ids} |",
+                r.rank, r.file, r.idr, r.text
+            );
+        } else {
+            println!(
+                "| {} | `{}` | {} | {:.3} | {ids} |",
+                r.rank, r.file, r.idr, r.text
+            );
+        }
     }
     print_ranked_by(answer.selection.as_ref());
     0
+}
+
+/// The vector model name a surface model name records on its rows
+/// (`glia_embed::Embedder::model`): what the sidecar's rows are matched by.
+fn recorded_model(surface: &str) -> &'static str {
+    if surface == "test-hash" {
+        glia_embed::MODEL_TEST_HASH
+    } else {
+        glia_embed::MODEL_BGE_SMALL
+    }
+}
+
+/// FB.7b: the repo's fused-recipe vectors of [`surface_model`] and its query
+/// embedder, or None: more than one repo (find --files refuses those), no
+/// `.glia/vectors.jsonl` under the root (nothing read, nothing printed), no
+/// fresh vector of that model, or an embedder that fails to load (a
+/// `warning:` line; the answer is the unfused one).
+fn semantic_source(result: &GenerateResult) -> Option<Arc<SemanticSource>> {
+    if result.repo_roots.len() != 1 {
+        return None;
+    }
+    let roots: BTreeMap<u64, PathBuf> = result
+        .repo_roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
+    if !roots.values().any(|r| r.join(VECTORS_FILE).is_file()) {
+        return None;
+    }
+    let surface = surface_model();
+    let model = recorded_model(surface);
+    let index = VectorIndex::load(&result.merged, &roots, model, FUSED_RECIPE);
+    if index.is_empty() {
+        return None;
+    }
+    let loaded = (|| {
+        if surface == "bge-small" {
+            for root in roots.values() {
+                glia_embed::refuse_repo_cache(root)?;
+            }
+        }
+        query_embedder(surface)
+    })();
+    let embedder = match loaded {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
+            );
+            return None;
+        }
+    };
+    if embedder.model() != model {
+        eprintln!(
+            "warning: the query embedder embeds {}, the vectors are {model}; ranking without vectors",
+            embedder.model()
+        );
+        return None;
+    }
+    SemanticSource::from_index(index, Arc::from(embedder)).map(Arc::new)
+}
+
+/// The query embedder `surface` names, started as `glia embed` starts it
+/// (cmd/inputs/embed.rs `load_embedder`): bge-small's GPU worker is this
+/// binary's `glia embed-worker` when it carries a GPU provider, else the
+/// `glia-embed-worker` beside it; a missing worker is the CPU
+/// (`fallback=no_worker`).
+fn query_embedder(surface: &str) -> Result<Box<dyn glia_embed::Embedder>, String> {
+    use glia_embed::worker::WorkerProgram;
+    if surface == "bge-small" {
+        let this = || WorkerProgram::this_binary(&[crate::cmd::embed_worker::SUBCOMMAND]);
+        let gpu_built = glia_embed::device::WEBGPU_BUILT || glia_embed::device::CUDA_BUILT;
+        let worker = match WorkerProgram::beside_current_exe() {
+            Some(external) if !gpu_built => external,
+            _ => this()?,
+        };
+        return glia_embed::bge_small(Some(worker));
+    }
+    glia_embed::named(surface)
 }
 
 /// The `ranked by <pick> (..)` line under the files: what the order is and
