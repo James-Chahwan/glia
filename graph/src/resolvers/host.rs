@@ -70,6 +70,13 @@ impl Owners {
     pub(crate) fn id_of(&self, rel: &str) -> Option<u32> {
         self.by_name.get(owner_spelling(rel).as_ref()).copied()
     }
+
+    /// FH.14b: the index of an owner segment exactly as a qname carries it
+    /// (the spelling [`Owners::intern`] stored), or `None` when no indexed
+    /// target is owned by it.
+    pub(crate) fn id_of_segment(&self, segment: &str) -> Option<u32> {
+        self.by_name.get(segment).copied()
+    }
 }
 
 /// A project rel as the engine writes it into an owner segment: verbatim
@@ -823,6 +830,20 @@ pub(crate) fn spans_services<T: HostScoped>(hits: &[T]) -> bool {
     };
     hits.iter()
         .any(|t| (t.repo(), t.owner()) != (first.repo(), first.owner()))
+}
+
+/// FH.14b: the project a client side sits in, as the scope a target's
+/// [`HostScoped`] reads: `(repo, None)` for a qname with no owner segment
+/// (the repo's root project), `(repo, Some(i))` for the nested project its
+/// ` @<path>` names, interned in the resolver's [`Owners`]. `None` when that
+/// project owns no target, so no target shares the client's project. The
+/// segment is read as the engine wrote it (already spelled), never
+/// re-escaped.
+pub(crate) fn client_scope(repo: RepoId, qname: &str, owners: &Owners) -> Option<AliasScope> {
+    match split_owner(qname).1 {
+        None => Some((repo, None)),
+        Some(segment) => owners.id_of_segment(segment).map(|i| (repo, Some(i))),
+    }
 }
 
 // ============================================================================

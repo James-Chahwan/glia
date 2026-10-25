@@ -8,8 +8,9 @@ use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    HostScoped, Narrowed, Owners, ServiceServes, build_service_alias_index, hit_hosts,
-    names_no_host, narrow_by_host, raw_field, spans_services, third_party_hosts,
+    AliasScope, HostScoped, Narrowed, Owners, ServiceServes, build_service_alias_index,
+    client_scope, hit_hosts, names_no_host, narrow_by_host, raw_field, spans_services,
+    third_party_hosts,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -46,9 +47,20 @@ use crate::types::RepoGraph;
 /// client whose only candidate is such a route pairs with nothing. A lone
 /// route of a service with no gRPC server is never dropped (a real service
 /// can serve one route), and a tie that survives keeps every target, as
-/// before (gaps' ambiguous_endpoint). fired_on, once
-/// per repo holding such a client:
-/// `[http] hostless clients=<c> narrowed=<n> ambiguous=<a> repo=<label>`.
+/// before (gaps' ambiguous_endpoint).
+///
+/// FH.14b: such a client never pairs a catch-all route of another project
+/// (a ROUTE whose whole path is `/*`, `/**`, `*`, `/*path`, `{*path}`,
+/// `{path...}`, `:path*`, `[...slug]`; `is_catch_all_path`): another
+/// package's dev-server SPA fallback serves nothing a host-less call in this
+/// package means. The project is the scope `HostScoped` reads, `(repo,
+/// owner)`, the owner the nested PROJECT the qname's ` @<path>` names, so a
+/// catch-all of the client's own project still pairs. Like the gRPC lone
+/// route it is skipped at every tier, so a concrete route the tier below
+/// finds still pairs, and a client left with no candidate stays unpaired
+/// (gaps' unpaired_endpoint), never a guess. fired_on, once per repo holding
+/// such a client:
+/// `[http] hostless clients=<c> narrowed=<n> ambiguous=<a> catchall_dropped=<d> repo=<label>`.
 ///
 /// Every node pairs ONCE, however many graph entries carry it (LB.4b): an
 /// ENDPOINT or ROUTE id present in two language graphs of one repo, or a ROUTE
@@ -250,6 +262,20 @@ impl HttpStackResolver {
         } else {
             HashSet::new()
         };
+        // FH.14b: every indexed route whose path is only a catch-all, with its
+        // project scope. A host-less client skips the ones outside its own
+        // project.
+        let catch_ids = catch_all_routes(&merged.graphs);
+        let catch_alls: HashMap<NodeId, AliasScope> = if catch_ids.is_empty() {
+            HashMap::new()
+        } else {
+            index
+                .values()
+                .flatten()
+                .filter(|t| catch_ids.contains(&t.route_id))
+                .map(|t| (t.route_id, (t.repo, t.owner)))
+                .collect()
+        };
         let mut edges = Vec::new();
         for ep in collect_endpoints(&merged.graphs) {
             stats.qnames.endpoint(ep.qname);
@@ -275,8 +301,13 @@ impl HttpStackResolver {
             let (mut hits, mut fold) =
                 lookup_route(&index, &stripped, &tails, &method, &norm, &prefixes, None);
             if names_no_host(ep.cells.iter().copied()) {
+                let own = client_scope(ep.repo, ep.qname, &owners);
+                let foreign = |id: &NodeId| catch_alls.get(id).is_some_and(|s| Some(*s) != own);
                 let narrowed = hits.iter().any(|(t, _)| incidental.contains(&t.route_id));
-                if narrowed {
+                let dropped = hits.iter().any(|(t, _)| foreign(&t.route_id));
+                if narrowed || dropped {
+                    let mut skip = incidental.clone();
+                    skip.extend(catch_alls.keys().filter(|id| foreign(id)));
                     (hits, fold) = lookup_route(
                         &index,
                         &stripped,
@@ -284,12 +315,12 @@ impl HttpStackResolver {
                         &method,
                         &norm,
                         &prefixes,
-                        Some(&incidental),
+                        Some(&skip),
                     );
                 }
                 stats
                     .hostless
-                    .record(ep.repo, narrowed, spans_services(&hits));
+                    .record(ep.repo, narrowed, dropped, spans_services(&hits));
             }
             let hosts = hit_hosts(ep.cells.iter().copied());
             match narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
@@ -345,25 +376,45 @@ impl HttpStackResolver {
 /// order a repo's first host-less client was met (graph order).
 #[derive(Default)]
 struct HostlessTally {
-    /// `(repo, clients, narrowed, ambiguous)`.
-    repos: Vec<(RepoId, usize, usize, usize)>,
+    repos: Vec<HostlessRepo>,
+}
+
+/// One repo's [`HostlessTally`] row.
+struct HostlessRepo {
+    repo: RepoId,
+    clients: usize,
+    /// FH.14: candidates held a gRPC service's lone HTTP route.
+    narrowed: usize,
+    /// Targets still span two or more services.
+    ambiguous: usize,
+    /// FH.14b: candidates held another project's catch-all route.
+    catchall_dropped: usize,
 }
 
 impl HostlessTally {
-    /// Count one host-less client of `repo`: whether narrowing cut its
-    /// targets, and whether they still span two or more services.
-    fn record(&mut self, repo: RepoId, narrowed: bool, ambiguous: bool) {
-        let at = match self.repos.iter().position(|r| r.0 == repo) {
+    /// Count one host-less client of `repo`: whether its candidates, as the
+    /// ladder first met them, held a gRPC service's lone route (`narrowed`)
+    /// or another project's catch-all (`dropped`), and whether its targets
+    /// still span two or more services.
+    fn record(&mut self, repo: RepoId, narrowed: bool, dropped: bool, ambiguous: bool) {
+        let at = match self.repos.iter().position(|r| r.repo == repo) {
             Some(at) => at,
             None => {
-                self.repos.push((repo, 0, 0, 0));
+                self.repos.push(HostlessRepo {
+                    repo,
+                    clients: 0,
+                    narrowed: 0,
+                    ambiguous: 0,
+                    catchall_dropped: 0,
+                });
                 self.repos.len() - 1
             }
         };
         if let Some(r) = self.repos.get_mut(at) {
-            r.1 += 1;
-            r.2 += usize::from(narrowed);
-            r.3 += usize::from(ambiguous);
+            r.clients += 1;
+            r.narrowed += usize::from(narrowed);
+            r.ambiguous += usize::from(ambiguous);
+            r.catchall_dropped += usize::from(dropped);
         }
     }
 
@@ -373,10 +424,11 @@ impl HostlessTally {
     fn lines(&self, graphs: &[RepoGraph]) -> Vec<String> {
         self.repos
             .iter()
-            .map(|&(repo, clients, narrowed, ambiguous)| {
-                let label = repo_label(graphs, repo);
+            .map(|r| {
+                let label = repo_label(graphs, r.repo);
                 format!(
-                    "[http] hostless clients={clients} narrowed={narrowed} ambiguous={ambiguous} repo={label}"
+                    "[http] hostless clients={} narrowed={} ambiguous={} catchall_dropped={} repo={label}",
+                    r.clients, r.narrowed, r.ambiguous, r.catchall_dropped
                 )
             })
             .collect()
@@ -1373,6 +1425,81 @@ fn fold_kind(seg: &str) -> Option<PlaceholderFold> {
         return Some(PlaceholderFold::Splat);
     }
     None
+}
+
+/// FH.14b: is `path` (a ROUTE's raw path, owner segment split off) nothing
+/// but a catch-all, in any framework's spelling? `*` / `**` (Express 4, Spring,
+/// Fastify), a named splat `*path` (Express 5, Rails), `{*path}` / `{**path}`
+/// with an optional `:constraint` (ASP.NET), `{path...}` (Go 1.22),
+/// `:path*` / `:path+` / `:path(.*)` (path-to-regexp, Next.js rewrites) and
+/// `[...slug]` / `[[...slug]]` (Next.js). The bare forms stay literal in
+/// [`normalise_http_path`] and the named ones fold to `{}`, so neither can be
+/// told from the index key: this reads the qname. One segment only: `/api/*`
+/// serves a prefix, not everything, and the root `/` is a page.
+fn is_catch_all_path(path: &str) -> bool {
+    let body = path.trim().trim_matches('/');
+    !body.is_empty() && !body.contains('/') && is_catch_all_segment(body)
+}
+
+/// FH.14b: one path segment that matches any rest of the path (see
+/// [`is_catch_all_path`]). Every named form needs an identifier name, so a
+/// glob (`*.js`, `***`) and the empty `{*}` / `:*` / `[...]` are not one.
+fn is_catch_all_segment(seg: &str) -> bool {
+    if seg == "*" || seg == "**" {
+        return true;
+    }
+    if let Some(name) = seg.strip_prefix('*') {
+        return is_route_ident(name);
+    }
+    if let Some(inner) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        let name = inner.split(':').next().unwrap_or(inner);
+        if let Some(n) = name.strip_prefix("**").or_else(|| name.strip_prefix('*')) {
+            return is_route_ident(n);
+        }
+        return name.strip_suffix("...").is_some_and(is_route_ident);
+    }
+    if let Some(name) = seg.strip_prefix(':') {
+        return name
+            .strip_suffix("(.*)")
+            .or_else(|| name.strip_suffix('*'))
+            .or_else(|| name.strip_suffix('+'))
+            .is_some_and(is_route_ident);
+    }
+    seg.strip_prefix("[[...")
+        .and_then(|s| s.strip_suffix("]]"))
+        .or_else(|| seg.strip_prefix("[...").and_then(|s| s.strip_suffix(']')))
+        .is_some_and(is_route_ident)
+}
+
+/// A route parameter's name: an ASCII identifier.
+fn is_route_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// FH.14b: the ROUTE nodes of `graphs` whose path is only a catch-all
+/// ([`is_catch_all_path`]), once per id. Only probed.
+fn catch_all_routes(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+    let mut out = HashSet::new();
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
+                continue;
+            }
+            if g.nav
+                .qname_by_id
+                .get(&n.id)
+                .and_then(|q| route_path(q))
+                .is_some_and(is_catch_all_path)
+            {
+                out.insert(n.id);
+            }
+        }
+    }
+    out
 }
 
 /// `(angle, splat, bracket)`: how many segments of `raw` fold to `{}` only
@@ -3596,7 +3723,246 @@ mod tests {
         let stats = HttpStackResolver.resolve_scoped(&mut merged, &RouteMounts::default(), None);
         assert_eq!(
             stats.hostless.lines(&merged.graphs),
-            vec!["[http] hostless clients=2 narrowed=1 ambiguous=1 repo=shop".to_string()]
+            vec![
+                "[http] hostless clients=2 narrowed=1 ambiguous=1 catchall_dropped=0 repo=shop"
+                    .to_string()
+            ]
+        );
+    }
+
+    // ---- FH.14b host-less clients and another project's catch-all ---------
+
+    /// Every catch-all spelling the route emitters write is one, as a whole
+    /// path only; a parameter, a glob, a prefixed catch-all and the root are
+    /// not.
+    #[test]
+    fn catch_all_paths_are_whole_path_catch_alls_only() {
+        for p in [
+            "/*",
+            "*",
+            "/**",
+            "**",
+            "/*path",
+            "/*splat/",
+            "/{*path}",
+            "/{**slug}",
+            "/{*slug:nonfile}",
+            "/{path...}",
+            "/:path*",
+            "/:rest+",
+            "/:path(.*)",
+            "/[...slug]",
+            "/[[...slug]]",
+        ] {
+            assert!(is_catch_all_path(p), "{p} is a catch-all");
+        }
+        for p in [
+            "/",
+            "",
+            "/x",
+            "/:id",
+            "/{id}",
+            "/<path:sub>",
+            "/[id]",
+            "/api/*",
+            "/static/*",
+            "/*/x",
+            "/*.js",
+            "/***",
+            "/{*}",
+            "/:*",
+            "/[...]",
+        ] {
+            assert!(!is_catch_all_path(p), "{p} is not a catch-all");
+        }
+    }
+
+    /// The fixture's shape: three packages, each its own project. A host-less
+    /// `GET /*` of `a` pairs neither `b`'s nor `c`'s catch-all; `c`'s pairs
+    /// its own catch-all only; `a`'s concrete call is untouched.
+    #[test]
+    fn hostless_client_never_pairs_another_projects_catch_all() {
+        let (rows, ids) = pair_one_repo(
+            RepoId(710),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/x @packages/a",
+                    no_host_get("/x"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/* @packages/a",
+                    no_host_get("/*"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/* @packages/c",
+                    no_host_get("/*"),
+                ),
+                (node_kind::ROUTE, "GET /x @packages/a", vec![]),
+                (node_kind::ROUTE, "GET /* @packages/b", vec![]),
+                (node_kind::ROUTE, "GET /* @packages/c", vec![]),
+            ],
+        );
+        assert_eq!(
+            rows,
+            vec![
+                (ids[0], ids[3], "exact".to_string()),
+                (ids[2], ids[5], "exact".to_string()),
+            ]
+        );
+    }
+
+    /// A client naming a host is not judged by this rule: it pairs another
+    /// project's catch-all as before. So does a client with no host whose
+    /// own project serves it (root project to root project, same repo).
+    #[test]
+    fn catch_all_drop_is_hostless_and_cross_project_only() {
+        let hosted = vec![hit(
+            r#"{"method":"GET","path":"/*","host":"admin-bundler:5173"}"#,
+        )];
+        let (rows, ids) = pair_one_repo(
+            RepoId(711),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/* @packages/cache",
+                    hosted,
+                ),
+                (node_kind::ROUTE, "GET /* @packages/admin-bundler", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+
+        let (rows, ids) = pair_one_repo(
+            RepoId(712),
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/*", no_host_get("/*")),
+                (node_kind::ROUTE, "GET /*", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+
+        // The root project's client against a nested project's catch-all:
+        // another project.
+        let (rows, _) = pair_one_repo(
+            RepoId(713),
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/*", no_host_get("/*")),
+                (node_kind::ROUTE, "GET /* @packages/admin-bundler", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![]);
+    }
+
+    /// A catch-all of another repo is another project, even with no owner
+    /// segment on either side.
+    #[test]
+    fn another_repos_catch_all_is_another_project() {
+        let (web, e) = repo_graph(
+            RepoId(714),
+            vec![(node_kind::ENDPOINT, "endpoint:GET:/*", no_host_get("/*"))],
+        );
+        let (spa, _) = repo_graph(RepoId(715), vec![(node_kind::ROUTE, "GET /*", vec![])]);
+        let mut merged = MergedGraph::new(vec![web, spa]);
+        HttpStackResolver.resolve(&mut merged);
+        let to: Vec<NodeId> = merged
+            .cross_edges
+            .iter()
+            .filter(|x| x.category == edge_category::HTTP_CALLS && x.from == e[0])
+            .map(|x| x.to)
+            .collect();
+        assert_eq!(to, vec![]);
+    }
+
+    /// A named catch-all (Express 5's `/*path`) normalises to `/{}`, as a
+    /// `/:slug` parameter route does, so before FH.14b a host-less
+    /// single-segment client tied the two. Only the parameter route pairs
+    /// now; a catch-all that is the only candidate in another project pairs
+    /// nothing; and the skip happens inside the ladder, so the tier below
+    /// finds the client's own method-agnostic route.
+    #[test]
+    fn named_catch_all_drops_and_the_ladder_falls_through() {
+        let (rows, ids) = pair_one_repo(
+            RepoId(716),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/${…} @web",
+                    no_host_get("/${id}"),
+                ),
+                (node_kind::ROUTE, "GET /*path @server", vec![]),
+                (node_kind::ROUTE, "GET /:slug @blog", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[2], "exact".to_string())]);
+
+        let (rows, _) = pair_one_repo(
+            RepoId(717),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/${…} @web",
+                    no_host_get("/${id}"),
+                ),
+                (node_kind::ROUTE, "GET /{*rest} @server", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![]);
+
+        let (rows, ids) = pair_one_repo(
+            RepoId(718),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/${…} @web",
+                    no_host_get("/${id}"),
+                ),
+                (node_kind::ROUTE, "GET /{*rest} @server", vec![]),
+                (node_kind::ROUTE, "ANY /:page @web", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[2], "any".to_string())]);
+    }
+
+    /// The marker counts each host-less client whose candidates held another
+    /// project's catch-all.
+    #[test]
+    fn hostless_marker_counts_catch_alls_dropped() {
+        let (mut g, ids) = repo_graph(
+            RepoId(719),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/* @packages/a",
+                    no_host_get("/*"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/* @packages/c",
+                    no_host_get("/*"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/x @packages/a",
+                    no_host_get("/x"),
+                ),
+                (node_kind::ROUTE, "GET /x @packages/a", vec![]),
+                (node_kind::ROUTE, "GET /* @packages/b", vec![]),
+                (node_kind::ROUTE, "GET /* @packages/c", vec![]),
+                (node_kind::PROJECT, "project:.", vec![]),
+            ],
+        );
+        g.nav.name_by_id.insert(ids[6], "mono".to_string());
+        let mut merged = MergedGraph::new(vec![g]);
+        let stats = HttpStackResolver.resolve_scoped(&mut merged, &RouteMounts::default(), None);
+        assert_eq!(
+            stats.hostless.lines(&merged.graphs),
+            vec![
+                "[http] hostless clients=3 narrowed=0 ambiguous=0 catchall_dropped=2 repo=mono"
+                    .to_string()
+            ]
         );
     }
 }

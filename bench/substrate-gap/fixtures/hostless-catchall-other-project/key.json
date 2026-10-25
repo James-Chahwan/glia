@@ -1,0 +1,23 @@
+{
+  "framework": "hostless-catchall-other-project",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "FH.14b: a host-less client never pairs a catch-all route of another project. Three npm packages in one repo (packages/a, b, c, each with its own package.json, so each is a nested PROJECT and its ROUTE / ENDPOINT qnames carry ` @packages/<p>`). packages/a calls `fetch('/x')` and `fetch('/*')` with no host and no base, and serves `GET /x`; packages/b serves only an Express catch-all `app.get('/*', serveIndex)` (a dev server's SPA fallback, the shape of medusa's admin-bundler); packages/c calls `fetch('/*')` and serves its own catch-all. A catch-all stays literal in the path normaliser, so the only clients that reach it are ones whose own path is the catch-all (medusa's `subscribers.get(\"*\")` read as an HTTP GET). Before FH.14b (debug CLI at 2e9ef8b7): `[http] routes=3 endpoints=3 paired=5`, a's `/*` paired b's and c's catch-alls and c's `/*` paired b's as well as its own. After it a catch-all of another project is out of a host-less client's ladder, so a's `/*` stays unpaired (an unpaired_endpoint row, never a guess) and c's pairs only its own project's catch-all. Recall alone cannot see the wrong pairs, so the precision gate is the forbid rows. Deliberately not bound to a matrix cell: typescript/http_client and typescript/http_server are scored elsewhere.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/x @packages/a", "exact": true, "note": "`fetch('/x')`: no host, no base"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/* @packages/a", "exact": true, "note": "`fetch('/*')` in packages/a: no host, no base"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/* @packages/c", "exact": true, "note": "`fetch('/*')` in packages/c: no host, no base"},
+    {"kind": "ROUTE", "name": "GET /x @packages/a", "exact": true, "note": "packages/a's concrete route"},
+    {"kind": "ROUTE", "name": "GET /* @packages/b", "exact": true, "note": "another package's catch-all, present so the forbid rows are not vacuous"},
+    {"kind": "ROUTE", "name": "GET /* @packages/c", "exact": true, "note": "packages/c's own catch-all"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/x @packages/a", "to": "GET /x @packages/a", "category": "HTTP_CALLS", "exact": true, "note": "a concrete pair is untouched"},
+    {"from": "endpoint:GET:/* @packages/c", "to": "GET /* @packages/c", "category": "HTTP_CALLS", "exact": true, "note": "a catch-all inside the client's own project still pairs"}
+  ],
+  "forbid": [
+    {"from": "endpoint:GET:/* @packages/a", "to": "GET /* @packages/b", "category": "HTTP_CALLS", "note": "another project's catch-all (matched before FH.14b)"},
+    {"from": "endpoint:GET:/* @packages/a", "to": "GET /* @packages/c", "category": "HTTP_CALLS", "note": "another project's catch-all (matched before FH.14b)"},
+    {"from": "endpoint:GET:/* @packages/c", "to": "GET /* @packages/b", "category": "HTTP_CALLS", "note": "another project's catch-all beside the client's own (matched before FH.14b)"}
+  ]
+}
