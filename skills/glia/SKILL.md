@@ -7,10 +7,13 @@ description: Answer structural questions about a codebase with the glia CLI, no 
 
 glia parses a repo into one cross-language graph and answers questions from it. The graph holds calls, imports, the HTTP / gRPC / GraphQL / queue / event / WebSocket links between services, data access, tests and docs. Each answer is one `glia <command> <repo> ...` call. Add `--json` for structured output (progress lines go to stderr). Open the `file:line` an answer gives and read it there rather than grepping for it.
 
+On a repo you have not seen before, run `glia health <repo> --json` first. It says, per boundary mechanism (HTTP, gRPC, RPC, GraphQL, queues, WebSocket), how much of the client and server side the graph pairs, with a verdict `OK`, `DEGRADED` or `BLIND`, plus the code files no parser read and the workspace imports left unbound. Where a mechanism is `BLIND`, an answer that depends on it ("0 breaking", "nothing calls this route") means glia could not see, not that nothing is there: grep for that part instead.
+
 ## Which command
 
 | Question | Command |
 |---|---|
+| Can I trust glia's answers on this repo? Which boundaries can it not see? | `glia health <repo> --json` |
 | What services are there, and how do they talk? | `glia arch <repo> --json` |
 | Where is X? (a name, qname or fragment) | `glia find <repo> X --json` |
 | Which files is this task, ticket or PR title about? | `glia find <repo> "<text>" --files --json` |

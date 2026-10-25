@@ -281,6 +281,14 @@ glia identity <REPO> [--diverged-only] [--json] [--limit <N>] [--rule <RULE>] [-
     candidates (vendored copies: heuristic, never collapsed), by rule and tier,
     each member located, diverged copies with their variants. Exits 0 with classes, 1
     with none (the absence says why), 2 on an error.
+glia health <REPO> [--json] [--with <WITH>]...
+    Whether glia's answers about this repo can be trusted, before asking one: per
+    boundary mechanism (http, grpc, rpc, graphql, queue, ws) the clients, servers and
+    pairs, how much of each side is paired and a verdict OK / DEGRADED / BLIND; then
+    the code files no parser read, workspace packages imported by name but bound to
+    no in-repo module, suspicious endpoint / route qnames and the dead-symbol share.
+    The verdict is the worst row; a library is never judged on reach. Run it first on
+    an unfamiliar repo. A report: exits 0, 2 on an error.
 
 # One symbol, channel or signal
 glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [--no-semantic] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...

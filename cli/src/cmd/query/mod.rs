@@ -2,7 +2,7 @@
 //! implementors (LD.7c), serves (LD.8b), why (LE.5), pack (CC.4c), hotspots
 //! (CC.10b), communities (CD.1e), splits (CD.2d), hubs (CD.4c),
 //! duplicate-flows (CD.4f), identity (DD.15), query (DB.5; its file is
-//! `rules_query.rs`, so the module is not `query::query`).
+//! `rules_query.rs`, so the module is not `query::query`), health (FH.2b).
 //!
 //! Each command is a variant of `QueryCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -15,6 +15,7 @@ mod communities;
 mod duplicate_flows;
 mod find;
 mod flows;
+mod health;
 mod hotspots;
 mod hubs;
 mod identity;
@@ -58,6 +59,17 @@ pub(crate) enum QueryCmd {
     /// it reaches, whether it crosses a service, the mechanisms it uses and
     /// where the entry is. Rows sharing a key are all kept. Exits 0.
     Flows(flows::Args),
+    /// Health (FH.2b): whether glia's answers about this repo can be trusted.
+    /// Per boundary mechanism (http, grpc, rpc, graphql, queue, ws) the
+    /// client and server nodes, the pairs, how much of each side is paired
+    /// and a verdict OK / DEGRADED / BLIND with its reason; then the code
+    /// files no parser read, workspace packages imported by name but bound to
+    /// no in-repo module, suspicious endpoint / route qnames and the share of
+    /// symbols `glia gaps` calls dead. The overall verdict is the worst row. A
+    /// library (no route, procedure or endpoint outside tests and examples)
+    /// is never judged on reach. Run it first on an unfamiliar repo. A
+    /// report: exits 0 whatever the verdict, 2 on an error.
+    Health(health::Args),
     /// Hotspots (CC.10b): modules and symbols that change often AND sit where
     /// much depends on them — each row's git churn, its churn rank and its
     /// PageRank centrality rank over the same ranked population, its last
@@ -151,6 +163,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::DuplicateFlows(a) => duplicate_flows::run(a),
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
+        QueryCmd::Health(a) => health::run(a),
         QueryCmd::Hotspots(a) => hotspots::run(a),
         QueryCmd::Hubs(a) => hubs::run(a),
         QueryCmd::Identity(a) => identity::run(a),

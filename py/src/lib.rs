@@ -58,6 +58,7 @@ mod flags;
 mod gaps;
 mod goal;
 mod graph;
+mod health;
 mod hotspots;
 mod hubs;
 mod identity;

@@ -13,20 +13,22 @@ Use whichever is available, in this order: the repo-graph MCP tools when loaded 
 
 | Want | MCP tool call | glia CLI | uvx mcp-repo-graph |
 |---|---|---|---|
+| Can the graph be trusted here? | | `glia health . --json` | |
 | Overview | `orient` | `glia arch . --json` and `glia flows . --json` | `uvx mcp-repo-graph orient` |
 | Map around one node | `orient seed=<node>` | `glia trace . <node> --json` | `uvx mcp-repo-graph orient "<node>"` |
 | Whole-repo map | `orient full=true` | `glia arch . --include-shared --json` | `uvx mcp-repo-graph orient --full` |
 | Where the graph is blind | the overview's **Blind spots** | `glia coverage . --json` | `uvx mcp-repo-graph orient` |
 | What could not be paired, what looks dead | | `glia gaps . --json` | |
 
-The glia CLI has no `orient` verb: `arch`, `flows`, `coverage` and `gaps` answer its parts.
+The glia CLI has no `orient` verb: `health`, `arch`, `flows`, `coverage` and `gaps` answer its parts.
 
 ## Steps
 
-1. Run the overview first. Over MCP it lists node and edge counts, the node kinds, the entry points (routes, CLI commands, handlers, jobs) and a **Blind spots** section. On the CLI, `glia arch . --json` gives the services and the links between them (HTTP, gRPC, queue, event), and `glia flows . --json` the entry points with where each one goes.
-2. Read the blind spots before trusting any "not found": `glia coverage . --json` lists the edge kinds and languages this repo's graph under-links, how many it did find, and what to grep instead. Those are the places grep is still needed.
-3. `glia gaps . --json` lists what could not be paired (a client call with no server route, a route nothing calls) and the likely-dead symbols.
-4. To zoom in on one area, take a node name from the overview or from a `find` and seed the map with it (`orient seed=<node>`, or `glia trace . <node> --json` for the flows through it).
+1. On a repo you have not seen before, run `glia health . --json` first (CLI only). Its `verdict` is the worst row: per boundary mechanism (http, grpc, rpc, graphql, queue, ws) how much of the client and server side the graph pairs (`OK`, `DEGRADED`, `BLIND`, with the reason and the measure, e.g. `servers reached 1% of 436`), then `parse` (code files no parser read), `workspace_unresolved` (in-repo packages imported by name and bound to nothing) and the dead-symbol share. A `BLIND` mechanism means every answer through it (a contract break, an unpaired route, a cross-service trace) is glia not seeing, not an absence: say so in the report and grep that part. A `library` role is never judged on reach.
+2. Run the overview. Over MCP it lists node and edge counts, the node kinds, the entry points (routes, CLI commands, handlers, jobs) and a **Blind spots** section. On the CLI, `glia arch . --json` gives the services and the links between them (HTTP, gRPC, queue, event), and `glia flows . --json` the entry points with where each one goes.
+3. Read the blind spots before trusting any "not found": `glia coverage . --json` lists the edge kinds and languages this repo's graph under-links, how many it did find, and what to grep instead. Those are the places grep is still needed.
+4. `glia gaps . --json` lists what could not be paired (a client call with no server route, a route nothing calls) and the likely-dead symbols.
+5. To zoom in on one area, take a node name from the overview or from a `find` and seed the map with it (`orient seed=<node>`, or `glia trace . <node> --json` for the flows through it).
 
 Report the main entry points and how they layer (entry, service, handler, data). Then pick up `glia-find`, `glia-trace` or `glia-impact` for the task itself.
 
