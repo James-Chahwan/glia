@@ -56,6 +56,7 @@ and matrix.py imports it from here.
 """
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import matrix_vocab as vocab
@@ -63,8 +64,15 @@ import matrix_vocab as vocab
 HERE = Path(__file__).parent
 RESULTS_PATH = HERE / "results-latest.json"
 COVERAGE_PATH = HERE / "COVERAGE.md"
+COHORT_DIR = HERE.parent / "cohort"
+sys.path.insert(0, str(COHORT_DIR))
+import cells as cohort_cells  # noqa: E402  -- bench/cohort/cells.py, stdlib only
 
-SCHEMA = 2
+# Schema 3 (FH.10) adds `cohort`: the outlier cohort's grade of each cell beside its fixture
+# grade (bench/cohort/cells.py), the chain cells and the cells a cohort miss created.
+SCHEMA = 3
+# what build_payload reads when no cohort is passed: the newest bench/cohort/results/<r>/
+_DEFAULT_COHORT = object()
 BEGIN = "<!-- BEGIN generated: matrix.py --emit -->"
 END = "<!-- END generated -->"
 
@@ -144,6 +152,12 @@ def na_digest():
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
+def chains_digest():
+    """sha256 over matrix_vocab.CHAINS, 12 hex — the chain rows, in the diff (FH.10)."""
+    blob = json.dumps(vocab.CHAINS, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
 def engine_version():
     """The installed wheel's version, or `unknown` if it will not import.
 
@@ -158,9 +172,70 @@ def engine_version():
         return "unknown"
 
 
+def load_cohort():
+    """The newest committed cohort release's column over the full vocabulary, or None."""
+    return cohort_cells.cohort(languages=vocab.LANGUAGES, mechanisms=vocab.MECHANISM_IDS)
+
+
+def _fixture_level(cells, lang, mech):
+    slot = cells.get((lang, mech))
+    if slot is not None:
+        return slot["level"]
+    return vocab.NA_LEVEL if f"{lang}/{mech}" in vocab.NOT_APPLICABLE else "unknown"
+
+
+GRADED = ("full", "partial", "none")
+
+
+def cohort_section(cohort, cells, languages, mechanisms):
+    """The payload's `cohort`: each graded cell gains its fixture level, the disagreements
+    (both graded, levels differ) and the totals. None when there is no cohort."""
+    if cohort is None:
+        return None
+    selected = {f"{lg}/{m}" for lg in languages for m in mechanisms}
+    out_cells = {}
+    for label, slot in sorted(cohort["cells"].items()):
+        if not slot.get("created") and label not in selected:
+            continue
+        lang, mech = label.split("/", 1)
+        out_cells[label] = {**slot, "fixture": "unknown" if slot.get("created")
+                            else _fixture_level(cells, lang, mech)}
+    chains = {k: {**v, "fixture": "unknown"} for k, v in sorted(cohort["chains"].items())}
+    grid = [(k, v) for k, v in out_cells.items() if not v["created"]]
+    disagree = sorted(k for k, v in grid if v["fixture"] in GRADED
+                      and v["level"] in GRADED and v["fixture"] != v["level"])
+    totals = {level: sum(1 for _, v in grid if v["level"] == level) for level in GRADED}
+    totals.update(graded=sum(totals.values()), disagree=len(disagree),
+                  unknown_graded=sum(1 for _, v in grid if v["fixture"] == "unknown"
+                                     and v["level"] in GRADED),
+                  created=len(cohort["created"]),
+                  chain_cells=sum(1 for v in chains.values() if v["level"] in GRADED))
+    return {"release": cohort["release"], "glia": cohort["glia"],
+            "tasks_sha256": cohort["tasks_sha256"], "rule": cohort["rule"],
+            "rows": cohort["rows"], "observed": cohort["observed"], "cells": out_cells,
+            "chains": chains, "created": list(cohort["created"]),
+            "outside_vocab_passing": list(cohort["outside_vocab_passing"]),
+            "disagree": disagree, "totals": totals}
+
+
+def cohort_marker(payload):
+    """`[matrix] cells=<grid> fixture_full=.. cohort_graded=.. cohort_full=.. disagree=..
+    chain_cells=.. created=..` -- FH.10's fired_on line."""
+    t = (payload.get("cohort") or {}).get("totals") or {}
+    return (f"[matrix] cells={payload['totals']['grid']} "
+            f"fixture_full={payload['totals']['full']} cohort_graded={t.get('graded', 0)} "
+            f"cohort_full={t.get('full', 0)} disagree={t.get('disagree', 0)} "
+            f"chain_cells={t.get('chain_cells', 0)} created={t.get('created', 0)}")
+
+
 def build_payload(cells, legacy_only, languages=None, mechanisms=None,
-                  engine=None):
-    """The committed JSON object. Pure: same inputs -> same bytes, always."""
+                  engine=None, cohort=_DEFAULT_COHORT):
+    """The committed JSON object. Pure: same inputs -> same bytes, always.
+
+    `cohort` is a bench/cohort/cells.cohort() result (None: no cohort column); by default
+    the newest committed release is read. The FH.10 marker goes to stderr."""
+    if cohort is _DEFAULT_COHORT:
+        cohort = load_cohort()
     languages = list(languages or vocab.LANGUAGES)
     mechanisms = list(mechanisms or vocab.MECHANISM_IDS)
     grid = len(languages) * len(mechanisms)
@@ -194,18 +269,22 @@ def build_payload(cells, legacy_only, languages=None, mechanisms=None,
 
     totals["covered"] = len(out_cells)
     totals["grid"] = grid
-    return {
+    payload = {
         "schema": SCHEMA,
         "engine": engine if engine is not None else engine_version(),
         "vocabulary": {"mechanisms": len(mechanisms), "languages": len(languages),
                        "digest": vocabulary_digest(),
                        "not_applicable": len(vocab.NOT_APPLICABLE),
-                       "na_digest": na_digest()},
+                       "na_digest": na_digest(), "chains": len(vocab.CHAINS),
+                       "chains_digest": chains_digest()},
         "totals": totals,
         "cells": out_cells,
         "not_applicable": {k: not_applicable[k] for k in sorted(not_applicable)},
         "legacy_only": sorted(legacy_only),
+        "cohort": cohort_section(cohort, cells, languages, mechanisms),
     }
+    print(cohort_marker(payload), file=sys.stderr)
+    return payload
 
 
 def render_results(payload):
@@ -230,6 +309,17 @@ def _level(payload, lang, mech):
     if label in payload["cells"]:
         return payload["cells"][label]["level"]
     return vocab.NA_LEVEL if label in payload.get("not_applicable", {}) else "unknown"
+
+
+def _cohort_level(payload, lang, mech):
+    """A cell's cohort level, `n/a` when no observed cohort row exercises it."""
+    slot = ((payload.get("cohort") or {}).get("cells") or {}).get(f"{lang}/{mech}")
+    return slot["level"] if slot else vocab.NA_LEVEL
+
+
+def _pair(payload, lang, mech):
+    """The rendered `fixture/cohort` glyph pair."""
+    return f"{GLYPH[_level(payload, lang, mech)]}/{GLYPH[_cohort_level(payload, lang, mech)]}"
 
 
 def _tally(payload, pairs):
@@ -273,6 +363,10 @@ def render_markdown(payload, languages=None, mechanisms=None):
         m = vocab.mechanism(mech)
         lines.append(f"- `{m['label']}` — **{m['id']}** ({m['family']})")
     lines.append("")
+    lines.append("Each cell reads `fixture/cohort`: the fixture grade, then the outlier "
+                 "cohort's grade of the same cell (`Cohort grades` below; `-` after the "
+                 "slash: no cohort row exercises it). The rollups count the fixture grade.")
+    lines.append("")
     lines.append("```")
     lines.append(f"LEGEND {GLYPH['full']} full  {GLYPH['partial']} partial  "
                  f"{GLYPH['none']} none (fixture exists, nothing emitted)  "
@@ -281,7 +375,7 @@ def render_markdown(payload, languages=None, mechanisms=None):
     lines.append(" " * LANG_W
                  + " ".join(vocab.mechanism(m)["label"].rjust(COL_W) for m in mechanisms))
     for lang in languages:
-        glyphs = (GLYPH[_level(payload, lang, m)] for m in mechanisms)
+        glyphs = (_pair(payload, lang, m) for m in mechanisms)
         lines.append(lang.ljust(LANG_W) + " ".join(g.rjust(COL_W) for g in glyphs))
     lines.append("")
     lines.append(f"PER-MECHANISM  across {len(languages)} languages:")
@@ -352,7 +446,66 @@ def render_markdown(payload, languages=None, mechanisms=None):
     else:
         lines.append("_None in this selection._")
     lines.append("")
+    lines.extend(_cohort_markdown(payload))
     return "\n".join(lines)
+
+
+def _repos(slot):
+    return ", ".join(f"{r} {p}/{n}" for r, (p, n) in slot["repos"].items())
+
+
+def _classes(slot):
+    return ", ".join(f"{k} {n}" for k, n in slot["classes"].items()) or "-"
+
+
+def _cohort_markdown(payload):
+    co = payload.get("cohort")
+    lines = ["## Cohort grades", ""]
+    if not co:
+        lines += ["_No cohort results: bench/cohort/results/ holds no release._", ""]
+        return lines
+    t, rule = co["totals"], co["rule"]
+    lines.append(f"Release `{co['release']}` (`{co['glia']}`, tasks digest "
+                 f"`{co['tasks_sha256']}`): {co['observed']} of {co['rows']} probe rows observed "
+                 "(bench/cohort/cells.py tags each with the cells and chains it exercises). A "
+                 f"cell is full when >= {rule['full']:.0%} of its rows passed, partial at >= "
+                 f"{rule['partial']:.0%}, none below. {t['graded']} grid cells graded "
+                 f"({t['full']} full, {t['partial']} partial, {t['none']} none), "
+                 f"{t['unknown_graded']} of them with no fixture; {t['disagree']} disagree with "
+                 f"their fixture grade; {t['chain_cells']} chain cells graded; {t['created']} "
+                 "cells created by a miss.")
+    lines.append("")
+
+    def table(title, intro, rows, empty):
+        lines.extend([f"### {title}", "", intro, ""])
+        if rows:
+            lines.append("| cell | fixture | cohort | passed | repos | missed checks |")
+            lines.append("|---|---|---|---|---|---|")
+            for label, slot in rows:
+                lines.append(f"| `{label}` | {GLYPH[slot['fixture']]} {slot['fixture']} | "
+                             f"{GLYPH[slot['level']]} {slot['level']} | "
+                             f"{slot['passed']}/{slot['rows']} | {_repos(slot)} | "
+                             f"{_classes(slot)} |")
+        else:
+            lines.append(empty)
+        lines.append("")
+
+    cells = co["cells"]
+    table("Disagreements", "Both grades exist and differ: the work list (README: reading "
+          "a disagreement).", [(k, cells[k]) for k in co["disagree"]], "_None._")
+    table("Cells with no fixture the cohort grades", "No fixture claims the cell; real repos "
+          "exercise it.", [(k, v) for k, v in cells.items() if not v["created"]
+                           and v["fixture"] == "unknown"], "_None._")
+    table("Chain cells", "Where mechanisms chain (bench/cohort/cells.py CHAINS); graded by the "
+          "cohort, fixture side by generated repos.", list(co["chains"].items()), "_None._")
+    table("Cells the cohort created", "A cohort miss on a cell outside the vocabulary "
+          "(a language glia has no parser for, a boundary no column models).",
+          [(k, cells[k]) for k in co["created"]], "_None._")
+    if co["outside_vocab_passing"]:
+        lines.append("Outside the vocabulary, only ever passed (no cell created): "
+                     + ", ".join(f"`{k}`" for k in co["outside_vocab_passing"]))
+        lines.append("")
+    return lines
 
 
 def splice(existing, block):
@@ -421,7 +574,24 @@ def level_drift(committed, payload):
             # an unlisted cell with no fixture is `unknown` in the n/a vocabulary
             was, now = (("unknown" if s == "(absent)" else s) for s in (was, now))
         lines.append(f"{label}: {was} -> {now}")
+    lines.extend(_cohort_drift(committed.get("cohort"), payload.get("cohort")))
     return lines
+
+
+def _cohort_drift(old, new):
+    """`cohort <label>: <was> -> <now>` for each cohort or chain cell whose level moved; a
+    cell no observed row exercises reads `n/a`."""
+    def levels(co):
+        co = co if isinstance(co, dict) else {}
+        out = {k: v.get("level", vocab.NA_LEVEL) for k, v in (co.get("cells") or {}).items()}
+        out.update({k: v.get("level", vocab.NA_LEVEL)
+                    for k, v in (co.get("chains") or {}).items()})
+        return out
+
+    was, now = levels(old), levels(new)
+    return [f"cohort {k}: {was.get(k, vocab.NA_LEVEL)} -> {now.get(k, vocab.NA_LEVEL)}"
+            for k in sorted(set(was) | set(now))
+            if was.get(k, vocab.NA_LEVEL) != now.get(k, vocab.NA_LEVEL)]
 
 
 def check(payload, results_path=RESULTS_PATH, coverage_path=COVERAGE_PATH,

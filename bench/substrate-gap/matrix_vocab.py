@@ -355,6 +355,32 @@ NOT_APPLICABLE = {
 
 
 # ---------------------------------------------------------------------------
+# Chain cells (FH.10) -- where mechanisms CHAIN. Real repos break where one
+# mechanism hands to another (a route prefix read through a constant, a client
+# that calls a wrapper that calls the endpoint, a client reaching a route through
+# a workspace SDK package, a single-file component calling a service), which no
+# per-mechanism column can show. Each chain is one row `chain/<id>`, graded by the
+# outlier cohort (bench/cohort/cells.py tags the rows that cross it) and, on the
+# fixture side, by generated repos (FH.11); until then its fixture grade is
+# `unknown`. Module level, NOT a MECHANISMS field, so the scoring ruler's digest
+# does not move; it has its own (matrix_emit.chains_digest). Order is render order.
+# ---------------------------------------------------------------------------
+
+CHAINS = [
+    {"id": "const_prefix", "label": "prefix through a constant",
+     "description": "a route prefix, base URL or path segment held in a constant or enum"},
+    {"id": "client_wrapper_endpoint", "label": "client -> wrapper -> endpoint",
+     "description": "the client calls a request wrapper that issues the HTTP call"},
+    {"id": "workspace_sdk_route", "label": "client -> workspace package -> SDK -> route",
+     "description": "the client imports a workspace SDK / client package that reaches the "
+                    "route"},
+    {"id": "sfc_service_endpoint", "label": "SFC -> service -> endpoint",
+     "description": "a single-file component calls a service that issues the call"},
+]
+CHAIN_IDS = [c["id"] for c in CHAINS]
+
+
+# ---------------------------------------------------------------------------
 # Accessors
 # ---------------------------------------------------------------------------
 
@@ -531,6 +557,10 @@ def _selftest():
         assert isinstance(reason, str) and len(reason) >= 20, (
             f"NOT_APPLICABLE {label!r}: the reason must say why, in >= 20 chars")
         assert not_applicable(lang, mech) == reason
+    assert len(set(CHAIN_IDS)) == len(CHAINS), "duplicate chain id"
+    for ch in CHAINS:
+        assert set(ch) == {"id", "label", "description"}, f"chain {ch!r}: id, label, description"
+        assert ch["id"] not in MECHANISM_IDS, f"chain {ch['id']!r} shadows a mechanism column"
     # the unknown anchor test_matrix.py measures must stay measurable
     assert "clojure/kafka" not in NOT_APPLICABLE
     assert not_applicable("clojure", "kafka") is None
@@ -538,7 +568,8 @@ def _selftest():
     print(
         f"[matrix] vocab: {len(MECHANISMS)} mechanisms, {len(LANGUAGES)} languages, "
         f"{len(kinds_seen)} kinds referenced, {len(cats_seen)} categories referenced, "
-        f"anchor={anchors} role_cells={roled} not_applicable={len(NOT_APPLICABLE)}",
+        f"anchor={anchors} role_cells={roled} not_applicable={len(NOT_APPLICABLE)} "
+        f"chains={len(CHAINS)}",
         file=sys.stderr,
     )
 

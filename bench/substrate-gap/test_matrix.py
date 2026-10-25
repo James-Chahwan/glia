@@ -593,8 +593,9 @@ def test_a_fixture_on_an_na_cell_is_an_error():
 def test_emit_counts_na_apart_from_unknown():
     import matrix_emit
     payload = matrix_emit.build_payload({}, [], languages=["solidity"],
-                                        mechanisms=["kafka", "calls"], engine="test")
-    assert payload["schema"] == 2, payload["schema"]
+                                        mechanisms=["kafka", "calls"], engine="test",
+                                        cohort=None)
+    assert payload["schema"] == 3, payload["schema"]
     totals = payload["totals"]
     assert totals["n/a"] == 1 and totals["unknown"] == 1, totals
     assert totals["covered"] == 0 and totals["grid"] == 2, totals
@@ -609,7 +610,7 @@ def test_emit_counts_na_apart_from_unknown():
     assert "0/1 applicable cells have a fixture" in md and ", 1 n/a" in md, md
     assert "## Not applicable" in md and "| `solidity/kafka` | structural |" in md, md
     grid_row = next(ln for ln in md.splitlines() if ln.startswith("solidity "))
-    assert grid_row.split() == ["solidity", "-", "?"], grid_row
+    assert grid_row.split() == ["solidity", "-/-", "?/-"], grid_row
     # a cell entering the list is drift; a schema-1 payload has no list at all
     old = {k: v for k, v in payload.items() if k != "not_applicable"}
     assert matrix_emit.level_drift(old, payload) == ["solidity/kafka: unknown -> n/a"]
@@ -678,6 +679,221 @@ def test_matrix_never_touches_run_py_or_results_jsonl():
     assert before == after, "matrix.py appended to results.jsonl"
     strays = (set(HERE.glob("matrix/*/*/*.gmap")) | set(HERE.glob("fixtures/*/*.gmap"))) - strays_before
     assert not strays, f"GLIA_NO_PERSIST leaked .gmap dirs into the corpus: {strays}"
+
+
+# ---------------------------------------------------------------------------
+# The cohort column (FH.10): bench/cohort/cells.py tags each cohort probe row
+# with the cells and chains it exercises; matrix_emit grades them beside the
+# fixture grade. Hermetic: a canned results dir, never the committed one.
+# ---------------------------------------------------------------------------
+
+def _cohort_tree(root):
+    """A canned bench/cohort layout: repos.json, tasks/<label>.jsonl and
+    results/r1/{meta.json,health.jsonl,tasks.jsonl}."""
+    root = Path(root)
+
+    def ev(boundary=(), parsed=True, exists=True):
+        return {"boundary": list(boundary), "exists": exists, "paired": [], "parsed": parsed}
+
+    def chk(rest="pass", gate="n/a", clear="n/a", names="n/a"):
+        out = [{"check": "locate", "status": "miss", "class": "glia_wrong", "why": ""}]
+        for name, st in (("rest", rest), ("gate", gate), ("clear", clear), ("names", names)):
+            cls = None if st in ("pass", "n/a") else st
+            out.append({"check": name, "status": "miss" if cls else st, "class": cls,
+                        "why": ""})
+        return out
+
+    def drift(tid, truth, evid, checks):
+        return {"task": tid, "repo": "web", "shape": "drift", "truth": truth,
+                "checks": checks, "S": {"evidence": evid}, "C": {}}
+
+    def other(tid, repo, shape, truth, checks):
+        return {"task": tid, "repo": repo, "shape": shape, "truth": truth, "checks": checks,
+                "start": {"evidence": {f: ev() for f in truth}}}
+
+    rows = [
+        drift("web-d1", ["web/src/App.svelte"], {"web/src/App.svelte": ev(parsed=False)},
+              chk(rest="glia_blind", gate="glia_blind", names="glia_blind")),
+        drift("web-d2", ["web/src/api/user.ts"], {"web/src/api/user.ts": ev(["ENDPOINT"])},
+              chk(gate="pass", names="pass", clear="pass")),
+        drift("web-d3", ["web/src/api/order.ts"], {"web/src/api/order.ts": ev()},
+              chk(gate="glia_wrong", names="pass")),
+        other("lib-r1", "lib", "ripple", ["a.go", "b.go", "README.md"], chk()),
+        other("lib-r2", "lib", "ripple", ["c.go"], chk(rest="n/a")),
+        other("lib-s1", "lib", "symptom", ["x.py"], chk(rest="noisy")),
+    ]
+    server = {"web-d1": ["server/src/user.controller.ts", "server/src/enum.ts",
+                         "packages/sdk/src/fetch-client.ts", "server/test/user.spec.ts",
+                         "open-api/spec.json"],
+              "web-d2": ["server/app.py"], "web-d3": ["server/app.py"]}
+    (root / "tasks").mkdir(parents=True)
+    (root / "tasks" / "web.jsonl").write_text("".join(
+        json.dumps({"id": t, "shape": "drift", "probe": {"server_files": s,
+                                                          "client_files": []}}) + "\n"
+        for t, s in sorted(server.items())))
+    rel = root / "results" / "r1"
+    rel.mkdir(parents=True)
+    (rel / "meta.json").write_text(json.dumps({"release": "r1", "glia": "glia test",
+                                               "tasks_sha256": "abc"}))
+    (rel / "tasks.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (rel / "health.jsonl").write_text(
+        json.dumps({"repo": "web", "routes": 5, "endpoints": 2}) + "\n"
+        + json.dumps({"repo": "lib", "routes": 0, "endpoints": 0}) + "\n")
+    (root / "repos.json").write_text(json.dumps({"repos": [
+        {"label": "web", "role": "app", "sides": {"server": ["server/"],
+                                                  "client": ["web/"]}},
+        {"label": "lib", "role": "library", "sides": {}}]}))
+    return root
+
+
+def _cells_module():
+    sys.path.insert(0, str(HERE.parent / "cohort"))
+    import cells
+    return cells
+
+
+def test_cohort_level_rule_and_release_order():
+    cells = _cells_module()
+    assert cells.level_of(4, 5) == "full" and cells.level_of(8, 10) == "full"
+    assert cells.level_of(3, 10) == "partial" and cells.level_of(7, 10) == "partial"
+    assert cells.level_of(2, 10) == "none" and cells.level_of(0, 3) == "none"
+    assert cells.level_of(0, 0) == "n/a"
+    assert cells.release_key("0.5.4") > cells.release_key("0.5.4-pre")
+    assert cells.release_key("0.5.10") > cells.release_key("0.5.9")
+    assert cells.language_of("web/App.vue") == "typescript"
+    assert cells.language_of("web/App.svelte") == "svelte", "an unparsed SFC is its own row"
+    assert cells.language_of("a/b.kts") == "kotlin" and cells.language_of("x.hpp") == "c_cpp"
+    assert cells.language_of("README.md") is None and cells.language_of("s.proto") is None
+
+
+def test_cohort_tags_cells_and_chains_from_the_stored_rows():
+    cells = _cells_module()
+    tmp = Path(tempfile.mkdtemp(prefix="fh10-"))
+    try:
+        root = _cohort_tree(tmp)
+        rows = cells.tag_rows(cells.load(root / "results", root / "tasks",
+                                         root / "repos.json", release="r1"))
+        by = {r["task"]: r for r in rows}
+        d1 = by["web-d1"]
+        # the client half is the truth file; the server half is the task's server files,
+        # tests and non-code left out
+        assert d1["cells"] == [("svelte", "http_client"), ("typescript", "http_server")], d1
+        assert d1["chains"] == ["const_prefix", "sfc_service_endpoint",
+                                "workspace_sdk_route"], d1
+        assert d1["passed"] is False and d1["classes"] == {"glia_blind": 3}, d1
+        assert by["web-d2"]["cells"] == [("python", "http_server"),
+                                         ("typescript", "http_client")]
+        assert by["web-d2"]["chains"] == ["client_wrapper_endpoint"]
+        assert by["web-d2"]["passed"] is True and by["web-d3"]["passed"] is False
+        assert by["lib-r1"]["cells"] == [("go", "calls")] and by["lib-r1"]["chains"] == []
+        assert by["lib-r1"]["passed"] is True
+        assert by["lib-r2"]["passed"] is None, "every relevant check n/a: no observation"
+        assert by["lib-s1"]["passed"] is False, "noisy is a miss, not a pass"
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_cohort_column_grades_beside_the_fixture_grade():
+    import matrix_emit
+    cells = _cells_module()
+    tmp = Path(tempfile.mkdtemp(prefix="fh10-"))
+    try:
+        root = _cohort_tree(tmp)
+        cohort = cells.cohort(root / "results", root / "tasks", root / "repos.json",
+                              vocab.LANGUAGES, vocab.MECHANISM_IDS, release="r1")
+        fixture = {("typescript", "http_client"): {**_slot("full"), "fixtures": ["f/a"]},
+                   ("go", "calls"): {**_slot("full"), "fixtures": ["f/b"]}}
+        err = io.StringIO()
+        real_err, sys.stderr = sys.stderr, err
+        try:
+            payload = matrix_emit.build_payload(fixture, [], engine="test", cohort=cohort)
+        finally:
+            sys.stderr = real_err
+        assert payload["schema"] == 3, payload["schema"]
+        voc = payload["vocabulary"]
+        assert voc["chains"] == len(vocab.CHAINS) == 4, voc
+        assert voc["chains_digest"] == matrix_emit.chains_digest(), voc
+        # the chain rows move their own digest, never the scoring ruler's
+        assert voc["digest"] == matrix_emit.vocabulary_digest(), voc
+        co = payload["cohort"]
+        assert co["release"] == "r1" and co["rule"] == {"full": 0.8, "partial": 0.3}, co
+        grid = co["cells"]
+        assert grid["typescript/http_client"]["level"] == "partial", grid
+        assert grid["typescript/http_client"]["passed"] == 1
+        assert grid["typescript/http_client"]["rows"] == 2
+        assert grid["typescript/http_client"]["repos"] == {"web": [1, 2]}
+        assert grid["typescript/http_client"]["fixture"] == "full"
+        assert grid["typescript/http_server"]["level"] == "none"
+        assert grid["typescript/http_server"]["fixture"] == "unknown", \
+            "an unknown cell a cohort repo uses is graded"
+        assert grid["go/calls"]["level"] == "full" and grid["python/calls"]["level"] == "none"
+        # a miss with no cell creates one, graded and listed
+        assert co["created"] == ["svelte/http_client"], co["created"]
+        assert grid["svelte/http_client"]["level"] == "none"
+        assert grid["svelte/http_client"]["created"] is True
+        chains = co["chains"]
+        assert sorted(chains) == ["chain/client_wrapper_endpoint", "chain/const_prefix",
+                                  "chain/sfc_service_endpoint", "chain/workspace_sdk_route"]
+        assert chains["chain/client_wrapper_endpoint"]["level"] == "partial", chains
+        assert chains["chain/sfc_service_endpoint"]["level"] == "none"
+        assert chains["chain/const_prefix"]["fixture"] == "unknown"
+        assert co["disagree"] == ["typescript/http_client"], co["disagree"]
+        t = co["totals"]
+        assert (t["graded"], t["full"], t["disagree"], t["created"], t["chain_cells"]) \
+            == (5, 1, 1, 1, 4), t
+        marker = [ln for ln in err.getvalue().splitlines() if ln.startswith("[matrix] cells=")]
+        assert marker == [f"[matrix] cells={len(vocab.LANGUAGES) * len(vocab.MECHANISM_IDS)} "
+                          "fixture_full=2 cohort_graded=5 cohort_full=1 disagree=1 "
+                          "chain_cells=4 created=1"], err.getvalue()
+        md = matrix_emit.render_markdown(payload)
+        row = next(ln for ln in md.splitlines() if ln.startswith("typescript "))
+        glyphs = row.split()[1:]
+        cols = vocab.MECHANISM_IDS
+        assert glyphs[cols.index("http_client")] == "●/◐", row
+        assert glyphs[cols.index("http_server")] == "?/·", row
+        assert glyphs[cols.index("kafka")] == "?/-", row
+        assert "## Cohort grades" in md and "### Disagreements" in md, md
+        assert "| `typescript/http_client` | ● full | ◐ partial | 1/2 | web 1/2 |" in md, md
+        assert "### Chain cells" in md and "`chain/sfc_service_endpoint`" in md, md
+        assert "### Cells the cohort created" in md and "`svelte/http_client`" in md, md
+        # a cohort level change is drift, and so is a chain's
+        moved = json.loads(json.dumps(payload))
+        moved["cohort"]["cells"]["go/calls"]["level"] = "none"
+        moved["cohort"]["chains"]["chain/const_prefix"]["level"] = "full"
+        assert matrix_emit.level_drift(payload, moved) == [
+            "cohort chain/const_prefix: none -> full", "cohort go/calls: full -> none"]
+        assert matrix_emit.level_drift(payload, payload) == []
+        # two separate builds are byte-identical
+        again = matrix_emit.build_payload(fixture, [], engine="test", cohort=cells.cohort(
+            root / "results", root / "tasks", root / "repos.json", vocab.LANGUAGES,
+            vocab.MECHANISM_IDS, release="r1"))
+        assert matrix_emit.render_results(again) == matrix_emit.render_results(payload)
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_no_cohort_results_reads_na_everywhere():
+    import matrix_emit
+    cells = _cells_module()
+    tmp = Path(tempfile.mkdtemp(prefix="fh10-"))
+    try:
+        assert cells.cohort(tmp / "results", tmp / "tasks", tmp / "repos.json",
+                            vocab.LANGUAGES, vocab.MECHANISM_IDS) is None
+        payload = matrix_emit.build_payload({}, [], languages=["go"], mechanisms=["calls"],
+                                            engine="test", cohort=None)
+        assert payload["cohort"] is None
+        md = matrix_emit.render_markdown(payload, ["go"], ["calls"])
+        assert next(ln for ln in md.splitlines() if ln.startswith("go ")).split() \
+            == ["go", "?/-"], md
+        assert "_No cohort results" in md, md
+    finally:
+        shutil.rmtree(tmp)
+
+
+def _slot(level):
+    zero = [0, 0]
+    return {"level": level, "via": None, "extract": zero, "literal": zero, "route": zero,
+            "forbid": zero, "reasons": []}
 
 
 # ---------------------------------------------------------------------------

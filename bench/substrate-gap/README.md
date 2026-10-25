@@ -199,6 +199,54 @@ Its glyphs: `●` full, `◐` partial, `·` none (a fixture exists, nothing emit
 language cannot express the mechanism; a fixture claiming one is an error) and `!`
 error. The coverage line divides by the applicable cells (grid minus n/a).
 
+## Two grades per cell: fixture / cohort (FH.10)
+
+Every `COVERAGE.md` cell reads `fixture/cohort`. The first glyph is the fixture grade
+above: hand-made, one mechanism at a time. The second is the **outlier cohort's**
+grade of the same cell (`bench/cohort/`, real public repos with tasks mined from their
+authors' commits): `bench/cohort/cells.py` tags each stored probe row of the newest
+`bench/cohort/results/<release>/` with the cells it exercises, from the stored truth
+files and evidence alone (no checkout, no glia run), and a cell is `●` when at least
+80% of its observed rows passed, `◐` at 30%, `·` below, `-` when no cohort row
+exercises it. A drift row tags its client truth files with the client mechanism of
+the boundary kinds they hold (http_client when they hold none and the repo has routes
+or endpoints) and its server half with the server counterpart; a ripple or symptom row
+tags `calls`. The relevant checks are rest, gate, clear and names for a drift row and
+rest otherwise; any miss, noisy included, fails the row for every cell it tags. The
+tagging is a path heuristic (`cells.py`'s docstring has every rule): a mis-tag shows as
+a disagreement to inspect, never as a silent pass.
+
+Below the grid, `## Cohort grades` lists:
+
+- **Disagreements**: both grades exist and differ. This is the work list. Reading one:
+  `● full` / `· none` means the mechanism works on its fixture and fails where real
+  repos use it, so the gap is in what the fixture does not hold: a chain (next list),
+  an unparsed file type, a framework spelling, a prefix the fixture writes literally.
+  Open the rows (`python3 bench/cohort/cells.py --cell <lang>/<mech>` prints each task
+  with its verdict and miss classes, `bench/cohort/results/<release>/report.md` has the
+  whys), turn the shape the miss shows into a fixture, and fix it: the fixture grade
+  stays, the cohort grade rises. A `glia_blind` miss is a missing node or edge; a
+  `glia_wrong` one an answer that reached the file and was still wrong; `noisy` a reach
+  buried in a too-large answer. The reverse (`· none` / `● full`) means the fixture asks
+  for more than the cohort's rows exercise: check the fixture before the cohort.
+- **Cells with no fixture the cohort grades**: unknown cells real repos use; the next
+  fixtures to author.
+- **Chain cells** (`matrix_vocab.CHAINS`, rows `chain/<id>`): prefix through a constant,
+  client -> wrapper -> endpoint, client -> workspace package -> SDK -> route, SFC ->
+  service -> endpoint. The cohort grades them; their fixture side is `unknown` until
+  generated repos (FH.11) grade it.
+- **Cells the cohort created**: a miss on a cell outside the vocabulary (a `svelte` row,
+  which no parser reads; an `rpc` or `queue` boundary no column models) creates the cell,
+  graded by the same rule. A cell outside the vocabulary that only ever passed creates
+  nothing.
+
+`results-latest.json` (schema 3) carries the same as `cohort`, each cell with its
+`fixture` level, per-repo `[passed, rows]` and its missed-check classes; `matrix.py
+--check` reports a cohort level change as `cohort <label>: <was> -> <now>`. Every
+`--emit` / `--check` prints `[matrix] cells=<grid> fixture_full=<f> cohort_graded=<g>
+cohort_full=<c> disagree=<d> chain_cells=<k> created=<x>` on stderr (cohort_graded and
+cohort_full count grid cells, chain_cells the chains with a grade).
+
 ## Incremental transparency guard (`incremental_check.py`, A1.7)
 
 Grading builds cold, so a stale parse cache can never move the matrix, and so the
