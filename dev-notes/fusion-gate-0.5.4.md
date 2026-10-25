@@ -30,11 +30,14 @@ THE FUSION RULE (FB.6b; committed before any held-out run; strictness as FB-5, J
   PREVIEW (fusion-preview): the three public repos of bench/rank-gate/fusion-preview.json, never in any
   gate panel, each in a language no other panel repo is written in, test window rank_eval's default
   (the newest 300 test-eligible commits): its R1 / R2 lines are labelled PREVIEW and are never the verdict.
-  VERDICT (fusion-verdict, the final step at the end of 0.5.4): the six snapshots of snapshots.json at
-  newer pinned revs plus the three preview repos at newer revs than the preview's, each run with
-  `--test-after <after>` (FB.6's rev, or the preview's rev): every test commit is newer than <after>, so
-  no test commit of FB.6 or of the preview is scored again (the report lists each window's first / last
-  sha and the intersection with the prior window, which must be 0, else the judge refuses).
+  VERDICT (fusion-verdict; panel ruling FB-6b-PANEL, James 2026-10-25, before any verdict run): nine
+  repos, the `verdict` rows of fusion-preview.json. Two are FB.6 snapshots with a full forward window
+  (commons-lang, commons-io: `--test-after <FB.6's rev>`, every test commit newer than it; the report
+  lists each window's first / last sha and the intersection with the prior window, which must be 0, else
+  the judge refuses). Seven are fresh (`"fresh": true`, `after` "-"): public repos never in any gate
+  panel, each with >= 300 test-eligible commits, pinned at their default branch's head, test window
+  rank_eval's default. The other four FB.6 snapshots (24..88 commits after their revs) and the three
+  preview repos (0 after theirs) are out: too few held-out commits for a 300-commit window.
   Device: the default (FB.14: the GPU worker, CPU fallback), recorded per repo from its `[embed] device=`
   line. FB.6's cached node vectors (CPU) are reused; vectors agree across devices to < 4e-7 and the
   spike's rankings matched exactly, so a mixed-device panel is valid.

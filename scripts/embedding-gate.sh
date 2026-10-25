@@ -62,11 +62,14 @@
 #   PREVIEW (fusion-preview): the three public repos of bench/rank-gate/fusion-preview.json, never in any
 #   gate panel, each in a language no other panel repo is written in, test window rank_eval's default
 #   (the newest 300 test-eligible commits): its R1 / R2 lines are labelled PREVIEW and are never the verdict.
-#   VERDICT (fusion-verdict, the final step at the end of 0.5.4): the six snapshots of snapshots.json at
-#   newer pinned revs plus the three preview repos at newer revs than the preview's, each run with
-#   `--test-after <after>` (FB.6's rev, or the preview's rev): every test commit is newer than <after>, so
-#   no test commit of FB.6 or of the preview is scored again (the report lists each window's first / last
-#   sha and the intersection with the prior window, which must be 0, else the judge refuses).
+#   VERDICT (fusion-verdict; panel ruling FB-6b-PANEL, James 2026-10-25, before any verdict run): nine
+#   repos, the `verdict` rows of fusion-preview.json. Two are FB.6 snapshots with a full forward window
+#   (commons-lang, commons-io: `--test-after <FB.6's rev>`, every test commit newer than it; the report
+#   lists each window's first / last sha and the intersection with the prior window, which must be 0, else
+#   the judge refuses). Seven are fresh (`"fresh": true`, `after` "-"): public repos never in any gate
+#   panel, each with >= 300 test-eligible commits, pinned at their default branch's head, test window
+#   rank_eval's default. The other four FB.6 snapshots (24..88 commits after their revs) and the three
+#   preview repos (0 after theirs) are out: too few held-out commits for a 300-commit window.
 #   Device: the default (FB.14: the GPU worker, CPU fallback), recorded per repo from its `[embed] device=`
 #   line. FB.6's cached node vectors (CPU) are reused; vectors agree across devices to < 4e-7 and the
 #   spike's rankings matched exactly, so a mixed-device panel is valid.
@@ -358,7 +361,8 @@ F2="LX[IDR,FUSE[T1s,SEMp:t2]]"
 FPAIRS="$F1,T1s;$F2,LX[IDR,T1s];$F2,SELf2t;$F1,SEMp:t2;$F2,$F1;$PAIRS"
 
 # The fusion rows of one key (`preview` | `verdict`) as `name url rev label after flags..` lines (after = `-`
-# for a preview row), with rank-gate.sh's refusal rule; a verdict row also needs a 40-hex `after`.
+# for a preview row), with rank-gate.sh's refusal rule; a verdict row also needs a 40-hex `after`, or
+# `"fresh": true` with `after` "-" (a repo never in any panel: no prior window, ruling FB-6b-PANEL).
 frows() {
   python3 -I - "$FPREVIEW" "$1" <<'PY'
 import json, re, sys
@@ -371,7 +375,8 @@ for r in rows:
     ok = (r.get("public") is True and str(r.get("url", "")).startswith("https://") and hexrev(r.get("rev", ""))
           and re.fullmatch(r"[A-Za-z0-9._-]+", name) is not None
           and re.fullmatch(r"[A-Za-z0-9._-]+", str(r.get("label", ""))) is not None
-          and (key != "verdict" or hexrev(r.get("after", ""))))
+          and (key != "verdict" or hexrev(r.get("after", ""))
+               or (r.get("fresh") is True and r.get("after", "-") == "-")))
     if not ok:
         print(f"[fusion-gate] refused {name}: not a public https snapshot", file=sys.stderr)
         bad = 1
@@ -435,7 +440,7 @@ frun() {
   while read -r name url rev label after flags; do
     t0=$(date +%s)
     extra=()
-    if [ "$mode" = verdict ]; then
+    if [ "$mode" = verdict ] && [ "$after" != - ]; then
       # the prior window (what FB.6 / the preview scored at <after>), listed for the overlap check
       # shellcheck disable=SC2086
       (cd "$frun" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${after:0:12}" --git "$DIR/$name.git" \
@@ -518,8 +523,14 @@ def shas(path):
 
 win = {l: shas(os.path.join(frun, f"{l}.json")) for l in labels}
 prior = {}
+fresh = set()
 if mode == "verdict":
+    for r in json.load(open(preview_json)).get("verdict", []):
+        if r.get("after", "-") == "-":
+            fresh.add(r["label"])
     for l in labels:
+        if l in fresh:
+            continue
         prior[l] = shas(os.path.join(frun, f"{l}.prior.json"))
         both = set(win[l]) & set(prior[l])
         if both:
@@ -544,7 +555,7 @@ f4 = lambda x: f"{x:+.4f}"
 ci = lambda r: f"[{r[1]:+.4f}, {r[2]:+.4f}]"
 title = "Preview" if mode == "preview" else "Verdict"
 sec = []
-sec.append(f"## {title} ({'three unseen public repos; never the verdict' if mode == 'preview' else 'the end-of-0.5.4 panel'})")
+sec.append(f"## {title} ({'three unseen public repos; never the verdict' if mode == 'preview' else 'two forward windows and seven fresh public repos'})")
 sec.append("")
 sec.append("| repo | language | rev | test commits | queries | first test sha | last test sha | prior window | shared with prior |")
 sec.append("|---|---|---|---:|---:|---|---|---|---:|")
@@ -552,7 +563,9 @@ for l in labels:
     p = pins.get(l, {})
     q = row(l, F1, "T1s")
     w = win[l]
-    if mode == "verdict":
+    if mode == "verdict" and l in fresh:
+        pr, shared = "none (fresh: never in a panel)", "0"
+    elif mode == "verdict":
         pw = prior[l]
         pr = f"{len(pw)} commits, {pw[0][:12]} .. {pw[-1][:12]}" if pw else "0 commits"
         shared = str(len(set(w) & set(pw)))
