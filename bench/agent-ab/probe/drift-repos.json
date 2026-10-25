@@ -1,0 +1,31 @@
+{
+ "repos": [
+  {
+   "label": "immich",
+   "url": "https://github.com/immich-app/immich.git",
+   "end_rev": "256eb55dbe92ac77e02794442f9487e88ffed2b1",
+   "lang": "polyglot",
+   "gate_rev": null,
+   "tuned": false,
+   "public": true
+  },
+  {
+   "label": "twenty",
+   "url": "https://github.com/twentyhq/twenty.git",
+   "end_rev": "8fd53a835fd5b968a5fe858d9439dae6070867f6",
+   "lang": "typescript",
+   "gate_rev": null,
+   "tuned": false,
+   "public": true
+  },
+  {
+   "label": "photoprism",
+   "url": "https://github.com/photoprism/photoprism.git",
+   "end_rev": "70e20b5e033f29e4d53b0eb34de44856806637d1",
+   "lang": "polyglot",
+   "gate_rev": null,
+   "tuned": false,
+   "public": true
+  }
+ ]
+}
