@@ -8806,6 +8806,579 @@
    "batch": "FB",
    "fixtures": [],
    "spec_group": "FB"
+  },
+  {
+   "id": "FH.1",
+   "title": "The outlier cohort: bench/cohort/ - one corpus of real public repos pinned by sha and tasks taken from their history (drift splits, ripples, symptoms), and one no-model runner over every probe (boundary health, glia-answer recall, the drift gate, the names check), misses classified and recorded",
+   "batch": "FH",
+   "area": "FH cohort: the Sibyl corpus",
+   "loc": 750,
+   "rationale": "James 2026-10-26 (option 1 of the Sibyl plan): the agent A/B showed glia correct but outcome-neutral on greppable repos and BLIND on real full-stack repos (immich: 436 routes, 14 client endpoints, 5 HTTP pairs, 3,997 dead symbols, 415 .svelte files unparsed; the drift gate named a client file on 0 of 13 tasks). Every fixture and gate so far was shaped by James's own repos and our shared assumptions (feedback: don't build around ourselves). The cohort is the standing corpus a release is judged on: real repos chosen for variety, tasks with known answers from the authors' own commits, every miss classified (glia blind / glia wrong / agent ignored) and kept. It consolidates bench/agent-ab/probe/ (drift.py, oracle.py, gate.py, names.py, health.py, diag.py), which proved each check on 89 tasks over 11 repos. No model runs here; the agent probes are FH.13.",
+   "entry_points": [
+    "bench/cohort/repos.json (new) - pinned public repos: the six FE.1 repos, immich, twenty, photoprism, gin-vue-admin, scaffold-eth-2, plus at least 9 more chosen for unmodelled shapes (a tRPC app, a Zod + Express API, a Pydantic / FastAPI + TS client, a GraphQL codegen app, a Kotlin + Spring app, a Python monorepo, a Solidity dapp with a client, a Rails + JS app, a .NET + TS app); each row has url, sha, lang, role (app | library | service-set), boundary sides",
+    "bench/cohort/cohort.py (new) - `build-tasks`, `run [--only] [--jobs]`, `report`, `check` (the FH.12 gate reads its JSON)",
+    "bench/cohort/tasks/<label>.jsonl - drift / ripple / symptom rows in tasks.py's schema (drift rows carry their synthetic start commit's recipe, rebuilt on demand)",
+    "bench/cohort/results/<release>/ - per-repo health, per-task probe rows, the miss list"
+   ],
+   "files_touched": [
+    "bench/cohort/README.md",
+    "bench/cohort/repos.json",
+    "bench/cohort/cohort.py",
+    "bench/cohort/test_cohort.py",
+    "bench/cohort/tasks/",
+    "bench/cohort/results/",
+    "bench/agent-ab/probe/README.md"
+   ],
+   "implementation": "1. Move the probe logic into bench/cohort/cohort.py as functions (checkout at a rev or a synthetic start, glia prep, health, locate / rest recall, drift gate at S and C, names check); keep bench/agent-ab/probe/ as thin wrappers or delete it, saying so in its README.\n2. Synthetic drift starts are rebuilt from the recipe (real commit, client prefixes, generated-path rule) into refs/cohort/drift/<id> of the bare clone, so the committed rows hold no sha that exists nowhere.\n3. repos.json gains `role`: an `app` is judged on both sides of its boundaries, a `library` never on client reach (the FE health run flagged websocket and commons-text falsely).\n4. Task mining per repo: drift splits (commits changing server and client prefixes together, 2-10 code files, generated paths to the server side), ripples (a changed definition with >= 2 caller files), symptoms (an issue-closing commit, the issue text as prompt); 3-6 per kind per repo; deterministic order (newest first).\n5. `run` executes every no-model probe per repo / task on a thread pool (one checkout per task, GLIA_THREADS=4), writes results/<release>/{health,tasks}.jsonl, and classifies each miss: `glia_blind` (the mechanism's node or edge is absent: no ENDPOINT, no pair, file unparsed), `glia_wrong` (present but wrong: a pair to the wrong service, a 0-breaking gate on a breaking change), `noisy` (rows > 10x distinct changes); `report` prints a markdown table per repo and per miss class.\n6. Hermetic tests on two tiny scripted git repos (a client and a server side) with a fake glia that prints canned JSON: task mining, the synthetic start, classification, determinism.",
+   "fixtures": [],
+   "acceptance": "`python3 bench/cohort/test_cohort.py` passes; `python3 bench/cohort/cohort.py run --release 0.5.4-pre` over the cohort writes results with one health row per repo and the 13 FE drift tasks reproducing gate.py's numbers (0 of 13 client files named at g053) within the same probe definitions; the README lists every repo with its role and why it is in the cohort.",
+   "fired_on_marker": "[cohort] run release=<r> repos=<n> tasks=<t> misses=<m> (blind=<b> wrong=<w> noisy=<z>) ms=<ms>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FE.4"
+   ],
+   "risks": "The cohort clones are large (twenty 2.3 GB); clones live under ${GLIA_COHORT_DIR:-~/.cache/glia-cohort}, never in the tree. Picking repos by what glia already handles would repeat the old mistake: each added repo states the shape it brings, chosen before running glia on it.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.2",
+   "title": "Boundary health as an answer: `glia health <repo>` and PyGraph.health() - per mechanism (HTTP, gRPC, GraphQL, queue, WebSocket) the producers, consumers and pairs, client and server reach, unparsed code-looking files, unresolved imports of the repo's own workspace packages, suspicious nodes, the dead share, the repo role; a BLIND verdict per mechanism with its reason",
+   "batch": "FH",
+   "area": "FH cockpit: blind spots up front",
+   "loc": 700,
+   "rationale": "The cockpit item of the Sibyl plan (James 2026-10-26: 'like a f22 jet with no open mechanism for the cockpit'): on immich glia answered '0 breaking' with full confidence while it paired 5 of 436 routes. Nobody, human or agent, could tell when to trust an answer. glia already knows: its own gaps counts and node / edge tallies say so. This packet makes that one call, and FH.9 puts its verdict on the answers that depend on a blind mechanism. probe/health.py's measures are the starting definitions.",
+   "entry_points": [
+    "engine/src/health.rs (new public slot) - health(merged, roots) -> Health",
+    "cli/src/cmd/query/health.rs (new) - `glia health <repo> [--with ..] [--json]`",
+    "py/src/health.rs (new) - PyGraph.health()"
+   ],
+   "files_touched": [
+    "engine/src/health.rs",
+    "engine/src/lib.rs",
+    "cli/src/cmd/query/health.rs",
+    "cli/src/cmd/query/mod.rs",
+    "cli/surface/health.txt",
+    "py/src/health.rs",
+    "py/api_surface/health.txt",
+    "py/tests/surface/test_health.py",
+    "engine/tests/health.rs",
+    "skills/glia/SKILL.md",
+    "skills/glia-orient/SKILL.md"
+   ],
+   "implementation": "1. Health per mechanism from the merged graph: counts of the producer kind (ENDPOINT, RPC_CALL, GRAPHQL_OPERATION, QUEUE_PRODUCER, WS client), consumer kind (ROUTE, RPC_PROCEDURE, GRAPHQL_RESOLVER, QUEUE_CONSUMER, WS route) and pair edges (HTTP_CALLS, RPC_CALLS, GRAPHQL_CALLS, QUEUE_FLOWS, WS_CONNECTS); client reach = producers with a pair / producers; server reach = consumers with a caller / consumers, test-only ROUTEs (DT.6a) excluded.\n2. Parse coverage: the walk's files by extension that no parser or router took, listed only for extensions in a known code-ish set (.svelte .astro .mdx .vue .razor .cshtml .erb .heex .hbs ...).\n3. Workspace imports: bare import specifiers naming a package a manifest under a repo root declares (package.json name, go.mod module of a non-root module, Cargo package) that bound to no in-repo module.\n4. Suspicious nodes: ENDPOINT / ROUTE qnames holding data: / blob: / mailto: / base64 / whitespace.\n5. Role: `library` when no ROUTE / RPC_PROCEDURE / page and no ENDPOINT exist outside tests, else `app`; a library is never BLIND on reach.\n6. Verdict per mechanism: BLIND when the side counts are lopsided (one side >= 10 and the other < 10% of it) or client reach < 20% with >= 10 producers or server reach < 20% with >= 10 consumers; DEGRADED between 20% and 60%; OK above. Each verdict names its reason and the measure.\n7. CLI table + --json; pyo3 dict; marker once per call. skills/glia/SKILL.md and glia-orient: run `glia health` first on an unknown repo.",
+   "fixtures": [],
+   "acceptance": "engine/tests/health.rs on three fixtures (a paired Go + TS app OK, an app whose client calls go through an unknown wrapper BLIND clients_unpaired, a library with no boundary role=library); `glia health` on the FH.1 cohort reproduces probe/health.py's immich verdict (HTTP BLIND) and marks websocket and commons-text as libraries; surface snapshots regenerated.",
+   "fired_on_marker": "[health] repo=<label> role=<app|library> http=<OK|DEGRADED|BLIND>:<reach> grpc=.. graphql=.. queue=.. ws=.. unparsed=<n> workspace_unresolved=<n> suspicious=<n> dead_share=<x>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "api_additive"
+    ],
+    "what_changes": "a new command, slot and pyo3 method",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": [
+     "repo-graph orient may surface it"
+    ]
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Thresholds are a first reading; FH.12's gate records them per release and FH.10 grades them on the cohort, so a change of threshold is visible. A big repo walk must not get slower: health reads the built graph only.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.3",
+   "title": "Constants and enum members wherever a path is expected: a route, endpoint, topic or operation whose path argument is an identifier, a member expression (`RouteKey.User`) or a template over them folds through the repo's constant table, TS enums and `as const` objects included, instead of minting the empty or literal-free path",
+   "batch": "FH",
+   "area": "FH chain fix: symbolic paths",
+   "loc": 500,
+   "rationale": "immich's `@Controller(RouteKey.User)` + `@Put('me')` mints ROUTE `PUT /me` (extract_decorator_string returns None for a non-literal, so the prefix is dropped); the client's `/users/me` then pairs nothing. The same break hits any framework whose route prefix, base URL, topic or GraphQL path is held in a constant or enum (one mechanism, not a style). The const table (engine/src/build/assemble.rs build_const_table, the DC.3 queue / event folds) already folds queue and event names; this extends the fold to every path-taking extractor and teaches the table TS enum members and `as const` object members.",
+   "entry_points": [
+    "parsers/code/extractors/src/ts_routes.rs - the NestJS shape records a symbolic prefix / suffix",
+    "parsers/code/extractors/src/constants.rs - TS enum members and `as const` object members enter the table",
+    "engine/src/build/grafts.rs - one path fold for ROUTE / ENDPOINT / topic nodes with a symbolic segment"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/ts_routes.rs",
+    "parsers/code/extractors/src/constants.rs",
+    "engine/src/build/grafts.rs",
+    "engine/src/build/assemble.rs",
+    "bench/substrate-gap/fixtures/nest-enum-prefix/",
+    "bench/substrate-gap/fixtures/ts-const-base-url/"
+   ],
+   "implementation": "1. Extractors keep a symbolic path argument instead of dropping it: a `PathPart::Symbol(text)` (identifier or dotted member) or a template whose holes are symbols; the node is minted with a placeholder qname segment `{const:<text>}` and a cell recording the parts.\n2. constants.rs reads `export enum E { A = 'a' }` / `enum E { A = 'a' }` members as `E.A`, and `const K = { A: 'a' } as const` / plain object consts as `K.A`, string values only.\n3. A post-cache graft folds placeholders through the table (same-file first, then the file's imports, then repo-unique), rewriting the qname and the ROUTE / ENDPOINT index before http / queue / graphql pairing runs; unresolved symbols stay placeholders, counted.\n4. Byte-identical builds at any thread count; the parse cache keys unchanged (the fold is post-cache).",
+   "fixtures": [],
+   "acceptance": "Fixtures nest-enum-prefix (enum and object-const controller prefixes, a template suffix; ROUTE PUT /users/me paired to a client fetch of /users/me) and ts-const-base-url (a client base URL constant) grade full; on immich (FH.1 cohort) routes ending in a bare suffix fall and HTTP pairs rise, recorded in the packet result with before / after.",
+   "fired_on_marker": "[path-fold] symbols=<s> folded=<f> unresolved=<u> (enum=<e> object=<o> const=<c>) repo=<label>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "A wrong fold mints a wrong route: same-file > import > repo-unique precedence, and a symbol with two string values stays unresolved. TS `const enum` and numeric enums are skipped (no string value).",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.4",
+   "title": "Endpoints from the call's shape, not its library: any call passing a path-shaped string and an HTTP method (an options object `method: 'PUT'`, a verb-named callee, a verb argument) is an ENDPOINT, a generated SDK's included; in-repo functions that forward a parameter into a known HTTP call become wrappers (CA.4's inference, extended to TS / JS / Python / Go); data: / blob: / mailto: URLs are never endpoints",
+   "batch": "FH",
+   "area": "FH chain fix: wrapper and SDK calls",
+   "loc": 750,
+   "rationale": "immich's generated SDK calls `oazapfts.fetchJson(\"/users/me\", oazapfts.json({ method: \"PUT\", .. }))`: no extractor knows oazapfts, so no ENDPOINT exists and 302 routes stay unpaired; twenty pairs 29 of 375 client endpoints. Listing client libraries one by one is the style treadmill James ruled out. The invariant is the call's shape: a path literal plus a method. CA.4 already infers Go collection wrappers from parameter flow; the same inference finds in-repo HTTP wrappers whose bodies reach fetch / axios / HttpClient. Also from the probe: a base64 data: URI in a spec file minted `endpoint:GET:/data:image/svg+xml;base64,..`.",
+   "entry_points": [
+    "parsers/code/typescript/src/lib.rs try_detect_endpoint - the shape rule after the named-client rules",
+    "engine/src/external/infer_wrappers.rs - HTTP wrappers beside the Go collection wrappers"
+   ],
+   "files_touched": [
+    "parsers/code/typescript/src/lib.rs",
+    "parsers/code/python/src/lib.rs",
+    "engine/src/external/infer_wrappers.rs",
+    "engine/src/external/wrappers.rs",
+    "parsers/code/extractors/src/ts_routes.rs",
+    "bench/substrate-gap/fixtures/ts-sdk-fetch-shape/",
+    "bench/substrate-gap/fixtures/ts-http-wrapper-forward/",
+    "bench/substrate-gap/fixtures/js-options-object-call/"
+   ],
+   "implementation": "1. The shape rule (TS family, then Python): a call not matched by a named-client rule whose first argument is a path-shaped string or template (starts with `/` or an absolute http(s) URL, no whitespace, not data: / blob: / mailto: / javascript:) AND (an object argument with a `method` string property, or a callee whose last name segment is an HTTP verb or `request`/`fetch*`/`http*`) mints an ENDPOINT; and the options-object form: a call whose only or first argument is an object literal with a path-shaped `url` / `path` / `endpoint` string property and a `method` property (gin-vue-admin's `service({ url: '/user/login', method: 'post' })`, 210 routes and 1 endpoint at g053), the path read from that property, EVIDENCE rule `call_shape`, tier HEURISTIC until paired (pairing makes the edge DERIVED as today).\n2. Wrapper inference: a FUNCTION / METHOD whose parameter flows unmodified (or as a template hole) into the path argument of an ENDPOINT-minting call becomes a wrapper with that parameter index and the method (literal or forwarded); its call sites with a literal there mint endpoints (rule `wrapper_call`), depth <= 3, ambiguity rules of CA.4.\n3. Never an endpoint: data: / blob: / mailto: / base64 payloads anywhere in the string (fixes the immich junk).\n4. Markers and the gaps `unresolved_endpoint` count stay consistent.",
+   "fixtures": [],
+   "acceptance": "Fixtures ts-sdk-fetch-shape (a generated-SDK-style `lib.fetchJson('/users/me', { method: 'PUT' })` pairs to a Go route) ts-http-wrapper-forward (an in-repo `api(path, opts)` wrapper over fetch) and js-options-object-call (an axios-instance `service({ url, method })` call) grade full; gin-vue-admin's client endpoints rise from 1; a negative fixture shows a logger call `log('/tmp/x')` minting nothing; on immich and twenty the FH.2 client reach rises (before / after in the result); no new ENDPOINT on the six FE.1 repos that was not there before unless it pairs.",
+   "fired_on_marker": "[endpoint-shape] calls=<c> minted=<m> (options_method=<o> verb_callee=<v>) rejected_urls=<r> file=<p>; [http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a> repo=<label>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Over-minting is the risk: the shape rule needs BOTH a path-shaped string and a method signal; HEURISTIC tier until paired; FH.10 measures precision on the cohort and the synthetic matrix.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.5",
+   "title": "Workspace packages: a bare import of a package the repo's own manifests declare binds to its in-repo module (npm / pnpm / yarn workspaces through package.json name + exports / module / main / types and the workspace globs; Go go.work modules; Cargo workspace members where not already bound)",
+   "batch": "FH",
+   "area": "FH chain fix: monorepo packages",
+   "loc": 550,
+   "rationale": "immich's web/ imports `{ updateMyUser } from '@immich/sdk'`, a pnpm `workspace:*` package at packages/sdk; glia leaves the import unbound, so the web -> SDK -> route chain breaks at its first hop. twenty: 10 of 42 workspace packages are imported this way. One mechanism across ecosystems: the repo declares the package itself.",
+   "entry_points": [
+    "graph/src/imports.rs ts_target - the workspace lookup before the external fallback",
+    "engine/src/walk.rs - the manifests' names and entry files"
+   ],
+   "files_touched": [
+    "graph/src/imports.rs",
+    "engine/src/walk.rs",
+    "engine/src/build/lang_build.rs",
+    "bench/substrate-gap/fixtures/pnpm-workspace-sdk/",
+    "bench/substrate-gap/fixtures/go-work-modules/"
+   ],
+   "implementation": "1. The walk collects workspace packages: every package.json under a repo root with a `name` (pnpm-workspace.yaml / package.json `workspaces` globs bound the set when present), its entry: `exports['.']` (import / types / default), `module`, `types`, `main`, else `src/index.*` / `index.*`; dist paths map back to src when the dist file is absent (`dist/index.js` -> `src/index.ts`).\n2. ts_target: a bare specifier equal to a workspace name (or `name/subpath`, resolved through `exports` subpaths, then the directory) binds to that module, IMPORTS rule `workspace_package`, before the external-package fallback.\n3. Go: go.work `use` modules bind like the root module (CI.3's rule); Cargo members are already bound by rust_crates (no change, checked).\n4. Identity: the workspace package's PACKAGE_DEP nodes stay; no SAME_AS change.",
+   "fixtures": [],
+   "acceptance": "Fixtures pnpm-workspace-sdk (web imports '@acme/sdk' -> packages/sdk/src/index.ts -> fetch -> Go route; the chain pairs end to end) and go-work-modules grade full; FH.2 workspace_unresolved on immich and twenty falls to the packages with no in-repo source (before / after recorded).",
+   "fired_on_marker": "[imports] workspace packages=<p> bound=<b> subpath=<s> unbound=<u> repo=<label>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "A published package with the same name as a workspace package is shadowed by the workspace (that is what the package manager does too). Entry resolution reads only manifests already walked; no node_modules.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.6",
+   "title": "Single-file components: .svelte and .astro join .vue, every <script> block (and Astro's --- frontmatter) parsed through the TS parser with line numbers preserved; Vue's own extraction fixed (it read the first <script> only and lost line positions)",
+   "batch": "FH",
+   "area": "FH chain fix: SFC scripts",
+   "loc": 350,
+   "rationale": "immich's web app is 415 .svelte files glia never parses, so every call from a page is invisible (the drift task's truth file was a .svelte page). Vue SFCs parse only their first <script> block, and the extracted slice restarts line numbers at the block, so POSITION lines are off by the block's offset. One mechanism: a markup file wrapping script blocks.",
+   "entry_points": [
+    "parsers/code/vue/src/lib.rs extract_script - every script block, blank-padded to keep lines",
+    "engine/src/extract.rs detect_language - svelte / astro"
+   ],
+   "files_touched": [
+    "parsers/code/vue/src/lib.rs",
+    "engine/src/extract.rs",
+    "engine/src/walk.rs",
+    "engine/src/route.rs",
+    "bench/agent-ab/tasks.py",
+    "bench/agent-ab/score.py",
+    "bench/substrate-gap/fixtures/svelte-page-fetch/",
+    "bench/substrate-gap/fixtures/vue-two-scripts/"
+   ],
+   "implementation": "1. One SFC script extractor (in the vue crate, reused): every `<script ...>` .. `</script>` block, in order; the output is the source with every byte outside a block replaced by spaces except newlines, so byte offsets and line numbers match the original file.\n2. Astro: the leading `---` frontmatter block plus `<script>` blocks.\n3. detect_language: `.svelte` and `.astro` route through it into the TS family (`svelte` / `astro` group keys inside the TS group, so the TS family stays one graph).\n4. bench/agent-ab tasks.py CODE_EXTS and score.py count .svelte / .astro (the probe's recall-0-with-overlap-1 rows).",
+   "fixtures": [],
+   "acceptance": "Fixtures svelte-page-fetch (a +page.svelte calling an SDK function and fetch, paired) and vue-two-scripts (calls in both blocks, POSITION lines equal to the file's) grade full; immich's FH.2 unparsed count drops by the .svelte files; every existing Vue fixture stays byte-identical except corrected lines, declared.",
+   "fired_on_marker": "[sfc] files=<n> blocks=<b> (svelte=<s> astro=<a> vue=<v>) repo=<label>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_contents"
+    ],
+    "what_changes": "Vue nodes' POSITION lines move to the file's real lines; .svelte / .astro files gain nodes",
+    "in_repo_consumers": [
+     "bench/substrate-gap fixtures with Vue"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph line numbers for Vue files"
+    ]
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Template expressions (`{fn()}`, `@click=`) are not parsed here (DT.5a did that for Angular only); a call only a template makes stays unseen, counted as a later packet if the cohort shows it matters.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.7",
+   "title": "Style-agnostic drift in contract-breaks and review: the names a change removed or renamed (case-normalised, rename pairs read within a hunk), walked across the paired boundary to every client (and --with repo), flagged where a client still uses an old name, one row per changed name located at the client site; one shared-schema change folds into one row with its operations listed",
+   "batch": "FH",
+   "area": "FH style-agnostic contracts",
+   "loc": 1250,
+   "rationale": "Plan item B. The drift gate named a client file on 0 of 13 real drift tasks: it judges declared schemas (OpenAPI, the TS / Go / Dart models) and never asks whether the clients still match, so photoprism's messageId rename reported 125 rows at the broken state and the same 125 at the fixed one, and immich's Zod contracts reported 0. Every style ends up as names on the wire; the boundary comes from glia's pairing (FH.3-FH.6 make it exist on these repos). Schema models stay as the precise tier; this is the fallback that works on a style glia has never seen.",
+   "entry_points": [
+    "engine/src/contract_breaks/names.rs (new) - name_breaks(base, worktree, merged) -> NameBreaks",
+    "engine/src/contract_breaks/mod.rs - the `names` rows and the shared-schema fold",
+    "engine/src/review.rs - name breaks in the PR report"
+   ],
+   "files_touched": [
+    "engine/src/contract_breaks/names.rs",
+    "engine/src/contract_breaks/mod.rs",
+    "engine/src/review.rs",
+    "cli/src/cmd/change/contract_breaks.rs",
+    "cli/surface/contract-breaks.txt",
+    "py/src/contract_breaks.rs",
+    "py/api_surface/contract_breaks.txt",
+    "engine/tests/name_breaks.rs",
+    "bench/substrate-gap/fixtures/drift-rename-go-ts/",
+    "bench/substrate-gap/fixtures/drift-zod-express-ts/"
+   ],
+   "implementation": "1. Changed names: from the base..worktree diff of the server-side files of each changed exchange (the files holding a changed ROUTE / RPC_PROCEDURE / GRAPHQL_RESOLVER / QUEUE_CONSUMER's handler and the code it reaches within the file set the diff touches), identifier and string-key tokens normalised (lower case, `_` / `-` dropped); removed = on - lines, absent from + lines; a rename pair = a removed and an added token in the same hunk, aligned by position on paired lines.\n2. The boundary: for each changed server node, the clients its pair edges reach (ENDPOINT / RPC_CALL / GRAPHQL_OPERATION / QUEUE_PRODUCER), their enclosing callables and the files those import or are imported by within depth 2 on the client side (the response handling code), across --with repos.\n3. A client use: an identifier, property access, destructured name, object key or string equal (normalised) to a removed name, located; generic names (fewer than 4 chars, or in the code domain's stop list) require a rename pair or a property-access position.\n4. Rows: one per (changed name, client site), tier HEURISTIC, DERIVED when the boundary edge is FACT and the name is a rename pair; blocking only under --models-min-tier heuristic (never by default); the fixed state reports none.\n5. The fold: schema rows whose (section, field, change) is identical across operations collapse into one row with `operations: [..]`, so photoprism's 125 rows become its distinct changes.",
+   "fixtures": [],
+   "acceptance": "engine/tests/name_breaks.rs and the two fixtures (a Go json tag rename read by a TS client; a Zod object key rename read by a TS client: flagged at the broken state, clear at the fixed state); on FH.1's drift tasks the cohort runner records client files named at S and rows at C, before (0 of 13) and after, in the packet result; photoprism fd8448's schema rows fold to their distinct changes.",
+   "fired_on_marker": "[name-breaks] base=<rev> exchanges=<e> names=<n> renames=<r> clients=<c> rows=<k> fixed=<f> folded_schema_rows=<s>-><t>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.3",
+    "FH.4",
+    "FH.5",
+    "FH.6"
+   ],
+   "risks": "Noise on generic names is the risk; FH.10 measures precision on the cohort. The diff side reads only the change's files, so a big change stays bounded.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.8",
+   "title": "Compact answers: blast-radius / diff-impact / review JSON cap their row lists at --top-k (default 200) with `truncated` counts and drop default-valued fields, so an answer is kilobytes not megabytes; `--full` restores every row",
+   "batch": "FH",
+   "area": "FH cockpit: answer size",
+   "loc": 300,
+   "rationale": "The oracle measured diff-impact's JSON for one photoprism change at 1.9 MB (310 rows for a one-line Go edit on microservices-demo). An agent pays for every byte it reads; a person cannot read it. The slimmed skill (c5d8110e) already prefers tables; the JSON needs a bound too.",
+   "entry_points": [
+    "engine/src/diff_impact.rs, engine/src/answers.rs (blast_radius rows) - the cap",
+    "cli/src/cmd/change/diff_impact.rs, cli/src/cmd/blast_radius.rs - --top-k default and --full"
+   ],
+   "files_touched": [
+    "engine/src/diff_impact.rs",
+    "engine/src/answers.rs",
+    "engine/src/review.rs",
+    "cli/src/cmd/change/diff_impact.rs",
+    "cli/src/cmd/blast_radius.rs",
+    "cli/src/cmd/change/review.rs",
+    "cli/surface/diff-impact.txt",
+    "cli/surface/blast-radius.txt",
+    "cli/surface/review.txt",
+    "py/src/diff_impact.rs",
+    "py/src/blast.rs"
+   ],
+   "implementation": "1. Row lists (results, seeds) cap at top_k after ranking (default 200 for JSON and table); the answer gains `truncated: {results: <n>, seeds: <m>}`; `--full` (pyo3 `full=True`) disables the cap.\n2. JSON drops null / empty / default fields per row (`linked_seeds: []`, `score` when ranking is off) with a documented list; the table form unchanged.\n3. The FE rank gate's harness calls set full (the gate measures the shipped ranking over every row).",
+   "fixtures": [],
+   "acceptance": "On microservices-demo's one-line change and photoprism fd8448, `diff-impact --json` is under 64 KB with `truncated` set; the rank gate check stays green (it runs with full); surfaces regenerated; the change is declared as a cli_output break.",
+   "fired_on_marker": "[answer-size] surface=<s> rows=<r> shown=<k> bytes=<b>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "api"
+    ],
+    "what_changes": "default JSON rows capped at 200 with `truncated`; null / default fields omitted",
+    "in_repo_consumers": [
+     "engine/examples/rank_eval.rs (full)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph impact tool"
+    ]
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "A consumer that read every row (repo-graph) must pass full; the handoff says so (FZ.2).",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.9",
+   "title": "Answers say when they are blind: an answer that depends on a mechanism FH.2 rates BLIND or DEGRADED on this repo carries a FACT caveat naming the mechanism and the measure (contract-breaks, review, serves, trace, flows, diff-impact, blast-radius, gaps)",
+   "batch": "FH",
+   "area": "FH cockpit: blind answers",
+   "loc": 400,
+   "rationale": "The drift gate said '0 breaking' on immich while HTTP pairing reached 5 of 436 routes; an absence already carries coverage caveats (LD.8a), but a non-empty answer or a zero count does not. The answer itself must say 'HTTP pairing here reaches 7% of clients'.",
+   "entry_points": [
+    "engine/src/health.rs - verdict lookup by mechanism",
+    "engine/src/absence.rs - the caveat row shape reused for non-empty answers"
+   ],
+   "files_touched": [
+    "engine/src/health.rs",
+    "engine/src/absence.rs",
+    "engine/src/contract_breaks/mod.rs",
+    "engine/src/review.rs",
+    "engine/src/serves.rs",
+    "engine/src/trace.rs",
+    "engine/src/diff_impact.rs",
+    "engine/src/gaps.rs",
+    "engine/tests/blind_caveats.rs"
+   ],
+   "implementation": "1. Each answer names the mechanisms it reads (contract-breaks: the exchanges' mechanisms; serves: the channel's; trace / flows: every cross edge category on the path; diff-impact / blast-radius: the carry categories that reached a cross edge).\n2. With a health verdict of BLIND / DEGRADED for one of them, the answer gains `blind: [{mechanism, verdict, reason, measure}]` and the table form one line `blind: http (clients paired 7% of 14)`.\n3. Health is computed once per answer from the merged graph (cached on the RankCache holder when present).",
+   "fixtures": [],
+   "acceptance": "engine/tests/blind_caveats.rs: on the BLIND fixture of FH.2 every listed answer carries the caveat; on the OK fixture none does; immich's contract-breaks reports `blind` for http.",
+   "fired_on_marker": "[blind] surface=<s> mechanisms=<m> blind=<b> degraded=<d>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "api_additive"
+    ],
+    "what_changes": "answers gain `blind`",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": [
+     "repo-graph may show it"
+    ]
+   },
+   "depends_on": [
+    "FH.2"
+   ],
+   "risks": "An extra health pass per answer: bounded (graph counts only); measured in the result.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.10",
+   "title": "The Sibyl matrix, real side: every coverage-matrix cell gains a cohort grade beside its fixture grade, chain cells are added (prefix through a constant, client -> wrapper -> endpoint, client -> workspace package -> SDK -> route, SFC -> service -> endpoint), unknown cells used by cohort repos are graded, and a cohort miss with no cell creates one",
+   "batch": "FH",
+   "area": "FH Sibyl matrix: real-repo grades",
+   "loc": 650,
+   "rationale": "James 2026-10-26: 'we need to improve the matrix and sybil like matrix also'. The matrix reads 346 full over hand-made per-mechanism fixtures while real repos break where mechanisms chain. A cell's truth is now two grades; their disagreement is the work list, and the matrix grows from real misses like the cohort does.",
+   "entry_points": [
+    "bench/substrate-gap/matrix_emit.py - the cohort column",
+    "bench/substrate-gap/matrix_vocab.py - chain cells"
+   ],
+   "files_touched": [
+    "bench/substrate-gap/matrix_emit.py",
+    "bench/substrate-gap/matrix_vocab.py",
+    "bench/substrate-gap/test_matrix.py",
+    "bench/substrate-gap/README.md",
+    "bench/cohort/cohort.py"
+   ],
+   "implementation": "1. The cohort runner tags each probe row with the (language / framework, mechanism) cells it exercises (from the files and node kinds on the truth path) and the chain it crosses.\n2. matrix_emit reads results/<release>/ and grades each cell full / partial / none by the share of its cohort rows that passed (>= 0.8 / >= 0.3 / below), `n/a` when no cohort repo exercises it; the rendered matrix shows `fixture / cohort`.\n3. Chain cells are new rows of the vocabulary, graded by the cohort and by FH.11's generated repos.\n4. A miss whose cells do not exist creates them (graded none) in the emitted matrix and lists them.",
+   "fixtures": [],
+   "acceptance": "The matrix renders both grades; test_matrix covers the cohort column and chain cells on a canned results dir; at the packet's run the immich / twenty HTTP cells read fixture full / cohort none (before FH.3-FH.6) and the README states how to read a disagreement.",
+   "fired_on_marker": "[matrix] cells=<n> fixture_full=<f> cohort_graded=<g> cohort_full=<c> disagree=<d> chain_cells=<k> created=<x>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Cell tagging from paths and kinds is a heuristic; mis-tags show as disagreements to inspect, not silent passes.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.11",
+   "title": "The Sibyl matrix, synthetic side: a pairwise generator of small repos over client language x server language x transport x boundary wiring (literal / constant / enum prefix, direct / wrapper / generated SDK) x packaging (one repo / workspace package / several repos) x contract shape (declared type / schema object / plain literal / generated), each with its expected pairs and drift answers by construction, graded like the cohort",
+   "batch": "FH",
+   "area": "FH Sibyl matrix: generated combos",
+   "loc": 1300,
+   "rationale": "James 2026-10-26: 'our synthetic sybil matrix of resolvers and code languages and mix and match combos'. Every combination is thousands of repos (the hand-fixture treadmill); pairwise coverage (each pair of axis values together at least once) is about 50-150 repos and catches the two-factor interactions that broke immich. Generated repos give exhaustive, known answers cheaply; the cohort says which combos occur.",
+   "entry_points": [
+    "bench/sibyl/gen.py (new) - the axes, the pairwise cover, per-axis templates",
+    "bench/sibyl/run.py (new) - build, grade, report"
+   ],
+   "files_touched": [
+    "bench/sibyl/README.md",
+    "bench/sibyl/gen.py",
+    "bench/sibyl/run.py",
+    "bench/sibyl/test_gen.py",
+    "bench/sibyl/templates/"
+   ],
+   "implementation": "1. Axes and values (each value a small template that writes its side): client TS / Dart / Kotlin / Swift / Python; server Go / TS-Nest / TS-Express / Java-Spring / Python-FastAPI / Rust-axum / C#-ASP.NET; transport REST / gRPC / GraphQL / queue / WebSocket (skip pairs a stack cannot express, listed); wiring literal / const / enum-prefix x direct / wrapper / generated-SDK; packaging single / workspace / multi-repo (--with); contract declared-type / schema-object (Zod, Pydantic, data class) / plain literal / generated.\n2. A deterministic pairwise cover (greedy IPOG, seed fixed) writes the case list; each case renders a repo with one exchange and one rename drift (S and C states) and its expected answer: the pair edge, the client file, the drift row.\n3. run.py builds each with the glia under test and grades pair present / drift flagged at S / clear at C / client named; results tagged with the FH.10 chain cells.\n4. Hermetic tests: the cover covers every pair; templates render parseable code (a syntax check per language where a toolchain is present, else skipped and counted).",
+   "fixtures": [],
+   "acceptance": "`python3 bench/sibyl/test_gen.py` passes; `python3 bench/sibyl/run.py` over the cover reports per axis pair the pass share, and its results feed FH.10's chain cells; the README lists the unexpressible pairs.",
+   "fired_on_marker": "[sibyl] cases=<n> pairs_covered=<p>/<t> pass=<k> fail=<f> (pair=<a> drift_s=<b> clear_c=<c> client=<d>)",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Templates must stay tiny and idiomatic or the matrix tests the generator; each template is reviewed against a real repo of that stack in the cohort.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.12",
+   "title": "The cohort gate in every close-out: scripts/cohort-gate.sh runs the FH.1 cohort (no model) and the FH.11 cover, compares per repo and per cell with the last release's committed results, and fails on a drop; the wave runner's close-out runs it beside the rank gate",
+   "batch": "FH",
+   "area": "FH gate",
+   "loc": 350,
+   "rationale": "James 2026-10-26: 'adding into the end of a release for these checks is a good idea'. The rank gate already blocks a ranking regression; nothing blocked glia going blind on a real repo. The cohort gate makes boundary health, drift detection and the Sibyl matrix a release check.",
+   "entry_points": [
+    "scripts/cohort-gate.sh (new) - check / baseline / ratchet like rank-gate.sh",
+    "dev-notes/wave-runner/closeout.py - the cohort line"
+   ],
+   "files_touched": [
+    "scripts/cohort-gate.sh",
+    "bench/cohort/results/baseline/",
+    "bench/cohort/README.md",
+    "dev-notes/wave-runner/closeout.py",
+    "WORKFLOW.md"
+   ],
+   "implementation": "1. `check`: run cohort + sibyl with the tree's glia, compare against bench/cohort/results/baseline/: per repo health verdicts and reach, per drift task client-named / clear, per matrix cell grade; a drop beyond a stated tolerance (reach -0.05, a verdict worse, a task passing before and failing now) fails, gains are listed.\n2. `baseline` / `ratchet` write the baseline (only on James's or a close-out's explicit call, as the rank gate's).\n3. closeout.py runs `check` when a wave touched engine/, graph/, parsers/ or code-domain/, after the rank gate, and prints its last line.",
+   "fixtures": [],
+   "acceptance": "The gate passes against its own fresh baseline; a seeded regression (FH.4's shape rule disabled through an env var in a test run) fails it naming immich's HTTP reach; closeout.py prints `[cohort-gate] check: ok - ..` on a close-out.",
+   "fired_on_marker": "[cohort-gate] check: ok - <repos> repos, <tasks> tasks, <cells> cells, <gains> gains, 0 drops (or check: FAILED (<n> drops: ..))",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1",
+    "FH.10",
+    "FH.11"
+   ],
+   "risks": "Runtime: the cohort is large; check runs per repo in parallel with a cap and reuses clones; a close-out that cannot afford it (usage) records `skipped` with the reason, never a silent pass.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.13",
+   "title": "Agent probes on the cohort with the slim skill: the verifier role (the glia arm runs review / contract-breaks before finishing; measured as client files missed), multi-repo (a repo split so only --with sees across), and a big repo (turns and tokens to a complete fix); a g054 arm (this tree's glia + skills); the report dev-notes/agent-ab-0.5.4.md replaces FE.4's full-run plan",
+   "batch": "FH",
+   "area": "FH agent probes",
+   "loc": 350,
+   "rationale": "The pilots and probes (2026-10-25/26) showed Opus 5.5 finding the same files with or without glia on greppable repos, the 46 KB skill adding 16k tokens per load (now 9.6 KB, c5d8110e), and the drift tasks failing on glia's blindness. James: locate-assist is obsolete for frontier models; the four untested values are facts across repos, exhaustive checks, gates and cost at scale. FE.4's 540-session full run is replaced by these probes on the shapes where glia should change the outcome, run after FH.3-FH.9 so the boundary exists.",
+   "entry_points": [
+    "bench/agent-ab/config.json - arm g054 (rev = the close-out commit, the slim skill)",
+    "bench/agent-ab/probe/ (or bench/cohort/) - verifier / multi-repo / big-repo task sets",
+    "dev-notes/agent-ab-0.5.4.md (new)"
+   ],
+   "files_touched": [
+    "bench/agent-ab/config.json",
+    "bench/agent-ab/run.py",
+    "bench/agent-ab/test_run.py",
+    "bench/agent-ab/README.md",
+    "bench/cohort/tasks/",
+    "dev-notes/agent-ab-0.5.4.md"
+   ],
+   "implementation": "1. Arm g054: rev = HEAD at the packet's wave, calibrate as g053; its skill dir is the slim skill (run.py copies the whole dir since c5d8110e).\n2. Verifier set: the FH.1 drift tasks with glia boundary health OK after FH.3-FH.6, plus FE pilot-2's multi-file tasks; the glia arms' prompt adds the skill's 'before you finish' step as an instruction; metric: truth client files missed.\n3. Multi-repo set: microservices-demo and immich split into per-service repos (a scripted split, history kept per path), the agent started in one, the others beside it; glia arms build with --with.\n4. Big-repo set: twenty and immich multi-file tasks; metric: turns and tokens to the first edit of each truth file.\n5. Runs: 1 rep, all arms, parallel per repo (run.py processes per repo run id), usage checked first; diag.py's per-session verdicts in the report.\n6. dev-notes/agent-ab-0.5.4.md: pilots 1-2 and the probe triage (from the probe record), then these three sets, each with the reading rule of score.py and diag's chain verdicts; results/0.5.4/ holds the scored rows and baseline.json for 0.5.5.",
+   "fixtures": [],
+   "acceptance": "The report is committed with every set's per-arm table and diag verdict counts; baseline.json reproduces from the committed sessions rows (`score.py --from-metrics`); FE.4's packet result is updated to point at it.",
+   "fired_on_marker": "[agent-ab] score sessions=<n> excluded=<k> tasks=<t>; [agent-ab] diag verdicts no_skill=<a> skill_only=<b> glia_missed=<c> glia_late=<d> glia_found=<e>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.7",
+    "FH.8",
+    "FH.9"
+   ],
+   "risks": "Subscription usage: three sets of 1-rep runs, each estimated from a pilot of its first repo before the rest, inside the 70% 7-day rule.",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.14",
+   "title": "Host narrowing for a client with no host: a client call whose base URL names no service (a load generator's `GET /`, a relative path in a non-web service) pairs only with a route of a service that serves HTTP at that path from a reachable entry, never with a gRPC-only service's incidental route; the cohort's wrong pairs become a regression list",
+   "batch": "FH",
+   "area": "FH precision: cross-service pairing",
+   "loc": 300,
+   "rationale": "The FH health probe found microservices-demo's only HTTP pair wrong: src/loadgenerator/locustfile.py's `GET /` paired to `GET / @src/cartservice/src`, a gRPC service, not the frontend that serves the storefront. A wrong pair is worse than a missing one (it silently misleads trace, serves and drift). CB.12's host narrowing handles a client that names a host; a host-less client falls through to every route of that path.",
+   "entry_points": [
+    "graph/src/resolvers/host.rs narrow_by_host - the host-less branch",
+    "graph/src/resolvers/http.rs - candidate ranking"
+   ],
+   "files_touched": [
+    "graph/src/resolvers/host.rs",
+    "graph/src/resolvers/http.rs",
+    "bench/substrate-gap/fixtures/hostless-client-two-services/"
+   ],
+   "implementation": "1. For a client with no host or base: candidates are the routes of that verb + path; drop a candidate whose service serves no other HTTP route reached from an entry (an incidental health / test route of a gRPC service) when another candidate's service does.\n2. Still ambiguous after that: no pair, `ambiguous_endpoint` gap row (as today for true ties), never a guess.\n3. The cohort runner (FH.1) records every pair whose server is in another service than the cohort's declared boundary sides as `glia_wrong`; that list is this packet's regression set.",
+   "fixtures": [],
+   "acceptance": "Fixture hostless-client-two-services (a Python load generator's GET / with a Go frontend serving / and a gRPC service exposing a health GET /) pairs to the frontend only; microservices-demo's pair moves to src/frontend; no FE.1 / cohort repo loses a correct pair (before / after list in the result).",
+   "fired_on_marker": "[http] hostless clients=<c> narrowed=<n> ambiguous=<a> repo=<label>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling and data",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1"
+   ],
+   "risks": "Narrowing can drop a correct pair when a real service serves one route only; such a case stays ambiguous (reported), not silently paired.",
+   "spec_group": "FH"
   }
  ],
  "deps_patch": {
