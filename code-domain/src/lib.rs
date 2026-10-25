@@ -1477,7 +1477,8 @@ pub fn same_stem_order(importer_ext: &str) -> &'static [&'static str] {
         "ts" | "tsx" => &["ts", "tsx", "js", "jsx", "vue"],
         // Node / Vite `resolve.extensions` default: `.mjs` `.js` `.mts` `.ts`
         // `.jsx` `.tsx`.
-        "js" | "jsx" | "vue" => &["js", "ts", "jsx", "tsx", "vue"],
+        // FH.6: a `.svelte` / `.astro` component resolves through Vite too.
+        "js" | "jsx" | "vue" | "svelte" | "astro" => &["js", "ts", "jsx", "tsx", "vue"],
         // Clojure `RT.load`: `.clj` before `.cljc`, never `.cljs`.
         "clj" => &["clj", "cljc"],
         // ClojureScript: `.cljs` before `.cljc`, never `.clj`.
@@ -3655,7 +3656,7 @@ mod tests {
         for ext in ["ts", "tsx"] {
             assert_eq!(same_stem_order(ext).first(), Some(&"ts"), "{ext}");
         }
-        for ext in ["js", "jsx", "vue"] {
+        for ext in ["js", "jsx", "vue", "svelte", "astro"] {
             assert_eq!(same_stem_order(ext).first(), Some(&"js"), "{ext}");
             assert!(
                 same_stem_order(ext).contains(&"ts"),

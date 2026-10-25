@@ -1278,7 +1278,7 @@ fn state_member(g: &RepoGraph, type_id: NodeId, name: &str) -> Option<NodeId> {
 fn is_ts_family(ext: &str) -> bool {
     matches!(
         ext,
-        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue"
+        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" | "svelte" | "astro"
     )
 }
 

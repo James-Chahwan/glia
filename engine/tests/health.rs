@@ -9,9 +9,10 @@
 //!   `clients_unpaired`.
 //! - `library_has_no_boundary`: a Python package with functions only: role
 //!   `library`, every mechanism OK `library`, verdict OK.
-//! - `unparsed_code_apart_from_docs`: `.svelte` files no parser reads make the
+//! - `unparsed_code_apart_from_docs`: `.marko` files no parser reads make the
 //!   `parse` row BLIND; `.mdx` / `.rst` prose is counted apart and alone never
-//!   raises it (FH.1b's correction).
+//!   raises it (FH.1b's correction); `.svelte` / `.astro` files are parsed
+//!   (FH.6), so never unparsed.
 //! - `workspace_package_import_unbound`: an npm workspace whose app imports two
 //!   sibling packages by their manifest names: one with in-repo source binds
 //!   (FH.5, IMPORTS rule `workspace_package`), one whose entry names only a
@@ -211,7 +212,7 @@ fn library_has_no_boundary() {
 
 #[test]
 fn unparsed_code_apart_from_docs() {
-    let root = tmp("svelte");
+    let root = tmp("marko");
     write(
         &root,
         "package.json",
@@ -225,20 +226,34 @@ fn unparsed_code_apart_from_docs() {
     for i in 0..12 {
         write(
             &root,
-            &format!("src/routes/Page{i}.svelte"),
-            "<script>\n  let n = 0;\n</script>\n<p>{n}</p>\n",
+            &format!("src/components/Page{i}.marko"),
+            "class {\n  onCreate() {\n    this.state = { n: 0 };\n  }\n}\n<p>${state.n}</p>\n",
         );
     }
+    // FH.6: single-file components the SFC parser reads are code, never
+    // unparsed.
+    write(
+        &root,
+        "src/routes/+page.svelte",
+        "<script>\n  let n = 0;\n</script>\n<p>{n}</p>\n",
+    );
+    write(
+        &root,
+        "src/pages/index.astro",
+        "---\nconst n = 0;\n---\n<p>{n}</p>\n",
+    );
     for i in 0..30 {
         write(&root, &format!("docs/page{i}.mdx"), "# Page\n\nText.\n");
     }
     write(&root, "docs/guide.rst", "Guide\n=====\n");
     // Gitignored and collapsed trees are not walked.
     write(&root, ".gitignore", "build/\n");
-    write(&root, "build/Out.svelte", "<p>x</p>\n");
-    write(&root, "node_modules/x/Dep.svelte", "<p>x</p>\n");
+    write(&root, "build/Out.marko", "<p>x</p>\n");
+    write(&root, "node_modules/x/Dep.marko", "<p>x</p>\n");
     let (_, h) = build(&root);
-    assert_eq!(h.parse.unparsed.get("svelte"), Some(&12), "{:?}", h.parse);
+    assert_eq!(h.parse.unparsed.get("marko"), Some(&12), "{:?}", h.parse);
+    assert_eq!(h.parse.unparsed.get("svelte"), None, "{:?}", h.parse);
+    assert_eq!(h.parse.unparsed.get("astro"), None, "{:?}", h.parse);
     assert_eq!(h.parse.unparsed_files, 12);
     assert_eq!(h.parse.docs_unparsed.get("mdx"), Some(&30));
     assert_eq!(h.parse.docs_unparsed.get("rst"), Some(&1));
@@ -250,7 +265,7 @@ fn unparsed_code_apart_from_docs() {
     assert_eq!(h.verdict, Verdict::Blind);
     assert!(
         h.reason
-            .starts_with("parse: code_unparsed (12 code files unparsed (.svelte 12) of ")
+            .starts_with("parse: code_unparsed (12 code files unparsed (.marko 12) of ")
     );
     assert!(h.marker("").contains(" unparsed=12 "));
     assert!(

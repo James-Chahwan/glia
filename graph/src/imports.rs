@@ -1279,13 +1279,18 @@ const DIR_INDEX: &str = "dir_index";
 
 /// DT.1b: the importer file extensions whose resolver (tsc, Node, a
 /// bundler) loads `<dir>/index.*` for a specifier naming a directory.
-const DIR_INDEX_IMPORTERS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue"];
+/// FH.6: `.svelte` / `.astro` single-file components import through Vite as
+/// a `.vue` file does.
+const DIR_INDEX_IMPORTERS: &[&str] = &[
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "svelte", "astro",
+];
 
 /// DT.1b: the extensions with which a TS-family specifier names a file
 /// (`./util.js`, `./data.json`, `./App.vue`). A specifier ending in one never
 /// loads a directory's index.
 const FILE_SPEC_EXTS: &[&str] = &[
-    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "json", "dart", "sol",
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "svelte", "astro", "json", "dart",
+    "sol",
 ];
 
 /// DT.1b: whether a specifier whose own extension is `explicit_ext`
