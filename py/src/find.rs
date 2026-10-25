@@ -8,7 +8,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
@@ -19,9 +18,7 @@ use glia_engine::find::{
 };
 use glia_engine::identity::Collapse;
 use glia_engine::rank::RankCache;
-use glia_engine::semantic::{
-    FUSED_RECIPE, SemanticSource, VECTORS_FILE, VectorIndex, surface_model,
-};
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -93,70 +90,6 @@ fn find_answer(
 /// repo holds no vector of the surface model (FB.7b): the fallback it ranks
 /// by is the unfused one.
 const NO_VECTORS: &str = "no_vectors";
-
-/// The vector model name a surface model name records on its rows.
-fn recorded_model(surface: &str) -> &'static str {
-    if surface == "test-hash" {
-        glia_embed::MODEL_TEST_HASH
-    } else {
-        glia_embed::MODEL_BGE_SMALL
-    }
-}
-
-/// FB.7b, minus pyo3: the fused-recipe vectors of `surface` (the caller
-/// passes `semantic::surface_model()`) under `repo_roots` and the query
-/// embedder (`embed::surface_embedder`'s, the
-/// process's one bge-small session; its worker looked for in `dirs`), or
-/// None: not one repo, no `.glia/vectors.jsonl` (nothing read), no fresh
-/// vector of the model, or an embedder that fails to load (a `warning:`
-/// stderr line).
-fn semantic_source(
-    merged: &MergedGraph,
-    repo_roots: &BTreeMap<u64, String>,
-    surface: &str,
-    embedder: impl FnOnce() -> Result<Arc<dyn glia_embed::Embedder>, String>,
-) -> Option<Arc<SemanticSource>> {
-    if repo_roots.len() != 1 {
-        return None;
-    }
-    let roots: BTreeMap<u64, PathBuf> = repo_roots
-        .iter()
-        .map(|(id, p)| (*id, PathBuf::from(p)))
-        .collect();
-    if !roots.values().any(|r| r.join(VECTORS_FILE).is_file()) {
-        return None;
-    }
-    let model = recorded_model(surface);
-    let index = VectorIndex::load(merged, &roots, model, FUSED_RECIPE);
-    if index.is_empty() {
-        return None;
-    }
-    let loaded = (|| {
-        if surface == "bge-small" {
-            for root in roots.values() {
-                glia_embed::refuse_repo_cache(root)?;
-            }
-        }
-        embedder()
-    })();
-    let embedder = match loaded {
-        Ok(e) if e.model() == model => e,
-        Ok(e) => {
-            eprintln!(
-                "warning: the query embedder embeds {}, the vectors are {model}; ranking without vectors",
-                e.model()
-            );
-            return None;
-        }
-        Err(e) => {
-            eprintln!(
-                "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
-            );
-            return None;
-        }
-    };
-    SemanticSource::from_index(index, embedder).map(Arc::new)
-}
 
 /// The whole body of [`PyGraph::find_files`], minus pyo3: the engine's
 /// `find_files` on surface `py` over the PyGraph's held [`RankCache`] (EA.7)
@@ -243,7 +176,7 @@ impl PyGraph {
             py.detach(|| {
                 self.semantic
                     .get_or_init(|| {
-                        semantic_source(&self.merged, &self.repo_roots, surface_model(), || {
+                        open_for_surface(&self.merged, &self.repo_roots, surface_model(), || {
                             surface_embedder(&dirs)
                         })
                     })
@@ -701,7 +634,7 @@ mod tests {
         };
         let q = "export the ledger";
         assert!(
-            semantic_source(&built.merged, &built.repo_roots, "test-hash", test_hash).is_none()
+            open_for_surface(&built.merged, &built.repo_roots, "test-hash", test_hash).is_none()
         );
         let plain = find_files_answer(
             &built.merged,
@@ -747,9 +680,9 @@ mod tests {
         .expect("embed");
         // bge-small is the surface model: the test-hash rows are not its.
         assert!(
-            semantic_source(&built.merged, &built.repo_roots, "bge-small", test_hash).is_none()
+            open_for_surface(&built.merged, &built.repo_roots, "bge-small", test_hash).is_none()
         );
-        let src = semantic_source(&built.merged, &built.repo_roots, "test-hash", test_hash)
+        let src = open_for_surface(&built.merged, &built.repo_roots, "test-hash", test_hash)
             .expect("a source over the test-hash vectors");
         let fused = find_files_answer(
             &built.merged,

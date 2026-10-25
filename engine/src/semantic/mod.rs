@@ -12,7 +12,7 @@ mod run;
 mod text;
 
 pub use index::{IndexStats, SemanticHit, VECTORS_FILE, VectorIndex};
-pub use query::{FUSED_RECIPE, QUERY_PREFIX, SemanticSource};
+pub use query::{FUSED_RECIPE, QUERY_PREFIX, SemanticSource, open_for_surface, recorded_model};
 pub use run::{EMBED_MODEL_ENV, EmbedOptions, EmbedReport, embed_repo, surface_model};
 pub use text::{
     CODE_CHARS, DEFAULT_RECIPE, DOC_CHARS, EmbedRecipe, MAX_IMPORTS, RECIPES, embed_text, text_hash,

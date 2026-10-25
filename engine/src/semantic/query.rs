@@ -150,3 +150,73 @@ impl SemanticSource {
         self.index.stats()
     }
 }
+
+/// The vector model name a surface model name ([`super::surface_model`]:
+/// `bge-small` | `test-hash`) records on its rows (`Embedder::model`): what
+/// the sidecar's rows are matched by.
+pub fn recorded_model(surface: &str) -> &'static str {
+    if surface == "test-hash" {
+        glia_embed::MODEL_TEST_HASH
+    } else {
+        glia_embed::MODEL_BGE_SMALL
+    }
+}
+
+/// A surface's [`SemanticSource`] (FB.7b; the CLI's and pyo3's one loader):
+/// the fused-recipe vectors of `surface` under `repo_roots` and the query
+/// embedder `embedder` builds, or None: not one repo, no
+/// `.glia/vectors.jsonl` under the root (nothing read, nothing printed), no
+/// fresh vector of the model, or an embedder that fails to load or embeds
+/// another model (a `warning:` stderr line; the answer is the unfused one).
+/// The embedder is built only once a fresh vector exists, so a repo without
+/// vectors never starts a model.
+pub fn open_for_surface(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    surface: &str,
+    embedder: impl FnOnce() -> Result<Arc<dyn Embedder>, String>,
+) -> Option<Arc<SemanticSource>> {
+    if repo_roots.len() != 1 {
+        return None;
+    }
+    let roots: BTreeMap<u64, PathBuf> = repo_roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
+    if !roots
+        .values()
+        .any(|r| r.join(super::VECTORS_FILE).is_file())
+    {
+        return None;
+    }
+    let model = recorded_model(surface);
+    let index = VectorIndex::load(merged, &roots, model, FUSED_RECIPE);
+    if index.is_empty() {
+        return None;
+    }
+    let loaded = (|| {
+        if surface == "bge-small" {
+            for root in roots.values() {
+                glia_embed::refuse_repo_cache(root)?;
+            }
+        }
+        embedder()
+    })();
+    let embedder = match loaded {
+        Ok(e) if e.model() == model => e,
+        Ok(e) => {
+            eprintln!(
+                "warning: the query embedder embeds {}, the vectors are {model}; ranking without vectors",
+                e.model()
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: the query embedder ({surface}) did not load, ranking without vectors: {e}"
+            );
+            return None;
+        }
+    };
+    SemanticSource::from_index(index, embedder).map(Arc::new)
+}

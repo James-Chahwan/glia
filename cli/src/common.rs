@@ -355,3 +355,24 @@ pub(crate) fn edge_category_name(c: glia_core::EdgeCategoryId) -> &'static str {
     // Delegate to the canonical code-domain table (WP-I).
     edge_category::name(c)
 }
+
+/// The embedder `model` names. bge-small's GPU worker is this binary as
+/// `glia embed-worker` (cmd/embed_worker.rs) when it carries a GPU provider
+/// (a source build's default `gpu-webgpu`); else the `glia-embed-worker`
+/// installed beside it (the glia-cli wheel builds `glia` without the provider,
+/// so it starts on any glibc, and ships the worker with the Dawn library);
+/// else this binary again, which answers `not_built` (the CPU). A build
+/// without the `embed` feature refuses bge-small with glia-embed's message.
+pub(crate) fn load_embedder(model: &str) -> Result<Box<dyn glia_embed::Embedder>, String> {
+    use glia_embed::worker::WorkerProgram;
+    if model == "bge-small" {
+        let this = || WorkerProgram::this_binary(&[crate::cmd::embed_worker::SUBCOMMAND]);
+        let gpu_built = glia_embed::device::WEBGPU_BUILT || glia_embed::device::CUDA_BUILT;
+        let worker = match WorkerProgram::beside_current_exe() {
+            Some(external) if !gpu_built => external,
+            _ => this()?,
+        };
+        return glia_embed::bge_small(Some(worker));
+    }
+    glia_embed::named(model)
+}
