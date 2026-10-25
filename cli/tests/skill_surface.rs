@@ -455,7 +455,11 @@ fn skill_pages(dir: &Path, name: &str) -> Vec<(String, String)> {
     paths
         .into_iter()
         .map(|p| {
-            let file = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+            let file = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
             let text = std::fs::read_to_string(&p).expect("read a skill page");
             (format!("{SKILLS_REL}/{name}/{file}"), text)
         })
@@ -521,7 +525,10 @@ fn check_skills(
         // SKILL.md are checked as part of it: the examples a skill points to are
         // the ones an agent runs.
         let mut pages = vec![(rel.clone(), md)];
-        pages.extend(skill_pages(path.parent().expect("a skill directory"), &name));
+        pages.extend(skill_pages(
+            path.parent().expect("a skill directory"),
+            &name,
+        ));
         let md = pages
             .iter()
             .map(|(_, text)| text.as_str())
