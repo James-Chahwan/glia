@@ -196,10 +196,14 @@ def build_binary(d, glia_repo, arm, rev):
         version = sh([binary, "--version"]).stdout.strip()
         meta = {"rev": rev, "sha": sha, "version": version}
         write_json(meta_path, meta)
-    skill = sh(["git", "-C", glia_repo, "show", f"{sha}:skills/glia/SKILL.md"]).stdout
-    skill_path = d / "skills" / arm / "glia" / "SKILL.md"
-    skill_path.parent.mkdir(parents=True, exist_ok=True)
-    skill_path.write_text(skill)
+    # the whole skill directory at the arm's rev: SKILL.md and the pages it points to
+    skill_dir = d / "skills" / arm / "glia"
+    shutil.rmtree(skill_dir, ignore_errors=True)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    names = sh(["git", "-C", glia_repo, "ls-tree", "--name-only", f"{sha}:skills/glia"]).stdout
+    for name in names.split():
+        page = sh(["git", "-C", glia_repo, "show", f"{sha}:skills/glia/{name}"]).stdout
+        (skill_dir / name).write_text(page)
     log(f"[agent-ab] binary arm={arm} sha={sha[:12]} version={meta['version']}")
     return meta
 
@@ -339,9 +343,9 @@ def checkout(d, label, parent, commit, copy):
 
 
 def install_skill(d, arm, copy):
-    dst = copy / ".claude" / "skills" / "glia" / "SKILL.md"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(d / "skills" / arm / "glia" / "SKILL.md", dst)
+    dst = copy / ".claude" / "skills" / "glia"
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(d / "skills" / arm / "glia", dst)
 
 
 def prep(d, cfg, arm, copy, env, log_path):

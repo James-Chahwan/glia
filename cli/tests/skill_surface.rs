@@ -441,6 +441,27 @@ fn skill_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// The `.md` pages beside a skill's `SKILL.md`, in name order, as (rel, text).
+fn skill_pages(dir: &Path, name: &str) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "md")
+                && p.file_name().is_some_and(|n| n != "SKILL.md")
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            let file = p.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+            let text = std::fs::read_to_string(&p).expect("read a skill page");
+            (format!("{SKILLS_REL}/{name}/{file}"), text)
+        })
+        .collect()
+}
+
 /// One skill's check.
 struct SkillReport {
     name: String,
@@ -496,6 +517,16 @@ fn check_skills(
             ));
             continue;
         };
+        // A skill's reference pages (`reference.md`, `examples.md`, ..) beside its
+        // SKILL.md are checked as part of it: the examples a skill points to are
+        // the ones an agent runs.
+        let mut pages = vec![(rel.clone(), md)];
+        pages.extend(skill_pages(path.parent().expect("a skill directory"), &name));
+        let md = pages
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let calls = invocations(&md);
         let paths: Vec<(String, bool)> = calls
             .iter()
@@ -517,7 +548,10 @@ fn check_skills(
             }
         }
         reports.push(SkillReport {
-            stale: stale_mentions(surface, &md, &rel),
+            stale: pages
+                .iter()
+                .flat_map(|(page_rel, text)| stale_mentions(surface, text, page_rel))
+                .collect(),
             invocations: calls.len(),
             name,
             rel,
