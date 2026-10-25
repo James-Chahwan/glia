@@ -1,0 +1,8 @@
+{
+  "name": "@acme/web",
+  "dependencies": {
+    "@acme/sdk": "workspace:*",
+    "@acme/ui": "workspace:*",
+    "lodash": "^4.17.21"
+  }
+}

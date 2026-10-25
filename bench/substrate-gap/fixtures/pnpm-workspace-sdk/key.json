@@ -1,0 +1,22 @@
+{
+  "framework": "pnpm-workspace-sdk",
+  "language": "typescript+go",
+  "dirs": ["."],
+  "mechanism": "imports",
+  "cells": ["typescript/imports"],
+  "note": "FH.5: a bare import of a package the repo's own manifests declare binds to its in-repo module. pnpm-workspace.yaml lists packages/* and web (tools/ is no member); packages/sdk's package.json names its build output (main / types / exports '.' and './fetch-client' under dist/, absent), which maps back to src/; packages/ui names no entry, so src/index.ts. The chain web -> SDK function -> fetch ENDPOINT -> Go route pairs end to end. Baseline at HEAD bd3ed8bd (debug CLI on a copy): 0 IMPORTS and 0 CALLS out of web/src/profile.ts (every `@acme/*` specifier was an npm package), so the chain broke at its first hop; the SDK's ENDPOINT -> ROUTE pairs already held. fired_on: `[imports] workspace packages=4 bound=3 subpath=1 unbound=0 repo=<label>`.",
+  "expect_edges": [
+    {"from": "web::src::profile", "to": "packages::sdk::src::index", "category": "IMPORTS", "exact": true, "note": "`from '@acme/sdk'`: exports '.' import ./dist/index.js -> src/index.ts (rule workspace_package)"},
+    {"from": "web::src::profile", "to": "packages::sdk::src::fetch-client", "category": "IMPORTS", "exact": true, "note": "`from '@acme/sdk/fetch-client'`: the exports subpath"},
+    {"from": "web::src::profile", "to": "packages::ui::src::index", "category": "IMPORTS", "exact": true, "note": "no entry field: src/index.ts"},
+    {"from": "web::src::profile::saveProfile", "to": "packages::sdk::src::index::updateMyUser", "category": "CALLS", "exact": true, "note": "the named binding follows the workspace import"},
+    {"from": "web::src::profile::saveProfile", "to": "packages::ui::src::index::formatName", "category": "CALLS", "exact": true},
+    {"from": "web::src::profile::showVersion", "to": "packages::sdk::src::fetch-client::getServerVersion", "category": "CALLS", "exact": true},
+    {"from": "packages::sdk::src::index::updateMyUser", "to": "endpoint:PUT:/api/users/me", "category": "CALLS", "note": "the SDK's fetch"},
+    {"from": "endpoint:PUT:/api/users/me", "to": "PUT /api/users/me", "category": "HTTP_CALLS", "note": "the SDK call pairs the Go route"}
+  ],
+  "forbid": [
+    {"from": "web::src::profile", "to": "tools::gen::src::index", "category": "IMPORTS", "note": "tools/gen declares @acme/gen but is no workspace member: pnpm links nothing"},
+    {"from": "web::src::profile::later", "to": "tools::gen::src::index::generate", "category": "CALLS"}
+  ]
+}

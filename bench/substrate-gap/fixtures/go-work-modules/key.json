@@ -1,0 +1,61 @@
+{
+  "framework": "go-work-modules",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "imports",
+  "cells": [
+    "go/imports"
+  ],
+  "note": "FH.5 guard: a go.work workspace (no go.mod at the walked root; `use` in block and single-line form) whose modules import each other's root package (CI.3's root-package shape, `example.com/acme/shared`) and a sub-package, one import aliased. Every `use` dir holds its own go.mod, which the walk finds as a project root, so LA.13's module map already binds each import like the root module's: measured at HEAD bd3ed8bd on a copy, IMPORTS 3/3 and CALLS 3/3 with no change (FH.5 adds no Go code; Cargo workspace members are bound by rust_crates the same way). The forbid row keeps the third-party module external.",
+  "expect_edges": [
+    {
+      "from": "api::cmd::main",
+      "to": "shared::version",
+      "category": "IMPORTS",
+      "exact": true,
+      "note": "`example.com/acme/shared`, the shared module's root package"
+    },
+    {
+      "from": "api::cmd::main",
+      "to": "shared::auth::auth",
+      "category": "IMPORTS",
+      "exact": true
+    },
+    {
+      "from": "worker::main",
+      "to": "shared::version",
+      "category": "IMPORTS",
+      "exact": true,
+      "note": "aliased `sh`"
+    },
+    {
+      "from": "api::cmd::main::main",
+      "to": "shared::version::Version",
+      "category": "CALLS",
+      "exact": true
+    },
+    {
+      "from": "api::cmd::main::main",
+      "to": "shared::auth::auth::Check",
+      "category": "CALLS",
+      "exact": true
+    },
+    {
+      "from": "worker::main::main",
+      "to": "shared::version::Version",
+      "category": "CALLS",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "MODULE",
+      "node": "api/cmd/main",
+      "cell": "IMPORTS",
+      "contains": "github.com/google/uuid",
+      "note": "the one third-party module stays a library"
+    }
+  ]
+}

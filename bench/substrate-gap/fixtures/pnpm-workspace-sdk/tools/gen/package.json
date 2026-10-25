@@ -1,0 +1,4 @@
+{
+  "name": "@acme/gen",
+  "main": "src/index.ts"
+}

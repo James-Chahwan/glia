@@ -1060,6 +1060,379 @@ pub(crate) fn is_dotenv_path(path: &str) -> bool {
     base == ".env" || base.starts_with(".env.")
 }
 
+// ---------------------------------------------------------------------------
+// FH.5: workspace packages
+// ---------------------------------------------------------------------------
+
+/// FH.5: one JS / TS package a `package.json` of the repo declares by `name`,
+/// as a bare import of that name loads it: npm / yarn / pnpm workspaces link
+/// a member under `node_modules/<name>`, so `from '@acme/sdk'` in one member
+/// reads another member's entry file. Read off the walk's project roots by
+/// [`workspace_packages`]; the TS-family import resolver maps a bare
+/// specifier through it once tsconfig `paths` miss (`lang_build`'s
+/// `WorkspaceSet`). Nothing under `node_modules` is ever read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkspacePackage {
+    /// `package.json` `name` as written (`@acme/sdk`).
+    pub(crate) name: String,
+    /// The package dir, repo-relative, `/`-separated, `""` at the repo root.
+    pub(crate) dir: String,
+    /// The repo-relative source file a bare import of `name` loads
+    /// ([`package_entry`]), or `None` when no candidate names a file that
+    /// exists.
+    pub(crate) entry: Option<String>,
+    /// `exports` subpath keys other than `.` (`./fetch-client`, `./*`) with
+    /// their chosen target ([`export_target`]), sorted by key.
+    pub(crate) subpaths: Vec<(String, String)>,
+}
+
+/// FH.5: the dirs whose first segment is a build output: an entry or
+/// subpath target under one (`dist/index.js`) is tried as its source
+/// counterpart first (`src/index.ts`, then `index.ts`), since the output is
+/// generated, usually gitignored, and never what the graph holds.
+const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", "lib", "esm", "cjs", "es", "types"];
+
+/// FH.5: the source extensions an extensionless or output-mapped target is
+/// probed with, in the order tsc / Node prefer them.
+const SOURCE_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+
+/// FH.5: the export conditions an `exports` entry is read through, in order
+/// (`import` / `types` / `default` first, as the spec names them; then the
+/// ones a source-only package still writes).
+const EXPORT_CONDITIONS: &[&str] = &[
+    "import", "types", "default", "module", "require", "node", "browser",
+];
+
+/// FH.5: every workspace package of one repo, sorted by (name, dir).
+///
+/// Each project root's dir (and the repo root) holding a `package.json`
+/// with a non-empty string `name` is a candidate. A dir whose `package.json`
+/// has `workspaces` (an array, or `{ "packages": [..] }`) or which holds a
+/// `pnpm-workspace.yaml` is a workspace root: its globs bound the set, so a
+/// candidate under a workspace root is kept only when it is that root or a
+/// positive glob matches its dir relative to the root and no `!` glob does
+/// ([`glob_matches`]). A candidate under no workspace root is kept (a
+/// stand-alone package of the repo). A `package.json` that is not JSON is
+/// skipped. Never fails.
+pub(crate) fn workspace_packages(root: &Path, roots: &[ProjectRoot]) -> Vec<WorkspacePackage> {
+    let dirs: BTreeSet<&str> = std::iter::once("")
+        .chain(roots.iter().map(|r| r.rel_path.as_str()))
+        .collect();
+    let mut candidates: Vec<(String, serde_json::Value)> = Vec::new();
+    // (workspace root dir, globs as written).
+    let mut workspaces: Vec<(String, Vec<String>)> = Vec::new();
+    for dir in dirs {
+        let abs = root.join(dir);
+        let manifest = std::fs::read_to_string(abs.join("package.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+        let mut globs: Vec<String> = manifest
+            .as_ref()
+            .map(package_json_workspaces)
+            .unwrap_or_default();
+        if let Ok(text) = std::fs::read_to_string(abs.join("pnpm-workspace.yaml")) {
+            globs.extend(pnpm_workspace_globs(&text));
+        }
+        if !globs.is_empty() {
+            workspaces.push((dir.to_string(), globs));
+        }
+        if let Some(manifest) = manifest {
+            candidates.push((dir.to_string(), manifest));
+        }
+    }
+    let mut out: Vec<WorkspacePackage> = candidates
+        .into_iter()
+        .filter(|(dir, _)| is_workspace_member(dir, &workspaces))
+        .filter_map(|(dir, manifest)| {
+            let name = manifest
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|n| !n.is_empty() && !n.contains(char::is_whitespace))?
+                .to_string();
+            let (dot, subpaths) = manifest.get("exports").map(exports_of).unwrap_or_default();
+            let entry = package_entry(root, &dir, &manifest, dot.as_deref());
+            Some(WorkspacePackage {
+                name,
+                dir,
+                entry,
+                subpaths,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.dir.cmp(&b.dir)));
+    out
+}
+
+/// FH.5: whether the package at `dir` is a member under the workspace roots'
+/// globs ([`workspace_packages`]).
+fn is_workspace_member(dir: &str, workspaces: &[(String, Vec<String>)]) -> bool {
+    let mut under_any = false;
+    for (ws, globs) in workspaces {
+        if dir == ws {
+            return true;
+        }
+        let Some(rel) = rel_under(dir, ws) else {
+            continue;
+        };
+        under_any = true;
+        let positive = globs
+            .iter()
+            .filter(|g| !g.starts_with('!'))
+            .any(|g| glob_matches(g, rel));
+        let negative = globs
+            .iter()
+            .filter_map(|g| g.strip_prefix('!'))
+            .any(|g| glob_matches(g, rel));
+        if positive && !negative {
+            return true;
+        }
+    }
+    !under_any
+}
+
+/// `dir` relative to `base` (both repo-relative, `""` the repo root), or
+/// `None` when `dir` is not strictly under `base`.
+fn rel_under<'a>(dir: &'a str, base: &str) -> Option<&'a str> {
+    if base.is_empty() {
+        return (!dir.is_empty()).then_some(dir);
+    }
+    dir.strip_prefix(base)?
+        .strip_prefix('/')
+        .filter(|r| !r.is_empty())
+}
+
+/// FH.5: `package.json` `workspaces` (npm / yarn): an array of globs, or
+/// yarn's `{ "packages": [..] }`.
+fn package_json_workspaces(manifest: &serde_json::Value) -> Vec<String> {
+    let ws = manifest.get("workspaces");
+    let list = ws.and_then(serde_json::Value::as_array).or_else(|| {
+        ws.and_then(|w| w.get("packages"))
+            .and_then(serde_json::Value::as_array)
+    });
+    list.into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(clean_glob)
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// FH.5: the `packages:` globs of a `pnpm-workspace.yaml`, block (`- 'a/*'`)
+/// or flow (`packages: ['a/*', b]`) style; comments and quotes dropped. Read
+/// by line, with no YAML dependency: the file's other keys (`catalog:`,
+/// `onlyBuiltDependencies:`) end the list.
+fn pnpm_workspace_globs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_list = false;
+    for line in text.lines() {
+        let content = strip_yaml_comment(line);
+        if content.trim().is_empty() {
+            continue;
+        }
+        let indented = content.starts_with(char::is_whitespace);
+        if !indented {
+            in_list = false;
+            if let Some(rest) = content.strip_prefix("packages:") {
+                let rest = rest.trim();
+                if let Some(flow) = rest.strip_prefix('[') {
+                    let flow = flow.split(']').next().unwrap_or("");
+                    out.extend(flow.split(',').map(clean_glob).filter(|g| !g.is_empty()));
+                } else {
+                    in_list = rest.is_empty();
+                }
+            }
+            continue;
+        }
+        if in_list && let Some(item) = content.trim().strip_prefix('-') {
+            let g = clean_glob(item);
+            if !g.is_empty() {
+                out.push(g);
+            }
+        }
+    }
+    out
+}
+
+/// A YAML line without its `#` comment (one outside quotes).
+fn strip_yaml_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, '#') if i == 0 || line[..i].ends_with(char::is_whitespace) => {
+                return &line[..i];
+            }
+            _ => {}
+        }
+    }
+    line
+}
+
+/// A workspace glob as a dir pattern: quotes, a leading `./` and a trailing
+/// `/` dropped (`'./packages/*/'` -> `packages/*`); a `!` stays in front.
+fn clean_glob(raw: &str) -> String {
+    let g = raw.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    let (neg, body) = match g.strip_prefix('!') {
+        Some(b) => ("!", b),
+        None => ("", g),
+    };
+    let body = body.trim_start_matches("./").trim_end_matches('/');
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("{neg}{body}")
+}
+
+/// FH.5: whether the workspace glob `pattern` (`packages/*`, `apps/**`,
+/// `libs/*-sdk`) matches the `/`-separated dir `path`: `**` is any number of
+/// segments (none included), `*` and `?` match within one segment.
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    let pat: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    glob_segments(&pat, &segs)
+}
+
+fn glob_segments(pat: &[&str], segs: &[&str]) -> bool {
+    match pat.split_first() {
+        None => segs.is_empty(),
+        Some((&"**", rest)) => (0..=segs.len()).any(|i| glob_segments(rest, &segs[i..])),
+        Some((p, rest)) => segs.split_first().is_some_and(|(s, tail)| {
+            glob_segment(p.as_bytes(), s.as_bytes()) && glob_segments(rest, tail)
+        }),
+    }
+}
+
+/// One path segment against one glob segment (`*`, `?`, literals).
+fn glob_segment(p: &[u8], s: &[u8]) -> bool {
+    match p.split_first() {
+        None => s.is_empty(),
+        Some((b'*', rest)) => (0..=s.len()).any(|i| glob_segment(rest, &s[i..])),
+        Some((b'?', rest)) => !s.is_empty() && glob_segment(rest, &s[1..]),
+        Some((c, rest)) => s.first() == Some(c) && glob_segment(rest, &s[1..]),
+    }
+}
+
+/// FH.5: a `package.json` `exports` value as `(the "." target, the other
+/// subpaths)`: a string or array is the `.` target alone; an object whose
+/// keys start with `.` is a subpath map (`.` taken out, every `./..` key with
+/// a target kept, sorted by key); any other object is the `.` entry's
+/// conditions. A `null` target (a blocked subpath) is dropped.
+pub(crate) fn exports_of(exports: &serde_json::Value) -> (Option<String>, Vec<(String, String)>) {
+    let Some(map) = exports.as_object() else {
+        return (export_target(exports), Vec::new());
+    };
+    if !map.keys().any(|k| k.starts_with('.')) {
+        return (export_target(exports), Vec::new());
+    }
+    let dot = map.get(".").and_then(export_target);
+    let mut subpaths: Vec<(String, String)> = map
+        .iter()
+        .filter(|(k, _)| k.starts_with("./"))
+        .filter_map(|(k, v)| Some((k.clone(), export_target(v)?)))
+        .collect();
+    subpaths.sort();
+    (dot, subpaths)
+}
+
+/// FH.5: the file an `exports` target names: a string; an array's first
+/// target that names one; a conditions object's first [`EXPORT_CONDITIONS`]
+/// key that names one (nested conditions followed).
+fn export_target(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(export_target),
+        serde_json::Value::Object(map) => EXPORT_CONDITIONS
+            .iter()
+            .find_map(|c| map.get(*c).and_then(export_target)),
+        _ => None,
+    }
+}
+
+/// FH.5: the entry of the package at repo-relative `dir`: the first of the
+/// `exports` `.` target (`dot`), `module`, `types`, `main`, then `src/index`
+/// and `index`, that names an existing source file ([`package_file`]).
+fn package_entry(
+    root: &Path,
+    dir: &str,
+    manifest: &serde_json::Value,
+    dot: Option<&str>,
+) -> Option<String> {
+    let field = |k: &str| manifest.get(k).and_then(serde_json::Value::as_str);
+    dot.into_iter()
+        .chain(["module", "types", "main"].into_iter().filter_map(field))
+        .chain(["src/index", "index"])
+        .find_map(|target| package_file(root, dir, target))
+}
+
+/// FH.5: the repo-relative source file a package target (`./dist/index.js`,
+/// `src/index.ts`, `utils`) names in the package at `dir`, or `None`. A
+/// target under an [`OUTPUT_DIRS`] dir is tried as its source counterpart
+/// first (`dist/index.js` and `dist/index.d.ts` -> `src/index.ts`, then
+/// `index.ts`); then the target itself when it is an existing file and no
+/// declaration file; then its stem with each [`SOURCE_EXTS`] extension, then
+/// `<stem>/index.<ext>`. A target that climbs out of the package or is
+/// absolute names nothing.
+pub(crate) fn package_file(root: &Path, dir: &str, target: &str) -> Option<String> {
+    let rel = target.trim().trim_start_matches("./");
+    if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|s| s == "..") {
+        return None;
+    }
+    let base = root.join(dir);
+    let join = |p: &str| {
+        if dir.is_empty() {
+            p.to_string()
+        } else {
+            format!("{dir}/{p}")
+        }
+    };
+    let is_file = |p: &str| base.join(p).is_file();
+    let probe = |stem: &str| {
+        SOURCE_EXTS
+            .iter()
+            .map(|e| format!("{stem}.{e}"))
+            .chain(SOURCE_EXTS.iter().map(|e| format!("{stem}/index.{e}")))
+            .find(|p| is_file(p))
+    };
+    let stem = source_stem(rel);
+    if let Some((first, rest)) = stem.split_once('/')
+        && OUTPUT_DIRS.contains(&first)
+        && let Some(hit) = probe(&format!("src/{rest}")).or_else(|| probe(rest))
+    {
+        return Some(join(&hit));
+    }
+    if !is_declaration(rel) && is_file(rel) {
+        return Some(join(rel));
+    }
+    probe(stem).map(|p| join(&p))
+}
+
+/// A target without its JS / TS / declaration extension (`dist/index.d.ts`
+/// -> `dist/index`, `index.mjs` -> `index`); an extensionless one unchanged.
+fn source_stem(rel: &str) -> &str {
+    for ext in [".d.ts", ".d.mts", ".d.cts"] {
+        if let Some(s) = rel.strip_suffix(ext) {
+            return s;
+        }
+    }
+    SOURCE_EXTS
+        .iter()
+        .find_map(|e| rel.strip_suffix(e).and_then(|s| s.strip_suffix('.')))
+        .unwrap_or(rel)
+}
+
+/// A TypeScript declaration file (`.d.ts` / `.d.mts` / `.d.cts`): never a
+/// source the graph holds.
+fn is_declaration(rel: &str) -> bool {
+    [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|e| rel.ends_with(e))
+}
+
 #[cfg(test)]
 mod walk_tests {
     use super::*;
@@ -2926,5 +3299,240 @@ mod walk_tests {
         );
         assert!(plan.pending.iter().any(|p| p.rel == "other/c.go"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    /// A scratch tree under the system temp dir, removed on drop.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("glia_ws_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Tree(d)
+        }
+
+        fn write(&self, rel: &str, text: &str) -> &Self {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+            self
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn npm(rel: &str) -> ProjectRoot {
+        ProjectRoot::new(rel.to_string(), "npm", "package.json", None)
+    }
+
+    #[test]
+    fn globs_match_by_segment() {
+        assert!(glob_matches("packages/*", "packages/sdk"));
+        assert!(!glob_matches("packages/*", "packages/sdk/nested"));
+        assert!(!glob_matches("packages/*", "packages"));
+        assert!(glob_matches("apps/**", "apps/web/admin"));
+        assert!(
+            glob_matches("apps/**", "apps"),
+            "`**` matches no segment too"
+        );
+        assert!(glob_matches("**/sdk", "a/b/sdk"));
+        assert!(glob_matches("libs/*-sdk", "libs/js-sdk"));
+        assert!(!glob_matches("libs/*-sdk", "libs/js-cli"));
+        assert!(glob_matches("web", "web"));
+        assert!(glob_matches("lib?", "libs"));
+    }
+
+    #[test]
+    fn pnpm_workspace_yaml_block_and_flow_lists() {
+        let text = "# members\npackages:\n  - 'packages/*'   # every package\n  - \"web\"\n  - '!**/test/**'\n\ncatalog:\n  - not-a-glob\n";
+        assert_eq!(
+            pnpm_workspace_globs(text),
+            ["packages/*", "web", "!**/test/**"]
+        );
+        assert_eq!(
+            pnpm_workspace_globs("packages: ['./apps/*/', libs/*]\n"),
+            ["apps/*", "libs/*"]
+        );
+        assert!(pnpm_workspace_globs("onlyBuiltDependencies:\n  - esbuild\n").is_empty());
+    }
+
+    #[test]
+    fn exports_forms() {
+        let v: serde_json::Value = serde_json::from_str(r#""./dist/index.js""#).unwrap();
+        assert_eq!(exports_of(&v), (Some("./dist/index.js".into()), vec![]));
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"import":"./esm/i.js","require":"./cjs/i.js"}"#).unwrap();
+        assert_eq!(
+            exports_of(&v).0.as_deref(),
+            Some("./esm/i.js"),
+            "conditions of `.`"
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{".":{"types":"./dist/index.d.ts","import":"./dist/index.js"},
+                "./fetch":{"node":{"import":"./dist/fetch.js"}},
+                "./*":"./dist/*.js",
+                "./internal":null,
+                "./package.json":"./package.json"}"#,
+        )
+        .unwrap();
+        let (dot, subpaths) = exports_of(&v);
+        assert_eq!(
+            dot.as_deref(),
+            Some("./dist/index.js"),
+            "import before types"
+        );
+        assert_eq!(
+            subpaths,
+            [
+                ("./*".to_string(), "./dist/*.js".to_string()),
+                ("./fetch".to_string(), "./dist/fetch.js".to_string()),
+                ("./package.json".to_string(), "./package.json".to_string()),
+            ],
+            "a null (blocked) subpath goes; nested conditions are followed"
+        );
+    }
+
+    #[test]
+    fn package_files_map_output_back_to_source() {
+        let t = Tree::new("files");
+        t.write("packages/sdk/src/index.ts", "export {}\n")
+            .write("packages/sdk/src/fetch.ts", "export {}\n")
+            .write("packages/sdk/dist/index.js", "built\n")
+            .write("packages/js/index.js", "module.exports = {}\n")
+            .write("packages/js/util/index.mjs", "export {}\n");
+        let f = |dir: &str, target: &str| package_file(&t.0, dir, target);
+        assert_eq!(
+            f("packages/sdk", "./dist/index.js").as_deref(),
+            Some("packages/sdk/src/index.ts"),
+            "the source counterpart wins even when the output exists"
+        );
+        assert_eq!(
+            f("packages/sdk", "dist/index.d.ts").as_deref(),
+            Some("packages/sdk/src/index.ts")
+        );
+        assert_eq!(
+            f("packages/sdk", "./dist/fetch.js").as_deref(),
+            Some("packages/sdk/src/fetch.ts"),
+            "an absent output file"
+        );
+        assert_eq!(
+            f("packages/sdk", "src/index").as_deref(),
+            Some("packages/sdk/src/index.ts")
+        );
+        assert_eq!(
+            f("packages/js", "index.js").as_deref(),
+            Some("packages/js/index.js")
+        );
+        assert_eq!(
+            f("packages/js", "./util").as_deref(),
+            Some("packages/js/util/index.mjs"),
+            "a directory's index"
+        );
+        assert_eq!(
+            f("packages/sdk", "../js/index.js"),
+            None,
+            "never out of the package"
+        );
+        assert_eq!(f("packages/sdk", "/abs/index.js"), None);
+        assert_eq!(f("packages/sdk", "dist/missing.js"), None);
+    }
+
+    #[test]
+    fn workspace_globs_bound_the_package_set() {
+        let t = Tree::new("set");
+        t.write("package.json", r#"{"name":"acme","private":true}"#)
+            .write("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n  - web\n")
+            .write(
+                "packages/sdk/package.json",
+                r#"{"name":"@acme/sdk","main":"dist/index.js","exports":{".":{"import":"./dist/index.js"},"./fetch":"./dist/fetch.js"}}"#,
+            )
+            .write("packages/sdk/src/index.ts", "export {}\n")
+            .write("packages/ui/package.json", r#"{"name":"@acme/ui"}"#)
+            .write("packages/ui/src/index.ts", "export {}\n")
+            .write("packages/empty/package.json", r#"{"name":"@acme/empty"}"#)
+            .write("packages/bad/package.json", "{ not json")
+            .write("web/package.json", r#"{"name":"@acme/web"}"#)
+            .write("tools/gen/package.json", r#"{"name":"@acme/gen","main":"src/index.ts"}"#)
+            .write("tools/gen/src/index.ts", "export {}\n");
+        let roots: Vec<ProjectRoot> = [
+            "",
+            "packages/bad",
+            "packages/empty",
+            "packages/sdk",
+            "packages/ui",
+            "tools/gen",
+            "web",
+        ]
+        .iter()
+        .map(|r| npm(r))
+        .collect();
+        let got = workspace_packages(&t.0, &roots);
+        let rows: Vec<(&str, &str, Option<&str>)> = got
+            .iter()
+            .map(|p| (p.name.as_str(), p.dir.as_str(), p.entry.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("@acme/empty", "packages/empty", None),
+                (
+                    "@acme/sdk",
+                    "packages/sdk",
+                    Some("packages/sdk/src/index.ts")
+                ),
+                ("@acme/ui", "packages/ui", Some("packages/ui/src/index.ts")),
+                ("@acme/web", "web", None),
+                ("acme", "", None),
+            ],
+            "tools/gen is no member; a package with no entry file stays (its imports count unbound)"
+        );
+        assert_eq!(
+            got[1].subpaths,
+            [("./fetch".to_string(), "./dist/fetch.js".to_string())]
+        );
+    }
+
+    #[test]
+    fn npm_workspaces_field_and_standalone_packages() {
+        let t = Tree::new("npmws");
+        t.write(
+            "mono/package.json",
+            r#"{"name":"mono","workspaces":{"packages":["libs/*","!libs/legacy"]}}"#,
+        )
+        .write(
+            "mono/libs/money/package.json",
+            r#"{"name":"@shop/money","main":"index.js"}"#,
+        )
+        .write("mono/libs/money/index.js", "module.exports = {}\n")
+        .write(
+            "mono/libs/legacy/package.json",
+            r#"{"name":"@shop/legacy","main":"index.js"}"#,
+        )
+        .write("mono/libs/legacy/index.js", "module.exports = {}\n")
+        .write("admin/package.json", r#"{"name":"admin","main":"main.js"}"#)
+        .write("admin/main.js", "\n");
+        let roots: Vec<ProjectRoot> = ["admin", "mono", "mono/libs/legacy", "mono/libs/money"]
+            .iter()
+            .map(|r| npm(r))
+            .collect();
+        let names: Vec<String> = workspace_packages(&t.0, &roots)
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["@shop/money", "admin", "mono"],
+            "a `!` glob excludes; a package under no workspace root is kept"
+        );
     }
 }

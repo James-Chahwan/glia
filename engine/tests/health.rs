@@ -12,8 +12,10 @@
 //! - `unparsed_code_apart_from_docs`: `.svelte` files no parser reads make the
 //!   `parse` row BLIND; `.mdx` / `.rst` prose is counted apart and alone never
 //!   raises it (FH.1b's correction).
-//! - `workspace_package_import_unbound`: an npm workspace whose app imports a
-//!   sibling package by its manifest name.
+//! - `workspace_package_import_unbound`: an npm workspace whose app imports two
+//!   sibling packages by their manifest names: one with in-repo source binds
+//!   (FH.5, IMPORTS rule `workspace_package`), one whose entry names only a
+//!   build output with no source is the unresolved row.
 //! - `suspicious_endpoint_qnames`: a `data:` URL fetch is a suspicious
 //!   ENDPOINT.
 //! - `cohort_health` (`#[ignore]`): every repo root named by
@@ -277,25 +279,37 @@ fn workspace_package_import_unbound() {
         "package.json",
         "{\"name\":\"mono\",\"private\":true,\"workspaces\":[\"packages/*\",\"apps/*\"]}\n",
     );
+    // FH.5: a package whose entry names only a build output, with no source
+    // in the repo, stays unbound; one with source binds and is no row.
     write(
         &root,
         "packages/sdk/package.json",
-        "{\"name\":\"@acme/sdk\",\"version\":\"1.0.0\",\"main\":\"src/index.ts\"}\n",
+        "{\"name\":\"@acme/sdk\",\"version\":\"1.0.0\",\"main\":\"dist/index.js\"}\n",
     );
     write(
         &root,
-        "packages/sdk/src/index.ts",
-        "export function getUser(id: string) {\n  return { id };\n}\n",
+        "packages/sdk/README.md",
+        "# sdk\n\nBuilt elsewhere.\n",
+    );
+    write(
+        &root,
+        "packages/ui/package.json",
+        "{\"name\":\"@acme/ui\",\"version\":\"1.0.0\",\"main\":\"src/index.ts\"}\n",
+    );
+    write(
+        &root,
+        "packages/ui/src/index.ts",
+        "export function label(id: string) {\n  return id;\n}\n",
     );
     write(
         &root,
         "apps/web/package.json",
-        "{\"name\":\"@acme/web\",\"version\":\"1.0.0\",\"dependencies\":{\"@acme/sdk\":\"*\"}}\n",
+        "{\"name\":\"@acme/web\",\"version\":\"1.0.0\",\"dependencies\":{\"@acme/sdk\":\"*\",\"@acme/ui\":\"*\"}}\n",
     );
     write(
         &root,
         "apps/web/src/main.ts",
-        "import { getUser } from '@acme/sdk';\nimport { thing } from 'left-pad';\n\nexport function show() {\n  return getUser('1');\n}\n",
+        "import { getUser } from '@acme/sdk';\nimport { label } from '@acme/ui';\nimport { thing } from 'left-pad';\n\nexport function show() {\n  return label(getUser('1'));\n}\n",
     );
     let (_, h) = build(&root);
     let names: Vec<&str> = h

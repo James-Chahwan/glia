@@ -1,0 +1,4 @@
+# The workspace members; tools/ is deliberately not one.
+packages:
+  - 'packages/*'
+  - "web"

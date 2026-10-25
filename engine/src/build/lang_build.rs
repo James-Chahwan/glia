@@ -11,9 +11,10 @@
 //! `#include` resolver `build_c_cpp` takes (its search roots are
 //! [`super::c_includes`], CB.22).
 
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glia_code_domain::project_roots::{LABEL_MANIFEST, ProjectRoot};
@@ -24,6 +25,7 @@ use glia_graph::{GraphError, RepoGraph};
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 use crate::passes::{GroupFill, fill_group_evidence};
+use crate::walk::{WorkspacePackage, package_file, workspace_packages};
 
 use super::c_includes::{IncludeRoots, angle_includes, c_cpp_module_qnames};
 
@@ -260,11 +262,26 @@ pub(crate) fn build_groups(
 fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
     let GroupInput { key, parses } = input;
     if key == TS_GROUP {
-        build_one(key, parses, |parses| {
+        // FH.5: the graph builder hands its workspace counts back through
+        // the resolver (`WORKSPACE_REPORT`), on this thread.
+        let report: Cell<Option<(usize, usize, usize)>> = Cell::new(None);
+        let build = build_one(key, parses, |parses| {
             glia_graph::build_typescript_family(ctx.repo, parses, |from, spec| {
+                if from == WORKSPACE_REPORT {
+                    report.set(parse_workspace_report(spec));
+                    return None;
+                }
                 resolve_ts_source_aliased(from, spec, ctx.ts_aliases)
             })
-        })
+        });
+        if let Some(line) = ctx
+            .ts_aliases
+            .workspace
+            .marker(report.get(), ctx.repo_label)
+        {
+            eprintln!("{line}");
+        }
+        build
     } else {
         build_one(key, parses, |parses| build_solo(key, parses, ctx))
     }
@@ -839,9 +856,14 @@ impl TsAliases {
 /// each walked project root (A8.4), so an Angular app under `web/` resolves
 /// through `web/tsconfig.json`. Only dirs that declare `paths` are kept,
 /// sorted by dir.
+///
+/// FH.5: it also holds the repo's workspace packages ([`WorkspaceSet`]), the
+/// resolver's last step for a bare specifier no `paths` key maps, so a watch
+/// session's group fingerprint (the set's `Debug`) moves with them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TsAliasSet {
     scopes: Vec<TsAliases>,
+    workspace: WorkspaceSet,
 }
 
 impl TsAliasSet {
@@ -870,7 +892,10 @@ impl TsAliasSet {
             );
             scopes.push(aliases);
         }
-        Self { scopes }
+        Self {
+            scopes,
+            workspace: WorkspaceSet::read(root, roots),
+        }
     }
 
     /// The aliases a module resolves through: the deepest scope whose dir
@@ -1054,7 +1079,168 @@ pub(super) fn resolve_ts_source_aliased(
     if spec.starts_with('.') {
         return resolve_ts_source(from_module, specifier);
     }
-    aliases.scope_of(from_module)?.map(spec)
+    aliases
+        .scope_of(from_module)
+        .and_then(|scope| scope.map(spec))
+        .or_else(|| aliases.workspace.resolve(spec))
+}
+
+// ---------------------------------------------------------------------------
+// FH.5: workspace packages
+// ---------------------------------------------------------------------------
+
+/// FH.5: the qname tags of `glia_graph`'s TS import pass (its
+/// `imports::WORKSPACE_ENTRY` / `WORKSPACE_SUBPATH` / `WORKSPACE_REPORT`,
+/// crate-private there): a qname [`WorkspaceSet::resolve`] mapped carries one
+/// of the first two, and the pass stamps the import IMPORTS rule
+/// `workspace_package` and hands its counts back as a call with the third as
+/// `from_module`. `ts_family_binds_a_workspace_package` pins the round trip.
+const WORKSPACE_ENTRY: &str = "\u{0}workspace:entry\u{0}";
+const WORKSPACE_SUBPATH: &str = "\u{0}workspace:subpath\u{0}";
+const WORKSPACE_REPORT: &str = "\u{0}workspace:report\u{0}";
+
+/// FH.5: one repo's workspace packages ([`workspace_packages`], read off the
+/// walk's project roots), by name, as the TS-family resolver's last step:
+/// a bare specifier equal to a package name (or `name/subpath`) maps to that
+/// package's in-repo module, before the external-package `None`. A
+/// published package of the same name is shadowed, as the package manager
+/// links the workspace member.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkspaceSet {
+    /// The repo root, for a subpath's file probe ([`package_file`]).
+    root: PathBuf,
+    /// Sorted by (name, dir).
+    packages: Vec<WorkspacePackage>,
+    /// Name -> its index in `packages`; `None` when two packages of the repo
+    /// declare the name, which then maps to nothing bindable (no guess).
+    by_name: BTreeMap<String, Option<usize>>,
+}
+
+impl WorkspaceSet {
+    /// The workspace packages under `root` ([`workspace_packages`]).
+    pub(crate) fn read(root: &Path, roots: &[ProjectRoot]) -> Self {
+        Self::of(root, workspace_packages(root, roots))
+    }
+
+    fn of(root: &Path, packages: Vec<WorkspacePackage>) -> Self {
+        let mut by_name: BTreeMap<String, Option<usize>> = BTreeMap::new();
+        for (i, p) in packages.iter().enumerate() {
+            by_name
+                .entry(p.name.clone())
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(i));
+        }
+        Self {
+            root: root.to_path_buf(),
+            packages,
+            by_name,
+        }
+    }
+
+    /// The tagged module qname bare specifier `spec` names, or `None` when
+    /// its package is no workspace package. `name` alone maps to the entry's
+    /// module; `name/sub` through the `exports` subpath `./sub` (exact, else
+    /// the longest-prefix `*` pattern), else the directory `<dir>/sub`
+    /// ([`package_file`], then the path's qname: the graph builder binds the
+    /// module, its same-stem sibling or the directory's index). A package
+    /// with no entry file, or a name two packages declare, maps to an empty
+    /// tagged qname: the builder counts it unbound.
+    fn resolve(&self, spec: &str) -> Option<String> {
+        let (name, sub) = split_package_specifier(spec)?;
+        let slot = *self.by_name.get(name)?;
+        let tag = if sub.is_empty() {
+            WORKSPACE_ENTRY
+        } else {
+            WORKSPACE_SUBPATH
+        };
+        let Some(pkg) = slot.and_then(|i| self.packages.get(i)) else {
+            return Some(tag.to_string());
+        };
+        let qname = if sub.is_empty() {
+            pkg.entry.as_deref().map(path_to_qname).unwrap_or_default()
+        } else {
+            self.subpath_qname(pkg, sub)
+        };
+        Some(format!("{tag}{qname}"))
+    }
+
+    /// The module qname `<pkg>/<sub>` names ([`WorkspaceSet::resolve`]).
+    fn subpath_qname(&self, pkg: &WorkspacePackage, sub: &str) -> String {
+        let key = format!("./{sub}");
+        let target = pkg
+            .subpaths
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t.clone())
+            .or_else(|| {
+                pkg.subpaths
+                    .iter()
+                    .filter_map(|(k, t)| {
+                        let (prefix, suffix) = k.split_once('*')?;
+                        let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                        Some((prefix.len(), t.replacen('*', star, 1)))
+                    })
+                    .max_by_key(|(len, _)| *len)
+                    .map(|(_, t)| t)
+            })
+            .unwrap_or_else(|| sub.to_string());
+        if let Some(file) = package_file(&self.root, &pkg.dir, &target) {
+            return path_to_qname(&file);
+        }
+        let rel = target.trim().trim_start_matches("./");
+        let path = if pkg.dir.is_empty() {
+            rel.to_string()
+        } else {
+            format!("{}/{rel}", pkg.dir)
+        };
+        ts_path_qname(&path).unwrap_or_default()
+    }
+
+    /// FH.5 fired_on, once per TS-family graph build of a repo with a
+    /// workspace package (`report` is the graph builder's counts, `None`
+    /// when no import named one):
+    ///   `[imports] workspace packages=<p> bound=<b> subpath=<s> unbound=<u> repo=<label>`
+    fn marker(&self, report: Option<(usize, usize, usize)>, repo_label: &str) -> Option<String> {
+        let packages = self.packages.len();
+        let (bound, subpath, unbound) = report.unwrap_or_default();
+        (packages > 0).then(|| {
+            format!(
+                "[imports] workspace packages={packages} bound={bound} subpath={subpath} \
+                 unbound={unbound} repo={repo_label}"
+            )
+        })
+    }
+}
+
+/// FH.5: a bare specifier as `(package name, subpath)`: `@scope/name/a/b` ->
+/// (`@scope/name`, `a/b`), `name/a` -> (`name`, `a`), `name` -> (`name`, ``).
+/// `None` for anything no package name starts: a relative or absolute path,
+/// a URL or `node:` builtin, a bare `@scope`.
+fn split_package_specifier(spec: &str) -> Option<(&str, &str)> {
+    if spec.is_empty() || spec.starts_with(['.', '/', '#']) || spec.contains(':') {
+        return None;
+    }
+    let cut = if spec.starts_with('@') {
+        let slash = spec.find('/')?;
+        spec[slash + 1..].find('/').map(|i| slash + 1 + i)
+    } else {
+        spec.find('/')
+    };
+    let (name, sub) = match cut {
+        Some(i) => (&spec[..i], spec[i + 1..].trim_end_matches('/')),
+        None => (spec, ""),
+    };
+    (!name.ends_with('/')).then_some((name, sub))
+}
+
+/// FH.5: the graph builder's `WORKSPACE_REPORT` specifier, `"<bound>
+/// <subpath> <unbound>"`, read back.
+fn parse_workspace_report(spec: &str) -> Option<(usize, usize, usize)> {
+    let mut it = spec.split(' ').map(str::parse::<usize>);
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(Ok(b)), Some(Ok(s)), Some(Ok(u)), None) => Some((b, s, u)),
+        _ => None,
+    }
 }
 
 /// DF.4a: the repo's own Dart packages, read off the walk's project roots
@@ -1417,7 +1603,10 @@ mod ts_alias_tests {
                 }
             })
             .collect();
-        TsAliasSet { scopes }
+        TsAliasSet {
+            scopes,
+            ..TsAliasSet::default()
+        }
     }
 
     #[test]
@@ -1649,6 +1838,308 @@ mod ts_alias_tests {
                 CellPayload::Bytes(_) => String::new(),
             });
         assert_eq!(cell.as_deref(), Some(r#"["@angular/core"]"#));
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    /// A scratch tree under the system temp dir, removed on drop.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("glia_lbws_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Tree(d)
+        }
+
+        fn write(&self, rel: &str, text: &str) -> &Self {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+            self
+        }
+
+        fn read(&self, src: &str) -> String {
+            std::fs::read_to_string(self.0.join(src)).unwrap()
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn npm(rel: &str) -> ProjectRoot {
+        ProjectRoot::new(rel.to_string(), "npm", "package.json", None)
+    }
+
+    /// The pnpm-workspace-sdk fixture's shape: an SDK whose manifest names
+    /// its build output, a source-only UI package, a web app importing both.
+    fn sdk_tree(tag: &str) -> (Tree, Vec<ProjectRoot>) {
+        let t = Tree::new(tag);
+        t.write("package.json", r#"{"name":"acme","private":true}"#)
+            .write("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n  - web\n")
+            .write(
+                "packages/sdk/package.json",
+                r#"{"name":"@acme/sdk","main":"dist/index.js","types":"dist/index.d.ts",
+                    "exports":{".":{"types":"./dist/index.d.ts","import":"./dist/index.js"},
+                               "./fetch-client":"./dist/fetch-client.js",
+                               "./models/*":"./dist/models/*.js"}}"#,
+            )
+            .write(
+                "packages/sdk/src/index.ts",
+                "export function updateMyUser(name: string): string {\n  return name;\n}\n",
+            )
+            .write(
+                "packages/sdk/src/fetch-client.ts",
+                "export function getServerVersion(): string {\n  return '1';\n}\n",
+            )
+            .write(
+                "packages/sdk/src/models/user.ts",
+                "export function userLabel(): string {\n  return 'u';\n}\n",
+            )
+            .write("packages/ui/package.json", r#"{"name":"@acme/ui"}"#)
+            .write(
+                "packages/ui/src/index.ts",
+                "export function formatName(n: string): string {\n  return n.trim();\n}\n",
+            )
+            .write("packages/ui/src/theme/index.ts", "export const dark = 1;\n")
+            .write("packages/nosrc/package.json", r#"{"name":"@acme/nosrc"}"#)
+            .write(
+                "web/package.json",
+                r#"{"name":"@acme/web","dependencies":{"@acme/sdk":"workspace:*"}}"#,
+            )
+            .write(
+                "web/src/profile.ts",
+                "import { updateMyUser } from '@acme/sdk';\n\
+                 import { getServerVersion } from '@acme/sdk/fetch-client';\n\
+                 import { userLabel } from '@acme/sdk/models/user';\n\
+                 import { formatName } from '@acme/ui';\n\
+                 import { nothing } from '@acme/nosrc';\n\
+                 import { debounce } from 'lodash';\n\
+                 export function saveProfile(n: string): string {\n  return updateMyUser(formatName(n)) + getServerVersion() + userLabel();\n}\n",
+            );
+        let roots = ["", "packages/nosrc", "packages/sdk", "packages/ui", "web"]
+            .iter()
+            .map(|r| npm(r))
+            .collect();
+        (t, roots)
+    }
+
+    fn untag(raw: Option<String>) -> Option<(&'static str, String)> {
+        let raw = raw?;
+        for (tag, name) in [(WORKSPACE_ENTRY, "entry"), (WORKSPACE_SUBPATH, "subpath")] {
+            if let Some(q) = raw.strip_prefix(tag) {
+                return Some((name, q.to_string()));
+            }
+        }
+        Some(("untagged", raw))
+    }
+
+    #[test]
+    fn bare_specifiers_map_through_workspace_packages() {
+        let (t, roots) = sdk_tree("resolve");
+        let set = TsAliasSet {
+            workspace: WorkspaceSet::read(&t.0, &roots),
+            ..TsAliasSet::default()
+        };
+        let r = |spec: &str| untag(resolve_ts_source_aliased("web::src::profile", spec, &set));
+        let q = |tag: &'static str, qname: &str| Some((tag, qname.to_string()));
+        assert_eq!(r("@acme/sdk"), q("entry", "packages::sdk::src::index"));
+        assert_eq!(
+            r("'@acme/sdk'"),
+            q("entry", "packages::sdk::src::index"),
+            "quotes"
+        );
+        assert_eq!(
+            r("@acme/sdk/fetch-client"),
+            q("subpath", "packages::sdk::src::fetch-client"),
+            "an exact exports subpath, its output mapped to source"
+        );
+        assert_eq!(
+            r("@acme/sdk/models/user"),
+            q("subpath", "packages::sdk::src::models::user"),
+            "a `*` pattern"
+        );
+        assert_eq!(
+            r("@acme/ui"),
+            q("entry", "packages::ui::src::index"),
+            "src/index.*"
+        );
+        assert_eq!(
+            r("@acme/ui/src/theme"),
+            q("subpath", "packages::ui::src::theme::index"),
+            "no exports: the directory"
+        );
+        assert_eq!(
+            r("@acme/ui/missing"),
+            q("subpath", "packages::ui::missing"),
+            "a subpath no file holds keeps its qname for the builder to miss"
+        );
+        assert_eq!(r("@acme/nosrc"), q("entry", ""), "no entry file: unbound");
+        assert_eq!(r("lodash"), None);
+        assert_eq!(r("@acme/gen"), None, "no workspace package");
+        assert_eq!(r("node:fs"), None);
+        assert_eq!(r("@acme"), None);
+        assert_eq!(
+            r("./util"),
+            q("untagged", "web::src::util"),
+            "relative is unchanged"
+        );
+        // A tsconfig `paths` key wins over a workspace name, as tsc reads it.
+        let mut aliased = set.clone();
+        let (base_url, entries) = parse_tsconfig_paths(
+            r#"{"compilerOptions":{"paths":{"@acme/sdk":["web/src/sdk-shim.ts"]}}}"#,
+        )
+        .unwrap();
+        aliased.scopes.push(TsAliases {
+            file: "tsconfig.json",
+            base_url,
+            entries,
+            ..TsAliases::default()
+        });
+        assert_eq!(
+            untag(resolve_ts_source_aliased(
+                "web::src::profile",
+                "@acme/sdk",
+                &aliased
+            )),
+            q("untagged", "web::src::sdk-shim")
+        );
+    }
+
+    #[test]
+    fn two_packages_of_one_name_bind_nothing() {
+        let t = Tree::new("dup");
+        t.write("a/package.json", r#"{"name":"dup","main":"index.js"}"#)
+            .write("a/index.js", "\n")
+            .write("b/package.json", r#"{"name":"dup","main":"index.js"}"#)
+            .write("b/index.js", "\n");
+        let set = WorkspaceSet::read(&t.0, &[npm("a"), npm("b")]);
+        assert_eq!(untag(set.resolve("dup")), Some(("entry", String::new())));
+        assert_eq!(
+            set.marker(None, "fx").as_deref(),
+            Some("[imports] workspace packages=2 bound=0 subpath=0 unbound=0 repo=fx")
+        );
+        assert_eq!(WorkspaceSet::default().marker(Some((1, 0, 0)), "fx"), None);
+        assert_eq!(parse_workspace_report("3 1 2"), Some((3, 1, 2)));
+        assert_eq!(parse_workspace_report("3 1"), None);
+    }
+
+    /// The round trip with `glia_graph`'s TS import pass: the tagged qnames
+    /// bind with IMPORTS rule `workspace_package`, named imports bind their
+    /// symbols, and the pass's counts come back for the marker.
+    #[test]
+    fn ts_family_binds_a_workspace_package() {
+        let (t, roots) = sdk_tree("build");
+        let repo = RepoId(7);
+        let parses: Vec<FileParse> = [
+            "packages/sdk/src/index.ts",
+            "packages/sdk/src/fetch-client.ts",
+            "packages/sdk/src/models/user.ts",
+            "packages/ui/src/index.ts",
+            "packages/ui/src/theme/index.ts",
+            "web/src/profile.ts",
+        ]
+        .iter()
+        .map(|p| crate::extract::parse_one(&t.read(p), p, "typescript", repo).unwrap())
+        .collect();
+        let aliases = TsAliasSet::read(&t.0, &roots, "fx");
+        let ctx = GroupCtx {
+            repo,
+            repo_label: "fx",
+            rust_crates: &[],
+            ts_aliases: &aliases,
+            c_includes: &IncludeRoots::default(),
+            dart_packages: &DartPackages::default(),
+        };
+        let build = build_one_group(
+            GroupInput {
+                key: TS_GROUP,
+                parses,
+            },
+            &ctx,
+        );
+        let (g, _, _) = build.graph.as_ref().expect("built");
+        let id = |q: &str| {
+            *g.symbols
+                .module_by_qname
+                .get(q)
+                .unwrap_or_else(|| panic!("{q}"))
+        };
+        let qname = |n: NodeId| g.nav.qname_by_id.get(&n).cloned().unwrap_or_default();
+        let web = id("web::src::profile");
+        let mut imports: Vec<(String, Option<String>)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS && e.from == web)
+            .map(|e| (qname(e.to), Evidence::of(e).and_then(|ev| ev.rule)))
+            .collect();
+        imports.sort();
+        let ws = Some("workspace_package".to_string());
+        assert_eq!(
+            imports,
+            [
+                ("packages::sdk::src::fetch-client".to_string(), ws.clone()),
+                ("packages::sdk::src::index".to_string(), ws.clone()),
+                ("packages::sdk::src::models::user".to_string(), ws.clone()),
+                ("packages::ui::src::index".to_string(), ws.clone()),
+            ]
+        );
+        let save = g
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "web::src::profile::saveProfile")
+            .map(|(id, _)| *id)
+            .expect("saveProfile");
+        let mut calls: Vec<String> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS && e.from == save)
+            .map(|e| qname(e.to))
+            .collect();
+        calls.sort();
+        assert_eq!(
+            calls,
+            [
+                "packages::sdk::src::fetch-client::getServerVersion",
+                "packages::sdk::src::index::updateMyUser",
+                "packages::sdk::src::models::user::userLabel",
+                "packages::ui::src::index::formatName",
+            ]
+        );
+        // The pass's counts, as the marker prints them: four bound (two
+        // through a subpath), `@acme/nosrc` unbound; lodash is no workspace
+        // package and counts nowhere.
+        let report = std::cell::Cell::new(None);
+        let resolver = |from: &str, spec: &str| {
+            if from == WORKSPACE_REPORT {
+                report.set(parse_workspace_report(spec));
+                return None;
+            }
+            resolve_ts_source_aliased(from, spec, &aliases)
+        };
+        let parses: Vec<FileParse> = ["packages/sdk/src/index.ts", "web/src/profile.ts"]
+            .iter()
+            .map(|p| crate::extract::parse_one(&t.read(p), p, "typescript", repo).unwrap())
+            .collect();
+        glia_graph::build_typescript_family(repo, parses, resolver).unwrap();
+        assert_eq!(
+            report.get(),
+            Some((1, 0, 4)),
+            "only the sdk entry is in this graph"
+        );
+        assert_eq!(
+            aliases.workspace.marker(Some((4, 2, 1)), "fx").as_deref(),
+            Some("[imports] workspace packages=5 bound=4 subpath=2 unbound=1 repo=fx")
+        );
     }
 }
 

@@ -847,6 +847,15 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
 /// only a named import of it. Prints the `[imports] reexport` marker
 /// ([`reexports::Barrels::marker`]) and returns its counters, which the tests
 /// read back (the builders drop them).
+///
+/// FH.5: a qname `resolve_source` tags [`WORKSPACE_ENTRY`] /
+/// [`WORKSPACE_SUBPATH`] (a bare specifier naming a package the repo's own
+/// manifests declare, `from '@acme/sdk'`) binds through [`ts_target`]'s
+/// lookups as any other and is stamped IMPORTS rule [`WORKSPACE_PACKAGE`];
+/// named imports bind the module's symbols as usual. The statements counted
+/// ([`WorkspaceBinds`]) go back to the resolver once, as a call with
+/// `from_module` [`WORKSPACE_REPORT`], for the engine's `[imports]
+/// workspace` marker.
 pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
@@ -857,9 +866,15 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     // alias, in statement order.
     let mut plain_dart: Vec<(NodeId, NodeId)> = Vec::new();
     let mut dir_index = DirIndexBinds::default();
+    let mut workspace = WorkspaceBinds::default();
     // DT.1q: the barrels' IMPORTS edges and export tables, before any
-    // statement binds a name through one.
-    let mut barrels = reexports::Barrels::read(g, imports, resolve_source, same);
+    // statement binds a name through one. A workspace-tagged qname (FH.5)
+    // reaches them untagged: a barrel re-exporting a workspace package binds
+    // as any re-export does.
+    let untagged = |from: &str, spec: &str| {
+        resolve_source(from, spec).map(|raw| untag_workspace(&raw).1.to_string())
+    };
+    let mut barrels = reexports::Barrels::read(g, imports, &untagged, same);
     barrels.materialize(g);
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
@@ -867,17 +882,21 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
         };
         match &stmt.target {
             ImportTarget::Module { path, alias } => {
-                let Some(target_qname) = resolve_source(&stmt.from_module, path) else {
+                let Some(raw) = resolve_source(&stmt.from_module, path) else {
                     continue;
                 };
-                let Some((target_id, rule)) = ts_target(
+                let (ws, target_qname) = untag_workspace(&raw);
+                let hit = ts_target_tagged(
                     g,
                     same,
-                    &target_qname,
+                    ws,
+                    target_qname,
                     spec_ext(path),
                     from_mod_id,
                     "module",
-                ) else {
+                );
+                workspace.record(ws, hit.is_some());
+                let Some((target_id, rule)) = hit else {
                     continue;
                 };
                 dir_index.record(rule, path);
@@ -901,17 +920,21 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 alias,
                 ..
             } => {
-                let Some(target_qname) = resolve_source(&stmt.from_module, module) else {
+                let Some(raw) = resolve_source(&stmt.from_module, module) else {
                     continue;
                 };
-                let Some((target_mod_id, rule)) = ts_target(
+                let (ws, target_qname) = untag_workspace(&raw);
+                let hit = ts_target_tagged(
                     g,
                     same,
-                    &target_qname,
+                    ws,
+                    target_qname,
                     spec_ext(module),
                     from_mod_id,
                     "symbol",
-                ) else {
+                );
+                workspace.record(ws, hit.is_some());
+                let Some((target_mod_id, rule)) = hit else {
                     continue;
                 };
                 dir_index.record(rule, module);
@@ -952,7 +975,112 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     if let Some(line) = barrels.marker() {
         eprintln!("{line}");
     }
+    if let Some(report) = workspace.report() {
+        // FH.5: hand the counts back through the resolver that tagged them
+        // ([`WORKSPACE_REPORT`]); its answer is ignored.
+        let _ = resolve_source(WORKSPACE_REPORT, &report);
+    }
     barrels.stats()
+}
+
+/// FH.5: the IMPORTS evidence rule of an import whose bare specifier names a
+/// package the repo's own manifests declare (a `package.json` `name` of a
+/// workspace member), bound to that package's in-repo module.
+pub(crate) const WORKSPACE_PACKAGE: &str = "workspace_package";
+
+/// FH.5: the prefix with which the TS-family source resolver tags the qname a
+/// workspace package's ENTRY maps to (`from '@acme/sdk'`). The resolver is a
+/// `Fn(&str, &str) -> Option<String>` the builders take as given, so the tag
+/// rides in the qname: a NUL never occurs in a qname named from a path. The
+/// engine's resolver (`lang_build::WorkspaceSet`) writes the same literals.
+pub(crate) const WORKSPACE_ENTRY: &str = "\u{0}workspace:entry\u{0}";
+
+/// FH.5: [`WORKSPACE_ENTRY`]'s twin for a `name/subpath` specifier
+/// (`from '@acme/sdk/fetch-client'`).
+pub(crate) const WORKSPACE_SUBPATH: &str = "\u{0}workspace:subpath\u{0}";
+
+/// FH.5: the `from_module` with which [`resolve_imports_ts`] hands its
+/// workspace counts back to the resolver that tagged them, once per graph
+/// build that saw a tagged qname: the specifier is `"<bound> <subpath>
+/// <unbound>"` ([`WorkspaceBinds::report`]). A resolver that never tags is
+/// never called with it.
+pub(crate) const WORKSPACE_REPORT: &str = "\u{0}workspace:report\u{0}";
+
+/// FH.5: a resolver answer split into its workspace tag (`Some(false)` an
+/// entry, `Some(true)` a subpath, `None` untagged) and the qname. An empty
+/// tagged qname is a workspace package whose entry names no file.
+fn untag_workspace(raw: &str) -> (Option<bool>, &str) {
+    if let Some(q) = raw.strip_prefix(WORKSPACE_ENTRY) {
+        (Some(false), q)
+    } else if let Some(q) = raw.strip_prefix(WORKSPACE_SUBPATH) {
+        (Some(true), q)
+    } else {
+        (None, raw)
+    }
+}
+
+/// [`ts_target`] for a resolver answer [`untag_workspace`] split: an untagged
+/// qname binds exactly as [`ts_target`] binds it; a workspace-tagged one
+/// binds through the same lookups (the module, its same-stem sibling, the
+/// directory's index) and is stamped IMPORTS rule [`WORKSPACE_PACKAGE`]
+/// whichever lookup bound it; an empty tagged qname binds nothing.
+fn ts_target_tagged(
+    g: &RepoGraph,
+    same: &mut SameStem,
+    ws: Option<bool>,
+    target_qname: &str,
+    explicit_ext: Option<&str>,
+    importer: NodeId,
+    rule: &'static str,
+) -> Option<(NodeId, &'static str)> {
+    if ws.is_some() && target_qname.is_empty() {
+        return None;
+    }
+    let hit = ts_target(g, same, target_qname, explicit_ext, importer, rule)?;
+    Some(match ws {
+        Some(_) => (hit.0, WORKSPACE_PACKAGE),
+        None => hit,
+    })
+}
+
+/// FH.5: what the workspace arm bound in one graph build: import statements
+/// (a `{ A, B }` import is one per name) whose specifier named a workspace
+/// package.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkspaceBinds {
+    /// Bound to an in-repo module, rule [`WORKSPACE_PACKAGE`].
+    pub(crate) bound: usize,
+    /// Of `bound`: through a `name/subpath` specifier.
+    pub(crate) subpath: usize,
+    /// Named a workspace package and bound nothing (no entry file, an
+    /// ambiguous name, a subpath no module holds).
+    pub(crate) unbound: usize,
+}
+
+impl WorkspaceBinds {
+    /// Count one statement: `ws` its tag, `bound` whether it bound.
+    fn record(&mut self, ws: Option<bool>, bound: bool) {
+        let Some(subpath) = ws else {
+            return;
+        };
+        if bound {
+            self.bound += 1;
+            self.subpath += usize::from(subpath);
+        } else {
+            self.unbound += 1;
+        }
+    }
+
+    /// The [`WORKSPACE_REPORT`] specifier, or `None` when no statement named
+    /// a workspace package.
+    pub(crate) fn report(&self) -> Option<String> {
+        let WorkspaceBinds {
+            bound,
+            subpath,
+            unbound,
+        } = *self;
+        (bound + unbound > 0).then(|| format!("{bound} {subpath} {unbound}"))
+    }
 }
 
 /// What [`bind_dart_library_names`] did in one graph build.
@@ -1215,8 +1343,10 @@ impl DirIndexBinds {
 /// language loads, LB.13), `dir_index` (the index module of the directory a
 /// TS-family specifier names, DT.1b), `reexport` (a TS / JS barrel -> each
 /// module it re-exports from, DT.1q), `namespace` (the member of the declared
-/// namespace PACKAGE a symbol import names, DF.2) or `tail_unique` (the repo-unique
-/// short name, a guess the full path could not confirm).
+/// namespace PACKAGE a symbol import names, DF.2), `workspace_package` (a
+/// bare specifier naming a package the repo's own manifests declare, FH.5) or
+/// `tail_unique` (the repo-unique short name, a guess the full path could not
+/// confirm).
 /// `line` is the import statement's 0-based row (LC.3b, basis site).
 fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str, line: u32) {
     let ev = graph_evidence("graph:imports", rule).line(line);
@@ -2440,6 +2570,119 @@ mod tests {
         );
         let stats = replay_dart(&mut g, &[("src::app", "src::util")], &[]);
         assert_eq!(stats, DartLibraryNames::default());
+    }
+
+    // ---- FH.5: workspace packages bind their in-repo modules ----------------
+
+    /// A resolver that maps the workspace names as the engine's
+    /// `WorkspaceSet` does (tagged), everything relative through
+    /// [`ts_source`], and records the pass's [`WORKSPACE_REPORT`].
+    fn workspace_resolver(
+        report: &std::cell::RefCell<Vec<String>>,
+    ) -> impl Fn(&str, &str) -> Option<String> + '_ {
+        move |from: &str, spec: &str| {
+            if from == WORKSPACE_REPORT {
+                report.borrow_mut().push(spec.to_string());
+                return None;
+            }
+            let spec = spec.trim_matches('\'');
+            match spec {
+                "@acme/sdk" => Some(format!("{WORKSPACE_ENTRY}packages::sdk::src::index")),
+                "@acme/sdk/fetch" => Some(format!("{WORKSPACE_SUBPATH}packages::sdk::src::fetch")),
+                "@acme/sdk/models" => {
+                    Some(format!("{WORKSPACE_SUBPATH}packages::sdk::src::models"))
+                }
+                "@acme/nosrc" => Some(WORKSPACE_ENTRY.to_string()),
+                "@acme/gone/x" => Some(format!("{WORKSPACE_SUBPATH}packages::gone::x")),
+                s if s.starts_with('.') => ts_source(from, s),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_tagged_imports_bind_with_their_rule() {
+        let web = "web::src::profile";
+        let mut app = file("web/src/profile.ts", web, "profile", &["save"]);
+        imports_and_calls(&mut app, web, "@acme/sdk", "updateMyUser", "save");
+        import_show(&mut app, web, "@acme/sdk/fetch", "getVersion");
+        import_module(&mut app, web, "@acme/sdk/models", Some("models"));
+        import_show(&mut app, web, "@acme/nosrc", "x");
+        import_show(&mut app, web, "@acme/gone/x", "y");
+        import_show(&mut app, web, "lodash", "debounce");
+        import_show(&mut app, web, "./local", "helper");
+        let parses = vec![
+            file(
+                "packages/sdk/src/index.ts",
+                "packages::sdk::src::index",
+                "index",
+                &["updateMyUser"],
+            ),
+            file(
+                "packages/sdk/src/fetch.ts",
+                "packages::sdk::src::fetch",
+                "fetch",
+                &["getVersion"],
+            ),
+            file(
+                "packages/sdk/src/models/index.ts",
+                "packages::sdk::src::models::index",
+                "index",
+                &["User"],
+            ),
+            file("web/src/local.ts", "web::src::local", "local", &["helper"]),
+            app,
+        ];
+        let report = std::cell::RefCell::new(Vec::new());
+        let g =
+            build_typescript_family(repo(), parses, workspace_resolver(&report)).expect("build");
+        let ws = |q: &str| (module(q), WORKSPACE_PACKAGE.to_string());
+        assert_eq!(
+            imports_from(&g, web),
+            [
+                ws("packages::sdk::src::index"),
+                ws("packages::sdk::src::fetch"),
+                ws("packages::sdk::src::models::index"),
+                (module("web::src::local"), "symbol".to_string()),
+            ],
+            "a subpath naming a directory binds its index, still rule workspace_package; \
+             an untagged import keeps its own rule"
+        );
+        let update = func("packages::sdk::src::index::updateMyUser");
+        assert_eq!(
+            calls_from(&g, &format!("{web}::save")),
+            [(update, "import_binding".to_string())]
+        );
+        assert_eq!(
+            g.symbols.module_import_bindings[&module(web)].get("models"),
+            Some(&module("packages::sdk::src::models::index"))
+        );
+        assert_eq!(
+            *report.borrow(),
+            ["3 2 2"],
+            "three bound (two through a subpath), the no-entry and the missing subpath \
+             unbound, lodash and the relative import uncounted; reported once"
+        );
+    }
+
+    #[test]
+    fn an_untagging_resolver_is_never_handed_a_report() {
+        let web = "web::src::profile";
+        let mut app = file("web/src/profile.ts", web, "profile", &["save"]);
+        import_show(&mut app, web, "./local", "helper");
+        let parses = vec![
+            file("web/src/local.ts", "web::src::local", "local", &["helper"]),
+            app,
+        ];
+        let report = std::cell::RefCell::new(Vec::new());
+        build_typescript_family(repo(), parses, workspace_resolver(&report)).expect("build");
+        assert!(report.borrow().is_empty());
+        assert_eq!(WorkspaceBinds::default().report(), None);
+        assert_eq!(untag_workspace("a::b"), (None, "a::b"));
+        assert_eq!(
+            untag_workspace(&format!("{WORKSPACE_SUBPATH}a::b")),
+            (Some(true), "a::b")
+        );
     }
 
     // ---- DT.1b: directory imports bind the directory's index module ---------
