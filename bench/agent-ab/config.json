@@ -10,6 +10,10 @@
   "g052": {"rev": "v0.5.2"},
   "g053": {"rev": "v0.5.3", "calibrate": true}
  },
- "disallowed_tools": ["Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit"],
+ "disallowed_tools": ["Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit", "Workflow",
+  "SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "DesignSync", "CronCreate",
+  "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree"],
+ "disabled_plugins": ["cc-plugin-agents-md@builtin", "cc-plugin-telemetry@builtin",
+  "cc-plugin-plugin-authoring@builtin"],
  "glia_threads": 4
 }

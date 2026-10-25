@@ -376,8 +376,12 @@ def test_pilot_then_resume():
             else:
                 assert c["glia_rc"] == 127 and c["glia_err"] == "glia: command not found", c
             argv = c["argv"]
-            assert argv[argv.index("--disallowedTools") + 1:] == [
-                "Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit"], argv
+            cfg = json.loads((run.HERE / "config.json").read_text())
+            assert argv[argv.index("--disallowedTools") + 1:] == cfg["disallowed_tools"], argv
+            assert {"Agent", "Task", "Workflow", "WebFetch", "RemoteTrigger"} <= \
+                set(cfg["disallowed_tools"]), cfg
+            assert json.loads(argv[argv.index("--settings") + 1]) == {"enabledPlugins": {
+                p: False for p in cfg["disabled_plugins"]}}, argv
             for flag in ("--strict-mcp-config", "--verbose"):
                 assert flag in argv
             assert argv[argv.index("--setting-sources") + 1] == "project"

@@ -371,6 +371,11 @@ def claude_cmd(cfg, prompt, max_turns):
            "--verbose", "--mcp-config", str(HERE / "empty-mcp.json"), "--strict-mcp-config",
            "--setting-sources", "project", "--permission-mode", "bypassPermissions",
            "--max-turns", str(max_turns)]
+    if cfg.get("disabled_plugins"):
+        # Claude Code's own built-in plugins load under any CLAUDE_CONFIG_DIR; the
+        # isolation check refuses every plugin, so the run turns them off
+        cmd += ["--settings", json.dumps(
+            {"enabledPlugins": {p: False for p in cfg["disabled_plugins"]}}, sort_keys=True)]
     if cfg["disallowed_tools"]:
         cmd += ["--disallowedTools", *cfg["disallowed_tools"]]
     return cmd

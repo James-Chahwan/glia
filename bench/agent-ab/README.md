@@ -167,7 +167,9 @@ tree:
   `auth=oauth_token`, never the value.
 - The session: `claude -p <prompt> --model <m> --output-format stream-json --verbose
   --mcp-config empty-mcp.json --strict-mcp-config --setting-sources project --permission-mode
-  bypassPermissions --max-turns <n> --disallowedTools <each>`, cwd the copy, the stream in
+  bypassPermissions --max-turns <n> [--settings {"enabledPlugins": {<each disabled_plugins>: false}}]
+  --disallowedTools <each>` (the disabled plugins are Claude Code's own built-ins, which load under
+  any config dir and which the isolation check refuses), cwd the copy, the stream in
   `DIR/sessions/<run>/<task>/<arm>/<rep>.jsonl`, killed after the timeout (`timeout`). A result
   whose error reads as a rate limit sleeps until the stream's `resetsAt`, else 900 s (at most
   6 h), the checkout reset, up to 5 attempts; then the run stops, resumable (exit 3).
