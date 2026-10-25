@@ -49,6 +49,15 @@
 //! `<path>.replace('<a>', '<b>')` with two string literals. Anything else (a
 //! call, `this.x`, `process.env.X || ..`, a ternary) binds nothing.
 //!
+//! TS ENUMS (FH.3). `[export] [declare] [const] enum E {` opens an enum
+//! body whose string-valued members bind as `E.<member>` (`RouteKey.User`
+//! for `User = 'users'`), never as the bare member name: a member called
+//! `User` is no constant by itself. A member with no initialiser, a numeric
+//! value or any other expression binds nothing. Object consts (`const K =
+//! { A: 'a' } as const`, or without `as const`) bind through the object walk
+//! above as `K.A` (and bare `A`). [`ConstTable::is_enum_member`] tells an
+//! enum binding apart, for the `[path-fold]` marker's `enum=` count.
+//!
 //! No panics: every slice goes through `get()` or lands on an ASCII byte.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,6 +99,8 @@ pub struct ConstTable {
     exprs: BTreeMap<String, String>,
     /// DF.20: extra distinct template values seen for an `exprs` key.
     expr_alternatives: BTreeMap<String, Vec<String>>,
+    /// FH.3: the keys a TS enum member bound (`RouteKey.User`).
+    enum_keys: BTreeSet<String>,
 }
 
 impl ConstTable {
@@ -102,12 +113,22 @@ impl ConstTable {
         let mut t = ConstTable::default();
         let mut chain: Vec<Option<String>> = Vec::new();
         let mut go_block = false;
+        // FH.3: the enum whose body is open.
+        let mut open_enum: Option<String> = None;
         for line in source.lines() {
             if !chain.is_empty() {
                 scan_object(line, &mut chain, &mut t);
                 continue;
             }
+            if let Some(name) = open_enum.take() {
+                open_enum = scan_enum(line, name, &mut t);
+                continue;
+            }
             let body = line.trim();
+            if ts && let Some((name, rest)) = enum_opener(body) {
+                open_enum = scan_enum(rest, name.to_string(), &mut t);
+                continue;
+            }
             if lang == "go" {
                 if go_block {
                     go_block = !body.starts_with(')');
@@ -157,6 +178,13 @@ impl ConstTable {
                 self.bind_expr(k, v);
             }
         }
+        self.enum_keys.extend(other.enum_keys.iter().cloned());
+    }
+
+    /// FH.3: `key` (normalised as the lookups normalise it) was bound by a TS
+    /// enum member (module doc), in this table or one merged into it.
+    pub fn is_enum_member(&self, key: &str) -> bool {
+        normalise_expr(key).is_some_and(|k| self.enum_keys.contains(&k))
     }
 
     /// The first value bound to exactly `key`.
@@ -490,6 +518,15 @@ impl ConstTable {
 
     fn bind(&mut self, key: &str, value: &str) {
         bind_first(&mut self.by_key, &mut self.alternatives, key, value);
+    }
+
+    /// FH.3: [`Self::insert`] for a TS enum member, recorded as one.
+    fn insert_enum(&mut self, key: &str, value: &str) {
+        if is_secret_name(key) || accept_value(value).is_none() {
+            return;
+        }
+        self.insert(key, value);
+        self.enum_keys.insert(key.to_string());
     }
 
     /// DF.20: validate, redact, then bind a config expression's normal form.
@@ -970,6 +1007,106 @@ fn accept_expr_value(v: &str) -> Option<String> {
         return None;
     }
     Some(mask_userinfo(v).unwrap_or_else(|| v.to_string()))
+}
+
+/// FH.3: TS `[export] [declare] [const] enum E {` — the enum's name and the
+/// rest of the line after the `{`.
+fn enum_opener(body: &str) -> Option<(&str, &str)> {
+    let mut rest = body;
+    for word in ["export ", "declare ", "const "] {
+        if let Some(r) = rest.strip_prefix(word) {
+            rest = r.trim_start();
+        }
+    }
+    let rest = rest.strip_prefix("enum ")?.trim_start();
+    let (name, after) = rest.split_at(ident_end(rest));
+    let after = after.trim_start().strip_prefix('{')?;
+    valid_name(name).then_some((name, after))
+}
+
+/// FH.3: one line of the body of enum `name`: every `Member = '<string>'`
+/// binds `name.Member`. Returns the enum still open after the line, `None`
+/// once its `}` closes it. A member whose initialiser is anything but one
+/// string literal is skipped to its `,` (or the line's end).
+fn scan_enum(line: &str, name: String, t: &mut ConstTable) -> Option<String> {
+    let mut rest = line;
+    loop {
+        rest = rest.trim_start_matches([' ', '\t', '\r', ',']);
+        if rest.is_empty() || rest.starts_with("//") {
+            return Some(name);
+        }
+        if let Some(r) = rest.strip_prefix("/*") {
+            match r.find("*/") {
+                Some(end) => {
+                    rest = r.get(end + 2..).unwrap_or("");
+                    continue;
+                }
+                None => return Some(name),
+            }
+        }
+        if rest.starts_with('}') {
+            return None;
+        }
+        let (member, after) = match rest.as_bytes().first() {
+            Some(b'"' | b'\'') => quoted(rest).unwrap_or(("", rest)),
+            _ => rest.split_at(ident_end(rest)),
+        };
+        let after = after.trim_start();
+        if !member.is_empty()
+            && valid_name(member)
+            && let Some(rhs) = after
+                .strip_prefix('=')
+                .filter(|r| !r.starts_with(['=', '>']))
+        {
+            if let Some((value, r)) = quoted(rhs.trim_start()) {
+                let r = r.trim_start();
+                if r.is_empty() || r.starts_with([',', '}']) || r.starts_with("//") {
+                    t.insert_enum(&format!("{name}.{member}"), value);
+                    rest = r;
+                    continue;
+                }
+            }
+            match skip_member(rhs) {
+                Some(r) => rest = r,
+                None => return Some(name),
+            }
+            continue;
+        }
+        if member.is_empty() {
+            match skip_member(rest) {
+                Some(r) => rest = r,
+                None => return Some(name),
+            }
+        } else {
+            rest = after;
+        }
+    }
+}
+
+/// FH.3: `s` past the end of one enum member's initialiser: from its
+/// top-level `,` (or the `}` that closes the enum) on. `None` when it runs
+/// past the line, which leaves the enum open for the next line.
+fn skip_member(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' | b'\'' | b'`' => {
+                let rest = skip_string(s.get(i..)?)?;
+                i = s.len() - rest.len();
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'}' if depth == 0 => return s.get(i..),
+            b'}' => depth -= 1,
+            b',' if depth == 0 => return s.get(i + 1..),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// TS `[export] const OBJ[: T] = {` — the rest of the line after the `{`.
@@ -2092,5 +2229,57 @@ export const PAGE = 'p';
             ]
         );
         assert_eq!(ConstTable::default().entries().count(), 0);
+    }
+
+    /// FH.3: string-valued TS enum members bind as `E.Member`, never as the
+    /// bare member; numeric, auto and computed members bind nothing.
+    #[test]
+    fn ts_enum_string_members_bind_qualified() {
+        let t = scan(
+            "export enum RouteKey {\n  User = 'users',\n  Asset = \"assets\", // assets\n  Count = 3,\n  Auto,\n  Joined = 'a' + 'b',\n}\n\
+             export const enum Dir { Up = 'up', Down = 'down' }\n\
+             enum Num {\n  A = 1,\n  B,\n}\n\
+             declare enum Ext {\n  /* c */ X = 'x',\n  Y = compute(1, 2),\n  Z = 'z'\n}\n\
+             export const ApiPrefix = {\n  Admin: 'admin',\n} as const;\n",
+            "typescript",
+        );
+        assert_eq!(t.get("RouteKey.User"), Some("users"));
+        assert_eq!(t.get("RouteKey.Asset"), Some("assets"));
+        assert_eq!(t.get("Dir.Up"), Some("up"));
+        assert_eq!(t.get("Dir.Down"), Some("down"));
+        assert_eq!(t.get("Ext.X"), Some("x"));
+        assert_eq!(t.get("Ext.Z"), Some("z"));
+        for absent in [
+            "User",
+            "RouteKey.Count",
+            "RouteKey.Auto",
+            "RouteKey.Joined",
+            "Num.A",
+            "Ext.Y",
+        ] {
+            assert_eq!(t.get(absent), None, "{absent}");
+        }
+        assert!(t.is_enum_member("RouteKey.User"));
+        assert!(!t.is_enum_member("ApiPrefix.Admin"));
+        assert_eq!(t.get("ApiPrefix.Admin"), Some("admin"));
+        // The object after the enums still binds: the enum closed.
+        let mut repo = ConstTable::default();
+        repo.merge_from(&t);
+        assert!(repo.is_enum_member("RouteKey.User"));
+        assert_eq!(repo.resolve_expr_strict("RouteKey.User"), Some("users"));
+        // A template's enum span folds (the A11.2 endpoint fold's reader).
+        assert_eq!(
+            fold_interpolations("${RouteKey.User}/me", &repo).as_deref(),
+            Some("users/me")
+        );
+    }
+
+    /// FH.3: enums are a TS shape only, and a secret-named member never binds.
+    #[test]
+    fn enum_scan_is_ts_only_and_redacted() {
+        let src = "enum Keys {\n  ApiToken = 'abc',\n  Name = 'n',\n}\n";
+        assert_eq!(scan(src, "typescript").get("Keys.ApiToken"), None);
+        assert_eq!(scan(src, "typescript").get("Keys.Name"), Some("n"));
+        assert_eq!(scan(src, "java").get("Keys.Name"), None);
     }
 }

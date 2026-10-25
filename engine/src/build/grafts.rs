@@ -133,6 +133,12 @@ pub(super) fn apply_post_cache(
         consts: const_table,
         file_tables,
     };
+    // FH.3: a ROUTE whose decorator path named a constant or an enum member
+    // (`@Controller(RouteKey.User)`, the ts_routes placeholder segment) folds
+    // through the same tables and the same cache rule. Above the owner pass
+    // (it re-keys ROUTEs, an owned kind) and so before the HTTP resolver
+    // indexes a route.
+    apply_path_symbol_fold(parses_by_lang, &folds).report(repo_label);
     let (queue_stats, queue_pool) = apply_queue_const_topics(parses_by_lang, &folds, parse_errors);
     queue_stats.report(repo_label);
     // CB.3b: event sites keyed by a constant fold to its literal through the
@@ -891,6 +897,274 @@ fn apply_queue_const_topics(
             threads,
         },
     )
+}
+
+/// FH.3: per-repo tallies of the symbolic path fold.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PathFoldStats {
+    /// Placeholder segments read off ROUTE qnames (one per occurrence).
+    symbols: usize,
+    /// Placeholders the const tables resolved.
+    folded: usize,
+    /// Placeholders kept: no table bound the symbol to one string value.
+    unresolved: usize,
+    /// Of `folded`: bound by a TS enum member (`RouteKey.User`).
+    enums: usize,
+    /// Of `folded`: bound by a dotted object member (`ApiPrefix.Admin`).
+    objects: usize,
+    /// Of `folded`: bound by a plain constant (`USERS`).
+    consts: usize,
+}
+
+impl PathFoldStats {
+    /// fired_on marker, once per repo where any ROUTE path named a symbol:
+    ///   `[path-fold] symbols=<s> folded=<f> unresolved=<u> (enum=<e> object=<o> const=<c>) repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.symbols > 0 {
+            eprintln!(
+                "[path-fold] symbols={} folded={} unresolved={} (enum={} object={} const={}) repo={repo_label}",
+                self.symbols, self.folded, self.unresolved, self.enums, self.objects, self.consts
+            );
+        }
+    }
+}
+
+/// What bound a folded symbol, for the `[path-fold]` breakdown.
+#[derive(Clone, Copy)]
+enum SymbolBinding {
+    Enum,
+    Object,
+    Const,
+}
+
+/// FH.3: a ROUTE whose path holds a `ts_routes` symbol placeholder
+/// (`PUT /~const:RouteKey.User~/me`, a NestJS decorator whose path argument
+/// is an identifier, a member expression or a template over them) is
+/// re-keyed to the path its symbols hold (`PUT /users/me`).
+///
+/// Each symbol resolves strictly (one string value, never an ambiguous key)
+/// through, in order: the route file's own A11.1 scan; the file's import of
+/// the symbol's root (`import { RouteKey } from './route-keys'`, a named or
+/// namespace import with a relative specifier, `.js` read as its `.ts`
+/// source) and that file's scan, under the imported name; then the repo
+/// table, under the same name. A symbol nothing binds stays a placeholder
+/// (counted `unresolved`), and a route with no symbol folded keeps its id.
+/// A folded value is spliced in verbatim, then the path's repeated `/`
+/// collapse and a trailing `/` drops, as Nest joins a prefix and a suffix.
+///
+/// Post-cache, like the queue / event folds: the parse cache keeps the
+/// placeholder qname and every build re-folds against the current tables,
+/// so an edit to the enum's file alone moves a cache-served route. Per
+/// parse, through `rekey::rekey_node`, so no HashMap order reaches an id.
+fn apply_path_symbol_fold(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    inputs: &FoldInputs<'_>,
+) -> PathFoldStats {
+    use glia_code_extractors::ts_routes::path_symbols;
+    let mut stats = PathFoldStats::default();
+    let by_path: BTreeMap<&str, usize> = inputs
+        .files
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.as_str(), i))
+        .collect();
+    for fp in parses_by_lang.values_mut().flatten() {
+        let mut moves: Vec<(NodeId, NodeId, String)> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for node in &fp.nodes {
+            if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::ROUTE) || !seen.insert(node.id) {
+                continue;
+            }
+            let Some((method, path)) = fp
+                .nav
+                .qname_by_id
+                .get(&node.id)
+                .and_then(|q| q.split_once(' '))
+            else {
+                continue;
+            };
+            let symbols = path_symbols(path);
+            if symbols.is_empty() {
+                continue;
+            }
+            let file = route_file(node).and_then(|f| by_path.get(f.as_str()).copied());
+            let mut out = String::with_capacity(path.len());
+            let mut last = 0;
+            let mut any = false;
+            for (range, symbol) in symbols {
+                stats.symbols += 1;
+                out.push_str(path.get(last..range.start).unwrap_or(""));
+                match resolve_path_symbol(symbol, file, &fp.imports, inputs, &by_path) {
+                    Some((value, binding)) => {
+                        stats.folded += 1;
+                        match binding {
+                            SymbolBinding::Enum => stats.enums += 1,
+                            SymbolBinding::Object => stats.objects += 1,
+                            SymbolBinding::Const => stats.consts += 1,
+                        }
+                        out.push_str(&value);
+                        any = true;
+                    }
+                    None => {
+                        stats.unresolved += 1;
+                        out.push_str(path.get(range.clone()).unwrap_or(""));
+                    }
+                }
+                last = range.end;
+            }
+            out.push_str(path.get(last..).unwrap_or(""));
+            if !any {
+                continue;
+            }
+            let qname = glia_code_domain::endpoint::route_qname(method, &tidy_route_path(&out));
+            let new = NodeId::from_parts(
+                glia_code_domain::GRAPH_TYPE,
+                inputs.repo,
+                node_kind::ROUTE,
+                &qname,
+            );
+            moves.push((node.id, new, qname));
+        }
+        for (old, new, qname) in moves {
+            crate::rekey::rekey_node(fp, old, new, &qname);
+            // A ROUTE's display name is its qname (LB.11b).
+            fp.nav.name_by_id.insert(new, qname);
+        }
+    }
+    stats
+}
+
+/// FH.3: the file a ROUTE was read from, off its first POSITION cell.
+fn route_file(node: &glia_core::Node) -> Option<String> {
+    node.cells.iter().find_map(|c| match &c.payload {
+        CellPayload::Json(p) if c.kind == cell_type::POSITION => {
+            let v: serde_json::Value = serde_json::from_str(p).ok()?;
+            v.get("file")?.as_str().map(str::to_string)
+        }
+        _ => None,
+    })
+}
+
+/// FH.3: `symbol`'s one string value and what bound it, by the precedence
+/// [`apply_path_symbol_fold`] documents. A value holding whitespace is no
+/// path segment and leaves the symbol unresolved.
+fn resolve_path_symbol(
+    symbol: &str,
+    file: Option<usize>,
+    imports: &[glia_code_domain::ImportStmt],
+    inputs: &FoldInputs<'_>,
+    by_path: &BTreeMap<&str, usize>,
+) -> Option<(String, SymbolBinding)> {
+    let bound = |table: &ConstTable, key: &str| {
+        let value = table.resolve_expr_strict(key)?;
+        if value.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let binding = if table.is_enum_member(key) {
+            SymbolBinding::Enum
+        } else if key.contains('.') {
+            SymbolBinding::Object
+        } else {
+            SymbolBinding::Const
+        };
+        Some((value.to_string(), binding))
+    };
+    if let Some(local) = file.and_then(|f| inputs.file_tables.get(f))
+        && let Some(hit) = bound(local, symbol)
+    {
+        return Some(hit);
+    }
+    let (root, rest) = match symbol.split_once('.') {
+        Some((root, rest)) => (root, Some(rest)),
+        None => (symbol, None),
+    };
+    let mut key = symbol.to_string();
+    let mut from: Option<&str> = None;
+    for imp in imports {
+        match &imp.target {
+            ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                ..
+            } if name != "default" && alias.as_deref().unwrap_or(name) == root => {
+                key = rest.map_or_else(|| name.clone(), |r| format!("{name}.{r}"));
+                from = Some(module);
+                break;
+            }
+            ImportTarget::Module {
+                path,
+                alias: Some(alias),
+            } if alias == root && rest.is_some() => {
+                key = rest.unwrap_or_default().to_string();
+                from = Some(path);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let importer = file
+        .and_then(|f| inputs.files.get(f))
+        .map(|(p, _)| p.as_str());
+    if let (Some(importer), Some(spec)) = (importer, from)
+        && let Some(target) = relative_import_file(importer, spec, by_path)
+        && let Some(table) = inputs.file_tables.get(target)
+        && let Some(hit) = bound(table, &key)
+    {
+        return Some(hit);
+    }
+    bound(inputs.consts, &key)
+}
+
+/// FH.3: the walked file a relative TS / JS import specifier names from
+/// `importer`: the exact path, the `.ts` / `.tsx` source of a `.js` /
+/// `.jsx` / `.mjs` specifier (TS ESM style), the path with a source
+/// extension, then its `index` file. `None` for a bare or aliased specifier
+/// (the repo table answers those) or a path above the repo root.
+fn relative_import_file(
+    importer: &str,
+    spec: &str,
+    by_path: &BTreeMap<&str, usize>,
+) -> Option<usize> {
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return None;
+    }
+    let mut parts: Vec<&str> = importer.split('/').collect();
+    parts.pop();
+    for seg in spec.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            seg => parts.push(seg),
+        }
+    }
+    let joined = parts.join("/");
+    const EXTS: [&str; 6] = [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
+    let mut candidates = vec![joined.clone()];
+    for (js, ts) in [
+        (".js", ".ts"),
+        (".jsx", ".tsx"),
+        (".mjs", ".mts"),
+        (".js", ".tsx"),
+    ] {
+        if let Some(stem) = joined.strip_suffix(js) {
+            candidates.push(format!("{stem}{ts}"));
+        }
+    }
+    candidates.extend(EXTS.iter().map(|e| format!("{joined}{e}")));
+    candidates.extend(EXTS.iter().map(|e| format!("{joined}/index{e}")));
+    candidates
+        .iter()
+        .find_map(|c| by_path.get(c.as_str()).copied())
+}
+
+/// FH.3: a folded route path with its repeated `/` collapsed and a trailing
+/// `/` dropped (the root stays `/`).
+fn tidy_route_path(path: &str) -> String {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    format!("/{}", segs.join("/"))
 }
 
 /// DC.3: what both const folds read besides the parses they swap.
@@ -3143,5 +3417,147 @@ mod quartz_conf_tests {
             graft_quartz_conf_schedules(&mut none, &[], REPO),
             QuartzConfStats::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod path_fold_tests {
+    use std::path::Path;
+
+    use glia_code_domain::edge_category;
+    use glia_graph::MergedGraph;
+
+    use super::tidy_route_path;
+    use crate::build::{generate_one, generate_one_with_cache};
+    use crate::cache::ParseCache;
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn qnames(m: &MergedGraph, kind: glia_core::NodeKindId) -> Vec<String> {
+        let mut out: Vec<String> = m
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes.iter().filter_map(move |n| {
+                    (g.nav.kind_by_id.get(&n.id) == Some(&kind))
+                        .then(|| g.nav.qname_by_id.get(&n.id).cloned())
+                        .flatten()
+                })
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn http_calls(m: &MergedGraph) -> Vec<(String, String)> {
+        let qname = |id| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
+        };
+        let mut out: Vec<(String, String)> = m
+            .all_edges()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| (qname(e.from), qname(e.to)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    const KEYS: &str = "export enum RouteKey {\n  User = 'users',\n  Album = 'albums',\n}\n\nexport const ApiPrefix = {\n  Admin: 'admin',\n} as const;\n";
+
+    fn write_repo(repo: &Path) {
+        write(repo, "server/route-keys.ts", KEYS);
+        write(
+            repo,
+            "server/user.controller.ts",
+            concat!(
+                "import { Controller, Get, Put } from '@nestjs/common';\n",
+                "import { ApiPrefix, RouteKey as RK } from './route-keys.js';\n",
+                "const LOCAL = 'local';\n\n",
+                "@Controller(RK.User)\n",
+                "export class UserController {\n",
+                "  @Put('me')\n  updateMe() {}\n\n",
+                "  @Get(`${RK.Album}/shared`)\n  shared() {}\n\n",
+                "  @Get(Missing.Key)\n  missing() {}\n",
+                "}\n\n",
+                "@Controller(ApiPrefix.Admin)\n",
+                "export class AdminController {\n",
+                "  @Get(LOCAL)\n  stats() {}\n",
+                "}\n",
+            ),
+        );
+        write(
+            repo,
+            "client/api.ts",
+            "export async function updateMe() {\n  return fetch('/users/me', { method: 'PUT' });\n}\n",
+        );
+    }
+
+    #[test]
+    fn symbolic_nest_paths_fold_through_enums_objects_and_consts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let built = generate_one(repo.to_str().unwrap()).unwrap();
+        assert_eq!(
+            qnames(&built.merged, glia_code_domain::node_kind::ROUTE),
+            vec![
+                "GET /admin/local",
+                "GET /users/albums/shared",
+                "GET /users/~const:Missing.Key~",
+                "PUT /users/me",
+            ]
+        );
+        assert_eq!(
+            http_calls(&built.merged),
+            vec![(
+                "endpoint:PUT:/users/me".to_string(),
+                "PUT /users/me".to_string()
+            )]
+        );
+    }
+
+    /// The fold is post-cache: editing only the enum's file moves a route
+    /// whose controller is served from the parse cache, and the warm build
+    /// equals a clean one.
+    #[test]
+    fn an_enum_edit_moves_a_cached_route() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let repo_s = repo.to_str().unwrap();
+        let mut cache = ParseCache::new();
+        let cold = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert!(
+            qnames(&cold.merged, glia_code_domain::node_kind::ROUTE)
+                .contains(&"PUT /users/me".to_string())
+        );
+        write(
+            &repo,
+            "server/route-keys.ts",
+            &KEYS.replace("'users'", "'people'"),
+        );
+        let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        let routes = qnames(&warm.merged, glia_code_domain::node_kind::ROUTE);
+        assert!(routes.contains(&"PUT /people/me".to_string()), "{routes:?}");
+        assert!(!routes.contains(&"PUT /users/me".to_string()), "{routes:?}");
+        let clean = generate_one(repo_s).unwrap();
+        assert_eq!(
+            routes,
+            qnames(&clean.merged, glia_code_domain::node_kind::ROUTE)
+        );
+    }
+
+    #[test]
+    fn tidy_collapses_slashes() {
+        assert_eq!(tidy_route_path("//users//me/"), "/users/me");
+        assert_eq!(tidy_route_path("/"), "/");
     }
 }

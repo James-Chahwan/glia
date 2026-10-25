@@ -533,7 +533,7 @@ fn nestjs_routes(source: &str) -> Vec<(&'static str, String, u32)> {
         let row = u32::try_from(row).unwrap_or(u32::MAX);
         let t = line.trim();
         if t.starts_with("@Controller(") {
-            controller_prefix = Some(extract_decorator_string(t).unwrap_or_default());
+            controller_prefix = Some(nest_path_arg(t).unwrap_or_default());
             continue;
         }
         for (deco, method) in &[
@@ -547,13 +547,121 @@ fn nestjs_routes(source: &str) -> Vec<(&'static str, String, u32)> {
             ("@All(", "all"),
         ] {
             if t.starts_with(deco) {
-                let suffix = extract_decorator_string(t).unwrap_or_default();
+                let suffix = nest_path_arg(t).unwrap_or_default();
                 let full = combine_nest_paths(controller_prefix.as_deref().unwrap_or(""), &suffix);
                 out.push((*method, full, row));
                 break;
             }
         }
     }
+    out
+}
+
+/// FH.3: opens a symbolic path segment: `~const:<symbol>~`, the placeholder
+/// a NestJS decorator whose path argument is an identifier or a member
+/// expression (`@Controller(RouteKey.User)`) writes into its ROUTE qname,
+/// and a template hole over one (`${RouteKey.User}`). The engine's
+/// post-cache path fold resolves the symbol through the repo's const table
+/// and rewrites the qname; one it cannot resolve stays. `~` is no path
+/// parameter in any framework's syntax (the HTTP resolver's normaliser folds
+/// `:x`, `{x}`, `<x>`, `[x]`, `*x` and `${..}` to `{}`), so an unresolved
+/// placeholder is a literal segment that pairs with nothing.
+pub const PATH_SYMBOL_OPEN: &str = "~const:";
+
+/// FH.3: closes a [`PATH_SYMBOL_OPEN`] placeholder.
+pub const PATH_SYMBOL_CLOSE: char = '~';
+
+/// FH.3: the placeholder segment for `symbol`.
+pub fn path_symbol(symbol: &str) -> String {
+    format!("{PATH_SYMBOL_OPEN}{symbol}{PATH_SYMBOL_CLOSE}")
+}
+
+/// FH.3: every placeholder `path` holds, in order, as (byte range of the
+/// whole placeholder, symbol).
+pub fn path_symbols(path: &str) -> Vec<(std::ops::Range<usize>, &str)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = path.get(from..).and_then(|r| r.find(PATH_SYMBOL_OPEN)) {
+        let start = from + at;
+        let body = start + PATH_SYMBOL_OPEN.len();
+        let Some(len) = path.get(body..).and_then(|r| r.find(PATH_SYMBOL_CLOSE)) else {
+            break;
+        };
+        let end = body + len + PATH_SYMBOL_CLOSE.len_utf8();
+        if let Some(symbol) = path.get(body..body + len).filter(|s| is_path_symbol(s)) {
+            out.push((start..end, symbol));
+        }
+        from = end;
+    }
+    out
+}
+
+/// FH.3: an identifier or a dotted member chain a const table may bind
+/// (`PREFIX`, `RouteKey.User`, `Api.v1.users`): never rooted at `this` /
+/// `super` / `process`, never a literal keyword, never reading an `env`.
+pub fn is_path_symbol(s: &str) -> bool {
+    let segs: Vec<&str> = s.split('.').collect();
+    let ident = |seg: &&str| {
+        let mut c = seg.chars();
+        c.next()
+            .is_some_and(|f| f.is_ascii_alphabetic() || f == '_' || f == '$')
+            && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+    };
+    let root = segs.first().copied().unwrap_or("");
+    s.len() <= 256
+        && segs.iter().all(ident)
+        && !matches!(
+            root,
+            "this" | "super" | "process" | "undefined" | "null" | "true" | "false"
+        )
+        && !segs.iter().any(|seg| seg.eq_ignore_ascii_case("env"))
+}
+
+/// FH.3: the path argument of a NestJS route decorator line. A string
+/// literal reads as [`extract_decorator_string`] always has; a backtick
+/// template has each `${<symbol>}` hole replaced by its [`path_symbol`]
+/// placeholder (any other hole is kept, so the registration is dropped as
+/// before); an identifier or member expression ending the argument is one
+/// placeholder. Anything else (an options object, no argument) falls back to
+/// [`extract_decorator_string`].
+fn nest_path_arg(line: &str) -> Option<String> {
+    let open = line.find('(')?;
+    let arg = line.get(open + 1..)?.trim_start();
+    match arg.as_bytes().first()? {
+        b'`' => extract_decorator_string(line).map(|raw| template_symbols(&raw)),
+        c if c.is_ascii_alphabetic() || *c == b'_' || *c == b'$' => {
+            let end = arg
+                .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.')))
+                .unwrap_or(arg.len());
+            let (symbol, rest) = arg.split_at(end);
+            let closes = rest.trim_start().starts_with([')', ',']);
+            (closes && is_path_symbol(symbol)).then(|| path_symbol(symbol))
+        }
+        _ => extract_decorator_string(line),
+    }
+}
+
+/// FH.3: `raw` (a template's body) with every `${<symbol>}` hole replaced by
+/// its placeholder; other holes are kept verbatim.
+fn template_symbols(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(at) = rest.find("${") {
+        out.push_str(rest.get(..at).unwrap_or(""));
+        let inner = rest.get(at + 2..).unwrap_or("");
+        let Some(end) = inner.find('}') else {
+            out.push_str(rest.get(at..).unwrap_or(""));
+            return out;
+        };
+        let expr = inner.get(..end).unwrap_or("").trim();
+        if is_path_symbol(expr) {
+            out.push_str(&path_symbol(expr));
+        } else {
+            out.push_str(rest.get(at..at + 2 + end + 1).unwrap_or(""));
+        }
+        rest = inner.get(end + 1..).unwrap_or("");
+    }
+    out.push_str(rest);
     out
 }
 
@@ -1209,6 +1317,29 @@ export class UsersController {
         ] {
             assert_eq!(position_rows(node(&r, q)), vec![row], "{q}");
         }
+    }
+
+    /// FH.3: a decorator path held in an enum member, an object const or a
+    /// template over them is kept as a placeholder segment, never dropped.
+    #[test]
+    fn nestjs_symbolic_paths_mint_placeholders() {
+        let src = "@Controller(RouteKey.User)\nexport class U {\n  @Put('me')\n  me() {}\n\n  @Get(`${RouteKey.Album}/shared`)\n  shared() {}\n\n  @Get(`${this.base}/x`)\n  dropped() {}\n\n  @Delete(ROUTE_ID, { x: 1 })\n  del() {}\n}\n@Controller({ path: 'opts' })\nexport class O {\n  @Get()\n  list() {}\n}\n";
+        let r = extract_ts_backend_routes(src, "src/u.controller.ts", module_id(), repo());
+        assert_eq!(
+            qnames(&r),
+            vec![
+                "DELETE /~const:RouteKey.User~/~const:ROUTE_ID~",
+                "GET /opts",
+                "GET /~const:RouteKey.User~/~const:RouteKey.Album~/shared",
+                "PUT /~const:RouteKey.User~/me",
+            ]
+        );
+        assert_eq!(
+            path_symbols("/~const:RouteKey.User~/~const:A~/me"),
+            vec![(1..22, "RouteKey.User"), (23..32, "A")]
+        );
+        assert!(path_symbols("/~const:this.x~/me").is_empty());
+        assert!(!is_path_symbol("process.env.BASE"));
     }
 
     /// Nest `@All(` is method-agnostic: `ANY`, never `ALL`.

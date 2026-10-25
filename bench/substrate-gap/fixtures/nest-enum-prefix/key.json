@@ -1,0 +1,21 @@
+{
+  "framework": "nest-enum-prefix",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "note": "FH.3 symbolic paths. A NestJS controller whose prefix is a TS enum member (`@Controller(RouteKey.User)`) or an `as const` object member (`@Controller(ApiPrefix.Admin)`), and a method path that is a template over an enum member (`@Get(`${RouteKey.Album}/shared`)`), all declared in ANOTHER file. ts_routes keeps each symbol as a `~const:<symbol>~` placeholder segment and the post-cache path fold resolves it through the const table, which reads TS enum members since FH.3. Baseline 2026-10-26 (HEAD 6b82d110, debug CLI): ROUTEs `PUT /me` and `GET /stats` (the prefix dropped), no `/users/albums/shared` route at all (a template path was dropped), and no HTTP_CALLS: the client's fetches of `/users/me`, `/users/albums/shared` and `/admin/stats` paired nothing. Deliberately not bound to a matrix cell: typescript/http is already scored.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "PUT /users/me", "exact": true, "note": "enum-member controller prefix folded"},
+    {"kind": "ROUTE", "name": "GET /users/albums/shared", "exact": true, "note": "template suffix over an enum member folded"},
+    {"kind": "ROUTE", "name": "GET /admin/stats", "exact": true, "note": "as-const object member prefix folded"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:PUT:/users/me", "to": "PUT /users/me", "category": "HTTP_CALLS", "exact": true, "note": "the client fetch pairs the folded route"},
+    {"from": "endpoint:GET:/users/albums/shared", "to": "GET /users/albums/shared", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:GET:/admin/stats", "to": "GET /admin/stats", "category": "HTTP_CALLS", "exact": true}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "PUT /me", "note": "PRECISION: the prefix-less route the unfolded decorator minted"},
+    {"kind": "ROUTE", "name": "GET /stats", "note": "PRECISION: the prefix-less admin route"},
+    {"kind": "ROUTE", "name": "PUT /~const:RouteKey.User~/me", "note": "PRECISION: the placeholder must not survive once the symbol resolves"}
+  ]
+}

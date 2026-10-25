@@ -1,0 +1,21 @@
+{
+  "framework": "ts-const-base-url",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "note": "FH.3 symbolic paths, client side. The client's base URLs live in a TS enum member (`ApiBase.Users`) and an `as const` object member (`Routes.orders`) of ANOTHER file, interpolated into the fetch path. The A11.2 endpoint fold reads the const table, which binds TS enum members since FH.3 (`E.Member`, string values only). Baseline 2026-10-26 (HEAD 6b82d110, debug CLI): `endpoint:GET:/api/orders/recent` already folded (object consts were in the table), but the enum base stayed `endpoint:GET:${…}/list` and paired the Go chi route only through the resolver's BaseFold tier. Deliberately not bound to a matrix cell: typescript/http_client is already scored.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/users/list", "exact": true, "note": "enum-member base folded"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/orders/recent", "exact": true, "note": "as-const object member base folded (the positive control)"},
+    {"kind": "ROUTE", "name": "/api/users/list", "note": "Go chi route"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/users/list", "to": "/api/users/list", "category": "HTTP_CALLS", "note": "from the FOLDED endpoint; a BaseFold pairing from `GET ${…}/list` does not match this row"},
+    {"from": "endpoint:GET:/api/orders/recent", "to": "/api/orders/recent", "category": "HTTP_CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/users/list", "cell": "ENDPOINT_HIT", "contains": "\"template\":\"${ApiBase.Users}/list\"", "note": "the TS parser keeps the substitution source verbatim"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/list", "note": "PRECISION: the unfolded placeholder node must not survive once the enum base resolves"}
+  ]
+}
