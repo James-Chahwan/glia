@@ -69,6 +69,7 @@ LANDED = {
     12: "FB.7c",
     13: "F0.7 FH.1a",
     14: "FH.1b",
+    15: "FH.2a FH.3 FH.5 FH.8 FH.10 FH.11a FH.14",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 SELECTED = "T0 T2 T5 T1 T11 TS TH"

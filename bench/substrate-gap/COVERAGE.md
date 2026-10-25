@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.3` · vocabulary digest `f31e7dc48404` · schema 2
+Engine `0.5.3` · vocabulary digest `f31e7dc48404` · schema 3
 
 Columns, left to right (the review's own abbreviations):
 
@@ -71,26 +71,28 @@ Columns, left to right (the review's own abbreviations):
 - `service` — **service** (topology)
 - `subproj` — **subproject** (topology)
 
+Each cell reads `fixture/cohort`: the fixture grade, then the outlier cohort's grade of the same cell (`Cohort grades` below; `-` after the slash: no cohort row exercises it). The rollups count the fixture grade.
+
 ```
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
-python           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-typescript       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-ruby             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-php              ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-swift            ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
-c_cpp            ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-scala            ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-clojure          ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-dart             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-elixir           ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
-terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
-kotlin           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
+python         ●/·     ●/·     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+go             ●/·     ●/·     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/·     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+typescript     ●/·     ●/·     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+java           ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/●     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+csharp         ●/-     ●/·     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+ruby           ●/-     ●/·     ●/-     ●/-     ●/-     ●/-     ?/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+php            ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ?/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+swift          ●/-     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-
+c_cpp          ●/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/◐     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-
+scala          ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+clojure        ●/-     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/-     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-
+dart           ●/·     ●/·     ●/-     ●/-     ●/-     ●/-     ?/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+elixir         ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ?/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+rust           ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/◐     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
+solidity       -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     ●/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     ●/-     ●/-     ?/-     ●/-     ?/-     ?/-     ?/-
+terraform      ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     -/-     ?/-     -/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     -/-     ?/-     -/-     ?/-     -/-     -/-     ?/-     ?/-     ?/-
+kotlin         ●/-     ●/·     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/◐     ●/-     ●/-     ●/-     ?/-     ?/-     ?/-
 
 PER-MECHANISM  across 17 languages:
   http_client  ● 15  ◐ 0   · 0   ? 1   - 1   ! 0
@@ -146,7 +148,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 346 full, 0 partial, 0 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 264
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 267
 
 ## Cells routed via an alternative mechanism
 
@@ -244,4 +246,65 @@ _None._
 | `terraform/injects` | structural | Terraform declares no types, so nothing is injected |
 | `terraform/redis` | structural | no Terraform construct publishes to or subscribes on a Redis channel or list; ElastiCache resources declare the store only |
 | `terraform/taskq` | structural | no Terraform construct names, enqueues or processes a task; a Cloud Tasks queue resource declares the queue only |
+
+## Cohort grades
+
+Release `0.5.4-pre` (`glia 0.5.3 (build 0.5.3+pdc42bbace0d19e35)`, tasks digest `810577329035`): 195 of 200 probe rows observed (bench/cohort/cells.py tags each with the cells and chains it exercises). A cell is full when >= 80% of its rows passed, partial at >= 30%, none below. 22 grid cells graded (1 full, 9 partial, 12 none), 0 of them with no fixture; 21 disagree with their fixture grade; 4 chain cells graded; 5 cells created by a miss.
+
+### Disagreements
+
+Both grades exist and differ: the work list (README: reading a disagreement).
+
+| cell | fixture | cohort | passed | repos | missed checks |
+|---|---|---|---|---|---|
+| `c_cpp/calls` | ● full | ◐ partial | 1/2 | immich 1/2 | glia_blind 1 |
+| `csharp/calls` | ● full | ◐ partial | 4/6 | microservices-demo 1/1, squidex 3/5 | glia_blind 1, glia_wrong 1 |
+| `csharp/http_server` | ● full | · none | 0/4 | squidex 0/4 | glia_blind 8, glia_wrong 2, noisy 2 |
+| `dart/calls` | ● full | ◐ partial | 7/13 | immich 2/5, samples 5/8 | glia_blind 4, glia_wrong 1, noisy 1 |
+| `dart/http_client` | ● full | · none | 0/5 | immich 0/2, samples 0/3 | glia_blind 10, glia_wrong 3 |
+| `dart/http_server` | ● full | · none | 0/4 | immich 0/1, samples 0/3 | glia_blind 10, glia_wrong 2 |
+| `go/calls` | ● full | ◐ partial | 8/13 | gin-vue-admin 2/3, microservices-demo 2/2, photoprism 3/4, websocket 1/4 | glia_wrong 1, noisy 4 |
+| `go/grpc` | ● full | · none | 0/1 | microservices-demo 0/1 | glia_wrong 2 |
+| `go/http_client` | ● full | · none | 0/3 | microservices-demo 0/3 | glia_wrong 3 |
+| `go/http_server` | ● full | · none | 0/10 | gin-vue-admin 0/4, microservices-demo 0/3, photoprism 0/3 | glia_blind 9, glia_wrong 10, noisy 3 |
+| `kotlin/calls` | ● full | ◐ partial | 5/8 | immich 1/2, tolgee 4/6 | glia_blind 2, noisy 1 |
+| `kotlin/http_server` | ● full | · none | 0/4 | tolgee 0/4 | glia_blind 9 |
+| `python/calls` | ● full | ◐ partial | 15/21 | click 7/8, mealie 2/3, microservices-demo 1/1, plane 4/5, prefect 1/4 | glia_blind 1, noisy 5 |
+| `python/http_client` | ● full | · none | 0/2 | prefect 0/2 | glia_wrong 4, noisy 1 |
+| `python/http_server` | ● full | · none | 0/10 | mealie 0/3, microservices-demo 0/2, plane 0/2, prefect 0/3 | glia_blind 15, glia_wrong 6, noisy 1 |
+| `ruby/calls` | ● full | ◐ partial | 5/7 | chatwoot 5/7 | glia_blind 1, noisy 1 |
+| `ruby/http_server` | ● full | · none | 0/4 | chatwoot 0/4 | glia_blind 10 |
+| `rust/calls` | ● full | ◐ partial | 3/5 | hoppscotch 2/3, immich 1/2 | glia_blind 2 |
+| `typescript/calls` | ● full | ◐ partial | 39/68 | chatwoot 1/3, documenso 4/8, gin-vue-admin 1/2, hoppscotch 4/7, immich 1/3, mealie 0/2, medusa 2/8, microservices-demo 3/3, scaffold-eth-2 4/5, shell 7/8, squidex 3/5, tolgee 2/2, twenty 3/8, zora-protocol 4/4 | glia_blind 16, glia_wrong 2, noisy 11 |
+| `typescript/http_client` | ● full | · none | 0/49 | chatwoot 0/4, documenso 0/1, gin-vue-admin 0/4, hoppscotch 0/4, immich 0/1, mealie 0/3, medusa 0/4, photoprism 0/3, plane 0/4, prefect 0/2, scaffold-eth-2 0/3, squidex 0/4, tolgee 0/4, twenty 0/4, zora-protocol 0/4 | glia_blind 92, glia_wrong 26, noisy 7 |
+| `typescript/http_server` | ● full | · none | 0/40 | documenso 0/1, hoppscotch 0/4, immich 0/6, mealie 0/1, medusa 0/4, microservices-demo 0/2, plane 0/2, prefect 0/4, scaffold-eth-2 0/3, squidex 0/1, tolgee 0/4, twenty 0/4, zora-protocol 0/4 | glia_blind 67, glia_wrong 25, noisy 5 |
+
+### Cells with no fixture the cohort grades
+
+No fixture claims the cell; real repos exercise it.
+
+_None._
+
+### Chain cells
+
+Where mechanisms chain (bench/cohort/cells.py CHAINS); graded by the cohort, fixture side by generated repos.
+
+| cell | fixture | cohort | passed | repos | missed checks |
+|---|---|---|---|---|---|
+| `chain/client_wrapper_endpoint` | ? unknown | · none | 0/15 | gin-vue-admin 0/1, immich 0/3, mealie 0/1, photoprism 0/1, plane 0/1, prefect 0/3, twenty 0/1, zora-protocol 0/4 | glia_blind 19, glia_wrong 15, noisy 2 |
+| `chain/const_prefix` | ? unknown | · none | 0/2 | immich 0/1, samples 0/1 | glia_blind 1, glia_wrong 3 |
+| `chain/sfc_service_endpoint` | ? unknown | · none | 0/17 | chatwoot 0/3, gin-vue-admin 0/3, hoppscotch 0/2, immich 0/3, mealie 0/3, photoprism 0/3 | glia_blind 35, glia_wrong 9, noisy 2 |
+| `chain/workspace_sdk_route` | ? unknown | · none | 0/13 | immich 0/6, medusa 0/2, plane 0/1, twenty 0/1, zora-protocol 0/3 | glia_blind 24, glia_wrong 9 |
+
+### Cells the cohort created
+
+A cohort miss on a cell outside the vocabulary (a language glia has no parser for, a boundary no column models).
+
+| cell | fixture | cohort | passed | repos | missed checks |
+|---|---|---|---|---|---|
+| `go/queue` | ? unknown | · none | 0/1 | photoprism 0/1 | glia_blind 2, glia_wrong 1 |
+| `svelte/calls` | ? unknown | · none | 0/1 | immich 0/1 | glia_blind 1 |
+| `svelte/http_client` | ? unknown | · none | 0/3 | immich 0/3 | glia_blind 9 |
+| `typescript/queue` | ? unknown | · none | 0/1 | photoprism 0/1 | glia_blind 2, glia_wrong 1 |
+| `typescript/rpc` | ? unknown | · none | 0/3 | documenso 0/3 | glia_blind 7, glia_wrong 2 |
 <!-- END generated -->

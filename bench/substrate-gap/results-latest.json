@@ -2709,13 +2709,14 @@
     },
     "go/imports": {
       "extract": [
-        4,
-        4
+        5,
+        5
       ],
       "fixtures": [
         "fixtures/go-imports",
         "fixtures/go-nested-modules",
-        "fixtures/go-root-package-imports"
+        "fixtures/go-root-package-imports",
+        "fixtures/go-work-modules"
       ],
       "forbid": [
         1,
@@ -2730,8 +2731,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        5,
-        5
+        8,
+        8
       ],
       "via": "import"
     },
@@ -8120,11 +8121,12 @@
     },
     "typescript/imports": {
       "extract": [
-        7,
-        7
+        8,
+        8
       ],
       "fixtures": [
         "fixtures/angular-imports",
+        "fixtures/pnpm-workspace-sdk",
         "fixtures/react-imports",
         "fixtures/ts-imports",
         "fixtures/ts-imports-rel",
@@ -8132,8 +8134,8 @@
         "fixtures/vue-imports"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
@@ -8144,8 +8146,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        6,
-        6
+        9,
+        9
       ],
       "via": "import"
     },
@@ -8495,6 +8497,891 @@
       "via": "websocket"
     }
   },
+  "cohort": {
+    "cells": {
+      "c_cpp/calls": {
+        "classes": {
+          "glia_blind": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 1,
+        "repos": {
+          "immich": [
+            1,
+            2
+          ]
+        },
+        "rows": 2
+      },
+      "csharp/calls": {
+        "classes": {
+          "glia_blind": 1,
+          "glia_wrong": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 4,
+        "repos": {
+          "microservices-demo": [
+            1,
+            1
+          ],
+          "squidex": [
+            3,
+            5
+          ]
+        },
+        "rows": 6
+      },
+      "csharp/http_server": {
+        "classes": {
+          "glia_blind": 8,
+          "glia_wrong": 2,
+          "noisy": 2
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "squidex": [
+            0,
+            4
+          ]
+        },
+        "rows": 4
+      },
+      "dart/calls": {
+        "classes": {
+          "glia_blind": 4,
+          "glia_wrong": 1,
+          "noisy": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 7,
+        "repos": {
+          "immich": [
+            2,
+            5
+          ],
+          "samples": [
+            5,
+            8
+          ]
+        },
+        "rows": 13
+      },
+      "dart/http_client": {
+        "classes": {
+          "glia_blind": 10,
+          "glia_wrong": 3
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            2
+          ],
+          "samples": [
+            0,
+            3
+          ]
+        },
+        "rows": 5
+      },
+      "dart/http_server": {
+        "classes": {
+          "glia_blind": 10,
+          "glia_wrong": 2
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            1
+          ],
+          "samples": [
+            0,
+            3
+          ]
+        },
+        "rows": 4
+      },
+      "go/calls": {
+        "classes": {
+          "glia_wrong": 1,
+          "noisy": 4
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 8,
+        "repos": {
+          "gin-vue-admin": [
+            2,
+            3
+          ],
+          "microservices-demo": [
+            2,
+            2
+          ],
+          "photoprism": [
+            3,
+            4
+          ],
+          "websocket": [
+            1,
+            4
+          ]
+        },
+        "rows": 13
+      },
+      "go/grpc": {
+        "classes": {
+          "glia_wrong": 2
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "microservices-demo": [
+            0,
+            1
+          ]
+        },
+        "rows": 1
+      },
+      "go/http_client": {
+        "classes": {
+          "glia_wrong": 3
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "microservices-demo": [
+            0,
+            3
+          ]
+        },
+        "rows": 3
+      },
+      "go/http_server": {
+        "classes": {
+          "glia_blind": 9,
+          "glia_wrong": 10,
+          "noisy": 3
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "gin-vue-admin": [
+            0,
+            4
+          ],
+          "microservices-demo": [
+            0,
+            3
+          ],
+          "photoprism": [
+            0,
+            3
+          ]
+        },
+        "rows": 10
+      },
+      "go/queue": {
+        "classes": {
+          "glia_blind": 2,
+          "glia_wrong": 1
+        },
+        "created": true,
+        "fixture": "unknown",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "photoprism": [
+            0,
+            1
+          ]
+        },
+        "rows": 1
+      },
+      "java/calls": {
+        "classes": {},
+        "created": false,
+        "fixture": "full",
+        "level": "full",
+        "passed": 5,
+        "repos": {
+          "commons-text": [
+            4,
+            4
+          ],
+          "microservices-demo": [
+            1,
+            1
+          ]
+        },
+        "rows": 5
+      },
+      "kotlin/calls": {
+        "classes": {
+          "glia_blind": 2,
+          "noisy": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 5,
+        "repos": {
+          "immich": [
+            1,
+            2
+          ],
+          "tolgee": [
+            4,
+            6
+          ]
+        },
+        "rows": 8
+      },
+      "kotlin/http_server": {
+        "classes": {
+          "glia_blind": 9
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "tolgee": [
+            0,
+            4
+          ]
+        },
+        "rows": 4
+      },
+      "python/calls": {
+        "classes": {
+          "glia_blind": 1,
+          "noisy": 5
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 15,
+        "repos": {
+          "click": [
+            7,
+            8
+          ],
+          "mealie": [
+            2,
+            3
+          ],
+          "microservices-demo": [
+            1,
+            1
+          ],
+          "plane": [
+            4,
+            5
+          ],
+          "prefect": [
+            1,
+            4
+          ]
+        },
+        "rows": 21
+      },
+      "python/http_client": {
+        "classes": {
+          "glia_wrong": 4,
+          "noisy": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "prefect": [
+            0,
+            2
+          ]
+        },
+        "rows": 2
+      },
+      "python/http_server": {
+        "classes": {
+          "glia_blind": 15,
+          "glia_wrong": 6,
+          "noisy": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "mealie": [
+            0,
+            3
+          ],
+          "microservices-demo": [
+            0,
+            2
+          ],
+          "plane": [
+            0,
+            2
+          ],
+          "prefect": [
+            0,
+            3
+          ]
+        },
+        "rows": 10
+      },
+      "ruby/calls": {
+        "classes": {
+          "glia_blind": 1,
+          "noisy": 1
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 5,
+        "repos": {
+          "chatwoot": [
+            5,
+            7
+          ]
+        },
+        "rows": 7
+      },
+      "ruby/http_server": {
+        "classes": {
+          "glia_blind": 10
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "chatwoot": [
+            0,
+            4
+          ]
+        },
+        "rows": 4
+      },
+      "rust/calls": {
+        "classes": {
+          "glia_blind": 2
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 3,
+        "repos": {
+          "hoppscotch": [
+            2,
+            3
+          ],
+          "immich": [
+            1,
+            2
+          ]
+        },
+        "rows": 5
+      },
+      "svelte/calls": {
+        "classes": {
+          "glia_blind": 1
+        },
+        "created": true,
+        "fixture": "unknown",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            1
+          ]
+        },
+        "rows": 1
+      },
+      "svelte/http_client": {
+        "classes": {
+          "glia_blind": 9
+        },
+        "created": true,
+        "fixture": "unknown",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            3
+          ]
+        },
+        "rows": 3
+      },
+      "typescript/calls": {
+        "classes": {
+          "glia_blind": 16,
+          "glia_wrong": 2,
+          "noisy": 11
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "partial",
+        "passed": 39,
+        "repos": {
+          "chatwoot": [
+            1,
+            3
+          ],
+          "documenso": [
+            4,
+            8
+          ],
+          "gin-vue-admin": [
+            1,
+            2
+          ],
+          "hoppscotch": [
+            4,
+            7
+          ],
+          "immich": [
+            1,
+            3
+          ],
+          "mealie": [
+            0,
+            2
+          ],
+          "medusa": [
+            2,
+            8
+          ],
+          "microservices-demo": [
+            3,
+            3
+          ],
+          "scaffold-eth-2": [
+            4,
+            5
+          ],
+          "shell": [
+            7,
+            8
+          ],
+          "squidex": [
+            3,
+            5
+          ],
+          "tolgee": [
+            2,
+            2
+          ],
+          "twenty": [
+            3,
+            8
+          ],
+          "zora-protocol": [
+            4,
+            4
+          ]
+        },
+        "rows": 68
+      },
+      "typescript/http_client": {
+        "classes": {
+          "glia_blind": 92,
+          "glia_wrong": 26,
+          "noisy": 7
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "chatwoot": [
+            0,
+            4
+          ],
+          "documenso": [
+            0,
+            1
+          ],
+          "gin-vue-admin": [
+            0,
+            4
+          ],
+          "hoppscotch": [
+            0,
+            4
+          ],
+          "immich": [
+            0,
+            1
+          ],
+          "mealie": [
+            0,
+            3
+          ],
+          "medusa": [
+            0,
+            4
+          ],
+          "photoprism": [
+            0,
+            3
+          ],
+          "plane": [
+            0,
+            4
+          ],
+          "prefect": [
+            0,
+            2
+          ],
+          "scaffold-eth-2": [
+            0,
+            3
+          ],
+          "squidex": [
+            0,
+            4
+          ],
+          "tolgee": [
+            0,
+            4
+          ],
+          "twenty": [
+            0,
+            4
+          ],
+          "zora-protocol": [
+            0,
+            4
+          ]
+        },
+        "rows": 49
+      },
+      "typescript/http_server": {
+        "classes": {
+          "glia_blind": 67,
+          "glia_wrong": 25,
+          "noisy": 5
+        },
+        "created": false,
+        "fixture": "full",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "documenso": [
+            0,
+            1
+          ],
+          "hoppscotch": [
+            0,
+            4
+          ],
+          "immich": [
+            0,
+            6
+          ],
+          "mealie": [
+            0,
+            1
+          ],
+          "medusa": [
+            0,
+            4
+          ],
+          "microservices-demo": [
+            0,
+            2
+          ],
+          "plane": [
+            0,
+            2
+          ],
+          "prefect": [
+            0,
+            4
+          ],
+          "scaffold-eth-2": [
+            0,
+            3
+          ],
+          "squidex": [
+            0,
+            1
+          ],
+          "tolgee": [
+            0,
+            4
+          ],
+          "twenty": [
+            0,
+            4
+          ],
+          "zora-protocol": [
+            0,
+            4
+          ]
+        },
+        "rows": 40
+      },
+      "typescript/queue": {
+        "classes": {
+          "glia_blind": 2,
+          "glia_wrong": 1
+        },
+        "created": true,
+        "fixture": "unknown",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "photoprism": [
+            0,
+            1
+          ]
+        },
+        "rows": 1
+      },
+      "typescript/rpc": {
+        "classes": {
+          "glia_blind": 7,
+          "glia_wrong": 2
+        },
+        "created": true,
+        "fixture": "unknown",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "documenso": [
+            0,
+            3
+          ]
+        },
+        "rows": 3
+      }
+    },
+    "chains": {
+      "chain/client_wrapper_endpoint": {
+        "classes": {
+          "glia_blind": 19,
+          "glia_wrong": 15,
+          "noisy": 2
+        },
+        "description": "the client calls a request wrapper that issues the HTTP call",
+        "fixture": "unknown",
+        "label": "client -> wrapper -> endpoint",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "gin-vue-admin": [
+            0,
+            1
+          ],
+          "immich": [
+            0,
+            3
+          ],
+          "mealie": [
+            0,
+            1
+          ],
+          "photoprism": [
+            0,
+            1
+          ],
+          "plane": [
+            0,
+            1
+          ],
+          "prefect": [
+            0,
+            3
+          ],
+          "twenty": [
+            0,
+            1
+          ],
+          "zora-protocol": [
+            0,
+            4
+          ]
+        },
+        "rows": 15
+      },
+      "chain/const_prefix": {
+        "classes": {
+          "glia_blind": 1,
+          "glia_wrong": 3
+        },
+        "description": "a route prefix, base URL or path segment held in a constant or enum",
+        "fixture": "unknown",
+        "label": "prefix through a constant",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            1
+          ],
+          "samples": [
+            0,
+            1
+          ]
+        },
+        "rows": 2
+      },
+      "chain/sfc_service_endpoint": {
+        "classes": {
+          "glia_blind": 35,
+          "glia_wrong": 9,
+          "noisy": 2
+        },
+        "description": "a single-file component calls a service that issues the call",
+        "fixture": "unknown",
+        "label": "SFC -> service -> endpoint",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "chatwoot": [
+            0,
+            3
+          ],
+          "gin-vue-admin": [
+            0,
+            3
+          ],
+          "hoppscotch": [
+            0,
+            2
+          ],
+          "immich": [
+            0,
+            3
+          ],
+          "mealie": [
+            0,
+            3
+          ],
+          "photoprism": [
+            0,
+            3
+          ]
+        },
+        "rows": 17
+      },
+      "chain/workspace_sdk_route": {
+        "classes": {
+          "glia_blind": 24,
+          "glia_wrong": 9
+        },
+        "description": "the client imports a workspace SDK / client package that reaches the route",
+        "fixture": "unknown",
+        "label": "client -> workspace package -> SDK -> route",
+        "level": "none",
+        "passed": 0,
+        "repos": {
+          "immich": [
+            0,
+            6
+          ],
+          "medusa": [
+            0,
+            2
+          ],
+          "plane": [
+            0,
+            1
+          ],
+          "twenty": [
+            0,
+            1
+          ],
+          "zora-protocol": [
+            0,
+            3
+          ]
+        },
+        "rows": 13
+      }
+    },
+    "created": [
+      "go/queue",
+      "svelte/calls",
+      "svelte/http_client",
+      "typescript/queue",
+      "typescript/rpc"
+    ],
+    "disagree": [
+      "c_cpp/calls",
+      "csharp/calls",
+      "csharp/http_server",
+      "dart/calls",
+      "dart/http_client",
+      "dart/http_server",
+      "go/calls",
+      "go/grpc",
+      "go/http_client",
+      "go/http_server",
+      "kotlin/calls",
+      "kotlin/http_server",
+      "python/calls",
+      "python/http_client",
+      "python/http_server",
+      "ruby/calls",
+      "ruby/http_server",
+      "rust/calls",
+      "typescript/calls",
+      "typescript/http_client",
+      "typescript/http_server"
+    ],
+    "glia": "glia 0.5.3 (build 0.5.3+pdc42bbace0d19e35)",
+    "observed": 195,
+    "outside_vocab_passing": [],
+    "release": "0.5.4-pre",
+    "rows": 200,
+    "rule": {
+      "full": 0.8,
+      "partial": 0.3
+    },
+    "tasks_sha256": "810577329035",
+    "totals": {
+      "chain_cells": 4,
+      "created": 5,
+      "disagree": 21,
+      "full": 1,
+      "graded": 22,
+      "none": 12,
+      "partial": 9,
+      "unknown_graded": 0
+    }
+  },
   "engine": "0.5.3",
   "legacy_only": [
     "fixtures/angular-base-url",
@@ -8594,6 +9481,7 @@
     "fixtures/guard-compiled-literals",
     "fixtures/guard-script-literals",
     "fixtures/history-cochange",
+    "fixtures/hostless-client-two-services",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
     "fixtures/http-dart-nav-precision",
@@ -8637,6 +9525,7 @@
     "fixtures/nav-react-pages-dir-not-next",
     "fixtures/nav-react-routes",
     "fixtures/nav-vue-links",
+    "fixtures/nest-enum-prefix",
     "fixtures/openapi-pact-fields",
     "fixtures/overlay-declared-cells",
     "fixtures/overlay-entrypoints",
@@ -8694,6 +9583,7 @@
     "fixtures/ts-abstract-class",
     "fixtures/ts-api-prefix-builder",
     "fixtures/ts-config-alias-endpoints",
+    "fixtures/ts-const-base-url",
     "fixtures/ts-decorator-anchor",
     "fixtures/ts-dir-index-imports",
     "fixtures/ts-endpoint-receiver-gate",
@@ -8876,7 +9766,7 @@
       "reason": "no Terraform construct names, enqueues or processes a task; a Cloud Tasks queue resource declares the queue only"
     }
   },
-  "schema": 2,
+  "schema": 3,
   "totals": {
     "covered": 346,
     "error": 0,
@@ -8888,6 +9778,8 @@
     "unknown": 136
   },
   "vocabulary": {
+    "chains": 4,
+    "chains_digest": "66e622c64fe2",
     "digest": "f31e7dc48404",
     "languages": 17,
     "mechanisms": 30,
