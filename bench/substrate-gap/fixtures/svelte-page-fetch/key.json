@@ -1,0 +1,27 @@
+{
+  "framework": "svelte-page-fetch",
+  "language": "typescript",
+  "dirs": ["web", "server"],
+  "cells": [
+    "typescript/http_client",
+    "typescript/http_server",
+    "typescript/calls"
+  ],
+  "note": "FH.6. A SvelteKit +page.svelte whose instance <script> sits below its markup calls an SDK function (lib/api.ts, which fetches /api/albums) and fetches /api/users itself; an Express server serves both. Before FH.6 no parser read .svelte: no load, no page CALLS, no /api/users ENDPOINT. The block's rows are the file's own (load at row 21, line 22).",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "load", "note": "the page's instance-script function"},
+    {"kind": "FUNCTION", "name": "pageTitle", "note": "the module-context <script> block"},
+    {"kind": "ENDPOINT", "name": "/api/users", "note": "the page's own fetch"},
+    {"kind": "ENDPOINT", "name": "/api/albums", "note": "the SDK's fetch"},
+    {"kind": "ROUTE", "name": "/api/users", "note": "Express"}
+  ],
+  "expect_edges": [
+    {"from": "load", "to": "getAlbums", "category": "CALLS", "note": "page -> SDK function through the relative import"},
+    {"from": "load", "to": "/api/users", "category": "CALLS", "note": "the page function calls its fetch ENDPOINT"},
+    {"from": "/api/users", "to": "/api/users", "category": "HTTP_CALLS", "note": "the page's fetch pairs the Express route"},
+    {"from": "/api/albums", "to": "/api/albums", "category": "HTTP_CALLS", "note": "the SDK's fetch pairs the Express route"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "+page::load", "cell": "POSITION", "contains": "\"start_line\":21,", "note": "the file's row: the block starts below the markup"}
+  ]
+}

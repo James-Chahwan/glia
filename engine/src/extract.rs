@@ -28,7 +28,14 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
             }
         }
         "js" | "jsx" => Some("typescript"),
-        "vue" => Some("vue"),
+        // FH.6: the `vue` tag is the single-file-component tag. A Svelte or
+        // Astro file is markup around script blocks exactly as a Vue SFC is,
+        // so it takes the same route: the vue crate blanks everything but its
+        // scripts (and Astro's `---` frontmatter) in place and parses the rest
+        // as TypeScript, inside the TS family's one graph, and every
+        // cross-cutting extractor that reads the TS family reads it. The
+        // `[sfc]` marker counts the three formats apart.
+        "vue" | "svelte" | "astro" => Some("vue"),
         "rs" => Some("rust"),
         "java" => Some("java"),
         // A14.2: Kotlin has its own parser. It shares ONE graph with Java

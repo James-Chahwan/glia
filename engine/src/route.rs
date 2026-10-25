@@ -149,7 +149,13 @@ pub(crate) fn parse_repo_files_hashed(
     // LG.1a: the one sequential fold, in walk order.
     let (mut n_synthetic, mut n_reused, mut n_reparsed, mut n_failed) = (0usize, 0, 0, 0);
     let (mut noncode_hit, mut noncode_miss) = (0usize, 0usize);
-    for ((path, _), r) in files.iter().zip(routed) {
+    // FH.6: the single-file components routed to the SFC parser (cache hits
+    // included), by format, and the script blocks they hold.
+    let mut sfc = SfcTally::default();
+    for ((path, source), r) in files.iter().zip(routed) {
+        if let Routed::Code { lang: "vue", .. } = &r {
+            sfc.add(path, source);
+        }
         match r {
             Routed::Skip => {}
             Routed::NonCode {
@@ -240,6 +246,10 @@ pub(crate) fn parse_repo_files_hashed(
         "[parallel] {repo_label}: routed {} files on {threads} threads (synthetic {n_synthetic}, reused {n_reused}, reparsed {n_reparsed}, failed {n_failed})",
         n_synthetic + n_reused + n_reparsed + n_failed
     );
+    // FH.6 fired_on, once per repo that holds a single-file component.
+    if let Some(line) = sfc.marker(repo_label) {
+        eprintln!("{line}");
+    }
     let SynthTally {
         proto_files,
         proto_services,
@@ -704,6 +714,45 @@ impl SynthTally {
             feature: out.feature.clone(),
             ..Default::default()
         });
+    }
+}
+
+/// FH.6: the per-repo `[sfc]` marker's counts: the files the walk routed to
+/// the single-file-component parser (`.vue`, `.svelte`, `.astro`; parsed or
+/// served from the cache) and the script blocks
+/// (`glia_parser_vue::script_view`) they hold.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SfcTally {
+    files: usize,
+    blocks: usize,
+    vue: usize,
+    svelte: usize,
+    astro: usize,
+}
+
+impl SfcTally {
+    fn add(&mut self, path: &str, source: &str) {
+        let Some(format) = glia_parser_vue::SfcFormat::of_path(path) else {
+            return;
+        };
+        self.files += 1;
+        self.blocks += glia_parser_vue::script_view(source, format).blocks;
+        match format {
+            glia_parser_vue::SfcFormat::Vue => self.vue += 1,
+            glia_parser_vue::SfcFormat::Svelte => self.svelte += 1,
+            glia_parser_vue::SfcFormat::Astro => self.astro += 1,
+        }
+    }
+
+    /// `[sfc] files=<n> blocks=<b> (svelte=<s> astro=<a> vue=<v>)
+    /// repo=<label>`, `None` for a repo with no single-file component.
+    fn marker(&self, repo_label: &str) -> Option<String> {
+        (self.files > 0).then(|| {
+            format!(
+                "[sfc] files={} blocks={} (svelte={} astro={} vue={}) repo={repo_label}",
+                self.files, self.blocks, self.svelte, self.astro, self.vue
+            )
+        })
     }
 }
 
@@ -2895,5 +2944,59 @@ mod tests {
             .expect("the template's bare parse");
         assert_eq!(template.refs.len(), 1);
         assert_eq!(template.refs[0].from_module, ts_module);
+    }
+
+    /// FH.6: `.svelte` and `.astro` route to the SFC parser under the `vue`
+    /// tag, in the TS family's build group; the parse keeps every script
+    /// block at the file's own lines; the `[sfc]` marker counts the formats.
+    #[test]
+    fn single_file_components_route_to_the_sfc_parser() {
+        for path in [
+            "web/App.vue",
+            "web/routes/+page.svelte",
+            "web/pages/index.astro",
+        ] {
+            assert_eq!(detect_language(path), Some("vue"), "{path}");
+            assert_eq!(build_group("vue"), "typescript");
+        }
+        let page = "<script context=\"module\">\n  export function preload() {}\n</script>\n\
+<script lang=\"ts\">\n  function load() { return fetch('/api/albums'); }\n</script>\n\
+<button on:click={load}>x</button>\n";
+        let parses = route("web/routes/+page.svelte", page);
+        let fp = &parses["vue"][0];
+        let row = |name: &str| {
+            let id = fp
+                .nav
+                .name_by_id
+                .iter()
+                .find(|(_, n)| n.as_str() == name)
+                .map(|(id, _)| *id)
+                .expect(name);
+            let node = fp.nodes.iter().find(|n| n.id == id).expect(name);
+            node.cells
+                .iter()
+                .find_map(|c| match (&c.payload, c.kind == cell_type::POSITION) {
+                    (CellPayload::Json(j), true) => serde_json::from_str::<serde_json::Value>(j)
+                        .ok()
+                        .and_then(|v| v["start_line"].as_u64()),
+                    _ => None,
+                })
+                .expect(name)
+        };
+        assert_eq!((row("preload"), row("load")), (1, 4));
+
+        let mut tally = SfcTally::default();
+        assert_eq!(tally.marker("web"), None);
+        tally.add(
+            "web/App.vue",
+            "<script setup>let a = 1;</script>\n<template/>\n",
+        );
+        tally.add("web/routes/+page.svelte", page);
+        tally.add("web/pages/index.astro", "---\nconst a = 1;\n---\n<p/>\n");
+        tally.add("web/util.ts", "export const b = 2;\n");
+        assert_eq!(
+            tally.marker("web").as_deref(),
+            Some("[sfc] files=3 blocks=4 (svelte=1 astro=1 vue=1) repo=web")
+        );
     }
 }

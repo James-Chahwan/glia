@@ -1,0 +1,20 @@
+{
+  "framework": "vue-two-scripts",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/calls"],
+  "note": "FH.6. A Vue SFC: a template, then a <script> block and a <script setup> block, then a <style>. Both blocks are parsed (glia read only the first before), and every POSITION is the file's own 0-based row: cardTitle at row 9 (line 10), refresh at row 20 (line 21). Before FH.6 the setup block was never parsed and rows restarted at the block.",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "cardTitle", "note": "declared in the options <script> block"},
+    {"kind": "FUNCTION", "name": "refresh", "note": "declared in the <script setup> block"}
+  ],
+  "expect_edges": [
+    {"from": "refresh", "to": "cardTitle", "category": "CALLS", "note": "setup block -> the other block's function, same module"},
+    {"from": "refresh", "to": "formatName", "category": "CALLS", "note": "setup block -> imported function"},
+    {"from": "UserCard", "to": "format", "category": "IMPORTS", "note": "the setup block's import"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "UserCard::cardTitle", "cell": "POSITION", "contains": "\"start_line\":9,", "note": "the file's row, not the block's"},
+    {"kind": "FUNCTION", "node": "UserCard::refresh", "cell": "POSITION", "contains": "\"start_line\":20,", "note": "the file's row, not the block's"}
+  ]
+}

@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CODE_EXTS = frozenset(
     ".go .ts .tsx .js .jsx .mjs .py .java .kt .dart .rs .cs .rb .php .swift .c .cc .cpp"
-    " .h .hpp .scala .ex .exs .proto .sol .vue".split())
+    " .h .hpp .scala .ex .exs .proto .sol .vue .svelte .astro".split())
 TEST_DIRS = frozenset({"test", "tests", "__tests__", "testdata"})
 TEST_RES = [re.compile(p) for p in (
     r"_test\.go$", r"^test_.*\.py$", r"_test\.py$", r"^Test.*\.java$", r".*Test\.java$",

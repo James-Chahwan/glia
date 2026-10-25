@@ -112,6 +112,9 @@ def parse_patch(text):
 
 
 def counted(path):
+    """An edited path the file metrics count: code by tasks.CODE_EXTS (the
+    single-file components .vue / .svelte / .astro included, FH.6), never a
+    test or glia's / Claude's own state."""
     return (path and not path.startswith(SKIP_PREFIXES) and tasks.is_code(path)
             and not tasks.is_test(path))
 
