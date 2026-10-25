@@ -707,6 +707,125 @@ pub(crate) fn narrow_by_host<T: HostScoped>(
 }
 
 // ============================================================================
+// FH.14 — narrowing a client that names no host
+// ============================================================================
+
+/// FH.14: does a client side name no host and no base at any call site? True
+/// when it has at least one ENDPOINT_HIT and every one is JSON with no `host`,
+/// no `hosts` array, no `folded_from` (an endpoint fold took a base off its
+/// path) and no `template` that starts with an interpolation (`${base}/x`).
+/// Such a client (a load generator's `GET /`, a relative path in a service
+/// that is no web app) says nothing about which service it calls, so
+/// [`narrow_by_host`] has nothing to act on, and [`ServiceServes`] judges its
+/// targets instead.
+pub(crate) fn names_no_host<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> bool {
+    let mut seen = false;
+    for c in cells {
+        if c.kind != cell_type::ENDPOINT_HIT {
+            continue;
+        }
+        let CellPayload::Json(json) = &c.payload else {
+            return false;
+        };
+        if str_field(json, "host").is_some()
+            || json.contains(HOSTS_KEY)
+            || str_field(json, "folded_from").is_some()
+            || str_field(json, "template").is_some_and(|t| t.starts_with("${"))
+        {
+            return false;
+        }
+        seen = true;
+    }
+    seen
+}
+
+/// FH.14: what each service of the build serves, the evidence a host-less
+/// client's targets are judged by. A service is a target scope, `(repo,
+/// owner)` as [`HostScoped`] reads it: how many distinct targets (HTTP
+/// ROUTEs) it holds, and whether it registers a GRPC_SERVER (its qname's
+/// owner segment, interned in the resolver's [`Owners`]; a GRPC_SERVER under
+/// an owner no target has scopes nothing). Built once per resolve; only
+/// probed, so no map order reaches an output.
+#[derive(Debug, Default)]
+pub(crate) struct ServiceServes {
+    targets: HashMap<AliasScope, HashSet<NodeId>>,
+    grpc: HashSet<AliasScope>,
+}
+
+impl ServiceServes {
+    /// Index `targets` (each target's id and scope) and the GRPC_SERVER
+    /// nodes of `graphs`.
+    pub(crate) fn new(
+        graphs: &[RepoGraph],
+        owners: &Owners,
+        targets: impl IntoIterator<Item = (NodeId, AliasScope)>,
+    ) -> Self {
+        let mut by_scope: HashMap<AliasScope, HashSet<NodeId>> = HashMap::new();
+        for (id, scope) in targets {
+            by_scope.entry(scope).or_default().insert(id);
+        }
+        let mut grpc = HashSet::new();
+        for g in graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_SERVER) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                match owner_from_qname_suffix(qname) {
+                    None => {
+                        grpc.insert((g.repo, None));
+                    }
+                    Some(o) => {
+                        if let Some(i) = owners.id_of(o) {
+                            grpc.insert((g.repo, Some(i)));
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            targets: by_scope,
+            grpc,
+        }
+    }
+
+    fn scope<T: HostScoped>(t: &T) -> AliasScope {
+        (t.repo(), t.owner())
+    }
+
+    /// The service of `t` holds no other target: `t`'s route is its only
+    /// HTTP route.
+    fn sole_target<T: HostScoped>(&self, t: &T) -> bool {
+        self.targets.get(&Self::scope(t)).map_or(0, HashSet::len) <= 1
+    }
+
+    /// `t` is a gRPC service's incidental HTTP route: its service registers a
+    /// GRPC_SERVER and serves no other HTTP route (ASP.NET's template
+    /// `MapGet("/")` beside `MapGrpcService`, a gRPC server's health page).
+    pub(crate) fn grpc_incidental<T: HostScoped>(&self, t: &T) -> bool {
+        self.grpc.contains(&Self::scope(t)) && self.sole_target(t)
+    }
+
+    /// Does any service register a GRPC_SERVER? Without one no target is
+    /// [`ServiceServes::grpc_incidental`].
+    pub(crate) fn any_grpc(&self) -> bool {
+        !self.grpc.is_empty()
+    }
+}
+
+/// FH.14: do `hits` lie in two or more services? A host-less client still
+/// pairing so after narrowing is ambiguous.
+pub(crate) fn spans_services<T: HostScoped>(hits: &[T]) -> bool {
+    let Some(first) = hits.first() else {
+        return false;
+    };
+    hits.iter()
+        .any(|t| (t.repo(), t.owner()) != (first.repo(), first.owner()))
+}
+
+// ============================================================================
 // CB.24 — narrowing a keyed side's targets
 // ============================================================================
 

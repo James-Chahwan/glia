@@ -1,0 +1,20 @@
+{
+  "framework": "hostless-client-two-services",
+  "language": "python+go+csharp",
+  "dirs": ["."],
+  "note": "FH.14 host narrowing for a client with no host. A Locust load generator (loadgen/, a requirements.txt project) calls `GET /` with no host and no base, the shape of microservices-demo's src/loadgenerator. Two services serve `GET /`: the Go storefront (frontend/, gorilla mux, three HTTP routes) and an ASP.NET gRPC service (cartservice/, MapGrpcService plus the template's one incidental `MapGet(\"/\")`). Before FH.14 the client paired with BOTH routes (CB.12's host narrowing needs a host to act on); after it, a candidate whose service serves gRPC and no other HTTP route is out of a host-less client's ladder, so only the frontend route pairs. Recall alone cannot see the wrong pair, so the precision gate is the forbid row. Deliberately not bound to a matrix cell: python/http_client, go/http_server and csharp/http_server are scored elsewhere.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/ @loadgen", "exact": true, "note": "locust `l.client.get(\"/\")`: no host, no base"},
+    {"kind": "ROUTE", "name": "GET / @frontend", "exact": true, "note": "the storefront route, the RIGHT target"},
+    {"kind": "ROUTE", "name": "GET / @cartservice", "exact": true, "note": "the gRPC service's incidental route, present so the forbid row is not vacuous"},
+    {"kind": "GRPC_SERVER", "name": "grpc_server:CartService @cartservice", "exact": true, "note": "the evidence that cartservice serves gRPC"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/ @loadgen", "to": "GET / @frontend", "category": "HTTP_CALLS", "exact": true, "note": "the host-less client pairs with the service that serves HTTP"},
+    {"from": "endpoint:GET:/cart @loadgen", "to": "GET /cart @frontend", "category": "HTTP_CALLS", "exact": true, "note": "an unambiguous pair is untouched"},
+    {"from": "endpoint:POST:/cart @loadgen", "to": "POST /cart @frontend", "category": "HTTP_CALLS", "exact": true, "note": "an unambiguous pair is untouched"}
+  ],
+  "forbid": [
+    {"from": "endpoint:GET:/ @loadgen", "to": "GET / @cartservice", "category": "HTTP_CALLS", "note": "the gRPC service's lone HTTP route must not receive a host-less client (matched before FH.14)"}
+  ]
+}

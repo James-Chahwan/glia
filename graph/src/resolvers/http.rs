@@ -8,8 +8,8 @@ use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, narrow_by_host, raw_field,
-    third_party_hosts,
+    HostScoped, Narrowed, Owners, ServiceServes, build_service_alias_index, hit_hosts,
+    names_no_host, narrow_by_host, raw_field, spans_services, third_party_hosts,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -36,6 +36,19 @@ use crate::types::RepoGraph;
 /// target, UNLESS the endpoint's recorded host names a service: then only the
 /// routes of the repos (A11.4) or nested projects (LB.4b) it names are kept
 /// (`narrow_by_host`, which falls back to every target on any doubt).
+///
+/// FH.14: a client that names no host and no base at any call site
+/// (`names_no_host`: a load generator's `GET /`, a relative path in a service
+/// that is no web app) is judged by what each candidate's service serves
+/// (`ServiceServes`). A route that is a gRPC service's only HTTP route (the
+/// service registers a GRPC_SERVER) is out of such a client's ladder at every
+/// tier, so the tier below can still find the service that serves HTTP, and a
+/// client whose only candidate is such a route pairs with nothing. A lone
+/// route of a service with no gRPC server is never dropped (a real service
+/// can serve one route), and a tie that survives keeps every target, as
+/// before (gaps' ambiguous_endpoint). fired_on, once
+/// per repo holding such a client:
+/// `[http] hostless clients=<c> narrowed=<n> ambiguous=<a> repo=<label>`.
 ///
 /// Every node pairs ONCE, however many graph entries carry it (LB.4b): an
 /// ENDPOINT or ROUTE id present in two language graphs of one repo, or a ROUTE
@@ -194,12 +207,14 @@ impl HttpStackResolver {
     /// [`Self::resolve_with_mounts`] with the ROUTE ids in `without` kept out
     /// of the route index (DT.6a, [`MountedHttpResolver::without_routes`]).
     /// `None` is exactly `resolve_with_mounts`.
+    ///
+    /// Returns the run's counters (the unit tests read the FH.14 tally).
     fn resolve_scoped(
         &self,
         merged: &mut MergedGraph,
         mounts: &RouteMounts,
         without: Option<&HashSet<NodeId>>,
-    ) {
+    ) -> HttpMatchStats {
         // Read ONCE per build. Never per lookup: the env read would show up in
         // every match and `normalise_http_path` (which is `pub`, and used by
         // fixtures and tests) must stay a pure function of its argument.
@@ -214,6 +229,27 @@ impl HttpStackResolver {
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in the Resolve stage of CODE_PASSES does not matter.
         let (aliases, project_aliases) = build_service_alias_index(&merged.graphs, &owners);
+        // FH.14: what each service serves, and the routes a host-less client
+        // never pairs with (a gRPC service's lone HTTP route). Built from the
+        // strong index, which holds every indexed route.
+        let serves = ServiceServes::new(
+            &merged.graphs,
+            &owners,
+            index
+                .values()
+                .flatten()
+                .map(|t| (t.route_id, (t.repo, t.owner))),
+        );
+        let incidental: HashSet<NodeId> = if serves.any_grpc() {
+            index
+                .values()
+                .flatten()
+                .filter(|t| serves.grpc_incidental(*t))
+                .map(|t| t.route_id)
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut edges = Vec::new();
         for ep in collect_endpoints(&merged.graphs) {
             stats.qnames.endpoint(ep.qname);
@@ -236,8 +272,25 @@ impl HttpStackResolver {
             stats.count_folds(raw_path);
             stats.count_client_normalised(ep.cells.iter().copied());
             let norm = normalise_http_path(raw_path);
-            let (mut hits, fold) =
-                lookup_route(&index, &stripped, &tails, &method, &norm, &prefixes);
+            let (mut hits, mut fold) =
+                lookup_route(&index, &stripped, &tails, &method, &norm, &prefixes, None);
+            if names_no_host(ep.cells.iter().copied()) {
+                let narrowed = hits.iter().any(|(t, _)| incidental.contains(&t.route_id));
+                if narrowed {
+                    (hits, fold) = lookup_route(
+                        &index,
+                        &stripped,
+                        &tails,
+                        &method,
+                        &norm,
+                        &prefixes,
+                        Some(&incidental),
+                    );
+                }
+                stats
+                    .hostless
+                    .record(ep.repo, narrowed, spans_services(&hits));
+            }
             let hosts = hit_hosts(ep.cells.iter().copied());
             match narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
                 Narrowed::No => {}
@@ -283,12 +336,84 @@ impl HttpStackResolver {
         stats.report_external();
         stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
+        stats.hostless.report(&merged.graphs);
+        stats
     }
+}
+
+/// FH.14: the `[http] hostless ..` counters, per repo of the client, in the
+/// order a repo's first host-less client was met (graph order).
+#[derive(Default)]
+struct HostlessTally {
+    /// `(repo, clients, narrowed, ambiguous)`.
+    repos: Vec<(RepoId, usize, usize, usize)>,
+}
+
+impl HostlessTally {
+    /// Count one host-less client of `repo`: whether narrowing cut its
+    /// targets, and whether they still span two or more services.
+    fn record(&mut self, repo: RepoId, narrowed: bool, ambiguous: bool) {
+        let at = match self.repos.iter().position(|r| r.0 == repo) {
+            Some(at) => at,
+            None => {
+                self.repos.push((repo, 0, 0, 0));
+                self.repos.len() - 1
+            }
+        };
+        if let Some(r) = self.repos.get_mut(at) {
+            r.1 += 1;
+            r.2 += usize::from(narrowed);
+            r.3 += usize::from(ambiguous);
+        }
+    }
+
+    /// One marker line per counted repo. The label is the repo's root PROJECT
+    /// name (`project:.`, its manifest label); a repo with no root manifest
+    /// has no label in the graph crate and prints its RepoId, 16 hex digits.
+    fn lines(&self, graphs: &[RepoGraph]) -> Vec<String> {
+        self.repos
+            .iter()
+            .map(|&(repo, clients, narrowed, ambiguous)| {
+                let label = repo_label(graphs, repo);
+                format!(
+                    "[http] hostless clients={clients} narrowed={narrowed} ambiguous={ambiguous} repo={label}"
+                )
+            })
+            .collect()
+    }
+
+    /// Print [`HostlessTally::lines`]; silent with no host-less client.
+    fn report(&self, graphs: &[RepoGraph]) {
+        for line in self.lines(graphs) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// The name of `repo`'s root PROJECT (`project:.`), else its id in hex.
+fn repo_label(graphs: &[RepoGraph], repo: RepoId) -> String {
+    graphs
+        .iter()
+        .filter(|g| g.repo == repo)
+        .flat_map(|g| {
+            g.nodes.iter().filter_map(move |n| {
+                (g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT)
+                    && g.nav.qname_by_id.get(&n.id).map(String::as_str) == Some("project:."))
+                .then(|| g.nav.name_by_id.get(&n.id))
+                .flatten()
+            })
+        })
+        .next()
+        .cloned()
+        .unwrap_or_else(|| format!("{:016x}", repo.0))
 }
 
 /// One client ENDPOINT node, however many graph entries carry it.
 struct EndpointNode<'g> {
     id: NodeId,
+    /// The repo of the first graph entry (an id hashes its repo, so every
+    /// entry shares it).
+    repo: RepoId,
     qname: &'g str,
     /// The strongest confidence of any entry.
     confidence: Confidence,
@@ -323,6 +448,7 @@ fn collect_endpoints(graphs: &[RepoGraph]) -> Vec<EndpointNode<'_>> {
             at.insert(n.id, out.len());
             out.push(EndpointNode {
                 id: n.id,
+                repo: g.repo,
                 qname,
                 confidence: n.confidence,
                 cells: n.cells.iter().collect(),
@@ -472,6 +598,8 @@ struct HttpMatchStats {
     /// path is the tail of more than one route.
     mount_folds: usize,
     mount_ambiguous: usize,
+    /// FH.14: host-less clients, per repo.
+    hostless: HostlessTally,
 }
 
 /// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
@@ -775,6 +903,17 @@ impl HostScoped for (RouteTarget, MatchTier) {
     }
 }
 
+/// FH.14: a bare target scopes as its tagged form does (the incidental-route
+/// set is read off the index, before any tier tags a target).
+impl HostScoped for RouteTarget {
+    fn repo(&self) -> RepoId {
+        self.repo
+    }
+    fn owner(&self) -> Option<u32> {
+        self.owner
+    }
+}
+
 /// Build `(METHOD, normalised_path) → Vec<RouteTarget>` across every graph in
 /// the merge. One target per (method, path) a Route node serves: a node's
 /// entries in several graphs, and stacked `ROUTE_METHOD` cells naming one verb
@@ -984,16 +1123,23 @@ impl HttpRouteMatcher {
     /// `path` is raw; it is normalised here with [`normalise_http_path`].
     pub fn lookup(&self, method: &str, path: &str) -> Vec<RouteMatch> {
         let norm = normalise_http_path(path);
-        lookup_direct(&self.index, &self.stripped, method, &norm, &self.prefixes)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(t, tier)| RouteMatch {
-                route: t.route_id,
-                confidence: weakest(t.confidence, tier.ceiling()),
-                exact: tier == MatchTier::Exact,
-                tier: tier.rule(),
-            })
-            .collect()
+        lookup_direct(
+            &self.index,
+            &self.stripped,
+            method,
+            &norm,
+            &self.prefixes,
+            None,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(t, tier)| RouteMatch {
+            route: t.route_id,
+            confidence: weakest(t.confidence, tier.ceiling()),
+            exact: tier == MatchTier::Exact,
+            tier: tier.rule(),
+        })
+        .collect()
     }
 }
 
@@ -1301,6 +1447,10 @@ const SUFFIX_TIER: bool = true;
 /// The tier ladder. Returns the targets from the FIRST tier that yields
 /// anything, tagged with that tier — never a union across tiers — and what the
 /// mount-segment fold (CB.23, inside tier 5) did, for its marker.
+///
+/// FH.14: a route in `skip` is no target at any tier, so a tier whose only
+/// targets are skipped yields nothing and the ladder goes on. `None` is the
+/// ladder as it was.
 fn lookup_route(
     index: &RouteIndex,
     stripped: &RouteIndex,
@@ -1308,9 +1458,10 @@ fn lookup_route(
     method: &str,
     norm_path: &str,
     prefixes: &[String],
+    skip: Option<&HashSet<NodeId>>,
 ) -> (Vec<(RouteTarget, MatchTier)>, MountFold) {
     // Tiers 1-4.
-    if let Some(hit) = lookup_direct(index, stripped, method, norm_path, prefixes) {
+    if let Some(hit) = lookup_direct(index, stripped, method, norm_path, prefixes, skip) {
         return (hit, MountFold::Unused);
     }
 
@@ -1327,7 +1478,7 @@ fn lookup_route(
     // Tier 5 — base fold: re-run tiers 1-4 against the folded path. The tier
     // REPORTED is BaseFold whatever matched inside, because the fold itself is
     // the inference being made.
-    if let Some(hit) = lookup_direct(index, stripped, method, folded, prefixes) {
+    if let Some(hit) = lookup_direct(index, stripped, method, folded, prefixes, skip) {
         return (retier(hit, MatchTier::BaseFold), MountFold::Unused);
     }
 
@@ -1336,7 +1487,7 @@ fn lookup_route(
     // so the folded path also pairs with the ONE route it is the tail of,
     // behind literal mount segments. Ambiguity falls through to tier 6 exactly
     // as a miss does, so tier 6 sees every endpoint it saw before.
-    let fold = match lookup_mount_tail(index, tails, method, folded) {
+    let fold = match lookup_mount_tail(index, tails, method, folded, skip) {
         MountTail::Unique(targets) => {
             let hit = targets
                 .into_iter()
@@ -1353,7 +1504,7 @@ fn lookup_route(
     // ambiguity bail. Emitting nothing beats fanning out.
     if SUFFIX_TIER {
         for cand in literal_suffixes(folded) {
-            if let Some(hit) = lookup_direct(index, stripped, method, &cand, prefixes) {
+            if let Some(hit) = lookup_direct(index, stripped, method, &cand, prefixes, skip) {
                 if hit.len() > MAX_SUFFIX_TARGETS {
                     return (Vec::new(), fold);
                 }
@@ -1450,6 +1601,7 @@ fn lookup_mount_tail(
     tails: &MountTailIndex,
     method: &str,
     folded: &str,
+    skip: Option<&HashSet<NodeId>>,
 ) -> MountTail {
     let method = method.to_ascii_uppercase();
     for m in [method.as_str(), ANY] {
@@ -1462,6 +1614,7 @@ fn lookup_mount_tail(
                 .get(&(m.to_string(), path.clone()))
                 .into_iter()
                 .flatten()
+                .filter(|t| !skipped(skip, t))
             {
                 push_target(&mut targets, *t);
             }
@@ -1488,6 +1641,7 @@ fn lookup_direct(
     method: &str,
     norm_path: &str,
     prefixes: &[String],
+    skip: Option<&HashSet<NodeId>>,
 ) -> Option<Vec<(RouteTarget, MatchTier)>> {
     let method = method.to_ascii_uppercase();
     let eps = strip_api_prefixes(norm_path, prefixes);
@@ -1513,11 +1667,24 @@ fn lookup_direct(
     }
 
     for (map, m, path, tier) in probes {
-        if let Some(targets) = map.get(&(m.to_string(), path)).filter(|t| !t.is_empty()) {
-            return Some(targets.iter().map(|t| (*t, tier)).collect());
+        let Some(targets) = map.get(&(m.to_string(), path)) else {
+            continue;
+        };
+        let hit: Vec<(RouteTarget, MatchTier)> = targets
+            .iter()
+            .filter(|t| !skipped(skip, t))
+            .map(|t| (*t, tier))
+            .collect();
+        if !hit.is_empty() {
+            return Some(hit);
         }
     }
     None
+}
+
+/// FH.14: is `t` one of the routes a lookup leaves out?
+fn skipped(skip: Option<&HashSet<NodeId>>, t: &RouteTarget) -> bool {
+    skip.is_some_and(|s| s.contains(&t.route_id))
 }
 
 /// Suffixes of `path`, longest first, excluding `path` itself (tier 5 already
@@ -3067,7 +3234,8 @@ mod tests {
         let qnames = g.nav.qname_by_id.clone();
         move |method, path| {
             let norm = normalise_http_path(path);
-            let (hits, fold) = lookup_route(&index, &stripped, &tails, method, &norm, &prefixes);
+            let (hits, fold) =
+                lookup_route(&index, &stripped, &tails, method, &norm, &prefixes, None);
             let hits = hits
                 .into_iter()
                 .map(|(t, tier)| {
@@ -3205,6 +3373,230 @@ mod tests {
                 Confidence::Medium,
                 Some("base_fold".to_string())
             )]
+        );
+    }
+
+    // ---- FH.14 host narrowing for a client with no host ------------------
+
+    /// One repo holding `specs`, a PROJECT per owner in `owners` beside it,
+    /// resolved; the HTTP_CALLS `(from, to, rule)` rows in emission order.
+    fn pair_one_repo(
+        repo: RepoId,
+        specs: Vec<(glia_core::NodeKindId, &str, Vec<Cell>)>,
+    ) -> (Vec<(NodeId, NodeId, String)>, Vec<NodeId>) {
+        let (g, ids) = repo_graph(repo, specs);
+        let mut merged = MergedGraph::new(vec![g]);
+        HttpStackResolver.resolve(&mut merged);
+        let rows = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| {
+                let rule = glia_code_domain::evidence::Evidence::of(e)
+                    .and_then(|ev| ev.rule)
+                    .unwrap_or_default();
+                (e.from, e.to, rule)
+            })
+            .collect();
+        (rows, ids)
+    }
+
+    fn no_host_get(path: &str) -> Vec<Cell> {
+        vec![hit(&format!(r#"{{"method":"GET","path":"{path}"}}"#))]
+    }
+
+    /// The fixture's shape: a load generator's `GET /` with no host, a
+    /// storefront serving `/` and `/cart`, and a gRPC service whose one HTTP
+    /// route is `/`. Only the storefront pairs.
+    #[test]
+    fn hostless_client_skips_a_grpc_services_lone_route() {
+        let (rows, ids) = pair_one_repo(
+            RepoId(701),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/ @loadgen",
+                    no_host_get("/"),
+                ),
+                (node_kind::ROUTE, "GET / @frontend", vec![]),
+                (node_kind::ROUTE, "GET /cart @frontend", vec![]),
+                (node_kind::ROUTE, "GET / @cartservice", vec![]),
+                (
+                    node_kind::GRPC_SERVER,
+                    "grpc_server:CartService @cartservice",
+                    vec![],
+                ),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+    }
+
+    /// microservices-demo's shape: the gRPC service's route is the only
+    /// candidate. A host-less client pairs with nothing rather than with it;
+    /// a client naming a host, or a lone route of a service that serves no
+    /// gRPC, pairs as before.
+    #[test]
+    fn hostless_client_never_pairs_a_grpc_services_lone_route() {
+        let specs = |hits: Vec<Cell>, grpc: bool| {
+            let mut v = vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/ @loadgen", hits),
+                (node_kind::ROUTE, "GET / @cartservice", vec![]),
+            ];
+            if grpc {
+                v.push((
+                    node_kind::GRPC_SERVER,
+                    "grpc_server:CartService @cartservice",
+                    vec![],
+                ));
+            }
+            v
+        };
+        let (rows, _) = pair_one_repo(RepoId(702), specs(no_host_get("/"), true));
+        assert_eq!(rows, vec![]);
+        let hosted = vec![hit(
+            r#"{"method":"GET","path":"/","host":"cartservice:7070"}"#,
+        )];
+        let (rows, ids) = pair_one_repo(RepoId(702), specs(hosted, true));
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+        let (rows, ids) = pair_one_repo(RepoId(702), specs(no_host_get("/"), false));
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+        // A site with a folded base names a base: not host-less.
+        let based = vec![hit(
+            r#"{"method":"GET","path":"/","template":"${environment.api}/","folded_from":"${…}/"}"#,
+        )];
+        let (rows, ids) = pair_one_repo(RepoId(702), specs(based, true));
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+    }
+
+    /// Skipping the gRPC service's route happens inside the ladder: the tier
+    /// below finds the storefront's method-agnostic `/`.
+    #[test]
+    fn hostless_skip_falls_through_to_the_next_tier() {
+        let (rows, ids) = pair_one_repo(
+            RepoId(703),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/ @loadgen",
+                    no_host_get("/"),
+                ),
+                (node_kind::ROUTE, "GET / @cartservice", vec![]),
+                (
+                    node_kind::GRPC_SERVER,
+                    "grpc_server:CartService @cartservice",
+                    vec![],
+                ),
+                (node_kind::ROUTE, "ANY / @frontend", vec![]),
+                (node_kind::ROUTE, "GET /cart @frontend", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[3], "any".to_string())]);
+    }
+
+    /// Among several candidates the gRPC service's lone route drops; a lone
+    /// route of a service with no gRPC server stays (a real service can serve
+    /// one route), so that tie keeps both targets, as does a tie of two
+    /// services that both serve more (gaps reports both as
+    /// ambiguous_endpoint).
+    #[test]
+    fn hostless_narrowing_drops_only_a_grpc_services_lone_route() {
+        let (rows, ids) = pair_one_repo(
+            RepoId(704),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @web",
+                    no_host_get("/health"),
+                ),
+                (node_kind::ROUTE, "GET /health @api", vec![]),
+                (node_kind::ROUTE, "GET /users @api", vec![]),
+                (node_kind::ROUTE, "GET /health @worker", vec![]),
+                (node_kind::GRPC_SERVER, "grpc_server:Worker @worker", vec![]),
+            ],
+        );
+        assert_eq!(rows, vec![(ids[0], ids[1], "exact".to_string())]);
+
+        let (rows, ids) = pair_one_repo(
+            RepoId(705),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @web",
+                    no_host_get("/health"),
+                ),
+                (node_kind::ROUTE, "GET /health @api", vec![]),
+                (node_kind::ROUTE, "GET /users @api", vec![]),
+                (node_kind::ROUTE, "GET /health @worker", vec![]),
+            ],
+        );
+        let to: Vec<NodeId> = rows.iter().map(|r| r.1).collect();
+        assert_eq!(to, vec![ids[1], ids[3]]);
+
+        let (rows, ids) = pair_one_repo(
+            RepoId(706),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @web",
+                    no_host_get("/health"),
+                ),
+                (node_kind::ROUTE, "GET /health @api", vec![]),
+                (node_kind::ROUTE, "GET /users @api", vec![]),
+                (node_kind::ROUTE, "GET /health @admin", vec![]),
+                (node_kind::ROUTE, "GET /audit @admin", vec![]),
+                (node_kind::GRPC_SERVER, "grpc_server:Admin @admin", vec![]),
+            ],
+        );
+        let to: Vec<NodeId> = rows.iter().map(|r| r.1).collect();
+        assert_eq!(
+            to,
+            vec![ids[1], ids[3]],
+            "a gRPC service serving HTTP too keeps its route"
+        );
+    }
+
+    /// The marker: one line per repo with a host-less client, its label the
+    /// repo's root PROJECT name.
+    #[test]
+    fn hostless_marker_counts_clients_narrowed_and_ambiguous() {
+        let (mut g, ids) = repo_graph(
+            RepoId(707),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/ @loadgen",
+                    no_host_get("/"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/health @loadgen",
+                    no_host_get("/health"),
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/cart @loadgen",
+                    vec![hit(r#"{"method":"GET","path":"/cart","host":"frontend"}"#)],
+                ),
+                (node_kind::ROUTE, "GET / @frontend", vec![]),
+                (node_kind::ROUTE, "GET /cart @frontend", vec![]),
+                (node_kind::ROUTE, "GET / @cartservice", vec![]),
+                (
+                    node_kind::GRPC_SERVER,
+                    "grpc_server:CartService @cartservice",
+                    vec![],
+                ),
+                (node_kind::ROUTE, "GET /health @frontend", vec![]),
+                (node_kind::ROUTE, "GET /health @admin", vec![]),
+                (node_kind::ROUTE, "GET /audit @admin", vec![]),
+                (node_kind::PROJECT, "project:.", vec![]),
+            ],
+        );
+        g.nav.name_by_id.insert(ids[10], "shop".to_string());
+        let mut merged = MergedGraph::new(vec![g]);
+        let stats = HttpStackResolver.resolve_scoped(&mut merged, &RouteMounts::default(), None);
+        assert_eq!(
+            stats.hostless.lines(&merged.graphs),
+            vec!["[http] hostless clients=2 narrowed=1 ambiguous=1 repo=shop".to_string()]
         );
     }
 }

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package shop;
+
+service CartService {
+  rpc AddItem(AddItemRequest) returns (Empty) {}
+  rpc GetCart(GetCartRequest) returns (Cart) {}
+}
+
+message AddItemRequest {
+  string user_id = 1;
+  string product_id = 2;
+  int32 quantity = 3;
+}
+
+message GetCartRequest {
+  string user_id = 1;
+}
+
+message Cart {
+  string user_id = 1;
+  repeated string product_ids = 2;
+}
+
+message Empty {}
