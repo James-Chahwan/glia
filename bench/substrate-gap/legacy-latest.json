@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 438,
+  "fixtures": 441,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -573,6 +573,26 @@
       "language": "go",
       "per_category": {
         "DOCUMENTS": 1.0
+      }
+    },
+    "drift-rename-go-ts": {
+      "framework": "drift-rename-go-ts",
+      "language": "go+typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0,
+        "IMPORTS": 1.0,
+        "USES": 1.0
+      }
+    },
+    "drift-zod-express-ts": {
+      "framework": "drift-zod-express-ts",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "elixir-docs": {
@@ -2451,6 +2471,14 @@
       "framework": "ts-http-fetch",
       "language": "typescript",
       "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "ts-http-wrapper-forward": {
+      "framework": "ts-http-wrapper-forward",
+      "language": "typescript+go",
+      "per_category": {
+        "CALLS": 1.0,
         "HTTP_CALLS": 1.0
       }
     },
