@@ -9757,6 +9757,179 @@
    "risks": "A Javalin app that reaches the framework through a wildcard re-export with no io.javalin import loses its routes; the import read covers `import io.javalin.*`.",
    "batch": "FH",
    "spec_group": "FH"
+  },
+  {
+   "id": "FH.8c",
+   "title": "Compact answers, part 3: the overview answer - blast-radius / diff-impact / review return a map by default (ranked files, `areas` with counts, the top 25 rows, capped seeds and changed) whose truncation notes name the `--scope` that drills into each area; `--offset` pages; slim rows (seed as an index, no name that repeats the qname tail); `--full` unchanged",
+   "area": "FH cockpit: compact answers",
+   "loc": 550,
+   "rationale": "FH.8b brought photoprism fd8448's diff-impact --json from 141,943 to 101,365 bytes, not under 64 KB: the 200 rows are 59.7 KB, seeds 20.5 KB, changed 19.8 KB. An agent rarely needs 200 rows at once; it needs to know where the impact is and then read one area. James 2026-10-26: \"can't we make it smaller by letting the agent pick how much it wants ? ... it might be a specific area\". --scope, --top-k and --top-files exist, but the first answer gives no map of which scope to ask for. Measured on after.json: the seed field is ~14 KB of the rows (13,977 B), names repeating the qname tail ~5.3 KB, the first 100 rows 29.6 KB.",
+   "entry_points": [
+    "engine/src/answers.rs (BlastRadius rows / seeds / Truncated, DEFAULT_ANSWER_ROWS / DEFAULT_ANSWER_SEEDS)",
+    "engine/src/diff_impact.rs (changed / seeds rendering)",
+    "engine/src/review.rs (the impact section of review)",
+    "cli/src/cmd/blast_radius.rs, cli/src/cmd/change/diff_impact.rs, cli/src/cmd/change/review.rs"
+   ],
+   "files_touched": [
+    "engine/src/answers.rs",
+    "engine/src/diff_impact.rs",
+    "engine/src/review.rs",
+    "cli/src/cmd/blast_radius.rs",
+    "cli/src/cmd/change/diff_impact.rs",
+    "cli/src/cmd/change/review.rs",
+    "cli/surface/blast-radius.txt",
+    "cli/surface/diff-impact.txt",
+    "cli/surface/review.txt",
+    "py/src/blast.rs",
+    "py/src/diff_impact.rs",
+    "py/src/review.rs",
+    "py/api_surface/blast.txt",
+    "py/api_surface/diff_impact.txt",
+    "py/api_surface/review.txt",
+    "py/tests/surface/test_blast.py",
+    "py/tests/surface/test_diff_impact.py",
+    "py/tests/surface/test_review.py",
+    "skills/glia/SKILL.md",
+    "skills/glia/examples.md"
+   ],
+   "implementation": "1. `areas`: the impact rows (all of them, before the cap) grouped by area: the PROJECT label when the build has project roots, else the first two path components of the row's file; each area {area, rows, files, top_file, scope} with `scope` the exact --scope value that selects it, sorted by rows desc then area. Every answer carries it unless full.\n2. The overview default: rows cut at DEFAULT_OVERVIEW_ROWS = 25 (was 200), seeds at min(top_k, 25), diff-impact `changed` at 25 with a count; `truncated` gains `next`: for rows, the largest area's `--scope <area>` and `--offset 25`. --top-k N still sets the row count explicitly (an agent asking for 200 gets 200).\n3. `--offset <n>` (pyo3 `offset=`): skip the first n rows of the ranked, scoped list; truncated counts what follows.\n4. Slim rows unless full: `seed` is the index into `seeds` (`seed_index`), and `name` is left out when it equals the qname's last `::` segment; `score` keeps 4 significant digits in JSON.\n5. --full / full=True keeps today's every-row answer byte for byte (seed qname, name, full score).\n6. skills/glia: one worked example of overview -> `--scope <area>` -> `--offset`, and the rule 'read areas first, ask for one area'.\n7. Markdown / text output: an `## areas` table after the files table; the rows table shows 25 with the next-scope line.",
+   "fixtures": [],
+   "acceptance": "photoprism fd8448 (FH.8's measurement command) diff-impact --json is under 20,000 bytes by default with `areas` and `truncated.next`; `--scope <the largest area>` returns that area's rows ranked within it; `--offset 25` returns rows 26-50; --full is byte-identical to the pre-packet --full; blast-radius and review behave alike; CLI / pyo3 surfaces regenerated; the rank gate stays 0 drops (rank_eval reads full answers).",
+   "fired_on_marker": "[answer-size] surface=<s> rows=<n> shown=<k> offset=<o> areas=<a> bytes=<b>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "api_signature"
+    ],
+    "what_changes": "default rows 200 -> 25 with areas and truncated.next; seed -> seed_index, name omitted when it repeats the qname tail, score rounded (unless full); new --offset / offset=",
+    "in_repo_consumers": [
+     "engine/examples/rank_eval.rs (full)",
+     "bench/cohort/cohort.py (reads review / diff-impact JSON: pass --full or read seed_index)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph impact tool"
+    ]
+   },
+   "depends_on": [
+    "FH.8b"
+   ],
+   "risks": "A consumer reading row.seed or row.name breaks unless it asks for --full; FZ.2 lists it. 25 may be too few for a small change; --top-k overrides it.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.7c",
+   "title": "Style-agnostic drift, part 3: name_breaks precision - an identifier-class name counts only with a rename pair, library and test-framework names never count, and a generated SDK between client and route is walked through (immich)",
+   "area": "FH style-agnostic contracts",
+   "loc": 400,
+   "rationale": "FH.7a (w17) measured name_breaks on the 13 FH.1 drift picks: 2 of 13 now name the client truth file (was 0), but precision is poor: removed server identifiers that are library or test calls (immich: describe, z, use, js, includes, change) and generic renames (photoprism id -> messageId) give hundreds to thousands of rows. And 3 of 6 immich tasks read exchanges=0: the exchange runs client -> generated SDK (packages/sdk/src/fetch-client.ts) -> route, and the changed DTO files are not within SERVER_DEPTH 3 of a paired route.",
+   "entry_points": [
+    "engine/src/contract_breaks/names.rs (name_breaks, ChangedName, GENERIC, SERVER_DEPTH, CLIENT_DEPTH)"
+   ],
+   "files_touched": [
+    "engine/src/contract_breaks/names.rs",
+    "engine/tests/name_breaks.rs"
+   ],
+   "implementation": "1. Name classes: a string-key / struct-tag / JSON-field name (a quoted key, a `json:\"..\"` tag, an object-literal key, a DTO field) counts as today; a bare identifier counts only when the hunk pairs it with a rename (old -> new).\n2. Never a changed name: an identifier bound to an import from an external package (read through the file's IMPORTS cell), or one only used in a test file (the walk's test classification).\n3. Generated SDK hop: a file stamped ORIGIN generated on the client -> route path is walked through without spending SERVER_DEPTH / CLIENT_DEPTH (a generated fetch client is a transparent hop).\n4. Measure on the same 13 picks through FH.7a's scratch probe (or FH.7b's surface once landed): rows per task before / after, and truth-named count.",
+   "fixtures": [],
+   "acceptance": "On the 13 FH.1 drift picks: truth-named count >= FH.7a's 2 of 13, and the median rows per task down at least 5x from FH.7a's numbers (~/.cache/glia-FH.7a/measure-picks.json); immich's 3 exchanges=0 tasks read exchanges > 0; name_breaks tests cover each rule.",
+   "fired_on_marker": "[name-breaks] .. dropped_library=<l> dropped_test=<t> unpaired_identifiers=<u> sdk_hops=<h>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "fewer name_breaks rows; no API change (the module has no surface until FH.7b)",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.7a"
+   ],
+   "risks": "Dropping unpaired identifiers can miss a plain deletion of a field used by name; the string-key class keeps JSON-field deletions.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.16",
+   "title": "Bundler module roots: webpack `resolve.modules` / `resolve.alias` (and vite `resolve.alias`) resolve TS / JS bare specifiers to in-repo modules, beside tsconfig paths",
+   "area": "FH boundary chain",
+   "loc": 300,
+   "rationale": "FH.7a (w17): photoprism's frontend imports `common/api` through webpack `resolve.modules: [PATHS.src, \"node_modules\", ..]` (frontend/webpack.config.js:107); no IMPORTS edge is minted, so the client-side walk never reaches api.js and both photoprism drift tasks miss their truth files. glia reads tsconfig `compilerOptions.paths` (TsAliases, engine/src/build/lang_build.rs) but no bundler config.",
+   "entry_points": [
+    "engine/src/build/lang_build.rs TsAliases / TsAliasSet / resolve_ts_source_aliased"
+   ],
+   "files_touched": [
+    "engine/src/build/lang_build.rs",
+    "engine/src/watch.rs"
+   ],
+   "implementation": "1. Read webpack.config.{js,cjs,mjs,ts} and vite.config.{js,ts,mjs} beside a package.json: `resolve.modules` entries that are a string literal, `path.join(__dirname, \"x\")` / `path.resolve(__dirname, \"x\")`, or a const holding one (one level, same file); `resolve.alias` / vite `alias` string -> string entries (an `$` exact-match key honoured). Text scan with the existing code_guard reader, no JS evaluation; anything else is skipped and counted.\n2. Each module root becomes an alias set entry like a tsconfig `baseUrl` with `*` -> `<root>/*`; aliases like tsconfig paths. Order: tsconfig paths first, then bundler aliases, then module roots in declaration order; node_modules entries ignored.\n3. watch durability: a webpack / vite config is a High path (re-plans the walk).",
+   "fixtures": [
+    {
+     "name": "webpack-resolve-modules",
+     "purpose": "a bare specifier resolved through webpack resolve.modules binds to the in-repo module (FH.16)",
+     "source_sketch": "web/package.json {\"name\":\"web\"}; web/webpack.config.js: const path = require('path'); const PATHS = { src: path.join(__dirname, 'src') }; module.exports = { resolve: { modules: [PATHS.src, 'node_modules'] } }; web/src/common/api.js: export function getUser(id) { return fetch('/api/users/' + id); }; web/src/page.js: import { getUser } from 'common/api'; export function show() { return getUser(1); }",
+     "key_json": "{\"framework\": \"webpack-resolve-modules\", \"language\": \"javascript\", \"dirs\": [\"web\"], \"note\": \"FH.16: webpack resolve.modules roots resolve bare specifiers. Baseline: no IMPORTS edge page -> common::api.\", \"expect_edges\": [{\"from\": \"src::page\", \"to\": \"src::common::api\", \"category\": \"IMPORTS\"}, {\"from\": \"src::page::show\", \"to\": \"src::common::api::getUser\", \"category\": \"CALLS\"}], \"forbid\": []}"
+    }
+   ],
+   "acceptance": "the fixture's IMPORTS edge page -> common::api exists (before: blind); photoprism fd8448's frontend shows `[ts-aliases] bundler=..` with module_roots>=1 and its drift task's client walk reaches frontend/src/common/api.js; byte_identical holds.",
+   "fired_on_marker": "[ts-aliases] bundler file=<f> module_roots=<m> aliases=<a> skipped=<s>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents only (more / fewer edges), no API or format change",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "A config computing roots dynamically is skipped (counted). A module root that shadows a real npm package name: the in-repo file wins only when it exists.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.17",
+   "title": "Inferred HTTP wrapper precision: test-file wrapper sites are ORIGIN test_fixture and pair nothing, Map-like `<unresolved>` parser endpoints seed no wrapper, an options-object builder is followed (twenty), and gaps' wrapped_sink reads inferred wrappers",
+   "area": "FH boundary chain",
+   "loc": 450,
+   "rationale": "FH.4b (w17) handoffs: photoprism's 428 inferred mints come from its Go API tests' PerformRequest(app, \"GET\", \"/api/v1/..\") helpers (httptest calls to its own routes); the TS parser's `endpoint:GET|DELETE:<unresolved>` on `this.<map>.get(x)` / `.delete(x)` (hoppscotch 31, immich 8 wrappers) seed phantom wrappers; twenty's makeRestApiRequest builds an options object before the client call and is not followed; gaps still reports the `<unresolved>` sink inside an inferred wrapper as unresolved_endpoint because wrapped_sink reads only overlay wrappers.",
+   "entry_points": [
+    "engine/src/external/infer_wrappers.rs",
+    "engine/src/gaps.rs wrapped_sink"
+   ],
+   "files_touched": [
+    "engine/src/external/infer_wrappers.rs",
+    "engine/src/gaps.rs",
+    "engine/tests/gaps_report.rs"
+   ],
+   "implementation": "1. A wrapper call site in a test file (the walk's test classification, `[walk] tests`, `_test.go`, test dirs) mints its ENDPOINT with ORIGIN test_fixture, and the http pass leaves it out of pairing as DT.6a does for test routes; counted.\n2. A wrapper candidate needs an HTTP-client sink: a parser ENDPOINT whose path is `<unresolved>` and whose receiver is not a known HTTP client (fetch / axios / http / requests / net/http needles or an overlay / inferred client) seeds nothing.\n3. Options-object builders: a wrapper whose parameter (or a destructured field of it) flows into an object literal's `url` / `path` key that is then passed to the client call, within the same function, is followed.\n4. gaps wrapped_sink also reads the owners named by `inferred:<call>` ORIGIN rules in the repo.",
+   "fixtures": [
+    {
+     "name": "ts-http-wrapper-precision",
+     "purpose": "options-object wrappers are followed; Map-like .get(id) seeds no wrapper; a Go test-file wrapper site is ORIGIN test_fixture and pairs nothing (FH.17)",
+     "source_sketch": "web/src/lib/rest.ts: export function makeRequest({ path }: { path: string }) { const opts = { url: '/api' + path, method: 'GET' }; return fetch(opts.url, opts); }; web/src/lib/cache.ts: class Cache { private m = new Map<string, number>(); read(id: string) { return this.m.get(id); } }; web/src/features/a.ts: makeRequest({ path: '/items' }); server/main.go: r.GET(\"/api/items\", list); server/api_test.go: func PerformRequest(r http.Handler, method, path string) { req := httptest.NewRequest(method, path, nil); _ = req }; func TestX(t *testing.T) { PerformRequest(r, \"GET\", \"/api/items\") }",
+     "key_json": "{\"framework\": \"ts-http-wrapper-precision\", \"language\": \"typescript+go\", \"dirs\": [\"web\", \"server\"], \"note\": \"FH.17\", \"expect_nodes\": [{\"kind\": \"ENDPOINT\", \"name\": \"endpoint:GET:/api/items\", \"exact\": true}], \"forbid\": [{\"kind\": \"ENDPOINT\", \"name\": \"endpoint:GET:<unresolved>\", \"note\": \"PRECISION: the Map-like get seeds no wrapper\"}]}"
+    }
+   ],
+   "acceptance": "photoprism fd8448: inferred mints that pair drop from 428 to only non-test sites (the test sites carry test_fixture and pair nothing); hoppscotch / immich inferred wrapper counts drop by the Map-like phantoms; twenty's makeRestApiRequest sites mint; gaps' unresolved_endpoint inside an inferred wrapper reads as wrapped_sink; the rank gate stays 0 drops.",
+   "fired_on_marker": "[http-wrappers] wrappers=<w> sites=<s> minted=<m> test_sites=<t> phantom_dropped=<p> options_object=<o> repo=<r>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents only (more / fewer edges), no API or format change",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.4b"
+   ],
+   "risks": "A test helper that really calls an external service loses its pairing; test_fixture keeps the node, so it stays visible.",
+   "batch": "FH",
+   "spec_group": "FH"
   }
  ],
  "deps_patch": {
