@@ -860,9 +860,14 @@ impl TsAliases {
 /// FH.5: it also holds the repo's workspace packages ([`WorkspaceSet`]), the
 /// resolver's last step for a bare specifier no `paths` key maps, so a watch
 /// session's group fingerprint (the set's `Debug`) moves with them.
+///
+/// FH.16: and every project dir's bundler config ([`BundlerScope`]): webpack
+/// / vite `resolve.alias` entries and webpack `resolve.modules` roots, read
+/// after the tsconfig `paths` and before the workspace packages.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TsAliasSet {
     scopes: Vec<TsAliases>,
+    bundler: Vec<BundlerScope>,
     workspace: WorkspaceSet,
 }
 
@@ -877,7 +882,11 @@ impl TsAliasSet {
             .chain(roots.iter().map(|r| r.rel_path.as_str()))
             .collect();
         let mut scopes = Vec::new();
+        let mut bundler = Vec::new();
         for dir in dirs {
+            if let Some(scope) = BundlerScope::read(root, dir) {
+                bundler.push(scope);
+            }
             let mut aliases = read_tsconfig_paths(&root.join(dir));
             if aliases.entries.is_empty() {
                 continue;
@@ -894,8 +903,18 @@ impl TsAliasSet {
         }
         Self {
             scopes,
+            bundler,
             workspace: WorkspaceSet::read(root, roots),
         }
+    }
+
+    /// FH.16: the bundler config a module resolves through: the deepest
+    /// scope whose dir holds it.
+    fn bundler_of(&self, from_module: &str) -> Option<&BundlerScope> {
+        self.bundler
+            .iter()
+            .filter(|s| in_dir(from_module, &s.dir_qname))
+            .max_by_key(|s| s.dir_qname.len())
     }
 
     /// The aliases a module resolves through: the deepest scope whose dir
@@ -903,22 +922,35 @@ impl TsAliasSet {
     fn scope_of(&self, from_module: &str) -> Option<&TsAliases> {
         self.scopes
             .iter()
-            .filter(|s| {
-                s.dir_qname.is_empty()
-                    || from_module
-                        .strip_prefix(s.dir_qname.as_str())
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
-            })
+            .filter(|s| in_dir(from_module, &s.dir_qname))
             .max_by_key(|s| s.dir_qname.len())
     }
 
-    /// Every `paths` key of every scope, as written (`@core/*`), for the
-    /// A16.4 IMPORTS-cell filter (`LocalModuleIndex::add_alias_prefix`).
+    /// Every `paths` key of every scope, as written (`@core/*`), then every
+    /// bundler alias key as a `paths` key would name it (`common$` ->
+    /// `common`; `@` -> `@` and `@/*`), for the A16.4 IMPORTS-cell filter
+    /// (`LocalModuleIndex::add_alias_prefix`). A module root adds no key: what
+    /// it maps depends on the files under it, never on the specifier alone.
     pub(super) fn keys(&self) -> impl Iterator<Item = &str> + '_ {
-        self.scopes
+        let paths = self
+            .scopes
             .iter()
-            .flat_map(|s| s.entries.iter().map(|(k, _)| k.as_str()))
+            .flat_map(|s| s.entries.iter().map(|(k, _)| k.as_str()));
+        let bundler = self
+            .bundler
+            .iter()
+            .flat_map(|s| s.keys.iter().map(String::as_str));
+        paths.chain(bundler)
     }
+}
+
+/// `from_module` sits in the dir whose module qname prefix is `dir_qname`
+/// (`""` holds every module).
+fn in_dir(from_module: &str, dir_qname: &str) -> bool {
+    dir_qname.is_empty()
+        || from_module
+            .strip_prefix(dir_qname)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
 }
 
 /// A6.8: the `paths` of `<dir>/tsconfig.json`, else of
@@ -1082,7 +1114,658 @@ pub(super) fn resolve_ts_source_aliased(
     aliases
         .scope_of(from_module)
         .and_then(|scope| scope.map(spec))
+        .or_else(|| {
+            aliases
+                .bundler_of(from_module)
+                .and_then(|scope| scope.map(spec, &aliases.workspace.root))
+        })
         .or_else(|| aliases.workspace.resolve(spec))
+}
+
+// ---------------------------------------------------------------------------
+// FH.16: bundler module roots and aliases
+// ---------------------------------------------------------------------------
+
+/// FH.16: the bundler configs read beside a project dir's `package.json`,
+/// in read order: a dir with both a webpack and a vite config merges them in
+/// this order.
+pub(crate) const BUNDLER_CONFIGS: [&str; 7] = [
+    "webpack.config.js",
+    "webpack.config.cjs",
+    "webpack.config.mjs",
+    "webpack.config.ts",
+    "vite.config.js",
+    "vite.config.ts",
+    "vite.config.mjs",
+];
+
+/// FH.16: `base` (a file name) is a bundler config [`TsAliasSet::read`]
+/// reads, so a watch session re-plans when one changes
+/// (`watch::durability`, reason `bundler`).
+pub(crate) fn is_bundler_config(base: &str) -> bool {
+    BUNDLER_CONFIGS.contains(&base)
+}
+
+/// FH.16: the extensions a module root binds a file of: the TS family's
+/// sources. A bare `x/y.css` under a module root stays a package import.
+const MODULE_ROOT_EXTS: [&str; 10] = [
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "vue", "svelte",
+];
+
+/// FH.16: one bundler `resolve.alias` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BundlerAlias {
+    /// The key without webpack's exact-match `$`.
+    key: String,
+    /// The key ended in `$`: only the specifier `key` itself matches.
+    exact: bool,
+    /// The target, a repo-relative `/`-path.
+    target: String,
+}
+
+/// FH.16: one project dir's bundler configs ([`BUNDLER_CONFIGS`]), read as
+/// text, never evaluated ([`read_bundler_config`]): the `resolve.alias`
+/// entries (webpack and vite) that map to an in-repo path, and webpack's
+/// `resolve.modules` roots other than `node_modules`. The TS-family resolver
+/// reads them after a tsconfig `paths` miss: aliases first, then the module
+/// roots in declaration order, each binding a bare specifier only when the
+/// file it names under that root exists ([`BundlerScope::map`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BundlerScope {
+    /// The config dir as a module qname prefix, `""` at the repo root.
+    dir_qname: String,
+    /// In declaration order.
+    aliases: Vec<BundlerAlias>,
+    /// Repo-relative dirs, in declaration order, deduplicated.
+    module_roots: Vec<String>,
+    /// The alias keys as `paths` keys ([`TsAliasSet::keys`]).
+    keys: Vec<String>,
+}
+
+impl BundlerScope {
+    /// The bundler configs of `dir` (repo-relative), or `None` when it holds
+    /// no `package.json` or no config yields an alias or a module root.
+    ///
+    /// fired_on marker, once per config file read:
+    ///   `[ts-aliases] bundler file=<f> module_roots=<m> aliases=<a> skipped=<s>`
+    fn read(root: &Path, dir: &str) -> Option<Self> {
+        let base = root.join(dir);
+        if !base.join("package.json").is_file() {
+            return None;
+        }
+        let mut scope = Self {
+            dir_qname: dir.replace('/', "::"),
+            ..Self::default()
+        };
+        for file in BUNDLER_CONFIGS {
+            let Ok(text) = std::fs::read_to_string(base.join(file)) else {
+                continue;
+            };
+            let read = read_bundler_config(&text, dir, file.starts_with("vite."));
+            let shown = if dir.is_empty() {
+                file.to_string()
+            } else {
+                format!("{dir}/{file}")
+            };
+            eprintln!(
+                "[ts-aliases] bundler file={shown} module_roots={} aliases={} skipped={}",
+                read.module_roots.len(),
+                read.aliases.len(),
+                read.skipped
+            );
+            for alias in read.aliases {
+                scope.keys.push(alias.key.clone());
+                if !alias.exact {
+                    scope.keys.push(format!("{}/*", alias.key));
+                }
+                scope.aliases.push(alias);
+            }
+            for r in read.module_roots {
+                if !scope.module_roots.contains(&r) {
+                    scope.module_roots.push(r);
+                }
+            }
+        }
+        (!scope.aliases.is_empty() || !scope.module_roots.is_empty()).then_some(scope)
+    }
+
+    /// The module qname bare specifier `spec` names: through the first alias
+    /// whose key is `spec` or a `/`-segment prefix of it (an exact key only
+    /// `spec` itself), else through the first module root holding the file
+    /// ([`package_file`]: the file, a source extension, `<spec>/index.<ext>`).
+    fn map(&self, spec: &str, root: &Path) -> Option<String> {
+        if spec.is_empty() || spec.starts_with(['.', '/', '#']) || spec.contains(':') {
+            return None;
+        }
+        let aliased = self.aliases.iter().find_map(|a| {
+            if spec == a.key {
+                return Some(a.target.clone());
+            }
+            let rest = spec.strip_prefix(a.key.as_str())?.strip_prefix('/')?;
+            (!a.exact).then(|| format!("{}/{rest}", a.target))
+        });
+        if let Some(path) = aliased {
+            return ts_path_qname(&path);
+        }
+        self.module_roots.iter().find_map(|dir| {
+            let file = package_file(root, dir, spec)?;
+            let ext = file.rsplit_once('.').map(|(_, e)| e)?;
+            MODULE_ROOT_EXTS
+                .contains(&ext)
+                .then(|| path_to_qname(&file))
+        })
+    }
+}
+
+/// FH.16: what one bundler config's text yields ([`read_bundler_config`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BundlerRead {
+    aliases: Vec<BundlerAlias>,
+    module_roots: Vec<String>,
+    /// Alias entries and module-root elements read as something other than
+    /// an in-repo path (a computed value, a package request, a regex key, a
+    /// path leaving the repo), and `modules` values holding no array.
+    skipped: usize,
+}
+
+/// FH.16: the `resolve: { modules, alias }` objects of one webpack / vite
+/// config (`dir` its repo-relative dir), read off its tokens
+/// ([`js_tokens`]). A value is a path when it is a string literal,
+/// `path.join` / `path.resolve(__dirname, "<lit>", ..)`,
+/// `fileURLToPath(new URL("<lit>", import.meta.url))`, or a `const` (or a
+/// member of a `const` object literal) holding one, one level, same file. A
+/// `modules` value contributes the elements of every array literal it holds
+/// (both arms of a ternary), so a conditional root that is not a path is
+/// skipped while the others stay; `node_modules` entries are ignored.
+fn read_bundler_config(text: &str, dir: &str, vite: bool) -> BundlerRead {
+    let toks = js_tokens(text);
+    let mut consts: BTreeMap<&str, usize> = BTreeMap::new();
+    for w in 0..toks.len().saturating_sub(3) {
+        if let (JsTok::Ident(kw), JsTok::Ident(name), JsTok::Punct('=')) =
+            (&toks[w], &toks[w + 1], &toks[w + 2])
+            && matches!(kw.as_str(), "const" | "let" | "var")
+            && toks.get(w + 3) != Some(&JsTok::Punct('='))
+        {
+            consts.entry(name.as_str()).or_insert(w + 3);
+        }
+    }
+    let cx = ConfigCx {
+        toks: &toks,
+        consts,
+        dir,
+        vite,
+    };
+    let mut out = BundlerRead::default();
+    for i in 0..toks.len().saturating_sub(2) {
+        if cx.is_ident(i, "resolve") && cx.is_punct(i + 1, ':') && cx.is_punct(i + 2, '{') {
+            for (key, (start, end)) in cx.properties(i + 2) {
+                match key.as_str() {
+                    "modules" => cx.read_modules(start, end, &mut out),
+                    "alias" => cx.read_aliases(start, end, &mut out),
+                    _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// FH.16: one bundler config's token, [`js_tokens`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum JsTok {
+    /// A string literal (or a template literal with no substitution),
+    /// unescaped.
+    Str(String),
+    Ident(String),
+    Punct(char),
+    /// A number, a regex or a template literal with a substitution.
+    Other,
+}
+
+/// FH.16: a JS / TS config's tokens, comments dropped. A `/` opens a regex
+/// literal where an operand is expected (after an operator, an opening
+/// bracket, a `,` / `:` / `;` or a keyword), so a quote inside a regex never
+/// opens a string.
+fn js_tokens(text: &str) -> Vec<JsTok> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut toks: Vec<JsTok> = Vec::new();
+    let mut i = 0;
+    while let Some(&c) = chars.get(i) {
+        let next = chars.get(i + 1).copied();
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '/' && next == Some('/') {
+            while chars.get(i).is_some_and(|&c| c != '\n') {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            i += 2;
+            while i < chars.len() && !(chars[i - 1] == '*' && chars[i] == '/') {
+                i += 1;
+            }
+            i += 1;
+        } else if c == '"' || c == '\'' {
+            let mut s = String::new();
+            i += 1;
+            while let Some(&d) = chars.get(i) {
+                i += 1;
+                match d {
+                    '\\' => {
+                        if let Some(&e) = chars.get(i) {
+                            s.push(e);
+                            i += 1;
+                        }
+                    }
+                    '\n' => break,
+                    _ if d == c => break,
+                    _ => s.push(d),
+                }
+            }
+            toks.push(JsTok::Str(s));
+        } else if c == '`' {
+            let (mut s, mut depth, mut plain) = (String::new(), 0usize, true);
+            i += 1;
+            while let Some(&d) = chars.get(i) {
+                i += 1;
+                match d {
+                    '\\' => {
+                        if let Some(&e) = chars.get(i) {
+                            s.push(e);
+                            i += 1;
+                        }
+                    }
+                    '$' if depth == 0 && chars.get(i) == Some(&'{') => {
+                        plain = false;
+                        depth = 1;
+                        i += 1;
+                    }
+                    '{' if depth > 0 => depth += 1,
+                    '}' if depth > 0 => depth -= 1,
+                    '`' if depth == 0 => break,
+                    _ => s.push(d),
+                }
+            }
+            toks.push(if plain { JsTok::Str(s) } else { JsTok::Other });
+        } else if c == '/' && regex_allowed(toks.last()) {
+            let mut class = false;
+            i += 1;
+            while let Some(&d) = chars.get(i) {
+                i += 1;
+                match d {
+                    '\\' => i += 1,
+                    '[' => class = true,
+                    ']' => class = false,
+                    '/' if !class => break,
+                    '\n' => break,
+                    _ => {}
+                }
+            }
+            while chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+                i += 1;
+            }
+            toks.push(JsTok::Other);
+        } else if c.is_alphabetic() || c == '_' || c == '$' {
+            let start = i;
+            while chars
+                .get(i)
+                .is_some_and(|&c| c.is_alphanumeric() || c == '_' || c == '$')
+            {
+                i += 1;
+            }
+            toks.push(JsTok::Ident(chars[start..i].iter().collect()));
+        } else if c.is_ascii_digit() {
+            while chars
+                .get(i)
+                .is_some_and(|&c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            {
+                i += 1;
+            }
+            toks.push(JsTok::Other);
+        } else {
+            toks.push(JsTok::Punct(c));
+            i += 1;
+        }
+    }
+    toks
+}
+
+/// A `/` after `prev` opens a regex literal rather than dividing.
+fn regex_allowed(prev: Option<&JsTok>) -> bool {
+    match prev {
+        None => true,
+        Some(JsTok::Punct(p)) => "(,=:[!&|?{};+-*%<>~^".contains(*p),
+        Some(JsTok::Ident(k)) => matches!(
+            k.as_str(),
+            "return" | "typeof" | "case" | "do" | "else" | "in" | "of" | "new" | "void" | "throw"
+        ),
+        Some(_) => false,
+    }
+}
+
+/// FH.16: the reading context of one bundler config.
+struct ConfigCx<'a> {
+    toks: &'a [JsTok],
+    /// `const` / `let` / `var` name -> its initialiser's first token, the
+    /// first declaration of the name (looked up, never iterated).
+    consts: BTreeMap<&'a str, usize>,
+    dir: &'a str,
+    vite: bool,
+}
+
+/// FH.16: a value read off a config ([`ConfigCx::value`]).
+enum ConfigVal {
+    /// A string literal, as written.
+    Lit(String),
+    /// A path relative to the config's dir (`__dirname`-rooted).
+    Path(String),
+    Unknown,
+}
+
+impl ConfigCx<'_> {
+    fn tok(&self, i: usize) -> Option<&JsTok> {
+        self.toks.get(i)
+    }
+
+    fn is_punct(&self, i: usize, c: char) -> bool {
+        self.tok(i) == Some(&JsTok::Punct(c))
+    }
+
+    fn is_ident(&self, i: usize, name: &str) -> bool {
+        matches!(self.tok(i), Some(JsTok::Ident(n)) if n == name)
+    }
+
+    /// The end of the expression starting at `i`: the index of the first
+    /// `,` / `;` or unbalanced closer at its depth (or the token count).
+    fn expr_end(&self, i: usize) -> usize {
+        let mut depth = 0usize;
+        let mut j = i;
+        while let Some(t) = self.tok(j) {
+            match t {
+                JsTok::Punct('(' | '[' | '{') => depth += 1,
+                JsTok::Punct(')' | ']' | '}') => {
+                    if depth == 0 {
+                        return j;
+                    }
+                    depth -= 1;
+                }
+                JsTok::Punct(',' | ';') if depth == 0 => return j,
+                _ => {}
+            }
+            j += 1;
+        }
+        j
+    }
+
+    /// The `(key, value span)` properties of the object literal opened at
+    /// `open`, in order; a shorthand `key` spans its own token; a spread or
+    /// computed key is passed over.
+    fn properties(&self, open: usize) -> Vec<(String, (usize, usize))> {
+        let mut out = Vec::new();
+        let mut i = open + 1;
+        while let Some(t) = self.tok(i) {
+            if matches!(t, JsTok::Punct('}')) {
+                break;
+            }
+            let key = match t {
+                JsTok::Ident(k) | JsTok::Str(k) => Some(k.clone()),
+                _ => None,
+            };
+            let colon = self.is_punct(i + 1, ':');
+            let end = self.expr_end(if colon { i + 2 } else { i });
+            match key {
+                Some(k) if colon => out.push((k, (i + 2, end))),
+                Some(k) if end == i + 1 => out.push((k, (i, end))),
+                _ => {}
+            }
+            if !self.is_punct(end, ',') {
+                break;
+            }
+            i = end + 1;
+        }
+        out
+    }
+
+    /// The value spanning `[start, end)`; `follow` allows one hop through a
+    /// `const` name or a `const` object's member.
+    fn value(&self, start: usize, end: usize, follow: bool) -> ConfigVal {
+        let span = &self.toks[start.min(end)..end];
+        match span {
+            [JsTok::Str(s)] => return ConfigVal::Lit(s.clone()),
+            [JsTok::Ident(d)] if d == "__dirname" => return ConfigVal::Path(String::new()),
+            [JsTok::Ident(name)] if follow => {
+                return self.const_value(name, None);
+            }
+            [JsTok::Ident(name), JsTok::Punct('.'), JsTok::Ident(member)] if follow => {
+                return self.const_value(name, Some(member));
+            }
+            _ => {}
+        }
+        // `path.join(..)` / `path.resolve(..)` / bare `join(..)` / `resolve(..)`.
+        let call = match span {
+            [
+                JsTok::Ident(_),
+                JsTok::Punct('.'),
+                JsTok::Ident(f),
+                JsTok::Punct('('),
+                ..,
+            ] => Some((f.as_str(), start + 4)),
+            [JsTok::Ident(f), JsTok::Punct('('), ..] => Some((f.as_str(), start + 2)),
+            _ => None,
+        };
+        let Some((f, args)) = call else {
+            return ConfigVal::Unknown;
+        };
+        if f == "fileURLToPath" {
+            return self.file_url(args, end);
+        }
+        if !matches!(f, "join" | "resolve") || !self.is_punct(end.saturating_sub(1), ')') {
+            return ConfigVal::Unknown;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        let mut i = args;
+        let mut first = true;
+        while i < end - 1 {
+            let e = self.expr_end(i);
+            let v = if first {
+                self.value(i, e, follow)
+            } else {
+                self.value(i, e, false)
+            };
+            match (first, v) {
+                (true, ConfigVal::Path(p)) => parts.push(p),
+                (false, ConfigVal::Lit(s)) if !(f == "resolve" && s.starts_with('/')) => {
+                    parts.push(s)
+                }
+                _ => return ConfigVal::Unknown,
+            }
+            first = false;
+            i = e + 1;
+        }
+        if first {
+            return ConfigVal::Unknown;
+        }
+        ConfigVal::Path(parts.join("/"))
+    }
+
+    /// `fileURLToPath(new URL("<lit>", import.meta.url))`, its argument list
+    /// opening at `args`.
+    fn file_url(&self, args: usize, end: usize) -> ConfigVal {
+        let at = |k: usize| self.tok(args + k);
+        let shape = self.is_ident(args, "new")
+            && self.is_ident(args + 1, "URL")
+            && self.is_punct(args + 2, '(')
+            && self.is_punct(args + 4, ',')
+            && self.is_ident(args + 5, "import")
+            && self.is_ident(args + 7, "meta")
+            && self.is_ident(args + 9, "url")
+            && self.is_punct(args + 10, ')')
+            && args + 12 == end;
+        match at(3) {
+            Some(JsTok::Str(s)) if shape => ConfigVal::Path(s.clone()),
+            _ => ConfigVal::Unknown,
+        }
+    }
+
+    /// The value of `const name`, or of its object literal's `member`.
+    fn const_value(&self, name: &str, member: Option<&str>) -> ConfigVal {
+        let Some(&start) = self.consts.get(name) else {
+            return ConfigVal::Unknown;
+        };
+        let end = self.expr_end(start);
+        let Some(member) = member else {
+            return self.value(start, end, false);
+        };
+        if !self.is_punct(start, '{') {
+            return ConfigVal::Unknown;
+        }
+        self.properties(start)
+            .into_iter()
+            .find(|(k, _)| k == member)
+            .map_or(ConfigVal::Unknown, |(_, (s, e))| self.value(s, e, false))
+    }
+
+    /// The value span a `const` name's initialiser stands for, when the
+    /// span is that one name; else the span itself.
+    fn deref(&self, start: usize, end: usize) -> (usize, usize) {
+        match self.toks.get(start..end) {
+            Some([JsTok::Ident(name)]) => self
+                .consts
+                .get(name.as_str())
+                .map_or((start, end), |&s| (s, self.expr_end(s))),
+            _ => (start, end),
+        }
+    }
+
+    /// `rel` (relative to the config's dir) as a repo-relative dir, or
+    /// `None` when it leaves the repo.
+    fn repo_path(&self, rel: &str) -> Option<String> {
+        let mut segs: Vec<&str> = Vec::new();
+        for part in self.dir.split('/').chain(rel.split(['/', '\\'])) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segs.pop()?;
+                }
+                p => segs.push(p),
+            }
+        }
+        Some(segs.join("/"))
+    }
+
+    /// A value as a repo-relative path: a `__dirname`-rooted path, or a
+    /// literal that is relative (`./x`, `../x`, or for `modules` a bare
+    /// `src`, which webpack looks up from the config's dir); vite reads a
+    /// `/src` alias against its root, the config's dir.
+    fn as_path(&self, v: ConfigVal, bare_ok: bool) -> Option<String> {
+        let rel = match v {
+            ConfigVal::Path(p) => p,
+            ConfigVal::Lit(s) if s.starts_with("./") || s.starts_with("../") || s == "." => s,
+            ConfigVal::Lit(s) if self.vite && s.starts_with('/') => s,
+            ConfigVal::Lit(s) if bare_ok && !s.starts_with('/') && !s.is_empty() => s,
+            _ => return None,
+        };
+        self.repo_path(&rel)
+    }
+
+    /// `resolve.modules` spanning `[start, end)`: every array literal at the
+    /// value's top level, element by element.
+    fn read_modules(&self, start: usize, end: usize, out: &mut BundlerRead) {
+        let (start, end) = self.deref(start, end);
+        let mut arrays = Vec::new();
+        let mut depth = 0usize;
+        for i in start..end {
+            match self.tok(i) {
+                Some(JsTok::Punct('[')) if depth == 0 => {
+                    arrays.push(i);
+                    depth += 1;
+                }
+                Some(JsTok::Punct('(' | '[' | '{')) => depth += 1,
+                Some(JsTok::Punct(')' | ']' | '}')) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if arrays.is_empty() {
+            out.skipped += 1;
+            return;
+        }
+        for open in arrays {
+            let mut i = open + 1;
+            while i < end && !self.is_punct(i, ']') {
+                let e = self.expr_end(i);
+                if e > i {
+                    let v = self.value(i, e, true);
+                    let node_modules = match &v {
+                        ConfigVal::Lit(s) | ConfigVal::Path(s) => {
+                            s.trim_end_matches('/').rsplit('/').next() == Some("node_modules")
+                        }
+                        ConfigVal::Unknown => false,
+                    };
+                    if !node_modules {
+                        match self.as_path(v, true) {
+                            Some(p) if !out.module_roots.contains(&p) => out.module_roots.push(p),
+                            Some(_) => {}
+                            None => out.skipped += 1,
+                        }
+                    }
+                }
+                if !self.is_punct(e, ',') {
+                    break;
+                }
+                i = e + 1;
+            }
+        }
+    }
+
+    /// `resolve.alias` spanning `[start, end)`: an object of `key: path`
+    /// entries, or vite's array of `{ find, replacement }`.
+    fn read_aliases(&self, start: usize, end: usize, out: &mut BundlerRead) {
+        let (start, end) = self.deref(start, end);
+        let push = |key: &str, v: ConfigVal, out: &mut BundlerRead| {
+            let (key, exact) = match key.strip_suffix('$') {
+                Some(k) => (k, true),
+                None => (key, false),
+            };
+            match self.as_path(v, false) {
+                Some(target) if !key.is_empty() => out.aliases.push(BundlerAlias {
+                    key: key.to_string(),
+                    exact,
+                    target,
+                }),
+                _ => out.skipped += 1,
+            }
+        };
+        if self.is_punct(start, '{') {
+            for (key, (s, e)) in self.properties(start) {
+                push(&key, self.value(s, e, true), out);
+            }
+        } else if self.is_punct(start, '[') {
+            let mut i = start + 1;
+            while i < end && !self.is_punct(i, ']') {
+                let e = self.expr_end(i);
+                let props = if self.is_punct(i, '{') {
+                    self.properties(i)
+                } else {
+                    Vec::new()
+                };
+                let find = props.iter().find(|(k, _)| k == "find");
+                let repl = props.iter().find(|(k, _)| k == "replacement");
+                match (find, repl) {
+                    (Some((_, (fs, fe))), Some((_, (rs, re)))) => match self.value(*fs, *fe, false)
+                    {
+                        ConfigVal::Lit(key) => push(&key, self.value(*rs, *re, true), out),
+                        _ => out.skipped += 1,
+                    },
+                    _ => out.skipped += 1,
+                }
+                if !self.is_punct(e, ',') {
+                    break;
+                }
+                i = e + 1;
+            }
+        } else {
+            out.skipped += 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2410,6 +3093,204 @@ mod dart_import_tests {
             targets.len(),
             3,
             "no edge for `dart:async` or `package:flutter`"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bundler_tests {
+    use super::*;
+
+    fn write(dir: &Path, rel: &str, text: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// The webpack-resolve-modules fixture's config: the root lives in a
+    /// const object's member, `node_modules` twice (a literal and a path).
+    const FIXTURE: &str = "const path = require('path');\n\nconst PATHS = {\n  src: path.join(__dirname, 'src'),\n  modules: path.join(__dirname, 'node_modules'),\n};\n\nmodule.exports = {\n  entry: './src/page.js',\n  resolve: {\n    modules: [PATHS.src, 'node_modules', PATHS.modules],\n  },\n};\n";
+
+    /// A conditional `modules` list (both arms read), a root assigned
+    /// outside the const literal (skipped), package aliases (skipped), and a
+    /// regex holding a quote that must not open a string.
+    const CONDITIONAL: &str = r#"/* header with a "quote */
+const path = require("path");
+const isCustom = !!process.env.CUSTOM_SRC;
+const PATHS = {
+  src: path.join(__dirname, "src"),
+  modules: path.join(__dirname, "node_modules"), // trailing comment
+  build: path.join(__dirname, "../assets/build"),
+};
+if (isCustom) {
+  PATHS.custom = path.join(__dirname, process.env.CUSTOM_SRC);
+}
+const config = {
+  module: { rules: [{ test: /'\.js$/, exclude: [/\.map$/] }] },
+  resolve: {
+    modules: isCustom ? [PATHS.custom, PATHS.src, "node_modules", PATHS.modules] : [PATHS.src, "node_modules", PATHS.modules],
+    preferRelative: true,
+    alias: {
+      "vue$": "vue/dist/vue.runtime.esm-bundler.js",
+      "hls.js": "hls.js/dist/hls.light.min.js",
+      common$: path.resolve(__dirname, "src/common/index.js"),
+      "@": `${__dirname}/src`,
+    },
+  },
+};
+module.exports = config;
+"#;
+
+    #[test]
+    fn webpack_modules_read_through_a_const_member() {
+        let r = read_bundler_config(FIXTURE, "web", false);
+        assert_eq!(r.module_roots, ["web/src"]);
+        assert!(r.aliases.is_empty());
+        assert_eq!(r.skipped, 0);
+    }
+
+    #[test]
+    fn a_conditional_list_reads_both_arms_and_counts_what_it_skips() {
+        let r = read_bundler_config(CONDITIONAL, "frontend", false);
+        assert_eq!(r.module_roots, ["frontend/src"]);
+        assert_eq!(
+            r.aliases,
+            [BundlerAlias {
+                key: "common".into(),
+                exact: true,
+                target: "frontend/src/common/index.js".into(),
+            }]
+        );
+        // PATHS.custom, the two package aliases, the templated `@`.
+        assert_eq!(r.skipped, 4);
+    }
+
+    #[test]
+    fn vite_aliases_object_array_and_url_forms() {
+        let object = "import { fileURLToPath, URL } from 'node:url'\nexport default defineConfig({\n  resolve: {\n    alias: {\n      '@': fileURLToPath(new URL('./src', import.meta.url)),\n      '~lib': '/lib',\n    },\n  },\n})\n";
+        let r = read_bundler_config(object, "", true);
+        let got: Vec<(&str, &str)> = r
+            .aliases
+            .iter()
+            .map(|a| (a.key.as_str(), a.target.as_str()))
+            .collect();
+        assert_eq!(got, [("@", "src"), ("~lib", "lib")]);
+        assert_eq!(r.skipped, 0);
+        // A `/lib` alias is an absolute path to webpack: skipped there.
+        assert_eq!(read_bundler_config(object, "", false).skipped, 1);
+
+        let array = "import path from 'path'\nconst alias = [\n  { find: '@', replacement: path.resolve(__dirname, './src') },\n  { find: /^~/, replacement: '' },\n]\nexport default { resolve: { alias } }\n";
+        let r = read_bundler_config(array, "app", true);
+        let got: Vec<(&str, &str)> = r
+            .aliases
+            .iter()
+            .map(|a| (a.key.as_str(), a.target.as_str()))
+            .collect();
+        assert_eq!(got, [("@", "app/src")]);
+        assert_eq!(r.skipped, 1, "the regex `find`");
+        // A `modules` value holding no array, and a path leaving the repo.
+        let odd = "module.exports = { resolve: { modules: roots(), alias: { x: path.join(__dirname, '../../out') } } }";
+        let r = read_bundler_config(odd, "web", false);
+        assert!(r.module_roots.is_empty() && r.aliases.is_empty());
+        assert_eq!(r.skipped, 2);
+    }
+
+    #[test]
+    fn module_roots_bind_only_files_that_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(root, "package.json", "{}");
+        write(root, "web/package.json", "{\"name\":\"web\"}");
+        write(root, "web/webpack.config.js", CONDITIONAL);
+        write(root, "web/src/common/api.js", "export const a = 1;\n");
+        write(root, "web/src/common/index.js", "export const b = 1;\n");
+        write(
+            root,
+            "web/src/component/notify.vue",
+            "<template></template>\n",
+        );
+        write(root, "web/src/css/app.css", "a {}\n");
+        write(root, "web/src/vue.js", "export default 1;\n");
+        write(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"paths":{"common/api":["web/src/other.ts"]}}}"#,
+        );
+        let roots = [
+            ProjectRoot::new(String::new(), "npm", "package.json", None),
+            ProjectRoot::new("web".into(), "npm", "package.json", None),
+        ];
+        let set = TsAliasSet::read(root, &roots, "fx");
+        let from = "web::src::page";
+        let r = |spec: &str| resolve_ts_source_aliased(from, spec, &set);
+        // tsconfig `paths` first.
+        assert_eq!(r("common/api").as_deref(), Some("web::src::other"));
+        // The exact alias, then the module root.
+        assert_eq!(r("common").as_deref(), Some("web::src::common::index"));
+        assert_eq!(
+            r("common/index").as_deref(),
+            Some("web::src::common::index")
+        );
+        assert_eq!(
+            r("component/notify.vue").as_deref(),
+            Some("web::src::component::notify")
+        );
+        // An in-repo file shadows the package of its name only when it exists.
+        assert_eq!(r("vue").as_deref(), Some("web::src::vue"));
+        assert_eq!(r("react"), None);
+        // A non-source file under a root stays a package import.
+        assert_eq!(r("css/app.css"), None);
+        // A module outside the config's dir does not read it.
+        assert_eq!(
+            resolve_ts_source_aliased("tools::x", "common/index", &set),
+            None
+        );
+        let keys: Vec<&str> = set.keys().collect();
+        assert_eq!(keys, ["common/api", "common"]);
+        assert!(is_bundler_config("vite.config.ts") && !is_bundler_config("vitest.config.js"));
+    }
+
+    /// The fixture end to end through the TS-family build: the IMPORTS edge
+    /// and the named import's CALLS.
+    #[test]
+    fn ts_family_binds_through_a_module_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(root, "package.json", "{\"name\":\"web\"}");
+        write(root, "webpack.config.js", FIXTURE);
+        let api = "export function getUser(id) {\n  return fetch('/api/users/' + id);\n}\n";
+        let page = "import { getUser } from 'common/api';\n\nexport function show() {\n  return getUser(1);\n}\n";
+        write(root, "src/common/api.js", api);
+        write(root, "src/page.js", page);
+        let roots = [ProjectRoot::new(String::new(), "npm", "package.json", None)];
+        let set = TsAliasSet::read(root, &roots, "fx");
+        let repo = RepoId(3);
+        let parses: Vec<FileParse> = [("src/common/api.js", api), ("src/page.js", page)]
+            .iter()
+            .map(|(p, text)| crate::extract::parse_one(text, p, "typescript", repo).unwrap())
+            .collect();
+        let g = glia_graph::build_typescript_family(repo, parses, |from, spec| {
+            resolve_ts_source_aliased(from, spec, &set)
+        })
+        .unwrap();
+        let qname = |n: NodeId| g.nav.qname_by_id.get(&n).cloned().unwrap_or_default();
+        let mut edges: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS || e.category == edge_category::CALLS)
+            .map(|e| (qname(e.from), qname(e.to)))
+            .filter(|(f, _)| f.starts_with("src::page"))
+            .collect();
+        edges.sort();
+        assert_eq!(
+            edges,
+            [
+                ("src::page".to_string(), "src::common::api".to_string()),
+                (
+                    "src::page::show".to_string(),
+                    "src::common::api::getUser".to_string()
+                ),
+            ]
         );
     }
 }

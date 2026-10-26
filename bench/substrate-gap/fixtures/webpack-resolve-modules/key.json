@@ -1,0 +1,11 @@
+{
+  "framework": "webpack-resolve-modules",
+  "language": "javascript",
+  "dirs": ["web"],
+  "note": "FH.16: webpack resolve.modules roots resolve bare specifiers. web/webpack.config.js names `PATHS.src` (a const object member holding `path.join(__dirname, 'src')`), `node_modules` and `PATHS.modules` (both ignored), so `from 'common/api'` in src/page.js binds src/common/api.js. Baseline: no IMPORTS edge page -> common::api (the specifier was an npm package). fired_on: `[ts-aliases] bundler file=webpack.config.js module_roots=1 aliases=0 skipped=0`.",
+  "expect_edges": [
+    {"from": "src::page", "to": "src::common::api", "category": "IMPORTS"},
+    {"from": "src::page::show", "to": "src::common::api::getUser", "category": "CALLS"}
+  ],
+  "forbid": []
+}

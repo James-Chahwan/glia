@@ -101,8 +101,8 @@ use twox_hash::XxHash64;
 use crate::build::assemble::{RepoBuildCtx, parse_and_graft, repo_markers};
 use crate::build::c_includes::IncludeRoots;
 use crate::build::lang_build::{
-    GroupCtx, GroupInput, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet, build_groups,
-    fold_groups, plan_groups,
+    BUNDLER_CONFIGS, GroupCtx, GroupInput, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet,
+    build_groups, fold_groups, is_bundler_config, plan_groups,
 };
 use crate::build::rpc_needles::RpcContext;
 use crate::build::timing::{self, BuildTimes, PhaseTimes};
@@ -163,6 +163,8 @@ pub enum Durability {
 /// - `gitignore`: any `.gitignore`;
 /// - `go_mod`: any `go.mod` (the module set, so the parse cache's context);
 /// - `tsconfig`: `tsconfig.json` / `tsconfig.base.json` (the TS path aliases);
+/// - `bundler`: a webpack / vite config (`webpack.config.{js,cjs,mjs,ts}`,
+///   `vite.config.{js,ts,mjs}`: the bundler aliases and module roots, FH.16);
 /// - `include_roots`: `CMakeLists.txt` / `compile_commands.json`;
 /// - `manifest`: a project-root manifest (a [`project_roots::MANIFESTS`] name,
 ///   `build.sbt` and `requirements.txt` included, or a
@@ -201,6 +203,7 @@ pub fn durability(rel: &str) -> Durability {
         ".gitignore" => Some("gitignore"),
         "go.mod" => Some("go_mod"),
         "tsconfig.json" | "tsconfig.base.json" => Some("tsconfig"),
+        _ if is_bundler_config(base) => Some("bundler"),
         "CMakeLists.txt" | "compile_commands.json" => Some("include_roots"),
         _ if is_project_manifest(base) || packages::is_manifest_path(rel) => Some("manifest"),
         _ if migrations::is_migration_path(rel) => Some("migration"),
@@ -387,7 +390,8 @@ pub struct WatchSession {
 enum Input {
     /// The walk's descent, re-read by every re-plan: a `.gitignore`
     /// (`IgnoreStack::push_dir`), a [`project_roots::MANIFESTS`] file (root
-    /// detection reads its text) or a [`TSCONFIGS`] file in an entered
+    /// detection reads its text) or a [`TSCONFIGS`] / `BUNDLER_CONFIGS`
+    /// (FH.16) file in an entered
     /// directory that is no table entry (a walk-skipped name, or a
     /// gitignored file: root detection lists ignored files too), a region
     /// root's `.git` file (`gate_dir` reads it: submodule or worktree). Also
@@ -1452,6 +1456,7 @@ impl WatchSession {
                         .iter()
                         .map(|(name, _)| *name)
                         .chain(TSCONFIGS)
+                        .chain(BUNDLER_CONFIGS)
                         .map(|name| join_rel(&d.rel, name))
                 })
                 .filter(|rel| !self.index.contains_key(rel))
@@ -2463,6 +2468,9 @@ mod tests {
             ("svc/go.mod", "go_mod"),
             ("tsconfig.json", "tsconfig"),
             ("app/tsconfig.base.json", "tsconfig"),
+            ("webpack.config.js", "bundler"),
+            ("frontend/webpack.config.ts", "bundler"),
+            ("web/vite.config.mjs", "bundler"),
             ("CMakeLists.txt", "include_roots"),
             ("build/compile_commands.json", "include_roots"),
             ("package.json", "manifest"),
@@ -2490,6 +2498,8 @@ mod tests {
             ".glia/vocab-snapshot",
             ".glia/vocab-snapshot/terms.jsonl",
             "report.sql",
+            "src/webpack.config.helper.js",
+            "vitest.config.js",
         ] {
             assert_eq!(durability(rel), Durability::Low, "{rel}");
         }
@@ -2655,6 +2665,44 @@ mod tests {
             u.groups_rebuilt
         );
         assert_clean(&s, &dir, tmp.path(), "tsconfig_paths");
+    }
+
+    /// FH.16: a webpack config is a `bundler` input. Adding a module root
+    /// re-plans and rebinds `common/api` (no source file changed), and the
+    /// update equals a clean build.
+    #[test]
+    fn bundler_config_edit_rebinds_typescript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = repo(tmp.path());
+        write(&dir, "package.json", "{\"name\":\"fx\"}\n");
+        write(
+            &dir,
+            "webpack.config.js",
+            "module.exports = { entry: './src/page.js' };\n",
+        );
+        write(
+            &dir,
+            "src/common/api.js",
+            "export function getUser(id) {\n  return id;\n}\n",
+        );
+        write(
+            &dir,
+            "src/page.js",
+            "import { getUser } from 'common/api';\n\nexport function show() {\n  return getUser(1);\n}\n",
+        );
+        let mut s = open(&dir);
+        write(
+            &dir,
+            "webpack.config.js",
+            "const path = require('path');\nmodule.exports = { resolve: { modules: [path.resolve(__dirname, 'src'), 'node_modules'] } };\n",
+        );
+        let u = s.apply(&[PathBuf::from("webpack.config.js")]).unwrap();
+        assert!(
+            u.groups_rebuilt.iter().any(|k| k == "typescript"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert_clean(&s, &dir, tmp.path(), "bundler_config");
     }
 
     /// The new crate `b` holds no new source file: only the Cargo packages
