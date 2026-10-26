@@ -164,10 +164,13 @@ fn answers(repo: &GitRepo) -> Vec<(&'static str, Vec<BlindCaveat>, String)> {
     assert!(!di.impact.results.is_empty(), "load0's radius: {di:#?}");
     out.push(("diff_impact", di.blind.clone(), json(&di)));
 
+    // FH.8b (FH.9's handoff): the standalone answer carries its own rows,
+    // the ones health gives for the mechanisms it read.
     let br = blast_radius(merged, &["load0"], &BlastOptions::default());
     assert!(!br.results.is_empty(), "load0's radius");
     let rows = blind_caveats(merged, "blast_radius", &blast_mechanisms(&br));
-    out.push(("blast_radius", rows, String::new()));
+    assert_eq!(br.blind, rows, "BlastRadius.blind is health's reading");
+    out.push(("blast_radius", br.blind.clone(), json(&br)));
 
     let gaps = gaps_report(merged, &roots_of(&built), &GapsOptions::default()).expect("gaps");
     out.push(("gaps", gaps.blind.clone(), json(&gaps)));

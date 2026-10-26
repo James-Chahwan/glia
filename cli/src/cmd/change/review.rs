@@ -66,10 +66,13 @@
 //!
 //! FH.8: `--full` keeps every impact row, impact seed and test row (no
 //! `--max-impact` / `--max-tests` cut and no seed cap, whose default is
-//! `DEFAULT_ANSWER_ROWS`, 200); a cut impact carries `impact.truncated:
-//! {results, seeds}` in the JSON, which leaves out null, empty and default
-//! fields (the engine's `DiffImpact` / `BlastRadius` list). stderr, per
-//! `--json`: `[answer-size] surface=review rows=<r> shown=<k> bytes=<b>`.
+//! `DEFAULT_ANSWER_SEEDS`, 50, FH.8b); a cut impact carries
+//! `impact.truncated: {results, seeds}` in the JSON, which leaves out null,
+//! empty and default fields (the engine's `DiffImpact` / `BlastRadius`
+//! list; FH.8b: a `changed` row that repeats a shown seed is `{id, change}`
+//! and a seed's `also_in` past three members folds, unless `--full`).
+//! stderr, per `--json`: `[answer-size] surface=review rows=<r> shown=<k>
+//! bytes=<b> seeds=<s> seeds_shown=<t> also_in_folded=<f>`.
 //!
 //! Fired-on markers: the engine's
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
@@ -312,7 +315,7 @@ mod tests {
             )
         );
         assert_eq!(e.models_min_tier, "fact", "the ruling's default");
-        assert_eq!(e.max_seeds, glia_engine::DEFAULT_ANSWER_ROWS);
+        assert_eq!(e.max_seeds, glia_engine::DEFAULT_ANSWER_SEEDS);
         let mut full = ReviewArgs::default();
         lift_caps(&mut full);
         assert_eq!(

@@ -20,7 +20,10 @@
 //!   are cut to `max_impact` (`counts.impact` is the uncut length), its seeds
 //!   to `max_seeds` (`counts.seeds` uncut), and `impact.truncated` counts
 //!   both cuts (FH.8; the JSON of `changed` and `impact` is compact, as
-//!   `diff_impact::DiffImpact` documents);
+//!   `diff_impact::DiffImpact` documents: FH.8b, under any cap below
+//!   `usize::MAX` a `changed` row that repeats a shown seed is `{id,
+//!   change}` and a seed's `also_in` past three members is folded; the CLI's
+//!   `--full` / pyo3's `full=True` lift every cap);
 //! - `tests`: `tests_for::tests_for_delta` (LE.3b / CC.1) with
 //!   [`ReviewArgs::tests`], cut to `max_tests` (`counts.tests` is the uncut
 //!   length; `test_files` is recomputed over the kept rows, so it stays "the
@@ -296,7 +299,8 @@ use glia_projection_text::ladder::note_tier;
 
 use crate::absence::BlindCaveat;
 use crate::answers::{
-    BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_ROWS, Locator, in_scope, project_roots,
+    AnswerSize, BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_SEEDS, Locator, SizedAnswer,
+    in_scope, project_roots,
 };
 use crate::calibrate::fusions::{
     AnswerInputs, Signals, answer_signals, needs, seeded_keys, seeded_order,
@@ -314,7 +318,7 @@ use crate::contract_breaks::{
 use crate::contract_fields::FieldSide;
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
-use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on};
+use crate::diff_impact::{ChangedNode, diff_impact_from_delta_on, fold_seed_rows};
 use crate::external::declared::{conventions, conventions_for, declared_constraints, node_repos};
 use crate::git_rev;
 use crate::health;
@@ -352,10 +356,11 @@ pub struct ReviewArgs {
     /// Test rows kept ([`DEFAULT_MAX_TESTS`]); `counts.tests` is uncut and
     /// `tests.absence` is the uncut answer's, as for `max_impact`.
     pub max_tests: usize,
-    /// FH.8: impact seeds kept ([`DEFAULT_ANSWER_ROWS`]); `counts.seeds` is
-    /// uncut. What this and `max_impact` cut is `impact.truncated`
-    /// (`{results, seeds}`, absent when nothing was cut); `usize::MAX` for
-    /// both (the CLI's `--full`) keeps every row.
+    /// FH.8: impact seeds kept ([`DEFAULT_ANSWER_SEEDS`], FH.8b; it was
+    /// `DEFAULT_ANSWER_ROWS`); `counts.seeds` is uncut. What this and
+    /// `max_impact` cut is `impact.truncated` (`{results, seeds}`, absent
+    /// when nothing was cut); `usize::MAX` for both (the CLI's `--full`)
+    /// keeps every row.
     pub max_seeds: usize,
     /// The weakest pairing tier at which a breaking inferred-model row blocks
     /// (`contract_breaks::MODEL_MIN_TIERS`; module docs "Model breaks"):
@@ -377,7 +382,7 @@ impl Default for ReviewArgs {
             tests: TestsForArgs::default(),
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
-            max_seeds: DEFAULT_ANSWER_ROWS,
+            max_seeds: DEFAULT_ANSWER_SEEDS,
             models_min_tier: MODEL_MIN_TIERS[0],
             title: None,
         }
@@ -493,6 +498,13 @@ pub struct Review {
     /// otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+}
+
+impl SizedAnswer for Review {
+    /// FH.8b: the impact radius's seeds (`[answer-size] surface=review ..`).
+    fn answer_size(&self) -> AnswerSize {
+        self.impact.size()
+    }
 }
 
 /// FB.12b: a convention governing at least one changed file (module docs
@@ -623,7 +635,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     } else {
         &args.blast
     };
-    let di = diff_impact_from_delta_on(rev, blast, "review");
+    let mut di = diff_impact_from_delta_on(rev, blast, "review");
     let mut impact = di.impact;
     let (intent, intent_line) = match blast.rank_cache.as_deref() {
         Some(cache) => review_intent(rev, cache, &mut impact, args.max_impact, ask),
@@ -640,6 +652,8 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     let impact_total = impact.rows_total();
     let seeds_total = impact.seeds.len() + impact.truncated.as_ref().map_or(0, |t| t.seeds);
     impact.cap(args.max_impact, args.max_seeds);
+    // FH.8b: `changed` folds against the seeds the review's cut kept.
+    fold_seed_rows(&mut di.changed, &impact);
 
     let mut tests = tests_for_delta(rev, &args.tests)?;
     // `omitted` is what a caller's `args.tests.limit` cut (CC.9a): the

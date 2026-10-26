@@ -88,7 +88,9 @@ use glia_core::NodeId;
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, BlindCaveat};
-use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded_on};
+use crate::answers::{
+    AnswerSize, BlastOptions, BlastRadius, Located, Locator, SizedAnswer, blast_radius_seeded_on,
+};
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
 use crate::health;
 use crate::identity::Collapse;
@@ -109,20 +111,69 @@ const PRIMITIVE: &str = "diff_impact";
 /// seed.
 ///
 /// FH.8, the JSON leaves out `file` / `line` when null and `seed` when false.
+///
+/// FH.8b: in a compact answer (one cut by a row cap: `BlastRadius`'s docs) a
+/// seed row whose seed `impact.seeds` shows is written as `{id, change}`
+/// only: its full row is that seed's. A row whose seed the seed cap cut
+/// stays whole. The struct always holds every field.
 #[non_exhaustive]
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct ChangedNode {
     pub id: u64,
     pub qname: String,
     pub kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /// 1-based.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
     pub change: &'static str,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub seed: bool,
+    /// FH.8b: the JSON names only the id and the change ([`fold_seed_rows`]).
+    pub(crate) seed_ref: bool,
+}
+
+impl serde::Serialize for ChangedNode {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("ChangedNode", 7)?;
+        st.serialize_field("id", &self.id)?;
+        if self.seed_ref {
+            st.serialize_field("change", &self.change)?;
+            return st.end();
+        }
+        st.serialize_field("qname", &self.qname)?;
+        st.serialize_field("kind", &self.kind)?;
+        match &self.file {
+            Some(f) => st.serialize_field("file", f)?,
+            None => st.skip_field("file")?,
+        }
+        match &self.line {
+            Some(l) => st.serialize_field("line", l)?,
+            None => st.skip_field("line")?,
+        }
+        st.serialize_field("change", &self.change)?;
+        if self.seed {
+            st.serialize_field("seed", &self.seed)?;
+        } else {
+            st.skip_field("seed")?;
+        }
+        st.end()
+    }
+}
+
+/// FH.8b: in a compact `impact` ([`BlastRadius::is_compact`]), each seed row
+/// of `changed` whose node `impact.seeds` shows is written as `{id, change}`;
+/// every other row (and every row of an uncut answer) whole. Recomputed on
+/// each call, so a later seed cut (review's `max_seeds`) restores the rows
+/// whose seed it dropped.
+pub(crate) fn fold_seed_rows(changed: &mut [ChangedNode], impact: &BlastRadius) {
+    let shown: HashSet<u64> = if impact.is_compact() {
+        impact.seeds.iter().map(|s| s.id).collect()
+    } else {
+        HashSet::new()
+    };
+    for c in changed {
+        c.seed_ref = c.seed && shown.contains(&c.id);
+    }
 }
 
 /// The answer (module docs): what changed, and the one radius around it.
@@ -132,7 +183,9 @@ pub struct ChangedNode {
 /// `impact` is [`BlastRadius`]'s compact form: its `results` and `seeds` cut
 /// to the caller's `top_k` (the CLI's and pyo3's default
 /// [`crate::answers::DEFAULT_ANSWER_ROWS`]) with `impact.truncated` counting
-/// the cut.
+/// the cut. FH.8b: `changed` rows that repeat a shown seed are folded
+/// ([`ChangedNode`]) and the seeds' `also_in` past three members
+/// (`BlastSeed`) when the impact is compact.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DiffImpact {
@@ -157,6 +210,12 @@ pub struct DiffImpact {
     /// empty, and not serialized, otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+}
+
+impl SizedAnswer for DiffImpact {
+    fn answer_size(&self) -> AnswerSize {
+        self.impact.size()
+    }
 }
 
 /// The impact of the working tree's change against git rev `base` (module
@@ -243,6 +302,7 @@ pub(crate) fn diff_impact_from_delta_on(
             line: n.line,
             change: n.change,
             seed: n.change != "removed" && is_seed.contains(&NodeId(n.id)),
+            seed_ref: false,
         })
         .collect();
     let listed: HashSet<u64> = changed
@@ -286,6 +346,7 @@ pub(crate) fn diff_impact_from_delta_on(
     if let Some(a) = impact.absence.as_mut() {
         a.unparsed_files = rev.after.parse_errors.len();
     }
+    fold_seed_rows(&mut changed, &impact);
     let answer = DiffImpact {
         base: Some(given),
         changed,
@@ -345,7 +406,7 @@ pub fn diff_impact_from_diff(
     let loc = Locator::new(merged);
     let seeds = seed_list(&loc, &ids);
     let is_seed: HashSet<NodeId> = seeds.iter().map(|&(_, id)| id).collect();
-    let changed: Vec<ChangedNode> = ids
+    let mut changed: Vec<ChangedNode> = ids
         .iter()
         .map(|&id| row(loc.locate(id), "diff_hit", is_seed.contains(&id)))
         .collect();
@@ -367,6 +428,7 @@ pub fn diff_impact_from_diff(
     } else {
         blast_radius_seeded_on(merged, &seeds, opts, "diff_impact")
     };
+    fold_seed_rows(&mut changed, &impact);
     let answer = DiffImpact {
         base: None,
         changed,
@@ -457,6 +519,7 @@ fn row(at: Located, change: &'static str, seed: bool) -> ChangedNode {
         line: at.line,
         change,
         seed,
+        seed_ref: false,
     }
 }
 
@@ -479,6 +542,8 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
             None,
         )),
         truncated: None,
+        blind: Vec::new(),
+        compact: false,
     }
 }
 
@@ -567,6 +632,7 @@ fn header_path<'a>(p: &'a str, prefix: &str) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn shape(items: &[DiffItem]) -> Vec<(&str, bool)> {
         items
@@ -648,6 +714,28 @@ diff --git a/shop/c.py b/shop/c.py\ndeleted file mode 100644\n--- a/shop/c.py\n+
             "{v}"
         );
         assert_eq!(cut.impact.rows_total(), n);
+        // FH.8b: a capped answer's changed row that repeats a shown seed is
+        // its id and change kind; the full row is under impact.seeds.
+        let seed_ids: Vec<&Value> = v["impact"]["seeds"]
+            .as_array()
+            .map(|s| s.iter().map(|s| &s["id"]).collect())
+            .unwrap_or_default();
+        let changed = v["changed"].as_array().cloned().unwrap_or_default();
+        assert!(!changed.is_empty(), "{v}");
+        for row in &changed {
+            assert!(seed_ids.contains(&&row["id"]), "every hit seeds: {v}");
+            let keys: Vec<&str> = row
+                .as_object()
+                .map(|o| o.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(keys, ["change", "id"], "{row}");
+        }
+        assert_eq!(
+            cut.changed[0].qname, all.changed[0].qname,
+            "the struct keeps it"
+        );
+        let full = serde_json::to_value(&all).expect("serialises");
+        assert!(full["changed"][0]["qname"].is_string(), "uncut: {full}");
         let missing = diff_impact_from_diff(&m, "gone.py\n", &BlastOptions::default());
         let v = serde_json::to_value(&missing).expect("serialises");
         assert_eq!(

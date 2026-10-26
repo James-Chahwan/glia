@@ -60,7 +60,13 @@ pub struct FileRanking {
 }
 
 /// One file of [`FileRanking::top`].
-#[derive(Serialize, Debug, Clone, PartialEq)]
+///
+/// FH.8b, the JSON (its `Serialize` is written out for the first rule):
+/// `cochange` is left out when co-change ranked nothing (it did not rank
+/// first, or no candidate file has a co-change score: no history snapshot),
+/// `ppr` when it is null (the `B0` base) and `depth` when it is null (a PPR
+/// base, or a file the BFS did not reach). The struct always holds them.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RankedFile {
     /// 1-based.
@@ -75,6 +81,33 @@ pub struct RankedFile {
     pub depth: Option<usize>,
     /// The answer's rows located in this file.
     pub rows: usize,
+    /// FH.8b: co-change ranked this list, so the JSON writes `cochange`.
+    pub(crate) cochange_ranked: bool,
+}
+
+impl Serialize for RankedFile {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("RankedFile", 7)?;
+        st.serialize_field("rank", &self.rank)?;
+        st.serialize_field("file", &self.file)?;
+        st.serialize_field("repo", &self.repo)?;
+        if self.cochange_ranked {
+            st.serialize_field("cochange", &self.cochange)?;
+        } else {
+            st.skip_field("cochange")?;
+        }
+        match &self.ppr {
+            Some(p) => st.serialize_field("ppr", p)?,
+            None => st.skip_field("ppr")?,
+        }
+        match &self.depth {
+            Some(d) => st.serialize_field("depth", d)?,
+            None => st.skip_field("depth")?,
+        }
+        st.serialize_field("rows", &self.rows)?;
+        st.end()
+    }
 }
 
 impl FileRanking {
@@ -110,6 +143,14 @@ impl FileRanking {
         k: usize,
         rows_per_file: &BTreeMap<u32, usize>,
     ) -> Vec<RankedFile> {
+        // FH.8b: co-change ranked when it ranks first and scored a
+        // candidate (a seed file's own score never orders a row).
+        let cochange_ranked = self.ranking.cochange_first
+            && self
+                .c0
+                .iter()
+                .enumerate()
+                .any(|(f, &c)| c > 0.0 && !self.seed_files.contains(&(f as u32)));
         self.order
             .iter()
             .take(k)
@@ -135,6 +176,7 @@ impl FileRanking {
                     ppr,
                     depth,
                     rows: rows_per_file.get(&f).copied().unwrap_or(0),
+                    cochange_ranked,
                 }
             })
             .collect()

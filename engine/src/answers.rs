@@ -14,12 +14,13 @@ use glia_code_extractors::queues::is_framework_tag;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use glia_graph::{MergedGraph, Reach, RepoGraph};
 
-use crate::absence::{self, Absence, Answer};
+use crate::absence::{self, Absence, Answer, BlindCaveat};
 use crate::calibrate::{
     COCHANGE_CANDIDATES, COCHANGE_SET, STRUCTURE_CANDIDATES, STRUCTURE_SET, Selection, Shape,
     explicit, log_selection, select as select_ranking,
 };
 use crate::find::{self, FindOptions};
+use crate::health;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
 use crate::rank::{
@@ -706,9 +707,12 @@ pub struct BlastOptions {
     /// Maximum hops along carry edges, counted from the nearest seed.
     pub depth: usize,
     /// Keep the first `top_k` rows, cut after `scope` and the ranking, and the
-    /// first `top_k` seeds; `None` keeps all. FH.8: what the cut drops is
-    /// [`BlastRadius::truncated`]. The CLI and pyo3 default it to
-    /// [`DEFAULT_ANSWER_ROWS`]; this default keeps all.
+    /// first `min(top_k, DEFAULT_ANSWER_SEEDS)` seeds; `None` keeps all.
+    /// FH.8: what the cut drops is [`BlastRadius::truncated`]. The CLI and
+    /// pyo3 default it to [`DEFAULT_ANSWER_ROWS`]; this default keeps all.
+    /// FH.8b: `Some` also makes the answer's JSON compact
+    /// ([`BlastRadius`]'s docs: a seed's `also_in` folded); `None` (the
+    /// surfaces' `--full` / `full=True`) writes every field whole.
     pub top_k: Option<usize>,
     /// Drop the rows no entry point reaches ([`entrypoint_reachable`])
     /// instead of flagging them `live: false`.
@@ -775,6 +779,12 @@ impl Default for BlastOptions {
 /// is left out when it equals `qname` (an id-seeded caller such as diff
 /// impact passes the qname), `file` / `line` when null, `linked_seeds` when
 /// empty, `identity` outside a class.
+///
+/// FH.8b: in a compact answer (one cut by a row cap, [`BlastRadius`]'s
+/// docs) an `identity.also_in` of more than [`ALSO_IN_SHOWN`] members is
+/// written as its first [`ALSO_IN_SHOWN`] members, in `also_in` order, and
+/// `also_in_count`, the whole list's length, after it. The struct always
+/// holds every member.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastSeed {
@@ -792,6 +802,46 @@ pub struct BlastSeed {
     /// its class-mates (`also_in`), which a walk class makes part of the seed
     /// itself (never rows). Absent from the JSON outside a class.
     pub identity: Option<RowIdentity>,
+    /// FH.8b: the answer is compact ([`BlastRadius::set_compact`]): fold
+    /// `identity.also_in` in the JSON.
+    pub(crate) compact: bool,
+}
+
+impl BlastSeed {
+    /// FH.8b: this seed's JSON folds its `identity.also_in`.
+    fn folds_also_in(&self) -> bool {
+        self.compact
+            && self
+                .identity
+                .as_ref()
+                .is_some_and(|i| i.also_in.len() > ALSO_IN_SHOWN)
+    }
+}
+
+/// FH.8b: a seed's class as its JSON writes it: [`RowIdentity`]'s fields in
+/// its order, `also_in` cut to [`ALSO_IN_SHOWN`] with `also_in_count` after
+/// it when `fold`.
+struct SeedIdentity<'a> {
+    identity: &'a RowIdentity,
+    fold: bool,
+}
+
+impl serde::Serialize for SeedIdentity<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if !self.fold {
+            return self.identity.serialize(s);
+        }
+        let i = self.identity;
+        let shown = &i.also_in[..ALSO_IN_SHOWN.min(i.also_in.len())];
+        let mut st = s.serialize_struct("RowIdentity", 5)?;
+        st.serialize_field("tier", &i.tier)?;
+        st.serialize_field("rules", &i.rules)?;
+        st.serialize_field("diverged", &i.diverged)?;
+        st.serialize_field("also_in", shown)?;
+        st.serialize_field("also_in_count", &i.also_in.len())?;
+        st.end()
+    }
 }
 
 impl serde::Serialize for BlastSeed {
@@ -820,7 +870,13 @@ impl serde::Serialize for BlastSeed {
             st.serialize_field("linked_seeds", &self.linked_seeds)?;
         }
         match &self.identity {
-            Some(i) => st.serialize_field("identity", i)?,
+            Some(identity) => st.serialize_field(
+                "identity",
+                &SeedIdentity {
+                    identity,
+                    fold: self.folds_also_in(),
+                },
+            )?,
             None => st.skip_field("identity")?,
         }
         st.end()
@@ -844,21 +900,62 @@ pub struct Truncated {
 /// [`BlastOptions::default`] cuts nothing.
 pub const DEFAULT_ANSWER_ROWS: usize = 200;
 
+/// FH.8b: the seeds a capped answer keeps: `min(top_k, DEFAULT_ANSWER_SEEDS)`
+/// for a [`BlastOptions::top_k`] cut, and `review::ReviewArgs::max_seeds`'
+/// default. Rows stay at [`DEFAULT_ANSWER_ROWS`]; `truncated.seeds` counts
+/// the seeds past it, and `--full` / `full=True` keeps every seed.
+pub const DEFAULT_ANSWER_SEEDS: usize = 50;
+
+/// FH.8b: the `identity.also_in` members a compact answer's seed shows
+/// ([`BlastSeed`]); `also_in_count` gives the whole list's length.
+pub const ALSO_IN_SHOWN: usize = 3;
+
+/// FH.8b: an answer's seed counts, for the `[answer-size]` line
+/// ([`answer_json`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AnswerSize {
+    /// Seeds before any cap (`truncated.seeds` added back).
+    pub seeds: usize,
+    /// Seeds the answer holds.
+    pub seeds_shown: usize,
+    /// Shown seeds whose `identity.also_in` the JSON folds.
+    pub also_in_folded: usize,
+}
+
+/// FH.8b: an answer [`answer_json`] serialises: it says how many seeds it
+/// holds and folds. `BlastRadius`, `diff_impact::DiffImpact` and
+/// `review::Review` (each through its impact radius).
+pub trait SizedAnswer: serde::Serialize {
+    fn answer_size(&self) -> AnswerSize;
+}
+
+impl SizedAnswer for BlastRadius {
+    fn answer_size(&self) -> AnswerSize {
+        self.size()
+    }
+}
+
 /// FH.8: `answer`'s JSON text for an answer surface (`blast_radius`,
 /// `diff_impact`, `review`), the one serialisation the CLI's `--json` and the
 /// pyo3 dicts read. `rows` is the uncut result-row count, `shown` the rows the
-/// JSON holds. fired_on, stderr, once per call:
-/// `[answer-size] surface=<s> rows=<r> shown=<k> bytes=<b>`.
-pub fn answer_json<T: serde::Serialize>(
+/// JSON holds. fired_on, stderr, once per call (FH.8b adds the seeds):
+/// `[answer-size] surface=<s> rows=<r> shown=<k> bytes=<b> seeds=<s>
+/// seeds_shown=<t> also_in_folded=<f>`.
+pub fn answer_json<T: SizedAnswer>(
     surface: &str,
     answer: &T,
     rows: usize,
     shown: usize,
 ) -> serde_json::Result<String> {
     let text = serde_json::to_string(answer)?;
+    let size = answer.answer_size();
     eprintln!(
-        "[answer-size] surface={surface} rows={rows} shown={shown} bytes={}",
-        text.len()
+        "[answer-size] surface={surface} rows={rows} shown={shown} bytes={} seeds={} seeds_shown={} also_in_folded={}",
+        text.len(),
+        size.seeds,
+        size.seeds_shown,
+        size.also_in_folded,
     );
     Ok(text)
 }
@@ -876,6 +973,15 @@ pub fn answer_json<T: serde::Serialize>(
 /// equals `qname`, `file` / `line` when null, `linked_seeds` when empty.
 /// Every other field is always written: `live: false` is the dead flag and
 /// `score` is the closure's PPR score under every ranking.
+///
+/// FH.8b: an answer cut by a row cap (a [`BlastOptions::top_k`], a review's
+/// `max_impact` / `max_seeds` below `usize::MAX`) is compact: a seed's
+/// `identity.also_in` past [`ALSO_IN_SHOWN`] members is folded
+/// ([`BlastSeed`]), and `diff_impact` / `review` reduce a `changed` row
+/// that repeats a shown seed to its id and change. `blind` (FH.9, the
+/// standalone [`blast_radius`]'s caveats) is left out when empty; a
+/// `files` row ([`crate::rank::RankedFile`]) leaves out what its ranking
+/// did not fill.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastRadius {
@@ -909,14 +1015,52 @@ pub struct BlastRadius {
     /// filter drops are not counted: they were never in the answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<Truncated>,
+    /// FH.8b (FH.9's handoff): the mechanisms the standalone [`blast_radius`]
+    /// read ([`crate::health::blast_mechanisms`]) that health rates BLIND or
+    /// DEGRADED on the graph, one `[blind] surface=blast_radius ..` line per
+    /// answer. Empty, and absent from the JSON, otherwise, and always in an
+    /// outer answer's impact (`diff_impact`, `review`), which carries its own
+    /// `blind`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
+    /// FH.8b: a row cap is in force, so the JSON is compact (type docs).
+    #[serde(skip)]
+    pub(crate) compact: bool,
 }
 
 impl BlastRadius {
+    /// FH.8b: mark the answer compact (type docs), each seed with it.
+    pub(crate) fn set_compact(&mut self) {
+        self.compact = true;
+        for s in &mut self.seeds {
+            s.compact = true;
+        }
+    }
+
+    /// FH.8b: a row cap is in force: the JSON is compact (type docs).
+    pub fn is_compact(&self) -> bool {
+        self.compact
+    }
+
+    /// FH.8b: the seeds before and after any cap, and the shown seeds whose
+    /// `also_in` the JSON folds.
+    pub fn size(&self) -> AnswerSize {
+        AnswerSize {
+            seeds: self.seeds.len() + self.truncated.as_ref().map_or(0, |t| t.seeds),
+            seeds_shown: self.seeds.len(),
+            also_in_folded: self.seeds.iter().filter(|s| s.folds_also_in()).count(),
+        }
+    }
+
     /// FH.8: keep the first `results` rows and the first `seeds` seeds,
     /// adding what each cut drops to [`BlastRadius::truncated`] (set only
     /// when something is dropped). The absence and every count are left as
-    /// they were: a cut never makes an answer empty-with-a-reason.
+    /// they were: a cut never makes an answer empty-with-a-reason. FH.8b: a
+    /// limit below `usize::MAX` makes the answer compact, cut or not.
     pub(crate) fn cap(&mut self, results: usize, seeds: usize) {
+        if results != usize::MAX || seeds != usize::MAX {
+            self.set_compact();
+        }
         let cut_results = self.results.len().saturating_sub(results);
         let cut_seeds = self.seeds.len().saturating_sub(seeds);
         if cut_results == 0 && cut_seeds == 0 {
@@ -988,10 +1132,15 @@ pub fn blast_radius(merged: &MergedGraph, queries: &[&str], opts: &BlastOptions)
             None => {}
         }
     }
-    if unresolved.is_empty() {
-        return blast_radius_seeded(merged, &seeds, opts);
-    }
-    radius(merged, &seeds, unresolved, opts, "blast_radius")
+    let mut answer = if unresolved.is_empty() {
+        blast_radius_seeded(merged, &seeds, opts)
+    } else {
+        radius(merged, &seeds, unresolved, opts, "blast_radius")
+    };
+    // FH.8b (FH.9's handoff): the standalone answer's caveats.
+    answer.blind =
+        health::blind_caveats(merged, "blast_radius", &health::blast_mechanisms(&answer));
+    answer
 }
 
 /// [`blast_radius`] from node ids the caller already holds — `(display
@@ -1180,6 +1329,7 @@ fn radius(
                 line: at.line,
                 linked_seeds: Vec::new(),
                 identity: view.row_identity(id, id),
+                compact: false,
             });
         }
         for (i, links) in linked.iter().enumerate() {
@@ -1323,10 +1473,11 @@ fn radius(
             kept_in_scope,
         )
     });
-    // FH.8: seeds cap at the same K, after the walk, the links and the
-    // absence have read every seed.
+    // FH.8: seeds cap at the same K (FH.8b: at most DEFAULT_ANSWER_SEEDS),
+    // after the walk, the links and the absence have read every seed.
     let mut cut_seeds = 0usize;
     if let Some(k) = opts.top_k {
+        let k = k.min(DEFAULT_ANSWER_SEEDS);
         cut_seeds = blast_seeds.len().saturating_sub(k);
         blast_seeds.truncate(k);
     }
@@ -1334,7 +1485,7 @@ fn radius(
         results: cut_results,
         seeds: cut_seeds,
     });
-    BlastRadius {
+    let mut answer = BlastRadius {
         seeds: blast_seeds,
         unresolved,
         results: out,
@@ -1342,7 +1493,13 @@ fn radius(
         selection,
         absence,
         truncated,
+        blind: Vec::new(),
+        compact: false,
+    };
+    if opts.top_k.is_some() {
+        answer.set_compact();
     }
+    answer
 }
 
 /// EC.8: one answer's [`Selection`] and the [`Ranking`] it names. The set is
@@ -3918,8 +4075,9 @@ mod compact_tests {
     //! FH.8: a capped answer says what it cut (`truncated`), and its JSON
     //! leaves out the null / empty / default fields its docs list.
 
-    use super::{BlastOptions, blast_radius};
+    use super::{BlastOptions, DEFAULT_ANSWER_ROWS, DEFAULT_ANSWER_SEEDS, blast_radius};
     use crate::build::generate_many;
+    use crate::identity::{AlsoIn, RowIdentity};
     use serde_json::Value;
 
     /// `core` and eight callers, two of which call each other's neighbour.
@@ -4065,5 +4223,133 @@ mod compact_tests {
             miss["absence"].is_object() && miss.get("results").is_some(),
             "{miss}"
         );
+    }
+
+    /// The capped options the CLI and pyo3 surfaces pass by default.
+    fn capped() -> BlastOptions {
+        BlastOptions {
+            top_k: Some(DEFAULT_ANSWER_ROWS),
+            ..BlastOptions::default()
+        }
+    }
+
+    /// A class of `n` other members, in their `also_in` order.
+    fn class_of(n: i64) -> RowIdentity {
+        RowIdentity {
+            tier: "derived",
+            rules: vec!["contract_op"],
+            diverged: false,
+            also_in: (1..=n)
+                .map(|i| AlsoIn {
+                    repo: "repo".to_string(),
+                    qname: format!("q{i}"),
+                    file: Some(format!("f{i}.py")),
+                    line: Some(i),
+                })
+                .collect(),
+        }
+    }
+
+    /// FH.8b: a capped answer's seed `identity.also_in` past three members
+    /// is the first three plus `also_in_count`; an uncut (`--full`) answer
+    /// keeps the whole list, and a list of three or fewer is never folded.
+    #[test]
+    fn a_capped_seed_folds_its_also_in_to_three_and_a_count() {
+        let (_dir, m) = app();
+        let mut cut = blast_radius(&m, &["app::core"], &capped());
+        cut.seeds[0].identity = Some(class_of(5));
+        let v = json(&cut);
+        let id = &v["seeds"][0]["identity"];
+        assert_eq!(id["also_in_count"], 5, "{id}");
+        let shown: Vec<&str> = id["also_in"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|m| m["qname"].as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(shown, ["q1", "q2", "q3"], "the first three, in order");
+        assert_eq!(cut.size().also_in_folded, 1);
+        assert_eq!(
+            cut.seeds[0].identity.as_ref().map(|i| i.also_in.len()),
+            Some(5),
+            "the struct keeps every member: only the JSON folds"
+        );
+
+        cut.seeds[0].identity = Some(class_of(3));
+        let v = json(&cut);
+        assert!(
+            v["seeds"][0]["identity"].get("also_in_count").is_none(),
+            "three members are shown whole: {v}"
+        );
+        assert_eq!(cut.size().also_in_folded, 0);
+
+        let mut full = blast_radius(&m, &["app::core"], &BlastOptions::default());
+        full.seeds[0].identity = Some(class_of(5));
+        let v = json(&full);
+        assert_eq!(
+            v["seeds"][0]["identity"],
+            json(&class_of(5)),
+            "an uncut answer writes the class as RowIdentity does"
+        );
+    }
+
+    /// FH.8b: a capped answer keeps [`DEFAULT_ANSWER_SEEDS`] seeds (rows stay
+    /// at `top_k`), `truncated.seeds` counting the rest; uncut keeps all.
+    #[test]
+    fn a_capped_answer_keeps_fifty_seeds() {
+        let mut src = String::from("def core(x):\n    return x\n\n\n");
+        for i in 1..=60 {
+            src.push_str(&format!("def s{i}():\n    return core({i})\n\n\n"));
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("api dir");
+        std::fs::write(api.join("app.py"), src).expect("write app.py");
+        let m = generate_many(&[api.display().to_string()])
+            .expect("builds")
+            .merged;
+        let names: Vec<String> = (1..=60).map(|i| format!("app::s{i}")).collect();
+        let queries: Vec<&str> = names.iter().map(String::as_str).collect();
+        let cut = blast_radius(&m, &queries, &capped());
+        assert_eq!(cut.seeds.len(), DEFAULT_ANSWER_SEEDS);
+        assert_eq!(cut.truncated.as_ref().map(|t| t.seeds), Some(10));
+        let size = cut.size();
+        assert_eq!((size.seeds, size.seeds_shown), (60, DEFAULT_ANSWER_SEEDS));
+        let all = blast_radius(&m, &queries, &BlastOptions::default());
+        assert_eq!(all.seeds.len(), 60);
+        assert!(all.truncated.is_none());
+    }
+
+    /// FH.8b: `files` rows leave out `cochange` when co-change ranked
+    /// nothing (no history snapshot) and `ppr` / `depth` when their base did
+    /// not run.
+    #[test]
+    fn ranked_files_leave_out_the_fields_their_ranking_did_not_fill() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("api dir");
+        std::fs::write(api.join("app.py"), "def core(x):\n    return x\n").expect("write");
+        std::fs::write(
+            api.join("user.py"),
+            "from app import core\n\n\ndef f():\n    return core(1)\n",
+        )
+        .expect("write");
+        let m = generate_many(&[api.display().to_string()])
+            .expect("builds")
+            .merged;
+        let ppr = json(&blast_radius(&m, &["app::core"], &BlastOptions::default()));
+        let row = &ppr["files"][0];
+        assert!(row.is_object(), "a ranked file: {ppr}");
+        assert!(row.get("cochange").is_none(), "no snapshot: {row}");
+        assert!(row.get("depth").is_none(), "no BFS: {row}");
+        assert!(row["ppr"].is_number(), "{row}");
+        let opts = BlastOptions {
+            ranking: crate::rank::Ranking::new(crate::rank::RankBase::Bfs, false),
+            select: false,
+            ..BlastOptions::default()
+        };
+        let bfs = json(&blast_radius(&m, &["app::core"], &opts));
+        let row = &bfs["files"][0];
+        assert!(row["depth"].is_number(), "BFS ran: {row}");
+        assert!(row.get("ppr").is_none(), "no PPR base: {row}");
+        assert!(row.get("cochange").is_none(), "co-change off: {row}");
     }
 }

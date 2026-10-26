@@ -185,6 +185,20 @@ fn rows(v: &Value) -> Vec<(String, u64, String)> {
     out
 }
 
+/// FH.8b: a changed row's qname. A compact answer writes a row that repeats a
+/// shown seed as `{id, change}`, its full row under `impact.seeds`.
+fn changed_qname(v: &Value, i: usize) -> Value {
+    let row = &v["changed"][i];
+    if row.get("qname").is_some() {
+        return row["qname"].clone();
+    }
+    v["impact"]["seeds"]
+        .as_array()
+        .and_then(|s| s.iter().find(|s| s["id"] == row["id"]))
+        .map(|s| s["qname"].clone())
+        .unwrap_or(Value::Null)
+}
+
 fn price_rows() -> Vec<(String, u64, String)> {
     vec![
         ("shop::a::place".to_string(), 1, PRICE.to_string()),
@@ -209,7 +223,9 @@ fn diff_file_json() {
     keys.sort_unstable();
     // FH.8: pasted mode's null base and empty lists are left out.
     assert_eq!(keys, ["changed", "impact"]);
-    assert_eq!(v["changed"][0]["qname"], PRICE);
+    assert_eq!(changed_qname(&v, 0), PRICE);
+    // FH.8b: the changed row repeats a shown seed, so it is its id and change.
+    assert!(v["changed"][0].get("qname").is_none(), "{v}");
     assert_eq!(v["changed"][0]["change"], "diff_hit");
     assert_eq!(rows(&v), price_rows());
     assert_eq!(
@@ -271,7 +287,10 @@ fn top_k_cuts_and_full_keeps_every_row() {
     let bytes = stdout(&cut).trim_end().len();
     assert!(
         stderr(&cut).lines().any(|l| l
-            == format!("[answer-size] surface=diff_impact rows=2 shown=1 bytes={bytes}")),
+            == format!(
+                "[answer-size] surface=diff_impact rows=2 shown=1 bytes={bytes} \
+                 seeds=1 seeds_shown=1 also_in_folded=0"
+            )),
         "{}",
         stderr(&cut)
     );
@@ -438,7 +457,7 @@ fn identity_rows_name_the_repo() {
     let out = s.diff_impact(&["--diff", &diff, "--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    assert_eq!(v["changed"][0]["qname"], "main::listOrders", "{v}");
+    assert_eq!(changed_qname(&v, 0), "main::listOrders", "{v}");
     assert_eq!(also_in_repos(&v), ["repo", "repo"], "{v}");
 
     // Rev mode: the same edit against HEAD.

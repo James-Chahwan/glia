@@ -2,7 +2,7 @@
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
 depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None,
-cochange=True, title=None)` builds the git
+cochange=True, title=None, full=False)` builds the git
 rev `base` and the working tree of the repo at `repo_path` and returns the
 engine's review as a native dict {base, counts, changed, impact, tests, edges,
 new_violations, resolved_violations, model_breaks, check_errors, blocking}
@@ -15,7 +15,12 @@ ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
 (its newest subject is the default title); EC.11: `selection_intent`
 follows it (set SELt2's calibrated pick, EC.12, else LX[IDR,P1]). FB.12b:
 `conventions` (after check_errors) lists the conventions governing the
-changed files, only when one does. Needs a `git` binary. Shared
+changed files, only when one does. FH.8b: the dict is compact by default
+(impact seeds capped at 50, a seed's identity also_in past three members
+folded to three plus also_in_count, a changed row that repeats a shown seed
+reduced to {id, change}); full=True lifts every cap (max_impact and
+max_tests included) and writes every row whole; one `[answer-size]
+surface=review ..` line per dict. Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -43,7 +48,8 @@ CONVENTION = ("\n[[convention]]\nid = \"api-pure\"\nscope = \"services/api\"\n"
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None)]
+      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None),
+      ("full", False)]
 # DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
 MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
 TAG = '`json:"customerName"`'
@@ -128,6 +134,27 @@ def main() -> int:
         c.check("max_tests / max_impact cut the rows, not the counts",
                 capped["tests"]["tests"] == [] and capped["impact"]["results"] == []
                 and capped["counts"] == d.get("counts"), capped.get("counts"))
+
+        c.check("FH.8b: markdown prints no answer-size line", "[answer-size]" not in err, err[-400:])
+        _, err = stderr_of(lambda: rg.review_vs_rev(str(top)))
+        size = [line for line in err.splitlines() if line.startswith("[answer-size] surface=review ")]
+        c.check("FH.8b: one answer-size line per dict, seeds counted",
+                len(size) == 1 and " seeds=" in size[0] and " also_in_folded=" in size[0], err[-600:])
+        seed_ids = {s.get("id") for s in d.get("impact", {}).get("seeds", [])}
+        c.check("FH.8b: by default a changed row that repeats a shown seed is {id, change}",
+                seed_ids != set()
+                and all(sorted(r) == ["change", "id"] for r in d.get("changed", []) if r.get("id") in seed_ids),
+                d.get("changed"))
+        whole, err = stderr_of(lambda: rg.review_vs_rev(str(top), max_tests=0, max_impact=0, full=True))
+        c.check("FH.8b: full=True lifts max_impact / max_tests",
+                len(whole["impact"]["results"]) == whole["counts"]["impact"]
+                and len(whole["tests"]["tests"]) == whole["counts"]["tests"]
+                and "truncated" not in whole["impact"], whole.get("counts"))
+        c.check("FH.8b: full=True writes every changed row whole",
+                whole["changed"] != [] and all("qname" in r for r in whole["changed"]), whole.get("changed"))
+        c.check("FH.8b: full=True keeps every seed",
+                len(whole["impact"]["seeds"]) == whole["counts"]["seeds"], whole["impact"].get("seeds"))
+        c.check("FH.8b: full=True still marks the dict", "[answer-size] surface=review " in err, err[-400:])
 
         c.raises("format=xml raises", ValueError, lambda: rg.review_vs_rev(str(top), format="xml"),
                  "unknown format `xml`: expected one of dict, markdown")

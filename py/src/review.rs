@@ -4,7 +4,7 @@
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
 //! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
-//! models_min_tier="fact", ranking=None, cochange=True, title=None)` builds the repo's
+//! models_min_tier="fact", ranking=None, cochange=True, title=None, full=False)` builds the repo's
 //! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
 //! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
 //! `{base, counts, changed, impact, tests, edges, new_violations,
@@ -15,7 +15,11 @@
 //! `models_min_tier` outside the engine's `contract_breaks::MODEL_MIN_TIERS`,
 //! an unknown `ranking`, or an engine `Err` (not a git work tree, an unknown
 //! rev, a failed build), raises `ValueError`; the format, the tier and the
-//! ranking are checked before anything is built.
+//! ranking are checked before anything is built. `full=True` (FH.8b) lifts
+//! every row cap: `max_impact`, `max_tests` and the impact's seed cap
+//! (`ReviewArgs::max_seeds`, 50) become unlimited, and the dict is the
+//! whole answer (no seed `also_in` folded, no `changed` row reduced to its
+//! id), as `glia review --full`.
 //!
 //! Transport only: the review, the renderer, the location of every row and
 //! the `[review] base=..` marker live in the engine; this module adds one
@@ -26,6 +30,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::answer_json;
 use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, Review,
@@ -107,6 +112,7 @@ struct Kw<'a> {
     ranking: Option<&'a str>,
     cochange: bool,
     title: Option<&'a str>,
+    full: bool,
 }
 
 impl Default for Kw<'_> {
@@ -122,15 +128,24 @@ impl Default for Kw<'_> {
             ranking: None,
             cochange: true,
             title: None,
+            full: false,
         }
     }
+}
+
+/// FH.8b: `full=True` lifts every row cap (`max_impact`, `max_tests`, the
+/// impact's seed cap), as the CLI's `review --full`.
+fn lift_caps(args: &mut ReviewArgs) {
+    args.max_impact = usize::MAX;
+    args.max_tests = usize::MAX;
+    args.max_seeds = usize::MAX;
 }
 
 /// The body of [`review_vs_rev_py`], minus pyo3. The format and the tier are
 /// checked before anything is built.
 fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String> {
     let format = check_format(kw.format)?;
-    let args = engine_args(
+    let mut args = engine_args(
         kw.depth,
         kw.max_tests,
         kw.max_impact,
@@ -139,6 +154,9 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
         kw.cochange,
         kw.title,
     )?;
+    if kw.full {
+        lift_caps(&mut args);
+    }
     let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
@@ -207,8 +225,16 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// reason; the markdown gains `### Intent` with its `_ranked by .._` line,
 /// and the impact rows in id-routed files come first (text never reorders
 /// them).
+///
+/// FH.8b: by default the dict is compact: `impact.seeds` keeps the first
+/// 50 (`impact.truncated.seeds` counts the rest), a seed's
+/// `identity.also_in` past three members is its first three plus
+/// `also_in_count`, and a `changed` row whose seed `impact.seeds` shows is
+/// `{id, change}` (its full row is that seed's). `full=True` (last keyword)
+/// lifts every cap, `max_impact` and `max_tests` included, and writes every
+/// row whole. One `[answer-size] surface=review ..` line per dict.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None, cochange=true, title=None))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -223,6 +249,7 @@ fn review_vs_rev_py(
     ranking: Option<&str>,
     cochange: bool,
     title: Option<&str>,
+    full: bool,
 ) -> PyResult<Py<PyAny>> {
     let kw = Kw {
         format,
@@ -234,12 +261,24 @@ fn review_vs_rev_py(
         ranking,
         cochange,
         title,
+        full,
     };
     let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
-        Answer::Dict(review) => to_py(py, serde_json::to_string(&review)),
+        Answer::Dict(review) => to_py(py, sized(&review)),
         Answer::Markdown(text) => Ok(text.into_pyobject(py)?.into_any().unbind()),
     }
+}
+
+/// FH.8b: the review's JSON through the engine's `answer_json` (the
+/// `[answer-size] surface=review ..` line).
+fn sized(review: &Review) -> Result<String, serde_json::Error> {
+    answer_json(
+        "review",
+        review,
+        review.counts.impact,
+        review.impact.results.len(),
+    )
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -418,6 +457,28 @@ mod tests {
             (r.counts.tests, r.counts.impact)
         );
 
+        // FH.8b: full lifts every cap; the default keeps the seed cap.
+        let full = Kw {
+            max_tests: 0,
+            max_impact: 0,
+            full: true,
+            ..Kw::default()
+        };
+        let Ok(Answer::Dict(whole)) = rev_answer(repo, "HEAD", &full) else {
+            panic!("format=dict is the review");
+        };
+        assert_eq!(whole.impact.results.len(), r.counts.impact, "every row");
+        assert_eq!(whole.tests.tests.len(), r.counts.tests, "every test");
+        assert!(whole.impact.truncated.is_none() && !whole.impact.is_compact());
+        assert!(r.impact.is_compact(), "the default answer is compact");
+        let mut args = ReviewArgs::default();
+        lift_caps(&mut args);
+        assert_eq!(
+            (args.max_impact, args.max_tests, args.max_seeds),
+            (usize::MAX, usize::MAX, usize::MAX)
+        );
+        assert!(sized(&whole).is_ok_and(|t| t.starts_with('{')));
+
         let xml = Kw {
             format: "xml",
             ..Kw::default()
@@ -502,9 +563,10 @@ mod tests {
                 k.models_min_tier,
                 k.ranking,
                 k.cochange,
-                k.title
+                k.title,
+                k.full
             ),
-            ("dict", 20, 4, 50, 50, "fact", None, true, None),
+            ("dict", 20, 4, 50, 50, "fact", None, true, None, false),
             "Kw::default is the pyo3 signature's"
         );
     }

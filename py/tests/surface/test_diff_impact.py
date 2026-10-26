@@ -9,7 +9,9 @@ reached them; lines are 1-based; a bad direction or an engine error raises
 ValueError. FH.8: the dicts are compact (a null `base`, empty edge lists and
 an empty `unresolved_diff_files` left out) and the impact's rows and seeds are
 cut to `top_k` (default 200) with `impact.truncated`; `full=True` keeps every
-one. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
+one. FH.8b: in a capped dict a changed row that repeats a shown seed is
+{id, change} (its full row is that seed's under impact.seeds); full=True
+writes every changed row whole. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
 test_build.py."""
 from __future__ import annotations
 
@@ -87,13 +89,18 @@ def main() -> int:
                 type(d) is dict and list(d) == ["changed", "impact"], type(d) is dict and list(d))
         c.check("pasted mode has no base", type(d) is dict and d.get("base") is None, d)
         changed = d.get("changed", []) if type(d) is dict else []
-        c.check("changed row keys in engine field order", bool(changed) and list(changed[0]) == CHANGED_KEYS,
-                changed)
-        first = changed[0] if changed else {}
+        c.check("FH.8b: a changed row that repeats a shown seed is {id, change}",
+                bool(changed) and list(changed[0]) == ["id", "change"], changed)
+        impact = d.get("impact", {}) if type(d) is dict else {}
+        seed = next((s for s in impact.get("seeds", []) if changed and s.get("id") == changed[0].get("id")), {})
+        c.check("FH.8b: its full row is the seed's", seed.get("qname") == PRICE, impact.get("seeds"))
+        whole_changed = g.diff_impact(DIFF, direction="backward", full=True).get("changed", [])
+        c.check("full: changed row keys in engine field order",
+                bool(whole_changed) and list(whole_changed[0]) == CHANGED_KEYS, whole_changed)
+        first = whole_changed[0] if whole_changed else {}
         c.check("the edited function is a seed",
                 (first.get("qname"), first.get("change"), first.get("seed"), first.get("line"))
                 == (PRICE, "diff_hit", True, 1), first)
-        impact = d.get("impact", {}) if type(d) is dict else {}
         c.check("impact is blast_radius's dict", list(impact) == [k for k in IMPACT_KEYS if k in impact]
                 and {"seeds", "results", "selection"} <= set(impact), list(impact))
         c.check("rows attributed to the seed", rows(d) == ROWS, rows(d))
