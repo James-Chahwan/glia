@@ -113,6 +113,10 @@ the baseline.
 | rank gate, `bash scripts/rank-gate.sh check` (EG.3) | a commit touches a ranked path; the release's last close-out | the ranked answers on six pinned snapshots vs `bench/rank-gate/baseline/` (Holm, one-sided) | `[rank-gate] check: ok - ..` |
 | cohort gate, `bash scripts/cohort-gate.sh check` (FH.12) | a commit touches `engine/`, `graph/`, `parsers/`, `code-domain/` or the gate's inputs; the release's last close-out | the outlier cohort (`bench/cohort/`, no model), `glia health` per cohort repo and the Sibyl cover (`bench/sibyl/`) vs `bench/cohort/results/baseline/`: per repo verdicts and reach (tolerance 0.05), per task checks, per matrix cell grade | `[cohort-gate] check: ok - ..` |
 
+A wave's close-out runs the cohort gate's fast tier only (`--only` closeout.py's `COHORT_FAST`:
+the eight cohort repos that cost minutes, plus the whole Sibyl cover); the full cohort (about
+1h40m, twenty and medusa most of it) runs at the release's last close-out, before a paid run, or
+with `GLIA_COHORT_GATE_FULL=1` (James 2026-10-26: *"2 hours is crazy ... fine for ... release"*).
 A close-out that cannot afford the cohort run sets `GLIA_COHORT_GATE_SKIP=<reason>`: the record
 says `check: skipped - <reason>`, never a silent pass, and a skip fails the release's last
 close-out. Reading a failure: the FAILED line names each drop (`immich/http/client_reach

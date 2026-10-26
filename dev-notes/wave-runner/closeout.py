@@ -55,6 +55,11 @@ RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 sn
 COHORT_PATHS = ("engine/", "graph/", "parsers/", "code-domain/", "bench/cohort/", "bench/sibyl/",
                 "scripts/cohort-gate.sh")
 COHORT_GATE_TIMEOUT = 14400   # seconds: FH.12's baseline (cohort + health + Sibyl, --jobs 4, sibling agents loading the box) took 6136 s
+# James 2026-10-26 ("2 hours is crazy ... fine for ... release"): a wave's close-out checks only the fast
+# tier, the cohort repos whose tasks + health summed under ~2 min of task time in FH.12's baseline
+# (twenty alone summed ~10,200 s, medusa ~3,500 s), plus the whole Sibyl cover. The release's last
+# close-out (`remaining` empty) runs the full cohort. A partial check is never ratcheted.
+COHORT_FAST = "websocket,commons-text,click,scaffold-eth-2,shell,microservices-demo,gin-vue-admin,zora-protocol"
 
 
 def sh(cmd, cwd=ROOT, timeout=1800):
@@ -149,11 +154,15 @@ def cohort_gate(touched, remaining, wave, release, cmd="bash scripts/cohort-gate
     the committed baseline. A wave touching none of COHORT_PATHS skips it; the release's last close-out
     (`remaining` false) always checks. GLIA_COHORT_GATE_SKIP=<reason> (the close-out cannot afford the
     run) makes the script print `check: skipped - <reason>` into the record: never a silent pass, and a
-    failed gate at the release's last close-out. Returns (ok, the `== ..` line, the failed gate or None)."""
+    failed gate at the release's last close-out. A wave that is not the release's last checks only
+    COHORT_FAST (minutes, not hours); GLIA_COHORT_GATE_FULL=1 forces the whole cohort.
+    Returns (ok, the `== ..` line, the failed gate or None)."""
     if not (ROOT / "scripts/cohort-gate.sh").exists():
         return False, "== [cohort-gate] check: skipped - no scripts/cohort-gate.sh", None
     if remaining and not any(p.startswith(COHORT_PATHS) for p in touched):
         return False, "== [cohort-gate] check: skipped - wave touched no engine/, graph/, parsers/ or code-domain/ path", None
+    if remaining and os.environ.get("GLIA_COHORT_GATE_FULL") != "1":
+        cmd = f"bash scripts/cohort-gate.sh check --only {COHORT_FAST} 2>&1"
     try:
         out, _ = sh(cmd, timeout=COHORT_GATE_TIMEOUT)
     except subprocess.TimeoutExpired:
