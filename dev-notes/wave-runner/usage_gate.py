@@ -22,6 +22,7 @@ so the status line renders once). The numbers are as fresh as the last status
 line render; other sessions on the account can have used more since.
 """
 import argparse
+import shutil
 import json
 import sys
 import time
@@ -65,7 +66,16 @@ def main():
     ap.add_argument("--near-reset-min", type=int, default=60)
     ap.add_argument("--start", metavar="WAVE")
     ap.add_argument("--end", metavar="WAVE")
+    ap.add_argument("--min-free-gb", type=float, default=60.0)
     a = ap.parse_args()
+
+    # James 2026-10-26 ("we gotta stop letting this happen"): /home filled to 7.6 MB during a
+    # rebuild (target/ was 251 GB). A wave builds a lot; never launch one without headroom.
+    free_gb = shutil.disk_usage(Path.home()).free / 2**30
+    print(f"disk: {free_gb:.0f} GB free on /home (minimum {a.min_free_gb:.0f})")
+    if free_gb < a.min_free_gb and not a.end:
+        print(f"HOLD: {free_gb:.0f} GB free on /home; clean target/ first (rm -rf target/debug/incremental, or cargo clean)")
+        sys.exit(2)
 
     lim = load_limits()
     five = (lim or {}).get("five_hour") or {}

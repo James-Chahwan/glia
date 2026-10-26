@@ -465,6 +465,14 @@ def main():
         out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{tag}wave{wave+1}.js")
         say("== " + out.strip().replace("\n", " | "))
 
+    # James 2026-10-26 ("we gotta stop letting this happen"): /home filled during a rebuild with
+    # target/ at 251 GB. Every close-out drops cargo's incremental caches (regenerable, the largest
+    # disposable part) and records target/ size and free space; usage_gate.py HOLDs below 60 GB.
+    shutil.rmtree(ROOT / "target/debug/incremental", ignore_errors=True)
+    tgt, _ = sh("du -sh target 2>/dev/null | cut -f1")
+    say(f"== disk: target/ {tgt.strip()} after dropping target/debug/incremental; "
+        f"{shutil.disk_usage(ROOT).free / 2**30:.0f} GB free on /home")
+
     if leap or release:
         # Record this wave's 5-hour usage cost and say whether the next wave can start (usage_gate.py).
         sh(f"python3 dev-notes/wave-runner/usage_gate.py --end {f'R{release}-' if release else ''}W{wave}")
