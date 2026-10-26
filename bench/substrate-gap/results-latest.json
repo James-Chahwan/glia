@@ -7786,15 +7786,17 @@
     },
     "typescript/calls": {
       "extract": [
-        16,
-        16
+        20,
+        20
       ],
       "fixtures": [
+        "fixtures/svelte-page-fetch",
         "fixtures/ts-arrow-class-fields",
         "fixtures/ts-calls",
         "fixtures/ts-field-dispatch",
         "fixtures/ts-param-local-receivers",
-        "fixtures/ts-receiver-inherited-calls"
+        "fixtures/ts-receiver-inherited-calls",
+        "fixtures/vue-two-scripts"
       ],
       "forbid": [
         10,
@@ -7802,15 +7804,15 @@
       ],
       "level": "full",
       "literal": [
-        14,
-        14
+        18,
+        18
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        23,
-        23
+        27,
+        27
       ],
       "via": "call"
     },
@@ -8034,8 +8036,8 @@
     },
     "typescript/http_client": {
       "extract": [
-        10,
-        10
+        12,
+        12
       ],
       "fixtures": [
         "fixtures/angular-http-calls",
@@ -8043,6 +8045,7 @@
         "fixtures/http-base-prefix",
         "fixtures/http-external-host",
         "fixtures/react-http_calls",
+        "fixtures/svelte-page-fetch",
         "fixtures/ts-http-fetch",
         "fixtures/vue-http-calls",
         "fixtures/xstack-ts-go-http"
@@ -8053,24 +8056,25 @@
       ],
       "level": "full",
       "literal": [
-        9,
-        9
+        11,
+        11
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        11,
-        11
+        13,
+        13
       ],
       "via": "http"
     },
     "typescript/http_server": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
+        "fixtures/svelte-page-fetch",
         "fixtures/ts-http-fetch",
         "matrix/typescript/http_server"
       ],
@@ -8080,13 +8084,13 @@
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        3,
+        3
       ],
       "reasons": [],
       "route": [
-        5,
-        5
+        7,
+        7
       ],
       "via": "http"
     },
@@ -9440,6 +9444,7 @@
     "fixtures/docs-sdd-project-scope",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
+    "fixtures/endpoint-shape-negatives",
     "fixtures/enum-owned-methods",
     "fixtures/event-const-literal",
     "fixtures/event-monorepo-process",
@@ -9481,6 +9486,7 @@
     "fixtures/guard-compiled-literals",
     "fixtures/guard-script-literals",
     "fixtures/history-cochange",
+    "fixtures/hostless-catchall-other-project",
     "fixtures/hostless-client-two-services",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
@@ -9502,8 +9508,10 @@
     "fixtures/java-enum-members",
     "fixtures/java-http-clients",
     "fixtures/java-jpa-table",
+    "fixtures/java-map-put-not-route",
     "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
+    "fixtures/js-options-object-call",
     "fixtures/k8s-multidoc-cron",
     "fixtures/kotlin-flip-guard",
     "fixtures/kotlin-ktor-client",
@@ -9526,6 +9534,7 @@
     "fixtures/nav-react-routes",
     "fixtures/nav-vue-links",
     "fixtures/nest-enum-prefix",
+    "fixtures/nest-enum-prefix-openapi",
     "fixtures/openapi-pact-fields",
     "fixtures/overlay-declared-cells",
     "fixtures/overlay-entrypoints",
@@ -9596,6 +9605,7 @@
     "fixtures/ts-query-suffix-endpoints",
     "fixtures/ts-reexport-barrels",
     "fixtures/ts-route-per-method",
+    "fixtures/ts-sdk-fetch-shape",
     "fixtures/ts-signal-state-fields",
     "fixtures/ts-signal-xfile-reads",
     "fixtures/ts-typed-receivers",

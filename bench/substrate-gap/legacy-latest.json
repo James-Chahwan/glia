@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 430,
+  "fixtures": 438,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -617,6 +617,11 @@
         "IMPORTS": 1.0
       }
     },
+    "endpoint-shape-negatives": {
+      "framework": "endpoint-shape-negatives",
+      "language": "typescript+python",
+      "per_category": {}
+    },
     "enum-owned-methods": {
       "framework": "enum-owned-methods",
       "language": "rust",
@@ -1087,6 +1092,13 @@
         "CO_CHANGES": 1.0
       }
     },
+    "hostless-catchall-other-project": {
+      "framework": "hostless-catchall-other-project",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
     "hostless-client-two-services": {
       "framework": "hostless-client-two-services",
       "language": "python+go+csharp",
@@ -1291,6 +1303,11 @@
         "INJECTS": 1.0
       }
     },
+    "java-map-put-not-route": {
+      "framework": "java-map-put-not-route",
+      "language": "java",
+      "per_category": {}
+    },
     "java-package-qnames": {
       "framework": "java-package-qnames",
       "language": "java",
@@ -1360,6 +1377,14 @@
       "framework": "java-spring-kafka-msgtype",
       "language": "java",
       "per_category": {}
+    },
+    "js-options-object-call": {
+      "framework": "js-options-object-call",
+      "language": "javascript+go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
     },
     "k8s-multidoc-cron": {
       "framework": "k8s-multidoc-cron",
@@ -1557,6 +1582,13 @@
       "language": "typescript",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "nest-enum-prefix-openapi": {
+      "framework": "nest-enum-prefix-openapi",
+      "language": "typescript",
+      "per_category": {
+        "DOCUMENTS": 1.0
       }
     },
     "openapi-pact-fields": {
@@ -2162,6 +2194,14 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "svelte-page-fetch": {
+      "framework": "svelte-page-fetch",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "swift-calls": {
       "framework": "swift-calls",
       "language": "swift",
@@ -2498,6 +2538,14 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "ts-sdk-fetch-shape": {
+      "framework": "ts-sdk-fetch-shape",
+      "language": "typescript+go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-signal-state-fields": {
       "framework": "ts-signal-state-fields",
       "language": "typescript",
@@ -2580,6 +2628,14 @@
       "framework": "vue-imports",
       "language": "typescript",
       "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "vue-two-scripts": {
+      "framework": "vue-two-scripts",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
         "IMPORTS": 1.0
       }
     },
