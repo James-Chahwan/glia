@@ -14,7 +14,8 @@ leap-corrections.json (ids A*.* and L*.*), and records LANDED in leap_schedule.p
 
 Steps (README order): commits + per-packet status from the workflow journal,
 workspace tests, fmt (F0.5), rustdoc (FD.23b), byte_identical, the out-of-workspace engram-export check
-(scripts/check-engram-export.sh), wheel rebuild + staleness check, run.py,
+(scripts/check-engram-export.sh), the rank gate (EG.3), the cohort gate (FH.12:
+scripts/cohort-gate.sh check, then its ratchet when every gate is green), wheel rebuild + staleness check, run.py,
 matrix --emit/--check, python suites, fold the wave's followups into every
 remaining packet's correction, update baseline.json (MEASURED) and LANDED,
 schedule --verify, render the next wave, commit.
@@ -49,6 +50,11 @@ CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
 RANKED_PATHS = ("core/", "code-domain/", "graph/", "parsers/", "engine/", "activation/",
                 "bench/rank-gate/", "scripts/rank-gate.sh")
 RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 snapshots); 2x that, at least 7200
+# FH.12: a wave whose packet commits touch one of these runs the cohort gate (scripts/cohort-gate.sh check)
+# after the rank gate: engine / graph / parser / code-domain changes, and the gate's own inputs.
+COHORT_PATHS = ("engine/", "graph/", "parsers/", "code-domain/", "bench/cohort/", "bench/sibyl/",
+                "scripts/cohort-gate.sh")
+COHORT_GATE_TIMEOUT = 14400   # seconds: FH.12's baseline (cohort + health + Sibyl, --jobs 4, sibling agents loading the box) took 6136 s
 
 
 def sh(cmd, cwd=ROOT, timeout=1800):
@@ -135,6 +141,31 @@ def package_name(crate_dir):
     """cargo package name of a workspace crate — repo-graph-* before LD.11a, glia-* after."""
     m = re.search(r'^name\s*=\s*"([^"]+)"', (ROOT / crate_dir / "Cargo.toml").read_text(), re.M)
     return m.group(1)
+
+
+def cohort_gate(touched, remaining, wave, release, cmd="bash scripts/cohort-gate.sh check 2>&1"):
+    """FH.12: the cohort gate (scripts/cohort-gate.sh, bench/cohort/results/baseline/), run after the rank
+    gate: the cohort's health and task checks, `glia health` per cohort repo and the Sibyl cells, against
+    the committed baseline. A wave touching none of COHORT_PATHS skips it; the release's last close-out
+    (`remaining` false) always checks. GLIA_COHORT_GATE_SKIP=<reason> (the close-out cannot afford the
+    run) makes the script print `check: skipped - <reason>` into the record: never a silent pass, and a
+    failed gate at the release's last close-out. Returns (ok, the `== ..` line, the failed gate or None)."""
+    if not (ROOT / "scripts/cohort-gate.sh").exists():
+        return False, "== [cohort-gate] check: skipped - no scripts/cohort-gate.sh", None
+    if remaining and not any(p.startswith(COHORT_PATHS) for p in touched):
+        return False, "== [cohort-gate] check: skipped - wave touched no engine/, graph/, parsers/ or code-domain/ path", None
+    try:
+        out, _ = sh(cmd, timeout=COHORT_GATE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"== [cohort-gate] check: FAILED (timeout after {COHORT_GATE_TIMEOUT}s)", "cohort gate (timeout)"
+    WF.mkdir(parents=True, exist_ok=True)
+    (WF / f"cohort-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+    last = (out.strip().splitlines() or [""])[-1]
+    ok = last.startswith("[cohort-gate] check: ok")
+    skipped = last.startswith("[cohort-gate] check: skipped")
+    if ok or (skipped and remaining):
+        return ok, f"== {last}", None
+    return False, f"== {last}", "cohort gate" + (" (skipped at the release's last close-out)" if skipped else "")
 
 
 def main():
@@ -249,13 +280,13 @@ def main():
     # has bench/rank-gate/gate.json. A wave whose packet commits touch no ranked path skips it; the
     # release's last close-out (nothing remaining) always checks, then requires full coverage.
     # closeout's sh lets TimeoutExpired escape: catch it so a slow check is a failed gate, not a crash.
+    touched = set()   # every path the wave's packet commits touch (the rank and cohort gates read it)
+    for r in res:
+        for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
+            o, _ = sh(f"git show --name-only --format= {c}")
+            touched.update(l.strip() for l in o.splitlines() if l.strip())
     rank_gate_ok = False
     if (ROOT / "bench/rank-gate/gate.json").exists():
-        touched = set()
-        for r in res:
-            for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
-                o, _ = sh(f"git show --name-only --format= {c}")
-                touched.update(l.strip() for l in o.splitlines() if l.strip())
         ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
         if remaining and not ranked:
             say("== [rank-gate] check: skipped - wave touched no ranked path")
@@ -277,6 +308,10 @@ def main():
                 say(f"== {last}")
                 if not last.startswith("[rank-gate] coverage: ok"):
                     gates.append("rank gate coverage")
+    cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release)
+    say(cohort_line)
+    if cohort_fail:
+        gates.append(cohort_fail)
 
     sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
@@ -433,6 +468,13 @@ def main():
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
             gates.append("rank gate ratchet")
+    if not gates and cohort_gate_ok:
+        # FH.12's ratchet: the green full check's results become the baseline when they moved (held
+        # while a reach decline sits inside the tolerance, so the baseline never creeps down).
+        out, rc = sh("bash scripts/cohort-gate.sh ratchet 2>&1")
+        say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
+        if rc:
+            gates.append("cohort gate ratchet")
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")
         sys.exit(1)
@@ -446,6 +488,7 @@ def main():
                  "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/leap-051-corrections.json "
                  + (f"dev-notes/leap-{release}-corrections.json " if release else "")
                  + ("bench/rank-gate/baseline/current " if (ROOT / "bench/rank-gate/baseline/current").exists() else "")
+                 + ("bench/cohort/results/baseline " if (ROOT / "bench/cohort/results/baseline").exists() else "")
                  + "dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")

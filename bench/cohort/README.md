@@ -12,11 +12,13 @@ pinned by sha, and tasks whose answers are the authors' own commits. No model ru
 - `cohort.py` - `build-tasks` mines `tasks/<label>.jsonl` from each repo's history;
   `build-tasks --check` re-derives every row offline; `starts` rebuilds the synthetic drift
   starts (`--compare-agent-ab` compares them with `bench/agent-ab/probe/drift.py`'s refs).
-  `run` / `report` / `check` are the no-model runner (below); FH.12's gate reads its results.
+  `run` / `report` / `check` are the no-model runner (below); FH.12's gate reads its results
+  (`## The cohort gate`).
 - `tasks/<label>.jsonl` - the task rows, in `bench/agent-ab/tasks.py`'s schema plus `shape`.
 - `results/<release>/` - one runner pass with one glia: `meta.json` (the glia version line,
   the corpus digest), `health.jsonl` (one row per repo), `tasks.jsonl` (one probe row per
-  task), `misses.jsonl`, `summary.json` (no times: what a gate compares) and `report.md`.
+  task), `misses.jsonl`, `summary.json` (no times: what a gate compares) and `report.md`; `results/baseline/` is the gate's
+  baseline, the same files plus the gate's own.
 - `test_cohort.py` - hermetic tests (two scripted git repos and a fake glia printing canned
   JSON; no network, `gh` or real glia).
 
@@ -115,6 +117,73 @@ another glia or another corpus wrote, and prints, once per run,
 drift gate per task and every miss by class. `check` re-derives every check, the miss list, the
 summary and the report from the stored probe rows, and exits 1 on a difference, a task with no
 probe row or a repo with no health row (`[cohort] check release=<r> ok - ..`).
+
+## The cohort gate (FH.12)
+
+    bash scripts/cohort-gate.sh check [--glia <bin>] [--only <label>,..] [--jobs 4]
+    bash scripts/cohort-gate.sh baseline | ratchet | run | compare <base> <new> | selftest
+
+The release check beside the rank gate (`scripts/rank-gate.sh`): where that one blocks a
+ranking regression, this one blocks glia going blind on a real repo or on a client / server
+combination it read before. `check` builds the tree's glia (`cargo build --release -p
+glia-cli`, or takes `--glia`), runs `build-tasks --check` (the corpus re-derives offline), the
+runner over the whole cohort (`run --release baseline` into the scratch dir, then `check` on
+it), `glia health --json` on each repo at its pinned sha (FH.2, reduced to `boundary.jsonl`)
+and the Sibyl cover (`bench/sibyl/run.py`, FH.11), then compares the lot with
+`results/baseline/`. Clones are reused from `$GLIA_COHORT_DIR`; scratch is
+`${GLIA_COHORT_GATE_DIR:-~/.cache/glia-cohort-gate}` (never this tree). Every run is one
+`--jobs` pool per stage (cohort, health builds, Sibyl cases), glia at `GLIA_THREADS=4`.
+
+`results/baseline/` is a runner results dir (`cohort.py check --release baseline` re-derives
+it) plus `boundary.jsonl` (one row per repo: verdict, role, the parse row, per mechanism the
+verdict, reason, producers / consumers / pairs and client / server reach, the unresolved
+workspace packages with their importer counts), `sibyl/results.json` / `results.md` and
+`gate.json` (the glia's version line, this checkout's head at the run, `glia_source` `built`
+or `given` by `--glia`, the tolerance). Base -> new, a drop is:
+
+| what | a drop |
+|---|---|
+| cohort health, per repo | `client_reach` / `route_reach` down more than 0.05, or lost; a new blind flag; a new probe error |
+| boundary health, per repo | the verdict or the parse verdict worse (OK < DEGRADED < BLIND); an app turned library; a new error |
+| boundary health, per mechanism | its verdict worse; `client_reach` / `server_reach` down more than 0.05, or lost |
+| cohort tasks | any check (locate, rest, gate = the client named, clear, names) `pass` before and not now |
+| Sibyl | a matrix cell or chain cell level worse (full > partial > none); a case check (pair, drift_s, clear_c, client) passing before and failing now |
+
+A reach down by 0.05 or less is a `decline`: listed, not a drop, and it holds the ratchet (a
+ratchet would let reach creep down 0.05 a wave). Gains are listed. A changed corpus (the tasks'
+digest, the repo set, the Sibyl seed / transports / case ids) is drift, exit 2: re-baseline.
+The last line, which `dev-notes/wave-runner/closeout.py` gates on:
+
+    [cohort-gate] check: ok - <repos> repos, <tasks> tasks, <cells> cells, <gains> gains, 0 drops
+    [cohort-gate] check: FAILED (<n> drops: <key> <old>-><new>, ..)          exit 1
+    [cohort-gate] check: FAILED (<reason>)                                    exit 2
+    [cohort-gate] check: skipped - <reason>                                   exit 3
+
+Drop keys name what moved: `<label>/<mechanism>/client_reach 0.712->0.1`,
+`<label>/health/verdict OK->BLIND`, `<label>/cohort/blind +clients_unpaired`,
+`<task>/<check> pass->miss`, `sibyl/cell/<lang>/<mech> full->partial`,
+`sibyl/case/<id>/<check> pass->fail`. `--only` judges those repos alone (the Sibyl cover
+still runs whole) and its marker ends `(partial: only <labels>)`; a partial check is never
+ratcheted. `GLIA_COHORT_GATE_SKIP=<reason>` prints the `skipped` line (a close-out that
+cannot afford the run records why; it fails the release's last close-out).
+
+The close-out runs `check` after the rank gate whenever the wave's commits touch `engine/`,
+`graph/`, `parsers/`, `code-domain/` or the gate's own inputs (`bench/cohort/`,
+`bench/sibyl/`, the script), and always at the release's last close-out; with every gate
+green it runs `ratchet`, which copies the check's results over the baseline only when a
+compared value moved (wall times excluded), the check was full and made at HEAD and no decline is pending. Only
+`baseline` (James's or a close-out's explicit call) and `ratchet` write `results/baseline/`.
+`selftest` checks the compare rules on seeded results with no glia and no network.
+
+The first baseline (a glia built at `5727c57d`, 21 repos, 200 tasks, `--jobs 4`) took 6136 s
+with other builds loading the machine; a full `check` of the same binary against it read `ok
+- 21 repos, 200 tasks, 48 cells, 0 gains, 0 drops` in 3382 s, and its ratchet (head `0f6ce15d`)
+rewrote only wall times, which the ratchet now ignores. Against it, a glia whose FH.4a call-shape rule was switched
+off (a private seed build, never committed) fails `check --only immich` with 7 drops, among
+them `immich/http/client_reach 0.973->0.333` and `immich/health/verdict OK->BLIND`. At
+that baseline the unbound workspace importers FH.2a measured before FH.5 (twenty-shared
+10,247, twenty-ui 3,052, @immich/sdk 187) read 0 / 68 / 0 (`boundary.jsonl`
+`workspace_unresolved`; twenty-sdk, not in FH.2a's list, reads 1,165).
 
 ## The repos
 

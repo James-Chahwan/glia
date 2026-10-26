@@ -96,6 +96,27 @@ The behavioral conventions that have already been argued through. Deviate only w
 | **Memory discipline** | Save feedback / project / reference; never code patterns, file paths, or git-derivable facts. |
 | **Respect locked invariants** | NodeKind/EdgeCategory/CellType u32 IDs, `::` qname separator, `.gmap` rebuild-whole-file — renumbering breaks persisted files. See `CLAUDE.md` + `CODE_RULES.md`. |
 | **llama.cpp-only inference; no JSON injection when a graph-side channel exists** | `CODE_RULES.md §10`. Graph-derived text directives are the sanctioned channel. |
+| **Real-repo gates at every close-out** | Fixtures are shaped by our own repos; the rank gate and the cohort gate (§5) judge glia on public repos it was never tuned on, against committed baselines. |
+
+---
+
+## 5. Close-out gates on real repos
+
+`dev-notes/wave-runner/closeout.py` runs two gates beside the workspace tests, fmt, rustdoc and
+the substrate-gap fixtures. Each has a committed baseline, a deterministic harness and one last
+line the close-out gates on; a drop fails the wave, gains are listed, and only the gate's own
+`baseline` (James's or a close-out's explicit call) or `ratchet` (a green close-out) writes
+the baseline.
+
+| gate | runs when | judges | last line |
+|---|---|---|---|
+| rank gate, `bash scripts/rank-gate.sh check` (EG.3) | a commit touches a ranked path; the release's last close-out | the ranked answers on six pinned snapshots vs `bench/rank-gate/baseline/` (Holm, one-sided) | `[rank-gate] check: ok - ..` |
+| cohort gate, `bash scripts/cohort-gate.sh check` (FH.12) | a commit touches `engine/`, `graph/`, `parsers/`, `code-domain/` or the gate's inputs; the release's last close-out | the outlier cohort (`bench/cohort/`, no model), `glia health` per cohort repo and the Sibyl cover (`bench/sibyl/`) vs `bench/cohort/results/baseline/`: per repo verdicts and reach (tolerance 0.05), per task checks, per matrix cell grade | `[cohort-gate] check: ok - ..` |
+
+A close-out that cannot afford the cohort run sets `GLIA_COHORT_GATE_SKIP=<reason>`: the record
+says `check: skipped - <reason>`, never a silent pass, and a skip fails the release's last
+close-out. Reading a failure: the FAILED line names each drop (`immich/http/client_reach
+0.712->0.1`, `<task>/gate pass->miss`); the full lists are in the gate's `last-check.json`.
 
 ---
 

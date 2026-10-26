@@ -1,0 +1,9 @@
+{
+ "glia": "glia 0.5.3 (build 0.5.3+p6ebc23fbd28cc0fa)",
+ "glia_head": "0f6ce15dda33650521c181cac897562df14dd60a",
+ "glia_source": "given",
+ "only": [],
+ "tolerance": {
+  "reach": 0.05
+ }
+}
