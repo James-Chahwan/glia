@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 441,
+  "fixtures": 443,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2482,6 +2482,14 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "ts-http-wrapper-precision": {
+      "framework": "ts-http-wrapper-precision",
+      "language": "typescript+go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-iface-extends": {
       "framework": "ts-iface-extends",
       "language": "typescript",
@@ -2702,6 +2710,14 @@
       "framework": "walk-user-config",
       "language": "python",
       "per_category": {}
+    },
+    "webpack-resolve-modules": {
+      "framework": "webpack-resolve-modules",
+      "language": "javascript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
     },
     "ws-needle-boundaries": {
       "framework": "ws-needle-boundaries",
