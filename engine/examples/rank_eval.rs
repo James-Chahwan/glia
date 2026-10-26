@@ -22464,6 +22464,10 @@ const GATE_METRICS: [&str; 2] = ["r10", "mrr"];
 /// The family-wise error rate of one check, per direction (James 2026-10-23, ruling EG-2:
 /// Holm over the changed rows of one check, one-sided, family alpha 0.05).
 const GATE_ALPHA: f64 = 0.05;
+/// The smallest mean change a gate counts (James 2026-10-26, on W16's 1e-7 MRR drops from one
+/// correct fixture edge): a Holm-rejected row whose |new - base| is below it is `same`, reported
+/// as `[rank-gate] below floor ..`.
+const GATE_MIN_EFFECT: f64 = 1e-4;
 
 /// A parsed gate.json: its metrics, in gate order each shape's gated rankers, and (EC.9b) the
 /// calibrated-vs-default contrasts: `contrasts` gated, `contrasts_info` reported only.
@@ -23044,7 +23048,15 @@ fn gate_check_main(args: &Args) -> i32 {
         GATE_ALPHA,
     );
     for (i, row) in rows.iter_mut().enumerate() {
-        row.verdict = if drops.contains(&i) {
+        let rejected = drops.contains(&i) || gains.contains(&i);
+        let effect = row.new - row.base;
+        row.verdict = if rejected && effect.abs() < GATE_MIN_EFFECT {
+            eprintln!(
+                "[rank-gate] below floor label={label} shape={} ranker={} metric={} diff={effect:.2e} floor={GATE_MIN_EFFECT:e}",
+                row.shape, row.ranker, row.metric
+            );
+            "same"
+        } else if drops.contains(&i) {
             "drop"
         } else if gains.contains(&i) {
             "gain"
