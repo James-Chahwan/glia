@@ -1,0 +1,9 @@
+{
+  "name": "drift-zod-express-ts-server",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "express": "^4.19.0",
+    "zod": "^3.23.0"
+  }
+}

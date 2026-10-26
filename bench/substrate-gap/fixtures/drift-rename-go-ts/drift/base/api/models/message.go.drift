@@ -1,0 +1,7 @@
+package models
+
+type Message struct {
+	MessageID string `json:"messageId"`
+	Subject   string `json:"subject"`
+	SentAt    string `json:"sentAt"`
+}

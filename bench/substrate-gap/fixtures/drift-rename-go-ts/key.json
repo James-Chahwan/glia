@@ -1,0 +1,19 @@
+{
+  "framework": "drift-rename-go-ts",
+  "language": "go+typescript",
+  "dirs": ["api", "web"],
+  "note": "FH.7a style-agnostic drift, Go -> TS. The broken state of a json tag rename: the gin handler GetMessage writes models.Message, whose json tag `messageId` became `messageUid` (drift/base/ holds the BASE model), while the axios client's interface and the view still read `messageId` (drift/fixed/ holds the authors' client half). glia_engine::contract_breaks::name_breaks reads the rename from the diff of the server side (the route, its HANDLED_BY handler and the model the handler USES), crosses the HTTP_CALLS pair to the ENDPOINT, and walks the client's callers and IMPORTS to the two stale reads (engine/tests/name_breaks.rs builds BASE / broken / fixed as git states of this fixture). This key grades the static boundary the walk needs; the `.drift` files are never parsed. Deliberately not bound to a matrix cell: go/http_server and typescript/http_client are already scored.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/messages/:id", "exact": true, "note": "the gin route of the changed exchange"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/messages/${…}", "exact": true, "note": "the axios client call"},
+    {"kind": "STRUCT", "name": "models::message::Message", "exact": true, "note": "the server model holding the renamed tag"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/messages/${…}", "to": "GET /api/messages/:id", "category": "HTTP_CALLS", "exact": true, "note": "the boundary"},
+    {"from": "GET /api/messages/:id", "to": "handlers::messages::GetMessage", "category": "HANDLED_BY", "exact": true},
+    {"from": "handlers::messages::GetMessage", "to": "models::message::Message", "category": "USES", "exact": true, "note": "the server side reaches the model file"},
+    {"from": "src::api::messages::getMessage", "to": "endpoint:GET:/api/messages/${…}", "category": "CALLS", "exact": true, "note": "the client callable"},
+    {"from": "src::api::messages", "to": "src::models::message", "category": "IMPORTS", "exact": true, "note": "client depth 1: the stale interface"},
+    {"from": "src::views::thread", "to": "src::api::messages", "category": "IMPORTS", "exact": true, "note": "client depth 1: the stale view"}
+  ]
+}

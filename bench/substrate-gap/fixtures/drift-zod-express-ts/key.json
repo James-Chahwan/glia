@@ -1,0 +1,16 @@
+{
+  "framework": "drift-zod-express-ts",
+  "language": "typescript",
+  "dirs": ["server", "web"],
+  "note": "FH.7a style-agnostic drift, Zod + Express -> fetch. The broken state of a Zod object key rename: the Express route's inline handler parses UserSchema, whose key `userName` became `displayName` (drift/base/ holds the BASE schema), while the fetch client's caller still destructures `userName` (drift/fixed/ holds the authors' client half). No declared or inferred model covers this exchange (a Zod object, an untyped res.json()), so only name_breaks sees it: the route has no HANDLED_BY, so the server side is its MODULE and what that IMPORTS (the schema file); across HTTP_CALLS the client side is fetchUser's file and the files importing it (engine/tests/name_breaks.rs builds BASE / broken / fixed as git states of this fixture). This key grades that static boundary; the `.drift` files are never parsed. Deliberately not bound to a matrix cell: typescript/http_server and typescript/http_client are already scored.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/users/:id", "exact": true, "note": "the Express route of the changed exchange"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/users/${…}", "exact": true, "note": "the fetch client call"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/users/${…}", "to": "GET /api/users/:id", "category": "HTTP_CALLS", "exact": true, "note": "the boundary"},
+    {"from": "src::routes::users", "to": "src::schemas::user", "category": "IMPORTS", "exact": true, "note": "the server side reaches the schema file"},
+    {"from": "src::lib::users::fetchUser", "to": "endpoint:GET:/api/users/${…}", "category": "CALLS", "exact": true, "note": "the client callable"},
+    {"from": "src::pages::profile", "to": "src::lib::users", "category": "IMPORTS", "exact": true, "note": "client depth 1: the stale destructuring"}
+  ]
+}

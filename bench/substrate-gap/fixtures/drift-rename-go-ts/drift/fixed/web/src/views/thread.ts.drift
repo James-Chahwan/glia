@@ -1,0 +1,6 @@
+import { getMessage } from '../api/messages';
+
+export async function openThread(id: string): Promise<string> {
+  const msg = await getMessage(id);
+  return `#${msg.messageUid}: ${msg.subject}`;
+}

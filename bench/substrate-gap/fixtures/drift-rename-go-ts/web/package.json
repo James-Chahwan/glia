@@ -1,0 +1,8 @@
+{
+  "name": "drift-rename-go-ts-web",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}

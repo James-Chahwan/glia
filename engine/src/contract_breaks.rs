@@ -117,6 +117,14 @@
 //! pairing's break fail the gate. `breaking_only` drops the compatible model
 //! rows as it drops compatible schema rows. See `contract_breaks/models.rs`.
 //!
+//! NAMES (FH.7a). The child module `names` is the style-agnostic fallback
+//! for the exchanges no declared or inferred model covers: [`name_breaks`]
+//! reads the names the change removed or renamed on the server side of each
+//! paired exchange (case-normalised, rename pairs read within a hunk) and
+//! lists every located client site, in any repo of the build, still using
+//! one, HEURISTIC (DERIVED for a rename over a fact pairing), blocking only
+//! under min tier `heuristic`. See `contract_breaks/names.rs`.
+//!
 //! Language-level public API (cargo-semver-checks parity) stays out: the
 //! graph has no visibility or signature cell.
 //!
@@ -160,6 +168,7 @@ use crate::git_rev;
 use crate::health;
 
 mod models;
+mod names;
 
 pub use models::{
     MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelBreaks, ModelChange, ModelExchange,
@@ -167,6 +176,10 @@ pub use models::{
 };
 // DT.1p: review folds the same judge into its own answer.
 pub(crate) use models::model_breaks_of;
+pub use names::{
+    CLIENT_DEPTH, ChangedName, GENERIC, NAME_MIN_TIERS, NameBreak, NameBreakArgs, NameBreaks,
+    SERVER_DEPTH, name_breaks,
+};
 
 /// The accepted [`ContractBreakArgs::avro_mode`] values, default first.
 pub const AVRO_MODES: &[&str] = &["backward", "forward", "full"];
