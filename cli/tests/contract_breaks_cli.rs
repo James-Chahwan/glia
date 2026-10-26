@@ -20,7 +20,9 @@
 //! one-line json tag rename, v2): one advisory row by default (exit 0, the
 //! `- models:` line, the `## models` section, the `[model-breaks] base=..`
 //! line after `[contract-breaks] base=`), blocking under `--models-min-tier
-//! derived` (exit 1); `heuristic` is a clap usage error (exit 2).
+//! derived` (exit 1) and under `heuristic` (FH.7b: the name rows' gate,
+//! which judges the model rows as `derived`); another tier is a clap usage
+//! error (exit 2).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -145,6 +147,49 @@ impl Scratch {
         )
         .expect("rename");
         s.commit("v2");
+        s
+    }
+
+    /// FH.7a's `drift-rename-go-ts` substrate-gap fixture: BASE committed
+    /// (the `drift/base/` model), the broken state in the working tree (the
+    /// server's json tag `messageId` renamed, the TS client still reading
+    /// it); `fixed` overlays the client half too (FH.7b).
+    fn name_drift(name: &str, fixed: bool) -> Self {
+        let s = Scratch::git_repo(name);
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../bench/substrate-gap/fixtures/drift-rename-go-ts");
+        let mut files = Vec::new();
+        files_under(&fixture, &fixture, &mut files);
+        let broken: Vec<&String> = files
+            .iter()
+            .filter(|f| *f != "key.json" && !f.starts_with("drift/"))
+            .collect();
+        let state = |s: &Scratch, which: &str| {
+            for rel in files
+                .iter()
+                .filter(|f| f.starts_with(&format!("drift/{which}/")))
+            {
+                let text = std::fs::read_to_string(fixture.join(rel)).expect("drift file");
+                let to = rel
+                    .strip_prefix(&format!("drift/{which}/"))
+                    .and_then(|r| r.strip_suffix(".drift"))
+                    .expect("a drift state file");
+                s.write(to, &text);
+            }
+        };
+        let write_broken = |s: &Scratch| {
+            for rel in &broken {
+                let text = std::fs::read_to_string(fixture.join(rel)).expect("fixture file");
+                s.write(rel, &text);
+            }
+        };
+        write_broken(&s);
+        state(&s, "base");
+        s.commit("base");
+        write_broken(&s);
+        if fixed {
+            state(&s, "fixed");
+        }
         s
     }
 
@@ -751,13 +796,102 @@ fn inferred_model_break_is_advisory() {
         show(&o)
     );
 
+    // FH.7b: heuristic is the name rows' gate; the model row is judged as
+    // under derived, so it blocks too.
     let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "heuristic"]);
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "heuristic: the model break fails the gate\n{}",
+        show(&o)
+    );
+    assert!(
+        stdout(&o).contains(
+            "- models: 1 breaking (1 blocking, 0 advisory) | 0 compatible | min tier heuristic\n"
+        ),
+        "{}",
+        show(&o)
+    );
+
+    let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "certain"]);
     assert_eq!(
         o.status.code(),
         Some(2),
         "clap refuses the tier\n{}",
         show(&o)
     );
-    assert!(stderr(&o).contains("fact, derived"), "{}", show(&o));
+    assert!(
+        stderr(&o).contains("fact, derived, heuristic"),
+        "{}",
+        show(&o)
+    );
     assert!(markers(&o).is_empty(), "nothing is built\n{}", show(&o));
+}
+
+/// FH.7b: the style-agnostic name rows. The broken state lists the two stale
+/// client sites under `## names` (advisory by default: exit 0, `advisory`
+/// 3 with the fixture's http_model row), blocks under `--models-min-tier
+/// heuristic` (exit 1, the model row judged as under derived), and the fixed
+/// state lists none; `[name-breaks] answer ..` fires once per run.
+#[test]
+fn stale_client_names_are_advisory_unless_heuristic() {
+    let s = Scratch::name_drift("name-breaks", false);
+    let o = s.breaks(&[]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+    let out = stdout(&o);
+    assert!(
+        out.contains("- names: 2 client sites (0 blocking, 2 advisory) | min tier fact\n"),
+        "{}",
+        show(&o)
+    );
+    let rows = section_rows(&out, "names");
+    assert_eq!(rows.len(), 2, "{}", show(&o));
+    assert!(
+        rows[0].starts_with(
+            "| `messageId` -> `messageUid` | advisory | heuristic | web/src/models/message.ts:2 ("
+        ),
+        "{}",
+        show(&o)
+    );
+    let err = stderr(&o);
+    let answers: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("[name-breaks] answer "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answers,
+        [
+            "[name-breaks] answer rows=2 blocking=0 advisory=2 min_tier=fact folded_schema_rows=0->0 surface=contract_breaks"
+        ],
+        "{}",
+        show(&o)
+    );
+
+    let o = s.breaks(&["--json"]);
+    let v = json(&o);
+    assert_eq!(
+        (
+            v["breaking"].as_u64(),
+            v["advisory"].as_u64(),
+            v["names"].as_array().map(Vec::len)
+        ),
+        // The tag rename is an advisory http_model row too (DT.1o).
+        (Some(0), Some(3), Some(2)),
+        "{v}"
+    );
+
+    let o = s.breaks(&["--models-min-tier", "heuristic"]);
+    assert_eq!(o.status.code(), Some(1), "{}", show(&o));
+    assert!(
+        stdout(&o).contains(
+            "- breaking: 3 (0 contract changes, 0 orphaned clients, 1 blocking model break, 2 blocking name breaks)"
+        ),
+        "{}",
+        show(&o)
+    );
+
+    let fixed = Scratch::name_drift("name-breaks-fixed", true);
+    let o = fixed.breaks(&["--models-min-tier", "heuristic", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+    assert!(json(&o).get("names").is_none(), "{}", show(&o));
 }

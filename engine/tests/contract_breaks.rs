@@ -812,13 +812,15 @@ fn the_derived_models_min_tier_makes_the_break_block() {
     );
 }
 
-/// (c) A tier outside `fact` / `derived` is refused before anything is
-/// built, with and without clients (the path does not exist).
+/// (c) A tier outside `fact` / `derived` / `heuristic` (FH.7b: the name
+/// rows' gate) is refused before anything is built, with and without
+/// clients (the path does not exist).
 #[test]
 fn an_unknown_models_min_tier_is_refused_before_building() {
-    for tier in ["heuristic", "Fact", ""] {
+    for tier in ["certain", "Fact", ""] {
         let args = models_at(tier);
-        let want = format!("unknown models min tier `{tier}`: expected one of fact, derived");
+        let want =
+            format!("unknown models min tier `{tier}`: expected one of fact, derived, heuristic");
         let err = contract_breaks_vs_rev("/nonexistent/dt1p", "HEAD", &args).expect_err("bad tier");
         assert_eq!(err, want);
         let clients = ["/nonexistent/dt1p-client".to_string()];

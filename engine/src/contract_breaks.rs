@@ -125,6 +125,34 @@
 //! one, HEURISTIC (DERIVED for a rename over a fact pairing), blocking only
 //! under min tier `heuristic`. See `contract_breaks/names.rs`.
 //!
+//! NAMES IN THE ANSWER (FH.7b). [`contract_breaks_vs_rev`] and
+//! [`contract_breaks_vs_rev_with`] run [`name_breaks`] over the same working
+//! tree and build (a `--with` client repo is walked too) and list its rows as
+//! [`ContractBreaks::names`]. The gate is
+//! [`ContractBreakArgs::models_min_tier`], which also takes `heuristic`
+//! ([`NAME_MIN_TIERS`]): a name row blocks only under `heuristic` (it is then
+//! counted in `breaking`), else it is counted in `advisory`. Under
+//! `heuristic` the model rows are judged as under `derived` (a heuristic
+//! model pairing never blocks, the models' own rule). [`contract_breaks`]
+//! over a caller's delta reads the working tree from the delta's one repo
+//! root; a delta of several repos names no provider, so it lists no name row
+//! and prints `[name-breaks] skipped reason=multi_repo roots=<n>`.
+//!
+//! THE SHARED-SCHEMA FOLD (FH.7b). One change to a schema many operations
+//! reference (`$ref` to a shared error body) is one row per operation before
+//! the fold, each with the same field changes. After sorting, an `operation`
+//! or `channel` row with at least one field change folds into the first row
+//! of its group, the group being every row with the same (status, kind,
+//! format, change, tier, note) and the same field changes, in order and in
+//! every field (section, field, change, producer, consumer, rule, breaking):
+//! the kept row (the least key) lists every folded key in
+//! [`SchemaChange::operations`], itself first, in row order. A row that
+//! folds nothing keeps `operations` empty (not serialised), so an answer with
+//! no shared change is byte-identical to the unfolded one. `breaking` still
+//! counts every breaking contract (each folded operation once), so the exit
+//! code and the count are the fold's to keep; only the listing shrinks.
+//! Removed and added contracts (no field change) and messages never fold.
+//!
 //! Language-level public API (cargo-semver-checks parity) stays out: the
 //! graph has no visibility or signature cell.
 //!
@@ -142,7 +170,12 @@
 //! status counts are schema rows before `breaking_only` filters them, so the
 //! line is unchanged by the model rows), then the models' own
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
-//! line (`contract_breaks/models.rs`), and, after both, once per
+//! line (`contract_breaks/models.rs`), then, for an answer that read the
+//! names (FH.7b), FH.7a's `[name-breaks] base=<rev> ..` line (printed before
+//! the two above, by the name pass) and
+//! `[name-breaks] answer rows=<k> blocking=<b> advisory=<a> min_tier=<t> folded_schema_rows=<s>-><t> surface=contract_breaks`
+//! (`s` the schema rows before the fold, `t` after it, both before
+//! `breaking_only`), and, after all, once per
 //! [`contract_breaks_vs_rev_with`] call given at least one client:
 //! `[contract-breaks] clients=<given> built_twice=<distinct clients built on
 //! both sides>`.
@@ -200,10 +233,12 @@ pub struct ContractBreakArgs {
     /// either way.
     pub breaking_only: bool,
     /// The weakest pairing tier at which a breaking inferred-model row blocks
-    /// ([`MODEL_MIN_TIERS`]; module docs INFERRED MODELS): `fact` (the
-    /// default: every pairing glia 0.5.2 infers is derived, so its rows are
-    /// advisory) or `derived`. [`contract_breaks_vs_rev`] refuses any other
-    /// value; [`contract_breaks`] judges one as `fact`.
+    /// ([`NAME_MIN_TIERS`]; module docs INFERRED MODELS and NAMES IN THE
+    /// ANSWER): `fact` (the default: every pairing glia 0.5.2 infers is
+    /// derived, so its rows are advisory), `derived`, or `heuristic` (FH.7b:
+    /// the name rows block too, the model rows are judged as under
+    /// `derived`). [`contract_breaks_vs_rev`] refuses any other value;
+    /// [`contract_breaks`] judges one as `fact`.
     pub models_min_tier: &'static str,
 }
 
@@ -246,6 +281,12 @@ pub struct SchemaChange {
     pub note: Option<&'static str>,
     /// Every declared difference, `producer` = before, `consumer` = after.
     pub changes: Vec<FieldChange>,
+    /// FH.7b: the keys of every operation (or channel) whose row folded into
+    /// this one, this row's own key first (module docs THE SHARED-SCHEMA
+    /// FOLD): one shared-schema change, listed once. Empty, and not
+    /// serialised, when nothing folded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<String>,
 }
 
 /// A client the change left without a provider.
@@ -278,14 +319,21 @@ pub struct ContractBreaks {
     /// MODELS), the compatible ones left out under `breaking_only`.
     pub models: Vec<ModelBreak>,
     pub orphaned_clients: Vec<OrphanedClient>,
-    /// Breaking schema rows plus orphaned clients plus blocking model rows:
-    /// the CI gate (above 0 fails it).
+    /// FH.7b: the client sites still using a name the change removed or
+    /// renamed on the server side of a paired exchange ([`name_breaks`],
+    /// module docs NAMES IN THE ANSWER), in its order. Empty, and not
+    /// serialised, when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<NameBreak>,
+    /// Breaking contracts (each operation of a folded schema row once) plus
+    /// orphaned clients plus blocking model rows plus blocking name rows: the
+    /// CI gate (above 0 fails it).
     pub breaking: usize,
-    /// Breaking model rows below the models min tier: listed, never in
-    /// `breaking`.
+    /// Breaking model rows below the models min tier plus name rows that do
+    /// not block: listed, never in `breaking`.
     pub advisory: usize,
-    /// `Some` exactly when `schemas`, `models` and `orphaned_clients` are all
-    /// empty.
+    /// `Some` exactly when `schemas`, `models`, `orphaned_clients` and
+    /// `names` are all empty.
     pub absence: Option<Absence>,
     /// FH.9: the client mechanisms the answer reads (the orphan search's
     /// HTTP, gRPC, RPC, GraphQL and WebSocket: the orphan search and the
@@ -324,12 +372,14 @@ pub fn contract_breaks_vs_rev(
     let rev = graph_delta_vs_rev(repo_path, base)?;
     let repo = Path::new(repo_path);
     let renames = git_rev::declared_renames(repo, &git_rev::resolve_rev(repo, base)?);
+    let names = name_breaks(base, repo_path, &rev.after, &name_args(args))?.rows;
     Ok(breaks_of(
         &rev.answer.base,
         &rev.before.merged,
         &rev.after,
         &rev.delta,
         Some(&renames),
+        names,
         args,
     ))
 }
@@ -387,12 +437,14 @@ pub fn contract_breaks_vs_rev_with(
     drop(tree);
     let renames = git_rev::declared_renames(repo, &rev);
     let (delta, _, _) = located_delta_with(&before.merged, &after.merged, &renames);
+    let names = name_breaks(&rev.given, repo_path, &after, &name_args(args))?.rows;
     let answer = breaks_of(
         &rev.given,
         &before.merged,
         &after,
         &delta,
         Some(&renames),
+        names,
         args,
     );
     marker();
@@ -400,7 +452,9 @@ pub fn contract_breaks_vs_rev_with(
 }
 
 /// `Err` naming a mode outside [`AVRO_MODES`] or a models min tier outside
-/// [`MODEL_MIN_TIERS`].
+/// [`NAME_MIN_TIERS`] (contract-breaks' gate also takes `heuristic`, FH.7b):
+/// ``unknown models min tier `<x>`: expected one of fact, derived,
+/// heuristic``.
 fn check_mode(args: &ContractBreakArgs) -> Result<(), String> {
     if !AVRO_MODES.contains(&args.avro_mode) {
         return Err(format!(
@@ -409,12 +463,79 @@ fn check_mode(args: &ContractBreakArgs) -> Result<(), String> {
             AVRO_MODES.join(", ")
         ));
     }
-    check_models_min_tier(args.models_min_tier)
+    if NAME_MIN_TIERS.contains(&args.models_min_tier) {
+        return Ok(());
+    }
+    Err(format!(
+        "unknown models min tier `{}`: expected one of {}",
+        args.models_min_tier,
+        NAME_MIN_TIERS.join(", ")
+    ))
+}
+
+/// The name pass's gate (module docs NAMES IN THE ANSWER): the models min
+/// tier when it is one of [`NAME_MIN_TIERS`], else `fact`.
+fn name_args(args: &ContractBreakArgs) -> NameBreakArgs {
+    let mut out = NameBreakArgs::default();
+    if let Some(&t) = NAME_MIN_TIERS.iter().find(|&&t| t == args.models_min_tier) {
+        out.min_tier = t;
+    }
+    out
+}
+
+/// The model judge's gate under a contract-breaks min tier: `heuristic`
+/// judges the model rows as `derived` (a heuristic model pairing never
+/// blocks); any other spelling passes through (the judge reads anything but
+/// `derived` as `fact`).
+fn model_min_tier(min_tier: &'static str) -> &'static str {
+    if min_tier == Tier::Heuristic.as_str() {
+        Tier::Derived.as_str()
+    } else {
+        min_tier
+    }
+}
+
+/// The name rows of a caller's delta (module docs NAMES IN THE ANSWER):
+/// the working tree is `worktree`, else the after build's one repo root,
+/// gated at `min_tier` (one of [`NAME_MIN_TIERS`], else `fact`). A build of
+/// several repos with no `worktree` names no provider: no row, and
+/// `[name-breaks] skipped reason=multi_repo roots=<n>` (`no_root` for a build
+/// with none). A failed name pass (git) is no row and
+/// `[name-breaks] skipped reason=error: <message>`: the answers over a
+/// delta return no `Err`.
+pub(crate) fn name_breaks_of(
+    base: &str,
+    worktree: Option<&str>,
+    after: &GenerateResult,
+    min_tier: &'static str,
+) -> Vec<NameBreak> {
+    let mut args = NameBreakArgs::default();
+    if NAME_MIN_TIERS.contains(&min_tier) {
+        args.min_tier = min_tier;
+    }
+    let none = |reason: String| {
+        eprintln!("[name-breaks] skipped reason={reason}");
+        Vec::new()
+    };
+    let root = match (worktree, after.repo_roots.len()) {
+        (Some(w), _) => w.to_string(),
+        (None, 1) => match after.repo_roots.values().next() {
+            Some(r) => r.clone(),
+            None => return none("no_root".to_string()),
+        },
+        (None, 0) => return none("no_root".to_string()),
+        (None, n) => return none(format!("multi_repo roots={n}")),
+    };
+    match name_breaks(base, &root, after, &args) {
+        Ok(b) => b.rows,
+        Err(e) => none(format!("error: {e}")),
+    }
 }
 
 /// `Err` naming a models min tier outside [`MODEL_MIN_TIERS`]: `unknown
-/// models min tier `<x>`: expected one of fact, derived`. The surfaces'
-/// one message (contract-breaks and review, CLI and pyo3).
+/// models min tier `<x>`: expected one of fact, derived`. Review's message
+/// (CLI and pyo3); contract-breaks' gate also takes `heuristic` (FH.7b,
+/// `check_mode`).
 pub(crate) fn check_models_min_tier(tier: &str) -> Result<(), String> {
     if MODEL_MIN_TIERS.contains(&tier) {
         return Ok(());
@@ -451,14 +572,18 @@ fn distinct_clients(repo_path: &str, clients: &[String]) -> Result<Vec<String>, 
 }
 
 /// The contract breaks of an already computed rev delta (module docs).
-/// Nothing is built; `base` is `rev.answer.base`.
+/// Nothing is built; `base` is `rev.answer.base`. The name rows read the
+/// delta's one repo root as the working tree (module docs NAMES IN THE
+/// ANSWER).
 pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBreaks {
+    let names = name_breaks_of(&rev.answer.base, None, &rev.after, name_args(args).min_tier);
     breaks_of(
         &rev.answer.base,
         &rev.before.merged,
         &rev.after,
         &rev.delta,
         None,
+        names,
         args,
     )
 }
@@ -468,13 +593,15 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
 /// `after - before`. One body for the single-repo and the `--with` pair.
 /// `renames` is git's `(old path, new path)` list for the rev (module docs,
 /// FD.25); `None` pairs through the delta's moves only and prints no
-/// `moved_files=` marker.
+/// `moved_files=` marker. `names` is the name pass's rows over the same
+/// pair, gated at `name_args(args)` (module docs NAMES IN THE ANSWER).
 fn breaks_of(
     base: &str,
     before: &MergedGraph,
     after_build: &GenerateResult,
     delta: &GraphDelta,
     renames: Option<&[(String, String)]>,
+    names: Vec<NameBreak>,
     args: &ContractBreakArgs,
 ) -> ContractBreaks {
     let after = &after_build.merged;
@@ -534,6 +661,7 @@ fn breaks_of(
             },
             note,
             changes,
+            operations: Vec::new(),
         });
     }
     for &b in &pairing.removed {
@@ -549,6 +677,7 @@ fn breaks_of(
             tier: Tier::Fact.as_str(),
             note: None,
             changes: Vec::new(),
+            operations: Vec::new(),
         });
     }
     for &a in &pairing.added {
@@ -564,6 +693,7 @@ fn breaks_of(
             tier: Tier::Fact.as_str(),
             note: None,
             changes: Vec::new(),
+            operations: Vec::new(),
         });
     }
     rows.sort_by(|x, y| row_key(x).cmp(&row_key(y)));
@@ -644,18 +774,29 @@ fn breaks_of(
         after_build,
         delta,
         &ModelBreakArgs {
-            min_tier: args.models_min_tier,
+            min_tier: model_min_tier(args.models_min_tier),
         },
     );
     let mut models = judged.rows;
-    let breaking = n_breaking + orphans.len() + judged.blocking;
+    let names_blocking = names.iter().filter(|r| r.blocking).count();
+    let names_advisory = names.len() - names_blocking;
+    let breaking = n_breaking + orphans.len() + judged.blocking + names_blocking;
+    let advisory = judged.advisory + names_advisory;
+    let unfolded = rows.len();
+    let mut rows = fold_shared(rows);
+    eprintln!(
+        "[name-breaks] answer rows={} blocking={names_blocking} advisory={names_advisory} min_tier={} folded_schema_rows={unfolded}->{} surface={PRIMITIVE}",
+        names.len(),
+        name_args(args).min_tier,
+        rows.len(),
+    );
     let listed = rows.len();
     let listed_models = models.len();
     if args.breaking_only {
         rows.retain(|r| r.status == "breaking");
         models.retain(|r| r.status == "breaking");
     }
-    let absence = (rows.is_empty() && models.is_empty() && orphans.is_empty()).then(|| {
+    let absence = (rows.is_empty() && models.is_empty() && orphans.is_empty() && names.is_empty()).then(|| {
         let mut note = if old.is_empty() && new.is_empty() && lost.is_empty() {
             format!(
                 "no contract (OpenAPI / AsyncAPI op or message type) in either graph and no client edge removed vs {base}"
@@ -705,11 +846,71 @@ fn breaks_of(
         schemas: rows,
         models,
         orphaned_clients: orphans,
+        names,
         breaking,
-        advisory: judged.advisory,
+        advisory,
         absence,
         blind: health::blind_caveats(after, PRIMITIVE, &read),
     }
+}
+
+// ---- the shared-schema fold (FH.7b) -----------------------------------------
+
+/// What makes two sorted schema rows one shared change (module docs THE
+/// SHARED-SCHEMA FOLD): `None` for a row that never folds (a message, or no
+/// field change).
+fn fold_key(r: &SchemaChange) -> Option<String> {
+    if r.kind == "message" || r.changes.is_empty() {
+        return None;
+    }
+    let changes: Vec<String> = r
+        .changes
+        .iter()
+        .map(|c| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{:?}\u{1f}{:?}\u{1f}{}\u{1f}{}",
+                c.section, c.field, c.change, c.producer, c.consumer, c.rule, c.breaking
+            )
+        })
+        .collect();
+    Some(format!(
+        "{}\u{1e}{}\u{1e}{}\u{1e}{}\u{1e}{}\u{1e}{:?}\u{1e}{}",
+        r.status,
+        r.kind,
+        r.format,
+        r.change,
+        r.tier,
+        r.note,
+        changes.join("\u{1d}")
+    ))
+}
+
+/// The rows, sorted, with every shared-schema change folded into its first
+/// row (module docs THE SHARED-SCHEMA FOLD). Order is kept: a kept row stays
+/// where it was, a folded one leaves. The map is looked up, never iterated.
+fn fold_shared(rows: Vec<SchemaChange>) -> Vec<SchemaChange> {
+    let mut first: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out: Vec<SchemaChange> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let Some(key) = fold_key(&r) else {
+            out.push(r);
+            continue;
+        };
+        match first.get(&key) {
+            Some(&at) => {
+                let kept = &mut out[at];
+                if kept.operations.is_empty() {
+                    kept.operations.push(kept.key.clone());
+                }
+                kept.operations.push(r.key);
+            }
+            None => {
+                first.insert(key, out.len());
+                out.push(r);
+            }
+        }
+    }
+    out
 }
 
 // ---- holders and their pairing ---------------------------------------------
@@ -1423,6 +1624,129 @@ mod tests {
             .iter()
             .map(|c| (c.field.as_str(), c.change, c.rule, c.breaking))
             .collect()
+    }
+
+    fn field_change(section: &str, field: &str, breaking: bool) -> FieldChange {
+        FieldChange {
+            section: section.to_string(),
+            field: field.to_string(),
+            change: if breaking {
+                "producer_only"
+            } else {
+                "consumer_only"
+            },
+            producer: breaking.then(|| "string".to_string()),
+            consumer: (!breaking).then(|| "string".to_string()),
+            rule: if breaking {
+                "response_field_removed"
+            } else {
+                "response_field_added"
+            },
+            breaking,
+        }
+    }
+
+    fn op_row(kind: &'static str, key: &str, changes: Vec<FieldChange>) -> SchemaChange {
+        SchemaChange {
+            kind,
+            key: key.to_string(),
+            format: "openapi".to_string(),
+            before: None,
+            after: None,
+            status: "breaking",
+            change: "modified",
+            tier: Tier::Fact.as_str(),
+            note: None,
+            changes,
+            operations: Vec::new(),
+        }
+    }
+
+    /// FH.7b: one shared-schema change (the same field changes on many
+    /// operations) folds into its first row, which lists every folded key;
+    /// a row whose changes differ in any field (here the section), a
+    /// message and a removed op (no field change) never fold, and order is
+    /// kept.
+    #[test]
+    fn shared_schema_rows_fold_into_their_first_row() {
+        let shared = || {
+            vec![
+                field_change("response:400", "id", true),
+                field_change("response:400", "messageId", false),
+            ]
+        };
+        let rows = vec![
+            op_row("operation", "DELETE /a", shared()),
+            op_row("operation", "GET /a", shared()),
+            op_row(
+                "operation",
+                "GET /b",
+                vec![
+                    field_change("response:401", "id", true),
+                    field_change("response:401", "messageId", false),
+                ],
+            ),
+            op_row("message", "shop.Order", shared()),
+            op_row("message", "shop.Other", shared()),
+            op_row("operation", "GET /gone", Vec::new()),
+            op_row("operation", "GET /gone2", Vec::new()),
+            op_row("operation", "POST /a", shared()),
+        ];
+        let folded = fold_shared(rows);
+        let keys: Vec<(&str, Vec<&str>)> = folded
+            .iter()
+            .map(|r| {
+                (
+                    r.key.as_str(),
+                    r.operations.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("DELETE /a", vec!["DELETE /a", "GET /a", "POST /a"]),
+                ("GET /b", vec![]),
+                ("shop.Order", vec![]),
+                ("shop.Other", vec![]),
+                ("GET /gone", vec![]),
+                ("GET /gone2", vec![]),
+            ]
+        );
+        // A row that folded nothing serialises as before: no `operations`.
+        let one = serde_json::to_value(&folded[1]).expect("json");
+        assert!(one.get("operations").is_none(), "{one}");
+        let many = serde_json::to_value(&folded[0]).expect("json");
+        assert_eq!(many["operations"][2], "POST /a", "{many}");
+
+        let mut other_status = op_row("operation", "PUT /a", shared());
+        other_status.status = "unknown";
+        let kept = fold_shared(vec![op_row("operation", "GET /a", shared()), other_status]);
+        assert_eq!(kept.len(), 2, "a different status never folds");
+    }
+
+    /// FH.7b: contract-breaks' gate takes `heuristic` (the name rows'), the
+    /// model judge reads it as `derived`, and the name pass gets it as given.
+    #[test]
+    fn heuristic_min_tier_gates_names_and_judges_models_as_derived() {
+        let mut args = ContractBreakArgs::default();
+        assert_eq!(name_args(&args).min_tier, "fact");
+        assert_eq!(model_min_tier(args.models_min_tier), "fact");
+        args.models_min_tier = "heuristic";
+        assert!(check_mode(&args).is_ok());
+        assert_eq!(name_args(&args).min_tier, "heuristic");
+        assert_eq!(model_min_tier(args.models_min_tier), "derived");
+        args.models_min_tier = "derived";
+        assert_eq!(model_min_tier(args.models_min_tier), "derived");
+        args.models_min_tier = "certain";
+        assert_eq!(
+            check_mode(&args),
+            Err(
+                "unknown models min tier `certain`: expected one of fact, derived, heuristic"
+                    .to_string()
+            )
+        );
+        assert_eq!(name_args(&args).min_tier, "fact");
     }
 
     #[test]

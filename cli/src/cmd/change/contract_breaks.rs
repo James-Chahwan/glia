@@ -22,37 +22,60 @@
 //! blocks). Every pairing glia 0.5.2 infers is derived, so by default a model
 //! row is ADVISORY: listed, counted in `advisory`, never in `breaking`.
 //!
+//! Names (FH.7b): every client site, in the provider or a `--with` repo,
+//! still using a name the change removed or renamed on the server side of a
+//! paired exchange (the engine's `contract_breaks::name_breaks`, FH.7a: the
+//! style-agnostic fallback for the exchanges no declared or inferred model
+//! covers). A name row is HEURISTIC (DERIVED for a rename over a fact
+//! pairing) and fails the gate only under `--models-min-tier heuristic`;
+//! under any other tier it is advisory (counted in `advisory`). Under
+//! `heuristic` the model rows are judged as under `derived`.
+//!
+//! Shared-schema fold (FH.7b): one change to a schema many operations
+//! reference is one row, listing every operation it folded (JSON
+//! `operations`, the table's key ` +<n>`); `breaking` still counts every
+//! breaking contract.
+//!
 //! Table mode prints `# glia contract-breaks <repo> vs <rev>`, a summary line
 //! (`- breaking: <B> (<n> contract changes, <o> orphaned clients[, <k>
-//! blocking model breaks]) | ..`), followed, when a model row exists, by `-
-//! models: <B> breaking (<K> blocking, <A> advisory) | <C> compatible | min
-//! tier <t>`, then `## breaking` and, unless `--breaking-only` left them out,
+//! blocking model breaks][, <k> blocking name breaks]) | ..`; with a folded
+//! row `<n> contract changes in <c> contracts`), followed, when a model row
+//! exists, by `- models: <B> breaking (<K> blocking, <A> advisory) | <C>
+//! compatible | min tier <t>` and, when a name row exists, by `- names: <N>
+//! client sites (<K> blocking, <A> advisory) | min tier <t>`, then
+//! `## breaking` and, unless `--breaking-only` left them out,
 //! `## unknown` and `## compatible` (a section with no row is omitted, bar
 //! `## breaking`), each `| kind | key | change | tier | at | rule | field |
 //! before | after |` with one row per field change (`before` is the rev's
 //! declaration, `after` the working tree's; a breaking one's rule in bold)
 //! and one row for a contract removed, added or without a comparable field
-//! (its `change` carries the engine's note). Then `## models` when a model
+//! (its `change` carries the engine's note); a folded row's key is its first
+//! operation's then ` +<n>` for the others. Then `## models` when a model
 //! row exists: `| pairing | via | status | gate | tier | changed | rule |
 //! field | before | after | client | server |`, one line per field change
 //! (`via` the first exchange's route or operation, ` +<n>` for the rest;
 //! `gate` `blocking` / `advisory` on a breaking row, `—` on a compatible
 //! one; a breaking rule in bold; a site the side's qname then the field's
 //! `file:line` there, else the side's, ` (at <rev>)` on one read from the
-//! rev). Then `## orphaned clients`, `| client | at | category | was calling
+//! rev). Then `## names` when a name row exists: `| name | gate | tier | at |
+//! position | client | server |`, one line per client site (`name` the old
+//! name, `` `old` -> `new` `` for a rename; `gate` `blocking` / `advisory`;
+//! `at` the client file's `file:line` in its repo, then ` (<repo>)`). Then
+//! `## orphaned clients`, `| client | at | category | was calling
 //! | reason | tier |`, when a client lost its provider. `at` is the working
 //! tree's 1-based `file:line` (LD.1), a removed contract's the rev's, marked
 //! `(at <rev>)`. An answer with no row in any section prints `_(no contract
 //! change vs <rev>)_` and the engine's absence. `--json` prints the engine's
-//! `ContractBreaks` (`{base, schemas, models, orphaned_clients, breaking,
-//! advisory, absence}`).
+//! `ContractBreaks` (`{base, schemas, models, orphaned_clients, names,
+//! breaking, advisory, absence}`; `names` and a row's `operations` only when
+//! not empty).
 //!
-//! Exit 1 when `breaking` (the breaking schema rows plus the orphaned clients
-//! plus the BLOCKING model rows) is above 0, else 0, in both modes: a
-//! compatible or unknown change, and an advisory model row, never fail the
-//! gate. Exit 2 on a usage error (an `--avro` mode outside
+//! Exit 1 when `breaking` (the breaking contracts plus the orphaned clients
+//! plus the BLOCKING model and name rows) is above 0, else 0, in both modes:
+//! a compatible or unknown change, and an advisory model or name row, never
+//! fail the gate. Exit 2 on a usage error (an `--avro` mode outside
 //! `contract_breaks::AVRO_MODES`, a `--models-min-tier` outside
-//! `contract_breaks::MODEL_MIN_TIERS`, `--no-overlay`) or a git / build
+//! `contract_breaks::NAME_MIN_TIERS`, `--no-overlay`) or a git / build
 //! failure, with the engine's message.
 //!
 //! Writes: the working tree's parse-cache sidecar
@@ -64,11 +87,14 @@
 //! `[contract-breaks] base=<rev> pairs=<P> breaking=<B> compatible=<C> unknown=<U> removed=<R> added=<A> orphaned_clients=<O>`
 //! (schema rows only), then its
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> http=<H> graphql=<G> rows=<R> breaking=<B> blocking=<K> advisory=<A> compatible=<C> new_pairings=<N> lost=<L> unjudged=<U>`,
-//! once per run each, then with `--with` `[contract-breaks] clients=<N> built_twice=<N>`.
+//! once per run each, then FH.7b's
+//! `[name-breaks] answer rows=<k> blocking=<b> advisory=<a> min_tier=<t> folded_schema_rows=<s>-><t> surface=contract_breaks`
+//! (after FH.7a's `[name-breaks] base=<rev> ..`, which the name pass prints
+//! first), then with `--with` `[contract-breaks] clients=<N> built_twice=<N>`.
 
 use glia_engine::contract_breaks::{
-    AVRO_MODES, ContractBreakArgs, ContractBreaks, MODEL_MIN_TIERS, ModelBreak, ModelSite,
-    OrphanedClient, SchemaChange, contract_breaks_vs_rev_with,
+    AVRO_MODES, ContractBreakArgs, ContractBreaks, ModelBreak, ModelSite, NAME_MIN_TIERS,
+    NameBreak, OrphanedClient, SchemaChange, contract_breaks_vs_rev_with,
 };
 use glia_engine::contract_fields::{FieldChange, FieldSide};
 
@@ -99,13 +125,14 @@ pub(crate) struct Args {
     breaking_only: bool,
     /// The weakest pairing tier at which an inferred client <-> server model
     /// break fails the gate: fact (the default; every pairing glia 0.5.2
-    /// infers is derived, so its rows are advisory) or derived; a heuristic
-    /// pairing never fails it.
+    /// infers is derived, so its rows are advisory), derived, or heuristic
+    /// (a stale client name site fails it too; model rows are judged as
+    /// under derived); a heuristic model pairing never fails it.
     #[arg(
         long,
         value_name = "TIER",
-        default_value = MODEL_MIN_TIERS[0],
-        value_parser = clap::builder::PossibleValuesParser::new(MODEL_MIN_TIERS),
+        default_value = NAME_MIN_TIERS[0],
+        value_parser = clap::builder::PossibleValuesParser::new(NAME_MIN_TIERS),
     )]
     models_min_tier: String,
     /// A client repo to build beside the provider on both sides, so its
@@ -114,14 +141,14 @@ pub(crate) struct Args {
     /// tree's), always at its own working tree.
     #[arg(long, value_name = "REPO")]
     with: Vec<String>,
-    /// Emit JSON (`{base, schemas, models, orphaned_clients, breaking,
-    /// advisory, absence}`) instead of tables.
+    /// Emit JSON (`{base, schemas, models, orphaned_clients, names,
+    /// breaking, advisory, absence}`) instead of tables.
     #[arg(long)]
     json: bool,
 }
 
 /// The engine's arguments; `Err` names a mode outside [`AVRO_MODES`] or a
-/// tier outside [`MODEL_MIN_TIERS`] (clap has already refused either, so
+/// tier outside [`NAME_MIN_TIERS`] (clap has already refused either, so
 /// this only guards the `&'static str` lookups).
 fn engine_args(
     avro: &str,
@@ -134,14 +161,14 @@ fn engine_args(
             AVRO_MODES.join(", ")
         ));
     };
-    let Some(tier) = MODEL_MIN_TIERS
+    let Some(tier) = NAME_MIN_TIERS
         .iter()
         .copied()
         .find(|t| *t == models_min_tier)
     else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
-            MODEL_MIN_TIERS.join(", ")
+            NAME_MIN_TIERS.join(", ")
         ));
     };
     let mut args = ContractBreakArgs::default();
@@ -201,10 +228,14 @@ fn field_name(c: &FieldChange) -> String {
 /// The table rows of one contract: one per field change, else one for the
 /// whole contract (removed, added, or not comparable).
 fn contract_rows(r: &SchemaChange, base: &str) -> Vec<String> {
+    let key = match r.operations.len() {
+        0 | 1 => format!("`{}`", r.key),
+        n => format!("`{}` +{}", r.key, n - 1),
+    };
     let lead = format!(
         "| {} | {} | {} | {} | {} |",
         r.kind,
-        cell(&format!("`{}`", r.key)),
+        cell(&key),
         cell(&row_change(r)),
         r.tier,
         cell(&row_at(r, base)),
@@ -318,6 +349,39 @@ fn print_models(models: &[ModelBreak], base: &str, min_tier: &str) {
     println!();
 }
 
+/// One `## names` line (module docs).
+fn name_row(n: &NameBreak) -> String {
+    let name = match &n.renamed_to {
+        Some(to) => format!("`{}` -> `{to}`", n.name),
+        None => format!("`{}`", n.name),
+    };
+    let gate = if n.blocking { "blocking" } else { "advisory" };
+    format!(
+        "| {} | {gate} | {} | {} | {} | {} | {} |",
+        cell(&name),
+        n.tier,
+        cell(&format!("{}:{} ({})", n.file, n.line, n.repo)),
+        n.position,
+        cell(&format!("`{}`", n.client)),
+        cell(&format!("`{}`", n.server)),
+    )
+}
+
+fn print_names(names: &[NameBreak], min_tier: &str) {
+    println!("## names");
+    println!();
+    println!(
+        "_Client sites still using a name the change removed or renamed on the server side of a paired exchange; a row fails the gate only under `--models-min-tier heuristic` ({min_tier})._"
+    );
+    println!();
+    println!("| name | gate | tier | at | position | client | server |");
+    println!("|---|---|---|---|---|---|---|");
+    for n in names {
+        println!("{}", name_row(n));
+    }
+    println!();
+}
+
 fn print_orphans(orphans: &[OrphanedClient]) {
     println!("## orphaned clients");
     println!();
@@ -354,13 +418,26 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
         )
     };
     let model_blocking = b.models.iter().filter(|m| m.blocking).count();
-    let blocking_models = match model_blocking {
+    let mut blocking_models = match model_blocking {
         0 => String::new(),
         1 => ", 1 blocking model break".to_string(),
         k => format!(", {k} blocking model breaks"),
     };
+    let name_blocking = b.names.iter().filter(|n| n.blocking).count();
+    match name_blocking {
+        0 => {}
+        1 => blocking_models.push_str(", 1 blocking name break"),
+        k => blocking_models.push_str(&format!(", {k} blocking name breaks")),
+    }
+    // FH.7b: a folded row stands for several contracts.
+    let contracts: usize = breaking.iter().map(|r| r.operations.len().max(1)).sum();
+    let folded = if contracts > breaking.len() {
+        format!(" in {contracts} contracts")
+    } else {
+        String::new()
+    };
     println!(
-        "- breaking: {} ({} contract {}, {} orphaned {}{blocking_models}) | {rest}",
+        "- breaking: {} ({} contract {}{folded}, {} orphaned {}{blocking_models}) | {rest}",
         b.breaking,
         breaking.len(),
         if breaking.len() == 1 {
@@ -384,11 +461,23 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
         };
         println!(
             "- models: {model_breaking} breaking ({model_blocking} blocking, {} advisory) | {model_compatible} | min tier {min_tier}",
-            b.advisory,
+            model_breaking - model_blocking,
+        );
+    }
+    if !b.names.is_empty() {
+        println!(
+            "- names: {} client {} ({name_blocking} blocking, {} advisory) | min tier {min_tier}",
+            b.names.len(),
+            if b.names.len() == 1 { "site" } else { "sites" },
+            b.names.len() - name_blocking,
         );
     }
     println!();
-    if b.schemas.is_empty() && b.models.is_empty() && b.orphaned_clients.is_empty() {
+    if b.schemas.is_empty()
+        && b.models.is_empty()
+        && b.orphaned_clients.is_empty()
+        && b.names.is_empty()
+    {
         let what = if breaking_only {
             "breaking contract change"
         } else {
@@ -410,6 +499,9 @@ fn print_table(repo: &str, b: &ContractBreaks, breaking_only: bool, min_tier: &s
     }
     if !b.models.is_empty() {
         print_models(&b.models, &b.base, min_tier);
+    }
+    if !b.names.is_empty() {
+        print_names(&b.names, min_tier);
     }
     if !b.orphaned_clients.is_empty() {
         print_orphans(&b.orphaned_clients);
@@ -468,19 +560,21 @@ mod tests {
         );
     }
 
-    /// DT.1p: every models min tier maps, the default is `fact`, and another
-    /// spelling is refused in the engine's words.
+    /// DT.1p / FH.7b: every min tier maps (`heuristic` too, the name rows'
+    /// gate), the default is `fact`, and another spelling is refused in the
+    /// engine's words.
     #[test]
     fn every_models_min_tier_maps_and_others_are_refused() {
-        for tier in MODEL_MIN_TIERS {
+        for tier in NAME_MIN_TIERS {
             let a = engine_args("backward", false, tier).expect("an engine tier");
             assert_eq!(a.models_min_tier, *tier);
         }
+        assert_eq!(NAME_MIN_TIERS, &["fact", "derived", "heuristic"]);
         assert_eq!(ContractBreakArgs::default().models_min_tier, "fact");
-        let err = engine_args("backward", false, "heuristic").expect_err("no such gate");
+        let err = engine_args("backward", false, "certain").expect_err("no such gate");
         assert_eq!(
             err,
-            "unknown models min tier `heuristic`: expected one of fact, derived"
+            "unknown models min tier `certain`: expected one of fact, derived, heuristic"
         );
     }
 

@@ -168,6 +168,25 @@
 //! calibrated pick orders `intent.files` only. A fixed H9s50 order loses on
 //! a gate snapshot, so text fusions ship only as a repo's calibrated pick.
 //!
+//! # Name breaks (FH.7b)
+//!
+//! [`Review::name_breaks`] is `contract_breaks::name_breaks` over the same
+//! working tree and rev (FH.7a, the style-agnostic drift fallback): every
+//! client site still using a name the change removed or renamed on the
+//! server side of a paired exchange. Always ADVISORY here: review's
+//! [`ReviewArgs::models_min_tier`] takes `fact` | `derived` only, and a name
+//! row blocks only under `heuristic` (`glia contract-breaks
+//! --models-min-tier heuristic` is the gate that can fail on one), so
+//! [`Review::blocking`] never moves for a name row. [`review_vs_rev`] reads
+//! its repo path; [`review`] over a caller's delta reads the delta's one repo
+//! root (`contract_breaks::name_breaks_of`). fired_on once per review:
+//! FH.7a's `[name-breaks] base=<rev> ..` line
+//! (printed by the name pass, before `[review] base=`) and, after the
+//! `[review] base=` line and the intent and conventions lines,
+//! `[name-breaks] answer rows=<k> blocking=0 advisory=<k> min_tier=<t>
+//! folded_schema_rows=0->0 surface=review`
+//! (review lists no schema row, so it folds none).
+//!
 //! # Conventions (FB.12b)
 //!
 //! A change inside a scope is checked against its conventions: [`Review::conventions`]
@@ -208,7 +227,10 @@
 //! one line per breaking change; `via` the first exchange's key, ` (+<n>)`
 //! for the rest; a site is the side's qname then the `file:line` of the
 //! change's field there, else of the side, ` (at <base>)` on a site read
-//! from the rev, a dash for none), `### Check errors` (when any: the working
+//! from the rev, a dash for none), `### Name breaks (advisory)` (FH.7b, when
+//! a name row exists: `| name | tier | at | position | client | server |`,
+//! the name `` `old` -> `new` `` for a rename, `at` the client site's
+//! `file:line` in the working tree; the headline ends ` | <N> name break(s)`), `### Check errors` (when any: the working
 //! tree's rule errors and the rules only partly compared), `### Rules that
 //! check nothing` (when any: one bullet per `unanchored` row, its reason,
 //! then its `fix:`), `### Tests to run`, `### Impact`, `### Intent` (EB.7,
@@ -313,7 +335,8 @@ use crate::check::{
     default_forbid_categories,
 };
 use crate::contract_breaks::{
-    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier, model_breaks_of,
+    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, NameBreak, check_models_min_tier,
+    model_breaks_of, name_breaks_of,
 };
 use crate::contract_fields::FieldSide;
 use crate::cycles::module_import_graph;
@@ -430,6 +453,9 @@ pub struct ReviewCounts {
     /// `model_breaks.len()`: the breaking inferred-model rows, advisory ones
     /// included.
     pub model_breaks: usize,
+    /// FH.7b: `name_breaks.len()`. Not serialised when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub name_breaks: usize,
     /// Every edge row by tier; a tier no row has is absent.
     pub edges_by_tier: BTreeMap<&'static str, usize>,
 }
@@ -461,6 +487,12 @@ pub struct Review {
     /// (module docs "Model breaks"), `contract_breaks`' order; advisory ones
     /// (`blocking` false) included.
     pub model_breaks: Vec<ModelBreak>,
+    /// FH.7b: the client sites still using a name the change removed or
+    /// renamed on the server side of a paired exchange (module docs "Name
+    /// breaks"), `name_breaks`' order. Advisory: never in `blocking`. Not
+    /// serialised when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub name_breaks: Vec<NameBreak>,
     /// `(rule id, message)`: the working tree's rule errors, plus a rule a
     /// side lists too few rows of to classify (module docs).
     pub check_errors: Vec<(String, String)>,
@@ -602,7 +634,7 @@ pub fn review_vs_rev(repo_path: &str, base: &str, args: &ReviewArgs) -> Result<R
     check_models_min_tier(args.models_min_tier)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
     let ask = intent_request(Path::new(repo_path), base, args.title.as_deref());
-    review_with_intent(&rev, args, ask)
+    review_with_intent(&rev, args, ask, Some(repo_path))
 }
 
 /// The review of an already computed rev delta (module docs). Nothing is
@@ -610,11 +642,17 @@ pub fn review_vs_rev(repo_path: &str, base: &str, args: &ReviewArgs) -> Result<R
 /// delta carries no repo path to read a title or a base tree from
 /// ([`ReviewArgs::title`] is read by [`review_vs_rev`] only).
 pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
-    review_with_intent(rev, args, IntentAsk::Off)
+    review_with_intent(rev, args, IntentAsk::Off, None)
 }
 
-/// [`review`] with the intent section [`review_vs_rev`] asked for.
-fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Result<Review, String> {
+/// [`review`] with the intent section [`review_vs_rev`] asked for, and the
+/// working tree the name breaks read (`None`: the delta's one repo root).
+fn review_with_intent(
+    rev: &RevDelta,
+    args: &ReviewArgs,
+    ask: IntentAsk,
+    worktree: Option<&str>,
+) -> Result<Review, String> {
     let (before, after) = (&rev.before.merged, &rev.after.merged);
 
     // EB.7: one RankCache for the impact walk and the intent's P1, built as
@@ -740,6 +778,8 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     )
     .rows;
     model_breaks.retain(|m| m.status == "breaking");
+    // FH.7b: review's tiers are fact | derived, so no name row blocks.
+    let name_breaks = name_breaks_of(&rev.answer.base, worktree, &rev.after, args.models_min_tier);
 
     let mut edges_by_tier: BTreeMap<&'static str, usize> = BTreeMap::new();
     for e in &edges {
@@ -757,6 +797,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         new_violations: new_violations.len(),
         resolved_violations: resolved_violations.len(),
         model_breaks: model_breaks.len(),
+        name_breaks: name_breaks.len(),
         edges_by_tier,
     };
     let answer = Review {
@@ -771,6 +812,7 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
         new_violations,
         resolved_violations,
         model_breaks,
+        name_breaks,
         check_errors,
         unanchored,
         conventions,
@@ -785,6 +827,13 @@ fn review_with_intent(rev: &RevDelta, args: &ReviewArgs, ask: IntentAsk) -> Resu
     if !answer.conventions.is_empty() {
         eprintln!("[review] conventions={}", answer.conventions.len());
     }
+    let names_blocking = answer.name_breaks.iter().filter(|n| n.blocking).count();
+    eprintln!(
+        "[name-breaks] answer rows={} blocking={names_blocking} advisory={} min_tier={} folded_schema_rows=0->0 surface=review",
+        answer.name_breaks.len(),
+        answer.name_breaks.len() - names_blocking,
+        args.models_min_tier,
+    );
     Ok(answer)
 }
 
@@ -1690,11 +1739,15 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
     let (model_blocking, model_advisory): (Vec<&ModelBreak>, Vec<&ModelBreak>) =
         r.model_breaks.iter().partition(|m| m.blocking);
     // DT.1p: only with a model break, so every pre-DT.1p headline holds.
-    let model_note = match (r.model_breaks.len(), model_advisory.len()) {
+    let mut model_note = match (r.model_breaks.len(), model_advisory.len()) {
         (0, _) => String::new(),
         (m, 0) => format!(" | {m} model break(s)"),
         (m, a) => format!(" | {m} model break(s) ({a} advisory)"),
     };
+    // FH.7b: only with a name break, so every earlier headline holds.
+    if !r.name_breaks.is_empty() {
+        model_note.push_str(&format!(" | {} name break(s)", r.name_breaks.len()));
+    }
     let mut blocks: Vec<String> = vec![format!(
         "## glia review vs {}\n**{} new violation(s)**{} | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}{model_note}",
         code(&r.base),
@@ -1715,7 +1768,8 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         && r.edges.is_empty()
         && r.new_violations.is_empty()
         && r.resolved_violations.is_empty()
-        && r.model_breaks.is_empty();
+        && r.model_breaks.is_empty()
+        && r.name_breaks.is_empty();
     if unchanged {
         let note = r.impact.absence.as_ref().map_or_else(
             || format!("no graph change vs {}", r.base),
@@ -1746,6 +1800,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         );
         model_breaks_md(&mut blocks, &model_advisory, &r.base, max);
     }
+    name_breaks_md(&mut blocks, r, max);
     check_errors_md(&mut blocks, r, max);
     unanchored_md(&mut blocks, r);
 
@@ -1931,6 +1986,42 @@ fn model_breaks_md(blocks: &mut Vec<String>, rows: &[&ModelBreak], base: &str, m
         ],
         lines,
         total,
+        max,
+    );
+}
+
+/// serde's `skip_serializing_if` for a count left out at 0 (FH.7b).
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// `### Name breaks (advisory)` (FH.7b, module docs "Markdown"; only when a
+/// name row exists): one line per client site, cut at `max`.
+fn name_breaks_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    if r.name_breaks.is_empty() {
+        return;
+    }
+    blocks.push("### Name breaks (advisory)".to_string());
+    // A review is one repo's: every site is the working tree's file.
+    let lines = r.name_breaks.iter().map(|n| {
+        let name = match &n.renamed_to {
+            Some(to) => format!("{} -> {}", code(&n.name), code(to)),
+            None => code(&n.name),
+        };
+        vec![
+            name,
+            text(n.tier),
+            at(Some(&n.file), Some(n.line)),
+            text(n.position),
+            code(&n.client),
+            code(&n.server),
+        ]
+    });
+    push_table(
+        blocks,
+        &["name", "tier", "at", "position", "client", "server"],
+        lines,
+        r.name_breaks.len(),
         max,
     );
 }

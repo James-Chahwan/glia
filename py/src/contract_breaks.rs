@@ -10,30 +10,31 @@
 //! (`contract_breaks_vs_rev_with`), so a client in another repo that lost
 //! its provider is an orphan too, and its typed calls are judged as model
 //! exchanges (DT.1p). It returns the engine's `ContractBreaks` as a native
-//! dict (LD.2): `{base, schemas, models, orphaned_clients, breaking,
-//! advisory, absence}`. An `avro` mode outside the engine's `AVRO_MODES`, a
-//! `models_min_tier` outside its `MODEL_MIN_TIERS` (both checked before any
-//! build) or an engine `Err` (not a git work tree, an unknown rev, a failed
-//! build) raises `ValueError`.
+//! dict (LD.2): `{base, schemas, models, orphaned_clients, names, breaking,
+//! advisory, absence}` (`names`, FH.7b, only when a name row exists). An
+//! `avro` mode outside the engine's `AVRO_MODES`, a `models_min_tier`
+//! outside its `NAME_MIN_TIERS` (`fact` | `derived` | `heuristic`; both
+//! checked before any build) or an engine `Err` (not a git work tree, an
+//! unknown rev, a failed build) raises `ValueError`.
 //!
 //! Transport only: the pairing, the evolution rules, the orphaned clients,
-//! the inferred-model judge, the location of every row and the
-//! `[contract-breaks] base=..` / `[model-breaks] base=..` markers live in the
-//! engine. The helpers the pyo3 entry point delegates to are pyo3-free,
+//! the inferred-model judge, the name breaks, the shared-schema fold, the
+//! location of every row and the `[contract-breaks] base=..` /
+//! `[model-breaks] base=..` / `[name-breaks] ..` markers live in the engine. The helpers the pyo3 entry point delegates to are pyo3-free,
 //! so `cargo test -p glia-py` covers them (see the crate doc).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::contract_breaks::{
-    AVRO_MODES, ContractBreakArgs, ContractBreaks, MODEL_MIN_TIERS, contract_breaks_vs_rev_with,
+    AVRO_MODES, ContractBreakArgs, ContractBreaks, NAME_MIN_TIERS, contract_breaks_vs_rev_with,
 };
 
 use crate::convert::to_py;
 use crate::registry::ModuleFns;
 
 /// The engine's arguments from the keyword arguments; `Err` names a mode
-/// outside [`AVRO_MODES`] or a tier outside [`MODEL_MIN_TIERS`] in the
+/// outside [`AVRO_MODES`] or a tier outside [`NAME_MIN_TIERS`] in the
 /// engine's own words.
 fn engine_args(
     avro: &str,
@@ -46,14 +47,14 @@ fn engine_args(
             AVRO_MODES.join(", ")
         ));
     };
-    let Some(tier) = MODEL_MIN_TIERS
+    let Some(tier) = NAME_MIN_TIERS
         .iter()
         .copied()
         .find(|t| *t == models_min_tier)
     else {
         return Err(format!(
             "unknown models min tier `{models_min_tier}`: expected one of {}",
-            MODEL_MIN_TIERS.join(", ")
+            NAME_MIN_TIERS.join(", ")
         ));
     };
     let mut args = ContractBreakArgs::default();
@@ -85,10 +86,12 @@ fn rev_answer(
 /// (`"backward"`: the new schema reads what the old one wrote, `"forward"`:
 /// the old reads the new, `"full"`: both).
 ///
-/// Returns a dict `{base, schemas, models, orphaned_clients, breaking,
-/// advisory, absence}`:
+/// Returns a dict `{base, schemas, models, orphaned_clients, names,
+/// breaking, advisory, absence}` (`names` only when a name row exists):
 /// `schemas` rows `{kind, key, format, before, after, status, change, tier,
-/// note, changes}` (`status` `breaking` | `unknown` | `compatible`; `before`
+/// note, changes, operations}` (`operations`, FH.7b, only on a row that
+/// folded one shared-schema change of several operations: every folded
+/// key, the row's own first; `status` `breaking` | `unknown` | `compatible`; `before`
 /// / `after` the declaration at the rev / in the working tree, each `{repo_id,
 /// qname, format, file, line}`; `changes` one `{section, field, change,
 /// producer, consumer, rule, breaking}` per declared difference, `producer`
@@ -99,16 +102,22 @@ fn rev_answer(
 /// tier, blocking, note, changes}` (`pairing` `http_model` |
 /// `graphql_selection`; `exchanges` `{key, tier, client_site, server_site}`;
 /// `changes` `{field, change, side, rule, breaking, before, after, client,
-/// server}`, each site `{file, line, at_base}`); `breaking` the breaking
-/// schema rows plus the orphaned clients plus the BLOCKING model rows (a CI
-/// gate fails when it is above 0); `advisory` the breaking model rows below
-/// `models_min_tier`; `absence` a dict saying why when nothing is listed,
-/// else `None`. `breaking_only=True` lists only the breaking schema and
-/// model rows; `breaking`, `advisory` and the orphans are the same either
-/// way. `models_min_tier` (`"fact"`, the default, or `"derived"`; check's
-/// vocabulary) is the weakest pairing tier at which a breaking model row
-/// blocks: every pairing glia 0.5.2 infers is derived, so by default a model
-/// row is advisory; a heuristic pairing never blocks.
+/// server}`, each site `{file, line, at_base}`); `names` (FH.7b) the client
+/// sites still using a name the change removed or renamed on the server
+/// side of a paired exchange, `{name, normalised, renamed_to, repo, file,
+/// line, position, client, server, tier, blocking}`; `breaking` the
+/// breaking contracts (each folded operation once) plus the orphaned
+/// clients plus the BLOCKING model and name rows (a CI gate fails when it is
+/// above 0); `advisory` the breaking model rows below `models_min_tier` plus
+/// the name rows that do not block; `absence` a dict saying why when nothing
+/// is listed, else `None`. `breaking_only=True` lists only the breaking
+/// schema and model rows; `breaking`, `advisory`, the orphans and the names
+/// are the same either way. `models_min_tier` (`"fact"`, the default,
+/// `"derived"` or `"heuristic"`) is the weakest tier at which a breaking
+/// model row (`fact` / `derived`; every pairing glia 0.5.2 infers is
+/// derived, so by default a model row is advisory, and a heuristic model
+/// pairing never blocks) or a name row (only under `"heuristic"`, which
+/// judges the model rows as `"derived"`) blocks.
 /// `with_repos` (a list of paths, default `None`) adds client repos: both
 /// sides are then built as multi-repo merges, the provider at the rev and at
 /// its working tree, each beside the same clients at their own trees, so a
@@ -120,8 +129,8 @@ fn rev_answer(
 /// repo and of every client as `generate(incremental=True)` does, never a
 /// `.gmap` layout. Raises ValueError on a bad `avro` mode or
 /// `models_min_tier` (`unknown models min tier `x`: expected one of fact,
-/// derived`, before any build), a client that is not a directory, or a git
-/// or build failure.
+/// derived, heuristic`, before any build), a client that is not a
+/// directory, or a git or build failure.
 #[pyfunction]
 #[pyo3(name = "contract_breaks_vs_rev", signature = (repo_path, base="HEAD", avro="backward", breaking_only=false, with_repos=None, models_min_tier="fact"))]
 fn contract_breaks_vs_rev_py(
@@ -218,7 +227,7 @@ mod tests {
             let a = engine_args(mode, false, "fact").expect("an engine mode");
             assert_eq!(a.avro_mode, *mode);
         }
-        for tier in MODEL_MIN_TIERS {
+        for tier in NAME_MIN_TIERS {
             let a = engine_args("backward", false, tier).expect("an engine tier");
             assert_eq!(a.models_min_tier, *tier);
         }
@@ -228,12 +237,12 @@ mod tests {
             "backward",
             false,
             None,
-            "heuristic",
+            "certain",
         )
         .expect_err("bad tier");
         assert_eq!(
             err,
-            "unknown models min tier `heuristic`: expected one of fact, derived"
+            "unknown models min tier `certain`: expected one of fact, derived, heuristic"
         );
         let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None, "fact")
             .expect_err("bad mode");

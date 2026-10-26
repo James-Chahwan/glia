@@ -415,7 +415,7 @@ glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-ro
     order the repo's calibrated pick, `selection_intent`). --ranking / --no-cochange rank
     the impact as blast-radius does. --full keeps every impact row, impact seed (50 by
     default, `impact.truncated`) and test row, and writes every row whole.
-glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--models-min-tier fact|derived] [--with <REPO>]...
+glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--models-min-tier fact|derived|heuristic] [--with <REPO>]...
     Did the change against a rev (default HEAD) break a client? Every OpenAPI /
     AsyncAPI op and proto / Avro / JSON Schema type paired old -> new and judged by
     its format's evolution rules, one row per field change; every client whose call
@@ -425,8 +425,13 @@ glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--bre
     server field lines (a JSON rename, a field removed or now optional, a new
     required request field, a type change). A model row blocks only when its tier is
     at least --models-min-tier (default fact, so the resolver-paired, derived rows
-    are advisory, counted in `advisory`, not `breaking`). A CI gate: exits 1 on a
-    breaking change, an orphaned client or a blocking model break, 0 otherwise.
+    are advisory, counted in `advisory`, not `breaking`). And the names (`names`,
+    any style): every client site, in any repo of the build, still using a name the
+    change removed or renamed on the server side of a paired exchange; heuristic, so
+    a name row blocks only under --models-min-tier heuristic. One change to a schema
+    many operations share is one row listing its `operations`. A CI gate: exits 1 on
+    a breaking change, an orphaned client or a blocking model or name break, 0
+    otherwise.
 glia cochange <REPO> [FILES]... [--base <REV>] [--json] [--min-confidence <SHARE>] [--min-support <N>] [--top <N>] [--unlinked-only] [--with <WITH>]...
     What usually changes with these files (or the working tree's change against
     --base): each with a directional confidence (`0.80 (4/5)`), its support and
