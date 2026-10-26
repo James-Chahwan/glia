@@ -15,8 +15,10 @@ import tempfile
 
 from test_build import Checks, params, rg, stderr_of
 
+# FH.4b: the path reaches fetch through String(..), which the inferred HTTP
+# wrappers do not follow, so request() stays a wrapper the graph cannot see.
 CLIENT_TS = ("export function request(method: string, path: string) {\n"
-             "  return fetch(path, { method });\n}\n\n"
+             "  return fetch(String(path), { method });\n}\n\n"
              "export async function loadUsers() {\n  return request('GET', '/users');\n}\n")
 API_PY = ("from flask import Flask\n\napp = Flask(__name__)\n\n\n"
           "@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n"

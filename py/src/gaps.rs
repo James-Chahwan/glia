@@ -151,9 +151,10 @@ mod tests {
         std::fs::create_dir_all(web.join("src")).expect("mkdir");
         std::fs::create_dir_all(web.join(".glia")).expect("mkdir");
         std::fs::create_dir_all(&api).expect("mkdir");
+        // FH.4b: `String(path)` keeps the wrapper out of the inference.
         std::fs::write(
             web.join("src/client.ts"),
-            "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n",
+            "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n",
         )
         .expect("write");
         std::fs::write(

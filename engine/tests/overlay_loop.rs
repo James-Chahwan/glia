@@ -652,7 +652,8 @@ fn closes_its_target_gap() {
     std::fs::create_dir_all(&api).expect("mkdir");
     std::fs::write(
         web.join("src/client.ts"),
-        "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n",
+        // FH.4b: `String(path)` keeps the wrapper out of the inference.
+        "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n",
     )
     .expect("write");
     std::fs::write(
@@ -859,8 +860,9 @@ fn deterministic() {
 // ---------------------------------------------------------------------------
 
 /// Probe r1's web side: a hand-rolled `request()` whose `fetch(path)` is an
-/// `<unresolved>` sink (line 2).
-const R1_CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
+/// `<unresolved>` sink (line 2); FH.4b: the path goes through `String(..)`,
+/// which the inferred HTTP wrappers do not follow.
+const R1_CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
 /// Probe r1's api side: two flask routes nothing in the build pairs to.
 const R1_API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n";
 
@@ -922,7 +924,10 @@ fn propose_lists_rows_with_snippets() {
     assert_eq!(snippet.start_line, 1, "2 - 3, clamped at the file start");
     let want: Vec<&str> = R1_CLIENT_TS.lines().take(5).collect();
     assert_eq!(snippet.lines, want, "lines 1-5");
-    assert_eq!(snippet.lines[1], "  return fetch(path, { method });");
+    assert_eq!(
+        snippet.lines[1],
+        "  return fetch(String(path), { method });"
+    );
 
     // Every located row in one root carries its snippet.
     for r in &full.rows {

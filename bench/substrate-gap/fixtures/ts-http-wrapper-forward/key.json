@@ -1,0 +1,30 @@
+{
+  "framework": "ts-http-wrapper-forward",
+  "language": "typescript+go",
+  "dirs": ["web", "server"],
+  "note": "FH.4b in-repo HTTP wrappers inferred from parameter flow, with no overlay. `api(path, opts)` hands its own `path` into fetch's template (`${API_BASE}${path}`) and its `opts` into fetch's options; `getJson` / `sendJson` forward into `api` (one level, the method fixed or forwarded through `{ method }`) and `readResource` forwards a `/v1`-prefixed path into `getJson` (two levels). Each literal call site mints the ENDPOINT the wrapper chain composes (EVIDENCE emitter `pass:inferred_wrapper`, rule `wrapper_call`), prefix folded through the const table, so it pairs the Go routes under /api. Where the FH.4a shape rule had already read a site (`getJson('/users')`, `api('/users/${id}', { method })`) without the prefix, the wrapper's reading replaces it. A non-literal, a commented call and a non-path literal mint nothing. Baseline: see the FH.4b commit. Deliberately not bound to a matrix cell: typescript/http_client is already scored.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/users", "exact": true, "note": "one level: getJson -> api"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/api/users", "exact": true, "note": "the method forwarded through { method }"},
+    {"kind": "ENDPOINT", "name": "endpoint:DELETE:/api/users/${…}", "exact": true, "note": "the wrapper itself, method from the site's options"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/v1/teams", "exact": true, "note": "two levels: readResource -> getJson -> api"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/users", "to": "GET /api/users", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:POST:/api/users", "to": "POST /api/users", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:DELETE:/api/users/${…}", "to": "DELETE /api/users/{id}", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:GET:/api/v1/teams", "to": "GET /api/v1/teams", "category": "HTTP_CALLS", "exact": true},
+    {"from": "listUsers", "to": "endpoint:GET:/api/users", "category": "CALLS"},
+    {"from": "listTeams", "to": "endpoint:GET:/api/v1/teams", "category": "CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/v1/teams", "cell": "ORIGIN", "contains": "inferred:wrapper"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/users", "note": "the shape rule's unprefixed reading is replaced"},
+    {"kind": "ENDPOINT", "name": "endpoint:DELETE:/users/${…}", "note": "the shape rule's unprefixed reading is replaced"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/legacy", "note": "a commented call"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/apicache key", "note": "PRECISION: a non-path literal"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/apicache%20key", "note": "PRECISION: a non-path literal"}
+  ]
+}

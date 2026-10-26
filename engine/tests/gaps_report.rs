@@ -22,7 +22,10 @@ use glia_engine::gaps::{
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
-const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
+/// FH.4b: the path reaches `fetch` through a call (`String(path)`), which the
+/// inferred HTTP wrappers do not follow, so `request` stays a wrapper the graph
+/// cannot see (a direct `fetch(path)` is inferred and its sites mint).
+const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
 const API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n";
 const M1_WEB_TS: &str = "import axios from 'axios';\n\nconst GATEWAY = process.env.GATEWAY_URL;\n\nexport async function listUsers() {\n  return axios.get(`${GATEWAY}/users`);\n}\n\nexport async function listOrders() {\n  return axios.get('/orders-svc/orders');\n}\n";
 const M1_ORDERS_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef orders_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef orders_list():\n    return []\n";

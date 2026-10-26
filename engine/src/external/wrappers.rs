@@ -158,7 +158,7 @@ use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
 
-use super::infer_wrappers::InferredWrappers;
+use super::infer_wrappers::{HttpShape, HttpSite, InferredWrappers, read_http_site};
 use crate::extract::detect_language;
 use crate::route::ModuleQnames;
 
@@ -172,6 +172,12 @@ pub(crate) const INFERRED_EMITTER: &str = "pass:inferred_wrapper";
 
 /// The ORIGIN provenance of every node an inferred stanza mints (CA.4).
 pub(crate) const INFERRED_PROVENANCE: &str = "inferred:wrapper";
+
+/// The EVIDENCE rule of every edge an inferred HTTP stanza adds (FH.4b).
+pub(crate) const WRAPPER_CALL_RULE: &str = "wrapper_call";
+
+/// The EVIDENCE rule of the TypeScript parser's FH.4a shape-rule CALLS edge.
+const CALL_SHAPE_RULE: &str = "call_shape";
 
 /// Identifier tokens that make `<token> <call>(` a definition.
 const DEF_KEYWORDS: &[&str] = &["function", "def", "fn", "func", "fun"];
@@ -216,6 +222,9 @@ struct Stanza<'c> {
     decl: Cow<'c, WrapperDecl>,
     kind: WrapperKind,
     source: StanzaSource,
+    /// FH.4b: an inferred HTTP wrapper's composition (its sites read through
+    /// `infer_wrappers::read_http_site`); `None` for every other stanza.
+    shape: Option<HttpShape>,
 }
 
 impl Stanza<'_> {
@@ -233,10 +242,13 @@ impl Stanza<'_> {
     }
 
     /// The confidence of every node and edge the stanza mints: the overlay
-    /// origin's (`llm` Weak, `human` Medium), Medium for an inferred one.
+    /// origin's (`llm` Weak, `human` Medium), Medium for an inferred
+    /// collection wrapper, Weak for an inferred HTTP one (FH.4b: a heuristic
+    /// until a resolver pairs it).
     fn confidence(&self) -> Confidence {
         match self.source {
             StanzaSource::Overlay { .. } => self.decl.origin.confidence(),
+            StanzaSource::Inferred { .. } if self.shape.is_some() => Confidence::Weak,
             StanzaSource::Inferred { .. } => Confidence::Medium,
         }
     }
@@ -265,7 +277,12 @@ impl Stanza<'_> {
             StanzaSource::Overlay { .. } => EMITTER,
             StanzaSource::Inferred { .. } => INFERRED_EMITTER,
         };
-        Evidence::emitter(emitter).rule(self.rule()).at(path, line0)
+        let rule = if self.shape.is_some() {
+            WRAPPER_CALL_RULE.to_string()
+        } else {
+            self.rule()
+        };
+        Evidence::emitter(emitter).rule(rule).at(path, line0)
     }
 
     /// The data_entity sites mint in the late half: the grafts call only
@@ -377,11 +394,15 @@ impl WrapperTally {
 struct Tallies {
     overlay: WrapperTally,
     inferred: WrapperTally,
+    /// FH.4b: the inferred HTTP wrappers' sites (`[http-wrappers]`).
+    http: WrapperTally,
 }
 
 impl Tallies {
     fn of(&mut self, st: &Stanza<'_>) -> &mut WrapperTally {
-        if st.is_inferred() {
+        if st.shape.is_some() {
+            &mut self.http
+        } else if st.is_inferred() {
             &mut self.inferred
         } else {
             &mut self.overlay
@@ -391,6 +412,7 @@ impl Tallies {
     fn add_mint(&mut self, m: Tallies) {
         self.overlay.add_mint(m.overlay);
         self.inferred.add_mint(m.inferred);
+        self.http.add_mint(m.http);
     }
 }
 
@@ -405,12 +427,22 @@ struct InferenceCounts {
     shadowed_by_overlay: usize,
     skipped_ambiguous: usize,
     skipped_unparsed: usize,
+    /// FH.4b: kept inferred HTTP wrappers (shadowed ones included), those
+    /// the precision gate dropped, and client calls whose owner did not read.
+    http_wrappers: usize,
+    http_ambiguous: usize,
+    http_unparsed: usize,
 }
 
 impl InferenceCounts {
-    /// The inference found a candidate wrapper (kept or skipped).
+    /// The inference found a candidate collection wrapper (kept or skipped).
     fn any(&self) -> bool {
         self.wrappers + self.skipped_ambiguous + self.skipped_unparsed > 0
+    }
+
+    /// The inference found a candidate HTTP wrapper (kept or skipped).
+    fn http_any(&self) -> bool {
+        self.http_wrappers + self.http_ambiguous + self.http_unparsed > 0
     }
 }
 
@@ -453,6 +485,7 @@ impl<'c> WrapperPass<'c> {
                             decl: Cow::Borrowed(s.get_ref()),
                             kind: s.get_ref().wrapper_kind()?,
                             source: StanzaSource::Overlay { ordinal },
+                            shape: None,
                         })
                     }),
             );
@@ -464,15 +497,20 @@ impl<'c> WrapperPass<'c> {
             forwarding: inferred.forwarding(),
             skipped_ambiguous: inferred.skipped_ambiguous,
             skipped_unparsed: inferred.skipped_unparsed,
+            http_wrappers: inferred.http.len(),
+            http_ambiguous: inferred.http_ambiguous,
+            http_unparsed: inferred.http_unparsed,
             ..InferenceCounts::default()
         };
-        for w in inferred.wrappers {
+        for w in inferred.wrappers.into_iter().chain(inferred.http) {
             if stanzas
                 .iter()
                 .take(overlay_stanzas)
                 .any(|s| s.decl.call == w.decl.call)
             {
-                inference.shadowed_by_overlay += 1;
+                if w.http.is_none() {
+                    inference.shadowed_by_overlay += 1;
+                }
                 continue;
             }
             let Some(kind) = w.decl.wrapper_kind() else {
@@ -485,9 +523,10 @@ impl<'c> WrapperPass<'c> {
                     def_file: w.def_file,
                     def_line0: w.def_line0,
                 },
+                shape: w.http,
             });
         }
-        if cfg.is_none() && !inference.any() {
+        if cfg.is_none() && !inference.any() && !inference.http_any() {
             return None;
         }
         let mut pass = WrapperPass {
@@ -500,6 +539,7 @@ impl<'c> WrapperPass<'c> {
                     stanzas: stanzas.len() - overlay_stanzas,
                     ..WrapperTally::default()
                 },
+                http: WrapperTally::default(),
             },
             stanzas,
             files: Vec::new(),
@@ -647,6 +687,13 @@ impl<'c> WrapperPass<'c> {
                 inf.skipped_unparsed
             );
         }
+        if inf.http_any() {
+            let t = &self.tally.http;
+            eprintln!(
+                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} repo={repo_label}",
+                inf.http_wrappers, t.sites, t.minted, inf.http_ambiguous
+            );
+        }
     }
 }
 
@@ -687,7 +734,7 @@ fn scan_file(source: &str, lang: &str, stanzas: &[Stanza<'_>]) -> Vec<Site> {
     out
 }
 
-fn is_ident_byte(b: u8) -> bool {
+pub(super) fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
@@ -776,7 +823,7 @@ fn call_hits(source: &str, call: &str, receiver: bool) -> Vec<Hit> {
 /// one line and within [`MAX_TYPE_ARGS`] bytes. `None` for anything that is
 /// not a generic argument list (a comparison, an arrow type, a mismatched or
 /// unclosed bracket).
-fn skip_type_args(b: &[u8], at: usize) -> Option<usize> {
+pub(super) fn skip_type_args(b: &[u8], at: usize) -> Option<usize> {
     let mut open: Vec<u8> = Vec::new();
     for (k, &c) in b.get(at..)?.iter().enumerate().take(MAX_TYPE_ARGS) {
         match c {
@@ -891,7 +938,7 @@ pub(super) fn arg_region(source: &str, from: usize) -> (&str, Option<usize>) {
 }
 
 /// See the module doc's DEFINITION rule.
-fn is_definition(prefix: &str, region: &str, after: &str) -> bool {
+pub(super) fn is_definition(prefix: &str, region: &str, after: &str) -> bool {
     let token = prefix
         .trim_end()
         .rsplit(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
@@ -984,6 +1031,13 @@ fn is_commented(prefix: &str) -> bool {
 fn read_args(region: &str, verb: Option<&'static str>, st: &Stanza<'_>) -> Read {
     let args = split_args(region);
     let arg = |i: Option<usize>| i.and_then(|i| args.get(i)).and_then(|a| literal(a));
+    if let Some(shape) = &st.shape {
+        return match read_http_site(shape, &args) {
+            HttpSite::NonLiteral => Read::NonLiteral,
+            HttpSite::Invalid => Read::Invalid,
+            HttpSite::Path { method, path } => http_read(method, &path),
+        };
+    }
     match st.kind {
         WrapperKind::Http => {
             let method = match (verb, &st.decl.method, st.decl.method_arg) {
@@ -1138,15 +1192,15 @@ pub(super) fn split_args(region: &str) -> Vec<&str> {
 
 /// One literal argument: its body (between the quotes, verbatim) and its
 /// quote byte (`:` for a symbol).
-struct Lit<'a> {
-    body: &'a str,
-    quote: u8,
+pub(super) struct Lit<'a> {
+    pub(super) body: &'a str,
+    pub(super) quote: u8,
 }
 
 /// `arg` when it is exactly one literal, after an optional `name=` /
 /// `name:` label: a quoted string with an optional one-letter prefix, or a
 /// `:symbol`.
-fn literal(arg: &str) -> Option<Lit<'_>> {
+pub(super) fn literal(arg: &str) -> Option<Lit<'_>> {
     let a = strip_label(arg.trim());
     let b = a.as_bytes();
     if b.first() == Some(&b':') && b.len() > 1 && b.get(1..)?.iter().all(|c| is_ident_byte(*c)) {
@@ -1293,6 +1347,7 @@ fn mint_http(
     at: &FileAt<'_>,
 ) -> Tallies {
     let mut t = Tallies::default();
+    let released = release_shape_reads(fp, sites);
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
     let endpoints: Vec<&Node> = fp
         .nodes
@@ -1304,6 +1359,7 @@ fn mint_http(
     let mut held: HashSet<(NodeId, usize)> = endpoints
         .iter()
         .flat_map(|n| hit_lines(n).map(move |l| (n.id, l)))
+        .filter(|k| !released.contains(k))
         .collect();
     let mut fresh: Vec<Node> = Vec::new();
     for site in sites {
@@ -1369,6 +1425,53 @@ fn mint_http(
     }
     graft_nodes(fp, fresh, at.lang);
     t
+}
+
+/// FH.4a's handoff: a call the shape rule already read (a CALLS edge to an
+/// ENDPOINT with EVIDENCE rule `call_shape`) on the line of a site this
+/// stage reads gives way to the stanza's reading: the edge goes, and its
+/// ENDPOINT with it when no other edge of the file names it (every node of
+/// that id, and its nav entry). Returns the `(endpoint, 1-based line)` pairs
+/// whose node stays, so the site is not taken for a duplicate of it.
+fn release_shape_reads(fp: &mut FileParse, sites: &[&Site]) -> HashSet<(NodeId, usize)> {
+    let lines: HashSet<u32> = sites
+        .iter()
+        .filter(|s| matches!(s.read, Read::Http { .. }))
+        .map(|s| s.line0)
+        .collect();
+    let mut released: HashSet<(NodeId, usize)> = HashSet::new();
+    if lines.is_empty() {
+        return released;
+    }
+    let mut dropped: Vec<(NodeId, u32)> = Vec::new();
+    let kinds = &fp.nav.kind_by_id;
+    fp.edges.retain(|e| {
+        let shape_line = (e.category == edge_category::CALLS
+            && kinds.get(&e.to) == Some(&node_kind::ENDPOINT))
+        .then(|| Evidence::of(e))
+        .flatten()
+        .filter(|ev| ev.rule.as_deref() == Some(CALL_SHAPE_RULE))
+        .and_then(|ev| ev.line)
+        .filter(|l| lines.contains(l));
+        if let Some(l) = shape_line {
+            dropped.push((e.to, l));
+        }
+        shape_line.is_none()
+    });
+    for (id, line0) in dropped {
+        if fp.edges.iter().any(|e| e.to == id || e.from == id) {
+            let line1 = usize::try_from(line0)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            released.insert((id, line1));
+            continue;
+        }
+        fp.nodes.retain(|n| n.id != id);
+        fp.nav.name_by_id.remove(&id);
+        fp.nav.qname_by_id.remove(&id);
+        fp.nav.kind_by_id.remove(&id);
+    }
+    released
 }
 
 /// The 0-based site lines a queue node records: its POSITION start and its

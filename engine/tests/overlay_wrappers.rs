@@ -7,6 +7,14 @@
 //! Pre-fix baseline (HEAD cb356fc): the wrapper yields only the inner
 //! `endpoint:GET:<unresolved>`, `api.get('/orders')` mints nothing, and
 //! `[http] routes=3 endpoints=0 paired=0`.
+//!
+//! FH.4b: probe r1's `request` is now an inferred HTTP wrapper (its `path`
+//! flows straight into `fetch`), so with no overlay its sites mint the same
+//! ENDPOINTs (ORIGIN `inferred:wrapper`); an overlay stanza naming `request`
+//! shadows the inference. The overlay-delta test reads [`OPAQUE_CLIENT_TS`],
+//! whose path goes through a call the inference does not follow. A stanza's
+//! site on a line the FH.4a shape rule also read takes the site over (the
+//! stanza's ORIGIN and EVIDENCE win).
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +34,10 @@ const API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app
 
 /// Probe r1 plus a POST call site.
 const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n\nexport async function createUser(u: unknown) {\n  return request(\"POST\", \"/users\");\n}\n";
+
+/// Probe r1 with the path through `String(..)`: no inferred wrapper, so only
+/// the overlay stanza mints its sites.
+const OPAQUE_CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n\nexport async function createUser(u: unknown) {\n  return request(\"POST\", \"/users\");\n}\n";
 
 const REQUEST_STANZA: &str = "version = 1\n\n[[wrapper]]\ncall = \"request\"\nkind = \"http\"\nmethod_arg = 0\npath_arg = 1\n";
 
@@ -296,17 +308,21 @@ fn receiver_form_mints_verb_endpoints() {
         ],
         "apiClient is not api"
     );
-    // FH.4a: the lower-case verb sites are the parser's now (EVIDENCE rule
-    // `call_shape`), so the stanza's are duplicates; it still mints the
-    // case-insensitive `api.Delete(..)`, which no parser rule reads.
-    let (n, _) = node(&r, "endpoint:DELETE:/orders/${…}").expect("node");
-    assert_eq!(
-        json_cells(&n.cells, cell_type::ORIGIN),
-        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#1"})]
-    );
+    // FH.4a reads the lower-case verb sites too (EVIDENCE rule `call_shape`);
+    // FH.4b: the stanza's reading of the same site wins, so they carry its
+    // ORIGIN and EVIDENCE, as does the case-insensitive `api.Delete(..)`,
+    // which no parser rule reads.
+    for q in ["endpoint:DELETE:/orders/${…}", "endpoint:GET:/orders"] {
+        let (n, _) = node(&r, q).expect("node");
+        assert_eq!(
+            json_cells(&n.cells, cell_type::ORIGIN),
+            [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#1"})],
+            "{q}"
+        );
+    }
     assert_eq!(
         calls_rule(&r, "src::client::listOrders", "endpoint:GET:/orders").as_deref(),
-        Some("call_shape")
+        Some("wrapper#1")
     );
     assert!(has_edge(
         &r,
@@ -483,11 +499,11 @@ fn queue_wrapper_mints_producer() {
 
 #[test]
 fn no_overlay_mints_nothing() {
-    let without_file = build_pair("none", CLIENT_TS, None, &BuildOptions::default());
+    let without_file = build_pair("none", OPAQUE_CLIENT_TS, None, &BuildOptions::default());
     assert_eq!(endpoints(&without_file), ["endpoint:GET:<unresolved>"]);
     let switched_off = build_pair(
         "off",
-        CLIENT_TS,
+        OPAQUE_CLIENT_TS,
         Some(REQUEST_STANZA),
         &BuildOptions::default().with_overlay(false),
     );
@@ -496,6 +512,46 @@ fn no_overlay_mints_nothing() {
         ["endpoint:GET:<unresolved>"],
         "--no-overlay"
     );
+}
+
+/// FH.4b: with no overlay (or with it switched off) probe r1's `request` is
+/// an inferred HTTP wrapper: its sites mint what the stanza would, Weak, with
+/// the inferred ORIGIN and EVIDENCE rule `wrapper_call`.
+#[test]
+fn no_overlay_infers_the_wrapper() {
+    let opts = [
+        BuildOptions::default(),
+        BuildOptions::default().with_overlay(false),
+    ];
+    for (i, opts) in opts.iter().enumerate() {
+        let overlay = (i == 1).then_some(REQUEST_STANZA);
+        let r = build_pair(&format!("infer{i}"), CLIENT_TS, overlay, opts);
+        assert_eq!(
+            endpoints(&r),
+            [
+                "endpoint:GET:/users",
+                "endpoint:GET:<unresolved>",
+                "endpoint:POST:/users"
+            ]
+        );
+        let (n, _) = node(&r, "endpoint:GET:/users").expect("node");
+        assert_eq!(n.confidence, Confidence::Weak);
+        assert_eq!(
+            json_cells(&n.cells, cell_type::ORIGIN),
+            [
+                serde_json::json!({"provenance": "inferred:wrapper", "rule": "inferred:request", "def": "src/client.ts:1"})
+            ]
+        );
+        assert_eq!(
+            calls_rule(&r, "src::client::loadUsers", "endpoint:GET:/users").as_deref(),
+            Some("wrapper_call")
+        );
+        let http = edges(&r, edge_category::HTTP_CALLS);
+        assert!(
+            http.contains(&("endpoint:POST:/users".into(), "POST /users".into())),
+            "{http:?}"
+        );
+    }
 }
 
 /// Map of file name -> bytes of a written layout.
@@ -559,7 +615,7 @@ fn wrapper_builds_are_byte_identical() {
 fn gaps_report_wrapped_sink_and_overlay_delta() {
     let root = tmp("gaps");
     let (web, api) = (root.join("web"), root.join("api"));
-    write(&web, "src/client.ts", CLIENT_TS);
+    write(&web, "src/client.ts", OPAQUE_CLIENT_TS);
     write(&api, "app.py", API_PY);
     write(&web, ".glia/overlay.toml", REQUEST_STANZA);
     let paths = [s(&web), s(&api)];
@@ -657,17 +713,17 @@ fn fixture_key_holds() {
         "endpoint:GET:/orders",
         edge_category::CALLS
     ));
-    // FH.4a: `api.get('/orders')` is the parser's shape-rule site (a verb on
-    // a client-named receiver), so the receiver stanza's site is a duplicate
-    // and the node carries no ORIGIN; the request wrapper's still does.
+    // FH.4a reads `api.get('/orders')` with its shape rule (a verb on a
+    // client-named receiver); FH.4b: the receiver stanza's reading of that
+    // site wins, so the node carries its ORIGIN and the edge its rule.
     let (n, _) = node(&r, "endpoint:GET:/orders").expect("node");
     assert_eq!(
         json_cells(&n.cells, cell_type::ORIGIN),
-        Vec::<serde_json::Value>::new()
+        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#2"})]
     );
     assert_eq!(
         calls_rule(&r, "src::client::listOrders", "endpoint:GET:/orders").as_deref(),
-        Some("call_shape")
+        Some("wrapper#2")
     );
     let (n, _) = node(&r, "endpoint:GET:/users").expect("node");
     assert_eq!(

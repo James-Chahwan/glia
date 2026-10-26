@@ -9,7 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
+/// FH.4b: the path reaches `fetch` through `String(..)`, which the inferred
+/// HTTP wrappers do not follow, so `request` stays a wrapper the graph cannot
+/// see and its `fetch` an `<unresolved>` sink.
+const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(String(path), { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
 const API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n";
 
 fn glia(args: &[&str]) -> Output {
