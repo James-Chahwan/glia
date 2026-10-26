@@ -496,9 +496,10 @@ def main():
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
             gates.append("rank gate ratchet")
-    if not gates and cohort_gate_ok:
+    if not gates and cohort_gate_ok and "(partial: only" not in cohort_line:
         # FH.12's ratchet: the green full check's results become the baseline when they moved (held
-        # while a reach decline sits inside the tolerance, so the baseline never creeps down).
+        # while a reach decline sits inside the tolerance, so the baseline never creeps down). A
+        # wave's fast-tier check is partial and never ratchets; the release's full check does.
         out, rc = sh("bash scripts/cohort-gate.sh ratchet 2>&1")
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
