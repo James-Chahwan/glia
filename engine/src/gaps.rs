@@ -13,10 +13,10 @@
 //!
 //! | category | what | tier | suggest |
 //! |---|---|---|---|
-//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap), and not a GraphQL transport (DT.11b: ENDPOINT_HIT `"via":"graphql"`) whose own (repo, LB.8 owner) has a GRAPHQL_OPERATION with a GRAPHQL_CALLS into a resolver, when no server project those resolvers sit in holds a ROUTE (no page, no test-only route) at the transport's last normalised path segment (DT.11c: the server serves its transport where glia reads no route, Apollo Server standalone or a NestJS GraphQLModule); any other unpaired transport is a row whose `detail` starts `graphql transport; `, plus `route_at_server=<qname> (<repo>)` naming the least such route when one exists (glia reads the mount: a real path mismatch) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it; never a test-file route, DT.6b), else `edge` |
+//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap), and not a GraphQL transport (DT.11b: ENDPOINT_HIT `"via":"graphql"`) whose own (repo, LB.8 owner) has a GRAPHQL_OPERATION with a GRAPHQL_CALLS into a resolver, when no server project those resolvers sit in holds a ROUTE (no page, no test-only route) at the transport's last normalised path segment (DT.11c: the server serves its transport where glia reads no route, Apollo Server standalone or a NestJS GraphQLModule); any other unpaired transport is a row whose `detail` starts `graphql transport; `, plus `route_at_server=<qname> (<repo>)` naming the least such route when one exists (glia reads the mount: a real path mismatch) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API). Never an endpoint every call site of which is an inferred HTTP wrapper's site in test code (FH.17: ENDPOINT_HIT `"test_site":true` on every entry, which the `http` pass pairs with nothing by design; counted on `[gaps] unpaired_endpoint rows withheld: <n> (test-site wrapper calls)`) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it; never a test-file route, DT.6b), else `edge` |
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
-//! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
+//! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo) or, FH.17, like an inferred HTTP wrapper of its repo (the `<call>` of an ENDPOINT's ORIGIN rule `inferred:<call>`, written where the wrapper's literal sites minted, FH.4b; a declared stanza naming the same last segment wins): the sink is real, its identity now lives at the wrapper's call sites (LF.2e / FH.4b mint them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS and no WebSocket client connecting through it (DT.3c: the route lent its path to a generic upgrade handler and a client paired with it at its best tier, `glia_graph::WebSocketStackResolver::served_routes`), and not ORIGIN `test_fixture` (a route only test code registers, DT.6a: every registration site a test path or a `[walk] tests` match, `passes::test_route_ids`; DT.6b withholds it, counted on its own marker) | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor; DT.5l: a Go runtime-interface method by signature, an app-delegate callback of an `@main` type, a member an external base's library calls - Transloco, Angular ErrorHandler / Resolve / TitleStrategy / RouteReuseStrategy, dio: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
@@ -472,7 +472,7 @@ pub fn gaps_report(
         .filter(|c| !skipped.contains(c))
         .collect();
     let wrapped = if wanted.contains(&WRAPPED_SINK) {
-        declared_wrappers(roots)
+        with_inferred(declared_wrappers(roots), merged)
     } else {
         Wrapped::new()
     };
@@ -563,7 +563,9 @@ fn category_mechanisms(category: &str) -> &'static [&'static str] {
 /// count (`ORPHAN_CATEGORIES`) before and after. The `with` orphan count
 /// reads the repos' `[[wrapper]]` stanzas, so a wrapper's `<unresolved>` sink
 /// is a `wrapped_sink` there and not an orphan; the `without` build applies
-/// no overlay, so it stays an `unresolved_endpoint`. One path builds
+/// no overlay, so it stays an `unresolved_endpoint`. Both read the inferred
+/// HTTP wrappers each build minted through (FH.17, `with_inferred`): the
+/// inference runs with or without the overlay. One path builds
 /// through `generate_one_opts` (what `glia gaps <repo>` reads), several
 /// through `generate_many_opts`. Doubles the build cost by design: the
 /// extraction-only build is the only consistent "without" view (an overlay
@@ -609,8 +611,14 @@ pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<Overlay
             &counts_without.edges_by_category,
             &counts_with.edges_by_category,
         ),
-        orphans_without: orphans(&without.merged, &Wrapped::new()),
-        orphans_with: orphans(&with.merged, &declared_wrappers(&with_roots)),
+        orphans_without: orphans(
+            &without.merged,
+            &with_inferred(Wrapped::new(), &without.merged),
+        ),
+        orphans_with: orphans(
+            &with.merged,
+            &with_inferred(declared_wrappers(&with_roots), &with.merged),
+        ),
         nodes_added_by_kind: deltas(&counts_without.nodes_by_kind, &counts_with.nodes_by_kind),
         verdict: verdict(&counts_without, &counts_with),
         without: counts_without,
@@ -1067,6 +1075,81 @@ fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
     out
 }
 
+/// The ORIGIN rule prefix of a node the inferred wrapper stage minted
+/// (`external::wrappers`, CA.4 / FH.4b): `inferred:<call>`.
+const INFERRED_RULE_PREFIX: &str = "inferred:";
+
+/// FH.17: `declared` plus each repo's inferred HTTP wrappers: the `<call>` of
+/// every ENDPOINT ORIGIN rule `inferred:<call>` (provenance `inferred:wrapper`,
+/// or `test_fixture` for a site in test code), keyed like a declared stanza
+/// (the call after its last `.` / `::`). A declared stanza keeps its key.
+/// Read from the graph, so a layout merge reads it as a build does.
+fn with_inferred(mut declared: Wrapped, merged: &MergedGraph) -> Wrapped {
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
+                continue;
+            }
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::ORIGIN) {
+                let CellPayload::Json(j) = &c.payload else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
+                    continue;
+                };
+                let Some(call) = v
+                    .get("rule")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|r| r.strip_prefix(INFERRED_RULE_PREFIX))
+                else {
+                    continue;
+                };
+                let name = call.rsplit(['.', ':']).next().unwrap_or(call);
+                if !name.is_empty() {
+                    declared
+                        .entry(n.repo.0)
+                        .or_default()
+                        .entry(name.to_string())
+                        .or_insert_with(|| call.to_string());
+                }
+            }
+        }
+    }
+    declared
+}
+
+/// FH.17: the key the inferred HTTP wrapper stage appends last to the
+/// ENDPOINT_HIT of a node it minted at a site in test code; the `http` pass
+/// (`glia_graph`'s `resolvers/http.rs`) pairs an ENDPOINT carrying it on
+/// every hit with nothing.
+const TEST_SITE_MARK: &str = r#""test_site":true"#;
+
+/// FH.17: the ENDPOINT ids every ENDPOINT_HIT of which, over every graph
+/// entry of the id, carries [`TEST_SITE_MARK`] (and there is one): the
+/// `http` pass's own reading. Only looked up, never iterated.
+fn test_site_endpoints(merged: &MergedGraph) -> HashSet<NodeId> {
+    let mut verdict: HashMap<NodeId, bool> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
+                continue;
+            }
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
+                let marked =
+                    matches!(&c.payload, CellPayload::Json(j) if j.contains(TEST_SITE_MARK));
+                verdict
+                    .entry(n.id)
+                    .and_modify(|v| *v &= marked)
+                    .or_insert(marked);
+            }
+        }
+    }
+    verdict
+        .into_iter()
+        .filter_map(|(id, marked)| marked.then_some(id))
+        .collect()
+}
+
 /// What [`collect_rows`] returns: the rows, unsorted, how many ROUTEs the
 /// DT.3c WebSocket rule kept out of `unpaired_route`, and how many unpaired
 /// GraphQL transports the DT.11c rule kept out of `unpaired_endpoint`
@@ -1127,6 +1210,13 @@ fn collect_rows(
     let mut ws_served = 0usize;
     // DT.6b: routes only test code registers.
     let mut test_withheld = 0usize;
+    // FH.17: endpoints only inferred wrappers' test-code sites call.
+    let test_sites = if want(UNPAIRED_ENDPOINT) {
+        test_site_endpoints(merged)
+    } else {
+        HashSet::new()
+    };
+    let mut test_site_withheld = 0usize;
     // DT.11c: unpaired GraphQL transports the project's paired operations
     // imply (no row), and the ones kept as rows.
     let (mut gql_implied, mut gql_unpaired) = (0usize, 0usize);
@@ -1197,6 +1287,11 @@ fn collect_rows(
                         None => {}
                     }
                 } else if targets.is_empty() {
+                    // FH.17: a test helper's call pairs nothing by design.
+                    if want(UNPAIRED_ENDPOINT) && test_sites.contains(&n.id) {
+                        test_site_withheld += 1;
+                        continue;
+                    }
                     // CG.4b: a third-party endpoint is labelled, not missing.
                     if want(UNPAIRED_ENDPOINT) && !provenance_is(n.cells, "external") {
                         // DT.11c: a GraphQL transport (DT.11b) whose own
@@ -1424,6 +1519,11 @@ fn collect_rows(
     }
     if want(UNPAIRED_ROUTE) && test_withheld > 0 {
         eprintln!("[gaps] unpaired_route rows withheld: {test_withheld} (test-file routes)");
+    }
+    if test_site_withheld > 0 {
+        eprintln!(
+            "[gaps] unpaired_endpoint rows withheld: {test_site_withheld} (test-site wrapper calls)"
+        );
     }
 
     if want(COCHANGE_NO_EDGE) {

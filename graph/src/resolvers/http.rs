@@ -286,6 +286,13 @@ impl HttpStackResolver {
             if raw_path == UNRESOLVED_PATH {
                 continue;
             }
+            // FH.17: an endpoint the engine's inferred HTTP wrappers minted
+            // only at sites in test code (a test helper driving the app's own
+            // router) pairs with nothing. Skipped before it is counted.
+            if all_sites_test(&ep.cells) {
+                stats.test_sites += 1;
+                continue;
+            }
             // CA-13: a third-party call pairs with nothing, even when the app
             // serves the same path. Skipped before it is counted, like
             // `<unresolved>`.
@@ -365,6 +372,7 @@ impl HttpStackResolver {
         stats.report_mounts(mounts);
         stats.report_host_narrowed(aliases.len());
         stats.report_external();
+        stats.report_test_sites();
         stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
         stats.hostless.report(&merged.graphs);
@@ -471,6 +479,28 @@ struct EndpointNode<'g> {
     confidence: Confidence,
     /// Every entry's cells, so host narrowing reads every call site.
     cells: Vec<&'g Cell>,
+}
+
+/// FH.17: the key the engine's inferred HTTP wrapper stage
+/// (`engine/src/external/wrappers.rs`) appends last to the ENDPOINT_HIT of a
+/// node it minted at a site in test code (the walk's test paths or the
+/// repo's declared `[walk] tests`).
+const TEST_SITE_MARK: &str = "\"test_site\":true";
+
+/// FH.17: every ENDPOINT_HIT among `cells` (an id's every entry, gathered by
+/// [`collect_endpoints`]) carries [`TEST_SITE_MARK`], and there is one: the
+/// endpoint is a test helper's call, which pairs with nothing. One hit
+/// without it (an extractor's site, a wrapper's site in app code) keeps the
+/// endpoint in pairing.
+fn all_sites_test(cells: &[&Cell]) -> bool {
+    let mut seen = false;
+    for c in cells.iter().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
+        match &c.payload {
+            CellPayload::Json(json) if json.contains(TEST_SITE_MARK) => seen = true,
+            _ => return false,
+        }
+    }
+    seen
 }
 
 /// Every ENDPOINT node of the merge, once per NodeId, in first-seen order.
@@ -645,6 +675,9 @@ struct HttpMatchStats {
     /// names a public host outside the build, and those hosts.
     external: usize,
     external_hosts: BTreeSet<String>,
+    /// FH.17: ENDPOINT nodes left unpaired because every call site is an
+    /// inferred wrapper's site in test code ([`all_sites_test`]).
+    test_sites: usize,
     /// CB.23: the edges the mount-segment fold emitted (counted under `base`
     /// too) and the ENDPOINT nodes it left unpaired because their folded
     /// path is the tail of more than one route.
@@ -797,6 +830,16 @@ impl HttpMatchStats {
             eprintln!(
                 "[http] test routes excluded from route index: {}",
                 self.test_excluded
+            );
+        }
+    }
+
+    /// FH.17's marker, only when an endpoint was left out.
+    fn report_test_sites(&self) {
+        if self.test_sites > 0 {
+            eprintln!(
+                "[http] test-site endpoints left unpaired: {}",
+                self.test_sites
             );
         }
     }
@@ -3059,6 +3102,26 @@ mod tests {
         };
         assert!(!all_sites_external(&[text]));
         assert!(!all_sites_external(&[]), "no hit, no mark");
+    }
+
+    /// FH.17: an endpoint every call site of which is an inferred wrapper's
+    /// site in test code (`"test_site":true`, appended by the engine's
+    /// wrapper stage) pairs with nothing, though the app serves the path; one
+    /// unmarked site (an extractor's, a wrapper's in app code) pairs it.
+    #[test]
+    fn test_site_endpoint_is_left_unpaired() {
+        let test = r#"{"method":"GET","path":"/search","file":"api_test.go","line":9,"col":2,"test_site":true}"#;
+        let app = r#"{"method":"GET","path":"/search","file":"client.go","line":3,"col":2}"#;
+        assert_eq!(pair_search(vec![hit(test)], "backend"), (0, None));
+        assert_eq!(
+            pair_search(vec![hit(test), hit(test)], "backend"),
+            (0, None)
+        );
+        assert_eq!(pair_search(vec![hit(test), hit(app)], "backend"), (1, None));
+        assert_eq!(pair_search(vec![hit(app)], "backend"), (1, None));
+        let cells = [hit(test)];
+        assert!(all_sites_test(&cells.iter().collect::<Vec<_>>()));
+        assert!(!all_sites_test(&[]), "no hit, no mark");
     }
 
     #[test]

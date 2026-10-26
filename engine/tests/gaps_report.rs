@@ -213,6 +213,105 @@ fn reports_the_probe_m1_fanout() {
     assert_eq!(routes, ["GET /orders"]);
 }
 
+/// FH.17: the `ts-http-wrapper-precision` fixture, copied into `root` as the
+/// two repos `web` and `server`.
+fn wrapper_precision(tag: &str) -> PathBuf {
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/ts-http-wrapper-precision");
+    let root = tmp(tag);
+    for rel in [
+        "web/src/lib/rest.ts",
+        "web/src/lib/cache.ts",
+        "web/src/features/a.ts",
+        "server/main.go",
+        "server/api_test.go",
+    ] {
+        write(
+            &root,
+            rel,
+            &std::fs::read_to_string(fx.join(rel)).expect("fixture file"),
+        );
+    }
+    root
+}
+
+/// FH.17: an options-object builder. `makeRequest` hands its destructured
+/// `path` into a local object's `url`, and fetch reads `opts.url`, which the
+/// parser cannot: an `<unresolved>` sink. The inference follows the object,
+/// so `makeRequest` is a wrapper and its literal site mints.
+const OPTS_TS: &str = "export function makeRequest({ path }: { path: string }) {\n  const opts = { url: \"/api\" + path, method: \"GET\" };\n  return fetch(opts.url, opts);\n}\n\nexport function loadItems() {\n  return makeRequest({ path: \"/items\" });\n}\n";
+
+/// FH.17: the `<unresolved>` sink inside an INFERRED wrapper is a
+/// `wrapped_sink`, named by the ORIGIN rule `inferred:makeRequest` its literal
+/// site minted, with no overlay (pre-FH.17 only a declared `[[wrapper]]` made
+/// one), and the minted `endpoint:GET:/api/items` is the identity.
+#[test]
+fn inferred_wrapper_sink_is_wrapped() {
+    let root = tmp("fh17-wrapped");
+    write(&root, "web/src/rest.ts", OPTS_TS);
+    let r = generate_one(&s(&root.join("web"))).expect("build");
+    let rep = report(&r);
+    std::fs::remove_dir_all(&root).ok();
+
+    let wrapped: Vec<(&str, &str)> = rows(&rep, WRAPPED_SINK)
+        .iter()
+        .map(|r| (r.qname.as_str(), r.detail.as_str()))
+        .collect();
+    assert_eq!(
+        wrapped,
+        [(
+            "endpoint:GET:<unresolved>",
+            "owner=src::rest::makeRequest; wrapper=makeRequest"
+        )],
+        "{rep:#?}"
+    );
+    assert!(rows(&rep, UNRESOLVED_ENDPOINT).is_empty(), "{rep:#?}");
+    let unpaired: Vec<&str> = rows(&rep, UNPAIRED_ENDPOINT)
+        .iter()
+        .map(|r| r.qname.as_str())
+        .collect();
+    assert_eq!(unpaired, ["endpoint:GET:/api/items"], "{rep:#?}");
+}
+
+/// FH.17: over the `ts-http-wrapper-precision` fixture, the test-file wrapper
+/// site's endpoint (`PerformRequest(r, "GET", "/api/stats")` in
+/// `api_test.go`) pairs nothing by design and is no `unpaired_endpoint` row,
+/// so the route only that test drives is an `unpaired_route`; the Map-like
+/// `lookup` / `drop` sinks seed no wrapper and stay `unresolved_endpoint`.
+#[test]
+fn test_site_endpoints_pair_nothing() {
+    let root = wrapper_precision("fh17-fixture");
+    let paths = ["web", "server"].map(|d| s(&root.join(d)));
+    let r = generate_many(&paths).expect("build");
+    let rep = report(&r);
+    std::fs::remove_dir_all(&root).ok();
+
+    let unpaired: Vec<&str> = rows(&rep, UNPAIRED_ENDPOINT)
+        .iter()
+        .map(|r| r.qname.as_str())
+        .collect();
+    assert!(unpaired.is_empty(), "{unpaired:?}");
+    let routes: Vec<&str> = rows(&rep, UNPAIRED_ROUTE)
+        .iter()
+        .map(|r| r.qname.as_str())
+        .collect();
+    assert_eq!(routes, ["GET /api/stats"], "{rep:#?}");
+    let mut unresolved: Vec<(&str, &str)> = rows(&rep, UNRESOLVED_ENDPOINT)
+        .iter()
+        .map(|r| (r.qname.as_str(), r.detail.as_str()))
+        .collect();
+    unresolved.sort_unstable();
+    assert_eq!(
+        unresolved.first(),
+        Some(&(
+            "endpoint:DELETE:<unresolved>",
+            "owner=src::lib::cache::Cache::drop"
+        )),
+        "{rep:#?}"
+    );
+    assert!(rows(&rep, WRAPPED_SINK).is_empty(), "{rep:#?}");
+}
+
 #[test]
 fn overlay_delta_counts_orphans() {
     let (web, api) = r1_pair("delta");

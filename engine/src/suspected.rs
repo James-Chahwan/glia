@@ -21,7 +21,9 @@
 //!    incoming `c` edge. A node whose channel the extractor could not read is
 //!    neither (`<unresolved>` in it or an `unresolved:` framework tag: those
 //!    are `unresolved_endpoint`'s / `tag_only_queue`'s rows), nor is a node a
-//!    cell marks `"external":true` (a third-party call, CG.4a), nor a ROUTE
+//!    cell marks `"external":true` (a third-party call, CG.4a) or
+//!    `"test_site":true` (FH.17: an inferred HTTP wrapper's site in test code,
+//!    which the `http` pass pairs with nothing by design), nor a ROUTE
 //!    that is a client-router page (`nav::is_nav_route`), nor a ROUTE only
 //!    test code registers (DT.6b: ORIGIN `test_fixture`, read through
 //!    `passes::test_route_ids`, the predicate DT.6a's `http` pass keeps such
@@ -503,7 +505,8 @@ fn learn(merged: &MergedGraph, kind_of: &dyn Fn(NodeId) -> Option<NodeKindId>) -
 }
 
 /// Can this node take part: its channel was read (no `<unresolved>`, no
-/// `unresolved:` framework tag), no cell marks it external, and it is not a
+/// `unresolved:` framework tag), no cell marks it external or (FH.17) a
+/// test helper's site, and it is not a
 /// client-router page nor a ROUTE only test code registers (in
 /// `test_routes`, DT.6b).
 fn pairable(n: &NodeRef<'_>, test_routes: &HashSet<NodeId>) -> bool {
@@ -515,6 +518,7 @@ fn pairable(n: &NodeRef<'_>, test_routes: &HashSet<NodeId>) -> bool {
     !(bare.contains("<unresolved>")
         || is_framework_tag(bare)
         || is_external(n.cells)
+        || is_test_site(n.cells)
         || (n.kind == node_kind::ROUTE && (is_nav_route(n.cells) || test_routes.contains(&n.id))))
 }
 
@@ -524,6 +528,15 @@ fn is_external(cells: &[Cell]) -> bool {
         matches!(&c.payload, CellPayload::Json(j) | CellPayload::Text(j)
             if j.contains("\"external\":true"))
     })
+}
+
+/// FH.17: a cell (the ENDPOINT_HIT of a node the inferred HTTP wrapper stage
+/// minted at a site in test code, `external::wrappers`) says the node is a
+/// test helper's call, which the `http` pass pairs with nothing.
+fn is_test_site(cells: &[Cell]) -> bool {
+    cells
+        .iter()
+        .any(|c| matches!(&c.payload, CellPayload::Json(j) if j.contains("\"test_site\":true")))
 }
 
 fn is_method(m: &str) -> bool {
@@ -837,5 +850,25 @@ mod tests {
         );
         // With no test-route set, the stamped route pairs as before DT.6b.
         assert!(pairable(&refs[0], &HashSet::new()));
+    }
+
+    /// FH.17: an ENDPOINT whose hit carries `"test_site":true` (an inferred
+    /// HTTP wrapper's site in test code) is no orphan; the same endpoint
+    /// unmarked is.
+    #[test]
+    fn pairable_skips_test_site_endpoints() {
+        use glia_code_domain::cell_type;
+
+        let hit = |json: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.to_string()),
+        };
+        let marked = [hit(
+            r#"{"method":"GET","path":"/api/v1/albums","test_site":true}"#,
+        )];
+        let plain = [hit(r#"{"method":"GET","path":"/api/v1/albums"}"#)];
+        assert!(is_test_site(&marked));
+        assert!(!is_test_site(&plain));
+        assert!(!is_test_site(&[]));
     }
 }

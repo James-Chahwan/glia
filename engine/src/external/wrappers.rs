@@ -107,7 +107,11 @@
 //! emitter [`EMITTER`], rule `wrapper#<n>`, at the site (basis `site`).
 //! An inferred stanza's node is Medium with the ORIGIN cell
 //! `{"provenance":"inferred:wrapper","rule":"inferred:<call>","def":"<file>:<1-based line>"}`
-//! (the wrapper's `func` line), and its edge carries EVIDENCE emitter
+//! (the wrapper's `func` line); FH.17: an inferred HTTP stanza's node minted
+//! at a site in test code (`passes::is_test_file`, or the repo's declared
+//! `[walk] tests` when the build reads its overlay file) writes provenance
+//! `test_fixture` there, and its ENDPOINT_HIT ends `"test_site":true`, which
+//! the `http` pass pairs with nothing. Its edge carries EVIDENCE emitter
 //! [`INFERRED_EMITTER`] (stage `pass`: a rule inference, tiered DERIVED),
 //! rule `inferred:<call>`, at the site. A
 //! sink the file's parse already holds for the SAME identity at the SAME line
@@ -134,6 +138,8 @@
 //!   `[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> data_entity=<e> receiver=<r>)`
 //! and once per repo where the inference found a candidate wrapper,
 //!   `[wrappers] inferred repo=<label> wrappers=<w> (direct=<d> forwarding=<f>) sites=<n> minted=<m> duplicate=<u> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> shadowed_by_overlay=<s> skipped_ambiguous=<a> skipped_unparsed=<p>`
+//! and once per repo where the HTTP inference found a candidate (FH.4b, FH.17),
+//!   `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p> options_object=<o> computed_verb=<c> repo=<label>`
 //! (`wrappers` counts the kept inferred wrappers, shadowed ones included;
 //! see `infer_wrappers` for the last three). In both,
 //! `sites = minted + duplicate + skipped_*`; `minted` counts sites that added
@@ -148,7 +154,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::glia_config::{
-    HTTP_METHODS, LoadedConfig, OVERLAY_FILE, Origin, WrapperDecl, WrapperKind,
+    HTTP_METHODS, LoadedConfig, OVERLAY_FILE, Origin, TestPaths, WrapperDecl, WrapperKind,
 };
 use glia_code_domain::{
     FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, node_kind,
@@ -175,6 +181,17 @@ pub(crate) const INFERRED_PROVENANCE: &str = "inferred:wrapper";
 
 /// The EVIDENCE rule of every edge an inferred HTTP stanza adds (FH.4b).
 pub(crate) const WRAPPER_CALL_RULE: &str = "wrapper_call";
+
+/// FH.17: the ORIGIN provenance of a node an inferred HTTP stanza mints at a
+/// site in test code (the provenance stamp's own word for test code).
+const TEST_PROVENANCE: &str = "test_fixture";
+
+/// FH.17: the key appended last to the ENDPOINT_HIT of a node an inferred
+/// HTTP stanza mints at a site in test code. The `http` resolver
+/// (`glia_graph`'s `resolvers/http.rs`, its `TEST_SITE_MARK`) leaves an
+/// ENDPOINT every hit of which carries it out of pairing, as CG.4a's
+/// `"external":true` does for a third-party call.
+const TEST_SITE_MARK: &str = r#""test_site":true"#;
 
 /// The EVIDENCE rule of the TypeScript parser's FH.4a shape-rule CALLS edge.
 const CALL_SHAPE_RULE: &str = "call_shape";
@@ -253,8 +270,10 @@ impl Stanza<'_> {
         }
     }
 
-    /// The ORIGIN cell of a node the stanza mints (see the module doc).
-    fn origin_cell(&self) -> Cell {
+    /// The ORIGIN cell of a node the stanza mints (see the module doc);
+    /// `test` (FH.17: an inferred HTTP stanza's site in test code) writes the
+    /// provenance `test_fixture` in place of `inferred:wrapper`.
+    fn origin_cell(&self, test: bool) -> Cell {
         match &self.source {
             StanzaSource::Overlay { .. } => origin_cell(self.decl.origin, &self.rule()),
             StanzaSource::Inferred {
@@ -263,12 +282,23 @@ impl Stanza<'_> {
             } => Cell {
                 kind: cell_type::ORIGIN,
                 payload: CellPayload::Json(format!(
-                    r#"{{"provenance":"{INFERRED_PROVENANCE}","rule":{},"def":{}}}"#,
+                    r#"{{"provenance":"{}","rule":{},"def":{}}}"#,
+                    if test {
+                        TEST_PROVENANCE
+                    } else {
+                        INFERRED_PROVENANCE
+                    },
                     json_str(&self.rule()),
                     json_str(&format!("{def_file}:{}", u64::from(*def_line0) + 1))
                 )),
             },
         }
+    }
+
+    /// FH.17: an inferred HTTP stanza, whose sites in test code mint
+    /// test-site endpoints.
+    fn is_inferred_http(&self) -> bool {
+        self.is_inferred() && self.shape.is_some()
     }
 
     /// The EVIDENCE of an edge the stanza mints at 0-based `line0` of `path`.
@@ -363,6 +393,8 @@ pub(crate) struct WrapperTally {
     pub(crate) queue_consumer: usize,
     pub(crate) data_entity: usize,
     pub(crate) receiver: usize,
+    /// FH.17: minted sites of an inferred HTTP stanza in test code.
+    pub(crate) test_sites: usize,
 }
 
 impl WrapperTally {
@@ -385,6 +417,7 @@ impl WrapperTally {
         self.queue_consumer += m.queue_consumer;
         self.data_entity += m.data_entity;
         self.receiver += m.receiver;
+        self.test_sites += m.test_sites;
     }
 }
 
@@ -432,6 +465,12 @@ struct InferenceCounts {
     http_wrappers: usize,
     http_ambiguous: usize,
     http_unparsed: usize,
+    /// FH.17: `<unresolved>` verb calls on no HTTP client that seeded
+    /// nothing, and kept wrappers read through a local options object or a
+    /// computed verb (`infer_wrappers`).
+    http_phantom: usize,
+    http_options_object: usize,
+    http_computed: usize,
 }
 
 impl InferenceCounts {
@@ -442,7 +481,7 @@ impl InferenceCounts {
 
     /// The inference found a candidate HTTP wrapper (kept or skipped).
     fn http_any(&self) -> bool {
-        self.http_wrappers + self.http_ambiguous + self.http_unparsed > 0
+        self.http_wrappers + self.http_ambiguous + self.http_unparsed + self.http_phantom > 0
     }
 }
 
@@ -455,6 +494,10 @@ pub(crate) struct WrapperPass<'c> {
     /// marker prints.
     overlay_declared: bool,
     inference: InferenceCounts,
+    /// FH.17: the repo's declared `[walk] tests` (CJ.4), read from the
+    /// overlay file the build applies; `None` under `--no-overlay`, where
+    /// only the path rule classes a site as test code.
+    tests: Option<TestPaths>,
 }
 
 impl<'c> WrapperPass<'c> {
@@ -469,6 +512,7 @@ impl<'c> WrapperPass<'c> {
         files: &[(String, String)],
         parse_errors: &mut Vec<String>,
     ) -> Option<Self> {
+        let tests = config.and_then(|c| c.config.walk.tests_matcher());
         let cfg = config.filter(|c| !c.config.wrapper.is_empty());
         let mut stanzas: Vec<Stanza<'c>> = Vec::new();
         if let Some(cfg) = cfg {
@@ -500,6 +544,9 @@ impl<'c> WrapperPass<'c> {
             http_wrappers: inferred.http.len(),
             http_ambiguous: inferred.http_ambiguous,
             http_unparsed: inferred.http_unparsed,
+            http_phantom: inferred.http_phantom,
+            http_options_object: inferred.http_options_object,
+            http_computed: inferred.http_computed,
             ..InferenceCounts::default()
         };
         for w in inferred.wrappers.into_iter().chain(inferred.http) {
@@ -545,6 +592,7 @@ impl<'c> WrapperPass<'c> {
             files: Vec::new(),
             overlay_declared: cfg.is_some(),
             inference,
+            tests,
         };
         for (i, (path, source)) in files.iter().enumerate() {
             let Some(lang) = detect_language(path) else {
@@ -629,6 +677,8 @@ impl<'c> WrapperPass<'c> {
                 lang: fs.lang,
                 module_id,
                 repo,
+                test: crate::passes::is_test_file(path)
+                    || self.tests.as_ref().is_some_and(|m| m.matches(path)),
             };
             let stanzas = &self.stanzas;
             let minted = catch_unwind(AssertUnwindSafe(|| match phase {
@@ -690,8 +740,15 @@ impl<'c> WrapperPass<'c> {
         if inf.http_any() {
             let t = &self.tally.http;
             eprintln!(
-                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} repo={repo_label}",
-                inf.http_wrappers, t.sites, t.minted, inf.http_ambiguous
+                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} test_sites={} phantom_dropped={} options_object={} computed_verb={} repo={repo_label}",
+                inf.http_wrappers,
+                t.sites,
+                t.minted,
+                inf.http_ambiguous,
+                t.test_sites,
+                inf.http_phantom,
+                inf.http_options_object,
+                inf.http_computed
             );
         }
     }
@@ -1265,6 +1322,10 @@ struct FileAt<'a> {
     lang: &'static str,
     module_id: NodeId,
     repo: RepoId,
+    /// FH.17: the file is test code: the provenance stamp's path rule
+    /// (`passes::is_test_file`: `_test.go`, `.spec.ts`, `test_*.py`, a test
+    /// directory segment ..) or the repo's declared `[walk] tests`.
+    test: bool,
 }
 
 /// `s` as a JSON string literal, quotes included.
@@ -1340,6 +1401,25 @@ fn add_template(n: &mut Node, template: &str) {
     }
 }
 
+/// FH.17: append [`TEST_SITE_MARK`] last to the ENDPOINT_HIT of a node an
+/// inferred HTTP stanza minted at a site in test code.
+fn mark_test_site(n: &mut Node) {
+    for c in n
+        .cells
+        .iter_mut()
+        .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+    {
+        if let CellPayload::Json(j) = &mut c.payload
+            && j.ends_with('}')
+        {
+            j.pop();
+            j.push(',');
+            j.push_str(TEST_SITE_MARK);
+            j.push('}');
+        }
+    }
+}
+
 fn mint_http(
     fp: &mut FileParse,
     sites: &[&Site],
@@ -1393,6 +1473,7 @@ fn mint_http(
             confidence: st.confidence(),
         };
         let pushed = fresh.len();
+        let test = at.test && st.is_inferred_http();
         let extras = HitExtras {
             raw: raw.as_deref(),
             host: None,
@@ -1416,12 +1497,16 @@ fn mint_http(
             if let Some(tpl) = template {
                 add_template(n, tpl);
             }
-            n.cells.push(st.origin_cell());
+            if test {
+                mark_test_site(n);
+            }
+            n.cells.push(st.origin_cell(test));
         }
         let t = t.of(st);
         t.minted += 1;
         t.http += 1;
         t.receiver += usize::from(site.receiver);
+        t.test_sites += usize::from(test);
     }
     graft_nodes(fp, fresh, at.lang);
     t
@@ -1619,7 +1704,7 @@ fn mint_queue(
                     kind: cell_type::CODE,
                     payload: CellPayload::Json(code),
                 },
-                st.origin_cell(),
+                st.origin_cell(false),
             ],
         });
         fp.nav
@@ -1681,7 +1766,10 @@ fn mint_entities(
                 id,
                 repo: at.repo,
                 confidence: st.confidence(),
-                cells: vec![anchor::position_cell(at.path, site.line0), st.origin_cell()],
+                cells: vec![
+                    anchor::position_cell(at.path, site.line0),
+                    st.origin_cell(false),
+                ],
             });
             fp.nav
                 .record(id, name, &qname, node_kind::DATA_ENTITY, Some(at.module_id));

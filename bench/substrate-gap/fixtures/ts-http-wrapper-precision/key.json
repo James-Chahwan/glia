@@ -1,0 +1,24 @@
+{
+  "framework": "ts-http-wrapper-precision",
+  "language": "typescript+go",
+  "dirs": ["web", "server"],
+  "note": "FH.17 inferred HTTP wrapper precision, with no overlay. `makeRequest({ path })` builds a local options object (`{ url: '/api' + path, method: 'GET' }`) and fetch reads `opts.url`: the inference follows the object, so `makeRequest({ path: '/items' })` mints `endpoint:GET:/api/items`, which pairs the Go route. `Cache.lookup` / `Cache.drop` call `.get(key)` / `.delete(key)` on an untyped field the parser keeps as `<unresolved>` (CH.3c fails open on an unknown type): no HTTP client receiver, so neither seeds a wrapper and `cached()`'s `c.lookup('/items')` / `c.drop('/items')` mint nothing (pre-FH.17 they minted endpoint:GET:/items, paired to GET /api/items by route prefix, and endpoint:DELETE:/items). The typed `new Map()` field's `.get(id)` is dropped by the parser already. `PerformRequest(r, method, path)` in server/api_test.go is a test helper over `http.NewRequest` driving the app's own router: its site `PerformRequest(r, \"GET\", \"/api/stats\")` mints `endpoint:GET:/api/stats` with ORIGIN `test_fixture` and pairs nothing, though main.go serves GET /api/stats. The spec's sketch used `httptest.NewRequest`, which no client needle reads; photoprism's helper (the case FH.17 measures) calls `http.NewRequest`, used here. The spec's forbid on `endpoint:GET:<unresolved>` is not kept: the parser itself mints that node for `fetch(opts.url, opts)` and for `this.entries.get(key)`, which a wrapper inference cannot remove; the phantom wrappers' minted endpoints are forbidden instead. Baseline: see the FH.17 commit. Deliberately not bound to a matrix cell: typescript/http_client is already scored.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/items", "exact": true, "note": "the options-object wrapper's literal site"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/stats", "exact": true, "note": "the test helper's site, minted test_fixture"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/items", "to": "GET /api/items", "category": "HTTP_CALLS", "exact": true},
+    {"from": "loadItems", "to": "endpoint:GET:/api/items", "category": "CALLS"},
+    {"from": "TestStats", "to": "endpoint:GET:/api/stats", "category": "CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/items", "cell": "ORIGIN", "contains": "inferred:makeRequest"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/stats", "cell": "ORIGIN", "contains": "test_fixture"}
+  ],
+  "forbid": [
+    {"from": "endpoint:GET:/api/stats", "to": "GET /api/stats", "category": "HTTP_CALLS", "note": "PRECISION: a test helper's site pairs nothing"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/items", "note": "PRECISION: the Map-like get seeds no wrapper"},
+    {"kind": "ENDPOINT", "name": "endpoint:DELETE:/items", "note": "PRECISION: the Map-like delete seeds no wrapper"}
+  ]
+}

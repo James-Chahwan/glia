@@ -1998,6 +1998,12 @@ enum TestPathRule {
     Dir,
 }
 
+/// FH.17: a repo-relative file is test / fixture code by its path alone
+/// ([`is_test_path`]): the rule the inferred HTTP wrappers' test sites read.
+pub(crate) fn is_test_file(file: &str) -> bool {
+    is_test_path(file).is_some()
+}
+
 /// Classify a repo-relative POSITION file as test / fixture code by its path
 /// alone (CG.2a). Components split on `/` (a `\` counts as one); the base name
 /// is tested for a suffix, then the `test_*.py` prefix, then every earlier

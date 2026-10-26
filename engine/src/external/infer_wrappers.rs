@@ -89,12 +89,38 @@
 //!    collection wrappers, per family, plus: a name that is an HTTP verb is
 //!    dropped (`get(path)` would mint from every `map.get('/x')`).
 //!
+//! 5. PRECISION, FH.17 (TS family): a client call that is a verb member
+//!    (`x.get(..)`, `x.delete(..)`) whose path the parser read as
+//!    `<unresolved>` seeds nothing unless its receiver names an HTTP client
+//!    ([`is_client_receiver`]: a word of `http` / `axios` / `client` / `api` /
+//!    `fetch` / `request` / `rest` / ..): the CH.3c receiver gate keeps such a
+//!    call when it cannot type the receiver, and a Map, store or cache whose
+//!    type it could not see would otherwise make every `cache.get(key)` site
+//!    an endpoint. Counted `phantom_dropped`.
+//! 6. OPTIONS OBJECTS, FH.17: a path argument that reads a `url` / `path` /
+//!    `uri` key of a local object literal (`fetch(opts.url, opts)`,
+//!    `axios(config)`), the object being the last `const` / `let` / `var` of
+//!    that name in the owner's body before the call, holds the parameter
+//!    when the object's value at that key does (step 2's hole rule); an
+//!    options argument naming such an object gives its `method`
+//!    ([`options_hole`], `options_object`). And a computed verb on a client
+//!    (`client[method](`/rest${path}`)`, supertest's / axios's verb by value)
+//!    is a client call whose method is the member's parameter
+//!    ([`computed_verb_calls`], `computed_verb`).
+//!
 //! The sites are read in `wrappers.rs` ([`read_http_site`]), minted with
 //! EVIDENCE emitter `pass:inferred_wrapper` rule `wrapper_call`, Weak:
 //! the path must be ONE literal starting with `/` or `http(s)://`, with no
 //! whitespace, every `${..}` hole right after a `/`; the composed path is
-//! `prefix + literal + suffix`. Counts: `[http-wrappers] wrappers=<w>
-//! sites=<s> minted=<m> ambiguous=<a> repo=<label>`.
+//! `prefix + literal + suffix`. A site in test code (FH.17: the provenance
+//! stamp's test paths, `_test.go`, `.spec.ts`, `test_*.py`, a test
+//! directory, or the repo's declared `[walk] tests`) mints its ENDPOINT with
+//! ORIGIN provenance `test_fixture` and a `"test_site":true` hit, which the
+//! `http` pass pairs with nothing (a test helper drives the app's own
+//! router, as photoprism's `PerformRequest(app, "GET", "/api/v1/..")` does).
+//! Counts: `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a>
+//! test_sites=<t> phantom_dropped=<p> options_object=<o> computed_verb=<c>
+//! repo=<label>`.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -156,6 +182,15 @@ pub(crate) struct InferredWrappers {
     pub(crate) http_ambiguous: usize,
     /// FH.4b: client calls whose owner's declaration did not read.
     pub(crate) http_unparsed: usize,
+    /// FH.17: TS `<unresolved>` verb calls on a receiver that is no HTTP
+    /// client ([`is_client_receiver`]): no client call, so no candidate.
+    pub(crate) http_phantom: usize,
+    /// FH.17: kept HTTP wrappers whose path reaches the client call through
+    /// a local options object ([`options_hole`]).
+    pub(crate) http_options_object: usize,
+    /// FH.17: kept HTTP wrappers whose client call is a computed verb on a
+    /// client (`client[method](path)`, [`computed_verb_calls`]).
+    pub(crate) http_computed: usize,
 }
 
 impl InferredWrappers {
@@ -577,6 +612,19 @@ struct HttpCandidate {
     shape: HttpShape,
     def_file: String,
     def_line0: u32,
+    /// FH.17: how the direct reading reached the client call.
+    via: Via,
+}
+
+/// FH.17: how a direct HTTP candidate's path reaches its client call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// The path argument itself (FH.4b), or a forwarding site.
+    Path,
+    /// A local object literal's `url` / `path` / `uri` key ([`options_hole`]).
+    Options,
+    /// A computed verb on a client ([`computed_verb_calls`]).
+    Computed,
 }
 
 /// A callable's parameters: local name, and where a site passes it.
@@ -590,13 +638,16 @@ struct HttpOwner {
 }
 
 /// How one client call takes its method.
-enum CallMethod {
+enum CallMethod<'s> {
     /// The callee names it (`axios.get`, `http.Post`, `requests.put`).
     Verb(&'static str),
     /// It is this argument (`http.NewRequest(method, url, nil)`).
     Arg(usize),
     /// The options argument after the path, else the parser's own reading.
     Options(String),
+    /// FH.17: the computed member of `client[<name>](..)`: the method when
+    /// `<name>` is a parameter of the owner.
+    Name(&'s str),
 }
 
 /// One HTTP client call in a file.
@@ -605,7 +656,7 @@ struct ClientCall<'s> {
     at: usize,
     args: Vec<&'s str>,
     path_arg: usize,
-    method: CallMethod,
+    method: CallMethod<'s>,
 }
 
 /// Which receiver a client needle's member is read on.
@@ -740,9 +791,10 @@ fn infer_http(
         let mut found: Vec<HttpCandidate> = Vec::new();
         for f in &code {
             match catch_unwind(AssertUnwindSafe(|| direct_http(f))) {
-                Ok((cands, unparsed)) => {
-                    found.extend(cands);
-                    out.http_unparsed += unparsed;
+                Ok(d) => {
+                    found.extend(d.cands);
+                    out.http_unparsed += d.unparsed;
+                    out.http_phantom += d.phantom;
                 }
                 Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
             }
@@ -798,6 +850,11 @@ fn admit_http(
             continue;
         }
         frontier.push((c.call.clone(), c.shape.clone()));
+        match c.via {
+            Via::Path => {}
+            Via::Options => out.http_options_object += 1,
+            Via::Computed => out.http_computed += 1,
+        }
         out.http.push(InferredWrapper {
             decl: http_decl(c.call, &c.shape, languages),
             def_file: c.def_file,
@@ -832,19 +889,32 @@ fn http_decl(call: String, shape: &HttpShape, languages: &[String]) -> WrapperDe
     }
 }
 
+/// What step 1 found in one file.
+struct DirectHttp {
+    cands: Vec<HttpCandidate>,
+    /// Client calls whose owner's declaration did not read.
+    unparsed: usize,
+    /// FH.17: `<unresolved>` verb calls on no HTTP client, left out.
+    phantom: usize,
+}
+
 /// Step 1 over one file: every client call whose path is a parameter hole of
-/// its owner; the candidates and the calls counted unparsed.
-fn direct_http(f: &CodeFile<'_>) -> (Vec<HttpCandidate>, usize) {
-    let calls = client_calls(f);
-    let mut out = Vec::new();
+/// its owner, directly or (FH.17) through a local options object.
+fn direct_http(f: &CodeFile<'_>) -> DirectHttp {
+    let (calls, phantom) = client_calls(f);
+    let mut out = DirectHttp {
+        cands: Vec::new(),
+        unparsed: 0,
+        phantom,
+    };
     if calls.is_empty() {
-        return (out, 0);
+        return out;
     }
     let Some(fp) = f.parse else {
-        return (out, calls.len());
+        out.unparsed = calls.len();
+        return out;
     };
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
-    let mut unparsed = 0usize;
     for call in calls {
         if commented_at(f.source, call.at) {
             continue;
@@ -853,19 +923,31 @@ fn direct_http(f: &CodeFile<'_>) -> (Vec<HttpCandidate>, usize) {
             continue;
         };
         let Some(decl) = http_owner(f, fp, owner) else {
-            unparsed += 1;
+            out.unparsed += 1;
             continue;
         };
         let Some(expr) = call.args.get(call.path_arg) else {
             continue;
         };
-        let Some((path, prefix, suffix)) = param_hole(expr, &decl.params) else {
+        // FH.17: the text the owner's body holds before the call, where a
+        // local options object is declared.
+        let body = line_offset(f.source, usize::try_from(decl.line0).unwrap_or(usize::MAX))
+            .and_then(|from| f.source.get(from..call.at))
+            .unwrap_or("");
+        let (path, prefix, suffix, mut via) = match param_hole(expr, &decl.params) {
+            Some((p, pre, suf)) => (p, pre, suf, Via::Path),
+            None => match options_hole(body, expr, &decl.params) {
+                Some((p, pre, suf)) => (p, pre, suf, Via::Options),
+                None => continue,
+            },
+        };
+        if matches!(call.method, CallMethod::Name(_)) {
+            via = Via::Computed;
+        }
+        let Some(method) = call_method(&call, &decl.params, body) else {
             continue;
         };
-        let Some(method) = call_method(&call, &decl.params) else {
-            continue;
-        };
-        out.push(HttpCandidate {
+        out.cands.push(HttpCandidate {
             call: decl.name,
             shape: HttpShape {
                 path,
@@ -875,9 +957,91 @@ fn direct_http(f: &CodeFile<'_>) -> (Vec<HttpCandidate>, usize) {
             },
             def_file: f.path.to_string(),
             def_line0: decl.line0,
+            via,
         });
     }
-    (out, unparsed)
+    out
+}
+
+/// FH.17: the keys of an options object that carry the request's path.
+const PATH_KEYS: &[&str] = &["url", "path", "uri"];
+
+/// FH.17, options-object builders: `expr` (a client call's path argument)
+/// reads a [`PATH_KEYS`] key of a local object literal (`opts.url`,
+/// `opts?.path`, `opts["url"]`), or is that object itself (`axios(config)`),
+/// and the object's value at that key holds the owner's parameter as
+/// [`param_hole`] reads it. The object is the LAST `const` / `let` / `var
+/// <name> [: T] = { .. }` declared in `body` (the owner's text before the
+/// call). One hop: an object assembled from another variable is not read.
+fn options_hole(body: &str, expr: &str, params: &Params) -> Option<(ParamRef, String, String)> {
+    let e = expr.trim();
+    let (name, keys): (&str, Vec<&str>) = match member_key(e) {
+        Some((name, key)) => (name, vec![key]),
+        None if !e.is_empty() && leading_ident(e) == e => (e, PATH_KEYS.to_vec()),
+        None => return None,
+    };
+    if !keys.iter().all(|k| PATH_KEYS.contains(k)) {
+        return None;
+    }
+    let props = split_args(local_object(body, name)?);
+    keys.iter()
+        .find_map(|k| prop_value(&props, k))
+        .and_then(|v| param_hole(v, params))
+}
+
+/// `name.key`, `name?.key` or `name["key"]` / `name['key']`: the name and the
+/// key.
+fn member_key(e: &str) -> Option<(&str, &str)> {
+    let name = leading_ident(e);
+    if name.is_empty() {
+        return None;
+    }
+    let rest = e.get(name.len()..)?;
+    if let Some(k) = rest.strip_prefix("?.").or_else(|| rest.strip_prefix('.')) {
+        return (!k.is_empty() && leading_ident(k) == k).then_some((name, k));
+    }
+    let inner = rest.strip_prefix('[')?.strip_suffix(']')?;
+    let lit = literal(inner).filter(|l| l.quote != b':' && l.quote != b'`')?;
+    (lit.body.len() + 2 == inner.trim().len()).then_some((name, lit.body))
+}
+
+/// FH.17: the inner text (between the braces) of the object literal the LAST
+/// `const` / `let` / `var <name> [: T] = {` in `body` assigns.
+fn local_object<'b>(body: &'b str, name: &str) -> Option<&'b str> {
+    let b = body.as_bytes();
+    let mut found = None;
+    for (at, _) in body.match_indices(name) {
+        let after = at + name.len();
+        if b.get(after).is_some_and(|c| is_ident_byte(*c)) {
+            continue;
+        }
+        let head = body.get(..at)?.trim_end();
+        let declared = ["const", "let", "var"].iter().any(|kw| {
+            head.strip_suffix(kw).is_some_and(|h| {
+                h.is_empty() || !h.as_bytes().last().is_some_and(|c| is_ident_byte(*c))
+            })
+        });
+        if !declared {
+            continue;
+        }
+        let rest = body.get(after..)?;
+        let eq = rest.find('=')?;
+        let ty = rest.get(..eq)?.trim();
+        if !(ty.is_empty() || ty.starts_with(':')) || rest.get(eq + 1..)?.starts_with(['=', '>']) {
+            continue;
+        }
+        let value = rest.get(eq + 1..)?;
+        let lead = value.len() - value.trim_start().len();
+        if !value.trim_start().starts_with('{') {
+            continue;
+        }
+        let open = after + eq + 1 + lead;
+        let (inner, close) = arg_region(body, open + 1);
+        if close.is_some() {
+            found = Some(inner);
+        }
+    }
+    found
 }
 
 /// Step 2 over one file: the live non-literal sites of the wrapper `call`
@@ -933,37 +1097,56 @@ fn forwarding_http(f: &CodeFile<'_>, call: &str, shape: &HttpShape) -> (Vec<Http
             },
             def_file: f.path.to_string(),
             def_line0: decl.line0,
+            via: Via::Path,
         });
     }
     (out, unparsed)
 }
 
-/// The file's HTTP client calls, in source order: for the TS family every
+/// The file's HTTP client calls, in source order, and (FH.17) the TS
+/// `<unresolved>` verb calls left out as phantoms: for the TS family every
 /// ENDPOINT its parse holds, read back at its ENDPOINT_HIT `line` / `col`
-/// (the TS parser pushes one ENDPOINT node per call site); for Go and Python
-/// the [`GO_NEEDLES`] / [`PY_NEEDLES`] shapes with any argument.
-fn client_calls<'s>(f: &CodeFile<'s>) -> Vec<ClientCall<'s>> {
-    let mut out = match f.lang {
-        "go" => needle_calls(f.source, GO_NEEDLES),
-        "python" => needle_calls(f.source, PY_NEEDLES),
-        _ => f
-            .parse
-            .map(|fp| endpoint_calls(f.source, fp))
-            .unwrap_or_default(),
+/// (the TS parser pushes one ENDPOINT node per call site), plus its computed
+/// verbs on a client ([`computed_verb_calls`]); for Go and Python the
+/// [`GO_NEEDLES`] / [`PY_NEEDLES`] shapes with any argument.
+fn client_calls<'s>(f: &CodeFile<'s>) -> (Vec<ClientCall<'s>>, usize) {
+    let (mut out, phantom) = match f.lang {
+        "go" => (needle_calls(f.source, GO_NEEDLES), 0),
+        "python" => (needle_calls(f.source, PY_NEEDLES), 0),
+        _ => {
+            let (mut calls, phantom) = f
+                .parse
+                .map(|fp| endpoint_calls(f.source, fp))
+                .unwrap_or_default();
+            calls.extend(computed_verb_calls(f.source));
+            (calls, phantom)
+        }
     };
     out.sort_by_key(|c| c.at);
     out.dedup_by_key(|c| c.at);
-    out
+    (out, phantom)
 }
 
-/// TS family: the client call at each ENDPOINT node's hit.
-fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> Vec<ClientCall<'s>> {
+/// TS family: the client call at each ENDPOINT node's hit, and (FH.17) how
+/// many were left out as phantoms: a verb call (`x.get(..)`) whose path the
+/// parser read as `<unresolved>` and whose receiver is no HTTP client
+/// ([`is_client_receiver`]) is the CH.3c receiver gate's fail-open guess (a
+/// Map, a store or a cache whose type the parser could not see), not a
+/// client call: it seeds no wrapper. `fetch(..)`, a non-verb member (the
+/// FH.4a shape rule's `lib.fetchJson(..)`) and every read path still seed.
+fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> (Vec<ClientCall<'s>>, usize) {
     let mut out = Vec::new();
+    let mut phantom = 0usize;
     for n in fp
         .nodes
         .iter()
         .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
     {
+        let unresolved = fp
+            .nav
+            .qname_by_id
+            .get(&n.id)
+            .is_some_and(|q| q.ends_with(UNRESOLVED));
         for c in n.cells.iter().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
             let CellPayload::Json(j) = &c.payload else {
                 continue;
@@ -991,15 +1174,22 @@ fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> Vec<ClientCall<'s>> {
             let Some((callee, open)) = call_head(source, at) else {
                 continue;
             };
-            let member = callee
-                .rsplit('.')
-                .next()
-                .unwrap_or(callee)
-                .trim_matches(['?', '!']);
+            let (receiver, member) = match callee.rsplit_once('.') {
+                Some((r, m)) => (Some(r.trim_end_matches(['?', '!'])), m),
+                None => (None, callee),
+            };
+            let member = member.trim_matches(['?', '!']);
             let method = match HTTP_METHODS.iter().find(|m| m.eq_ignore_ascii_case(member)) {
                 Some(m) => CallMethod::Verb(m),
                 None => CallMethod::Options(method.to_ascii_uppercase()),
             };
+            if unresolved
+                && matches!(method, CallMethod::Verb(_))
+                && !receiver.is_some_and(|r| is_client_receiver(last_segment(r)))
+            {
+                phantom += 1;
+                continue;
+            }
             out.push(ClientCall {
                 at,
                 args: split_args(arg_region(source, open + 1).0),
@@ -1007,6 +1197,132 @@ fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> Vec<ClientCall<'s>> {
                 method,
             });
         }
+    }
+    (out, phantom)
+}
+
+/// The path segment the parser writes for a client call it could not read.
+const UNRESOLVED: &str = "<unresolved>";
+
+/// The last `.`-separated identifier of a callee chain (`this.http` ->
+/// `http`).
+fn last_segment(chain: &str) -> &str {
+    chain
+        .rsplit('.')
+        .next()
+        .unwrap_or(chain)
+        .trim_matches(['?', '!'])
+}
+
+/// FH.17: the words that make a receiver an HTTP client: the client
+/// libraries the parsers name (fetch, axios, ky, got, superagent, jQuery,
+/// `requests`) and the names an app gives one (`http`, `client`, `api`,
+/// `rest`, `request`).
+const CLIENT_WORDS: &[&str] = &[
+    "http",
+    "https",
+    "axios",
+    "client",
+    "api",
+    "fetch",
+    "fetcher",
+    "request",
+    "requests",
+    "rest",
+    "ky",
+    "got",
+    "superagent",
+    "xhr",
+    "jquery",
+];
+
+/// FH.17: a receiver identifier names an HTTP client: one of its words
+/// (split at `_` / `$` / `-` and at camel-case humps, lower-cased) is a
+/// [`CLIENT_WORDS`] entry (`http`, `this.apiClient`, `restClient`,
+/// `HTTPService`), or it is jQuery's `$`. `entries`, `cache`, `store`,
+/// `itemsById` name none.
+fn is_client_receiver(recv: &str) -> bool {
+    recv == "$"
+        || words(recv)
+            .iter()
+            .any(|w| CLIENT_WORDS.contains(&w.as_str()))
+}
+
+/// An identifier's words: split at `_` / `$` / `-` / digits and at
+/// camel-case humps (`HTTPClient` -> `http`, `client`), lower-cased.
+fn words(ident: &str) -> Vec<String> {
+    let chars: Vec<char> = ident.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphabetic() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).and_then(|k| chars.get(k));
+        let next = chars.get(i + 1);
+        let hump = c.is_ascii_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_ascii_lowercase()
+                    || (p.is_ascii_uppercase() && next.is_some_and(char::is_ascii_lowercase))
+            });
+        if hump && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        cur.push(c.to_ascii_lowercase());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// FH.17, TS family: every live `<recv>[<name>](..)` call whose receiver
+/// (the identifier before `[`) is an HTTP client ([`is_client_receiver`])
+/// and whose computed member is a bare identifier (`client[method](path)`,
+/// supertest's and axios's verb by value). Its path is argument 0, its
+/// method the member, read as a parameter of the owner
+/// ([`CallMethod::Name`]). At most `queue_topic::MAX_HITS_PER_NEEDLE`.
+fn computed_verb_calls(source: &str) -> Vec<ClientCall<'_>> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (open_bracket, _) in source.match_indices('[') {
+        if out.len() >= queue_topic::MAX_HITS_PER_NEEDLE {
+            break;
+        }
+        let mut s = open_bracket;
+        while s > 0 && b.get(s - 1).is_some_and(|c| is_ident_byte(*c)) {
+            s -= 1;
+        }
+        let Some(recv) = source.get(s..open_bracket).filter(|r| !r.is_empty()) else {
+            continue;
+        };
+        let Some(close) = source
+            .get(open_bracket + 1..)
+            .and_then(|r| r.find(']'))
+            .map(|k| open_bracket + 1 + k)
+        else {
+            continue;
+        };
+        let Some(name) = source.get(open_bracket + 1..close).map(str::trim) else {
+            continue;
+        };
+        if name.is_empty()
+            || leading_ident(name) != name
+            || b.get(close + 1) != Some(&b'(')
+            || !is_client_receiver(recv)
+            || commented_at(source, s)
+        {
+            continue;
+        }
+        out.push(ClientCall {
+            at: s,
+            args: split_args(arg_region(source, close + 2).0),
+            path_arg: 0,
+            method: CallMethod::Name(name),
+        });
     }
     out
 }
@@ -1504,8 +1820,10 @@ fn verb(s: &str) -> Option<String> {
 }
 
 /// The method of a direct client call (module doc, step 3); `None` when it
-/// is neither fixed nor forwarded.
-fn call_method(call: &ClientCall<'_>, params: &Params) -> Option<MethodFrom> {
+/// is neither fixed nor forwarded. `body` is the owner's text before the
+/// call: an options argument that names a local object literal there
+/// (FH.17, `fetch(opts.url, opts)`) is read as that object.
+fn call_method(call: &ClientCall<'_>, params: &Params, body: &str) -> Option<MethodFrom> {
     match &call.method {
         CallMethod::Verb(v) => Some(MethodFrom::Fixed((*v).to_string())),
         CallMethod::Arg(i) => {
@@ -1515,8 +1833,18 @@ fn call_method(call: &ClientCall<'_>, params: &Params) -> Option<MethodFrom> {
                 None => param_of(params, a).cloned().map(MethodFrom::Arg),
             }
         }
+        CallMethod::Name(name) => param_of(params, name).cloned().map(MethodFrom::Arg),
         CallMethod::Options(default) => {
-            options_method(call.args.get(call.path_arg + 1).copied(), params, default)
+            let arg = call.args.get(call.path_arg + 1).map(|a| a.trim());
+            let local = arg
+                .filter(|a| {
+                    !a.is_empty() && leading_ident(a) == *a && param_of(params, a).is_none()
+                })
+                .and_then(|a| local_object(body, a));
+            match local {
+                Some(inner) => options_method(Some(&format!("{{{inner}}}")), params, default),
+                None => options_method(arg, params, default),
+            }
         }
     }
 }
@@ -2029,6 +2357,59 @@ export class Api {
         assert_eq!(w.http_ambiguous, 1);
     }
 
+    const FIX_REST: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/ts-http-wrapper-precision/web/src/lib/rest.ts"
+    );
+    const FIX_CACHE: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/ts-http-wrapper-precision/web/src/lib/cache.ts"
+    );
+    const FIX_A: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/ts-http-wrapper-precision/web/src/features/a.ts"
+    );
+
+    /// FH.17: an options-object builder is followed (its `opts.url` read
+    /// through the local object literal, the method through the same object);
+    /// a computed verb on a client (`client[method](..)`) forwards the method
+    /// parameter; a verb call on a receiver that is no HTTP client
+    /// (`this.entries.get(key)`, the parser's `<unresolved>`) seeds nothing,
+    /// counted `phantom_dropped`, while `fetch`, a client-named receiver and a
+    /// non-verb member still seed.
+    #[test]
+    fn ts_options_objects_computed_verbs_and_phantoms() {
+        let sup = r#"import request from "supertest";
+export const makeRestApiRequest = ({ method, path }: Params) => {
+  const client = request(`http://localhost:${PORT}`);
+  return client[method](`/rest${path}`).set("Authorization", "x");
+};
+export function dispatch(type: string, payload: unknown) {
+  return handlers[type](payload);
+}
+export class Remote {
+  private apiClient: any;
+  private store: any;
+  fetchOne(url: string) { return this.apiClient.get(url); }
+  readOne(key: string) { return this.store.get(key); }
+}
+"#;
+        let w = infer(&[
+            ("src/lib/rest.ts", FIX_REST),
+            ("src/lib/cache.ts", FIX_CACHE),
+            ("src/features/a.ts", FIX_A),
+            ("src/sup.ts", sup),
+        ]);
+        assert_eq!(
+            http_found(&w),
+            [
+                r#"fetchOne path=0 ""+P+"" method=GET depth=1 @src/sup.ts:12"#,
+                r#"makeRequest path=0.path "/api"+P+"" method=GET depth=1 @src/lib/rest.ts:4"#,
+                r#"makeRestApiRequest path=0.path "/rest"+P+"" method=arg0.method depth=1 @src/sup.ts:2"#,
+            ]
+        );
+        // `lookup`, `drop` and `readOne`: verb calls on no HTTP client.
+        assert_eq!(w.http_phantom, 3);
+        assert_eq!((w.http_options_object, w.http_computed), (1, 1));
+    }
+
     #[test]
     fn python_wrappers_through_self_and_fstrings() {
         let src = r#"import requests
@@ -2253,6 +2634,113 @@ def users(c):
         assert_eq!(
             (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
             ("pass:inferred_wrapper", Some("wrapper_call"), Some(16))
+        );
+    }
+
+    /// FH.17, the `ts-http-wrapper-precision` fixture end to end: the
+    /// options-object wrapper's site pairs the Go route; the Map-like methods
+    /// mint nothing; the Go test helper's site in `api_test.go` mints its
+    /// ENDPOINT with ORIGIN `test_fixture` and a `"test_site":true` hit, and
+    /// the http pass pairs it with nothing although the route exists.
+    #[test]
+    fn fixture_precision_builds() {
+        let fx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bench/substrate-gap/fixtures/ts-http-wrapper-precision");
+        let root = std::env::temp_dir().join(format!("glia_fh17_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in [
+            "web/src/lib/rest.ts",
+            "web/src/lib/cache.ts",
+            "web/src/features/a.ts",
+            "server/main.go",
+            "server/api_test.go",
+        ] {
+            let dest = root.join(rel);
+            std::fs::create_dir_all(dest.parent().expect("a parent")).expect("mkdir");
+            std::fs::copy(fx.join(rel), &dest).expect("copy");
+        }
+        let repos: Vec<String> = ["web", "server"]
+            .iter()
+            .map(|d| root.join(d).to_string_lossy().into_owned())
+            .collect();
+        let built = crate::generate_many_opts(&repos, false, &crate::BuildOptions::default());
+        std::fs::remove_dir_all(&root).ok();
+        let r = built.expect("build");
+        let qname = |id: NodeId| {
+            r.merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
+        };
+        let mut endpoints: Vec<String> = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+                    .filter_map(|n| g.nav.qname_by_id.get(&n.id).cloned())
+            })
+            .collect();
+        endpoints.sort();
+        endpoints.dedup();
+        assert_eq!(
+            endpoints,
+            [
+                "endpoint:DELETE:<unresolved>",
+                "endpoint:GET:/api/items",
+                "endpoint:GET:/api/stats",
+                "endpoint:GET:<unresolved>",
+            ]
+        );
+        let paired: Vec<(String, String)> = r
+            .merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == glia_code_domain::edge_category::HTTP_CALLS)
+            .map(|e| (qname(e.from), qname(e.to)))
+            .collect();
+        assert_eq!(
+            paired,
+            [(
+                "endpoint:GET:/api/items".to_string(),
+                "GET /api/items".to_string()
+            )]
+        );
+        let stats = r
+            .merged
+            .graphs
+            .iter()
+            .find_map(|g| {
+                g.nodes.iter().find(|n| {
+                    g.nav.qname_by_id.get(&n.id).map(String::as_str)
+                        == Some("endpoint:GET:/api/stats")
+                })
+            })
+            .expect("the test site's endpoint");
+        let json = |kind| -> Vec<&str> {
+            stats
+                .cells
+                .iter()
+                .filter(|c| c.kind == kind)
+                .filter_map(|c| match &c.payload {
+                    CellPayload::Json(j) => Some(j.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            json(cell_type::ORIGIN),
+            [
+                r#"{"provenance":"test_fixture","rule":"inferred:PerformRequest","def":"api_test.go:11"}"#
+            ]
+        );
+        let hits = json(cell_type::ENDPOINT_HIT);
+        assert!(
+            hits.len() == 1 && hits[0].ends_with(r#","test_site":true}"#),
+            "{hits:?}"
         );
     }
 }
