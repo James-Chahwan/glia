@@ -23,7 +23,8 @@
   "Values that are NOT code-domain registry ids: the build-target domain's own registries in build-domain/src/registry.rs (TARGET 1.., DEPENDS_ON 1.., LOCATION 1..; header-described in targets.gmap, FA.16); same_as rule names `id_lineage` (FC.1); the embedding model ids (`Xenova/bge-small-en-v1.5`, `glia-test-hash-v1/64`); UnitKind / Role / KeyType strings (FC.1); gaps category names; snapshot versions"
  ],
  "exclusive": [
-  "FD.7d"
+  "FD.7d",
+  "FH.18"
  ],
  "packets": [
   {
@@ -9928,6 +9929,60 @@
     "FH.4b"
    ],
    "risks": "A test helper that really calls an external service loses its pairing; test_fixture keeps the node, so it stays visible.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.18",
+   "title": "One test binary per crate: engine / cli / graph / store / rules integration tests compiled into one target each (a build script lists tests/*.rs), except a keep-list of tests that need their own process or are named by tooling; link parallelism capped during waves",
+   "area": "FH tooling: build and test speed",
+   "loc": 350,
+   "rationale": "James 2026-10-26 (\"should we have an options for test and build to make it quicker\"). Measured: after one engine/src change, `cargo test --workspace --no-run` relinks ~300 integration-test binaries (engine 214, cli 55, graph 15, store 11, rules 8), each holding the whole engine: 198 s wall / 1,631 s CPU with the default linker, and target/debug grows to 65 GB after one clean build (251 GB accumulated over waves; /home filled once). mold cut CPU 13x (124 s) but wall rose to 303 s: the bottleneck is writing ~300 large binaries, and 16 parallel mold links x 16 threads lagged the desktop. Merging the tests removes that write volume at its source.",
+   "entry_points": [
+    "engine/Cargo.toml, cli/Cargo.toml, graph/Cargo.toml, store/Cargo.toml, rules/Cargo.toml (autotests)",
+    "dev-notes/wave-runner/closeout.py (test commands it runs)",
+    "dev-notes/wave-runner/shared_brief_054.md",
+    "new where absent: <crate>/build.rs (new), <crate>/tests/all.rs (new), e.g. rules/build.rs (new), rules/tests/all.rs (new)"
+   ],
+   "files_touched": [
+    "engine/Cargo.toml",
+    "engine/build.rs",
+    "engine/tests/all.rs",
+    "cli/Cargo.toml",
+    "cli/build.rs",
+    "cli/tests/all.rs",
+    "graph/Cargo.toml",
+    "graph/build.rs",
+    "graph/tests/all.rs",
+    "store/Cargo.toml",
+    "store/build.rs",
+    "store/tests/all.rs",
+    "rules/Cargo.toml",
+    "rules/build.rs",
+    "rules/tests/all.rs",
+    "dev-notes/wave-runner/closeout.py",
+    "dev-notes/wave-runner/shared_brief_054.md",
+    "WORKFLOW.md",
+    "CODE_RULES.md"
+   ],
+   "implementation": "1. Per crate: `autotests = false`; one `[[test]] name = \"<crate>_tests\" path = \"tests/all.rs\"`; tests/all.rs is `include!(concat!(env!(\"OUT_DIR\"), \"/test_mods.rs\"));`, which build.rs writes as one `#[path = \"<abs>/tests/<f>.rs\"] mod <f>;` per tests/*.rs not on the keep-list (sorted; `cargo:rerun-if-changed=tests`), so a new test file joins with no shared-file edit. If the crate already has a build.rs, extend it; a build.rs must not change PARSER_STAMP's hashed inputs (check stamp/'s HASHED_ROOTS).\n2. Keep-list, each still its own `[[test]]`: tests named by tooling (byte_identical, parallel_build, watch_parity, api_stability, readme_surface, skill_surface, cli_surface, rules' toy) and every test that changes process-global state (set_var / current_dir / panic hooks: identity_scip, load_or_rebuild, rank_blast, build_layout, docs_sources_cli, hooks_cli, docs_stub_cli, contract_fields_cli at spec time; grep again). A merged test that fails only when run beside others moves to the keep-list rather than being weakened.\n3. Fix what merging breaks without changing assertions: `mod common;` style sharing (none at spec time), duplicate `#[macro_use]`, items that assumed a crate root.\n4. Link parallelism: closeout.py and the shared brief run cargo with `CARGO_BUILD_JOBS=8` (half the cores) so the desktop stays usable during a wave.\n5. The shared brief gains one rule: a spec's `--test <name>` means `--test <crate>_tests <name>::` unless <name> is on the keep-list; WORKFLOW.md / CODE_RULES.md test commands updated the same way.\n6. Measure before / after on the same machine with the disk idle: `touch engine/src/lib.rs; cargo test --workspace --no-run` wall + CPU, `du -sh target/debug` after a clean build, and `cargo test --workspace` wall.",
+   "fixtures": [],
+   "acceptance": "`cargo test --workspace` passes with the same number of tests as before (closeout's count, 6885 at W17) and 0 failed; integration-test binaries drop from ~300 to the keep-list plus 5; the measurement in step 6 is recorded in the result with before / after numbers (target/debug size and the touch-rebuild wall both lower); `cargo test -p glia-engine --test byte_identical` and every other keep-list name still run by that name.",
+   "fired_on_marker": "[tests] crate=<c> merged=<n> kept=<k> (build.rs warning-free; the marker is the result's measurement table)",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "test target names: merged tests run as `--test <crate>_tests <name>::`; no API, CLI or graph change",
+    "in_repo_consumers": [
+     "dev-notes/wave-runner/closeout.py",
+     "dev-notes/wave-runner/shared_brief_054.md"
+    ],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "A test that leaks global state into a neighbour fails only merged: it goes to the keep-list. A build.rs per crate adds a little compile time; it only lists files.",
    "batch": "FH",
    "spec_group": "FH"
   }
