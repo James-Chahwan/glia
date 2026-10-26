@@ -9791,7 +9791,8 @@
     "py/tests/surface/test_diff_impact.py",
     "py/tests/surface/test_review.py",
     "skills/glia/SKILL.md",
-    "skills/glia/examples.md"
+    "skills/glia/examples.md",
+    "skills/glia/reference.md"
    ],
    "implementation": "1. `areas`: the impact rows (all of them, before the cap) grouped by area: the PROJECT label when the build has project roots, else the first two path components of the row's file; each area {area, rows, files, top_file, scope} with `scope` the exact --scope value that selects it, sorted by rows desc then area. Every answer carries it unless full.\n2. The overview default: rows cut at DEFAULT_OVERVIEW_ROWS = 25 (was 200), seeds at min(top_k, 25), diff-impact `changed` at 25 with a count; `truncated` gains `next`: for rows, the largest area's `--scope <area>` and `--offset 25`. --top-k N still sets the row count explicitly (an agent asking for 200 gets 200).\n3. `--offset <n>` (pyo3 `offset=`): skip the first n rows of the ranked, scoped list; truncated counts what follows.\n4. Slim rows unless full: `seed` is the index into `seeds` (`seed_index`), and `name` is left out when it equals the qname's last `::` segment; `score` keeps 4 significant digits in JSON.\n5. --full / full=True keeps today's every-row answer byte for byte (seed qname, name, full score).\n6. skills/glia: one worked example of overview -> `--scope <area>` -> `--offset`, and the rule 'read areas first, ask for one area'.\n7. Markdown / text output: an `## areas` table after the files table; the rows table shows 25 with the next-scope line.",
    "fixtures": [],
@@ -9983,6 +9984,209 @@
    },
    "depends_on": [],
    "risks": "A test that leaks global state into a neighbour fails only merged: it goes to the keep-list. A build.rs per crate adds a little compile time; it only lists files.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.19",
+   "title": "NestJS route handlers: a @Get / @Post / .. decorated method is the HANDLED_BY target of the ROUTE its decorator mints (every Nest ROUTE was orphaned)",
+   "area": "FH boundary chain",
+   "loc": 250,
+   "rationale": "FH.7c (w19) found immich's NestJS ROUTEs carry no HANDLED_BY edge, so a walk from a route never reaches its controller method. Verified 2026-10-27 on a two-route controller: ROUTE `GET /users/:id` and `PUT /users/me` are minted, the METHODs exist, and there is no edge between them (no edge at all on the ROUTE). The NestJS scanner in ts_routes.rs returns (method, path, row) and no handler. Every NestJS cohort repo is affected (immich, twenty, documenso, hoppscotch).",
+   "entry_points": [
+    "parsers/code/extractors/src/ts_routes.rs: the NestJS @Controller + verb-decorator scanner (`Scan a TS source for NestJS @Controller ..`, ~line 526) and the A3.5 HANDLED_BY refs it already emits for Express routes"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/ts_routes.rs"
+   ],
+   "implementation": "1. The Nest scanner returns the handler: the first method declaration after the verb decorator (skipping further decorators and parameter decorators), and the enclosing class.\n2. Emit a HANDLED_BY UnresolvedRef ROUTE -> `<Class>::<method>` the way the Express path does (same ref shape, so the graph builder binds it in-file), rule `nest_handler`.\n3. A method carrying several verb decorators gets one edge per ROUTE.",
+   "fixtures": [
+    {
+     "name": "nest-handled-by",
+     "purpose": "a NestJS route is HANDLED_BY its decorated controller method (FH.19)",
+     "source_sketch": "api/package.json {\"name\":\"api\",\"dependencies\":{\"@nestjs/common\":\"10.0.0\"}}; api/src/users/users.controller.ts: import { Controller, Get, Put, Param } from '@nestjs/common'; @Controller('users') export class UsersController { @Get(':id') getUser(@Param('id') id: string) { return { id }; } @Put('me') updateMe() { return {}; } }",
+     "key_json": "{\"framework\": \"nest-handled-by\", \"language\": \"typescript\", \"dirs\": [\"api\"], \"note\": \"FH.19. Baseline 2026-10-27: both ROUTEs minted, no HANDLED_BY.\", \"expect_edges\": [{\"from\": \"GET /users/:id\", \"to\": \"src::users::users.controller::UsersController::getUser\", \"category\": \"HANDLED_BY\", \"exact\": true}, {\"from\": \"PUT /users/me\", \"to\": \"src::users::users.controller::UsersController::updateMe\", \"category\": \"HANDLED_BY\", \"exact\": true}], \"forbid\": []}"
+    }
+   ],
+   "acceptance": "the fixture's two HANDLED_BY edges exist (before: none); immich @ the cohort pin: `[http] ..` handled routes rise and a sample controller route reaches its method; byte_identical holds; the rank gate stays 0 drops.",
+   "fired_on_marker": "[ts-routes] nest handlers bound=<b> unbound=<u> file=<p>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents only (more / fewer edges), no API or format change",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "A decorator on an overloaded or abstract method binds to the first implementation after it.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.7d",
+   "title": "Style-agnostic drift, part 4: generic renames stay one row - a changed name whose client matches span more than a cap of files, or that is a generic identifier (id, params, data, ..) without a key-class match, folds to one aggregate row with its count",
+   "area": "FH style-agnostic contracts",
+   "loc": 300,
+   "rationale": "After FH.7b / FH.7c / FH.16 (w19), photoprism fd8448's names answer names both client truth files but holds 771 rows at S (2,749 once FH.16 let the walk reach more clients): the `id -> messageId` / `params -> messageParams` rename on one shared error body matches every `.id` in the frontend. A reviewer needs one row saying 'id renamed, N client sites', not N rows.",
+   "entry_points": [
+    "engine/src/contract_breaks/names.rs (name_breaks, ChangedName, GENERIC)"
+   ],
+   "files_touched": [
+    "engine/src/contract_breaks/names.rs",
+    "engine/tests/name_breaks.rs"
+   ],
+   "implementation": "1. A changed name in GENERIC (extend it: id, ids, params, data, type, name, value, values, key, items, list, result, error, message, status, code) counts per client site only when the client site is a key-class match (a quoted key, an object-literal key, a JSON field access in the same exchange's client function); other matches fold into one row {name, change, client_sites: N, client_files: M, sample_files: first 3}.\n2. Any name whose client matches exceed NAME_SITE_CAP (25) files folds the same way.\n3. Measure the 13 FH.1 drift picks (`bench/cohort/cohort.py run --ids <regex>` once FH.1c lands, else FH.7b's driver ~/.cache/glia-FH.7b/measure.py): rows and truth-named at S and C.",
+   "fixtures": [],
+   "acceptance": "photoprism fd8448 at S: names rows <= 60 and both client truth files still named; the 13 picks' truth-named count at S stays >= 3; name_breaks tests cover the fold and the cap.",
+   "fired_on_marker": "[name-breaks] .. folded_generic=<g> folded_cap=<c>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output"
+    ],
+    "what_changes": "contract-breaks `names` / review `name_breaks` rows: a generic or over-cap name is one aggregate row with client_sites / client_files / sample_files",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": [
+     "repo-graph contract-breaks / review readers"
+    ]
+   },
+   "depends_on": [
+    "FH.7b",
+    "FH.7c"
+   ],
+   "risks": "A real rename of a generic field into a key-class client site still reports per site; only free-text matches fold.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.16b",
+   "title": "Bundler module roots, part 2: vitest.config.* joins webpack / vite as a module-root and alias source",
+   "area": "FH boundary chain",
+   "loc": 80,
+   "rationale": "FH.16 (w19): many vite repos repeat their `resolve.alias` in vitest.config.*, and some declare it only there; FH.16 reads webpack.config.* and vite.config.* only.",
+   "entry_points": [
+    "engine/src/build/lang_build.rs BUNDLER_CONFIGS"
+   ],
+   "files_touched": [
+    "engine/src/build/lang_build.rs",
+    "engine/src/watch.rs"
+   ],
+   "implementation": "1. Add vitest.config.{js,ts,mjs,cjs,mts} (and vitest.workspace is out) to BUNDLER_CONFIGS with the vite reader; watch durability High as FH.16's.\n2. When both a vite and a vitest config declare the same alias key, the vite one wins (vitest's usually spreads it).",
+   "fixtures": [],
+   "acceptance": "a unit test: an alias declared only in vitest.config.ts resolves an import; `[ts-aliases] bundler file=vitest.config.ts ..` prints; byte_identical holds.",
+   "fired_on_marker": "[ts-aliases] bundler file=vitest.config.<ext> module_roots=<m> aliases=<a> skipped=<s>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents only (more / fewer edges), no API or format change",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.16"
+   ],
+   "risks": "A vitest config that spreads a function-computed alias object is skipped and counted, as FH.16 does for webpack.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.17b",
+   "title": "Inferred HTTP wrapper precision, part 2: an axios / fetch instance imported under a generic name (`import instance from '@/utils/request'`) is a client by its import specifier's words",
+   "area": "FH boundary chain",
+   "loc": 150,
+   "rationale": "FH.17 (w19): the phantom rule keeps an `<unresolved>` verb call only when the receiver's name is client-like, so `import instance from '@/utils/request'; instance.get(url)` (gin-vue-admin's style) is dropped as a phantom.",
+   "entry_points": [
+    "engine/src/external/infer_wrappers.rs (the phantom rule)"
+   ],
+   "files_touched": [
+    "engine/src/external/infer_wrappers.rs"
+   ],
+   "implementation": "1. A receiver bound by a default or named import whose specifier's last path words include request, http, api, client, axios, fetch or service counts as client-like for the phantom rule.\n2. Count it separately in the marker.",
+   "fixtures": [],
+   "acceptance": "a unit test: `instance.get('/x')` through `import instance from '@/utils/request'` mints; `this.cache.get(id)` still drops; gin-vue-admin's inferred mints rise; the rank gate stays 0 drops.",
+   "fired_on_marker": "[http-wrappers] .. client_by_import=<n> ..",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents only (more / fewer edges), no API or format change",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.17"
+   ],
+   "risks": "A non-HTTP `api` module with get/delete methods is read as a client; its sites still need a `/`-led literal to mint.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.20",
+   "title": "TS type aliases as nodes: `type X = {..}` / `type X = A & B` mint a TYPE node with SCHEMA_FIELDS when object-shaped, and a generic argument naming it is a USES, so a generated SDK (oazapfts) is a hop the client walk crosses",
+   "area": "FH boundary chain",
+   "loc": 450,
+   "rationale": "FH.7c (w19): immich's client -> route exchange runs through a generated oazapfts SDK whose DTOs are `type X = {..}` aliases; aliases are not nodes, so the changed DTO is unreachable within the walk's depth (3 of 6 immich drift tasks read exchanges=0).",
+   "entry_points": [
+    "parsers/code/typescript/src/lib.rs (interfaces / classes already mint SCHEMA_FIELDS, DT.1c)",
+    "engine/tests/ts_type_alias_nodes.rs (new)"
+   ],
+   "files_touched": [
+    "parsers/code/typescript/src/lib.rs",
+    "engine/tests/ts_type_alias_nodes.rs"
+   ],
+   "implementation": "1. A top-level `type X = <object literal type>` (or an intersection of object literals and named types) mints an INTERFACE node X (reuse the kind INTERFACE, ORIGIN `type_alias`) with SCHEMA_FIELDS read as an interface's (DT.1c's ModelSchema, format ts).\n2. A generic argument or annotation naming X (`fetchJson<X>(..)`, `: X`, `Promise<X>`) is a USES of X from the enclosing callable (parser rule `type_ref`).\n3. Non-object aliases (unions of literals, function types) mint nothing.",
+   "fixtures": [],
+   "acceptance": "a test file: an object type alias is a node with its fields, a function returning `Promise<X>` USES it; immich's 3 exchanges=0 drift tasks read exchanges > 0 through FH.7b's names (measure with FH.7b's driver); byte_identical holds; the rank gate stays 0 drops.",
+   "fired_on_marker": "[ts-types] aliases=<a> object=<o> type_refs=<r> file=<p>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents: new INTERFACE nodes for object type aliases and USES edges",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "Large generated SDKs mint many nodes; ORIGIN generated (DE.7) still applies and dead_symbol withholds them.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.1c",
+   "title": "The cohort runner reads `names`: contract-breaks' name rows count toward the drift gate's truth_named, and distinct_changes reads folded schema rows' `operations`",
+   "area": "FH cohort",
+   "loc": 80,
+   "rationale": "FH.7b (w19): bench/cohort/cohort.py gate_state builds contract-breaks rows from schemas / models / orphaned_clients only, so the cohort never credits a client named by a name row; and its schemas counts now see folded rows.",
+   "entry_points": [
+    "bench/cohort/cohort.py gate_state"
+   ],
+   "files_touched": [
+    "bench/cohort/cohort.py",
+    "bench/cohort/test_cohort.py"
+   ],
+   "implementation": "1. gate_state adds each `names` row's client files to the rows it scores; a missing key reads as empty.\n2. distinct_changes counts a folded schema row once per entry in `operations`.\n3. Re-derive the committed baseline only through the release's full cohort run (never here); a partial run with --ids over the 13 drift picks prints the new numbers.",
+   "fixtures": [],
+   "acceptance": "test_cohort.py covers a names row and a folded row; `cohort.py run --ids <the 13 drift picks>` reports truth_named >= 3 at S.",
+   "fired_on_marker": "[cohort] task <id> .. cb_names=<n>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.7b"
+   ],
+   "risks": "Name rows can be noisy until FH.7d folds generic renames, so truth_named may rise with low precision; the gate compares against the baseline, never an absolute.",
    "batch": "FH",
    "spec_group": "FH"
   }
