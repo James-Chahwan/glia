@@ -20,8 +20,8 @@
 //! unjudged=0`: `cargo test -p glia-engine --test model_breaks --
 //! --nocapture 2>&1 | grep '^\[model-breaks\] base='`.
 
-mod git_fixture;
-mod model_shop;
+use crate::git_fixture;
+use crate::model_shop;
 
 use git_fixture::GitRepo;
 use glia_engine::contract_breaks::{

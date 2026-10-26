@@ -437,7 +437,7 @@ fn run_child(root: &Path) -> (Vec<String>, String) {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_rank_blast",
+            &libtest_name("child_rank_blast"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -531,4 +531,13 @@ fn no_snapshot_marker() {
     );
     assert_eq!(rank.len(), 2, "{stderr}");
     assert!(rank.iter().all(|l| l.contains(" lifted=0 ")), "{stderr}");
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

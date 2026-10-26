@@ -23,8 +23,8 @@
 //! listed (DT.7c), not a rule error; a rule's coverage caveats print once
 //! per section (DT.8a's fold).
 
-mod git_fixture;
-mod model_shop;
+use crate::git_fixture;
+use crate::model_shop;
 
 use std::collections::BTreeMap;
 

@@ -308,7 +308,7 @@ fn markers_count_the_reads() {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_build_for_stderr",
+            &libtest_name("child_build_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -344,4 +344,13 @@ fn markers_count_the_reads() {
         ),
         "{page}"
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

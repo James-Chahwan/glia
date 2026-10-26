@@ -18,8 +18,8 @@
 //! UnknownRecord`) is judged by its member. fired_on: `[model-breaks]
 //! base=<rev> ..`, after the unchanged `[contract-breaks] base=` line.
 
-mod git_fixture;
-mod model_shop;
+use crate::git_fixture;
+use crate::model_shop;
 
 use std::path::Path;
 

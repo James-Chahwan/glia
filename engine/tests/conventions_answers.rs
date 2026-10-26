@@ -11,7 +11,7 @@
 //! fired_on: the `[pack] query=..` line's ` conventions=<n>` field and the
 //! `[review] conventions=<n>` line (only when one is listed).
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_engine::generate_one;

@@ -414,7 +414,7 @@ fn loaders_print_the_needs_rebuild_marker() {
     let run = Command::new(std::env::current_exe().expect("test binary path"))
         .args([
             "--exact",
-            "child_load_pre_leap_layouts",
+            &libtest_name("child_load_pre_leap_layouts"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -448,4 +448,13 @@ fn loaders_print_the_needs_rebuild_marker() {
         2,
         "{stderr}"
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

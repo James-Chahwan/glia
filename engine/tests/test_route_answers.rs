@@ -348,7 +348,7 @@ fn gaps_stderr(variant: Variant) -> Vec<String> {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_gaps_for_stderr",
+            &libtest_name("child_gaps_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -406,4 +406,13 @@ fn markers_count_the_withheld_routes() {
     );
     let rows = lines_with(&lines, "[gaps] rows=");
     assert!(rows[0].contains(" unpaired_route=2 "), "{rows:?}");
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

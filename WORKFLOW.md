@@ -97,6 +97,7 @@ The behavioral conventions that have already been argued through. Deviate only w
 | **Respect locked invariants** | NodeKind/EdgeCategory/CellType u32 IDs, `::` qname separator, `.gmap` rebuild-whole-file — renumbering breaks persisted files. See `CLAUDE.md` + `CODE_RULES.md`. |
 | **llama.cpp-only inference; no JSON injection when a graph-side channel exists** | `CODE_RULES.md §10`. Graph-derived text directives are the sanctioned channel. |
 | **Real-repo gates at every close-out** | Fixtures are shaped by our own repos; the rank gate and the cohort gate (§5) judge glia on public repos it was never tuned on, against committed baselines. |
+| **One test binary per crate; 8 build jobs** | Before FH.18 a `touch engine/src/lib.rs` relinked ~320 test binaries, each holding the engine (target/debug 65 GB after one clean build; /home filled once). engine / cli / graph / store / rules compile tests/*.rs into `<crate>_tests`: run one file with `cargo test -p <pkg> --test <crate>_tests <file>::`; only build.rs's `KEEP` files keep their own `--test <name>` (`CODE_RULES.md` §19). Build with `CARGO_BUILD_JOBS=8` during waves; the close-out does. |
 
 ---
 

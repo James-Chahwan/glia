@@ -378,7 +378,7 @@ fn marker_line() {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_communities",
+            &libtest_name("child_communities"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -410,4 +410,13 @@ fn marker_line() {
         line.contains(" modularity=0.") && line.contains(" levels="),
         "{line}"
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

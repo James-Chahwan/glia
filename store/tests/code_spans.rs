@@ -234,7 +234,7 @@ fn child(mode: &str, repo: &Path, layout: &Path) -> String {
     let out = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "child_process_entry",
+            &libtest_name("child_process_entry"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -657,4 +657,13 @@ fn upsert_keeps_spans_readable() {
         );
     }
     assert!(layout.join(MANIFEST_NAME).is_file());
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

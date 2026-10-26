@@ -32,7 +32,7 @@
 //!     saying which. Every fixture above has no record, so (1)-(5) pin EB.7's
 //!     uncalibrated order unchanged.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_code_domain::snapshots::{

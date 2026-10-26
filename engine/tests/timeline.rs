@@ -2,7 +2,7 @@
 //! over the first-parent revs of a real git repo through the shared hermetic
 //! harness, then read back as edge history and as-of views.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::path::PathBuf;
 

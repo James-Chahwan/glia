@@ -187,7 +187,7 @@ fn run_child(scenario: &str, repo: &Path, out: Option<&Path>) -> String {
     let mut cmd = Command::new(std::env::current_exe().expect("test binary path"));
     cmd.args([
         "--exact",
-        "child_scenario",
+        &libtest_name("child_scenario"),
         "--nocapture",
         "--test-threads=1",
     ])
@@ -471,4 +471,13 @@ fn pre_leap_parse_cache_is_discarded() {
         &want,
         "incremental build over the pre-leap cache",
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

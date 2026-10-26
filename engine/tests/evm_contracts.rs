@@ -16,7 +16,7 @@
 //! `bench/` is outside the cargo workspace's crates, so the fixture is copied
 //! into a tempdir (never its key.json) and built there.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};

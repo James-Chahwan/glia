@@ -21,7 +21,7 @@
 //!     unchanged; `select = false` is the same order as an explicit choice;
 //!     the JSON gains `selection` after `absence`.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_code_domain::snapshots::{

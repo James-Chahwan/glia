@@ -298,7 +298,7 @@ fn deterministic() {
 // commits, a_test.py 6, b.py 6; db/migrate.sql is no MODULE. a.py imports
 // b.py and a_test.py imports a.py; nothing links the migration.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use glia_engine::GenerateResult;
 use glia_engine::cochange::{cochange_multi, cochange_vs_rev};

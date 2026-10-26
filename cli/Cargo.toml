@@ -2,6 +2,8 @@
 name = "glia-cli"
 version.workspace = true
 edition = "2024"
+# FH.18: tests/*.rs compile into one target (build.rs); see the [[test]] tables below.
+autotests = false
 publish = false
 description = "glia CLI — analyze a repo, query impact reachability, merge multiple .gmap-style scans into a cross-service graph."
 
@@ -55,3 +57,17 @@ gpu-webgpu = ["embed", "glia-embed/gpu-webgpu"]
 # The CUDA provider, opt-in only (GLIA_EMBED_DEVICE=cuda; never a published
 # wheel): needs the CUDA 13 runtime and cuDNN 9 on the library path.
 gpu-cuda = ["embed", "glia-embed/gpu-cuda"]
+
+# FH.18: one integration-test binary. build.rs lists every tests/*.rs that is not kept as
+# its own target into `cli_tests`; each kept file is on build.rs's KEEP list too.
+[[test]]
+name = "cli_tests"
+path = "tests/all.rs"
+
+[[test]]
+name = "readme_surface"
+path = "tests/readme_surface.rs"
+
+[[test]]
+name = "skill_surface"
+path = "tests/skill_surface.rs"

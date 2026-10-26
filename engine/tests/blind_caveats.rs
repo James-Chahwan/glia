@@ -23,7 +23,7 @@
 //!   the client mechanisms health rates BLIND / DEGRADED there, and the run
 //!   prints health's rows and the boundary_health time.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_engine::absence::BlindCaveat;

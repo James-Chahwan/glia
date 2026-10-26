@@ -19,7 +19,7 @@
 //! (7) a vector whose node moved is stale: the moved file (no text either)
 //!     is no row until the next embed, and the index counts it missing.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

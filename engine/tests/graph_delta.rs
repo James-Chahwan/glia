@@ -2,7 +2,7 @@
 //! (`glia_engine::delta::graph_delta_vs_rev`), every case built on a
 //! real git repo through the shared two-commit harness.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_code_domain::{DocProvenance, DocRecord, DocSourceKind, node_kind};

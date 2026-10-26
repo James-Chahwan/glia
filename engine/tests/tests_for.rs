@@ -8,7 +8,7 @@
 //! `[tests-for] seeds=.. tests=..` per answer; `cli/tests/tests_for_cli.rs`
 //! asserts that line.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::path::Path;
 

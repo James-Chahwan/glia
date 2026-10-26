@@ -1,6 +1,7 @@
 //! Two-commit git fixture harness (LE.1b), shared by the integration tests
 //! that build a graph against a git rev (LE.1b graph delta, LE.2 diff impact,
-//! LE.3b tests-for, LE.7a patterns) through `mod git_fixture;`.
+//! LE.3b tests-for, LE.7a patterns) through `use crate::git_fixture;`: engine/build.rs
+//! declares it once at the root of engine_tests (FH.18).
 //!
 //! Every git call runs hermetically: a fixed identity, no signing, `main` as
 //! the initial branch, no system or global config and `HOME` pointed into the

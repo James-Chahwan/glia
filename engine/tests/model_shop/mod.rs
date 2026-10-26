@@ -1,8 +1,9 @@
 //! The `model-breaks-shop` fixture (engine/tests/data/model-breaks-shop) as a
 //! git work tree, shared by the inferred-model break tests (DT.1o's
 //! model_breaks, DT.1p's contract-breaks / review wiring). It uses
-//! `crate::git_fixture::GitRepo`, so a test crate that declares
-//! `mod model_shop;` also declares `mod git_fixture;`.
+//! `crate::git_fixture::GitRepo`: engine/build.rs declares both helper
+//! directories once at the root of engine_tests (FH.18), and a test file
+//! reaches them with `use crate::model_shop;`.
 //!
 //! The fixture is examples-glia trimmed to its order exchanges and the admin
 //! GraphQL documents: an Angular `OrderService` (GET / POST / PATCH typed

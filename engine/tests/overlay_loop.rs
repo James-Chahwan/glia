@@ -719,7 +719,7 @@ fn try_stderr(dir: &str) -> Vec<String> {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_try_for_stderr",
+            &libtest_name("child_try_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -1116,7 +1116,7 @@ fn accept_stderr(dir: &str) -> Vec<String> {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_accept_for_stderr",
+            &libtest_name("child_accept_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -1696,7 +1696,7 @@ fn accept_writes_a_rule_stanza() {
     let out = Command::new(exe)
         .args([
             "--exact",
-            "child_rule_accept_for_stderr",
+            &libtest_name("child_rule_accept_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -1779,4 +1779,13 @@ fn version_raise_refuses_hidden_stanzas() {
     let plain = merge(Some(base), &cand, Some(&cand.stanzas()[2..3])).expect("merge");
     assert!(plain.text.starts_with("version = 1\n"), "{}", plain.text);
     assert_eq!(plain.text, format!("{base}\n{ACYCLIC}"));
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

@@ -597,7 +597,7 @@ fn markers() {
     let out = Command::new(std::env::current_exe().expect("test binary path"))
         .args([
             "--exact",
-            "child_markers_for_stderr",
+            &libtest_name("child_markers_for_stderr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -618,4 +618,13 @@ fn markers() {
         ],
         "an empty view prints no collapse line:\n{stderr}"
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

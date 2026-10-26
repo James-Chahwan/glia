@@ -19,7 +19,7 @@
 //! report's `experimental` key); run with `--nocapture` to see it. The CLI
 //! test (`cli/tests/patterns_cli.rs`) asserts the line.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::collections::BTreeMap;
 

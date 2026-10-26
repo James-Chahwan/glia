@@ -62,8 +62,18 @@ COHORT_GATE_TIMEOUT = 14400   # seconds: FH.12's baseline (cohort + health + Sib
 COHORT_FAST = "websocket,commons-text,click,scaffold-eth-2,shell,microservices-demo,gin-vue-admin,zora-protocol"
 
 
+# FH.18 (James 2026-10-26, "should we have an options for test and build to make it quicker"):
+# every cargo the close-out runs, and the gate scripts it calls, builds with 8 jobs (half the
+# cores), so the links of a wave's builds leave the desktop usable. An explicit
+# CARGO_BUILD_JOBS in the caller's environment wins.
+CARGO_BUILD_JOBS = "8"
+
+
 def sh(cmd, cwd=ROOT, timeout=1800):
-    r = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True, timeout=timeout)
+    env = dict(os.environ)
+    env.setdefault("CARGO_BUILD_JOBS", CARGO_BUILD_JOBS)
+    r = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True, timeout=timeout,
+                       env=env)
     return r.stdout + r.stderr, r.returncode
 
 
@@ -272,6 +282,7 @@ def main():
     say(rustdoc_marker)
     if not rustdoc_ok:
         gates.append("rustdoc")
+    # byte_identical stays its own test target (FH.18's keep-list, engine/build.rs KEEP).
     out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
     bi = "2 passed; 0 failed" in out
     say(f"== byte_identical: {'green' if bi else 'RED'}")

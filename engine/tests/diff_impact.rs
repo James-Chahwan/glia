@@ -7,7 +7,7 @@
 //! engine prints `[diff-impact] mode=.. base=.. changed=.. seeds=..` per
 //! answer; `cli/tests/diff_impact_cli.rs` asserts that line.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use git_fixture::GitRepo;
 use glia_engine::diff_impact::{

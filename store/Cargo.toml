@@ -2,6 +2,8 @@
 name = "glia-store"
 version.workspace = true
 edition = "2024"
+# FH.18: tests/*.rs compile into one target (build.rs); see the [[test]] tables below.
+autotests = false
 publish = false
 
 [dependencies]
@@ -21,3 +23,9 @@ tempfile = "3"
 glia-parser-go = { path = "../parsers/code/go" }
 glia-parser-typescript = { path = "../parsers/code/typescript" }
 glia-projection-text = { path = "../projection-text" }
+
+# FH.18: one integration-test binary. build.rs lists every tests/*.rs that is not kept as
+# its own target into `store_tests`; each kept file is on build.rs's KEEP list too.
+[[test]]
+name = "store_tests"
+path = "tests/all.rs"

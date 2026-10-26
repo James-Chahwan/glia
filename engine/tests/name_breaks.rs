@@ -19,7 +19,7 @@
 //! fired_on: `[name-breaks] base=<rev> exchanges=<e> names=<n> renames=<r>
 //! clients=<c> rows=<k> fixed=<f>`, once per call.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::fs;
 use std::path::{Path, PathBuf};

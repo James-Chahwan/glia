@@ -10,7 +10,7 @@
 //! only, so review answers its fallback with reason `no_set` until the repo
 //! is recalibrated.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

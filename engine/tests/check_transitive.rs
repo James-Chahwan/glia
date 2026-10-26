@@ -478,7 +478,7 @@ fn markers(which: &str) -> Vec<String> {
     let exe = std::env::current_exe().expect("the test binary");
     let out = Command::new(Path::new(&exe))
         .args([
-            "markers_child",
+            &libtest_name("markers_child"),
             "--exact",
             "--nocapture",
             "--test-threads=1",
@@ -599,7 +599,7 @@ fn edge_levels_marker_fires_once() {
     let exe = std::env::current_exe().expect("the test binary");
     let out = Command::new(Path::new(&exe))
         .args([
-            "two_rules_child",
+            &libtest_name("two_rules_child"),
             "--exact",
             "--nocapture",
             "--test-threads=1",
@@ -625,4 +625,13 @@ fn edge_levels_marker_fires_once() {
         "the vector holds the merged graph's edges: {}",
         lines[0]
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

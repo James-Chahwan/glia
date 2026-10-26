@@ -819,7 +819,7 @@ fn no_violation_marker_fires() {
     let exe = std::env::current_exe().expect("the test binary");
     let out = std::process::Command::new(exe)
         .args([
-            "no_violation_marker_child",
+            &libtest_name("no_violation_marker_child"),
             "--exact",
             "--nocapture",
             "--test-threads=1",
@@ -835,4 +835,13 @@ fn no_violation_marker_fires() {
         .filter(|l| l.starts_with("[gaps] rotted_rule"))
         .collect();
     assert_eq!(lines, ["[gaps] rotted_rule no_violation=1"], "{stderr}");
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

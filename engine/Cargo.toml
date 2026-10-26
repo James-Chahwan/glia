@@ -2,6 +2,8 @@
 name = "glia-engine"
 version.workspace = true
 edition = "2024"
+# FH.18: tests/*.rs compile into one target (build.rs); see the [[test]] tables below.
+autotests = false
 publish = false
 description = "Pure-Rust orchestration: walk a repo, run language parsers + cross-cutting extractors, build per-lang graphs, merge, run cross-graph resolvers. Consumed by the pyo3 wrapper (`glia-py`) and the `glia` CLI."
 
@@ -85,3 +87,29 @@ sem-eval = ["glia-embed/fastembed"]
 
 [dev-dependencies]
 tempfile = "3"
+
+# FH.18: one integration-test binary. build.rs lists every tests/*.rs that is not kept as
+# its own target into `engine_tests`; each kept file is on build.rs's KEEP list too.
+[[test]]
+name = "engine_tests"
+path = "tests/all.rs"
+
+[[test]]
+name = "api_stability"
+path = "tests/api_stability.rs"
+
+[[test]]
+name = "byte_identical"
+path = "tests/byte_identical.rs"
+
+[[test]]
+name = "load_or_rebuild"
+path = "tests/load_or_rebuild.rs"
+
+[[test]]
+name = "parallel_build"
+path = "tests/parallel_build.rs"
+
+[[test]]
+name = "watch_parity"
+path = "tests/watch_parity.rs"

@@ -15,7 +15,7 @@
 //! surface=calibrate ..` line per calibration replaces the per-commit
 //! `[ids]` / `[id-defs]` / `[id-ns]` / `[id-paths]` / `[idr]` lines.
 
-mod git_fixture;
+use crate::git_fixture;
 
 use std::path::{Path, PathBuf};
 
@@ -812,7 +812,7 @@ fn replay_routes_print_one_aggregate_idr_line() {
     let out = std::process::Command::new(exe)
         .args([
             "--exact",
-            "child_calibrate_idr",
+            &libtest_name("child_calibrate_idr"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -970,7 +970,7 @@ fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
         let mut cmd = std::process::Command::new(exe);
         cmd.args([
             "--exact",
-            "child_calibrate_vocab",
+            &libtest_name("child_calibrate_vocab"),
             "--nocapture",
             "--test-threads=1",
         ])
@@ -1021,4 +1021,13 @@ fn an_override_vocabulary_routes_ids_the_root_does_not_declare() {
         "{}",
         vocab[0]
     );
+}
+
+/// `name`'s libtest path in this test binary: `<file>::<name>` when this file is a module of
+/// its crate's merged test target (FH.18), `<name>` when it is its own target.
+fn libtest_name(name: &str) -> String {
+    match module_path!().split_once("::") {
+        Some((_, module)) => format!("{module}::{name}"),
+        None => name.to_owned(),
+    }
 }

@@ -19,7 +19,7 @@ use glia_store::{
     read_timeline, timeline_subject, write_timeline,
 };
 
-mod git_fixture;
+use crate::git_fixture;
 
 /// Two repos under one scratch dir: a Flask route plus a class with an
 /// `@property` accessor, and a TypeScript client fetching that route.
