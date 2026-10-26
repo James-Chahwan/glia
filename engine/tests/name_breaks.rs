@@ -393,3 +393,351 @@ fn an_unknown_rev_is_an_error() {
     .expect_err("unknown rev");
     assert!(err.contains("no-such-rev"), "{err}");
 }
+
+// ---- FH.7c: precision ---------------------------------------------------------
+
+/// A one-repo Express server and fetch client: `files` at BASE, committed,
+/// then `changed` written over them in the working tree.
+fn express_repo(files: &[(&str, &str)], changed: &[(&str, &str)]) -> GitRepo {
+    let repo = GitRepo::init();
+    repo.write(
+        "server/package.json",
+        "{\"name\":\"server\",\"dependencies\":{\"express\":\"^4.19.0\",\"date-fns\":\"^3.6.0\"}}\n",
+    );
+    repo.write(
+        "web/package.json",
+        "{\"name\":\"web\",\"dependencies\":{\"date-fns\":\"^3.6.0\"}}\n",
+    );
+    for (path, text) in files {
+        repo.write(path, text);
+    }
+    repo.commit("base");
+    for (path, text) in changed {
+        repo.write(path, text);
+    }
+    repo
+}
+
+const ORDERS_ROUTE: &str = r#"import { Router } from 'express';
+
+export const orders = Router();
+
+orders.get('/api/orders/:id', (req, res) => {
+  const shipLabel = `L-${req.params.id}`;
+  res.json({ id: req.params.id, shipLabel, carrier: 'post' });
+});
+
+function legacyAudit(id: string): void {
+  console.log(id);
+}
+"#;
+
+const ORDERS_CLIENT: &str = r#"export async function loadOrder(id: string) {
+  const res = await fetch(`/api/orders/${id}`);
+  const body = await res.json();
+  legacyAudit(body.id);
+  return body.shipLabel;
+}
+
+function legacyAudit(id: string): string {
+  return id;
+}
+"#;
+
+#[test]
+fn a_bare_identifier_counts_only_with_a_rename_pair() {
+    // `shipLabel` (a shorthand wire key, a bare identifier) is renamed: it
+    // counts. `legacyAudit` (a bare identifier the change deletes, paired
+    // with nothing) is no name, though the client spells it too.
+    let repo = express_repo(
+        &[
+            ("server/src/routes/orders.ts", ORDERS_ROUTE),
+            ("web/src/orders.ts", ORDERS_CLIENT),
+        ],
+        &[(
+            "server/src/routes/orders.ts",
+            &ORDERS_ROUTE.replace("shipLabel", "deliveryLabel").replace(
+                "\nfunction legacyAudit(id: string): void {\n  console.log(id);\n}\n",
+                "",
+            ),
+        )],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    let changed: Vec<(&str, Option<&str>)> = b
+        .names
+        .iter()
+        .map(|n| (n.name.as_str(), n.renamed_to.as_deref()))
+        .collect();
+    assert_eq!(changed, vec![("shipLabel", Some("deliveryLabel"))], "{d}");
+    assert_eq!(
+        sites(&b),
+        vec![site("shipLabel", "web/src/orders.ts", 5)],
+        "{d}"
+    );
+    assert!(b.unpaired_identifiers >= 1, "{d}");
+}
+
+const STAMP_ROUTE: &str = r#"import { Router } from 'express';
+import { formatDistance } from 'date-fns';
+
+export const stamps = Router();
+
+stamps.get('/api/stamps/:id', (req, res) => {
+  res.json({ id: req.params.id, age: formatDistance(new Date(), new Date()) });
+});
+"#;
+
+const STAMP_CLIENT: &str = r#"import { formatDistance } from 'date-fns';
+
+export async function loadStamp(id: string) {
+  const res = await fetch(`/api/stamps/${id}`);
+  const body = await res.json();
+  return `${body.age} ${formatDistance(new Date(), new Date())}`;
+}
+"#;
+
+#[test]
+fn a_name_bound_to_an_external_import_is_never_a_name() {
+    // The server swaps one date-fns function for another: a rename pair of
+    // two identifiers, both bound to an external package. The client's own
+    // date-fns call is no drift.
+    let repo = express_repo(
+        &[
+            ("server/src/routes/stamps.ts", STAMP_ROUTE),
+            ("web/src/stamps.ts", STAMP_CLIENT),
+        ],
+        &[(
+            "server/src/routes/stamps.ts",
+            &STAMP_ROUTE.replace("formatDistance", "formatRelative"),
+        )],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    assert!(b.names.is_empty(), "{d}");
+    assert!(b.rows.is_empty(), "{d}");
+    assert!(b.dropped_library >= 1, "{d}");
+}
+
+const SAMPLE_ROUTE: &str = r#"import { Router } from 'express';
+import { sampleOrder } from '../fixtures/sample';
+
+export const samples = Router();
+
+samples.get('/api/samples/:id', (req, res) => {
+  res.json(sampleOrder);
+});
+"#;
+
+const SAMPLE_FIXTURE: &str = r#"export const sampleOrder = {
+  id: 'o-1',
+  legacyCode: 'abc',
+};
+"#;
+
+const SAMPLE_CLIENT: &str = r#"export async function loadSample(id: string) {
+  const res = await fetch(`/api/samples/${id}`);
+  const body = await res.json();
+  return body.legacyCode;
+}
+"#;
+
+#[test]
+fn a_name_only_a_test_file_removes_is_never_a_name() {
+    // The route serves a fixture module (a `fixtures/` path: test code by the
+    // walk's classification); a key it renames is no client drift.
+    let repo = express_repo(
+        &[
+            ("server/src/routes/samples.ts", SAMPLE_ROUTE),
+            ("server/src/fixtures/sample.ts", SAMPLE_FIXTURE),
+            ("web/src/samples.ts", SAMPLE_CLIENT),
+        ],
+        &[(
+            "server/src/fixtures/sample.ts",
+            &SAMPLE_FIXTURE.replace("legacyCode", "sampleCode"),
+        )],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    assert!(b.names.is_empty(), "{d}");
+    assert!(b.rows.is_empty(), "{d}");
+    assert!(b.dropped_test >= 1, "{d}");
+}
+
+const ITEMS_ROUTE: &str = r#"import { Router } from 'express';
+
+export const items = Router();
+
+items.get('/api/items/:id', (req, res) => {
+  res.json({ id: req.params.id });
+});
+"#;
+
+const ITEM_SCHEMA: &str = r#"import { z } from 'zod';
+
+export const ItemSchema = z.object({
+  id: z.string(),
+  itemLabel: z.string(),
+});
+"#;
+
+const ITEMS_SDK: &str = r#"/**
+ * Items API
+ * DO NOT MODIFY - This file has been generated using oazapfts.
+ */
+export type ItemDto = {
+    id: string;
+    itemLabel: string;
+};
+export type ItemList = {
+    items: ItemDto[];
+};
+export async function getItem(id: string): Promise<ItemDto> {
+    const res = await fetch(`/api/items/${id}`);
+    return res.json() as Promise<ItemDto>;
+}
+"#;
+
+const ITEMS_VIEW: &str = r#"import { getItem } from '../../../sdk/src/fetch-client';
+
+export async function showItem(id: string): Promise<string> {
+  const item = await getItem(id);
+  return item.itemLabel;
+}
+"#;
+
+#[test]
+fn a_generated_sdk_between_client_and_route_is_walked_through() {
+    // The server's change sits in a schema no route reaches by an edge; the
+    // regenerated SDK's type is what the route's generated client returns.
+    // The SDK is a transparent hop: its type's rename is the exchange's
+    // name, the SDK file is no client, and the app code calling it is.
+    let repo = express_repo(
+        &[
+            ("server/src/routes/items.ts", ITEMS_ROUTE),
+            ("server/src/dtos/item.ts", ITEM_SCHEMA),
+            ("sdk/src/fetch-client.ts", ITEMS_SDK),
+            ("web/src/lib/item-view.ts", ITEMS_VIEW),
+        ],
+        &[
+            (
+                "server/src/dtos/item.ts",
+                &ITEM_SCHEMA.replace("itemLabel", "displayLabel"),
+            ),
+            (
+                "sdk/src/fetch-client.ts",
+                &ITEMS_SDK.replace("itemLabel", "displayLabel"),
+            ),
+        ],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    assert!(b.exchanges >= 1, "{d}");
+    assert!(b.sdk_hops >= 1, "{d}");
+    let changed: Vec<(&str, Option<&str>)> = b
+        .names
+        .iter()
+        .map(|n| (n.name.as_str(), n.renamed_to.as_deref()))
+        .collect();
+    assert_eq!(changed, vec![("itemLabel", Some("displayLabel"))], "{d}");
+    assert_eq!(
+        sites(&b),
+        vec![site("itemLabel", "web/src/lib/item-view.ts", 5)],
+        "{d}"
+    );
+}
+
+#[test]
+fn a_changed_exchange_with_no_removed_name_still_counts() {
+    // A pure addition on the server side: the exchange changed, no name was
+    // removed, no row.
+    let repo = express_repo(
+        &[
+            ("server/src/routes/orders.ts", ORDERS_ROUTE),
+            ("web/src/orders.ts", ORDERS_CLIENT),
+        ],
+        &[(
+            "server/src/routes/orders.ts",
+            &ORDERS_ROUTE.replace("carrier: 'post' ", "carrier: 'post', weight: 2 "),
+        )],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    assert_eq!(b.exchanges, 1, "{d}");
+    assert!(b.names.is_empty() && b.rows.is_empty(), "{d}");
+}
+
+#[test]
+fn a_generated_sdk_function_renamed_is_a_name_for_its_callers() {
+    // The regenerated SDK renames the function the app calls, while the
+    // server gains a local of the old name: the SDK is the client's
+    // interface, so the name left it, and the app's call still names it.
+    let sdk = ITEMS_SDK.replace(
+        "export async function getItem(id: string)",
+        "export async function fetchItem(id: string)",
+    );
+    let route = ITEMS_ROUTE.replace(
+        "  res.json({ id: req.params.id });",
+        "  const getItem = { id: req.params.id };\n  res.json(getItem);",
+    );
+    let repo = express_repo(
+        &[
+            ("server/src/routes/items.ts", ITEMS_ROUTE),
+            ("sdk/src/fetch-client.ts", ITEMS_SDK),
+            ("web/src/lib/item-view.ts", ITEMS_VIEW),
+        ],
+        &[
+            ("server/src/routes/items.ts", &route),
+            ("sdk/src/fetch-client.ts", &sdk),
+        ],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    let changed: Vec<(&str, Option<&str>)> = b
+        .names
+        .iter()
+        .map(|n| (n.name.as_str(), n.renamed_to.as_deref()))
+        .collect();
+    assert_eq!(changed, vec![("getItem", Some("fetchItem"))], "{d}");
+    assert_eq!(
+        sites(&b),
+        vec![
+            site("getItem", "web/src/lib/item-view.ts", 1),
+            site("getItem", "web/src/lib/item-view.ts", 4),
+        ],
+        "{d}"
+    );
+}
+
+const ORDERS_TEST: &str = r#"import { loadOrder } from '../orders';
+
+export async function checkOrder(): Promise<boolean> {
+  const order = await loadOrder('o-1');
+  const res = await fetch('/api/orders/o-2');
+  const body = await res.json();
+  return order === body.shipLabel;
+}
+"#;
+
+#[test]
+fn a_name_only_test_files_use_and_a_test_client_are_never_names() {
+    // The app client reads nothing renamed; a test file beside it does,
+    // and a test's own fetch of the route is no client at all.
+    let client = ORDERS_CLIENT.replace("  return body.shipLabel;\n", "  return body.id;\n");
+    let repo = express_repo(
+        &[
+            ("server/src/routes/orders.ts", ORDERS_ROUTE),
+            ("web/src/orders.ts", &client),
+            ("web/src/__tests__/orders.ts", ORDERS_TEST),
+        ],
+        &[(
+            "server/src/routes/orders.ts",
+            &ORDERS_ROUTE.replace("shipLabel", "deliveryLabel"),
+        )],
+    );
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    assert!(b.names.is_empty(), "{d}");
+    assert!(b.rows.is_empty(), "{d}");
+    assert_eq!(b.dropped_test, 1, "{d}");
+}

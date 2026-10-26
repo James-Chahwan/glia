@@ -33,23 +33,52 @@
 //!    (common prefix plus suffix), then the most look-alike names; on a
 //!    pair, what is left once the common prefix and suffix are stripped is
 //!    aligned by position when both sides are as long.
+//!
+//!    A removed name COUNTS (FH.7c) only at a wire position: a token of a
+//!    string with no whitespace in it (a quoted key, a struct tag, a JSON
+//!    field, a path segment; a word of a sentence is not one), or an
+//!    identifier written as a key (`name:` / `name?:`: an object-literal key,
+//!    a DTO or type field; never inside a parameter list, never after a `.`,
+//!    never on a block line such as `if x:` or `case x:`). Any other
+//!    identifier counts only when the hunk pairs it with a rename. Never a
+//!    name, whatever its position: a token of an import statement, or an
+//!    identifier the file binds by importing an external package (an import
+//!    whose library the file's IMPORTS cell lists); nor a name read from a
+//!    hunk of a test file (the file's MODULE stamped ORIGIN `test_fixture`),
+//!    nor one whose client uses (step 5) all sit in test files. A hunk of a
+//!    generated file (its MODULE stamped ORIGIN `generated`) is read against
+//!    that file's own lines: a generated SDK is its clients' interface, so a
+//!    name that leaves it is removed for them, whatever the rest of the
+//!    change does with the word. The marker counts what each rule dropped.
 //! 3. THE EXCHANGES. Every pair edge (HTTP_CALLS, GRPC_CALLS, RPC_CALLS,
 //!    GRAPHQL_CALLS, QUEUE_FLOWS, WS_CONNECTS) from a client node (ENDPOINT,
 //!    GRPC_CLIENT, RPC_CALL, GRAPHQL_OPERATION, QUEUE_PRODUCER, WS_CLIENT) to
 //!    a server node (ROUTE, GRPC_SERVICE, RPC_PROCEDURE, GRAPHQL_RESOLVER,
-//!    QUEUE_CONSUMER, WS_HANDLER) of the worktree's repo. The server side is
+//!    QUEUE_CONSUMER, WS_HANDLER) of the worktree's repo; a client end in a
+//!    test file (stamped ORIGIN `test_fixture`, or placed in a test file) is a
+//!    test of the server, not a client, and pairs nothing. The server side is
 //!    the server node, its HANDLED_BY handlers (no handler: the MODULE of the
 //!    server node's file, an inline closure's), and what they reach within
 //!    [`SERVER_DEPTH`] hops of CALLS / USES / INJECTS / RETURNS_TYPE /
-//!    IMPLEMENTS / INHERITS_FROM / IMPORTS / HANDLED_BY inside that repo. An
-//!    exchange CHANGED when a hunk of the diff falls in the span of one of
-//!    those nodes (a MODULE spans its file); its names are the removed names
-//!    on those hunks' `-` lines.
+//!    IMPLEMENTS / INHERITS_FROM / IMPORTS / HANDLED_BY inside that repo. A
+//!    GENERATED SDK (FH.7c) is a transparent hop: a client end in the
+//!    worktree's repo stamped ORIGIN `generated` (a generated fetch client),
+//!    with the generated callables calling it and the type declarations their
+//!    text names in that file (followed through the types they name), belongs
+//!    to the server side at no depth, and a step into a generated node spends
+//!    none. An exchange CHANGED when a hunk of the diff falls in the span of
+//!    one of those nodes (a MODULE spans its file), whether or not it removed
+//!    a name; its names are the counted removed names on those hunks' `-`
+//!    lines.
 //! 4. THE CLIENTS. For each changed exchange's client nodes: the client's file
 //!    and the files of the callables that CALLS / USES it (the response
-//!    handling code), then every file their MODULEs import or are imported by
-//!    within [`CLIENT_DEPTH`] IMPORTS hops, in any repo of the build (a
-//!    `--with` client too), less the exchange's server-side files.
+//!    handling code; through a generated callable, the callables that call
+//!    it, so a generated client's own file is a root only when nothing
+//!    outside it calls it; a caller in a test file is no root), then every
+//!    file their MODULEs import or are imported by within [`CLIENT_DEPTH`]
+//!    IMPORTS hops (leaving a generated MODULE spends no hop), in any repo of
+//!    the build (a `--with` client too), less the exchange's server-side
+//!    files and every generated file.
 //! 5. A USE. In a client file, a token whose normalised form is one of the
 //!    exchange's names, outside a comment. A GENERIC name (normalised shorter
 //!    than 4, or in [`GENERIC`]) counts only at a property access (`x.type`)
@@ -68,8 +97,10 @@
 //! The diff side reads only the change's hunks, and the client side only the
 //! files the boundary reaches, so a big change stays bounded. fired_on, once
 //! per [`name_breaks`] call: `[name-breaks] base=<rev> exchanges=<e>
-//! names=<n> renames=<r> clients=<c> rows=<k> fixed=<f>` (c = client files
-//! scanned).
+//! names=<n> renames=<r> clients=<c> rows=<k> fixed=<f> dropped_library=<l>
+//! dropped_test=<t> unpaired_identifiers=<u> sdk_hops=<h>` (c = client files
+//! scanned; l / t / u the distinct removed names each step-2 rule dropped; h
+//! the generated client ends walked through).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -450,6 +481,9 @@ const SERVER_WALK: [EdgeCategoryId; 8] = [
     edge_category::IMPORTS,
 ];
 
+/// The generated callables whose text step 3 reads type names from.
+const CALLABLE_KINDS: [NodeKindId; 2] = [node_kind::FUNCTION, node_kind::METHOD];
+
 /// How [`name_breaks`] gates. Built outside the crate from `Default` plus
 /// field assignment.
 #[non_exhaustive]
@@ -535,6 +569,21 @@ pub struct NameBreaks {
     pub fixed: usize,
     /// Rows that block.
     pub blocking: usize,
+    /// Distinct removed names never counted because every occurrence was an
+    /// import statement's token or an identifier bound to an external
+    /// package's import (step 2). The marker's; not serialised.
+    #[serde(skip)]
+    pub dropped_library: usize,
+    /// Distinct removed names read only from hunks of test files (step 2).
+    #[serde(skip)]
+    pub dropped_test: usize,
+    /// Distinct removed names only ever a bare identifier with no rename pair
+    /// or a word of a sentence string (step 2).
+    #[serde(skip)]
+    pub unpaired_identifiers: usize,
+    /// Generated client ends of changed exchanges walked through (step 3).
+    #[serde(skip)]
+    pub sdk_hops: usize,
 }
 
 /// The name breaks of the working tree at `worktree` against git rev `base`
@@ -579,7 +628,8 @@ pub fn name_breaks(
     diff.retain(|f| !prose(&f.path));
     let answer = answer(&rev.given, &rev.sha, repo, &diff, after, args);
     eprintln!(
-        "[name-breaks] base={} exchanges={} names={} renames={} clients={} rows={} fixed={}",
+        "[name-breaks] base={} exchanges={} names={} renames={} clients={} rows={} fixed={} \
+         dropped_library={} dropped_test={} unpaired_identifiers={} sdk_hops={}",
         answer.base,
         answer.exchanges,
         answer.names.len(),
@@ -591,6 +641,10 @@ pub fn name_breaks(
         answer.clients,
         answer.rows.len(),
         answer.fixed,
+        answer.dropped_library,
+        answer.dropped_test,
+        answer.unpaired_identifiers,
+        answer.sdk_hops,
     );
     Ok(answer)
 }
@@ -623,6 +677,10 @@ fn answer(
         clients: 0,
         fixed: 0,
         blocking: 0,
+        dropped_library: 0,
+        dropped_test: 0,
+        unpaired_identifiers: 0,
+        sdk_hops: 0,
     };
     if diff.iter().all(|f| f.hunks.is_empty()) {
         return out;
@@ -632,7 +690,30 @@ fn answer(
     };
     let index = Index::new(after);
     let classes = ClassSets::of(diff);
-    let by_file: BTreeMap<&str, &FileDiff> = diff.iter().map(|f| (f.path.as_str(), f)).collect();
+    // A generated file is its clients' interface: a name leaves it when it
+    // leaves that file, whatever the rest of the change does with the word.
+    let own_classes: Vec<Option<ClassSets>> = diff
+        .iter()
+        .map(|f| {
+            let module = index.module_at.get(&(provider, f.path.clone()));
+            module
+                .is_some_and(|m| index.generated.contains(m))
+                .then(|| ClassSets::of(std::slice::from_ref(f)))
+        })
+        .collect();
+    let by_file: BTreeMap<&str, usize> = diff
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.path.as_str(), i))
+        .collect();
+    let mut texts = TextCache::new(after);
+    // Step 2's file context (test file, external import bindings), per diff
+    // file, and each hunk's removed names, read once.
+    let ctxs: Vec<FileCtx> = diff
+        .iter()
+        .map(|f| FileCtx::of(f, provider, &index, &mut texts))
+        .collect();
+    let mut found: HashMap<(usize, usize), Vec<Found>> = HashMap::new();
 
     // Step 3: the exchanges, keyed by server node, clients with their best tier.
     let mut pairs: BTreeMap<u64, BTreeMap<u64, Tier>> = BTreeMap::new();
@@ -641,6 +722,7 @@ fn answer(
             || !index.kind_in(e.to, &SERVER_KINDS)
             || !index.kind_in(e.from, &CLIENT_KINDS)
             || index.repo.get(&e.to) != Some(&provider)
+            || index.tests.contains(&e.from)
         {
             continue;
         }
@@ -655,19 +737,49 @@ fn answer(
 
     let mut changed: BTreeMap<String, ChangedName> = BTreeMap::new();
     let mut exchanges: Vec<Exchange> = Vec::new();
+    let mut touched_exchanges = 0;
+    // Step 2's drops, by normalised name.
+    let (mut library, mut test, mut unpaired) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut sdk_hops: BTreeSet<u64> = BTreeSet::new();
     for (&server, clients) in &pairs {
         let server = NodeId(server);
-        let (reached, server_files) = index.server_side(server, provider);
+        let sdk: Vec<NodeId> = clients
+            .keys()
+            .map(|&c| NodeId(c))
+            .filter(|c| index.generated.contains(c) && index.repo.get(c) == Some(&provider))
+            .collect();
+        let (reached, server_files) = index.server_side(server, provider, &sdk, &mut texts);
         let mut names = BTreeSet::new();
+        let mut touched = false;
         for (file, spans) in &reached {
-            let Some(fd) = by_file.get(file.as_str()) else {
+            let Some(&fi) = by_file.get(file.as_str()) else {
                 continue;
             };
-            for h in &fd.hunks {
+            let ctx = &ctxs[fi];
+            for (hi, h) in diff[fi].hunks.iter().enumerate() {
                 if !spans.iter().any(|&(s, e)| h.touches(s, e)) {
                     continue;
                 }
-                for found in h.names(&classes) {
+                touched = true;
+                let list = found
+                    .entry((fi, hi))
+                    .or_insert_with(|| h.names(own_classes[fi].as_ref().unwrap_or(&classes), ctx));
+                for found in list.iter() {
+                    match found.status {
+                        Status::Library => {
+                            library.insert(found.normalised.clone());
+                            continue;
+                        }
+                        _ if ctx.test => {
+                            test.insert(found.normalised.clone());
+                            continue;
+                        }
+                        Status::Unpaired => {
+                            unpaired.insert(found.normalised.clone());
+                            continue;
+                        }
+                        Status::Counted => {}
+                    }
                     names.insert(found.normalised.clone());
                     let entry =
                         changed
@@ -688,6 +800,11 @@ fn answer(
                 }
             }
         }
+        if !touched {
+            continue;
+        }
+        touched_exchanges += 1;
+        sdk_hops.extend(sdk.iter().map(|c| c.0));
         if names.is_empty() {
             continue;
         }
@@ -703,14 +820,26 @@ fn answer(
             server_files,
         });
     }
-    out.exchanges = exchanges.len();
+    out.exchanges = touched_exchanges;
+    out.sdk_hops = sdk_hops.len();
+    let counted = |n: &String| changed.get(n).is_some_and(|c| c.exchanges > 0);
+    out.dropped_library = library.iter().filter(|n| !counted(n)).count();
+    out.dropped_test = test
+        .iter()
+        .filter(|n| !counted(n) && !library.contains(*n))
+        .count();
+    out.unpaired_identifiers = unpaired
+        .iter()
+        .filter(|n| !counted(n) && !library.contains(*n) && !test.contains(*n))
+        .count();
 
     // Steps 4-6: the client files, the uses, the rows.
     let diff_files: HashSet<&str> = diff.iter().map(|f| f.path.as_str()).collect();
-    let mut texts = TextCache::new(after);
     let mut rows: BTreeMap<(String, String, i64, String), NameBreak> = BTreeMap::new();
     let mut scanned: BTreeSet<(u64, String)> = BTreeSet::new();
     let mut fixed: BTreeSet<(String, String)> = BTreeSet::new();
+    // Per name: whether some site sits outside a test file (step 2).
+    let mut outside_tests: BTreeMap<String, bool> = BTreeMap::new();
     let server_qname = |id: NodeId| index.loc.locate(id).qname;
     for x in &exchanges {
         let server = server_qname(x.server);
@@ -739,10 +868,12 @@ fn answer(
                     }
                 }
             }
+            let test_file = index.test_files.contains(&file_key);
             for u in uses {
                 let Some(name) = changed.get(&u.normalised) else {
                     continue;
                 };
+                *outside_tests.entry(u.normalised.clone()).or_default() |= !test_file;
                 let renamed = name.renamed_to.is_some();
                 let row_tier = if tier == Tier::Fact && renamed {
                     Tier::Derived
@@ -772,11 +903,24 @@ fn answer(
             }
         }
     }
-    out.rows = rows.into_values().collect();
+    // A name only test files use is never a changed name.
+    let test_only: BTreeSet<String> = outside_tests
+        .into_iter()
+        .filter(|(_, outside)| !outside)
+        .map(|(n, _)| n)
+        .collect();
+    out.dropped_test += test_only.len();
+    out.rows = rows
+        .into_values()
+        .filter(|r| !test_only.contains(&r.normalised))
+        .collect();
     out.blocking = out.rows.iter().filter(|r| r.blocking).count();
     out.clients = scanned.len();
     out.fixed = fixed.len();
-    let mut names: Vec<ChangedName> = changed.into_values().filter(|c| c.exchanges > 0).collect();
+    let mut names: Vec<ChangedName> = changed
+        .into_values()
+        .filter(|c| c.exchanges > 0 && !test_only.contains(&c.normalised))
+        .collect();
     names.sort_by(|a, b| (&a.file, a.line, &a.normalised).cmp(&(&b.file, b.line, &b.normalised)));
     out.names = names;
     out
@@ -820,6 +964,48 @@ struct Index<'a> {
     module_at: HashMap<(u64, String), NodeId>,
     out: HashMap<NodeId, Vec<(NodeId, EdgeCategoryId)>>,
     inn: HashMap<NodeId, Vec<(NodeId, EdgeCategoryId)>>,
+    /// Nodes stamped ORIGIN `generated` / `generated_proto`, and every node
+    /// placed in the file of a MODULE so stamped (step 3).
+    generated: HashSet<NodeId>,
+    /// `(repo, file)` of every MODULE stamped ORIGIN `test_fixture` (step 2).
+    test_files: HashSet<(u64, String)>,
+    /// Nodes stamped ORIGIN `test_fixture`, and every node placed in a test
+    /// file: a client end or caller here is a test, not a client (step 4).
+    tests: HashSet<NodeId>,
+    /// `(repo, file)` -> the library names its MODULE's IMPORTS cell lists.
+    libs: HashMap<(u64, String), Vec<String>>,
+}
+
+/// The ORIGIN cell's `provenance`, when a node has one.
+fn provenance(cells: &[glia_core::Cell]) -> Option<String> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ORIGIN)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .ok()?
+                    .get("provenance")?
+                    .as_str()
+                    .map(str::to_string)
+            }
+            _ => None,
+        })
+}
+
+/// The library names of a node's IMPORTS cell (a JSON string array).
+fn library_cell(cells: &[glia_core::Cell]) -> Vec<String> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::IMPORTS)
+        .filter_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => {
+                serde_json::from_str::<Vec<String>>(s).ok()
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 impl<'a> Index<'a> {
@@ -830,6 +1016,10 @@ impl<'a> Index<'a> {
         let mut repo = HashMap::new();
         let mut place = HashMap::new();
         let mut module_at = HashMap::new();
+        let mut generated = HashSet::new();
+        let mut test_files = HashSet::new();
+        let mut tests = HashSet::new();
+        let mut libs = HashMap::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if repo.contains_key(&n.id) {
@@ -839,6 +1029,13 @@ impl<'a> Index<'a> {
                 let k = g.nav.kind_by_id.get(&n.id).copied();
                 if let Some(k) = k {
                     kind.insert(n.id, k);
+                }
+                let origin = provenance(&n.cells);
+                if matches!(origin.as_deref(), Some("generated" | "generated_proto")) {
+                    generated.insert(n.id);
+                }
+                if origin.as_deref() == Some("test_fixture") {
+                    tests.insert(n.id);
                 }
                 let span = position_span(&n.cells);
                 let file = span
@@ -860,11 +1057,42 @@ impl<'a> Index<'a> {
                     }
                 };
                 if k == Some(node_kind::MODULE) {
-                    module_at.entry((g.repo.0, file.clone())).or_insert(n.id);
+                    let key = (g.repo.0, file.clone());
+                    if origin.as_deref() == Some("test_fixture") {
+                        test_files.insert(key.clone());
+                    }
+                    libs.entry(key.clone())
+                        .or_insert_with(|| library_cell(&n.cells));
+                    module_at.entry(key).or_insert(n.id);
                 }
                 place.insert(n.id, (file, rows));
             }
         }
+        // A node of a generated MODULE's file is generated too (a client
+        // end the provenance pass leaves unstamped).
+        let generated_files: HashSet<(u64, &String)> = module_at
+            .iter()
+            .filter(|(_, m)| generated.contains(*m))
+            .map(|((r, f), _)| (*r, f))
+            .collect();
+        let more: Vec<NodeId> = place
+            .iter()
+            .filter(|(id, (file, _))| {
+                repo.get(*id)
+                    .is_some_and(|r| generated_files.contains(&(*r, file)))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        generated.extend(more);
+        let more: Vec<NodeId> = place
+            .iter()
+            .filter(|(id, (file, _))| {
+                repo.get(*id)
+                    .is_some_and(|r| test_files.contains(&(*r, (*file).clone())))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        tests.extend(more);
         let mut out: HashMap<NodeId, Vec<(NodeId, EdgeCategoryId)>> = HashMap::new();
         let mut inn: HashMap<NodeId, Vec<(NodeId, EdgeCategoryId)>> = HashMap::new();
         for e in merged.all_edges() {
@@ -879,6 +1107,10 @@ impl<'a> Index<'a> {
             module_at,
             out,
             inn,
+            generated,
+            test_files,
+            tests,
+            libs,
         }
     }
 
@@ -897,12 +1129,44 @@ impl<'a> Index<'a> {
             .unwrap_or(id)
     }
 
+    /// The callables that CALLS / USES `id`, in edge order.
+    fn callers(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.inn
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter(|(_, cat)| *cat == edge_category::CALLS || *cat == edge_category::USES)
+            .map(|(from, _)| *from)
+    }
+
+    /// Step 3's generated hop: `ends` (generated client ends) and every
+    /// generated node that calls one, transitively, in discovery order.
+    fn through_generated(&self, ends: &[NodeId]) -> Vec<NodeId> {
+        let mut seen: HashSet<NodeId> = ends.iter().copied().collect();
+        let mut out: Vec<NodeId> = Vec::new();
+        let mut queue: VecDeque<NodeId> = ends.iter().copied().collect();
+        while let Some(n) = queue.pop_front() {
+            out.push(n);
+            for from in self.callers(n) {
+                if self.generated.contains(&from) && seen.insert(from) {
+                    queue.push_back(from);
+                }
+            }
+        }
+        out
+    }
+
     /// Step 3: per file of `provider`, the spans the server side of `server`
-    /// reaches, and the files of that side.
+    /// reaches, and the files of that side. `sdk` are the exchange's
+    /// generated client ends in `provider`: they, the generated callables
+    /// calling them and the type declarations those callables name join the
+    /// side at no depth, and a step into a generated node spends none.
     fn server_side(
         &self,
         server: NodeId,
         provider: u64,
+        sdk: &[NodeId],
+        texts: &mut TextCache,
     ) -> (BTreeMap<String, Vec<Span>>, BTreeSet<String>) {
         let mut start = vec![server];
         let handlers: Vec<NodeId> = self
@@ -917,35 +1181,62 @@ impl<'a> Index<'a> {
             start.push(self.module_of(server));
         }
         start.extend(handlers);
-        let mut seen: HashSet<NodeId> = HashSet::new();
+        let hop = self.through_generated(sdk);
+        start.extend(hop.iter().copied());
+        // A 0-1 walk: a step into a generated node costs nothing.
+        let mut dist: HashMap<NodeId, usize> = HashMap::new();
         let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
         for s in start {
-            if seen.insert(s) {
+            if dist.insert(s, 0).is_none() {
                 queue.push_back((s, 0));
             }
         }
+        let mut done: HashSet<NodeId> = HashSet::new();
         let mut reached: BTreeMap<String, Vec<Span>> = BTreeMap::new();
         let mut files = BTreeSet::new();
         while let Some((id, depth)) = queue.pop_front() {
+            if dist.get(&id).is_some_and(|&d| d < depth) || !done.insert(id) {
+                continue;
+            }
             if let Some((file, span)) = self.place.get(&id)
                 && self.repo.get(&id) == Some(&provider)
             {
                 reached.entry(file.clone()).or_default().push(*span);
                 files.insert(file.clone());
             }
-            if depth >= SERVER_DEPTH || seen.len() >= SERVER_VISIT_CAP {
+            if dist.len() >= SERVER_VISIT_CAP {
                 continue;
             }
             for (to, cat) in self.out.get(&id).into_iter().flatten() {
-                if !SERVER_WALK.contains(cat)
-                    || self.repo.get(to) != Some(&provider)
-                    || seen.len() >= SERVER_VISIT_CAP
+                if !SERVER_WALK.contains(cat) || self.repo.get(to) != Some(&provider) {
+                    continue;
+                }
+                let free = self.generated.contains(to);
+                let next = depth + usize::from(!free);
+                if next > SERVER_DEPTH
+                    || dist.get(to).is_some_and(|&d| d <= next)
+                    || (dist.len() >= SERVER_VISIT_CAP && !dist.contains_key(to))
                 {
                     continue;
                 }
-                if seen.insert(*to) {
-                    queue.push_back((*to, depth + 1));
+                dist.insert(*to, next);
+                if free {
+                    queue.push_front((*to, next));
+                } else {
+                    queue.push_back((*to, next));
                 }
+            }
+        }
+        // The generated callables' types, read from their file's text.
+        for id in hop {
+            let Some((file, span)) = self.place.get(&id) else {
+                continue;
+            };
+            if self.repo.get(&id) != Some(&provider) || !self.kind_in(id, &CALLABLE_KINDS) {
+                continue;
+            }
+            for t in texts.sdk_types(provider, file, *span) {
+                reached.entry(file.clone()).or_default().push(t);
             }
         }
         (reached, files)
@@ -953,36 +1244,60 @@ impl<'a> Index<'a> {
 
     /// Step 4: every client file of `clients`, keyed `(repo, file)`, with the
     /// client it is reached from (best tier, then least node id: the qname
-    /// tie-break is the row's) and that client's pair tier.
+    /// tie-break is the row's) and that client's pair tier. A generated
+    /// client or caller is walked through to the callables calling it, and
+    /// an IMPORTS hop out of a generated MODULE spends no depth; a generated
+    /// file is never a client file.
     fn client_files(&self, clients: &BTreeMap<u64, Tier>) -> BTreeMap<(u64, String), (u64, Tier)> {
         let mut out: BTreeMap<(u64, String), (u64, Tier)> = BTreeMap::new();
         for (&client, &tier) in clients {
             let c = NodeId(client);
-            let mut roots: Vec<NodeId> = vec![c];
-            roots.extend(
-                self.inn
-                    .get(&c)
-                    .into_iter()
-                    .flatten()
-                    .filter(|(_, cat)| *cat == edge_category::CALLS || *cat == edge_category::USES)
-                    .map(|(from, _)| *from),
-            );
-            let mut seen: HashSet<NodeId> = HashSet::new();
+            // The client and its callers, through generated callers.
+            let mut roots: Vec<NodeId> = Vec::new();
+            let mut seen_roots: HashSet<NodeId> = HashSet::from([c]);
+            let mut stack: Vec<NodeId> = vec![c];
+            while let Some(n) = stack.pop() {
+                let generated = self.generated.contains(&n);
+                if !generated && !self.tests.contains(&n) {
+                    roots.push(n);
+                }
+                if generated || n == c {
+                    for from in self.callers(n) {
+                        if seen_roots.insert(from) {
+                            stack.push(from);
+                        }
+                    }
+                }
+            }
+            if roots.is_empty() {
+                // A generated client nothing outside the SDK calls: its file
+                // is the root, and the walk leaves it at no depth.
+                roots.push(c);
+            }
+            let mut dist: HashMap<NodeId, usize> = HashMap::new();
             let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
             for r in roots {
                 let m = self.module_of(r);
-                if seen.insert(m) {
+                if dist.insert(m, 0).is_none() {
                     queue.push_back((m, 0));
                 }
             }
+            let mut done: HashSet<NodeId> = HashSet::new();
             while let Some((m, depth)) = queue.pop_front() {
-                if let (Some(repo), Some((file, _))) = (self.repo.get(&m), self.place.get(&m)) {
+                if dist.get(&m).is_some_and(|&d| d < depth) || !done.insert(m) {
+                    continue;
+                }
+                let generated = self.generated.contains(&m);
+                if !generated
+                    && let (Some(repo), Some((file, _))) = (self.repo.get(&m), self.place.get(&m))
+                {
                     let slot = out.entry((*repo, file.clone())).or_insert((client, tier));
                     if tier < slot.1 {
                         *slot = (client, tier);
                     }
                 }
-                if depth >= CLIENT_DEPTH {
+                let next = depth + usize::from(!generated);
+                if next > CLIENT_DEPTH {
                     continue;
                 }
                 let edges = self
@@ -995,9 +1310,15 @@ impl<'a> Index<'a> {
                     if *cat != edge_category::IMPORTS {
                         continue;
                     }
-                    let next = self.module_of(*other);
-                    if seen.insert(next) {
-                        queue.push_back((next, depth + 1));
+                    let to = self.module_of(*other);
+                    if dist.get(&to).is_some_and(|&d| d <= next) {
+                        continue;
+                    }
+                    dist.insert(to, next);
+                    if next == depth {
+                        queue.push_front((to, next));
+                    } else {
+                        queue.push_back((to, next));
                     }
                 }
             }
@@ -1041,10 +1362,12 @@ struct Use {
     position: &'static str,
 }
 
-/// Client file texts, read once per `(repo, file)`.
+/// File texts under the build's repo roots, read once per `(repo, file)`,
+/// and a generated file's type declarations, read once.
 struct TextCache<'a> {
     after: &'a GenerateResult,
     texts: HashMap<(u64, String), String>,
+    decls: HashMap<(u64, String), HashMap<String, Span>>,
 }
 
 impl<'a> TextCache<'a> {
@@ -1052,7 +1375,25 @@ impl<'a> TextCache<'a> {
         TextCache {
             after,
             texts: HashMap::new(),
+            decls: HashMap::new(),
         }
+    }
+
+    /// The text of `file` in `repo` (empty when unreadable or over
+    /// [`FILE_CAP`]).
+    fn text(&mut self, repo: u64, file: &str) -> &str {
+        let key = (repo, file.to_string());
+        let after = self.after;
+        self.texts.entry(key).or_insert_with(|| {
+            after
+                .repo_roots
+                .get(&repo)
+                .map(|root| PathBuf::from(root).join(file))
+                .and_then(|p| std::fs::read(p).ok())
+                .filter(|b| b.len() <= FILE_CAP)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        })
     }
 
     fn uses(
@@ -1062,22 +1403,377 @@ impl<'a> TextCache<'a> {
         names: &BTreeSet<String>,
         changed: &BTreeMap<String, ChangedName>,
     ) -> Vec<Use> {
-        let key = (repo, file.to_string());
-        if !self.texts.contains_key(&key) {
-            let text = self
-                .after
-                .repo_roots
-                .get(&repo)
-                .map(|root| PathBuf::from(root).join(file))
-                .and_then(|p| std::fs::read(p).ok())
-                .filter(|b| b.len() <= FILE_CAP)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            self.texts.insert(key.clone(), text);
-        }
-        let text = self.texts.get(&key).map(String::as_str).unwrap_or("");
-        scan_uses(text, file, names, changed)
+        scan_uses(self.text(repo, file), file, names, changed)
     }
+
+    /// Step 3: the spans of the type declarations of generated `file` that
+    /// the rows `span` covers name, then the ones those name, each once.
+    fn sdk_types(&mut self, repo: u64, file: &str, span: Span) -> Vec<Span> {
+        let key = (repo, file.to_string());
+        if !self.decls.contains_key(&key) {
+            let decls = type_decls(self.text(repo, file));
+            self.decls.insert(key.clone(), decls);
+        }
+        let (Some(text), Some(decls)) = (self.texts.get(&key), self.decls.get(&key)) else {
+            return Vec::new();
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let idents = |(s, e): Span| -> Vec<String> {
+            let (s, e) = (s.max(0) as usize, e.max(0) as usize);
+            lines
+                .iter()
+                .take(e.saturating_add(1))
+                .skip(s)
+                .flat_map(|l| line_tokens(l, false))
+                .filter(|t| t.class == Class::Ident)
+                .map(|t| t.raw)
+                .collect()
+        };
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        let mut queue: VecDeque<String> = idents(span).into();
+        while let Some(name) = queue.pop_front() {
+            let Some(&decl) = decls.get(&name) else {
+                continue;
+            };
+            if !seen.insert(name) {
+                continue;
+            }
+            out.push(decl);
+            queue.extend(idents(decl));
+        }
+        out
+    }
+}
+
+/// The type declarations of a file by name (first wins), each with its
+/// 0-based rows: a `type` / `interface` / `class` / `enum` / `struct` /
+/// `record` line (after `export` / `declare` / `public` / `data` and the
+/// like) to the line its braces close, or its own line when it ends in `;`
+/// before any brace, or its indented block when it ends in `:`.
+fn type_decls(text: &str) -> HashMap<String, Span> {
+    const MODIFIERS: &[&str] = &[
+        "export", "declare", "default", "public", "internal", "abstract", "sealed", "data",
+        "partial", "final", "open",
+    ];
+    const KEYWORDS: &[&str] = &["type", "interface", "class", "enum", "struct", "record"];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: HashMap<String, Span> = HashMap::new();
+    for (i, line) in lines.iter().enumerate() {
+        let mut words = line.split_whitespace().peekable();
+        while words.peek().is_some_and(|w| MODIFIERS.contains(w)) {
+            words.next();
+        }
+        if !words.next().is_some_and(|w| KEYWORDS.contains(&w)) {
+            continue;
+        }
+        let Some(name) = words.next().map(|w| {
+            w.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect::<String>()
+        }) else {
+            continue;
+        };
+        if name.is_empty() || out.contains_key(&name) {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let block = line.trim_end().ends_with(':');
+        let mut depth: i64 = 0;
+        let mut opened = false;
+        let mut end = i;
+        for (j, l) in lines.iter().enumerate().skip(i).take(2000) {
+            end = j;
+            if block {
+                let t = l.trim();
+                if j > i && !t.is_empty() && l.len() - l.trim_start().len() <= indent {
+                    end = j - 1;
+                    break;
+                }
+                continue;
+            }
+            for c in l.bytes() {
+                match c {
+                    b'{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if (opened && depth <= 0) || (!opened && l.trim_end().ends_with(';')) {
+                break;
+            }
+        }
+        out.insert(name, (i as i64, end as i64));
+    }
+    out
+}
+
+// ---- step 2's file context -------------------------------------------------------
+
+/// What step 2 knows about one diff file.
+struct FileCtx {
+    /// Its MODULE is stamped ORIGIN `test_fixture`.
+    test: bool,
+    /// Normalised identifiers the file binds by importing an external
+    /// package: an import whose library its MODULE's IMPORTS cell lists, read
+    /// from the worktree text and the hunks' removed lines.
+    external: HashSet<String>,
+}
+
+impl FileCtx {
+    fn of(f: &FileDiff, provider: u64, index: &Index, texts: &mut TextCache) -> Self {
+        let key = (provider, f.path.clone());
+        let test = index.test_files.contains(&key);
+        let mut external = HashSet::new();
+        let libs = index.libs.get(&key).map(Vec::as_slice).unwrap_or_default();
+        if let Some(lang) = crate::extract::detect_language(&f.path)
+            && !libs.is_empty()
+        {
+            let mut text = texts.text(provider, &f.path).to_string();
+            for h in &f.hunks {
+                for l in &h.minus {
+                    text.push('\n');
+                    text.push_str(l);
+                }
+            }
+            for (names, spec) in import_bindings(&text, lang) {
+                let lib = glia_code_domain::library_name(&spec, lang);
+                if lib.is_some_and(|l| libs.contains(&l)) {
+                    external.extend(names.iter().map(|n| normalise(n)));
+                }
+            }
+        }
+        FileCtx { test, external }
+    }
+}
+
+/// The import statements of `text` as (bound names, module spec), for the
+/// languages step 2 reads: the TS family, Python, Go, Rust, the JVM family
+/// and C#, Dart. Bound names are every identifier of the statement but its
+/// keywords (an imported name and its alias alike).
+fn import_bindings(text: &str, lang: &str) -> Vec<(Vec<String>, String)> {
+    const SKIP: &[&str] = &[
+        "import", "export", "from", "as", "type", "typeof", "default", "use", "pub", "crate",
+        "self", "super", "static", "using", "show", "hide", "deferred", "const", "let", "var",
+        "require",
+    ];
+    let idents = |s: &str| -> Vec<String> {
+        line_tokens(s, false)
+            .into_iter()
+            .filter(|t| t.class == Class::Ident && !SKIP.contains(&t.raw.as_str()))
+            .map(|t| t.raw)
+            .collect()
+    };
+    let quoted = |s: &str| -> Option<String> {
+        let at = s.rfind(['\'', '"'])?;
+        let q = s.as_bytes()[at];
+        let open = s[..at].rfind(q as char)?;
+        Some(s[open + 1..at].to_string())
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        let starts = |p: &str| t.starts_with(p);
+        match lang {
+            "typescript" | "javascript" | "react" | "angular" | "vue" => {
+                if starts("import ")
+                    || starts("import{")
+                    || (starts("export ") && t.contains(" from "))
+                {
+                    // To the line holding the module spec.
+                    let mut stmt = String::new();
+                    let mut j = i;
+                    while j < lines.len() && j < i + 64 {
+                        stmt.push_str(lines[j]);
+                        stmt.push('\n');
+                        let l = lines[j];
+                        if (l.contains(" from ") || l.trim_start().starts_with("from "))
+                            && (l.contains('\'') || l.contains('"'))
+                            || (j == i && !l.contains('{') && (l.contains('\'') || l.contains('"')))
+                        {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if let Some(spec) = quoted(&stmt) {
+                        let head = stmt.rsplit_once(" from ").map_or("", |(h, _)| h);
+                        out.push((idents(head), spec));
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                if t.contains("require(")
+                    && let Some((head, call)) = t.split_once("require(")
+                    && let Some(spec) = quoted(call.split(')').next().unwrap_or(""))
+                {
+                    let head = head.split('=').next().unwrap_or("");
+                    out.push((idents(head), spec));
+                }
+            }
+            "python" => {
+                if let Some(rest) = t.strip_prefix("import ") {
+                    for part in rest.split(',') {
+                        let mut it = part.split(" as ");
+                        let spec = it.next().unwrap_or("").trim().to_string();
+                        let mut names: Vec<String> = spec
+                            .split('.')
+                            .next()
+                            .map(str::to_string)
+                            .into_iter()
+                            .collect();
+                        names.extend(it.next().map(|a| a.trim().to_string()));
+                        out.push((names, spec));
+                    }
+                } else if let Some(rest) = t.strip_prefix("from ")
+                    && let Some((spec, names)) = rest.split_once(" import ")
+                {
+                    let mut stmt = names.to_string();
+                    let mut j = i;
+                    if names.contains('(') {
+                        while !lines[j].contains(')') && j + 1 < lines.len() && j < i + 64 {
+                            j += 1;
+                            stmt.push('\n');
+                            stmt.push_str(lines[j]);
+                        }
+                    }
+                    out.push((idents(&stmt), spec.trim().to_string()));
+                    i = j + 1;
+                    continue;
+                }
+            }
+            "go" => {
+                let one = |l: &str| -> Option<(Vec<String>, String)> {
+                    let spec = quoted(l)?;
+                    let alias = l.split('"').next().unwrap_or("").trim();
+                    let name = if alias.is_empty() || alias == "import" {
+                        let mut segs = spec.rsplit('/');
+                        let last = segs.next().unwrap_or("");
+                        let versioned = last.len() > 1
+                            && last.starts_with('v')
+                            && last[1..].bytes().all(|b| b.is_ascii_digit());
+                        if versioned {
+                            segs.next().unwrap_or(last)
+                        } else {
+                            last
+                        }
+                        .to_string()
+                    } else {
+                        alias.trim_start_matches("import").trim().to_string()
+                    };
+                    Some((vec![name], spec))
+                };
+                if t == "import (" {
+                    let mut j = i + 1;
+                    while j < lines.len() && lines[j].trim() != ")" {
+                        out.extend(one(lines[j].trim()));
+                        j += 1;
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                if starts("import ") {
+                    out.extend(one(t));
+                }
+            }
+            "rust" if starts("use ") || starts("pub use ") => {
+                let mut stmt = t.to_string();
+                let mut j = i;
+                while !stmt.contains(';') && j + 1 < lines.len() && j < i + 64 {
+                    j += 1;
+                    stmt.push_str(lines[j]);
+                }
+                let spec = stmt
+                    .trim_start_matches("pub ")
+                    .trim_start_matches("use ")
+                    .trim()
+                    .to_string();
+                out.push((idents(&stmt), spec));
+                i = j + 1;
+                continue;
+            }
+            "java" | "kotlin" | "scala" | "csharp" => {
+                let rest = t
+                    .strip_prefix("import ")
+                    .or_else(|| t.strip_prefix("using "))
+                    .map(|r| r.trim_start_matches("static ").trim_end_matches(';').trim());
+                if let Some(rest) = rest
+                    && !rest.contains('(')
+                {
+                    let (alias, path) = match rest.split_once('=') {
+                        Some((a, p)) => (Some(a.trim()), p.trim()),
+                        None => match rest.split_once(" as ") {
+                            Some((p, a)) => (Some(a.trim()), p.trim()),
+                            None => (None, rest),
+                        },
+                    };
+                    let mut names: Vec<String> = path
+                        .rsplit('.')
+                        .next()
+                        .filter(|n| *n != "*")
+                        .map(str::to_string)
+                        .into_iter()
+                        .collect();
+                    names.extend(alias.map(str::to_string));
+                    out.push((names, path.to_string()));
+                }
+            }
+            "dart" => {
+                if (starts("import ") || starts("export "))
+                    && let Some(spec) = t.split(['\'', '"']).nth(1)
+                {
+                    let tail = t.rsplit(['\'', '"']).next().unwrap_or("");
+                    out.push((idents(tail), spec.to_string()));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A line that is an import statement (or a line of one a statement's own
+/// line names): its tokens are module specifiers and bindings, never a name.
+fn import_line(line: &str, ext: &str) -> bool {
+    let t = line.trim();
+    let word = |w: &str, after: &[char]| t.strip_prefix(w).is_some_and(|r| r.starts_with(after));
+    let from_tail = (t.starts_with('}') || t.starts_with("from "))
+        && (t.contains(" from '") || t.contains(" from \"") || t.starts_with("from "));
+    word("import", &[' ', '{', '\'', '"', '*'])
+        || word("use", &[' '])
+        || t.starts_with("pub use ")
+        || t.starts_with("#include")
+        || t.starts_with("@import")
+        || t.starts_with("require_relative")
+        || (t.starts_with("using ") && t.ends_with(';') && !t.contains('=') && !t.contains('('))
+        || ((t.starts_with("export ") || t.starts_with("part "))
+            && (t.contains(" from ") || ext == "dart"))
+        || (t.contains("require(") && (t.contains('\'') || t.contains('"')))
+        || (t.starts_with("require ") && (t.contains('\'') || t.contains('"')))
+        || from_tail
+        || (ext == "go" && go_import_spec(t))
+}
+
+/// A Go import block's line: an optional alias, then one quoted path.
+fn go_import_spec(t: &str) -> bool {
+    let Some(open) = t.find('"') else {
+        return false;
+    };
+    let alias = t[..open].trim();
+    t.ends_with('"')
+        && t.len() > open + 1
+        && !t[open + 1..t.len() - 1].contains(['"', ' '])
+        && (alias.is_empty()
+            || alias == "_"
+            || alias == "."
+            || alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_'))
 }
 
 /// Step 5: the uses of `names` in `text`, one per (name, line), the
@@ -1143,6 +1839,8 @@ struct Hunk {
     plus: Vec<(i64, String)>,
     /// The file's extension reads `#` as a comment.
     hash: bool,
+    /// The file's extension, ASCII lower case.
+    ext: String,
 }
 
 struct FileDiff {
@@ -1185,6 +1883,11 @@ fn parse_diff(text: &str) -> Vec<FileDiff> {
                 minus: Vec::new(),
                 plus: Vec::new(),
                 hash: hash_comments(&file.path),
+                ext: file
+                    .path
+                    .rsplit_once('.')
+                    .map(|(_, e)| e.to_ascii_lowercase())
+                    .unwrap_or_default(),
             });
             continue;
         }
@@ -1287,6 +1990,7 @@ struct Found {
     renamed_to: Option<String>,
     /// 1-based new-side line.
     line: i64,
+    status: Status,
 }
 
 impl Hunk {
@@ -1303,8 +2007,9 @@ impl Hunk {
         first <= e && last >= s
     }
 
-    /// The removed names on this hunk's `-` lines, with their rename pairs.
-    fn names(&self, sets: &ClassSets) -> Vec<Found> {
+    /// The removed names on this hunk's `-` lines, with their rename pairs
+    /// and step 2's reading of each (the best of its occurrences).
+    fn names(&self, sets: &ClassSets, ctx: &FileCtx) -> Vec<Found> {
         // Old name -> (new spelling, its line, its class): a string class
         // pair (the wire name) wins over an identifier one, else the first.
         let mut renames: BTreeMap<String, (String, i64, Class)> = BTreeMap::new();
@@ -1328,28 +2033,80 @@ impl Hunk {
         // Normalised name -> (its index in `out`, the class its spelling came from).
         let mut seen: HashMap<String, (usize, Class)> = HashMap::new();
         for old in &self.minus {
+            let import = import_line(old, &self.ext);
+            let block = block_line(old);
             for t in name_tokens(old, self.hash) {
                 if !is_name(&t) || !sets.lost(t.class, &t.norm) || !sets.removed(&t.norm) {
                     continue;
                 }
+                let renamed = renames.get(&t.norm);
+                let status =
+                    if import || (t.class == Class::Ident && ctx.external.contains(&t.norm)) {
+                        Status::Library
+                    } else if renamed.is_some() || wire_position(&t, block) {
+                        Status::Counted
+                    } else {
+                        Status::Unpaired
+                    };
                 if let Some(&(at, class)) = seen.get(&t.norm) {
-                    if class == Class::Ident && t.class == Class::Str {
+                    let have = out[at].status;
+                    let spell = status > have
+                        || (status == have && class == Class::Ident && t.class == Class::Str);
+                    if spell {
+                        out[at].status = status.max(have);
                         out[at].raw = t.raw.clone();
-                        seen.insert(t.norm.clone(), (at, Class::Str));
+                        seen.insert(t.norm.clone(), (at, t.class));
                     }
                     continue;
                 }
                 seen.insert(t.norm.clone(), (out.len(), t.class));
-                let renamed = renames.get(&t.norm);
                 out.push(Found {
                     raw: t.raw.clone(),
                     normalised: t.norm.clone(),
                     renamed_to: renamed.map(|(n, _, _)| n.clone()),
                     line: renamed.map_or(self.new_start.max(1), |(_, at, _)| *at),
+                    status,
                 });
             }
         }
         out
+    }
+}
+
+/// Step 2's reading of a removed name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Status {
+    /// A bare identifier with no rename pair, or a word of a sentence string.
+    Unpaired,
+    /// An import statement's token, or an identifier bound to an external
+    /// package's import.
+    Library,
+    /// At a wire position, or renamed: a name.
+    Counted,
+}
+
+/// Lines whose trailing `x:` opens a block or a branch, not a key.
+const BLOCK_WORDS: &[&str] = &[
+    "if", "elif", "else", "for", "while", "with", "def", "class", "try", "except", "finally",
+    "case", "default", "match", "switch", "when", "lambda", "async",
+];
+
+fn block_line(line: &str) -> bool {
+    let t = line.trim_start();
+    let word: String = t
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    BLOCK_WORDS.contains(&word.as_str())
+}
+
+/// Step 2's wire position: a token of a string with no whitespace, or an
+/// identifier written as a key outside a parameter list, a property access
+/// and a block line.
+fn wire_position(t: &Tok, block: bool) -> bool {
+    match t.class {
+        Class::Str => !t.wordy,
+        Class::Ident => t.key && !t.property && !t.param && !block,
     }
 }
 
@@ -1501,8 +2258,15 @@ struct Tok {
     norm: String,
     /// Right after a `.`.
     property: bool,
-    /// Right before a `:` (not `::`).
+    /// Right before a `:` (not `::`), or a `?:` / `!:` (an optional or
+    /// definite field).
     key: bool,
+    /// A string token of a literal holding whitespace (a sentence, not a
+    /// name).
+    wordy: bool,
+    /// An identifier whose innermost bracket open on its line is a `(`: a
+    /// parameter list or a call's arguments.
+    param: bool,
 }
 
 impl Tok {
@@ -1578,14 +2342,62 @@ fn name_tokens(line: &str, hash: bool) -> Vec<Tok> {
         .iter()
         .any(|t| t.class == Class::Str && t.key && TAG_KEYS.contains(&t.norm.as_str()));
     if tagged {
-        return toks.into_iter().filter(|t| t.class == Class::Str).collect();
+        // A struct tag's keys are names, though the tag holds spaces.
+        return toks
+            .into_iter()
+            .filter(|t| t.class == Class::Str)
+            .map(|t| Tok { wordy: false, ..t })
+            .collect();
     }
     toks
 }
 
 enum Mode {
-    Code { brace: u32 },
-    Str(u8),
+    Code {
+        brace: u32,
+    },
+    /// The quote, and whether the literal holds whitespace.
+    Str(u8, bool),
+}
+
+/// Whether the literal opening at `start` (just past its quote `q`) holds
+/// whitespace before it closes (a template's `${..}` skipped) or the line
+/// ends.
+fn literal_wordy(b: &[u8], start: usize, q: u8) -> bool {
+    let mut j = start;
+    while j < b.len() {
+        let c = b[j];
+        if c == b'\\' {
+            j += 2;
+            continue;
+        }
+        if c == q {
+            return false;
+        }
+        if q == b'`' && c == b'$' && b.get(j + 1) == Some(&b'{') {
+            let mut depth = 0usize;
+            while j < b.len() {
+                match b[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            j += 1;
+            continue;
+        }
+        if c.is_ascii_whitespace() {
+            return true;
+        }
+        j += 1;
+    }
+    false
 }
 
 fn ident_start(c: u8) -> bool {
@@ -1602,6 +2414,8 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
     let n = b.len();
     let mut out = Vec::new();
     let mut stack: Vec<Mode> = vec![Mode::Code { brace: 0 }];
+    // Brackets open on this line, innermost last (step 2's `param`).
+    let mut brackets: Vec<u8> = Vec::new();
     let mut i = 0;
     while i < n {
         let c = b[i];
@@ -1624,7 +2438,7 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
                 break;
             }
             if c == b'"' || c == b'\'' || c == b'`' {
-                stack.push(Mode::Str(c));
+                stack.push(Mode::Str(c, literal_wordy(b, i + 1, c)));
                 i += 1;
                 continue;
             }
@@ -1632,6 +2446,7 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
                 if let Some(Mode::Code { brace }) = stack.last_mut() {
                     *brace += 1;
                 }
+                brackets.push(c);
             } else if c == b'}' {
                 let close =
                     matches!(stack.last(), Some(Mode::Code { brace: 0 })) && stack.len() > 1;
@@ -1643,13 +2458,19 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
                 if let Some(Mode::Code { brace }) = stack.last_mut() {
                     *brace = brace.saturating_sub(1);
                 }
+                brackets.pop();
+            } else if c == b'(' || c == b'[' {
+                brackets.push(c);
+            } else if c == b')' || c == b']' {
+                brackets.pop();
             }
             if ident_start(c) {
                 let mut j = i + 1;
                 while j < n && ident_char(b[j]) {
                     j += 1;
                 }
-                push_tok(&mut out, line, i, j, Class::Ident, None);
+                let param = brackets.last() == Some(&b'(');
+                push_tok(&mut out, line, i, j, Class::Ident, None, param);
                 i = j;
                 continue;
             }
@@ -1662,10 +2483,9 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
             i += 1;
             continue;
         }
-        let Some(Mode::Str(q)) = stack.last() else {
+        let Some(&Mode::Str(q, wordy)) = stack.last() else {
             break;
         };
-        let q = *q;
         if c == b'\\' {
             i += 2;
             continue;
@@ -1688,7 +2508,10 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
             while j > i + 1 && b[j - 1] == b'-' {
                 j -= 1;
             }
-            push_tok(&mut out, line, i, j, Class::Str, Some(q));
+            push_tok(&mut out, line, i, j, Class::Str, Some(q), false);
+            if let Some(t) = out.last_mut() {
+                t.wordy = wordy;
+            }
             i = j;
             continue;
         }
@@ -1705,7 +2528,15 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
 
 /// Push the token `line[i..j]`, its property and key flags read from the
 /// bytes around it (`quote`: the string it sits in, skipped before a `:`).
-fn push_tok(out: &mut Vec<Tok>, line: &str, i: usize, j: usize, class: Class, quote: Option<u8>) {
+fn push_tok(
+    out: &mut Vec<Tok>,
+    line: &str,
+    i: usize,
+    j: usize,
+    class: Class,
+    quote: Option<u8>,
+    param: bool,
+) {
     let b = line.as_bytes();
     let raw = &line[i..j];
     let norm = normalise(raw);
@@ -1723,16 +2554,22 @@ fn push_tok(out: &mut Vec<Tok>, line: &str, i: usize, j: usize, class: Class, qu
     {
         k += 1;
     }
+    let optional = quote.is_none()
+        && matches!(b.get(k), Some(b'?' | b'!'))
+        && b.get(k + 1) == Some(&b':')
+        && b.get(k + 2) != Some(&b':');
     while k < b.len() && (b[k] == b' ' || b[k] == b'\t') {
         k += 1;
     }
-    let key = b.get(k) == Some(&b':') && b.get(k + 1) != Some(&b':');
+    let key = optional || (b.get(k) == Some(&b':') && b.get(k + 1) != Some(&b':'));
     out.push(Tok {
         class,
         raw: raw.to_string(),
         norm,
         property,
         key,
+        wordy: false,
+        param,
     });
 }
 
@@ -1760,6 +2597,13 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_ctx() -> FileCtx {
+        FileCtx {
+            test: false,
+            external: HashSet::new(),
+        }
+    }
 
     fn norms(line: &str) -> Vec<(Class, String, &'static str)> {
         line_tokens(line, false)
@@ -1810,13 +2654,13 @@ mod tests {
         assert_eq!(diff[0].path, "m.go");
         assert_eq!(diff[0].hunks.len(), 3);
         let sets = ClassSets::of(&diff);
-        let found = diff[0].hunks[0].names(&sets);
+        let found = diff[0].hunks[0].names(&sets, &no_ctx());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].raw, "oldName");
         assert_eq!(found[0].renamed_to.as_deref(), Some("newName"));
         assert_eq!(found[0].line, 4);
         // `moved` left code and reached a string: not removed.
-        assert!(diff[0].hunks[2].names(&sets).is_empty());
+        assert!(diff[0].hunks[2].names(&sets, &no_ctx()).is_empty());
         assert!(diff[0].hunks[2].touches(11, 11));
         assert!(!diff[0].hunks[2].touches(13, 20));
     }
@@ -1827,11 +2671,128 @@ mod tests {
         let text = "diff --git a/r.go b/r.go\n--- a/r.go\n+++ b/r.go\n@@ -9 +9 @@ type R struct {\n-\tID      string `json:\"id,omitempty\"`\n+\tMessageID     string `json:\"messageId,omitempty\"`\n";
         let diff = parse_diff(text);
         let sets = ClassSets::of(&diff);
-        let found = diff[0].hunks[0].names(&sets);
+        let found = diff[0].hunks[0].names(&sets, &no_ctx());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].raw, "id");
         assert_eq!(found[0].renamed_to.as_deref(), Some("messageId"));
         assert_eq!(found[0].line, 9);
+    }
+
+    #[test]
+    fn a_wire_position_is_a_name_shaped_string_or_a_key_outside_parameters() {
+        let toks = |l: &str| -> Vec<(String, bool)> {
+            let block = block_line(l);
+            line_tokens(l, false)
+                .into_iter()
+                .map(|t| {
+                    let w = wire_position(&t, block);
+                    (t.norm, w)
+                })
+                .collect()
+        };
+        // A quoted key and a value string are names; a sentence is not.
+        assert_eq!(
+            toks("  \"user_id\": x, note: 'two words',"),
+            vec![
+                ("userid".into(), true),
+                ("x".into(), false),
+                ("note".into(), true),
+                ("two".into(), false),
+                ("words".into(), false),
+            ]
+        );
+        // `?:` / `!:` fields are keys; a parameter's annotation is not.
+        assert_eq!(
+            toks("  password?: string; token!: string;"),
+            vec![
+                ("password".into(), true),
+                ("string".into(), false),
+                ("token".into(), true),
+                ("string".into(), false),
+            ]
+        );
+        assert!(
+            toks("function f(id: string) { return { id: 1 } }")
+                .iter()
+                .filter(|(n, _)| n == "id")
+                .map(|(_, w)| *w)
+                .eq([false, true])
+        );
+        // A block line's trailing colon and a property are no key.
+        assert!(toks("if user.active:").iter().all(|(_, w)| !w));
+        // A Go tag's keys are names though the tag holds spaces.
+        let tag: Vec<(String, bool)> =
+            name_tokens("\tID string `json:\"id\" binding:\"required\"`", false)
+                .into_iter()
+                .map(|t| (t.norm.clone(), wire_position(&t, false)))
+                .collect();
+        assert!(tag.contains(&("id".into(), true)), "{tag:?}");
+    }
+
+    #[test]
+    fn import_lines_and_external_bindings_are_read_per_language() {
+        assert!(import_line("import { a as b } from 'lib';", "ts"));
+        assert!(import_line("} from \"lib\";", "ts"));
+        assert!(import_line("from pkg.mod import thing", "py"));
+        assert!(import_line("\tchi \"github.com/go-chi/chi/v5\"", "go"));
+        assert!(import_line("use serde::Deserialize;", "rs"));
+        assert!(!import_line("const user = useUser();", "ts"));
+        assert!(!import_line("\"id\",", "go"));
+        let ts = import_bindings(
+            "import {\n  formatDistance,\n  parse as parseDate,\n} from 'date-fns';\nimport z from 'zod';\nconst { join } = require('path');\n",
+            "typescript",
+        );
+        assert_eq!(
+            ts,
+            vec![
+                (
+                    vec!["formatDistance".into(), "parse".into(), "parseDate".into()],
+                    "date-fns".into()
+                ),
+                (vec!["z".into()], "zod".into()),
+                (vec!["join".into()], "path".into()),
+            ]
+        );
+        let go = import_bindings(
+            "import (\n\t\"fmt\"\n\tchi \"github.com/go-chi/chi/v5\"\n\t\"github.com/gin-gonic/gin\"\n)\n",
+            "go",
+        );
+        assert_eq!(
+            go.iter().map(|(n, _)| n[0].as_str()).collect::<Vec<_>>(),
+            vec!["fmt", "chi", "gin"]
+        );
+        let py = import_bindings(
+            "import numpy as np\nfrom flask import (\n  Flask,\n  jsonify,\n)\n",
+            "python",
+        );
+        assert_eq!(py[0].0, vec!["numpy".to_string(), "np".to_string()]);
+        assert_eq!(
+            py[1],
+            (vec!["Flask".into(), "jsonify".into()], "flask".into())
+        );
+        let rs = import_bindings("use serde::{Deserialize, Serialize as Ser};\n", "rust");
+        assert_eq!(rs[0].0, vec!["serde", "Deserialize", "Serialize", "Ser"]);
+        let jvm = import_bindings(
+            "import com.acme.api.Client;\nimport static org.x.Y.z;\n",
+            "java",
+        );
+        assert_eq!(
+            jvm[0],
+            (vec!["Client".into()], "com.acme.api.Client".into())
+        );
+        assert_eq!(jvm[1].0, vec!["z".to_string()]);
+    }
+
+    #[test]
+    fn type_declarations_span_their_braces() {
+        let text = "/** gen */\nexport type A = {\n    b: B;\n};\nexport type B = {\n    c: string;\n};\nexport type Alias = string;\nexport function f(): A {\n    return x;\n}\n";
+        let d = type_decls(text);
+        assert_eq!(d.get("A"), Some(&(1, 3)));
+        assert_eq!(d.get("B"), Some(&(4, 6)));
+        assert_eq!(d.get("Alias"), Some(&(7, 7)));
+        assert!(!d.contains_key("f"));
+        let py = type_decls("class M(BaseModel):\n    a: int\n    b: str\n\nx = 1\n");
+        assert_eq!(py.get("M"), Some(&(0, 3)));
     }
 
     #[test]
