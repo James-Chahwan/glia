@@ -165,9 +165,30 @@ pub fn extract_ts_backend_routes(
     }
 
     // Shape 4: NestJS controllers — combine @Controller(prefix) with method
-    // decorators @Get/@Post/...(suffix), located at the decorator.
-    for (method, route, row) in nestjs_routes(source) {
-        add_method(&mut by_route, &route, method, "", row);
+    // decorators @Get/@Post/...(suffix), located at the decorator. FH.19: the
+    // method the decorator decorates is the route's handler, a HANDLED_BY ref
+    // `<Class>.<method>` the graph binds to that class's own METHOD (the
+    // registering file declares the class: `module_type_method`). The ROUTE
+    // cell's `handler` stays "" as before: the edge carries the binding.
+    let nest = nestjs_routes(source);
+    let (mut nest_bound, mut nest_unbound) = (0usize, 0usize);
+    for r in &nest {
+        let Some(key) = add_method(&mut by_route, &r.path, r.method, "", r.row) else {
+            continue;
+        };
+        match &r.handler {
+            Some(h) => {
+                nest_bound += 1;
+                handled_by.entry((key.0, key.1, h.clone())).or_insert(r.row);
+            }
+            None => nest_unbound += 1,
+        }
+    }
+    // FH.19 fired_on marker: one per file holding a NestJS verb decorator.
+    if nest_bound + nest_unbound > 0 {
+        eprintln!(
+            "[ts-routes] nest handlers bound={nest_bound} unbound={nest_unbound} file={path}"
+        );
     }
 
     // Shape 5: Hapi.js — `server.route({ method: 'GET', path: '/x', handler })`
@@ -523,38 +544,203 @@ fn sveltekit_params_to_colon(path: &str) -> String {
     nextjs_params_to_colon(path)
 }
 
+/// One NestJS verb decorator (`@Get(..)`, `@Post(..)`, ..): its method, the
+/// full path (the enclosing `@Controller` prefix joined to its own), the
+/// decorator's 0-based row and, FH.19, the handler it decorates as
+/// `<Class>.<method>` when the scan reads both a method declaration after it
+/// and an enclosing class declaration before it.
+#[derive(Debug, PartialEq)]
+struct NestRoute {
+    method: &'static str,
+    path: String,
+    row: u32,
+    handler: Option<String>,
+}
+
+/// The verb decorators [`nestjs_routes`] reads, with the method each serves.
+const NEST_VERBS: &[(&str, &str)] = &[
+    ("@Get(", "get"),
+    ("@Post(", "post"),
+    ("@Put(", "put"),
+    ("@Patch(", "patch"),
+    ("@Delete(", "delete"),
+    ("@Head(", "head"),
+    ("@Options(", "options"),
+    ("@All(", "all"),
+];
+
 /// Scan a TS source for NestJS @Controller + @Get/@Post/... method decorators.
-/// Returns (method, full_path, row) triples, `row` the decorator's 0-based
-/// line.
-fn nestjs_routes(source: &str) -> Vec<(&'static str, String, u32)> {
+/// Each route is located at the decorator's 0-based line. FH.19: its handler
+/// is the first method declaration after the decorator ([`nest_method_after`]:
+/// further decorators, comments and modifiers skipped, so a method carrying
+/// several verb decorators is every one's handler) in the class the last
+/// `class` declaration line before the decorator names ([`class_decl_name`]).
+fn nestjs_routes(source: &str) -> Vec<NestRoute> {
     let mut out = Vec::new();
     let mut controller_prefix: Option<String> = None;
-    for (row, line) in source.lines().enumerate() {
+    let mut class: Option<&str> = None;
+    let mut line_start = 0usize;
+    for (row, raw) in source.split_inclusive('\n').enumerate() {
+        let at = line_start + (raw.len() - raw.trim_start().len());
+        line_start += raw.len();
         let row = u32::try_from(row).unwrap_or(u32::MAX);
-        let t = line.trim();
+        let t = raw.trim();
+        if let Some(name) = class_decl_name(t) {
+            class = Some(name);
+        }
         if t.starts_with("@Controller(") {
             controller_prefix = Some(nest_path_arg(t).unwrap_or_default());
             continue;
         }
-        for (deco, method) in &[
-            ("@Get(", "get"),
-            ("@Post(", "post"),
-            ("@Put(", "put"),
-            ("@Patch(", "patch"),
-            ("@Delete(", "delete"),
-            ("@Head(", "head"),
-            ("@Options(", "options"),
-            ("@All(", "all"),
-        ] {
-            if t.starts_with(deco) {
-                let suffix = nest_path_arg(t).unwrap_or_default();
-                let full = combine_nest_paths(controller_prefix.as_deref().unwrap_or(""), &suffix);
-                out.push((*method, full, row));
-                break;
-            }
-        }
+        let Some((deco, method)) = NEST_VERBS.iter().find(|(d, _)| t.starts_with(d)) else {
+            continue;
+        };
+        let suffix = nest_path_arg(t).unwrap_or_default();
+        let path = combine_nest_paths(controller_prefix.as_deref().unwrap_or(""), &suffix);
+        let args = at + deco.len();
+        let handler = source
+            .get(args..)
+            .and_then(|rest| find_balanced_close(rest, b'(', b')'))
+            .and_then(|close| source.get(args + close + 1..))
+            .and_then(nest_method_after)
+            .zip(class)
+            .map(|(m, c)| format!("{c}.{m}"));
+        out.push(NestRoute {
+            method,
+            path,
+            row,
+            handler,
+        });
     }
     out
+}
+
+/// FH.19: the class a declaration line declares: `class X`, behind any of
+/// `export` / `default` / `abstract` / `declare` and leading decorators
+/// (`@Controller('users') export class UsersController {`). None for any
+/// other line, a comment or an anonymous `export default class {`.
+fn class_decl_name(line: &str) -> Option<&str> {
+    let mut i = skip_decorators(line, 0)?;
+    loop {
+        let (word, end) = read_ident(line, i)?;
+        let next = skip_trivia(line, end);
+        match word {
+            "export" | "default" | "abstract" | "declare" => i = next,
+            "class" => return read_ident(line, next).map(|(name, _)| name),
+            _ => return None,
+        }
+    }
+}
+
+/// FH.19: the method name a NestJS verb decorator decorates, read from the
+/// text right after the decorator's closing `)`: further decorators and
+/// comments are skipped, then the modifiers (`public`, `async`, `static`,
+/// `override`, ..), and the identifier that follows is the method when a
+/// `(` (after an optional `?` and type parameters) opens its parameters. A
+/// property, a constructor or anything unreadable is None.
+fn nest_method_after(s: &str) -> Option<&str> {
+    const MODIFIERS: &[&str] = &[
+        "public",
+        "private",
+        "protected",
+        "static",
+        "async",
+        "override",
+        "readonly",
+        "abstract",
+        "declare",
+        "get",
+        "set",
+    ];
+    let mut i = skip_decorators(s, 0)?;
+    loop {
+        let (word, end) = read_ident(s, i)?;
+        let mut next = skip_trivia(s, end);
+        let follows_ident = |at: usize| {
+            s.get(at..)
+                .and_then(|r| r.chars().next())
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$' || c == '*')
+        };
+        if MODIFIERS.contains(&word) && follows_ident(next) {
+            i = next;
+            if s.get(i..).is_some_and(|r| r.starts_with('*')) {
+                i = skip_trivia(s, i + 1);
+            }
+            continue;
+        }
+        if s.get(next..).is_some_and(|r| r.starts_with('?')) {
+            next = skip_trivia(s, next + 1);
+        }
+        if s.get(next..).is_some_and(|r| r.starts_with('<')) {
+            let close = s
+                .get(next + 1..)
+                .and_then(|r| find_balanced_close(r, b'<', b'>'))?;
+            next = skip_trivia(s, next + 1 + close + 1);
+        }
+        let opens = s.get(next..).is_some_and(|r| r.starts_with('('));
+        return (opens && word != "constructor").then_some(word);
+    }
+}
+
+/// FH.19: `s` from `i` past whitespace and `//` / `/* */` comments.
+fn skip_trivia(s: &str, mut i: usize) -> usize {
+    let bytes = s.as_bytes();
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let rest = s.get(i..).unwrap_or("");
+        if rest.starts_with("//") {
+            i += rest.find('\n').unwrap_or(rest.len());
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            i += 2 + body.find("*/").map_or(body.len(), |e| e + 2);
+        } else {
+            return i;
+        }
+    }
+}
+
+/// FH.19: `s` from `i` past trivia and every decorator (`@Name`, `@a.b`, each
+/// with an optional balanced argument list). None when a decorator's
+/// arguments never close.
+fn skip_decorators(s: &str, mut i: usize) -> Option<usize> {
+    loop {
+        i = skip_trivia(s, i);
+        if !s.get(i..).is_some_and(|r| r.starts_with('@')) {
+            return Some(i);
+        }
+        let mut end = i + 1;
+        while let Some((_, e)) = read_ident(s, end) {
+            end = e;
+            if !s.get(end..).is_some_and(|r| r.starts_with('.')) {
+                break;
+            }
+            end += 1;
+        }
+        let next = skip_trivia(s, end);
+        i = if s.get(next..).is_some_and(|r| r.starts_with('(')) {
+            let close = s
+                .get(next + 1..)
+                .and_then(|r| find_balanced_close(r, b'(', b')'))?;
+            next + 1 + close + 1
+        } else {
+            end
+        };
+    }
+}
+
+/// FH.19: the identifier starting at `i` (ASCII letters, digits, `_`, `$`;
+/// not starting with a digit) and the offset just past it.
+fn read_ident(s: &str, i: usize) -> Option<(&str, usize)> {
+    let rest = s.get(i..)?;
+    let len = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .unwrap_or(rest.len());
+    let word = rest.get(..len)?;
+    word.chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_digit())
+        .then_some((word, i + len))
 }
 
 /// FH.3: opens a symbolic path segment: `~const:<symbol>~`, the placeholder
@@ -1342,6 +1528,81 @@ export class UsersController {
         );
         assert!(path_symbols("/~const:this.x~/me").is_empty());
         assert!(!is_path_symbol("process.env.BASE"));
+    }
+
+    /// FH.19: each Nest route is HANDLED_BY the method its verb decorator
+    /// decorates, read past further decorators (multi-line arguments
+    /// included), comments, modifiers and multi-line parameter decorators.
+    #[test]
+    fn nestjs_routes_are_handled_by_their_decorated_method() {
+        let src = "import { Controller, Get, Put } from '@nestjs/common';\n\n@Controller('users')\nexport class UsersController {\n  @Get(':id')\n  getUser(@Param('id') id: string) {\n    return { id };\n  }\n\n  @Put('me')\n  @UseGuards(AuthGuard)\n  @ApiOperation({\n    summary: 'update (me)',\n  })\n  // the caller's own profile\n  public async updateMe(\n    @Body() body: Dto,\n  ): Promise<Dto> {\n    return body;\n  }\n}\n";
+        let r =
+            extract_ts_backend_routes(src, "src/users/users.controller.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["GET /users/:id", "PUT /users/me"]);
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        };
+        assert_eq!(
+            handled_by(&r),
+            vec![
+                (
+                    "GET /users/:id".to_string(),
+                    attr("UsersController", "getUser")
+                ),
+                (
+                    "PUT /users/me".to_string(),
+                    attr("UsersController", "updateMe")
+                ),
+            ]
+        );
+        // The ref's site line is the decorator's row.
+        let lines: Vec<u32> = r.refs.iter().map(|x| x.line).collect();
+        assert_eq!(lines, vec![4, 9]);
+    }
+
+    /// FH.19: a method carrying several verb decorators is the handler of
+    /// every ROUTE they mint; a same-line decorator, `static` / `async *`
+    /// modifiers and type parameters still read the method; and the class is
+    /// the last one declared before the decorator.
+    #[test]
+    fn nestjs_handler_shapes() {
+        let src = "class Helper {}\n@Controller('a') export class AController {\n  @Get('x')\n  @Post('x')\n  both() {}\n  @Get('one') one() {}\n  @Delete('gen')\n  async generic<T>(t: T) {}\n  @Patch('opt')\n  maybe?(): void {}\n}\n@Controller('b')\nexport default abstract class BController {\n  @Get()\n  static async *stream() {}\n}\n";
+        let r = extract_ts_backend_routes(src, "src/a.controller.ts", module_id(), repo());
+        // Refs come in (path, METHOD) key order.
+        let got: Vec<(String, String)> = handled_by(&r)
+            .into_iter()
+            .map(|(q, h)| match h {
+                CallQualifier::Attribute { base, name } => (q, format!("{base}.{name}")),
+                other => (q, format!("{other:?}")),
+            })
+            .collect();
+        let want: Vec<(String, String)> = [
+            ("DELETE /a/gen", "AController.generic"),
+            ("GET /a/one", "AController.one"),
+            ("PATCH /a/opt", "AController.maybe"),
+            ("GET /a/x", "AController.both"),
+            ("POST /a/x", "AController.both"),
+            ("GET /b", "BController.stream"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(got, want);
+    }
+
+    /// FH.19: no ref when the decorator decorates no readable method (a
+    /// property) or no class declaration precedes it; the route is still
+    /// minted.
+    #[test]
+    fn nestjs_unreadable_handler_emits_route_without_ref() {
+        let src = "@Get('prop')\nhandler = () => 1;\n@Controller('c')\nexport class C {\n  @Get('field')\n  field = 1;\n}\n";
+        let r = extract_ts_backend_routes(src, "src/c.controller.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["GET /c/field", "GET /prop"]);
+        assert!(r.refs.is_empty(), "no handler ref: {:?}", handled_by(&r));
+        assert_eq!(nest_method_after("\n  constructor(x: X) {}"), None);
+        assert_eq!(class_decl_name("// a class Foo"), None);
+        assert_eq!(class_decl_name("export default class {"), None);
     }
 
     /// Nest `@All(` is method-agnostic: `ANY`, never `ALL`.

@@ -1,0 +1,11 @@
+{
+  "framework": "nest-handled-by",
+  "language": "typescript",
+  "dirs": ["api"],
+  "note": "FH.19. A NestJS route is HANDLED_BY the controller method its verb decorator decorates: the scanner reads the first method declaration after the decorator (skipping further decorators, modifiers and parameter decorators) and the enclosing class, and emits a HANDLED_BY ref ROUTE -> `<Class>.<method>` that the graph binds to the class declared in the same file (calls.rs module_type_method, EVIDENCE rule type_method). Baseline 2026-10-27 (HEAD 7e6902a8, debug CLI): both ROUTEs minted, no HANDLED_BY. Deliberately not bound to a matrix cell: typescript/http is already scored.",
+  "expect_edges": [
+    {"from": "GET /users/:id", "to": "src::users::users.controller::UsersController::getUser", "category": "HANDLED_BY", "exact": true},
+    {"from": "PUT /users/me", "to": "src::users::users.controller::UsersController::updateMe", "category": "HANDLED_BY", "exact": true, "note": "a second decorator and multi-line parameter decorators sit between the verb decorator and the method"}
+  ],
+  "forbid": []
+}
