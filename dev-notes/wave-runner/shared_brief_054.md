@@ -69,7 +69,8 @@ Probing another repo: use `GLIA_NO_PERSIST=1 ./target/debug/glia <cmd> <copy>` o
   microservices-demo, gin-vue-admin, zora-protocol; rank gate: shell, websocket, samples, commons-lang, commons-io)
   unless your packet is ABOUT a named big repo (its spec says so). twenty, medusa, immich, photoprism, tolgee and prefect
   builds take minutes each and a 13-task run on them took ~90 min in W19: run one big-repo task at most, and say in
-  `surprises` how long it took. The release's full cohort and rank gates cover the big repos.
+  `surprises` how long it took. The close-out's full cohort and rank gates (every 4th wave and at release) cover the big
+  repos.
 - KEEP THE SHARED TREE COMPILING. Every agent builds the same tree. Land an edit that compiles (stub a new fn with its
   final signature first, fill it after) rather than leaving a half-written file between tool calls; a sibling that finds
   the tree broken falls back to a cold isolated build that costs minutes and tens of GB. Prefer `cargo check -p <crate>`

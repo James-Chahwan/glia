@@ -59,6 +59,11 @@ RANK_CODE_PATHS = ("engine/src/rank/", "engine/src/intent/", "engine/src/calibra
                    "code-domain/src/profile.rs", "engine/examples/rank_eval.rs", "bench/rank-gate/",
                    "scripts/rank-gate.sh")
 RANK_FAST = "shell,websocket,samples,commons-lang,commons-io"
+# James 2026-10-30 ("it's not small repos all the time ... we've built enough waves we might wanna do the full"):
+# the fast tiers are per wave, but every FULL_GATES_EVERY waves since a gate's last full check it runs in full,
+# so a big-repo regression surfaces within a few waves of its cause. baseline.json `gates_last_full` holds
+# the wave each gate last ran in full (the release's last close-out is always full).
+FULL_GATES_EVERY = 4
 RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 snapshots); 2x that, at least 7200
 # FH.12: a wave whose packet commits touch one of these runs the cohort gate (scripts/cohort-gate.sh check)
 # after the rank gate: engine / graph / parser / code-domain changes, and the gate's own inputs.
@@ -168,7 +173,7 @@ def package_name(crate_dir):
     return m.group(1)
 
 
-def cohort_gate(touched, remaining, wave, release, cmd="bash scripts/cohort-gate.sh check 2>&1"):
+def cohort_gate(touched, remaining, wave, release, full_due=False, cmd="bash scripts/cohort-gate.sh check 2>&1"):
     """FH.12: the cohort gate (scripts/cohort-gate.sh, bench/cohort/results/baseline/), run after the rank
     gate: the cohort's health and task checks, `glia health` per cohort repo and the Sibyl cells, against
     the committed baseline. A wave touching none of COHORT_PATHS skips it; the release's last close-out
@@ -181,7 +186,7 @@ def cohort_gate(touched, remaining, wave, release, cmd="bash scripts/cohort-gate
         return False, "== [cohort-gate] check: skipped - no scripts/cohort-gate.sh", None
     if remaining and not any(p.startswith(COHORT_PATHS) for p in touched):
         return False, "== [cohort-gate] check: skipped - wave touched no engine/, graph/, parsers/ or code-domain/ path", None
-    if remaining and os.environ.get("GLIA_COHORT_GATE_FULL") != "1":
+    if remaining and not full_due and os.environ.get("GLIA_COHORT_GATE_FULL") != "1":
         cmd = f"bash scripts/cohort-gate.sh check --only {COHORT_FAST} 2>&1"
     try:
         out, _ = sh(cmd, timeout=COHORT_GATE_TIMEOUT)
@@ -231,6 +236,8 @@ def main():
     # permission fix) is merged over the wave's run, the later run winning per packet.
     runs = args[1].split(",")
     base = json.loads((HERE / "baseline.json").read_text())
+    last_full = base.setdefault("gates_last_full", {"rank": 20, "cohort": 20})
+    full_due = {g: wave - int(last_full.get(g, wave)) >= FULL_GATES_EVERY for g in ("rank", "cohort")}
     gates, lines = [], []
     t0 = time.time()
     # stdout carries each step's elapsed wall time (James 2026-10-30: see where a close-out's time goes);
@@ -325,8 +332,10 @@ def main():
             say("== [rank-gate] check: skipped - wave touched no ranked path")
         else:
             try:
-                fast = (remaining and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
+                fast = (remaining and not full_due["rank"] and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
                         and not any(p.startswith(RANK_CODE_PATHS) for p in touched))
+                if not fast:
+                    last_full["rank"] = wave
                 env = f"GLIA_RANK_GATE_ONLY={RANK_FAST} GLIA_RANK_GATE_JOBS=3 " if fast else ""
                 out, _ = sh(f"{env}bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
                 (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
@@ -344,7 +353,9 @@ def main():
                 say(f"== {last}")
                 if not last.startswith("[rank-gate] coverage: ok"):
                     gates.append("rank gate coverage")
-    cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release)
+    cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release, full_due["cohort"])
+    if "(partial: only" not in cohort_line and "skipped" not in cohort_line:
+        last_full["cohort"] = wave
     say(cohort_line)
     if cohort_fail:
         gates.append(cohort_fail)

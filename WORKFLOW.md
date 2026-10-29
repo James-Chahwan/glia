@@ -122,6 +122,8 @@ The rank gate has the same split: a wave that changed no ranking or answer code 
 `RANK_CODE_PATHS`) runs its fast tier, the five small snapshots 3 at a time (`GLIA_RANK_GATE_ONLY`,
 `GLIA_RANK_GATE_JOBS`; measured 136 s against ~13 min for all six); a wave touching ranking code, the
 release's last close-out and `GLIA_RANK_GATE_FULL=1` run every snapshot. A partial check never ratchets.
+Both gates also run in full every 4th wave since their last full check (closeout.py `FULL_GATES_EVERY`,
+baseline.json `gates_last_full`), so a big-repo regression shows up within a few waves (James 2026-10-30).
 A close-out that cannot afford the cohort run sets `GLIA_COHORT_GATE_SKIP=<reason>`: the record
 says `check: skipped - <reason>`, never a silent pass, and a skip fails the release's last
 close-out. Reading a failure: the FAILED line names each drop (`immich/http/client_reach
