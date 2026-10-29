@@ -15,7 +15,8 @@ the coverage matrix (FH.10): the cohort says which combos occur, this matrix say
   `graphql.py`, `queue.py` and `websocket.py` (FH.11b) hold their servers and share
   `channel.py` (placement through rest.py's layout, the server manifests, the expected answer),
   `payload.py` (the client's model per `contract`) and, for the two message transports,
-  `stream.py` (the receiving clients).
+  `stream.py` (the receiving clients); `evm.py` (FH.11c) is self-contained: a Solidity contract,
+  its TypeScript and Go clients, the drift and the expected answer.
 - `run.py` - builds every case with the glia under test and grades it (`## Running`).
 - `test_gen.py` - hermetic tests: `python3 bench/sibyl/test_gen.py`.
 
@@ -23,9 +24,9 @@ the coverage matrix (FH.10): the cohort says which combos occur, this matrix say
 
 | axis | values |
 |---|---|
-| `client` | `ts`, `dart`, `kotlin`, `swift`, `python` |
-| `server` | `go-gin`, `ts-nest`, `ts-express`, `java-spring`, `python-fastapi`, `rust-axum`, `csharp-aspnet` |
-| `transport` | `rest`, `grpc`, `graphql`, `queue`, `websocket` |
+| `client` | `ts`, `dart`, `kotlin`, `swift`, `python`; `go` (evm only) |
+| `server` | `go-gin`, `ts-nest`, `ts-express`, `java-spring`, `python-fastapi`, `rust-axum`, `csharp-aspnet`; `solidity` (evm only) |
+| `transport` | `rest`, `grpc`, `graphql`, `queue`, `websocket`; `evm` (opt-in) |
 | `wiring_source` | `literal`, `const`, `enum-prefix` |
 | `wiring_call` | `direct`, `wrapper`, `generated-sdk` |
 | `packaging` | `single`, `workspace`, `multi-repo` |
@@ -51,6 +52,21 @@ the coverage matrix (FH.10): the cohort says which combos occur, this matrix say
 The server values are one framework each: Go is gin, Python is FastAPI, Rust is axum, Java is
 Spring Boot, C# is ASP.NET Core controllers.
 
+`evm` (FH.11c) is an opt-in transport: `gen.py` / `run.py --transports evm` (or a list naming it)
+cover it, but it is not in `gen.AXES["transport"]`, so the default cover, run.py's default run and
+the cohort gate's Sibyl step stay the five transports above, case for case (`gen.OPT_IN_TRANSPORTS`;
+why, and how it joins the default, under `## Running`). A transport module may narrow the client /
+server values it renders (`VALUES`):
+
+| transport | client values | server values |
+|---|---|---|
+| `evm` | client: `ts`, `go` | server: `solidity` |
+
+A value only such a module renders (`go`, `solidity`) joins its axis only when that transport is
+selected, and every (transport, value) a module does not render is a forbidden pair
+(`gen.unrendered()`, beside the table below), so no REST case is asked for a Go client and no
+`evm` case for a Dart one.
+
 ## Unexpressible pairs
 
 The cover never asks for these; each is a pair no stack of the matrix writes idiomatically.
@@ -75,12 +91,15 @@ The cover never asks for these; each is a pair no stack of the matrix writes idi
 | `queue` x `swift` | an iOS app does not hold a broker connection; it reaches queues through a server |
 | `websocket` x `generated-sdk` | WebSocket clients are hand-written; no generator writes a socket SDK for these stacks (websocket.py) |
 | `queue` x `generated-sdk` | Kafka consumers are hand-written; what a generator writes for a topic is its message model (`generated`), not the subscription (queue.py) |
+| `evm` x `enum-prefix` | an EVM call names its contract by ABI and address; there is no path or channel segment to prefix (evm.py) |
+| `evm` x `declared-type` | a contract's interface is its ABI: fragments, a JSON ABI or a generated binding, never a hand-declared payload type (evm.py) |
 
 A transport module may add rows (`UNEXPRESSIBLE` in its module, merged by `gen.unexpressible()`);
-the last two rows are websocket.py's and queue.py's. A pair that is allowed alone but that no
-full case can hold is printed as `implied_unexpressible=<n>` on the marker line; the
-all-transport table implies none (a one-transport cover does: `transport=grpc` rules out every
-pair with `direct`, which the marker counts).
+the websocket.py, queue.py and evm.py rows say whose they are. A pair that is allowed alone but
+that no full case can hold is printed as `implied_unexpressible=<n>` on the marker line; the
+five-transport table implies none (a one-transport cover does: `transport=grpc` rules out every
+pair with `direct`, which the marker counts; so does a cover with `evm`, whose `go` / `solidity`
+pair with no other transport's values).
 
 ## The cover
 
@@ -93,7 +112,9 @@ no unexpressible pair; ties go to a `random.Random(54)`, so the cover is a funct
 axes, the table and the seed. A case id is `<transport>-<nnn>-<client>-<server>`. Over REST it
 is 37 cases holding 272 pairs (the floor is client x server = 35); over all five transports,
 41 cases holding 361 pairs. A one-transport cover (`--transports grpc`) reaches every pair of
-that transport's variants: grpc 25 cases, graphql 36, queue 28, websocket 36.
+that transport's variants: grpc 25 cases, graphql 36, queue 28, websocket 36, evm 11 (92 pairs).
+All six (`--transports rest,grpc,graphql,queue,websocket,evm`) are 46 cases holding 399 pairs,
+the marker ending `transports=rest,grpc,graphql,queue,websocket,evm implied_unexpressible=15`.
 
 ## A case
 
@@ -107,6 +128,28 @@ exchange per transport:
 | `graphql` | `query GetUser($id) { user(id) { id displayName email } }` at `/graphql` | gqlgen, Nest code-first (+ its committed `schema.gql`), Apollo Server under Express, Spring for GraphQL, Strawberry, async-graphql, Hot Chocolate | Apollo Client, package:graphql, OkHttp, URLSession, httpx; graphql-codegen, graphql_codegen, Apollo Kotlin / iOS, ariadne-codegen |
 | `queue` | Kafka topic `users.updated`, the server producing, the client consuming | kafka-go, Nest `ClientKafka`, kafkajs, `KafkaTemplate`, aiokafka, rdkafka, Confluent.Kafka | kafkajs, kafka-clients, aiokafka |
 | `websocket` | `/ws/users`, the server pushing the user on connect | gorilla in gin, Nest gateway (ws adapter), `ws` beside Express, Spring `WebSocketConfigurer`, FastAPI `@router.websocket`, axum `WebSocketUpgrade`, an ASP.NET controller | WebSocket API, web_socket_channel, OkHttp, URLSessionWebSocketTask, `websockets` |
+
+An `evm` case is a contract, not a field: `contracts/Escrow.sol` (a hardhat project: `deposit`,
+`release`, the public getter `arbiter`, the events `Deposited` and `Released`) served to
+
+| client | `contract=plain-literal` | `schema-object` | `generated` |
+|---|---|---|---|
+| `ts` | ethers `Contract` over a human-readable ABI | viem `readContract` / `writeContract` / `watchContractEvent` over an `as const` JSON ABI imported from `abi.ts` | a TypeChain binding (`typechain-types/`, `Escrow__factory.connect`) |
+| `go` | a `bind.BoundContract` over a JSON ABI const in the calling file | the const in another file of the package (`chain/abi.go`) | an abigen v1 binding (`EscrowMetaData`, `EscrowTransactor`, ..) |
+
+`wiring_call=direct` calls each member by name in the api layer, `wrapper` routes the writes
+through a hand-written method-name helper (`callEscrow('deposit', ..)`, Go `c.submit(opts,
+"deposit", ..)`), `generated-sdk` makes the generated binding the api layer (a TypeChain instance
+the api layer exports and the app calls; an abigen package of its own). `wiring_source` is the
+contract address, inline or a `const`. The drift, one kind per case (`evm.drift_of`: the cover
+number mod 3), and the client follows at C:
+
+- `fn_rename` - `release` becomes `settle`;
+- `event_rename` - the event `Released` becomes `Settled`;
+- `arity` - `release` takes a third argument, `bytes32 memo`.
+
+`deposit` never drifts: it is the pair (`RPC_CALLS` to `evm:Escrow.deposit`, `exchange.match`
+`^evm:Escrow\.deposit$`).
 
 `wiring_source` is a REST path prefix, a GraphQL endpoint path (Spring: the root field's name,
 its path being configuration), a gRPC dial address or listen address / port, a topic, or a
@@ -144,6 +187,11 @@ cache directory, never the repo.
   clear at `C`.
 - `primary` / `with` - the repo whose change starts the drift is built, the others join with
   `--with`.
+- `evm` only: `edges`, what the exchange holds at P (RPC_CALLS from the client file to
+  `evm:Escrow.deposit` / `.release` / `.arbiter`, EVENT_FLOWS from `Escrow.Released` to the
+  subscription); `drift.kind`, `member_kind`, `old` / `new` (`arity` too, for that kind), and
+  `drift.client_sites`, every S line of a changed client file naming the stale member (`file`,
+  1-based `line`, `text`): the sites contract-breaks / review should name.
 
 ## Running
 
@@ -181,6 +229,25 @@ each check alone (a chain's `pair` level is how far glia reaches through it). `r
 `p` the expressible pairs the run's cases hold, `t` all of them for the transports run. Exits 0
 when every glia call answered (whatever it scored), 2 when one did not.
 
+`evm` is not in run.py's default run yet: run.py's cell tables (`MECH` by transport, `LANG` by
+client / server value) have no row for `evm`, `go` or `solidity`, so `run.py --transports evm`
+stops at a KeyError in `cells_of`. Once they do (`MECH["evm"] = ("evm", "evm")`, `LANG["go"] =
+"go"`, `LANG["solidity"] = "solidity"`), `evm` moves from `gen.OPT_IN_TRANSPORTS` into
+`gen.AXES["transport"]` (the test `test_opt_in_matches_run_tables` fails until both move
+together) and the cohort gate's Sibyl cells are rebaselined (`scripts/cohort-gate.sh
+baseline`). Its baseline, measured with those three rows supplied from outside the tree (the
+debug glia `0.5.3+p54f568830b8d5ad5`, 11 cases):
+
+    [sibyl] cases=11 pairs_covered=92/92 pass=0 fail=11 (pair=0 drift_s=9 clear_c=9 client=9)
+
+`pair` reads 0 because glia pairs a client whose ABI it read only while every entry of that
+ABI fits the contract (`[evm-link] .. abi=<n>`): at S the stale `release` / `Released` entry
+leaves the whole client unmatched (`unmatched=4`), the never-drifting `deposit` with it. At P
+seven of the eleven pair all four members (every Go case, DT.10f reading Go's method-name
+wrapper, and the ethers `direct` one); the three TypeScript `wrapper` cases pair the getter and
+the event only (their writes name the method through a variable: `dynamic=1`), and the TypeChain
+instance the app imports (`ts` x `generated-sdk`) mints no client node.
+
 ## The tests
 
 `python3 bench/sibyl/test_gen.py` checks, with no glia and no network: the REST and the
@@ -189,15 +256,17 @@ expressible, and none of the table; the cover is deterministic and moves with th
 transport has templates, and every axis value it can express renders (over the all-transport
 cover plus each transport's own); the expected files exist in every state and the drift holds by
 construction (S's server files spell only the new name, every S..C client file the old one at
-S and the new one at C); the layouts; the git form (three commits per repo, the refs, the same
-heads on two renders); users_pb2.py's serialized descriptor is byte for byte protoc's for the
+S and the new one at C); the layouts; the `evm` cover (its values, every drift kind, the
+default covers untouched by it: no `go` / `solidity` outside it) and renders (the drift per kind,
+the ABI form per `contract`, `client_sites` naming real S lines); the git form (three commits
+per repo, the refs, the same heads on two renders); users_pb2.py's serialized descriptor is byte for byte protoc's for the
 case's .proto; run.py grades a right answer from a canned glia as four passes on every
-transport, fails each check alone on the answer that breaks it, matches channels and sums the
-pairs and the marker as stated. Then every rendered file is parsed by a parse-only toolchain
-where one is present: TypeScript `transpileModule` diagnostics (a `typescript` package from
+transport, fails each check alone on the answer that breaks it (an `evm` case too, given the cell
+rows run.py lacks), matches channels and sums the pairs and the marker as stated. Then every
+rendered file is parsed by a parse-only toolchain where one is present: TypeScript `transpileModule` diagnostics (a `typescript` package from
 `SIBYL_TYPESCRIPT`, `npm root -g` or the npx cache), `gofmt -e`, `rustfmt --emit stdout`,
-javac's parse phase, `dart format`, `swiftc -parse`, `protoc`, graphql-core, Python `ast`, and
-JSON / TOML / XML / YAML readers. Each checker first has to reject a broken file (the control). Kotlin and C# have no parse-only toolchain, and
+javac's parse phase, `dart format`, `swiftc -parse`, `protoc`, graphql-core, `solc --stop-after
+parsing`, `go work edit -json`, Python `ast`, and JSON / TOML / XML / YAML readers. Each checker first has to reject a broken file (the control). Kotlin and C# have no parse-only toolchain, and
 an absent one is skipped; skips are counted on
 `[sibyl] syntax checked=<n> skipped=<m> (<lang>:<files> <reason>, ..)`. Temporary trees go
 under `$SIBYL_TMP` (default `~/.cache/glia-sibyl-test/`).

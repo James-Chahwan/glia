@@ -10,7 +10,21 @@ with their expected answers by construction.
 stderr. `render` writes, per case, DIR/<id>/expected.json and each repo of the case as a git
 repository with three commits, P (base), S (the server renamed the field) and C (the client
 followed), each also at refs/sibyl/<state>; `--trees` writes plain DIR/<id>/<state>/<repo>/
-trees instead. No glia runs here: run.py (FH.11b) builds and grades the rendered cases."""
+trees instead. No glia runs here: run.py (FH.11b) builds and grades the rendered cases.
+
+`evm` (FH.11c) is an OPT-IN transport (`OPT_IN_TRANSPORTS`): `--transports evm` (or a list naming
+it) covers and renders it, but it is not in `AXES["transport"]`, the default run.py and the cohort
+gate (scripts/cohort-gate.sh) read. run.py's matrix-cell table `MECH` is keyed by transport and
+its `LANG` by client / server value, and neither has a row for `evm`, `go` or `solidity`, so a
+default run holding evm cases would stop at a KeyError. Removal path: once run.py carries
+`MECH["evm"]` and `LANG["go"]` / `LANG["solidity"]`, move "evm" from OPT_IN_TRANSPORTS into
+AXES["transport"] and rebaseline the cohort gate's Sibyl cells (`cohort-gate.sh baseline`).
+
+A transport module may declare `VALUES`, the client / server values its templates render (evm:
+clients ts and go, server solidity). A value no default transport renders (`go`, `solidity`)
+joins an axis only when a selected transport declares it, so a cover without evm is the cover
+FH.11a / FH.11b wrote, case for case; `unrendered()` turns each (transport, value) a module does
+not render into a forbidden pair beside the UNEXPRESSIBLE ones."""
 
 import argparse
 import json
@@ -81,20 +95,64 @@ UNEXPRESSIBLE = [
 ]
 
 
+# Transports gen.py covers and renders only when asked by name (see the module doc).
+OPT_IN_TRANSPORTS = ["evm"]
+ALL_TRANSPORTS = AXES["transport"] + OPT_IN_TRANSPORTS
+# The axes a template module may narrow with `VALUES`.
+VALUE_AXES = ("client", "server")
+
+
+def values_of(transport, axis):
+    """The `axis` values `transport`'s templates render: its module's VALUES, else AXES'."""
+    mod = templates.TRANSPORTS[transport]
+    return list(getattr(mod, "VALUES", {}).get(axis) or AXES[axis])
+
+
+def all_values(axis):
+    """Every value of `axis` some transport renders: AXES' first, then each module's extras in
+    ALL_TRANSPORTS order."""
+    if axis == "transport":
+        return list(ALL_TRANSPORTS)
+    out = list(AXES[axis])
+    for t in ALL_TRANSPORTS:
+        out += [v for v in values_of(t, axis) if v not in out]
+    return out
+
+
+def unrendered():
+    """((transport, t), (axis, v), why) for every client / server value some transport renders
+    and `t`'s templates do not."""
+    rows = []
+    for t in ALL_TRANSPORTS:
+        for axis in VALUE_AXES:
+            mine = values_of(t, axis)
+            rows += [(("transport", t), (axis, v), f"the {t} templates render no {axis} {v}")
+                     for v in all_values(axis) if v not in mine]
+    return rows
+
+
 def unexpressible():
     rows = list(UNEXPRESSIBLE)
     for mod in templates.TRANSPORTS.values():
         rows += list(getattr(mod, "UNEXPRESSIBLE", []))
-    return rows
+    return rows + unrendered()
 
 
 def axes_for(transports):
-    bad = [t for t in transports if t not in AXES["transport"]]
+    bad = [t for t in transports if t not in ALL_TRANSPORTS]
     if bad or not transports:
         raise SystemExit(f"[sibyl] unknown transports {bad or transports}; "
-                         f"known: {', '.join(AXES['transport'])}")
-    return {k: (sorted(transports, key=AXES["transport"].index) if k == "transport" else list(v))
-            for k, v in AXES.items()}
+                         f"known: {', '.join(ALL_TRANSPORTS)}")
+    out = {}
+    for k in AXES:
+        if k == "transport":
+            out[k] = sorted(transports, key=ALL_TRANSPORTS.index)
+        elif k in VALUE_AXES:
+            held = {v for t in transports for v in values_of(t, k)}
+            out[k] = [v for v in all_values(k) if v in held]
+        else:
+            out[k] = list(AXES[k])
+    return out
 
 
 class Cover:

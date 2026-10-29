@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Hermetic tests for bench/sibyl/gen.py (FH.11a) and run.py (FH.11b): the cover holds every
+"""Hermetic tests for bench/sibyl/gen.py (FH.11a, FH.11c) and run.py (FH.11b): the cover holds every
 expressible axis pair and no unexpressible one, every transport's cases render deterministically
 with their drift by construction, the git form has P / S / C, every rendered file parses where a
 parse-only toolchain is present (each checker first proven to reject a broken file), and run.py
-grades a case end to end against a canned glia. No real glia, no network.
+grades a case end to end against a canned glia; the opt-in evm transport (FH.11c) renders its
+drift by construction and leaves every default cover as it was. No real glia, no network.
 
   python3 bench/sibyl/test_gen.py
 
@@ -29,9 +30,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import gen  # noqa: E402
+from templates import evm  # noqa: E402
 from templates.common import NEW, OLD  # noqa: E402
 
 ALL = ",".join(gen.AXES["transport"])
+EVERY = ",".join(gen.ALL_TRANSPORTS)
 
 
 def tmpdir():
@@ -86,6 +89,57 @@ class CoverTest(unittest.TestCase):
     def test_all_transport_cover_holds_every_pair(self):
         self.check_cover(ALL)
 
+    def test_evm_cover_holds_every_pair(self):
+        cases = self.check_cover("evm")
+        for c in cases:
+            ax = c["axes"]
+            self.assertEqual(ax["transport"], "evm")
+            self.assertIn(ax["client"], ("ts", "go"), c["id"])
+            self.assertEqual(ax["server"], "solidity", c["id"])
+            self.assertNotEqual(ax["wiring_source"], "enum-prefix", c["id"])
+            self.assertNotEqual(ax["contract"], "declared-type", c["id"])
+        # every expressible value appears; each drift kind is exercised
+        for k, vs in gen.axes_for(["evm"]).items():
+            held = {v for v in vs if any((k, v) in p for p in brute_pairs(
+                gen.axes_for(["evm"]), [(a, b) for a, b, _ in gen.unexpressible()]))}
+            self.assertEqual({c["axes"][k] for c in cases}, held, k)
+        self.assertEqual({evm.drift_of(c) for c in cases}, set(evm.DRIFTS))
+
+    def test_every_transport_cover_holds_every_pair(self):
+        cases = self.check_cover(EVERY)
+        evm_cases = [c for c in cases if c["axes"]["transport"] == "evm"]
+        self.assertTrue(evm_cases)
+        for c in cases:
+            on_chain = c["axes"]["transport"] == "evm"
+            self.assertEqual(c["axes"]["server"] == "solidity", on_chain, c["id"])
+            if c["axes"]["client"] == "go":
+                self.assertTrue(on_chain, c["id"])
+
+    def test_opt_in_leaves_default_axes(self):
+        """evm's values (go, solidity) join an axis only when evm is selected, so the default
+        covers (run.py's and the cohort gate's) are the ones FH.11a / FH.11b wrote."""
+        self.assertNotIn("evm", gen.AXES["transport"])
+        self.assertIn("evm", gen.ALL_TRANSPORTS)
+        for ts in [gen.AXES["transport"]] + [[t] for t in gen.AXES["transport"]]:
+            axes = gen.axes_for(ts)
+            for k in ("client", "server"):
+                self.assertEqual(axes[k], [v for v in gen.AXES[k]
+                                           if v in set(gen.values_of(ts[0], k))
+                                           or len(ts) > 1], (ts, k))
+            self.assertNotIn("go", axes["client"])
+            self.assertNotIn("solidity", axes["server"])
+        self.assertEqual(gen.axes_for(["evm"])["client"], ["ts", "go"])
+        self.assertEqual(gen.axes_for(gen.ALL_TRANSPORTS)["client"], gen.AXES["client"] + ["go"])
+
+    def test_opt_in_matches_run_tables(self):
+        """evm stays out of the default run while run.py's cell tables have no row for it; once
+        run.py gains MECH["evm"] / LANG["go"] / LANG["solidity"], evm moves into AXES["transport"]
+        (gen.py's module doc) and this test says so."""
+        import run
+        ready = "evm" in run.MECH and {"go", "solidity"} <= set(run.LANG)
+        self.assertEqual(ready, "evm" in gen.AXES["transport"],
+                         "run.py's MECH / LANG and gen.AXES['transport'] disagree on evm")
+
     def test_cover_is_deterministic_and_seeded(self):
         a = gen.cover(["rest"], quiet=True)
         self.assertEqual(a, gen.cover(["rest"], quiet=True))
@@ -105,17 +159,33 @@ class CoverTest(unittest.TestCase):
             gen.render_case({"id": "x", "axes": {"transport": "carrier-pigeon"}})
 
     def test_every_transport_has_templates(self):
-        self.assertEqual(sorted(gen.templates.TRANSPORTS), sorted(gen.AXES["transport"]))
+        self.assertEqual(sorted(gen.templates.TRANSPORTS), sorted(gen.ALL_TRANSPORTS))
+
+    def test_marker_names_evm(self):
+        r = subprocess.run([sys.executable, str(HERE / "gen.py"), "cover", "--transports", EVERY],
+                           capture_output=True, text=True, check=True)
+        m = re.search(r"^\[sibyl\] cover cases=(\d+) pairs=(\d+)/(\d+) "
+                      r"transports=rest,grpc,graphql,queue,websocket,evm( |$)", r.stderr, re.M)
+        self.assertIsNotNone(m, r.stderr)
+        self.assertEqual(m.group(2), m.group(3))
 
     def test_readme_lists_axes_and_unexpressible_pairs(self):
         text = (HERE / "README.md").read_text()
-        for axis, values in gen.AXES.items():
+        for axis in gen.AXES:
             self.assertIn(f"`{axis}`", text)
-            for v in values:
+            for v in gen.all_values(axis):
                 self.assertIn(f"`{v}`", text, f"README misses {axis} value {v}")
+        rendered = set(gen.unrendered())
         for a, b, _ in gen.unexpressible():
+            if (a, b, _) in rendered:
+                continue
             self.assertRegex(text, rf"`{re.escape(a[1])}`[^\n]*`{re.escape(b[1])}`",
                              f"README misses unexpressible {a} x {b}")
+        for t in gen.ALL_TRANSPORTS:  # a transport that narrows its values says which
+            for axis, vs in getattr(gen.templates.TRANSPORTS[t], "VALUES", {}).items():
+                self.assertRegex(text, rf"`{t}`[^\n]*{axis}[^\n]*"
+                                 + "".join(rf"[^\n]*`{re.escape(v)}`" for v in vs),
+                                 f"README misses {t}'s {axis} values")
 
 
 SPELL_OLD = OLD.spellings()
@@ -234,6 +304,109 @@ class RenderTest(unittest.TestCase):
                 # A SwiftPM app reaches its local package by path; there is no root manifest.
                 if c["axes"]["client"] != "swift":
                     self.assertTrue(any("/" not in f for f in files), (c["id"], "root manifest"))
+
+
+class EvmTest(unittest.TestCase):
+    """The evm transport's renders: the contract drifts one way per case at S, the client follows
+    at C, and the expected answer is read off the renders."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = gen.cover(["evm"], quiet=True)
+        cls.renders = [(c, gen.render_case(c)) for c in cls.cases]
+
+    def test_render_is_deterministic(self):
+        for c, r in self.renders:
+            self.assertEqual(gen.render_case(c), r, c["id"])
+
+    def test_expected_by_construction(self):
+        for c, (states, exp) in self.renders:
+            cid, kind = c["id"], exp["drift"]["kind"]
+            self.assertEqual(kind, evm.drift_of(c))
+            self.assertEqual(exp["transport"], "evm")
+            self.assertEqual(exp["pair"]["category"], "RPC_CALLS")
+            self.assertEqual(exp["exchange"]["procedure"], "evm:Escrow.deposit")
+            self.assertTrue(re.search(exp["exchange"]["match"][0], "evm:Escrow.deposit"))
+            self.assertFalse(re.search(exp["exchange"]["match"][0], "evm:Escrow.depositAll"))
+            cl, srv = exp["pair"]["client"], exp["pair"]["server"]
+            for state in ("P", "S", "C"):
+                self.assertIn(cl["file"], states[state][cl["repo"]], cid)
+                self.assertIn(exp["reader"]["file"], states[state][cl["repo"]], cid)
+                sol = states[state][srv["repo"]][srv["route_file"]]
+                self.assertIn("function deposit(address payee) external payable", sol, cid)
+                # the pair's call names deposit in every state: it never drifts
+                self.assertRegex(states[state][cl["repo"]][cl["file"]],
+                                 r"""\.deposit\(|['"]deposit['"]""", cid)
+            self.assertEqual({e["category"] for e in exp["edges"]}, {"RPC_CALLS", "EVENT_FLOWS"})
+            sp_p, sp_s = (states[s][srv["repo"]][srv["route_file"]] for s in ("P", "S"))
+            new, old = exp["drift"]["new"], exp["drift"]["old"]
+            if kind == "fn_rename":
+                self.assertIn("function settle(", sp_s)
+                self.assertNotIn("function release(", sp_s)
+            elif kind == "event_rename":
+                self.assertIn("event Settled(", sp_s)
+                self.assertNotIn("Released", sp_s)
+            else:
+                self.assertIn("bytes32 memo", sp_s)
+                self.assertNotIn("memo", sp_p)
+                self.assertEqual(exp["drift"]["arity"], {"old": 2, "new": 3})
+            self.assertEqual(exp["drift"]["server_files"],
+                             [{"repo": srv["repo"], "file": srv["route_file"]}], cid)
+            files = exp["drift"]["client_files"]
+            self.assertTrue(files, cid)
+            self.assertIn(cl, files, cid)
+            stale = re.compile(r"Released\b" if kind == "event_rename" else r"\b[Rr]elease\b")
+            for ref in files:
+                self.assertEqual(ref["repo"], cl["repo"], cid)
+                s_text = states["S"][ref["repo"]][ref["file"]]
+                c_text = states["C"][ref["repo"]][ref["file"]]
+                self.assertNotEqual(s_text, c_text)
+                if kind != "arity":
+                    self.assertFalse(stale.search(c_text), (cid, ref, "C still holds " + old))
+                    self.assertIn(new.lower(), c_text.lower(), (cid, ref))
+                else:
+                    self.assertRegex(c_text, r"(?i)memo", (cid, ref))
+            # the client and contracts do not change from P to S on the client's side
+            self.assertEqual(states["P"][cl["repo"]].get(cl["file"]),
+                             states["S"][cl["repo"]].get(cl["file"]), cid)
+            sites = exp["drift"]["client_sites"]
+            self.assertTrue(sites, cid)
+            for site in sites:
+                lines = states["S"][site["repo"]][site["file"]].splitlines()
+                self.assertEqual(lines[site["line"] - 1].strip(), site["text"], cid)
+                self.assertTrue(stale.search(site["text"]), (cid, site))
+            self.assertIn(cl["file"], {s["file"] for s in sites}, cid)
+
+    def test_layouts(self):
+        for c, (states, exp) in self.renders:
+            pk, files = c["axes"]["packaging"], None
+            repos = sorted(states["P"])
+            self.assertEqual(repos, ["client", "server"] if pk == "multi-repo" else ["repo"])
+            files = states["P"]["repo"] if pk != "multi-repo" else states["P"]["client"]
+            if pk == "workspace":
+                root = "go.work" if c["axes"]["client"] == "go" else "pnpm-workspace.yaml"
+                self.assertIn(root, files, c["id"])
+                self.assertTrue(exp["reader"]["file"].startswith("apps/web/"), c["id"])
+            manifest = "go.mod" if c["axes"]["client"] == "go" else "package.json"
+            self.assertTrue(any(f.endswith(manifest) for f in files), c["id"])
+            self.assertTrue(exp["pair"]["server"]["route_file"].endswith(
+                "contracts/Escrow.sol"), c["id"])
+
+    def test_abi_forms(self):
+        """Each `contract` value writes the ABI form the module doc names."""
+        for c, (states, exp) in self.renders:
+            files = states["P"][exp["pair"]["client"]["repo"]]
+            text = "\n".join(files.values())
+            form, lang = c["axes"]["contract"], c["axes"]["client"]
+            if form == "generated":
+                self.assertTrue("Escrow__factory" in text if lang == "ts"
+                                else "Code generated - DO NOT EDIT." in text, c["id"])
+            elif form == "schema-object":
+                self.assertTrue("escrowAbi" in text if lang == "ts"
+                                else any(f.endswith("chain/abi.go") for f in files), c["id"])
+            else:
+                self.assertTrue("'function deposit(address payee) payable'" in text
+                                if lang == "ts" else "const EscrowABI = `[" in text, c["id"])
 
 
 class GitTest(unittest.TestCase):
@@ -362,6 +535,27 @@ class RunTest(unittest.TestCase):
                                  (case["id"], row["evidence"]))
                 self.assertTrue(row["pass"])
                 self.assertNotIn("errors", row)
+
+    @unittest.skipUnless(shutil.which("git"), "git absent")
+    def test_evm_case_grades_with_run_tables(self):
+        """An evm case follows run.py's grading interface: with the cell-table rows run.py does
+        not have yet (gen.py's module doc), a right answer passes every check."""
+        from unittest import mock
+        cases = gen.cover(["evm"], quiet=True)
+        for pack in ("single", "multi-repo"):
+            case = next(c for c in cases if c["axes"]["packaging"] == pack)
+            _, exp = gen.render_case(case)
+            self.answer(exp)
+            # the canned pair names the procedure the way glia does
+            q = json.loads((self.answers / "query.json").read_text())
+            q["results"][0]["values"][1]["node"]["qname"] = exp["exchange"]["procedure"]
+            (self.answers / "query.json").write_text(json.dumps(q))
+            with mock.patch.dict(self.R.MECH, {"evm": ("evm", "evm")}), \
+                    mock.patch.dict(self.R.LANG, {"go": "go", "solidity": "solidity"}):
+                row = self.R.run_case(self.glia, case, self.tmp / "work")
+            self.assertEqual(row["checks"], {c: True for c in self.R.CHECKS},
+                             (case["id"], row["evidence"]))
+            self.assertIn(row["cells"][0].split("/")[1], {"evm"})
 
     @unittest.skipUnless(shutil.which("git"), "git absent")
     def test_each_check_fails_alone(self):
@@ -508,6 +702,8 @@ class Checker:
                 "kotlin": "no parse-only kotlin toolchain",
                 "csharp": "no parse-only C# toolchain",
                 "proto": None if shutil.which("protoc") else "protoc absent",
+                "solidity": None if shutil.which("solc") else "solc absent",
+                "gowork": None if shutil.which("go") else "go absent",
                 "graphql": None if _has_module("graphql") else "graphql-core absent",
                 "yaml": None if _has_module("yaml") else "PyYAML absent"}
         return need.get(lang)
@@ -525,6 +721,12 @@ class Checker:
         if lang == "gomod":  # `go mod edit -json` parses one go.mod, offline
             return self._each(paths, lambda p: subprocess.run(
                 ["go", "mod", "edit", "-json", p], capture_output=True, check=True, env=OFFLINE))
+        if lang == "gowork":  # `go work edit -json` parses one go.work, offline
+            return self._each(paths, lambda p: subprocess.run(
+                ["go", "work", "edit", "-json", p], capture_output=True, check=True, env=OFFLINE))
+        if lang == "solidity":  # each file alone: solc parses, no imports to resolve
+            return self._each(paths, lambda p: subprocess.run(
+                ["solc", "--stop-after", "parsing", p], capture_output=True, check=True))
         if lang == "yaml":
             import yaml
             return self._each(paths, lambda p: yaml.safe_load(Path(p).read_text()))
@@ -573,12 +775,14 @@ def lang_of(path):
     name = Path(path).name
     if name.endswith(".gradle.kts") or name.endswith(".kt"):
         return "kotlin"
+    if name == "go.work":
+        return "gowork"
     ext = Path(path).suffix
     return {".ts": "ts", ".go": "go", ".rs": "rust", ".java": "java", ".dart": "dart",
             ".swift": "swift", ".py": "python", ".cs": "csharp", ".json": "json",
             ".toml": "toml", ".csproj": "xml", ".yaml": "yaml", ".yml": "yaml",
             ".mod": "gomod", ".proto": "proto", ".graphqls": "graphql", ".graphql": "graphql",
-            ".gql": "graphql"}.get(ext)
+            ".gql": "graphql", ".sol": "solidity"}.get(ext)
 
 
 # A file each checker must reject: the control that proves a check is not a pass-through.
@@ -597,6 +801,8 @@ BROKEN = {
     "yaml": ("bad.yaml", "a: [1,\n"),
     "proto": ("bad.proto", 'syntax = "proto3";\nmessage M { string a = ; }\n'),
     "graphql": ("bad.graphqls", "type Query {\n  user(id: ID!: User\n}\n"),
+    "gowork": ("go.work", "go 1.22\n\nuse (\n"),
+    "solidity": ("Bad.sol", "pragma solidity ^0.8.24;\ncontract Bad { function f( {} }\n"),
 }
 
 
@@ -606,7 +812,7 @@ class SyntaxTest(unittest.TestCase):
         try:
             chk = Checker(work)
             by_lang = {}
-            for i, c in enumerate(every_case()):
+            for i, c in enumerate(every_case() + gen.cover(["evm"], quiet=True)):
                 states, _ = gen.render_case(c)
                 for state, by_repo in states.items():
                     for repo, files in by_repo.items():
