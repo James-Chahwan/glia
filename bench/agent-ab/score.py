@@ -9,11 +9,12 @@ task-cluster bootstrap, the markdown report and baseline.json.
 
 `score <run_id>` reads ${GLIA_AGENT_AB_DIR:-~/.cache/glia-agent-ab}/runs/<id>/
 (meta.json, sessions.jsonl), the patches under DIR/patches/<id>/ and the task rows
-in tasks/. `--out-sessions` writes the per-session metric rows (no transcript,
+in tasks/ of the repos the run pinned (meta.json `tasks`: a `run.py run --only` run
+pins its own repos, as `run.py report` reads them). `--out-sessions` writes the per-session metric rows (no transcript,
 patch or path outside the task repo), and `--from-metrics` scores from such a
 file alone, so a committed metrics file reproduces the committed baseline byte
 for byte. Markers on stdout: `[agent-ab] score sessions=<n> excluded=<k>
-tasks=<t>` and, per arm and metric, `[agent-ab] compare arm=<a> metric=<m>
+tasks=<t> pairs=<a-b,..|->` and, per arm and metric, `[agent-ab] compare arm=<a> metric=<m>
 diff=<d> ci=[lo,hi] verdict=<v>`. Stdlib only.
 """
 import argparse
@@ -38,7 +39,9 @@ DIRECTION = {"solved": 1, "file_recall": 1, "file_precision": 1, "line_overlap":
              "usd": -1, "turns": -1, "wall_s": -1}
 METRICS = list(DIRECTION) + ["glia_calls"]  # glia_calls is reported, never judged
 QUALITY = ("solved", "file_recall", "line_overlap")
-PAIRS = (("g052", "none"), ("g053", "none"), ("g053", "g052"))
+# The arm pairs scored when both arms ran: FH.13's g054 first (as run.py's PROBE_PAIRS).
+PAIRS = (("g054", "none"), ("g054", "g053"), ("g052", "none"), ("g053", "none"),
+         ("g053", "g052"))
 RESAMPLES, SEED, WIDEN, MIN_SPLIT = 2000, 20261023, 3, 5
 SCHEMA = 1
 
@@ -158,13 +161,35 @@ def session_metrics(row, task, patch_text):
 
 
 # --- reading a run -------------------------------------------------------------
+def pinned_tasks(meta, repos_path, tasks_dir):
+    """run.load_tasks over the repos the run pinned (meta `tasks` labels), in repos.json
+    order: a repo the run did not pin is never read, and a pinned one repos.json lacks
+    refuses."""
+    labels = set(meta.get("tasks") or {})
+    if not labels:
+        raise ScoreError("refused: the run's meta.json pins no task files")
+    repos = tasks.load_repos(repos_path)
+    missing = sorted(labels - {r["label"] for r in repos})
+    if missing:
+        raise ScoreError(f"refused: the run pins task files of repos {repos_path} lacks "
+                         f"({', '.join(missing)})")
+    out, shas = [], {}
+    for repo in repos:
+        if repo["label"] not in labels:
+            continue
+        data = (Path(tasks_dir) / f"{repo['label']}.jsonl").read_bytes()
+        shas[repo["label"]] = run.sha256(data)
+        out += [(repo, json.loads(line)) for line in data.decode().splitlines() if line.strip()]
+    return out, shas
+
+
 def metrics_from_run(run_id, d, repos_path, tasks_dir):
     """(meta, metric rows) of DIR/runs/<run_id>, step 1 over every session row."""
     run_dir = d / "runs" / run_id
     meta = run.read_json(run_dir / "meta.json")
     if meta is None:
         raise ScoreError(f"no run meta at {run_dir / 'meta.json'}")
-    task_list, shas = run.load_tasks(repos_path, tasks_dir)
+    task_list, shas = pinned_tasks(meta, repos_path, tasks_dir)
     if shas != meta.get("tasks"):
         changed = sorted(k for k in set(shas) | set(meta.get("tasks") or {})
                          if shas.get(k) != (meta.get("tasks") or {}).get(k))
@@ -324,7 +349,8 @@ def score(head, rows):
     scored = [r for r in rows if r["metrics"] is not None]
     excluded = Counter(r["terminated"] for r in rows if r["metrics"] is None)
     marker = (f"[agent-ab] score sessions={len(scored)} excluded={sum(excluded.values())} "
-              f"tasks={len({r['task_id'] for r in scored})}")
+              f"tasks={len({r['task_id'] for r in scored})} "
+              f"pairs={','.join(f'{a}-{b}' for a, b in pairs) or '-'}")
     return baseline, render_md(head, rows, tm, arms, by_subset, subs, excluded), marker
 
 

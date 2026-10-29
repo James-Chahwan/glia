@@ -135,7 +135,12 @@ PLAN = [
 
 
 @contextlib.contextmanager
-def canned_run():
+def canned_run(rename=None, only=None):
+    """The canned run r1. `rename` maps arm names (g052 -> g054 makes a g054 run);
+    `only` pins those repo labels alone, as `run.py run --only` does."""
+    rename = rename or {}
+    plan = [({**row, "arm": rename.get(row["arm"], row["arm"])}, patch) for row, patch in PLAN
+            if only is None or row["repo"] in only]
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         d, tdir = tmp / "dir", tmp / "tasks"
@@ -144,13 +149,16 @@ def canned_run():
         (tdir / "alpha.jsonl").write_text(json.dumps(TASK_A, sort_keys=True) + "\n")
         (tdir / "beta.jsonl").write_text(json.dumps(TASK_R, sort_keys=True) + "\n")
         _, shas = run.load_tasks(tmp / "repos.json", tdir)
+        if only is not None:
+            shas = {k: v for k, v in shas.items() if k in only}
+        arms = {"g052": {"sha": "1" * 40, "version": "glia 0.5.2"},
+                "g053": {"sha": "2" * 40, "version": "glia 0.5.3"}}
         run.write_json(d / "runs" / "r1" / "meta.json", {
             "config": "c" * 64, "prompt": "p" * 64, "tasks": shas,
             "claude_version": "2.1.310 (Claude Code)", "model": "claude-opus-5-5",
-            "arms": {"g052": {"sha": "1" * 40, "version": "glia 0.5.2"},
-                     "g053": {"sha": "2" * 40, "version": "glia 0.5.3"}}})
+            "arms": {rename.get(a, a): m for a, m in arms.items()}})
         lines = []
-        for row, patch in PLAN:
+        for row, patch in plan:
             row = dict(row)
             if patch is not None:
                 p = d / "patches" / "r1" / f"{row['task_id']}.{row['arm']}.{row['rep']}.diff"
@@ -234,7 +242,8 @@ def test_score_marker_and_determinism():
         out = [str(tmp / n) for n in ("x.md", "x.json", "s.jsonl", "x2.md", "x2.json", "y.json")]
         rc, so, _ = cli(base + ["score", "r1", "--out-md", out[0], "--out-json", out[1],
                                 "--out-sessions", out[2]])
-        assert rc == 0 and so.strip() == "[agent-ab] score sessions=6 excluded=4 tasks=2", so
+        assert rc == 0 and so.strip() == ("[agent-ab] score sessions=6 excluded=4 tasks=2 "
+                                          "pairs=g052-none,g053-none,g053-g052"), so
         rc, _, _ = cli(base + ["score", "r1", "--out-md", out[3], "--out-json", out[4]])
         assert rc == 0
         assert Path(out[0]).read_bytes() == Path(out[3]).read_bytes()
@@ -318,6 +327,62 @@ def test_refuses_changed_tasks():
         (Path(base[3]) / "alpha.jsonl").write_text(json.dumps(TASK_A) + "\n")
         rc, _, err = cli(base + ["score", "r1"])
         assert rc == 2 and "alpha" in err, err
+
+
+def test_g054_pairs():
+    # FH.13's arm g054 against none and against g053, beside g053-none; no g052 pair.
+    assert ("g054", "none") in score.PAIRS and ("g054", "g053") in score.PAIRS
+    with canned_run(rename={"g052": "g054"}) as (tmp, base):
+        x = str(tmp / "x.json")
+        rc, so, err = cli(base + ["score", "r1", "--out-json", x, "--out-md", str(tmp / "x.md")])
+        assert rc == 0, err
+        assert so.strip() == ("[agent-ab] score sessions=6 excluded=4 tasks=2 "
+                              "pairs=g054-none,g054-g053,g053-none"), so
+        b = json.loads(Path(x).read_text())
+        assert set(b["pairs"]) == {"g054-none", "g054-g053", "g053-none"}
+        assert set(b["pairs_by_subset"]["untuned"]) == set(b["pairs"])
+        # g054 holds what g052 held: partial on alpha against none's mean of 0.5.
+        assert b["pairs"]["g054-none"]["solved"]["diff"] == -0.5
+        md = (tmp / "x.md").read_text()
+        assert "- g054-none pooled: " in md and "- g054-g053 pooled: " in md
+        assert "- g053-g052 pooled" not in md and "- g053-g052 untuned" not in md
+
+
+def test_pairs_marker_with_no_pair():
+    _, _, marker = score.score({"run_id": "r", "model": None, "claude_version": None,
+                                "glia": {}, "tasks": {}, "prompt_sha256": None,
+                                "config_sha256": None, "date": "2026-10-30"}, [])
+    assert marker == "[agent-ab] score sessions=0 excluded=0 tasks=0 pairs=-", marker
+
+
+def test_scores_only_the_runs_pinned_tasks():
+    # A run made with --only alpha pins alpha.jsonl alone: beta's task file may have
+    # moved since (or be gone) without refusing, and beta's rows are not read.
+    with canned_run(only={"alpha"}) as (tmp, base):
+        x = str(tmp / "x.json")
+        (Path(base[3]) / "beta.jsonl").write_text(json.dumps(TASK_R) + "\n")
+        rc, so, err = cli(base + ["score", "r1", "--out-json", x])
+        assert rc == 0, err
+        assert so.startswith("[agent-ab] score sessions=4 excluded=2 tasks=1 "), so
+        b = json.loads(Path(x).read_text())
+        assert set(b["fingerprints"]["tasks"]) == {"alpha.jsonl"}
+        assert {r["task_id"] for r in b["per_task"]} == {TASK_A["id"]}
+        (Path(base[3]) / "beta.jsonl").unlink()
+        rc, so2, err = cli(base + ["score", "r1", "--out-json", str(tmp / "y.json")])
+        assert rc == 0 and so2 == so, err
+        assert Path(x).read_bytes() == (tmp / "y.json").read_bytes()
+        # The pinned file itself still refuses when it moved.
+        (Path(base[3]) / "alpha.jsonl").write_text(json.dumps(TASK_A) + "\n")
+        rc, _, err = cli(base + ["score", "r1"])
+        assert rc == 2 and "alpha" in err, err
+
+
+def test_refuses_a_pinned_repo_missing_from_repos():
+    with canned_run() as (tmp, base):
+        repos = {"repos": [r for r in REPOS["repos"] if r["label"] == "alpha"]}
+        Path(base[1]).write_text(json.dumps(repos))
+        rc, _, err = cli(base + ["score", "r1"])
+        assert rc == 2 and "beta" in err and "repos" in err, err
 
 
 def test_after_gate_split_needs_both_sides():
