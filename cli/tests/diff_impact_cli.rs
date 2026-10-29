@@ -167,8 +167,19 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-/// `(qname, depth, seed)` per impact row of a JSON answer, sorted.
+/// `(qname, depth, seed)` per impact row of a JSON answer, sorted. FH.8c: a
+/// capped answer's slim row names its seed by `seed_index` into
+/// `impact.seeds`.
 fn rows(v: &Value) -> Vec<(String, u64, String)> {
+    let seed_of = |r: &Value| -> String {
+        match r["seed_index"].as_u64() {
+            Some(i) => v["impact"]["seeds"][i as usize]["qname"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            None => r["seed"].as_str().unwrap_or("").to_string(),
+        }
+    };
     let mut out: Vec<(String, u64, String)> = v["impact"]["results"]
         .as_array()
         .expect("impact.results")
@@ -177,7 +188,7 @@ fn rows(v: &Value) -> Vec<(String, u64, String)> {
             (
                 r["qname"].as_str().unwrap_or("").to_string(),
                 r["depth"].as_u64().unwrap_or(99),
-                r["seed"].as_str().unwrap_or("").to_string(),
+                seed_of(r),
             )
         })
         .collect();
@@ -239,8 +250,11 @@ fn diff_file_json() {
         .map(String::as_str)
         .collect();
     // FH.8: the null absence, the empty unresolved and an uncut answer's
-    // `truncated` are left out.
-    assert_eq!(impact_keys, ["files", "results", "seeds", "selection"]);
+    // `truncated` are left out; FH.8c: the overview's `areas` are in.
+    assert_eq!(
+        impact_keys,
+        ["areas", "files", "results", "seeds", "selection"]
+    );
     // EC.8: no record in the scratch repo: SELh0's fallback, logged once.
     assert_eq!(
         (
@@ -279,21 +293,41 @@ fn top_k_cuts_and_full_keeps_every_row() {
     assert_eq!(cut.status.code(), Some(0), "{}", stderr(&cut));
     let v: Value = serde_json::from_str(&stdout(&cut)).expect("valid JSON");
     assert_eq!(rows(&v), price_rows()[..1], "{v}");
+    // FH.8c: the cut names the next page (one area, so no scope).
     assert_eq!(
         v["impact"]["truncated"],
-        serde_json::json!({"results": 1, "seeds": 0}),
+        serde_json::json!({"results": 1, "seeds": 0, "next": {"offset": 1}}),
+        "{v}"
+    );
+    let areas = v["impact"]["areas"].as_array().expect("impact.areas");
+    assert_eq!(areas.len(), 1, "{v}");
+    assert_eq!(
+        (areas[0]["area"].as_str(), areas[0]["rows"].as_u64()),
+        (Some("shop"), Some(2)),
         "{v}"
     );
     let bytes = stdout(&cut).trim_end().len();
     assert!(
         stderr(&cut).lines().any(|l| l
             == format!(
-                "[answer-size] surface=diff_impact rows=2 shown=1 bytes={bytes} \
-                 seeds=1 seeds_shown=1 also_in_folded=0"
+                "[answer-size] surface=diff_impact rows=2 shown=1 offset=0 areas=1 \
+                 bytes={bytes} seeds=1 seeds_shown=1 also_in_folded=0"
             )),
         "{}",
         stderr(&cut)
     );
+    // FH.8c: --offset 1 is the second row; it conflicts with --full.
+    let next = run(&["--top-k", "1", "--offset", "1", "--json"]);
+    assert_eq!(next.status.code(), Some(0), "{}", stderr(&next));
+    let v: Value = serde_json::from_str(&stdout(&next)).expect("valid JSON");
+    assert_eq!(rows(&v), price_rows()[1..], "{v}");
+    assert_eq!(
+        v["impact"]["truncated"],
+        serde_json::json!({"results": 0, "seeds": 0, "offset": 1}),
+        "{v}"
+    );
+    let both = run(&["--full", "--offset", "1"]);
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
     let full = run(&["--full", "--json"]);
     assert_eq!(full.status.code(), Some(0), "{}", stderr(&full));
     let v: Value = serde_json::from_str(&stdout(&full)).expect("valid JSON");
@@ -301,7 +335,7 @@ fn top_k_cuts_and_full_keeps_every_row() {
     assert!(v["impact"].get("truncated").is_none(), "{v}");
     let table = run(&["--top-k", "1"]);
     assert!(
-        stdout(&table).contains("_(1 of 2 rows; --full lists every row)_"),
+        stdout(&table).contains("_(1 of 2 rows; next: --offset 1; --full lists every row)_"),
         "{}",
         stdout(&table)
     );

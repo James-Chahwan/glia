@@ -72,7 +72,18 @@
 //! list; FH.8b: a `changed` row that repeats a shown seed is `{id, change}`
 //! and a seed's `also_in` past three members folds, unless `--full`).
 //! stderr, per `--json`: `[answer-size] surface=review rows=<r> shown=<k>
-//! bytes=<b> seeds=<s> seeds_shown=<t> also_in_folded=<f>`.
+//! offset=<o> areas=<a> bytes=<b> seeds=<s> seeds_shown=<t>
+//! also_in_folded=<f>`.
+//!
+//! FH.8c, the overview answer (as `glia blast-radius`): `--max-impact`
+//! defaults to 25 (`DEFAULT_MAX_IMPACT`, it was 50), the impact seeds and the
+//! `changed` rows to 25 (`counts` stay uncut); the JSON's `impact.areas` maps
+//! every impact row by area with the `--scope` value that selects it,
+//! `impact.truncated.next` names the largest area and the next `--offset`,
+//! `--offset <N>` skips the first N impact rows, and the impact rows are
+//! slim unless `--full` (`seed_index`, no `name` repeating the qname's tail,
+//! a 4-digit `score`). The markdown adds `### Impact areas` after `###
+//! Impact` when the impact rows were cut.
 //!
 //! Fired-on markers: the engine's
 //! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
@@ -124,9 +135,13 @@ pub(crate) struct Args {
     /// Impact rows the review keeps (`counts.impact` stays the uncut total).
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_IMPACT)]
     max_impact: usize,
-    /// Keep every impact row, impact seed and test row: no `--max-impact` /
-    /// `--max-tests` cut and no seed cap.
-    #[arg(long, conflicts_with_all = ["max_impact", "max_tests"])]
+    /// Skip the first N impact rows of the ranked answer (the next page).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    offset: usize,
+    /// Keep every impact row, impact seed, changed row and test row, every
+    /// field whole: no `--max-impact` / `--max-tests` cut, no seed cap, no
+    /// areas, no slim rows.
+    #[arg(long, conflicts_with_all = ["max_impact", "max_tests", "offset"])]
     full: bool,
     /// The weakest pairing tier at which an inferred client <-> server model
     /// break fails the gate: fact (the default; every pairing glia 0.5.2
@@ -212,6 +227,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
+    engine.offset = args.offset;
     if args.full {
         lift_caps(&mut engine);
     }

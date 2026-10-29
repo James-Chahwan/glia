@@ -68,6 +68,7 @@ Flags most commands share:
 - `--with <repo>` (repeatable) merges more repos in, so links pair across them. With one service per repo, pass the others this way. Each row's file stays relative to its own repo's root.
 - `--scope <path-or-label>` narrows the answer within a repo.
 - The ranked walks also take `--top-k`, `--depth` and `--direction forward|backward|both`.
+- `blast-radius`, `diff-impact` and `review` answer with an overview by default: the ranked `files`, `areas` (every row grouped by sub-project or directory, with `rows`, `files`, `top_file` and the exact `scope` that selects it) and the top 25 rows. Read `areas` first, then ask for one area with `--scope <area's scope>` (`review` takes no `--scope`: ask `diff-impact` for the area), or page the whole answer with `--offset 25`; `truncated.next` names both. `--top-k <N>` sets the rows, `--full` returns every row and field whole.
 - `--no-collapse` (on `find`, `blast-radius`, `trace`, `flows`, `tests-for`, `serves` and `arch`) shows one row per copy instead of one per identity class.
 
 
@@ -79,6 +80,7 @@ Drop `--json` when you only read the answer: the table form is about half the si
 - `tier`: `fact` (read in the source), `derived` (paired by a resolver) or `heuristic` (a name match). Weigh the answer by it.
 - An empty answer carries `absence` with the reason and the edge kinds glia is known to miss; grep for those.
 - `live: false` (`⊘`) means no entry point reaches the node.
+- In the overview rows, `seed_index` points into `seeds` (a row whose seed is past the 25 shown keeps `seed`), and `name` is left out when it is the qname's last `::` segment.
 
 Every field, exit code and what each command writes: [reference.md](reference.md). Worked runs of every command, input and output: [examples.md](examples.md). Read them only when this page is not enough.
 

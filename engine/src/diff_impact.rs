@@ -89,7 +89,8 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, BlindCaveat};
 use crate::answers::{
-    AnswerSize, BlastOptions, BlastRadius, Located, Locator, SizedAnswer, blast_radius_seeded_on,
+    AnswerSize, BlastOptions, BlastRadius, DEFAULT_ANSWER_SEEDS, Located, Locator, SizedAnswer,
+    blast_radius_seeded_on,
 };
 use crate::delta::{DeltaEdge, RevDelta, graph_delta_vs_rev};
 use crate::health;
@@ -182,10 +183,14 @@ pub(crate) fn fold_seed_rows(changed: &mut [ChangedNode], impact: &BlastRadius) 
 /// `edges_added` / `edges_removed` / `unresolved_diff_files` when empty, and
 /// `impact` is [`BlastRadius`]'s compact form: its `results` and `seeds` cut
 /// to the caller's `top_k` (the CLI's and pyo3's default
-/// [`crate::answers::DEFAULT_ANSWER_ROWS`]) with `impact.truncated` counting
-/// the cut. FH.8b: `changed` rows that repeat a shown seed are folded
-/// ([`ChangedNode`]) and the seeds' `also_in` past three members
-/// (`BlastSeed`) when the impact is compact.
+/// [`crate::answers::DEFAULT_OVERVIEW_ROWS`], FH.8c) with `impact.truncated`
+/// counting the cut. FH.8b: `changed` rows that repeat a shown seed are
+/// folded ([`ChangedNode`]) and the seeds' `also_in` past three members
+/// (`BlastSeed`) when the impact is compact. FH.8c: the overview answer's
+/// `impact.areas`, slim rows and `impact.truncated.next` (`BlastRadius`),
+/// and a `top_k` cut keeps the first `min(top_k,
+/// DEFAULT_ANSWER_SEEDS)` `changed` rows, `changed_truncated` counting the
+/// rest.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DiffImpact {
@@ -194,6 +199,10 @@ pub struct DiffImpact {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     pub changed: Vec<ChangedNode>,
+    /// FH.8c: the `changed` rows a `top_k` cut left out. Not serialised when
+    /// 0 (always under `--full`).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub changed_truncated: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edges_added: Vec<DeltaEdge>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -347,9 +356,11 @@ pub(crate) fn diff_impact_from_delta_on(
         a.unparsed_files = rev.after.parse_errors.len();
     }
     fold_seed_rows(&mut changed, &impact);
+    let changed_truncated = cap_changed(&mut changed, opts);
     let answer = DiffImpact {
         base: Some(given),
         changed,
+        changed_truncated,
         edges_added,
         edges_removed,
         impact,
@@ -429,9 +440,11 @@ pub fn diff_impact_from_diff(
         blast_radius_seeded_on(merged, &seeds, opts, "diff_impact")
     };
     fold_seed_rows(&mut changed, &impact);
+    let changed_truncated = cap_changed(&mut changed, opts);
     let answer = DiffImpact {
         base: None,
         changed,
+        changed_truncated,
         edges_added: Vec::new(),
         edges_removed: Vec::new(),
         blind: health::blind_caveats(merged, "diff_impact", &health::blast_mechanisms(&impact)),
@@ -531,6 +544,7 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
         unresolved: Vec::new(),
         results: Vec::new(),
         files: Vec::new(),
+        areas: Vec::new(),
         selection: None,
         absence: Some(absence::empty(
             merged,
@@ -547,11 +561,25 @@ fn no_seed(merged: &MergedGraph, query: &str, note: String) -> BlastRadius {
     }
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// FH.8c: a `top_k` cut keeps the first `min(top_k, DEFAULT_ANSWER_SEEDS)`
+/// `changed` rows; returns how many it left out.
+fn cap_changed(changed: &mut Vec<ChangedNode>, opts: &BlastOptions) -> usize {
+    let Some(k) = opts.top_k else { return 0 };
+    let k = k.min(DEFAULT_ANSWER_SEEDS);
+    let cut = changed.len().saturating_sub(k);
+    changed.truncate(k);
+    cut
+}
+
 fn marker(mode: &str, a: &DiffImpact, seeds: usize) {
     eprintln!(
         "[diff-impact] mode={mode} base={} changed={} seeds={seeds} impact={} edges +{} -{} unresolved_files={}",
         a.base.as_deref().unwrap_or("-"),
-        a.changed.len(),
+        a.changed.len() + a.changed_truncated,
         a.impact.results.len(),
         a.edges_added.len(),
         a.edges_removed.len(),
@@ -710,9 +738,10 @@ diff --git a/shop/c.py b/shop/c.py\ndeleted file mode 100644\n--- a/shop/c.py\n+
         let v = serde_json::to_value(&cut).expect("serialises");
         assert_eq!(
             v["impact"]["truncated"],
-            serde_json::json!({"results": n - 2, "seeds": 0}),
+            serde_json::json!({"results": n - 2, "seeds": 0, "next": {"offset": 2}}),
             "{v}"
         );
+        assert!(v.get("changed_truncated").is_none(), "nothing cut: {v}");
         assert_eq!(cut.impact.rows_total(), n);
         // FH.8b: a capped answer's changed row that repeats a shown seed is
         // its id and change kind; the full row is under impact.seeds.
@@ -736,6 +765,21 @@ diff --git a/shop/c.py b/shop/c.py\ndeleted file mode 100644\n--- a/shop/c.py\n+
         );
         let full = serde_json::to_value(&all).expect("serialises");
         assert!(full["changed"][0]["qname"].is_string(), "uncut: {full}");
+        // FH.8c: a cut keeps the first min(top_k, DEFAULT_ANSWER_SEEDS)
+        // changed rows and counts the rest; the marker counts them all.
+        let list = diff_impact_from_diff(&m, "app.py\n", &BlastOptions::default());
+        let total = list.changed.len();
+        assert!(total > 2, "every node of the file: {total}");
+        let cut = diff_impact_from_diff(&m, "app.py\n", &opts);
+        assert_eq!(cut.changed.len(), 2);
+        assert_eq!(cut.changed_truncated, total - 2);
+        let v = serde_json::to_value(&cut).expect("serialises");
+        assert_eq!(v["changed_truncated"], total - 2, "{v}");
+        assert_eq!(
+            (cut.changed[0].id, cut.changed[1].id),
+            (list.changed[0].id, list.changed[1].id),
+            "the first rows"
+        );
         let missing = diff_impact_from_diff(&m, "gone.py\n", &BlastOptions::default());
         let v = serde_json::to_value(&missing).expect("serialises");
         assert_eq!(

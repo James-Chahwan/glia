@@ -29,7 +29,7 @@ use glia_engine::rank::{RankCache, Ranking};
 use glia_engine::{BlastOptions, answer_json};
 use glia_graph::MergedGraph;
 
-use crate::blast::{ranking_selected, reach_named, row_cap};
+use crate::blast::{Cap, ranking_selected, reach_named, row_cap};
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
@@ -84,7 +84,7 @@ impl RankKw {
 fn options(
     direction: &str,
     depth: usize,
-    top_k: Option<usize>,
+    cap: Cap,
     live_only: bool,
     scope: Option<&str>,
     rank: &RankKw,
@@ -92,7 +92,8 @@ fn options(
     let mut opts = BlastOptions::default();
     opts.direction = reach_named(direction)?;
     opts.depth = depth;
-    opts.top_k = top_k;
+    opts.top_k = cap.top_k;
+    opts.offset = cap.offset;
     opts.live_only = live_only;
     opts.scope = scope.map(str::to_string);
     opts.ranking = rank.ranking;
@@ -111,14 +112,14 @@ fn diff_answer(
     diff_text: &str,
     direction: &str,
     depth: usize,
-    top_k: Option<usize>,
+    cap: Cap,
     live_only: bool,
     scope: Option<&str>,
     rank: &RankKw,
 ) -> Result<DiffImpact, String> {
     // Collapsing with the graph's repo labels, so a collapsed row's `also_in`
     // names each repo by its label, not `repo#<id % 1000>` (DD.10).
-    let mut opts = options(direction, depth, top_k, live_only, scope, rank)?;
+    let mut opts = options(direction, depth, cap, live_only, scope, rank)?;
     opts.collapse = Collapse::with_labels(labels);
     Ok(diff_impact_from_diff(merged, diff_text, &opts))
 }
@@ -132,12 +133,12 @@ fn rev_answer(
     base: &str,
     direction: &str,
     depth: usize,
-    top_k: Option<usize>,
+    cap: Cap,
     live_only: bool,
     scope: Option<&str>,
     rank: &RankKw,
 ) -> Result<DiffImpact, String> {
-    let opts = options(direction, depth, top_k, live_only, scope, rank)?;
+    let opts = options(direction, depth, cap, live_only, scope, rank)?;
     diff_impact_vs_rev(repo_path, base, &opts)
 }
 
@@ -148,8 +149,12 @@ impl PyGraph {
     /// spanning each added line (a changed-file list: every node of each
     /// file) seeds ONE blast radius, `blast_radius`'s walk and ranking over
     /// all the seeds at once. `direction` ∈ {`forward`, `backward`, `both`},
-    /// `depth` hops, `top_k` rows (and seeds; default 200, `full=True` for
-    /// every one, FH.8), `live_only` and `scope` as in `blast_radius`. The
+    /// `depth` hops, `top_k` rows (and seeds and `changed` rows, at most 25;
+    /// default 25, FH.8c; `full=True` for every one, FH.8), `offset` (skip
+    /// the first impact rows, FH.8c), `live_only` and `scope` as in
+    /// `blast_radius`. FH.8c: unless `full`, `impact` is `blast_radius`'s
+    /// overview (`areas`, slim rows with `seed_index`, `truncated.next`) and
+    /// `changed_truncated` counts the `changed` rows cut. The
     /// dict leaves out null, empty and default fields (FH.8): `base` when
     /// `None`, the edge lists and `unresolved_diff_files` when empty, a
     /// `changed` row's `file` / `line` when null and `seed` when false, and
@@ -168,7 +173,7 @@ impl PyGraph {
     /// PyGraph's held ranking indexes; `ranking=None` (the default, EC.8)
     /// applies the repo's calibrated pick, else `ppr`, and `impact` gains
     /// `selection`. Raises ValueError on a bad `direction` or `ranking`.
-    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false))]
+    #[pyo3(signature = (diff_text, direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false, offset=0))]
     #[allow(clippy::too_many_arguments)]
     fn diff_impact(
         &self,
@@ -182,8 +187,9 @@ impl PyGraph {
         cochange: bool,
         top_files: usize,
         full: bool,
+        offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
+        let cap = row_cap(top_k, offset, full).map_err(PyValueError::new_err)?;
         let rank = RankKw::named(ranking, cochange, top_files, Some(self.rank.clone()))
             .map_err(PyValueError::new_err)?;
         let answer = diff_answer(
@@ -192,7 +198,7 @@ impl PyGraph {
             diff_text,
             direction,
             depth,
-            top_k,
+            cap,
             live_only,
             scope,
             &rank,
@@ -231,7 +237,7 @@ fn sized(answer: &DiffImpact) -> Result<String, serde_json::Error> {
 /// raises ValueError on a bad `direction` or `ranking` (before any build) or
 /// a git or build failure.
 #[pyfunction]
-#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false))]
+#[pyo3(name = "diff_impact_vs_rev", signature = (repo_path, base="HEAD", direction="both", depth=4, top_k=None, live_only=false, scope=None, ranking=None, cochange=true, top_files=10, full=false, offset=0))]
 #[allow(clippy::too_many_arguments)]
 fn diff_impact_vs_rev_py(
     repo_path: &str,
@@ -245,11 +251,12 @@ fn diff_impact_vs_rev_py(
     cochange: bool,
     top_files: usize,
     full: bool,
+    offset: usize,
 ) -> PyResult<Py<PyAny>> {
-    let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
+    let cap = row_cap(top_k, offset, full).map_err(PyValueError::new_err)?;
     let rank = RankKw::named(ranking, cochange, top_files, None).map_err(PyValueError::new_err)?;
     let answer = rev_answer(
-        repo_path, base, direction, depth, top_k, live_only, scope, &rank,
+        repo_path, base, direction, depth, cap, live_only, scope, &rank,
     )
     .map_err(PyValueError::new_err)?;
     Python::attach(|py| to_py(py, sized(&answer)))
@@ -365,7 +372,7 @@ mod tests {
             DIFF,
             "backward",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -417,7 +424,7 @@ mod tests {
             DIFF,
             "backward",
             1,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -437,7 +444,7 @@ mod tests {
             DIFF,
             "forward",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -450,18 +457,28 @@ mod tests {
             DIFF,
             "sideways",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
         )
         .expect_err("bad direction");
         assert!(err.contains("sideways"), "{err}");
-        let o =
-            options("both", 2, Some(3), true, Some("shop"), &RankKw::default()).expect("options");
+        let o = options(
+            "both",
+            2,
+            Cap {
+                top_k: Some(3),
+                offset: 1,
+            },
+            true,
+            Some("shop"),
+            &RankKw::default(),
+        )
+        .expect("options");
         assert_eq!(
-            (o.depth, o.top_k, o.live_only, o.scope.as_deref()),
-            (2, Some(3), true, Some("shop"))
+            (o.depth, o.top_k, o.offset, o.live_only, o.scope.as_deref()),
+            (2, Some(3), 1, true, Some("shop"))
         );
         assert_eq!(
             (o.ranking, o.select, o.top_files, o.rank_cache.is_none()),
@@ -474,7 +491,7 @@ mod tests {
             &built.repo_labels,
         ));
         let rank = RankKw::named(Some("bfs"), false, 3, Some(held.clone())).expect("bfs");
-        let o = options("both", 2, None, false, None, &rank).expect("options");
+        let o = options("both", 2, Cap::default(), false, None, &rank).expect("options");
         assert_eq!(
             (o.ranking.harness_name(), o.select, o.top_files),
             ("B0", false, 3)
@@ -511,7 +528,7 @@ mod tests {
             "HEAD",
             "backward",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -539,7 +556,7 @@ mod tests {
             "no-such-rev",
             "both",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -602,7 +619,7 @@ mod tests {
             &hunk,
             "both",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),
@@ -625,7 +642,7 @@ mod tests {
             "HEAD",
             "both",
             4,
-            None,
+            Cap::default(),
             false,
             None,
             &RankKw::default(),

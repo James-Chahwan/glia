@@ -87,14 +87,15 @@ fn several_qnames_are_one_radius() {
     // gain `files`, the measured file ranking, and (EC.8) `selection`, the
     // ranking that ordered the rows; the seeds' own file is never listed.
     // FH.8: the empty `unresolved` and `files`, the null `absence` and an
-    // uncut answer's `truncated` are left out.
+    // uncut answer's `truncated` are left out. FH.8c: the default answer is
+    // the overview, so it maps its rows by area.
     let keys: Vec<&str> = v
         .as_object()
         .expect("object")
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["results", "seeds", "selection"], "{v}");
+    assert_eq!(keys, ["areas", "results", "seeds", "selection"], "{v}");
     assert_eq!(
         v["selection"]["shape"], "k1",
         "both seeds are in app.py: {v}"
@@ -110,10 +111,12 @@ fn several_qnames_are_one_radius() {
         .iter()
         .find(|r| r["qname"] == "app::create_order")
         .expect("the shared caller");
+    // FH.8c: a slim row names its seed by index into `seeds`.
     assert_eq!(
-        create["seed"], "app::save",
+        create["seed_index"], 0,
         "the first seed's wave reaches it first: {v}"
     );
+    assert!(create.get("seed").is_none(), "{create}");
     assert!(
         rows.iter()
             .all(|r| r["qname"] != "app::save" && r["qname"] != "app::publish"),

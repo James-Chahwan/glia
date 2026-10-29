@@ -11,7 +11,10 @@ an empty `unresolved_diff_files` left out) and the impact's rows and seeds are
 cut to `top_k` (default 200) with `impact.truncated`; `full=True` keeps every
 one. FH.8b: in a capped dict a changed row that repeats a shown seed is
 {id, change} (its full row is that seed's under impact.seeds); full=True
-writes every changed row whole. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
+writes every changed row whole. FH.8c: `top_k` defaults to 25, the impact is
+blast_radius's overview (`areas`, `truncated.next`, slim rows naming their seed
+by `seed_index`), `changed` keeps 25 rows (`changed_truncated`), and `offset=`
+(last keyword) pages. `diff_impact_vs_rev` needs a `git` binary. Shared helpers:
 test_build.py."""
 from __future__ import annotations
 
@@ -31,7 +34,7 @@ PRICE = "shop::a::price"
 PLACE = "shop::a::place"
 CHECKOUT = "shop::b::checkout"
 CHANGED_KEYS = ["id", "qname", "kind", "file", "line", "change", "seed"]
-IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "selection", "absence", "truncated"]
+IMPACT_KEYS = ["seeds", "unresolved", "results", "files", "areas", "selection", "absence", "truncated"]
 ROWS = [(PLACE, 1, PRICE), (CHECKOUT, 2, PRICE)]
 DIFF = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,2 +1,2 @@\n"
         " def price(o):\n"
@@ -42,16 +45,23 @@ DELETION = ("--- a/shop/a.py\n+++ b/shop/a.py\n@@ -1,3 +1,2 @@\n"
             "-    o = o\n"
             "     return o\n")
 KW = [("direction", "both"), ("depth", 4), ("top_k", None), ("live_only", False), ("scope", None),
-      ("ranking", None), ("cochange", True), ("top_files", 10), ("full", False)]
+      ("ranking", None), ("cochange", True), ("top_files", 10), ("full", False), ("offset", 0)]
 DIFF_MARKER = "[diff-impact] mode=diff base=- changed=1 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 REV_MARKER = "[diff-impact] mode=rev base=HEAD changed=2 seeds=1 impact=2 edges +0 -0 unresolved_files=0"
 
 
 def rows(d) -> list:
+    """(qname, depth, seed) per impact row, sorted; a slim row's seed is
+    `impact.seeds[seed_index]` (FH.8c)."""
     if type(d) is not dict:
         return d
-    return sorted((r.get("qname"), r.get("depth"), r.get("seed"))
-                  for r in d.get("impact", {}).get("results", []))
+    impact = d.get("impact", {})
+
+    def seed(r):
+        if "seed_index" in r:
+            return impact["seeds"][r["seed_index"]]["qname"]
+        return r.get("seed")
+    return sorted((r.get("qname"), r.get("depth"), seed(r)) for r in impact.get("results", []))
 
 
 def git(top: pathlib.Path, *args: str) -> None:
@@ -111,12 +121,22 @@ def main() -> int:
         c.check("depth bound", rows(g.diff_impact(DIFF, direction="backward", depth=1)) == ROWS[:1])
         cut, err = stderr_of(lambda: g.diff_impact(DIFF, direction="backward", top_k=1))
         c.check("top_k", len(cut["impact"]["results"]) == 1)
-        c.check("impact.truncated counts the cut", cut["impact"].get("truncated") == {"results": 1, "seeds": 0},
+        c.check("impact.truncated counts the cut and names the next page",
+                cut["impact"].get("truncated") == {"results": 1, "seeds": 0, "next": {"offset": 1}},
                 cut["impact"].get("truncated"))
-        c.check("[answer-size] marker", "[answer-size] surface=diff_impact rows=2 shown=1 bytes=" in err,
-                err[-400:])
+        c.check("impact.areas maps the rows", [(a.get("area"), a.get("rows")) for a in
+                                               cut["impact"].get("areas", [])] == [("shop", 2)],
+                cut["impact"].get("areas"))
+        c.check("[answer-size] marker",
+                "[answer-size] surface=diff_impact rows=2 shown=1 offset=0 areas=1 bytes=" in err, err[-400:])
+        page = g.diff_impact(DIFF, direction="backward", top_k=1, offset=1)
+        c.check("offset=1 is the row top_k=1 left out",
+                rows(page) == [x for x in ROWS if x not in rows(cut)], (rows(page), rows(cut)))
+        c.raises("offset with full raises", ValueError,
+                 lambda: g.diff_impact(DIFF, offset=1, full=True), "full keeps every row")
         whole = g.diff_impact(DIFF, direction="backward", full=True)
-        c.check("full keeps every row", rows(whole) == ROWS and "truncated" not in whole["impact"], rows(whole))
+        c.check("full keeps every row, no areas", rows(whole) == ROWS and "truncated" not in whole["impact"]
+                and "areas" not in whole["impact"], rows(whole))
         c.raises("top_k with full raises", ValueError,
                  lambda: g.diff_impact(DIFF, top_k=1, full=True), "full keeps every row")
         c.check("scope", rows(g.diff_impact(DIFF, direction="backward", scope="shop/b.py")) == ROWS[1:])

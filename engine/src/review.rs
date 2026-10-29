@@ -23,7 +23,13 @@
 //!   `diff_impact::DiffImpact` documents: FH.8b, under any cap below
 //!   `usize::MAX` a `changed` row that repeats a shown seed is `{id,
 //!   change}` and a seed's `also_in` past three members is folded; the CLI's
-//!   `--full` / pyo3's `full=True` lift every cap);
+//!   `--full` / pyo3's `full=True` lift every cap). FH.8c, the overview
+//!   answer: under a cap the impact carries `areas` (`answers::Area`, every
+//!   row by sub-project or directory) and slim rows, `max_impact` defaults to
+//!   `answers::DEFAULT_OVERVIEW_ROWS` (25), `offset` skips the first impact
+//!   rows, a cut names its next page (`impact.truncated.next`), `changed` is
+//!   cut to `max_seeds` (`counts.nodes_changed` uncut), and the markdown adds
+//!   `### Impact areas` after `### Impact` when the impact rows were cut;
 //! - `tests`: `tests_for::tests_for_delta` (LE.3b / CC.1) with
 //!   [`ReviewArgs::tests`], cut to `max_tests` (`counts.tests` is the uncut
 //!   length; `test_files` is recomputed over the kept rows, so it stays "the
@@ -321,8 +327,8 @@ use glia_projection_text::ladder::note_tier;
 
 use crate::absence::BlindCaveat;
 use crate::answers::{
-    AnswerSize, BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_SEEDS, Locator, SizedAnswer,
-    in_scope, project_roots,
+    AnswerSize, BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_SEEDS,
+    DEFAULT_OVERVIEW_ROWS, Locator, SizedAnswer, in_scope, project_roots,
 };
 use crate::calibrate::fusions::{
     AnswerInputs, Signals, answer_signals, needs, seeded_keys, seeded_order,
@@ -356,8 +362,9 @@ use crate::rank::{FileIndex, RankCache, Ranking, rank_files};
 use crate::tests_for::{TestsFor, TestsForArgs, tests_for_delta};
 use crate::why::tier_of;
 
-/// [`ReviewArgs::default`]'s `max_impact`.
-pub const DEFAULT_MAX_IMPACT: usize = 50;
+/// [`ReviewArgs::default`]'s `max_impact`: FH.8c's overview,
+/// [`DEFAULT_OVERVIEW_ROWS`] (it was 50).
+pub const DEFAULT_MAX_IMPACT: usize = DEFAULT_OVERVIEW_ROWS;
 /// [`ReviewArgs::default`]'s `max_tests`.
 pub const DEFAULT_MAX_TESTS: usize = 50;
 
@@ -383,8 +390,13 @@ pub struct ReviewArgs {
     /// `DEFAULT_ANSWER_ROWS`); `counts.seeds` is uncut. What this and
     /// `max_impact` cut is `impact.truncated` (`{results, seeds}`, absent
     /// when nothing was cut); `usize::MAX` for both (the CLI's `--full`)
-    /// keeps every row.
+    /// keeps every row. FH.8c: also the `changed` rows kept
+    /// (`counts.nodes_changed` is uncut).
     pub max_seeds: usize,
+    /// FH.8c: impact rows skipped before the `max_impact` cut, after the
+    /// ranking and the intent's reorder (`impact.truncated.offset`); 0 (the
+    /// default) skips none.
+    pub offset: usize,
     /// The weakest pairing tier at which a breaking inferred-model row blocks
     /// (`contract_breaks::MODEL_MIN_TIERS`; module docs "Model breaks"):
     /// `fact` (the default: every pairing glia 0.5.2 infers is derived, so
@@ -406,6 +418,7 @@ impl Default for ReviewArgs {
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
             max_seeds: DEFAULT_ANSWER_SEEDS,
+            offset: 0,
             models_min_tier: MODEL_MIN_TIERS[0],
             title: None,
         }
@@ -689,7 +702,11 @@ fn review_with_intent(
     let blind = health::blind_caveats(after, "review", &read);
     let impact_total = impact.rows_total();
     let seeds_total = impact.seeds.len() + impact.truncated.as_ref().map_or(0, |t| t.seeds);
-    impact.cap(args.max_impact, args.max_seeds);
+    // FH.8c: a capped review's impact maps every row by area before the cut.
+    if args.max_impact != usize::MAX || args.max_seeds != usize::MAX {
+        impact.map_areas(after);
+    }
+    impact.page(args.offset, args.max_impact, args.max_seeds);
     // FH.8b: `changed` folds against the seeds the review's cut kept.
     fold_seed_rows(&mut di.changed, &impact);
 
@@ -786,8 +803,11 @@ fn review_with_intent(
         *edges_by_tier.entry(e.tier).or_insert(0) += 1;
     }
     let conventions = review_conventions(before, after, &di.changed);
+    let nodes_changed = di.changed.len();
+    // FH.8c: `changed` cut with the seeds (`counts.nodes_changed` uncut).
+    di.changed.truncate(args.max_seeds);
     let counts = ReviewCounts {
-        nodes_changed: di.changed.len(),
+        nodes_changed,
         seeds: seeds_total,
         edges_added: edges.iter().filter(|e| e.change == ADDED).count(),
         edges_removed: edges.iter().filter(|e| e.change == REMOVED).count(),
@@ -1849,6 +1869,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         c.impact,
         max,
     );
+    impact_areas_md(&mut blocks, r, max);
     intent_md(&mut blocks, r, max);
     conventions_md(&mut blocks, r, max);
 
@@ -1875,7 +1896,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
                 yes_no(n.seed),
             ]
         }),
-        r.changed.len(),
+        c.nodes_changed,
         max,
     );
 
@@ -2162,6 +2183,51 @@ pub(crate) fn push_table<I>(
     if rows.len() < total {
         blocks.push(format!("_({} of {total})_", rows.len()));
     }
+}
+
+/// FH.8c: `### Impact areas`, only when the impact rows were cut: every
+/// impact row by area (`BlastRadius::areas`), then the next page's flags
+/// (`impact.truncated.next`): review's `--offset`, and for one area
+/// `glia diff-impact --scope`, the same impact (review takes no scope).
+fn impact_areas_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    let impact = &r.impact;
+    let Some(next) = impact.truncated.as_ref().and_then(|t| t.next.as_ref()) else {
+        return;
+    };
+    if impact.areas.is_empty() {
+        return;
+    }
+    blocks.push("### Impact areas".to_string());
+    push_table(
+        blocks,
+        &["area", "rows", "files", "top file", "scope"],
+        impact.areas.iter().map(|a| {
+            vec![
+                text(&a.area),
+                a.rows.to_string(),
+                a.files.to_string(),
+                a.top_file.as_deref().map_or_else(|| DASH.to_string(), text),
+                a.scope.as_deref().map_or_else(|| DASH.to_string(), code),
+            ]
+        }),
+        impact.areas.len() + impact.truncated.as_ref().map_or(0, |t| t.areas),
+        max,
+    );
+    // review takes no --scope: an area's rows are diff-impact's `--scope`.
+    let scope = next
+        .scope
+        .as_deref()
+        .map(|s| {
+            format!(
+                ", or one area: `glia diff-impact --base {} --scope {s}`",
+                r.base
+            )
+        })
+        .unwrap_or_default();
+    blocks.push(format!(
+        "_next: `--offset {}`{scope}; `--full` lists every row_",
+        next.offset
+    ));
 }
 
 /// `### Check errors`: the working tree's rule errors and the rules only

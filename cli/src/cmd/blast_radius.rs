@@ -26,17 +26,29 @@
 //! carries `selection`, and stderr the engine's `[select]
 //! surface=blast_radius ..` line.
 //!
-//! FH.8: the rows and the seeds are cut to `--top-k` (default
-//! `DEFAULT_ANSWER_ROWS`, 200) after the ranking, in the table and the JSON;
-//! `--full` keeps every one. A cut answer's JSON carries `truncated:
-//! {results, seeds}` (the rows and seeds left out) and the table ends with a
-//! `_(<shown> of <total> rows ..)_` line. The JSON leaves out null, empty and
-//! default fields (the list is on the engine's `BlastRadius`). stderr, per
-//! `--json`: `[answer-size] surface=blast_radius rows=<r> shown=<k>
-//! bytes=<b>`.
+//! FH.8: the rows and the seeds are cut to `--top-k` after the ranking, in
+//! the table and the JSON; `--full` keeps every one. A cut answer's JSON
+//! carries `truncated: {results, seeds}` (the rows and seeds left out) and
+//! the table ends with a `_(<shown> of <total> rows ..)_` line. The JSON
+//! leaves out null, empty and default fields (the list is on the engine's
+//! `BlastRadius`).
+//!
+//! FH.8c, the overview answer: `--top-k` defaults to
+//! `DEFAULT_OVERVIEW_ROWS` (25; it was 200) and the seeds to 25. The answer
+//! maps every row by area (`areas`: a sub-project, else the first two
+//! directories, with its rows, files, best file and the `--scope` that
+//! selects it; the table mode's `## areas` table after `## files`), and a
+//! cut names its next page (`truncated.next`: the largest area's `--scope`,
+//! the `--offset` past the shown rows; the table's cut line says the same).
+//! `--offset <N>` skips the first N rows of the ranked, scoped list
+//! (`truncated.offset`). The JSON rows are slim unless `--full`: `seed_index`
+//! (into `seeds`) for `seed`, no `name` repeating the qname's tail, `score`
+//! to 4 significant digits; `--full` is the uncut answer, every field whole.
+//! stderr, per `--json`: `[answer-size] surface=blast_radius rows=<r>
+//! shown=<k> offset=<o> areas=<a> bytes=<b> ..`.
 
 use glia_engine::identity::{Collapse, RowIdentity};
-use glia_engine::{BlastAnswer, BlastOptions, BlastRadius, DEFAULT_ANSWER_ROWS, answer_json};
+use glia_engine::{BlastAnswer, BlastOptions, BlastRadius, DEFAULT_OVERVIEW_ROWS, answer_json};
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -62,12 +74,17 @@ pub(crate) struct Args {
     /// Maximum hops along carry edges.
     #[arg(long, default_value_t = 4)]
     depth: usize,
-    /// Keep the first K rows and the first K seeds of the ranked answer; a
-    /// cut answer says how many it left out (`truncated`).
-    #[arg(long, value_name = "K", default_value_t = DEFAULT_ANSWER_ROWS)]
+    /// Keep the first K rows and the first K (at most 25) seeds of the
+    /// ranked answer; a cut answer says how many it left out and which
+    /// `--scope` / `--offset` reads more (`truncated`).
+    #[arg(long, value_name = "K", default_value_t = DEFAULT_OVERVIEW_ROWS)]
     top_k: usize,
-    /// Keep every row and seed: no `--top-k` cut.
-    #[arg(long, conflicts_with = "top_k")]
+    /// Skip the first N rows of the ranked, scoped answer (the next page).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    offset: usize,
+    /// Keep every row and seed, every field whole: no `--top-k` cut, no
+    /// areas, no slim rows.
+    #[arg(long, conflicts_with_all = ["top_k", "offset"])]
     full: bool,
     /// Drop nodes not reachable from an entrypoint (likely-dead code).
     #[arg(long)]
@@ -116,6 +133,7 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.direction = direction;
     opts.depth = args.depth;
     opts.top_k = (!args.full).then_some(args.top_k);
+    opts.offset = args.offset;
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
     opts.collapse = if args.no_collapse {
@@ -152,6 +170,7 @@ pub(crate) fn run(args: Args) -> i32 {
     if answer.absence.is_none() {
         let ranking = applied_ranking(answer.selection.as_ref(), opts.ranking);
         render_files(&answer.files, ranking, result.repo_labels.len() > 1);
+        render_areas(&answer);
     }
     code
 }
@@ -217,15 +236,24 @@ fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
 }
 
 /// FH.8: the table's last line when the row cap cut the answer:
-/// `_(<shown> of <total> rows[, <shown> of <total> seeds]; --full lists
-/// every row)_`, or `None` when nothing was cut.
+/// `_(<shown> of <total> rows[, <shown> of <total> seeds][; next: --scope
+/// <area> or --offset <n>]; --full lists every row)_` (FH.8c: after an
+/// `--offset`, `rows <first>-<last> of <total>`), or `None` when nothing was
+/// cut or skipped.
 pub(crate) fn truncated_note(answer: &BlastRadius) -> Option<String> {
     let t = answer.truncated.as_ref()?;
-    let mut parts = vec![format!(
-        "{} of {} rows",
-        answer.results.len(),
-        answer.results.len() + t.results
-    )];
+    let shown = answer.results.len();
+    let total = answer.rows_total();
+    let rows = if t.offset > 0 {
+        format!(
+            "rows {}-{} of {total}",
+            (t.offset + 1).min(t.offset + shown),
+            t.offset + shown
+        )
+    } else {
+        format!("{shown} of {total} rows")
+    };
+    let mut parts = vec![rows];
     if t.seeds > 0 {
         parts.push(format!(
             "{} of {} seeds",
@@ -233,7 +261,57 @@ pub(crate) fn truncated_note(answer: &BlastRadius) -> Option<String> {
             answer.seeds.len() + t.seeds
         ));
     }
-    Some(format!("_({}; --full lists every row)_", parts.join(", ")))
+    let next = t.next.as_ref().map_or_else(String::new, |n| {
+        let scope = n
+            .scope
+            .as_deref()
+            .map(|s| format!("--scope {s} or "))
+            .unwrap_or_default();
+        format!("; next: {scope}--offset {}", n.offset)
+    });
+    Some(format!(
+        "_({}{next}; --full lists every row)_",
+        parts.join(", ")
+    ))
+}
+
+/// FH.8c: the `## areas` table (`BlastRadius::areas`): every row of the
+/// answer by area, most rows first, with the `--scope` that selects each.
+/// Nothing when the answer has no areas (`--full`, or no row).
+pub(crate) fn render_areas(answer: &BlastRadius) {
+    if answer.areas.is_empty() {
+        return;
+    }
+    println!();
+    println!("## areas");
+    println!();
+    println!("| area | rows | files | top file | scope |");
+    println!("|---|--:|--:|---|---|");
+    for a in &answer.areas {
+        println!(
+            "| {} | {} | {} | {} | {} |",
+            a.area,
+            a.rows,
+            a.files,
+            a.top_file.as_deref().unwrap_or("—"),
+            a.scope
+                .as_deref()
+                .map_or_else(|| "—".to_string(), |s| format!("`--scope {s}`"))
+        );
+    }
+    if let Some(cut) = answer
+        .truncated
+        .as_ref()
+        .map(|t| t.areas)
+        .filter(|&n| n > 0)
+    {
+        println!();
+        println!(
+            "_({} of {} areas, the most rows first)_",
+            answer.areas.len(),
+            answer.areas.len() + cut
+        );
+    }
 }
 
 /// `file:line`, `file` or `None`.

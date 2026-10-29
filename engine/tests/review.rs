@@ -641,9 +641,13 @@ fn markdown_rows_are_capped_with_the_total() {
     args.max_impact = 0;
     let cut = review_vs_rev(repo.path(), "HEAD", &args).expect("review");
     let text = md(&cut);
+    // FH.8c: a cut impact maps its rows by area, then names the next page.
     assert!(
         text.contains(
-            "### Tests to run\n\n_(0 of 1)_\n\n### Impact\n\n_(0 of 1)_\n\n### Edge changes"
+            "### Tests to run\n\n_(0 of 1)_\n\n### Impact\n\n_(0 of 1)_\n\n### Impact areas\n\n\
+             | area | rows | files | top file | scope |\n|---|---|---|---|---|\n\
+             | tests | 1 | 1 | tests/test_pay.py | `tests` |\n\n\
+             _next: `--offset 0`; `--full` lists every row_\n\n### Edge changes"
         ),
         "{text}"
     );

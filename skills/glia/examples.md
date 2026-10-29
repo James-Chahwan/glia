@@ -36,10 +36,10 @@ glia pack . users --budget 4000 --json
           {"qname":"server::main::listUsers","kind":"FUNCTION","file":"server/main.go","line":9,"fidelity":"full","tokens":35,"rank":3,…,"reason":"seed",…},
           {"qname":"server::main","kind":"MODULE","file":"server/main.go","line":1,"fidelity":"full","tokens":77,"rank":5,"tier":"derived","reason":"neighbour",…},…],"dropped":0,"rerenders":0,"absence":null}
 
-# xstack-go-http
+# xstack-go-http; a row names its seed by index into "seeds" ("seed_index"; --full writes "seed", the qname, and "name")
 glia blast-radius . client::client::FetchUsers --direction forward --json
 {"seeds":[{"query":"client::client::FetchUsers","kind":"FUNCTION","file":"client/client.go","line":8,…}],"unresolved":[],
- "results":[{"qname":"endpoint:GET:/users","kind":"ENDPOINT","reason":"CALLS","depth":1,"score":0.267,"live":false,"file":"client/client.go","line":9,"seed":"client::client::FetchUsers"},
+ "results":[{"qname":"endpoint:GET:/users","kind":"ENDPOINT","reason":"CALLS","depth":1,"score":0.267,"live":false,"file":"client/client.go","line":9,"seed_index":0},
             {"qname":"GET /users","kind":"ROUTE","reason":"HTTP_CALLS","depth":2,"file":"server/main.go","line":13,…},
             {"qname":"server::main::listUsers","reason":"HANDLED_BY","depth":3,"file":"server/main.go","line":9,…}],"absence":null}
 
@@ -77,10 +77,24 @@ glia review . --title "SHOP-12 round order totals" --json
 glia diff-impact . --json
 {"base":"HEAD","changed":[{"qname":"billing::billing::audit","file":"billing/billing.ts","line":5,"change":"added","seed":true},{"qname":"billing::billing::settle","change":"modified","seed":true,…},…],
  "edges_added":[{"from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","site_file":"billing/billing.ts","site_line":4,…},…],
- "impact":{"seeds":[…],"results":[{"qname":"event_emit:payment.settled","reason":"USES","depth":1,"seed":"billing::billing::settle",…},
+ "impact":{"seeds":[…],"results":[{"qname":"event_emit:payment.settled","reason":"USES","depth":1,"seed_index":0,…},
                                   {"qname":"event_handle:payment.settled","reason":"EVENT_FLOWS","depth":2,"file":"orders/orders.ts","line":4,…},…]}}
 git diff | glia diff-impact . --diff - --json
 {"changed":[{"qname":"billing::billing::settle","change":"diff_hit","seed":true,…},…],…}
+
+# a large Go monorepo, a change reaching 6,157 rows: the default answer is the overview, about 20 KB (--full: about 2 MB).
+# Read "areas" first, then ask for one area; "truncated.next" names the largest area and the next page
+glia diff-impact . --base HEAD^ --json
+{"base":"HEAD^","changed":[…],"changed_truncated":114,
+ "impact":{"seeds":[…],"results":[{"qname":"internal::entity::auth_session::Session::Abort","kind":"METHOD","reason":"CALLS","depth":1,"score":0.01705,"live":true,"file":"internal/entity/auth_session.go","line":1007,"seed_index":3},…],
+  "files":[…],
+  "areas":[{"area":"internal/entity","rows":1651,"files":300,"top_file":"internal/entity/auth_session.go","scope":"internal/entity"},
+           {"area":"internal/config","rows":875,"files":86,"top_file":"internal/config/config_features.go","scope":"internal/config"},…],
+  "truncated":{"results":6132,"seeds":110,"areas":24,"next":{"scope":"internal/entity","offset":25}}}}
+# one area, ranked within it
+glia diff-impact . --base HEAD^ --scope internal/entity --json
+# or the next 25 rows of the whole answer (rows 26-50); --top-k 200 asks for more at once
+glia diff-impact . --base HEAD^ --offset 25 --json
 
 # xstack-go-http with client/ and server/ as two repos; the feature word is a name, a qname or a flows key
 glia trace client FetchUsers --with server --json
@@ -146,7 +160,11 @@ glia contract-breaks . --base main --json
              {"section":"fields","field":"currency","change":"consumer_only","producer":null,"consumer":"string","rule":"proto_unknown_field","breaking":false}],…}],
  "models":[],"orphaned_clients":[],"breaking":1,"advisory":0,"absence":null}
 # "models" judges the inferred client / server models the same way (a JSON rename, a field removed or now optional, a new required
-# request field), one row per model pair with both field lines; advisory unless --models-min-tier derived, as the 0.5.2 pairs are derived
+# request field), one row per model pair with both field lines; advisory unless --models-min-tier derived, as the 0.5.2 pairs are derived.
+# "names" lists the client sites still using a name the change removed or renamed server-side (advisory; they block only under
+# --models-min-tier heuristic, which contract-breaks takes and review does not: review lists them under "### Name breaks (advisory)");
+# a schema change several operations share is one "schemas" row whose "operations" lists their keys
+glia contract-breaks . --base main --models-min-tier heuristic --json
 
 # models-http-contract; a client field the server never writes is json_field_missing (breaking); "producer" is the server side
 glia contracts portal --with billing --fields --json

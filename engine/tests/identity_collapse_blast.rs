@@ -550,7 +550,14 @@ fn packages_fold_not_walk() {
     top.top_k = Some(1);
     let one = blast(&r, &seeds, &top);
     assert_eq!(one.results.len(), 1);
-    assert_eq!(json(&one.results[0]), json(&on.results[0]));
+    // FH.8c: the capped row is slim in the JSON (seed_index, a 4-digit
+    // score); the row itself is the uncut answer's first.
+    let (a, b) = (&one.results[0], &on.results[0]);
+    assert_eq!(
+        (a.id, &a.qname, a.score, a.depth, &a.seed),
+        (b.id, &b.qname, b.score, b.depth, &b.seed)
+    );
+    assert_eq!(json(&a.identity), json(&b.identity));
 }
 
 /// (5) `live_only` keeps a walk class when ANY member is live: shop's

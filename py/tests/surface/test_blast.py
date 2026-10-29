@@ -2,8 +2,10 @@
 """pyo3 surface, py/src/blast.rs (LD.2, many seeds LD.5): `blast_radius`
 takes one qname or a list of them and returns a native dict
 `{seeds, unresolved, results, absence}`, compact (FH.8: null, empty and
-default fields left out; rows and seeds cut to `top_k`, default 200, with
-`truncated`; `full=True` keeps every one). Shared helpers: test_build.py."""
+default fields left out; rows and seeds cut to `top_k`, default 25 since
+FH.8c, with `truncated`; `full=True` keeps every one). FH.8c: the default
+answer is the overview (`areas`, `truncated.next`, slim rows naming their
+seed by `seed_index`), `offset=` pages. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -11,8 +13,20 @@ import tempfile
 
 from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
-TOP = ["seeds", "unresolved", "results", "files", "selection", "absence", "truncated"]
+TOP = ["seeds", "unresolved", "results", "files", "areas", "selection", "absence", "truncated"]
 KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line", "seed"]
+# FH.8c: a slim row (the default answer) writes `seed_index` for `seed` and
+# leaves out a `name` that is the qname's last `::` segment.
+SLIM_KEYS = ["id", "qname", "name", "kind", "reason", "depth", "score", "live", "file", "line",
+             "seed", "seed_index"]
+AREA_KEYS = ["area", "rows", "files", "top_file", "scope"]
+
+
+def seed_of(answer: dict, row: dict) -> str:
+    """A row's seed qname: `seed`, or (a slim row) `seeds[seed_index]`."""
+    if "seed_index" in row:
+        return answer["seeds"][row["seed_index"]]["qname"]
+    return row.get("seed", "")
 # FH.8: `query` equal to the qname and an empty `linked_seeds` are left out.
 SEED_KEYS = ["id", "qname", "kind", "file", "line"]
 
@@ -31,7 +45,8 @@ def main() -> int:
         c.check("signature", params(rg.PyGraph.blast_radius) == [
             ("qnames", None), ("direction", "both"), ("depth", 4), ("top_k", None),
             ("live_only", False), ("scope", None), ("collapse", True), ("ranking", None),
-            ("cochange", True), ("top_files", 10), ("full", False)], params(rg.PyGraph.blast_radius))
+            ("cochange", True), ("top_files", 10), ("full", False), ("offset", 0)],
+                params(rg.PyGraph.blast_radius))
 
         a = g.blast_radius("app::helper")
         c.check("blast_radius -> dict", type(a) is dict, type(a))
@@ -41,12 +56,21 @@ def main() -> int:
         b = a.get("results") or []
         c.check("blast_radius reaches the callers", any(r.get("qname") == "app::main" for r in b),
                 [r.get("qname") for r in b][:5])
-        c.check("record keys in engine field order", b and list(b[0]) == KEYS, b and list(b[0]))
+        c.check("slim record keys in engine field order", b and all(
+            list(r) == [k for k in SLIM_KEYS if k in r] and ("seed" in r) != ("seed_index" in r)
+            for r in b), b and list(b[0]))
+        c.check("a slim row leaves out a name that repeats the qname's tail",
+                all(r.get("name") != r["qname"].split("::")[-1] for r in b), b[:2])
         c.check("ids are ints of the graph", all(type(r["id"]) is int and r["id"] in ids for r in b))
         c.check("score is a float", all(type(r["score"]) is float for r in b))
         c.check("line is an int (1-based) or None",
                 all(r["line"] is None or (type(r["line"]) is int and r["line"] >= 1) for r in b))
-        c.check("one seed owns every row", all(r["seed"] == "app::helper" for r in b))
+        c.check("one seed owns every row", all(seed_of(a, r) == "app::helper" for r in b))
+        areas = a.get("areas") or []
+        c.check("the overview maps its rows by area", areas
+                and all(list(x) == [k for k in AREA_KEYS if k in x] for x in areas)
+                and sum(x["rows"] for x in areas) == len(b) + (a.get("truncated") or {}).get("results", 0),
+                areas)
         seeds = a.get("seeds") or []
         c.check("seed keys in engine field order", seeds and list(seeds[0]) == SEED_KEYS,
                 seeds and list(seeds[0]))
@@ -65,7 +89,7 @@ def main() -> int:
         c.check("a seed is never a row", all(r["qname"] not in ("app::helper", "app::main")
                                              for r in m["results"]))
         c.check("rows attributed to their seed", m["results"]
-                and all(r["seed"] == "app::helper" for r in m["results"]))
+                and all(seed_of(m, r) == "app::helper" for r in m["results"]))
         c.check("[blast] marker", "[blast] seeds=2 unresolved=0 reached=24 linked_seeds=1 walk=Backward" in err,
                 err)
 
@@ -84,15 +108,30 @@ def main() -> int:
         # top_k; every call prints its size.
         (whole, err) = stderr_of(lambda: g.blast_radius("app::helper", full=True))
         n = len(whole["results"])
-        c.check("full keeps every row, nothing truncated", n == len(b) and "truncated" not in whole,
-                (n, len(b), list(whole)))
+        c.check("full keeps every row, nothing truncated, no areas",
+                n == len(b) + (a.get("truncated") or {}).get("results", 0)
+                and "truncated" not in whole and "areas" not in whole, (n, len(b), list(whole)))
+        c.check("full rows are whole", whole["results"] and all(list(r) == [k for k in KEYS if k in r]
+                                                                and "seed" in r and "name" in r
+                                                                for r in whole["results"]),
+                whole["results"][:1])
         c.check("[answer-size] marker",
-                f"[answer-size] surface=blast_radius rows={n} shown={n} bytes=" in err, err[-400:])
+                f"[answer-size] surface=blast_radius rows={n} shown={n} offset=0 areas=0 bytes=" in err,
+                err[-400:])
         one = g.blast_radius("app::helper", top_k=1)
         c.check("top_k=1 keeps the first row", [r["qname"] for r in one["results"]]
                 == [r["qname"] for r in whole["results"][:1]], one["results"])
-        c.check("truncated counts the cut", one.get("truncated") == {"results": n - 1, "seeds": 0},
-                one.get("truncated"))
+        t1 = one.get("truncated") or {}
+        c.check("truncated counts the cut and names the next page",
+                (t1.get("results"), t1.get("seeds"), (t1.get("next") or {}).get("offset")) == (n - 1, 0, 1),
+                t1)
+        nxt = g.blast_radius("app::helper", top_k=1, offset=1)
+        c.check("offset=1 is the second row", [r["id"] for r in nxt["results"]]
+                == [r["id"] for r in whole["results"][1:2]], nxt["results"])
+        c.check("truncated.offset counts the skipped rows", (nxt.get("truncated") or {}).get("offset") == 1,
+                nxt.get("truncated"))
+        c.raises("offset with full", ValueError, lambda: g.blast_radius("app::helper", offset=1, full=True),
+                 "full keeps every row")
         two = g.blast_radius(["app::helper", "app::main"], top_k=1)
         c.check("seeds cap at top_k", len(two["seeds"]) == 1 and two["truncated"]["seeds"] == 1,
                 two.get("truncated"))

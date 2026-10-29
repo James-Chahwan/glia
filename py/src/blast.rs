@@ -3,7 +3,7 @@
 
 use glia_engine::identity::Collapse;
 use glia_engine::rank::Ranking;
-use glia_engine::{BlastOptions, DEFAULT_ANSWER_ROWS, answer_json};
+use glia_engine::{BlastOptions, DEFAULT_OVERVIEW_ROWS, answer_json};
 use glia_graph::Reach;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -21,17 +21,31 @@ impl PyGraph {
     /// every score comes from the same run, each node's `depth` counts from
     /// the nearest seed, and no seed is ever a row.
     ///
-    /// FH.8, the row cap: `top_k` (default `None` = 200,
-    /// `glia_engine::DEFAULT_ANSWER_ROWS`) keeps the first K rows and the
-    /// first K seeds after the ranking, and a cut answer carries `truncated`
-    /// `{results, seeds}` (the rows and seeds left out); `full=True` keeps
-    /// every one (and refuses a `top_k` with ValueError). The dict leaves out
+    /// FH.8, the row cap: `top_k` (default `None` = 25,
+    /// `glia_engine::DEFAULT_OVERVIEW_ROWS`, FH.8c) keeps the first K rows
+    /// and the first K (at most 25) seeds after the ranking, and a cut answer
+    /// carries `truncated` `{results, seeds}` (the rows and seeds left out);
+    /// `full=True` keeps every one (and refuses a `top_k` or an `offset` with
+    /// ValueError).
+    ///
+    /// FH.8c, the overview answer (unless `full`): `areas`, every row grouped
+    /// by sub-project or directory (`{area, rows, files, top_file, scope}`,
+    /// most rows first, the 10 largest; `scope` is the exact `scope=` value
+    /// that selects the area), and a cut's `truncated.next` `{scope, offset}`:
+    /// the largest area's `scope=` and the `offset=` of the next page.
+    /// `offset` (default 0, last keyword) skips the first rows of the ranked,
+    /// scoped list (`truncated.offset`). Rows are slim: `seed_index` (an index
+    /// into `seeds`) for `seed` (a row whose seed the seed cap cut keeps
+    /// `seed`), no `name` when it is the qname's last `::` segment, `score`
+    /// to 4 significant digits. `full=True` writes every field whole and no
+    /// `areas`. The dict leaves out
     /// null, empty and default fields: `unresolved` / `files` when empty,
     /// `absence` when `None` (so present exactly when `results` is empty),
     /// `truncated` when nothing was cut, a row's `file` / `line` when null, a
     /// seed's `query` when it equals its `qname`, its `file` / `line` when
     /// null and `linked_seeds` when empty. stderr: `[answer-size]
-    /// surface=blast_radius rows=<r> shown=<k> bytes=<b>`.
+    /// surface=blast_radius rows=<r> shown=<k> offset=<o> areas=<a>
+    /// bytes=<b> ..`.
     ///
     /// Returns a dict `{seeds, unresolved, results, absence}`:
     /// - `seeds`: one per distinct node, `{query, id, qname, kind, file,
@@ -89,7 +103,7 @@ impl PyGraph {
     /// never overridden. The dict gains `selection` `{set, shape, pick,
     /// source, reason, test_commits}` (`source` `calibrated`, `fallback` or
     /// `explicit`) whenever a seed resolved.
-    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking=None, cochange=true, top_files=10, full=false))]
+    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true, ranking=None, cochange=true, top_files=10, full=false, offset=0))]
     #[allow(clippy::too_many_arguments)]
     fn blast_radius(
         &self,
@@ -105,8 +119,9 @@ impl PyGraph {
         cochange: bool,
         top_files: usize,
         full: bool,
+        offset: usize,
     ) -> PyResult<Py<PyAny>> {
-        let top_k = row_cap(top_k, full).map_err(PyValueError::new_err)?;
+        let cap = row_cap(top_k, offset, full).map_err(PyValueError::new_err)?;
         let (ranking, select) =
             ranking_selected(ranking, cochange).map_err(PyValueError::new_err)?;
         let queries = seed_queries(qnames)?;
@@ -117,7 +132,8 @@ impl PyGraph {
         opts.rank_cache = Some(self.rank.clone());
         opts.direction = reach_named(direction).map_err(PyValueError::new_err)?;
         opts.depth = depth;
-        opts.top_k = top_k;
+        opts.top_k = cap.top_k;
+        opts.offset = cap.offset;
         opts.live_only = live_only;
         opts.scope = scope.map(str::to_string);
         opts.collapse = if collapse {
@@ -139,16 +155,31 @@ impl PyGraph {
     }
 }
 
+/// FH.8 / FH.8c: the engine's row cap and offset ([`BlastOptions::top_k`]
+/// / `offset`), from the `top_k=` / `offset=` / `full=` keywords.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Cap {
+    pub(crate) top_k: Option<usize>,
+    pub(crate) offset: usize,
+}
+
 /// FH.8: the engine's `top_k` from the `top_k=` / `full=` keywords: `full`
-/// keeps every row (`None`), else `top_k` or [`DEFAULT_ANSWER_ROWS`]; both
-/// at once is an `Err` naming the conflict.
-pub(crate) fn row_cap(top_k: Option<usize>, full: bool) -> Result<Option<usize>, String> {
+/// keeps every row (`None`), else `top_k` or [`DEFAULT_OVERVIEW_ROWS`]
+/// (FH.8c); `full` with a `top_k` or a non-zero `offset` is an `Err` naming
+/// the conflict.
+pub(crate) fn row_cap(top_k: Option<usize>, offset: usize, full: bool) -> Result<Cap, String> {
     match (top_k, full) {
         (Some(k), true) => Err(format!(
             "top_k={k} and full=True conflict: full keeps every row"
         )),
-        (None, true) => Ok(None),
-        (k, false) => Ok(Some(k.unwrap_or(DEFAULT_ANSWER_ROWS))),
+        (None, true) if offset > 0 => Err(format!(
+            "offset={offset} and full=True conflict: full keeps every row"
+        )),
+        (None, true) => Ok(Cap::default()),
+        (k, false) => Ok(Cap {
+            top_k: Some(k.unwrap_or(DEFAULT_OVERVIEW_ROWS)),
+            offset,
+        }),
     }
 }
 
@@ -224,13 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn the_row_cap_defaults_to_200_and_full_lifts_it() {
-        assert_eq!(row_cap(None, false), Ok(Some(200)));
-        assert_eq!(row_cap(Some(7), false), Ok(Some(7)));
-        assert_eq!(row_cap(None, true), Ok(None));
+    fn the_row_cap_defaults_to_25_and_full_lifts_it() {
+        let cap = |top_k, offset| Cap { top_k, offset };
+        assert_eq!(row_cap(None, 0, false), Ok(cap(Some(25), 0)));
+        assert_eq!(row_cap(Some(7), 3, false), Ok(cap(Some(7), 3)));
+        assert_eq!(row_cap(None, 0, true), Ok(cap(None, 0)));
         assert_eq!(
-            row_cap(Some(7), true),
+            row_cap(Some(7), 0, true),
             Err("top_k=7 and full=True conflict: full keeps every row".to_string())
+        );
+        assert_eq!(
+            row_cap(None, 25, true),
+            Err("offset=25 and full=True conflict: full keeps every row".to_string())
         );
     }
 

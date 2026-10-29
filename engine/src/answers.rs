@@ -50,7 +50,15 @@ use crate::rank::{
 ///     identity: None,
 /// };
 /// ```
-#[derive(serde::Serialize, Debug, Clone)]
+///
+/// FH.8c, slim rows: in a compact answer (one cut by a row cap,
+/// [`BlastRadius`]'s docs) the JSON writes `seed_index`, the row's seed as
+/// an index into the answer's `seeds`, in place of `seed` (a row whose seed
+/// the seed cap cut keeps `seed`), leaves out `name` when it equals the
+/// qname's last `::` segment, and writes `score` to 4 significant digits.
+/// An uncut answer (`--full` / `full=True`) writes every field whole. The
+/// struct always holds every field.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastAnswer {
     pub id: u64,
@@ -65,10 +73,8 @@ pub struct BlastAnswer {
     /// = likely dead. Best-effort; annotated, not filtered, unless `live_only`.
     pub live: bool,
     /// FH.8: absent from the JSON when the row has no file.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /// 1-based (see [`Located`]). FH.8: absent from the JSON when null.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
     /// The qname of the seed whose wave reached this node first (LD.5): with
     /// one seed, that seed; with several, the root of the node's parent chain
@@ -79,8 +85,68 @@ pub struct BlastAnswer {
     /// tier, rules, whether the members' contents differ, and every other
     /// member (`also_in`). Absent from the JSON outside a class, so such a
     /// row serialises exactly as before.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<RowIdentity>,
+    /// FH.8c: the id of the seed `seed` names (0 when it names none).
+    pub(crate) seed_id: u64,
+    /// FH.8c: in a compact answer, the index into [`BlastRadius::seeds`] of
+    /// this row's seed when that seed is shown ([`BlastRadius::set_compact`]);
+    /// `None` otherwise.
+    pub(crate) seed_index: Option<usize>,
+    /// FH.8c: the answer is compact, so the JSON row is slim (type docs).
+    pub(crate) compact: bool,
+}
+
+/// FH.8c: a slim row leaves out a `name` that is just `qname`'s last `::`
+/// segment.
+fn name_repeats_qname(qname: &str, name: &str) -> bool {
+    qname.rsplit("::").next() == Some(name)
+}
+
+/// FH.8c: `x` to 4 significant digits, the slim row's `score` (the nearest
+/// f64 to the rounded decimal, so the JSON prints it short).
+fn four_significant(x: f64) -> f64 {
+    format!("{x:.3e}").parse().unwrap_or(x)
+}
+
+impl serde::Serialize for BlastAnswer {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let slim = self.compact;
+        let mut st = s.serialize_struct("BlastAnswer", 12)?;
+        st.serialize_field("id", &self.id)?;
+        st.serialize_field("qname", &self.qname)?;
+        if slim && name_repeats_qname(&self.qname, &self.name) {
+            st.skip_field("name")?;
+        } else {
+            st.serialize_field("name", &self.name)?;
+        }
+        st.serialize_field("kind", &self.kind)?;
+        st.serialize_field("reason", &self.reason)?;
+        st.serialize_field("depth", &self.depth)?;
+        if slim {
+            st.serialize_field("score", &four_significant(self.score))?;
+        } else {
+            st.serialize_field("score", &self.score)?;
+        }
+        st.serialize_field("live", &self.live)?;
+        match &self.file {
+            Some(f) => st.serialize_field("file", f)?,
+            None => st.skip_field("file")?,
+        }
+        match &self.line {
+            Some(l) => st.serialize_field("line", l)?,
+            None => st.skip_field("line")?,
+        }
+        match (slim, self.seed_index) {
+            (true, Some(i)) => st.serialize_field("seed_index", &i)?,
+            _ => st.serialize_field("seed", &self.seed)?,
+        }
+        match &self.identity {
+            Some(identity) => st.serialize_field("identity", identity)?,
+            None => st.skip_field("identity")?,
+        }
+        st.end()
+    }
 }
 
 /// Types whose liveness a live METHOD they declare implies (A7.8): the
@@ -706,14 +772,19 @@ pub struct BlastOptions {
     pub direction: Reach,
     /// Maximum hops along carry edges, counted from the nearest seed.
     pub depth: usize,
-    /// Keep the first `top_k` rows, cut after `scope` and the ranking, and the
-    /// first `min(top_k, DEFAULT_ANSWER_SEEDS)` seeds; `None` keeps all.
-    /// FH.8: what the cut drops is [`BlastRadius::truncated`]. The CLI and
-    /// pyo3 default it to [`DEFAULT_ANSWER_ROWS`]; this default keeps all.
-    /// FH.8b: `Some` also makes the answer's JSON compact
-    /// ([`BlastRadius`]'s docs: a seed's `also_in` folded); `None` (the
-    /// surfaces' `--full` / `full=True`) writes every field whole.
+    /// Keep the first `top_k` rows, cut after `scope`, the ranking and
+    /// `offset`, and the first `min(top_k, DEFAULT_ANSWER_SEEDS)` seeds;
+    /// `None` keeps all. FH.8: what the cut drops is
+    /// [`BlastRadius::truncated`]. The CLI and pyo3 default it to
+    /// [`DEFAULT_OVERVIEW_ROWS`]; this default keeps all. FH.8b: `Some` also
+    /// makes the answer's JSON compact ([`BlastRadius`]'s docs: a seed's
+    /// `also_in` folded, FH.8c: slim rows and `areas`); `None` (the surfaces'
+    /// `--full` / `full=True`) writes every field whole.
     pub top_k: Option<usize>,
+    /// FH.8c: skip the first `offset` rows of the ranked, scoped list before
+    /// the `top_k` cut (`truncated.offset` counts them, `truncated.results`
+    /// what follows the shown rows). 0 (the default) skips none.
+    pub offset: usize,
     /// Drop the rows no entry point reaches ([`entrypoint_reachable`])
     /// instead of flagging them `live: false`.
     pub live_only: bool,
@@ -757,6 +828,7 @@ impl Default for BlastOptions {
             direction: Reach::Both,
             depth: 4,
             top_k: None,
+            offset: 0,
             live_only: false,
             scope: None,
             collapse: Collapse::default(),
@@ -892,19 +964,81 @@ pub struct Truncated {
     pub results: usize,
     /// Seeds past the cap.
     pub seeds: usize,
+    /// FH.8c: result rows skipped before the shown ones
+    /// ([`BlastOptions::offset`]). Not serialised when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
+    /// FH.8c: [`Area`]s past [`DEFAULT_OVERVIEW_AREAS`] (the smallest ones).
+    /// Not serialised when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub areas: usize,
+    /// FH.8c: how to read the rows the cap left out: the largest area's
+    /// `--scope` and the `--offset` of the next page. Only when result rows
+    /// were cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<NextPage>,
 }
 
-/// FH.8: the row cap the CLI and pyo3 surfaces of `blast-radius`,
-/// `diff-impact` and `review` (its seeds) apply by default: their `--top-k` /
-/// `top_k=` default, lifted by `--full` / `full=True`. The engine's own
-/// [`BlastOptions::default`] cuts nothing.
-pub const DEFAULT_ANSWER_ROWS: usize = 200;
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// FH.8c: the drill-down a cut answer suggests ([`Truncated::next`]): `scope`
+/// is the `--scope` (pyo3 `scope=`) value of the area holding the most rows,
+/// when the rows span more than one area, and `offset` the `--offset` (pyo3
+/// `offset=`) that reads the rows after the shown ones.
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NextPage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub offset: usize,
+}
+
+/// FH.8c: one area of an answer's rows ([`BlastRadius::areas`]): the rows of
+/// one sub-project, else of one directory. `area` names it (a sub-project's
+/// label, else the first two directories of the rows' files, a root-level
+/// file itself, or [`UNLOCATED_AREA`]); `rows` and `files` count its rows
+/// and their distinct files over every row of the answer (before the row
+/// cap and `offset`); `top_file` is its best-ranked row's file; `scope` is
+/// the exact `--scope` value that selects it (absent for the unlocated
+/// rows, which every scope keeps).
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Area {
+    pub area: String,
+    pub rows: usize,
+    pub files: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// FH.8c: the [`Area`] of the rows no file locates.
+pub const UNLOCATED_AREA: &str = "(no file)";
+
+/// FH.8c: the [`Area`]s a compact answer lists, the ones holding the most
+/// rows; `truncated.areas` counts the rest. Measured on photoprism fd8448's
+/// diff-impact (34 areas, the smallest 24 holding 16% of the rows): ten keep
+/// the default answer under 20,000 bytes.
+pub const DEFAULT_OVERVIEW_AREAS: usize = 10;
+
+/// FH.8c: the rows the CLI and pyo3 surfaces of `blast-radius`,
+/// `diff-impact` and `review` (its `max_impact`) show by default: their
+/// `--top-k` / `top_k=` default, lifted by `--full` / `full=True`. The
+/// overview answer: the ranked files, the [`Area`]s and these first rows,
+/// whose `truncated.next` names the `--scope` / `--offset` that read more.
+/// (FH.8's `DEFAULT_ANSWER_ROWS`, 200, which this replaces.) The engine's
+/// own [`BlastOptions::default`] cuts nothing.
+pub const DEFAULT_OVERVIEW_ROWS: usize = 25;
 
 /// FH.8b: the seeds a capped answer keeps: `min(top_k, DEFAULT_ANSWER_SEEDS)`
 /// for a [`BlastOptions::top_k`] cut, and `review::ReviewArgs::max_seeds`'
-/// default. Rows stay at [`DEFAULT_ANSWER_ROWS`]; `truncated.seeds` counts
-/// the seeds past it, and `--full` / `full=True` keeps every seed.
-pub const DEFAULT_ANSWER_SEEDS: usize = 50;
+/// default; FH.8c: also the `changed` rows a capped `diff_impact` / `review`
+/// keeps (50 -> 25). `truncated.seeds` counts the seeds past it, and
+/// `--full` / `full=True` keeps every seed.
+pub const DEFAULT_ANSWER_SEEDS: usize = 25;
 
 /// FH.8b: the `identity.also_in` members a compact answer's seed shows
 /// ([`BlastSeed`]); `also_in_count` gives the whole list's length.
@@ -921,6 +1055,10 @@ pub struct AnswerSize {
     pub seeds_shown: usize,
     /// Shown seeds whose `identity.also_in` the JSON folds.
     pub also_in_folded: usize,
+    /// FH.8c: result rows skipped by an offset (`truncated.offset`).
+    pub offset: usize,
+    /// FH.8c: the [`Area`]s the answer lists.
+    pub areas: usize,
 }
 
 /// FH.8b: an answer [`answer_json`] serialises: it says how many seeds it
@@ -939,9 +1077,10 @@ impl SizedAnswer for BlastRadius {
 /// FH.8: `answer`'s JSON text for an answer surface (`blast_radius`,
 /// `diff_impact`, `review`), the one serialisation the CLI's `--json` and the
 /// pyo3 dicts read. `rows` is the uncut result-row count, `shown` the rows the
-/// JSON holds. fired_on, stderr, once per call (FH.8b adds the seeds):
-/// `[answer-size] surface=<s> rows=<r> shown=<k> bytes=<b> seeds=<s>
-/// seeds_shown=<t> also_in_folded=<f>`.
+/// JSON holds. fired_on, stderr, once per call (FH.8b adds the seeds, FH.8c
+/// the offset and the areas):
+/// `[answer-size] surface=<s> rows=<n> shown=<k> offset=<o> areas=<a>
+/// bytes=<b> seeds=<s> seeds_shown=<t> also_in_folded=<f>`.
 pub fn answer_json<T: SizedAnswer>(
     surface: &str,
     answer: &T,
@@ -951,7 +1090,9 @@ pub fn answer_json<T: SizedAnswer>(
     let text = serde_json::to_string(answer)?;
     let size = answer.answer_size();
     eprintln!(
-        "[answer-size] surface={surface} rows={rows} shown={shown} bytes={} seeds={} seeds_shown={} also_in_folded={}",
+        "[answer-size] surface={surface} rows={rows} shown={shown} offset={} areas={} bytes={} seeds={} seeds_shown={} also_in_folded={}",
+        size.offset,
+        size.areas,
         text.len(),
         size.seeds,
         size.seeds_shown,
@@ -982,6 +1123,14 @@ pub fn answer_json<T: SizedAnswer>(
 /// standalone [`blast_radius`]'s caveats) is left out when empty; a
 /// `files` row ([`crate::rank::RankedFile`]) leaves out what its ranking
 /// did not fill.
+///
+/// FH.8c, the overview answer: a compact answer also carries `areas`, every
+/// row grouped by sub-project or directory ([`Area`]: rows, files, the best
+/// file and the `--scope` that selects it), and its rows are slim
+/// ([`BlastAnswer`]: `seed_index` for `seed`, no `name` repeating the
+/// qname's tail, `score` to 4 significant digits). A cut answer's
+/// `truncated.next` names the largest area's `--scope` and the next page's
+/// `--offset`. The surfaces cut at [`DEFAULT_OVERVIEW_ROWS`] by default.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastRadius {
@@ -999,6 +1148,13 @@ pub struct BlastRadius {
     /// Empty when no seed has a candidate file.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<RankedFile>,
+    /// FH.8c: the rows by area, most rows first (then by area name), counted
+    /// over every row the scope kept (before `offset` and the row cap): the
+    /// first [`DEFAULT_OVERVIEW_AREAS`], `truncated.areas` counting the rest.
+    /// Filled in a compact answer only: empty, and absent from the JSON, in
+    /// an uncut one (`--full`) and when no row is in radius.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<Area>,
     /// 0.5.3 (EC.8): which ranking ordered the rows and why: `{set, shape,
     /// pick, source, reason, test_commits}`, `source` `calibrated` (the
     /// record's pick), `fallback` (no applicable record, `reason` naming why)
@@ -1029,11 +1185,23 @@ pub struct BlastRadius {
 }
 
 impl BlastRadius {
-    /// FH.8b: mark the answer compact (type docs), each seed with it.
+    /// FH.8b: mark the answer compact (type docs), each seed with it; FH.8c:
+    /// each row too, with its seed's index among the shown seeds.
     pub(crate) fn set_compact(&mut self) {
         self.compact = true;
         for s in &mut self.seeds {
             s.compact = true;
+        }
+        let shown: HashMap<u64, usize> = self
+            .seeds
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, s)| (s.id, i))
+            .collect();
+        for r in &mut self.results {
+            r.compact = true;
+            r.seed_index = shown.get(&r.seed_id).copied();
         }
     }
 
@@ -1043,41 +1211,184 @@ impl BlastRadius {
     }
 
     /// FH.8b: the seeds before and after any cap, and the shown seeds whose
-    /// `also_in` the JSON folds.
+    /// `also_in` the JSON folds; FH.8c: the rows an offset skipped and the
+    /// areas.
     pub fn size(&self) -> AnswerSize {
         AnswerSize {
             seeds: self.seeds.len() + self.truncated.as_ref().map_or(0, |t| t.seeds),
             seeds_shown: self.seeds.len(),
             also_in_folded: self.seeds.iter().filter(|s| s.folds_also_in()).count(),
+            offset: self.truncated.as_ref().map_or(0, |t| t.offset),
+            areas: self.areas.len(),
         }
     }
 
-    /// FH.8: keep the first `results` rows and the first `seeds` seeds,
-    /// adding what each cut drops to [`BlastRadius::truncated`] (set only
-    /// when something is dropped). The absence and every count are left as
-    /// they were: a cut never makes an answer empty-with-a-reason. FH.8b: a
-    /// limit below `usize::MAX` makes the answer compact, cut or not.
-    pub(crate) fn cap(&mut self, results: usize, seeds: usize) {
+    /// FH.8c: the [`Area`]s of every row this answer holds now, the first
+    /// [`DEFAULT_OVERVIEW_AREAS`] kept and the rest counted in `truncated`.
+    /// A caller about to [`BlastRadius::page`] a compact answer calls it
+    /// first.
+    pub(crate) fn map_areas(&mut self, merged: &MergedGraph) {
+        let mut areas = areas_of(merged, &self.results);
+        let cut = areas.len().saturating_sub(DEFAULT_OVERVIEW_AREAS);
+        areas.truncate(DEFAULT_OVERVIEW_AREAS);
+        self.areas = areas;
+        if cut > 0 {
+            self.truncated.get_or_insert_with(Truncated::default).areas += cut;
+        }
+    }
+
+    /// FH.8: skip the first `offset` rows (FH.8c), then keep the first
+    /// `results` rows and the first `seeds` seeds, adding what each cut drops
+    /// to [`BlastRadius::truncated`] (set only when something is dropped).
+    /// The absence and every count are left as they were: a cut never makes
+    /// an answer empty-with-a-reason. FH.8b: a limit below `usize::MAX`
+    /// makes the answer compact, cut or not. FH.8c: a row cut names the next
+    /// page ([`Truncated::next`]) from `areas`, which the caller fills
+    /// before the cut.
+    pub(crate) fn page(&mut self, offset: usize, results: usize, seeds: usize) {
+        let skipped = offset.min(self.results.len());
+        self.results.drain(..skipped);
+        let cut_results = self.results.len().saturating_sub(results);
+        let cut_seeds = self.seeds.len().saturating_sub(seeds);
+        self.results.truncate(results);
+        self.seeds.truncate(seeds);
+        if skipped > 0 || cut_results > 0 || cut_seeds > 0 {
+            let t = self.truncated.get_or_insert_with(Truncated::default);
+            t.offset += skipped;
+            t.results += cut_results;
+            t.seeds += cut_seeds;
+        }
         if results != usize::MAX || seeds != usize::MAX {
             self.set_compact();
         }
-        let cut_results = self.results.len().saturating_sub(results);
-        let cut_seeds = self.seeds.len().saturating_sub(seeds);
-        if cut_results == 0 && cut_seeds == 0 {
-            return;
+        self.set_next();
+    }
+
+    /// FH.8c: [`Truncated::next`] from the cut and the areas: the next page's
+    /// offset, and the largest located area's scope when the rows span more
+    /// than one located area (the unlocated rows are in every scope, so a
+    /// scoped answer never names its own scope again). `None` when no result
+    /// row was cut.
+    fn set_next(&mut self) {
+        let shown = self.results.len();
+        let mut located = self.areas.iter().filter_map(|a| a.scope.as_ref());
+        let scope = match (located.next(), located.next()) {
+            (Some(first), Some(_)) => Some(first.clone()),
+            _ => None,
+        };
+        if let Some(t) = &mut self.truncated {
+            t.next = (t.results > 0).then(|| NextPage {
+                scope,
+                offset: t.offset + shown,
+            });
         }
-        self.results.truncate(results);
-        self.seeds.truncate(seeds);
-        let t = self.truncated.get_or_insert_with(Truncated::default);
-        t.results += cut_results;
-        t.seeds += cut_seeds;
     }
 
     /// FH.8: the result rows before any cap ([`BlastRadius::truncated`]
-    /// added back).
+    /// added back, FH.8c: the rows an offset skipped too).
     pub fn rows_total(&self) -> usize {
-        self.results.len() + self.truncated.as_ref().map_or(0, |t| t.results)
+        self.results.len() + self.truncated.as_ref().map_or(0, |t| t.results + t.offset)
     }
+}
+
+/// FH.8c: every row's [`Area`] (the type's docs), most rows first, then by
+/// area name. A row's area is the deepest non-root PROJECT ([`project_roots`])
+/// whose path holds its file: named and scoped by its label when that label
+/// resolves to it alone ([`resolve_scope`]), else by its path. A row under
+/// no such project is in the area of its file's first two directories (a
+/// root-level file is its own area); a row with no file is in
+/// [`UNLOCATED_AREA`], with no scope.
+pub(crate) fn areas_of(merged: &MergedGraph, rows: &[BlastAnswer]) -> Vec<Area> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let projects = project_areas(&project_roots(merged));
+    group_areas(rows.iter().map(|r| r.file.as_deref()), &projects)
+}
+
+/// FH.8c: `(path, area, scope)` per non-root project, deepest path first.
+fn project_areas(roots: &[ProjectInfo]) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = roots
+        .iter()
+        .filter(|p| p.path != ".")
+        .map(|p| {
+            let by_label = !p.label.is_empty()
+                && roots.iter().filter(|q| q.label == p.label).count() == 1
+                && roots.iter().filter(|q| q.path == p.path).count() == 1
+                && !roots
+                    .iter()
+                    .any(|q| q.path == p.label || q.qname == p.label);
+            let name = if by_label { &p.label } else { &p.path };
+            (p.path.clone(), name.clone(), name.clone())
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.cmp(b)));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// FH.8c: a file's directory area: its first two directories, or the file
+/// itself at the root.
+fn directory_area(file: &str) -> String {
+    let f = file.trim_start_matches("./").trim_start_matches('/');
+    let parts: Vec<&str> = f.split('/').collect();
+    match parts.split_last() {
+        Some((_, dirs)) if !dirs.is_empty() => dirs[..dirs.len().min(2)].join("/"),
+        _ => f.to_string(),
+    }
+}
+
+/// FH.8c: one area's tally while [`group_areas`] reads the rows: its rows,
+/// its distinct files and its first (best-ranked) row's file.
+struct AreaTally<'a> {
+    rows: usize,
+    files: BTreeSet<&'a str>,
+    top: Option<&'a str>,
+}
+
+/// FH.8c: [`areas_of`] over the rows' files, in rank order.
+fn group_areas<'a>(
+    files: impl Iterator<Item = Option<&'a str>>,
+    projects: &[(String, String, String)],
+) -> Vec<Area> {
+    let mut by: BTreeMap<(String, Option<String>), AreaTally<'a>> = BTreeMap::new();
+    for file in files {
+        let key = match file {
+            None => (UNLOCATED_AREA.to_string(), None),
+            Some(f) => match projects.iter().find(|(path, _, _)| in_scope(f, path)) {
+                Some((_, area, scope)) => (area.clone(), Some(scope.clone())),
+                None => {
+                    let area = directory_area(f);
+                    (area.clone(), Some(area))
+                }
+            },
+        };
+        let acc = by.entry(key).or_insert_with(|| AreaTally {
+            rows: 0,
+            files: BTreeSet::new(),
+            top: file,
+        });
+        acc.rows += 1;
+        if let Some(f) = file {
+            acc.files.insert(f);
+        }
+    }
+    let mut out: Vec<Area> = by
+        .into_iter()
+        .map(|((area, scope), t)| Area {
+            area,
+            rows: t.rows,
+            files: t.files.len(),
+            top_file: t.top.map(str::to_string),
+            scope,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.rows
+            .cmp(&a.rows)
+            .then_with(|| (&a.area, &a.scope).cmp(&(&b.area, &b.scope)))
+    });
+    out
 }
 
 /// **blast_radius** (P3, LD.5): the complete, deduped, edge-category-aware,
@@ -1106,8 +1417,8 @@ impl BlastRadius {
 /// is unresolved (suggestions for the first), `no_edges` when the seeds
 /// resolved but no carry edge leads anywhere (mechanisms from the seeds'
 /// kinds; a MODULE / PACKAGE seed is told that structural edges are not
-/// carry edges), `no_match` when `scope`, `live_only`, `top_k = Some(0)` or
-/// `depth = 0` removed every row.
+/// carry edges), `no_match` when `scope`, `live_only`, `top_k = Some(0)`,
+/// an `offset` past the last row (FH.8c) or `depth = 0` removed every row.
 ///
 /// Identity (DD.10, `opts.collapse`, on by default): a walk class (messages,
 /// contract ops, SCIP symbols, a package and its project) is one node in the
@@ -1251,6 +1562,9 @@ fn radius(
     let mut rank_line: Option<String> = None;
     let mut selection: Option<Selection> = None;
     let mut cut_results = 0usize;
+    let mut skipped = 0usize;
+    let mut cut_areas = 0usize;
+    let mut areas: Vec<Area> = Vec::new();
     if !ids.is_empty() {
         let loc = Locator::new(merged);
         // EC.8: the ranking this answer applies, chosen before the cache's
@@ -1340,10 +1654,10 @@ fn radius(
         }
         // A hit's `seed` is a walk node: the seed itself, or its class's
         // representative.
-        let seed_qname: HashMap<NodeId, &str> = walk_seeds
+        let seed_qname: HashMap<NodeId, (&str, u64)> = walk_seeds
             .iter()
             .zip(&blast_seeds)
-            .map(|(&id, s)| (id, s.qname.as_str()))
+            .map(|(&id, s)| (id, (s.qname.as_str(), s.id)))
             .collect();
 
         out = hits
@@ -1358,6 +1672,7 @@ fn radius(
                     h.id
                 };
                 let at = loc.locate(shown);
+                let (seed, seed_id) = seed_qname.get(&h.seed).copied().unwrap_or(("", 0));
                 BlastAnswer {
                     id: shown.0,
                     qname: at.qname,
@@ -1369,11 +1684,11 @@ fn radius(
                     live: walk_live.contains(&h.id),
                     file: at.file,
                     line: at.line,
-                    seed: seed_qname
-                        .get(&h.seed)
-                        .map(|q| q.to_string())
-                        .unwrap_or_default(),
+                    seed: seed.to_string(),
                     identity: view.row_identity(h.id, shown),
+                    seed_id,
+                    seed_index: None,
+                    compact: false,
                 }
             })
             .collect();
@@ -1418,6 +1733,15 @@ fn radius(
             "blast_radius",
         );
         kept_in_scope = out.len();
+        // FH.8c: the areas of every scoped row (compact answers only), then
+        // the offset, then the cut.
+        if opts.top_k.is_some() {
+            areas = areas_of(merged, &out);
+            cut_areas = areas.len().saturating_sub(DEFAULT_OVERVIEW_AREAS);
+            areas.truncate(DEFAULT_OVERVIEW_AREAS);
+        }
+        skipped = opts.offset.min(out.len());
+        out.drain(..skipped);
         if let Some(k) = opts.top_k {
             cut_results = out.len().saturating_sub(k);
             out.truncate(k);
@@ -1481,15 +1805,20 @@ fn radius(
         cut_seeds = blast_seeds.len().saturating_sub(k);
         blast_seeds.truncate(k);
     }
-    let truncated = (cut_results > 0 || cut_seeds > 0).then_some(Truncated {
-        results: cut_results,
-        seeds: cut_seeds,
-    });
+    let truncated =
+        (cut_results > 0 || cut_seeds > 0 || skipped > 0 || cut_areas > 0).then_some(Truncated {
+            results: cut_results,
+            seeds: cut_seeds,
+            offset: skipped,
+            areas: cut_areas,
+            next: None,
+        });
     let mut answer = BlastRadius {
         seeds: blast_seeds,
         unresolved,
         results: out,
         files: ranked_files,
+        areas,
         selection,
         absence,
         truncated,
@@ -1499,6 +1828,7 @@ fn radius(
     if opts.top_k.is_some() {
         answer.set_compact();
     }
+    answer.set_next();
     answer
 }
 
@@ -1684,10 +2014,19 @@ fn blast_absence(
     {
         return absence::scope_emptied(merged, P, &query, reached - dead, s);
     }
-    let note = format!(
-        "top_k 0 keeps none of the {kept_in_scope} {} in radius of {named}",
-        absence::plural(kept_in_scope, "row", "rows")
-    );
+    // FH.8c: an offset at or past the last row.
+    let note = if opts.offset > 0 && opts.offset >= kept_in_scope {
+        format!(
+            "offset {} skips all of the {kept_in_scope} {} in radius of {named}",
+            opts.offset,
+            absence::plural(kept_in_scope, "row", "rows")
+        )
+    } else {
+        format!(
+            "top_k 0 keeps none of the {kept_in_scope} {} in radius of {named}",
+            absence::plural(kept_in_scope, "row", "rows")
+        )
+    };
     absence::empty(merged, P, &query, "no_match", note, &[], None)
 }
 
@@ -4075,7 +4414,10 @@ mod compact_tests {
     //! FH.8: a capped answer says what it cut (`truncated`), and its JSON
     //! leaves out the null / empty / default fields its docs list.
 
-    use super::{BlastOptions, DEFAULT_ANSWER_ROWS, DEFAULT_ANSWER_SEEDS, blast_radius};
+    use super::{
+        Area, BlastOptions, DEFAULT_ANSWER_SEEDS, DEFAULT_OVERVIEW_ROWS, NextPage, ProjectInfo,
+        UNLOCATED_AREA, blast_radius, group_areas, project_areas,
+    };
     use crate::build::generate_many;
     use crate::identity::{AlsoIn, RowIdentity};
     use serde_json::Value;
@@ -4118,9 +4460,10 @@ mod compact_tests {
         let cut = blast_radius(&m, &["app::core"], &opts);
         assert_eq!(cut.results.len(), 3);
         let v = json(&cut);
+        // FH.8c: one area (the one file), so `next` names only the offset.
         assert_eq!(
             v["truncated"],
-            serde_json::json!({"results": n - 3, "seeds": 0}),
+            serde_json::json!({"results": n - 3, "seeds": 0, "next": {"offset": 3}}),
             "{v}"
         );
 
@@ -4160,7 +4503,7 @@ mod compact_tests {
         let before = a.truncated.clone().unwrap_or_default();
         let total = a.rows_total();
         let firsts: Vec<String> = a.results.iter().take(2).map(|r| r.qname.clone()).collect();
-        a.cap(2, 1);
+        a.page(0, 2, 1);
         let t = a.truncated.clone().expect("cut");
         assert_eq!((t.results, t.seeds), (before.results + 3, before.seeds + 2));
         assert_eq!(a.rows_total(), total, "the uncut count survives the cut");
@@ -4169,7 +4512,7 @@ mod compact_tests {
         assert_eq!(a.seeds.len(), 1);
         assert!(a.absence.is_none());
         let mut whole = blast_radius(&m, &["app::core"], &BlastOptions::default());
-        whole.cap(usize::MAX, usize::MAX);
+        whole.page(0, usize::MAX, usize::MAX);
         assert!(
             whole.truncated.is_none(),
             "a cap that cuts nothing records nothing"
@@ -4228,7 +4571,7 @@ mod compact_tests {
     /// The capped options the CLI and pyo3 surfaces pass by default.
     fn capped() -> BlastOptions {
         BlastOptions {
-            top_k: Some(DEFAULT_ANSWER_ROWS),
+            top_k: Some(DEFAULT_OVERVIEW_ROWS),
             ..BlastOptions::default()
         }
     }
@@ -4294,7 +4637,7 @@ mod compact_tests {
     /// FH.8b: a capped answer keeps [`DEFAULT_ANSWER_SEEDS`] seeds (rows stay
     /// at `top_k`), `truncated.seeds` counting the rest; uncut keeps all.
     #[test]
-    fn a_capped_answer_keeps_fifty_seeds() {
+    fn a_capped_answer_keeps_the_default_seeds() {
         let mut src = String::from("def core(x):\n    return x\n\n\n");
         for i in 1..=60 {
             src.push_str(&format!("def s{i}():\n    return core({i})\n\n\n"));
@@ -4310,7 +4653,10 @@ mod compact_tests {
         let queries: Vec<&str> = names.iter().map(String::as_str).collect();
         let cut = blast_radius(&m, &queries, &capped());
         assert_eq!(cut.seeds.len(), DEFAULT_ANSWER_SEEDS);
-        assert_eq!(cut.truncated.as_ref().map(|t| t.seeds), Some(10));
+        assert_eq!(
+            cut.truncated.as_ref().map(|t| t.seeds),
+            Some(60 - DEFAULT_ANSWER_SEEDS)
+        );
         let size = cut.size();
         assert_eq!((size.seeds, size.seeds_shown), (60, DEFAULT_ANSWER_SEEDS));
         let all = blast_radius(&m, &queries, &BlastOptions::default());
@@ -4351,5 +4697,249 @@ mod compact_tests {
         assert!(row["depth"].is_number(), "BFS ran: {row}");
         assert!(row.get("ppr").is_none(), "no PPR base: {row}");
         assert!(row.get("cochange").is_none(), "co-change off: {row}");
+    }
+
+    /// FH.8c: the overview defaults: 25 rows, 25 seeds.
+    #[test]
+    fn the_overview_default_is_twenty_five_rows_and_seeds() {
+        assert_eq!((DEFAULT_OVERVIEW_ROWS, DEFAULT_ANSWER_SEEDS), (25, 25));
+    }
+
+    fn project(path: &str, label: &str) -> ProjectInfo {
+        ProjectInfo {
+            qname: format!("project:{path}"),
+            label: label.to_string(),
+            ecosystem: "npm".to_string(),
+            manifest: format!("{path}/package.json"),
+            path: path.to_string(),
+        }
+    }
+
+    /// FH.8c: a row's area is its deepest non-root project (by a label that
+    /// resolves to it alone, else by path), else its file's first two
+    /// directories (a root file is its own area), else the unlocated area;
+    /// most rows first, then by name; `top_file` is the first row's file.
+    #[test]
+    fn areas_group_rows_by_project_then_two_directories() {
+        let roots = vec![
+            project(".", "root"),
+            project("apps/web", "@shop/web"),
+            project("apps/web/admin", "@shop/admin"),
+            project("libs/a", "dup"),
+            project("libs/b", "dup"),
+        ];
+        let projects = project_areas(&roots);
+        let files = [
+            Some("internal/api/a.go"),
+            Some("apps/web/src/x.ts"),
+            Some("internal/api/v1/b.go"),
+            Some("apps/web/admin/y.ts"),
+            Some("internal/api/a.go"),
+            Some("main.go"),
+            None,
+            Some("libs/a/z.ts"),
+            Some("pkg/c.go"),
+        ];
+        let areas = group_areas(files.iter().copied(), &projects);
+        let row = |area: &str, rows, files, top: Option<&str>, scope: Option<&str>| Area {
+            area: area.to_string(),
+            rows,
+            files,
+            top_file: top.map(str::to_string),
+            scope: scope.map(str::to_string),
+        };
+        assert_eq!(
+            areas,
+            vec![
+                row(
+                    "internal/api",
+                    3,
+                    2,
+                    Some("internal/api/a.go"),
+                    Some("internal/api")
+                ),
+                row(UNLOCATED_AREA, 1, 0, None, None),
+                row(
+                    "@shop/admin",
+                    1,
+                    1,
+                    Some("apps/web/admin/y.ts"),
+                    Some("@shop/admin")
+                ),
+                row(
+                    "@shop/web",
+                    1,
+                    1,
+                    Some("apps/web/src/x.ts"),
+                    Some("@shop/web")
+                ),
+                row("libs/a", 1, 1, Some("libs/a/z.ts"), Some("libs/a")),
+                row("main.go", 1, 1, Some("main.go"), Some("main.go")),
+                row("pkg", 1, 1, Some("pkg/c.go"), Some("pkg")),
+            ]
+        );
+    }
+
+    /// FH.8c: `offset` skips the first rows of the ranked list, the cut
+    /// counts what follows, and `truncated.next` names the next page; an
+    /// offset past the end is a `no_match` absence saying so.
+    #[test]
+    fn offset_pages_through_the_ranked_rows() {
+        let (_dir, m) = app();
+        let all = blast_radius(&m, &["app::core"], &BlastOptions::default());
+        let n = all.results.len();
+        let page = |offset, k| BlastOptions {
+            top_k: Some(k),
+            offset,
+            ..BlastOptions::default()
+        };
+        let second = blast_radius(&m, &["app::core"], &page(2, 3));
+        let want: Vec<&str> = all.results[2..5].iter().map(|r| r.qname.as_str()).collect();
+        let got: Vec<&str> = second.results.iter().map(|r| r.qname.as_str()).collect();
+        assert_eq!(got, want);
+        let t = second.truncated.clone().expect("cut");
+        assert_eq!((t.offset, t.results), (2, n - 5));
+        assert_eq!(
+            t.next,
+            Some(NextPage {
+                scope: None,
+                offset: 5
+            })
+        );
+        assert_eq!(second.rows_total(), n);
+        assert_eq!(second.size().offset, 2);
+        assert_eq!(json(&second)["truncated"]["offset"], 2);
+        let last = blast_radius(&m, &["app::core"], &page(n - 1, 3));
+        let t = last.truncated.clone().expect("skipped");
+        assert_eq!((last.results.len(), t.offset, t.results), (1, n - 1, 0));
+        assert!(t.next.is_none(), "nothing follows the last page");
+        let past = blast_radius(&m, &["app::core"], &page(n, 3));
+        let a = past.absence.expect("empty");
+        assert_eq!(a.reason, "no_match");
+        assert!(
+            a.note
+                .starts_with(&format!("offset {n} skips all of the {n} rows")),
+            "{}",
+            a.note
+        );
+    }
+
+    /// FH.8c: a compact answer's rows are slim (`seed_index` into the shown
+    /// seeds, no `name` repeating the qname's tail, `score` to 4 significant
+    /// digits) and it carries `areas`; an uncut one writes every field and
+    /// no areas. A row whose seed the seed cap cut keeps `seed`.
+    #[test]
+    fn a_compact_answer_has_slim_rows_and_areas() {
+        let (_dir, m) = app();
+        let three = ["app::a1", "app::a2", "app::core"];
+        let full = blast_radius(&m, &three, &BlastOptions::default());
+        let fv = json(&full);
+        assert!(fv.get("areas").is_none(), "{fv}");
+        let row = &fv["results"][0];
+        assert!(row["seed"].is_string() && row["name"].is_string(), "{row}");
+        assert_eq!(row["score"].as_f64(), Some(full.results[0].score));
+
+        let cut = blast_radius(&m, &three, &capped());
+        let v = json(&cut);
+        assert_eq!(
+            v["areas"],
+            serde_json::json!([{
+                "area": "app.py", "rows": cut.results.len(), "files": 1,
+                "top_file": "app.py", "scope": "app.py"
+            }]),
+            "{v}"
+        );
+        assert_eq!(cut.size().areas, 1);
+        for (r, row) in cut
+            .results
+            .iter()
+            .zip(v["results"].as_array().expect("rows"))
+        {
+            assert!(
+                row.get("seed").is_none() && row.get("name").is_none(),
+                "{row}"
+            );
+            let i = row["seed_index"].as_u64().expect("an index") as usize;
+            assert_eq!(cut.seeds[i].qname, r.seed, "{row}");
+            let score = row["score"].as_f64().expect("a score");
+            assert_eq!(
+                score,
+                format!("{:.3e}", r.score).parse::<f64>().expect("f64")
+            );
+            assert!(
+                (score - r.score).abs() <= r.score.abs() * 5e-4,
+                "{score} vs {}",
+                r.score
+            );
+        }
+
+        let mut one = blast_radius(&m, &three, &capped());
+        one.page(0, usize::MAX, 1);
+        let v = json(&one);
+        let rows = v["results"].as_array().expect("rows");
+        assert!(
+            rows.iter().all(|r| r
+                .get("seed_index")
+                .map_or(r["seed"].is_string(), |i| i == 0)),
+            "a cut seed's rows keep `seed`: {v}"
+        );
+        assert!(rows.iter().any(|r| r["seed"].is_string()), "{v}");
+    }
+
+    /// FH.8c: a compact answer lists the [`super::DEFAULT_OVERVIEW_AREAS`]
+    /// largest areas and counts the rest in `truncated.areas`.
+    #[test]
+    fn the_area_list_is_capped_and_counts_the_rest() {
+        let (_dir, m) = app();
+        let mut a = blast_radius(&m, &["app::core"], &BlastOptions::default());
+        let extra = super::DEFAULT_OVERVIEW_AREAS + 2;
+        let template = a.results[0].clone();
+        a.results = (0..extra)
+            .map(|i| {
+                let mut r = template.clone();
+                r.file = Some(format!("d{i:02}/x/y.py"));
+                r
+            })
+            .collect();
+        a.results.push({
+            let mut r = template.clone();
+            r.file = Some("d00/x/z.py".to_string());
+            r
+        });
+        a.map_areas(&m);
+        assert_eq!(a.areas.len(), super::DEFAULT_OVERVIEW_AREAS);
+        assert_eq!((a.areas[0].area.as_str(), a.areas[0].rows), ("d00/x", 2));
+        assert_eq!(a.truncated.as_ref().map(|t| t.areas), Some(2));
+        a.page(0, 3, usize::MAX);
+        let v = json(&a);
+        assert_eq!(v["truncated"]["areas"], 2, "{v}");
+        assert_eq!(v["truncated"]["next"]["scope"], "d00/x", "{v}");
+
+        // One located area and the unlocated rows (every scope keeps them):
+        // no scope to suggest, as in an answer already scoped to the area.
+        a.areas = vec![
+            Area {
+                area: "d00/x".to_string(),
+                rows: 5,
+                files: 1,
+                top_file: Some("d00/x/y.py".to_string()),
+                scope: Some("d00/x".to_string()),
+            },
+            Area {
+                area: UNLOCATED_AREA.to_string(),
+                rows: 1,
+                files: 0,
+                top_file: None,
+                scope: None,
+            },
+        ];
+        a.set_next();
+        assert_eq!(
+            a.truncated.as_ref().and_then(|t| t.next.clone()),
+            Some(NextPage {
+                scope: None,
+                offset: 3
+            })
+        );
     }
 }

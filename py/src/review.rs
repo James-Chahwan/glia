@@ -3,8 +3,9 @@
 //! pyo3 twin of `glia review`.
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
-//! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
-//! models_min_tier="fact", ranking=None, cochange=True, title=None, full=False)` builds the repo's
+//! markdown_rows=20, depth=4, max_tests=50, max_impact=25,
+//! models_min_tier="fact", ranking=None, cochange=True, title=None, full=False,
+//! offset=0)` builds the repo's
 //! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
 //! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
 //! `{base, counts, changed, impact, tests, edges, new_violations,
@@ -17,9 +18,11 @@
 //! rev, a failed build), raises `ValueError`; the format, the tier and the
 //! ranking are checked before anything is built. `full=True` (FH.8b) lifts
 //! every row cap: `max_impact`, `max_tests` and the impact's seed cap
-//! (`ReviewArgs::max_seeds`, 50) become unlimited, and the dict is the
-//! whole answer (no seed `also_in` folded, no `changed` row reduced to its
-//! id), as `glia review --full`.
+//! (`ReviewArgs::max_seeds`, 25 since FH.8c) become unlimited, and the dict
+//! is the whole answer (no seed `also_in` folded, no `changed` row reduced
+//! to its id, FH.8c: no `impact.areas`, no slim rows), as `glia review
+//! --full`. `offset` (FH.8c) skips the first impact rows; it conflicts with
+//! `full`.
 //!
 //! Transport only: the review, the renderer, the location of every row and
 //! the `[review] base=..` marker live in the engine; this module adds one
@@ -113,6 +116,7 @@ struct Kw<'a> {
     cochange: bool,
     title: Option<&'a str>,
     full: bool,
+    offset: usize,
 }
 
 impl Default for Kw<'_> {
@@ -129,6 +133,7 @@ impl Default for Kw<'_> {
             cochange: true,
             title: None,
             full: false,
+            offset: 0,
         }
     }
 }
@@ -155,8 +160,15 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
         kw.title,
     )?;
     if kw.full {
+        if kw.offset > 0 {
+            return Err(format!(
+                "offset={} and full=True conflict: full keeps every row",
+                kw.offset
+            ));
+        }
         lift_caps(&mut args);
     }
+    args.offset = kw.offset;
     let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
@@ -226,15 +238,24 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// and the impact rows in id-routed files come first (text never reorders
 /// them).
 ///
+/// FH.8c, the overview: `max_impact` defaults to 25 (it was 50), and unless
+/// `full` the impact carries `areas` (every impact row by sub-project or
+/// directory, `{area, rows, files, top_file, scope}`, the 10 largest),
+/// `truncated.next` `{scope, offset}` when rows were cut, and slim rows
+/// (`seed_index` for `seed`, no `name` repeating the qname's tail, a 4-digit
+/// `score`); `changed` keeps 25 rows (`counts.nodes_changed` uncut).
+/// `offset` (last keyword) skips the first impact rows; with `full=True` it
+/// raises ValueError.
+///
 /// FH.8b: by default the dict is compact: `impact.seeds` keeps the first
-/// 50 (`impact.truncated.seeds` counts the rest), a seed's
+/// 25 (`impact.truncated.seeds` counts the rest), a seed's
 /// `identity.also_in` past three members is its first three plus
 /// `also_in_count`, and a `changed` row whose seed `impact.seeds` shows is
 /// `{id, change}` (its full row is that seed's). `full=True` (last keyword)
 /// lifts every cap, `max_impact` and `max_tests` included, and writes every
 /// row whole. One `[answer-size] surface=review ..` line per dict.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=25, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false, offset=0))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -250,6 +271,7 @@ fn review_vs_rev_py(
     cochange: bool,
     title: Option<&str>,
     full: bool,
+    offset: usize,
 ) -> PyResult<Py<PyAny>> {
     let kw = Kw {
         format,
@@ -262,6 +284,7 @@ fn review_vs_rev_py(
         cochange,
         title,
         full,
+        offset,
     };
     let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
@@ -293,7 +316,7 @@ inventory::submit! { ModuleFns { name: "review", add: register } }
 const _: () = {
     assert!(DEFAULT_MARKDOWN_ROWS == 20);
     assert!(DEFAULT_MAX_TESTS == 50);
-    assert!(DEFAULT_MAX_IMPACT == 50);
+    assert!(DEFAULT_MAX_IMPACT == 25);
 };
 
 #[cfg(test)]
@@ -496,6 +519,17 @@ mod tests {
             err, "unknown models min tier `x`: expected one of fact, derived",
             "refused before any build: the path is never read"
         );
+        // FH.8c: an offset with full=True is refused before any build.
+        let paged = Kw {
+            offset: 25,
+            full: true,
+            ..Kw::default()
+        };
+        let err = rev_answer("/nonexistent/fh8c", "HEAD", &paged).expect_err("offset + full");
+        assert_eq!(
+            err,
+            "offset=25 and full=True conflict: full keeps every row"
+        );
         let bad = Kw {
             ranking: Some("x"),
             ..Kw::default()
@@ -564,9 +598,10 @@ mod tests {
                 k.ranking,
                 k.cochange,
                 k.title,
-                k.full
+                k.full,
+                k.offset
             ),
-            ("dict", 20, 4, 50, 50, "fact", None, true, None, false),
+            ("dict", 20, 4, 50, 25, "fact", None, true, None, false, 0),
             "Kw::default is the pyo3 signature's"
         );
     }

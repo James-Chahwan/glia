@@ -307,7 +307,7 @@ glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]
     Reachability walk from one entity: forward, backward or both.
-glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backward|both] [--full] [--json] [--live-only] [--no-cochange] [--no-collapse] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <K>] [--with <WITH>]...
+glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backward|both] [--full] [--json] [--live-only] [--no-cochange] [--no-collapse] [--offset <N>] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <K>] [--with <WITH>]...
     Edge-category-aware, PPR-ranked, located closure around one or more seeds, each
     row naming its seed, edge reason and `live` flag; import / contain edges excluded.
     A shared message, contract op or SCIP symbol is one node of the walk, so the radius
@@ -317,11 +317,16 @@ glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backw
     bfs, and the rows each holds. --ranking forces ppr, ppr-wide (damping 0.85, sum-pooled
     per file) or bfs; without it the repo's calibrated pick ranks (glia history calibrate),
     else co-change then ppr, named on one `ranking:` line (`selection` in --json).
-    --no-cochange drops the co-change tier. Rows are cut to --top-k (200) after the
-    ranking and seeds to the lesser of --top-k and 50, `truncated` counting what was left
-    out; --full keeps every one. The JSON leaves out null, empty and default fields, and
-    a capped answer shows a seed's identity also_in past three members as the first three
-    and `also_in_count`.
+    --no-cochange drops the co-change tier. The default answer is an overview: rows cut
+    to --top-k (25) after the ranking, seeds to the lesser of --top-k and 25, `truncated`
+    counting what was left out, and `areas` / `## areas` mapping every row by sub-project
+    or directory (rows, files, best file, the --scope that selects it, the 10 largest);
+    `truncated.next` names the largest area's --scope and the next --offset. Read the
+    areas first, then ask for one with --scope; --offset <N> skips the first N rows.
+    Capped rows are slim: `seed_index` into `seeds`, no `name` repeating the qname's
+    tail, a 4-digit `score`. --full keeps every row and field whole. The JSON leaves out
+    null, empty and default fields, and a capped answer shows a seed's identity also_in
+    past three members as the first three and `also_in_count`.
 glia trace <REPO> <FEATURE> [--depth <DEPTH>] [--json] [--max-paths <MAX_PATHS>] [--no-collapse] [--to <TO>] [--with <WITH>]...
     Ranked distinct paths from a feature across service boundaries, each hop with its
     mechanism; --to gives the paths between two nodes. A hop through an identity class
@@ -381,12 +386,13 @@ glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>
 glia delta <REPO> [--base <BASE>] [--category <CATEGORY>]... [--edges-only] [--json]
     What the working tree's change did to the graph against a git rev (default HEAD):
     nodes and edges added, removed, modified or moved, located.
-glia diff-impact <REPO> [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--direction forward|backward|both] [--full] [--json] [--live-only] [--no-cochange] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <K>] [--with <WITH>]...
+glia diff-impact <REPO> [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--direction forward|backward|both] [--full] [--json] [--live-only] [--no-cochange] [--offset <N>] [--ranking ppr|ppr-wide|bfs] [--scope <SCOPE>] [--top-files <N>] [--top-k <K>] [--with <WITH>]...
     The changed nodes (--base rev or --diff file) and one ranked blast radius around
     them, each row naming the change that reached it. Ranked and filed as blast-radius
     (--ranking, --no-cochange, --top-files, `selection`, `## files`), and cut as it is
-    (--top-k 200, `impact.truncated`, --full); a capped answer's changed row that
-    repeats a shown seed is its id and change, the full row under `impact.seeds`.
+    (--top-k 25, `impact.areas`, `impact.truncated.next`, --offset, --full); a capped
+    answer keeps 25 changed rows (`changed_truncated` counts the rest), and a changed
+    row that repeats a shown seed is its id and change, the full row under `impact.seeds`.
 glia tests-for <REPO> [QNAMES]... [--base <REV>] [--depth <DEPTH>] [--diff <FILE>] [--files-only] [--json] [--limit <N>] [--no-collapse] [--no-module-level] [--no-signals] [--scope <SCOPE>] [--with <WITH>]...
     The tests to run for a change (seed qnames, --diff or --base), tiered FACT /
     DERIVED / HEURISTIC and ranked by the test and history snapshots' signals (failed
@@ -400,7 +406,7 @@ glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min
     --min-support sighted handlers is the convention, and every handler off it a
     located DIVERGENCE. Blind handlers are listed, never counted. Counts, not rules;
     --base keeps the divergences the change touched.
-glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--ranking ppr|ppr-wide|bfs] [--title <TEXT>]
+glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--offset <N>] [--ranking ppr|ppr-wide|bfs] [--title <TEXT>]
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, the declared rules checked on both sides, and the inferred-model
@@ -413,8 +419,10 @@ glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-ro
     at the base through task / requirement rows, past commits ranked by its words,
     and the impact rows in id-routed files listed first (`intent`, `### Intent`, its file
     order the repo's calibrated pick, `selection_intent`). --ranking / --no-cochange rank
-    the impact as blast-radius does. --full keeps every impact row, impact seed (50 by
-    default, `impact.truncated`) and test row, and writes every row whole.
+    the impact as blast-radius does, and the impact is its overview: --max-impact 25
+    rows, 25 seeds and 25 changed rows, `impact.areas` (### Impact areas when cut),
+    `impact.truncated.next`, --offset. --full keeps every impact row, impact seed,
+    changed row and test row, and writes every row whole.
 glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--models-min-tier fact|derived|heuristic] [--with <REPO>]...
     Did the change against a rev (default HEAD) break a client? Every OpenAPI /
     AsyncAPI op and proto / Avro / JSON Schema type paired old -> new and judged by

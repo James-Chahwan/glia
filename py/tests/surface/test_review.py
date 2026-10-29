@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
-depth=4, max_tests=50, max_impact=50, models_min_tier="fact", ranking=None,
-cochange=True, title=None, full=False)` builds the git
+depth=4, max_tests=50, max_impact=25, models_min_tier="fact", ranking=None,
+cochange=True, title=None, full=False, offset=0)` builds the git
 rev `base` and the working tree of the repo at `repo_path` and returns the
 engine's review as a native dict {base, counts, changed, impact, tests, edges,
 new_violations, resolved_violations, model_breaks, check_errors, blocking}
@@ -16,11 +16,13 @@ ranked LX[IDR,P1]) is a key only with a `title`, or a commit in base..HEAD
 follows it (set SELt2's calibrated pick, EC.12, else LX[IDR,P1]). FB.12b:
 `conventions` (after check_errors) lists the conventions governing the
 changed files, only when one does. FH.8b: the dict is compact by default
-(impact seeds capped at 50, a seed's identity also_in past three members
+(impact seeds capped at 25 since FH.8c, a seed's identity also_in past three members
 folded to three plus also_in_count, a changed row that repeats a shown seed
 reduced to {id, change}); full=True lifts every cap (max_impact and
 max_tests included) and writes every row whole; one `[answer-size]
-surface=review ..` line per dict. Needs a `git` binary. Shared
+surface=review ..` line per dict. FH.8c: max_impact defaults to 25, a cut
+impact carries `areas` and `truncated.next`, its rows are slim (`seed_index`),
+and `offset=` skips impact rows (refused with full=True). Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -48,8 +50,8 @@ CONVENTION = ("\n[[convention]]\nid = \"api-pure\"\nscope = \"services/api\"\n"
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None),
-      ("full", False)]
+      ("max_tests", 50), ("max_impact", 25), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None),
+      ("full", False), ("offset", 0)]
 # DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
 MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
 TAG = '`json:"customerName"`'
@@ -134,6 +136,13 @@ def main() -> int:
         c.check("max_tests / max_impact cut the rows, not the counts",
                 capped["tests"]["tests"] == [] and capped["impact"]["results"] == []
                 and capped["counts"] == d.get("counts"), capped.get("counts"))
+        areas = capped["impact"].get("areas") or []
+        c.check("FH.8c: a cut impact maps every impact row by area",
+                sum(a.get("rows", 0) for a in areas) == capped["counts"]["impact"]
+                and (capped["impact"].get("truncated") or {}).get("next", {}).get("offset") == 0, areas)
+        c.raises("FH.8c: offset with full raises before any build", ValueError,
+                 lambda: rg.review_vs_rev(str(pathlib.Path(tmp) / "nowhere"), offset=1, full=True),
+                 "full keeps every row")
 
         c.check("FH.8b: markdown prints no answer-size line", "[answer-size]" not in err, err[-400:])
         _, err = stderr_of(lambda: rg.review_vs_rev(str(top)))
@@ -149,7 +158,8 @@ def main() -> int:
         c.check("FH.8b: full=True lifts max_impact / max_tests",
                 len(whole["impact"]["results"]) == whole["counts"]["impact"]
                 and len(whole["tests"]["tests"]) == whole["counts"]["tests"]
-                and "truncated" not in whole["impact"], whole.get("counts"))
+                and "truncated" not in whole["impact"] and "areas" not in whole["impact"],
+                whole.get("counts"))
         c.check("FH.8b: full=True writes every changed row whole",
                 whole["changed"] != [] and all("qname" in r for r in whole["changed"]), whole.get("changed"))
         c.check("FH.8b: full=True keeps every seed",
