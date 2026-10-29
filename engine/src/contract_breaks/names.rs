@@ -83,9 +83,9 @@
 //!    exchange's names, outside a comment. A GENERIC name (normalised shorter
 //!    than 4, or in [`GENERIC`]) counts only at a property access (`x.type`)
 //!    or when the change renamed it.
-//! 6. ROWS. One per (name, client file, line), sorted by (repo label, file,
-//!    line, name); `position` says how the line uses it (`property`, `key`,
-//!    `string` or `identifier`). The tier is `derived` when the pair edge is
+//! 6. ROWS. One per (name, client file, line) (step 7 folds some), sorted
+//!    by (repo label, file, line, name); `position` says how the line uses
+//!    it (`property`, `key`, `string`, `identifier`, or `folded`). The tier is `derived` when the pair edge is
 //!    a fact and the name is a rename pair, else `heuristic`; a row of several
 //!    exchanges keeps its best tier, then the least (client, server) qname. A
 //!    row blocks only under [`NameBreakArgs::min_tier`] `heuristic`.
@@ -93,14 +93,32 @@
 //!    itself fixed: a client file of the change that used the name at the
 //!    base and no longer does, so the fixed state of a drift reads `rows=0
 //!    fixed=<n>`.
+//! 7. FOLDS (FH.7d). A rename of a generic field (`id -> messageId`) matches
+//!    every `.id` of a frontend; a reviewer needs one row saying so, not one
+//!    per site. A site is ANCHORED when it is the exchange's own field
+//!    access: a property, key (a shorthand `{ name }` too) or string use
+//!    inside one of the exchange's client functions (the FUNCTION / METHOD
+//!    roots of step 4), or a property read off a receiver the same line
+//!    reads another of the exchange's names off (`Tp(data.id, data.params)`:
+//!    the body, read field by field). A generic name keeps a row per
+//!    anchored or key site (`name:`, `"name":`, a shorthand `{ name }`
+//!    outside an import statement); its other, free-text sites fold. Any
+//!    name matched in more than 25 client files keeps only its anchored
+//!    sites (all of them fold too when they alone span more than 25 files).
+//!    A name's folded sites are ONE row at its first site, position
+//!    `folded`, with [`NameBreak::folded`] (`generic` or `cap`),
+//!    `client_sites`, `client_files` and the first 3 `sample_files`, its
+//!    tier, client and server the best of the sites'. Only free text folds:
+//!    a key-class site of a renamed generic field is still a row of its own.
 //!
 //! The diff side reads only the change's hunks, and the client side only the
 //! files the boundary reaches, so a big change stays bounded. fired_on, once
 //! per [`name_breaks`] call: `[name-breaks] base=<rev> exchanges=<e>
 //! names=<n> renames=<r> clients=<c> rows=<k> fixed=<f> dropped_library=<l>
-//! dropped_test=<t> unpaired_identifiers=<u> sdk_hops=<h>` (c = client files
-//! scanned; l / t / u the distinct removed names each step-2 rule dropped; h
-//! the generated client ends walked through).
+//! dropped_test=<t> unpaired_identifiers=<u> sdk_hops=<h> folded_generic=<g>
+//! folded_cap=<p>` (c = client files scanned; l / t / u the distinct removed
+//! names each step-2 rule dropped; h the generated client ends walked
+//! through; g / p the folded rows of each step-7 reason, counted in k).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -136,10 +154,22 @@ const SERVER_VISIT_CAP: usize = 4000;
 /// The largest client file read; a larger one is skipped.
 const FILE_CAP: usize = 4 * 1024 * 1024;
 
+/// Client files a name may be matched in before its unanchored sites fold
+/// into one row (step 7).
+const NAME_SITE_CAP: usize = 25;
+
+/// How many of a folded row's files it names ([`NameBreak::sample_files`]).
+const SAMPLE_FILES: usize = 3;
+
 /// Normalised names too common on any wire to count at a plain identifier:
-/// they need a property access or a rename pair (step 5). The cohort's
-/// `names.py` noise list, normalised, plus the short wire words.
+/// they need a property access or a rename pair (step 5), and a client site
+/// of one is a row of its own only when it is key-class (step 7). The
+/// cohort's `names.py` noise list, normalised, plus the short wire words
+/// (any name shorter than 4 is generic too: `id`, `ids`, `key`).
 pub const GENERIC: &[&str] = &[
+    "id",
+    "ids",
+    "key",
     "this",
     "that",
     "true",
@@ -548,6 +578,21 @@ pub struct NameBreak {
     pub tier: &'static str,
     /// Under [`NameBreakArgs::min_tier`] `heuristic` only.
     pub blocking: bool,
+    /// A folded row only (step 7): why its sites folded, `generic` (a
+    /// generic name's free-text matches) or `cap` (the name is matched in
+    /// more than 25 client files). The row's file, line, client, server and
+    /// tier are its first site's (the best tier's); its position `folded`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folded: Option<&'static str>,
+    /// A folded row only: the client sites (file, line) it stands for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_sites: Option<usize>,
+    /// A folded row only: the distinct client files of those sites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_files: Option<usize>,
+    /// A folded row only: its first 3 files, in (repo label, file) order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sample_files: Vec<String>,
 }
 
 /// The name breaks of the working tree against `base` (module docs).
@@ -584,6 +629,12 @@ pub struct NameBreaks {
     /// Generated client ends of changed exchanges walked through (step 3).
     #[serde(skip)]
     pub sdk_hops: usize,
+    /// Folded rows whose reason is `generic` (step 7).
+    #[serde(skip)]
+    pub folded_generic: usize,
+    /// Folded rows whose reason is `cap` (step 7).
+    #[serde(skip)]
+    pub folded_cap: usize,
 }
 
 /// The name breaks of the working tree at `worktree` against git rev `base`
@@ -629,7 +680,8 @@ pub fn name_breaks(
     let answer = answer(&rev.given, &rev.sha, repo, &diff, after, args);
     eprintln!(
         "[name-breaks] base={} exchanges={} names={} renames={} clients={} rows={} fixed={} \
-         dropped_library={} dropped_test={} unpaired_identifiers={} sdk_hops={}",
+         dropped_library={} dropped_test={} unpaired_identifiers={} sdk_hops={} \
+         folded_generic={} folded_cap={}",
         answer.base,
         answer.exchanges,
         answer.names.len(),
@@ -645,6 +697,8 @@ pub fn name_breaks(
         answer.dropped_test,
         answer.unpaired_identifiers,
         answer.sdk_hops,
+        answer.folded_generic,
+        answer.folded_cap,
     );
     Ok(answer)
 }
@@ -681,6 +735,8 @@ fn answer(
         dropped_test: 0,
         unpaired_identifiers: 0,
         sdk_hops: 0,
+        folded_generic: 0,
+        folded_cap: 0,
     };
     if diff.iter().all(|f| f.hunks.is_empty()) {
         return out;
@@ -835,7 +891,7 @@ fn answer(
 
     // Steps 4-6: the client files, the uses, the rows.
     let diff_files: HashSet<&str> = diff.iter().map(|f| f.path.as_str()).collect();
-    let mut rows: BTreeMap<(String, String, i64, String), NameBreak> = BTreeMap::new();
+    let mut rows: BTreeMap<(String, String, i64, String), Site> = BTreeMap::new();
     let mut scanned: BTreeSet<(u64, String)> = BTreeSet::new();
     let mut fixed: BTreeSet<(String, String)> = BTreeSet::new();
     // Per name: whether some site sits outside a test file (step 2).
@@ -843,6 +899,7 @@ fn answer(
     let server_qname = |id: NodeId| index.loc.locate(id).qname;
     for x in &exchanges {
         let server = server_qname(x.server);
+        let spans = index.client_spans(&x.clients);
         for (file_key, (client, tier)) in index.client_files(&x.clients) {
             let (repo_id, file) = &file_key;
             if *repo_id == provider && x.server_files.contains(file) {
@@ -855,14 +912,15 @@ fn answer(
                 .cloned()
                 .unwrap_or_else(|| format!("repo#{repo_id}"));
             let client_qname = index.loc.locate(NodeId(client)).qname;
-            let uses = texts.uses(*repo_id, file, &x.names, &changed);
+            let fn_spans = spans.get(&file_key).map(Vec::as_slice).unwrap_or_default();
+            let uses = texts.uses(*repo_id, file, &x.names, &changed, fn_spans);
             let used: BTreeSet<&str> = uses.iter().map(|u| u.normalised.as_str()).collect();
             if *repo_id == provider && diff_files.contains(file.as_str()) {
                 let base_text = git_text(repo, &["show", &format!("{sha}:./{file}")])
                     .ok()
                     .flatten()
                     .unwrap_or_default();
-                for u in scan_uses(&base_text, file, &x.names, &changed) {
+                for u in scan_uses(&base_text, file, &x.names, &changed, &[]) {
                     if !used.contains(u.normalised.as_str()) {
                         fixed.insert((u.normalised, file.clone()));
                     }
@@ -893,12 +951,20 @@ fn answer(
                     server: server.clone(),
                     tier: row_tier.as_str(),
                     blocking: args.min_tier == Tier::Heuristic.as_str(),
+                    folded: None,
+                    client_sites: None,
+                    client_files: None,
+                    sample_files: Vec::new(),
                 };
-                match rows.get(&key) {
-                    Some(have) if !better(&candidate, have) => {}
-                    _ => {
-                        rows.insert(key, candidate);
-                    }
+                let slot = rows.entry(key).or_insert_with(|| Site {
+                    row: candidate.clone(),
+                    anchored: false,
+                    key: false,
+                });
+                slot.anchored |= u.anchored;
+                slot.key |= u.key;
+                if better(&candidate, &slot.row) {
+                    slot.row = candidate;
                 }
             }
         }
@@ -910,10 +976,14 @@ fn answer(
         .map(|(n, _)| n)
         .collect();
     out.dropped_test += test_only.len();
-    out.rows = rows
+    let sites: Vec<Site> = rows
         .into_values()
-        .filter(|r| !test_only.contains(&r.normalised))
+        .filter(|s| !test_only.contains(&s.row.normalised))
         .collect();
+    let (rows, generic, cap) = fold(sites);
+    out.rows = rows;
+    out.folded_generic = generic;
+    out.folded_cap = cap;
     out.blocking = out.rows.iter().filter(|r| r.blocking).count();
     out.clients = scanned.len();
     out.fixed = fixed.len();
@@ -924,6 +994,109 @@ fn answer(
     names.sort_by(|a, b| (&a.file, a.line, &a.normalised).cmp(&(&b.file, b.line, &b.normalised)));
     out.names = names;
     out
+}
+
+/// One client site's row before step 7, with what step 7 reads: whether
+/// some exchange anchors it ([`Use::anchored`]) and whether it is a key.
+struct Site {
+    row: NameBreak,
+    anchored: bool,
+    key: bool,
+}
+
+/// Step 7: the sites (in row order) folded per name. A name matched in more
+/// than [`NAME_SITE_CAP`] client files keeps only its anchored sites (and
+/// those only while they span no more than the cap); a generic name keeps
+/// its anchored and key sites. Every other site of the name folds into one
+/// row at its first site, carrying the counts. Returns the rows in (repo
+/// label, file, line, name) order and the folded rows by reason (generic,
+/// cap).
+fn fold(sites: Vec<Site>) -> (Vec<NameBreak>, usize, usize) {
+    // Per name: the (repo label, file) of every site, of its anchored ones.
+    type Files<'s> = BTreeSet<(&'s str, &'s str)>;
+    let mut files: BTreeMap<&str, (Files, Files)> = BTreeMap::new();
+    for s in &sites {
+        let slot = files.entry(s.row.normalised.as_str()).or_default();
+        let file = (s.row.repo.as_str(), s.row.file.as_str());
+        slot.0.insert(file);
+        if s.anchored {
+            slot.1.insert(file);
+        }
+    }
+    let over: BTreeMap<String, (bool, bool)> = files
+        .into_iter()
+        .map(|(n, (all, anchored))| {
+            (
+                n.to_string(),
+                (all.len() > NAME_SITE_CAP, anchored.len() > NAME_SITE_CAP),
+            )
+        })
+        .collect();
+    let mut kept: Vec<NameBreak> = Vec::new();
+    // Per name, its folded sites in row order and the reason.
+    let mut folded: BTreeMap<String, (Vec<NameBreak>, &'static str)> = BTreeMap::new();
+    for s in sites {
+        let (cap, anchored_cap) = over.get(&s.row.normalised).copied().unwrap_or_default();
+        let reason = if cap && (!s.anchored || anchored_cap) {
+            Some("cap")
+        } else if is_generic(&s.row.normalised) && !s.anchored && !s.key {
+            Some("generic")
+        } else {
+            None
+        };
+        match reason {
+            None => kept.push(s.row),
+            Some(r) => {
+                let slot = folded
+                    .entry(s.row.normalised.clone())
+                    .or_insert_with(|| (Vec::new(), r));
+                if r == "cap" {
+                    slot.1 = r;
+                }
+                slot.0.push(s.row);
+            }
+        }
+    }
+    let (mut generic, mut cap) = (0, 0);
+    for (_, (group, reason)) in folded {
+        if reason == "cap" {
+            cap += 1;
+        } else {
+            generic += 1;
+        }
+        let distinct: BTreeSet<(&str, &str)> = group
+            .iter()
+            .map(|r| (r.repo.as_str(), r.file.as_str()))
+            .collect();
+        let sample_files: Vec<String> = distinct
+            .iter()
+            .take(SAMPLE_FILES)
+            .map(|(_, f)| f.to_string())
+            .collect();
+        let client_files = distinct.len();
+        let client_sites = group.len();
+        // The first site's place, the best tier's (client, server).
+        let mut best = group[0].clone();
+        for r in &group[1..] {
+            if better(r, &best) {
+                best.tier = r.tier;
+                best.client = r.client.clone();
+                best.server = r.server.clone();
+            }
+        }
+        kept.push(NameBreak {
+            position: "folded",
+            folded: Some(reason),
+            client_sites: Some(client_sites),
+            client_files: Some(client_files),
+            sample_files,
+            ..best
+        });
+    }
+    kept.sort_by(|a, b| {
+        (&a.repo, &a.file, a.line, &a.normalised).cmp(&(&b.repo, &b.file, b.line, &b.normalised))
+    });
+    (kept, generic, cap)
 }
 
 /// A row of several exchanges keeps its best tier, then the least (client,
@@ -1242,6 +1415,45 @@ impl<'a> Index<'a> {
         (reached, files)
     }
 
+    /// Step 4's roots of client `c`: `c` and the callables that call it,
+    /// walked through generated callers, less generated and test nodes.
+    fn roots(&self, c: NodeId) -> Vec<NodeId> {
+        let mut roots: Vec<NodeId> = Vec::new();
+        let mut seen: HashSet<NodeId> = HashSet::from([c]);
+        let mut stack: Vec<NodeId> = vec![c];
+        while let Some(n) = stack.pop() {
+            let generated = self.generated.contains(&n);
+            if !generated && !self.tests.contains(&n) {
+                roots.push(n);
+            }
+            if generated || n == c {
+                for from in self.callers(n) {
+                    if seen.insert(from) {
+                        stack.push(from);
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    /// Step 7's client functions of `clients`: per `(repo, file)`, the spans
+    /// of the FUNCTION / METHOD roots (step 4) placed there, in root order.
+    fn client_spans(&self, clients: &BTreeMap<u64, Tier>) -> HashMap<(u64, String), Vec<Span>> {
+        let mut out: HashMap<(u64, String), Vec<Span>> = HashMap::new();
+        for &client in clients.keys() {
+            for r in self.roots(NodeId(client)) {
+                if !self.kind_in(r, &CALLABLE_KINDS) {
+                    continue;
+                }
+                if let (Some(repo), Some((file, span))) = (self.repo.get(&r), self.place.get(&r)) {
+                    out.entry((*repo, file.clone())).or_default().push(*span);
+                }
+            }
+        }
+        out
+    }
+
     /// Step 4: every client file of `clients`, keyed `(repo, file)`, with the
     /// client it is reached from (best tier, then least node id: the qname
     /// tie-break is the row's) and that client's pair tier. A generated
@@ -1252,23 +1464,7 @@ impl<'a> Index<'a> {
         let mut out: BTreeMap<(u64, String), (u64, Tier)> = BTreeMap::new();
         for (&client, &tier) in clients {
             let c = NodeId(client);
-            // The client and its callers, through generated callers.
-            let mut roots: Vec<NodeId> = Vec::new();
-            let mut seen_roots: HashSet<NodeId> = HashSet::from([c]);
-            let mut stack: Vec<NodeId> = vec![c];
-            while let Some(n) = stack.pop() {
-                let generated = self.generated.contains(&n);
-                if !generated && !self.tests.contains(&n) {
-                    roots.push(n);
-                }
-                if generated || n == c {
-                    for from in self.callers(n) {
-                        if seen_roots.insert(from) {
-                            stack.push(from);
-                        }
-                    }
-                }
-            }
+            let mut roots = self.roots(c);
             if roots.is_empty() {
                 // A generated client nothing outside the SDK calls: its file
                 // is the root, and the walk leaves it at no depth.
@@ -1360,6 +1556,14 @@ struct Use {
     normalised: String,
     line: i64,
     position: &'static str,
+    /// Some token of the line uses it as a key (`name:`, `"name":`, a
+    /// shorthand `{ name }` outside an import statement).
+    key: bool,
+    /// Step 7: the exchange's own field access. A property, key or string
+    /// use inside one of the exchange's client functions, or a property read
+    /// off a receiver the same line reads another of the exchange's names
+    /// off (`data.id, data.params`: the exchange's body, read field by field).
+    anchored: bool,
 }
 
 /// File texts under the build's repo roots, read once per `(repo, file)`,
@@ -1402,8 +1606,9 @@ impl<'a> TextCache<'a> {
         file: &str,
         names: &BTreeSet<String>,
         changed: &BTreeMap<String, ChangedName>,
+        spans: &[Span],
     ) -> Vec<Use> {
-        scan_uses(self.text(repo, file), file, names, changed)
+        scan_uses(self.text(repo, file), file, names, changed, spans)
     }
 
     /// Step 3: the spans of the type declarations of generated `file` that
@@ -1777,40 +1982,71 @@ fn go_import_spec(t: &str) -> bool {
 }
 
 /// Step 5: the uses of `names` in `text`, one per (name, line), the
-/// strongest position of the line kept.
+/// strongest position of the line kept. `spans` are the 0-based rows of the
+/// exchange's client functions in this file ([`Use::anchored`]).
 fn scan_uses(
     text: &str,
     file: &str,
     names: &BTreeSet<String>,
     changed: &BTreeMap<String, ChangedName>,
+    spans: &[Span],
 ) -> Vec<Use> {
     let hash = hash_comments(file);
-    let mut out: BTreeMap<(i64, String), &'static str> = BTreeMap::new();
+    let ext = file
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    // Per (line, name): the strongest position, key, anchored.
+    let mut out: BTreeMap<(i64, String), (&'static str, bool, bool)> = BTreeMap::new();
     for (i, line) in text.lines().enumerate() {
         if comment_line(line, hash) {
             continue;
         }
-        for t in line_tokens(line, hash) {
-            if !names.contains(&t.norm) {
-                continue;
+        let row = i as i64;
+        let import = import_line(line, &ext);
+        let in_fn = spans.iter().any(|&(s, e)| s <= row && row <= e);
+        let toks: Vec<Tok> = line_tokens(line, hash)
+            .into_iter()
+            .filter(|t| names.contains(&t.norm))
+            .collect();
+        // Receivers this line reads two or more of the names off.
+        let mut read_off: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for t in &toks {
+            if let Some(r) = t.receiver.as_deref() {
+                read_off.entry(r).or_default().insert(t.norm.as_str());
             }
+        }
+        for t in &toks {
             let renamed = changed.get(&t.norm).is_some_and(|c| c.renamed_to.is_some());
             if is_generic(&t.norm) && !renamed && !t.property {
                 continue;
             }
-            let at = (i as i64 + 1, t.norm.clone());
+            let key = t.key || (t.shorthand && !import);
+            let field = t.property || key || (t.class == Class::Str && !t.wordy);
+            let shape = t
+                .receiver
+                .as_deref()
+                .and_then(|r| read_off.get(r))
+                .is_some_and(|n| n.len() >= 2);
+            let anchored = (in_fn && field) || shape;
             let pos = t.position();
-            let slot = out.entry(at).or_insert(pos);
-            if position_rank(pos) < position_rank(slot) {
-                *slot = pos;
+            let slot = out
+                .entry((row + 1, t.norm.clone()))
+                .or_insert((pos, false, false));
+            if position_rank(pos) < position_rank(slot.0) {
+                slot.0 = pos;
             }
+            slot.1 |= key;
+            slot.2 |= anchored;
         }
     }
     out.into_iter()
-        .map(|((line, normalised), position)| Use {
+        .map(|((line, normalised), (position, key, anchored))| Use {
             normalised,
             line,
             position,
+            key,
+            anchored,
         })
         .collect()
 }
@@ -2267,6 +2503,13 @@ struct Tok {
     /// An identifier whose innermost bracket open on its line is a `(`: a
     /// parameter list or a call's arguments.
     param: bool,
+    /// A property's receiver: the dotted identifier chain right before its
+    /// `.` (`res.data` of `res.data.id`, `?.` read as `.`); `None` for a
+    /// non-property or a receiver that is no plain chain (`f().id`).
+    receiver: Option<String>,
+    /// An identifier alone between `{` / `,` and `,` / `}` inside a `{` of
+    /// its line: a shorthand object key or destructured field (step 7 only).
+    shorthand: bool,
 }
 
 impl Tok {
@@ -2470,7 +2713,11 @@ fn line_tokens(line: &str, hash: bool) -> Vec<Tok> {
                     j += 1;
                 }
                 let param = brackets.last() == Some(&b'(');
+                let brace = brackets.last() == Some(&b'{');
                 push_tok(&mut out, line, i, j, Class::Ident, None, param);
+                if brace && let Some(t) = out.last_mut() {
+                    t.shorthand = shorthand_at(b, i, j);
+                }
                 i = j;
                 continue;
             }
@@ -2548,6 +2795,7 @@ fn push_tok(
         k -= 1;
     }
     let property = k > 0 && b[k - 1] == b'.';
+    let receiver = property.then(|| receiver_before(b, k - 1)).flatten();
     let mut k = j;
     if let Some(q) = quote
         && b.get(k) == Some(&q)
@@ -2570,7 +2818,36 @@ fn push_tok(
         key,
         wordy: false,
         param,
+        receiver,
+        shorthand: false,
     });
+}
+
+/// Whether the identifier `b[i..j]`, inside a `{` of its line, stands alone
+/// between `{` / `,` and `,` / `}`: an object literal's shorthand key
+/// (`{ password }`) or a destructured field.
+fn shorthand_at(b: &[u8], i: usize, j: usize) -> bool {
+    let before = b[..i].iter().rev().find(|c| !c.is_ascii_whitespace());
+    let after = b[j..].iter().find(|c| !c.is_ascii_whitespace());
+    matches!(before, Some(b'{' | b',')) && matches!(after, Some(b',' | b'}'))
+}
+
+/// The dotted identifier chain ending right before `b[dot]` (a `.`), its
+/// optional-chaining `?.` read as `.`: `None` when no identifier precedes
+/// the dot.
+fn receiver_before(b: &[u8], dot: usize) -> Option<String> {
+    let mut k = dot;
+    if k > 0 && b[k - 1] == b'?' {
+        k -= 1;
+    }
+    let end = k;
+    while k > 0 && (ident_char(b[k - 1]) || b[k - 1] == b'.' || b[k - 1] == b'?') {
+        k -= 1;
+    }
+    let chain: String = String::from_utf8_lossy(&b[k..end]).replace("?.", ".");
+    let chain = chain.trim_start_matches(['.', '?']).to_string();
+    let first = chain.bytes().next()?;
+    ident_start(first).then_some(chain)
 }
 
 // ---- git -----------------------------------------------------------------------
@@ -2810,9 +3087,82 @@ mod tests {
             },
         );
         let names: BTreeSet<String> = ["type".to_string()].into();
-        let uses = scan_uses("const type = 1;\nx = r.type;\n", "c.ts", &names, &changed);
+        let uses = scan_uses(
+            "const type = 1;\nx = r.type;\n",
+            "c.ts",
+            &names,
+            &changed,
+            &[],
+        );
         assert_eq!(uses.len(), 1);
         assert_eq!(uses[0].line, 2);
         assert_eq!(uses[0].position, "property");
+    }
+
+    fn renamed(names: &[(&str, &str)]) -> BTreeMap<String, ChangedName> {
+        names
+            .iter()
+            .map(|(from, to)| {
+                (
+                    from.to_string(),
+                    ChangedName {
+                        name: from.to_string(),
+                        normalised: from.to_string(),
+                        renamed_to: Some(to.to_string()),
+                        file: "s.go".into(),
+                        line: 1,
+                        exchanges: 1,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_receiver_is_the_dotted_chain_before_the_property() {
+        let recv = |line: &str, name: &str| {
+            line_tokens(line, false)
+                .into_iter()
+                .find(|t| t.raw == name)
+                .and_then(|t| t.receiver)
+        };
+        assert_eq!(recv("x = res.data.id;", "id").as_deref(), Some("res.data"));
+        assert_eq!(
+            recv("x = res?.data?.id;", "id").as_deref(),
+            Some("res.data")
+        );
+        assert_eq!(recv("x = this.id;", "id").as_deref(), Some("this"));
+        assert_eq!(recv("x = f().id;", "id"), None);
+        assert_eq!(recv("x = id;", "id"), None);
+    }
+
+    #[test]
+    fn a_site_is_anchored_by_its_client_function_or_the_exchanges_shape() {
+        let changed = renamed(&[("id", "messageId"), ("params", "messageParams")]);
+        let names: BTreeSet<String> = changed.keys().cloned().collect();
+        let text = "function f(data) {\n  return data.id;\n}\n\
+                    m = Tp(data.id, data.params);\n\
+                    n = a.id + b.params;\n\
+                    o = { id: 1 };\n\
+                    p = { id, x };\n\
+                    import { id } from './ids';\n";
+        let uses = scan_uses(text, "c.ts", &names, &changed, &[(0, 2)]);
+        let got: Vec<(i64, &str, &str, bool, bool)> = uses
+            .iter()
+            .map(|u| (u.line, u.normalised.as_str(), u.position, u.key, u.anchored))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (2, "id", "property", false, true),
+                (4, "id", "property", false, true),
+                (4, "params", "property", false, true),
+                (5, "id", "property", false, false),
+                (5, "params", "property", false, false),
+                (6, "id", "key", true, false),
+                (7, "id", "identifier", true, false),
+                (8, "id", "identifier", false, false),
+            ]
+        );
     }
 }

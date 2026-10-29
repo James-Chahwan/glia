@@ -741,3 +741,194 @@ fn a_name_only_test_files_use_and_a_test_client_are_never_names() {
     assert!(b.rows.is_empty(), "{d}");
     assert_eq!(b.dropped_test, 1, "{d}");
 }
+
+// ---- FH.7d: generic and over-cap names fold ---------------------------------
+
+const TICKET_SERVER: &str = r#"package main
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+type Ticket struct {
+	ID    string `json:"id"`
+	Owner string `json:"owner"`
+	Ref   string `json:"ticketRef"`
+}
+
+func getTicket(c *gin.Context) {
+	c.JSON(http.StatusOK, Ticket{ID: "t-1", Owner: "ops", Ref: "r-1"})
+}
+
+func main() {
+	r := gin.Default()
+	r.GET("/api/tickets/:ref", getTicket)
+	_ = r.Run(":8080")
+}
+"#;
+
+/// The exchange's client function: its field reads are anchored sites.
+const TICKET_CLIENT: &str = r#"import axios from 'axios';
+
+export async function loadTicket(ref: string) {
+  const res = await axios.get(`/api/tickets/${ref}`);
+  return { key: res.data.id, ref: res.data.ticketRef };
+}
+"#;
+
+/// A file importing the client: a key site, then two free-text matches.
+const TICKET_ROWS: &str = r#"import { loadTicket } from './ticket';
+
+export async function rows(ref: string) {
+  const t = await loadTicket(ref);
+  const row = { id: t.key };
+  return [row];
+}
+
+export function pick(items: { key: string }[]): string {
+  const first = items[0].id;
+  const id = first;
+  return id;
+}
+"#;
+
+/// A file importing the client and reading the non-generic name.
+const TICKET_VIEW: &str = r#"import { loadTicket } from '../ticket';
+
+export async function view(ref: string): Promise<string> {
+  const t = await loadTicket(ref);
+  return String(t.ticketRef);
+}
+"#;
+
+/// The ticket repo at BASE, `views` view files under web/views/, then the
+/// server's `id` -> `ticketId` and `ticketRef` -> `ticketKey` renames in
+/// the working tree.
+fn ticket_repo(views: usize) -> GitRepo {
+    let repo = GitRepo::init();
+    repo.write(
+        "go.mod",
+        "module example.com/tickets\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n",
+    );
+    repo.write("main.go", TICKET_SERVER);
+    repo.write(
+        "package.json",
+        "{\"name\":\"tickets\",\"dependencies\":{\"axios\":\"^1.6.0\"}}\n",
+    );
+    repo.write("web/ticket.ts", TICKET_CLIENT);
+    repo.write("web/rows.ts", TICKET_ROWS);
+    for i in 0..views {
+        repo.write(&format!("web/views/v{i:02}.ts"), TICKET_VIEW);
+    }
+    repo.commit("base");
+    repo.write(
+        "main.go",
+        &TICKET_SERVER
+            .replace("`json:\"id\"`", "`json:\"ticketId\"`")
+            .replace("`json:\"ticketRef\"`", "`json:\"ticketKey\"`"),
+    );
+    repo
+}
+
+/// `(name, file, line, folded reason)` of every row, in answer order.
+fn folds(b: &NameBreaks) -> Vec<(String, String, i64, Option<&'static str>)> {
+    b.rows
+        .iter()
+        .map(|r| (r.name.clone(), r.file.clone(), r.line, r.folded))
+        .collect()
+}
+
+#[test]
+fn a_generic_rename_counts_key_class_sites_and_folds_the_rest() {
+    // `id` is generic: its read in the exchange's client function and the
+    // object-literal key in rows.ts stay sites; the property read and the
+    // local's two lines in rows.ts' `pick` (free text) fold into one row
+    // with a count.
+    let repo = ticket_repo(0);
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    let changed: Vec<(&str, Option<&str>)> = b
+        .names
+        .iter()
+        .map(|n| (n.name.as_str(), n.renamed_to.as_deref()))
+        .collect();
+    assert!(changed.contains(&("id", Some("ticketId"))), "{d}");
+    assert!(changed.contains(&("ticketRef", Some("ticketKey"))), "{d}");
+    let s =
+        |n: &str, f: &str, l: i64, r: Option<&'static str>| (n.to_string(), f.to_string(), l, r);
+    assert_eq!(
+        folds(&b),
+        vec![
+            s("id", "web/rows.ts", 5, None),
+            s("id", "web/rows.ts", 10, Some("generic")),
+            s("id", "web/ticket.ts", 5, None),
+            s("ticketRef", "web/ticket.ts", 5, None),
+        ],
+        "{d}"
+    );
+    let agg = &b.rows[1];
+    assert_eq!(agg.position, "folded", "{d}");
+    assert_eq!(agg.client_sites, Some(3), "{d}");
+    assert_eq!(agg.client_files, Some(1), "{d}");
+    assert_eq!(agg.sample_files, vec!["web/rows.ts".to_string()], "{d}");
+    assert_eq!(agg.renamed_to.as_deref(), Some("ticketId"), "{d}");
+    assert!(
+        b.rows[0].client_sites.is_none() && b.rows[0].sample_files.is_empty(),
+        "{d}"
+    );
+    assert_eq!((b.folded_generic, b.folded_cap), (1, 0), "{d}");
+    // The aggregate's serialised form carries its counts; a site row none.
+    let json = serde_json::to_value(&b.rows).expect("json");
+    assert_eq!(json[1]["client_sites"], 3, "{json}");
+    assert_eq!(json[1]["folded"], "generic", "{json}");
+    assert!(json[0].get("client_sites").is_none(), "{json}");
+    assert!(json[0].get("folded").is_none(), "{json}");
+}
+
+#[test]
+fn a_name_matched_in_more_files_than_the_cap_folds_but_its_anchored_site_stays() {
+    // `ticketRef` is no generic name, but 26 view files read it as well as
+    // the client function: 27 files is over the cap (25 files), so the views fold
+    // into one row; the client function's read is the exchange's and stays.
+    let repo = ticket_repo(26);
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    let refs: Vec<&glia_engine::contract_breaks::NameBreak> =
+        b.rows.iter().filter(|r| r.name == "ticketRef").collect();
+    assert_eq!(refs.len(), 2, "{d}");
+    assert_eq!(
+        (refs[0].file.as_str(), refs[0].line, refs[0].folded),
+        ("web/ticket.ts", 5, None),
+        "{d}"
+    );
+    let agg = refs[1];
+    assert_eq!(agg.folded, Some("cap"), "{d}");
+    assert_eq!(agg.client_sites, Some(26), "{d}");
+    assert_eq!(agg.client_files, Some(26), "{d}");
+    assert_eq!(
+        agg.sample_files,
+        vec![
+            "web/views/v00.ts".to_string(),
+            "web/views/v01.ts".to_string(),
+            "web/views/v02.ts".to_string()
+        ],
+        "{d}"
+    );
+    assert_eq!(
+        (agg.file.as_str(), agg.line),
+        ("web/views/v00.ts", 5),
+        "{d}"
+    );
+    assert_eq!(b.folded_cap, 1, "{d}");
+
+    // At the cap (24 views + the client: 25 files) every site is a row.
+    let repo = ticket_repo(24);
+    let b = names(&repo, &NameBreakArgs::default());
+    let d = dump(&b);
+    let refs = b.rows.iter().filter(|r| r.name == "ticketRef").count();
+    assert_eq!(refs, 25, "{d}");
+    assert!(b.rows.iter().all(|r| r.folded != Some("cap")), "{d}");
+    assert_eq!(b.folded_cap, 0, "{d}");
+}
