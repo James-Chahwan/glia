@@ -42,8 +42,10 @@
 //!    never on a block line such as `if x:` or `case x:`). Any other
 //!    identifier counts only when the hunk pairs it with a rename. Never a
 //!    name, whatever its position: a token of an import statement, or an
-//!    identifier the file binds by importing an external package (an import
-//!    whose library the file's IMPORTS cell lists); nor a name read from a
+//!    identifier the file binds by importing an external package (a row of
+//!    its MODULE's IMPORT_BINDINGS cell, or of the base revision's imports when
+//!    a hunk removes an import line, whose library the file's IMPORTS cell
+//!    lists); nor a name read from a
 //!    hunk of a test file (the file's MODULE stamped ORIGIN `test_fixture`),
 //!    nor one whose client uses (step 5) all sit in test files. A hunk of a
 //!    generated file (its MODULE stamped ORIGIN `generated`) is read against
@@ -765,9 +767,10 @@ fn answer(
     let mut texts = TextCache::new(after);
     // Step 2's file context (test file, external import bindings), per diff
     // file, and each hunk's removed names, read once.
+    let base = BaseFiles { repo, sha };
     let ctxs: Vec<FileCtx> = diff
         .iter()
-        .map(|f| FileCtx::of(f, provider, &index, &mut texts))
+        .map(|f| FileCtx::of(f, provider, &index, &base))
         .collect();
     let mut found: HashMap<(usize, usize), Vec<Found>> = HashMap::new();
 
@@ -1147,6 +1150,8 @@ struct Index<'a> {
     tests: HashSet<NodeId>,
     /// `(repo, file)` -> the library names its MODULE's IMPORTS cell lists.
     libs: HashMap<(u64, String), Vec<String>>,
+    /// `(repo, file)` -> its MODULE's IMPORT_BINDINGS payload (FA.21).
+    bindings: HashMap<(u64, String), String>,
 }
 
 /// The ORIGIN cell's `provenance`, when a node has one.
@@ -1162,6 +1167,17 @@ fn provenance(cells: &[glia_core::Cell]) -> Option<String> {
                     .as_str()
                     .map(str::to_string)
             }
+            _ => None,
+        })
+}
+
+/// A node's IMPORT_BINDINGS payload (FA.21), when it has one.
+fn bindings_cell(cells: &[glia_core::Cell]) -> Option<String> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::IMPORT_BINDINGS)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => Some(s.clone()),
             _ => None,
         })
 }
@@ -1193,6 +1209,7 @@ impl<'a> Index<'a> {
         let mut test_files = HashSet::new();
         let mut tests = HashSet::new();
         let mut libs = HashMap::new();
+        let mut bindings = HashMap::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if repo.contains_key(&n.id) {
@@ -1236,6 +1253,9 @@ impl<'a> Index<'a> {
                     }
                     libs.entry(key.clone())
                         .or_insert_with(|| library_cell(&n.cells));
+                    if let Some(cell) = bindings_cell(&n.cells) {
+                        bindings.entry(key.clone()).or_insert(cell);
+                    }
                     module_at.entry(key).or_insert(n.id);
                 }
                 place.insert(n.id, (file, rows));
@@ -1284,6 +1304,7 @@ impl<'a> Index<'a> {
             test_files,
             tests,
             libs,
+            bindings,
         }
     }
 
@@ -1724,12 +1745,13 @@ struct FileCtx {
     test: bool,
     /// Normalised identifiers the file binds by importing an external
     /// package: an import whose library its MODULE's IMPORTS cell lists, read
-    /// from the worktree text and the hunks' removed lines.
+    /// from its MODULE's IMPORT_BINDINGS cell and, when a hunk removes an
+    /// import line, from the base revision's parse of the file.
     external: HashSet<String>,
 }
 
 impl FileCtx {
-    fn of(f: &FileDiff, provider: u64, index: &Index, texts: &mut TextCache) -> Self {
+    fn of(f: &FileDiff, provider: u64, index: &Index, base: &BaseFiles) -> Self {
         let key = (provider, f.path.clone());
         let test = index.test_files.contains(&key);
         let mut external = HashSet::new();
@@ -1737,14 +1759,23 @@ impl FileCtx {
         if let Some(lang) = crate::extract::detect_language(&f.path)
             && !libs.is_empty()
         {
-            let mut text = texts.text(provider, &f.path).to_string();
-            for h in &f.hunks {
-                for l in &h.minus {
-                    text.push('\n');
-                    text.push_str(l);
-                }
+            let mut rows = index
+                .bindings
+                .get(&key)
+                .map(|cell| binding_rows(cell, lang))
+                .unwrap_or_default();
+            let ext = Path::new(&f.path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let removes_import = f
+                .hunks
+                .iter()
+                .any(|h| h.minus.iter().any(|l| import_line(l, ext)));
+            if removes_import {
+                rows.extend(base.bindings(&f.path, lang, provider));
             }
-            for (names, spec) in import_bindings(&text, lang) {
+            for (names, spec) in rows {
                 let lib = glia_code_domain::library_name(&spec, lang);
                 if lib.is_some_and(|l| libs.contains(&l)) {
                     external.extend(names.iter().map(|n| normalise(n)));
@@ -1755,191 +1786,98 @@ impl FileCtx {
     }
 }
 
-/// The import statements of `text` as (bound names, module spec), for the
-/// languages step 2 reads: the TS family, Python, Go, Rust, the JVM family
-/// and C#, Dart. Bound names are every identifier of the statement but its
-/// keywords (an imported name and its alias alike).
-fn import_bindings(text: &str, lang: &str) -> Vec<(Vec<String>, String)> {
-    const SKIP: &[&str] = &[
-        "import", "export", "from", "as", "type", "typeof", "default", "use", "pub", "crate",
-        "self", "super", "static", "using", "show", "hide", "deferred", "const", "let", "var",
-        "require",
-    ];
-    let idents = |s: &str| -> Vec<String> {
-        line_tokens(s, false)
-            .into_iter()
-            .filter(|t| t.class == Class::Ident && !SKIP.contains(&t.raw.as_str()))
-            .map(|t| t.raw)
-            .collect()
-    };
-    let quoted = |s: &str| -> Option<String> {
-        let at = s.rfind(['\'', '"'])?;
-        let q = s.as_bytes()[at];
-        let open = s[..at].rfind(q as char)?;
-        Some(s[open + 1..at].to_string())
-    };
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let t = lines[i].trim();
-        let starts = |p: &str| t.starts_with(p);
-        match lang {
-            "typescript" | "javascript" | "react" | "angular" | "vue" => {
-                if starts("import ")
-                    || starts("import{")
-                    || (starts("export ") && t.contains(" from "))
-                {
-                    // To the line holding the module spec.
-                    let mut stmt = String::new();
-                    let mut j = i;
-                    while j < lines.len() && j < i + 64 {
-                        stmt.push_str(lines[j]);
-                        stmt.push('\n');
-                        let l = lines[j];
-                        if (l.contains(" from ") || l.trim_start().starts_with("from "))
-                            && (l.contains('\'') || l.contains('"'))
-                            || (j == i && !l.contains('{') && (l.contains('\'') || l.contains('"')))
-                        {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    if let Some(spec) = quoted(&stmt) {
-                        let head = stmt.rsplit_once(" from ").map_or("", |(h, _)| h);
-                        out.push((idents(head), spec));
-                    }
-                    i = j + 1;
-                    continue;
-                }
-                if t.contains("require(")
-                    && let Some((head, call)) = t.split_once("require(")
-                    && let Some(spec) = quoted(call.split(')').next().unwrap_or(""))
-                {
-                    let head = head.split('=').next().unwrap_or("");
-                    out.push((idents(head), spec));
-                }
-            }
-            "python" => {
-                if let Some(rest) = t.strip_prefix("import ") {
-                    for part in rest.split(',') {
-                        let mut it = part.split(" as ");
-                        let spec = it.next().unwrap_or("").trim().to_string();
-                        let mut names: Vec<String> = spec
-                            .split('.')
-                            .next()
-                            .map(str::to_string)
-                            .into_iter()
-                            .collect();
-                        names.extend(it.next().map(|a| a.trim().to_string()));
-                        out.push((names, spec));
-                    }
-                } else if let Some(rest) = t.strip_prefix("from ")
-                    && let Some((spec, names)) = rest.split_once(" import ")
-                {
-                    let mut stmt = names.to_string();
-                    let mut j = i;
-                    if names.contains('(') {
-                        while !lines[j].contains(')') && j + 1 < lines.len() && j < i + 64 {
-                            j += 1;
-                            stmt.push('\n');
-                            stmt.push_str(lines[j]);
-                        }
-                    }
-                    out.push((idents(&stmt), spec.trim().to_string()));
-                    i = j + 1;
-                    continue;
-                }
-            }
-            "go" => {
-                let one = |l: &str| -> Option<(Vec<String>, String)> {
-                    let spec = quoted(l)?;
-                    let alias = l.split('"').next().unwrap_or("").trim();
-                    let name = if alias.is_empty() || alias == "import" {
-                        let mut segs = spec.rsplit('/');
-                        let last = segs.next().unwrap_or("");
-                        let versioned = last.len() > 1
-                            && last.starts_with('v')
-                            && last[1..].bytes().all(|b| b.is_ascii_digit());
-                        if versioned {
-                            segs.next().unwrap_or(last)
-                        } else {
-                            last
-                        }
-                        .to_string()
-                    } else {
-                        alias.trim_start_matches("import").trim().to_string()
-                    };
-                    Some((vec![name], spec))
-                };
-                if t == "import (" {
-                    let mut j = i + 1;
-                    while j < lines.len() && lines[j].trim() != ")" {
-                        out.extend(one(lines[j].trim()));
-                        j += 1;
-                    }
-                    i = j + 1;
-                    continue;
-                }
-                if starts("import ") {
-                    out.extend(one(t));
-                }
-            }
-            "rust" if starts("use ") || starts("pub use ") => {
-                let mut stmt = t.to_string();
-                let mut j = i;
-                while !stmt.contains(';') && j + 1 < lines.len() && j < i + 64 {
-                    j += 1;
-                    stmt.push_str(lines[j]);
-                }
-                let spec = stmt
-                    .trim_start_matches("pub ")
-                    .trim_start_matches("use ")
-                    .trim()
-                    .to_string();
-                out.push((idents(&stmt), spec));
-                i = j + 1;
-                continue;
-            }
-            "java" | "kotlin" | "scala" | "csharp" => {
-                let rest = t
-                    .strip_prefix("import ")
-                    .or_else(|| t.strip_prefix("using "))
-                    .map(|r| r.trim_start_matches("static ").trim_end_matches(';').trim());
-                if let Some(rest) = rest
-                    && !rest.contains('(')
-                {
-                    let (alias, path) = match rest.split_once('=') {
-                        Some((a, p)) => (Some(a.trim()), p.trim()),
-                        None => match rest.split_once(" as ") {
-                            Some((p, a)) => (Some(a.trim()), p.trim()),
-                            None => (None, rest),
-                        },
-                    };
-                    let mut names: Vec<String> = path
-                        .rsplit('.')
-                        .next()
-                        .filter(|n| *n != "*")
-                        .map(str::to_string)
-                        .into_iter()
-                        .collect();
-                    names.extend(alias.map(str::to_string));
-                    out.push((names, path.to_string()));
-                }
-            }
-            "dart" => {
-                if (starts("import ") || starts("export "))
-                    && let Some(spec) = t.split(['\'', '"']).nth(1)
-                {
-                    let tail = t.rsplit(['\'', '"']).next().unwrap_or("");
-                    out.push((idents(tail), spec.to_string()));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+/// The base revision's side of step 2: a diff file's imports as the base
+/// tree held them, read only for a file whose hunks remove an import line
+/// (the worktree's are its MODULE's IMPORT_BINDINGS cell).
+struct BaseFiles<'a> {
+    repo: &'a Path,
+    sha: &'a str,
+}
+
+impl BaseFiles<'_> {
+    /// `(bound names, spec)` of the base file's external imports: the file at
+    /// the base rev, parsed by its language parser, read through
+    /// [`glia_code_domain::import_bindings_json`] with no local index (the
+    /// IMPORTS cell's library list decides what is external). Empty when the
+    /// file is new at the base or does not parse.
+    fn bindings(&self, path: &str, lang: &str, provider: u64) -> Vec<(Vec<String>, String)> {
+        let Some(text) = git_text(self.repo, &["show", &format!("{}:./{path}", self.sha)])
+            .ok()
+            .flatten()
+        else {
+            return Vec::new();
+        };
+        let Ok(fp) = crate::extract::parse_one(&text, path, lang, glia_core::RepoId(provider))
+        else {
+            return Vec::new();
+        };
+        let local = glia_code_domain::LocalModuleIndex::default();
+        glia_code_domain::import_bindings_json(&fp.imports, lang, &local)
+            .map(|cell| binding_rows(&cell, lang))
+            .unwrap_or_default()
     }
-    out
+}
+
+/// An IMPORT_BINDINGS payload (FA.21) as `(bound names, spec)` rows. A
+/// symbol import binds its imported name (never `default` or a glob's `*`)
+/// and its alias; a whole-module import binds its alias, else its language's
+/// default name (Go: the last path segment, a `/vN` major version skipped;
+/// Python: the first dotted segment, kept beside an alias as `import numpy
+/// as np` names both; Rust and the JVM / .NET family: the last segment; the TS
+/// family and Dart: nothing, a side-effect import).
+fn binding_rows(cell: &str, lang: &str) -> Vec<(Vec<String>, String)> {
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(cell) else {
+        return Vec::new();
+    };
+    let field =
+        |r: &serde_json::Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    rows.iter()
+        .filter_map(|r| {
+            let spec = field(r, "spec")?;
+            let alias = field(r, "alias");
+            let mut names: Vec<String> = Vec::new();
+            match field(r, "name") {
+                Some(name) if name != "default" && name != "*" => names.push(name),
+                Some(_) => {}
+                None if alias.is_none() || lang == "python" => {
+                    names.extend(default_binding(&spec, lang));
+                }
+                None => {}
+            }
+            names.extend(alias);
+            Some((names, spec))
+        })
+        .collect()
+}
+
+/// The name a whole-module import binds when it names no alias.
+fn default_binding(spec: &str, lang: &str) -> Option<String> {
+    let last = |seps: &[char]| {
+        spec.rsplit(seps)
+            .find(|s| !s.is_empty())
+            .filter(|s| *s != "*")
+            .map(str::to_string)
+    };
+    match lang {
+        "go" => {
+            let mut segs = spec.rsplit(['/', ':']).filter(|s| !s.is_empty());
+            let tail = segs.next()?;
+            let versioned = tail.len() > 1
+                && tail.starts_with('v')
+                && tail[1..].bytes().all(|b| b.is_ascii_digit());
+            Some(
+                if versioned {
+                    segs.next().unwrap_or(tail)
+                } else {
+                    tail
+                }
+                .to_string(),
+            )
+        }
+        "python" => spec.split('.').find(|s| !s.is_empty()).map(str::to_string),
+        "rust" | "java" | "kotlin" | "scala" | "csharp" => last(&[':', '.']),
+        _ => None,
+    }
 }
 
 /// A line that is an import statement (or a line of one a statement's own
@@ -3015,49 +2953,42 @@ mod tests {
         assert!(import_line("use serde::Deserialize;", "rs"));
         assert!(!import_line("const user = useUser();", "ts"));
         assert!(!import_line("\"id\",", "go"));
-        let ts = import_bindings(
-            "import {\n  formatDistance,\n  parse as parseDate,\n} from 'date-fns';\nimport z from 'zod';\nconst { join } = require('path');\n",
+        // FA.21: the bound names of an IMPORT_BINDINGS cell's rows.
+        let ts = binding_rows(
+            r#"[{"spec":"date-fns","name":null,"alias":"df","line":3},{"spec":"date-fns","name":"parse","alias":"parseDate","line":0},{"spec":"polyfill","name":null,"alias":null,"line":2},{"spec":"zod","name":"default","alias":"z","line":1}]"#,
             "typescript",
         );
         assert_eq!(
             ts,
             vec![
-                (
-                    vec!["formatDistance".into(), "parse".into(), "parseDate".into()],
-                    "date-fns".into()
-                ),
+                (vec!["df".into()], "date-fns".into()),
+                (vec!["parse".into(), "parseDate".into()], "date-fns".into()),
+                (vec![], "polyfill".into()),
                 (vec!["z".into()], "zod".into()),
-                (vec!["join".into()], "path".into()),
             ]
         );
-        let go = import_bindings(
-            "import (\n\t\"fmt\"\n\tchi \"github.com/go-chi/chi/v5\"\n\t\"github.com/gin-gonic/gin\"\n)\n",
+        let go = binding_rows(
+            r#"[{"spec":"github.com/go-chi/chi/v5","name":null,"alias":null,"line":2},{"spec":"github.com/gin-gonic/gin","name":null,"alias":"g","line":3}]"#,
             "go",
         );
         assert_eq!(
-            go.iter().map(|(n, _)| n[0].as_str()).collect::<Vec<_>>(),
-            vec!["fmt", "chi", "gin"]
+            go.iter().map(|(n, _)| n.join(",")).collect::<Vec<_>>(),
+            vec!["chi", "g"]
         );
-        let py = import_bindings(
-            "import numpy as np\nfrom flask import (\n  Flask,\n  jsonify,\n)\n",
+        let py = binding_rows(
+            r#"[{"spec":"numpy","name":null,"alias":"np","line":0},{"spec":"flask","name":"Flask","alias":null,"line":1}]"#,
             "python",
         );
         assert_eq!(py[0].0, vec!["numpy".to_string(), "np".to_string()]);
-        assert_eq!(
-            py[1],
-            (vec!["Flask".into(), "jsonify".into()], "flask".into())
+        assert_eq!(py[1], (vec!["Flask".into()], "flask".into()));
+        let rs = binding_rows(
+            r#"[{"spec":"serde","name":"Serialize","alias":"Ser","line":0},{"spec":"tokio::sync","name":null,"alias":null,"line":1},{"spec":"x","name":"*","alias":null,"line":2}]"#,
+            "rust",
         );
-        let rs = import_bindings("use serde::{Deserialize, Serialize as Ser};\n", "rust");
-        assert_eq!(rs[0].0, vec!["serde", "Deserialize", "Serialize", "Ser"]);
-        let jvm = import_bindings(
-            "import com.acme.api.Client;\nimport static org.x.Y.z;\n",
-            "java",
-        );
-        assert_eq!(
-            jvm[0],
-            (vec!["Client".into()], "com.acme.api.Client".into())
-        );
-        assert_eq!(jvm[1].0, vec!["z".to_string()]);
+        assert_eq!(rs[0].0, vec!["Serialize", "Ser"]);
+        assert_eq!(rs[1].0, vec!["sync"]);
+        assert!(rs[2].0.is_empty(), "a glob binds no one name");
+        assert!(binding_rows("not json", "go").is_empty());
     }
 
     #[test]

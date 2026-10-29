@@ -12,7 +12,7 @@ use glia_code_domain::glia_config::LoadedConfig;
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{
     CodeNav, FileParse, ImportTarget, LocalModuleIndex, NavFact, attach_imports_cell_filtered,
-    cell_type, node_kind,
+    cell_type, import_bindings_cell, node_kind,
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
@@ -2380,6 +2380,7 @@ fn filter_imports_cells(
         local.add_alias_prefix(key);
     }
     let (mut kept, mut dropped, mut groups) = (0usize, 0usize, 0usize);
+    let mut bindings = BindingsTally::default();
     for (lang, parses) in parses_by_lang.iter_mut() {
         let mut filtered_any = false;
         for fp in parses.iter_mut().filter(|fp| carries_imports(fp)) {
@@ -2387,6 +2388,7 @@ fn filter_imports_cells(
             kept += k;
             dropped += d;
             filtered_any = true;
+            bindings.add(attach_import_bindings_cell(fp, lang, &local));
         }
         groups += usize::from(filtered_any);
     }
@@ -2394,7 +2396,74 @@ fn filter_imports_cells(
         eprintln!(
             "[imports] local-filter: kept {kept}, dropped {dropped} intra-repo name(s) across {groups} language group(s) repo={repo_label}"
         );
+        eprintln!(
+            "[imports] bindings cell modules={} rows={} capped={} repo={repo_label}",
+            bindings.modules, bindings.rows, bindings.capped
+        );
     }
+}
+
+/// FA.21: the `[imports] bindings cell ..` marker's per-repo sums.
+#[derive(Debug, Default)]
+struct BindingsTally {
+    /// MODULEs that carry the cell.
+    modules: usize,
+    /// Rows written, summed over those cells.
+    rows: usize,
+    /// Cells the cap cut short.
+    capped: usize,
+}
+
+impl BindingsTally {
+    fn add(&mut self, cell: Option<(usize, usize)>) {
+        if let Some((rows, capped)) = cell {
+            self.modules += 1;
+            self.rows += rows;
+            self.capped += usize::from(capped > 0);
+        }
+    }
+}
+
+/// FA.21: put one IMPORT_BINDINGS cell (`import_bindings_json`: each
+/// external import's specifier, imported name, local alias and row) on the
+/// file's MODULE, right after its IMPORTS cell, so a pass after the language
+/// build, a joint build and a layout merge alike read which names an import
+/// of an org-internal package bound. Only the MODULE carries it (never the
+/// IMPORTS cell's every-node fan-out). The file's MODULE is its MODULE with
+/// the least (qname length, qname): a Rust inline `mod tests` is a longer
+/// qname under it. Idempotent: an existing cell (a replayed parse) is
+/// removed first from every node. Returns the cell's `(rows, capped)`, or
+/// `None` when the file imports no library or has no MODULE.
+fn attach_import_bindings_cell(
+    fp: &mut FileParse,
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> Option<(usize, usize)> {
+    for n in &mut fp.nodes {
+        n.cells.retain(|c| c.kind != cell_type::IMPORT_BINDINGS);
+    }
+    let (json, rows, capped) = import_bindings_cell(&fp.imports, lang, local)?;
+    let module = fp
+        .nodes
+        .iter()
+        .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+        .filter_map(|n| Some((fp.nav.qname_by_id.get(&n.id)?, n.id)))
+        .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .map(|(_, id)| id)?;
+    let node = fp.nodes.iter_mut().find(|n| n.id == module)?;
+    let at = node
+        .cells
+        .iter()
+        .position(|c| c.kind == cell_type::IMPORTS)
+        .map_or(node.cells.len(), |i| i + 1);
+    node.cells.insert(
+        at,
+        Cell {
+            kind: cell_type::IMPORT_BINDINGS,
+            payload: CellPayload::Json(json),
+        },
+    );
+    Some((rows, capped))
 }
 
 #[cfg(test)]

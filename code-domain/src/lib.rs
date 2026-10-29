@@ -1328,6 +1328,62 @@ fn local_lookup_key<'a>(lib: &'a str, lang: &str) -> &'a str {
     lib
 }
 
+/// One import's library reading: its library name ([`library_name`]) and
+/// whether the repo declares it ([`LocalModuleIndex`]). `None` for a Python
+/// relative import (intra-package) and for a path that names no library.
+fn classify_import(
+    imp: &ImportStmt,
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> Option<(String, bool)> {
+    let (path, symbol) = match &imp.target {
+        ImportTarget::Module { path, .. } => (path.as_str(), None),
+        ImportTarget::Symbol {
+            module,
+            name,
+            level,
+            ..
+        } => {
+            if *level > 0 {
+                return None; // Python relative import — intra-package
+            }
+            (module.as_str(), Some(name.as_str()))
+        }
+    };
+    let lib = library_name(path, lang)?;
+    let is_local = local.is_local_path(local_lookup_key(&lib, lang))
+        || (ts_alias_applies(lang) && local.is_alias_import(path))
+        || (symbol_evidence_applies(lang) && symbol.is_some_and(|n| local.is_local_symbol(n)));
+    Some((lib, is_local))
+}
+
+/// The library names `imports` name, split into those some import keeps
+/// (a dependency) and those every import of them proves local.
+fn classify_library_names(
+    imports: &[ImportStmt],
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut kept = std::collections::BTreeSet::new();
+    let mut dropped = std::collections::BTreeSet::new();
+    for (lib, is_local) in imports
+        .iter()
+        .filter_map(|imp| classify_import(imp, lang, local))
+    {
+        if is_local {
+            dropped.insert(lib);
+        } else {
+            kept.insert(lib);
+        }
+    }
+    // A name one import proves local and another does not is still a dependency.
+    let dropped = dropped.difference(&kept).cloned().collect();
+    (kept, dropped)
+}
+
 /// [`library_names`] minus every name that resolves inside the repo. Returns
 /// the kept names (deduped, sorted, capped at 10 AFTER filtering, so a file
 /// whose first ten names were local still reports its real dependencies) and
@@ -1337,38 +1393,89 @@ fn filter_library_names(
     lang: &str,
     local: &LocalModuleIndex,
 ) -> (Vec<String>, usize) {
-    let mut kept = std::collections::BTreeSet::new();
-    let mut dropped = std::collections::BTreeSet::new();
-    for imp in imports {
-        let (path, symbol) = match &imp.target {
-            ImportTarget::Module { path, .. } => (path.as_str(), None),
+    let (kept, dropped) = classify_library_names(imports, lang, local);
+    (kept.into_iter().take(10).collect(), dropped.len())
+}
+
+/// FA.21: the most rows one IMPORT_BINDINGS cell holds; the rest are
+/// counted in a trailing `{"capped":<n>}` row.
+pub const IMPORT_BINDINGS_CAP: usize = 256;
+
+/// FA.21: the IMPORT_BINDINGS cell payload of one file — every import whose
+/// library [`attach_imports_cell_filtered`] keeps (the same classification,
+/// before its cap of 10 names), as JSON rows
+/// `{"spec":<raw specifier>,"name":<imported name|null>,"alias":<local name|null>,"line":<0-based row>}`.
+///
+/// A whole-module import (`import * as ns`, Go `import lib "x/y"`, Python
+/// `import a.b as c`) has `name` null and `alias` its written alias, else
+/// null: the reader applies its language's default bound name (Go's last
+/// path segment, Python's first). A symbol import (`import { a as b }`, a
+/// default import's `default`, Python `from m import n`, Rust `use m::n`) has
+/// its imported name and alias. A Python relative import is never listed.
+///
+/// Rows are deduped and sorted by (spec, name, alias, line), null first, and
+/// capped at [`IMPORT_BINDINGS_CAP`] with a trailing `{"capped":<n>}` naming
+/// how many rows were left out. `None` when the file imports no library.
+pub fn import_bindings_json(
+    imports: &[ImportStmt],
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> Option<String> {
+    import_bindings_cell(imports, lang, local).map(|(json, _, _)| json)
+}
+
+/// [`import_bindings_json`] with its tallies: `(payload, rows written, rows
+/// left out by the cap)`, read by the build's
+/// `[imports] bindings cell ..` marker.
+pub fn import_bindings_cell(
+    imports: &[ImportStmt],
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> Option<(String, usize, usize)> {
+    let (kept, _) = classify_library_names(imports, lang, local);
+    let rows: std::collections::BTreeSet<(&str, Option<&str>, Option<&str>, u32)> = imports
+        .iter()
+        .filter(|imp| classify_import(imp, lang, local).is_some_and(|(lib, _)| kept.contains(&lib)))
+        .map(|imp| match &imp.target {
+            ImportTarget::Module { path, alias } => {
+                (path.as_str(), None, alias.as_deref(), imp.line)
+            }
             ImportTarget::Symbol {
                 module,
                 name,
-                level,
+                alias,
                 ..
-            } => {
-                if *level > 0 {
-                    continue; // Python relative import — intra-package
-                }
-                (module.as_str(), Some(name.as_str()))
-            }
-        };
-        let Some(lib) = library_name(path, lang) else {
-            continue;
-        };
-        let is_local = local.is_local_path(local_lookup_key(&lib, lang))
-            || (ts_alias_applies(lang) && local.is_alias_import(path))
-            || (symbol_evidence_applies(lang) && symbol.is_some_and(|n| local.is_local_symbol(n)));
-        if is_local {
-            dropped.insert(lib);
-        } else {
-            kept.insert(lib);
-        }
+            } => (
+                module.as_str(),
+                Some(name.as_str()),
+                alias.as_deref(),
+                imp.line,
+            ),
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
     }
-    // A name one import proves local and another does not is still a dependency.
-    let dropped = dropped.difference(&kept).count();
-    (kept.into_iter().take(10).collect(), dropped)
+    let string = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let opt = |s: Option<&str>| s.map_or_else(|| "null".to_string(), string);
+    let mut out: Vec<String> = rows
+        .iter()
+        .take(IMPORT_BINDINGS_CAP)
+        .map(|(spec, name, alias, line)| {
+            format!(
+                "{{\"spec\":{},\"name\":{},\"alias\":{},\"line\":{line}}}",
+                string(spec),
+                opt(*name),
+                opt(*alias)
+            )
+        })
+        .collect();
+    let capped = rows.len().saturating_sub(IMPORT_BINDINGS_CAP);
+    let written = out.len();
+    if capped > 0 {
+        out.push(format!("{{\"capped\":{capped}}}"));
+    }
+    Some((format!("[{}]", out.join(",")), written, capped))
 }
 
 /// [`library_names`] without the names that resolve inside the repo (A16.4).
@@ -4004,6 +4111,79 @@ mod tests {
         assert_eq!(
             library_names_filtered(&imports, "python", &local),
             vec!["zzz".to_string()]
+        );
+    }
+
+    // ---- FA.21: the IMPORT_BINDINGS payload ----------------------------------
+
+    fn aliased(mut imp: ImportStmt, a: &str, line: u32) -> ImportStmt {
+        match &mut imp.target {
+            ImportTarget::Module { alias, .. } | ImportTarget::Symbol { alias, .. } => {
+                *alias = Some(a.to_string())
+            }
+        }
+        imp.line = line;
+        imp
+    }
+
+    #[test]
+    fn import_bindings_list_external_imports_sorted_and_skip_local_ones() {
+        let local = index_of(&[(node_kind::MODULE, "myapp::users")]);
+        let mut relative = symbol_import("sibling", "x");
+        if let ImportTarget::Symbol { level, .. } = &mut relative.target {
+            *level = 1;
+        }
+        let imports = vec![
+            aliased(symbol_import("requests.api", "get"), "fetch", 4),
+            module_import("myapp.users"),
+            relative,
+            aliased(module_import("numpy"), "np", 1),
+            symbol_import("requests.api", "get"),
+        ];
+        assert_eq!(
+            import_bindings_json(&imports, "python", &local).as_deref(),
+            Some(
+                r#"[{"spec":"numpy","name":null,"alias":"np","line":1},{"spec":"requests.api","name":"get","alias":null,"line":0},{"spec":"requests.api","name":"get","alias":"fetch","line":4}]"#
+            )
+        );
+        // Only local and relative imports: no cell.
+        assert_eq!(
+            import_bindings_json(&[module_import("myapp.users")], "python", &local),
+            None
+        );
+        // A TS specifier a tsconfig alias names is in-repo; a package is not.
+        let mut ts_local = LocalModuleIndex::default();
+        ts_local.add_alias_prefix("@core/*");
+        assert_eq!(
+            import_bindings_cell(
+                &[
+                    symbol_import("@core/thing", "a"),
+                    symbol_import("@org/lib", "b")
+                ],
+                "typescript",
+                &ts_local,
+            )
+            .map(|(json, rows, capped)| (json.contains("@core"), rows, capped)),
+            Some((false, 1, 0))
+        );
+    }
+
+    #[test]
+    fn import_bindings_escape_and_cap() {
+        let quoted = symbol_import("we\"ird", "n");
+        let cell = import_bindings_json(&[quoted], "typescript", &LocalModuleIndex::default());
+        assert_eq!(
+            cell.as_deref(),
+            Some(r#"[{"spec":"we\"ird","name":"n","alias":null,"line":0}]"#)
+        );
+        let many: Vec<ImportStmt> = (0..260)
+            .map(|i| symbol_import(&format!("pkg{i:03}"), "n"))
+            .collect();
+        let (json, rows, capped) =
+            import_bindings_cell(&many, "typescript", &LocalModuleIndex::default()).unwrap();
+        assert_eq!((rows, capped), (IMPORT_BINDINGS_CAP, 4));
+        assert!(
+            json.ends_with(r#"{"spec":"pkg255","name":"n","alias":null,"line":0},{"capped":4}]"#)
         );
     }
 
