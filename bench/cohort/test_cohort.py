@@ -530,8 +530,10 @@ class CannedGlia:
 
     def __init__(self, answers):
         self.answers = answers
+        self.calls = []
 
     def json(self, *args):
+        self.calls.append(args)
         d = self.answers.get(args[0])
         return d, len(json.dumps(d)), 0, None if d is not None else "rc=1 none"
 
@@ -580,6 +582,48 @@ class GateStateTest(unittest.TestCase):
         # an empty operations list folds nothing
         self.assertEqual(self.state(cb([dict(row, operations=[])], 1), [])
                          ["distinct_changes"], 1)
+
+
+class FoldedNamesTest(unittest.TestCase):
+    """A folded name row (FH.7d) names its sample_files, and review is read with --full so its
+    numbers do not move with the default caps (FH.8c / FH.8d) (FH.1d)."""
+
+    @staticmethod
+    def folded(name, first, samples):
+        return dict(name_row(name, first), position="folded", folded="generic",
+                    client_sites=7, client_files=len(samples), sample_files=samples)
+
+    def test_folded_row_sample_files_count_toward_truth_named(self):
+        row = self.folded("status", "web/src/a.ts", ["web/src/a.ts", "web/src/client.ts"])
+        ans = dict(cb([], 0), names=[row, name_row("mail", "web/src/b.ts")])
+        glia = CannedGlia({"contract-breaks": ans, "review": {"counts": {}}})
+        got = C.gate_state(glia, ["web/src/client.ts", "web/src/pager.ts"])["cb"]
+        self.assertEqual(got["truth_named"], ["web/src/client.ts"])
+        self.assertEqual(got["files_named"], 3)
+        self.assertEqual((got["names"], got["names_folded"]), (2, 1))
+
+    def test_task_line_marks_folded_rows(self):
+        res = {"task": "app-1", "shape": "drift",
+               "checks": [{"check": "gate", "class": None, "status": "pass"}],
+               "S": {"gate": {"cb": {"names": 2, "names_folded": 1}}}}
+        self.assertEqual(C.task_line(res), "[cohort] task app-1 drift gate=pass cb_names=2"
+                         " (folded sample files counted)")
+        res["S"]["gate"]["cb"]["names_folded"] = 0
+        self.assertTrue(C.task_line(res).endswith(" cb_names=2"))
+        self.assertTrue(C.task_line(dict(res, S={})).endswith(" cb_names=-"))
+
+    def test_files_in_reads_sample_files(self):
+        acc = C.files_in({"rows": [{"file": "a", "sample_files": ["a", "b", 3]}]}, set())
+        self.assertEqual(acc, {"a", "b"})
+
+    def test_review_is_read_with_full(self):
+        row = self.folded("status", "web/src/a.ts", ["web/src/client.ts"])
+        glia = CannedGlia({"contract-breaks": cb([], 0),
+                           "review": {"counts": {}, "name_breaks": [row]}})
+        got = C.gate_state(glia, ["web/src/client.ts"])["review"]
+        self.assertEqual(got["truth_named"], ["web/src/client.ts"])
+        review = [c for c in glia.calls if c[0] == "review"]
+        self.assertEqual(review, [("review", ".", "--base", "HEAD~1", "--full", "--json")])
 
 
 class CommittedTest(unittest.TestCase):

@@ -60,7 +60,10 @@ clone of the bare clone, deleted after), GLIA_THREADS=4:
            schemas / models / orphaned_clients row or, since FH.1c, a `names` row (FH.7a's
            client sites still using a removed name); a shared-schema row the fold kept
            counts its changes once per entry in its `operations` (FH.7b). Each task line
-           ends `cb_names=<n>`, the name rows at S (`-` when no gate ran)
+           ends `cb_names=<n>`, the name rows at S (`-` when no gate ran), then
+           ` (folded sample files counted)` when a folded name row (FH.7d) was read: its
+           sample_files count toward truth_named beside its file (FH.1d). review is read
+           with --full, so its files_named never moves with review's default caps
   clear    (drift, when the gate breaks at S) at C, fewer breaking rows than at S
   names    (drift) at S, a file `diff-impact --depth 6` reaches still holds a name the
            server change removed, and it is a client truth file
@@ -636,11 +639,14 @@ def diff_idents(diff):
 
 
 def files_in(obj, acc):
-    """gate.py: every `file` string anywhere in an answer."""
+    """gate.py: every `file` string anywhere in an answer, and every string of a folded name
+    row's `sample_files` (FH.7d: the row's `file` is only its first site's; FH.1d)."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k == "file" and isinstance(v, str):
                 acc.add(v)
+            elif k == "sample_files" and isinstance(v, list):
+                acc.update(f for f in v if isinstance(f, str))
             else:
                 files_in(v, acc)
     elif isinstance(obj, list):
@@ -784,6 +790,16 @@ def evidence(glia, paths):
             for p in sorted(paths)}
 
 
+def task_line(res):
+    """The runner's per-task line: each check's class or status, then the name rows at S, and
+    ` (folded sample files counted)` when a folded name row was read (FH.1d)."""
+    cbn = ((res.get("S") or {}).get("gate") or {}).get("cb") or {}
+    return (f"[cohort] task {res['task']} {res['shape']} " + " ".join(
+        f"{c['check']}={c['class'] or c['status']}" for c in res["checks"])
+        + f" cb_names={cbn.get('names', '-')}"
+        + (" (folded sample files counted)" if cbn.get("names_folded") else ""))
+
+
 def gate_state(glia, truth):
     """gate.py's state, after the build: contract-breaks and review vs HEAD~1."""
     res = {}
@@ -798,6 +814,8 @@ def gate_state(glia, truth):
                      "schemas": len(d.get("schemas") or []), "models": len(d.get("models") or []),
                      "orphaned_clients": len(d.get("orphaned_clients") or []),
                      "names": len(names),
+                     # FH.1d: the folded name rows (FH.7d), whose sample_files count above
+                     "names_folded": sum(1 for r in names if r.get("sample_files")),
                      "rows": len(rows) + len(names),
                      "distinct_changes": len(changes_in(rows, names)),
                      "files_named": len(named),
@@ -807,7 +825,9 @@ def gate_state(glia, truth):
                      "bytes": nb, "ms": ms}
     else:
         res["cb"] = {"error": err}
-    d, nb, ms, err = glia.json("review", ".", "--base", "HEAD~1", "--json")
+    # --full (FH.1d): every list uncapped, so files_named moves with glia's reach and never
+    # with review's default caps (FH.8c / FH.8d)
+    d, nb, ms, err = glia.json("review", ".", "--base", "HEAD~1", "--full", "--json")
     if isinstance(d, dict):
         named = files_in(d, set())
         res["review"] = {"truth_named": sorted(t for t in truth if t in named),
@@ -1389,10 +1409,7 @@ def cmd_run(a, repos, all_repos):
                       f"{' error=' + res['error'] if res.get('error') else ''}", flush=True)
             else:
                 new_tasks.append(res)
-                cbn = ((res.get("S") or {}).get("gate") or {}).get("cb") or {}
-                print(f"[cohort] task {res['task']} {res['shape']} " + " ".join(
-                    f"{c['check']}={c['class'] or c['status']}" for c in res["checks"])
-                    + f" cb_names={cbn.get('names', '-')}", flush=True)
+                print(task_line(res), flush=True)
     keep_h = {h["repo"] for h in new_health}
     keep_t = {t["task"] for t in new_tasks}
     health = [h for h in old_health if h["repo"] not in keep_h] + new_health
