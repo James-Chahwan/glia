@@ -1,0 +1,263 @@
+{"id": "000037731a23e3ed", "verdict": "correct", "reason": "decl is a method of the `impl Builtin for StartsWith` block", "judge": "FD.3a"}
+{"id": "00004c3ba2dfd022", "verdict": "correct", "reason": "health_connect.c declares the function Activity__getLoaderManager (FFI_PLUGIN_EXPORT JniResult ..)", "judge": "FD.3a"}
+{"id": "000061f0ffcaec0f", "verdict": "correct", "reason": "_objc_msgSend_301 is a method inside class PedometerBindings (the class opened at line 9 has not closed by line 8308)", "judge": "FD.3a"}
+{"id": "00006c26a2d1adf3", "verdict": "correct", "reason": "ws_breadth_probes_pair calls connects(&m, ..), the helper fn declared in the same test file", "judge": "FD.3a"}
+{"id": "000078ccc35753f3", "verdict": "correct", "reason": "health_connect.c #includes \"dartjni.h\" and Intent__getStringExtra calls its static inline load_method", "judge": "FD.3a"}
+{"id": "0001242a2010ca46", "verdict": "correct", "reason": "clean_and_cap_doc returns Some(cap_doc(s)), the pub(crate) fn declared right below it", "judge": "FD.3a"}
+{"id": "00014834337f29ba", "verdict": "correct", "reason": "engine/src/intent/paths.rs declares fn glob", "judge": "FD.3a"}
+{"id": "00024054fa95b8a7", "verdict": "correct", "reason": "kcite_line iterates law_cites(l, &known.order), the fn of the same example file", "judge": "FD.3a"}
+{"id": "00025a554a0ab02f", "verdict": "correct", "reason": "the textEditingValue getter is declared inside class BasicTextInputClientState", "judge": "FD.3a"}
+{"id": "000268b94e414f9a", "verdict": "correct", "reason": "evaluate builds Outcome::Error(e), the variant of the file's enum Outcome", "judge": "FD.3a"}
+{"id": "0002ed8486eabdce", "verdict": "correct", "reason": "health_connect.c #includes \"dartjni.h\" and get_Context__TV_INPUT_SERVICE calls its static inline load_static_field", "judge": "FD.3a"}
+{"id": "00037beeb10eacf5", "verdict": "correct", "reason": "G::new calls RepoId::from_canonical, RepoId being glia_core's (use glia_core::{.., RepoId}) whose impl declares from_canonical", "judge": "FD.3a"}
+{"id": "000383d1bfe3e9a8", "verdict": "correct", "reason": "classify_call's closure calls text_of(n, src), the module-level fn of the same file", "judge": "FD.3a"}
+{"id": "0004ef8df104bff4", "verdict": "correct", "reason": "snapshots/src/junit.rs declares pub fn parse_junit", "judge": "FD.3a"}
+{"id": "0005314661dfb255", "verdict": "correct", "reason": "import 'context_menu_region.dart' resolves to context_menus/lib/context_menu_region.dart", "judge": "FD.3a"}
+{"id": "00063d73556e5998", "verdict": "correct", "reason": "the test calls chain(N), the helper fn of the same test file", "judge": "FD.3a"}
+{"id": "00073d333fb77eae", "verdict": "correct", "reason": "rust_lapin_rows passes module_id(), the helper fn of queues.rs's mod tests (the only module_id in scope)", "judge": "FD.3a"}
+{"id": "0007694aef4bbc0d", "verdict": "correct", "reason": "engine/tests/intent_ids.rs declares the #[test] fn a_bad_pattern_drops_only_itself", "judge": "FD.3a"}
+{"id": "0007ee80c06e817a", "verdict": "correct", "reason": "prepared_test.go declares the package-level var preparedMessageTests", "judge": "FD.3a"}
+{"id": "0007f693ee69f039", "verdict": "correct", "reason": "the test calls route_id(\"GET /x\"), the helper of routes.rs's mod tests", "judge": "FD.3a"}
+{"id": "00084b7e03f216d8", "verdict": "correct", "reason": "unknown_names calls errors(&p), the helper fn of analysis.rs's mod tests", "judge": "FD.3a"}
+{"id": "00086dd828949d79", "verdict": "correct", "reason": "the test calls extract_yaml_contracts, the pub fn of contracts.rs reached through use super::*", "judge": "FD.3a"}
+{"id": "0008877eab4cc0c2", "verdict": "correct", "reason": "graph/src/resolvers/host.rs declares const HOSTS_KEY", "judge": "FD.3a"}
+{"id": "0008998d2306209e", "verdict": "correct", "reason": "_MyAppState.build's routes map constructs DefaultValuesPage(onChangedPlatform: ..), the class imported from default_values_page.dart", "judge": "FD.3a"}
+{"id": "0008f26b62a233b1", "verdict": "correct", "reason": "three_react_repos calls write(&root, ..), the helper fn of the same test file", "judge": "FD.3a"}
+{"id": "0009534e10d89cc5", "verdict": "correct", "reason": "the test calls read_paths_at(&Tree::Rev {..}, ..), the pub(crate) fn of git_rev.rs", "judge": "FD.3a"}
+{"id": "00097d9208ce1074", "verdict": "correct", "reason": "graph_of calls self.graphs(id), Ctx's own method declared just above", "judge": "FD.3a"}
+{"id": "0009ef2b294c3f34", "verdict": "correct", "reason": "toy_core calls RepoId::from_canonical, glia_core's RepoId constructor", "judge": "FD.3a"}
+{"id": "000a8a661711d0c0", "verdict": "correct", "reason": "Context__enforcePermission calls check_exception(), the static inline function of the included dartjni.h", "judge": "FD.3a"}
+{"id": "000af2dc2be05046", "verdict": "correct", "reason": "the test calls qnames(&c), the helper fn of queues.rs's mod tests", "judge": "FD.3a"}
+{"id": "000af6f50b03c515", "verdict": "correct", "reason": "extract_trpc_procedure_nodes iterates router_prefixes(&routers, idx, 0), the fn of the same file", "judge": "FD.3a"}
+{"id": "000b4e1993159f50", "verdict": "correct", "reason": "the test calls entry(..), the helper fn of cron.rs's mod tests", "judge": "FD.3a"}
+{"id": "000b8bb9af09ada5", "verdict": "correct", "reason": "projection-text/src/ladder.rs declares struct Held<'a>", "judge": "FD.3a"}
+{"id": "000d359059ff442d", "verdict": "correct", "reason": "recover calls self.at_clause(), Parser's own method", "judge": "FD.3a"}
+{"id": "000d3c61196eb02b", "verdict": "correct", "reason": "this.stop_services(ext) inside the constructor's cancel arrow calls Launcher's own stop_services method", "judge": "FD.3a"}
+{"id": "000da8747e92ccb6", "verdict": "correct", "reason": "queryable_entity's \"string\" arm calls literal_source(expr, src), the fn of the same file", "judge": "FD.3a"}
+{"id": "000e3c91c18beb63", "verdict": "correct", "reason": "`use super::files::FileIndex;` in rank/cache.rs resolves to engine/src/rank/files.rs", "judge": "FD.3a"}
+{"id": "000e40c750264dd1", "verdict": "correct", "reason": "the test passes repo(), the helper fn of the rust parser's mod tests", "judge": "FD.3a"}
+{"id": "000e456b2f025fb2", "verdict": "correct", "reason": "record_implements calls is_local(&sym.symbol), the module-level fn of scip.rs", "judge": "FD.3a"}
+{"id": "000e668800b90c6f", "verdict": "correct", "reason": "the test calls run(vec![..]), the helper fn of identity.rs's mod tests", "judge": "FD.3a"}
+{"id": "000efea5a4f0ee59", "verdict": "correct", "reason": "self.memo is a Lookup<MemoKey, ..> (closure.rs field), so self.memo.contains_key calls value::Lookup::contains_key", "judge": "FD.3a"}
+{"id": "00110c81d5439160", "verdict": "correct", "reason": "the test calls order_exchanges(), the helper fn of the same test file", "judge": "FD.3a"}
+{"id": "00116a8c9ef41fc2", "verdict": "correct", "reason": "the test imports and calls contract_breaks_vs_rev_with, the pub fn of engine/src/contract_breaks.rs", "judge": "FD.3a"}
+{"id": "0011776799aca1b0", "verdict": "correct", "reason": "join_group compares `*j == Joint::Builder`, the variant of the file's enum Joint", "judge": "FD.3a"}
+{"id": "0011cf63d844f5d6", "verdict": "correct", "reason": "read_name matches PathRead::LineLiteral, the variant of the file's enum PathRead", "judge": "FD.3a"}
+{"id": "0014a4f23646a6e2", "verdict": "correct", "reason": "package:linting_tool/routes.dart resolves to experimental/linting_tool/lib/routes.dart (pubspec name linting_tool)", "judge": "FD.3a"}
+{"id": "0018f0fef9e06563", "verdict": "correct", "reason": "of_path returns Self::Vue, the variant of enum SfcFormat", "judge": "FD.3a"}
+{"id": "002002ba169e589b", "verdict": "correct", "reason": "Write is a variant of enum AccessVerb", "judge": "FD.3a"}
+{"id": "002737ca656b88a9", "verdict": "correct", "reason": "Pos is a variant of enum CLit", "judge": "FD.3a"}
+{"id": "002cc68ecd0dde71", "verdict": "correct", "reason": "import 'theme.dart' resolves to ai_recipe_generation/lib/theme.dart", "judge": "FD.3a"}
+{"id": "00378a43a169fe8f", "verdict": "correct", "reason": "`use crate::git_rev::{self, ..}` resolves to engine/src/git_rev.rs", "judge": "FD.3a"}
+{"id": "0038aa2d630e967e", "verdict": "correct", "reason": "tier_confidence matches Tier::Derived, Tier imported from glia_activation::profile", "judge": "FD.3a"}
+{"id": "0039ffdac6b4a850", "verdict": "correct", "reason": "move_down is a method declared in class Tiler", "judge": "FD.3a"}
+{"id": "0041fe7d17762e38", "verdict": "correct", "reason": "url_value builds UrlValue::Chain(chain), the variant of the file's enum UrlValue", "judge": "FD.3a"}
+{"id": "004365ae2ffd9973", "verdict": "correct", "reason": "Category is a variant of enum ColType", "judge": "FD.3a"}
+{"id": "004d581fe409121f", "verdict": "correct", "reason": "Pascal is a variant of enum RenameRule", "judge": "FD.3a"}
+{"id": "004ed0b368df627e", "verdict": "correct", "reason": "#include \"generated_plugin_registrant.h\" resolves to the header beside the .cc file", "judge": "FD.3a"}
+{"id": "0055a0db7216435d", "verdict": "correct", "reason": "family matches QueueFramework::Asynq, the variant of the file's enum QueueFramework", "judge": "FD.3a"}
+{"id": "00586d84a52b2c5f", "verdict": "correct", "reason": "enclosing_project matches CellTarget::Bound(id), CellTarget imported from glia_graph::cells", "judge": "FD.3a"}
+{"id": "006219cb19992036", "verdict": "correct", "reason": "the java parser's `pub use glia_code_domain::{.., edge_category, ..}` names code-domain's pub mod edge_category", "judge": "FD.3a"}
+{"id": "0065860612261e88", "verdict": "correct", "reason": "import 'src/games_services/games_services.dart' resolves to that file under game_template/lib", "judge": "FD.3a"}
+{"id": "006619abd2b3e81a", "verdict": "correct", "reason": "`use glia_engine::find::{..}` resolves to engine/src/find.rs", "judge": "FD.3a"}
+{"id": "006640795a289826", "verdict": "correct", "reason": "expr_inner builds Expr::Or { .. }, the variant of the gql ast's enum Expr", "judge": "FD.3a"}
+{"id": "0066c075019031b5", "verdict": "correct", "reason": "run matches QueryCmd::DuplicateFlows(a), the variant of the file's enum QueryCmd", "judge": "FD.3a"}
+{"id": "00677c5db68df4b5", "verdict": "correct", "reason": "class _FirebaseUser implements User, the abstract class of the imported auth.dart (firebase_auth's User is hidden)", "judge": "FD.3a"}
+{"id": "0067fa06101bf273", "verdict": "correct", "reason": "resolve compares against Narrowed::No, Narrowed imported from resolvers/host.rs", "judge": "FD.3a"}
+{"id": "006c91e18b18500f", "verdict": "correct", "reason": "#include \"my_application.h\" resolves to simple_shader/linux/my_application.h", "judge": "FD.3a"}
+{"id": "006f8431fd06edca", "verdict": "correct", "reason": "resolve_direct returns Tier::Fact, the variant of rank_eval's own enum Tier (the example declares it and imports no other Tier)", "judge": "FD.3a"}
+{"id": "00868dbcced0bdf4", "verdict": "correct", "reason": "Barrels::read matches NavFact::Exports { names }, the code-domain NavFact variant", "judge": "FD.3a"}
+{"id": "00891de4d215a3fd", "verdict": "correct", "reason": "`use glia_code_domain::evidence::Evidence;` resolves to code-domain/src/evidence.rs", "judge": "FD.3a"}
+{"id": "008da353d1bf249a", "verdict": "correct", "reason": "`use crate::types::RepoGraph;` resolves to graph/src/types.rs", "judge": "FD.3a"}
+{"id": "00911ce2e0fd7016", "verdict": "correct", "reason": "depth matches CTerm::Const(ConstVal::Int(n)), CTerm imported from crate::analysis", "judge": "FD.3a"}
+{"id": "00915b23256e80f1", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling script test_build.py's def stderr_of (the surface scripts run with their own directory on sys.path)", "judge": "FD.3a"}
+{"id": "0093c42aa3c8beca", "verdict": "correct", "reason": "collapse matches Gate::Dotnet(c), the variant of the file's enum Gate", "judge": "FD.3a"}
+{"id": "00969564fad2c786", "verdict": "correct", "reason": "read_hit builds TopicForm::Literal, TopicForm imported from crate::queue_topic", "judge": "FD.3a"}
+{"id": "009a576c17d9cb70", "verdict": "correct", "reason": "the test's expr matches Expr::StrTest { .. }, Expr imported from glia_rules::gql::ast", "judge": "FD.3a"}
+{"id": "009d5a4b8b341814", "verdict": "correct", "reason": "the ruby parser's lib.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "009fc0b2c0fd8e8c", "verdict": "correct", "reason": "`use glia_engine::calibrate::{..}` resolves to engine/src/calibrate/mod.rs", "judge": "FD.3a"}
+{"id": "00a1099e8df11257", "verdict": "correct", "reason": "magic.rs's test helper value matches CTerm::Const(..), the analysis enum's variant", "judge": "FD.3a"}
+{"id": "00a41457e5b4d4d5", "verdict": "correct", "reason": "the test passes Which::Stable, the variant of relation.rs's enum Which", "judge": "FD.3a"}
+{"id": "00a5f18d79d31324", "verdict": "correct", "reason": "`use super::key::{CacheKey, file_key};` resolves to engine/src/shared_cache/key.rs", "judge": "FD.3a"}
+{"id": "00ac1e23b622ae77", "verdict": "correct", "reason": "Tight is a variant of enum Gap", "judge": "FD.3a"}
+{"id": "00ad7018756b2206", "verdict": "correct", "reason": "Launcher extends search.Search, search is `import * as search from 'dialog_search'`, whose class Search is the target", "judge": "FD.3a"}
+{"id": "00adc1dc7e7082c2", "verdict": "correct", "reason": "`impl SizedAnswer for DiffImpact`, SizedAnswer being the trait of engine/src/answers.rs", "judge": "FD.3a"}
+{"id": "00b0397c34dcb0e3", "verdict": "correct", "reason": "`use glia_activation::algo::{Adjacency, CategorySet, GraphSource};` resolves to activation/src/algo/mod.rs", "judge": "FD.3a"}
+{"id": "00b11dde66f369e9", "verdict": "correct", "reason": "Word is a variant of enum Tok", "judge": "FD.3a"}
+{"id": "00b1ee0973991b44", "verdict": "correct", "reason": "test_tests_for.py is the pyo3 surface test of py/src/tests_for.rs and calls the PyGraph.tests_for / tests_for_rev it binds", "judge": "FD.3a"}
+{"id": "00b3f00ea6d875a8", "verdict": "correct", "reason": "typed_term matches ColType::CategorySet, the variant of ir.rs's enum ColType", "judge": "FD.3a"}
+{"id": "00b4089e825b669d", "verdict": "correct", "reason": "Unbound is a variant of enum TypeHit", "judge": "FD.3a"}
+{"id": "00b46fde3daf438f", "verdict": "correct", "reason": "Branch::rule matches Branch::ImportBinding, the variant of the file's enum Branch", "judge": "FD.3a"}
+{"id": "00b5cd91658bff61", "verdict": "correct", "reason": "block matches PTok::Dir(d), the variant of the file's enum PTok", "judge": "FD.3a"}
+{"id": "00b90b7a368d7040", "verdict": "correct", "reason": "`use crate::ir::{..}` resolves to rules/src/ir.rs", "judge": "FD.3a"}
+{"id": "00b99dce3e6b6efe", "verdict": "correct", "reason": "fishAllergies is a value of enum DietaryRestrictionsFilter", "judge": "FD.3a"}
+{"id": "00baba3e2d75da0f", "verdict": "correct", "reason": "`use glia_code_domain::{..}` resolves to code-domain/src/lib.rs", "judge": "FD.3a"}
+{"id": "00bd0e7589600859", "verdict": "correct", "reason": "Branch::rule matches Branch::PackageSymbol, the variant of the file's enum Branch", "judge": "FD.3a"}
+{"id": "00c0240b8aed99ea", "verdict": "correct", "reason": "Accept is a struct variant of enum OverlayCmd", "judge": "FD.3a"}
+{"id": "00c69b42ce50a863", "verdict": "wrong", "reason": "the `use super::{.., node_kind}` statement sits inside the inline `pub mod endpoint`, so the importer is that module; the edge credits the file's root MODULE, which declares node_kind itself (an inline module's import attributed to the enclosing file)", "judge": "FD.3a"}
+{"id": "00ca3d84795b557a", "verdict": "correct", "reason": "`use glia_code_domain::evidence::Evidence;` resolves to code-domain/src/evidence.rs", "judge": "FD.3a"}
+{"id": "00d9928104f0b455", "verdict": "correct", "reason": "`use glia_core::NodeId;` resolves to core/src/lib.rs, glia-core's crate root", "judge": "FD.3a"}
+{"id": "00da3aca2991d1bd", "verdict": "correct", "reason": "`use glia_engine::generate_one_opts;` resolves to the engine crate root engine/src/lib.rs (its facade re-export)", "judge": "FD.3a"}
+{"id": "00e444858d4e1aa1", "verdict": "correct", "reason": "sbt_tokens pushes SbtTok::Newline, the variant of the file's enum SbtTok", "judge": "FD.3a"}
+{"id": "00e6cfd815d38a81", "verdict": "correct", "reason": "`use glia_engine::{BUILD_STAMP, ..}` resolves to the engine crate root engine/src/lib.rs", "judge": "FD.3a"}
+{"id": "00e7c60337f1418f", "verdict": "correct", "reason": "`use glia_code_domain::{.., node_kind}` names code-domain's pub mod node_kind", "judge": "FD.3a"}
+{"id": "00ea5d2c96a0e915", "verdict": "correct", "reason": "judge_parse returns Verdict::Degraded, the variant of the file's enum Verdict", "judge": "FD.3a"}
+{"id": "00ebe08081dc4329", "verdict": "correct", "reason": "the test sets direction: Direction::Forward, the variant of activation's enum Direction", "judge": "FD.3a"}
+{"id": "00ec096a45b5cf80", "verdict": "correct", "reason": "the test's `use glia_engine::calibrate::fusions::{..}` resolves to engine/src/calibrate/fusions.rs", "judge": "FD.3a"}
+{"id": "00eec78f9b9b4b02", "verdict": "correct", "reason": "`use glia_code_domain::project_roots::ProjectRoot;` resolves to code-domain/src/project_roots.rs", "judge": "FD.3a"}
+{"id": "00f3b95b4226e86a", "verdict": "correct", "reason": "the test compares r.qualifier == CallQualifier::Bare(..), the code-domain CallQualifier variant", "judge": "FD.3a"}
+{"id": "00fe07d3eb7295bf", "verdict": "correct", "reason": "`use glia_code_domain::{.., edge_category, ..}` names code-domain's pub mod edge_category", "judge": "FD.3a"}
+{"id": "0106f1d0c2b688ff", "verdict": "correct", "reason": "serveWs calls internalError(ws, \"stdin:\", err), the function declared in the same file", "judge": "FD.3a"}
+{"id": "0107229620734c0f", "verdict": "correct", "reason": "unexpectedCloseErrorTests' rows build &CloseError{Code: ..} composite literals of the conn.go struct", "judge": "FD.3a"}
+{"id": "01126e2c63fe084f", "verdict": "correct", "reason": "`use glia_engine::delta::graph_delta_vs_rev;` resolves to engine/src/delta.rs", "judge": "FD.3a"}
+{"id": "01291ece511538e6", "verdict": "correct", "reason": "`use crate::transport::{..}` resolves to doc-sources/src/transport.rs", "judge": "FD.3a"}
+{"id": "012abc022a9b6137", "verdict": "correct", "reason": "build reads AppColors.white50, the static const of class AppColors from the imported package:linting_tool/theme/colors.dart", "judge": "FD.3a"}
+{"id": "0147083d515f8a9a", "verdict": "correct", "reason": "import { Stack } from './stack' resolves to src/stack.ts", "judge": "FD.3a"}
+{"id": "0148ce30eb64f548", "verdict": "correct", "reason": "snapshots/src/git_history.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "0162d1b1c5127389", "verdict": "correct", "reason": "engine/src/http_owner.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "018f7acf2dcd6b86", "verdict": "correct", "reason": "TestWriteBufferPool calls newConn(fakeNetConn{..}, ..) and checks the pooled write buffer it builds", "judge": "FD.3a"}
+{"id": "021e3003ebbab53d", "verdict": "correct", "reason": "`impl GraphSource for Counting` in source.rs's tests, GraphSource imported from glia_activation::algo", "judge": "FD.3a"}
+{"id": "027d88c570dbb83c", "verdict": "correct", "reason": "calculate returns Movement.NONE, the NONE member of enum Movement", "judge": "FD.3a"}
+{"id": "02b012386e15c80a", "verdict": "correct", "reason": "json_test.go's TestJSON exercises WriteJSON / ReadJSON declared in json.go (same package)", "judge": "FD.3a"}
+{"id": "02c51c8671d0da2e", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "02d4593c9d2f12bd", "verdict": "correct", "reason": "`impl Candidate for Short`, Candidate imported from super::candidate", "judge": "FD.3a"}
+{"id": "02efdbfd374381ba", "verdict": "correct", "reason": "embed/src/lib.rs has `impl Embedder for HashEmbedder` (line 328) for the struct declared at the site", "judge": "FD.3a"}
+{"id": "0321794221f226c2", "verdict": "correct", "reason": "`from test_build import Checks, ..` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "036831dcf9eb68fa", "verdict": "correct", "reason": "test_merge.py is the pyo3 surface test of py/src/merge.rs and calls merge_gmaps", "judge": "FD.3a"}
+{"id": "036f849a50a95592", "verdict": "correct", "reason": "`impl FactSource for CodeFacts<'_>`, FactSource being glia-rules' trait of rules/src/source.rs", "judge": "FD.3a"}
+{"id": "047d343991eb5495", "verdict": "correct", "reason": "the go parser's lib.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "04adcc1a47820380", "verdict": "correct", "reason": "generated class NSDictionary extends NSObject, the one NSObject class of the same file", "judge": "FD.3a"}
+{"id": "050cf17ea73ea0ef", "verdict": "correct", "reason": "TestNetConn calls newConn and checks NetConn() on the result", "judge": "FD.3a"}
+{"id": "051d05bd5ca4cc77", "verdict": "correct", "reason": "class _AndroidStepsRepo implements StepsRepo, the abstract class in the same file", "judge": "FD.3a"}
+{"id": "053e9ec04f31c4b2", "verdict": "correct", "reason": "engine/src/docs.rs holds #[cfg(test)] mod docs_tests", "judge": "FD.3a"}
+{"id": "05561e4d549154b5", "verdict": "correct", "reason": "`impl GraphSource for WalkGraph<'_>`, glia_activation::algo's trait", "judge": "FD.3a"}
+{"id": "063fa2660adb89e1", "verdict": "correct", "reason": "`impl GraphSource for ReachSource<'_>`, glia_activation::algo's trait", "judge": "FD.3a"}
+{"id": "069dffd7ce33eadf", "verdict": "correct", "reason": "the typescript parser's lib.rs holds #[cfg(test)] mod wire_shape_tests", "judge": "FD.3a"}
+{"id": "070e4e0d31b6273c", "verdict": "correct", "reason": "class PageWidth extends SinglePage from the imported pages_flow.dart", "judge": "FD.3a"}
+{"id": "0751230243201f77", "verdict": "correct", "reason": "`from test_build import .., fixture_repo, ..` names the sibling test_build.py's def fixture_repo", "judge": "FD.3a"}
+{"id": "07a4a343079942e0", "verdict": "correct", "reason": "test_diff_impact.py is the pyo3 surface test of py/src/diff_impact.rs and calls diff_impact / diff_impact_vs_rev", "judge": "FD.3a"}
+{"id": "07d7a1888740bc5f", "verdict": "correct", "reason": "store/src/code_section.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "07ee1a48ccf86109", "verdict": "correct", "reason": "generated class NSXMLParser extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "07f9171ff3ef2f9e", "verdict": "correct", "reason": "TopLeft is a member of enum DefaultPointerPosition", "judge": "FD.3a"}
+{"id": "07ff4e4e6da55863", "verdict": "correct", "reason": "class FirebaseEntryApi implements EntryApi from the imported api.dart", "judge": "FD.3a"}
+{"id": "08228db7a42aa12e", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_NSError extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "0824617d3dec20ea", "verdict": "correct", "reason": "code-domain/src/lib.rs holds pub mod edge_category", "judge": "FD.3a"}
+{"id": "085ce6aa70419efd", "verdict": "correct", "reason": "py/src/cycles.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "08756aa5db2491f7", "verdict": "correct", "reason": "`impl GraphSource for HubSource<'_>`, glia_activation::algo's trait", "judge": "FD.3a"}
+{"id": "08eed5dcba79bb9c", "verdict": "correct", "reason": "py/src/timeline.rs holds #[cfg(test)] mod tests", "judge": "FD.3a"}
+{"id": "0915bcf5942b675f", "verdict": "correct", "reason": "generated class NSString extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "0959193c6b5ed9d2", "verdict": "correct", "reason": "TestFailedConnectionReadPanic loops c.ReadMessage() on a *Conn", "judge": "FD.3a"}
+{"id": "09b66c21b06b4d01", "verdict": "correct", "reason": "generated class CLCondition extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "0a0ec60a85bae6e0", "verdict": "correct", "reason": "custom_buttons_page_test.dart imports package:context_menus/custom_buttons_page.dart and pumps its page", "judge": "FD.3a"}
+{"id": "0af4a685f1c9ca01", "verdict": "correct", "reason": "test_effects.py is the pyo3 surface test of py/src/effects.rs and calls PyGraph.effects", "judge": "FD.3a"}
+{"id": "0b64e9601200fc63", "verdict": "wrong", "reason": "no type of engine/src/check.rs is credited: the impls are `impl PathGraph for MergedGraph` (glia-graph's type) and `for ModuleImports`; the parser attributes an impl whose self type is not a local node (a foreign type) to the file's MODULE, and a module implements nothing", "judge": "FD.3a"}
+{"id": "0ba29264910ee101", "verdict": "correct", "reason": "main_test.dart imports package:asset_transformation/main.dart and renders its app", "judge": "FD.3a"}
+{"id": "0bc750c47ec2d852", "verdict": "correct", "reason": "`impl<G: ?Sized> FilterPredicate<G> for DropIds` in plan.rs's tests", "judge": "FD.3a"}
+{"id": "0c5cd78f54972f65", "verdict": "correct", "reason": "generated class NSHTTPCookie extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "0c68650bc1a89259", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "0d81f1fb138a1d94", "verdict": "correct", "reason": "client is a *Conn from newTestConn and the test calls client.WriteMessage(CloseMessage, msg)", "judge": "FD.3a"}
+{"id": "0dea950948e6e823", "verdict": "correct", "reason": "test_records.py is the pyo3 surface test of py/src/records.rs (the *_json dumps)", "judge": "FD.3a"}
+{"id": "0dfdac9232ef4a9f", "verdict": "correct", "reason": "generated class ObjCBlock_bool_ObjCObject_ffiUnsignedLong_bool extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "0e3ab96226269f2b", "verdict": "correct", "reason": "generated class NSCachedURLResponse extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "0e42a9bb81b2c11d", "verdict": "correct", "reason": "`impl CochangeHistory for CoState`, the trait of engine/src/rank/cochange.rs", "judge": "FD.3a"}
+{"id": "0e94e629f272f387", "verdict": "correct", "reason": "TestTokenListContainsValue calls tokenListContainsValue directly", "judge": "FD.3a"}
+{"id": "0ec92a9cdac28545", "verdict": "wrong", "reason": "server_test.go is package websocket at the repo root and tests the root server.go (Upgrader, Subprotocols, IsWebSocketUpgrade), not examples/echo/server.go (package main): the name_match pairing matched the file stem across directories", "judge": "FD.3a"}
+{"id": "0f297755e97533aa", "verdict": "correct", "reason": "`from test_build import Checks, ..` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "0fb13a7b7474c4a5", "verdict": "correct", "reason": "`from test_build import .., fixture_repo, ..` names the sibling test_build.py's def fixture_repo", "judge": "FD.3a"}
+{"id": "0fe76cd656b1aeb9", "verdict": "correct", "reason": "examples/command imports \"github.com/gorilla/websocket\", the repository-root package (the one go.mod), of which client.go is a file", "judge": "FD.3a"}
+{"id": "10cc6b4dec2d32bc", "verdict": "correct", "reason": "field_types_page_test.dart imports package:context_menus/field_types_page.dart and pumps its page", "judge": "FD.3a"}
+{"id": "10edd91051c5c3e2", "verdict": "correct", "reason": "test_build.py is the pyo3 surface test of py/src/build.rs (generate / generate_many)", "judge": "FD.3a"}
+{"id": "11c2a881bab81966", "verdict": "correct", "reason": "`from test_build import .., stderr_of, tree` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "11cb3f5eb0760c2c", "verdict": "correct", "reason": "`impl GraphSource for ToyGraph`, glia_activation::algo's trait", "judge": "FD.3a"}
+{"id": "1214dc7a18674567", "verdict": "correct", "reason": "generated class NSNotification extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "1216b0732c07e328", "verdict": "correct", "reason": "Ext extends Ecs.System<ExtEvent>, Ecs is the ecs module whose System class is the target", "judge": "FD.3a"}
+{"id": "12c5408abcb66789", "verdict": "correct", "reason": "mask_test.go tests maskBytes declared in mask.go (same package)", "judge": "FD.3a"}
+{"id": "12d0526626174f50", "verdict": "correct", "reason": "`impl CrossGraphResolver for EventBusResolver`, the trait of resolvers/mod.rs", "judge": "FD.3a"}
+{"id": "12d130f891200599", "verdict": "correct", "reason": "_PageOpticalSizeState extends SinglePageState from the imported pages_flow.dart", "judge": "FD.3a"}
+{"id": "137c137670c1eaf3", "verdict": "correct", "reason": "`from test_build import .., stderr_of, tree` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "1426a220c38d0233", "verdict": "correct", "reason": "`impl Builtin for InScope` in exec.rs's tests, Builtin being rules/src/source.rs's trait", "judge": "FD.3a"}
+{"id": "147f4610eb99e8f3", "verdict": "correct", "reason": "generated class NSDecimalNumberHandler extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "14e422afb18c7535", "verdict": "correct", "reason": "class FirebaseAuthService implements Auth from the imported auth.dart", "judge": "FD.3a"}
+{"id": "1524376bb65886d1", "verdict": "correct", "reason": "test_embed.py is the pyo3 surface test of py/src/embed.rs and calls rg.embed", "judge": "FD.3a"}
+{"id": "15c36f3d8687cc1c", "verdict": "correct", "reason": "class FirebaseCategoryApi implements CategoryApi from the imported api.dart", "judge": "FD.3a"}
+{"id": "15c83be44f5680e3", "verdict": "correct", "reason": "WebStartupAnalyzer extends WebStartupAnalyzerBase, imported via package:web_startup_analyzer/src/web_startup_analyzer_base.dart", "judge": "FD.3a"}
+{"id": "16171dcc417cd3f8", "verdict": "correct", "reason": "`from test_build import .., tree` names the sibling test_build.py's def tree", "judge": "FD.3a"}
+{"id": "164e33d8ce0f5d0d", "verdict": "correct", "reason": "`from test_build import Checks, ..` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "167c64d00536c4bc", "verdict": "correct", "reason": "TestReadLimit writes with wc.WriteMessage on a *Conn to exceed the read limit", "judge": "FD.3a"}
+{"id": "175f7f29cfedb64c", "verdict": "correct", "reason": "generated class CMPedometerEvent extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "1857a4419eec2074", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin and submit overrides the abstract Builtin.submit", "judge": "FD.3a"}
+{"id": "188152f60d77af04", "verdict": "correct", "reason": "`from test_build import Checks, rg` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "1924ab289b772ca8", "verdict": "correct", "reason": "`impl CrossGraphResolver for RpcStackResolver`", "judge": "FD.3a"}
+{"id": "195b9d596c427ec4", "verdict": "correct", "reason": "generated class NSRegularExpression extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "19dde1f2ba6f2e5b", "verdict": "correct", "reason": "`impl GraphSource for Sub`, glia_activation::algo's trait", "judge": "FD.3a"}
+{"id": "1a34b0ef948c2657", "verdict": "correct", "reason": "`impl CrossGraphResolver for HttpStackResolver`", "judge": "FD.3a"}
+{"id": "1b07c4a15f7efc30", "verdict": "correct", "reason": "`from test_build import Checks, ..` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "1b112f795e93e798", "verdict": "correct", "reason": "generated __$$CountImplCopyWithImpl<$Res> extends _$CountCopyWithImpl<$Res, _$CountImpl>, declared in the same freezed file", "judge": "FD.3a"}
+{"id": "1b580657a7f5d118", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_NSArray extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "1b6cff97591d3856", "verdict": "correct", "reason": "`impl CrossGraphResolver for MountedHttpResolver<'_>`", "judge": "FD.3a"}
+{"id": "1bc46b1a11820bfe", "verdict": "correct", "reason": "generated class NSURLProtocol extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "1c1a65d2e5bdd201", "verdict": "correct", "reason": "generated class NSMutableData extends NSData of the same file", "judge": "FD.3a"}
+{"id": "1c397e8eef775033", "verdict": "correct", "reason": "`from test_build import .., node_ids, ..` names the sibling test_build.py's def node_ids", "judge": "FD.3a"}
+{"id": "1d3cca758c36190e", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_ObjCObject_NSError extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "1d85c4e3a55512ce", "verdict": "correct", "reason": "`from test_build import .., tree` names the sibling test_build.py's def tree", "judge": "FD.3a"}
+{"id": "1de36d95887c4033", "verdict": "correct", "reason": "server_test.dart starts `dart run bin/server.dart` with Process.start and exercises it over HTTP", "judge": "FD.3a"}
+{"id": "1e05738903e44d39", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin, plugins is `import * as plugins from 'launcher_plugins'`", "judge": "FD.3a"}
+{"id": "1e5ddac7e7eb6cc5", "verdict": "correct", "reason": "the test builds its close frame with FormatCloseMessage from conn.go", "judge": "FD.3a"}
+{"id": "1ed489307c35b840", "verdict": "wrong", "reason": "the module graph/src/resolvers/host.rs implements nothing: the edge stands for the blanket `impl<T: HostScoped> HostScoped for &T`, whose self type (a reference) is no local node, so the parser credits the file's MODULE", "judge": "FD.3a"}
+{"id": "1ed8caac3fc8b41f", "verdict": "correct", "reason": "generated class NSURLCache extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "1f226d30fd32f1a7", "verdict": "correct", "reason": "focus_image_test.dart imports package:animations/src/misc/focus_image.dart and tests its widget", "judge": "FD.3a"}
+{"id": "1f255057abfc24db", "verdict": "correct", "reason": "`from test_build import Checks, params, ..` names the sibling test_build.py's def params", "judge": "FD.3a"}
+{"id": "1f46daa3b96fb342", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "1f4a18e217c0e770", "verdict": "correct", "reason": "`from test_build import Checks, ..` names the sibling test_build.py's class Checks", "judge": "FD.3a"}
+{"id": "1fe12838ca752a43", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_NSCachedURLResponse extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "201e4e8a6fe8afd6", "verdict": "correct", "reason": "`impl<G: ?Sized> SynthHook<G> for JoinKeys` in plan.rs's tests", "judge": "FD.3a"}
+{"id": "20c57cc5c2485efd", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin and init overrides the abstract Builtin.init", "judge": "FD.3a"}
+{"id": "20f4b1d929fd9686", "verdict": "correct", "reason": "conn_test.go tests the Conn type and functions of conn.go (same package)", "judge": "FD.3a"}
+{"id": "216eab790a9f535f", "verdict": "correct", "reason": "card_swipe_test.dart imports package:animations/src/misc/card_swipe.dart and tests its widget", "judge": "FD.3a"}
+{"id": "229cb3b5998eb9da", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "22ae84e042411680", "verdict": "correct", "reason": "samples_index_test.dart imports package:samples_index/samples_index.dart and tests its functions", "judge": "FD.3a"}
+{"id": "22c407e5172d901c", "verdict": "correct", "reason": "TestControl calls wc.NextWriter(PongMessage) on a *Conn", "judge": "FD.3a"}
+{"id": "233d1c5b418289b2", "verdict": "correct", "reason": "generated class CLLocationManager extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "23c5292f29a5e74a", "verdict": "correct", "reason": "generated class NSSet extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "24110518c52a0e25", "verdict": "correct", "reason": "generated class NSAttributedString extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "24168422e0e30670", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "248ba9be2a126646", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_NSString_bool extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "24942b66742e0236", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "254a1809d90e56cd", "verdict": "wrong", "reason": "federated_plugin_web_integration_test.dart is the flutter drive host (`main() => integrationDriver()`) and the target is itself the integration test suite, not code under test (that is federated_plugin_web.dart): name_match paired a driver with its test target by the _test stem", "judge": "FD.3a"}
+{"id": "263646d4b4af5239", "verdict": "correct", "reason": "`from test_build import Checks, params, ..` names the sibling test_build.py's def params", "judge": "FD.3a"}
+{"id": "26b0fedf982eeee4", "verdict": "correct", "reason": "MemoryOnlyPlayerProgressPersistence implements PlayerProgressPersistence from the imported player_progress_persistence.dart", "judge": "FD.3a"}
+{"id": "28b091498dad1277", "verdict": "correct", "reason": "`from test_build import Checks, params, ..` names the sibling test_build.py's def params", "judge": "FD.3a"}
+{"id": "293ef1859065092c", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "29ce55a6289297e8", "verdict": "correct", "reason": "generated class ObjCBlock_ffiVoid_NSProgress extends _ObjCBlockBase of the same file", "judge": "FD.3a"}
+{"id": "29e974e06d04e2be", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin and query overrides the abstract Builtin.query", "judge": "FD.3a"}
+{"id": "29f4339cc6c9d168", "verdict": "correct", "reason": "test_cycles.py is the pyo3 surface test of py/src/cycles.rs and calls cycles", "judge": "FD.3a"}
+{"id": "2a8d80b6b7130a2f", "verdict": "correct", "reason": "web/animations' hero_animation_test.dart imports package:animations/src/misc/hero_animation.dart, which resolves to its own package (web/animations pubspec name animations)", "judge": "FD.3a"}
+{"id": "2abe72379aab0c28", "verdict": "correct", "reason": "`from test_build import .., fixture_repo, ..` names the sibling test_build.py's def fixture_repo", "judge": "FD.3a"}
+{"id": "2affeeca1d5f41a1", "verdict": "correct", "reason": "generated class NSArray extends NSObject of the same file", "judge": "FD.3a"}
+{"id": "2b60a56d56392bc3", "verdict": "correct", "reason": "`from test_build import .., params, ..` names the sibling test_build.py's def params", "judge": "FD.3a"}
+{"id": "2ca0920d35a383da", "verdict": "correct", "reason": "_PageNarrativePreState extends NarrativePageState from the imported pages_flow.dart", "judge": "FD.3a"}
+{"id": "2d8fa7538f78585f", "verdict": "correct", "reason": "MemoryOnlySettingsPersistence implements SettingsPersistence from the imported settings_persistence.dart", "judge": "FD.3a"}
+{"id": "2d99c394538ea8e8", "verdict": "correct", "reason": "`from test_build import Checks, node_ids, ..` names the sibling test_build.py's def node_ids", "judge": "FD.3a"}
+{"id": "2f1a75d6940d95bf", "verdict": "correct", "reason": "`from test_build import .., stderr_of` names the sibling test_build.py's def stderr_of", "judge": "FD.3a"}
+{"id": "317aa5e6067135a6", "verdict": "wrong", "reason": "platform_channels/test/home_page_test.dart imports package:platform_channels/main.dart and has no home_page.dart of its own; name_match paired the stem with experimental/linting_tool's home_page.dart in another package", "judge": "FD.3a"}
+{"id": "37f3fb4864c76e5d", "verdict": "wrong", "reason": "json_test.go's \"encoding/json\" import is the standard library, not the repo's json.go (same package websocket, needing no import): a name-only tail_unique binding matched a stdlib import path's last segment to a same-named in-repo file", "judge": "FD.3a"}
+{"id": "3dfa29897629f7e3", "verdict": "correct", "reason": "the freezed part file (part of 'models.dart') declares abstract class _Increment implements Increment, the models.dart class", "judge": "FD.3a"}
+{"id": "475b755b5e69f335", "verdict": "correct", "reason": "Kotlin class EngineBindings(..) : DataModelObserver, the interface declared in DataModel.kt of the same package", "judge": "FD.3a"}
+{"id": "531c330eaaaa9cb9", "verdict": "wrong", "reason": "`import java.util.ArrayList;` is the JDK class, not an event emitter: a name-only tail_unique binding matched the import's last segment to an EVENT_EMITTER node named after an ArrayList construction in the same file", "judge": "FD.3a"}
+{"id": "54d94e4447f0b88f", "verdict": "correct", "reason": "*simpleBufferPool's Put(interface{}) satisfies BufferPool.Put; the comment and TestWriteBufferPool pass &pool as a BufferPool", "judge": "FD.3a"}
+{"id": "7c1a90a7de405e5f", "verdict": "correct", "reason": "the get_inner property is annotated `-> Inner`, the class of the same file", "judge": "FD.3a"}
+{"id": "7eb2dd94f8493f72", "verdict": "correct", "reason": "interface Monitor extends Rectangular, the ambient global interface declared in src/mod.d.ts", "judge": "FD.3a"}
+{"id": "82ec7b21d7c09a89", "verdict": "correct", "reason": "the pytest function test_embed runs `assert main() == 0`, calling the file's main", "judge": "FD.3a"}
+{"id": "85e6f5482dde6b74", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin, plugins is `import * as plugins from 'launcher_plugins'`", "judge": "FD.3a"}
+{"id": "8738b31da5908414", "verdict": "correct", "reason": "simpleBufferPool's method set (Get, Put) satisfies interface BufferPool, as its doc comment and the newConn(.., &pool, ..) call state", "judge": "FD.3a"}
+{"id": "8e6da9793d6e7aa8", "verdict": "correct", "reason": "ScriptsBuiltin extends plugins.Builtin, plugins is `import * as plugins from 'launcher_plugins'`", "judge": "FD.3a"}
+{"id": "940c78587898469e", "verdict": "correct", "reason": "*simpleBufferPool's Get() interface{} satisfies BufferPool.Get", "judge": "FD.3a"}
+{"id": "95d02b2f6392c209", "verdict": "correct", "reason": "Forest extends Ecs.World, Ecs is `import * as Ecs from 'ecs'` whose World class is the target", "judge": "FD.3a"}
+{"id": "9854a2df9e2d943e", "verdict": "correct", "reason": "class Count with _$Count applies the mixin _$Count declared in its freezed part file, so Count is a subtype of _$Count", "judge": "FD.3a"}
+{"id": "a73bb0296e50ccf8", "verdict": "correct", "reason": "ShellBuiltin extends plugins.Builtin, plugins is `import * as plugins from 'launcher_plugins'`", "judge": "FD.3a"}
+{"id": "b1cf6e1c0a895a85", "verdict": "correct", "reason": "DoubleFlutterActivity : FragmentActivity(), EngineBindingsDelegate, the interface declared in EngineBindings.kt of the same package", "judge": "FD.3a"}
+{"id": "b556c07c6ee77de6", "verdict": "correct", "reason": "the freezed part file declares abstract class _Count implements Count, the models.dart class", "judge": "FD.3a"}
+{"id": "b87dda24a94d99aa", "verdict": "correct", "reason": "MainActivity : AppCompatActivity(), DataModelObserver, the interface in DataModel.kt of the same package", "judge": "FD.3a"}
+{"id": "c5d10753f5cbfadd", "verdict": "correct", "reason": "SingleFlutterActivity : FlutterActivity(), EngineBindingsDelegate, the interface in EngineBindings.kt of the same package", "judge": "FD.3a"}
+{"id": "d0b83cd08628d081", "verdict": "correct", "reason": "class Increment with _$Increment applies the mixin _$Increment declared in its freezed part file", "judge": "FD.3a"}
+{"id": "ffa92777eb5bdf90", "verdict": "correct", "reason": "class System<T> extends World, World declared in the same file", "judge": "FD.3a"}
