@@ -54,7 +54,7 @@ CONVENTION = ("\n[[convention]]\nid = \"api-pure\"\nscope = \"services/api\"\n"
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
         "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 25), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None),
+      ("max_tests", 25), ("max_impact", 25), ("models_min_tier", "fact"), ("ranking", None), ("cochange", True), ("title", None),
       ("full", False), ("offset", 0)]
 # DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
 MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
