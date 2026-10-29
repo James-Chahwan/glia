@@ -47,6 +47,13 @@ impl SiteFiles {
         SiteFiles(files)
     }
 
+    /// The file a node sits in, when its POSITION cell locates it. Read by
+    /// the Lua require resolution (the requirer's path drives the candidate
+    /// walk) and by `build_lua`'s call binding (L1, lua-support).
+    pub(crate) fn file_of(&self, id: NodeId) -> Option<&str> {
+        self.0.get(&id).map(String::as_str)
+    }
+
     /// DT.5k: true when `r` was read in a TypeScript / JavaScript file (its
     /// `from_module`'s, else its `from`'s, by extension: [`is_ts_family`]).
     pub(crate) fn is_ts_family(&self, r: &UnresolvedRef) -> bool {

@@ -624,6 +624,153 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
     Ok(g)
 }
 
+/// Build a per-repo Lua graph (L1, lua-support). Everything the Lua parser
+/// emitted is a ref: `IMPORTS` refs are the `require("spec")` sites
+/// ([`crate::imports::resolve_lua_requires`], the same-dir / lib-root walk),
+/// `CALLS` refs the call sites, bound here — file-locally only:
+///
+/// - a bare `f(..)` binds the in-file FUNCTION / METHOD of that name (the
+///   flat table-field model means a bare name is only ever a plain function;
+///   `function T.f()` never answers a bare `f`), rule `local_call`;
+/// - a qualified `T.f(..)` / `T:m(..)` binds when `T` is an in-file module
+///   table that minted `T.f`, rule `module_table`;
+/// - or when `T` is the alias of a same-file `local T = require("spec")`
+///   whose require bound — then the target MODULE's member named `f` binds,
+///   when exactly one does, rule `require_alias`.
+///
+/// Everything else stays bare (unresolved), never guessed: no cross-file
+/// binding by name, no metatable dispatch, no globals. Evidence emitter
+/// `graph:calls` at the call site's row.
+pub fn build_lua(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    families: &glia_code_domain::plugin_families::PluginFamilies,
+) -> Result<RepoGraph, GraphError> {
+    let (mut g, _all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let (imports_refs, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+        all_refs.into_iter().partition(|r| r.category == edge_category::IMPORTS);
+    let (lua_calls, other_refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+        rest.into_iter().partition(|r| r.category == edge_category::CALLS);
+    let files = SiteFiles::of(&g);
+    let (requires, alias_targets) =
+        crate::imports::resolve_lua_requires(&mut g, &imports_refs, &files, families);
+    if let Some(line) = requires.marker() {
+        eprintln!("{line}");
+    }
+    let calls = resolve_lua_calls(&mut g, &lua_calls, &alias_targets, &files);
+    if let Some(line) = calls.marker() {
+        eprintln!("{line}");
+    }
+    let mut tally = EvidenceTally::default();
+    // A language-blind extractor's call sites, if any ever land on a Lua
+    // file, take the generic treatment; the Lua parser emits none.
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &other_refs, &mut tally);
+    emit_method_level_implements(&mut g);
+    tally.report();
+    Ok(g)
+}
+
+/// What [`resolve_lua_calls`] did to one Lua graph.
+#[derive(Default)]
+struct LuaCallStats {
+    bound: usize,
+    local: usize,
+    module_table: usize,
+    require_alias: usize,
+    unbound: usize,
+}
+
+impl LuaCallStats {
+    /// fired_on, once per Lua graph with anything to show:
+    /// `[lua-calls] bound=<b> (local=<l> module_table=<m> require_alias=<a>) unbound=<u>`.
+    fn marker(&self) -> Option<String> {
+        (self.bound > 0 || self.unbound > 0).then(|| {
+            format!(
+                "[lua-calls] bound={} (local={} module_table={} require_alias={}) unbound={}",
+                self.bound, self.local, self.module_table, self.require_alias, self.unbound
+            )
+        })
+    }
+}
+
+/// The Lua call binding (see [`build_lua`]): file-local only, over the CALLS
+/// refs the parser emitted.
+fn resolve_lua_calls(
+    g: &mut RepoGraph,
+    refs: &[UnresolvedRef],
+    alias_targets: &HashMap<NodeId, HashMap<String, NodeId>>,
+    files: &SiteFiles,
+) -> LuaCallStats {
+    let mut stats = LuaCallStats::default();
+    for r in refs {
+        let resolved: Option<(NodeId, &'static str)> = match &r.qualifier {
+            CallQualifier::Bare(name) => g
+                .symbols
+                .module_symbols
+                .get(&r.from_module)
+                .and_then(|s| s.get(name).copied())
+                .map(|to| (to, "local_call")),
+            CallQualifier::Attribute { base, name } => {
+                let module_table = g
+                    .symbols
+                    .module_symbols
+                    .get(&r.from_module)
+                    .and_then(|s| s.get(&format!("{base}.{name}")).copied())
+                    .map(|to| (to, "module_table"));
+                module_table.or_else(|| {
+                    let target = alias_targets.get(&r.from_module).and_then(|m| m.get(base))?;
+                    let ids: HashSet<NodeId> = g
+                        .symbols
+                        .module_symbols
+                        .get(target)
+                        .map(|s| {
+                            s.iter()
+                                .filter(|(k, _)| member_name_of(k) == Some(name.as_str()))
+                                .map(|(_, v)| *v)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if ids.len() == 1 {
+                        ids.iter().next().map(|to| (*to, "require_alias"))
+                    } else {
+                        None
+                    }
+                })
+            }
+            CallQualifier::SelfMethod(_) | CallQualifier::SuperMethod(_)
+            | CallQualifier::ComplexReceiver { .. } => None,
+        };
+        match resolved {
+            Some((to, rule)) => {
+                stats.bound += 1;
+                match rule {
+                    "local_call" => stats.local += 1,
+                    "module_table" => stats.module_table += 1,
+                    _ => stats.require_alias += 1,
+                }
+                let ev = match files.file_of(r.from_module).or_else(|| files.file_of(r.from)) {
+                    Some(file) => graph_evidence("graph:calls", rule).at(file, r.line),
+                    None => graph_evidence("graph:calls", rule).line(r.line),
+                };
+                push_edge(g, r.from, to, edge_category::CALLS, ev);
+            }
+            None => {
+                stats.unbound += 1;
+                g.unresolved_refs.push(r.clone());
+            }
+        }
+    }
+    stats
+}
+
+/// The member name a module-symbol key ends with: `T.f` -> `f`. The dotted
+/// keys are table fields; the require-alias rule matches on the member.
+fn member_name_of(key: &str) -> Option<&str> {
+    key.rsplit('.').next()
+}
+
 /// Build a per-repo C/C++ graph. Every C/C++ file is its own MODULE, named by
 /// its file name (`src::Widget.h`, LB.10a); `resolve_source(from, spec)` maps
 /// a quoted `#include` to the included file's MODULE qname (the engine's
@@ -5337,10 +5484,27 @@ fn alias_heads(path: &str) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    /// The seed family row, as the build threads it (`lib_roots` exercises the
+    /// lib-path require walk in every Lua test that binds a require).
+    fn lua_families() -> glia_code_domain::plugin_families::PluginFamilies {
+        use glia_code_domain::plugin_families::{PluginFamily, RegistrationCall, Shape};
+        glia_code_domain::plugin_families::PluginFamilies::new(vec![PluginFamily {
+            name: "maki".to_string(),
+            manifest: "plugin.toml".to_string(),
+            calls: vec![RegistrationCall {
+                prefix: "maki.api.register_".to_string(),
+                shape: Shape::Table,
+                tools: vec!["tool".to_string(), "command".to_string()],
+                handler_name: String::new(),
+            }],
+            lib_roots: vec!["lib".to_string()],
+        }])
+    }
+
     use super::*;
     use crate::test_support::repo;
-    use glia_code_domain::{GRAPH_TYPE, ImportTarget, edge_category};
-    use glia_core::{Confidence, Node};
+    use glia_code_domain::{GRAPH_TYPE, ImportTarget, cell_type, edge_category, evidence};
+    use glia_core::{CellPayload, Confidence, Node};
 
     #[test]
     fn empty_repo_builds_cleanly() {
@@ -9624,5 +9788,339 @@ mod tests {
         assert_eq!(calls_from(&g2, "lib::caller::Shop.Caller::full"), want);
         assert_eq!(m1.counts(), (1, 1));
         assert_eq!(m2.counts(), (1, 1));
+    }
+    // ---- L1 (lua-support): build_lua - requires and file-local calls --------
+
+    /// A Lua FileParse hand-built: MODULE `module` at `file`, `defs` as
+    /// (kind, qname, nav name) children, `ref_specs` as (category, qualifier,
+    /// 0-based line) refs from the module, `facts` as RequireAlias facts.
+    fn lua_parse(
+        repo: RepoId,
+        module: &str,
+        file: &str,
+        defs: &[(NodeKindId, &str, &str)],
+        ref_specs: &[(EdgeCategoryId, CallQualifier, u32)],
+        facts: Vec<(&str, &str)>,
+    ) -> FileParse {
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module);
+        let mut nav = CodeNav::default();
+        nav.record(module_id, module.rsplit("::").next().unwrap_or(module), module, node_kind::MODULE, None);
+        let mut nodes = vec![Node {
+            id: module_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":9}}"#)),
+            }],
+        }];
+        let mut edges = Vec::new();
+        for (kind, qname, name) in defs {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, *kind, qname);
+            nav.record(id, name, qname, *kind, Some(module_id));
+            edges.push(Edge::new(module_id, id, edge_category::DEFINES, Confidence::Strong));
+            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells: vec![] });
+        }
+        for fact in facts {
+            nav.record_fact(
+                module_id,
+                NavFact::RequireAlias { alias: fact.0.to_string(), spec: fact.1.to_string() },
+            );
+        }
+        let refs = ref_specs
+            .iter()
+            .map(|(category, qualifier, line)| UnresolvedRef {
+                from: module_id,
+                from_module: module_id,
+                qualifier: qualifier.clone(),
+                category: *category,
+                line: *line,
+            })
+            .collect();
+        FileParse { nodes, edges, imports: vec![], calls: vec![], refs, nav, properties: HashSet::new() }
+    }
+
+    fn lua_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) -> Option<&'static str> {
+        g.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == category)
+            .and_then(|e| evidence::Evidence::read(&e.cells))
+            .and_then(|ev| ev.rule)
+            .map(|r| match r.as_str() {
+                "require_path" => "require_path",
+                "local_call" => "local_call",
+                "module_table" => "module_table",
+                "require_alias" => "require_alias",
+                _ => "other",
+            })
+    }
+
+    #[test]
+    fn build_lua_binds_requires_same_dir_and_lib() {
+        let r = repo();
+        let init = lua_parse(
+            r,
+            "plugins::question::init",
+            "plugins/question/init.lua",
+            &[],
+            &[
+                (edge_category::IMPORTS, CallQualifier::Bare("helper".into()), 0),
+                (edge_category::IMPORTS, CallQualifier::Bare("maki.tool_view".into()), 1),
+            ],
+            vec![],
+        );
+        let helper = lua_parse(
+            r,
+            "plugins::question::helper",
+            "plugins/question/helper.lua",
+            &[(node_kind::FUNCTION, "plugins::question::helper::greet", "greet")],
+            &[],
+            vec![],
+        );
+        let tool_view = lua_parse(
+            r,
+            "plugins::lib::maki::tool_view",
+            "plugins/lib/maki/tool_view.lua",
+            &[(node_kind::FUNCTION, "plugins::lib::maki::tool_view::ToolView.render", "ToolView.render")],
+            &[],
+            vec![],
+        );
+        let g = build_lua(r, vec![init, helper, tool_view], &lua_families()).unwrap();
+        let init_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::question::init");
+        let helper_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::question::helper");
+        let tv_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::lib::maki::tool_view");
+        // same-dir first, then the lib-root walk (requirer dir, `plugins`, root).
+        assert_eq!(lua_edge(&g, init_id, helper_id, edge_category::IMPORTS), Some("require_path"));
+        assert_eq!(lua_edge(&g, init_id, tv_id, edge_category::IMPORTS), Some("require_path"));
+        // The require site's own row is the evidence line (site basis).
+        let ev = g
+            .edges
+            .iter()
+            .find(|e| e.from == init_id && e.to == tv_id)
+            .and_then(|e| evidence::Evidence::read(&e.cells))
+            .unwrap();
+        assert_eq!(ev.file.as_deref(), Some("plugins/question/init.lua"));
+        assert_eq!(ev.line, Some(1));
+    }
+
+    #[test]
+    fn build_lua_require_walks_ancestors_to_the_root() {
+        // `require("maki.tool_view")` from `plugins/question/question_form.lua`
+        // binds `plugins/lib/maki/tool_view.lua` (ancestor `plugins`, root `lib`).
+        let r = repo();
+        let requirer = lua_parse(
+            r,
+            "plugins::question::question_form",
+            "plugins/question/question_form.lua",
+            &[],
+            &[(edge_category::IMPORTS, CallQualifier::Bare("maki.tool_view".into()), 3)],
+            vec![],
+        );
+        let target = lua_parse(
+            r,
+            "plugins::lib::maki::tool_view",
+            "plugins/lib/maki/tool_view.lua",
+            &[],
+            &[],
+            vec![],
+        );
+        let g = build_lua(r, vec![requirer, target], &lua_families()).unwrap();
+        let from = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::question::question_form");
+        let to = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::lib::maki::tool_view");
+        assert_eq!(lua_edge(&g, from, to, edge_category::IMPORTS), Some("require_path"));
+    }
+
+    #[test]
+    fn build_lua_leaves_an_unbound_require_bare() {
+        let r = repo();
+        let p = lua_parse(
+            r,
+            "x",
+            "x.lua",
+            &[],
+            &[(edge_category::IMPORTS, CallQualifier::Bare("nope".into()), 0)],
+            vec![],
+        );
+        let g = build_lua(r, vec![p], &lua_families()).unwrap();
+        assert!(
+            g.unresolved_refs
+                .iter()
+                .any(|u| u.category == edge_category::IMPORTS && matches!(&u.qualifier, CallQualifier::Bare(s) if s == "nope")),
+            "an unresolvable require stays bare"
+        );
+        assert!(g.edges.iter().all(|e| e.category != edge_category::IMPORTS));
+    }
+
+    #[test]
+    fn build_lua_require_skips_a_same_qname_non_lua_module() {
+        // `x::helper` exists but is a `.py` file: no .lua candidate answers,
+        // the ref stays bare and the skip counts ambiguous (the marker).
+        let r = repo();
+        let requirer = lua_parse(
+            r,
+            "x::init",
+            "x/init.lua",
+            &[],
+            &[(edge_category::IMPORTS, CallQualifier::Bare("helper".into()), 0)],
+            vec![],
+        );
+        let py = lua_parse(r, "x::helper", "x/helper.py", &[], &[], vec![]);
+        let g = build_lua(r, vec![requirer, py], &lua_families()).unwrap();
+        let from = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "x::init");
+        assert!(
+            g.unresolved_refs
+                .iter()
+                .any(|u| u.category == edge_category::IMPORTS),
+            "a non-.lua candidate is skipped, never guessed"
+        );
+        assert!(
+            !g.edges
+                .iter()
+                .any(|e| e.from == from && e.category == edge_category::IMPORTS)
+        );
+    }
+
+    #[test]
+    fn build_lua_binds_calls_file_locally() {
+        let r = repo();
+        let init = lua_parse(
+            r,
+            "plugins::question::init",
+            "plugins/question/init.lua",
+            &[
+                (node_kind::FUNCTION, "plugins::question::init::greet", "greet"),
+                (node_kind::FUNCTION, "plugins::question::init::T.f", "T.f"),
+                (node_kind::METHOD, "plugins::question::init::T.m", "T.m"),
+            ],
+            &[
+                (edge_category::CALLS, CallQualifier::Bare("greet".into()), 0),
+                (edge_category::CALLS, CallQualifier::Bare("f".into()), 1),
+                (edge_category::CALLS, CallQualifier::Attribute { base: "T".into(), name: "f".into() }, 2),
+                (edge_category::CALLS, CallQualifier::Attribute { base: "T".into(), name: "m".into() }, 3),
+                (edge_category::CALLS, CallQualifier::Attribute { base: "nope".into(), name: "f".into() }, 4),
+            ],
+            vec![],
+        );
+        let g = build_lua(r, vec![init], &lua_families()).unwrap();
+        let init_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::question::init");
+        let greet = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "plugins::question::init::greet");
+        let tf = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "plugins::question::init::T.f");
+        let tm = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "plugins::question::init::T.m");
+        // Bare `greet` binds the plain function; bare `f` does NOT answer the
+        // table field `T.f` (a bare name is a global in Lua, never the field).
+        assert_eq!(lua_edge(&g, init_id, greet, edge_category::CALLS), Some("local_call"));
+        assert_eq!(lua_edge(&g, init_id, tf, edge_category::CALLS), Some("module_table"));
+        assert_eq!(lua_edge(&g, init_id, tm, edge_category::CALLS), Some("module_table"));
+        assert_eq!(
+            g.unresolved_refs
+                .iter()
+                .filter(|u| u.category == edge_category::CALLS)
+                .count(),
+            2,
+            "bare `f` and the unknown `nope.f` stay bare"
+        );
+    }
+
+    #[test]
+    fn build_lua_require_alias_binds_the_target_module_member() {
+        let r = repo();
+        let init = lua_parse(
+            r,
+            "plugins::mytool::init",
+            "plugins/mytool/init.lua",
+            &[],
+            &[
+                (edge_category::IMPORTS, CallQualifier::Bare("helper".into()), 0),
+                (edge_category::CALLS, CallQualifier::Attribute { base: "helper".into(), name: "greet".into() }, 2),
+            ],
+            vec![("helper", "helper")],
+        );
+        let helper = lua_parse(
+            r,
+            "plugins::mytool::helper",
+            "plugins/mytool/helper.lua",
+            &[(node_kind::FUNCTION, "plugins::mytool::helper::greet", "greet")],
+            &[],
+            vec![],
+        );
+        let g = build_lua(r, vec![init, helper], &lua_families()).unwrap();
+        let init_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::mytool::init");
+        let greet = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "plugins::mytool::helper::greet");
+        assert_eq!(lua_edge(&g, init_id, greet, edge_category::CALLS), Some("require_alias"));
+    }
+
+    #[test]
+    fn build_lua_require_alias_with_two_members_binds_none() {
+        // Two tables of the target module both define `f`: never guessed.
+        let r = repo();
+        let init = lua_parse(
+            r,
+            "x",
+            "x.lua",
+            &[],
+            &[
+                (edge_category::IMPORTS, CallQualifier::Bare("m".into()), 0),
+                (edge_category::CALLS, CallQualifier::Attribute { base: "m".into(), name: "f".into() }, 1),
+            ],
+            vec![("m", "m")],
+        );
+        let target = lua_parse(
+            r,
+            "m",
+            "m.lua",
+            &[
+                (node_kind::FUNCTION, "m::A.f", "A.f"),
+                (node_kind::FUNCTION, "m::B.f", "B.f"),
+            ],
+            &[],
+            vec![],
+        );
+        let g = build_lua(r, vec![init, target], &lua_families()).unwrap();
+        assert_eq!(
+            g.unresolved_refs.iter().filter(|u| u.category == edge_category::CALLS).count(),
+            1,
+            "two candidate members leave the call bare"
+        );
+        assert!(g.edges.iter().all(|e| e.category != edge_category::CALLS));
+    }
+
+    #[test]
+    fn build_lua_registration_is_reachable_through_defines_and_handled_by() {
+        // A hand-built registration: PLUGIN_TOOL + two handlers, the parser's
+        // edges. build_lua keeps them; nothing binds (no calls were emitted).
+        let r = repo();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "plugins::mytool::init");
+        let tool = NodeId::from_parts(GRAPH_TYPE, r, node_kind::PLUGIN_TOOL, "plugin_tool:greet @maki/mytool");
+        let exec = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "plugins::mytool::init::greet.execute");
+        let restore = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "plugins::mytool::init::greet.restore");
+        let mut nav = CodeNav::default();
+        nav.record(module_id, "init", "plugins::mytool::init", node_kind::MODULE, None);
+        nav.record(tool, "greet", "plugin_tool:greet @maki/mytool", node_kind::PLUGIN_TOOL, None);
+        nav.record(exec, "greet.execute", "plugins::mytool::init::greet.execute", node_kind::FUNCTION, Some(module_id));
+        nav.record(restore, "greet.restore", "plugins::mytool::init::greet.restore", node_kind::FUNCTION, Some(module_id));
+        let p = FileParse {
+            nodes: vec![Node { id: module_id, repo: r, confidence: Confidence::Strong, cells: vec![] }],
+            edges: vec![
+                Edge::new(module_id, tool, edge_category::DEFINES, Confidence::Strong),
+                Edge::new(module_id, exec, edge_category::DEFINES, Confidence::Strong),
+                Edge::new(tool, exec, edge_category::HANDLED_BY, Confidence::Strong),
+                Edge::new(tool, restore, edge_category::HANDLED_BY, Confidence::Strong),
+            ],
+            imports: vec![],
+            calls: vec![],
+            refs: vec![],
+            nav,
+            properties: HashSet::new(),
+        };
+        let g = build_lua(r, vec![p], &lua_families()).unwrap();
+        assert_eq!(
+            g.edges.iter().filter(|e| e.category == edge_category::HANDLED_BY).count(),
+            2
+        );
+        assert_eq!(
+            g.edges.iter().filter(|e| e.category == edge_category::CALLS).count(),
+            0,
+            "no calls were emitted; nothing binds"
+        );
     }
 }

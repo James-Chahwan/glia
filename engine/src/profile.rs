@@ -52,7 +52,7 @@ use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver,
     GrpcStackResolver, HttpStackResolver, IacResolver, IdentityResolver, MergedGraph,
-    ModelResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
+    ModelResolver, PluginResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
     WebSocketStackResolver,
 };
 
@@ -179,6 +179,10 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("cron", CronResolver),
     resolver!("config", ConfigResolver),
     resolver!("iac", IacResolver),
+    // L3 (lua-support): the plugin-host bridge. Reads nodes only (PLUGIN,
+    // PLUGIN_TOOL, the scan kinds' CODE cells), so its place among the
+    // resolvers is free; it sits with the rest of the `resolver!` rows.
+    resolver!("plugin", PluginResolver),
     // DT.1h: http_model SAME_AS stars, client model -> server model. It reads
     // the HTTP_CALLS edges the `http` pass drew (EVIDENCE `resolver:http`)
     // and the persisted ENDPOINT_HIT / MESSAGE_TYPE / SCHEMA_FIELDS cells, so
@@ -375,7 +379,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 28] = [
+    const HEAD_ORDER: [&str; 29] = [
         "http",
         "grpc",
         "rpc",
@@ -391,6 +395,7 @@ mod tests {
         "cron",
         "config",
         "iac",
+        "plugin",
         "models",
         "identity",
         "external_edges",
@@ -425,7 +430,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (17, 9, 2)
+            (18, 9, 2) // L3 (lua-support): the plugin resolver is the 18th Resolve pass
         );
     }
 
@@ -443,7 +448,7 @@ mod tests {
 
         let t = &CODE_PROFILE.tables;
         // The carry list `graph::blast` hardcoded before LD.14b, in order.
-        const HEAD_CARRY: [EdgeCategoryId; 26] = [
+        const HEAD_CARRY: [EdgeCategoryId; 27] = [
             ec::CALLS,
             ec::USES,
             ec::HTTP_CALLS,
@@ -470,6 +475,8 @@ mod tests {
             ec::SCHEDULES,
             ec::READS_CONFIG,
             ec::DEFINES_CONFIG,
+            // L3 (lua-support): host -> plugin, the loader reaches what it loads.
+            ec::LOADS,
         ];
         assert_eq!(t.carry_edges, HEAD_CARRY);
 
@@ -577,7 +584,7 @@ mod tests {
         // literally, plus the five inbound handler kinds LD.6 reconciled in
         // (GRPC_SERVER, RPC_PROCEDURE, QUEUE_CONSUMER, GRAPHQL_RESOLVER,
         // CRON_JOB), in table order.
-        const ENTRY_KINDS: [NodeKindId; 11] = [
+        const ENTRY_KINDS: [NodeKindId; 12] = [
             nk::ROUTE,
             nk::GRPC_SERVICE,
             nk::GRPC_SERVER,
@@ -589,6 +596,8 @@ mod tests {
             nk::CLI_COMMAND,
             nk::CRON_JOB,
             nk::COMPONENT,
+            // L3 (lua-support): a registration the host invokes at load time.
+            nk::PLUGIN_TOOL,
         ];
         assert_eq!(t.entry.kinds, ENTRY_KINDS, "entry kinds, in table order");
         let head_entry = |kind: Option<NodeKindId>, name: &str, roles: &[NodeKindId]| {
@@ -618,9 +627,10 @@ mod tests {
                 }
             }
         }
-        // 11 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
-        // `main` / `test*` / `Test*` match.
-        assert_eq!(entries_without_roles, 11 * 8 + 2 * 5);
+        // 12 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
+        // `main` / `test*` / `Test*` match. L3 (lua-support): the 12th kind
+        // is PLUGIN_TOOL.
+        assert_eq!(entries_without_roles, 12 * 8 + 2 * 5);
         // DT.5l: a Go `func init()` is an entry through the file's extension
         // only; the extension-blind pin above never sees it, a TS / Python
         // `init` and a Go METHOD `init` are no entries.

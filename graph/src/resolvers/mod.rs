@@ -29,6 +29,8 @@ mod cron;
 mod config;
 mod iac;
 mod cli;
+// L3 (lua-support): the plugin-host bridge.
+mod plugin;
 // 0.5.2 (D0.5): SAME_AS identity stars (DD.5-DD.7).
 mod identity;
 // DT.1g: the models pass's inputs (client wires: both sides of every paired
@@ -53,6 +55,7 @@ pub use cron::CronResolver;
 pub use config::ConfigResolver;
 pub use iac::IacResolver;
 pub use cli::CliInvocationResolver;
+pub use plugin::PluginResolver;
 pub use identity::IdentityResolver;
 pub use models::{
     ClientWire, ClientWireStats, ClientWires, ResolvedField, ResolvedShape, RouteHandler, RouteSide,
