@@ -144,6 +144,11 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             nk::CLI_COMMAND,
             nk::CRON_JOB,
             nk::COMPONENT,
+            // L3 (lua-support): a registration is an entry the host invokes at
+            // load time, so liveness seeds it and `dead_symbol` can call an
+            // unregistered tool dead. PLUGIN is NOT an entry: the loader
+            // invokes tools, not manifests.
+            nk::PLUGIN_TOOL,
         ],
         roles: &[nk::COMPONENT],
         named: &[
@@ -153,7 +158,12 @@ pub const CODE_TABLES: DomainTables = DomainTables {
                 prefixes: &["test", "Test"],
                 exts: &[],
             },
-            NamedEntry { kinds: &[nk::FUNCTION], exact: &["init"], prefixes: &[], exts: &["go"] },
+            NamedEntry {
+                kinds: &[nk::FUNCTION],
+                exact: &["init"],
+                prefixes: &[],
+                exts: &["go"],
+            },
         ],
     },
     // The semantic edges blast radius and liveness follow. Structural
@@ -189,6 +199,11 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         ec::SCHEDULES,
         ec::READS_CONFIG,
         ec::DEFINES_CONFIG,
+        // L3 (lua-support): a change to the loader reaches the plugins it
+        // loads - host → plugin, the blast-radius direction that matters
+        // (lua-support ruling 2). No activation weight row: it weighs the
+        // default, like every table row the domain has not tuned.
+        ec::LOADS,
     ],
     // LE.4d: what a function does to the outside world, as (target kind,
     // reaching category). A category alone misfires: USES also links a
@@ -198,20 +213,50 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     effect_sinks: &[
         EffectSink {
             class: "db",
-            kinds: &[nk::DATA_ENTITY, nk::DATABASE, nk::CACHE, nk::BLOB_STORE, nk::SEARCH_INDEX],
+            kinds: &[
+                nk::DATA_ENTITY,
+                nk::DATABASE,
+                nk::CACHE,
+                nk::BLOB_STORE,
+                nk::SEARCH_INDEX,
+            ],
             via: &[ec::ACCESSES_DATA],
         },
-        EffectSink { class: "email", kinds: &[nk::EMAIL_SERVICE], via: &[ec::ACCESSES_DATA] },
-        EffectSink { class: "queue_produce", kinds: &[nk::QUEUE_PRODUCER], via: &[ec::USES] },
-        EffectSink { class: "http_call", kinds: &[nk::ENDPOINT], via: &[ec::CALLS, ec::USES] },
-        EffectSink { class: "event_emit", kinds: &[nk::EVENT_EMITTER], via: &[ec::USES] },
+        EffectSink {
+            class: "email",
+            kinds: &[nk::EMAIL_SERVICE],
+            via: &[ec::ACCESSES_DATA],
+        },
+        EffectSink {
+            class: "queue_produce",
+            kinds: &[nk::QUEUE_PRODUCER],
+            via: &[ec::USES],
+        },
+        EffectSink {
+            class: "http_call",
+            kinds: &[nk::ENDPOINT],
+            via: &[ec::CALLS, ec::USES],
+        },
+        EffectSink {
+            class: "event_emit",
+            kinds: &[nk::EVENT_EMITTER],
+            via: &[ec::USES],
+        },
         EffectSink {
             class: "rpc_call",
             kinds: &[nk::GRPC_CLIENT, nk::RPC_CALL],
             via: &[ec::USES, ec::CALLS],
         },
-        EffectSink { class: "ws_send", kinds: &[nk::WS_CLIENT], via: &[ec::USES] },
-        EffectSink { class: "graphql_op", kinds: &[nk::GRAPHQL_OPERATION], via: &[ec::USES] },
+        EffectSink {
+            class: "ws_send",
+            kinds: &[nk::WS_CLIENT],
+            via: &[ec::USES],
+        },
+        EffectSink {
+            class: "graphql_op",
+            kinds: &[nk::GRAPHQL_OPERATION],
+            via: &[ec::USES],
+        },
     ],
     // `calls` and cross-stack calls highest, flows and handlers next, imports
     // medium, structural edges (`contains`, `defines`) lowest; any category
@@ -492,7 +537,15 @@ impl InvokedMembers {
         member_name: &str,
         ext: &str,
     ) -> bool {
-        self.matches_at(owner_roles, owner_name, member_name, ext, &|| None, &|_| None, &|_| false)
+        self.matches_at(
+            owner_roles,
+            owner_name,
+            member_name,
+            ext,
+            &|| None,
+            &|_| None,
+            &|_| false,
+        )
     }
 
     /// DT.5l: [`Self::matches`] with the three readers the new gates need:
@@ -552,7 +605,9 @@ impl InvokedMembers {
         if !self.sigs.is_empty() && !sig().is_some_and(|s| self.sigs.contains(&s.as_str())) {
             return false;
         }
-        self.siblings.iter().all(|(n, want)| sibling_sig(n).is_some_and(|s| s == *want))
+        self.siblings
+            .iter()
+            .all(|(n, want)| sibling_sig(n).is_some_and(|s| s == *want))
     }
 
     /// The name half of [`Self::matches`], cheap enough to test before the
@@ -696,7 +751,13 @@ const CTOR_LIKE_OWNER: &[&str] = &[
 pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
     row(
         "angular",
-        &[nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD],
+        &[
+            nk::COMPONENT,
+            nk::DIRECTIVE,
+            nk::PIPE,
+            nk::SERVICE,
+            nk::GUARD,
+        ],
         TS_ONLY,
         &[
             "ngOnInit",
@@ -730,7 +791,13 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
         "angular",
         &[nk::SERVICE, nk::GUARD],
         TS_ONLY,
-        &["canActivate", "canActivateChild", "canDeactivate", "canMatch", "canLoad"],
+        &[
+            "canActivate",
+            "canActivateChild",
+            "canDeactivate",
+            "canMatch",
+            "canLoad",
+        ],
         false,
     ),
     row("constructor", &[], JS_FAMILY, &["constructor"], false),
@@ -758,15 +825,39 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
         false,
     ),
     go(&["Error", "String"], &[SIG_STRING], &[]),
-    go(&["Unwrap"], &["()(error)", "()([]error)"], &[("Error", SIG_STRING)]),
-    go(&["MarshalJSON", "MarshalText", "MarshalBSON"], &["()([]byte,error)"], &[]),
-    go(&["UnmarshalJSON", "UnmarshalText", "UnmarshalBSON"], &["([]byte)(error)"], &[]),
+    go(
+        &["Unwrap"],
+        &["()(error)", "()([]error)"],
+        &[("Error", SIG_STRING)],
+    ),
+    go(
+        &["MarshalJSON", "MarshalText", "MarshalBSON"],
+        &["()([]byte,error)"],
+        &[],
+    ),
+    go(
+        &["UnmarshalJSON", "UnmarshalText", "UnmarshalBSON"],
+        &["([]byte)(error)"],
+        &[],
+    ),
     go(&["Scan"], &["(any)(error)"], &[]),
     go(&["Value"], &["()(Value,error)"], &[]),
     go(&["ServeHTTP"], &["(ResponseWriter,*Request)()"], &[]),
-    go(&["Len"], &[SIG_LEN], &[("Less", SIG_LESS), ("Swap", SIG_SWAP)]),
-    go(&["Less"], &[SIG_LESS], &[("Len", SIG_LEN), ("Swap", SIG_SWAP)]),
-    go(&["Swap"], &[SIG_SWAP], &[("Len", SIG_LEN), ("Less", SIG_LESS)]),
+    go(
+        &["Len"],
+        &[SIG_LEN],
+        &[("Less", SIG_LESS), ("Swap", SIG_SWAP)],
+    ),
+    go(
+        &["Less"],
+        &[SIG_LESS],
+        &[("Len", SIG_LEN), ("Swap", SIG_SWAP)],
+    ),
+    go(
+        &["Swap"],
+        &[SIG_SWAP],
+        &[("Len", SIG_LEN), ("Less", SIG_LESS)],
+    ),
     row(
         "apple_app",
         &[nk::COMPONENT],
@@ -789,19 +880,54 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
         ],
         false,
     ),
-    based("transloco", TS_ONLY, &transloco("TranslocoLoader"), &["getTranslation"]),
-    based("transloco", TS_ONLY, &transloco("TranslocoMissingHandler"), &["handle"]),
+    based(
+        "transloco",
+        TS_ONLY,
+        &transloco("TranslocoLoader"),
+        &["getTranslation"],
+    ),
+    based(
+        "transloco",
+        TS_ONLY,
+        &transloco("TranslocoMissingHandler"),
+        &["handle"],
+    ),
     based(
         "transloco",
         TS_ONLY,
         &transloco("TranslocoInterceptor"),
         &["preSaveTranslation", "preSaveTranslationKey"],
     ),
-    based("transloco", TS_ONLY, &transloco("TranslocoTranspiler"), &["transpile"]),
-    based("transloco", TS_ONLY, &transloco("TranslocoFallbackStrategy"), &["getNextLangs"]),
-    based("angular", TS_ONLY, &[base("@angular/core", "ErrorHandler")], &["handleError"]),
-    based("angular", TS_ONLY, &[base("@angular/router", "Resolve")], &["resolve"]),
-    based("angular", TS_ONLY, &[base("@angular/router", "TitleStrategy")], &["updateTitle"]),
+    based(
+        "transloco",
+        TS_ONLY,
+        &transloco("TranslocoTranspiler"),
+        &["transpile"],
+    ),
+    based(
+        "transloco",
+        TS_ONLY,
+        &transloco("TranslocoFallbackStrategy"),
+        &["getNextLangs"],
+    ),
+    based(
+        "angular",
+        TS_ONLY,
+        &[base("@angular/core", "ErrorHandler")],
+        &["handleError"],
+    ),
+    based(
+        "angular",
+        TS_ONLY,
+        &[base("@angular/router", "Resolve")],
+        &["resolve"],
+    ),
+    based(
+        "angular",
+        TS_ONLY,
+        &[base("@angular/router", "TitleStrategy")],
+        &["updateTitle"],
+    ),
     based(
         "angular",
         TS_ONLY,
@@ -809,12 +935,22 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
             base("@angular/router", "RouteReuseStrategy"),
             base("@angular/router", "BaseRouteReuseStrategy"),
         ],
-        &["shouldDetach", "store", "shouldAttach", "retrieve", "shouldReuseRoute"],
+        &[
+            "shouldDetach",
+            "store",
+            "shouldAttach",
+            "retrieve",
+            "shouldReuseRoute",
+        ],
     ),
     based(
         "dio",
         &["dart"],
-        &[base("dio", "Interceptor"), base("dio", "QueuedInterceptor"), base("dio", "InterceptorsWrapper")],
+        &[
+            base("dio", "Interceptor"),
+            base("dio", "QueuedInterceptor"),
+            base("dio", "InterceptorsWrapper"),
+        ],
         &["onRequest", "onResponse", "onError"],
     ),
 ];
@@ -822,7 +958,10 @@ pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
 /// Transloco's base `name`, from either of its package names (`@jsverse`
 /// since v7, `@ngneat` before).
 const fn transloco(name: &'static str) -> [ExternalBase; 2] {
-    [base("@jsverse/transloco", name), base("@ngneat/transloco", name)]
+    [
+        base("@jsverse/transloco", name),
+        base("@ngneat/transloco", name),
+    ]
 }
 
 /// DT.5d: the framework tag (`angular`, `constructor`, `flutter`, ...) of the
@@ -860,7 +999,15 @@ pub fn invoked_member_at(
     INVOKED_MEMBERS
         .iter()
         .find(|r| {
-            r.matches_at(owner_roles, owner_name, member_name, ext, &once, sibling_sig, has_base)
+            r.matches_at(
+                owner_roles,
+                owner_name,
+                member_name,
+                ext,
+                &once,
+                sibling_sig,
+                has_base,
+            )
         })
         .map(|r| r.framework)
 }
@@ -872,7 +1019,10 @@ pub fn invoked_member_at(
 /// matcher use.
 pub fn node_ext(cells: &[Cell]) -> Option<String> {
     let (file, _) = crate::evidence::locate(cells)?;
-    std::path::Path::new(&file).extension().and_then(|e| e.to_str()).map(str::to_string)
+    std::path::Path::new(&file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -888,39 +1038,94 @@ mod tests {
         let none: &[NodeKindId] = &[];
         let m = invoked_member;
         // (a) lifecycle hooks, on every Angular role.
-        for role in [nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD] {
+        for role in [
+            nk::COMPONENT,
+            nk::DIRECTIVE,
+            nk::PIPE,
+            nk::SERVICE,
+            nk::GUARD,
+        ] {
             for hook in INVOKED_MEMBERS[0].names {
                 assert_eq!(m(&[role], "Owner", hook, "ts"), Some("angular"), "{hook}");
             }
         }
-        assert_eq!(m(comp, "Page", "ngOnDestroyLater", "ts"), None, "a hook look-alike");
+        assert_eq!(
+            m(comp, "Page", "ngOnDestroyLater", "ts"),
+            None,
+            "a hook look-alike"
+        );
         assert_eq!(m(none, "Plain", "ngOnInit", "ts"), None, "no Angular role");
-        assert_eq!(m(comp, "Page", "ngOnInit", "js"), None, "Angular is TypeScript");
+        assert_eq!(
+            m(comp, "Page", "ngOnInit", "js"),
+            None,
+            "Angular is TypeScript"
+        );
         // (b) ControlValueAccessor / Validator members.
         for member in INVOKED_MEMBERS[1].names {
-            assert_eq!(m(comp, "AmountInput", member, "ts"), Some("angular"), "{member}");
-            assert_eq!(m(&[nk::DIRECTIVE], "D", member, "ts"), Some("angular"), "{member}");
+            assert_eq!(
+                m(comp, "AmountInput", member, "ts"),
+                Some("angular"),
+                "{member}"
+            );
+            assert_eq!(
+                m(&[nk::DIRECTIVE], "D", member, "ts"),
+                Some("angular"),
+                "{member}"
+            );
             assert_eq!(m(svc, "S", member, "ts"), None, "{member} on a SERVICE");
         }
         // (c) PipeTransform.
-        assert_eq!(m(&[nk::PIPE], "MoneyPipe", "transform", "ts"), Some("angular"));
-        assert_eq!(m(svc, "Mapper", "transform", "ts"), None, "transform on a SERVICE");
+        assert_eq!(
+            m(&[nk::PIPE], "MoneyPipe", "transform", "ts"),
+            Some("angular")
+        );
+        assert_eq!(
+            m(svc, "Mapper", "transform", "ts"),
+            None,
+            "transform on a SERVICE"
+        );
         assert_eq!(m(comp, "Page", "transform", "ts"), None);
         // (d) HttpInterceptor (and NestJS interceptors).
-        assert_eq!(m(svc, "AuthInterceptor", "intercept", "ts"), Some("angular"));
+        assert_eq!(
+            m(svc, "AuthInterceptor", "intercept", "ts"),
+            Some("angular")
+        );
         assert_eq!(m(comp, "Page", "intercept", "ts"), None);
         // (e) route guards.
         for member in INVOKED_MEMBERS[4].names {
-            assert_eq!(m(&[nk::GUARD], "AuthGuard", member, "ts"), Some("angular"), "{member}");
-            assert_eq!(m(svc, "AuthGuard", member, "ts"), Some("angular"), "{member}");
-            assert_eq!(m(&[nk::PIPE], "P", member, "ts"), None, "{member} on a PIPE");
+            assert_eq!(
+                m(&[nk::GUARD], "AuthGuard", member, "ts"),
+                Some("angular"),
+                "{member}"
+            );
+            assert_eq!(
+                m(svc, "AuthGuard", member, "ts"),
+                Some("angular"),
+                "{member}"
+            );
+            assert_eq!(
+                m(&[nk::PIPE], "P", member, "ts"),
+                None,
+                "{member} on a PIPE"
+            );
         }
         // (f)-(j) constructors by name, any owner, gated by extension.
         for ext in JS_FAMILY {
-            assert_eq!(m(none, "Repo", "constructor", ext), Some("constructor"), "{ext}");
+            assert_eq!(
+                m(none, "Repo", "constructor", ext),
+                Some("constructor"),
+                "{ext}"
+            );
         }
-        assert_eq!(m(svc, "OrderService", "constructor", "ts"), Some("constructor"));
-        assert_eq!(m(none, "Repo", "constructor", "go"), None, "a `constructor` in a .go file");
+        assert_eq!(
+            m(svc, "OrderService", "constructor", "ts"),
+            Some("constructor")
+        );
+        assert_eq!(
+            m(none, "Repo", "constructor", "go"),
+            None,
+            "a `constructor` in a .go file"
+        );
         assert_eq!(m(none, "Repo", "constructor", "py"), None);
         for (ext, name) in [
             ("py", "__init__"),
@@ -929,19 +1134,35 @@ mod tests {
             ("php", "__construct"),
             ("swift", "init"),
         ] {
-            assert_eq!(m(none, "Worker", name, ext), Some("constructor"), "{ext} {name}");
+            assert_eq!(
+                m(none, "Worker", name, ext),
+                Some("constructor"),
+                "{ext} {name}"
+            );
         }
         assert_eq!(m(none, "Worker", "__init__", "rb"), None);
         assert_eq!(m(none, "Worker", "initialize", "py"), None);
         assert_eq!(m(none, "Worker", "init", "ts"), None);
         // (k) the METHOD named like its owner.
         for ext in CTOR_LIKE_OWNER {
-            assert_eq!(m(none, "Friend", "Friend", ext), Some("constructor"), "{ext}");
+            assert_eq!(
+                m(none, "Friend", "Friend", ext),
+                Some("constructor"),
+                "{ext}"
+            );
             assert_eq!(m(none, "Friend", "fromJson", ext), None, "{ext}: a factory");
         }
-        assert_eq!(m(none, "Friend", "Friend", "ts"), None, "TS names its constructor");
+        assert_eq!(
+            m(none, "Friend", "Friend", "ts"),
+            None,
+            "TS names its constructor"
+        );
         assert_eq!(m(none, "Friend", "Friend", "py"), None);
-        assert_eq!(m(none, "", "", "dart"), None, "an empty name matches nothing");
+        assert_eq!(
+            m(none, "", "", "dart"),
+            None,
+            "an empty name matches nothing"
+        );
         // The extension compares ignoring ASCII case; the name exactly.
         assert_eq!(m(none, "Repo", "constructor", "TS"), Some("constructor"));
         assert_eq!(m(none, "Repo", "Constructor", "ts"), None);
@@ -949,13 +1170,33 @@ mod tests {
         assert_eq!(m(comp, "Page", "constructor", "ts"), Some("constructor"));
         // (l) DT.5e: Flutter's lifecycle, on a Dart COMPONENT only.
         for member in INVOKED_MEMBERS[11].names {
-            assert_eq!(m(comp, "CardPage", member, "dart"), Some("flutter"), "{member}");
-            assert_eq!(m(none, "CartModel", member, "dart"), None, "{member} on a plain class");
-            assert_eq!(m(svc, "Repo", member, "dart"), None, "{member} on a SERVICE");
-            assert_eq!(m(comp, "Page", member, "ts"), None, "{member} in a .ts file");
+            assert_eq!(
+                m(comp, "CardPage", member, "dart"),
+                Some("flutter"),
+                "{member}"
+            );
+            assert_eq!(
+                m(none, "CartModel", member, "dart"),
+                None,
+                "{member} on a plain class"
+            );
+            assert_eq!(
+                m(svc, "Repo", member, "dart"),
+                None,
+                "{member} on a SERVICE"
+            );
+            assert_eq!(
+                m(comp, "Page", member, "ts"),
+                None,
+                "{member} in a .ts file"
+            );
         }
         assert_eq!(m(comp, "CardPage", "onTap", "dart"), None, "a plain member");
-        assert_eq!(m(comp, "CardPage", "Build", "dart"), None, "the name compares exactly");
+        assert_eq!(
+            m(comp, "CardPage", "Build", "dart"),
+            None,
+            "the name compares exactly"
+        );
         // A widget's constructor is still the constructor row's.
         assert_eq!(m(comp, "CardPage", "CardPage", "dart"), Some("constructor"));
     }
@@ -1007,7 +1248,10 @@ mod tests {
                 }
                 "constructor" => {
                     assert!(r.owner_roles.is_empty());
-                    assert!(r.names.is_empty() == r.named_like_owner, "names or named_like_owner");
+                    assert!(
+                        r.names.is_empty() == r.named_like_owner,
+                        "names or named_like_owner"
+                    );
                     assert!(r.owner_bases.is_empty() && !r.checks_signature());
                 }
                 other => panic!("an unknown framework tag {other:?}"),
@@ -1027,7 +1271,10 @@ mod tests {
     /// first appear in the `[invoked]` marker's order.
     #[test]
     fn dt5l_rows_hold_their_invariants() {
-        let all_sigs: Vec<&str> = INVOKED_MEMBERS.iter().flat_map(|r| r.sigs.iter().copied()).collect();
+        let all_sigs: Vec<&str> = INVOKED_MEMBERS
+            .iter()
+            .flat_map(|r| r.sigs.iter().copied())
+            .collect();
         for r in INVOKED_MEMBERS {
             if r.checks_signature() {
                 assert_eq!(r.exts, ["go"], "{:?}", r.names);
@@ -1035,7 +1282,10 @@ mod tests {
             for (n, sig) in r.siblings {
                 assert!(all_sigs.contains(sig), "{n} {sig}");
                 let row = INVOKED_MEMBERS.iter().find(|x| x.names.contains(n));
-                assert!(row.is_some_and(|x| x.sigs.contains(sig)), "{n}'s own row lists {sig}");
+                assert!(
+                    row.is_some_and(|x| x.sigs.contains(sig)),
+                    "{n}'s own row lists {sig}"
+                );
             }
             for b in r.owner_bases {
                 assert!(!b.library.is_empty() && !b.name.is_empty(), "{b:?}");
@@ -1049,7 +1299,15 @@ mod tests {
         }
         assert_eq!(
             order,
-            ["angular", "constructor", "flutter", "go_runtime", "apple_app", "transloco", "dio"]
+            [
+                "angular",
+                "constructor",
+                "flutter",
+                "go_runtime",
+                "apple_app",
+                "transloco",
+                "dio"
+            ]
         );
     }
 
@@ -1064,8 +1322,10 @@ mod tests {
         bases: &[ExternalBase],
     ) -> Option<&'static str> {
         let sig = sig.map(str::to_string);
-        let sib: Vec<(String, String)> =
-            siblings.iter().map(|(n, s)| (n.to_string(), s.to_string())).collect();
+        let sib: Vec<(String, String)> = siblings
+            .iter()
+            .map(|(n, s)| (n.to_string(), s.to_string()))
+            .collect();
         let bases = bases.to_vec();
         invoked_member_at(
             roles,
@@ -1091,31 +1351,82 @@ mod tests {
             ("Value", "()(Value,error)"),
             ("ServeHTTP", "(ResponseWriter,*Request)()"),
         ] {
-            assert_eq!(at(none, member, "go", Some(sig), &[], &[]), Some("go_runtime"), "{member}");
+            assert_eq!(
+                at(none, member, "go", Some(sig), &[], &[]),
+                Some("go_runtime"),
+                "{member}"
+            );
         }
-        assert_eq!(at(none, "Scan", "go", Some("()(bool)"), &[], &[]), None, "Scan() bool");
+        assert_eq!(
+            at(none, "Scan", "go", Some("()(bool)"), &[], &[]),
+            None,
+            "Scan() bool"
+        );
         assert_eq!(at(none, "Value", "go", Some("()(int64)"), &[], &[]), None);
-        assert_eq!(at(none, "String", "go", Some("(string)(string)"), &[], &[]), None);
-        assert_eq!(at(none, "String", "go", None, &[], &[]), None, "an unreadable signature");
-        assert_eq!(at(none, "String", "ts", Some("()(string)"), &[], &[]), None, "a .ts file");
-        assert_eq!(at(none, "Len", "go", Some("(int,int)(bool)"), &[], &[]), None);
-        assert_eq!(at(none, "Stringify", "go", Some("()(string)"), &[], &[]), None);
+        assert_eq!(
+            at(none, "String", "go", Some("(string)(string)"), &[], &[]),
+            None
+        );
+        assert_eq!(
+            at(none, "String", "go", None, &[], &[]),
+            None,
+            "an unreadable signature"
+        );
+        assert_eq!(
+            at(none, "String", "ts", Some("()(string)"), &[], &[]),
+            None,
+            "a .ts file"
+        );
+        assert_eq!(
+            at(none, "Len", "go", Some("(int,int)(bool)"), &[], &[]),
+            None
+        );
+        assert_eq!(
+            at(none, "Stringify", "go", Some("()(string)"), &[], &[]),
+            None
+        );
 
         // sort.Interface is all three.
         let sorted: &[(&str, &str)] = &[("Less", "(int,int)(bool)"), ("Swap", "(int,int)()")];
-        assert_eq!(at(none, "Len", "go", Some("()(int)"), sorted, &[]), Some("go_runtime"));
-        assert_eq!(at(none, "Len", "go", Some("()(int)"), &[], &[]), None, "a lone Len");
+        assert_eq!(
+            at(none, "Len", "go", Some("()(int)"), sorted, &[]),
+            Some("go_runtime")
+        );
+        assert_eq!(
+            at(none, "Len", "go", Some("()(int)"), &[], &[]),
+            None,
+            "a lone Len"
+        );
         let wrong: &[(&str, &str)] = &[("Less", "(int,int)(int)"), ("Swap", "(int,int)()")];
         assert_eq!(at(none, "Len", "go", Some("()(int)"), wrong, &[]), None);
-        let full: &[(&str, &str)] =
-            &[("Len", "()(int)"), ("Less", "(int,int)(bool)"), ("Swap", "(int,int)()")];
-        assert_eq!(at(none, "Less", "go", Some("(int,int)(bool)"), full, &[]), Some("go_runtime"));
-        assert_eq!(at(none, "Swap", "go", Some("(int,int)()"), full, &[]), Some("go_runtime"));
+        let full: &[(&str, &str)] = &[
+            ("Len", "()(int)"),
+            ("Less", "(int,int)(bool)"),
+            ("Swap", "(int,int)()"),
+        ];
+        assert_eq!(
+            at(none, "Less", "go", Some("(int,int)(bool)"), full, &[]),
+            Some("go_runtime")
+        );
+        assert_eq!(
+            at(none, "Swap", "go", Some("(int,int)()"), full, &[]),
+            Some("go_runtime")
+        );
         // An Unwrap is an error's.
         let err: &[(&str, &str)] = &[("Error", "()(string)")];
-        assert_eq!(at(none, "Unwrap", "go", Some("()(error)"), err, &[]), Some("go_runtime"));
-        assert_eq!(at(none, "Unwrap", "go", Some("()([]error)"), err, &[]), Some("go_runtime"));
-        assert_eq!(at(none, "Unwrap", "go", Some("()(error)"), &[], &[]), None, "no Error");
+        assert_eq!(
+            at(none, "Unwrap", "go", Some("()(error)"), err, &[]),
+            Some("go_runtime")
+        );
+        assert_eq!(
+            at(none, "Unwrap", "go", Some("()([]error)"), err, &[]),
+            Some("go_runtime")
+        );
+        assert_eq!(
+            at(none, "Unwrap", "go", Some("()(error)"), &[], &[]),
+            None,
+            "no Error"
+        );
 
         // The signature reader runs at most once, and never past a cheap gate.
         let calls = std::cell::Cell::new(0);
@@ -1140,36 +1451,92 @@ mod tests {
     fn apple_app_and_external_base_rows() {
         let comp: &[NodeKindId] = &[nk::COMPONENT];
         let none: &[NodeKindId] = &[];
-        assert_eq!(at(comp, "application", "swift", None, &[], &[]), Some("apple_app"));
+        assert_eq!(
+            at(comp, "application", "swift", None, &[], &[]),
+            Some("apple_app")
+        );
         assert_eq!(at(comp, "body", "swift", None, &[], &[]), Some("apple_app"));
-        assert_eq!(at(none, "application", "swift", None, &[], &[]), None, "no @main role");
+        assert_eq!(
+            at(none, "application", "swift", None, &[], &[]),
+            None,
+            "no @main role"
+        );
         assert_eq!(at(comp, "application", "ts", None, &[], &[]), None);
         assert_eq!(at(comp, "applicationLater", "swift", None, &[], &[]), None);
         // A Swift constructor is still the constructor row's.
-        assert_eq!(at(comp, "init", "swift", None, &[], &[]), Some("constructor"));
+        assert_eq!(
+            at(comp, "init", "swift", None, &[], &[]),
+            Some("constructor")
+        );
 
         let loader = base("@jsverse/transloco", "TranslocoLoader");
-        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[loader]), Some("transloco"));
+        assert_eq!(
+            at(none, "getTranslation", "ts", None, &[], &[loader]),
+            Some("transloco")
+        );
         let old = base("@ngneat/transloco", "TranslocoLoader");
-        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[old]), Some("transloco"));
-        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[]), None, "no base");
+        assert_eq!(
+            at(none, "getTranslation", "ts", None, &[], &[old]),
+            Some("transloco")
+        );
+        assert_eq!(
+            at(none, "getTranslation", "ts", None, &[], &[]),
+            None,
+            "no base"
+        );
         let other = base("@jsverse/transloco", "TranslocoMissingHandler");
-        assert_eq!(at(none, "getTranslation", "ts", None, &[], &[other]), None, "another base");
-        assert_eq!(at(none, "handle", "ts", None, &[], &[other]), Some("transloco"));
-        assert_eq!(at(none, "getTranslation", "dart", None, &[], &[loader]), None);
+        assert_eq!(
+            at(none, "getTranslation", "ts", None, &[], &[other]),
+            None,
+            "another base"
+        );
+        assert_eq!(
+            at(none, "handle", "ts", None, &[], &[other]),
+            Some("transloco")
+        );
+        assert_eq!(
+            at(none, "getTranslation", "dart", None, &[], &[loader]),
+            None
+        );
 
         let handler = base("@angular/core", "ErrorHandler");
-        assert_eq!(at(none, "handleError", "ts", None, &[], &[handler]), Some("angular"));
+        assert_eq!(
+            at(none, "handleError", "ts", None, &[], &[handler]),
+            Some("angular")
+        );
         assert_eq!(at(none, "handleError", "ts", None, &[], &[]), None);
         let reuse = base("@angular/router", "BaseRouteReuseStrategy");
-        assert_eq!(at(none, "shouldReuseRoute", "ts", None, &[], &[reuse]), Some("angular"));
+        assert_eq!(
+            at(none, "shouldReuseRoute", "ts", None, &[], &[reuse]),
+            Some("angular")
+        );
         let resolve = base("@angular/router", "Resolve");
-        assert_eq!(at(none, "resolve", "ts", None, &[], &[resolve]), Some("angular"));
+        assert_eq!(
+            at(none, "resolve", "ts", None, &[], &[resolve]),
+            Some("angular")
+        );
 
         let dio = base("dio", "Interceptor");
-        assert_eq!(at(none, "onRequest", "dart", None, &[], &[dio]), Some("dio"));
-        assert_eq!(at(none, "onError", "dart", None, &[], &[base("dio", "QueuedInterceptor")]), Some("dio"));
-        assert_eq!(at(none, "onRequest", "ts", None, &[], &[dio]), None, "dio is Dart");
+        assert_eq!(
+            at(none, "onRequest", "dart", None, &[], &[dio]),
+            Some("dio")
+        );
+        assert_eq!(
+            at(
+                none,
+                "onError",
+                "dart",
+                None,
+                &[],
+                &[base("dio", "QueuedInterceptor")]
+            ),
+            Some("dio")
+        );
+        assert_eq!(
+            at(none, "onRequest", "ts", None, &[], &[dio]),
+            None,
+            "dio is Dart"
+        );
         assert_eq!(at(none, "onRequest", "dart", None, &[], &[]), None);
     }
 
@@ -1178,7 +1545,10 @@ mod tests {
     #[test]
     fn invoked_member_never_reads_a_dt5l_gate() {
         let roles: &[NodeKindId] = &[nk::COMPONENT];
-        for r in INVOKED_MEMBERS.iter().filter(|r| r.checks_signature() || !r.owner_bases.is_empty()) {
+        for r in INVOKED_MEMBERS
+            .iter()
+            .filter(|r| r.checks_signature() || !r.owner_bases.is_empty())
+        {
             for name in r.names {
                 for ext in r.exts {
                     let tag = invoked_member(roles, "Owner", name, ext);
@@ -1190,7 +1560,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(invoked_member(roles, "AppDelegate", "application", "swift"), Some("apple_app"));
+        assert_eq!(
+            invoked_member(roles, "AppDelegate", "application", "swift"),
+            Some("apple_app")
+        );
     }
 
     /// DT.5l: Go `init` is an entry in a .go file only, and node_ext reads
@@ -1204,7 +1577,10 @@ mod tests {
         assert!(!e.is_entry_at(f, "init", &[], || Some("ts".into())));
         assert!(!e.is_entry_at(f, "init", &[], || Some("py".into())));
         assert!(!e.is_entry_at(Some(nk::METHOD), "init", &[], || Some("go".into())));
-        assert!(!e.is_entry(f, "init", &[]), "the extension-blind form never matches init");
+        assert!(
+            !e.is_entry(f, "init", &[]),
+            "the extension-blind form never matches init"
+        );
         assert!(e.is_entry(f, "main", &[]) && e.is_entry_at(f, "main", &[], || None));
         assert!(e.is_entry_at(f, "TestX", &[], || Some("ts".into())));
 
@@ -1213,7 +1589,10 @@ mod tests {
             payload: CellPayload::Json(format!("{{\"file\":\"{file}\",\"start_line\":3}}")),
         };
         assert_eq!(node_ext(&[pos("a/b.go")]).as_deref(), Some("go"));
-        assert_eq!(node_ext(&[pos("src/x.component.TS")]).as_deref(), Some("TS"));
+        assert_eq!(
+            node_ext(&[pos("src/x.component.TS")]).as_deref(),
+            Some("TS")
+        );
         assert_eq!(node_ext(&[pos("Makefile")]), None);
         assert_eq!(node_ext(&[]), None);
     }
@@ -1223,8 +1602,14 @@ mod tests {
         assert_eq!(CODE_TABLES.validate(), Ok(()));
         assert_eq!(CODE_TABLES.graph_type, "code");
         assert_eq!(CODE_TABLES.registries.kind_name(nk::ROUTE), Some("ROUTE"));
-        assert_eq!(CODE_TABLES.registries.category_name(ec::NAVIGATES_TO), Some("NAVIGATES_TO"));
-        assert_eq!(CODE_TABLES.registries.cell_name(cell_type::ORIGIN), Some("ORIGIN"));
+        assert_eq!(
+            CODE_TABLES.registries.category_name(ec::NAVIGATES_TO),
+            Some("NAVIGATES_TO")
+        );
+        assert_eq!(
+            CODE_TABLES.registries.cell_name(cell_type::ORIGIN),
+            Some("ORIGIN")
+        );
     }
 
     /// LE.4d: a sink is the (kind, category) pair. The USES a function has on
@@ -1261,10 +1646,28 @@ mod tests {
         // not linked: CO_CHANGES must never carry a blast radius or liveness,
         // and must weigh 0 in every activation preset (an unlisted category
         // would weigh 1.0 and reshape every ranking in a repo with history).
-        assert!(!CODE_TABLES.carries(ec::CO_CHANGES), "CO_CHANGES must stay OUT of carry_edges");
-        assert!(!CODE_TABLES.effect_sinks.iter().any(|s| s.via.contains(&ec::CO_CHANGES)));
-        for preset in [None, Some("repair"), Some("review"), Some("onboard"), Some("centrality")] {
-            let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
+        assert!(
+            !CODE_TABLES.carries(ec::CO_CHANGES),
+            "CO_CHANGES must stay OUT of carry_edges"
+        );
+        assert!(
+            !CODE_TABLES
+                .effect_sinks
+                .iter()
+                .any(|s| s.via.contains(&ec::CO_CHANGES))
+        );
+        for preset in [
+            None,
+            Some("repair"),
+            Some("review"),
+            Some("onboard"),
+            Some("centrality"),
+        ] {
+            let w = CODE_TABLES
+                .activation_config(preset)
+                .edge_weights
+                .get(&ec::CO_CHANGES)
+                .copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");
         }
     }
@@ -1277,11 +1680,29 @@ mod tests {
         // through the quotient, so the edge carries no blast radius or
         // liveness, is no effect, groups no community and weighs 0 in every
         // activation preset (an unlisted category would weigh 1.0).
-        assert!(!CODE_TABLES.carries(ec::SAME_AS), "SAME_AS must stay OUT of carry_edges");
-        assert!(!CODE_TABLES.effect_sinks.iter().any(|s| s.via.contains(&ec::SAME_AS)));
+        assert!(
+            !CODE_TABLES.carries(ec::SAME_AS),
+            "SAME_AS must stay OUT of carry_edges"
+        );
+        assert!(
+            !CODE_TABLES
+                .effect_sinks
+                .iter()
+                .any(|s| s.via.contains(&ec::SAME_AS))
+        );
         assert_eq!(CODE_TABLES.community_weight(ec::SAME_AS), 0);
-        for preset in [None, Some("repair"), Some("review"), Some("onboard"), Some("centrality")] {
-            let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::SAME_AS).copied();
+        for preset in [
+            None,
+            Some("repair"),
+            Some("review"),
+            Some("onboard"),
+            Some("centrality"),
+        ] {
+            let w = CODE_TABLES
+                .activation_config(preset)
+                .edge_weights
+                .get(&ec::SAME_AS)
+                .copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");
         }
     }
@@ -1329,15 +1750,29 @@ mod tests {
         assert_eq!(pairs("scip_symbol"), Some((SCIP_DEF_KINDS, SCIP_DEF_KINDS)));
         assert_eq!(SCIP_DEF_KINDS.len(), 8);
         for name in ["body_hash", "path_suffix"] {
-            assert_eq!(pairs(name), Some((VENDORED_KINDS, VENDORED_KINDS)), "{name}");
-            assert!(rule(name).is_some_and(|r| !r.tier.collapses()), "{name} never collapses");
+            assert_eq!(
+                pairs(name),
+                Some((VENDORED_KINDS, VENDORED_KINDS)),
+                "{name}"
+            );
+            assert!(
+                rule(name).is_some_and(|r| !r.tier.collapses()),
+                "{name} never collapses"
+            );
         }
         assert_eq!(VENDORED_KINDS[0], nk::MODULE);
-        assert_eq!(&VENDORED_KINDS[1..], &SCIP_DEF_KINDS[..6], "a file plus its declared code");
+        assert_eq!(
+            &VENDORED_KINDS[1..],
+            &SCIP_DEF_KINDS[..6],
+            "a file plus its declared code"
+        );
         const CLIENT: &[NodeKindId] = &[nk::INTERFACE, nk::CLASS];
         const SERVER: &[NodeKindId] = &[nk::STRUCT];
         assert_eq!(pairs("http_model"), Some((CLIENT, SERVER)));
-        assert!(rule("http_model").is_some_and(|r| r.tier.collapses()), "http_model collapses");
+        assert!(
+            rule("http_model").is_some_and(|r| r.tier.collapses()),
+            "http_model collapses"
+        );
         const GQL_MEMBER: &[NodeKindId] = &[nk::INTERFACE, nk::CLASS, nk::STRUCT];
         assert_eq!(pairs("graphql_model"), Some((GQL_MEMBER, MESSAGE)));
         assert!(
@@ -1349,7 +1784,11 @@ mod tests {
         for r in rules {
             assert!(!r.key.is_empty() && !r.key.contains('\n'), "{}", r.name);
             let diverged = same_as::evidence_rule(r.name, true);
-            assert_eq!(same_as::split_evidence_rule(&diverged), (r.name, true), "{diverged}");
+            assert_eq!(
+                same_as::split_evidence_rule(&diverged),
+                (r.name, true),
+                "{diverged}"
+            );
         }
         assert!(rule("package_name/diverged").is_none());
     }
@@ -1363,22 +1802,43 @@ mod tests {
     fn community_weights_exclude_structure_history_and_docs() {
         assert_eq!(CODE_TABLES.validate(), Ok(()));
         let w = |c| CODE_TABLES.community_weight(c);
-        for c in [ec::CONTAINS, ec::DOCUMENTS, ec::TESTS, ec::DEPENDS_ON, ec::CO_CHANGES] {
+        for c in [
+            ec::CONTAINS,
+            ec::DOCUMENTS,
+            ec::TESTS,
+            ec::DEPENDS_ON,
+            ec::CO_CHANGES,
+        ] {
             assert_eq!(w(c), 0, "{} is left out", ec::name(c));
         }
-        let shares: Vec<_> =
-            ec::ALL.iter().filter(|(_, n)| n.starts_with("SHARES_")).map(|(c, _)| *c).collect();
+        let shares: Vec<_> = ec::ALL
+            .iter()
+            .filter(|(_, n)| n.starts_with("SHARES_"))
+            .map(|(c, _)| *c)
+            .collect();
         assert_eq!(shares.len(), 7, "{shares:?}");
         for c in &shares {
             assert_eq!(w(*c), 0, "{} is left out", ec::name(*c));
         }
-        for c in [ec::CALLS, ec::HANDLED_BY, ec::DEFINES, ec::HTTP_CALLS, ec::QUEUE_FLOWS] {
+        for c in [
+            ec::CALLS,
+            ec::HANDLED_BY,
+            ec::DEFINES,
+            ec::HTTP_CALLS,
+            ec::QUEUE_FLOWS,
+        ] {
             assert!(w(c) > 0, "{} groups", ec::name(c));
         }
-        assert!(w(ec::CALLS) > w(ec::DEFINES), "a call binds harder than a definition");
+        assert!(
+            w(ec::CALLS) > w(ec::DEFINES),
+            "a call binds harder than a definition"
+        );
 
-        let left_out: Vec<&str> =
-            ec::ALL.iter().filter(|(c, _)| w(*c) == 0).map(|(_, n)| *n).collect();
+        let left_out: Vec<&str> = ec::ALL
+            .iter()
+            .filter(|(c, _)| w(*c) == 0)
+            .map(|(_, n)| *n)
+            .collect();
         assert_eq!(
             left_out,
             [
@@ -1395,13 +1855,27 @@ mod tests {
                 "SHARES_DATA_SOURCE",
                 "CO_CHANGES",
                 "SAME_AS",
+                // L3 (lua-support): LOADS carries a blast radius but groups no
+                // community - a loader loading thirty plugins is not thirty
+                // plugins merging into one community through it.
+                "LOADS",
             ]
         );
-        assert_eq!(CODE_TABLES.community_weights.len() + left_out.len(), ec::ALL.len());
+        assert_eq!(
+            CODE_TABLES.community_weights.len() + left_out.len(),
+            ec::ALL.len()
+        );
         // The table is laid out in `ec::ALL` order.
-        let listed: Vec<_> = CODE_TABLES.community_weights.iter().map(|(c, _)| *c).collect();
-        let in_all: Vec<_> =
-            ec::ALL.iter().map(|(c, _)| *c).filter(|c| listed.contains(c)).collect();
+        let listed: Vec<_> = CODE_TABLES
+            .community_weights
+            .iter()
+            .map(|(c, _)| *c)
+            .collect();
+        let in_all: Vec<_> = ec::ALL
+            .iter()
+            .map(|(c, _)| *c)
+            .filter(|c| listed.contains(c))
+            .collect();
         assert_eq!(listed, in_all);
     }
 
@@ -1415,7 +1889,10 @@ mod tests {
         let onboard = CODE_TABLES.activation_config(Some("onboard"));
         assert!(repair.edge_weights[&ec::CALLS] > base.edge_weights[&ec::CALLS]);
         assert!(onboard.edge_weights[&ec::CONTAINS] > base.edge_weights[&ec::CONTAINS]);
-        assert_ne!(repair.edge_weights, onboard.edge_weights, "the presets differ");
+        assert_ne!(
+            repair.edge_weights, onboard.edge_weights,
+            "the presets differ"
+        );
         // CC.10a: `centrality` zeroes structure, tests and docs, and keeps
         // every other base weight.
         let centrality = CODE_TABLES.activation_config(Some("centrality"));
