@@ -434,6 +434,11 @@ class RunTest(unittest.TestCase):
         # pager.ts is added by the change: it does not exist at S, so nothing can name it
         self.assertEqual(d["S"]["evidence"]["web/src/pager.ts"]["exists"], False)
         self.assertEqual(d["S"]["gate"]["cb"]["distinct_changes"], 1)
+        # FH.1c's marker: the drift's contract-breaks held no name row; others ran no gate
+        self.assertRegex(out, rf"\[cohort\] task {d['task']} drift .* names=glia_wrong "
+                              r"cb_names=0\n")
+        self.assertRegex(out, rf"\[cohort\] task {tasks['ripple']['task']} ripple .* "
+                              r"cb_names=-\n")
         self.assertEqual(d["S"]["names"]["boundary_has_truth"], ["web/src/client.ts"])
         ripple = {c["check"]: c for c in tasks["ripple"]["checks"]}
         self.assertIn("server/a.go: unparsed", ripple["rest"]["why"])
@@ -518,6 +523,63 @@ class RunTest(unittest.TestCase):
                       "rest_in_answer": [], "rows": 0})
         got = {c["check"]: c["status"] for c in C.classify(row)}
         self.assertEqual((got["locate"], got["rest"]), ("n/a", "n/a"))
+
+
+class CannedGlia:
+    """gate_state's glia: one canned answer per command (FH.1c)."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def json(self, *args):
+        d = self.answers.get(args[0])
+        return d, len(json.dumps(d)), 0, None if d is not None else "rc=1 none"
+
+
+def name_row(name, file):
+    return {"name": name, "normalised": name.lower(), "renamed_to": None, "repo": "app",
+            "file": file, "line": 3, "position": "property", "client": f"{file}::f",
+            "server": "server/api.go::H", "tier": "heuristic", "blocking": False}
+
+
+class GateStateTest(unittest.TestCase):
+    """gate_state reads contract-breaks' name rows and the shared-schema fold (FH.1c)."""
+
+    REVIEW = {"counts": {}}
+
+    def state(self, answer, truth):
+        return C.gate_state(CannedGlia({"contract-breaks": answer, "review": self.REVIEW}),
+                            truth)["cb"]
+
+    def test_names_rows_count_toward_truth_named(self):
+        ans = dict(cb([], 0), names=[name_row("userName", "web/src/client.ts"),
+                                     name_row("userName", "web/src/other.ts"),
+                                     name_row("mail", "web/src/client.ts")])
+        got = self.state(ans, ["web/src/client.ts", "web/src/pager.ts"])
+        self.assertEqual(got["truth_named"], ["web/src/client.ts"])
+        self.assertEqual(got["names"], 3)
+        self.assertEqual(got["rows"], 3)
+        self.assertEqual(got["files_named"], 2)
+        # one distinct change per removed name, however many client sites use it
+        self.assertEqual(got["distinct_changes"], 2)
+
+    def test_missing_names_key_reads_empty(self):
+        got = self.state(cb([], 0), ["web/src/client.ts"])
+        self.assertEqual((got["names"], got["rows"], got["truth_named"]), (0, 0, []))
+
+    def test_folded_schema_row_counts_once_per_operation(self):
+        change = [{"section": "response", "field": "code", "change": "removed"}]
+        row = {"kind": "operation", "key": "GET /a", "change": "modified",
+               "changes": change, "file": "api/openapi.yaml"}
+        folded = dict(row, operations=["GET /a", "GET /b", "GET /c"])
+        self.assertEqual(self.state(cb([folded], 3), [])["distinct_changes"], 3)
+        # unfolded, the same change on three operations is one distinct change
+        three = [dict(row, key=k) for k in ("GET /a", "GET /b", "GET /c")]
+        self.assertEqual(self.state(cb(three, 3), [])["distinct_changes"], 1)
+        self.assertEqual(self.state(cb([row], 1), [])["distinct_changes"], 1)
+        # an empty operations list folds nothing
+        self.assertEqual(self.state(cb([dict(row, operations=[])], 1), [])
+                         ["distinct_changes"], 1)
 
 
 class CommittedTest(unittest.TestCase):

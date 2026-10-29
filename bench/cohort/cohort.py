@@ -56,7 +56,11 @@ clone of the bare clone, deleted after), GLIA_THREADS=4:
   rest     (every task) given the core of the change (a drift task's server half, else the
            truth file with the most changed lines applied to the work tree), the rest of the
            change from `diff-impact`, recall@10 against grep's
-  gate     (drift) at S, `contract-breaks --base HEAD~1` names a client truth file
+  gate     (drift) at S, `contract-breaks --base HEAD~1` names a client truth file in a
+           schemas / models / orphaned_clients row or, since FH.1c, a `names` row (FH.7a's
+           client sites still using a removed name); a shared-schema row the fold kept
+           counts its changes once per entry in its `operations` (FH.7b). Each task line
+           ends `cb_names=<n>`, the name rows at S (`-` when no gate ran)
   clear    (drift, when the gate breaks at S) at C, fewer breaking rows than at S
   names    (drift) at S, a file `diff-impact --depth 6` reaches still holds a name the
            server change removed, and it is a client truth file
@@ -645,14 +649,22 @@ def files_in(obj, acc):
     return acc
 
 
-def changes_in(rows):
-    """gate.py: the distinct (section, field, change) triples contract-breaks rows hold."""
+def changes_in(rows, names=()):
+    """gate.py: the distinct (section, field, change) triples contract-breaks rows hold.
+    A row the shared-schema fold kept (FH.7b) stands for every operation in its
+    `operations`, so its triples count once per operation (FH.1c); a name row (FH.7a) is
+    one change per removed name, however many client sites still use it."""
     out = set()
     for r in rows:
-        for c in r.get("changes") or []:
-            out.add((c.get("section"), c.get("field"), c.get("change")))
-        if not r.get("changes"):
-            out.add((r.get("kind"), r.get("key"), r.get("change")))
+        ops = r.get("operations") or [None]
+        for op in ops:
+            tag = () if op is None else (op,)
+            for c in r.get("changes") or []:
+                out.add((c.get("section"), c.get("field"), c.get("change")) + tag)
+            if not r.get("changes"):
+                out.add((r.get("kind"), r.get("key"), r.get("change")) + tag)
+    for r in names:
+        out.add(("name", r.get("normalised"), r.get("renamed_to")))
     return out
 
 
@@ -778,11 +790,16 @@ def gate_state(glia, truth):
     d, nb, ms, err = glia.json("contract-breaks", ".", "--base", "HEAD~1", "--json")
     if isinstance(d, dict):
         rows = [r for k in ("schemas", "models", "orphaned_clients") for r in d.get(k) or []]
-        named = files_in(rows, set())
+        # FH.1c: a name row (FH.7a) names the client file still using a removed name;
+        # an answer without the key (before FH.7a) reads as no name row
+        names = d.get("names") or []
+        named = files_in(rows + names, set())
         res["cb"] = {"breaking": d.get("breaking"), "advisory": d.get("advisory"),
                      "schemas": len(d.get("schemas") or []), "models": len(d.get("models") or []),
                      "orphaned_clients": len(d.get("orphaned_clients") or []),
-                     "rows": len(rows), "distinct_changes": len(changes_in(rows)),
+                     "names": len(names),
+                     "rows": len(rows) + len(names),
+                     "distinct_changes": len(changes_in(rows, names)),
                      "files_named": len(named),
                      "truth_named": sorted(t for t in truth if t in named),
                      # oracle.py's contract_breaks row count: every list in the answer
@@ -1370,9 +1387,10 @@ def cmd_run(a, repos, all_repos):
                       f"{' error=' + res['error'] if res.get('error') else ''}", flush=True)
             else:
                 new_tasks.append(res)
+                cbn = ((res.get("S") or {}).get("gate") or {}).get("cb") or {}
                 print(f"[cohort] task {res['task']} {res['shape']} " + " ".join(
-                    f"{c['check']}={c['class'] or c['status']}" for c in res["checks"]),
-                    flush=True)
+                    f"{c['check']}={c['class'] or c['status']}" for c in res["checks"])
+                    + f" cb_names={cbn.get('names', '-')}", flush=True)
     keep_h = {h["repo"] for h in new_health}
     keep_t = {t["task"] for t in new_tasks}
     health = [h for h in old_health if h["repo"] not in keep_h] + new_health
