@@ -30,8 +30,11 @@ fn write_repo_a(dir: &Path) {
     std::fs::write(dir.join("a.py"), A_PY).unwrap();
     std::fs::write(dir.join("b.py"), B_PY).unwrap();
     std::fs::write(dir.join("c.py"), "def gone():\n    return None\n").unwrap();
-    std::fs::write(dir.join("README.md"), "# Service A\n\nUse `foo` and `Widget.spin`.\n")
-        .unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "# Service A\n\nUse `foo` and `Widget.spin`.\n",
+    )
+    .unwrap();
 }
 
 /// Repo B: two go files under a go.mod, so the go-prefix build context and a
@@ -45,7 +48,11 @@ fn write_repo_b(dir: &Path) {
         "package main\n\nimport \"net/http\"\n\n// Items lists items.\nfunc Items(w http.ResponseWriter, r *http.Request) {}\n\nfunc main() {\n\thttp.HandleFunc(\"/api/items\", Items)\n}\n",
     )
     .unwrap();
-    std::fs::write(dir.join("util.go"), "package main\n\nfunc helper() int { return 1 }\n").unwrap();
+    std::fs::write(
+        dir.join("util.go"),
+        "package main\n\nfunc helper() int { return 1 }\n",
+    )
+    .unwrap();
 }
 
 fn two_repos(tmp: &Path) -> (PathBuf, PathBuf, Vec<String>) {
@@ -53,7 +60,10 @@ fn two_repos(tmp: &Path) -> (PathBuf, PathBuf, Vec<String>) {
     let b = tmp.join("svc-b");
     write_repo_a(&a);
     write_repo_b(&b);
-    let paths = vec![a.to_str().unwrap().to_string(), b.to_str().unwrap().to_string()];
+    let paths = vec![
+        a.to_str().unwrap().to_string(),
+        b.to_str().unwrap().to_string(),
+    ];
     (a, b, paths)
 }
 
@@ -91,10 +101,26 @@ fn generate_many_writes_no_sidecar_by_default() {
     let (a, b, paths) = two_repos(tmp.path());
     let result = generate_many(&paths).unwrap();
     assert!(result.total_nodes > 0, "fixture must produce a graph");
-    assert!(!sidecar(&a).exists(), "generate_many wrote a sidecar into {}", a.display());
-    assert!(!sidecar(&b).exists(), "generate_many wrote a sidecar into {}", b.display());
-    assert!(!a.join(".glia").exists(), "generate_many created {}/.glia", a.display());
-    assert!(!b.join(".glia").exists(), "generate_many created {}/.glia", b.display());
+    assert!(
+        !sidecar(&a).exists(),
+        "generate_many wrote a sidecar into {}",
+        a.display()
+    );
+    assert!(
+        !sidecar(&b).exists(),
+        "generate_many wrote a sidecar into {}",
+        b.display()
+    );
+    assert!(
+        !a.join(".glia").exists(),
+        "generate_many created {}/.glia",
+        a.display()
+    );
+    assert!(
+        !b.join(".glia").exists(),
+        "generate_many created {}/.glia",
+        b.display()
+    );
 }
 
 /// Warm both sidecars, then change BOTH repos so the second build mixes reused,
@@ -107,7 +133,10 @@ fn multi_repo_incremental_is_byte_identical_to_clean() {
     let (a, b, paths) = two_repos(tmp.path());
 
     generate_many_incremental(&paths).unwrap();
-    assert!(sidecar(&a).exists() && sidecar(&b).exists(), "warm build must write both sidecars");
+    assert!(
+        sidecar(&a).exists() && sidecar(&b).exists(),
+        "warm build must write both sidecars"
+    );
 
     // A: a.py reused, b.py reparsed, c.py evicted.
     std::fs::write(
@@ -156,19 +185,46 @@ fn sidecars_are_per_repo() {
     let (a_s, b_s) = (a.to_str().unwrap(), b.to_str().unwrap());
     let (ca, cb) = (ParseCache::load(a_s), ParseCache::load(b_s));
     // A: a.py + b.py + c.py. B: main.go + util.go. Each holds only its own.
-    assert_eq!(ca.len(), 3, "svc-a cache must hold exactly its three .py files");
-    assert_eq!(cb.len(), 2, "svc-b cache must hold exactly its two .go files");
+    assert_eq!(
+        ca.len(),
+        3,
+        "svc-a cache must hold exactly its three .py files"
+    );
+    assert_eq!(
+        cb.len(),
+        2,
+        "svc-b cache must hold exactly its two .go files"
+    );
     assert_ne!(ca.len(), cb.len());
 
-    // The sidecar is keyed to the repo identity it was built under: a cache
-    // pointed at the other repo's identity discards everything (audit #2).
+    // The sidecar is keyed to the repo identity + parse context it was built
+    // under: a cache pointed at the other repo's identity discards everything
+    // (audit #2). The context is the build's full key — the go.mod module set
+    // plus the plugin-family fingerprint (lua-support); neither repo declares
+    // families, so both keys carry the empty fingerprint.
+    let b_context = glia_engine::ParseContext::new(
+        glia_engine::GoModules::root_only("example.com/svcb"),
+        Default::default(),
+    )
+    .context_key();
+    let a_context = glia_engine::ParseContext::default().context_key();
     let mut cross = ParseCache::load(a_s);
-    cross.validate_context(&repo_identity(&b).key, "example.com/svcb");
-    assert!(cross.is_empty(), "svc-a's cache must not be reusable as svc-b's");
+    cross.validate_context(&repo_identity(&b).key, &b_context);
+    assert!(
+        cross.is_empty(),
+        "svc-a's cache must not be reusable as svc-b's"
+    );
     // …while its own identity, however the path is spelled, keeps it.
     let mut own = ParseCache::load(a_s);
-    own.validate_context(&repo_identity(Path::new(&format!("{a_s}/."))).key, "");
-    assert_eq!(own.len(), 3, "svc-a's cache must survive a respelling of its own path");
+    own.validate_context(
+        &repo_identity(Path::new(&format!("{a_s}/."))).key,
+        &a_context,
+    );
+    assert_eq!(
+        own.len(),
+        3,
+        "svc-a's cache must survive a respelling of its own path"
+    );
 }
 
 /// Proof the multi-repo path READS the sidecar rather than reparsing and
@@ -203,8 +259,12 @@ fn the_sidecar_is_actually_consulted() {
 
 /// Sorted NodeIds of every node in the build.
 fn node_ids(r: &GenerateResult) -> Vec<u64> {
-    let mut ids: Vec<u64> =
-        r.merged.graphs.iter().flat_map(|g| g.nodes.iter().map(|n| n.id.0)).collect();
+    let mut ids: Vec<u64> = r
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter().map(|n| n.id.0))
+        .collect();
     ids.sort_unstable();
     ids
 }
@@ -233,7 +293,11 @@ fn a_respelled_repo_path_reuses_the_sidecar() {
     write_merged_sharded(&clean.merged, &out_clean).unwrap();
     assert_dirs_byte_identical(&out_incr, &out_clean, "respelled incremental vs clean");
     assert_dirs_byte_identical(&out_incr, &out_orig, "respelled vs original spelling");
-    assert_eq!(node_ids(&incr), node_ids(&original), "NodeIds moved with the spelling");
+    assert_eq!(
+        node_ids(&incr),
+        node_ids(&original),
+        "NodeIds moved with the spelling"
+    );
 
     // Proof the respelled build READ the sidecar rather than discarding it:
     // plant a.py's parse under b.py's key; a reusing build serves it, so

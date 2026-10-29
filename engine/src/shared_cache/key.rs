@@ -107,21 +107,25 @@ impl serde::Serialize for CacheKey {
 
 /// The content address of the parse of one file: blake3 `derive_key`
 /// (context `"glia parse cache object v1"`) over each field framed as a `u64` LE length and its bytes,
-/// in this order: `stamp`, `repo_key`, `lang`, `path`, `module_qname`, the Go
-/// module-set key (`go_ctx` when `lang` is `"go"`, else `""`), then the 32-byte
-/// blake3 of `content`. The framing makes the fields unambiguous (`"ab" + "c"`
-/// never hashes as `"a" + "bc"`), and a non-Go file's key never moves with
-/// the go.mod set it does not read.
+/// in this order: `stamp`, `repo_key`, `lang`, `path`, `module_qname`, the
+/// parse-context key (`ctx` for the languages that read one — `go` the
+/// go.mod module-set key, `lua` the plugin-family fingerprint — `""` for
+/// every other), then the 32-byte blake3 of `content`. The framing makes the
+/// fields unambiguous (`"ab" + "c"` never hashes as `"a" + "bc"`), and a
+/// file's key never moves with a context it does not read.
 pub fn file_key(
     stamp: &str,
     repo_key: &str,
     lang: &str,
     path: &str,
     module_qname: &str,
-    go_ctx: &str,
+    ctx: &str,
     content: &[u8],
 ) -> CacheKey {
-    let go = if lang == "go" { go_ctx } else { "" };
+    let context_field = match lang {
+        "go" | "lua" => ctx,
+        _ => "",
+    };
     let content_hash = blake3::hash(content);
     let mut h = blake3::Hasher::new_derive_key(KEY_CONTEXT);
     for field in [
@@ -130,7 +134,7 @@ pub fn file_key(
         lang.as_bytes(),
         path.as_bytes(),
         module_qname.as_bytes(),
-        go.as_bytes(),
+        context_field.as_bytes(),
         content_hash.as_bytes().as_slice(),
     ] {
         h.update(&(field.len() as u64).to_le_bytes());

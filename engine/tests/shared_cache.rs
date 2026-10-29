@@ -120,7 +120,12 @@ fn sidecar_entries(repo: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 fn go_ctx() -> String {
-    GoModules::from_entries(vec![(String::new(), "example.com/b".to_string())]).context_key()
+    // The build's full parse-context key: the go.mod module set plus the
+    // plugin-family fingerprint (empty here — the fixture declares none).
+    format!(
+        "go={};plugin_families=",
+        GoModules::from_entries(vec![(String::new(), "example.com/b".to_string())]).context_key()
+    )
 }
 
 #[test]
@@ -420,7 +425,10 @@ fn pairs(entries: &[(String, CacheKey, Vec<u8>)]) -> Vec<(CacheKey, Vec<u8>)> {
     entries.iter().map(|(_, k, p)| (*k, p.clone())).collect()
 }
 
-fn entry<'a>(entries: &'a [(String, CacheKey, Vec<u8>)], path: &str) -> &'a (String, CacheKey, Vec<u8>) {
+fn entry<'a>(
+    entries: &'a [(String, CacheKey, Vec<u8>)],
+    path: &str,
+) -> &'a (String, CacheKey, Vec<u8>) {
     entries
         .iter()
         .find(|(p, _, _)| p == path)
@@ -453,7 +461,10 @@ fn warm_build(repo: &Path, out: &Path) -> CacheDiff {
     let mut cache = ParseCache::load(s(repo));
     let result = generate_one_with_cache(s(repo), &mut cache).expect("incremental build");
     write_merged_sharded(&result.merged, out).expect("write warm graph");
-    cache.last_diff().expect("the build recorded a diff").clone()
+    cache
+        .last_diff()
+        .expect("the build recorded a diff")
+        .clone()
 }
 
 fn cold_build(repo: &Path, out: &Path) {
@@ -548,9 +559,18 @@ fn a_poisoned_payload_is_caught_by_the_sample() {
     let b = copy(tmp.path(), "b");
     let err = import_entries(s(&b), pairs(&entries), &opts(Verify::All))
         .expect_err("a poisoned payload passed the full re-parse");
-    assert!(err.contains("util.ts") && err.contains("differs from a local parse"), "{err}");
-    assert!(!sidecar_path(&b).exists(), "a failed import wrote the sidecar");
-    assert!(!glia_store::default_gmap_dir(&b).exists(), "a failed import created the layout dir");
+    assert!(
+        err.contains("util.ts") && err.contains("differs from a local parse"),
+        "{err}"
+    );
+    assert!(
+        !sidecar_path(&b).exists(),
+        "a failed import wrote the sidecar"
+    );
+    assert!(
+        !glia_store::default_gmap_dir(&b).exists(),
+        "a failed import created the layout dir"
+    );
 }
 
 #[test]
@@ -624,7 +644,13 @@ fn module_form_change_misses() {
         .collect();
     assert_eq!(
         rows,
-        [("a.py", "a.py"), ("a.ts", "a.ts"), ("b.go", "b"), ("util.js", "util.js"), ("util.ts", "util.ts")]
+        [
+            ("a.py", "a.py"),
+            ("a.ts", "a.ts"),
+            ("b.go", "b"),
+            ("util.js", "util.js"),
+            ("util.ts", "util.ts")
+        ]
     );
     let (_, a_py_key, a_py) = entry(&entries, "a.py");
     let b_a_py = w.rows.iter().find(|r| r.path == "a.py").expect("a.py row");
@@ -658,10 +684,15 @@ fn parse_for_cache_matches_the_build() {
     let (a, entries) = exported(tmp.path());
     let on_disk = sidecar_entries(&a);
     for (path, _, payload) in &entries {
-        assert_eq!(Some(payload), on_disk.get(path), "{path}: export is not the sidecar entry");
+        assert_eq!(
+            Some(payload),
+            on_disk.get(path),
+            "{path}: export is not the sidecar entry"
+        );
     }
     let b = copy(tmp.path(), "b");
-    let summary = import_entries(s(&b), pairs(&entries), &opts(Verify::All)).expect("verified import");
+    let summary =
+        import_entries(s(&b), pairs(&entries), &opts(Verify::All)).expect("verified import");
     assert_eq!(counts(&summary), (4, 4, 0, 4, true));
     assert_eq!(sidecar_entries(&b), on_disk);
 }
@@ -672,18 +703,19 @@ fn verify_sample_is_bounded() {
     let (_a, entries) = exported(tmp.path());
 
     let sampled = copy(tmp.path(), "b");
-    let summary =
-        import_entries(s(&sampled), pairs(&entries), &opts(Verify::Count(2))).expect("sampled import");
+    let summary = import_entries(s(&sampled), pairs(&entries), &opts(Verify::Count(2)))
+        .expect("sampled import");
     assert_eq!(counts(&summary), (4, 4, 0, 2, true));
 
     let all = copy(tmp.path(), "c");
-    let summary = import_entries(s(&all), pairs(&entries), &opts(Verify::All)).expect("full import");
+    let summary =
+        import_entries(s(&all), pairs(&entries), &opts(Verify::All)).expect("full import");
     assert_eq!(counts(&summary), (4, 4, 0, 4, true));
 
     // A sample larger than what was accepted checks what there is.
     let over = copy(tmp.path(), "d");
-    let summary =
-        import_entries(s(&over), pairs(&entries), &opts(Verify::Count(99))).expect("oversized sample");
+    let summary = import_entries(s(&over), pairs(&entries), &opts(Verify::Count(99)))
+        .expect("oversized sample");
     assert_eq!(counts(&summary), (4, 4, 0, 4, true));
 
     // The sample changes what is checked, never what is written.

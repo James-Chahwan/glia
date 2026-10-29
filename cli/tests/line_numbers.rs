@@ -228,7 +228,7 @@ fn resolve_and_trace_rows_carry_live() {
         .find(|l| l.starts_with("[live] annotate surface=resolve"))
         .unwrap_or_else(|| panic!("the resolve marker fires:\n{stderr}"));
     eprintln!("{marker}");
-    assert_eq!(marker, "[live] annotate surface=resolve rows=3 live=2 entry_kinds=11");
+    assert_eq!(marker, "[live] annotate surface=resolve rows=3 live=2 entry_kinds=12");
     let v = json(&out);
     let mut got: Vec<(String, bool)> = v["results"]
         .as_array()

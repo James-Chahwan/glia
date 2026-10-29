@@ -460,6 +460,7 @@ mod tests {
                 repo,
                 &GoModules::root_only(""),
                 &modules.module_qname(path),
+                &Default::default(),
             )
             .expect("parses");
             parses.entry(lang).or_default().push(fp);

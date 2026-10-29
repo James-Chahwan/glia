@@ -492,6 +492,14 @@ glia tests ingest <REPO> [--junit <PATH>...] [--lcov <PATH>...] [--log <PATH>...
     its newest run; the snapshot keeps the last --window runs (default 10; --reset
     drops the earlier ones): FAIL cells per test (fails in the window, latest run)
     and COVERAGE cells. Messages are redacted for secrets before they are stored.
+glia plugin-families <REPO> [--force]
+    Write <repo>/.glia/plugin_families.toml, the plugin-family declaration the
+    build's runtime discovery reads first (lua-support): each [[plugin_family]]
+    names one embedded-plugin architecture — its manifest basename, the lib
+    roots a dotted require walks, and its registration calls. The written file
+    is the seed architectures as editable tables; a family declared here beats
+    an inferred one, and a build never creates the file. --force overwrites.
+    Exits 2 when the repo is missing or the file exists without --force.
 glia scip import <REPO> <INDEX> [--prefix <PREFIX>]
     Decode a SCIP index (scip-python, scip-typescript, scip-java, scip-go,
     rust-analyzer) into <repo>/.glia/scip-snapshot/; the next build binds it as

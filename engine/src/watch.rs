@@ -114,7 +114,7 @@ use crate::delta::{
     DeltaCounts, DeltaEdge, DeltaNode, DeltaScope, located_delta_counted, located_delta_scoped,
 };
 use crate::external::{RepoInputs, repo_inputs};
-use crate::extract::{GoModules, TS_FAMILY, detect_language};
+use crate::extract::{GoModules, ParseContext, TS_FAMILY, detect_language};
 use crate::passes::GroupFill;
 use crate::rank::RankCache;
 use crate::walk::{
@@ -481,6 +481,11 @@ struct Setup {
     ident: RepoIdentity,
     repo: RepoId,
     go: GoModules,
+    /// The repo's plugin families (lua-support): declared
+    /// `.glia/plugin_families.toml`, else inferred. A change re-parses every
+    /// Lua file (it shapes what a parse mints), so it joins the parse-cache
+    /// context and the full-rebuild reasons.
+    families: glia_code_domain::plugin_families::PluginFamilies,
     ts_aliases: TsAliasSet,
     c_includes: IncludeRoots,
     /// The walked file list `c_includes` was read for ([`paths_fp`]).
@@ -542,12 +547,14 @@ impl Setup {
         let repo = RepoId::from_canonical(&ident.key);
         let config = load_config(at, repo);
         let go = go_modules_for(at.root, roots, at.label);
+        let families = glia_code_domain::plugin_families::for_repo(at.root);
         let ts_aliases = TsAliasSet::read(at.root, roots, at.label);
         let c_includes = IncludeRoots::read(at.root, files, roots, at.label);
         Self {
             ident,
             repo,
             go,
+            families,
             ts_aliases,
             c_includes,
             files_fp: paths_fp(files),
@@ -598,6 +605,13 @@ impl Setup {
             ident,
             repo,
             go,
+            // The families refresh with their two inputs: a replan (the tree
+            // the inference scans) and a `.glia` change (the declared file).
+            families: if replan || high.contains("glia_inputs") {
+                glia_code_domain::plugin_families::for_repo(at.root)
+            } else {
+                self.families.clone()
+            },
             ts_aliases,
             c_includes,
             files_fp,
@@ -660,7 +674,15 @@ impl WatchSession {
             walk,
             read,
         };
-        let built = build(&at, &setup, &mut tree, &mut cache, &[], services_fp, started);
+        let built = build(
+            &at,
+            &setup,
+            &mut tree,
+            &mut cache,
+            &[],
+            services_fp,
+            started,
+        );
         eprintln!(
             "[watch] open repo={root} files={walked} groups={} nodes={} edges={} took={}",
             built.groups.len(),
@@ -668,7 +690,11 @@ impl WatchSession {
             built.result.total_edges,
             timing::ms(started.elapsed())
         );
-        let rank = Arc::new(RankCache::new("watch", &built.result.repo_roots, &built.result.repo_labels));
+        let rank = Arc::new(RankCache::new(
+            "watch",
+            &built.result.repo_roots,
+            &built.result.repo_labels,
+        ));
         let mut session = Self {
             abs_roots: abs_roots(&root_path),
             index: index_of(&records),
@@ -841,7 +867,11 @@ impl WatchSession {
         self.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
-        self.rank = Arc::new(RankCache::new("watch", &self.result.repo_roots, &self.result.repo_labels));
+        self.rank = Arc::new(RankCache::new(
+            "watch",
+            &self.result.repo_roots,
+            &self.result.repo_labels,
+        ));
         crate::memory::release_freed_memory("watch_update");
         let stats = self.cache.stats;
         let update = WatchUpdate {
@@ -1452,7 +1482,10 @@ fn build(
     started: Instant,
 ) -> Built {
     let (root, label, opts) = (at.root, at.label, at.opts);
-    cache.validate_context(&setup.ident.key, &setup.go.context_key());
+    cache.validate_context(
+        &setup.ident.key,
+        &ParseContext::new(setup.go.clone(), setup.families.clone()).context_key(),
+    );
     let mut rpc = RpcContext::default();
     rpc.add_files(&tree.files);
     let inputs = vec![RepoInputs {
@@ -1465,6 +1498,7 @@ fn build(
         repo: setup.repo,
         repo_label: label,
         go: &setup.go,
+        plugin_families: &setup.families,
         ts_aliases: &setup.ts_aliases,
         c_includes: &setup.c_includes,
         rpc: &rpc,
@@ -1487,6 +1521,7 @@ fn build(
         ts_aliases: &setup.ts_aliases,
         c_includes: &setup.c_includes,
         dart_packages: &g.dart_packages,
+        plugin_families: &setup.families,
     };
     // DC.7b: the group fingerprints, then a clone of each matching cached
     // build OUT into its reuse slot.
@@ -1621,11 +1656,15 @@ fn hidden_fp(key: &str, ctx: &GroupCtx<'_>) -> u64 {
         ts_aliases,
         c_includes,
         dart_packages,
+        plugin_families,
     } = *ctx;
     let debug = match key {
         "rust" => format!("{rust_crates:?}"),
         "c_cpp" => format!("{c_includes:?}"),
         "dart" => format!("{dart_packages:?}"),
+        // lua-support: the families shape what a Lua parse mints, so the lua
+        // group's fingerprint carries their key.
+        "lua" => format!("{}/{}", plugin_families.context_key(), 0),
         _ if TS_FAMILY.contains(&key) => format!("{ts_aliases:?}"),
         _ => return 0,
     };
@@ -1642,18 +1681,18 @@ fn reuse_slots(
     fingerprints: &[Option<u64>],
     cached: &[CachedGroup],
 ) -> (Vec<Option<LangBuild>>, Vec<Option<usize>>) {
-    let by_key: BTreeMap<&str, usize> = cached
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.key, i))
-        .collect();
+    let by_key: BTreeMap<&str, usize> =
+        cached.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
     keys.iter()
         .zip(fingerprints)
         .map(|(key, fp)| {
             let hit = fp.and_then(|fp| {
-                by_key
-                    .get(key)
-                    .and_then(|&i| cached.get(i).filter(|c| c.fingerprint == fp).map(|c| (i, c)))
+                by_key.get(key).and_then(|&i| {
+                    cached
+                        .get(i)
+                        .filter(|c| c.fingerprint == fp)
+                        .map(|c| (i, c))
+                })
             });
             (hit.map(|(_, c)| c.build.clone()), hit.map(|(i, _)| i))
         })
@@ -1663,7 +1702,11 @@ fn reuse_slots(
 /// DC.7b: the group cache an update leaves, aligned with the plan: a reused
 /// group keeps its previous entry (`kept`), a rebuilt one with a fingerprint
 /// takes a clone of its build.
-fn cache_slots(builds: &[LangBuild], fingerprints: &[Option<u64>], kept: &[Option<usize>]) -> Vec<Slot> {
+fn cache_slots(
+    builds: &[LangBuild],
+    fingerprints: &[Option<u64>],
+    kept: &[Option<usize>],
+) -> Vec<Slot> {
     builds
         .iter()
         .zip(fingerprints)
@@ -1741,6 +1784,8 @@ fn full_rebuild_reason(
         Some("identity")
     } else if before.go.context_key() != after.go.context_key() {
         Some("go_modules")
+    } else if before.families != after.families {
+        Some("plugin_families")
     } else if before.overlay_fp != after.overlay_fp {
         Some("overlay")
     } else if services_before != services_after {
@@ -2419,7 +2464,11 @@ mod tests {
             "web/lib/util.ts",
             "export function util(): number {\n  return 1;\n}\n",
         );
-        write(&dir, "Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n");
+        write(
+            &dir,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\"]\n",
+        );
         write(
             &dir,
             "crates/a/Cargo.toml",
@@ -2492,10 +2541,7 @@ mod tests {
             ),
             (
                 "proto_service",
-                vec![(
-                    "api/greet.proto",
-                    proto("  rpc Bye (Req) returns (Rep);\n"),
-                )],
+                vec![("api/greet.proto", proto("  rpc Bye (Req) returns (Rep);\n"))],
                 vec!["api/greet.proto"],
             ),
             (
@@ -2632,7 +2678,9 @@ mod tests {
         want.extend(["go graph: e".to_string(), "typescript graph: e".to_string()]);
         assert_eq!(s.result().parse_errors, want);
         assert!(
-            !s.graph_keys.iter().any(|k| *k == "go" || *k == "typescript"),
+            !s.graph_keys
+                .iter()
+                .any(|k| *k == "go" || *k == "typescript"),
             "{:?}",
             s.graph_keys
         );
@@ -2643,7 +2691,9 @@ mod tests {
         );
         let full = located_delta_counted(&prev, &s.result().merged, &[]);
         assert!(
-            u.nodes.iter().any(|n| n.change == "removed" && n.qname.ends_with("F")),
+            u.nodes
+                .iter()
+                .any(|n| n.change == "removed" && n.qname.ends_with("F")),
             "the go graph's nodes are gone: {:?}",
             u.nodes
         );
@@ -2677,7 +2727,9 @@ mod tests {
             assert_eq!(json(&u.nodes), json(&nodes), "{tag}: node rows");
             assert_eq!(json(&u.edges), json(&edges), "{tag}: edge rows");
             assert_eq!(
-                u.counts.nodes_added + u.counts.nodes_removed + u.counts.nodes_modified
+                u.counts.nodes_added
+                    + u.counts.nodes_removed
+                    + u.counts.nodes_modified
                     + u.counts.nodes_moved,
                 nodes.len(),
                 "{tag}"

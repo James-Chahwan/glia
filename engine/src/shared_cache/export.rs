@@ -83,7 +83,10 @@ fn plan(repo_path: &str) -> Result<Planned, String> {
     }
     let ident = repo_identity(root);
     let (files, _regions, _md, roots) = crate::walk::walk_source_files(root);
-    let go_ctx = crate::build::go_modules_for(root, &roots, repo_path).context_key();
+    let go = crate::build::go_modules_for(root, &roots, repo_path);
+    let go_ctx =
+        crate::extract::ParseContext::new(go, glia_code_domain::plugin_families::for_repo(root))
+            .context_key();
     let mut rows: Vec<CacheRow> = cache_plan(&files)
         .into_iter()
         .map(|r| CacheRow {

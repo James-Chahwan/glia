@@ -121,7 +121,11 @@ struct Checkout {
     repo: RepoId,
     repo_key: String,
     go: GoModules,
-    go_ctx: String,
+    /// The repo's plugin families (lua-support), part of the parse context.
+    families: glia_code_domain::plugin_families::PluginFamilies,
+    /// The full parse-context key: the go.mod module set plus the plugin
+    /// families, what `parse_for_cache` reads beyond the file.
+    context: String,
     repo_label: String,
 }
 
@@ -137,10 +141,13 @@ impl Checkout {
         let ident = repo_identity(root);
         let (files, _regions, _md, roots) = crate::walk::walk_source_files(root);
         let go = crate::build::go_modules_for(root, &roots, repo_path);
+        let families = glia_code_domain::plugin_families::for_repo(root);
+        let context = crate::extract::ParseContext::new(go.clone(), families.clone()).context_key();
         Ok(Self {
             files,
             repo: RepoId::from_canonical(&ident.key),
-            go_ctx: go.context_key(),
+            families,
+            context,
             go,
             repo_key: ident.key,
             repo_label: crate::arch::repo_label_for(repo_path),
@@ -159,7 +166,7 @@ impl Checkout {
                         r.lang,
                         r.path,
                         &r.module_qname,
-                        &self.go_ctx,
+                        &self.context,
                         r.source.as_bytes(),
                     ),
                     content_hash: cache::content_hash(r.source),
@@ -178,7 +185,7 @@ impl Checkout {
     /// another identity or go.mod set is emptied, as a build would.
     fn cache(&self, repo_path: &str) -> ParseCache {
         let mut cache = ParseCache::load(repo_path);
-        cache.validate_context(&self.repo_key, &self.go_ctx);
+        cache.validate_context(&self.repo_key, &self.context);
         cache
     }
 }
@@ -218,7 +225,10 @@ pub fn wanted(repo_path: &str) -> Result<Wanted, String> {
 fn check(row: &CacheRow, payload: &[u8]) -> Result<CacheEntry, String> {
     let entry = CacheEntry::from_payload(payload)?;
     if entry.lang != row.lang {
-        return Err(format!("parsed as another language (the checkout parses it as {})", row.lang));
+        return Err(format!(
+            "parsed as another language (the checkout parses it as {})",
+            row.lang
+        ));
     }
     if entry.content_hash != row.content_hash {
         return Err("parsed from other content than the checked-out file".to_string());
@@ -263,8 +273,11 @@ pub fn import_entries(
         .into_iter()
         .filter(|p| is_wanted(&cache, &p.row))
         .collect();
-    let by_key: BTreeMap<CacheKey, usize> =
-        planned.iter().enumerate().map(|(i, p)| (p.row.key, i)).collect();
+    let by_key: BTreeMap<CacheKey, usize> = planned
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.row.key, i))
+        .collect();
 
     // Slot i holds row i's accepted (payload, entry); the first acceptable
     // offer for a row takes it.
@@ -299,8 +312,10 @@ pub fn import_entries(
         .collect();
     let modules = ModuleQnames::plan(&co.files);
     let (checks, _threads) = crate::parallel::par_map_ordered(&sample, |&i| {
-        let offered = taken[i].as_ref().map_or(&[][..], |(payload, _)| payload.as_slice());
-        verify_one(&planned[i], offered, co.repo, &co.go, &modules)
+        let offered = taken[i]
+            .as_ref()
+            .map_or(&[][..], |(payload, _)| payload.as_slice());
+        verify_one(&planned[i], offered, &co, &modules)
     });
     // Sample in path order, so the error names the first mismatching path.
     checks.into_iter().collect::<Result<Vec<()>, String>>()?;
@@ -334,13 +349,13 @@ pub fn import_entries(
 fn verify_one(
     p: &Planned<'_>,
     offered: &[u8],
-    repo: RepoId,
-    go: &GoModules,
+    co: &Checkout,
     modules: &ModuleQnames,
 ) -> Result<(), String> {
     let path = &p.row.path;
+    let context = crate::extract::ParseContext::new(co.go.clone(), co.families.clone());
     let parse = match crate::parallel::quiet(|| {
-        parse_for_cache(p.source, path, p.row.lang, repo, go, modules)
+        parse_for_cache(p.source, path, p.row.lang, co.repo, &context, modules)
     }) {
         Ok(Ok((parse, _stats))) => parse,
         Ok(Err(e)) => {
@@ -450,7 +465,10 @@ mod tests {
         for _ in 0..2000 {
             let s = sample_indices(10, 3, &mut rng);
             assert_eq!(s.len(), 3);
-            assert!(s.windows(2).all(|w| w[0] < w[1]), "{s:?} not sorted and distinct");
+            assert!(
+                s.windows(2).all(|w| w[0] < w[1]),
+                "{s:?} not sorted and distinct"
+            );
             for i in s {
                 seen[i] += 1;
             }

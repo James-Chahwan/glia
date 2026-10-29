@@ -11,6 +11,7 @@ use clap::Subcommand;
 mod gaps;
 mod history;
 mod overlay;
+mod plugin_families;
 mod scip;
 mod tests;
 
@@ -40,6 +41,13 @@ pub(crate) enum InputsCmd {
     /// into .glia/overlay.toml, or removes rules by gap id, after validating
     /// the result. Only accept writes, and only that file.
     Overlay(overlay::Args),
+    /// Plugin family declaration (lua-support): `plugin-families <repo>`
+    /// writes `.glia/plugin_families.toml`, the file the build's runtime
+    /// discovery reads first (a declared family beats an inferred one). The
+    /// written file is the seed architectures as editable `[[plugin_family]]`
+    /// tables. The only writer of the file; a build never creates it. Exits 2
+    /// when the repo is missing or the file exists without `--force`.
+    PluginFamilies(plugin_families::Args),
     /// SCIP index snapshot (CE-1): decode a compiler-grade SCIP index
     /// (scip-python, scip-typescript, scip-java, scip-go, rust-analyzer scip)
     /// and write `<repo>/.glia/scip-snapshot/`, which the next build ingests
@@ -55,6 +63,7 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::History(a) => history::run(a),
         InputsCmd::Tests(a) => tests::run(a),
         InputsCmd::Overlay(a) => overlay::run(a),
+        InputsCmd::PluginFamilies(a) => plugin_families::run(a),
         InputsCmd::Scip(a) => scip::run(a),
     }
 }

@@ -106,7 +106,8 @@ fn inbound_handler_kinds_are_entrypoints() {
 fn entry_kinds_matches_profile() {
     let kinds = entry_kinds();
     let ids: Vec<u32> = kinds.iter().map(|(k, _)| k.0).collect();
-    assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28]);
+    // L3 (lua-support): PLUGIN_TOOL (50) joins the entry kinds.
+    assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28, 50]);
     let table: Vec<NodeKindId> = CODE_PROFILE.tables.entry.kinds.to_vec();
     assert_eq!(kinds.iter().map(|(k, _)| *k).collect::<Vec<_>>(), table);
     for (k, name) in &kinds {
