@@ -46,3 +46,11 @@ rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
 - The DPG explainer's future directions (LLM uplift of new graph features, biology-inspired ideas; 2026-10-24): only in
   a chat paste so far; commit it as docs/dpg.md.
 - Close-out speed: per-step timestamps, then a faster rank gate (about 14 of a close-out's ~20 minutes).
+
+## 5. From 0.5.4's W20 follow-ups (James 2026-10-30: the precision extensions move here)
+
+- Clients reached through class heritage: `this.get(url)` in a class extending an imported `APIService` / `HttpService` (the bulk of the remaining phantom_dropped: plane 43, chatwoot 128; FH.17b's handoff).
+- TS type references imported from another file (`import { Dto } from './types'; http.get<Dto>()`) as USES through import bindings, and abstract method signatures' type names (FH.20's handoff).
+- A NestJS verb decorator that shares its line with another decorator (`@UseGuards(X) @Get('a') foo()`) mints no ROUTE (FH.19's handoff).
+- gin-vue-admin: 131 of 196 endpoints pair; the 65 unpaired look like Go router-group prefixes not folded into the route path (checked 2026-10-30).
+- Dropped: a `nest_handler` rule name on Nest HANDLED_BY edges (cosmetic; the binding works through graph:refs).

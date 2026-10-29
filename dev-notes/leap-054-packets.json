@@ -8339,6 +8339,7 @@
     "FH.11c",
     "FH.12",
     "FH.13",
+    "FH.13b",
     "FH.14",
     "FH.14b",
     "FH.15",
@@ -8351,6 +8352,7 @@
     "FH.1a",
     "FH.1b",
     "FH.1c",
+    "FH.1d",
     "FH.20",
     "FH.2a",
     "FH.2b",
@@ -8367,6 +8369,7 @@
     "FH.8",
     "FH.8b",
     "FH.8c",
+    "FH.8d",
     "FH.9"
    ],
    "risks": "Runs after the last follow-up wave (seed \u00a74: followups finish inside 0.5.4; the release docs packet runs last). Large prose diff: write per section and keep 0.5.3's text. The version bump is NOT this packet: it is the release step after FZ (James's rule).",
@@ -8479,6 +8482,7 @@
     "FH.11c",
     "FH.12",
     "FH.13",
+    "FH.13b",
     "FH.14",
     "FH.14b",
     "FH.15",
@@ -8491,6 +8495,7 @@
     "FH.1a",
     "FH.1b",
     "FH.1c",
+    "FH.1d",
     "FH.20",
     "FH.2a",
     "FH.2b",
@@ -8507,6 +8512,7 @@
     "FH.8",
     "FH.8b",
     "FH.8c",
+    "FH.8d",
     "FH.9"
    ],
    "risks": "Written after the last follow-up wave from landed results, never from packet text. The Engram ask (dev-notes/engram-ask-0.5.4.md) is James's to send: the handoff references it and changes nothing in it. Never write under another repo.",
@@ -10105,6 +10111,117 @@
     "FH.11b"
    ],
    "risks": "The cohort gate's Sibyl cells grow: the release's full check rebaselines them (a corpus change is drift, exit 2, so the release close-out runs `cohort-gate.sh baseline` once, declared).",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.8d",
+   "title": "Compact answers, part 4: review's default answer fits - name_breaks and tests capped like impact (25, counted, `--full` keeps all), and a folded name row (FH.7d) renders its client_sites / client_files / sample files in the CLI table and review markdown",
+   "area": "FH cockpit: compact answers",
+   "loc": 350,
+   "rationale": "FH.8c (w20): photoprism's default review JSON is still 288 KB, almost all name_breaks (223,907 B, uncapped) and tests (42,713 B, max_tests 50); the overview default was meant to fit an agent's tool output. FH.7d (w20): a folded name row stands for N client sites, but cli/src/cmd/change/contract_breaks.rs name_row / print_names and engine/src/review.rs name_breaks_md print it as one line at its first site with position `folded` and no counts.",
+   "entry_points": [
+    "engine/src/review.rs (ReviewArgs max_impact / max_tests, name_breaks_md)",
+    "cli/src/cmd/change/contract_breaks.rs name_row / print_names"
+   ],
+   "files_touched": [
+    "engine/src/review.rs",
+    "cli/src/cmd/change/contract_breaks.rs",
+    "cli/src/cmd/change/review.rs",
+    "cli/surface/review.txt",
+    "py/src/review.rs",
+    "py/api_surface/review.txt",
+    "py/tests/surface/test_review.py"
+   ],
+   "implementation": "1. ReviewArgs gains max_names (default 25, `--full` / full=True: all); review JSON keeps the first max_names name_breaks (folded rows first, then by tier, file, line) with `counts.name_breaks` uncut and `name_breaks_truncated` counting the rest; max_tests default 50 -> 25.\n2. A folded name row renders `<N> sites in <M> files (e.g. a, b, c)` in place of `file:line` in the CLI names table and review's `### Name breaks (advisory)`.\n3. Measure photoprism fd8448's default review --json bytes before / after.",
+   "fixtures": [],
+   "acceptance": "photoprism fd8448's default review --json is under 64 KB with name_breaks_truncated set; --full is byte-identical to the pre-packet default plus nothing cut; a folded row shows its counts in both renderers (tests); review's blocking result unchanged; CLI / pyo3 surfaces regenerated.",
+   "fired_on_marker": "[answer-size] surface=review .. names=<n> names_shown=<k> tests_shown=<t> bytes=<b>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output"
+    ],
+    "what_changes": "review default: name_breaks capped at 25 with name_breaks_truncated, tests 50 -> 25; folded name rows render counts",
+    "in_repo_consumers": [
+     "bench/cohort/cohort.py (reads review files_named: pass --full)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph review readers"
+    ]
+   },
+   "depends_on": [
+    "FH.8c",
+    "FH.7d"
+   ],
+   "risks": "An agent wanting every name row passes --full; the truncation count says so.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.1d",
+   "title": "The cohort runner credits folded name rows: a folded row's sample_files count toward truth_named, and review is read with --full so the cohort's numbers do not move with the default caps",
+   "area": "FH cohort",
+   "loc": 60,
+   "rationale": "FH.7d (w20): a folded name row names its sample_files, not one `file`, so cohort.py's files_in misses them; FH.8c / FH.8d cap review's default lists, so the runner's review files_named would shrink with defaults rather than with glia's reach (the diff-impact calls already pass --top-k 200, 2f8c6107).",
+   "entry_points": [
+    "bench/cohort/cohort.py gate_state / files_in"
+   ],
+   "files_touched": [
+    "bench/cohort/cohort.py",
+    "bench/cohort/test_cohort.py"
+   ],
+   "implementation": "1. files_in reads a row's sample_files (when present) beside its file.\n2. gate_state's review call passes --full.\n3. A test for a folded row and for the --full flag on review.",
+   "fixtures": [],
+   "acceptance": "test_cohort.py passes with the new cases; the fast tier (`scripts/cohort-gate.sh check --only <COHORT_FAST>`) reads 0 drops.",
+   "fired_on_marker": "[cohort] task <id> .. cb_names=<n> (folded sample files counted)",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.1c",
+    "FH.7d"
+   ],
+   "risks": "Counting sample files can only add truth-named files; the gate counts pass -> non-pass only.",
+   "batch": "FH",
+   "spec_group": "FH"
+  },
+  {
+   "id": "FH.13b",
+   "title": "Agent probes, part 2: score.py carries the g054 arm's pairs (g054 vs none, g054 vs g053) and `score <run_id>` scores only the run's pinned task files, as run.py report does",
+   "area": "FH agent probes",
+   "loc": 120,
+   "rationale": "FH.13 (w20): score.PAIRS lists only g052 / g053 pairs, so score.py's own baseline.json never carries the g054 arm FH.13 added, and `score <run_id>` reads every repo instead of the run's pinned tasks. The measured runs themselves wait for James (a `claude setup-token` token, ruling FE-3); this packet makes the scorer ready for them.",
+   "entry_points": [
+    "bench/agent-ab/score.py PAIRS"
+   ],
+   "files_touched": [
+    "bench/agent-ab/score.py",
+    "bench/agent-ab/test_score.py"
+   ],
+   "implementation": "1. PAIRS gains (\"g054\",\"none\") and (\"g054\",\"g053\").\n2. `score <run_id>` filters repos / tasks to the run's pinned task files (the same list run.py report reads).\n3. Tests for both; no measured run here.",
+   "fixtures": [],
+   "acceptance": "test_score.py passes with g054 pairs and the filter; `python3 score.py --help` unchanged otherwise.",
+   "fired_on_marker": "[agent-ab] score sessions=<n> .. pairs=g054-none,g054-g053,..",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench tooling",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.13"
+   ],
+   "risks": "none beyond the scorer's own tests.",
    "batch": "FH",
    "spec_group": "FH"
   }
