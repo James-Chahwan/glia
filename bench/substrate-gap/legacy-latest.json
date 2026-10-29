@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 443,
+  "fixtures": 444,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1609,6 +1609,13 @@
       "language": "typescript",
       "per_category": {
         "DOCUMENTS": 1.0
+      }
+    },
+    "nest-handled-by": {
+      "framework": "nest-handled-by",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "openapi-pact-fields": {

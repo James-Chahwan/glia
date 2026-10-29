@@ -9537,6 +9537,7 @@
     "fixtures/nav-vue-links",
     "fixtures/nest-enum-prefix",
     "fixtures/nest-enum-prefix-openapi",
+    "fixtures/nest-handled-by",
     "fixtures/openapi-pact-fields",
     "fixtures/overlay-declared-cells",
     "fixtures/overlay-entrypoints",
