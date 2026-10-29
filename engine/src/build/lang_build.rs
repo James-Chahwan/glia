@@ -1128,8 +1128,11 @@ pub(super) fn resolve_ts_source_aliased(
 
 /// FH.16: the bundler configs read beside a project dir's `package.json`,
 /// in read order: a dir with both a webpack and a vite config merges them in
-/// this order.
-pub(crate) const BUNDLER_CONFIGS: [&str; 7] = [
+/// this order. FH.16b: a `vitest.config.*` is read last, by the vite reader
+/// ([`is_vite_config`]); an alias key a webpack or vite config already
+/// declared stays theirs ([`BundlerScope::read`]). `vitest.workspace.*` is
+/// not read.
+pub(crate) const BUNDLER_CONFIGS: [&str; 12] = [
     "webpack.config.js",
     "webpack.config.cjs",
     "webpack.config.mjs",
@@ -1137,7 +1140,23 @@ pub(crate) const BUNDLER_CONFIGS: [&str; 7] = [
     "vite.config.js",
     "vite.config.ts",
     "vite.config.mjs",
+    "vitest.config.js",
+    "vitest.config.ts",
+    "vitest.config.mjs",
+    "vitest.config.cjs",
+    "vitest.config.mts",
 ];
+
+/// FH.16b: `file` (a [`BUNDLER_CONFIGS`] name) is read as a vite config: a
+/// vite or a vitest one.
+fn is_vite_config(file: &str) -> bool {
+    file.starts_with("vite.") || is_vitest_config(file)
+}
+
+/// FH.16b: `file` (a [`BUNDLER_CONFIGS`] name) is a `vitest.config.*`.
+fn is_vitest_config(file: &str) -> bool {
+    file.starts_with("vitest.")
+}
 
 /// FH.16: `base` (a file name) is a bundler config [`TsAliasSet::read`]
 /// reads, so a watch session re-plans when one changes
@@ -1201,7 +1220,7 @@ impl BundlerScope {
             let Ok(text) = std::fs::read_to_string(base.join(file)) else {
                 continue;
             };
-            let read = read_bundler_config(&text, dir, file.starts_with("vite."));
+            let read = read_bundler_config(&text, dir, is_vite_config(file));
             let shown = if dir.is_empty() {
                 file.to_string()
             } else {
@@ -1214,6 +1233,12 @@ impl BundlerScope {
                 read.skipped
             );
             for alias in read.aliases {
+                // FH.16b: vitest's config usually spreads the vite one's
+                // aliases; where both declare a key, the earlier config's
+                // entry stands.
+                if is_vitest_config(file) && scope.aliases.iter().any(|a| a.key == alias.key) {
+                    continue;
+                }
                 scope.keys.push(alias.key.clone());
                 if !alias.exact {
                     scope.keys.push(format!("{}/*", alias.key));
@@ -3247,7 +3272,37 @@ module.exports = config;
         );
         let keys: Vec<&str> = set.keys().collect();
         assert_eq!(keys, ["common/api", "common"]);
-        assert!(is_bundler_config("vite.config.ts") && !is_bundler_config("vitest.config.js"));
+        assert!(is_bundler_config("vite.config.ts") && is_bundler_config("vitest.config.js"));
+        assert!(!is_bundler_config("vitest.workspace.ts"));
+    }
+
+    /// FH.16b: a `vitest.config.*` is a vite-read bundler config. An alias
+    /// declared only there binds; a key both declare binds through the vite
+    /// config's target (vitest's usually spreads it).
+    #[test]
+    fn vitest_config_aliases_bind_and_vite_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(root, "package.json", "{\"name\":\"web\"}");
+        write(
+            root,
+            "vite.config.ts",
+            "import { defineConfig } from 'vite'\nimport path from 'path'\nexport default defineConfig({ resolve: { alias: { '@': path.resolve(__dirname, './src') } } })\n",
+        );
+        write(
+            root,
+            "vitest.config.ts",
+            "import { defineConfig } from 'vitest/config'\nimport { fileURLToPath } from 'node:url'\nexport default defineConfig({\n  resolve: {\n    alias: [\n      { find: '@', replacement: fileURLToPath(new URL('./test-src', import.meta.url)) },\n      { find: '~test', replacement: '/tests/helpers' },\n    ],\n  },\n  test: { environment: 'jsdom' },\n})\n",
+        );
+        let roots = [ProjectRoot::new(String::new(), "npm", "package.json", None)];
+        let set = TsAliasSet::read(root, &roots, "fx");
+        let r = |spec: &str| resolve_ts_source_aliased("src::page", spec, &set);
+        // Declared only in vitest.config.ts.
+        assert_eq!(r("~test/render").as_deref(), Some("tests::helpers::render"));
+        // Declared in both: the vite target.
+        assert_eq!(r("@/lib/api").as_deref(), Some("src::lib::api"));
+        let keys: Vec<&str> = set.keys().collect();
+        assert_eq!(keys, ["@", "@/*", "~test", "~test/*"]);
     }
 
     /// The fixture end to end through the TS-family build: the IMPORTS edge

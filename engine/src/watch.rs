@@ -163,8 +163,9 @@ pub enum Durability {
 /// - `gitignore`: any `.gitignore`;
 /// - `go_mod`: any `go.mod` (the module set, so the parse cache's context);
 /// - `tsconfig`: `tsconfig.json` / `tsconfig.base.json` (the TS path aliases);
-/// - `bundler`: a webpack / vite config (`webpack.config.{js,cjs,mjs,ts}`,
-///   `vite.config.{js,ts,mjs}`: the bundler aliases and module roots, FH.16);
+/// - `bundler`: a webpack / vite / vitest config (`webpack.config.{js,cjs,mjs,ts}`,
+///   `vite.config.{js,ts,mjs}`, `vitest.config.{js,ts,mjs,cjs,mts}`: the
+///   bundler aliases and module roots, FH.16, FH.16b);
 /// - `include_roots`: `CMakeLists.txt` / `compile_commands.json`;
 /// - `manifest`: a project-root manifest (a [`project_roots::MANIFESTS`] name,
 ///   `build.sbt` and `requirements.txt` included, or a
@@ -2471,6 +2472,8 @@ mod tests {
             ("webpack.config.js", "bundler"),
             ("frontend/webpack.config.ts", "bundler"),
             ("web/vite.config.mjs", "bundler"),
+            ("vitest.config.js", "bundler"),
+            ("web/vitest.config.mts", "bundler"),
             ("CMakeLists.txt", "include_roots"),
             ("build/compile_commands.json", "include_roots"),
             ("package.json", "manifest"),
@@ -2499,7 +2502,8 @@ mod tests {
             ".glia/vocab-snapshot/terms.jsonl",
             "report.sql",
             "src/webpack.config.helper.js",
-            "vitest.config.js",
+            "vitest.workspace.ts",
+            "web/vitest.setup.ts",
         ] {
             assert_eq!(durability(rel), Durability::Low, "{rel}");
         }
