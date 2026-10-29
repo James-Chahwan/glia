@@ -45,6 +45,7 @@ members = [
     "parsers/code/elixir",
     "parsers/code/solidity",
     "parsers/code/terraform",
+    "parsers/code/lua",
     "parsers/code/react",
     "parsers/code/angular",
     "parsers/code/vue",

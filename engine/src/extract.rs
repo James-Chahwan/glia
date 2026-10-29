@@ -3,13 +3,51 @@
 
 use std::path::Path;
 
-use glia_code_domain::{CodeNav, FileParse, NavFact, edge_category, evidence, node_kind};
+use glia_code_domain::{
+    CodeNav, FileParse, NavFact, edge_category, evidence, node_kind,
+    plugin_families::PluginFamilies,
+};
 use glia_core::{NodeId, RepoId};
 
 /// The repo's `go.mod` set (LA.13), what [`parse_one_with_go_modules`] maps
 /// Go imports through. Re-exported so a caller can build one
 /// (`GoModules::from_entries`) without depending on the Go parser crate.
 pub use glia_parser_go::GoModules;
+
+/// Everything a parse reads beyond the file itself: the repo's go.mod module
+/// set (LA.13) and its plugin families (lua-support). One value threaded
+/// through the route so a parser gains a context by adding a field, never a
+/// parameter; `context_key` is what a parse cache keys its entries by.
+#[derive(Debug, Clone, Default)]
+pub struct ParseContext {
+    pub go: GoModules,
+    pub plugin_families: PluginFamilies,
+    /// Private: the context grows by adding fields, never by a caller
+    /// constructing it — `new` / `default` are the constructors, so a new
+    /// context input cannot break one.
+    _sealed: (),
+}
+
+impl ParseContext {
+    pub fn new(go: GoModules, plugin_families: PluginFamilies) -> Self {
+        Self {
+            go,
+            plugin_families,
+            _sealed: (),
+        }
+    }
+
+    /// The context a parse cache keys its entries by: the go.mod module-set
+    /// key plus the plugin-family fingerprint, both of which shape what a
+    /// parse mints without moving any file's content hash.
+    pub fn context_key(&self) -> String {
+        format!(
+            "go={};plugin_families={}",
+            self.go.context_key(),
+            self.plugin_families.context_key()
+        )
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Language detection + per-language parser dispatch
@@ -50,6 +88,9 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "ex" | "exs" => Some("elixir"),
         "sol" => Some("solidity"),
         "tf" | "hcl" => Some("terraform"),
+        // L1 (lua-support): Lua — application plugins (maki) and embedded-host
+        // scripts. The walk admits `.lua` through this arm.
+        "lua" => Some("lua"),
         "proto" => Some("proto"),
         // A10.4: a standalone GraphQL schema. Routed to the SDL resolver scan
         // in `route.rs`, never to a language parser. CB.1: `.graphqls` is the
@@ -85,12 +126,7 @@ pub(crate) fn build_group(lang: &'static str) -> &'static str {
 /// Parse a single file with the appropriate language parser. Public so the
 /// pyo3 wrapper's `parse_file_to_json` can call directly without going
 /// through the full repo-walk pipeline.
-pub fn parse_one(
-    source: &str,
-    path: &str,
-    lang: &str,
-    repo: RepoId,
-) -> Result<FileParse, String> {
+pub fn parse_one(source: &str, path: &str, lang: &str, repo: RepoId) -> Result<FileParse, String> {
     parse_one_with(source, path, lang, repo, "")
 }
 
@@ -106,7 +142,16 @@ pub fn parse_one_with(
     repo: RepoId,
     go_module_prefix: &str,
 ) -> Result<FileParse, String> {
-    parse_one_with_go_modules(source, path, lang, repo, &GoModules::root_only(go_module_prefix))
+    parse_one_with_context(
+        source,
+        path,
+        lang,
+        repo,
+        &ParseContext::new(
+            GoModules::root_only(go_module_prefix),
+            PluginFamilies::default(),
+        ),
+    )
 }
 
 /// Like [`parse_one_with`] under every `go.mod` of the repo (LA.13): a Go
@@ -120,6 +165,22 @@ pub fn parse_one_with_go_modules(
     repo: RepoId,
     go: &GoModules,
 ) -> Result<FileParse, String> {
+    parse_one_with_context(
+        source,
+        path,
+        lang,
+        repo,
+        &ParseContext::new(go.clone(), PluginFamilies::default()),
+    )
+}
+
+pub(crate) fn parse_one_with_context(
+    source: &str,
+    path: &str,
+    lang: &str,
+    repo: RepoId,
+    context: &ParseContext,
+) -> Result<FileParse, String> {
     // LB.10a: every C/C++ MODULE is named by its full file name, so a
     // single-file parse names it exactly as the repo build does.
     let module_qname = if lang == "c_cpp" {
@@ -127,7 +188,15 @@ pub fn parse_one_with_go_modules(
     } else {
         path_to_qname(path)
     };
-    parse_one_as(source, path, lang, repo, go, &module_qname)
+    parse_one_as(
+        source,
+        path,
+        lang,
+        repo,
+        &context.go,
+        &module_qname,
+        &context.plugin_families,
+    )
 }
 
 /// [`parse_one_with`] under an explicit MODULE qname. The router passes the
@@ -142,6 +211,7 @@ pub(crate) fn parse_one_as(
     repo: RepoId,
     go: &GoModules,
     module_qname: &str,
+    plugin_families: &PluginFamilies,
 ) -> Result<FileParse, String> {
     let module_qname = module_qname.to_string();
     match lang {
@@ -149,8 +219,10 @@ pub(crate) fn parse_one_as(
             .map_err(|e| e.to_string()),
         "go" => glia_parser_go::parse_file_with_modules(source, path, &module_qname, go, repo)
             .map_err(|e| e.to_string()),
-        "typescript" | "js" => glia_parser_typescript::parse_file(source, path, &module_qname, repo)
-            .map_err(|e| e.to_string()),
+        "typescript" | "js" => {
+            glia_parser_typescript::parse_file(source, path, &module_qname, repo)
+                .map_err(|e| e.to_string())
+        }
         "rust" => glia_parser_rust::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "java" => glia_parser_java::parse_file(source, path, &module_qname, repo)
@@ -184,6 +256,9 @@ pub(crate) fn parse_one_as(
         "solidity" => glia_parser_solidity::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "terraform" => glia_parser_terraform::parse_file(source, path, &module_qname, repo)
+            .map_err(|e| e.to_string()),
+        // L1 (lua-support): the plugin-host bridge's parser half.
+        "lua" => glia_parser_lua::parse_file(source, path, &module_qname, repo, plugin_families)
             .map_err(|e| e.to_string()),
         "react" => glia_parser_react::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
@@ -329,11 +404,21 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(websocket::extract_ws_client_nodes(
         source, path, module_id, repo
     ));
-    run_marked!(eventbus::extract_event_emitter_nodes(source, path, module_id, repo));
-    run_marked!(eventbus::extract_event_handler_nodes(source, path, module_id, repo));
-    run_marked!(graphql::extract_graphql_operation_nodes(source, path, module_id, repo));
-    run_marked!(graphql::extract_graphql_resolver_nodes(source, lang, module_id, repo));
-    run_marked!(grpc::extract_grpc_client_nodes(source, path, module_id, repo));
+    run_marked!(eventbus::extract_event_emitter_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(eventbus::extract_event_handler_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(graphql::extract_graphql_operation_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(graphql::extract_graphql_resolver_nodes(
+        source, lang, module_id, repo
+    ));
+    run_marked!(grpc::extract_grpc_client_nodes(
+        source, path, module_id, repo
+    ));
     // DT.10c: EVM contract clients (ethers `new Contract(addr, ABI, runner)`
     // calls and `.on` / `.once` subscriptions) as RPC_CALL `evm_call:..` /
     // EVENT_HANDLER `evm_event:..` markers, anchored by the A5.8 pass below
@@ -349,11 +434,14 @@ pub(crate) fn apply_cross_cutting_extractors(
     // extractor's own facts, the CB.24 note below); cached with the parse, and
     // the post-cache join (build/evm_abi.rs) fills the cells that import them.
     for (name, entries) in std::mem::take(&mut evm.abi_decls) {
-        let mut entries: Vec<String> =
-            entries.iter().map(glia_code_domain::evm::AbiEntry::to_key).collect();
+        let mut entries: Vec<String> = entries
+            .iter()
+            .map(glia_code_domain::evm::AbiEntry::to_key)
+            .collect();
         entries.sort();
         entries.dedup();
-        fp.nav.record_fact(module_id, NavFact::EvmAbi { name, entries });
+        fp.nav
+            .record_fact(module_id, NavFact::EvmAbi { name, entries });
     }
     run_marked!(evm);
     run_with_edges!(
@@ -470,7 +558,14 @@ pub(crate) fn apply_cross_cutting_extractors(
             ("rpc", trpc::trpc_client_hosts(source)),
         ] {
             for (host, line) in hosts {
-                fp.nav.record_fact(module_id, NavFact::ClientHost { via: via.into(), host, line });
+                fp.nav.record_fact(
+                    module_id,
+                    NavFact::ClientHost {
+                        via: via.into(),
+                        host,
+                        line,
+                    },
+                );
             }
         }
         // DT.11b: a GraphQL client's transport is an HTTP call, so each
@@ -532,7 +627,10 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(react::extract_react_nodes(
-            source, &module_qname, module_id, repo
+            source,
+            &module_qname,
+            module_id,
+            repo
         ));
     }
     if matches!(lang, "angular" | "typescript") {
@@ -543,7 +641,10 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(angular::extract_angular_nodes(
-            source, &module_qname, module_id, repo
+            source,
+            &module_qname,
+            module_id,
+            repo
         ));
         // DT.5a: an inline `template:` / `host:` binding that calls or reads
         // a METHOD of its own component is a CALLS / USES from the CLASS, at
@@ -554,14 +655,8 @@ pub(crate) fn apply_cross_cutting_extractors(
         // a member (`theme.toggle()`) is a receiver CallSite from the CLASS,
         // bound by the graph through the member's declared type, and a
         // decorator-bound member (`@HostListener`, `@Input() set ..`) a USES.
-        let mut out = angular_template::bind_inline(
-            source,
-            path,
-            &fp.nodes,
-            &fp.nav,
-            &module_qname,
-            repo,
-        );
+        let mut out =
+            angular_template::bind_inline(source, path, &fp.nodes, &fp.nav, &module_qname, repo);
         evidence::stamp_missing(&mut out.edges, angular_template::EMITTER);
         fp.edges.extend(out.edges);
         fp.calls.extend(out.call_sites);
@@ -574,7 +669,11 @@ pub(crate) fn apply_cross_cutting_extractors(
             .cloned()
             .unwrap_or_default();
         run!(vue::extract_vue_nodes(
-            source, path, &module_qname, module_id, repo
+            source,
+            path,
+            &module_qname,
+            module_id,
+            repo
         ));
     }
 
@@ -718,6 +817,23 @@ pub(crate) fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     dst.parent_of.extend(src.parent_of);
     for (k, v) in src.children_of {
         dst.children_of.entry(k).or_default().extend(v);
+    }
+    // The per-scope NavFacts ride every merge too (the graph crate's
+    // `append_facts` semantics: a fact already present is not repeated). The
+    // plugin manifest's `NavFact::PluginManifest` (lua-support) is what
+    // `resolver:plugin`'s `manifest_literal` census reads; a synthetic branch
+    // that records a fact must not lose it in the route's own merge.
+    for (k, v) in src.nav_facts {
+        let list = dst.nav_facts.entry(k).or_default();
+        if list.is_empty() {
+            *list = v;
+        } else {
+            for f in v {
+                if !list.contains(&f) {
+                    list.push(f);
+                }
+            }
+        }
     }
 }
 

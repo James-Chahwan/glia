@@ -488,6 +488,7 @@ dependencies = [
  "glia-parser-go",
  "glia-parser-java",
  "glia-parser-kotlin",
+ "glia-parser-lua",
  "glia-parser-php",
  "glia-parser-python",
  "glia-parser-react",
@@ -649,6 +650,16 @@ dependencies = [
  "serde_json",
  "tree-sitter",
  "tree-sitter-kotlin-ng",
+]
+
+[[package]]
+name = "glia-parser-lua"
+version = "0.5.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "tree-sitter",
+ "tree-sitter-lua",
 ]
 
 [[package]]
@@ -1874,6 +1885,16 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-lua"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-php"

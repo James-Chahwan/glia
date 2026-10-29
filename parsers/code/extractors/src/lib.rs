@@ -18,6 +18,10 @@ pub mod nav_routes;
 pub mod next_pages;
 pub mod openapi_annot;
 pub mod packages;
+
+/// The plugin-manifest extractor: one PLUGIN node per routed `<dir>/plugin.toml`.
+/// (L2, lua-support)
+pub mod plugin_manifest;
 pub mod prisma;
 pub mod eventbus;
 pub mod generated;

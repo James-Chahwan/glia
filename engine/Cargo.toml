@@ -36,6 +36,8 @@ glia-parser-dart = { path = "../parsers/code/dart" }
 glia-parser-elixir = { path = "../parsers/code/elixir" }
 glia-parser-solidity = { path = "../parsers/code/solidity" }
 glia-parser-terraform = { path = "../parsers/code/terraform" }
+# L1 (LUA-SUPPORT): the Lua parser and the plugin-host bridge it feeds.
+glia-parser-lua = { path = "../parsers/code/lua" }
 glia-parser-react = { path = "../parsers/code/react" }
 glia-parser-angular = { path = "../parsers/code/angular" }
 glia-parser-vue = { path = "../parsers/code/vue" }

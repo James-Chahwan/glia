@@ -41,7 +41,7 @@ pub(crate) type WalkResult = (
     Vec<(String, String)>, // source files to parse
     Vec<RegionAnchor>,     // collapsed build/vendor regions
     Vec<(String, String)>, // markdown docs (rel_path, text) — G18
-    Vec<ProjectRoot>,      // manifest-rooted and declared sub-projects, sorted by rel_path — A8.4, LF.3a
+    Vec<ProjectRoot>, // manifest-rooted and declared sub-projects, sorted by rel_path — A8.4, LF.3a
 );
 
 /// The engine's own output directories: the layout `<root>/.glia/graph`
@@ -132,7 +132,10 @@ pub(crate) enum Read {
     Md(String),
     /// A sniffed `.json`: `over_cap` when it was never read, `admitted` its
     /// text when it is an API contract, a JSON Schema or a .NET settings file.
-    Json { over_cap: bool, admitted: Option<String> },
+    Json {
+        over_cap: bool,
+        admitted: Option<String>,
+    },
     Src(String),
     /// Nothing to keep: a read failed, or a doc fell through to no rule.
     Unreadable,
@@ -211,7 +214,10 @@ impl FileStamp {
     /// permission). Follows symlinks, like the read.
     pub(crate) fn of(path: &Path) -> Option<Self> {
         let m = std::fs::metadata(path).ok()?;
-        Some(Self { len: m.len(), mtime: m.modified().ok() })
+        Some(Self {
+            len: m.len(),
+            mtime: m.modified().ok(),
+        })
     }
 }
 
@@ -316,7 +322,9 @@ pub(crate) fn plan_walk(root: &Path) -> WalkPlan {
     // the store loads the same file through `IgnoreStack::for_repo`, so a user
     // skip gates the freshness scan exactly as it gates this walk. User config
     // is config, not inference: `--no-overlay` never switches it off.
-    let config = glia_config::load(root).map(|l| l.config).unwrap_or_default();
+    let config = glia_config::load(root)
+        .map(|l| l.config)
+        .unwrap_or_default();
     // Per-directory `.gitignore` layers: pushed on the way down, popped on the
     // way back up, so each verdict sees exactly the files git would. (A8.2)
     let mut ignores = IgnoreStack::with_config(root, &config.walk);
@@ -334,7 +342,8 @@ pub(crate) fn plan_walk(root: &Path) -> WalkPlan {
         gitignores: Vec::new(),
     };
     let pushed = ignores.push_dir(root);
-    walk_dir(root, root, &mut ignores, &mut plan);
+    let manifests = glia_code_domain::plugin_families::walk_manifest_names(root);
+    walk_dir(root, root, &mut ignores, &mut plan, &manifests);
     if pushed {
         ignores.pop();
     }
@@ -422,7 +431,12 @@ pub(crate) fn read_walk(
         }
         Vec::new()
     };
-    let ReadFold { files, md, json, counts } = fold;
+    let ReadFold {
+        files,
+        md,
+        json,
+        counts,
+    } = fold;
     eprintln!(
         "[parallel] walk {}: read {} files on {threads} threads (md {}, json {}, source {})",
         root.display(),
@@ -449,10 +463,16 @@ pub(crate) fn read_walk(
     // A10.8 fired_on marker: `... 2>&1 | grep '^\[contract\] json sniffed='`.
     // Gated on non-zero like the other walk lines.
     if json.sniffed > 0 {
-        eprintln!("[contract] json sniffed={} admitted={}", json.sniffed, json.admitted);
+        eprintln!(
+            "[contract] json sniffed={} admitted={}",
+            json.sniffed, json.admitted
+        );
     }
     if json.over_cap > 0 {
-        eprintln!("[contract] json over_cap={} cap_bytes={JSON_CONTRACT_CAP}", json.over_cap);
+        eprintln!(
+            "[contract] json over_cap={} cap_bytes={JSON_CONTRACT_CAP}",
+            json.over_cap
+        );
     }
     // Explicit, although the name-sorted walk already discovers roots in a
     // stable order: A8.5's node order (and so shard bytes) keys on this Vec,
@@ -483,7 +503,10 @@ struct DeclaredDirs {
 impl DeclaredDirs {
     fn new(decls: &[Spanned<ProjectDecl>]) -> Self {
         Self {
-            wanted: decls.iter().map(|d| d.get_ref().rel_path().to_string()).collect(),
+            wanted: decls
+                .iter()
+                .map(|d| d.get_ref().rel_path().to_string())
+                .collect(),
             visited: BTreeSet::new(),
         }
     }
@@ -529,13 +552,17 @@ fn merge_declared_roots(
         let decl = decl.get_ref();
         let rel = decl.rel_path();
         if !declared.visited.contains(rel) {
-            eprintln!("[roots] declared root {rel} skipped: {}", missing_reason(rel, regions));
+            eprintln!(
+                "[roots] declared root {rel} skipped: {}",
+                missing_reason(rel, regions)
+            );
             n.missing += 1;
             continue;
         }
         let root = ProjectRoot::declared(rel.to_string(), decl.label.as_deref());
         if let Some(found) = roots.iter_mut().find(|r| r.rel_path == rel) {
-            let unnamed = [project_roots::LABEL_DIR, project_roots::LABEL_ROOT].contains(&found.label_source);
+            let unnamed =
+                [project_roots::LABEL_DIR, project_roots::LABEL_ROOT].contains(&found.label_source);
             if unnamed && root.label_source == project_roots::LABEL_DECLARED {
                 eprintln!(
                     "[roots] declared root {rel} labels {} manifest {}: {:?} over the directory label {:?}",
@@ -610,7 +637,11 @@ impl SbtMembers {
     fn declare(&mut self, dir_rel: &str, manifest: &str, text: &str) -> Vec<String> {
         let mut mine = Vec::new();
         for (dir, id) in project_roots::sbt_subprojects(text) {
-            let rel = if dir_rel.is_empty() { dir } else { format!("{dir_rel}/{dir}") };
+            let rel = if dir_rel.is_empty() {
+                dir
+            } else {
+                format!("{dir_rel}/{dir}")
+            };
             if self.wanted.contains_key(&rel) {
                 continue;
             }
@@ -644,7 +675,10 @@ impl SbtMembers {
         let mut missing = 0usize;
         for rel in mine {
             if self.wanted.remove(rel).is_some() {
-                self.lines.push(format!("[roots] sbt member {rel} skipped: {}", missing_reason(rel, regions)));
+                self.lines.push(format!(
+                    "[roots] sbt member {rel} skipped: {}",
+                    missing_reason(rel, regions)
+                ));
                 missing += 1;
             }
         }
@@ -660,11 +694,19 @@ impl SbtMembers {
 /// (VCS / editor metadata, glia's control dir, the engine's own output).
 fn missing_reason(rel: &str, regions: &[RegionAnchor]) -> String {
     let covering = regions.iter().find(|r| {
-        rel == r.rel_path || rel.strip_prefix(r.rel_path.as_str()).is_some_and(|t| t.starts_with('/'))
+        rel == r.rel_path
+            || rel
+                .strip_prefix(r.rel_path.as_str())
+                .is_some_and(|t| t.starts_with('/'))
     });
     match covering {
-        Some(r) => format!("inside region {} ({})", r.rel_path, r.provenance.provenance()),
-        None => "not a directory the walk reads (absent, a file, or under a skipped directory)".to_string(),
+        Some(r) => format!(
+            "inside region {} ({})",
+            r.rel_path,
+            r.provenance.provenance()
+        ),
+        None => "not a directory the walk reads (absent, a file, or under a skipped directory)"
+            .to_string(),
     }
 }
 
@@ -672,13 +714,25 @@ fn missing_reason(rel: &str, regions: &[RegionAnchor]) -> String {
 /// regions, record every entered directory, region root and `.gitignore`
 /// (DC.1), and queue every file a rule reads into `plan.pending` (LG.1b: the
 /// reads themselves run afterwards, in [`read_walk`]).
-fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkPlan) {
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    ignores: &mut IgnoreStack,
+    plan: &mut WalkPlan,
+    manifests: &[String],
+) {
     // Stat before the listing, as a file's stamp precedes its read: an entry
     // added after the stat moves the mtime past the recorded one, whether or
     // not the listing caught it.
     let mtime = mtime_of(dir);
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let dir_rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let dir_rel = dir
+        .strip_prefix(root)
+        .unwrap_or(dir)
+        .to_string_lossy()
+        .to_string();
     plan.declared.enter(&dir_rel);
     // Sort by name: read_dir yields filesystem/inode order, which leaked into
     // node/edge Vec order (and so shard bytes) — stable-ish on one machine,
@@ -709,22 +763,30 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
         }
         text
     })
-    .map(|(ecosystem, manifest, label)| ProjectRoot::new(dir_rel.clone(), ecosystem, &manifest, label));
+    .map(|(ecosystem, manifest, label)| {
+        ProjectRoot::new(dir_rel.clone(), ecosystem, &manifest, label)
+    });
     if let Some(root) = plan.sbt.enter(&dir_rel, own) {
         plan.roots.push(root);
     }
-    let sbt_members = names.iter().any(|n| n == project_roots::SBT_MANIFEST).then(|| {
-        let text = sbt_text
-            .take()
-            .unwrap_or_else(|| std::fs::read_to_string(dir.join(project_roots::SBT_MANIFEST)).unwrap_or_default());
-        let manifest = match dir_rel.as_str() {
-            "" => project_roots::SBT_MANIFEST.to_string(),
-            rel => format!("{rel}/{}", project_roots::SBT_MANIFEST),
-        };
-        let mine = plan.sbt.declare(&dir_rel, &manifest, &text);
-        (manifest, mine)
+    let sbt_members = names
+        .iter()
+        .any(|n| n == project_roots::SBT_MANIFEST)
+        .then(|| {
+            let text = sbt_text.take().unwrap_or_else(|| {
+                std::fs::read_to_string(dir.join(project_roots::SBT_MANIFEST)).unwrap_or_default()
+            });
+            let manifest = match dir_rel.as_str() {
+                "" => project_roots::SBT_MANIFEST.to_string(),
+                rel => format!("{rel}/{}", project_roots::SBT_MANIFEST),
+            };
+            let mine = plan.sbt.declare(&dir_rel, &manifest, &text);
+            (manifest, mine)
+        });
+    plan.dirs.push(WalkedDir {
+        rel: dir_rel,
+        mtime,
     });
-    plan.dirs.push(WalkedDir { rel: dir_rel, mtime });
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -751,7 +813,11 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
             );
             plan.counts.record(gate);
             if let Some(provenance) = gate.collapse() {
-                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
                 plan.region_dirs.push(WalkedDir {
                     rel: rel.clone(),
                     mtime: mtime_of(&path),
@@ -767,7 +833,7 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, plan);
+            walk_dir(root, &path, ignores, plan, manifests);
             if pushed {
                 ignores.pop();
             }
@@ -783,7 +849,8 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().to_string();
             let lower = rel_str.to_ascii_lowercase();
-            let source_rule = || detect_language(&rel_str).is_some() || is_bypass_path(&rel_str);
+            let source_rule =
+                || detect_language(&rel_str).is_some() || is_bypass_path(&rel_str, manifests);
             // Markdown docs (G18) — collected separately; the include/skip rules
             // are applied in `build_docs_graph`. An oversize or non-UTF-8 doc
             // falls through to the source rule (`PendingClass::Markdown`).
@@ -791,7 +858,11 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
                 let class = PendingClass::Markdown {
                     source_fallback: source_rule(),
                 };
-                plan.pending.push(Pending { rel: rel_str, abs: path, class });
+                plan.pending.push(Pending {
+                    rel: rel_str,
+                    abs: path,
+                    class,
+                });
                 continue;
             }
             // A10.8: a `.json` is read only to be sniffed, and queued only when
@@ -802,7 +873,7 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
             // `package.json` / `composer.json` are manifests (`is_bypass_path`)
             // and keep their own route below. Anything under a collapsed region
             // (node_modules, dist, ...) is never reached.
-            if lower.ends_with(".json") && !is_bypass_path(&rel_str) {
+            if lower.ends_with(".json") && !is_bypass_path(&rel_str, manifests) {
                 plan.pending.push(Pending {
                     rel: rel_str,
                     abs: path,
@@ -884,7 +955,10 @@ pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> glia
 /// repo root. An empty tail would be ambiguous. A walked relative path never
 /// contains `::`, so the locked separator never appears inside the qname. (A8.5)
 pub(crate) fn project_qname(rel_path: &str) -> String {
-    format!("project:{}", if rel_path.is_empty() { "." } else { rel_path })
+    format!(
+        "project:{}",
+        if rel_path.is_empty() { "." } else { rel_path }
+    )
 }
 
 /// Build one edge-less `PROJECT` node per detected [`ProjectRoot`] (A8.5). It
@@ -940,7 +1014,7 @@ pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> glia_g
     }
 }
 
-fn is_bypass_path(path: &str) -> bool {
+fn is_bypass_path(path: &str, plugin_manifests: &[String]) -> bool {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -951,6 +1025,16 @@ fn is_bypass_path(path: &str) -> bool {
     is_dockerfile_path(path)
         || is_dotenv_path(path)
         || is_angular_template_path(path)
+        // L2 (lua-support): a candidate plugin manifest of an embedded plugin
+        // family (`<dir>/plugin.toml`). The walk's admission is the union of
+        // what a family could name (declared manifests, else the seed table's),
+        // so it stays family-data-driven without reading the families itself;
+        // the route branch decides with the repo's actual families. Not in
+        // `packages::is_manifest_path` on purpose: the package machinery's
+        // dependency + declared-binary shape is the wrong one for it.
+        || plugin_manifests.iter().any(|m| {
+            path.rsplit('/').next().is_some_and(|base| base == m)
+        })
         || glia_code_extractors::packages::is_manifest_path(path)
         // A13.9: a migration `.sql` (Flyway name, `.up.sql`, `db/migrate/`,
         // `migrations/`). Any other `.sql` stays unread.
@@ -986,9 +1070,7 @@ fn is_component_template_sibling(path: &Path) -> bool {
 
 pub(crate) fn is_dockerfile_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    base == "dockerfile"
-        || base.ends_with(".dockerfile")
-        || base.starts_with("dockerfile.")
+    base == "dockerfile" || base.ends_with(".dockerfile") || base.starts_with("dockerfile.")
 }
 
 pub(crate) fn is_dotenv_path(path: &str) -> bool {
@@ -1020,10 +1102,21 @@ mod walk_tests {
     fn gitignore_matcher_semantics() {
         let root = std::env::temp_dir().join(format!("glia_gi_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for d in ["gen", "src/gen", "dist-x", "dist-keep", "src/generated", "notes/generated"] {
+        for d in [
+            "gen",
+            "src/gen",
+            "dist-x",
+            "dist-keep",
+            "src/generated",
+            "notes/generated",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        std::fs::write(root.join(".gitignore"), "/gen\ndist-*\n!dist-keep\n*.min.js\n").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "/gen\ndist-*\n!dist-keep\n*.min.js\n",
+        )
+        .unwrap();
         std::fs::write(root.join("src/.gitignore"), "generated/\n").unwrap();
         for f in [
             "app.js",
@@ -1054,14 +1147,21 @@ mod walk_tests {
         assert!(region_paths.contains(&"src/generated"), "{region_paths:?}");
         // ...and does not leak upward to a sibling tree.
         assert!(parsed.contains(&"notes/generated/n.py"), "{parsed:?}");
-        assert!(!region_paths.contains(&"notes/generated"), "{region_paths:?}");
+        assert!(
+            !region_paths.contains(&"notes/generated"),
+            "{region_paths:?}"
+        );
         // File-level: `*.min.js` drops the bundle beside the authored file.
         assert!(parsed.contains(&"app.js"), "{parsed:?}");
         assert!(!parsed.contains(&"vendor.min.js"), "{parsed:?}");
         // Exactly the four sources above, and gitignore-attributed regions only.
         assert_eq!(parsed.len(), 4, "{parsed:?}");
         assert_eq!(regions.len(), 3, "{region_paths:?}");
-        assert!(regions.iter().all(|r| r.provenance == Collapse::BuildOutput));
+        assert!(
+            regions
+                .iter()
+                .all(|r| r.provenance == Collapse::BuildOutput)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1077,12 +1177,20 @@ mod walk_tests {
         // authored source
         std::fs::write(root.join("src/app/a.ts"), "export class A {}").unwrap();
         // vendored dep (must NOT be parsed)
-        std::fs::write(root.join("node_modules/left-pad/index.js"), "module.exports=1").unwrap();
+        std::fs::write(
+            root.join("node_modules/left-pad/index.js"),
+            "module.exports=1",
+        )
+        .unwrap();
         // gitignored build mirror
         std::fs::write(root.join("www/main.abc12345def0.js"), "var a=1").unwrap();
         // capacitor bundle mirror NOT in .gitignore — caught by hash-chunk probe
         let pub_dir = root.join("android/app/src/main/assets/public");
-        for h in ["1624.4e9cc6119b4878fe", "1102.7837812dd7ed4d51", "2075.f756d5b13b56050a"] {
+        for h in [
+            "1624.4e9cc6119b4878fe",
+            "1102.7837812dd7ed4d51",
+            "2075.f756d5b13b56050a",
+        ] {
             std::fs::write(pub_dir.join(format!("{h}.js")), "var b=2").unwrap();
         }
 
@@ -1100,7 +1208,10 @@ mod walk_tests {
             "hash-chunk bundle mirror should collapse: {region_paths:?}"
         );
         // node_modules is vendored; the bundle mirrors are build_output.
-        let nm = regions.iter().find(|r| r.rel_path == "node_modules").unwrap();
+        let nm = regions
+            .iter()
+            .find(|r| r.rel_path == "node_modules")
+            .unwrap();
         assert_eq!(nm.provenance, Collapse::Vendored);
         let pub_region = regions
             .iter()
@@ -1133,15 +1244,20 @@ mod walk_tests {
             "internal sealed class PhantomAssemblyInfo {}",
         )
         .unwrap();
-        std::fs::write(root.join("bin/Debug/Api.g.cs"), "internal sealed class PhantomBinClass {}")
-            .unwrap();
+        std::fs::write(
+            root.join("bin/Debug/Api.g.cs"),
+            "internal sealed class PhantomBinClass {}",
+        )
+        .unwrap();
 
         let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // PRECISION: the generated C# never reaches a parser. grade.py has no
         // expect_absent_nodes, so this half of the fix is provable only here.
         assert!(
-            files.iter().all(|(p, _)| !p.starts_with("obj/") && !p.starts_with("bin/")),
+            files
+                .iter()
+                .all(|(p, _)| !p.starts_with("obj/") && !p.starts_with("bin/")),
             "generated .NET output must not be parsed: {files:?}"
         );
         assert!(files.iter().any(|(p, _)| p == "Program.cs"), "{files:?}");
@@ -1164,8 +1280,15 @@ mod walk_tests {
         let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // A Python repo's `bin/` of console scripts is authored source.
-        assert!(files.iter().any(|(p, _)| p == "bin/console_entry.py"), "{files:?}");
-        assert!(regions.is_empty(), "no project file => no collapse: {}", regions.len());
+        assert!(
+            files.iter().any(|(p, _)| p == "bin/console_entry.py"),
+            "{files:?}"
+        );
+        assert!(
+            regions.is_empty(),
+            "no project file => no collapse: {}",
+            regions.len()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1175,9 +1298,16 @@ mod walk_tests {
         std::fs::create_dir_all(root.join("app")).unwrap();
         std::fs::create_dir_all(root.join("libs/sdk")).unwrap();
         std::fs::write(root.join("app/main.py"), "def run():\n    pass\n").unwrap();
-        std::fs::write(root.join("libs/sdk/.git"), "gitdir: ../../.git/modules/sdk\n").unwrap();
-        std::fs::write(root.join("libs/sdk/vendor_client.py"), "class VendorClient:\n    pass\n")
-            .unwrap();
+        std::fs::write(
+            root.join("libs/sdk/.git"),
+            "gitdir: ../../.git/modules/sdk\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("libs/sdk/vendor_client.py"),
+            "class VendorClient:\n    pass\n",
+        )
+        .unwrap();
 
         let (files, regions, _md, _roots) = walk_source_files(&root);
 
@@ -1199,12 +1329,23 @@ mod walk_tests {
     #[test]
     fn walk_admits_migration_sql_only() {
         let root = walk_tmp("migrations");
-        for d in ["db/migrations", "db/migrate", "tests/data", "big/migrations"] {
+        for d in [
+            "db/migrations",
+            "db/migrate",
+            "tests/data",
+            "big/migrations",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let files_in = [
-            ("db/migrations/V1__create_users.sql", "CREATE TABLE users (id INT);\n"),
-            ("db/migrate/002_orders.sql", "ALTER TABLE orders ADD COLUMN note TEXT;\n"),
+            (
+                "db/migrations/V1__create_users.sql",
+                "CREATE TABLE users (id INT);\n",
+            ),
+            (
+                "db/migrate/002_orders.sql",
+                "ALTER TABLE orders ADD COLUMN note TEXT;\n",
+            ),
             ("tests/data/q.sql", "SELECT * FROM fixtures_only;\n"),
             ("report.sql", "CREATE TABLE not_a_migration (id INT);\n"),
         ];
@@ -1227,7 +1368,10 @@ mod walk_tests {
         sql.sort_unstable();
         assert_eq!(
             sql,
-            ["db/migrate/002_orders.sql", "db/migrations/V1__create_users.sql"],
+            [
+                "db/migrate/002_orders.sql",
+                "db/migrations/V1__create_users.sql"
+            ],
             "{files:?}"
         );
 
@@ -1247,7 +1391,10 @@ mod walk_tests {
         assert_eq!(
             accessed,
             [
-                ("db::migrate::002_orders.sql".to_string(), "data_entity:sql:orders".to_string()),
+                (
+                    "db::migrate::002_orders.sql".to_string(),
+                    "data_entity:sql:orders".to_string()
+                ),
                 (
                     "db::migrations::V1__create_users.sql".to_string(),
                     "data_entity:sql:users".to_string()
@@ -1297,9 +1444,16 @@ mod walk_tests {
         read.sort_unstable();
         assert_eq!(
             read,
-            ["application.conf", "lib/reference.conf", "svc/src/main/resources/prod.conf"]
+            [
+                "application.conf",
+                "lib/reference.conf",
+                "svc/src/main/resources/prod.conf"
+            ]
         );
-        assert!(read.iter().all(|p| crate::route::parser_route(p).is_none()), "{read:?}");
+        assert!(
+            read.iter().all(|p| crate::route::parser_route(p).is_none()),
+            "{read:?}"
+        );
         let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
         let modules: Vec<&String> = r
             .merged
@@ -1331,18 +1485,30 @@ mod walk_tests {
         std::fs::create_dir_all(root.join("node_modules/swagger-ui")).unwrap();
         std::fs::create_dir_all(root.join("big")).unwrap();
         let files_in = [
-            ("openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
+            (
+                "openapi.json",
+                r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#,
+            ),
             (
                 "package-lock.json",
                 r#"{"name":"shop","lockfileVersion":3,"packages":{"":{"dependencies":{"swagger-ui":"5"}}}}"#,
             ),
-            ("tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#),
+            (
+                "tsconfig.json",
+                r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#,
+            ),
             (
                 "key.json",
                 r#"{"framework":"contract-pact","language":"json+python","dirs":["."],"expect_nodes":[{"kind":"DOC_SECTION","name":"GET /users","note":"openapi"}]}"#,
             ),
-            ("package.json", r#"{"name":"shop","dependencies":{"flask-openapi":"1"}}"#),
-            ("node_modules/swagger-ui/swagger.json", r#"{"swagger":"2.0","paths":{}}"#),
+            (
+                "package.json",
+                r#"{"name":"shop","dependencies":{"flask-openapi":"1"}}"#,
+            ),
+            (
+                "node_modules/swagger-ui/swagger.json",
+                r#"{"swagger":"2.0","paths":{}}"#,
+            ),
         ];
         for (rel, body) in files_in {
             std::fs::write(root.join(rel), body).unwrap();
@@ -1354,8 +1520,15 @@ mod walk_tests {
             .map(|(p, _)| p.as_str())
             .filter(|p| p.ends_with(".json") && *p != "package.json")
             .collect();
-        assert_eq!(json, ["openapi.json"], "exactly one of four candidate .json admitted: {files:?}");
-        assert!(files.iter().any(|(p, _)| p == "package.json"), "the manifest keeps its own route");
+        assert_eq!(
+            json,
+            ["openapi.json"],
+            "exactly one of four candidate .json admitted: {files:?}"
+        );
+        assert!(
+            files.iter().any(|(p, _)| p == "package.json"),
+            "the manifest keeps its own route"
+        );
         assert!(regions.iter().any(|r| r.rel_path == "node_modules"));
 
         // Over the cap: a real contract, but never read.
@@ -1366,7 +1539,10 @@ mod walk_tests {
         )
         .unwrap();
         let (files, ..) = walk_source_files(&root);
-        assert!(files.iter().all(|(p, _)| p != "big/swagger.json"), "over-cap json is skipped");
+        assert!(
+            files.iter().all(|(p, _)| p != "big/swagger.json"),
+            "over-cap json is skipped"
+        );
 
         // End to end: the admitted contract becomes a DOC_SECTION under its
         // own MODULE, and nothing else in the tree does.
@@ -1393,17 +1569,35 @@ mod walk_tests {
         let root = walk_tmp("appsettings");
         std::fs::create_dir_all(root.join("src/Api/Properties")).unwrap();
         let files_in = [
-            ("src/Api/appsettings.json", r#"{"Stripe":{"SecretKey":"sk_test_x"}}"#),
-            ("src/Api/appsettings.Development.json", r#"{"Logging":{"LogLevel":{"Default":"Debug"}}}"#),
-            ("src/Api/Properties/launchSettings.json", r#"{"profiles":{"Api":{"commandName":"Project"}}}"#),
-            ("src/Api/mysettings.json", r#"{"Stripe":{"SecretKey":"sk_test_y"}}"#),
+            (
+                "src/Api/appsettings.json",
+                r#"{"Stripe":{"SecretKey":"sk_test_x"}}"#,
+            ),
+            (
+                "src/Api/appsettings.Development.json",
+                r#"{"Logging":{"LogLevel":{"Default":"Debug"}}}"#,
+            ),
+            (
+                "src/Api/Properties/launchSettings.json",
+                r#"{"profiles":{"Api":{"commandName":"Project"}}}"#,
+            ),
+            (
+                "src/Api/mysettings.json",
+                r#"{"Stripe":{"SecretKey":"sk_test_y"}}"#,
+            ),
         ];
         for (rel, body) in files_in {
             std::fs::write(root.join(rel), body).unwrap();
         }
         let (files, ..) = walk_source_files(&root);
         let json: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(json, ["src/Api/appsettings.Development.json", "src/Api/appsettings.json"]);
+        assert_eq!(
+            json,
+            [
+                "src/Api/appsettings.Development.json",
+                "src/Api/appsettings.json"
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1424,12 +1618,18 @@ mod walk_tests {
  "properties":{"address":{"$ref":"#/definitions/Address"}},
  "definitions":{"Address":{"type":"object","properties":{"street":{"type":"string"}}}}}"##,
             ),
-            ("schemas/refund.json", r#"{"type":"object","properties":{"refundId":{"type":"string"}}}"#),
+            (
+                "schemas/refund.json",
+                r#"{"type":"object","properties":{"refundId":{"type":"string"}}}"#,
+            ),
             (
                 "testdata/settings.json",
                 r#"{"name":"billing","config":{"type":"object","properties":{"retries":3}}}"#,
             ),
-            ("config/app.json", r#"{"$schema":"https://json.schemastore.org/app","type":"module"}"#),
+            (
+                "config/app.json",
+                r#"{"$schema":"https://json.schemastore.org/app","type":"module"}"#,
+            ),
             ("data/event.json", r#"{"type":"object","id":7}"#),
         ];
         for (rel, body) in files_in {
@@ -1440,7 +1640,11 @@ mod walk_tests {
         let json: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(
             json,
-            ["schemas/refund.json", "schemas/user.schema.json", "testdata/settings.json"],
+            [
+                "schemas/refund.json",
+                "schemas/user.schema.json",
+                "testdata/settings.json"
+            ],
             "the two schemas and the nested look-alike pass the gate; the rest never do"
         );
 
@@ -1449,7 +1653,12 @@ mod walk_tests {
         let mut settings_nodes = 0usize;
         for g in &r.merged.graphs {
             for n in &g.nodes {
-                let q = g.nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+                let q = g
+                    .nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .map(String::as_str)
+                    .unwrap_or("");
                 if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MESSAGE_TYPE) {
                     types.push(q.to_string());
                 }
@@ -1461,9 +1670,16 @@ mod walk_tests {
         types.sort_unstable();
         assert_eq!(
             types,
-            ["message:jsonschema:User", "message:jsonschema:User.Address", "message:jsonschema:refund"]
+            [
+                "message:jsonschema:User",
+                "message:jsonschema:User.Address",
+                "message:jsonschema:refund"
+            ]
         );
-        assert_eq!(settings_nodes, 0, "the look-alike mints no MESSAGE_TYPE and no MODULE");
+        assert_eq!(
+            settings_nodes, 0,
+            "the look-alike mints no MESSAGE_TYPE and no MODULE"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1509,16 +1725,27 @@ mod walk_tests {
     #[test]
     fn walk_admits_component_template_siblings() {
         let root = walk_tmp("template-siblings");
-        for d in ["src/app/orders", "src/app/user-profile", "src/legacy", "src/odd.ts"] {
+        for d in [
+            "src/app/orders",
+            "src/app/user-profile",
+            "src/legacy",
+            "src/odd.ts",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         for (rel, body) in [
             ("src/index.html", "<shop-root></shop-root>"),
             ("src/main.ts", "export const main = 1;\n"),
             ("src/app/orders/orders.page.html", "<p>{{ total() }}</p>"),
-            ("src/app/orders/orders.page.ts", "export class OrdersPage {}\n"),
+            (
+                "src/app/orders/orders.page.ts",
+                "export class OrdersPage {}\n",
+            ),
             ("src/app/user-profile/user-profile.html", "<p></p>"),
-            ("src/app/user-profile/user-profile.ts", "export class UserProfile {}\n"),
+            (
+                "src/app/user-profile/user-profile.ts",
+                "export class UserProfile {}\n",
+            ),
             ("src/legacy/view.html", "<p></p>"),
             ("src/legacy/view.tsx", "export const View = () => null;\n"),
             ("src/legacy/page.html", "<p></p>"),
@@ -1542,8 +1769,11 @@ mod walk_tests {
         );
         // No route reads it, and the MODULE plan names the TS files as it
         // would with the html left out.
-        let without: Vec<(String, String)> =
-            files.iter().filter(|(p, _)| !p.ends_with(".html")).cloned().collect();
+        let without: Vec<(String, String)> = files
+            .iter()
+            .filter(|(p, _)| !p.ends_with(".html"))
+            .cloned()
+            .collect();
         let (with_plan, without_plan) = (
             crate::route::ModuleQnames::plan(&files),
             crate::route::ModuleQnames::plan(&without),
@@ -1552,13 +1782,21 @@ mod walk_tests {
             if p.ends_with(".html") {
                 assert_eq!(crate::route::parser_route(p), None, "{p}");
             } else {
-                assert_eq!(with_plan.module_qname(p), without_plan.module_qname(p), "{p}");
+                assert_eq!(
+                    with_plan.module_qname(p),
+                    without_plan.module_qname(p),
+                    "{p}"
+                );
             }
         }
-        assert!(is_component_template_sibling(&root.join("src/app/orders/orders.page.html")));
+        assert!(is_component_template_sibling(
+            &root.join("src/app/orders/orders.page.html")
+        ));
         assert!(!is_component_template_sibling(&root.join("src/index.html")));
         assert!(!is_component_template_sibling(&root.join("src/odd.html")));
-        assert!(!is_component_template_sibling(&root.join("src/app/orders/orders.page.ts")));
+        assert!(!is_component_template_sibling(
+            &root.join("src/app/orders/orders.page.ts")
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1567,23 +1805,38 @@ mod walk_tests {
     #[test]
     fn project_roots_ride_the_walk() {
         let root = walk_tmp("roots");
-        for d in ["apps/web", "services/api", "node_modules/left-pad", "libs/plain"] {
+        for d in [
+            "apps/web",
+            "services/api",
+            "node_modules/left-pad",
+            "libs/plain",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(root.join("package.json"), r#"{"name":"@shop/monorepo"}"#).unwrap();
         std::fs::write(root.join("apps/web/package.json"), r#"{"private":true}"#).unwrap();
         std::fs::write(root.join("apps/web/index.ts"), "export const x = 1;\n").unwrap();
-        std::fs::write(root.join("services/api/go.mod"), "module github.com/shop/api\n\ngo 1.22\n").unwrap();
+        std::fs::write(
+            root.join("services/api/go.mod"),
+            "module github.com/shop/api\n\ngo 1.22\n",
+        )
+        .unwrap();
         std::fs::write(root.join("services/api/main.go"), "package main\n").unwrap();
-        std::fs::write(root.join("node_modules/left-pad/package.json"), r#"{"name":"left-pad"}"#).unwrap();
+        std::fs::write(
+            root.join("node_modules/left-pad/package.json"),
+            r#"{"name":"left-pad"}"#,
+        )
+        .unwrap();
         std::fs::write(root.join("libs/plain/util.py"), "x = 1\n").unwrap();
 
         let (_files, regions, _md, roots) = walk_source_files(&root);
 
         let rels: Vec<&str> = roots.iter().map(|r| r.rel_path.as_str()).collect();
         assert_eq!(rels, ["", "apps/web", "services/api"]);
-        let got: Vec<(&str, &str, &str)> =
-            roots.iter().map(|r| (r.ecosystem, r.label.as_str(), r.manifest.as_str())).collect();
+        let got: Vec<(&str, &str, &str)> = roots
+            .iter()
+            .map(|r| (r.ecosystem, r.label.as_str(), r.manifest.as_str()))
+            .collect();
         assert_eq!(
             got,
             [
@@ -1593,7 +1846,10 @@ mod walk_tests {
             ]
         );
         assert!(regions.iter().any(|r| r.rel_path == "node_modules"));
-        assert_eq!(project_roots::marker(&roots), "3 project roots (go=1 npm=2)");
+        assert_eq!(
+            project_roots::marker(&roots),
+            "3 project roots (go=1 npm=2)"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1610,20 +1866,37 @@ mod walk_tests {
         use crate::build::{generate_many, generate_one};
 
         let root = walk_tmp("projects");
-        for d in ["apps/web", "services/api", "libs/core/src", "node_modules/left-pad"] {
+        for d in [
+            "apps/web",
+            "services/api",
+            "libs/core/src",
+            "node_modules/left-pad",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let files = [
             ("package.json", r#"{"name":"shop-monorepo","private":true}"#),
-            ("README.md", "# Shop\n\nThe `shop-core` crate and the `apisvc` module.\n"),
+            (
+                "README.md",
+                "# Shop\n\nThe `shop-core` crate and the `apisvc` module.\n",
+            ),
             ("apps/web/package.json", r#"{"name":"@shop/web"}"#),
-            ("apps/web/index.ts", "export function webEntry(): number { return 1; }\n"),
+            (
+                "apps/web/index.ts",
+                "export function webEntry(): number { return 1; }\n",
+            ),
             // The Go module label `apisvc` is also the name of a function.
             ("services/api/go.mod", "module apisvc\n\ngo 1.22\n"),
-            ("services/api/main.go", "package main\n\nfunc main() { apisvc() }\n\nfunc apisvc() {}\n"),
+            (
+                "services/api/main.go",
+                "package main\n\nfunc main() { apisvc() }\n\nfunc apisvc() {}\n",
+            ),
             ("libs/core/Cargo.toml", "[package]\nname = \"shop-core\"\n"),
             ("libs/core/src/lib.rs", "pub fn core_fn() {}\n"),
-            ("node_modules/left-pad/package.json", r#"{"name":"left-pad"}"#),
+            (
+                "node_modules/left-pad/package.json",
+                r#"{"name":"left-pad"}"#,
+            ),
         ];
         for (rel, body) in files {
             std::fs::write(root.join(rel), body).unwrap();
@@ -1649,13 +1922,20 @@ mod walk_tests {
                             }
                             other => panic!("exactly one ORIGIN cell, got {other:?}"),
                         };
-                        (g.nav.qname_by_id[&n.id].clone(), g.nav.name_by_id[&n.id].clone(), n.id, origin)
+                        (
+                            g.nav.qname_by_id[&n.id].clone(),
+                            g.nav.name_by_id[&n.id].clone(),
+                            n.id,
+                            origin,
+                        )
                     })
             })
             .collect();
         projects.sort_by(|a, b| a.0.cmp(&b.0));
-        let got: Vec<(&str, &str)> =
-            projects.iter().map(|(q, n, ..)| (q.as_str(), n.as_str())).collect();
+        let got: Vec<(&str, &str)> = projects
+            .iter()
+            .map(|(q, n, ..)| (q.as_str(), n.as_str()))
+            .collect();
         assert_eq!(
             got,
             [
@@ -1684,7 +1964,13 @@ mod walk_tests {
 
         // The literal substrings that walk-project-roots/key.json's
         // expect_cells grade.
-        let origin_of = |q: &str| projects.iter().find(|p| p.0 == q).map(|p| p.3.as_str()).unwrap();
+        let origin_of = |q: &str| {
+            projects
+                .iter()
+                .find(|p| p.0 == q)
+                .map(|p| p.3.as_str())
+                .unwrap()
+        };
         assert!(origin_of("project:.").contains(r#""manifest":"package.json""#));
         assert!(origin_of("project:libs/core").contains(r#""provenance":"project_root""#));
         assert!(origin_of("project:services/api").contains(r#""ecosystem":"go""#));
@@ -1704,19 +1990,30 @@ mod walk_tests {
         // edge, and PROJECT has degree 0, so name resolution picks the
         // function.
         let func = m.resolve_name("apisvc").unwrap();
-        assert!(!ids.contains(&func), "the degree-0 PROJECT must lose pick_primary");
+        assert!(
+            !ids.contains(&func),
+            "the degree-0 PROJECT must lose pick_primary"
+        );
         for seed in ["apisvc", "main", "core_fn", "webEntry"] {
             let hits = blast_radius(m, &[seed], &BlastOptions::default()).results;
-            assert!(hits.iter().all(|h| h.kind != "PROJECT"), "{seed}: {:?}",
-                hits.iter().map(|h| &h.qname).collect::<Vec<_>>());
+            assert!(
+                hits.iter().all(|h| h.kind != "PROJECT"),
+                "{seed}: {:?}",
+                hits.iter().map(|h| &h.qname).collect::<Vec<_>>()
+            );
         }
         let apisvc = blast_radius(m, &["apisvc"], &BlastOptions::default()).results;
-        assert!(!apisvc.is_empty(), "the control seed has a real neighbour (main)");
+        assert!(
+            !apisvc.is_empty(),
+            "the control seed has a real neighbour (main)"
+        );
 
         // Same shard slot from both entry points (regions, projects, docs).
         let slot = |m: &glia_graph::MergedGraph| {
             m.graphs.iter().position(|g| {
-                g.nodes.first().is_some_and(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
+                g.nodes
+                    .first()
+                    .is_some_and(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
             })
         };
         let many = generate_many(std::slice::from_ref(&path)).unwrap();
@@ -1736,8 +2033,16 @@ mod walk_tests {
         for d in ["packages/utils", "packages/money"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        std::fs::write(root.join("packages/utils/package.json"), r#"{"private":true}"#).unwrap();
-        std::fs::write(root.join("packages/money/package.json"), r#"{"name":"@shop/money"}"#).unwrap();
+        std::fs::write(
+            root.join("packages/utils/package.json"),
+            r#"{"private":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("packages/money/package.json"),
+            r#"{"name":"@shop/money"}"#,
+        )
+        .unwrap();
 
         let (_files, _regions, _md, roots) = walk_source_files(&root);
         let g = build_project_graph(&roots, RepoId::from_canonical("dd4-label-source"));
@@ -1747,19 +2052,26 @@ mod walk_tests {
             .iter()
             .map(|n| {
                 let origin = match &n.cells[..] {
-                    [glia_core::Cell { kind, payload: glia_core::CellPayload::Json(j) }]
-                        if *kind == glia_code_domain::cell_type::ORIGIN =>
-                    {
-                        j.clone()
-                    }
+                    [
+                        glia_core::Cell {
+                            kind,
+                            payload: glia_core::CellPayload::Json(j),
+                        },
+                    ] if *kind == glia_code_domain::cell_type::ORIGIN => j.clone(),
                     other => panic!("exactly one JSON ORIGIN cell, got {other:?}"),
                 };
-                (g.nav.qname_by_id[&n.id].clone(), g.nav.name_by_id[&n.id].clone(), origin)
+                (
+                    g.nav.qname_by_id[&n.id].clone(),
+                    g.nav.name_by_id[&n.id].clone(),
+                    origin,
+                )
             })
             .collect();
         got.sort_by(|a, b| a.0.cmp(&b.0));
-        let parsed: Vec<serde_json::Value> =
-            got.iter().map(|(.., o)| serde_json::from_str(o).unwrap()).collect();
+        let parsed: Vec<serde_json::Value> = got
+            .iter()
+            .map(|(.., o)| serde_json::from_str(o).unwrap())
+            .collect();
         let rows: Vec<(&str, &str, Option<&str>)> = got
             .iter()
             .zip(&parsed)
@@ -1776,8 +2088,18 @@ mod walk_tests {
         assert_eq!(parsed[1]["manifest"], "packages/utils/package.json");
         // `json!` sorts its keys, so the payload text a fixture's `contains`
         // row reads is stable.
-        assert!(got[1].2.contains(r#""label":"utils","label_source":"dir","manifest":"#), "{}", got[1].2);
-        assert!(got[0].2.contains(r#""label_source":"manifest""#), "{}", got[0].2);
+        assert!(
+            got[1]
+                .2
+                .contains(r#""label":"utils","label_source":"dir","manifest":"#),
+            "{}",
+            got[1].2
+        );
+        assert!(
+            got[0].2.contains(r#""label_source":"manifest""#),
+            "{}",
+            got[0].2
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1788,10 +2110,19 @@ mod walk_tests {
     #[test]
     fn engine_output_dir_is_skipped() {
         let root = walk_tmp("selfout");
-        for d in [".glia/graph", ".ai/repo-graph", "pkg/.glia/graph", "pkg/.ai/repo-graph"] {
+        for d in [
+            ".glia/graph",
+            ".ai/repo-graph",
+            "pkg/.glia/graph",
+            "pkg/.ai/repo-graph",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        std::fs::write(root.join(".gitignore"), "**/.glia/graph/\n**/.ai/repo-graph/\n").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "**/.glia/graph/\n**/.ai/repo-graph/\n",
+        )
+        .unwrap();
         std::fs::write(root.join(".glia/graph/leak.py"), "x = 1\n").unwrap();
         std::fs::write(root.join(".ai/repo-graph/leak.py"), "x = 1\n").unwrap();
         std::fs::write(root.join(".ai/notes.md"), "# Notes\n").unwrap();
@@ -1803,11 +2134,20 @@ mod walk_tests {
 
         let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
         assert!(!region_paths.contains(&".glia/graph"), "{region_paths:?}");
-        assert!(!region_paths.contains(&".ai/repo-graph"), "{region_paths:?}");
+        assert!(
+            !region_paths.contains(&".ai/repo-graph"),
+            "{region_paths:?}"
+        );
         let own = |p: &str| p.starts_with(".glia/graph/") || p.starts_with(".ai/repo-graph/");
         assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
-        assert!(md.iter().any(|(p, _)| p == ".ai/notes.md"), "authored .ai is still walked");
-        assert!(md.iter().all(|(p, _)| !p.contains(".glia")), "LF.1d: .glia is never walked: {md:?}");
+        assert!(
+            md.iter().any(|(p, _)| p == ".ai/notes.md"),
+            "authored .ai is still walked"
+        );
+        assert!(
+            md.iter().all(|(p, _)| !p.contains(".glia")),
+            "LF.1d: .glia is never walked: {md:?}"
+        );
         // Only the ROOT legacy copy is ours; a nested one stays under the
         // usual gates. A nested `.glia` is the control dir too: no region.
         assert_eq!(region_paths, ["pkg/.ai/repo-graph"]);
@@ -1816,7 +2156,12 @@ mod walk_tests {
         std::fs::remove_file(root.join(".gitignore")).unwrap();
         let (files, regions, _md, _roots) = walk_source_files(&root);
         assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
-        assert!(files.iter().any(|(p, _)| p == "pkg/.ai/repo-graph/other.py"), "{files:?}");
+        assert!(
+            files
+                .iter()
+                .any(|(p, _)| p == "pkg/.ai/repo-graph/other.py"),
+            "{files:?}"
+        );
         assert!(files.iter().all(|(p, _)| !p.contains(".glia")), "{files:?}");
         assert!(regions.is_empty(), "{}", regions.len());
         let _ = std::fs::remove_dir_all(&root);
@@ -1828,11 +2173,25 @@ mod walk_tests {
     #[test]
     fn declared_roots_extend_and_never_enter_a_region() {
         let root = walk_tmp("declared");
-        for d in ["tools/migrator", "svc/api", "node_modules/pkg", "legacy/tool", ".glia"] {
+        for d in [
+            "tools/migrator",
+            "svc/api",
+            "node_modules/pkg",
+            "legacy/tool",
+            ".glia",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        std::fs::write(root.join("tools/migrator/run.py"), "def migrate():\n    return 2\n").unwrap();
-        std::fs::write(root.join("svc/api/pyproject.toml"), "[project]\nname = \"api-svc\"\n").unwrap();
+        std::fs::write(
+            root.join("tools/migrator/run.py"),
+            "def migrate():\n    return 2\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("svc/api/pyproject.toml"),
+            "[project]\nname = \"api-svc\"\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join(".glia/overlay.toml"),
             concat!(
@@ -1849,18 +2208,36 @@ mod walk_tests {
         let (files, regions, _md, roots) = walk_source_files(&root);
         let got: Vec<(&str, &str, &str, &str)> = roots
             .iter()
-            .map(|r| (r.rel_path.as_str(), r.label.as_str(), r.ecosystem, r.manifest.as_str()))
+            .map(|r| {
+                (
+                    r.rel_path.as_str(),
+                    r.label.as_str(),
+                    r.ecosystem,
+                    r.manifest.as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
             [
                 ("svc/api", "api-svc", "python", "svc/api/pyproject.toml"),
-                ("tools/migrator", "migrator", "declared", ".glia/overlay.toml"),
+                (
+                    "tools/migrator",
+                    "migrator",
+                    "declared",
+                    ".glia/overlay.toml"
+                ),
             ],
             "sorted by path; the manifest shadows the declaration"
         );
-        assert!(files.iter().any(|(p, _)| p == "tools/migrator/run.py"), "{files:?}");
-        let legacy = regions.iter().find(|r| r.rel_path == "legacy").expect("legacy region");
+        assert!(
+            files.iter().any(|(p, _)| p == "tools/migrator/run.py"),
+            "{files:?}"
+        );
+        let legacy = regions
+            .iter()
+            .find(|r| r.rel_path == "legacy")
+            .expect("legacy region");
         assert_eq!(legacy.provenance, Collapse::Excluded);
         assert_eq!(
             missing_reason("legacy/tool", &regions),
@@ -1879,10 +2256,22 @@ mod walk_tests {
             declared.enter(rel);
         }
         // The walk's own svc/api root: pyproject.toml names it `api-svc`.
-        let mut detected =
-            vec![ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", Some("api-svc".into()))];
+        let mut detected = vec![ProjectRoot::new(
+            "svc/api".into(),
+            "python",
+            "pyproject.toml",
+            Some("api-svc".into()),
+        )];
         let n = merge_declared_roots(&cfg.project, &declared, &regions, &mut detected);
-        assert_eq!(n, DeclaredCounts { added: 1, shadowed: 1, missing: 3, relabelled: 0 });
+        assert_eq!(
+            n,
+            DeclaredCounts {
+                added: 1,
+                shadowed: 1,
+                missing: 3,
+                relabelled: 0
+            }
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1919,13 +2308,33 @@ mod walk_tests {
         let (_files, _regions, _md, roots) = walk_source_files(&root);
         let got: Vec<(&str, &str, &str, &str, &str)> = roots
             .iter()
-            .map(|r| (r.rel_path.as_str(), r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()))
+            .map(|r| {
+                (
+                    r.rel_path.as_str(),
+                    r.label.as_str(),
+                    r.label_source,
+                    r.ecosystem,
+                    r.manifest.as_str(),
+                )
+            })
             .collect();
         assert_eq!(
             got,
             [
-                ("svc/api", "api-svc", "manifest", "python", "svc/api/pyproject.toml"),
-                ("svc/email", "email-sender", "declared", "python", "svc/email/requirements.txt"),
+                (
+                    "svc/api",
+                    "api-svc",
+                    "manifest",
+                    "python",
+                    "svc/api/pyproject.toml"
+                ),
+                (
+                    "svc/email",
+                    "email-sender",
+                    "declared",
+                    "python",
+                    "svc/email/requirements.txt"
+                ),
                 ("tools", "tools", "dir", "python", "tools/requirements.txt"),
                 ("web", "storefront", "declared", "npm", "web/package.json"),
             ]
@@ -1936,13 +2345,26 @@ mod walk_tests {
             declared.enter(rel);
         }
         let mut detected = vec![
-            ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", Some("api-svc".into())),
+            ProjectRoot::new(
+                "svc/api".into(),
+                "python",
+                "pyproject.toml",
+                Some("api-svc".into()),
+            ),
             ProjectRoot::new("svc/email".into(), "python", "requirements.txt", None),
             ProjectRoot::new("tools".into(), "python", "requirements.txt", None),
             ProjectRoot::new("web".into(), "npm", "package.json", None),
         ];
         let n = merge_declared_roots(&cfg.project, &declared, &[], &mut detected);
-        assert_eq!(n, DeclaredCounts { added: 0, shadowed: 2, missing: 0, relabelled: 2 });
+        assert_eq!(
+            n,
+            DeclaredCounts {
+                added: 0,
+                shadowed: 2,
+                missing: 0,
+                relabelled: 2
+            }
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1965,10 +2387,20 @@ mod walk_tests {
     }
 
     /// The `(rel_path, label, label_source, ecosystem, manifest)` of each root.
-    fn root_rows(roots: &[ProjectRoot]) -> Vec<(String, String, &'static str, &'static str, String)> {
+    fn root_rows(
+        roots: &[ProjectRoot],
+    ) -> Vec<(String, String, &'static str, &'static str, String)> {
         roots
             .iter()
-            .map(|r| (r.rel_path.clone(), r.label.clone(), r.label_source, r.ecosystem, r.manifest.clone()))
+            .map(|r| {
+                (
+                    r.rel_path.clone(),
+                    r.label.clone(),
+                    r.label_source,
+                    r.ecosystem,
+                    r.manifest.clone(),
+                )
+            })
             .collect()
     }
 
@@ -2013,8 +2445,15 @@ mod walk_tests {
             ),
         );
         let plan = plan_walk(&root);
-        assert_eq!(plan.sbt.lines, ["[roots] sbt members=2 missing=0 manifest=build.sbt"]);
-        assert!(plan.sbt.wanted.is_empty(), "every member resolved: {:?}", plan.sbt.wanted);
+        assert_eq!(
+            plan.sbt.lines,
+            ["[roots] sbt members=2 missing=0 manifest=build.sbt"]
+        );
+        assert!(
+            plan.sbt.wanted.is_empty(),
+            "every member resolved: {:?}",
+            plan.sbt.wanted
+        );
         let (_files, _regions, _md, roots) = read_walk(&root, &plan, None, false).0;
         assert_eq!(
             root_rows(&roots),
@@ -2025,7 +2464,10 @@ mod walk_tests {
             ]
         );
         assert_eq!(project_roots::marker(&roots), "3 project roots (sbt=3)");
-        assert_eq!(project_qnames(&root), ["project:.", "project:api", "project:worker"]);
+        assert_eq!(
+            project_qnames(&root),
+            ["project:.", "project:api", "project:worker"]
+        );
 
         // A nested build: members join its directory, the manifest is its
         // repo-relative path; a `package.json` deciding the directory's root
@@ -2041,7 +2483,10 @@ mod walk_tests {
         .unwrap();
         std::fs::write(nested.join("scala/package.json"), r#"{"name":"shop-js"}"#).unwrap();
         let plan = plan_walk(&nested);
-        assert_eq!(plan.sbt.lines, ["[roots] sbt members=2 missing=0 manifest=scala/build.sbt"]);
+        assert_eq!(
+            plan.sbt.lines,
+            ["[roots] sbt members=2 missing=0 manifest=scala/build.sbt"]
+        );
         let (.., roots) = read_walk(&nested, &plan, None, false).0;
         assert_eq!(
             root_rows(&roots),
@@ -2073,7 +2518,10 @@ mod walk_tests {
         for (rel, body) in [
             ("api/build.sbt", "name := \"api-svc\"\n"),
             ("web/package.json", r#"{"name":"@shop/web"}"#),
-            (".glia/overlay.toml", "version = 1\n[[project]]\npath = \"worker\"\nlabel = \"w\"\n"),
+            (
+                ".glia/overlay.toml",
+                "version = 1\n[[project]]\npath = \"worker\"\nlabel = \"w\"\n",
+            ),
         ] {
             std::fs::write(root.join(rel), body).unwrap();
         }
@@ -2130,7 +2578,10 @@ mod walk_tests {
             ("README", "readme\n"),
             ("old/legacy/Old.scala", "object Old\n"),
             ("libs/sdk/.git", "gitdir: ../../.git/modules/sdk\n"),
-            (".glia/overlay.toml", "version = 1\n[walk]\nskip = [\"old\"]\n"),
+            (
+                ".glia/overlay.toml",
+                "version = 1\n[walk]\nskip = [\"old\"]\n",
+            ),
         ] {
             std::fs::write(root.join(rel), body).unwrap();
         }
@@ -2164,7 +2615,10 @@ mod walk_tests {
 
         let (files, regions, _md, _roots) = walk_source_files(&root);
 
-        assert!(files.is_empty(), "no source outside the two other repos: {files:?}");
+        assert!(
+            files.is_empty(),
+            "no source outside the two other repos: {files:?}"
+        );
         let wt = regions.iter().find(|r| r.rel_path == "wt").unwrap();
         assert_eq!(wt.provenance, Collapse::Worktree);
         assert_eq!(wt.provenance.provenance(), "worktree");
@@ -2208,7 +2662,12 @@ mod walk_tests {
         let expect_files = ["api/small.json", "app.py", "ops/big/Dockerfile.md", "zz.go"];
         let expect_md = ["README.md", "ops/small/Dockerfile.md"];
         let keys = |v: &[(String, String)]| v.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-        let pool = |n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+        let pool = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+        };
         let seq = pool(1).install(|| walk_source_files(&root));
         let par = pool(8).install(|| walk_source_files(&root));
         for (label, (files, _, md, _)) in [("1 thread", &seq), ("8 threads", &par)] {
@@ -2217,8 +2676,15 @@ mod walk_tests {
         }
         assert_eq!(seq.0, par.0, "same texts on 1 and 8 threads");
         assert_eq!(seq.2, par.2);
-        let big = seq.0.iter().find(|(p, _)| p == "ops/big/Dockerfile.md").unwrap();
-        assert_eq!(big.1, big_dockerfile, "the oversize doc is read whole, as source");
+        let big = seq
+            .0
+            .iter()
+            .find(|(p, _)| p == "ops/big/Dockerfile.md")
+            .unwrap();
+        assert_eq!(
+            big.1, big_dockerfile,
+            "the oversize doc is read whole, as source"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2226,21 +2692,35 @@ mod walk_tests {
     /// directory, a vendored region, a `[walk] skip` and a manifest root.
     fn dc1_tree(tag: &str) -> std::path::PathBuf {
         let root = walk_tmp(tag);
-        for d in ["docs", "api", "svc", "node_modules/left-pad", ".glia", "legacy", "build"] {
+        for d in [
+            "docs",
+            "api",
+            "svc",
+            "node_modules/left-pad",
+            ".glia",
+            "legacy",
+            "build",
+        ] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         for (rel, body) in [
             (".gitignore", "/build\n*.gen.py\n"),
             ("README.md", "# Fixture\n"),
             ("docs/guide.md", "# Guide\n\nRun `svc/app.py`.\n"),
-            ("api/openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
+            (
+                "api/openapi.json",
+                r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#,
+            ),
             ("tsconfig.json", r#"{"compilerOptions":{"strict":true}}"#),
             ("svc/app.py", "def run():\n    return 1\n"),
             ("svc/out.gen.py", "generated = 1\n"),
             ("svc/main.go", "package main\n\nfunc main() {}\n"),
             ("node_modules/left-pad/index.js", "module.exports = 1;\n"),
             ("package.json", r#"{"name":"@shop/fixture"}"#),
-            (".glia/overlay.toml", "version = 1\n[walk]\nskip = [\"legacy\"]\n"),
+            (
+                ".glia/overlay.toml",
+                "version = 1\n[walk]\nskip = [\"legacy\"]\n",
+            ),
             ("legacy/old.py", "old = 2\n"),
             ("build/b.py", "built = 3\n"),
         ] {
@@ -2257,15 +2737,29 @@ mod walk_tests {
         let walked = walk_source_files(&root);
         let plan = plan_walk(&root);
         let (read, records) = read_walk(&root, &plan, None, false);
-        assert_eq!(read, walked, "files, regions, md and roots match the composed walk");
+        assert_eq!(
+            read, walked,
+            "files, regions, md and roots match the composed walk"
+        );
         assert!(records.is_empty(), "a clean read keeps no file table");
 
         // The fixture exercises every rule it names.
         let keys = |v: &[(String, String)]| v.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
-        assert_eq!(keys(&walked.0), ["api/openapi.json", "package.json", "svc/app.py", "svc/main.go"]);
+        assert_eq!(
+            keys(&walked.0),
+            [
+                "api/openapi.json",
+                "package.json",
+                "svc/app.py",
+                "svc/main.go"
+            ]
+        );
         assert_eq!(keys(&walked.2), ["README.md", "docs/guide.md"]);
-        let regions: Vec<(&str, Collapse)> =
-            walked.1.iter().map(|r| (r.rel_path.as_str(), r.provenance)).collect();
+        let regions: Vec<(&str, Collapse)> = walked
+            .1
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.provenance))
+            .collect();
         assert_eq!(
             regions,
             [
@@ -2283,11 +2777,23 @@ mod walk_tests {
         let pending: Vec<&str> = plan.pending.iter().map(|p| p.rel.as_str()).collect();
         let recorded: Vec<&str> = records.iter().map(|r| r.rel.as_str()).collect();
         assert_eq!(recorded, pending);
-        assert!(pending.contains(&"tsconfig.json"), "sniffed, not admitted: {pending:?}");
-        assert!(records.iter().all(|r| r.stamp.is_some()), "every queued file is stamped");
+        assert!(
+            pending.contains(&"tsconfig.json"),
+            "sniffed, not admitted: {pending:?}"
+        );
+        assert!(
+            records.iter().all(|r| r.stamp.is_some()),
+            "every queued file is stamped"
+        );
         let ts = records.iter().find(|r| r.rel == "tsconfig.json").unwrap();
         assert_eq!(ts.class, PendingClass::JsonSniff);
-        assert_eq!(ts.read, Read::Json { over_cap: false, admitted: None });
+        assert_eq!(
+            ts.read,
+            Read::Json {
+                over_cap: false,
+                admitted: None
+            }
+        );
         let len = |rel: &str| std::fs::metadata(root.join(rel)).unwrap().len();
         assert!(records.iter().all(|r| r.stamp.unwrap().len == len(&r.rel)));
         let _ = std::fs::remove_dir_all(&root);
@@ -2310,7 +2816,8 @@ mod walk_tests {
         let edited = "svc/app.py";
         std::fs::write(root.join(edited), "def run():\n    return 2 + 40\n").unwrap();
 
-        let prior: BTreeMap<&str, &ReadRecord> = before.iter().map(|r| (r.rel.as_str(), r)).collect();
+        let prior: BTreeMap<&str, &ReadRecord> =
+            before.iter().map(|r| (r.rel.as_str(), r)).collect();
         let hits = AtomicUsize::new(0);
         let reuse = |p: &Pending| -> Option<Read> {
             if p.rel == edited {
@@ -2323,10 +2830,22 @@ mod walk_tests {
         let plan = plan_walk(&root);
         let (second, after) = read_walk(&root, &plan, Some(&reuse), true);
 
-        assert_eq!(hits.load(Ordering::Relaxed), plan.pending.len() - 1, "every other file reused");
-        assert_eq!(second, walk_source_files(&root), "the reused read is a fresh walk");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            plan.pending.len() - 1,
+            "every other file reused"
+        );
+        assert_eq!(
+            second,
+            walk_source_files(&root),
+            "the reused read is a fresh walk"
+        );
         let app = second.0.iter().find(|(p, _)| p == edited).unwrap();
-        assert!(app.1.contains("2 + 40"), "the edited file was re-read: {:?}", app.1);
+        assert!(
+            app.1.contains("2 + 40"),
+            "the edited file was re-read: {:?}",
+            app.1
+        );
         let rels = |v: &[ReadRecord]| v.iter().map(|r| r.rel.clone()).collect::<Vec<_>>();
         assert_eq!(rels(&before), rels(&after));
         let moved: Vec<&str> = before
@@ -2371,19 +2890,40 @@ mod walk_tests {
 
         let plan = plan_walk(&root);
         let dirs: Vec<&str> = plan.dirs.iter().map(|d| d.rel.as_str()).collect();
-        assert_eq!(dirs, ["", "other", "sub", "sub/deep"], "entered dirs, no region");
+        assert_eq!(
+            dirs,
+            ["", "other", "sub", "sub/deep"],
+            "entered dirs, no region"
+        );
         let region_dirs: Vec<&str> = plan.region_dirs.iter().map(|d| d.rel.as_str()).collect();
         assert_eq!(region_dirs, ["gen", "node_modules"]);
-        assert_eq!(plan.gitignores, [".gitignore", "sub/.gitignore"], "none inside a region");
-        assert!(plan.dirs.iter().chain(&plan.region_dirs).all(|d| d.mtime.is_some()));
+        assert_eq!(
+            plan.gitignores,
+            [".gitignore", "sub/.gitignore"],
+            "none inside a region"
+        );
+        assert!(
+            plan.dirs
+                .iter()
+                .chain(&plan.region_dirs)
+                .all(|d| d.mtime.is_some())
+        );
 
         // An mtime pinned in the past, so the move below never hides in one tick.
         let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
         for d in ["other", "node_modules"] {
-            std::fs::File::open(root.join(d)).unwrap().set_modified(old).unwrap();
+            std::fs::File::open(root.join(d))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
         }
         let mtime = |plan: &WalkPlan, rel: &str| {
-            plan.dirs.iter().chain(&plan.region_dirs).find(|d| d.rel == rel).unwrap().mtime
+            plan.dirs
+                .iter()
+                .chain(&plan.region_dirs)
+                .find(|d| d.rel == rel)
+                .unwrap()
+                .mtime
         };
         let plan = plan_walk(&root);
         assert_eq!(mtime(&plan, "other"), Some(old));
@@ -2392,8 +2932,16 @@ mod walk_tests {
         std::fs::write(root.join("other/c.go"), "package other\n\nfunc C() {}\n").unwrap();
         std::fs::create_dir_all(root.join("node_modules/right-pad")).unwrap();
         let plan = plan_walk(&root);
-        assert_ne!(mtime(&plan, "other"), Some(old), "a new file moves its directory's mtime");
-        assert_ne!(mtime(&plan, "node_modules"), Some(old), "a region root's own entries move it");
+        assert_ne!(
+            mtime(&plan, "other"),
+            Some(old),
+            "a new file moves its directory's mtime"
+        );
+        assert_ne!(
+            mtime(&plan, "node_modules"),
+            Some(old),
+            "a region root's own entries move it"
+        );
         assert!(plan.pending.iter().any(|p| p.rel == "other/c.go"));
         let _ = std::fs::remove_dir_all(&root);
     }

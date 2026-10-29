@@ -16,7 +16,7 @@ use glia_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 use crate::build::memo::NonCodeOut;
 use crate::cache::{self, ParseCache};
 use crate::extract::{
-    ExtractStats, GoModules, apply_cross_cutting_extractors, build_group, detect_language,
+    ExtractStats, ParseContext, apply_cross_cutting_extractors, build_group, detect_language,
     merge_nav, parse_one_as, path_to_qname, synthetic_module_qname,
 };
 use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
@@ -48,11 +48,11 @@ use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
-    go: &GoModules,
+    context: &ParseContext,
     cache: Option<&mut ParseCache>,
     repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
-    parse_repo_files_hashed(files, None, repo, go, cache, repo_label)
+    parse_repo_files_hashed(files, None, repo, context, cache, repo_label)
 }
 
 /// [`parse_repo_files`] with the walked files' content hashes, index-aligned
@@ -72,7 +72,7 @@ pub(crate) fn parse_repo_files_hashed(
     files: &[(String, String)],
     hashes: Option<&[u64]>,
     repo: RepoId,
-    go: &GoModules,
+    context: &ParseContext,
     mut cache: Option<&mut ParseCache>,
     repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
@@ -125,7 +125,7 @@ pub(crate) fn parse_repo_files_hashed(
     );
     let ctx = RouteCtx {
         repo,
-        go,
+        context,
         modules: &modules,
         prisma_provider: prisma_provider.as_deref(),
     };
@@ -152,7 +152,12 @@ pub(crate) fn parse_repo_files_hashed(
     for ((path, _), r) in files.iter().zip(routed) {
         match r {
             Routed::Skip => {}
-            Routed::NonCode { key, fp, tally: t, memo } => {
+            Routed::NonCode {
+                key,
+                fp,
+                tally: t,
+                memo,
+            } => {
                 n_synthetic += 1;
                 for line in &t.lines {
                     eprintln!("{line}");
@@ -168,7 +173,11 @@ pub(crate) fn parse_repo_files_hashed(
                     NonCodeMemo::Fresh(Some(hash)) if PURE_NONCODE.contains(&key) => {
                         noncode_miss += 1;
                         if let Some(c) = cache.as_deref_mut() {
-                            let out = NonCodeOut { key, fp: fp.clone(), tally: t };
+                            let out = NonCodeOut {
+                                key,
+                                fp: fp.clone(),
+                                tally: t,
+                            };
                             c.memo_mut().noncode.insert(path.clone(), hash, out);
                         }
                     }
@@ -284,7 +293,8 @@ pub(crate) fn parse_repo_files_hashed(
         // file whose parse failed, still has a const scan or a memo entry);
         // the const scan and the needles look up after this, over the same
         // walked set.
-        let walked: std::collections::HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let walked: std::collections::HashSet<&str> =
+            files.iter().map(|(p, _)| p.as_str()).collect();
         let memo = c.memo_mut();
         memo.retain(&walked);
         memo.stats.noncode_hit = noncode_hit;
@@ -459,8 +469,16 @@ pub(crate) fn parse_repo_files_hashed(
     // `backend_routes`, spec-kit `specs/<NNN-slug>/contracts/`. `features` is
     // the distinct features that declared at least one op.
     for (framework, features, ops) in [
-        ("feature_yaml", contracts.feature_yaml_features.len(), contracts.feature_yaml),
-        ("speckit", contracts.speckit_features.len(), contracts.speckit),
+        (
+            "feature_yaml",
+            contracts.feature_yaml_features.len(),
+            contracts.feature_yaml,
+        ),
+        (
+            "speckit",
+            contracts.speckit_features.len(),
+            contracts.speckit,
+        ),
     ] {
         if ops > 0 {
             eprintln!("[sdd] framework={framework} features={features} ops={ops}");
@@ -504,7 +522,7 @@ pub(crate) fn parse_repo_files_hashed(
 /// Prisma provider. Read-only, shared by every pool worker.
 struct RouteCtx<'a> {
     repo: RepoId,
-    go: &'a GoModules,
+    context: &'a ParseContext,
     modules: &'a ModuleQnames,
     prisma_provider: Option<&'a str>,
 }
@@ -712,7 +730,12 @@ fn route_one(
         && let Some(out) = c.memo().noncode.get(path, &h)
     {
         let NonCodeOut { key, fp, tally } = out.clone();
-        return Routed::NonCode { key, fp, tally, memo: NonCodeMemo::Hit };
+        return Routed::NonCode {
+            key,
+            fp,
+            tally,
+            memo: NonCodeMemo::Hit,
+        };
     }
     let mut branch: &'static str = "route";
     match crate::parallel::quiet(|| route_branches(path, source, hash, ctx, cache, &mut branch)) {
@@ -748,19 +771,14 @@ fn route_branches(
     if yaml_ext {
         *branch = "yaml";
         let module_id = synthetic_module_id(repo, path);
-        let cron_out = glia_code_extractors::cron::extract_cron_nodes(
-            source, path, module_id, repo,
-        );
-        let cfg_out = glia_code_extractors::config::extract_yaml_env_defs(
-            source, module_id, repo,
-        );
-        let iac_out =
-            glia_code_extractors::iac::extract_yaml(source, module_id, repo);
+        let cron_out =
+            glia_code_extractors::cron::extract_cron_nodes(source, path, module_id, repo);
+        let cfg_out = glia_code_extractors::config::extract_yaml_env_defs(source, module_id, repo);
+        let iac_out = glia_code_extractors::iac::extract_yaml(source, module_id, repo);
         // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
         // API surface. Non-contract yaml takes a cheap sniff-miss here.
-        let contract_out = glia_code_extractors::contracts::extract_yaml_contracts(
-            source, path, module_id, repo,
-        );
+        let contract_out =
+            glia_code_extractors::contracts::extract_yaml_contracts(source, path, module_id, repo);
         // A10.3: the same call also covers `asyncapi.yaml`; `record`
         // routes the count to the format the file sniffed as.
         t.keep_contract(&contract_out);
@@ -773,24 +791,36 @@ fn route_branches(
                 path,
                 module_id,
                 repo,
-                vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes, contract_out.nodes],
-                vec![cron_out.edges, cfg_out.edges, iac_out.edges, contract_out.edges],
+                vec![
+                    cron_out.nodes,
+                    cfg_out.nodes,
+                    iac_out.nodes,
+                    contract_out.nodes,
+                ],
+                vec![
+                    cron_out.edges,
+                    cfg_out.edges,
+                    iac_out.edges,
+                    contract_out.edges,
+                ],
                 vec![cron_out.nav, cfg_out.nav, iac_out.nav, contract_out.nav],
                 vec![],
             )
         });
-        return Routed::NonCode { key: "yaml", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "yaml",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     if is_dockerfile_path(path) {
         *branch = "dockerfile";
         let module_id = synthetic_module_id(repo, path);
-        let cfg_out = glia_code_extractors::config::extract_dockerfile_defs(
-            source, module_id, repo,
-        );
-        let iac_out = glia_code_extractors::iac::extract_dockerfile(
-            source, path, module_id, repo,
-        );
+        let cfg_out =
+            glia_code_extractors::config::extract_dockerfile_defs(source, module_id, repo);
+        let iac_out = glia_code_extractors::iac::extract_dockerfile(source, path, module_id, repo);
         let fp = (!cfg_out.nodes.is_empty() || !iac_out.nodes.is_empty()).then(|| {
             synthetic_parse(
                 path,
@@ -802,22 +832,61 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "dockerfile", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "dockerfile",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
+    }
+
+    // L2 (lua-support): a plugin manifest of an embedded host
+    // (`<dir>/plugin.toml`) is one PLUGIN node keyed by its parent directory
+    // - it must never fall into the package-manifest machinery below, whose
+    // dependency + declared-binary shape is the wrong one for it.
+    if glia_code_extractors::plugin_manifest::is_routed(path, &ctx.context.plugin_families) {
+        *branch = "plugin-manifest";
+        let module_id = synthetic_module_id(repo, path);
+        let out = glia_code_extractors::plugin_manifest::extract_for_path(
+            source,
+            path,
+            module_id,
+            repo,
+            &ctx.context.plugin_families,
+        );
+        if let Some(marker) = out.marker {
+            t.lines.push(marker);
+        }
+        let fp = (!out.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![out.nodes],
+                vec![out.edges],
+                vec![out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode {
+            key: "plugin-manifest",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     if glia_code_extractors::packages::is_manifest_path(path) {
         *branch = "manifest";
         let module_id = synthetic_module_id(repo, path);
-        let pkg_out = glia_code_extractors::packages::extract_for_path(
-            source, path, module_id, repo,
-        );
+        let pkg_out =
+            glia_code_extractors::packages::extract_for_path(source, path, module_id, repo);
         // LA.20c: the binaries the manifest declares (pyproject scripts,
         // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
         // invocation's argv0 pairs with them. A manifest that declares a
         // binary but no dependency is still stashed.
-        let bin_out = glia_code_extractors::cli::extract_manifest_binaries(
-            source, path, module_id, repo,
-        );
+        let bin_out =
+            glia_code_extractors::cli::extract_manifest_binaries(source, path, module_id, repo);
         if let Some(marker) = glia_code_extractors::cli::manifest_marker(path, &bin_out) {
             t.lines.push(marker);
         }
@@ -832,15 +901,18 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "manifest", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "manifest",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     if is_dotenv_path(path) {
         *branch = "dotenv";
         let module_id = synthetic_module_id(repo, path);
-        let cfg_out = glia_code_extractors::config::extract_dotenv_defs(
-            source, module_id, repo,
-        );
+        let cfg_out = glia_code_extractors::config::extract_dotenv_defs(source, module_id, repo);
         let fp = (!cfg_out.nodes.is_empty()).then(|| {
             synthetic_parse(
                 path,
@@ -852,7 +924,12 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "dotenv", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "dotenv",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // A13.9: a migration `.sql` (the walk admits one only through
@@ -863,9 +940,8 @@ fn route_branches(
     if glia_code_extractors::migrations::is_migration_path(path) {
         *branch = "migration";
         let module_id = synthetic_module_id(repo, path);
-        let out = glia_code_extractors::migrations::extract_sql_migration(
-            source, path, module_id, repo,
-        );
+        let out =
+            glia_code_extractors::migrations::extract_sql_migration(source, path, module_id, repo);
         t.lines.push(out.marker(path));
         let fp = (!out.entities.nodes.is_empty()).then(|| {
             synthetic_parse(
@@ -878,7 +954,12 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "migration", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "migration",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // A13.16: a Prisma schema (the walk admits `.prisma` only through
@@ -907,7 +988,12 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "prisma", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "prisma",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // LA.6c: an Angular `.component.html` template (admitted by the walk)
@@ -924,8 +1010,7 @@ fn route_branches(
     if is_angular_template_path(path) {
         *branch = "nav template links";
         let module_id = modules.module_id(&angular_component_source(path, modules), repo);
-        let links =
-            glia_code_extractors::nav_links::extract_template_links(source, module_id);
+        let links = glia_code_extractors::nav_links::extract_template_links(source, module_id);
         t.links_router += links.router;
         t.links_href += links.href;
         t.links_origin += links.origin;
@@ -935,7 +1020,12 @@ fn route_branches(
             refs: links.refs,
             ..Default::default()
         });
-        return Routed::NonCode { key: "angular", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "angular",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // A10.8: the walker queues a `.json` only when it sniffed as an API
@@ -970,7 +1060,12 @@ fn route_branches(
                     vec![],
                 )
             });
-            return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
+            return Routed::NonCode {
+                key: "json",
+                fp,
+                tally: t,
+                memo: fresh(),
+            };
         }
         // LA.16 (A10.12): a JSON Schema that is not an API contract
         // declares MESSAGE_TYPEs, the shape a `.proto` message or an
@@ -997,11 +1092,15 @@ fn route_branches(
                     recs.module_cells,
                 )
             });
-            return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
+            return Routed::NonCode {
+                key: "json",
+                fp,
+                tally: t,
+                memo: fresh(),
+            };
         }
-        let out = glia_code_extractors::contracts::extract_json_contract(
-            source, path, module_id, repo,
-        );
+        let out =
+            glia_code_extractors::contracts::extract_json_contract(source, path, module_id, repo);
         t.keep_contract(&out);
         let fp = (!out.nodes.is_empty()).then(|| {
             synthetic_parse(
@@ -1014,22 +1113,27 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "json",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
-    let Some(lang) = detect_language(path) else { return Routed::Skip };
+    let Some(lang) = detect_language(path) else {
+        return Routed::Skip;
+    };
 
     if lang == "proto" {
         *branch = "proto";
         let module_id = synthetic_module_id(repo, path);
-        let out = glia_code_extractors::grpc::extract_grpc_service_nodes(
-            source, path, module_id, repo,
-        );
+        let out =
+            glia_code_extractors::grpc::extract_grpc_service_nodes(source, path, module_id, repo);
         // A10.5: the file's `message` / `enum` declarations, as
         // MESSAGE_TYPE nodes under the same MODULE.
-        let msgs = glia_code_extractors::schemas::extract_proto_messages(
-            source, path, module_id, repo,
-        );
+        let msgs =
+            glia_code_extractors::schemas::extract_proto_messages(source, path, module_id, repo);
         t.proto_files += 1;
         t.proto_services += out.service_count;
         t.proto_rpcs += out.rpc_count;
@@ -1058,7 +1162,12 @@ fn route_branches(
                 out.module_cells,
             )
         });
-        return Routed::NonCode { key: "proto", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "proto",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // A10.4: a `.graphql` / `.graphqls` / `.gql` schema reaches the SDL
@@ -1076,9 +1185,7 @@ fn route_branches(
             nodes,
             nav,
             mut anchors,
-        } = glia_code_extractors::graphql::extract_graphql_sdl_file_nodes(
-            source, module_id, repo,
-        );
+        } = glia_code_extractors::graphql::extract_graphql_sdl_file_nodes(source, module_id, repo);
         let types = glia_code_extractors::graphql::extract_graphql_sdl_file_types(
             source, path, module_id, repo,
         );
@@ -1100,7 +1207,12 @@ fn route_branches(
             glia_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
             fp
         });
-        return Routed::NonCode { key: "graphql", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "graphql",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // A10.6: an Avro `.avsc` is the shared contract under a Kafka stack.
@@ -1109,9 +1221,8 @@ fn route_branches(
     if lang == "avro" {
         *branch = "avro";
         let module_id = synthetic_module_id(repo, path);
-        let recs = glia_code_extractors::schemas::extract_avro_records(
-            source, path, module_id, repo,
-        );
+        let recs =
+            glia_code_extractors::schemas::extract_avro_records(source, path, module_id, repo);
         t.avro_files += 1;
         t.avro_records += recs.message_count;
         t.avro_enums += recs.enum_count;
@@ -1129,13 +1240,20 @@ fn route_branches(
                 recs.module_cells,
             )
         });
-        return Routed::NonCode { key: "avro", fp, tally: t, memo: fresh() };
+        return Routed::NonCode {
+            key: "avro",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
     }
 
     // Every branch above routed its own files, so `parser_route` is
     // `Some(lang)` here; reading it as the gate keeps the LB.9b plan
     // (built from `parser_route`) and this router on one routing.
-    let Some(lang) = parser_route(path) else { return Routed::Skip };
+    let Some(lang) = parser_route(path) else {
+        return Routed::Skip;
+    };
     *branch = "parse cache";
     let module_qname = modules.module_qname(path);
 
@@ -1173,7 +1291,7 @@ fn route_branches(
     // `quiet` inside `route_one`'s, so a parse panic keeps the hash and the
     // LB.9b rejection the fold needs.
     let parse_result =
-        crate::parallel::quiet(|| parse_for_cache(source, path, lang, repo, ctx.go, modules));
+        crate::parallel::quiet(|| parse_for_cache(source, path, lang, repo, ctx.context, modules));
     let outcome = match parse_result {
         Ok(Ok((fp, stats))) => CodeOutcome::Parsed(fp, stats),
         Ok(Err(e)) => CodeOutcome::Failed(format!("{path}: {e}")),
@@ -1202,10 +1320,18 @@ pub(crate) fn parse_for_cache(
     path: &str,
     lang: &str,
     repo: RepoId,
-    go: &GoModules,
+    context: &ParseContext,
     modules: &ModuleQnames,
 ) -> Result<(FileParse, ExtractStats), String> {
-    let mut fp = parse_one_as(source, path, lang, repo, go, &modules.module_qname(path))?;
+    let mut fp = parse_one_as(
+        source,
+        path,
+        lang,
+        repo,
+        &context.go,
+        &modules.module_qname(path),
+        &context.plugin_families,
+    )?;
     // LC.3a: the edges present now are the parser's own. Stamped here,
     // before the extractors, so the parse cache stores the stamp and a cache
     // hit replays it.
@@ -1357,7 +1483,8 @@ impl ModuleQnames {
                 *plan.same_group.entry(group).or_default() += 1;
                 plan.same_group_files += files;
             }
-            plan.qualified.extend(groups.values().flatten().map(|p| (*p).to_string()));
+            plan.qualified
+                .extend(groups.values().flatten().map(|p| (*p).to_string()));
         }
         plan
     }
@@ -1378,7 +1505,12 @@ impl ModuleQnames {
 
     /// The MODULE id of `path` under this plan.
     pub(crate) fn module_id(&self, path: &str, repo: RepoId) -> NodeId {
-        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &self.module_qname(path))
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::MODULE,
+            &self.module_qname(path),
+        )
     }
 
     /// fired_on marker, once per repo with a cross-group qualified file:
@@ -1399,8 +1531,11 @@ impl ModuleQnames {
     /// (groups in name order, `n` = that group's stems).
     fn same_group_marker(&self, repo_label: &str) -> Option<String> {
         (self.same_group_files > 0).then(|| {
-            let per_group: Vec<String> =
-                self.same_group.iter().map(|(g, n)| format!("{g}={n}")).collect();
+            let per_group: Vec<String> = self
+                .same_group
+                .iter()
+                .map(|(g, n)| format!("{g}={n}"))
+                .collect();
             format!(
                 "[modules] same-group stems: files={} stems={} ({}) repo={repo_label}",
                 self.same_group_files,
@@ -1427,7 +1562,9 @@ impl ModuleQnames {
 /// never compiled alone.
 fn is_c_cpp_header(path: &str) -> bool {
     matches!(
-        std::path::Path::new(path).extension().and_then(|e| e.to_str()),
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str()),
         Some("h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp")
     )
 }
@@ -1527,7 +1664,7 @@ fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
 /// under (the `[modules]` marker counts these). A new non-code branch adds its
 /// key here; `synthetic_modules_are_named_by_file_name` fails on a routed key
 /// it lacks.
-const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
+const SYNTHETIC_MODULE_KEYS: [&str; 11] = [
     "avro",
     "dockerfile",
     "dotenv",
@@ -1535,6 +1672,8 @@ const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
     "json",
     "manifest",
     "migration",
+    // L2 (lua-support): the routed plugin manifest.
+    "plugin-manifest",
     "prisma",
     "proto",
     "yaml",
@@ -1611,9 +1750,61 @@ mod tests {
     fn route(path: &str, source: &str) -> HashMap<&'static str, Vec<FileParse>> {
         let files = vec![(path.to_string(), source.to_string())];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         parses
+    }
+
+    /// L2 (lua-support): a plugin manifest rides its own branch, keyed by
+    /// its parent directory with the host label as the owner segment - and
+    /// never falls into the package-manifest machinery.
+    #[test]
+    fn plugin_manifest_rides_its_own_branch() {
+        // The maki seed family names the manifest, so the branch fires; an
+        // empty family set routes the file nowhere (the walk would not have
+        // admitted it).
+        let families = glia_code_domain::plugin_families::PluginFamilies::new(
+            glia_code_domain::plugin_families::seed_families(),
+        );
+        let files = vec![(
+            "plugins/question/plugin.toml".to_string(),
+            "[permissions]\nnet = 1\n".to_string(),
+        )];
+        let (parses, errors) = parse_repo_files(
+            &files,
+            RepoId(1),
+            &ParseContext::new(Default::default(), families),
+            None,
+            "test",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let fp = &parses["plugin-manifest"][0];
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "plugins::question::plugin.toml",
+        );
+        assert_eq!(fp.nodes[0].id, module_id, "the manifest is a MODULE");
+        let plugin = fp
+            .nodes
+            .iter()
+            .find(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::PLUGIN))
+            .expect("one PLUGIN node");
+        assert_eq!(
+            fp.nav.qname_by_id.get(&plugin.id).map(String::as_str),
+            Some("plugin:question @maki")
+        );
+        assert_eq!(fp.nav.parent_of.get(&plugin.id), Some(&module_id));
+        assert!(
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::PACKAGE_DEP),
+            "a plugin.toml never takes the package branch"
+        );
+        // A like-named basename that is not a manifest routes nowhere.
+        assert!(route("plugins/question/other.toml", "[permissions]\n").is_empty());
     }
 
     /// A13.9: a migration `.sql` becomes a MODULE whose ACCESSES_DATA edges
@@ -1640,7 +1831,12 @@ mod tests {
             "data_entity:sql:users",
         );
         assert_eq!(fp.nodes[0].id, module_id, "the migration file is a MODULE");
-        assert_eq!(fp.nodes.len(), 2, "MODULE + one DATA_ENTITY: {:?}", fp.nav.qname_by_id);
+        assert_eq!(
+            fp.nodes.len(),
+            2,
+            "MODULE + one DATA_ENTITY: {:?}",
+            fp.nav.qname_by_id
+        );
         assert_eq!(fp.edges.len(), 1);
         assert_eq!((fp.edges[0].from, fp.edges[0].to), (module_id, users));
         assert_eq!(fp.edges[0].category, edge_category::ACCESSES_DATA);
@@ -1661,8 +1857,12 @@ mod tests {
                       model User {\n  id Int @id\n  @@map(\"app_users\")\n}\n";
         let parses = route("prisma/schema.prisma", schema);
         let fp = &parses["prisma"][0];
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "prisma::schema.prisma");
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "prisma::schema.prisma",
+        );
         let user = NodeId::from_parts(
             GRAPH_TYPE,
             RepoId(1),
@@ -1690,10 +1890,14 @@ mod tests {
             ),
         ];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let fps = &parses["prisma"];
-        assert_eq!(fps.len(), 1, "the model-less datasource file stashes nothing");
+        assert_eq!(
+            fps.len(),
+            1,
+            "the model-less datasource file stashes nothing"
+        );
         let event = NodeId::from_parts(
             GRAPH_TYPE,
             RepoId(1),
@@ -1714,8 +1918,12 @@ mod tests {
         assert_eq!(fps.len(), 1);
         let fp = &fps[0];
 
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "api::schema.graphql");
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "api::schema.graphql",
+        );
         assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
 
         let mut resolvers: Vec<&str> = fp
@@ -1725,7 +1933,10 @@ mod tests {
             .filter_map(|n| fp.nav.qname_by_id.get(&n.id).map(String::as_str))
             .collect();
         resolvers.sort_unstable();
-        assert_eq!(resolvers, ["graphql_resolver:Query", "graphql_resolver:getUser"]);
+        assert_eq!(
+            resolvers,
+            ["graphql_resolver:Query", "graphql_resolver:getUser"]
+        );
 
         let get_user = NodeId::from_parts(
             GRAPH_TYPE,
@@ -1733,7 +1944,11 @@ mod tests {
             node_kind::GRAPHQL_RESOLVER,
             "graphql_resolver:getUser",
         );
-        let node = fp.nodes.iter().find(|n| n.id == get_user).expect("getUser node");
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == get_user)
+            .expect("getUser node");
         let position = node
             .cells
             .iter()
@@ -1750,13 +1965,21 @@ mod tests {
             && e.to == get_user
             && e.category == edge_category::CONTAINS));
         assert!(
-            !fp.nav.kind_by_id.values().any(|k| *k == node_kind::GRAPHQL_OPERATION),
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::GRAPHQL_OPERATION),
             "a schema declares no client operations"
         );
 
         // DT.1j: the object type is a MESSAGE_TYPE the MODULE DEFINES, its
         // edge stamped by the synthetic sweep; the root type is none.
-        let user = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:User");
+        let user = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:User",
+        );
         assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::MESSAGE_TYPE));
         assert_eq!(fp.nav.parent_of.get(&user), Some(&module_id));
         let defines = fp
@@ -1765,17 +1988,32 @@ mod tests {
             .find(|e| e.from == module_id && e.to == user && e.category == edge_category::DEFINES)
             .expect("MODULE DEFINES the type");
         assert_eq!(
-            evidence::Evidence::of(defines).map(|ev| ev.emitter).as_deref(),
+            evidence::Evidence::of(defines)
+                .map(|ev| ev.emitter)
+                .as_deref(),
             Some("extractor:graphql")
         );
-        let types = fp.nav.kind_by_id.values().filter(|k| **k == node_kind::MESSAGE_TYPE).count();
+        let types = fp
+            .nav
+            .kind_by_id
+            .values()
+            .filter(|k| **k == node_kind::MESSAGE_TYPE)
+            .count();
         assert_eq!(types, 1, "`type Query` is a root, never a MESSAGE_TYPE");
 
         // A schema file of types only is a parse too.
         let parses = route("api/types.graphql", "type Order {\n  id: ID!\n}\n");
         let fp = &parses["graphql"][0];
-        let order = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:Order");
-        assert_eq!(fp.nav.kind_by_id.get(&order), Some(&node_kind::MESSAGE_TYPE));
+        let order = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Order",
+        );
+        assert_eq!(
+            fp.nav.kind_by_id.get(&order),
+            Some(&node_kind::MESSAGE_TYPE)
+        );
     }
 
     /// DT.1j: the SDL types of a code file's GraphQL-marked literal join its
@@ -1786,15 +2024,35 @@ mod tests {
         let src = "import { gql } from 'graphql-tag';\n\nexport const typeDefs = gql`\n  type Query {\n    products: [Product!]!\n  }\n  type Product {\n    id: ID!\n  }\n`;\n";
         let parses = route("api/schema.ts", src);
         let fp = &parses["typescript"][0];
-        let product =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:Product");
-        let node = fp.nodes.iter().find(|n| n.id == product).expect("Product type");
-        let position = node.cells.iter().find(|c| c.kind == cell_type::POSITION).map(|c| match &c.payload {
-            CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
-            CellPayload::Bytes(_) => String::new(),
-        });
-        assert_eq!(position.as_deref(), Some(r#"{"file":"api/schema.ts","start_line":6,"end_line":8}"#));
-        let module = fp.nav.parent_of.get(&product).copied().expect("a nav parent");
+        let product = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Product",
+        );
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == product)
+            .expect("Product type");
+        let position = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::POSITION)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            });
+        assert_eq!(
+            position.as_deref(),
+            Some(r#"{"file":"api/schema.ts","start_line":6,"end_line":8}"#)
+        );
+        let module = fp
+            .nav
+            .parent_of
+            .get(&product)
+            .copied()
+            .expect("a nav parent");
         assert_eq!(fp.nav.kind_by_id.get(&module), Some(&node_kind::MODULE));
         let defines = fp
             .edges
@@ -1802,7 +2060,9 @@ mod tests {
             .find(|e| e.from == module && e.to == product && e.category == edge_category::DEFINES)
             .expect("MODULE DEFINES the type");
         assert_eq!(
-            evidence::Evidence::of(defines).map(|ev| ev.emitter).as_deref(),
+            evidence::Evidence::of(defines)
+                .map(|ev| ev.emitter)
+                .as_deref(),
             Some("extractor:graphql")
         );
     }
@@ -1813,7 +2073,11 @@ mod tests {
     #[test]
     fn graphqls_schema_files_route_to_the_sdl_scan() {
         assert_eq!(detect_language("schema/schema.graphqls"), Some("graphql"));
-        assert_eq!(parser_route("schema/schema.graphqls"), None, "never a code parser");
+        assert_eq!(
+            parser_route("schema/schema.graphqls"),
+            None,
+            "never a code parser"
+        );
 
         let sdl = "type Query {\n  user: User\n}\n\ntype User {\n  id: ID!\n}\n";
         let parses = route("server/schema.graphqls", sdl);
@@ -1832,10 +2096,15 @@ mod tests {
             node_kind::GRAPHQL_RESOLVER,
             "graphql_resolver:user",
         );
-        assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::GRAPHQL_RESOLVER));
-        assert!(fp.edges.iter().any(|e| e.from == module_id
-            && e.to == user
-            && e.category == edge_category::CONTAINS));
+        assert_eq!(
+            fp.nav.kind_by_id.get(&user),
+            Some(&node_kind::GRAPHQL_RESOLVER)
+        );
+        assert!(
+            fp.edges.iter().any(|e| e.from == module_id
+                && e.to == user
+                && e.category == edge_category::CONTAINS)
+        );
     }
 
     /// CB.1: every C/C++ extension routes to the c_cpp parser - `.hh` /
@@ -1850,18 +2119,27 @@ mod tests {
             assert_eq!(detect_language(path), Some("c_cpp"), "{path}");
             assert_eq!(parser_route(path), Some("c_cpp"), "{path}");
         }
-        let parses = route("src/detail.inl", "inline int detail_helper() { return 1; }\n");
+        let parses = route(
+            "src/detail.inl",
+            "inline int detail_helper() { return 1; }\n",
+        );
         let fp = &parses["c_cpp"][0];
         let module_id =
             NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "src::detail.inl");
-        assert_eq!(fp.nodes[0].id, module_id, "a .inl is a MODULE named by file name");
+        assert_eq!(
+            fp.nodes[0].id, module_id,
+            "a .inl is a MODULE named by file name"
+        );
         let helper = NodeId::from_parts(
             GRAPH_TYPE,
             RepoId(1),
             node_kind::FUNCTION,
             "src::detail.inl::detail_helper",
         );
-        assert!(fp.nodes.iter().any(|n| n.id == helper), "its inline function is walked");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == helper),
+            "its inline function is walked"
+        );
     }
 
     #[test]
@@ -1873,10 +2151,17 @@ mod tests {
         assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["avro"]);
         let fp = &parses["avro"][0];
 
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "schemas::user.avsc");
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "schemas::user.avsc",
+        );
         assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
-        let module_pos = fp.nodes[0].cells.iter().find(|c| c.kind == cell_type::POSITION);
+        let module_pos = fp.nodes[0]
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::POSITION);
         assert!(
             matches!(module_pos.map(|c| &c.payload), Some(CellPayload::Json(s))
                 if s == r#"{"file":"schemas/user.avsc","start_line":0,"end_line":1}"#),
@@ -1891,7 +2176,10 @@ mod tests {
         assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::MESSAGE_TYPE));
         assert_eq!(fp.nav.parent_of.get(&user), Some(&module_id));
 
-        assert!(route("schemas/broken.avsc", "{\"type\": ").is_empty(), "malformed: no MODULE");
+        assert!(
+            route("schemas/broken.avsc", "{\"type\": ").is_empty(),
+            "malformed: no MODULE"
+        );
     }
 
     /// LA.16 (A10.12): a JSON Schema reaches the MESSAGE_TYPE scan in the
@@ -1899,7 +2187,8 @@ mod tests {
     /// schemas also sniff as schema-shaped stays on the contract path.
     #[test]
     fn json_schema_files_route_to_the_message_type_scan() {
-        let schema = "{\n  \"title\": \"Refund\",\n  \"type\": \"object\",\n  \"properties\": {}\n}\n";
+        let schema =
+            "{\n  \"title\": \"Refund\",\n  \"type\": \"object\",\n  \"properties\": {}\n}\n";
         let parses = route("schemas/refund.schema.json", schema);
         assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["json"]);
         let fp = &parses["json"][0];
@@ -1910,9 +2199,16 @@ mod tests {
                 if s == r#"{"file":"schemas/refund.schema.json","start_line":0,"end_line":4}"#),
             "the schema file's MODULE carries its whole-file POSITION"
         );
-        let refund =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:jsonschema:Refund");
-        assert_eq!(fp.nav.kind_by_id.get(&refund), Some(&node_kind::MESSAGE_TYPE));
+        let refund = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MESSAGE_TYPE,
+            "message:jsonschema:Refund",
+        );
+        assert_eq!(
+            fp.nav.kind_by_id.get(&refund),
+            Some(&node_kind::MESSAGE_TYPE)
+        );
         assert_eq!(fp.nav.parent_of.get(&refund), Some(&module_id));
 
         let openapi = r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}},
@@ -1920,11 +2216,21 @@ mod tests {
         let parses = route("openapi.json", openapi);
         let fp = &parses["json"][0];
         let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
-        assert!(kinds.contains(&node_kind::DOC_SECTION), "still a contract op");
-        assert!(!kinds.contains(&node_kind::MESSAGE_TYPE), "a contract is never a JSON Schema");
+        assert!(
+            kinds.contains(&node_kind::DOC_SECTION),
+            "still a contract op"
+        );
+        assert!(
+            !kinds.contains(&node_kind::MESSAGE_TYPE),
+            "a contract is never a JSON Schema"
+        );
 
         assert!(
-            route("testdata/settings.json", r#"{"config":{"type":"object","properties":{}}}"#).is_empty(),
+            route(
+                "testdata/settings.json",
+                r#"{"config":{"type":"object","properties":{}}}"#
+            )
+            .is_empty(),
             "a nested look-alike stashes nothing, not even a MODULE"
         );
     }
@@ -1942,19 +2248,30 @@ mod tests {
             None,
             &RouteCtx {
                 repo: RepoId(1),
-                go: &GoModules::default(),
+                context: &ParseContext::default(),
                 modules: &ModuleQnames::plan(&files),
                 prisma_provider: None,
             },
             None,
         );
-        assert!(matches!(routed, Routed::NonCode { key: "json", fp: Some(_), .. }));
+        assert!(matches!(
+            routed,
+            Routed::NonCode {
+                key: "json",
+                fp: Some(_),
+                ..
+            }
+        ));
 
         let parses = route("server/appsettings.json", src);
         assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["json"]);
         let fp = &parses["json"][0];
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "server::appsettings.json");
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "server::appsettings.json",
+        );
         assert_eq!(fp.nodes[0].id, module_id, "the settings file is a MODULE");
         assert_eq!(fp.nav.name_by_id[&module_id], "appsettings.json");
         let key = NodeId::from_parts(
@@ -1970,8 +2287,14 @@ mod tests {
             .iter()
             .find(|e| e.to == key)
             .expect("a DEFINES_CONFIG edge into the setting");
-        assert_eq!((edge.from, edge.category), (module_id, edge_category::DEFINES_CONFIG));
-        assert_eq!(evidence::Evidence::of(edge).unwrap().emitter, "extractor:json");
+        assert_eq!(
+            (edge.from, edge.category),
+            (module_id, edge_category::DEFINES_CONFIG)
+        );
+        assert_eq!(
+            evidence::Evidence::of(edge).unwrap().emitter,
+            "extractor:json"
+        );
         let node = fp.nodes.iter().find(|n| n.id == key).unwrap();
         assert!(matches!(&node.cells[0].payload, CellPayload::Json(s)
             if s == r#"{"source":"appsettings","redacted":true}"#));
@@ -1987,7 +2310,10 @@ mod tests {
         let fp = &route("openapi.json", openapi)["json"][0];
         let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
         assert!(kinds.contains(&node_kind::DOC_SECTION), "a contract op");
-        assert!(!kinds.contains(&node_kind::CONFIG_KEY), "no setting from a contract");
+        assert!(
+            !kinds.contains(&node_kind::CONFIG_KEY),
+            "no setting from a contract"
+        );
         // A settings file whose content looks like a contract is still settings.
         let fp = &route("appsettings.json", openapi)["json"][0];
         let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
@@ -2052,17 +2378,26 @@ mod tests {
         let fp = &parses["manifest"][0];
         assert_eq!(manifest_cli(fp, "server::package.json"), ["cli:shipit"]);
         assert!(
-            fp.nav.qname_by_id.values().any(|q| q == "package:npm:commander"),
+            fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "package:npm:commander"),
             "the dependency is still read"
         );
 
         let scripts_only = "[project.scripts]\nmytool = \"mytool.cli:cli\"\n";
         let parses = route("server/pyproject.toml", scripts_only);
-        assert_eq!(manifest_cli(&parses["manifest"][0], "server::pyproject.toml"), ["cli:mytool"]);
+        assert_eq!(
+            manifest_cli(&parses["manifest"][0], "server::pyproject.toml"),
+            ["cli:mytool"]
+        );
 
         let bin_only = "[package]\nname = \"tools\"\n\n[[bin]]\nname = \"migrate\"\n";
         let parses = route("Cargo.toml", bin_only);
-        assert_eq!(manifest_cli(&parses["manifest"][0], "Cargo.toml"), ["cli:migrate"]);
+        assert_eq!(
+            manifest_cli(&parses["manifest"][0], "Cargo.toml"),
+            ["cli:migrate"]
+        );
 
         // Neither a dependency nor a binary: nothing is stashed.
         assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
@@ -2074,7 +2409,8 @@ mod tests {
     /// same op stay two nodes, each ORIGIN naming its feature.
     #[test]
     fn feature_scoped_contract_ops_route_through_the_contract_branches() {
-        let openapi = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+        let openapi =
+            "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
         let files: Vec<(String, String)> = [
             (
                 "features/activities/feature.yaml",
@@ -2092,7 +2428,7 @@ mod tests {
         .map(|(p, s)| (p.to_string(), s.to_string()))
         .collect();
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let mut ops: Vec<(String, String)> = parses
             .values()
@@ -2106,7 +2442,9 @@ mod tests {
                             .cells
                             .iter()
                             .find_map(|c| match &c.payload {
-                                CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j.clone()),
+                                CellPayload::Json(j) if c.kind == cell_type::ORIGIN => {
+                                    Some(j.clone())
+                                }
                                 _ => None,
                             })
                             .unwrap_or_default();
@@ -2126,14 +2464,27 @@ mod tests {
                 "contract::specs::003-web::contracts::openapi::GET:/orders",
             ]
         );
-        assert!(ops[2].1.contains(r#""feature":"002-admin""#), "{}", ops[2].1);
-        assert!(ops[0].1.contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#), "{}", ops[0].1);
+        assert!(
+            ops[2].1.contains(r#""feature":"002-admin""#),
+            "{}",
+            ops[2].1
+        );
+        assert!(
+            ops[0]
+                .1
+                .contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#),
+            "{}",
+            ops[0].1
+        );
     }
 
     // ---- LB.9b: MODULEs named by file name across build groups ----------
 
     fn files_of(paths: &[&str]) -> Vec<(String, String)> {
-        paths.iter().map(|p| (p.to_string(), String::new())).collect()
+        paths
+            .iter()
+            .map(|p| (p.to_string(), String::new()))
+            .collect()
     }
 
     fn qualified(paths: &[&str]) -> Vec<String> {
@@ -2181,7 +2532,7 @@ mod tests {
         .map(|(p, s)| (p.to_string(), s.to_string()))
         .collect();
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let mut routed: Vec<(&str, String)> = Vec::new();
         for (lang, fps) in &parses {
@@ -2200,7 +2551,11 @@ mod tests {
             .collect();
         expected.sort();
         assert_eq!(routed, expected);
-        assert_eq!(expected.len(), 7, "setup.py f.py g.ts h.dart k.kt m.go x.component.ts");
+        assert_eq!(
+            expected.len(),
+            7,
+            "setup.py f.py g.ts h.dart k.kt m.go x.component.ts"
+        );
     }
 
     #[test]
@@ -2217,14 +2572,20 @@ mod tests {
             ["web/x.ts", "web/x.vue"]
         );
         // Kotlin joins Java's graph (A14.2).
-        assert_eq!(qualified(&["jvm/A.java", "jvm/A.kt"]), ["jvm/A.java", "jvm/A.kt"]);
+        assert_eq!(
+            qualified(&["jvm/A.java", "jvm/A.kt"]),
+            ["jvm/A.java", "jvm/A.kt"]
+        );
         // yaml never routes to a parser.
         assert!(qualified(&["c/app.py", "c/app.yaml"]).is_empty());
         // Different directories never share a key.
         assert!(qualified(&["a/user.py", "b/user.ts"]).is_empty());
         // Three groups, one of them holding two files.
         let plan = ModuleQnames::plan(&files_of(&["u.py", "u.ts", "u.js", "v.go"]));
-        assert_eq!((plan.cross_group_files, plan.stems, plan.same_group_dupes), (3, 1, 1));
+        assert_eq!(
+            (plan.cross_group_files, plan.stems, plan.same_group_dupes),
+            (3, 1, 1)
+        );
         assert_eq!(plan.qualified.len(), 3);
         assert_eq!(plan.c_cpp_marker("r"), None);
         assert_eq!(
@@ -2255,9 +2616,18 @@ mod tests {
             qualified(&["c/core.clj", "c/core.cljs", "c/core.cljc"]),
             ["c/core.clj", "c/core.cljs", "c/core.cljc"]
         );
-        assert_eq!(qualified(&["j/Foo.java", "j/Foo.kt"]), ["j/Foo.java", "j/Foo.kt"]);
-        assert_eq!(qualified(&["l/foo.ex", "l/foo.exs"]), ["l/foo.ex", "l/foo.exs"]);
-        assert_eq!(qualified(&["t/main.tf", "t/main.hcl"]), ["t/main.tf", "t/main.hcl"]);
+        assert_eq!(
+            qualified(&["j/Foo.java", "j/Foo.kt"]),
+            ["j/Foo.java", "j/Foo.kt"]
+        );
+        assert_eq!(
+            qualified(&["l/foo.ex", "l/foo.exs"]),
+            ["l/foo.ex", "l/foo.exs"]
+        );
+        assert_eq!(
+            qualified(&["t/main.tf", "t/main.hcl"]),
+            ["t/main.tf", "t/main.hcl"]
+        );
         let lone = ModuleQnames::plan(&files_of(&["src/util.ts", "src/app.js"]));
         assert_eq!(lone.module_qname("src/util.ts"), "src::util");
         assert_eq!(lone.same_group_marker("r"), None);
@@ -2278,7 +2648,9 @@ mod tests {
         ]));
         assert_eq!(
             plan.same_group_marker("fx").as_deref(),
-            Some("[modules] same-group stems: files=6 stems=3 (clojure=1 java=1 typescript=1) repo=fx")
+            Some(
+                "[modules] same-group stems: files=6 stems=3 (clojure=1 java=1 typescript=1) repo=fx"
+            )
         );
         assert_eq!(
             plan.marker("fx").as_deref(),
@@ -2291,14 +2663,17 @@ mod tests {
     #[test]
     fn a_qualified_parse_names_its_symbols_under_the_file_name() {
         let files: Vec<(String, String)> = vec![
-            ("api/user.py".to_string(), "def validate(x):\n    return x\n".to_string()),
+            (
+                "api/user.py".to_string(),
+                "def validate(x):\n    return x\n".to_string(),
+            ),
             (
                 "api/user.ts".to_string(),
                 "export function validate(x: number) { return x; }\n".to_string(),
             ),
         ];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         for (lang, qname) in [("python", "api::user.py"), ("typescript", "api::user.ts")] {
             let fp = &parses[lang][0];
@@ -2308,7 +2683,10 @@ mod tests {
                 NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname)
             );
             assert_eq!(fp.nav.qname_by_id[&module], qname);
-            assert_eq!(fp.nav.name_by_id[&module], "user", "the stem stays the name");
+            assert_eq!(
+                fp.nav.name_by_id[&module], "user",
+                "the stem stays the name"
+            );
             let validate = format!("{qname}::validate");
             assert!(
                 fp.nav.qname_by_id.values().any(|q| *q == validate),
@@ -2322,7 +2700,10 @@ mod tests {
     /// same-stem sibling, and never qualifies a file of another group.
     #[test]
     fn c_cpp_files_are_always_named_by_file_name() {
-        assert_eq!(qualified(&["src/W.h", "src/W.cpp"]), ["src/W.h", "src/W.cpp"]);
+        assert_eq!(
+            qualified(&["src/W.h", "src/W.cpp"]),
+            ["src/W.h", "src/W.cpp"]
+        );
         let plan = ModuleQnames::plan(&files_of(&["src/W.h", "src/W.cpp", "main.cpp"]));
         assert_eq!(plan.module_qname("src/W.h"), "src::W.h");
         assert_eq!(plan.module_qname("src/W.cpp"), "src::W.cpp");
@@ -2334,7 +2715,10 @@ mod tests {
         assert_eq!(plan.marker("r"), None, "no cross-group stem");
         assert_eq!(qualified(&["src/main.cpp"]), ["src/main.cpp"]);
         // A C/C++ file never makes a same-stem file of another group qualify.
-        assert_eq!(qualified(&["native/w.cpp", "native/w.dart"]), ["native/w.cpp"]);
+        assert_eq!(
+            qualified(&["native/w.cpp", "native/w.dart"]),
+            ["native/w.cpp"]
+        );
         let plan = ModuleQnames::plan(&files_of(&["native/w.cpp", "native/w.dart"]));
         assert_eq!(plan.module_qname("native/w.dart"), "native::w");
         assert_eq!(plan.marker("r"), None);
@@ -2368,20 +2752,30 @@ mod tests {
             ),
         ];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let fps = &parses["c_cpp"];
         assert_eq!(fps.len(), 2);
         // LB.10b: a header's global class takes the header's directory, not
         // its file, as scope (`src::Widget`); the free function keeps its file.
-        for (qname, child) in [("src::Widget.h", "src::Widget"), ("src::Widget.cpp", "src::Widget.cpp::make")] {
+        for (qname, child) in [
+            ("src::Widget.h", "src::Widget"),
+            ("src::Widget.cpp", "src::Widget.cpp::make"),
+        ] {
             let module = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname);
             let fp = fps
                 .iter()
                 .find(|fp| fp.nodes.first().map(|n| n.id) == Some(module))
                 .unwrap_or_else(|| panic!("MODULE {qname}"));
-            assert_eq!(fp.nav.name_by_id[&module], "Widget", "the stem stays the name");
-            assert!(fp.nav.qname_by_id.values().any(|q| q == child), "{:?}", fp.nav.qname_by_id);
+            assert_eq!(
+                fp.nav.name_by_id[&module], "Widget",
+                "the stem stays the name"
+            );
+            assert!(
+                fp.nav.qname_by_id.values().any(|q| q == child),
+                "{:?}",
+                fp.nav.qname_by_id
+            );
         }
     }
 
@@ -2394,7 +2788,10 @@ mod tests {
                 "web/x.component.html".to_string(),
                 "<a routerLink=\"/home\">h</a>\n".to_string(),
             ),
-            ("web/x.component.py".to_string(), "def f():\n    return 1\n".to_string()),
+            (
+                "web/x.component.py".to_string(),
+                "def f():\n    return 1\n".to_string(),
+            ),
             (
                 "web/x.component.ts".to_string(),
                 "import { Component } from '@angular/core';\n\
@@ -2404,10 +2801,14 @@ mod tests {
             ),
         ];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
-        let ts_module =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "web::x.component.ts");
+        let ts_module = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "web::x.component.ts",
+        );
         assert!(
             parses["angular"]
                 .iter()
@@ -2567,7 +2968,7 @@ mod tests {
             ),
         ];
         let (parses, errors) =
-            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+            parse_repo_files(&files, RepoId(1), &ParseContext::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let ts_module = parses
             .values()
