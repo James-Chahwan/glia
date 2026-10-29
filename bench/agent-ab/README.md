@@ -9,7 +9,9 @@ changed. It is measurement tooling (stdlib Python, hermetic `python3 test_*.py` 
 
 The harness lands in four parts: FE.1 the task set (this directory's `repos.json`, `tasks.py`,
 `tasks/`), FE.2 the session driver (`run.py`), FE.3 the scorer (`score.py`), FE.4 the measured
-run and the committed report.
+run and the committed report. FE.4's full run (540 sessions on the FE.1 tasks) is replaced by
+FH.13's probes on the shapes where glia should change the outcome (the verifier role,
+multi-repo, big repos): `## The 0.5.4 probes (FH.13)` below.
 
 ## What it measures
 
@@ -26,8 +28,12 @@ FE.2's driver runs every task under three arms, the same prompt text for each:
 - `glia-0.5.2`: the 0.5.2 release binary and its `skills/glia/SKILL.md`;
 - `glia-0.5.3`: the 0.5.3 binary (the ranking release) and its skill.
 
-In `config.json` and every output the arms are `none`, `g052` and `g053`. Each glia arm's
-snapshot steps (history sync, calibrate) run before the agent's clock starts.
+In every output the arms are `none`, `g052` and `g053`. Each glia arm's snapshot steps
+(history sync, calibrate) run before the agent's clock starts. Since FH.13 the committed
+`config.json` holds the probe arms instead: `none`, `g053` and `g054` (the 0.5.4 tree's glia and
+its slim skill directory, calibrated as g053), one rep, Claude Code 2.1.312; FE.2 / FE.3's
+three-arm configuration is the one their tests build (`test_run.py`'s `World`) and the one the
+pilots' runs under DIR were pinned by (a run's meta refuses a resume under the new config).
 
 ## Tasks
 
@@ -349,3 +355,86 @@ The run is subscription-authenticated (`CLAUDE_CODE_OAUTH_TOKEN` from `claude se
 ruling FE-3) and usage-gated: check `dev-notes/wave-runner/usage_gate.py` before the pilot and
 before each resume of the full run; the full run starts only after James approves the pilot's
 estimate.
+
+## The 0.5.4 probes (FH.13)
+
+The pilots and probes of 2026-10-25/26 (`dev-notes/agent-ab-probe-0.5.4.md`) showed a frontier
+model finding the same files with or without glia on repos it can grep. FE.4's full run is
+replaced by three probe sets on the shapes where glia should change the outcome, each run at
+one rep under `config.json`'s arms (`none`, `g053`, `g054`):
+
+| set | tasks | what it asks | metric |
+|---|---|---|---|
+| `verifier` | 24: the FH.1 drift tasks of the cohort apps whose boundary health read OK in `bench/cohort/results/baseline/boundary.jsonl` after FH.3-FH.6 (immich 6, microservices-demo 4, gin-vue-admin 4, scaffold-eth-2 4), then FE pilot 2's six multi-file tasks | a glia arm is told to do the skill's "Before you finish a change" step (`diff-impact`, `contract-breaks`, `review` with `--base HEAD~1` on a drift task, whose server change is the HEAD commit, else `--base HEAD`) | `missed`: truth (client) code files the patch leaves untouched |
+| `multirepo` | 10: the immich and microservices-demo drift tasks, each monorepo split into per-service repositories | the agent starts in the repository its truth files are in, the others beside it; every arm is told the layout, a glia arm that glia sees across only with `--with ../<repo>` | `missed`, beside score.py's recall |
+| `bigrepo` | 16: twenty's and immich's ripple and symptom tasks with 2+ code files | the plain prompt | turns and input tokens to the first edit of each truth file |
+
+A set lives in `bench/cohort/tasks/agent/<set>/`: `set.json` (name, metric, `about`, the task ids
+and where they come from, `cohort` = `bench/cohort/tasks/` or `agent-ab` = `tasks/`, the prompt
+notes and, for a split, `workspace`), and the rows `run.py build-set` materialises from it,
+`repos.json` (agent-ab's schema: the FE.1 row when the repo is one, else the cohort's) and
+`<label>.jsonl`. `build-set <dir> --check` re-derives them offline and exits 1 on a difference
+(`test_run.py` checks all three). Every set run reads the cohort's bare clones
+(`${GLIA_COHORT_DIR:-~/.cache/glia-cohort}`); a drift row starts at its synthetic S
+(`cohort.checkout_rev`, rebuilt when the ref is missing), any other at its parent. The selection
+was fixed before any session: the sets are id lists, so a later ratchet of the cohort baseline
+does not move them.
+
+**The split.** `workspace` maps a monorepo label to `parts` (`{name: prefix/}`) and a `rest`
+part (everything no prefix holds). A split row's truth, probe and test paths are
+`<part>/<path>`; it starts in the part holding most truth code files (ties by name), and a drift
+prompt names the repositories the server change landed in ("The latest commit in ../server
+(beside this repository) changed the server: .."). At session time each part is its own
+repository under the session's copy: the last 400 first-parent commits of the start touching
+the part, each re-committed with the part's tree and its original author, date and message
+(committer = author), chained oldest first, written once to the clone's
+`refs/agent-ab/split/<task>/<part>` (deterministic: a rebuild gives the same sha). A part that
+does not exist at the start is left out. The agent runs in `<copy>/<start>` with `--add-dir
+<copy>` (every arm alike); a glia arm's prep runs `history sync`, `build` and `calibrate` in every
+part and puts the skill in the start part. `files_opened` and the patch read in workspace
+coordinates (`<part>/<path>`; the patch is every part's diff, part order, `a/<part>/` prefixes),
+so score.py scores a split session unchanged. microservices-demo splits into its twelve
+`src/<service>/` repositories plus `platform` (protos, manifests, the rest); immich into `web`,
+`mobile` and `server` (the server, the OpenAPI spec, the generated SDK, e2e: a regenerated SDK
+follows the server).
+
+**Prompts.** `session_prompt`: the template's task, then the set's `note` (every arm), then for a
+glia arm `config.json`'s `glia_prompt` and the set's `glia_note`. `{base}` is `HEAD~1` on a
+drift row, else `HEAD`; `{repos}`, `{start}` and `{with}` (`--with ../<part>` for every other
+part) fill a split row's notes. With no set the prompt is FE.2's byte for byte. A set run's meta
+pins `set` (set.json's sha256) beside the prompt.
+
+**Running.** Usage first (`python3 dev-notes/wave-runner/usage_gate.py`, the 70% 7-day rule),
+then once per arm set: `python3 run.py binaries` (g054 builds this tree at its pinned rev) and
+`python3 run.py isolation` (three `ok`); each needs `CLAUDE_CODE_OAUTH_TOKEN` (ruling FE-3).
+Each set is first piloted on its first repo, its estimate read before the rest:
+
+```
+python3 run.py --set ../cohort/tasks/agent/verifier pilot --run-id ver-immich --only immich
+python3 run.py --set ../cohort/tasks/agent/verifier run --run-id ver-immich --only immich
+python3 run.py --set ../cohort/tasks/agent/verifier run --run-id ver-<label> --only <label> &
+```
+
+`--only <label>[,..]` runs those repos alone, and its pins name only their task files, so one
+run id per repo runs repos in parallel processes. `report` scores a set over all its run ids:
+
+```
+python3 run.py --set ../cohort/tasks/agent/<set> report --run-id <id> [--run-id <id> ..] \
+    --out-md <md> --out-json results/0.5.4/<set>/baseline.json \
+    --out-sessions results/0.5.4/<set>/sessions.jsonl --out-probe results/0.5.4/<set>/probe.jsonl
+```
+
+It scores each run against its own repos (score.py's `metrics_from_run`), merges the rows under
+one meta line (the runs must share model, Claude Code, binaries, prompt and config), and writes
+score.py's outputs (`baseline.json` reproduces from `sessions.jsonl` alone: `score.py score
+--from-metrics`), the probe rows (`--out-probe`, per session: truth files, `missed`, the turn and
+cumulative input tokens at the first Edit / Write / MultiEdit of each truth file, `all_edited`,
+`verified` = a glia `diff-impact` / `contract-breaks` / `review` after the first edit, and
+`probe/diag.py`'s verdict for a glia arm; no transcript text) and the set's markdown section:
+score.py's arm table, the pairs g054-none, g054-g053 and g053-none under score.py's reading rule,
+the probe table, the `missed` paired differences (task-cluster bootstrap, lower is better) and
+the diag verdict counts. score.py's own `PAIRS` are FE.3's (g052 / g053): its `baseline.json`
+from a probe run carries the g053-none pair only, and the g054 pairs are the report's. Markers:
+`[agent-ab] set name=<s> metric=<m> tasks=<n> repos=<r> split=<k> sha256=<12>` (build-set),
+`[agent-ab] score sessions=<n> excluded=<k> tasks=<t>` and `[agent-ab] diag verdicts
+no_skill=<a> skill_only=<b> glia_missed=<c> glia_late=<d> glia_found=<e>` (report).

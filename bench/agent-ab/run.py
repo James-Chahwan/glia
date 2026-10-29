@@ -9,13 +9,24 @@ its own leak-free checkout of the task commit's parent.
     python3 run.py run --run-id <id>     # the whole matrix (resumes; budget stop)
     python3 run.py status [--run-id <id>]
 
+FH.13's probe sets (bench/cohort/tasks/agent/<set>/: set.json, repos.json, rows):
+
+    python3 run.py build-set <set dir> [--check]   # materialise / re-derive the rows
+    python3 run.py --set <set dir> pilot|run|status [--only <label>,..] ...
+    python3 run.py --set <set dir> report --run-id <id> [--run-id ..] [--out-md ..]
+                   [--out-json ..] [--out-sessions ..] [--out-probe ..]
+
 Everything is written under ${GLIA_AGENT_AB_DIR:-~/.cache/glia-agent-ab} (the
-FE.1 bare clones' directory), never in the glia tree. Markers on stdout:
-`[agent-ab] binary ..`, `[agent-ab] isolation ..`, `[agent-ab] session ..`,
-`[agent-ab] pilot ..`, `[agent-ab] budget stop ..`. Stdlib only.
+FE.1 bare clones' directory), never in the glia tree; a set run reads the cohort's
+bare clones (${GLIA_COHORT_DIR:-~/.cache/glia-cohort}) and writes its split refs
+(refs/agent-ab/split/..) there. Markers on stdout: `[agent-ab] binary ..`,
+`[agent-ab] isolation ..`, `[agent-ab] session ..`, `[agent-ab] pilot ..`,
+`[agent-ab] budget stop ..`, `[agent-ab] set ..`, `[agent-ab] score ..`,
+`[agent-ab] diag verdicts ..`. Stdlib only.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -54,6 +65,22 @@ RL_PHRASES = ("rate limit", "usage limit", "rate_limit", "resets at", "too many 
 RL_ATTEMPTS, RL_DEFAULT_WAIT_S, RL_MAX_WAIT_S = 5, 900, 6 * 3600
 PREP_TIMEOUT_S = 3600
 ISOLATION_PROMPT = "Reply with the word ok."
+# FH.13's probe sets: where they live, where their rows come from, the split refs
+SETS_DIR = GLIA_REPO / "bench" / "cohort" / "tasks" / "agent"
+SET_SOURCES = {"cohort": GLIA_REPO / "bench" / "cohort" / "tasks", "agent-ab": HERE / "tasks"}
+SET_METRICS = ("missed", "first_edit", "across")
+SPLIT_REF, SPLIT_DEPTH = "refs/agent-ab/split/", 400
+DRIFT_RE = re.compile(r"^The latest commit on this branch \(HEAD\) changed the server: (.*)\. "
+                      r"The (.+) were not updated with it and no longer match the server\. ",
+                      re.S)
+SPLIT_DRIFT_PROMPT = ("The latest commit in {changed} (beside this repository) changed the "
+                      "server: {subject}. The {names} were not updated with it and no longer "
+                      "match the server. Update the client code so it works with the server as "
+                      "it is now.")
+EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit"})
+VERIFY_SUBS = frozenset({"diff-impact", "contract-breaks", "review"})
+PROBE_PAIRS = (("g054", "none"), ("g054", "g053"), ("g053", "none"))
+DIAG_VERDICTS = ("no_skill", "skill_only", "glia_missed", "glia_late", "glia_found")
 sleep = time.sleep  # the tests replace it
 
 
@@ -322,24 +349,30 @@ def session_env(d, cfg, arm, config_dir, base=None):
 
 
 # --- the checkout and the glia prep ------------------------------------------
-def checkout(d, label, parent, commit, copy):
-    gd = d / f"{label}.git"
+def checkout(d, label, parent, commit, copy, gd=None):
+    gd = gd or d / f"{label}.git"
     if not gd.is_dir():
         raise RunError(f"{label}: no bare clone at {gd} (run tasks.py build)")
+    fetch_into(gd, parent, copy)
+    if sh(["git", "-C", copy, "cat-file", "-e", f"{commit}^{{commit}}"],
+          check=False).returncode == 0:
+        raise RunError(f"leak: {copy} holds the task commit {commit[:12]}; run aborted")
+
+
+def fetch_into(gd, rev, copy):
+    """A fresh repo at copy whose `main` is rev, fetched alone from the bare clone gd: no
+    remote, `.glia/` and `.claude/` excluded."""
     sh(["git", "--git-dir", gd, "config", "uploadpack.allowAnySHA1InWant", "true"])
     if copy.exists():
         shutil.rmtree(copy)
     copy.mkdir(parents=True)
     sh(["git", "init", "-q", copy])
-    sh(["git", "-C", copy, "fetch", "-q", "--no-tags", gd, parent])
+    sh(["git", "-C", copy, "fetch", "-q", "--no-tags", gd, rev])
     sh(["git", "-C", copy, "checkout", "-q", "--detach", "FETCH_HEAD"])
     sh(["git", "-C", copy, "branch", "-q", "-f", "main", "FETCH_HEAD"])
     sh(["git", "-C", copy, "checkout", "-q", "main"])
     with open(copy / ".git" / "info" / "exclude", "a") as f:
         f.write(".glia/\n.claude/\n")
-    if sh(["git", "-C", copy, "cat-file", "-e", f"{commit}^{{commit}}"],
-          check=False).returncode == 0:
-        raise RunError(f"leak: {copy} holds the task commit {commit[:12]}; run aborted")
 
 
 def install_skill(d, arm, copy):
@@ -348,23 +381,27 @@ def install_skill(d, arm, copy):
     shutil.copytree(d / "skills" / arm / "glia", dst)
 
 
-def prep(d, cfg, arm, copy, env, log_path):
-    """history sync, build (and calibrate for an arm that sets it); outside the
-    agent's clock. Returns (prep_ms, ok)."""
+def prep(d, cfg, arm, copy, env, log_path, roots=None):
+    """history sync, build (and calibrate for an arm that sets it) in each repo root
+    (the copy, or every part of a split workspace), then the skill into the copy (the
+    agent's start); outside the agent's clock. Returns (prep_ms, ok)."""
     steps = [["history", "sync"], ["build"]]
     if cfg["arms"][arm].get("calibrate"):
         steps.append(["history", "calibrate"])
     t0, ok = time.monotonic(), True
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "wb") as out:
-        for step in steps:
-            try:
-                p = subprocess.run([str(d / "bin" / arm / "glia"), *step, str(copy)], cwd=copy,
-                                   env=env, stdout=out, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, timeout=PREP_TIMEOUT_S)
-                ok = p.returncode == 0
-            except subprocess.TimeoutExpired:
-                ok = False
+        for root in roots or [copy]:
+            for step in steps:
+                try:
+                    p = subprocess.run([str(d / "bin" / arm / "glia"), *step, str(root)],
+                                       cwd=root, env=env, stdout=out, stderr=subprocess.STDOUT,
+                                       stdin=subprocess.DEVNULL, timeout=PREP_TIMEOUT_S)
+                    ok = p.returncode == 0
+                except subprocess.TimeoutExpired:
+                    ok = False
+                if not ok:
+                    break
             if not ok:
                 break
     if ok:
@@ -373,7 +410,7 @@ def prep(d, cfg, arm, copy, env, log_path):
 
 
 # --- one Claude Code session -------------------------------------------------
-def claude_cmd(cfg, prompt, max_turns):
+def claude_cmd(cfg, prompt, max_turns, add_dir=None):
     cmd = ["claude", "-p", prompt, "--model", cfg["model"], "--output-format", "stream-json",
            "--verbose", "--mcp-config", str(HERE / "empty-mcp.json"), "--strict-mcp-config",
            "--setting-sources", "project", "--permission-mode", "bypassPermissions",
@@ -383,6 +420,8 @@ def claude_cmd(cfg, prompt, max_turns):
         # isolation check refuses every plugin, so the run turns them off
         cmd += ["--settings", json.dumps(
             {"enabledPlugins": {p: False for p in cfg["disabled_plugins"]}}, sort_keys=True)]
+    if add_dir:  # a split workspace: the sibling repositories, every arm alike
+        cmd += ["--add-dir", str(add_dir)]
     if cfg["disallowed_tools"]:
         cmd += ["--disallowedTools", *cfg["disallowed_tools"]]
     return cmd
@@ -605,14 +644,16 @@ def user_skill_names():
     return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
 
 
-def _rel(copy, cwd, path):
+def _rel(copy, cwd, path, depth=0):
+    """path, repo-relative to copy, or None outside it or under a skipped dir; depth 1
+    reads a split workspace, whose first component is the part (the repo)."""
     if not path or path.startswith("-"):
         return None
     ap = os.path.normpath(os.path.join(cwd, os.path.expanduser(path)))
     rp = os.path.relpath(ap, copy)
     if rp == "." or rp.startswith(".."):
         return None
-    if rp.split(os.sep)[0] in SKIP_DIRS:
+    if SKIP_DIRS & set(rp.split(os.sep)[:depth + 1]):
         return None
     return rp.replace(os.sep, "/")
 
@@ -635,8 +676,23 @@ def _open_args(word, args):
     return files
 
 
-def session_metrics(events, copy):
+def tracked_files(copy, parts=None):
+    """The committed paths of the copy, or of every part of a split workspace as
+    `<part>/<path>`."""
+    if not parts:
+        return set(sh(["git", "-C", copy, "ls-tree", "-r", "--name-only", "HEAD"],
+                      check=False).stdout.splitlines())
+    return {f"{name}/{p}" for name in parts
+            for p in sh(["git", "-C", Path(copy) / name, "ls-tree", "-r", "--name-only",
+                         "HEAD"], check=False).stdout.splitlines()}
+
+
+def session_metrics(events, copy, start=None, parts=None):
+    """files_opened (repo-relative; a split workspace's as `<part>/<path>`, the agent
+    starting in part `start`), tool / glia / grep calls."""
     copy = os.path.realpath(copy)
+    home = os.path.join(copy, start) if start else copy
+    depth = 1 if parts else 0
     tracked = None
     opened, tool_calls, glia_calls, grep_calls = [], Counter(), [], 0
 
@@ -649,9 +705,9 @@ def session_metrics(events, copy):
         if name == "Grep":
             grep_calls += 1
         elif name == "Read":
-            add(_rel(copy, copy, str(inp.get("file_path") or "")))
+            add(_rel(copy, home, str(inp.get("file_path") or ""), depth))
         elif name == "Bash":
-            cwd = copy
+            cwd = home
             for word, args in segments(str(inp.get("command") or "")):
                 if word == "cd" and args:
                     cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(args[0])))
@@ -668,30 +724,342 @@ def session_metrics(events, copy):
                     glia_calls.append({"subcommand": " ".join(sub), "flags": flags})
                 elif word in OPENERS or word == "sed":
                     for f in _open_args(word, args):
-                        rel = _rel(copy, cwd, f)
+                        rel = _rel(copy, cwd, f, depth)
                         if rel is None:
                             continue
                         if tracked is None:
-                            tracked = set(sh(["git", "-C", copy, "ls-tree", "-r", "--name-only",
-                                              "HEAD"], check=False).stdout.splitlines())
+                            tracked = tracked_files(copy, parts)
                         if os.path.isfile(os.path.join(copy, rel)) or rel in tracked:
                             add(rel)
     return {"files_opened": opened, "tool_calls": dict(sorted(tool_calls.items())),
             "glia_calls": glia_calls, "grep_calls": grep_calls}
 
 
-def write_patch(copy, path):
-    sh(["git", "-C", copy, "add", "-A", "-N", "."], check=False)
-    diff = subprocess.run(["git", "-C", str(copy), "diff", "--no-color", "-U0", "HEAD"],
-                          capture_output=True).stdout
+def write_patch(copy, path, parts=None):
+    """The agent's change as one -U0 diff against HEAD; a split workspace's is every
+    part's diff in part order, its paths prefixed `<part>/`."""
+    diff = b""
+    for name in parts or [None]:
+        repo = Path(copy) / name if name else Path(copy)
+        prefix = f"{name}/" if name else ""
+        sh(["git", "-C", repo, "add", "-A", "-N", "."], check=False)
+        diff += subprocess.run(["git", "-C", str(repo), "diff", "--no-color", "-U0",
+                                f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}", "HEAD"],
+                               capture_output=True).stdout
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(diff)
     return {"path": str(path), "sha256": sha256(diff), "bytes": len(diff)}
 
 
-def reset_copy(copy):
-    sh(["git", "-C", copy, "reset", "-q", "--hard"], check=False)
-    sh(["git", "-C", copy, "clean", "-fdq"], check=False)
+def reset_copy(copy, parts=None):
+    for name in parts or [None]:
+        repo = Path(copy) / name if name else Path(copy)
+        sh(["git", "-C", repo, "reset", "-q", "--hard"], check=False)
+        sh(["git", "-C", repo, "clean", "-fdq"], check=False)
+
+
+# --- probe sets (FH.13) --------------------------------------------------------
+def _module(name, path):
+    """A sibling harness module by path (the cohort runner, the frozen diag probe),
+    loaded once and only when a set needs it."""
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
+
+
+def cohort_mod():
+    return _module("cohort", GLIA_REPO / "bench" / "cohort" / "cohort.py")
+
+
+def load_set(set_dir):
+    """set.json: name, metric, tasks [{from, id}], note / glia_note (prompt text with
+    {base} {start} {repos} {with}), workspace {label: {parts: {name: prefix}, rest}}."""
+    path = Path(set_dir) / "set.json"
+    if not path.is_file():
+        raise RunError(f"{set_dir}: no set.json")
+    data = path.read_bytes()
+    spec = json.loads(data)
+    for key in ("name", "metric", "tasks"):
+        if key not in spec:
+            raise RunError(f"{path}: missing {key}")
+    if spec["metric"] not in SET_METRICS:
+        raise RunError(f"{path}: metric {spec['metric']!r} is none of {', '.join(SET_METRICS)}")
+    for t in spec["tasks"]:
+        if t.get("from") not in SET_SOURCES or not t.get("id"):
+            raise RunError(f"{path}: a task needs `from` ({', '.join(SET_SOURCES)}) and `id`")
+    for label, ws in (spec.get("workspace") or {}).items():
+        if not ws.get("parts") or not ws.get("rest") or ws["rest"] in ws["parts"] \
+                or any(not p.endswith("/") for p in ws["parts"].values()):
+            raise RunError(f"{path}: workspace {label} needs parts (prefixes ending in /) "
+                           "and a rest name that is no part")
+    return {**spec, "dir": Path(set_dir), "sha256": sha256(data)}
+
+
+def part_of(path, ws):
+    """(part, path inside it): the longest part prefix, else the rest part."""
+    for name, prefix in sorted(ws["parts"].items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if path.startswith(prefix):
+            return name, path[len(prefix):]
+    return ws["rest"], path
+
+
+def ws_path(path, ws):
+    if path is None:
+        return None
+    name, rel = part_of(path, ws)
+    return f"{name}/{rel}"
+
+
+def _listing(paths, sep=", ", last=" and "):
+    paths = list(paths)
+    return paths[0] if len(paths) == 1 else sep.join(paths[:-1]) + last + paths[-1]
+
+
+def split_row(row, ws):
+    """A monorepo task row in split-workspace coordinates: every truth / probe path is
+    `<part>/<path>`, the agent starts in the part holding most truth code files (ties
+    by name), and a drift prompt names the repositories the server change is in."""
+    out = json.loads(json.dumps(row))
+    for c in out["truth"]["code"]:
+        c["path"], c["old_path"] = ws_path(c["path"], ws), ws_path(c.get("old_path"), ws)
+    for key in ("tests", "other"):
+        out["truth"][key] = sorted(ws_path(p, ws) for p in out["truth"][key])
+    probe = out.get("probe") or {}
+    for key in ("client_files", "server_files"):
+        if key in probe:
+            probe[key] = sorted(ws_path(p, ws) for p in probe[key])
+    counts = Counter(c["path"].split("/", 1)[0] for c in out["truth"]["code"])
+    start = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    changed = sorted({p.split("/", 1)[0] for p in probe.get("server_files", [])} - {start})
+    out["workspace"] = {"parts": ws["parts"], "rest": ws["rest"], "start": start,
+                        "changed": changed}
+    if out.get("shape") == "drift":
+        m = DRIFT_RE.match(out["prompt_subject"])
+        if not m or not changed:
+            raise RunError(f"{row['id']}: a split drift row needs the drift prompt and a "
+                           "server part other than the start")
+        out["prompt_subject"] = SPLIT_DRIFT_PROMPT.format(
+            changed=_listing(f"../{n}" for n in changed), subject=m.group(1), names=m.group(2))
+    return out
+
+
+def source_row(sources, src, tid):
+    label = tid.rsplit("-", 1)[0]
+    path = Path(sources[src]) / f"{label}.jsonl"
+    for row in read_rows(path):
+        if row["id"] == tid:
+            return label, row
+    raise RunError(f"{tid}: not in {path}")
+
+
+def set_repo_row(label, sources):
+    """The set's repos.json row: the agent-ab row when FE.1 has the repo (its end_rev and
+    tuned flag), else the cohort row in agent-ab's schema."""
+    ab = {r["label"]: r for r in tasks.load_repos(Path(sources["agent-ab"]).parent / "repos.json")}
+    if label in ab:
+        return ab[label]
+    co = {r["label"]: r for r in cohort_mod().load_repos(
+        Path(sources["cohort"]).parent / "repos.json")}
+    if label not in co:
+        raise RunError(f"{label}: in neither repos.json")
+    r = co[label]
+    return {"label": label, "url": r["url"], "end_rev": r["sha"], "lang": r["lang"],
+            "gate_rev": None, "tuned": False, "public": True}
+
+
+def build_set(set_dir, check=False, sources=None):
+    """Write (or, with check, compare) the set's repos.json and <label>.jsonl from its
+    set.json and the source rows. Returns 0, or 1 on a difference under check."""
+    spec, sources = load_set(set_dir), sources or SET_SOURCES
+    rows = {}
+    for t in spec["tasks"]:
+        label, row = source_row(sources, t["from"], t["id"])
+        ws = (spec.get("workspace") or {}).get(label)
+        rows.setdefault(label, []).append(split_row(row, ws) if ws else row)
+    files = {"repos.json": tasks.render_repos([set_repo_row(lb, sources) for lb in rows])}
+    for label, rs in rows.items():
+        files[f"{label}.jsonl"] = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rs)
+    stale = sorted(p.name for p in Path(set_dir).glob("*.jsonl") if p.name not in files)
+    diff = [n for n, text in files.items()
+            if not (Path(set_dir) / n).is_file() or (Path(set_dir) / n).read_text() != text]
+    if check:
+        for n in diff + stale:
+            log(f"[agent-ab] set {spec['name']} differs: {n}")
+    else:
+        for n in diff:
+            (Path(set_dir) / n).write_text(files[n])
+        for n in stale:
+            (Path(set_dir) / n).unlink()
+    n = sum(len(rs) for rs in rows.values())
+    log(f"[agent-ab] set name={spec['name']} metric={spec['metric']} tasks={n} "
+        f"repos={len(rows)} split={sum(1 for rs in rows.values() for r in rs if 'workspace' in r)}"
+        f" sha256={sha256(''.join(files[k] for k in sorted(files)).encode())[:12]}")
+    return 1 if check and (diff or stale) else 0
+
+
+def fill_note(text, row):
+    ws = row.get("workspace")
+    names = sorted(set(ws["parts"]) | {ws["rest"]}) if ws else []
+    others = [n for n in names if ws and n != ws["start"]]
+    return (text.replace("{base}", "HEAD~1" if row.get("shape") == "drift" else "HEAD")
+            .replace("{start}", ws["start"] if ws else ".")
+            .replace("{repos}", _listing(f"../{n}" for n in names) if names else ".")
+            .replace("{with}", " ".join(f"--with ../{n}" for n in others)))
+
+
+def session_prompt(template, cfg, spec, repo, row, glia_arm):
+    """The task prompt, the set's note (every arm), then for a glia arm the config's
+    glia_prompt and the set's glia_note. With no set it is FE.2's prompt."""
+    notes = [fill_note(spec["note"], row)] if spec and spec.get("note") else []
+    if glia_arm:
+        notes += [cfg["glia_prompt"]] if cfg.get("glia_prompt") else []
+        notes += [fill_note(spec["glia_note"], row)] if spec and spec.get("glia_note") else []
+    return "\n\n".join([render_prompt(template, repo, row)] + notes)
+
+
+def git_out(gd, *args, env=None, inp=None, check=True):
+    p = subprocess.run(["git", "--git-dir", str(gd), "-c", "commit.gpgSign=false", *args],
+                       capture_output=True, input=inp, env={**os.environ, "LC_ALL": "C",
+                                                           **(env or {})})
+    if check and p.returncode:
+        raise RunError(f"git {' '.join(args[:2])}: {p.stderr.decode(errors='replace').strip()}")
+    return p.stdout
+
+
+def tree_without(gd, tree, excludes, memo):
+    """tree with every excluded path (`a/b/`) removed; an emptied subtree is dropped."""
+    key = (tree, tuple(sorted(excludes)))
+    if key in memo:
+        return memo[key]
+    heads = {}
+    for e in excludes:
+        first, _, rest = e.strip("/").partition("/")
+        heads.setdefault(first, []).append(rest)
+    entries = []
+    for ent in git_out(gd, "ls-tree", "-z", tree).split(b"\0"):
+        if not ent:
+            continue
+        meta, name = ent.split(b"\t", 1)
+        mode, kind, sha = meta.decode().split()
+        subs = heads.get(name.decode(errors="surrogateescape"))
+        if subs is not None:
+            if "" in subs:
+                continue
+            if kind == "tree":
+                sha = tree_without(gd, sha, subs, memo)
+                if sha is None:
+                    continue
+        entries.append(f"{mode} {kind} {sha}\t".encode() + name)
+    out = git_out(gd, "mktree", "-z", inp=b"".join(e + b"\0" for e in entries)).decode().strip() \
+        if entries else None
+    memo[key] = out
+    return out
+
+
+def part_tree(gd, rev, prefix, exclude, memo):
+    """The part's tree at rev: the prefix's subtree, or for the rest part the root minus
+    every part prefix. None when it does not exist there."""
+    if prefix:
+        p = git_out(gd, "rev-parse", "--verify", "-q", f"{rev}:{prefix.rstrip('/')}",
+                    check=False).decode().strip()
+        return p if p and git_out(gd, "cat-file", "-t", p).decode().strip() == "tree" else None
+    root = git_out(gd, "rev-parse", f"{rev}^{{tree}}").decode().strip()
+    return tree_without(gd, root, exclude, memo)
+
+
+def split_ref(gd, task_id, name, rev, prefix, exclude):
+    """The part's history as its own repo: the last SPLIT_DEPTH first-parent commits of
+    rev touching it, each re-committed with the part's tree and the original author,
+    date and message (committer = author), chained oldest first; the tip's tree is the
+    part at rev. Written once to refs/agent-ab/split/<task>/<part> (deterministic, so a
+    rebuild gives the same sha). None when the part does not exist at rev."""
+    ref = f"{SPLIT_REF}{task_id}/{name}"
+    have = git_out(gd, "rev-parse", "--verify", "-q", ref, check=False).decode().strip()
+    if have:
+        return have
+    memo = {}
+    want = part_tree(gd, rev, prefix, exclude, memo)
+    if want is None:
+        return None
+    spec = [prefix] if prefix else ["."] + [f":(exclude){e}" for e in exclude]
+    log_ = git_out(gd, "log", "-z", "--first-parent", f"--max-count={SPLIT_DEPTH}",
+                   "--date=raw", "--format=%H%x01%an%x01%ae%x01%ad%x01%B", rev, "--", *spec)
+    commits = [c.split(b"\x01", 4) for c in log_.split(b"\0") if c.strip()]
+    if not commits or commits[0][0].decode() != git_out(gd, "rev-parse", rev).decode().strip():
+        head = git_out(gd, "log", "-z", "-1", "--date=raw",
+                       "--format=%H%x01%an%x01%ae%x01%ad%x01%B", rev)
+        commits.insert(0, head.split(b"\0")[0].split(b"\x01", 4))
+    trees = {}
+    if prefix:  # one batch lookup of the prefix's subtree in every commit
+        query = "".join(f"{c[0].decode()}:{prefix.rstrip('/')}\n" for c in commits).encode()
+        for c, line in zip(commits, git_out(gd, "cat-file", "--batch-check=%(objectname) "
+                                            "%(objecttype)", inp=query).decode().splitlines()):
+            oid, _, kind = line.partition(" ")
+            trees[c[0]] = oid if kind == "tree" else None
+    tip, last = None, None
+    for c in reversed(commits):
+        sha, an, ae, ad, msg = c
+        tree = trees[sha] if prefix else part_tree(gd, sha.decode(), prefix, exclude, memo)
+        if tree is None or tree == last:
+            continue
+        who = {"GIT_AUTHOR_NAME": an.decode(errors="replace"),
+               "GIT_AUTHOR_EMAIL": ae.decode(errors="replace"),
+               "GIT_AUTHOR_DATE": ad.decode(), "GIT_COMMITTER_NAME": an.decode(errors="replace"),
+               "GIT_COMMITTER_EMAIL": ae.decode(errors="replace"),
+               "GIT_COMMITTER_DATE": ad.decode()}
+        tip = git_out(gd, "commit-tree", tree, *(["-p", tip] if tip else []), env=who,
+                      inp=msg).decode().strip()
+        last = tree
+    if last != want:
+        raise RunError(f"{task_id}: split {name} ends at another tree than {rev[:12]}'s")
+    git_out(gd, "update-ref", ref, tip)
+    return tip
+
+
+def checkout_workspace(gd, row, rev, copy):
+    """Every part of a split row's monorepo at rev, each its own repo with its own history
+    under copy/<part>/; returns the part names checked out (sorted)."""
+    ws = row["workspace"]
+    if copy.exists():
+        shutil.rmtree(copy)
+    copy.mkdir(parents=True)
+    names = []
+    for name in sorted(set(ws["parts"]) | {ws["rest"]}):
+        prefix = ws["parts"].get(name)
+        exclude = [] if prefix else sorted(ws["parts"].values())
+        tip = split_ref(gd, row["id"], name, rev, prefix, exclude)
+        if tip is None:
+            continue
+        fetch_into(gd, tip, copy / name)
+        if sh(["git", "-C", copy / name, "cat-file", "-e", f"{row['commit']}^{{commit}}"],
+              check=False).returncode == 0:
+            raise RunError(f"leak: {copy / name} holds the task commit; run aborted")
+        names.append(name)
+    if ws["start"] not in names:
+        raise RunError(f"{row['id']}: the start part {ws['start']} does not exist at {rev[:12]}")
+    return names
+
+
+def set_clone(label):
+    gd = cohort_mod().cohort_dir() / f"{label}.git"
+    if not gd.is_dir():
+        raise RunError(f"{label}: no cohort clone at {gd} (run bench/cohort/cohort.py "
+                       "build-tasks first)")
+    return gd
+
+
+def start_rev(gd, row):
+    """A set row's start: a drift row's synthetic S (rebuilt into the cohort clone when its
+    ref is missing), else its parent."""
+    if row.get("shape") == "drift":
+        try:
+            return cohort_mod().checkout_rev(gd, row)
+        except cohort_mod().CohortError as e:
+            raise RunError(f"{row['id']}: {e}") from e
+    return row["parent"]
 
 
 # --- the run -----------------------------------------------------------------
@@ -742,20 +1110,31 @@ def one_session(ctx, repo, task, arm, rep):
            "glia_sha": ctx["metas"][arm]["sha"] if glia_arm else None, "prep_ms": 0,
            **empty_row()}
     env = session_env(d, cfg, arm, ctx["config_dir"])
+    spec, parts, start = ctx.get("set"), None, None
     try:
-        checkout(d, repo["label"], task["parent"], task["commit"], copy)
+        if spec is None:
+            checkout(d, repo["label"], task["parent"], task["commit"], copy)
+        else:
+            gd = set_clone(repo["label"])
+            rev = start_rev(gd, task)
+            if task.get("workspace"):
+                parts = checkout_workspace(gd, task, rev, copy)
+                start = task["workspace"]["start"]
+            else:
+                checkout(d, repo["label"], rev, task["commit"], copy, gd=gd)
+        home = copy / start if start else copy
         if glia_arm:
             prep_log = d / "sessions" / run_id / task["id"] / arm / f"{rep}.prep.log"
-            row["prep_ms"], ok = prep(d, cfg, arm, copy, env, prep_log)
+            row["prep_ms"], ok = prep(d, cfg, arm, home, env, prep_log,
+                                      roots=[copy / n for n in parts] if parts else None)
             if not ok:
                 row["terminated"] = "prep_failed"
                 return row
-        prompt = render_prompt(ctx["template"], repo, task,
-                               cfg.get("glia_prompt") if glia_arm else None)
+        prompt = session_prompt(ctx["template"], cfg, spec, repo, task, glia_arm)
         out = d / "sessions" / run_id / task["id"] / arm / f"{rep}.jsonl"
         events, _, timed_out, wall_ms, attempts = run_with_waits(
-            claude_cmd(cfg, prompt, cfg["max_turns"]), copy, env, out, cfg["timeout_s"],
-            reset=lambda: reset_copy(copy))
+            claude_cmd(cfg, prompt, cfg["max_turns"], add_dir=copy if parts else None), home,
+            env, out, cfg["timeout_s"], reset=lambda: reset_copy(copy, parts))
         init, result = first(events, "system", "init"), result_event(events)
         row.update(wall_ms=wall_ms, attempts=attempts, model=(init or {}).get("model"))
         if result is not None:
@@ -764,8 +1143,8 @@ def one_session(ctx, repo, task, arm, rep):
                        duration_ms=result.get("duration_ms") or 0,
                        total_cost_usd=float(result.get("total_cost_usd") or 0.0),
                        usage={k: int(usage.get(k) or 0) for k in row["usage"]})
-        row.update(session_metrics(events, copy))
-        row["patch"] = write_patch(copy, d / "patches" / run_id / f"{key}.diff")
+        row.update(session_metrics(events, copy, start, parts))
+        row["patch"] = write_patch(copy, d / "patches" / run_id / f"{key}.diff", parts)
         bad_init = init_violations(init, glia_arm, cfg["disallowed_tools"], ctx["user_skills"])
         contaminated, network = transcript_violations(events, glia_arm)
         row["violations"] = bad_init + contaminated + network
@@ -788,10 +1167,20 @@ def open_run(a, cfg, d, run_id):
         raise RunError("refused: no passing `python3 run.py isolation` for this claude "
                        "version, model and these binaries")
     task_list, shas = load_tasks(a.repos, a.tasks_dir)
+    spec = load_set(a.set) if a.set else None
+    if getattr(a, "only", None):
+        keep = set(a.only.split(","))
+        unknown = sorted(keep - set(shas))
+        if unknown:
+            raise RunError(f"--only names no repo of the task set: {', '.join(unknown)}")
+        task_list = [(r, t) for r, t in task_list if r["label"] in keep]
+        shas = {k: v for k, v in shas.items() if k in keep}
     template = load_template()
     pins = {"config": pinned_config(cfg), "prompt": sha256(template), "tasks": shas,
             "claude_version": cfg["claude_version"], "model": cfg["model"],
             "arms": {arm: {"sha": m["sha"], "version": m["version"]} for arm, m in metas.items()}}
+    if spec is not None:
+        pins["set"] = spec["sha256"]
     run_dir = d / "runs" / run_id
     meta = read_json(run_dir / "meta.json")
     if meta is None:
@@ -802,7 +1191,7 @@ def open_run(a, cfg, d, run_id):
     write_deny(d)
     log(f"[agent-ab] run id={run_id} auth={auth} tasks={len(task_list)} arms={len(cfg['arms'])}")
     ctx = {"dir": d, "cfg": cfg, "run_id": run_id, "auth": auth, "metas": metas,
-           "template": template, "config_dir": fresh_config_dir(d, run_id),
+           "template": template, "config_dir": fresh_config_dir(d, run_id), "set": spec,
            "user_skills": user_skill_names(), "keep": a.keep,
            "rows": run_dir / "sessions.jsonl"}
     return ctx, task_list
@@ -858,6 +1247,187 @@ def cmd_run(a, cfg, d, pilot=False):
             f"{usage_line(usage_before, usage_windows(os.environ), len(rows), total)}")
         log(f"[agent-ab] full run: python3 run.py run --run-id {run_id}")
     return 0
+
+
+# --- the probe report (FH.13) ----------------------------------------------------
+def probe_metrics(events, task, patch_text, copy, score):
+    """What a probe set reads beyond score.py, from one session's transcript and patch:
+    truth code files missed (not in the patch), the turn and the cumulative input tokens
+    at the first Edit / Write / MultiEdit of each truth file (a file changed only through
+    Bash is not counted as edited here; the patch still counts it for `missed`), and
+    whether a verifying glia command (diff-impact, contract-breaks, review) ran after
+    the agent's first edit."""
+    ws = task.get("workspace")
+    depth, home = (1, os.path.join(copy, ws["start"])) if ws else (0, copy)
+    truth = {c["old_path"] if c["status"] == "D" and c.get("old_path") else c["path"]
+             for c in task["truth"]["code"]}
+    edited = {p for p in score.parse_patch(patch_text) if score.counted(p)}
+    turn = tokens = 0
+    first, first_edit, verified = {}, None, False
+    for e in events:
+        if e.get("type") != "assistant":
+            continue
+        turn += 1
+        u = (e.get("message") or {}).get("usage") or {}
+        tokens += sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                     "cache_creation_input_tokens"))
+        for b in (e.get("message") or {}).get("content") or []:
+            if not isinstance(b, dict) or b.get("type") != "tool_use":
+                continue
+            inp = b.get("input") or {}
+            if b.get("name") in EDIT_TOOLS:
+                rel = _rel(copy, home, str(inp.get("file_path") or ""), depth)
+                if rel:
+                    first_edit = first_edit or turn
+                    if rel in truth:
+                        first.setdefault(rel, (turn, tokens))
+            elif b.get("name") == "Bash" and first_edit is not None:
+                for word, args in segments(str(inp.get("command") or "")):
+                    pos = [x for x in args if not x.startswith("-")]
+                    if word == "glia" and pos[:1] and pos[0] in VERIFY_SUBS:
+                        verified = True
+    done = len(first) == len(truth)
+    return {"truth": len(truth), "missed": len(truth - edited), "edited_truth": len(first),
+            "all_edited": done,
+            "all_edited_turn": max(t for t, _ in first.values()) if done else None,
+            "all_edited_tokens": max(k for _, k in first.values()) if done else None,
+            "first_edit_turn_mean": (sum(t for t, _ in first.values()) / len(first)
+                                     if first else None),
+            "verified": verified}
+
+
+def _run_meta(d, run_id):
+    meta = read_json(d / "runs" / run_id / "meta.json")
+    if meta is None:
+        raise RunError(f"no run meta at {d / 'runs' / run_id / 'meta.json'}")
+    return meta
+
+
+def merge_heads(heads):
+    """One score meta line over several run ids of one set (e.g. one per repo): the same
+    model, Claude Code version, binaries, prompt and config, task files merged."""
+    for key in ("model", "claude_version", "glia", "prompt_sha256", "config_sha256"):
+        if len({json.dumps(h[key], sort_keys=True) for h in heads}) > 1:
+            raise RunError(f"refused: the runs differ in {key}")
+    tasks_ = {}
+    for h in heads:
+        tasks_.update(h["tasks"])
+    return {**heads[0], "run_id": "+".join(h["run_id"] for h in heads),
+            "date": max(h["date"] for h in heads), "tasks": dict(sorted(tasks_.items()))}
+
+
+def cmd_report(a, cfg, d):
+    score = _module("score", HERE / "score.py")
+    diag = _module("diag", HERE / "probe" / "diag.py")
+    spec = load_set(a.set) if a.set else None
+    task_list, _ = load_tasks(a.repos, a.tasks_dir)
+    by_id = {t["id"]: t for _, t in task_list}
+    all_repos = json.loads(Path(a.repos).read_text())["repos"]
+    heads, rows, probe = [], [], []
+    tmp = d / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    for rid in a.run_id:
+        labels = set(_run_meta(d, rid).get("tasks") or {})
+        # a run made with --only pins its own repos: score it against those alone
+        repos_path = tmp / f"repos.{rid}.json"
+        repos_path.write_text(json.dumps({"repos": [r for r in all_repos
+                                                    if r["label"] in labels]}))
+        head, rs = score.metrics_from_run(rid, d, repos_path, a.tasks_dir)
+        heads.append(head)
+        rows += rs
+        for r in read_rows(d / "runs" / rid / "sessions.jsonl"):
+            if r.get("terminated") in score.EXCLUDED:
+                continue
+            key = f"{r['task_id']}.{r['arm']}.{r['rep']}"
+            tpath = d / "sessions" / rid / r["task_id"] / r["arm"] / f"{r['rep']}.jsonl"
+            events = read_rows(tpath) if tpath.is_file() else []
+            ppath = d / "patches" / rid / f"{key}.diff"
+            patch = ppath.read_bytes().decode("utf-8", "replace") if ppath.is_file() else ""
+            copy = str((d / "work" / rid / r["task_id"] / r["arm"] / str(r["rep"])).resolve())
+            task = by_id[r["task_id"]]
+            row = {"run_id": rid, "task_id": r["task_id"], "repo": r["repo"], "arm": r["arm"],
+                   "rep": r["rep"], **probe_metrics(events, task, patch, copy, score),
+                   "verdict": (diag.session(tpath, task)["verdict"]
+                               if r["arm"] != "none" and tpath.is_file() else None)}
+            probe.append(row)
+    rows.sort(key=lambda x: (x["task_id"], x["arm"], x["rep"]))
+    probe.sort(key=lambda x: (x["task_id"], x["arm"], x["rep"]))
+    head = merge_heads(heads)
+    baseline, _, marker = score.score(head, rows)
+    if a.out_sessions:
+        score.write_metrics(a.out_sessions, head, rows)
+    if a.out_json:
+        Path(a.out_json).write_text(json.dumps(baseline, indent=1, sort_keys=True) + "\n")
+    if a.out_probe:
+        Path(a.out_probe).write_text("".join(json.dumps(p, sort_keys=True) + "\n"
+                                             for p in probe))
+    verdicts = Counter(p["verdict"] for p in probe if p["verdict"])
+    diag_line = "[agent-ab] diag verdicts " + " ".join(f"{v}={verdicts[v]}"
+                                                       for v in DIAG_VERDICTS)
+    md = render_probe_md(score, spec, head, rows, probe)
+    if a.out_md:
+        Path(a.out_md).write_text(md)
+    else:
+        print(md, end="")
+    log(marker)
+    log(diag_line)
+    return 0
+
+
+def render_probe_md(score, spec, head, rows, probe):
+    """One set's section of the probe report: score.py's per-arm table and the probe
+    pairs under its rule, the set's own metric, the diag verdict counts."""
+    tm = score.task_means(rows)
+    arms = sorted({a for _, a in tm})
+    scored = [r for r in rows if r["metrics"] is not None]
+    excluded = Counter(r["terminated"] for r in rows if r["metrics"] is None)
+    name = spec["name"] if spec else "agent-ab"
+    L = [f"### {name}", "",
+         f"- runs: {head['run_id']}; model {head['model']}; {head['claude_version']}",
+         f"- metric: {spec['metric'] if spec else 'score.py'}",
+         f"- sessions scored: {len(scored)} over {len({r['task_id'] for r in scored})} tasks; "
+         "excluded: " + (", ".join(f"{k} {v}" for k, v in sorted(excluded.items())) or "none"),
+         ""]
+    L += score.table(["arm"] + score.METRICS,
+                     [[a] + [score.fmt(v) for v in score.arm_means(tm, a).values()]
+                      for a in arms])
+    pairs = {f"{x}-{y}": score.paired(tm, x, y) for x, y in PROBE_PAIRS
+             if x in arms and y in arms}
+    if pairs:
+        L += [""] + score.pair_table(pairs) + [""]
+        L += [f"- {p}: {score.reading(ms)}" for p, ms in pairs.items()]
+    L += ["", "| arm | sessions | truth files | missed (mean) | all truth edited | "
+          "turn to all edited (median) | tokens to all edited (median) | "
+          "first-edit turn (mean) | verified after editing |", "|" + "---|" * 9]
+    for a in arms:
+        ps = [p for p in probe if p["arm"] == a]
+        done = [p for p in ps if p["all_edited"]]
+        med = (lambda xs: score.fmt(statistics.median(xs)) if xs else "-")
+        L.append(f"| {a} | {len(ps)} | {sum(p['truth'] for p in ps)} | "
+                 f"{score.fmt(score.mean([p['missed'] for p in ps]))} | "
+                 f"{len(done)}/{len(ps)} | {med([p['all_edited_turn'] for p in done])} | "
+                 f"{med([p['all_edited_tokens'] for p in done])} | "
+                 f"{score.fmt(score.mean([p['first_edit_turn_mean'] for p in ps]))} | "
+                 + (f"{sum(p['verified'] for p in ps)}/{len(ps)} |" if a != "none" else "- |"))
+    task_missed = {}
+    for p in probe:
+        task_missed.setdefault((p["task_id"], p["arm"]), []).append(p["missed"])
+    for x, y in PROBE_PAIRS:
+        tids = sorted({t for t, a in task_missed if a == x and (t, y) in task_missed})
+        if not tids:
+            continue
+        diffs = [score.mean(task_missed[(t, x)]) - score.mean(task_missed[(t, y)]) for t in tids]
+        dd, lo, hi = score.bootstrap(diffs)
+        v = ("n.s." if len(diffs) < 2 or lo <= 0 <= hi else "better" if hi < 0 else "worse")
+        L.append(f"- missed {x}-{y}: diff {score.fmt(dd)} [{score.fmt(lo)}, {score.fmt(hi)}] "
+                 f"over {len(diffs)} tasks: {v}")
+    L += ["", "| arm | " + " | ".join(DIAG_VERDICTS) + " |", "|" + "---|" * 6]
+    for a in arms:
+        if a == "none":
+            continue
+        c = Counter(p["verdict"] for p in probe if p["arm"] == a and p["verdict"])
+        L.append(f"| {a} | " + " | ".join(str(c[v]) for v in DIAG_VERDICTS) + " |")
+    return "\n".join(L) + "\n"
 
 
 def cmd_isolation(a, cfg, d):
@@ -916,9 +1486,10 @@ def cmd_status(a, cfg, d):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--config", default=str(HERE / "config.json"))
-    ap.add_argument("--repos", default=str(HERE / "repos.json"))
-    ap.add_argument("--tasks-dir", default=str(HERE / "tasks"))
+    ap.add_argument("--repos", default=None, help="default: repos.json, or the set's")
+    ap.add_argument("--tasks-dir", default=None, help="default: tasks/, or the set's dir")
     ap.add_argument("--glia-repo", default=str(GLIA_REPO))
+    ap.add_argument("--set", help="a probe set dir (bench/cohort/tasks/agent/<set>)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("binaries")
     sub.add_parser("isolation")
@@ -927,9 +1498,23 @@ def main(argv=None):
         p.add_argument("--run-id", required=name == "run")
         p.add_argument("--keep", action="store_true", help="keep each session's checkout")
         p.add_argument("--max-usd", type=float, help="override config max_usd")
+        p.add_argument("--only", help="these repo labels only (comma-separated): one run id "
+                       "per repo runs repos in parallel processes")
     sub.add_parser("status").add_argument("--run-id")
+    b = sub.add_parser("build-set")
+    b.add_argument("set_dir")
+    b.add_argument("--check", action="store_true", help="re-derive and compare; exit 1 on drift")
+    r = sub.add_parser("report")
+    r.add_argument("--run-id", action="append", required=True)
+    for flag in ("--out-md", "--out-json", "--out-sessions", "--out-probe"):
+        r.add_argument(flag)
     a = ap.parse_args(argv)
+    base = Path(a.set) if a.set else HERE
+    a.repos = a.repos or str(base / "repos.json")
+    a.tasks_dir = a.tasks_dir or str(base if a.set else HERE / "tasks")
     try:
+        if a.cmd == "build-set":
+            return build_set(a.set_dir, check=a.check)
         cfg = load_config(a.config)
         d = tasks.cache_dir().resolve()
         d.mkdir(parents=True, exist_ok=True)
@@ -939,6 +1524,8 @@ def main(argv=None):
             return cmd_isolation(a, cfg, d)
         if a.cmd in ("pilot", "run"):
             return cmd_run(a, cfg, d, pilot=a.cmd == "pilot")
+        if a.cmd == "report":
+            return cmd_report(a, cfg, d)
         return cmd_status(a, cfg, d)
     except (RunError, tasks.TaskError) as e:
         print(f"[agent-ab] error: {e}", file=sys.stderr)

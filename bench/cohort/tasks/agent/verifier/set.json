@@ -1,0 +1,104 @@
+{
+ "about": "The verifier role: the FH.1 drift tasks of the cohort apps whose boundary health read OK in bench/cohort/results/baseline/boundary.jsonl (immich, microservices-demo, gin-vue-admin, scaffold-eth-2; after FH.3-FH.6), then FE pilot 2's six multi-file tasks. A glia arm is told to run the skill's 'Before you finish a change' step; the metric is the truth (client) code files the patch leaves untouched.",
+ "glia_note": "Before you finish, do the glia skill's \"Before you finish a change\" step: run `glia diff-impact . --base {base}`, `glia contract-breaks . --base {base}` and `glia review . --base {base}`, and fix what they list that your change should cover.",
+ "metric": "missed",
+ "name": "verifier",
+ "tasks": [
+  {
+   "from": "cohort",
+   "id": "immich-3f6a07120318"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-8d377bfef5a0"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-7b51c50a96cf"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-8b3d6b320bf7"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-c7f6197e7556"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-47c5a3dbf6d3"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-1c8abe204b55"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-577eeb38c8c2"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-65b5da1a9b3e"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-4d8848bc5eeb"
+  },
+  {
+   "from": "cohort",
+   "id": "gin-vue-admin-09603c436ef2"
+  },
+  {
+   "from": "cohort",
+   "id": "gin-vue-admin-abe85cf6e7d3"
+  },
+  {
+   "from": "cohort",
+   "id": "gin-vue-admin-24215f8b287b"
+  },
+  {
+   "from": "cohort",
+   "id": "gin-vue-admin-f6fa4c30640c"
+  },
+  {
+   "from": "cohort",
+   "id": "scaffold-eth-2-87557d93c8c5"
+  },
+  {
+   "from": "cohort",
+   "id": "scaffold-eth-2-c43f51c36ea0"
+  },
+  {
+   "from": "cohort",
+   "id": "scaffold-eth-2-4fa0a912d273"
+  },
+  {
+   "from": "cohort",
+   "id": "scaffold-eth-2-19f0ea1379f6"
+  },
+  {
+   "from": "agent-ab",
+   "id": "shell-3ac7848a5941"
+  },
+  {
+   "from": "agent-ab",
+   "id": "websocket-a70cea529a3a"
+  },
+  {
+   "from": "agent-ab",
+   "id": "samples-effe13307c41"
+  },
+  {
+   "from": "agent-ab",
+   "id": "commons-text-63f201341248"
+  },
+  {
+   "from": "agent-ab",
+   "id": "microservices-demo-9cdbc60fddc0"
+  },
+  {
+   "from": "agent-ab",
+   "id": "click-831c8f0948af"
+  }
+ ]
+}

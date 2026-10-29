@@ -1,14 +1,14 @@
 {
  "model": "claude-opus-5-5",
- "claude_version": "2.1.310 (Claude Code)",
- "runs": 3,
+ "claude_version": "2.1.312 (Claude Code)",
+ "runs": 1,
  "max_turns": 40,
  "timeout_s": 1200,
  "max_usd": 400,
  "arms": {
   "none": {},
-  "g052": {"rev": "v0.5.2"},
-  "g053": {"rev": "v0.5.3", "calibrate": true}
+  "g053": {"rev": "v0.5.3", "calibrate": true},
+  "g054": {"rev": "e8e082042f2932c9a80c486e14ca7dc3cbb2eef0", "calibrate": true}
  },
  "disallowed_tools": ["Agent", "Task", "WebFetch", "WebSearch", "NotebookEdit", "Workflow",
   "SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "DesignSync", "CronCreate",

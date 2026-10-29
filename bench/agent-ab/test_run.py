@@ -71,10 +71,10 @@ if spec.get("rate_limit_first") and not flag.exists():
           "result": "Claude AI usage limit reached"})
     sys.exit(1)
 time.sleep(spec.get("sleep", 0))
-for t in spec.get("tools", []):
+for i, t in enumerate(spec.get("tools", [])):
     inp = {k: v.replace("{cwd}", cwd) for k, v in t["input"].items()}
     emit({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": t["name"], "input": inp}]}})
+        {"type": "tool_use", "id": f"toolu_{i}", "name": t["name"], "input": inp}]}})
 for path, text in spec.get("edits", {}).items():
     pathlib.Path(cwd, path).write_text(text)
 emit({"type": "result", "subtype": spec.get("subtype", "success"), "is_error": False,
@@ -184,7 +184,10 @@ class World:
         script(fakebin / "claude", FAKE_CLAUDE,
                **{"@PY@": sys.executable, "@VERSION@": VERSION})
         cfg = json.loads((run.HERE / "config.json").read_text())
-        cfg.update(runs=runs, timeout_s=timeout_s, claude_version=VERSION)
+        # FE.2's three arms, whatever the committed config's probe arms are
+        cfg.update(runs=runs, timeout_s=timeout_s, claude_version=VERSION,
+                   arms={"none": {}, "g052": {"rev": "v0.5.2"},
+                         "g053": {"rev": "v0.5.3", "calibrate": True}})
         self.config = self.tmp / "config.json"
         self.config.write_text(json.dumps(cfg))
         home = self.tmp / "home"
@@ -204,7 +207,7 @@ class World:
     def set_scenario(self, scen):
         self.scenario.write_text(json.dumps(scen))
 
-    def main(self, *argv, **env):
+    def main(self, *argv, set_dir=None, **env):
         saved = {k: os.environ.get(k) for k in {**self.env, **env}}
         for k, v in {**self.env, **env}.items():
             if v is None:
@@ -214,9 +217,10 @@ class World:
         out = io.StringIO()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-                rc = run.main(["--config", str(self.config),
-                               "--repos", str(self.tmp / "repos.json"),
-                               "--tasks-dir", str(self.tmp / "tasks"),
+                where = (["--set", str(set_dir)] if set_dir else
+                         ["--repos", str(self.tmp / "repos.json"),
+                          "--tasks-dir", str(self.tmp / "tasks")])
+                rc = run.main(["--config", str(self.config), *where,
                                "--glia-repo", str(self.glia_repo), *argv])
         finally:
             for k, v in saved.items():
@@ -515,6 +519,241 @@ def test_usage_windows_and_line():
     assert run.usage_line(before, before, 6, 180) == \
         "usage=unknown reason=rate_limits_not_refreshed updated=100"
     assert run.usage_line(None, after, 6, 180) == "usage=unknown reason=no_rate_limits_file"
+
+
+# --- FH.13: the probe arms and sets -------------------------------------------
+def test_config_probe_arms():
+    cfg = json.loads((run.HERE / "config.json").read_text())
+    assert list(cfg["arms"]) == ["none", "g053", "g054"], cfg["arms"]
+    assert cfg["arms"]["g054"]["calibrate"] is True and cfg["arms"]["g053"]["calibrate"] is True
+    assert len(cfg["arms"]["g054"]["rev"]) == 40 and cfg["runs"] == 1, cfg
+
+
+def test_committed_sets_rebuild():
+    out = io.StringIO()
+    names = sorted(p.name for p in run.SETS_DIR.iterdir() if (p / "set.json").is_file())
+    assert names == ["bigrepo", "multirepo", "verifier"], names
+    with contextlib.redirect_stdout(out):
+        rcs = [run.build_set(run.SETS_DIR / n, check=True) for n in names]
+    assert rcs == [0, 0, 0], out.getvalue()
+    for n, metric in (("bigrepo", "first_edit"), ("multirepo", "across"), ("verifier", "missed")):
+        assert f"[agent-ab] set name={n} metric={metric} " in out.getvalue(), out.getvalue()
+    task_list, _ = run.load_tasks(run.SETS_DIR / "multirepo" / "repos.json",
+                                  run.SETS_DIR / "multirepo")
+    assert task_list and all(t["workspace"]["start"] not in t["workspace"]["changed"]
+                             and t["prompt_subject"].startswith("The latest commit in ../")
+                             for _, t in task_list)
+
+
+def test_split_row_and_notes():
+    ws = {"parts": {"web": "web/", "app": "mobile/app/"}, "rest": "server"}
+    row = {"id": "x-1", "shape": "drift", "truth": {"code": [
+        {"path": "web/a.ts", "status": "M", "old_path": None, "hunks": [[1, 1]]},
+        {"path": "web/b.ts", "status": "R", "old_path": "web/old.ts", "hunks": []},
+        {"path": "mobile/app/c.dart", "status": "M", "old_path": None, "hunks": []}],
+        "tests": ["web/a.spec.ts"], "other": ["README.md"]},
+        "probe": {"server_files": ["api/x.go", "mobile/app/gen.dart"], "client_files": []},
+        "prompt_subject": (
+            "The latest commit on this branch (HEAD) changed the server: drop a field (#1). "
+            "The web app were not updated with it and no longer match the server. Update the "
+            "client code so it works with the server as it is now.")}
+    out = run.split_row(row, ws)
+    assert [c["path"] for c in out["truth"]["code"]] == ["web/a.ts", "web/b.ts", "app/c.dart"]
+    assert out["truth"]["code"][1]["old_path"] == "web/old.ts"
+    assert out["truth"]["other"] == ["server/README.md"], out["truth"]
+    assert out["workspace"]["start"] == "web" and out["workspace"]["changed"] == ["app", "server"]
+    assert out["prompt_subject"].startswith(
+        "The latest commit in ../app and ../server (beside this repository) changed the server: "
+        "drop a field (#1). The web app were not updated"), out["prompt_subject"]
+    assert row["truth"]["code"][2]["path"] == "mobile/app/c.dart"  # the source is untouched
+    note = "{repos}; in {start}; `{with}`; base {base}"
+    assert run.fill_note(note, out) == ("../app, ../server and ../web; in web; "
+                                        "`--with ../app --with ../server`; base HEAD~1")
+    assert run.fill_note("base {base}", {"shape": "ripple"}) == "base HEAD"
+    cfg = {"glia_prompt": "Use glia."}
+    spec = {"note": "N {start}", "glia_note": "G {base}"}
+    repo = {"label": "toy", "url": "https://github.com/example/toy.git"}
+    plain = {"prompt_subject": "Fix it", "issue": None, "issue_fetch": "none"}
+    assert run.session_prompt("{task}", cfg, None, repo, plain, True) == \
+        run.render_prompt("{task}", repo, plain, "Use glia.")
+    assert run.session_prompt("{task}", cfg, spec, repo, plain, False) == "Fix it\n\nN ."
+    assert run.session_prompt("{task}", cfg, spec, repo, plain, True) == \
+        "Fix it\n\nN .\n\nUse glia.\n\nG HEAD"
+
+
+SPLIT_FILES = [
+    {"web/app.ts": "export const a = 1;\n", "srv/api.go": "package srv\n", "README.md": "x\n"},
+    {"srv/api.go": "package srv\n\nfunc Api() {}\n"},
+    {"README.md": "y\n"},
+    {"web/app.ts": "export const a = 2;\n"},
+]
+
+
+def split_world(w):
+    """A web/ + srv/ origin, its bare clone as the cohort clone of `toy`, and a set with
+    one split task (the commit changing web/app.ts) and one plain task."""
+    origin = w.tmp / "sorigin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    shas = []
+    for i, files in enumerate(SPLIT_FILES):
+        for p, text in files.items():
+            (origin / p).parent.mkdir(parents=True, exist_ok=True)
+            (origin / p).write_text(text)
+        git(origin, "add", "-A")
+        git(origin, "commit", "-q", "-m", f"split commit {i}")
+        shas.append(git(origin, "rev-parse", "HEAD"))
+    cohort = w.tmp / "cohort"
+    cohort.mkdir()
+    subprocess.run(["git", "clone", "-q", "--bare", str(origin), str(cohort / "toy.git")],
+                   check=True)
+    src = w.tmp / "src" / "tasks"
+    src.mkdir(parents=True)
+    truth = lambda p: {"code": [{"path": p, "status": "M", "old_path": None,  # noqa: E731
+                                 "hunks": [[1, 1]]}], "tests": [], "other": []}
+    rows = [{"id": f"toy-{shas[3][:12]}", "repo": "toy", "commit": shas[3], "parent": shas[2],
+             "shape": "ripple", "prompt_subject": "bump the web constant",
+             "issue": None, "issue_fetch": "none", "truth": truth("web/app.ts"),
+             "probe": {"server_files": ["srv/api.go"]}},
+            {"id": f"toy-{shas[1][:12]}", "repo": "toy", "commit": shas[1], "parent": shas[0],
+             "shape": "ripple", "prompt_subject": "add the api function",
+             "issue": None, "issue_fetch": "none", "truth": truth("srv/api.go")}]
+    (src / "toy.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (src.parent / "repos.json").write_text((w.tmp / "repos.json").read_text())
+    for name, ws in (("split", {"toy": {"parts": {"web": "web/"}, "rest": "srv"}}),
+                     ("plain", None)):
+        sd = w.tmp / "sets" / name
+        sd.mkdir(parents=True)
+        spec = {"name": name, "metric": "across" if ws else "missed",
+                "tasks": [{"from": "cohort", "id": rows[0]["id"]}],
+                "note": "Repos: {repos}; you are in {start}." if ws else None,
+                "glia_note": "Pass `{with}`." if ws else "Verify against {base}."}
+        if ws:
+            spec["workspace"] = ws
+        else:
+            spec["tasks"].append({"from": "cohort", "id": rows[1]["id"]})
+        (sd / "set.json").write_text(json.dumps(spec))
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert run.build_set(sd, sources={"cohort": src, "agent-ab": src}) == 0
+            assert run.build_set(sd, check=True, sources={"cohort": src, "agent-ab": src}) == 0
+    return shas, rows
+
+
+def test_split_workspace_checkout():
+    with world() as w:
+        shas, _ = split_world(w)
+        os.environ["GLIA_COHORT_DIR"] = str(w.tmp / "cohort")
+        try:
+            row = run.read_rows(w.tmp / "sets" / "split" / "toy.jsonl")[0]
+            assert row["truth"]["code"][0]["path"] == "web/app.ts"
+            assert row["workspace"]["start"] == "web" and row["workspace"]["changed"] == ["srv"]
+            gd = run.set_clone("toy")
+            copy = w.tmp / "ws"
+            assert run.checkout_workspace(gd, row, shas[2], copy) == ["srv", "web"]
+            assert (copy / "web" / "app.ts").read_text() == "export const a = 1;\n"
+            assert sorted(os.listdir(copy / "srv")) == [".git", "README.md", "srv"]
+            assert (copy / "srv" / "srv" / "api.go").read_text().endswith("func Api() {}\n")
+            # history kept per path: web saw commit 0 only; the rest saw 0, 1 and 2
+            assert git(copy / "web", "log", "--format=%s") == "split commit 0"
+            assert git(copy / "srv", "log", "--format=%s").splitlines() == [
+                "split commit 2", "split commit 1", "split commit 0"]
+            assert git(copy / "web", "log", "-1", "--format=%an %ae") == "Dev dev@example.invalid"
+            for part in ("web", "srv"):
+                r = subprocess.run(["git", "-C", str(copy / part), "cat-file", "-e", shas[3]],
+                                   capture_output=True)
+                assert r.returncode != 0 and git(copy / part, "remote") == ""
+            ref = git(gd, "rev-parse", f"{run.SPLIT_REF}{row['id']}/web")
+            # deterministic: dropping the ref and splitting again gives the same commit
+            git(gd, "update-ref", "-d", f"{run.SPLIT_REF}{row['id']}/web")
+            assert run.split_ref(gd, row["id"], "web", shas[2], "web/", []) == ref
+            # the patch and the opened files read in workspace coordinates
+            (copy / "web" / "app.ts").write_text("export const a = 2;\n")
+            (copy / "srv" / "new.go").write_text("package srv\n")
+            (copy / "web" / ".glia").mkdir()
+            out = w.tmp / "p.diff"
+            run.write_patch(copy, out, ["srv", "web"])
+            text = out.read_text()
+            assert "+++ b/web/app.ts" in text and "+++ b/srv/new.go" in text, text
+            assert ".glia" not in text
+            hidden = str(copy / "web" / ".glia" / "x")
+            ev = [{"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "cat app.ts ../srv/srv/api.go"}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": hidden}}]}}]
+            m = run.session_metrics(ev, copy, "web", ["srv", "web"])
+            assert m["files_opened"] == ["web/app.ts", "srv/srv/api.go"], m
+        finally:
+            os.environ.pop("GLIA_COHORT_DIR", None)
+
+
+def test_set_pilot_and_report():
+    with world() as w:
+        split_world(w)
+        w.env["GLIA_COHORT_DIR"] = str(w.tmp / "cohort")
+        w.ready()
+        edit = {"name": "Edit", "input": {"file_path": "{cwd}/app.ts"}}
+        glia_review = {"name": "Bash", "input": {"command": "glia review . --base HEAD"}}
+        w.set_scenario({"default": {"tools": [edit], "edits": {"app.ts": "export const a = 2;\n"}},
+                        "by_arm": {"g053": {"tools": [edit, glia_review]}}})
+        split_dir = w.tmp / "sets" / "split"
+        rc, out = w.main("pilot", "--run-id", "s1", set_dir=split_dir)
+        assert rc == 0, out
+        calls = w.calls()
+        assert len(calls) == 3, calls
+        for c in calls:
+            copy = Path(c["cwd"]).parent
+            assert Path(c["cwd"]).name == "web", c
+            argv = c["argv"]
+            assert argv[argv.index("--add-dir") + 1] == str(copy), argv
+            prompt = argv[argv.index("-p") + 1]
+            assert "\n\nRepos: ../srv and ../web; you are in web." in prompt, prompt
+            assert prompt.endswith("Pass `--with ../srv`.") == (c["arm"] != "none"), prompt
+            assert c["graph"] == c["history"] == (c["arm"] != "none")
+            assert c["skills"] == (["glia"] if c["arm"] != "none" else [])
+        rs = w.rows("s1")
+        assert {r["terminated"] for r in rs} == {"end"}, rs
+        assert all(r["files_opened"] == [] for r in rs)
+        diff = Path(rs[0]["patch"]["path"]).read_text()
+        assert "+++ b/web/app.ts" in diff, diff
+        meta = json.loads((w.cache / "runs" / "s1" / "meta.json").read_text())
+        assert meta["set"] == run.load_set(split_dir)["sha256"]
+        # the plain set, one run id per repo label (only one here)
+        rc, out = w.main("pilot", "--run-id", "s2", "--only", "toy",
+                         set_dir=w.tmp / "sets" / "plain")
+        assert rc == 0, out
+        last = w.calls()[-1]["argv"]
+        assert "--add-dir" not in last
+        assert last[last.index("-p") + 1].endswith("Verify against HEAD."), last
+        assert w.main("pilot", "--run-id", "s3", "--only", "nope",
+                      set_dir=w.tmp / "sets" / "plain")[0] == 2
+        files = {k: w.tmp / f"out.{k}" for k in ("md", "json", "sessions", "probe")}
+        rc, out = w.main("report", "--run-id", "s1", "--out-md", str(files["md"]),
+                         "--out-json", str(files["json"]), "--out-sessions",
+                         str(files["sessions"]), "--out-probe", str(files["probe"]),
+                         set_dir=split_dir)
+        assert rc == 0, out
+        assert "[agent-ab] score sessions=3 excluded=0 tasks=1" in out, out
+        assert ("[agent-ab] diag verdicts no_skill=1 skill_only=0 glia_missed=1 glia_late=0 "
+                "glia_found=0") in out, out
+        probe = run.read_rows(files["probe"])
+        assert [(p["arm"], p["missed"], p["all_edited"], p["all_edited_turn"], p["verified"])
+                for p in probe] == [("g052", 0, True, 1, False), ("g053", 0, True, 1, True),
+                                    ("none", 0, True, 1, False)], probe
+        md = files["md"].read_text()
+        assert md.startswith("### split\n"), md
+        for line in ("| g053 | 1 | 1 | 0.000 | 1/1 | 1.000 | 0.000 | 1.000 | 1/1 |",
+                     "| none | 1 | 1 | 0.000 | 1/1 | 1.000 | 0.000 | 1.000 | - |",
+                     "- missed g053-none: diff 0.000 [0.000, 0.000] over 1 tasks: n.s.",
+                     "| g052 | 1 | 0 | 0 | 0 | 0 |", "| g053 | 0 | 0 | 1 | 0 | 0 |"):
+            assert line in md, (line, md)
+        # baseline.json reproduces from the sessions rows through score.py alone
+        import score
+        again = w.tmp / "again.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert score.main(["score", "--from-metrics", str(files["sessions"]),
+                               "--out-json", str(again)]) == 0
+        assert again.read_bytes() == files["json"].read_bytes()
+
 
 
 def main():

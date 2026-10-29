@@ -1,0 +1,6 @@
+{
+ "repos": [
+  {"label": "immich", "url": "https://github.com/immich-app/immich.git", "end_rev": "256eb55dbe92ac77e02794442f9487e88ffed2b1", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "microservices-demo", "url": "https://github.com/GoogleCloudPlatform/microservices-demo.git", "end_rev": "38e7348eb289eb5b87c0c6e8cb19ced0449dc389", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true}
+ ]
+}

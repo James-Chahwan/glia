@@ -1,0 +1,13 @@
+{
+ "repos": [
+  {"label": "immich", "url": "https://github.com/immich-app/immich.git", "end_rev": "256eb55dbe92ac77e02794442f9487e88ffed2b1", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "microservices-demo", "url": "https://github.com/GoogleCloudPlatform/microservices-demo.git", "end_rev": "38e7348eb289eb5b87c0c6e8cb19ced0449dc389", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "gin-vue-admin", "url": "https://github.com/flipped-aurora/gin-vue-admin.git", "end_rev": "f7f1009c98e6c180d6d89f897cf36907a85ecc43", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "scaffold-eth-2", "url": "https://github.com/scaffold-eth/scaffold-eth-2.git", "end_rev": "87557d93c8c5c7c7c366002729f0fac8599f2fbb", "lang": "polyglot", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "shell", "url": "https://github.com/pop-os/shell.git", "end_rev": "7898b65c20735057faf0797f8ed056704ca55f0d", "lang": "typescript", "gate_rev": "9616931a2f8da33ff60d6332cbb1e4036c9ae2b3", "tuned": true, "public": true},
+  {"label": "websocket", "url": "https://github.com/gorilla/websocket.git", "end_rev": "e064f32e3674d9d79a8fd417b5bc06fa5c6cad8f", "lang": "go", "gate_rev": "dcea2f088ce10b1b0722c4eb995a4e145b5e9047", "tuned": true, "public": true},
+  {"label": "samples", "url": "https://github.com/flutter/samples.git", "end_rev": "21c71902bb2c7da3cce328ba5946cba2f35a660a", "lang": "dart", "gate_rev": "291ba126bfc1279d074b91e61ad44919768ebe7f", "tuned": true, "public": true},
+  {"label": "commons-text", "url": "https://github.com/apache/commons-text.git", "end_rev": "1be8170d5e39699c4ff7cf3259497e695f6fce23", "lang": "java", "gate_rev": null, "tuned": false, "public": true},
+  {"label": "click", "url": "https://github.com/pallets/click.git", "end_rev": "2247b35ea1c47c727d7a06e51fa280e12a863ff6", "lang": "python", "gate_rev": null, "tuned": false, "public": true}
+ ]
+}

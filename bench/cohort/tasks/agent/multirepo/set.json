@@ -1,0 +1,75 @@
+{
+ "about": "Multi-repo: the immich and microservices-demo drift tasks with each monorepo split into per-service repositories (history kept per path, refs/agent-ab/split/), the agent started in the repository its truth files are in, the others beside it. Only --with lets glia see across them.",
+ "glia_note": "Each repository has its own glia graph, and glia sees across them only when you name the others: add `{with}` to a glia command (blast-radius, diff-impact, trace, flows, contract-breaks, ..).",
+ "metric": "across",
+ "name": "multirepo",
+ "note": "This system is split into separate repositories, checked out side by side: {repos}. You are in ../{start}; the others are beside it in the parent directory, and a change may need edits in any of them.",
+ "tasks": [
+  {
+   "from": "cohort",
+   "id": "immich-3f6a07120318"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-8d377bfef5a0"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-7b51c50a96cf"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-8b3d6b320bf7"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-c7f6197e7556"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-47c5a3dbf6d3"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-1c8abe204b55"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-577eeb38c8c2"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-65b5da1a9b3e"
+  },
+  {
+   "from": "cohort",
+   "id": "microservices-demo-4d8848bc5eeb"
+  }
+ ],
+ "workspace": {
+  "immich": {
+   "parts": {
+    "mobile": "mobile/",
+    "web": "web/"
+   },
+   "rest": "server"
+  },
+  "microservices-demo": {
+   "parts": {
+    "adservice": "src/adservice/",
+    "cartservice": "src/cartservice/",
+    "checkoutservice": "src/checkoutservice/",
+    "currencyservice": "src/currencyservice/",
+    "emailservice": "src/emailservice/",
+    "frontend": "src/frontend/",
+    "loadgenerator": "src/loadgenerator/",
+    "paymentservice": "src/paymentservice/",
+    "productcatalogservice": "src/productcatalogservice/",
+    "recommendationservice": "src/recommendationservice/",
+    "shippingservice": "src/shippingservice/",
+    "shoppingassistantservice": "src/shoppingassistantservice/"
+   },
+   "rest": "platform"
+  }
+ }
+}

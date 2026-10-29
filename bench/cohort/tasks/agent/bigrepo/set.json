@@ -1,0 +1,71 @@
+{
+ "about": "Big repos: the twenty and immich multi-file ripple and symptom tasks (2+ code files). The metric is the turns and the input tokens to the first edit of each truth file.",
+ "metric": "first_edit",
+ "name": "bigrepo",
+ "tasks": [
+  {
+   "from": "cohort",
+   "id": "twenty-a055a5b5f3ca"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-6c071357d103"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-7e66f5894042"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-e1b4d607303c"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-d2aab27b3411"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-f08ce7111b25"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-ce4532cc4c48"
+  },
+  {
+   "from": "cohort",
+   "id": "twenty-c1a6004b1630"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-cd47ee30676e"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-616839e8d43a"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-b08a8fb56c17"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-003670d013b7"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-457da17c5d02"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-9ee412110f02"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-95c1f0efeb19"
+  },
+  {
+   "from": "cohort",
+   "id": "immich-c2d840089963"
+  }
+ ]
+}
