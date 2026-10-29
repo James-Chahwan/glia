@@ -2,7 +2,7 @@
 
 **Born 2026-10-30.** James cut 0.5.4 to what was built plus two small tracks (*"Nah we can change to option 3 to round of
 0.5.4 now right ?"*, superseding the 2026-10-24 ruling that 0.5.4 ships only after every track). 0.5.4 ships T0 T1 T2 T3
-T5 T10 (+FD.31) T11 TS TH, FH.11c and F0.8. Everything below moves here.
+T5 T10 (+FD.31) T11 TS TH and FH.11c. Everything below moves here.
 
 ## 1. Tracks moved from 0.5.4 (already specced)
 
@@ -19,9 +19,11 @@ re-verify pass (`dev-notes/reverify_054.md`'s method) against the shipped 0.5.4 
 | T8 | Stack Graphs-style incremental resolution, watch's body-only fast path, multi-repo watch, the watch memory budget (F.3) | 19 | ~7,080 |
 | T9 | build-target graphs (bazel), the first non-code domain | 6 | ~2,180 |
 
-0.5.4's F0.8 removes these tracks' empty wave-0 slots (goal / clarify / targets modules, build-domain and the bazel
-parser crate); 0.5.5's wave 0 re-adds what its packets need. The registry ids 0.5.4's F0.1 allocated for T6
-(GOAL_UNIT 50, TRACES 38, UNIT 26) stay reserved for it.
+The moved tracks' empty wave-0 slots ship in 0.5.4 untouched, reserved here (James 2026-10-30: kept rather than removed,
+since 0.5.5 starts straight away): build-domain/src/lib.rs, code-domain/src/goal.rs, engine/src/clarify/{answer,questions}.rs,
+engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs, engine/src/targets.rs, parsers/build/bazel/src/lib.rs,
+py/src/{clarify,goal,targets}.rs. The registry ids 0.5.4's F0.1 allocated for T6 (GOAL_UNIT 50, TRACES 38, UNIT 26) stay
+reserved too. 0.5.5's packets fill these slots; no new wave-0 is needed for them.
 
 ## 2. From the Sibyl cohort follow-up (2026-10-26, option 1: "C + D go to 0.5.5")
 
