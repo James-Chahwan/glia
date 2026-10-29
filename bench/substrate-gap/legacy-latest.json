@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 444,
+  "fixtures": 445,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1636,6 +1636,11 @@
     "overlay-subdir-constraint": {
       "framework": "overlay-subdir-constraint",
       "language": "go",
+      "per_category": {}
+    },
+    "package-deps-jvm-dart-elixir-dotnet": {
+      "framework": "package-deps-jvm-dart-elixir-dotnet",
+      "language": "java+kotlin+dart+elixir+csharp",
       "per_category": {}
     },
     "php-braced-use": {
