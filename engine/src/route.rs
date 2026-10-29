@@ -831,10 +831,14 @@ fn route_branches(
         // A10.3: the same call also covers `asyncapi.yaml`; `record`
         // routes the count to the format the file sniffed as.
         t.keep_contract(&contract_out);
+        // FD.31: a `pubspec.yaml` keeps this route and gains its pub
+        // dependencies beside it (empty for every other yaml).
+        let deps_out = deps_beside(source, path, module_id, repo, &mut t.lines);
         let fp = (!cron_out.nodes.is_empty()
             || !cfg_out.nodes.is_empty()
             || !iac_out.nodes.is_empty()
-            || !contract_out.nodes.is_empty())
+            || !contract_out.nodes.is_empty()
+            || !deps_out.nodes.is_empty())
         .then(|| {
             synthetic_parse(
                 path,
@@ -845,14 +849,22 @@ fn route_branches(
                     cfg_out.nodes,
                     iac_out.nodes,
                     contract_out.nodes,
+                    deps_out.nodes,
                 ],
                 vec![
                     cron_out.edges,
                     cfg_out.edges,
                     iac_out.edges,
                     contract_out.edges,
+                    deps_out.edges,
                 ],
-                vec![cron_out.nav, cfg_out.nav, iac_out.nav, contract_out.nav],
+                vec![
+                    cron_out.nav,
+                    cfg_out.nav,
+                    iac_out.nav,
+                    contract_out.nav,
+                    deps_out.nav,
+                ],
                 vec![],
             )
         });
@@ -894,6 +906,11 @@ fn route_branches(
         let module_id = synthetic_module_id(repo, path);
         let pkg_out =
             glia_code_extractors::packages::extract_for_path(source, path, module_id, repo);
+        // FD.31: a pom.xml, Gradle build file or .NET project file says what
+        // it read, once per file.
+        if let Some(marker) = &pkg_out.marker {
+            t.lines.push(marker.clone());
+        }
         // LA.20c: the binaries the manifest declares (pyproject scripts,
         // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
         // invocation's argv0 pairs with them. A manifest that declares a
@@ -1353,6 +1370,17 @@ pub(crate) fn parse_for_cache(
     }
     let mut stats = ExtractStats::default();
     apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
+    // FD.31: a `mix.exs` stays an Elixir file and gains its Hex dependencies
+    // on its own MODULE (empty for every other code file). Before the cache
+    // put, so a cache hit replays them; the marker prints on the parse only.
+    let mut lines = Vec::new();
+    let deps_out = deps_beside(source, path, module_id, repo, &mut lines);
+    for line in lines {
+        eprintln!("{line}");
+    }
+    fp.nodes.extend(deps_out.nodes);
+    fp.edges.extend(deps_out.edges);
+    merge_nav(&mut fp.nav, deps_out.nav);
     // G15: denormalize the file's library names onto every node as an
     // IMPORTS cell (one place, all languages). This is the RAW list:
     // telling a dependency from the repo's own module needs the whole
@@ -1681,6 +1709,36 @@ const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
     "proto",
     "yaml",
 ];
+
+/// FD.31: the dependencies a file that keeps its own route declares beside
+/// it (`pubspec.yaml` through the yaml branch, `mix.exs` through the Elixir
+/// parse), on `module_id`, each DEPENDS_ON stamped `extractor:manifest` as the
+/// manifest branch's are; its `[packages]` marker joins `lines`. Empty for
+/// every other path.
+fn deps_beside(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    lines: &mut Vec<String>,
+) -> glia_code_extractors::packages::PackageNodes {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let mut out = if matches!(base, "pubspec.yaml" | "mix.exs") {
+        glia_code_extractors::packages::extract_deps_beside(source, path, module_id, repo)
+    } else {
+        glia_code_extractors::packages::PackageNodes {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: CodeNav::default(),
+            marker: None,
+        }
+    };
+    evidence::stamp_missing(&mut out.edges, "extractor:manifest");
+    if let Some(marker) = out.marker.take() {
+        lines.push(marker);
+    }
+    out
+}
 
 /// A non-code file's MODULE id (LB.9a): keyed on [`synthetic_module_qname`],
 /// the full file name, so `api/user.proto` never shares a NodeId with
@@ -2352,6 +2410,93 @@ mod tests {
 
         // Neither a dependency nor a binary: nothing is stashed.
         assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
+    }
+
+    /// The PACKAGE_DEP qnames of `fp`, each a DEPENDS_ON target of
+    /// `module_id` stamped `extractor:manifest`, sorted.
+    fn deps_on(fp: &FileParse, module_id: NodeId) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::DEPENDS_ON)
+            .inspect(|e| {
+                assert_eq!(e.from, module_id, "{e:?}");
+                let ev = glia_code_domain::evidence::Evidence::of(e).expect("evidence");
+                assert_eq!(ev.emitter, "extractor:manifest", "{e:?}");
+            })
+            .filter_map(|e| fp.nav.qname_by_id.get(&e.to).cloned())
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// FD.31: a pom.xml, a Gradle build file and a .NET project file route
+    /// down the manifest branch; a `pubspec.yaml` keeps the yaml route and a
+    /// `mix.exs` the Elixir parse, each gaining its dependencies on its own
+    /// MODULE beside what that route reads.
+    #[test]
+    fn remaining_manifests_mint_their_dependencies() {
+        let pom = "<project><dependencies><dependency><groupId>org.slf4j</groupId>\
+                   <artifactId>slf4j-api</artifactId></dependency></dependencies></project>";
+        for (path, src, module, dep) in [
+            (
+                "jvm/pom.xml",
+                pom,
+                "jvm::pom.xml",
+                "package:maven:org.slf4j:slf4j-api",
+            ),
+            (
+                "jvm/build.gradle.kts",
+                "dependencies {\n    implementation(\"com.squareup.okhttp3:okhttp:4.12.0\")\n}\n",
+                "jvm::build.gradle.kts",
+                "package:maven:com.squareup.okhttp3:okhttp",
+            ),
+            (
+                "net/Api.csproj",
+                "<Project><ItemGroup><PackageReference Include=\"Newtonsoft.Json\" /></ItemGroup></Project>",
+                "net::Api.csproj",
+                "package:nuget:Newtonsoft.Json",
+            ),
+        ] {
+            assert_eq!(parser_route(path), None, "{path}");
+            let parses = route(path, src);
+            let fp = &parses["manifest"][0];
+            let module_id = synthetic_module_id(RepoId(1), path);
+            assert_eq!(fp.nodes[0].id, module_id, "{path}: a MODULE named {module}");
+            assert_eq!(deps_on(fp, module_id), [dep], "{path}");
+        }
+
+        let pubspec = "name: app\ndependencies:\n  http: ^1.2.0\n  flutter:\n    sdk: flutter\n";
+        let parses = route("app/pubspec.yaml", pubspec);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["yaml"]);
+        let fp = &parses["yaml"][0];
+        let module_id = synthetic_module_id(RepoId(1), "app/pubspec.yaml");
+        assert_eq!(deps_on(fp, module_id), ["package:pub:http"]);
+
+        let mix = "defmodule Ex.MixProject do\n  use Mix.Project\n  defp deps, do: [{:jason, \"~> 1.4\"}]\nend\n";
+        assert_eq!(parser_route("ex/mix.exs"), Some("elixir"));
+        let parses = route("ex/mix.exs", mix);
+        let fp = &parses["elixir"][0];
+        let module_id = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "ex::mix");
+        assert!(
+            fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q == "ex::mix::Ex.MixProject" || q.starts_with("ex::mix::")),
+            "the Elixir parse is kept: {:?}",
+            fp.nav.qname_by_id.values().collect::<Vec<_>>()
+        );
+        assert_eq!(deps_on(fp, module_id), ["package:hex:jason"]);
+
+        // Every other yaml and code file gains nothing.
+        let parses = route("config/app.yaml", "dependencies:\n  http: ^1.2.0\n");
+        assert!(
+            parses.values().flatten().all(|fp| deps_on(
+                fp,
+                synthetic_module_id(RepoId(1), "config/app.yaml")
+            )
+            .is_empty())
+        );
     }
 
     /// LE.9a: a quokka `features/<f>/feature.yaml` and spec-kit

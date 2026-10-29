@@ -16,19 +16,31 @@
 //!   - `gomod`      — go.mod `require <name> <version>`
 //!   - `rubygems`   — Gemfile `gem '<name>', ...`
 //!   - `composer`   — composer.json `require` / `require-dev`
+//!   - `maven`      — FD.31: pom.xml `<dependencies><dependency>` (`groupId:artifactId`),
+//!     Gradle `build.gradle` / `build.gradle.kts` configuration calls
+//!     (`implementation("g:a:v")`, the `group:` / `name:` map form)
+//!   - `pub`        — FD.31: pubspec.yaml `dependencies:` / `dev_dependencies:`
+//!     (an `sdk:` entry such as `flutter: sdk: flutter` is the SDK, no package)
+//!   - `hex`        — FD.31: mix.exs `{:name, ..}` tuples of the `deps` function
+//!   - `nuget`      — FD.31: `*.csproj` / `*.fsproj` / `*.vbproj`
+//!     `<PackageReference Include="N">`
 //!
 //! Each extractor is a pure function over the file's source. Caller dispatches
-//! by file basename via `extract_for_path`.
+//! by file basename via `extract_for_path` (the manifest route) or, for a file
+//! that keeps another route, [`extract_deps_beside`]: `pubspec.yaml` stays a
+//! YAML file and `mix.exs` an Elixir one, and their dependency read is appended
+//! to that file's MODULE. pom.xml, the Gradle build files and the .NET project
+//! files have no other route, so [`is_manifest_path`] names them and the walk
+//! reads them for this read alone.
 //!
-//! Out of scope (deferred to v0.5+):
-//!   - Maven `pom.xml` (XML parsing)
-//!   - Gradle `build.gradle` / `*.gradle.kts` (Groovy/Kotlin DSL)
-//!   - .NET `*.csproj` (XML PackageReference)
+//! Out of scope:
+//!   - Gradle version catalogs (`implementation(libs.okhttp)`): the build file
+//!     names no artifact; counted `catalog_refs=` in the `[packages]` marker
+//!   - Maven `<dependencyManagement>` and plugin `<dependencies>` (versions
+//!     and build tooling, not the project's own dependencies)
 //!   - Lockfiles (`package-lock.json`, `Cargo.lock`, `go.sum`, etc.) — manifest
-//!     declarations cover declared intent; lockfile-level analysis is a v0.5+
-//!     refinement
+//!     declarations cover declared intent
 //!   - Version-pinning analysis (we extract the name, not the constraint)
-//!   - Org-internal-package routing (per TODO; depends on workflow story)
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
@@ -37,6 +49,11 @@ pub struct PackageNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+    /// FD.31 fired_on, one per manifest of the four ecosystems it reads
+    /// (`maven`, `pub`, `hex`, `nuget`), even one that declares nothing:
+    /// `[packages] eco=<e> deps=<n> path=<p>` (a Gradle file adds
+    /// `catalog_refs=<c>` before `path=`). `None` for every other manifest.
+    pub marker: Option<String>,
 }
 
 /// Detect manifest type from path basename and extract dependencies. Returns
@@ -72,12 +89,54 @@ pub fn extract_for_path(source: &str, path: &str, module_id: NodeId, repo: RepoI
             .into_iter()
             .map(|n| ("composer", n))
             .collect(),
-        _ => Vec::new(),
+        _ => return extract_deps_beside(source, path, module_id, repo),
     };
     build_nodes(names_with_eco, module_id, repo)
 }
 
-/// True when the path is a recognised manifest filename. DH.10: a
+/// FD.31: the dependencies of a pom.xml, a `build.gradle` / `build.gradle.kts`,
+/// a `pubspec.yaml`, a `mix.exs` or a `.csproj` / `.fsproj` / `.vbproj`, as
+/// `package:<maven|pub|hex|nuget>:<name>` PACKAGE_DEPs each with a DEPENDS_ON
+/// from `module_id`, and the file's `[packages]` marker. Empty (no marker) for
+/// any other path. The router calls it beside the file's own route for a
+/// `pubspec.yaml` (YAML) and a `mix.exs` (Elixir), and through
+/// [`extract_for_path`] for the rest.
+pub fn extract_deps_beside(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> PackageNodes {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let (eco, names, catalog_refs) = match base {
+        "pom.xml" => ("maven", scan_pom_xml(source), None),
+        "build.gradle" | "build.gradle.kts" => {
+            let (names, catalog) = scan_gradle(source);
+            ("maven", names, Some(catalog))
+        }
+        "pubspec.yaml" => ("pub", scan_pubspec(source), None),
+        "mix.exs" => ("hex", scan_mix_exs(source), None),
+        _ if is_dotnet_project_name(base) => ("nuget", scan_package_references(source), None),
+        _ => return build_nodes(Vec::new(), module_id, repo),
+    };
+    let mut out = build_nodes(
+        names.into_iter().map(|n| (eco, n)).collect(),
+        module_id,
+        repo,
+    );
+    let catalog = catalog_refs.map_or(String::new(), |c| format!(" catalog_refs={c}"));
+    out.marker = Some(format!(
+        "[packages] eco={eco} deps={}{catalog} path={path}",
+        out.nodes.len()
+    ));
+    out
+}
+
+/// True when the path is a recognised manifest filename: the walk reads it
+/// and the router sends it down the manifest branch, so no language parser
+/// sees it. FD.31 adds pom.xml, `build.gradle`, `build.gradle.kts` and the
+/// .NET project files, which no parser reads; `pubspec.yaml` and `mix.exs`
+/// keep their YAML / Elixir route and are not named here. DH.10: a
 /// `*.gemspec` too, read for the executables it ships
 /// (`cli::extract_manifest_binaries`) and for no dependency
 /// ([`extract_for_path`] has no arm for it), so the walk reads it, the router
@@ -93,7 +152,22 @@ pub fn is_manifest_path(path: &str) -> bool {
             | "go.mod"
             | "Gemfile"
             | "composer.json"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
     ) || is_gemspec_name(base)
+        || is_dotnet_project_name(base)
+}
+
+/// FD.31: a .NET project file name, `<name>.csproj` / `.fsproj` / `.vbproj`
+/// (extension ASCII case ignored; a bare `.csproj` is not one).
+fn is_dotnet_project_name(base: &str) -> bool {
+    base.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && ["csproj", "fsproj", "vbproj"]
+                .iter()
+                .any(|e| ext.eq_ignore_ascii_case(e))
+    })
 }
 
 /// DH.10: a RubyGems spec file name, `<name>.gemspec` (a bare `.gemspec` is
@@ -131,7 +205,12 @@ fn build_nodes(deps: Vec<(&'static str, String)>, module_id: NodeId, repo: RepoI
             cells: Vec::new(),
         });
     }
-    PackageNodes { nodes, edges, nav }
+    PackageNodes {
+        nodes,
+        edges,
+        nav,
+        marker: None,
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -568,6 +647,560 @@ fn scan_composer_json(source: &str) -> Vec<String> {
     out
 }
 
+// ----------------------------------------------------------------------------
+// FD.31: pom.xml — `<project><dependencies><dependency>` (and a profile's),
+// read by a tag-level scan with an element stack (no XML dependency). The
+// dependency is `groupId:artifactId`; its version, scope and type are not
+// read. `<dependencyManagement>` (version pins) and a plugin's or an
+// extension's `<dependencies>` (build tooling) are no dependency of the
+// project. A coordinate holding a `${property}` names no artifact.
+// ----------------------------------------------------------------------------
+
+fn scan_pom_xml(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack: Vec<&str> = Vec::new();
+    // The `<dependency>` being read: its groupId and artifactId so far.
+    let mut dep: Option<(Option<String>, Option<String>)> = None;
+    let mut rest = source;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open..];
+        if let Some(after) = rest.strip_prefix("<!--") {
+            rest = after.split_once("-->").map_or("", |(_, r)| r);
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("<![CDATA[") {
+            rest = after.split_once("]]>").map_or("", |(_, r)| r);
+            continue;
+        }
+        let Some(close) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[1..close];
+        rest = &rest[close + 1..];
+        if tag.starts_with('?') || tag.starts_with('!') || tag.ends_with('/') {
+            continue;
+        }
+        if let Some(name) = tag.strip_prefix('/') {
+            let name = name.trim();
+            if let Some(at) = stack.iter().rposition(|t| *t == name) {
+                stack.truncate(at);
+            }
+            if name == "dependency"
+                && let Some((Some(g), Some(a))) = dep.take()
+            {
+                out.push(format!("{g}:{a}"));
+            }
+            continue;
+        }
+        let name = tag.split_whitespace().next().unwrap_or("");
+        if name == "dependency"
+            && stack.last() == Some(&"dependencies")
+            && !stack
+                .iter()
+                .any(|t| matches!(*t, "dependencyManagement" | "plugin" | "extension"))
+        {
+            dep = Some((None, None));
+        } else if stack.last() == Some(&"dependency")
+            && let Some((group, artifact)) = dep.as_mut()
+        {
+            let text = rest.split('<').next().unwrap_or("").trim();
+            let ok = is_maven_part(text);
+            match name {
+                "groupId" => *group = ok.then(|| text.to_string()),
+                "artifactId" => *artifact = ok.then(|| text.to_string()),
+                _ => {}
+            }
+        }
+        stack.push(name);
+    }
+    out
+}
+
+/// A Maven groupId / artifactId as written: non-empty, `[A-Za-z0-9._-]` only
+/// (so a `${property}` or an interpolated Gradle string is none).
+fn is_maven_part(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// `group:artifact[:version[:classifier]][@ext]` -> `group:artifact`, when
+/// both parts are [`is_maven_part`]s (the version is never read).
+fn maven_coordinate(s: &str) -> Option<String> {
+    let s = s.split('@').next().unwrap_or(s);
+    let mut parts = s.split(':');
+    let (g, a) = (parts.next()?.trim(), parts.next()?.trim());
+    (is_maven_part(g) && is_maven_part(a)).then(|| format!("{g}:{a}"))
+}
+
+// ----------------------------------------------------------------------------
+// FD.31: Gradle `build.gradle` (Groovy) / `build.gradle.kts` (Kotlin) — the
+// configuration calls inside every `dependencies { .. }` block (a
+// `buildscript`'s and a `subprojects`' included; a `constraints { .. }` block
+// pins versions and is skipped): `implementation("g:a:v")`,
+// `api 'g:a:v'`, `testImplementation(platform("g:a:v"))`, the map form
+// `implementation(group = "g", name = "a")` / `implementation group: 'g',
+// name: 'a'`, and `kotlin("stdlib")` (`org.jetbrains.kotlin:kotlin-stdlib`).
+// `project(":x")`, `files(..)` / `fileTree(..)` and a version-catalog accessor
+// (`libs.okhttp`, counted) name no published artifact.
+// ----------------------------------------------------------------------------
+
+/// The configuration names Gradle and its Java / Android / Kotlin plugins
+/// declare dependencies under; any `<variant>Implementation` / `..Api` /
+/// `..CompileOnly` / `..RuntimeOnly` / `..AnnotationProcessor` (a source set's
+/// or a build variant's) is one too.
+const GRADLE_CONFIGS: &[&str] = &[
+    "implementation",
+    "api",
+    "compileOnly",
+    "compileOnlyApi",
+    "runtimeOnly",
+    "annotationProcessor",
+    "developmentOnly",
+    "kapt",
+    "ksp",
+    "classpath",
+    "compile",
+    "runtime",
+    "testCompile",
+    "testRuntime",
+];
+
+const GRADLE_CONFIG_SUFFIXES: &[&str] = &[
+    "Implementation",
+    "Api",
+    "CompileOnly",
+    "RuntimeOnly",
+    "AnnotationProcessor",
+];
+
+fn is_gradle_config(ident: &str) -> bool {
+    GRADLE_CONFIGS.contains(&ident)
+        || GRADLE_CONFIG_SUFFIXES.iter().any(|suf| {
+            ident.strip_suffix(suf).is_some_and(|prefix| {
+                prefix
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_lowercase())
+            })
+        })
+}
+
+/// The `group:artifact` names of a Gradle build file and its count of
+/// version-catalog references.
+fn scan_gradle(source: &str) -> (Vec<String>, usize) {
+    let src = strip_comments(source, CommentStyle::CLike);
+    let mut out = Vec::new();
+    let mut catalog = 0usize;
+    for (start, ident) in idents(&src) {
+        if ident != "dependencies" {
+            continue;
+        }
+        let after = &src[start + ident.len()..];
+        let open = after.len() - after.trim_start().len();
+        if !after[open..].starts_with('{') {
+            continue;
+        }
+        let body_start = start + ident.len() + open + 1;
+        let Some(close) = balanced_close(&src[body_start..], b'{', b'}') else {
+            continue;
+        };
+        scan_gradle_block(&src[body_start..body_start + close], &mut out, &mut catalog);
+    }
+    (out, catalog)
+}
+
+/// One `dependencies { .. }` body. A nested `dependencies` block is read by
+/// [`scan_gradle`]'s own walk, so only this body's configuration calls are.
+fn scan_gradle_block(body: &str, out: &mut Vec<String>, catalog: &mut usize) {
+    let mut skip_to = 0usize;
+    for (start, ident) in idents(body) {
+        if start < skip_to {
+            continue;
+        }
+        let after_ident = start + ident.len();
+        let rest = &body[after_ident..];
+        let ws = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let rest = &rest[ws..];
+        if matches!(ident, "constraints" | "dependencies") && rest.starts_with('{') {
+            if let Some(close) = balanced_close(&rest[1..], b'{', b'}') {
+                skip_to = after_ident + ws + 1 + close;
+            }
+            continue;
+        }
+        if !is_gradle_config(ident) {
+            continue;
+        }
+        let arg = if let Some(inner) = rest.strip_prefix('(') {
+            let Some(close) = balanced_close(inner, b'(', b')') else {
+                continue;
+            };
+            &inner[..close]
+        } else if rest.starts_with(['"', '\'']) || rest.starts_with(|c: char| c.is_alphabetic()) {
+            // Groovy's call without parentheses: the rest of the line, up
+            // to a trailing configuration closure.
+            let line = rest.split('\n').next().unwrap_or(rest);
+            line.split('{').next().unwrap_or(line)
+        } else {
+            continue;
+        };
+        read_gradle_arg(arg.trim(), out, catalog);
+    }
+}
+
+fn read_gradle_arg(arg: &str, out: &mut Vec<String>, catalog: &mut usize) {
+    if arg.starts_with(['"', '\'']) {
+        for s in quoted_strings(arg) {
+            if let Some(c) = maven_coordinate(&s) {
+                out.push(c);
+            }
+        }
+        return;
+    }
+    let head: String = arg
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let tail = arg[head.len()..].trim_start();
+    match head.as_str() {
+        "platform" | "enforcedPlatform" | "testFixtures" if tail.starts_with('(') => {
+            if let Some(c) = quoted_strings(tail)
+                .first()
+                .and_then(|s| maven_coordinate(s))
+            {
+                out.push(c);
+            } else if !tail.contains(['"', '\'']) && tail.contains('.') {
+                *catalog += 1;
+            }
+        }
+        "kotlin" if tail.starts_with('(') => {
+            if let Some(m) = quoted_strings(tail).first()
+                && is_maven_part(m)
+            {
+                out.push(format!("org.jetbrains.kotlin:kotlin-{m}"));
+            }
+        }
+        "project" | "files" | "fileTree" | "gradleApi" | "localGroovy" | "gradleTestKit" => {}
+        "group" => {
+            let group = map_value(arg, "group");
+            let name = map_value(arg, "name");
+            if let (Some(g), Some(a)) = (group, name)
+                && is_maven_part(&g)
+                && is_maven_part(&a)
+            {
+                out.push(format!("{g}:{a}"));
+            }
+        }
+        _ if !head.is_empty() && tail.starts_with('.') => *catalog += 1,
+        _ => {}
+    }
+}
+
+/// The quoted value of `key: '<v>'` (Groovy map) or `key = "<v>"` (Kotlin
+/// named argument) in a Gradle call's argument text.
+fn map_value(arg: &str, key: &str) -> Option<String> {
+    idents(arg).into_iter().find_map(|(start, ident)| {
+        if ident != key {
+            return None;
+        }
+        let rest = arg[start + ident.len()..].trim_start();
+        let rest = rest
+            .strip_prefix(':')
+            .or_else(|| rest.strip_prefix('='))?
+            .trim_start();
+        first_quoted(rest)
+    })
+}
+
+/// Every complete `".."` / `'..'` string of `s`, in order (no escapes read).
+fn quoted_strings(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(at) = rest.find(['"', '\'']) {
+        let q = rest[at..].chars().next().unwrap_or('"');
+        let body = &rest[at + 1..];
+        let Some(end) = body.find(q) else {
+            break;
+        };
+        out.push(body[..end].to_string());
+        rest = &body[end + 1..];
+    }
+    out
+}
+
+/// The identifiers of `src` outside string literals, with their byte offsets:
+/// a run of `[A-Za-z0-9_]` starting with a letter or `_`, not preceded by an
+/// identifier character or a `.` (so `configurations.implementation` and
+/// `libs.api` are no configuration call).
+fn idents(src: &str) -> Vec<(usize, &str)> {
+    let b = src.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            i += 1;
+            while i < b.len() && b[i] != c {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+            continue;
+        }
+        if (c.is_ascii_alphabetic() || c == b'_')
+            && (i == 0 || !(word(b[i - 1]) || b[i - 1] == b'.'))
+        {
+            let start = i;
+            while i < b.len() && word(b[i]) {
+                i += 1;
+            }
+            out.push((start, &src[start..i]));
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommentStyle {
+    /// `//` line and `/* .. */` block comments (Groovy, Kotlin).
+    CLike,
+    /// `#` line comments (YAML, Elixir).
+    Hash,
+}
+
+/// `src` with its comments blanked to spaces (newlines kept, so offsets and
+/// lines stay put), string literals left whole.
+fn strip_comments(src: &str, style: CommentStyle) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\'' {
+            i += 1;
+            while i < b.len() && b[i] != c && b[i] != b'\n' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+            continue;
+        }
+        let line_comment = match style {
+            CommentStyle::CLike => c == b'/' && b.get(i + 1) == Some(&b'/'),
+            CommentStyle::Hash => c == b'#',
+        };
+        if line_comment {
+            while i < b.len() && b[i] != b'\n' {
+                out[i] = b' ';
+                i += 1;
+            }
+            continue;
+        }
+        if style == CommentStyle::CLike && c == b'/' && b.get(i + 1) == Some(&b'*') {
+            while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                if b[i] != b'\n' {
+                    out[i] = b' ';
+                }
+                i += 1;
+            }
+            let end = (i + 2).min(b.len());
+            out[i..end].fill(b' ');
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    // Only ASCII bytes were replaced (by ASCII spaces), so the text stays UTF-8.
+    String::from_utf8(out).unwrap_or_else(|_| src.to_string())
+}
+
+// ----------------------------------------------------------------------------
+// FD.31: pubspec.yaml — the keys of the top-level `dependencies:` and
+// `dev_dependencies:` maps. An entry whose value holds `sdk:` (`flutter:
+// sdk: flutter`, `flutter_test`) is the SDK, not a pub package;
+// `dependency_overrides:` overrides versions and declares nothing.
+// ----------------------------------------------------------------------------
+
+fn scan_pubspec(source: &str) -> Vec<String> {
+    let src = strip_comments(source, CommentStyle::Hash);
+    let mut out = Vec::new();
+    let mut in_section = false;
+    let mut child_indent: Option<usize> = None;
+    // The entry being read and whether its nested value named an `sdk:`.
+    let mut entry: Option<(String, bool)> = None;
+    let flush = |entry: &mut Option<(String, bool)>, out: &mut Vec<String>| {
+        if let Some((name, false)) = entry.take() {
+            out.push(name);
+        }
+    };
+    for line in src.lines() {
+        let t = line.trim();
+        if t.is_empty() || t == "---" {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            flush(&mut entry, &mut out);
+            in_section = matches!(t, "dependencies:" | "dev_dependencies:");
+            child_indent = None;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let child = *child_indent.get_or_insert(indent);
+        if indent == child {
+            flush(&mut entry, &mut out);
+            let Some((key, _)) = t.split_once(':') else {
+                continue;
+            };
+            let key = key.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                entry = Some((key.to_string(), false));
+            }
+        } else if indent > child
+            && let Some((_, sdk)) = entry.as_mut()
+            && t.starts_with("sdk:")
+        {
+            *sdk = true;
+        }
+    }
+    flush(&mut entry, &mut out);
+    out
+}
+
+// ----------------------------------------------------------------------------
+// FD.31: mix.exs — the `{:name, ..}` tuples of the list the `deps` function
+// returns (`defp deps do [..] end` / `defp deps, do: [..]`), else of an
+// inline `deps: [..]` keyword in `project/0`. An option's own tuples and
+// atoms (`only: [:dev, :test]`) are inside a dependency tuple, not the list.
+// ----------------------------------------------------------------------------
+
+fn scan_mix_exs(source: &str) -> Vec<String> {
+    let src = strip_comments(source, CommentStyle::Hash);
+    let ids = idents(&src);
+    let fn_list = ids.windows(2).find_map(|w| {
+        let [(_, kw), (at, name)] = w else {
+            return None;
+        };
+        (matches!(*kw, "def" | "defp") && *name == "deps").then(|| at + name.len())
+    });
+    let list_start = fn_list
+        .and_then(|from| src[from..].find('[').map(|o| from + o))
+        .or_else(|| {
+            ids.iter().find_map(|(at, name)| {
+                let rest = src[at + name.len()..].strip_prefix(':')?;
+                (*name == "deps" && rest.trim_start().starts_with('['))
+                    .then(|| src.len() - rest.trim_start().len())
+            })
+        });
+    let Some(open) = list_start else {
+        return Vec::new();
+    };
+    let body_start = open + 1;
+    let Some(close) = balanced_close(&src[body_start..], b'[', b']') else {
+        return Vec::new();
+    };
+    let body = &src[body_start..body_start + close];
+    let b = body.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'{' => {
+                let inner = &body[i + 1..];
+                let atom = inner.trim_start().strip_prefix(':').map(|a| {
+                    a.chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                });
+                if let Some(atom) = atom.filter(|a| !a.is_empty()) {
+                    out.push(atom);
+                }
+                i += 1 + balanced_close(inner, b'{', b'}').unwrap_or(inner.len());
+            }
+            b'[' => {
+                let inner = &body[i + 1..];
+                i += 1 + balanced_close(inner, b'[', b']').unwrap_or(inner.len());
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+// ----------------------------------------------------------------------------
+// FD.31: .NET project files — `<PackageReference Include="N" .. />` (the tag
+// and attribute names ASCII case-insensitive, as MSBuild reads them; one
+// Include may list several names split by `;`). An `Update=` item edits a
+// reference declared elsewhere and an `$(Property)` name is no package.
+// ----------------------------------------------------------------------------
+
+fn scan_package_references(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = source.to_ascii_lowercase();
+    let needle = "<packagereference";
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(needle) {
+        let start = from + rel + needle.len();
+        from = start;
+        // The tag must end here (`<PackageReferences>` is another element).
+        if !lower[start..].starts_with(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>') {
+            continue;
+        }
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
+        let tag_lower = &lower[start..end];
+        let tag = &source[start..end];
+        let Some(value) = xml_attr(tag_lower, tag, "include") else {
+            continue;
+        };
+        for name in value.split(';').map(str::trim) {
+            if !name.is_empty()
+                && !name.contains("$(")
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The value of attribute `name` (given lowercase) in one tag's attribute
+/// text, read from `tag` at the offsets its ASCII-lowercased copy matched.
+fn xml_attr(tag_lower: &str, tag: &str, name: &str) -> Option<String> {
+    let mut from = 0;
+    while let Some(rel) = tag_lower[from..].find(name) {
+        let at = from + rel;
+        from = at + name.len();
+        let before_ok = at == 0 || tag_lower.as_bytes()[at - 1].is_ascii_whitespace();
+        let rest = tag[at + name.len()..].trim_start();
+        if !before_ok {
+            continue;
+        }
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        return first_quoted(rest);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +1442,269 @@ end
         let src = "Gem::Specification.new do |s|\n  s.name = \"mytool\"\n  s.add_dependency \"thor\"\n  s.executables = [\"mytool\"]\nend\n";
         let out = extract_for_path(src, "server/mytool.gemspec", module_id(repo), repo);
         assert!(out.nodes.is_empty() && out.edges.is_empty());
+    }
+
+    fn names(out: &PackageNodes) -> Vec<String> {
+        let mut v: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+        v.sort();
+        v
+    }
+
+    fn deps_of(src: &str, path: &str) -> PackageNodes {
+        let repo = RepoId(1);
+        extract_deps_beside(src, path, module_id(repo), repo)
+    }
+
+    /// FD.31: a project's own dependencies are `groupId:artifactId`; a
+    /// managed version, a plugin's classpath, an exclusion and a
+    /// `${property}` coordinate are none.
+    #[test]
+    fn pom_xml_dependencies() {
+        let src = r#"<?xml version="1.0"?>
+<project>
+  <groupId>com.acme</groupId>
+  <artifactId>shop</artifactId>
+  <parent><groupId>org.parent</groupId><artifactId>parent</artifactId></parent>
+  <!-- <dependency><groupId>x.commented</groupId><artifactId>out</artifactId></dependency> -->
+  <dependencyManagement><dependencies>
+    <dependency><groupId>org.managed</groupId><artifactId>bom</artifactId></dependency>
+  </dependencies></dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+      <exclusions><exclusion><groupId>x.excl</groupId><artifactId>gone</artifactId></exclusion></exclusions>
+    </dependency>
+    <dependency><groupId>${project.groupId}</groupId><artifactId>sibling</artifactId></dependency>
+    <dependency><artifactId>no-group</artifactId></dependency>
+  </dependencies>
+  <profiles><profile><dependencies>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><scope>test</scope></dependency>
+  </dependencies></profile></profiles>
+  <build><plugins><plugin>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <dependencies><dependency><groupId>org.tool</groupId><artifactId>tool</artifactId></dependency></dependencies>
+  </plugin></plugins></build>
+</project>
+"#;
+        let out = deps_of(src, "svc/pom.xml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:maven:junit:junit",
+                "package:maven:org.slf4j:slf4j-api"
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=maven deps=2 path=svc/pom.xml")
+        );
+        // The manifest route reaches the same read.
+        let repo = RepoId(1);
+        let via = extract_for_path(src, "svc/pom.xml", module_id(repo), repo);
+        assert_eq!(names(&via), names(&out));
+        assert_eq!(via.edges.len(), 2);
+        assert!(
+            via.edges
+                .iter()
+                .all(|e| e.category == edge_category::DEPENDS_ON)
+        );
+    }
+
+    /// FD.31: Kotlin DSL and Groovy configuration calls, platforms, the map
+    /// form and `kotlin(..)`; a project, file or catalog reference and
+    /// anything outside a `dependencies` block (or in `constraints`) is none.
+    #[test]
+    fn gradle_dependencies() {
+        let kts = r#"plugins { id("org.jetbrains.kotlin.jvm") version "2.0.0" }
+val implementation = "not:a-call"
+dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    api(platform("org.springframework.boot:spring-boot-dependencies:3.3.0"))
+    testImplementation(kotlin("test"))
+    debugImplementation(group = "com.example", name = "debug-kit", version = "1.0")
+    implementation(project(":core"))
+    implementation(libs.retrofit)
+    implementation(files("libs/local.jar"))
+    // implementation("commented:out:1")
+    /* api("block:commented:1") */
+    constraints { implementation("org.pinned:only-a-version:2.0") }
+    compileOnly("org.projectlombok:lombok:${lombokVersion}")
+}
+"#;
+        let out = deps_of(kts, "app/build.gradle.kts");
+        assert_eq!(
+            names(&out),
+            [
+                "package:maven:com.example:debug-kit",
+                "package:maven:com.squareup.okhttp3:okhttp",
+                "package:maven:org.jetbrains.kotlin:kotlin-test",
+                "package:maven:org.projectlombok:lombok",
+                "package:maven:org.springframework.boot:spring-boot-dependencies",
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=maven deps=5 catalog_refs=1 path=app/build.gradle.kts")
+        );
+        let groovy = r#"buildscript {
+    dependencies { classpath 'com.android.tools.build:gradle:8.5.0' }
+}
+dependencies {
+    implementation 'com.google.guava:guava:33.0-jre'
+    testImplementation "junit:junit:4.13.2"
+    runtimeOnly group: 'org.postgresql', name: 'postgresql', version: '42.7.3'
+    implementation('io.reactivex:rxjava:1.3.8') { exclude group: 'x', module: 'y' }
+    implementation libs.okhttp
+}
+"#;
+        let out = deps_of(groovy, "build.gradle");
+        assert_eq!(
+            names(&out),
+            [
+                "package:maven:com.android.tools.build:gradle",
+                "package:maven:com.google.guava:guava",
+                "package:maven:io.reactivex:rxjava",
+                "package:maven:junit:junit",
+                "package:maven:org.postgresql:postgresql",
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=maven deps=5 catalog_refs=1 path=build.gradle")
+        );
+    }
+
+    /// FD.31: pub packages of both maps; an `sdk:` entry is the SDK and
+    /// `dependency_overrides` declares nothing.
+    #[test]
+    fn pubspec_dependencies() {
+        let src = "name: app\nenvironment:\n  sdk: \">=3.0.0 <4.0.0\"\ndependencies:\n  http: ^1.2.0\n  flutter:\n    sdk: flutter\n  # commented: ^1.0.0\n  shared:\n    path: ../shared\n  riverpod:\n    hosted: https://pub.example.dev\n    version: ^2.0.0\ndev_dependencies:\n  flutter_test:\n    sdk: flutter\n  lints: ^4.0.0\ndependency_overrides:\n  meta: 1.9.0\nflutter:\n  uses-material-design: true\n";
+        let out = deps_of(src, "app/pubspec.yaml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:pub:http",
+                "package:pub:lints",
+                "package:pub:riverpod",
+                "package:pub:shared",
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=pub deps=4 path=app/pubspec.yaml")
+        );
+    }
+
+    /// FD.31: the deps function's tuples, in either `do` form, or an inline
+    /// `deps:` list; an option's atoms are no dependency.
+    #[test]
+    fn mix_exs_dependencies() {
+        let one_line = "defmodule Ex.MixProject do\n  use Mix.Project\n  def project, do: [app: :ex, deps: deps()]\n  defp deps, do: [{:jason, \"~> 1.4\"}]\nend\n";
+        let out = deps_of(one_line, "ex/mix.exs");
+        assert_eq!(names(&out), ["package:hex:jason"]);
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=hex deps=1 path=ex/mix.exs")
+        );
+        let block = r#"defmodule Shop.MixProject do
+  use Mix.Project
+  def project do
+    [app: :shop, version: "0.1.0", deps: deps()]
+  end
+
+  defp deps do
+    [
+      {:phoenix, "~> 1.7"},
+      # {:commented, "~> 1.0"},
+      {:ecto_sql, "~> 3.10", only: [:dev, :test], runtime: false},
+      {:my_lib, git: "https://example.com/my_lib.git", tag: "v1"},
+      {:shared, in_umbrella: true}
+    ]
+  end
+end
+"#;
+        assert_eq!(
+            names(&deps_of(block, "mix.exs")),
+            [
+                "package:hex:ecto_sql",
+                "package:hex:my_lib",
+                "package:hex:phoenix",
+                "package:hex:shared",
+            ]
+        );
+        let inline = "defmodule A.MixProject do\n  def project do\n    [app: :a, deps: [{:plug, \"~> 1.0\"}]]\n  end\nend\n";
+        assert_eq!(names(&deps_of(inline, "mix.exs")), ["package:hex:plug"]);
+        assert!(deps_of("defmodule B do\nend\n", "mix.exs").nodes.is_empty());
+    }
+
+    /// FD.31: `PackageReference Include` in any .NET project file; `Update`
+    /// and a property name are none.
+    #[test]
+    fn dotnet_package_references() {
+        let src = r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <packagereference include='Serilog.AspNetCore'>
+      <Version>8.0.0</Version>
+    </packagereference>
+    <PackageReference Update="Updated.Elsewhere" Version="1.0" />
+    <PackageReference Include="$(SharedPackage)" />
+    <ProjectReference Include="..\Core\Core.csproj" />
+  </ItemGroup>
+</Project>
+"#;
+        let out = deps_of(src, "net/Api.csproj");
+        assert_eq!(
+            names(&out),
+            [
+                "package:nuget:Newtonsoft.Json",
+                "package:nuget:Serilog.AspNetCore"
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=nuget deps=2 path=net/Api.csproj")
+        );
+        assert_eq!(names(&deps_of(src, "Lib.fsproj")).len(), 2);
+    }
+
+    /// FD.31: the walk reads the build files no parser reads through the
+    /// manifest route; pubspec.yaml and mix.exs keep their own route.
+    #[test]
+    fn fd31_manifest_paths() {
+        for path in [
+            "pom.xml",
+            "svc/pom.xml",
+            "build.gradle",
+            "app/build.gradle.kts",
+            "net/Api.csproj",
+            "Lib.FSPROJ",
+            "x/Tool.vbproj",
+        ] {
+            assert!(is_manifest_path(path), "{path}");
+        }
+        for path in [
+            "pubspec.yaml",
+            "mix.exs",
+            ".csproj",
+            "settings.gradle",
+            "pom.xml.bak",
+            "Api.csproj.user",
+        ] {
+            assert!(!is_manifest_path(path), "{path}");
+        }
+        let out = deps_of("anything", "README.md");
+        assert!(out.nodes.is_empty() && out.marker.is_none());
+        // The seven earlier manifests keep no marker.
+        let repo = RepoId(1);
+        let npm = extract_for_path(
+            r#"{"dependencies":{"a":"1"}}"#,
+            "package.json",
+            module_id(repo),
+            repo,
+        );
+        assert!(npm.marker.is_none());
     }
 }

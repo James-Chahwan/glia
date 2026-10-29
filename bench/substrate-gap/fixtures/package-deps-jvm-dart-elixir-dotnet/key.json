@@ -1,0 +1,16 @@
+{
+  "framework": "package-deps-jvm-dart-elixir-dotnet",
+  "language": "java+kotlin+dart+elixir+csharp",
+  "dirs": ["."],
+  "note": "FD.31. Baseline: none of the five PACKAGE_DEPs exist.",
+  "expect_nodes": [
+    {"kind": "PACKAGE_DEP", "name": "org.slf4j:slf4j-api"},
+    {"kind": "PACKAGE_DEP", "name": "com.squareup.okhttp3:okhttp"},
+    {"kind": "PACKAGE_DEP", "name": "http"},
+    {"kind": "PACKAGE_DEP", "name": "jason"},
+    {"kind": "PACKAGE_DEP", "name": "Newtonsoft.Json"}
+  ],
+  "forbid": [
+    {"kind": "PACKAGE_DEP", "name": "flutter"}
+  ]
+}

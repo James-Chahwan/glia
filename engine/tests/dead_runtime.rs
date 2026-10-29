@@ -408,11 +408,13 @@ fn markers() {
     };
     // DT.5j: NewPoint's `&Point{..}` / `&Queue{}` are USES of the STRUCTs
     // (rule composite_literal), so the carry walk reaches both before the
-    // owner step would (owners 2 -> 0, the same 32 live nodes).
+    // owner step would (owners 2 -> 0, the same 32 live nodes). FD.31:
+    // mobile/pubspec.yaml's MODULE and its `package:pub:dio` PACKAGE_DEP join
+    // the graph (80 -> 82 nodes), neither of them live.
     assert_eq!(
         with("[live] profile="),
         [
-            "[live] profile=code entrypoints=8 (kind=3 role=4 declared=1) owners=0 implementers=0 invoked=9 reached=32/80"
+            "[live] profile=code entrypoints=8 (kind=3 role=4 declared=1) owners=0 implementers=0 invoked=9 reached=32/82"
         ],
         "kind: two mains and geo's init; role: two Angular components, @main, MainActivity; declared: tool"
     );

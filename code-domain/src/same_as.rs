@@ -25,7 +25,8 @@
 //!   `package:<eco>:<name>` and the PROJECT whose manifest names that package
 //!   reduce to one `<eco>:<name>` key under the ecosystem's own name rules -
 //!   PEP 503 for PyPI, `-` == `_` for crates.io, case-folding for Composer,
-//!   verbatim for npm and Go modules. Spike S1 measured every pair.
+//!   Maven `groupId:artifactId`, pub, Hex and NuGet (FD.31), verbatim for npm
+//!   and Go modules. Spike S1 measured every pair.
 //! - **SCIP** ([`scip_identity_key`](crate::same_as::scip_identity_key)): a SCIP symbol is `scheme manager
 //!   package version descriptor...`; package + descriptor is the identity, the
 //!   version is not (two releases of one symbol are one identity whose bodies
@@ -228,9 +229,11 @@ pub fn contract_op_key_cells(cells: &[Cell]) -> Option<ContractOpKey> {
 /// The identity key of a PACKAGE_DEP qname `package:<eco>:<name>`:
 /// `<eco>:<name>` with the name normalised as its ecosystem defines one
 /// package name - `pypi` PEP 503 (ASCII-lowercase, every run of `-` `_` `.`
-/// one `-`), `cargo` `-` read as `_`, `composer` ASCII-lowercase; `npm`,
-/// `gomod` and every other ecosystem verbatim. `None` for another qname shape
-/// or an empty ecosystem or name.
+/// one `-`), `cargo` `-` read as `_`; `composer`, `maven` (`groupId:artifactId`,
+/// FD.31), `pub`, `hex` and `nuget` ASCII-lowercase; `npm`, `gomod` and every
+/// other ecosystem verbatim. `None` for another qname shape or an empty
+/// ecosystem or name, and for a `maven` name that is no `group:artifact`
+/// pair.
 pub fn dep_identity_key(dep_qname: &str) -> Option<String> {
     let (eco, name) = dep_qname.strip_prefix("package:")?.split_once(':')?;
     dep_key(eco, name)
@@ -238,11 +241,14 @@ pub fn dep_identity_key(dep_qname: &str) -> Option<String> {
 
 /// The [`dep_identity_key`] a PROJECT stands for: its manifest ecosystem
 /// mapped to the PACKAGE_DEP ecosystem (`npm` -> `npm`, `go` -> `gomod`,
-/// `cargo` -> `cargo`, `python` -> `pypi`, `php` -> `composer`) and its label
-/// normalised the same way. `None` for every other PROJECT ecosystem (maven,
-/// gradle, dart, elixir, dotnet and the rest extract no PACKAGE_DEP; a
-/// Gemfile names no package; a declared root has no manifest) and for an
-/// empty label.
+/// `cargo` -> `cargo`, `python` -> `pypi`, `php` -> `composer`, and FD.31's
+/// `dart` -> `pub`, `elixir` -> `hex`, `dotnet` -> `nuget`, `maven` /
+/// `gradle` -> `maven`) and its label normalised the same way. A Maven
+/// package is `groupId:artifactId`, so a `maven` / `gradle` label keys only
+/// when it is such a pair: a pom's label is its bare `<artifactId>` and a
+/// Gradle root's its directory, which name no Maven package. `None` for
+/// every other PROJECT ecosystem (a Gemfile names no package; a declared
+/// root has no manifest) and for an empty label.
 pub fn project_dep_key(ecosystem: &str, label: &str) -> Option<String> {
     let eco = match ecosystem {
         "npm" => "npm",
@@ -250,6 +256,10 @@ pub fn project_dep_key(ecosystem: &str, label: &str) -> Option<String> {
         "cargo" => "cargo",
         "python" => "pypi",
         "php" => "composer",
+        "dart" => "pub",
+        "elixir" => "hex",
+        "dotnet" => "nuget",
+        "maven" | "gradle" => "maven",
         _ => return None,
     };
     dep_key(eco, label)
@@ -262,7 +272,18 @@ fn dep_key(eco: &str, name: &str) -> Option<String> {
     let name = match eco {
         "pypi" => pep503(name),
         "cargo" => name.replace('-', "_"),
-        "composer" => name.to_ascii_lowercase(),
+        // FD.31: Maven Central and every Maven repository treat a coordinate
+        // as `groupId:artifactId` (case-folded here, as the build tools that
+        // resolve one on a case-insensitive file system do); pub and Hex
+        // names are lowercase by rule and NuGet ids case-insensitive.
+        "maven" => {
+            let (g, a) = name.split_once(':')?;
+            if g.is_empty() || a.is_empty() || a.contains(':') {
+                return None;
+            }
+            name.to_ascii_lowercase()
+        }
+        "composer" | "pub" | "hex" | "nuget" => name.to_ascii_lowercase(),
         _ => name.to_string(),
     };
     Some(format!("{eco}:{name}"))
@@ -565,9 +586,7 @@ mod tests {
             project_dep_key("cargo", "my-lib").as_deref(),
             Some("cargo:my_lib")
         );
-        for eco in [
-            "maven", "ruby", "dart", "declared", "gradle", "elixir", "dotnet", "swift",
-        ] {
+        for eco in ["ruby", "declared", "swift", "sbt", "cmake"] {
             assert_eq!(project_dep_key(eco, "lib"), None, "{eco}");
         }
         assert_eq!(project_dep_key("npm", ""), None);
@@ -596,6 +615,52 @@ mod tests {
         assert_eq!(dep_identity_key("package::x"), None);
         assert_eq!(dep_identity_key("module:npm:x"), None);
         assert_eq!(dep_identity_key("package:npm"), None);
+    }
+
+    /// FD.31: the four ecosystems FD.31's manifests mint, each PROJECT
+    /// ecosystem keyed as the PACKAGE_DEP its manifest's name is.
+    #[test]
+    fn fd31_ecosystems() {
+        let pairs = [
+            (("dart", "money_kit"), "package:pub:money_kit"),
+            (("elixir", "Shop_Core"), "package:hex:shop_core"),
+            (("dotnet", "Acme.Core"), "package:nuget:acme.core"),
+            (("maven", "com.acme:core"), "package:maven:com.acme:core"),
+            (("gradle", "Com.Acme:Core"), "package:maven:com.acme:core"),
+        ];
+        for ((eco, label), dep) in pairs {
+            let p = project_dep_key(eco, label);
+            assert!(p.is_some(), "{eco} {label}");
+            assert_eq!(p, dep_identity_key(dep), "{eco} {label} vs {dep}");
+        }
+        assert_eq!(
+            dep_identity_key("package:maven:Org.SLF4J:slf4j-API").as_deref(),
+            Some("maven:org.slf4j:slf4j-api")
+        );
+        assert_eq!(
+            dep_identity_key("package:nuget:Newtonsoft.Json"),
+            dep_identity_key("package:nuget:newtonsoft.json")
+        );
+        assert_eq!(
+            dep_identity_key("package:pub:http").as_deref(),
+            Some("pub:http")
+        );
+        assert_eq!(
+            dep_identity_key("package:hex:jason").as_deref(),
+            Some("hex:jason")
+        );
+        // A Maven package is a group:artifact pair: a bare artifactId (a
+        // pom's PROJECT label) or a three-part coordinate keys nothing.
+        assert_eq!(project_dep_key("maven", "core"), None);
+        assert_eq!(project_dep_key("gradle", "app"), None);
+        assert_eq!(dep_identity_key("package:maven:core"), None);
+        assert_eq!(dep_identity_key("package:maven::core"), None);
+        assert_eq!(dep_identity_key("package:maven:g:a:1.0"), None);
+        // Ecosystems never share a key.
+        assert_ne!(
+            dep_identity_key("package:pub:http"),
+            dep_identity_key("package:hex:http")
+        );
     }
 
     #[test]
