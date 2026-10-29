@@ -418,6 +418,41 @@ struct Acc {
     receiver_stats: ReceiverStats,
     /// FH.4a: the `[endpoint-shape]` counters.
     shape_stats: ShapeStats,
+    /// FH.20: this file's object type aliases ([`visit_type_alias`]) by
+    /// name: the INTERFACE nodes a type reference binds in-file.
+    type_aliases: HashMap<String, NodeId>,
+    /// FH.20: type names read in a type position ([`record_type_ident`]),
+    /// one per `(from, name)` in walk order, at the lowest row. Bound in
+    /// `resolve_intra_file` once every alias of the file is known.
+    type_refs: Vec<TypeRef>,
+    /// FH.20: `(from, name)` -> its index in `type_refs`.
+    type_ref_seen: HashMap<(NodeId, String), usize>,
+    /// FH.20: type names a scope binds itself (a type parameter, a local
+    /// `type` / `interface` / class declaration): they shadow an alias.
+    type_shadows: HashSet<(NodeId, String)>,
+    /// FH.20: the `[ts-types]` counters.
+    type_alias_stats: TypeAliasStats,
+}
+
+/// FH.20: a type name read in a type position by `from` (an annotation, a
+/// generic argument, an `as` / `satisfies` type, a signature's parameter or
+/// return type).
+struct TypeRef {
+    from: NodeId,
+    name: String,
+    /// The lowest 0-based row it is read at.
+    row: u32,
+}
+
+/// FH.20: what one file's top-level type aliases gave the graph (the
+/// `[ts-types]` marker).
+#[derive(Default, Clone, Copy)]
+struct TypeAliasStats {
+    /// Top-level `type X = ..` declarations seen (`aliases=`).
+    aliases: usize,
+    /// Of those, the object-shaped ones minted as INTERFACE nodes
+    /// (`object=`).
+    object: usize,
 }
 
 /// DT.5k: one member access `<receiver>.<name>` awaiting the receiver check
@@ -888,6 +923,12 @@ fn visit_top(
         }
         "interface_declaration" => {
             visit_interface(n, src, file_rel, module_qname, module_id, repo, acc);
+        }
+        // FH.20: an object-shaped `type X = {..}` / `A & {..}` is a model, as
+        // an interface is. `declare type` is an `ambient_declaration` and
+        // falls through to `_`.
+        "type_alias_declaration" => {
+            visit_type_alias(n, src, file_rel, module_qname, module_id, repo, acc);
         }
         // `enum` and `const enum` share this node; `export enum` arrives
         // through the export_statement recursion above. `declare enum` is an
@@ -1603,7 +1644,7 @@ fn visit_function_field(
         Some(class_id),
     );
 
-    record_callable(method_id, value, acc);
+    record_callable(method_id, value, src, acc);
     // DF.22a: the function value's parameters are the field METHOD's locals.
     record_param_types(value, src, method_id, acc);
 
@@ -2070,6 +2111,237 @@ fn collect_interface_heritage(
 }
 
 // ============================================================================
+// FH.20: object type aliases as models
+// ============================================================================
+
+/// FH.20: a top-level `type X = <object literal type>`, or an intersection of
+/// object literal types and named types (`type X = Base & { extra: T }`,
+/// `type X = A & B`), is an INTERFACE node `<module>::X` defined by the
+/// MODULE: a generated fetch SDK (oazapfts) writes its DTOs this way, and
+/// as an interface they carry their fields and take type references
+/// ([`record_type_ident`]). Its SCHEMA_FIELDS cell is read as an
+/// interface's ([`type_alias_schema`]); each named member of an
+/// intersection is an INHERITS_FROM ref, as an interface's `extends` is
+/// ([`collect_interface_heritage`]), so the models pass flattens its fields.
+///
+/// A union, a literal, a function / constructor type, a mapped or
+/// conditional type, a primitive member (`string & { __brand: .. }`) and a
+/// plain rename (`type Y = X`, `type P = Partial<X>`) mint nothing. The node
+/// carries no ORIGIN cell: provenance is the build's (`test_fixture`, DE.7's
+/// `generated`), and its CODE text starts `type`. A second alias of one
+/// name in the file (a TS error) is skipped.
+#[allow(clippy::too_many_arguments)]
+fn visit_type_alias(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    acc.type_alias_stats.aliases += 1;
+    let Some(name) = child_text(n, "name", src) else {
+        return;
+    };
+    let Some(value) = n.child_by_field_name("value") else {
+        return;
+    };
+    let Some((schema, bases)) = type_alias_schema(value, src) else {
+        return;
+    };
+    if acc.type_aliases.contains_key(name) {
+        return;
+    }
+    let alias_qname = format!("{module_qname}::{name}");
+    let alias_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &alias_qname);
+    let mut cells = build_cells(&n, src, file_rel);
+    if schema_describes(&schema) {
+        cells.push(schema.cell());
+    }
+    acc.nodes.push(Node {
+        id: alias_id,
+        repo,
+        confidence: Confidence::Strong,
+        cells,
+    });
+    acc.edges.push(Edge {
+        from: module_id,
+        to: alias_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.nav.record(
+        alias_id,
+        name,
+        &alias_qname,
+        node_kind::INTERFACE,
+        Some(module_id),
+    );
+    let mut seen = BTreeSet::new();
+    for (base, row) in bases {
+        if !seen.insert(base.clone()) {
+            continue;
+        }
+        acc.refs.push(UnresolvedRef {
+            from: alias_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(base),
+            category: edge_category::INHERITS_FROM,
+            line: row,
+        });
+    }
+    acc.type_aliases.insert(name.to_string(), alias_id);
+    acc.type_alias_stats.object += 1;
+}
+
+/// FH.20: the [`ModelSchema`] (format `ts`) of an alias's value and its
+/// intersection's named members as `(simple name, 0-based row)`, in source
+/// order; `None` when the value is not object-shaped ([`visit_type_alias`]).
+///
+/// An object literal type's members read as an interface body's
+/// ([`push_signature_members`]). A named member of an intersection
+/// (`Base`, `ns.Base`) is a base the schema `extends`; a generic one
+/// (`Omit<Base, 'id'>`, `Base<T>`) is a base too but is not listed and
+/// leaves the model `open`, as a generic `extends` does. Parentheses are
+/// read through.
+fn type_alias_schema(value: TsNode, src: &[u8]) -> Option<(ModelSchema, Vec<(String, u32)>)> {
+    let mut schema = ModelSchema::new(WireFormat::Ts);
+    let mut bases = Vec::new();
+    match unparenthesized(value).kind() {
+        "object_type" | "intersection_type" => {}
+        _ => return None,
+    }
+    read_alias_member(value, src, &mut schema, &mut bases, true).then_some((schema, bases))
+}
+
+/// FH.20: `ty` with every `parenthesized_type` wrapper read through.
+fn unparenthesized(ty: TsNode) -> TsNode {
+    let mut t = ty;
+    while t.kind() == "parenthesized_type" {
+        match first_named(t) {
+            Some(inner) => t = inner,
+            None => break,
+        }
+    }
+    t
+}
+
+/// FH.20: one member of an alias's value into `schema` / `bases`; `false`
+/// when it is not object-shaped. `top` is the alias's whole value, where a
+/// bare name is a rename and mints nothing.
+fn read_alias_member(
+    ty: TsNode,
+    src: &[u8],
+    schema: &mut ModelSchema,
+    bases: &mut Vec<(String, u32)>,
+    top: bool,
+) -> bool {
+    let ty = unparenthesized(ty);
+    match ty.kind() {
+        "object_type" => {
+            push_signature_members(schema, ty, src);
+            true
+        }
+        "intersection_type" => {
+            let mut c = ty.walk();
+            let members: Vec<TsNode> = ty
+                .named_children(&mut c)
+                .filter(|m| m.kind() != "comment")
+                .collect();
+            !members.is_empty()
+                && members
+                    .into_iter()
+                    .all(|m| read_alias_member(m, src, schema, bases, false))
+        }
+        "type_identifier" | "nested_type_identifier" if !top => {
+            let Some(base) = heritage_type_name(ty, src) else {
+                return false;
+            };
+            push_base(schema, base);
+            bases.push((base.to_string(), line_at(ty)));
+            true
+        }
+        "generic_type" if !top => {
+            let Some(base) = heritage_type_name(ty, src) else {
+                return false;
+            };
+            schema.open = true;
+            bases.push((base.to_string(), line_at(ty)));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// FH.20: record a `type_identifier` the walk of `from` meets. A name in a
+/// type position is a [`TypeRef`] of `from`; the name a type parameter or a
+/// local `type` / `interface` / `class` declaration binds shadows an alias
+/// for `from` instead; a qualified `ns.X` names another module's `X` and is
+/// neither.
+fn record_type_ident(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let name = text(node, src);
+    if name.is_empty() {
+        return;
+    }
+    if let Some(parent) = node.parent() {
+        match parent.kind() {
+            "nested_type_identifier" => return,
+            "type_parameter"
+            | "type_alias_declaration"
+            | "interface_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration"
+            | "class"
+                if parent.child_by_field_name("name") == Some(node) =>
+            {
+                acc.type_shadows.insert((from, name.to_string()));
+                return;
+            }
+            _ => {}
+        }
+    }
+    let row = line_at(node);
+    match acc.type_ref_seen.get(&(from, name.to_string())) {
+        Some(&i) => {
+            if let Some(r) = acc.type_refs.get_mut(i) {
+                r.row = r.row.min(row);
+            }
+        }
+        None => {
+            acc.type_ref_seen
+                .insert((from, name.to_string()), acc.type_refs.len());
+            acc.type_refs.push(TypeRef {
+                from,
+                name: name.to_string(),
+                row,
+            });
+        }
+    }
+}
+
+/// FH.20: the type names a callable's signature reads, as [`TypeRef`]s of
+/// `from`: its parameters' and its return type's, and its type parameters'
+/// names as shadows. The body is the call walk's ([`collect_calls_in`]).
+fn record_signature_types(func: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    for field in ["type_parameters", "parameters", "return_type"] {
+        let Some(part) = func.child_by_field_name(field) else {
+            continue;
+        };
+        let mut stack = vec![part];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "type_identifier" {
+                record_type_ident(node, src, from, acc);
+                continue;
+            }
+            let mut c = node.walk();
+            stack.extend(node.named_children(&mut c));
+        }
+    }
+}
+
+// ============================================================================
 // DT.1c: declared model fields (SCHEMA_FIELDS, format ts)
 // ============================================================================
 
@@ -2124,7 +2396,8 @@ const MODULE_DECORATORS: &[&str] = &["NgModule", "Module"];
 ///
 /// `None` for an interface with no field, no base and nothing open (a
 /// method-only service contract, an empty marker): it describes no body.
-/// A `type X = {..}` alias mints no node, so it carries no schema.
+/// An object-shaped `type X = {..}` alias reads the same way
+/// ([`type_alias_schema`], FH.20).
 fn ts_interface_schema(iface: TsNode, src: &[u8]) -> Option<ModelSchema> {
     let mut schema = ModelSchema::new(WireFormat::Ts);
     let mut cursor = iface.walk();
@@ -2142,6 +2415,19 @@ fn ts_interface_schema(iface: TsNode, src: &[u8]) -> Option<ModelSchema> {
         }
     }
     let body = iface.child_by_field_name("body")?;
+    push_signature_members(&mut schema, body, src);
+    schema_describes(&schema).then_some(schema)
+}
+
+/// DT.1c: the schema lists a field or a base, or is open: it describes a
+/// body ([`ts_interface_schema`]'s `None` rule).
+fn schema_describes(schema: &ModelSchema) -> bool {
+    !schema.fields.is_empty() || !schema.extends.is_empty() || schema.open
+}
+
+/// DT.1c: the members of an interface body or an object literal type (FH.20)
+/// into `schema`, by [`ts_interface_schema`]'s field rule.
+fn push_signature_members(schema: &mut ModelSchema, body: TsNode, src: &[u8]) {
     let mut bc = body.walk();
     for member in body.named_children(&mut bc) {
         match member.kind() {
@@ -2167,8 +2453,6 @@ fn ts_interface_schema(iface: TsNode, src: &[u8]) -> Option<ModelSchema> {
             _ => {}
         }
     }
-    let describes = !schema.fields.is_empty() || !schema.extends.is_empty() || schema.open;
-    describes.then_some(schema)
 }
 
 /// DT.1c: a field-only class's declared fields as a [`ModelSchema`] (format
@@ -2589,7 +2873,7 @@ fn visit_method(
         Some(class_id),
     );
 
-    record_callable(method_id, n, acc);
+    record_callable(method_id, n, src, acc);
 
     // A13.15: `constructor(@InjectRepository(User) private repo: …)`.
     if let Some(params) = n.child_by_field_name("parameters") {
@@ -2910,7 +3194,7 @@ fn emit_function(
         node_kind::FUNCTION,
         Some(module_id),
     );
-    record_callable(func_id, n, acc);
+    record_callable(func_id, n, src, acc);
     // DF.22a: parameters type the receivers of the body.
     record_param_types(n, src, func_id, acc);
     // DT.5k: a declared class return type types a caller's result local.
@@ -2955,7 +3239,7 @@ fn emit_function_value(
         node_kind::FUNCTION,
         Some(module_id),
     );
-    record_callable(func_id, value, acc);
+    record_callable(func_id, value, src, acc);
     // DF.22a: the arrow's / function expression's parameters type the
     // receivers of its body.
     record_param_types(value, src, func_id, acc);
@@ -3120,6 +3404,11 @@ fn collect_calls_in(
         // DT.5g: a bare identifier passed by value.
         if matches!(kind, "identifier" | "shorthand_property_identifier") {
             record_value_ref(node, src, from, acc);
+        }
+        // FH.20: a type name (an annotation, a generic argument, an `as`
+        // type) is a type reference of `from`.
+        if kind == "type_identifier" {
+            record_type_ident(node, src, from, acc);
         }
         if kind == "call_expression" {
             if let Some(q) = extract_call_qualifier(node, src) {
@@ -3579,11 +3868,14 @@ fn param_count(func: TsNode) -> usize {
 }
 
 /// CH.3b: record `id`'s parameter count. A name declared twice (a getter and
-/// its setter share one METHOD id) keeps the larger count.
-fn record_callable(id: NodeId, func: TsNode, acc: &mut Acc) {
+/// its setter share one METHOD id) keeps the larger count. FH.20: and the
+/// type names its signature reads ([`record_signature_types`]).
+fn record_callable(id: NodeId, func: TsNode, src: &[u8], acc: &mut Acc) {
     let n = param_count(func);
     let slot = acc.callable_params.entry(id).or_insert(0);
     *slot = (*slot).max(n);
+    // FH.20: the signature's type names are the callable's type references.
+    record_signature_types(func, src, id, acc);
 }
 
 // ============================================================================
@@ -7604,6 +7896,36 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             }
         }
     }
+    // FH.20: a type name a scope reads that names one of the file's object
+    // type aliases is a USES of the alias from that scope (rule `type_ref`),
+    // at the first site's row, unless the scope binds the name itself (a
+    // type parameter, a local type declaration). An imported or global type
+    // name binds nothing here.
+    let type_refs = std::mem::take(&mut acc.type_refs);
+    let mut type_ref_edges = 0usize;
+    for tr in type_refs {
+        let Some(&to) = acc.type_aliases.get(&tr.name) else {
+            continue;
+        };
+        if to == tr.from || acc.type_shadows.contains(&(tr.from, tr.name.clone())) {
+            continue;
+        }
+        let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+            .rule("type_ref")
+            .line(tr.row);
+        out.edges.push(
+            Edge::new(tr.from, to, edge_category::USES, Confidence::Strong).with_cell(ev.to_cell()),
+        );
+        type_ref_edges += 1;
+    }
+    let ts = acc.type_alias_stats;
+    if ts.aliases + type_ref_edges > 0 {
+        eprintln!(
+            "[ts-types] aliases={} object={} type_refs={type_ref_edges} file={}",
+            ts.aliases, ts.object, acc.file_rel
+        );
+    }
+
     let vs = acc.value_stats;
     if candidates + vs.const_inits + vs.decorators + accessor_edges > 0 {
         eprintln!(

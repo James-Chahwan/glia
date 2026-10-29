@@ -3620,9 +3620,11 @@ fn graphql_model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<GraphqlModelRep
 /// 4. **The client model.** The value at k, when it resolved to a client
 ///    model, pairs T when [`confirms`] holds between the model's JSON names
 ///    and T's field names (no case folding), diverged when the model lists a
-///    name T does not (an open or interface T claims none absent). A TS type
-///    alias (graphql-codegen's `type GetUsersQuery = {..}`) mints no node:
-///    its keys are unknown and no class forms.
+///    name T does not (an open or interface T claims none absent). An
+///    object-shaped TS type alias (graphql-codegen's `type GetUsersQuery =
+///    {..}`, a fragment type) is an INTERFACE with its fields since FH.20,
+///    so it resolves as any client model does; an inline object type at k
+///    is no model and forms no class.
 /// 5. **Stars.** [`model_stars`] over the pairs (no embed rule): a client
 ///    model pairing two types joins neither, two client models of one
 ///    project pairing one type are both dropped, one per project joins. The

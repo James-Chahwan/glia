@@ -3551,11 +3551,12 @@ mod tests {
     #[test]
     fn nodeless_exports_shadow_stars() {
         let (g, imports) = ts_graph(&[
-            // A local type alias beside a star exporting class Session.
+            // A local (non-object, so nodeless: FH.20) type alias beside a
+            // star exporting class Session.
             ("src/s.ts", "export class Session {}\n"),
             (
                 "src/t.ts",
-                "export type Session = { id: string };\nexport * from './s';\n",
+                "export type Session = 'a' | 'b';\nexport * from './s';\n",
             ),
             // A nodeless const re-exported by a from-less clause.
             ("src/k2.ts", "export class X {}\n"),
