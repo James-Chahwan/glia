@@ -822,8 +822,10 @@ def names_state(glia, truth, changed):
     """names.py's state, after the build."""
     _, diff, _, _ = sh(["git", "diff", "HEAD~1", "HEAD"], cwd=glia.copy)
     names = old_names(diff)
+    # --top-k 200: the pre-FH.8c default row cap, so the baseline's numbers stay comparable (FH.8c
+    # made 25 the default; the boundary set reads every impact row's file).
     d, _, ms, err = glia.json("diff-impact", ".", "--base", "HEAD~1", "--json",
-                              "--top-files", "200", "--depth", "6")
+                              "--top-files", "200", "--depth", "6", "--top-k", "200")
     if not isinstance(d, dict):
         return {"error": f"diff-impact {err}"}
     imp = d.get("impact") or {}
@@ -886,7 +888,7 @@ def rest(glia, gd, row, truth):
         _, diff, _, _ = sh(["git", "diff"], cwd=glia.copy)
         base = []
     rest_files = [f for f in truth if f not in seed]
-    d, nb, ms, err = glia.json("diff-impact", ".", *base, "--json", "--top-files", "20")
+    d, nb, ms, err = glia.json("diff-impact", ".", *base, "--json", "--top-files", "20", "--top-k", "200")
     imp = (d or {}).get("impact") or {}
     g_files = [f["file"] for f in imp.get("files") or [] if f.get("file") not in seed]
     reached = {f["file"] for f in imp.get("files") or [] if f.get("file")}
