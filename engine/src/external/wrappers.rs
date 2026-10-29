@@ -139,7 +139,7 @@
 //! and once per repo where the inference found a candidate wrapper,
 //!   `[wrappers] inferred repo=<label> wrappers=<w> (direct=<d> forwarding=<f>) sites=<n> minted=<m> duplicate=<u> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> shadowed_by_overlay=<s> skipped_ambiguous=<a> skipped_unparsed=<p>`
 //! and once per repo where the HTTP inference found a candidate (FH.4b, FH.17),
-//!   `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p> options_object=<o> computed_verb=<c> repo=<label>`
+//!   `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p> client_by_import=<i> options_object=<o> computed_verb=<c> repo=<label>`
 //! (`wrappers` counts the kept inferred wrappers, shadowed ones included;
 //! see `infer_wrappers` for the last three). In both,
 //! `sites = minted + duplicate + skipped_*`; `minted` counts sites that added
@@ -469,6 +469,9 @@ struct InferenceCounts {
     /// nothing, and kept wrappers read through a local options object or a
     /// computed verb (`infer_wrappers`).
     http_phantom: usize,
+    /// FH.17b: `<unresolved>` verb calls kept because their receiver is
+    /// imported from a client module (`infer_wrappers`).
+    http_client_by_import: usize,
     http_options_object: usize,
     http_computed: usize,
 }
@@ -481,7 +484,12 @@ impl InferenceCounts {
 
     /// The inference found a candidate HTTP wrapper (kept or skipped).
     fn http_any(&self) -> bool {
-        self.http_wrappers + self.http_ambiguous + self.http_unparsed + self.http_phantom > 0
+        self.http_wrappers
+            + self.http_ambiguous
+            + self.http_unparsed
+            + self.http_phantom
+            + self.http_client_by_import
+            > 0
     }
 }
 
@@ -545,6 +553,7 @@ impl<'c> WrapperPass<'c> {
             http_ambiguous: inferred.http_ambiguous,
             http_unparsed: inferred.http_unparsed,
             http_phantom: inferred.http_phantom,
+            http_client_by_import: inferred.http_client_by_import,
             http_options_object: inferred.http_options_object,
             http_computed: inferred.http_computed,
             ..InferenceCounts::default()
@@ -740,13 +749,14 @@ impl<'c> WrapperPass<'c> {
         if inf.http_any() {
             let t = &self.tally.http;
             eprintln!(
-                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} test_sites={} phantom_dropped={} options_object={} computed_verb={} repo={repo_label}",
+                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} test_sites={} phantom_dropped={} client_by_import={} options_object={} computed_verb={} repo={repo_label}",
                 inf.http_wrappers,
                 t.sites,
                 t.minted,
                 inf.http_ambiguous,
                 t.test_sites,
                 inf.http_phantom,
+                inf.http_client_by_import,
                 inf.http_options_object,
                 inf.http_computed
             );

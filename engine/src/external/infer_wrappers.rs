@@ -96,7 +96,12 @@
 //!    `fetch` / `request` / `rest` / ..): the CH.3c receiver gate keeps such a
 //!    call when it cannot type the receiver, and a Map, store or cache whose
 //!    type it could not see would otherwise make every `cache.get(key)` site
-//!    an endpoint. Counted `phantom_dropped`.
+//!    an endpoint. Counted `phantom_dropped`. FH.17b: a receiver that is a
+//!    default or named import (`import instance from '@/utils/request'`,
+//!    `import { service as svc } from '../services/api'`) of a module whose
+//!    specifier's last path words name a client ([`is_client_specifier`]:
+//!    `request`, `http`, `api`, `client`, `axios`, `fetch` or `service`) is
+//!    a client too ([`import_clients`]), counted `client_by_import`.
 //! 6. OPTIONS OBJECTS, FH.17: a path argument that reads a `url` / `path` /
 //!    `uri` key of a local object literal (`fetch(opts.url, opts)`,
 //!    `axios(config)`), the object being the last `const` / `let` / `var` of
@@ -119,8 +124,8 @@
 //! `http` pass pairs with nothing (a test helper drives the app's own
 //! router, as photoprism's `PerformRequest(app, "GET", "/api/v1/..")` does).
 //! Counts: `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a>
-//! test_sites=<t> phantom_dropped=<p> options_object=<o> computed_verb=<c>
-//! repo=<label>`.
+//! test_sites=<t> phantom_dropped=<p> client_by_import=<i> options_object=<o>
+//! computed_verb=<c> repo=<label>`.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -185,6 +190,9 @@ pub(crate) struct InferredWrappers {
     /// FH.17: TS `<unresolved>` verb calls on a receiver that is no HTTP
     /// client ([`is_client_receiver`]): no client call, so no candidate.
     pub(crate) http_phantom: usize,
+    /// FH.17b: TS `<unresolved>` verb calls kept as client calls because
+    /// their receiver is imported from a client module ([`import_clients`]).
+    pub(crate) http_client_by_import: usize,
     /// FH.17: kept HTTP wrappers whose path reaches the client call through
     /// a local options object ([`options_hole`]).
     pub(crate) http_options_object: usize,
@@ -794,7 +802,8 @@ fn infer_http(
                 Ok(d) => {
                     found.extend(d.cands);
                     out.http_unparsed += d.unparsed;
-                    out.http_phantom += d.phantom;
+                    out.http_phantom += d.gate.phantom;
+                    out.http_client_by_import += d.gate.by_import;
                 }
                 Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
             }
@@ -894,18 +903,27 @@ struct DirectHttp {
     cands: Vec<HttpCandidate>,
     /// Client calls whose owner's declaration did not read.
     unparsed: usize,
-    /// FH.17: `<unresolved>` verb calls on no HTTP client, left out.
+    /// FH.17 / FH.17b: the phantom rule's counts.
+    gate: PhantomGate,
+}
+
+/// What the FH.17 phantom rule did in one file: `<unresolved>` verb calls on
+/// no HTTP client, left out, and (FH.17b) those kept because their receiver
+/// is imported from a client module.
+#[derive(Debug, Default, Clone, Copy)]
+struct PhantomGate {
     phantom: usize,
+    by_import: usize,
 }
 
 /// Step 1 over one file: every client call whose path is a parameter hole of
 /// its owner, directly or (FH.17) through a local options object.
 fn direct_http(f: &CodeFile<'_>) -> DirectHttp {
-    let (calls, phantom) = client_calls(f);
+    let (calls, gate) = client_calls(f);
     let mut out = DirectHttp {
         cands: Vec::new(),
         unparsed: 0,
-        phantom,
+        gate,
     };
     if calls.is_empty() {
         return out;
@@ -1109,22 +1127,22 @@ fn forwarding_http(f: &CodeFile<'_>, call: &str, shape: &HttpShape) -> (Vec<Http
 /// (the TS parser pushes one ENDPOINT node per call site), plus its computed
 /// verbs on a client ([`computed_verb_calls`]); for Go and Python the
 /// [`GO_NEEDLES`] / [`PY_NEEDLES`] shapes with any argument.
-fn client_calls<'s>(f: &CodeFile<'s>) -> (Vec<ClientCall<'s>>, usize) {
-    let (mut out, phantom) = match f.lang {
-        "go" => (needle_calls(f.source, GO_NEEDLES), 0),
-        "python" => (needle_calls(f.source, PY_NEEDLES), 0),
+fn client_calls<'s>(f: &CodeFile<'s>) -> (Vec<ClientCall<'s>>, PhantomGate) {
+    let (mut out, gate) = match f.lang {
+        "go" => (needle_calls(f.source, GO_NEEDLES), PhantomGate::default()),
+        "python" => (needle_calls(f.source, PY_NEEDLES), PhantomGate::default()),
         _ => {
-            let (mut calls, phantom) = f
+            let (mut calls, gate) = f
                 .parse
                 .map(|fp| endpoint_calls(f.source, fp))
                 .unwrap_or_default();
             calls.extend(computed_verb_calls(f.source));
-            (calls, phantom)
+            (calls, gate)
         }
     };
     out.sort_by_key(|c| c.at);
     out.dedup_by_key(|c| c.at);
-    (out, phantom)
+    (out, gate)
 }
 
 /// TS family: the client call at each ENDPOINT node's hit, and (FH.17) how
@@ -1133,10 +1151,13 @@ fn client_calls<'s>(f: &CodeFile<'s>) -> (Vec<ClientCall<'s>>, usize) {
 /// ([`is_client_receiver`]) is the CH.3c receiver gate's fail-open guess (a
 /// Map, a store or a cache whose type the parser could not see), not a
 /// client call: it seeds no wrapper. `fetch(..)`, a non-verb member (the
-/// FH.4a shape rule's `lib.fetchJson(..)`) and every read path still seed.
-fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> (Vec<ClientCall<'s>>, usize) {
+/// FH.4a shape rule's `lib.fetchJson(..)`) and every read path still seed,
+/// and so (FH.17b) does a verb call whose whole receiver is a name the file
+/// imports from a client module ([`import_clients`]).
+fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> (Vec<ClientCall<'s>>, PhantomGate) {
     let mut out = Vec::new();
-    let mut phantom = 0usize;
+    let mut gate = PhantomGate::default();
+    let mut imported: Option<Vec<&str>> = None;
     for n in fp
         .nodes
         .iter()
@@ -1187,8 +1208,13 @@ fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> (Vec<ClientCall<'s>>, 
                 && matches!(method, CallMethod::Verb(_))
                 && !receiver.is_some_and(|r| is_client_receiver(last_segment(r)))
             {
-                phantom += 1;
-                continue;
+                let clients = imported.get_or_insert_with(|| import_clients(source));
+                if receiver.is_some_and(|r| clients.contains(&r)) {
+                    gate.by_import += 1;
+                } else {
+                    gate.phantom += 1;
+                    continue;
+                }
             }
             out.push(ClientCall {
                 at,
@@ -1198,7 +1224,7 @@ fn endpoint_calls<'s>(source: &'s str, fp: &FileParse) -> (Vec<ClientCall<'s>>, 
             });
         }
     }
-    (out, phantom)
+    (out, gate)
 }
 
 /// The path segment the parser writes for a client call it could not read.
@@ -1277,6 +1303,167 @@ fn words(ident: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// FH.17b: the words of an import specifier's last path segment that make
+/// the module an HTTP client's (`@/utils/request`, `./http-client`,
+/// `@/lib/apiService`), a trailing `s` dropped (`services`, `requests`).
+const CLIENT_MODULE_WORDS: &[&str] = &[
+    "request", "http", "api", "client", "axios", "fetch", "service",
+];
+
+/// The code file extensions an import specifier may spell out.
+const CODE_EXTS: &[&str] = &[
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue",
+];
+
+/// FH.17b: an import specifier names a client module: a word of its last
+/// path segment, a code extension dropped (the segment before it when that
+/// is `index`), is a [`CLIENT_MODULE_WORDS`] entry, as written or without a
+/// trailing `s` (`@/utils/request`, `./http-client.ts`, `./user.service`).
+/// `@/store`, `./cache/index.ts` and `lodash` name none.
+fn is_client_specifier(spec: &str) -> bool {
+    let spec = spec.split(['?', '#']).next().unwrap_or(spec);
+    let mut segs = spec
+        .trim_end_matches('/')
+        .rsplit('/')
+        .map(|s| {
+            CODE_EXTS
+                .iter()
+                .find_map(|e| s.strip_suffix(e))
+                .unwrap_or(s)
+        })
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..");
+    let Some(mut last) = segs.next() else {
+        return false;
+    };
+    if last == "index" {
+        match segs.next() {
+            Some(prev) => last = prev,
+            None => return false,
+        }
+    }
+    words(last).iter().any(|w| {
+        let w = w.as_str();
+        CLIENT_MODULE_WORDS.contains(&w)
+            || w.strip_suffix('s')
+                .is_some_and(|s| CLIENT_MODULE_WORDS.contains(&s))
+    })
+}
+
+/// FH.17b, TS family: the local names the file binds by a default or named
+/// value import (`import instance from '..'`, `import { a, b as c } from
+/// '..'`, `import d, { e } from '..'`) of a client module
+/// ([`is_client_specifier`]), in source order. A type-only import or
+/// specifier binds no value, a namespace import (`* as ns`) is not read, an
+/// import in a comment is skipped, and a name the file also declares with
+/// `const` / `let` / `var` / `function` / `class` (a local that may shadow
+/// it) is left out.
+fn import_clients(source: &str) -> Vec<&str> {
+    /// The longest `import` clause read, in bytes: a `from` further on is
+    /// another statement's.
+    const IMPORT_WINDOW: usize = 4096;
+    let b = source.as_bytes();
+    let mut out: Vec<&str> = Vec::new();
+    for (at, _) in source.match_indices("import") {
+        if at > 0
+            && b.get(at - 1)
+                .is_some_and(|c| is_ident_byte(*c) || *c == b'.')
+        {
+            continue;
+        }
+        let rest = &source[at + "import".len()..];
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '{') || commented_at(source, at) {
+            continue;
+        }
+        let window = &rest[..rest.floor_char_boundary(IMPORT_WINDOW)];
+        let Some(from) = find_word(window, "from") else {
+            continue;
+        };
+        let clause = rest[..from].trim();
+        if clause.is_empty()
+            || clause.contains(['(', ';', '\'', '"', '`'])
+            || word_at(clause, "type")
+        {
+            continue;
+        }
+        let after = rest[from + "from".len()..].trim_start();
+        let Some(q) = after.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            continue;
+        };
+        let Some(end) = after[1..].find(q) else {
+            continue;
+        };
+        if !is_client_specifier(&after[1..1 + end]) {
+            continue;
+        }
+        let (default, named) = match clause.find('{') {
+            Some(open) => {
+                let close = clause[open..].find('}').map_or(clause.len(), |c| open + c);
+                (&clause[..open], &clause[open + 1..close])
+            }
+            None => (clause, ""),
+        };
+        let default = default.trim().trim_end_matches(',').trim();
+        if !default.is_empty() && !default.starts_with('*') && is_js_ident(default) {
+            out.push(default);
+        }
+        for spec in named.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if word_at(spec, "type") {
+                continue;
+            }
+            let local = spec.rsplit_once(" as ").map_or(spec, |(_, l)| l).trim();
+            if is_js_ident(local) {
+                out.push(local);
+            }
+        }
+    }
+    out.retain(|name| !declared_locally(source, name));
+    out
+}
+
+/// `text` starts with the keyword `kw` followed by whitespace.
+fn word_at(text: &str, kw: &str) -> bool {
+    text.strip_prefix(kw)
+        .is_some_and(|r| r.starts_with(char::is_whitespace))
+}
+
+/// The byte offset of the first `kw` in `text` that stands as a word.
+fn find_word(text: &str, kw: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    text.match_indices(kw).map(|(i, _)| i).find(|&i| {
+        (i == 0 || b.get(i - 1).is_some_and(|c| !is_ident_byte(*c)))
+            && b.get(i + kw.len()).is_some_and(|c| !is_ident_byte(*c))
+    })
+}
+
+/// A whole JS identifier.
+fn is_js_ident(s: &str) -> bool {
+    !s.is_empty() && !s.starts_with(|c: char| c.is_ascii_digit()) && s.bytes().all(is_ident_byte)
+}
+
+/// The file declares `name` itself (`const name`, `let name`, `var name`,
+/// `function name`, `class name`), so a use of it may not be the import.
+fn declared_locally(source: &str, name: &str) -> bool {
+    ["const", "let", "var", "function", "class"]
+        .iter()
+        .any(|kw| {
+            let b = source.as_bytes();
+            source.match_indices(kw).any(|(i, _)| {
+                if i > 0
+                    && b.get(i - 1)
+                        .is_some_and(|c| is_ident_byte(*c) || *c == b'.')
+                {
+                    return false;
+                }
+                let rest = &source[i + kw.len()..];
+                let trimmed = rest.trim_start();
+                trimmed.len() < rest.len()
+                    && trimmed.strip_prefix(name).is_some_and(|r| {
+                        !r.starts_with(|c: char| c.is_ascii() && is_ident_byte(c as u8))
+                    })
+            })
+        })
 }
 
 /// FH.17, TS family: every live `<recv>[<name>](..)` call whose receiver
@@ -2408,6 +2595,68 @@ export class Remote {
         // `lookup`, `drop` and `readOne`: verb calls on no HTTP client.
         assert_eq!(w.http_phantom, 3);
         assert_eq!((w.http_options_object, w.http_computed), (1, 1));
+    }
+
+    /// FH.17b: a verb call whose receiver is a default or named import from
+    /// a module whose specifier's last path words name a client
+    /// (`@/utils/request`, `../services/api/index`, `./http-client.ts`) is a
+    /// client call although the receiver's own name (`instance`, `svc`) is
+    /// none; a member receiver (`this.cache`, though `cache` is imported from
+    /// `./request`), an import of another module (`@/store`), a type-only
+    /// import and a name the file redeclares (`entries`) stay phantoms.
+    #[test]
+    fn ts_receivers_imported_from_client_modules() {
+        let src = r#"import instance from '@/utils/request';
+import { service as svc, other } from "../services/api/index";
+import type { Shape } from "./http-client.ts";
+import store from "@/store";
+import { cache, entries } from "./request";
+export function getThing(url: string) { return instance.get(url); }
+export const send = (path: string, body: unknown) => svc.post(path, body);
+export function readOther(key: string) { return other.delete(key); }
+export function readStore(key: string) { return store.get(key); }
+export class Repo {
+  private cache: any;
+  readOne(id: string) { return this.cache.get(id); }
+}
+export function typed(path: string) { return Shape.get(path); }
+export function local(path: string) {
+  const entries = new Map<string, string>();
+  return entries.get(path);
+}
+export function useThing() { return getThing("/x"); }
+"#;
+        let w = infer(&[("src/api/user.ts", src)]);
+        assert_eq!(
+            http_found(&w),
+            [
+                r#"getThing path=0 ""+P+"" method=GET depth=1 @src/api/user.ts:6"#,
+                r#"readOther path=0 ""+P+"" method=DELETE depth=1 @src/api/user.ts:8"#,
+                r#"send path=0 ""+P+"" method=POST depth=1 @src/api/user.ts:7"#,
+            ]
+        );
+        // `readStore`, `readOne`, `typed` and `local`: no client by import.
+        assert_eq!(w.http_phantom, 4);
+        assert_eq!(w.http_client_by_import, 3);
+    }
+
+    #[test]
+    fn import_specifier_client_words() {
+        for (spec, client) in [
+            ("@/utils/request", true),
+            ("../services/api/index", true),
+            ("./http-client.ts", true),
+            ("~/lib/fetcher", false),
+            ("@/lib/apiService", true),
+            ("./requests.js", true),
+            ("@/store", false),
+            ("./user.service", true),
+            ("../a/index.js", false),
+            ("./cache/index.ts", false),
+            ("lodash", false),
+        ] {
+            assert_eq!(is_client_specifier(spec), client, "{spec}");
+        }
     }
 
     #[test]
