@@ -75,6 +75,15 @@
 //! offset=<o> areas=<a> bytes=<b> seeds=<s> seeds_shown=<t>
 //! also_in_folded=<f>`.
 //!
+//! FH.8d: the overview also cuts the name rows (`name_breaks`) at 25,
+//! folded rows first (`counts.name_breaks` uncut, `name_breaks_truncated`
+//! the rest), and `--max-tests` defaults to 25 (it was 50); `--full` keeps
+//! every name row in the engine's order. A folded name row prints `<N>
+//! sites in <M> files (e.g. a, b, c)` in `### Name breaks (advisory)`'s
+//! `at` column. The `[answer-size] surface=review` line (the engine's
+//! `review::review_json`) adds `names=<n> names_shown=<k> tests_shown=<t>`
+//! before `bytes=`.
+//!
 //! FH.8c, the overview answer (as `glia blast-radius`): `--max-impact`
 //! defaults to 25 (`DEFAULT_MAX_IMPACT`, it was 50), the impact seeds and the
 //! `changed` rows to 25 (`counts` stay uncut); the JSON's `impact.areas` maps
@@ -100,12 +109,10 @@
 use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, ReviewArgs,
-    caveat_fold, render_markdown, review_vs_rev,
+    caveat_fold, render_markdown, review_json, review_vs_rev,
 };
 
 use glia_engine::rank::Ranking;
-
-use glia_engine::answer_json;
 
 use crate::common::{CalibratedRankingArgs, build_options, render_selection};
 
@@ -138,9 +145,9 @@ pub(crate) struct Args {
     /// Skip the first N impact rows of the ranked answer (the next page).
     #[arg(long, value_name = "N", default_value_t = 0)]
     offset: usize,
-    /// Keep every impact row, impact seed, changed row and test row, every
-    /// field whole: no `--max-impact` / `--max-tests` cut, no seed cap, no
-    /// areas, no slim rows.
+    /// Keep every impact row, impact seed, changed row, test row and name
+    /// row, every field whole: no `--max-impact` / `--max-tests` cut, no seed
+    /// or name cap, no areas, no slim rows.
     #[arg(long, conflicts_with_all = ["max_impact", "max_tests", "offset"])]
     full: bool,
     /// The weakest pairing tier at which an inferred client <-> server model
@@ -197,11 +204,12 @@ fn engine_args(
 }
 
 /// FH.8 `--full`: lift every row cap of `args` (impact rows, impact seeds,
-/// test rows).
+/// test rows; FH.8d: name rows).
 fn lift_caps(args: &mut ReviewArgs) {
     args.max_impact = usize::MAX;
     args.max_tests = usize::MAX;
     args.max_seeds = usize::MAX;
+    args.max_names = usize::MAX;
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -242,12 +250,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let format = if args.json { "json" } else { "markdown" };
     eprintln!("[review] surface=cli format={format} exit={exit}");
     if args.json {
-        match answer_json(
-            "review",
-            &review,
-            review.counts.impact,
-            review.impact.results.len(),
-        ) {
+        match review_json(&review) {
             Ok(text) => println!("{text}"),
             Err(e) => {
                 eprintln!("error: serialising the review: {e}");
@@ -335,9 +338,20 @@ mod tests {
         let mut full = ReviewArgs::default();
         lift_caps(&mut full);
         assert_eq!(
-            (full.max_impact, full.max_tests, full.max_seeds),
-            (usize::MAX, usize::MAX, usize::MAX)
+            (
+                full.max_impact,
+                full.max_tests,
+                full.max_seeds,
+                full.max_names
+            ),
+            (usize::MAX, usize::MAX, usize::MAX, usize::MAX)
         );
+        // FH.8d: the overview's caps.
+        assert_eq!(
+            (e.max_tests, e.max_names),
+            (DEFAULT_MAX_TESTS, glia_engine::review::DEFAULT_MAX_NAMES)
+        );
+        assert_eq!((DEFAULT_MAX_TESTS, e.max_names), (25, 25));
         let err = engine_args(4, 50, 50, "heuristic", Ranking::default(), true, None)
             .expect_err("no such gate");
         assert_eq!(

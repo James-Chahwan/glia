@@ -3,7 +3,7 @@
 //! pyo3 twin of `glia review`.
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
-//! markdown_rows=20, depth=4, max_tests=50, max_impact=25,
+//! markdown_rows=20, depth=4, max_tests=25, max_impact=25,
 //! models_min_tier="fact", ranking=None, cochange=True, title=None, full=False,
 //! offset=0)` builds the repo's
 //! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
@@ -22,7 +22,12 @@
 //! is the whole answer (no seed `also_in` folded, no `changed` row reduced
 //! to its id, FH.8c: no `impact.areas`, no slim rows), as `glia review
 //! --full`. `offset` (FH.8c) skips the first impact rows; it conflicts with
-//! `full`.
+//! `full`. FH.8d: `max_tests` defaults to 25 (it was 50), and `name_breaks`
+//! keeps 25 rows, folded rows first (`counts.name_breaks` uncut,
+//! `name_breaks_truncated` the rest; `full=True` keeps every name row); the
+//! dict goes through the engine's `review::review_json`, whose
+//! `[answer-size] surface=review ..` line adds `names=<n> names_shown=<k>
+//! tests_shown=<t>` before `bytes=`.
 //!
 //! Transport only: the review, the renderer, the location of every row and
 //! the `[review] base=..` marker live in the engine; this module adds one
@@ -33,11 +38,10 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use glia_engine::answer_json;
 use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, Review,
-    ReviewArgs, render_markdown, review_vs_rev,
+    ReviewArgs, render_markdown, review_json, review_vs_rev,
 };
 
 use crate::blast::ranking_selected;
@@ -139,11 +143,12 @@ impl Default for Kw<'_> {
 }
 
 /// FH.8b: `full=True` lifts every row cap (`max_impact`, `max_tests`, the
-/// impact's seed cap), as the CLI's `review --full`.
+/// impact's seed cap; FH.8d: the name rows), as the CLI's `review --full`.
 fn lift_caps(args: &mut ReviewArgs) {
     args.max_impact = usize::MAX;
     args.max_tests = usize::MAX;
     args.max_seeds = usize::MAX;
+    args.max_names = usize::MAX;
 }
 
 /// The body of [`review_vs_rev_py`], minus pyo3. The format and the tier are
@@ -254,8 +259,12 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// `{id, change}` (its full row is that seed's). `full=True` (last keyword)
 /// lifts every cap, `max_impact` and `max_tests` included, and writes every
 /// row whole. One `[answer-size] surface=review ..` line per dict.
+///
+/// FH.8d: `max_tests` defaults to 25 (it was 50) and `name_breaks` keeps 25
+/// rows, folded rows first (`counts.name_breaks` uncut,
+/// `name_breaks_truncated` the rest); `full=True` keeps every name row.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=25, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false, offset=0))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=25, max_impact=25, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false, offset=0))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -293,15 +302,11 @@ fn review_vs_rev_py(
     }
 }
 
-/// FH.8b: the review's JSON through the engine's `answer_json` (the
-/// `[answer-size] surface=review ..` line).
+/// FH.8b: the review's JSON through the engine's serialiser (the
+/// `[answer-size] surface=review ..` line; FH.8d: `review::review_json`,
+/// which adds the name and test counts).
 fn sized(review: &Review) -> Result<String, serde_json::Error> {
-    answer_json(
-        "review",
-        review,
-        review.counts.impact,
-        review.impact.results.len(),
-    )
+    review_json(review)
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -315,7 +320,7 @@ inventory::submit! { ModuleFns { name: "review", add: register } }
 /// these pin them to the engine's.
 const _: () = {
     assert!(DEFAULT_MARKDOWN_ROWS == 20);
-    assert!(DEFAULT_MAX_TESTS == 50);
+    assert!(DEFAULT_MAX_TESTS == 25);
     assert!(DEFAULT_MAX_IMPACT == 25);
 };
 
@@ -497,8 +502,13 @@ mod tests {
         let mut args = ReviewArgs::default();
         lift_caps(&mut args);
         assert_eq!(
-            (args.max_impact, args.max_tests, args.max_seeds),
-            (usize::MAX, usize::MAX, usize::MAX)
+            (
+                args.max_impact,
+                args.max_tests,
+                args.max_seeds,
+                args.max_names
+            ),
+            (usize::MAX, usize::MAX, usize::MAX, usize::MAX)
         );
         assert!(sized(&whole).is_ok_and(|t| t.starts_with('{')));
 
@@ -601,7 +611,7 @@ mod tests {
                 k.full,
                 k.offset
             ),
-            ("dict", 20, 4, 50, 25, "fact", None, true, None, false, 0),
+            ("dict", 20, 4, 25, 25, "fact", None, true, None, false, 0),
             "Kw::default is the pyo3 signature's"
         );
     }

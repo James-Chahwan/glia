@@ -33,7 +33,7 @@
 //! - `tests`: `tests_for::tests_for_delta` (LE.3b / CC.1) with
 //!   [`ReviewArgs::tests`], cut to `max_tests` (`counts.tests` is the uncut
 //!   length; `test_files` is recomputed over the kept rows, so it stays "the
-//!   distinct files of `tests`");
+//!   distinct files of `tests`"; FH.8d: 25 by default, it was 50);
 //! - `edges`: every added, removed and reconfidenced edge of the delta, the
 //!   first edge with that key on its side (the working tree for added and
 //!   reconfidenced, the base for removed), tiered by `why::tier_of` exactly as
@@ -191,7 +191,19 @@
 //! `[review] base=` line and the intent and conventions lines,
 //! `[name-breaks] answer rows=<k> blocking=0 advisory=<k> min_tier=<t>
 //! folded_schema_rows=0->0 surface=review`
-//! (review lists no schema row, so it folds none).
+//! (review lists no schema row, so it folds none; `rows` is the uncut
+//! count).
+//!
+//! FH.8d, the overview: `name_breaks` keeps [`ReviewArgs::max_names`] rows
+//! ([`DEFAULT_MAX_NAMES`], 25; `usize::MAX` under the CLI's `--full` /
+//! pyo3's `full=True`), `counts.name_breaks` stays the uncut total and
+//! `name_breaks_truncated` counts the rest. A cut keeps the folded rows
+//! first, then by tier, file and line; an uncut list keeps `name_breaks`'
+//! order. A folded row (FH.7d) renders `<N> sites in <M> files (e.g. a, b,
+//! c)` in place of its `file:line` ([`name_break_sites`]), here and in the
+//! CLI's contract-breaks `## names` table. The JSON goes through
+//! [`review_json`], whose `[answer-size] surface=review ..` line adds
+//! `names=<n> names_shown=<k> tests_shown=<t>` before `bytes=`.
 //!
 //! # Conventions (FB.12b)
 //!
@@ -365,8 +377,12 @@ use crate::why::tier_of;
 /// [`ReviewArgs::default`]'s `max_impact`: FH.8c's overview,
 /// [`DEFAULT_OVERVIEW_ROWS`] (it was 50).
 pub const DEFAULT_MAX_IMPACT: usize = DEFAULT_OVERVIEW_ROWS;
-/// [`ReviewArgs::default`]'s `max_tests`.
-pub const DEFAULT_MAX_TESTS: usize = 50;
+/// [`ReviewArgs::default`]'s `max_tests`: FH.8d, the overview's
+/// [`DEFAULT_OVERVIEW_ROWS`] (it was 50).
+pub const DEFAULT_MAX_TESTS: usize = DEFAULT_OVERVIEW_ROWS;
+/// FH.8d: [`ReviewArgs::default`]'s `max_names`, the name rows a review
+/// keeps (module docs "Name breaks").
+pub const DEFAULT_MAX_NAMES: usize = DEFAULT_OVERVIEW_ROWS;
 
 /// What a [`review`] walks and keeps. Start from `default()` and set fields:
 /// `#[non_exhaustive]` rules out a struct literal outside this crate.
@@ -386,6 +402,12 @@ pub struct ReviewArgs {
     /// Test rows kept ([`DEFAULT_MAX_TESTS`]); `counts.tests` is uncut and
     /// `tests.absence` is the uncut answer's, as for `max_impact`.
     pub max_tests: usize,
+    /// FH.8d: name rows kept ([`DEFAULT_MAX_NAMES`]); `counts.name_breaks`
+    /// is uncut and `name_breaks_truncated` counts the rows past the cut,
+    /// which keeps folded rows first (module docs "Name breaks").
+    /// `usize::MAX` (the CLI's `--full`) keeps every row in
+    /// `contract_breaks::name_breaks`' order.
+    pub max_names: usize,
     /// FH.8: impact seeds kept ([`DEFAULT_ANSWER_SEEDS`], FH.8b; it was
     /// `DEFAULT_ANSWER_ROWS`); `counts.seeds` is uncut. What this and
     /// `max_impact` cut is `impact.truncated` (`{results, seeds}`, absent
@@ -417,6 +439,7 @@ impl Default for ReviewArgs {
             tests: TestsForArgs::default(),
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
+            max_names: DEFAULT_MAX_NAMES,
             max_seeds: DEFAULT_ANSWER_SEEDS,
             offset: 0,
             models_min_tier: MODEL_MIN_TIERS[0],
@@ -466,7 +489,8 @@ pub struct ReviewCounts {
     /// `model_breaks.len()`: the breaking inferred-model rows, advisory ones
     /// included.
     pub model_breaks: usize,
-    /// FH.7b: `name_breaks.len()`. Not serialised when 0.
+    /// FH.7b: the name rows; FH.8d: uncut by `max_names`. Not serialised
+    /// when 0.
     #[serde(skip_serializing_if = "is_zero")]
     pub name_breaks: usize,
     /// Every edge row by tier; a tier no row has is absent.
@@ -503,9 +527,14 @@ pub struct Review {
     /// FH.7b: the client sites still using a name the change removed or
     /// renamed on the server side of a paired exchange (module docs "Name
     /// breaks"), `name_breaks`' order. Advisory: never in `blocking`. Not
-    /// serialised when empty.
+    /// serialised when empty. FH.8d: cut to `max_names`, folded rows first
+    /// when the cut drops a row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub name_breaks: Vec<NameBreak>,
+    /// FH.8d: the name rows the `max_names` cut left out
+    /// (`counts.name_breaks` is the uncut total). Not serialised when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub name_breaks_truncated: usize,
     /// `(rule id, message)`: the working tree's rule errors, plus a rule a
     /// side lists too few rows of to classify (module docs).
     pub check_errors: Vec<(String, String)>,
@@ -796,7 +825,12 @@ fn review_with_intent(
     .rows;
     model_breaks.retain(|m| m.status == "breaking");
     // FH.7b: review's tiers are fact | derived, so no name row blocks.
-    let name_breaks = name_breaks_of(&rev.answer.base, worktree, &rev.after, args.models_min_tier);
+    let mut name_breaks =
+        name_breaks_of(&rev.answer.base, worktree, &rev.after, args.models_min_tier);
+    let names_total = name_breaks.len();
+    let names_blocking = name_breaks.iter().filter(|n| n.blocking).count();
+    // FH.8d: the overview keeps `max_names` rows, folded rows first.
+    let name_breaks_truncated = cap_name_breaks(&mut name_breaks, args.max_names);
 
     let mut edges_by_tier: BTreeMap<&'static str, usize> = BTreeMap::new();
     for e in &edges {
@@ -817,7 +851,7 @@ fn review_with_intent(
         new_violations: new_violations.len(),
         resolved_violations: resolved_violations.len(),
         model_breaks: model_breaks.len(),
-        name_breaks: name_breaks.len(),
+        name_breaks: names_total,
         edges_by_tier,
     };
     let answer = Review {
@@ -833,6 +867,7 @@ fn review_with_intent(
         resolved_violations,
         model_breaks,
         name_breaks,
+        name_breaks_truncated,
         check_errors,
         unanchored,
         conventions,
@@ -847,11 +882,9 @@ fn review_with_intent(
     if !answer.conventions.is_empty() {
         eprintln!("[review] conventions={}", answer.conventions.len());
     }
-    let names_blocking = answer.name_breaks.iter().filter(|n| n.blocking).count();
     eprintln!(
-        "[name-breaks] answer rows={} blocking={names_blocking} advisory={} min_tier={} folded_schema_rows=0->0 surface=review",
-        answer.name_breaks.len(),
-        answer.name_breaks.len() - names_blocking,
+        "[name-breaks] answer rows={names_total} blocking={names_blocking} advisory={} min_tier={} folded_schema_rows=0->0 surface=review",
+        names_total - names_blocking,
         args.models_min_tier,
     );
     Ok(answer)
@@ -1765,8 +1798,8 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         (m, a) => format!(" | {m} model break(s) ({a} advisory)"),
     };
     // FH.7b: only with a name break, so every earlier headline holds.
-    if !r.name_breaks.is_empty() {
-        model_note.push_str(&format!(" | {} name break(s)", r.name_breaks.len()));
+    if c.name_breaks > 0 {
+        model_note.push_str(&format!(" | {} name break(s)", c.name_breaks));
     }
     let mut blocks: Vec<String> = vec![format!(
         "## glia review vs {}\n**{} new violation(s)**{} | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}{model_note}",
@@ -1789,7 +1822,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         && r.new_violations.is_empty()
         && r.resolved_violations.is_empty()
         && r.model_breaks.is_empty()
-        && r.name_breaks.is_empty();
+        && c.name_breaks == 0;
     if unchanged {
         let note = r.impact.absence.as_ref().map_or_else(
             || format!("no graph change vs {}", r.base),
@@ -2016,23 +2049,112 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+/// FH.8d: cut `rows` to `max`, returning how many it left out. A cut keeps
+/// the folded rows first (each stands for many client sites), then by tier
+/// (strongest first), file, line, repo label and normalised name; with
+/// nothing to cut the rows keep `contract_breaks::name_breaks`' order.
+fn cap_name_breaks(rows: &mut Vec<NameBreak>, max: usize) -> usize {
+    if rows.len() <= max {
+        return 0;
+    }
+    let tier = |t: &str| Tier::parse(t).unwrap_or(Tier::Heuristic);
+    rows.sort_by(|a, b| {
+        (
+            a.folded.is_none(),
+            tier(a.tier),
+            &a.file,
+            a.line,
+            &a.repo,
+            &a.normalised,
+        )
+            .cmp(&(
+                b.folded.is_none(),
+                tier(b.tier),
+                &b.file,
+                b.line,
+                &b.repo,
+                &b.normalised,
+            ))
+    });
+    let cut = rows.len() - max;
+    rows.truncate(max);
+    cut
+}
+
+/// FH.8d: where a folded name row (FH.7d, `position` `folded`) stands:
+/// `<N> sites in <M> files (e.g. a, b, c)` from its `client_sites`,
+/// `client_files` and `sample_files`; `None` for a site row, which stands
+/// at its own `file:line`. Plain text: the CLI's `## names` table and
+/// review's `### Name breaks (advisory)` escape it their own way.
+pub fn name_break_sites(n: &NameBreak) -> Option<String> {
+    n.folded?;
+    let sites = n.client_sites.unwrap_or(1);
+    let files = n.client_files.unwrap_or(n.sample_files.len());
+    let mut out = format!("{sites} sites in {files} files");
+    if !n.sample_files.is_empty() {
+        out.push_str(&format!(" (e.g. {})", n.sample_files.join(", ")));
+    }
+    Some(out)
+}
+
+/// FH.8d: the review's JSON, the one serialisation the CLI's `--json` and
+/// pyo3's dict read (in place of `answers::answer_json`, whose line it
+/// extends). fired_on, stderr, once per call:
+/// `[answer-size] surface=review rows=<n> shown=<k> offset=<o> areas=<a>
+/// names=<n> names_shown=<k> tests_shown=<t> bytes=<b> seeds=<s>
+/// seeds_shown=<t> also_in_folded=<f>` (`rows` / `shown` the impact's,
+/// `names` the uncut name rows).
+pub fn review_json(review: &Review) -> serde_json::Result<String> {
+    let text = serde_json::to_string(review)?;
+    eprintln!("{}", answer_size_line(review, text.len()));
+    Ok(text)
+}
+
+fn answer_size_line(r: &Review, bytes: usize) -> String {
+    let size = r.answer_size();
+    format!(
+        "[answer-size] surface=review rows={} shown={} offset={} areas={} names={} names_shown={} tests_shown={} bytes={bytes} seeds={} seeds_shown={} also_in_folded={}",
+        r.counts.impact,
+        r.impact.results.len(),
+        size.offset,
+        size.areas,
+        r.counts.name_breaks,
+        r.name_breaks.len(),
+        r.tests.tests.len(),
+        size.seeds,
+        size.seeds_shown,
+        size.also_in_folded,
+    )
+}
+
 /// `### Name breaks (advisory)` (FH.7b, module docs "Markdown"; only when a
-/// name row exists): one line per client site, cut at `max`.
+/// name row exists): one line per client site, cut at `max` and counted
+/// against `counts.name_breaks` (FH.8d: the uncut total).
 fn name_breaks_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
-    if r.name_breaks.is_empty() {
+    if r.counts.name_breaks == 0 {
         return;
     }
     blocks.push("### Name breaks (advisory)".to_string());
+    name_breaks_table(blocks, &r.name_breaks, r.counts.name_breaks, max);
+}
+
+/// The name rows' table: a site row at its `file:line`, a folded one at
+/// [`name_break_sites`].
+fn name_breaks_table(blocks: &mut Vec<String>, rows: &[NameBreak], total: usize, max: usize) {
     // A review is one repo's: every site is the working tree's file.
-    let lines = r.name_breaks.iter().map(|n| {
+    let lines = rows.iter().map(|n| {
         let name = match &n.renamed_to {
             Some(to) => format!("{} -> {}", code(&n.name), code(to)),
             None => code(&n.name),
         };
+        let place = match name_break_sites(n) {
+            Some(sites) => text(&sites),
+            None => at(Some(&n.file), Some(n.line)),
+        };
         vec![
             name,
             text(n.tier),
-            at(Some(&n.file), Some(n.line)),
+            place,
             text(n.position),
             code(&n.client),
             code(&n.server),
@@ -2042,7 +2164,7 @@ fn name_breaks_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
         blocks,
         &["name", "tier", "at", "position", "client", "server"],
         lines,
-        r.name_breaks.len(),
+        total,
         max,
     );
 }
@@ -2985,5 +3107,105 @@ mod tests {
         for n in [INTENT_FUSION_REVIEW, "H9s50", "LX[IDR,H9s50]"] {
             assert_eq!(flat.order(n), Some(vec![0, 1, 2]), "{n}");
         }
+    }
+
+    /// A name row at `file:line`; `folded` makes it FH.7d's aggregate.
+    fn name_row(file: &str, line: i64, tier: &'static str, folded: bool) -> NameBreak {
+        NameBreak {
+            name: "id".to_string(),
+            normalised: "id".to_string(),
+            renamed_to: Some("ticketId".to_string()),
+            repo: "app".to_string(),
+            file: file.to_string(),
+            line,
+            position: if folded { "folded" } else { "property" },
+            client: "web::rows::pick".to_string(),
+            server: "main::Ticket".to_string(),
+            tier,
+            blocking: false,
+            folded: folded.then_some("generic"),
+            client_sites: folded.then_some(7),
+            client_files: folded.then_some(4),
+            sample_files: if folded {
+                vec!["web/a.ts".into(), "web/b.ts".into(), "web/c.ts".into()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn places(rows: &[NameBreak]) -> Vec<(String, i64)> {
+        rows.iter().map(|n| (n.file.clone(), n.line)).collect()
+    }
+
+    /// FH.8d: a cut keeps folded rows first, then tier, file, line, and
+    /// counts what it dropped; no cut keeps the answer's order.
+    #[test]
+    fn the_name_cap_keeps_folded_rows_first_and_counts_the_rest() {
+        let rows = vec![
+            name_row("web/a.ts", 3, "heuristic", false),
+            name_row("web/b.ts", 9, "derived", false),
+            name_row("web/z.ts", 1, "heuristic", true),
+            name_row("web/a.ts", 1, "heuristic", false),
+        ];
+        let mut uncut = rows.clone();
+        assert_eq!(cap_name_breaks(&mut uncut, 4), 0);
+        assert_eq!(places(&uncut), places(&rows), "no cut, no reorder");
+        let mut all = rows.clone();
+        assert_eq!(cap_name_breaks(&mut all, usize::MAX), 0);
+        assert_eq!(places(&all), places(&rows), "--full keeps the order");
+        let mut cut = rows.clone();
+        assert_eq!(cap_name_breaks(&mut cut, 3), 1);
+        assert_eq!(
+            places(&cut),
+            vec![
+                ("web/z.ts".to_string(), 1),
+                ("web/b.ts".to_string(), 9),
+                ("web/a.ts".to_string(), 1),
+            ]
+        );
+        let mut none = rows;
+        assert_eq!(cap_name_breaks(&mut none, 0), 4);
+        assert!(none.is_empty());
+    }
+
+    /// FH.8d: a folded row reads as its counts and samples, a site row as
+    /// nothing (it stands at its own file:line).
+    #[test]
+    fn a_folded_name_row_names_its_sites() {
+        assert_eq!(
+            name_break_sites(&name_row("web/z.ts", 1, "heuristic", true)).as_deref(),
+            Some("7 sites in 4 files (e.g. web/a.ts, web/b.ts, web/c.ts)")
+        );
+        assert_eq!(
+            name_break_sites(&name_row("web/a.ts", 3, "heuristic", false)),
+            None
+        );
+    }
+
+    /// FH.8d: review's `### Name breaks (advisory)` table prints a folded
+    /// row's counts in its `at` cell and counts the cut against the uncut
+    /// total.
+    #[test]
+    fn the_name_table_prints_a_folded_rows_counts() {
+        let rows = vec![
+            name_row("web/z.ts", 1, "heuristic", true),
+            name_row("web/a.ts", 3, "heuristic", false),
+        ];
+        let mut blocks = Vec::new();
+        name_breaks_table(&mut blocks, &rows, 30, 20);
+        let table = &blocks[0];
+        assert!(
+            table.contains(
+                "| `id` -> `ticketId` | heuristic | 7 sites in 4 files (e.g. web/a.ts, web/b.ts, web/c.ts) | folded | "
+            ),
+            "{table}"
+        );
+        assert!(
+            table.contains("| `id` -> `ticketId` | heuristic | web/a.ts:3 | property | "),
+            "{table}"
+        );
+        assert!(!table.contains("web/z.ts:1"), "{table}");
+        assert_eq!(blocks[1], "_(2 of 30)_");
     }
 }

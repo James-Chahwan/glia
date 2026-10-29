@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
-depth=4, max_tests=50, max_impact=25, models_min_tier="fact", ranking=None,
+depth=4, max_tests=25, max_impact=25, models_min_tier="fact", ranking=None,
 cochange=True, title=None, full=False, offset=0)` builds the git
 rev `base` and the working tree of the repo at `repo_path` and returns the
 engine's review as a native dict {base, counts, changed, impact, tests, edges,
@@ -22,7 +22,11 @@ reduced to {id, change}); full=True lifts every cap (max_impact and
 max_tests included) and writes every row whole; one `[answer-size]
 surface=review ..` line per dict. FH.8c: max_impact defaults to 25, a cut
 impact carries `areas` and `truncated.next`, its rows are slim (`seed_index`),
-and `offset=` skips impact rows (refused with full=True). Needs a `git` binary. Shared
+and `offset=` skips impact rows (refused with full=True). FH.8d: max_tests
+defaults to 25 (it was 50), name_breaks keeps 25 rows (folded rows first,
+`name_breaks_truncated` counting the rest; full=True keeps all), and the
+answer-size line adds names= / names_shown= / tests_shown= before bytes=.
+Needs a `git` binary. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -149,6 +153,11 @@ def main() -> int:
         size = [line for line in err.splitlines() if line.startswith("[answer-size] surface=review ")]
         c.check("FH.8b: one answer-size line per dict, seeds counted",
                 len(size) == 1 and " seeds=" in size[0] and " also_in_folded=" in size[0], err[-600:])
+        tests_shown = len(d.get("tests", {}).get("tests", []))
+        c.check("FH.8d: the answer-size line counts names and shown tests",
+                len(size) == 1 and f" names=0 names_shown=0 tests_shown={tests_shown} bytes=" in size[0],
+                err[-600:])
+        c.check("FH.8d: no name row, no name_breaks_truncated", "name_breaks_truncated" not in d, list(d))
         seed_ids = {s.get("id") for s in d.get("impact", {}).get("seeds", [])}
         c.check("FH.8b: by default a changed row that repeats a shown seed is {id, change}",
                 seed_ids != set()

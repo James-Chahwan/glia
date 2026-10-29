@@ -60,7 +60,9 @@
 //! rev). Then `## names` when a name row exists: `| name | gate | tier | at |
 //! position | client | server |`, one line per client site (`name` the old
 //! name, `` `old` -> `new` `` for a rename; `gate` `blocking` / `advisory`;
-//! `at` the client file's `file:line` in its repo, then ` (<repo>)`). Then
+//! `at` the client file's `file:line` in its repo, then ` (<repo>)`; FH.8d:
+//! a folded row's `<N> sites in <M> files (e.g. a, b, c)`, the engine's
+//! `review::name_break_sites`). Then
 //! `## orphaned clients`, `| client | at | category | was calling
 //! | reason | tier |`, when a client lost its provider. `at` is the working
 //! tree's 1-based `file:line` (LD.1), a removed contract's the rev's, marked
@@ -97,6 +99,8 @@ use glia_engine::contract_breaks::{
     NameBreak, OrphanedClient, SchemaChange, contract_breaks_vs_rev_with,
 };
 use glia_engine::contract_fields::{FieldChange, FieldSide};
+
+use glia_engine::review::name_break_sites;
 
 use crate::cmd::resolve::print_absence;
 use crate::common::build_options;
@@ -356,11 +360,14 @@ fn name_row(n: &NameBreak) -> String {
         None => format!("`{}`", n.name),
     };
     let gate = if n.blocking { "blocking" } else { "advisory" };
+    // FH.8d: a folded row (FH.7d) stands for its sites, not its first one.
+    let place =
+        name_break_sites(n).unwrap_or_else(|| format!("{}:{} ({})", n.file, n.line, n.repo));
     format!(
         "| {} | {gate} | {} | {} | {} | {} | {} |",
         cell(&name),
         n.tier,
-        cell(&format!("{}:{} ({})", n.file, n.line, n.repo)),
+        cell(&place),
         n.position,
         cell(&format!("`{}`", n.client)),
         cell(&format!("`{}`", n.server)),
@@ -575,6 +582,99 @@ mod tests {
         assert_eq!(
             err,
             "unknown models min tier `certain`: expected one of fact, derived, heuristic"
+        );
+    }
+
+    /// A git repo for one test under the temp dir, removed on drop.
+    struct Repo(std::path::PathBuf);
+
+    impl Repo {
+        fn git(&self, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=glia",
+                    "-c",
+                    "user.email=glia@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .arg("-C")
+                .arg(&self.0)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .expect("a git binary");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn write(&self, rel: &str, text: &str) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
+            std::fs::write(path, text).expect("write");
+        }
+    }
+
+    impl Drop for Repo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const TICKET_SERVER: &str = "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\ntype Ticket struct {\n\tID    string `json:\"id\"`\n\tOwner string `json:\"owner\"`\n}\n\nfunc getTicket(c *gin.Context) {\n\tc.JSON(http.StatusOK, Ticket{ID: \"t-1\", Owner: \"ops\"})\n}\n\nfunc main() {\n\tr := gin.Default()\n\tr.GET(\"/api/tickets/:ref\", getTicket)\n\t_ = r.Run(\":8080\")\n}\n";
+    const TICKET_CLIENT: &str = "import axios from 'axios';\n\nexport async function loadTicket(ref: string) {\n  const res = await axios.get(`/api/tickets/${ref}`);\n  return { key: res.data.id };\n}\n";
+    const TICKET_ROWS: &str = "import { loadTicket } from './ticket';\n\nexport async function rows(ref: string) {\n  const t = await loadTicket(ref);\n  const row = { id: t.key };\n  return [row];\n}\n\nexport function pick(items: { key: string }[]): string {\n  const first = items[0].id;\n  const id = first;\n  return id;\n}\n";
+
+    /// FH.8d: a generic rename's free-text sites fold into one row (FH.7d),
+    /// and `## names` prints its counts and sample files where a site row
+    /// prints its `file:line (repo)`.
+    #[test]
+    fn a_folded_name_row_prints_its_counts() {
+        let dir = std::env::temp_dir().join(format!("glia-fh8d-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let repo = Repo(dir);
+        repo.git(&["init", "-q"]);
+        repo.write(
+            "go.mod",
+            "module example.com/tickets\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n",
+        );
+        repo.write("main.go", TICKET_SERVER);
+        repo.write(
+            "package.json",
+            "{\"name\":\"tickets\",\"dependencies\":{\"axios\":\"^1.6.0\"}}\n",
+        );
+        repo.write("web/ticket.ts", TICKET_CLIENT);
+        repo.write("web/rows.ts", TICKET_ROWS);
+        repo.git(&["add", "-A"]);
+        repo.git(&["commit", "-q", "-m", "base"]);
+        repo.write(
+            "main.go",
+            &TICKET_SERVER.replace("`json:\"id\"`", "`json:\"ticketId\"`"),
+        );
+        let path = repo.0.to_str().expect("utf-8 path");
+        let b = contract_breaks_vs_rev_with(path, "HEAD", &[], &ContractBreakArgs::default())
+            .expect("contract breaks");
+        let rows: Vec<String> = b.names.iter().map(name_row).collect();
+        let folded: Vec<&String> = rows.iter().filter(|r| r.contains(" | folded | ")).collect();
+        assert_eq!(folded.len(), 1, "{rows:#?}");
+        assert!(
+            folded[0].starts_with(
+                "| `id` -> `ticketId` | advisory | heuristic | 3 sites in 1 files (e.g. web/rows.ts) | folded | "
+            ),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(" | web/ticket.ts:5 (") && r.contains(" | property | ")),
+            "{rows:#?}"
         );
     }
 
