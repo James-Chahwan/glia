@@ -80,6 +80,20 @@ sys.exit(2 if bad else 0)
 PY
 }
 ROWS=$(rows) || exit 2
+# GLIA_RANK_GATE_ONLY=<label,..>: run and judge only these snapshots (a partial check: its line says so and
+# `ratchet` refuses it). closeout.py uses it for a wave that changed no ranking / answer code (the fast tier);
+# the release's last close-out always runs every snapshot (James 2026-10-30: bring gate times down).
+ONLY=${GLIA_RANK_GATE_ONLY:-}
+if [ -n "$ONLY" ]; then
+  [[ "$ONLY" =~ ^[A-Za-z0-9._,-]+$ ]] || { say "check: FAILED (GLIA_RANK_GATE_ONLY takes labels)"; exit 2; }
+  ROWS=$(while read -r name url rev label flags; do
+    case ",$ONLY," in *",$label,"*) echo "$name $url $rev $label $flags" ;; esac
+  done <<< "$ROWS")
+  [ -n "$ROWS" ] || { say "check: FAILED (GLIA_RANK_GATE_ONLY matched no snapshot: $ONLY)"; exit 2; }
+fi
+# GLIA_RANK_GATE_JOBS=<n>: snapshots run n at a time (default 1, the measured order).
+JOBS=${GLIA_RANK_GATE_JOBS:-1}
+[[ "$JOBS" =~ ^[1-9]$ ]] || { say "check: FAILED (GLIA_RANK_GATE_JOBS takes 1..9)"; exit 2; }
 
 do_fetch() {
   exec 8>"$DIR/.fetch.lock"
@@ -124,20 +138,29 @@ do_run() {
     || { tail -20 "$RUN/build.log"; say "check: FAILED (build rank_eval)"; exit 2; }
   export GLIA_RANK_GATE_HEAD
   GLIA_RANK_GATE_HEAD=$(git -C "$HERE" rev-parse HEAD)
-  while read -r name url rev label flags; do
+  run_one() {
+    local name=$1 url=$2 rev=$3 label=$4; shift 4; local flags="$*" t0 q
     t0=$(date +%s)
     # cwd = run/: anything rank_eval writes by default lands there, never in the repo.
     # shellcheck disable=SC2086
     (cd "$RUN" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${rev:0:12}" --git "$DIR/$name.git" --rev "$rev" \
         --label "$label" $flags "${COMMON[@]}" "${SEMF[@]}" --out "$RUN/$label.json" --md "$RUN/$label.md" \
         --r1md "$RUN/$label.r1.md" --r3md "$RUN/$label.r3.md" 2> "$RUN/$label.log") \
-      || { tail -5 "$RUN/$label.log"; say "check: FAILED (run $label)"; exit 2; }
+      || { tail -5 "$RUN/$label.log"; say "check: FAILED (run $label)"; touch "$RUN/.failed"; return 2; }
     grep -E '^\[rank-parity\] label=[^ ]+ shape=find |^\[sem-eval\] label=[^ ]+ engine queries ' "$RUN/$label.log" || true
     (cd "$RUN" && "$BIN" --gate-trim "$GATE" --gate-new "$RUN/$label.json" --out "$RUN/$label.trim.json" 2> "$RUN/$label.trim.log") \
-      || { cat "$RUN/$label.trim.log"; say "check: FAILED (trim $label)"; exit 2; }
+      || { cat "$RUN/$label.trim.log"; say "check: FAILED (trim $label)"; touch "$RUN/.failed"; return 2; }
     q=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"].get("queries", "?"))' "$RUN/$label.json")
     say "run label=$label queries=$q s=$(( $(date +%s) - t0 ))"
+  }
+  rm -f "$RUN/.failed"
+  while read -r name url rev label flags; do
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+    # shellcheck disable=SC2086
+    run_one "$name" "$url" "$rev" "$label" $flags &
   done <<< "$ROWS"
+  wait
+  [ ! -f "$RUN/.failed" ] || exit 2
 }
 
 labels() { while read -r _ _ _ label _; do echo "$label"; done <<< "$ROWS"; }
@@ -159,9 +182,10 @@ do_check() {
       verdicts+=("$base=$out.json:$rc")
     done
   done
-  python3 -I - "$RUN/last-check.json" "$GLIA_RANK_GATE_HEAD" "${verdicts[@]}" <<'PY'
+  python3 -I - "$RUN/last-check.json" "$GLIA_RANK_GATE_HEAD" "$ONLY" "${verdicts[@]}" <<'PY'
 import json, sys
-dest, head, items = sys.argv[1], sys.argv[2], sys.argv[3:]
+dest, head, only, items = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+partial = f" (partial: only {only})" if only else ""
 rows = gains = 0
 drops, drift, missing, other, labels = [], [], [], [], []
 gain_rows, new = set(), {}
@@ -196,15 +220,15 @@ for it in items:
     if rc not in ("0", "1", "2"):
         other.append(f"{lab} vs {base} exit {rc}")
 ok = not (drops or drift or missing or other)
-json.dump({"ok": ok, "glia_head": head, "labels": labels, "rows": rows, "gains": len(gain_rows),
+json.dump({"ok": ok, "partial": bool(only), "glia_head": head, "labels": labels, "rows": rows, "gains": len(gain_rows),
            "drops": drops, "drift": drift, "missing": missing, "new": new}, open(dest, "w"), indent=1, sort_keys=True)
 if drift:
     print(f"[rank-gate] check: FAILED (drift {', '.join(drift)})"); sys.exit(2)
 if missing or other:
     print(f"[rank-gate] check: FAILED (missing {', '.join(missing + other)})"); sys.exit(2)
 if drops:
-    print(f"[rank-gate] check: FAILED ({len(drops)} drops: {', '.join(drops)})"); sys.exit(1)
-print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops on {len(labels)} snapshots")
+    print(f"[rank-gate] check: FAILED ({len(drops)} drops: {', '.join(drops)}){partial}"); sys.exit(1)
+print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops on {len(labels)} snapshots{partial}")
 PY
   exit $?
 }
@@ -229,6 +253,8 @@ except (OSError, ValueError):
     print(f"[rank-gate] {sys.argv[3]}: FAILED (no last check recorded)"); sys.exit(2)
 if not c.get("ok"):
     print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check was not ok)"); sys.exit(2)
+if c.get("partial"):
+    print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check was partial)"); sys.exit(2)
 if c.get("glia_head") != sys.argv[2]:
     print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check ran at {c.get('glia_head')}, HEAD is {sys.argv[2]})"); sys.exit(2)
 PY

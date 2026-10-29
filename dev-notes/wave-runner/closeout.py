@@ -23,7 +23,7 @@ schedule --verify, render the next wave, commit.
 Prints a DELTA against the previous baseline so an unexpected blind spot,
 partial, forbid violation or missing cell is visible instead of buried.
 """
-import glob, json, os, re, shutil, subprocess, sys
+import glob, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -49,6 +49,16 @@ CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
 # EG.3: a wave whose packet commits touch one of these runs the rank gate (scripts/rank-gate.sh check).
 RANKED_PATHS = ("core/", "code-domain/", "graph/", "parsers/", "engine/", "activation/",
                 "bench/rank-gate/", "scripts/rank-gate.sh")
+# James 2026-10-30 ("experiment quickly to bring the gate times down"): a wave that changed no ranking
+# or answer code runs the rank gate's fast tier, the five small snapshots 3 at a time (measured 136 s
+# against ~13 min for all six; the glia snapshot alone ran 478 s). A wave touching RANK_CODE_PATHS, and
+# the release's last close-out, run every snapshot. A partial check never ratchets.
+RANK_CODE_PATHS = ("engine/src/rank/", "engine/src/intent/", "engine/src/calibrate/", "engine/src/semantic/",
+                   "engine/src/answers.rs", "engine/src/find.rs", "engine/src/diff_impact.rs",
+                   "engine/src/review.rs", "engine/src/pack", "activation/", "embed/",
+                   "code-domain/src/profile.rs", "engine/examples/rank_eval.rs", "bench/rank-gate/",
+                   "scripts/rank-gate.sh")
+RANK_FAST = "shell,websocket,samples,commons-lang,commons-io"
 RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 snapshots); 2x that, at least 7200
 # FH.12: a wave whose packet commits touch one of these runs the cohort gate (scripts/cohort-gate.sh check)
 # after the rank gate: engine / graph / parser / code-domain changes, and the gate's own inputs.
@@ -222,7 +232,10 @@ def main():
     runs = args[1].split(",")
     base = json.loads((HERE / "baseline.json").read_text())
     gates, lines = [], []
-    say = lambda s: (print(s), lines.append(s))
+    t0 = time.time()
+    # stdout carries each step's elapsed wall time (James 2026-10-30: see where a close-out's time goes);
+    # the recorded lines stay as they were.
+    say = lambda s: (print(f"{s}  [t+{int(time.time() - t0)}s]"), lines.append(s))
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
     py = LEAP_PY if (leap or release) else "python3"   # every command that imports the wheel (glia_py)
 
@@ -305,16 +318,19 @@ def main():
         for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
             o, _ = sh(f"git show --name-only --format= {c}")
             touched.update(l.strip() for l in o.splitlines() if l.strip())
-    rank_gate_ok = False
+    rank_gate_ok, rank_line = False, ""
     if (ROOT / "bench/rank-gate/gate.json").exists():
         ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
         if remaining and not ranked:
             say("== [rank-gate] check: skipped - wave touched no ranked path")
         else:
             try:
-                out, _ = sh("bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
+                fast = (remaining and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
+                        and not any(p.startswith(RANK_CODE_PATHS) for p in touched))
+                env = f"GLIA_RANK_GATE_ONLY={RANK_FAST} GLIA_RANK_GATE_JOBS=3 " if fast else ""
+                out, _ = sh(f"{env}bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
                 (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
-                last = (out.strip().splitlines() or [""])[-1]
+                last = rank_line = (out.strip().splitlines() or [""])[-1]
                 say(f"== {last}")
                 rank_gate_ok = last.startswith("[rank-gate] check: ok")
                 if not rank_gate_ok:
@@ -490,8 +506,9 @@ def main():
         out, _ = sh("python3 dev-notes/wave-runner/usage_gate.py")
         say("== usage for the next wave: " + out.strip().replace("\n", " | "))
 
-    if not gates and rank_gate_ok:
-        # The ratchet: the green check's trims become baseline/current (only the moved ones).
+    if not gates and rank_gate_ok and "(partial: only" not in rank_line:
+        # The ratchet: the green check's trims become baseline/current (only the moved ones); a
+        # fast-tier (partial) check never ratchets.
         out, rc = sh("bash scripts/rank-gate.sh ratchet 2>&1")
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:

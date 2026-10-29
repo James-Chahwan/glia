@@ -118,6 +118,10 @@ A wave's close-out runs the cohort gate's fast tier only (`--only` closeout.py's
 the eight cohort repos that cost minutes, plus the whole Sibyl cover); the full cohort (about
 1h40m, twenty and medusa most of it) runs at the release's last close-out, before a paid run, or
 with `GLIA_COHORT_GATE_FULL=1` (James 2026-10-26: *"2 hours is crazy ... fine for ... release"*).
+The rank gate has the same split: a wave that changed no ranking or answer code (closeout.py's
+`RANK_CODE_PATHS`) runs its fast tier, the five small snapshots 3 at a time (`GLIA_RANK_GATE_ONLY`,
+`GLIA_RANK_GATE_JOBS`; measured 136 s against ~13 min for all six); a wave touching ranking code, the
+release's last close-out and `GLIA_RANK_GATE_FULL=1` run every snapshot. A partial check never ratchets.
 A close-out that cannot afford the cohort run sets `GLIA_COHORT_GATE_SKIP=<reason>`: the record
 says `check: skipped - <reason>`, never a silent pass, and a skip fails the release's last
 close-out. Reading a failure: the FAILED line names each drop (`immich/http/client_reach
