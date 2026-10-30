@@ -107,7 +107,8 @@ use crate::build::lang_build::{
 use crate::build::rpc_needles::RpcContext;
 use crate::build::timing::{self, BuildTimes, PhaseTimes};
 use crate::build::{
-    BuildOptions, Finished, GenerateResult, aux_graphs, finish_build, go_modules_for,
+    BuildOptions, Finished, GenerateResult, aux_graphs, finish_build, go_module_dirs,
+    go_modules_for,
 };
 use crate::cache::{ParseCache, parse_fingerprint};
 use crate::calibrate::record::CALIBRATION_DIR;
@@ -1531,6 +1532,7 @@ fn build(
         recv_fields,
     } = plan_groups(std::mem::take(&mut g.parses_by_lang), label);
     let keys: Vec<&'static str> = groups.iter().map(|group| group.key).collect();
+    let go_module_dirs = go_module_dirs(&setup.go);
     let group_ctx = GroupCtx {
         repo: setup.repo,
         repo_label: label,
@@ -1538,6 +1540,7 @@ fn build(
         ts_aliases: &setup.ts_aliases,
         c_includes: &setup.c_includes,
         dart_packages: &g.dart_packages,
+        go_module_dirs: &go_module_dirs,
     };
     // DC.7b: the group fingerprints, then a clone of each matching cached
     // build OUT into its reuse slot.
@@ -1654,7 +1657,8 @@ fn group_fingerprints(
 /// the Cargo packages for `rust` (`build_rust`), the include roots for
 /// `c_cpp` (`build_c_cpp`'s resolver), the own Dart packages for `dart`
 /// (`resolve_dart_source`), the tsconfig aliases for the TS family's group
-/// (`build_typescript_family`); 0 for every other group. Each is hashed
+/// (`build_typescript_family`), the go.mod root dirs for `go`
+/// (`build_go_with`'s cross-module gate, FD.81); 0 for every other group. Each is hashed
 /// through its `Debug`, which holds only strings, vecs, options, ordered maps
 /// and counts, so it is a pure function of the content (`DartPackages`' own
 /// resolved-URI counter is in it too: a count left over could only cost a
@@ -1672,11 +1676,13 @@ fn hidden_fp(key: &str, ctx: &GroupCtx<'_>) -> u64 {
         ts_aliases,
         c_includes,
         dart_packages,
+        go_module_dirs,
     } = *ctx;
     let debug = match key {
         "rust" => format!("{rust_crates:?}"),
         "c_cpp" => format!("{c_includes:?}"),
         "dart" => format!("{dart_packages:?}"),
+        "go" => format!("{go_module_dirs:?}"),
         _ if TS_FAMILY.contains(&key) => format!("{ts_aliases:?}"),
         _ => return 0,
     };

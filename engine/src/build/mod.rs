@@ -814,6 +814,17 @@ pub(crate) fn go_modules_for(root: &Path, roots: &[ProjectRoot], repo_label: &st
     go
 }
 
+/// FD.81: the repo-relative root dirs of `go`'s modules (`/`-separated, `""`
+/// for the repo root), sorted and deduped: the Go build group's
+/// [`lang_build::GroupCtx::go_module_dirs`], which `glia_graph::build_go_with`'s
+/// implicit-IMPLEMENTS pass reads to keep a pair inside one module.
+pub(crate) fn go_module_dirs(go: &GoModules) -> Vec<String> {
+    let mut dirs: Vec<String> = go.iter().map(|(dir, _)| dir.to_string()).collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 /// The `module` path of `<dir>/go.mod` (`module example.com/svc`, also quoted
 /// or with a trailing `//` comment), or `None` without a go.mod or a module
 /// line.
@@ -1353,6 +1364,7 @@ mod stage_tests {
         let plan = plan_groups(std::mem::take(&mut grafted.parses_by_lang), repo_path);
         let plan_keys: Vec<&'static str> = plan.groups.iter().map(|g| g.key).collect();
         let slots: Vec<Option<LangBuild>> = plan_keys.iter().map(|k| reuse(k)).collect();
+        let go_module_dirs = go_module_dirs(&go);
         let group_ctx = GroupCtx {
             repo,
             repo_label: repo_path,
@@ -1360,6 +1372,7 @@ mod stage_tests {
             ts_aliases: &ts_aliases,
             c_includes: &c_includes,
             dart_packages: &grafted.dart_packages,
+            go_module_dirs: &go_module_dirs,
         };
         let builds = build_groups(plan.groups, slots, &group_ctx);
         let kept = builds.clone();

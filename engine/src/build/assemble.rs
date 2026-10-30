@@ -439,6 +439,7 @@ pub(super) fn build_graphs_for_repo(
         di_refs,
         recv_fields,
     } = lang_build::plan_groups(std::mem::take(&mut grafted.parses_by_lang), ctx.repo_label);
+    let go_module_dirs = super::go_module_dirs(ctx.go);
     let group_ctx = GroupCtx {
         repo: ctx.repo,
         repo_label: ctx.repo_label,
@@ -446,6 +447,7 @@ pub(super) fn build_graphs_for_repo(
         ts_aliases: ctx.ts_aliases,
         c_includes: ctx.c_includes,
         dart_packages: &grafted.dart_packages,
+        go_module_dirs: &go_module_dirs,
     };
     // A clean build reuses nothing: every group is built.
     let reuse: Vec<Option<LangBuild>> = Vec::new();

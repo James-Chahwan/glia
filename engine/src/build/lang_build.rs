@@ -100,6 +100,10 @@ pub(crate) struct GroupCtx<'a> {
     /// The repo's own Dart packages, the Dart import resolver's input
     /// ([`resolve_dart_source`], DF.4a).
     pub(crate) dart_packages: &'a DartPackages,
+    /// FD.81: the repo's go.mod root dirs (`super::go_module_dirs`),
+    /// `glia_graph::build_go_with`'s input: implicit IMPLEMENTS stays inside
+    /// one Go module.
+    pub(crate) go_module_dirs: &'a [String],
 }
 
 /// What [`fold_groups`] hands back.
@@ -351,11 +355,12 @@ fn build_solo(
         rust_crates,
         c_includes,
         dart_packages,
+        go_module_dirs,
         ..
     } = *ctx;
     match lang {
         "python" => glia_graph::build_python(repo, parses),
-        "go" => glia_graph::build_go(repo, parses),
+        "go" => glia_graph::build_go_with(repo, parses, go_module_dirs),
         "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" => {
             glia_graph::build_dotted(repo, parses)
         }
@@ -2829,6 +2834,7 @@ mod workspace_tests {
             ts_aliases: &aliases,
             c_includes: &IncludeRoots::default(),
             dart_packages: &DartPackages::default(),
+            go_module_dirs: &[],
         };
         let build = build_one_group(
             GroupInput {

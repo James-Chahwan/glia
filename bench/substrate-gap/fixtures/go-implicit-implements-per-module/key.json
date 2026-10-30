@@ -1,0 +1,57 @@
+{
+  "framework": "go-implicit-implements-per-module",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.81 (edge audit FD.3c, IMPLEMENTS|derived cluster G1), microservices-demo's shape: src/checkoutservice and src/frontend are separate Go modules (each a go.mod), each with its own genproto package declaring CartServiceClient and cartServiceClient over package-local message types. Implicit IMPLEMENTS stays inside each module; frontend/conn's Price satisfies checkoutservice/money's Formatter across modules through an import with predeclared-only signatures, and keeps its edge. Baseline HEAD c4152966 (debug CLI): the 4 forbid rows fire (plus their method-level same_name twins).",
+  "expect_edges": [
+    {
+      "from": "src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient",
+      "to": "src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "src::frontend::genproto::demo_grpc.pb::cartServiceClient",
+      "to": "src::frontend::genproto::demo_grpc.pb::CartServiceClient",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "src::frontend::genproto::demo_grpc.pb::cartServiceClient::GetCart",
+      "to": "src::frontend::genproto::demo_grpc.pb::CartServiceClient::GetCart",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "src::frontend::conn::conn::Price",
+      "to": "src::checkoutservice::money::money::Formatter",
+      "category": "IMPLEMENTS",
+      "note": "cross-module, imported, predeclared-only signatures: kept"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient",
+      "to": "src::frontend::genproto::demo_grpc.pb::CartServiceClient",
+      "category": "IMPLEMENTS",
+      "note": "G1 method_signature across go.mods"
+    },
+    {
+      "from": "src::frontend::genproto::demo_grpc.pb::cartServiceClient",
+      "to": "src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient",
+      "category": "IMPLEMENTS",
+      "note": "G1 method_signature across go.mods"
+    },
+    {
+      "from": "src::frontend::genproto::demo_grpc.pb::cartServiceClient::GetCart",
+      "to": "src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient::GetCart",
+      "category": "IMPLEMENTS",
+      "note": "G1 same_name rides on the type pair"
+    },
+    {
+      "from": "src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient::AddItem",
+      "to": "src::frontend::genproto::demo_grpc.pb::CartServiceClient::AddItem",
+      "category": "IMPLEMENTS",
+      "note": "G1 same_name rides on the type pair"
+    }
+  ]
+}

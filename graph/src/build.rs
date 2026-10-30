@@ -112,7 +112,26 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// receiver facts, the model written into the cell, a handler -USES-> STRUCT
 /// edge drawn, and every Go STRUCT's SCHEMA_FIELDS field typed the same way
 /// (`go_wire`); `[go-wire] resolved` prints what it found.
+///
+/// Builds with no Go module roots known: [`build_go_with`] with `&[]`, so the
+/// FD.81 cross-module gate of the implicit-IMPLEMENTS pass never applies.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
+    build_go_with(repo, parses, &[])
+}
+
+/// [`build_go`] given the repo's Go module roots (FD.81): `go_module_dirs`
+/// holds each go.mod's repo-relative directory, `/`-separated, `""` for the
+/// repo root. The implicit-IMPLEMENTS pass then keeps a type and an interface
+/// of two different nearest module roots paired only when every signature
+/// was compared and none names a type both sides' packages declare: two
+/// modules' copies of one generated package declare distinct types that
+/// share their text. `[iface] go implicit filtered: .. cross_module=<c>`
+/// counts the pairs dropped. An empty slice is [`build_go`].
+pub fn build_go_with(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    go_module_dirs: &[String],
+) -> Result<RepoGraph, GraphError> {
     let GoPasses {
         g,
         split,
@@ -125,7 +144,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
         aliases,
         wire,
         values,
-    } = build_go_passes(repo, parses);
+    } = build_go_passes_with(repo, parses, &GoModuleRoots::new(go_module_dirs));
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
@@ -241,7 +260,15 @@ struct GoPasses {
     values: ValueStats,
 }
 
-/// [`build_go`]'s passes, returning the stats its markers print.
+/// [`build_go_passes_with`] with no Go module roots known, for the tests.
+#[cfg(test)]
+fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
+    build_go_passes_with(repo, parses, &GoModuleRoots::default())
+}
+
+/// [`build_go_with`]'s passes, returning the stats its markers print.
+/// `modules` (the repo's go.mod roots) is read only by the
+/// implicit-IMPLEMENTS pass's cross-module gate (FD.81).
 ///
 /// CI.2a: the embed refs (interface and struct) bind right after the symbol
 /// table, before any import or call pass, so the call hook reads the
@@ -249,7 +276,7 @@ struct GoPasses {
 /// the ImportStmts, so no binding moves. Their edges and unbound refs are
 /// pushed where LD.7b pushed them, after `resolve_refs`, so a graph without a
 /// struct embed keeps its edge and `unresolved_refs` order.
-fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
+fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModuleRoots) -> GoPasses {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
@@ -287,7 +314,7 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     // CI.6: the signatures name an in-repo type alias by its target before
     // CA.3b compares them (and CI.2b's promoted method sets read them).
     let aliases = resolve_go_alias_sigs(&mut g, &packages);
-    let mut implicit = emit_go_implicit_implements(&mut g, &packages);
+    let mut implicit = emit_go_implicit_implements(&mut g, &packages, modules);
     // CI.2b: a type-level edge's interface method the type does not declare
     // pairs with the METHOD its embed promotes, when a STRUCT declares it (a
     // method promoted from an embedded interface is an interface METHOD, and
@@ -3586,6 +3613,129 @@ fn go_ev(rule: &str) -> Evidence {
 /// unknown.
 const GO_PREDECLARED_IFACES: &[(&str, &[(&str, &str)])] = &[("error", &[("Error", "()(string)")])];
 
+/// FD.81: the Go predeclared types a CA.3a signature can name. None of them
+/// is a package's own type, so a cross-module pair whose signatures name only
+/// these (and imported types) keeps its edge.
+const GO_PREDECLARED_TYPES: &[&str] = &[
+    "any",
+    "bool",
+    "byte",
+    "comparable",
+    "complex64",
+    "complex128",
+    "error",
+    "float32",
+    "float64",
+    "int",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "rune",
+    "string",
+    "uint",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "uintptr",
+];
+
+/// FD.81: the words a CA.3a signature shape spells that name no type.
+const GO_SHAPE_KEYWORDS: &[&str] = &["chan", "func", "interface", "map", "struct"];
+
+/// FD.81: the identifier tokens of a CA.3a normalised signature
+/// (`(Context,*AddItemRequest,...CallOption)(*Empty,error)` -> `Context`,
+/// `AddItemRequest`, `CallOption`, `Empty`, `error`) that may name a type:
+/// every maximal run of letters, digits and `_` not starting with a digit
+/// (an array length), less the shape keywords ([`GO_SHAPE_KEYWORDS`]) and
+/// the predeclared types ([`GO_PREDECLARED_TYPES`]). CA.3a dropped every
+/// package qualifier, so whether a token was written `pkg.T` or `T` is read
+/// from the declaring packages instead ([`GoModuleRoots::local_types`]).
+fn go_sig_type_tokens(sig: &str) -> impl Iterator<Item = &str> {
+    sig.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|t| t.chars().next().is_some_and(|c| !c.is_ascii_digit()))
+        .filter(|t| !GO_SHAPE_KEYWORDS.contains(t) && !GO_PREDECLARED_TYPES.contains(t))
+}
+
+/// FD.81: a repo's Go module roots as package-dir qname prefixes, the input
+/// of the implicit-IMPLEMENTS pass's cross-module gate. Empty when the build
+/// knows no go.mod ([`build_go`]), and the gate is then off.
+#[derive(Debug, Default)]
+struct GoModuleRoots {
+    /// Each go.mod's directory as a qname (`src::frontend`, `""` at the
+    /// repo root), sorted and deduped.
+    roots: Vec<String>,
+}
+
+impl GoModuleRoots {
+    /// From the repo-relative go.mod dirs (`/`-separated, `""` or `.` for the
+    /// repo root).
+    fn new(dirs: &[String]) -> Self {
+        let mut roots: Vec<String> = dirs
+            .iter()
+            .map(|d| {
+                d.split(['/', '\\'])
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+            .collect();
+        roots.sort();
+        roots.dedup();
+        Self { roots }
+    }
+
+    /// The nearest module root of the package dir `dir` (a `::` qname): the
+    /// longest root equal to `dir` or a whole-segment prefix of it, `None`
+    /// when no root encloses it (or none is known).
+    fn module_of(&self, dir: &str) -> Option<&str> {
+        self.roots
+            .iter()
+            .filter(|r| {
+                r.is_empty()
+                    || dir == r.as_str()
+                    || dir
+                        .strip_prefix(r.as_str())
+                        .is_some_and(|rest| rest.starts_with("::"))
+            })
+            .max_by_key(|r| r.len())
+            .map(String::as_str)
+    }
+
+    /// Package dir -> the type names it declares (its STRUCT and INTERFACE
+    /// nodes: a Go defined type of another shape mints no node), read once
+    /// per graph when a root is known, else empty. A signature token one of
+    /// these names was written unqualified in that package: a Go type name
+    /// without a qualifier is the package's own (or predeclared).
+    fn local_types<'g>(&self, nav: &'g CodeNav) -> HashMap<&'g str, HashSet<&'g str>> {
+        let mut by_dir: HashMap<&'g str, HashSet<&'g str>> = HashMap::new();
+        if self.roots.is_empty() {
+            return by_dir;
+        }
+        for (id, kind) in &nav.kind_by_id {
+            if *kind != node_kind::STRUCT && *kind != node_kind::INTERFACE {
+                continue;
+            }
+            let Some(parent) = nav.parent_of.get(id) else {
+                continue;
+            };
+            if nav.kind_by_id.get(parent) != Some(&node_kind::MODULE) {
+                continue;
+            }
+            let (Some(module), Some(name)) = (nav.qname_by_id.get(parent), nav.name_by_id.get(id))
+            else {
+                continue;
+            };
+            by_dir
+                .entry(go_package_dir(module))
+                .or_default()
+                .insert(name.as_str());
+        }
+        by_dir
+    }
+}
+
 /// What [`emit_go_implicit_implements`] did to one Go graph.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct GoImplicitStats {
@@ -3611,6 +3761,11 @@ struct GoImplicitStats {
     /// Pairs rejected by the reachability gate with a side in a `_test.go`
     /// file.
     test_side: usize,
+    /// FD.81: pairs of a type and an interface of two different Go module
+    /// roots rejected because a signature was not compared, or a compared
+    /// signature names a type both sides' packages declare (two modules'
+    /// copies of one package: distinct types sharing their text).
+    cross_module: usize,
     /// Edges pushed whose every method signature was compared (EVIDENCE rule
     /// `method_signature`; the rest keep `method_set`).
     signature_checked: usize,
@@ -3639,15 +3794,16 @@ impl GoImplicitStats {
 
     /// CA.3b fired_on, after [`GoImplicitStats::marker`]: `[iface] go implicit
     /// filtered: signature=S scope=P (one_method=O test_side=X)
-    /// signature_checked=K`.
+    /// cross_module=C signature_checked=K` (FD.81 added `cross_module=`).
     fn filtered_marker(&self) -> String {
         format!(
             "[iface] go implicit filtered: signature={} scope={} (one_method={} test_side={}) \
-             signature_checked={}",
+             cross_module={} signature_checked={}",
             self.signature,
             self.one_method + self.test_side,
             self.one_method,
             self.test_side,
+            self.cross_module,
             self.signature_checked,
         )
     }
@@ -4178,6 +4334,18 @@ struct Have<'g> {
     src: HaveSrc,
 }
 
+/// One method of an interface's set in [`emit_go_implicit_implements`]: the
+/// interface METHOD declaring it (the first in the embed walk), or a
+/// predeclared interface's method ([`GO_PREDECLARED_IFACES`]).
+#[derive(Clone, Copy)]
+struct Want<'g> {
+    /// CA.3a's normalised signature, `None` when the parse recorded none.
+    sig: Option<&'g str>,
+    /// FD.81: the package (directory) of the declaring interface, `None` for
+    /// a predeclared interface's method.
+    dir: Option<&'g str>,
+}
+
 /// One name-covering pair [`emit_go_implicit_implements`] keeps.
 struct ImplicitPair {
     ty: NodeId,
@@ -4258,6 +4426,7 @@ struct ImplicitPair {
 fn emit_go_implicit_implements(
     g: &mut RepoGraph,
     packages: &GoPackages,
+    modules: &GoModuleRoots,
 ) -> Option<GoImplicitStats> {
     let ifaces: Vec<NodeId> = g
         .nodes
@@ -4280,6 +4449,13 @@ fn emit_go_implicit_implements(
                 return None;
             }
             nav.qname_by_id.get(parent).map(|q| go_package_dir(q))
+        };
+        // FD.81: the type names each package declares, read only when the
+        // build knows a module root.
+        let local_types = modules.local_types(nav);
+        let declares = |dir: Option<&str>, name: &str| {
+            dir.and_then(|d| local_types.get(d))
+                .is_some_and(|names| names.contains(name))
         };
 
         let mut embeds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -4398,9 +4574,9 @@ fn emit_go_implicit_implements(
 
         for &iface in &ifaces {
             // (method name, declaring package when the name is unexported) ->
-            // the signature of the interface METHOD declaring it (the first
-            // in the embed walk), `None` when unknown.
-            let mut set: BTreeMap<(&str, Option<&str>), Option<&str>> = BTreeMap::new();
+            // the interface METHOD declaring it (the first in the embed
+            // walk): its signature and package.
+            let mut set: BTreeMap<(&str, Option<&str>), Want> = BTreeMap::new();
             let mut visited: HashSet<NodeId> = HashSet::new();
             let mut stack = vec![iface];
             let mut known = true;
@@ -4421,11 +4597,16 @@ fn emit_go_implicit_implements(
                         known = false;
                         break 'walk;
                     };
-                    set.entry(key)
-                        .or_insert_with(|| nav.method_sigs.get(mid).map(String::as_str));
+                    set.entry(key).or_insert_with(|| Want {
+                        sig: nav.method_sigs.get(mid).map(String::as_str),
+                        dir: pkg_of(&i),
+                    });
                 }
                 for &(name, sig) in predeclared.get(&i).into_iter().flatten() {
-                    set.entry((name, None)).or_insert(Some(sig));
+                    set.entry((name, None)).or_insert(Want {
+                        sig: Some(sig),
+                        dir: None,
+                    });
                 }
                 stack.extend(embeds.get(&i).into_iter().flatten().copied());
             }
@@ -4448,6 +4629,8 @@ fn emit_go_implicit_implements(
             // to every pair of this interface (a one-method set).
             let iface_side = packages.side(g, iface);
             let one_method = set.len() == 1;
+            // FD.81: the interface's nearest module root.
+            let iface_module = pkg_of(&iface).and_then(|d| modules.module_of(d));
             for &ty in candidates {
                 let Some(methods) = have_sets.get(&ty) else {
                     continue;
@@ -4465,7 +4648,7 @@ fn emit_go_implicit_implements(
                 // R1: signatures, where both sides recorded one.
                 let mut checked = true;
                 let mut differs = false;
-                for (&(name, _), &sig_i) in &set {
+                for (&(name, _), &Want { sig: sig_i, .. }) in &set {
                     let sig_t = methods.get(name).and_then(|h| h.sig);
                     match (sig_i, sig_t) {
                         (Some(a), Some(b)) if a != b => {
@@ -4479,6 +4662,40 @@ fn emit_go_implicit_implements(
                 if differs {
                     stats.signature += 1;
                     continue;
+                }
+                // FD.81: a type and an interface of two different module
+                // roots pair only when every signature was compared and none
+                // names a type BOTH sides' declaring packages declare. CA.3a
+                // dropped the qualifiers, so a token declared in a package
+                // was written unqualified there: two modules' copies of one
+                // generated package (`*GetCartRequest` in each) are distinct
+                // types sharing their text, while a type written `money.T`
+                // on one side and `T` in money itself may be one type.
+                let cross = match (pkg_of(&ty).and_then(|d| modules.module_of(d)), iface_module) {
+                    (Some(t), Some(i)) => t != i,
+                    _ => false,
+                };
+                if cross {
+                    let local = !checked
+                        || set.iter().any(
+                            |(
+                                &(name, _),
+                                &Want {
+                                    sig: sig_i,
+                                    dir: dir_i,
+                                },
+                            )| {
+                                let dir_t = methods.get(name).and_then(|h| h.dir);
+                                sig_i.is_some_and(|sig| {
+                                    go_sig_type_tokens(sig)
+                                        .any(|t| declares(dir_i, t) && declares(dir_t, t))
+                                })
+                            },
+                        );
+                    if local {
+                        stats.cross_module += 1;
+                        continue;
+                    }
                 }
                 // R2: an import path, for a one-method set or a test side.
                 if let (Some(t), Some(i)) = (packages.side(g, ty), iface_side)
@@ -6942,7 +7159,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=2 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=2"
+                 cross_module=0 signature_checked=2"
             )
         );
     }
@@ -6964,7 +7181,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=0"
+                 cross_module=0 signature_checked=0"
             )
         );
 
@@ -7003,7 +7220,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=1 (one_method=1 test_side=0) \
-                 signature_checked=0"
+                 cross_module=0 signature_checked=0"
             )
         );
 
@@ -7026,7 +7243,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=1"
+                 cross_module=0 signature_checked=1"
             )
         );
 
@@ -7176,7 +7393,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=1"
+                 cross_module=0 signature_checked=1"
             )
         );
     }
@@ -7210,8 +7427,173 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=1 (one_method=1 test_side=0) \
-                 signature_checked=1"
+                 cross_module=0 signature_checked=1"
             )
+        );
+    }
+
+    // ---- FD.81: implicit IMPLEMENTS stays inside one Go module ------------
+
+    /// Two modules `m1` / `m2`, each with its own `gen` package declaring
+    /// `Req` and `Client { Do(*Req) (*Req, error); Name() string }` and a
+    /// `client` implementing it; `m1/other` declares its own `Req` and an
+    /// `impl` of the same text; `m2/use`'s `Adapter` names `m1`'s `gen.Req`
+    /// through an import (no `Req` of its own); `m1/money`'s `Formatter` has
+    /// predeclared-only signatures, implemented by `m2/conn`'s `Price` and by
+    /// `m2/box`'s generic `Box` (whose signatures record none).
+    fn module_iface_sources() -> Vec<FileParse> {
+        let gen_go = "package gen\n\ntype Req struct{}\n\n\
+                      type Client interface {\n\tDo(r *Req) (*Req, error)\n\tName() string\n}\n\n\
+                      type client struct{}\n\n\
+                      func (c *client) Do(r *Req) (*Req, error) { return r, nil }\n\
+                      func (c *client) Name() string { return \"\" }\n";
+        let other = "package other\n\ntype Req struct{}\n\ntype impl struct{}\n\n\
+                     func (i *impl) Do(r *Req) (*Req, error) { return r, nil }\n\
+                     func (i *impl) Name() string { return \"\" }\n";
+        let adapter = "package use\n\nimport \"example.com/m1/gen\"\n\n\
+                       type Adapter struct{}\n\n\
+                       func (a *Adapter) Do(r *gen.Req) (*gen.Req, error) { return r, nil }\n\
+                       func (a *Adapter) Name() string { return \"\" }\n";
+        let money = "package money\n\ntype Formatter interface {\n\tFormat(units int64) string\n\
+                     \tCurrency() string\n}\n";
+        let price = "package conn\n\ntype Price struct{}\n\n\
+                     func (p *Price) Format(units int64) string { return \"\" }\n\
+                     func (p *Price) Currency() string { return \"\" }\n";
+        let boxed = "package box\n\ntype Box[T any] struct{}\n\n\
+                     func (b *Box[T]) Format(units int64) string { return \"\" }\n\
+                     func (b *Box[T]) Currency() string { return \"\" }\n";
+        go_sources(&[
+            ("m1/gen/gen.go", gen_go),
+            ("m2/gen/gen.go", gen_go),
+            ("m1/other/other.go", other),
+            ("m2/use/use.go", adapter),
+            ("m1/money/money.go", money),
+            ("m2/conn/conn.go", price),
+            ("m2/box/box.go", boxed),
+        ])
+    }
+
+    /// The IMPLEMENTS pairs (type qname, interface qname) of `g`, sorted.
+    fn implements_qnames(g: &RepoGraph) -> Vec<(String, String)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut pairs: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .map(|e| (q(&e.from), q(&e.to)))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    /// FD.81: with the module roots known, a type and an interface of two
+    /// modules pair only when every signature was compared and none names a
+    /// type both sides' packages declare. Same-module pairs, an imported
+    /// type named on one side only and predeclared-only signatures keep
+    /// their edge; with no roots ([`build_go`]) nothing moves.
+    #[test]
+    fn go_implicit_cross_module_pairs_need_shared_types() {
+        let roots = GoModuleRoots::new(&["m1".to_string(), "m2/".to_string()]);
+        let GoPasses { g, implicit, .. } =
+            build_go_passes_with(repo(), module_iface_sources(), &roots);
+        let pair = |t: &str, i: &str| (t.to_string(), i.to_string());
+        let type_level: Vec<(String, String)> = implements_qnames(&g)
+            .into_iter()
+            .filter(|(t, _)| t.matches("::").count() == 3)
+            .collect();
+        assert_eq!(
+            type_level,
+            vec![
+                pair("m1::gen::gen::client", "m1::gen::gen::Client"),
+                pair("m1::other::other::impl", "m1::gen::gen::Client"),
+                pair("m2::conn::conn::Price", "m1::money::money::Formatter"),
+                pair("m2::gen::gen::client", "m2::gen::gen::Client"),
+                pair("m2::use::use::Adapter", "m1::gen::gen::Client"),
+                pair("m2::use::use::Adapter", "m2::gen::gen::Client"),
+            ]
+        );
+        // The method-level pairs ride on the type-level ones: no
+        // cross-module copy pair is left at either level.
+        let all = implements_qnames(&g);
+        assert!(all.contains(&pair(
+            "m1::gen::gen::client::Do",
+            "m1::gen::gen::Client::Do"
+        )));
+        assert!(!all.contains(&pair(
+            "m1::gen::gen::client::Do",
+            "m2::gen::gen::Client::Do"
+        )));
+        assert!(!all.contains(&pair(
+            "m2::gen::gen::client::Name",
+            "m1::gen::gen::Client::Name"
+        )));
+        assert!(all.contains(&pair(
+            "m2::conn::conn::Price::Format",
+            "m1::money::money::Formatter::Format"
+        )));
+        assert_eq!(
+            filtered(&implicit).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
+                 cross_module=4 signature_checked=6"
+            )
+        );
+
+        // No module roots: every name-and-signature match stands.
+        let (g, stats) = go_implicit(module_iface_sources());
+        assert_eq!(
+            implements_qnames(&g)
+                .iter()
+                .filter(|(t, _)| t.matches("::").count() == 3)
+                .count(),
+            10
+        );
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
+                 cross_module=0 signature_checked=9"
+            )
+        );
+        assert_eq!(
+            build_go(repo(), module_iface_sources()).unwrap().edges,
+            build_go_with(repo(), module_iface_sources(), &[])
+                .unwrap()
+                .edges
+        );
+        // One module root around both sides: nothing is cross-module.
+        let one = build_go_with(repo(), module_iface_sources(), &[String::new()]).unwrap();
+        assert_eq!(implements_qnames(&one), implements_qnames(&g));
+    }
+
+    /// FD.81: a package dir's nearest module root is the longest root that
+    /// is the dir or a whole-segment prefix of it; the signature tokens are
+    /// the type names, less the predeclared types and the shape keywords.
+    #[test]
+    fn go_module_roots_and_signature_tokens() {
+        let roots = GoModuleRoots::new(&[
+            String::new(),
+            "svc".to_string(),
+            "svc/api/v2".to_string(),
+            "./tools/".to_string(),
+        ]);
+        assert_eq!(roots.module_of("svc::internal"), Some("svc"));
+        assert_eq!(roots.module_of("svc"), Some("svc"));
+        assert_eq!(roots.module_of("svc-b::client"), Some(""));
+        assert_eq!(roots.module_of("svc::api::v2::users"), Some("svc::api::v2"));
+        assert_eq!(roots.module_of("tools"), Some("tools"));
+        assert_eq!(roots.module_of(""), Some(""));
+        let nested = GoModuleRoots::new(&["svc".to_string()]);
+        assert_eq!(nested.module_of("web"), None);
+        assert_eq!(GoModuleRoots::default().module_of("svc"), None);
+        let tokens: Vec<&str> = go_sig_type_tokens(
+            "(Context,*AddItemRequest,...CallOption,map[string][]*Item,[4]byte,func(int)error,\
+             <-chan(struct{}))(*Empty,error)",
+        )
+        .collect();
+        assert_eq!(
+            tokens,
+            vec!["Context", "AddItemRequest", "CallOption", "Item", "Empty"]
         );
     }
 
