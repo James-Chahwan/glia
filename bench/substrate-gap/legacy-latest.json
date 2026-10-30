@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 445,
+  "fixtures": 447,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1622,6 +1622,20 @@
       "framework": "openapi-pact-fields",
       "language": "yaml+json",
       "per_category": {}
+    },
+    "org-packages-go": {
+      "framework": "org-packages",
+      "language": "go",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "org-packages-npm": {
+      "framework": "org-packages",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
     },
     "overlay-declared-cells": {
       "framework": "overlay-declared-cells",

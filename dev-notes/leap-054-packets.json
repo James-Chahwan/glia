@@ -8375,7 +8375,9 @@
     "FH.21",
     "FH.22",
     "FH.23",
-    "FD.3d"
+    "FD.3d",
+    "FH.24",
+    "FH.25"
    ],
    "risks": "Runs after the last follow-up wave (seed \u00a74: followups finish inside 0.5.4; the release docs packet runs last). Large prose diff: write per section and keep 0.5.3's text. The version bump is NOT this packet: it is the release step after FZ (James's rule).",
    "spec_group": "FZ"
@@ -8522,7 +8524,9 @@
     "FH.21",
     "FH.22",
     "FH.23",
-    "FD.3d"
+    "FD.3d",
+    "FH.24",
+    "FH.25"
    ],
    "risks": "Written after the last follow-up wave from landed results, never from packet text. The Engram ask (dev-notes/engram-ask-0.5.4.md) is James's to send: the handoff references it and changes nothing in it. Never write under another repo.",
    "spec_group": "FZ"
@@ -10378,6 +10382,79 @@
     "FD.3a"
    ],
    "risks": "Reallocation can drop a few FD.3a ids from the smaller repos' strata (proportional split); their verdicts leave with them, which is correct. The polyglot repo adds Java / C# / Python structure samples, so judging takes longer than FD.3a's per-row average; FD.3b then judges the mechanism strata on this sample."
+  },
+  {
+   "id": "FH.24",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH Sibyl matrix / EVM precision (W22 follow-up)",
+   "title": "contract-breaks reads a stale event subscription as an orphan: an EVENT_FLOWS edge resolver:evm paired is looked up by its `to` end (the subscriber), so a renamed or removed contract event leaves a `target_removed` / `pairing_lost` orphan at the subscription's site",
+   "loc": 160,
+   "rationale": "FH.23 (w22) found it: after abi_partial, a client whose ABI drifts on one event keeps every other pairing, but the stale subscription is never reported. contract_breaks.rs `orphaned` reads only CLIENT_CATEGORIES (HTTP / gRPC / RPC / GraphQL / WS) and takes an edge's `from` as the client, while EVENT_FLOWS runs emitter -> subscription. So the 4 event_rename Sibyl cases (evm-001, 004, 007, 010 under --transports evm; 037 in the default cover) read drift_s = 0 and client = 0, though the drift is in the graph. The fn_rename / arity cases already pass through RPC_CALLS.",
+   "entry_points": [
+    "engine/src/contract_breaks.rs: CLIENT_CATEGORIES, the `served` / `lost` sets, RemovedCall, orphaned (and its unit tests)",
+    "graph/src/resolvers/evm.rs: the EVENT_FLOWS edges resolver:evm writes (EVIDENCE emitter resolver:evm), read-only here",
+    "bench/sibyl/run.py: drift_s / client read orphaned_clients"
+   ],
+   "files_touched": [
+    "engine/src/contract_breaks.rs",
+    "engine/tests/evm_event_orphans.rs"
+   ],
+   "implementation": "1. Read how `served` / `lost` / orphaned treat CLIENT_CATEGORIES today; leave that list and ContractBreaks::blind's mechanism list unchanged. 2. Add a second, oriented reading: EVENT_FLOWS edges whose EVIDENCE emitter is `resolver:evm` count with the client at the `to` end (the evm_event: subscription) and the provider at the `from` end (the Solidity event). `served` gains (to, EVENT_FLOWS) for such edges in the after graph; `lost` gains RemovedCall { client: to, target: from, .. } for such removed edges. A generic eventbus EVENT_FLOWS (any other emitter) is not read: in-process event wiring is no client / provider contract. 3. The orphan's located row is the subscription's site, as the other categories locate theirs. 4. Unit test in contract_breaks.rs (orphaned with an oriented event edge); engine test engine/tests/evm_event_orphans.rs (new): a Go client subscribing `Released` against a contract that renames it to `Settled` (another member still pairing through abi_partial) -> exactly one orphan at the subscription's line, reason pairing_lost or target_removed; an unchanged contract -> none; an eventbus EVENT_FLOWS removed -> none. 5. Run `python3 bench/sibyl/run.py --glia target/debug/glia --transports evm` before and after and quote both markers; the default cover's evm-037 too.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-engine --lib contract_breaks` and `cargo test -p glia-engine --test engine_tests evm_event_orphans::` green; `cargo test -p glia-engine --test byte_identical` green; the Sibyl evm run's drift_s and client rise on the event_rename cases (quote `[sibyl] cases=..` before / after; no check on any non-evm transport moves: run the default cover and diff per case against bench/cohort/results/baseline/sibyl/results.json, only evm-* rows may change). The close-out's cohort gate then reads Sibyl gains, never drift (the corpus is unchanged). WALL TIME: the Sibyl evm run is ~1 s, the default cover ~3 s.",
+   "fired_on_marker": "[sibyl] cases=.. (pair=<p> drift_s=<d> clear_c=<c> client=<k>) on --transports evm, drift_s / client up on the event_rename cases; contract-breaks' orphaned_clients names the stale subscription",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output"
+    ],
+    "what_changes": "contract-breaks / review gain orphaned-client rows for stale EVM event subscriptions (resolver:evm EVENT_FLOWS read by its subscriber end); a review can newly exit 1 on one (orphans block as other orphans do).",
+    "in_repo_consumers": [
+     "engine/src/review.rs reads orphaned_clients unchanged"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph (contract-breaks rows), FZ.2 handoff"
+    ]
+   },
+   "depends_on": [
+    "FH.23"
+   ],
+   "risks": "An evm EVENT_FLOWS the resolver re-pairs to another same-named event after a change is served, not orphaned: that is correct. Generic eventbus flows stay out by design; widening them is a separate question, not this packet."
+  },
+  {
+   "id": "FH.25",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH build speed (W22 follow-up)",
+   "title": "Dart member reads look a type name up through the pass's GlobalNames index (resolve_type_name_with), not the per-site repo-wide scan; resolve_type_name goes when nothing calls it",
+   "loc": 60,
+   "rationale": "FH.21 (w22) found the build's per-site cost was unique_global_function scanning every module's symbol table (~23k on twenty) and replaced it with a per-pass GlobalNames index everywhere but one caller: graph/src/build/dart.rs's resolve_member_reads still calls calls::resolve_type_name, the slow scan, once per Dart member read. On a large Dart tree that is the same cost FH.21 removed elsewhere.",
+   "entry_points": [
+    "graph/src/calls.rs: GlobalNames, resolve_type_name, resolve_type_name_with",
+    "graph/src/build/dart.rs: resolve_member_reads (line ~232), the provider_type hook"
+   ],
+   "files_touched": [
+    "graph/src/calls.rs",
+    "graph/src/build/dart.rs"
+   ],
+   "implementation": "1. resolve_member_reads builds one GlobalNames for its pass (as FH.21's passes do) and calls resolve_type_name_with. 2. If resolve_type_name then has no caller, delete it (and fix any doc link that names it to name resolve_type_name_with); never #[allow(dead_code)]. 3. Measure: the cohort's / rank gate's Dart snapshot (flutter `samples`, ~/.cache) built twice with GLIA_NO_PERSIST=1, before and after: quote [timing] language_build and confirm the layout bytes match (`glia build` to two temp dirs + cmp, or byte_identical's method).",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-graph` green; `cargo test -p glia-engine --test engine_tests dart` green; `cargo test -p glia-engine --test byte_identical` green; the Dart snapshot's graph is byte-identical before / after, its language_build time quoted both ways. WALL TIME: two samples builds, about a minute.",
+   "fired_on_marker": "[reads] member reads accessor_read=.. (unchanged counts) and [timing] repo=samples .. language_build=<ms> before / after",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "build speed only; graph contents byte-identical. PARSER_STAMP moves (graph/src is hashed).",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FH.21"
+   ],
+   "risks": "resolve_type_name_with must answer exactly as the scan did (FH.21's GlobalNames already pins that for its callers); byte identity on the Dart snapshot is the check."
   }
  ],
  "deps_patch": {

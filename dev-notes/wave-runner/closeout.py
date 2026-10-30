@@ -221,6 +221,9 @@ def cohort_gate(touched, remaining, wave, release, full_due=False, cmd="bash scr
     WF.mkdir(parents=True, exist_ok=True)
     (WF / f"cohort-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
     last = (out.strip().splitlines() or [""])[-1]
+    if "--only" in cmd and "(partial: only" not in last:
+        # a fast-tier FAILED line (corpus drift exits before the suffix) is still partial: never a full run
+        last += f" (partial: only {COHORT_FAST})"
     ok = last.startswith("[cohort-gate] check: ok")
     skipped = last.startswith("[cohort-gate] check: skipped")
     if ok or (skipped and remaining):
