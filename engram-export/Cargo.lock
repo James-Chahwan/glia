@@ -293,14 +293,14 @@ dependencies = [
 
 [[package]]
 name = "glia-activation"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-core",
 ]
 
 [[package]]
 name = "glia-build-domain"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-activation",
  "glia-core",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "glia-code-domain"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64",
  "glia-activation",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "glia-code-extractors"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "glia-core"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "rkyv",
  "serde",
@@ -347,18 +347,18 @@ dependencies = [
 
 [[package]]
 name = "glia-doc"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "tree-sitter",
 ]
 
 [[package]]
 name = "glia-embed"
-version = "0.5.4"
+version = "0.5.5"
 
 [[package]]
 name = "glia-engine"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bincode",
  "blake3",
@@ -379,6 +379,7 @@ dependencies = [
  "glia-parser-go",
  "glia-parser-java",
  "glia-parser-kotlin",
+ "glia-parser-lua",
  "glia-parser-php",
  "glia-parser-python",
  "glia-parser-react",
@@ -404,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "glia-engram-export"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bincode",
  "clap",
@@ -419,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "glia-graph"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-activation",
  "glia-code-domain",
@@ -430,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-angular"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -444,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-bazel"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-build-domain",
  "glia-core",
@@ -452,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-c-cpp"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -467,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-clojure"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -481,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-csharp"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -495,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-dart"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -509,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-elixir"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -523,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-go"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -537,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-java"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -551,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-kotlin"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -561,8 +562,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia-parser-lua"
+version = "0.5.5"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "tree-sitter",
+ "tree-sitter-lua",
+]
+
+[[package]]
 name = "glia-parser-php"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -576,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-python"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -589,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-react"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -603,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-ruby"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -617,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-rust"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -631,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-scala"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -645,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-solidity"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -659,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-swift"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -673,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-terraform"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -686,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-typescript"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -700,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "glia-parser-vue"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -714,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "glia-projection-text"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-activation",
  "glia-code-domain",
@@ -725,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "glia-rules"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-activation",
  "glia-core",
@@ -733,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "glia-snapshots"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-build-domain",
  "glia-code-domain",
@@ -744,11 +755,11 @@ dependencies = [
 
 [[package]]
 name = "glia-stamp"
-version = "0.5.4"
+version = "0.5.5"
 
 [[package]]
 name = "glia-store"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "glia-code-domain",
  "glia-core",
@@ -1355,6 +1366,16 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-lua"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8daaf5f4235188a58603c39760d5fa5d4b920d36a299c934adddae757f32a10c"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
 
 [[package]]
 name = "tree-sitter-php"

@@ -2029,8 +2029,8 @@ questions over one graph computes `entrypoint_reachable` once.
   (188d0192, a86c1372, workflow files only, so the published code is the tag's). Published by the
   dispatched runs wheels-py 41089926548 and wheels-cli 41089922225 (`glia-cli` through its
   pending publisher, owner James-Chahwan, repo glia, workflow wheels-cli.yml).
-- **0.5.5 — Lua and the use-pattern axis: complete on local `main`; the version bump, tag and publish
-  are the release step after the docs.** The first community patch: Brian Ealdwine's glia PR #3, read as
+- **0.5.5 — Lua and the use-pattern axis: complete on local `main`, version bumped, awaiting the tag
+  (the release gates ran in full: rank 92 gains / 0 drops, cohort 17 gains / 0 drops).** The first community patch: Brian Ealdwine's glia PR #3, read as
   text (never checked out or run) and rebuilt on 0.5.4 with its gaps fixed, credited `Co-authored-by`; the old
   0.5.5 seed is now 0.5.6 (James 2026-10-31: *"we could a small lua pr 0.5.5 then bump our 0.5.5 to 0.5.6"*).
   Plan and rulings `dev-notes/next-leap-0.5.5.md`. The Lua parser (functions in every form, nested locals keyed
