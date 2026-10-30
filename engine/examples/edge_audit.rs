@@ -9,7 +9,14 @@
 //! edge_audit show   <samples.jsonl> --root <dir> [--label <l>] [--id <hex>]
 //! edge_audit report --samples <glob>.. --verdicts <glob>.. --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--judge <name>] [--check]
+//!                   [--rejudge <glob>].. [--adjudication <file>]
 //! ```
+//!
+//! The report's agreement check (FD.3c): a verdict file named `rejudge.jsonl`
+//! (or any `--rejudge` file) is a second, blind judge over a fixed subset
+//! ([`rejudge_set`]); the report states Cohen's kappa per family (a first
+//! verdict file's stem) and overall, and where the two disagree the row of
+//! `adjudication.jsonl` (default: beside the plan) replaces the first verdict.
 //!
 //! The tier is [`glia_engine::why::edge_tier`], the reading `glia why`, `check`
 //! and `glia query` print. Selection is deterministic: each candidate edge's
@@ -502,6 +509,8 @@ struct ReportOut {
     tiers: Vec<AggOut>,
     repos: BTreeMap<String, RepoOut>,
     under_floor: Vec<String>,
+    /// The blind re-judge's agreement with the first verdicts (None without one).
+    agreement: Option<AgreementOut>,
 }
 
 fn stratum_out(category: &str, tier: &str, big_n: u64, c: Counts, plan: &Plan) -> StratumOut {
@@ -652,59 +661,351 @@ fn read_samples(paths: &[PathBuf]) -> Result<(Vec<Header>, Vec<SampleRow>), Stri
     Ok((headers, rows))
 }
 
-/// The verdict each sample id gets: one judge's verdict, or (several judges)
-/// the shared verdict, `unsure` when they disagree. Errors name the id.
+/// The verdict file of the blind re-judge (FD.3c), read for agreement only.
+const REJUDGE_FILE: &str = "rejudge.jsonl";
+/// The disagreements' adjudication, beside the plan by default.
+const ADJUDICATION_FILE: &str = "adjudication.jsonl";
+/// Cohen's kappa below this marks a family LOW AGREEMENT: its strata's
+/// precision is provisional until the rubric is tightened and re-judged.
+const LOW_KAPPA: f64 = 0.6;
+/// The re-judge takes at least this many ids per family (all of a smaller one).
+const MIN_REJUDGE: usize = 20;
+/// The verdicts kappa counts, `unsure` its own category.
+const VERDICTS: [&str; 3] = ["correct", "wrong", "unsure"];
+
+/// One row of `adjudication.jsonl`: a disagreement between the first verdict
+/// and the blind re-judge, re-read at source. `final` replaces the first
+/// verdict in the report; `reason` is read by people, not the estimate.
+#[derive(Debug, Clone, Deserialize)]
+struct Adjudication {
+    id: String,
+    first: String,
+    second: String,
+    #[serde(rename = "final")]
+    final_verdict: String,
+}
+
+/// Agreement between the first verdicts and the blind re-judge over one family
+/// (a first-verdict file's stem) or all of them.
+#[derive(Debug, Clone, Serialize)]
+struct KappaOut {
+    name: String,
+    /// The re-judge rule's set size ([`rejudge_set`]).
+    expected: u64,
+    rejudged: u64,
+    /// Ids of the rule's set with no re-judge verdict.
+    missing: u64,
+    /// Re-judged ids outside the rule's set (counted in kappa all the same).
+    extra: u64,
+    agree: u64,
+    raw_agreement: Option<f64>,
+    expected_agreement: Option<f64>,
+    /// None when both judges used one category only (p_e = 1).
+    kappa: Option<f64>,
+    /// `ok`, `low_agreement` (kappa below [`LOW_KAPPA`]), `undefined` or `none`.
+    status: String,
+    /// `first/second` -> count, over the verdicts present.
+    matrix: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgreementOut {
+    families: Vec<KappaOut>,
+    overall: KappaOut,
+    disagreements: u64,
+    adjudicated: u64,
+    /// Disagreements with no adjudication row: their verdict is `unsure`.
+    unadjudicated: u64,
+    low_agreement: Vec<String>,
+}
+
+/// What the report counts per id, and the re-judge's agreement (None when no
+/// re-judge file was read, or `--judge` picked one judge).
+#[derive(Debug)]
+struct Resolved {
+    verdicts: BTreeMap<String, String>,
+    agreement: Option<AgreementOut>,
+}
+
+/// Cohen's kappa = (p_o - p_e) / (1 - p_e) over (first, second) verdict pairs,
+/// the three verdicts each a category; `expected` / `missing` / `extra` are
+/// the caller's.
+fn kappa_of(name: &str, pairs: &[(&str, &str)]) -> KappaOut {
+    let n = pairs.len() as u64;
+    let mut matrix: BTreeMap<String, u64> = BTreeMap::new();
+    let (mut a, mut b) = ([0u64; 3], [0u64; 3]);
+    let slot = |v: &str| VERDICTS.iter().position(|c| *c == v).unwrap_or(2);
+    for (f, s) in pairs {
+        *matrix.entry(format!("{f}/{s}")).or_default() += 1;
+        a[slot(f)] += 1;
+        b[slot(s)] += 1;
+    }
+    let agree = pairs.iter().filter(|(f, s)| f == s).count() as u64;
+    let (raw, pe, kappa) = if n == 0 {
+        (None, None, None)
+    } else {
+        let nf = n as f64;
+        let po = agree as f64 / nf;
+        let pe: f64 = (0..3)
+            .map(|i| (a[i] as f64 / nf) * (b[i] as f64 / nf))
+            .sum();
+        let k = if pe < 1.0 {
+            Some(r4((po - pe) / (1.0 - pe)))
+        } else {
+            None
+        };
+        (Some(r4(po)), Some(r4(pe)), k)
+    };
+    let status = match (n, kappa) {
+        (0, _) => "none",
+        (_, None) => "undefined",
+        (_, Some(k)) if k < LOW_KAPPA => "low_agreement",
+        _ => "ok",
+    };
+    KappaOut {
+        name: name.to_string(),
+        expected: 0,
+        rejudged: n,
+        missing: 0,
+        extra: 0,
+        agree,
+        raw_agreement: raw,
+        expected_agreement: pe,
+        kappa,
+        status: status.to_string(),
+        matrix,
+    }
+}
+
+/// The ids a family's blind re-judge takes, from its sorted ids: those whose
+/// last hex digit is `0`, or the first 10% by id (rounded up, at least
+/// [`MIN_REJUDGE`], at most all), whichever set is larger (the first 10% on a
+/// tie).
+fn rejudge_set(sorted_ids: &[String]) -> BTreeSet<String> {
+    let k = sorted_ids
+        .len()
+        .div_ceil(10)
+        .max(MIN_REJUDGE)
+        .min(sorted_ids.len());
+    let zeros: BTreeSet<String> = sorted_ids
+        .iter()
+        .filter(|i| i.ends_with('0'))
+        .cloned()
+        .collect();
+    if zeros.len() > k {
+        zeros
+    } else {
+        sorted_ids[..k].iter().cloned().collect()
+    }
+}
+
+/// One verdict file's rows, checked: a known verdict, a sampled id.
+fn read_verdicts(p: &Path, ids: &BTreeSet<String>) -> Result<Vec<VerdictRow>, String> {
+    let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: VerdictRow =
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?;
+        if !VERDICTS.contains(&v.verdict.as_str()) {
+            return Err(format!(
+                "verdict {}: `{}` is not correct|wrong|unsure",
+                v.id, v.verdict
+            ));
+        }
+        if !ids.contains(&v.id) {
+            return Err(format!("verdict {}: id is in no samples file", v.id));
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// `adjudication.jsonl`'s rows; an absent file is none.
+fn read_adjudication(p: &Path) -> Result<Vec<Adjudication>, String> {
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push(
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?,
+        );
+    }
+    Ok(out)
+}
+
+/// The shared verdict of several judges, `unsure` when they disagree.
+fn shared(per: &BTreeMap<String, String>) -> String {
+    let first = per
+        .values()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "unsure".to_string());
+    if per.values().all(|v| *v == first) {
+        first
+    } else {
+        "unsure".to_string()
+    }
+}
+
+/// The verdict each sample id gets. With `judge`, that judge's verdict from
+/// any file (first or re-judge), no agreement. Otherwise the first verdict
+/// (several first judges: their shared verdict, `unsure` when they disagree);
+/// where the blind re-judge (`rejudge` files) disagrees, the adjudication's
+/// `final`, else `unsure`. An id with two verdicts from one judge, a re-judged
+/// id with no first verdict, or an adjudication row that does not name a real
+/// disagreement is an error naming the id.
 fn resolve_verdicts(
-    paths: &[PathBuf],
+    first_paths: &[PathBuf],
+    rejudge_paths: &[PathBuf],
+    adjudication: &[Adjudication],
     ids: &BTreeSet<String>,
     judge: Option<&str>,
-) -> Result<BTreeMap<String, String>, String> {
-    let mut by_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for p in paths {
-        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        for (i, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let v: VerdictRow = serde_json::from_str(line)
-                .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?;
-            if !matches!(v.verdict.as_str(), "correct" | "wrong" | "unsure") {
-                return Err(format!(
-                    "verdict {}: `{}` is not correct|wrong|unsure",
-                    v.id, v.verdict
-                ));
-            }
-            if !ids.contains(&v.id) {
-                return Err(format!("verdict {}: id is in no samples file", v.id));
-            }
+) -> Result<Resolved, String> {
+    // id -> judge -> verdict, and each first id's family (its file's stem).
+    let mut first: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut second: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut family: BTreeMap<String, String> = BTreeMap::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let files = first_paths
+        .iter()
+        .map(|p| (p, false))
+        .chain(rejudge_paths.iter().map(|p| (p, true)));
+    for (p, is_second) in files {
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        for v in read_verdicts(p, ids)? {
             if judge.is_some_and(|j| j != v.judge) {
                 continue;
             }
-            let per = by_id.entry(v.id.clone()).or_default();
-            if per.insert(v.judge.clone(), v.verdict).is_some() {
+            if !seen.insert((v.id.clone(), v.judge.clone())) {
                 return Err(format!(
                     "verdict {}: two verdicts from judge `{}`",
                     v.id, v.judge
                 ));
             }
+            if is_second && judge.is_none() {
+                second.entry(v.id).or_default().insert(v.judge, v.verdict);
+            } else {
+                family.entry(v.id.clone()).or_insert_with(|| stem.clone());
+                first.entry(v.id).or_default().insert(v.judge, v.verdict);
+            }
         }
     }
-    Ok(by_id
-        .into_iter()
-        .map(|(id, per)| {
-            let first = per
-                .values()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "unsure".to_string());
-            let one = if per.values().all(|v| *v == first) {
-                first
-            } else {
-                "unsure".to_string()
-            };
-            (id, one)
-        })
-        .collect())
+    let mut verdicts: BTreeMap<String, String> = first
+        .iter()
+        .map(|(id, per)| (id.clone(), shared(per)))
+        .collect();
+    if judge.is_some() || rejudge_paths.is_empty() {
+        return Ok(Resolved {
+            verdicts,
+            agreement: None,
+        });
+    }
+    let second: BTreeMap<String, String> = second
+        .iter()
+        .map(|(id, per)| (id.clone(), shared(per)))
+        .collect();
+    if let Some(id) = second.keys().find(|id| !verdicts.contains_key(*id)) {
+        return Err(format!("re-judge {id}: id has no first verdict"));
+    }
+    let mut adj: BTreeMap<&str, &Adjudication> = BTreeMap::new();
+    for a in adjudication {
+        let (Some(f), Some(s)) = (verdicts.get(&a.id), second.get(&a.id)) else {
+            return Err(format!(
+                "adjudication {}: id has no first and re-judge verdict",
+                a.id
+            ));
+        };
+        if *f != a.first || *s != a.second || f == s {
+            return Err(format!(
+                "adjudication {}: first/second `{}/{}` is not the disagreement `{f}/{s}`",
+                a.id, a.first, a.second
+            ));
+        }
+        if !VERDICTS.contains(&a.final_verdict.as_str()) {
+            return Err(format!(
+                "adjudication {}: final `{}` is not correct|wrong|unsure",
+                a.id, a.final_verdict
+            ));
+        }
+        if adj.insert(a.id.as_str(), a).is_some() {
+            return Err(format!("adjudication {}: two rows", a.id));
+        }
+    }
+    // Agreement per family, before any adjudication replaces a verdict.
+    let mut by_family: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (id, f) in &family {
+        by_family.entry(f.as_str()).or_default().push(id.clone());
+    }
+    let (mut families, mut all_pairs) = (Vec::new(), Vec::new());
+    let (mut expected, mut missing, mut extra) = (0, 0, 0);
+    for (name, fam_ids) in &by_family {
+        let want = rejudge_set(fam_ids);
+        let pairs: Vec<(&str, &str)> = fam_ids
+            .iter()
+            .filter_map(|id| Some((verdicts[id].as_str(), second.get(id)?.as_str())))
+            .collect();
+        let mut k = kappa_of(name, &pairs);
+        k.expected = want.len() as u64;
+        k.missing = want.iter().filter(|id| !second.contains_key(*id)).count() as u64;
+        k.extra = fam_ids
+            .iter()
+            .filter(|id| second.contains_key(*id) && !want.contains(*id))
+            .count() as u64;
+        (expected, missing, extra) = (expected + k.expected, missing + k.missing, extra + k.extra);
+        all_pairs.extend(pairs);
+        families.push(k);
+    }
+    let mut overall = kappa_of("overall", &all_pairs);
+    (overall.expected, overall.missing, overall.extra) = (expected, missing, extra);
+    let disagreements = all_pairs.iter().filter(|(f, s)| f != s).count() as u64;
+    let (mut adjudicated, mut unadjudicated) = (0, 0);
+    for (id, s) in &second {
+        let Some(v) = verdicts.get_mut(id) else {
+            continue;
+        };
+        if v == s {
+            continue;
+        }
+        match adj.get(id.as_str()) {
+            Some(a) => {
+                adjudicated += 1;
+                *v = a.final_verdict.clone();
+            }
+            None => {
+                unadjudicated += 1;
+                *v = "unsure".to_string();
+            }
+        }
+    }
+    let low_agreement = families
+        .iter()
+        .chain(std::iter::once(&overall))
+        .filter(|k| k.status == "low_agreement")
+        .map(|k| k.name.clone())
+        .collect();
+    Ok(Resolved {
+        verdicts,
+        agreement: Some(AgreementOut {
+            families,
+            overall,
+            disagreements,
+            adjudicated,
+            unadjudicated,
+            low_agreement,
+        }),
+    })
 }
 
 fn build_report(
@@ -814,6 +1115,7 @@ fn build_report(
         tiers,
         repos,
         under_floor,
+        agreement: None,
     }
 }
 
@@ -874,6 +1176,71 @@ fn agg_table(md: &mut String, head: &str, rows: &[AggOut]) {
     }
 }
 
+/// A kappa as `0.400`, `undefined` (one category) or `-` (nothing re-judged).
+fn kappa_text(k: &KappaOut) -> String {
+    match (k.kappa, k.status.as_str()) {
+        (Some(v), _) => format!("{v:.3}"),
+        (None, "undefined") => "undefined".to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn agreement_section(md: &mut String, a: &AgreementOut) {
+    md.push_str("## Agreement (blind re-judge)\n\n");
+    md.push_str(&format!(
+        "A second judge re-judged each family's ids ending in hex `0` or its first 10% by id \
+         (whichever is larger, at least {MIN_REJUDGE}) without reading the first verdicts. \
+         Cohen's kappa is over the three verdicts, `unsure` its own category; it is undefined \
+         when both judges used one verdict only. A family below {LOW_KAPPA} is LOW AGREEMENT \
+         and its strata's precision is provisional. A disagreement is re-read at source and \
+         its adjudicated verdict replaces the first one; an unadjudicated one counts as \
+         `unsure`.\n\n"
+    ));
+    md.push_str(&format!(
+        "kappa: overall {} (raw agreement {}, {} ids); {}\n\n",
+        kappa_text(&a.overall),
+        f3(a.overall.raw_agreement),
+        a.overall.rejudged,
+        a.families
+            .iter()
+            .map(|k| format!("{} {}", k.name, kappa_text(k)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    md.push_str(
+        "| family | rule set | re-judged | missing | extra | agree | raw agreement | expected agreement | kappa | status |\n",
+    );
+    md.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
+    for k in a.families.iter().chain(std::iter::once(&a.overall)) {
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            k.name,
+            k.expected,
+            k.rejudged,
+            k.missing,
+            k.extra,
+            k.agree,
+            f3(k.raw_agreement),
+            f3(k.expected_agreement),
+            kappa_text(k),
+            if k.status == "low_agreement" {
+                "LOW AGREEMENT"
+            } else {
+                k.status.as_str()
+            }
+        ));
+    }
+    md.push_str(&format!(
+        "\ndisagreements {}, adjudicated {}, unadjudicated {}\n\n",
+        a.disagreements, a.adjudicated, a.unadjudicated
+    ));
+    for f in &a.low_agreement {
+        md.push_str(&format!(
+            "LOW AGREEMENT: `{f}`: its strata's precision is provisional.\n\n"
+        ));
+    }
+}
+
 fn render_md(r: &ReportOut) -> String {
     let mut md = String::from("# Edge-precision audit\n\n");
     md.push_str(
@@ -899,6 +1266,9 @@ fn render_md(r: &ReportOut) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    if let Some(a) = &r.agreement {
+        agreement_section(&mut md, a);
+    }
     md.push_str("## Strata (pooled)\n\n");
     strata_table(&mut md, &r.strata);
     md.push_str("\n## Categories\n\n");
@@ -1079,15 +1449,18 @@ fn run_show(args: &[String]) -> Result<ExitCode, String> {
 }
 
 fn run_report(args: &[String]) -> Result<ExitCode, String> {
-    let (mut samples, mut verdicts) = (Vec::new(), Vec::new());
+    let (mut samples, mut verdicts, mut rejudge) = (Vec::new(), Vec::new(), Vec::new());
     let (mut plan, mut out_json, mut out_md, mut judge, mut check) =
         (None, None, None, None, false);
+    let mut adjudication: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
         match flag {
             "--samples" => samples.extend(expand(&value(args, &mut i, flag)?)?),
             "--verdicts" => verdicts.extend(expand(&value(args, &mut i, flag)?)?),
+            "--rejudge" => rejudge.extend(expand(&value(args, &mut i, flag)?)?),
+            "--adjudication" => adjudication = Some(value(args, &mut i, flag)?),
             "--plan" => plan = Some(value(args, &mut i, flag)?),
             "--out-json" => out_json = Some(value(args, &mut i, flag)?),
             "--out-md" => out_md = Some(value(args, &mut i, flag)?),
@@ -1097,7 +1470,20 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
         }
         i += 1;
     }
-    let plan = Plan::read(&plan.ok_or("report: --plan is required")?)?;
+    let plan_path = plan.ok_or("report: --plan is required")?;
+    let plan = Plan::read(&plan_path)?;
+    // A verdict file named `rejudge.jsonl` is the blind re-judge, never a first
+    // verdict; the adjudication defaults to `adjudication.jsonl` beside the plan.
+    let (second, first): (Vec<PathBuf>, Vec<PathBuf>) = verdicts
+        .into_iter()
+        .partition(|p| p.file_name().is_some_and(|n| n == REJUDGE_FILE));
+    let (mut verdicts, mut rejudge) = (first, [rejudge, second].concat());
+    let adjudication = adjudication.map(PathBuf::from).unwrap_or_else(|| {
+        Path::new(&plan_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(ADJUDICATION_FILE)
+    });
     let (out_json, out_md) = (
         out_json.ok_or("report: --out-json is required")?,
         out_md.ok_or("report: --out-md is required")?,
@@ -1106,6 +1492,8 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
     samples.dedup();
     verdicts.sort();
     verdicts.dedup();
+    rejudge.sort();
+    rejudge.dedup();
     if samples.is_empty() {
         return Err("report: no samples file matched".to_string());
     }
@@ -1116,12 +1504,14 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
             return Err(format!("sample {}: id appears twice", r.id));
         }
     }
-    let resolved = resolve_verdicts(&verdicts, &ids, judge.as_deref())?;
-    let report = build_report(&headers, &rows, &resolved, &plan);
+    let adjudication = read_adjudication(&adjudication)?;
+    let resolved = resolve_verdicts(&verdicts, &rejudge, &adjudication, &ids, judge.as_deref())?;
+    let mut report = build_report(&headers, &rows, &resolved.verdicts, &plan);
+    report.agreement = resolved.agreement;
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n";
     let md = render_md(&report);
     eprintln!(
-        "[edge-audit] report strata={} judged={} unsure={} under_floor={} insufficient={}",
+        "[edge-audit] report strata={} judged={} unsure={} under_floor={} insufficient={} kappa={}",
         report.strata.len(),
         report.strata.iter().map(|s| s.n).sum::<u64>(),
         report.strata.iter().map(|s| s.unsure).sum::<u64>(),
@@ -1130,8 +1520,17 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
             .strata
             .iter()
             .filter(|s| s.status == "insufficient")
-            .count()
+            .count(),
+        report
+            .agreement
+            .as_ref()
+            .map_or("-".to_string(), |a| kappa_text(&a.overall))
     );
+    if let Some(a) = &report.agreement {
+        for f in &a.low_agreement {
+            eprintln!("[edge-audit] LOW AGREEMENT family={f}: its precision is provisional");
+        }
+    }
     if check {
         for (path, want) in [(&out_json, &json), (&out_md, &md)] {
             let have = std::fs::read_to_string(path).unwrap_or_default();
@@ -1313,7 +1712,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve_verdicts(&[p.clone()], &ids, None)
+            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
                 .unwrap_err()
                 .contains("99")
         );
@@ -1324,7 +1723,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve_verdicts(&[p.clone()], &ids, None)
+            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
                 .unwrap_err()
                 .contains("01")
         );
@@ -1335,11 +1734,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_verdicts(&[p.clone()], &ids, None).unwrap()["01"],
+            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
+                .unwrap()
+                .verdicts["01"],
             "unsure"
         );
         assert_eq!(
-            resolve_verdicts(&[p], &ids, Some("k")).unwrap()["01"],
+            resolve_verdicts(&[p], &[], &[], &ids, Some("k"))
+                .unwrap()
+                .verdicts["01"],
             "wrong"
         );
     }
@@ -1393,5 +1796,152 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert!(!rows.is_empty());
         assert!(headers[0].excluded.get("skip").copied().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn kappa_identical_and_textbook() {
+        // Identical verdicts over two categories: kappa 1.0.
+        let same = [
+            ("correct", "correct"),
+            ("wrong", "wrong"),
+            ("correct", "correct"),
+            ("unsure", "unsure"),
+        ];
+        let k = kappa_of("t", &same);
+        assert_eq!(k.kappa, Some(1.0));
+        assert_eq!(k.raw_agreement, Some(1.0));
+        assert_eq!(k.status, "ok");
+        // The textbook 2x2 (50 items: yes/yes 20, yes/no 5, no/yes 10,
+        // no/no 15): p_o = .7, p_e = .5*.6 + .5*.4 = .5, kappa = .4.
+        let mut t = Vec::new();
+        t.extend(std::iter::repeat_n(("correct", "correct"), 20));
+        t.extend(std::iter::repeat_n(("correct", "wrong"), 5));
+        t.extend(std::iter::repeat_n(("wrong", "correct"), 10));
+        t.extend(std::iter::repeat_n(("wrong", "wrong"), 15));
+        let k = kappa_of("t", &t);
+        assert_eq!(k.raw_agreement, Some(0.7));
+        assert_eq!(k.expected_agreement, Some(0.5));
+        assert_eq!(k.kappa, Some(0.4));
+        assert_eq!(k.status, "low_agreement");
+        assert_eq!(k.matrix["correct/wrong"], 5);
+        // Unsure is its own category: one unsure against correct disagrees.
+        let k = kappa_of("t", &[("correct", "unsure"), ("wrong", "wrong")]);
+        assert_eq!(k.agree, 1);
+        // One category on both sides: p_e = 1, kappa undefined.
+        let k = kappa_of("t", &[("correct", "correct"), ("correct", "correct")]);
+        assert_eq!(k.kappa, None);
+        assert_eq!(k.status, "undefined");
+        assert_eq!(kappa_of("t", &[]).status, "none");
+    }
+
+    #[test]
+    fn rejudge_set_takes_the_larger_rule() {
+        let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("{i:04x}")).collect() };
+        // 299 ids, every 16th ends in 0 (19 of them): the first max(30, 20) win.
+        let a = ids(299);
+        let s = rejudge_set(&a);
+        assert_eq!(s.len(), 30);
+        assert!(s.contains("0000") && s.contains("001d") && !s.contains("001e"));
+        // 50 ids: 10% is 5, the floor 20 wins over the 4 ending in 0.
+        assert_eq!(rejudge_set(&ids(50)).len(), 20);
+        // 1000 ids ending 0 only on every 16th = 63 < 100: the first 100.
+        assert_eq!(rejudge_set(&ids(1000)).len(), 100);
+        // When more ids end in 0 than the first 10%, the 0-ending ids win.
+        let zeros: Vec<String> = (0..40).map(|i| format!("{i:03x}0")).collect();
+        let mut mixed = zeros.clone();
+        mixed.extend((0..20).map(|i| format!("{i:03x}1")));
+        mixed.sort();
+        assert_eq!(rejudge_set(&mixed), zeros.into_iter().collect());
+        // A family smaller than 20 is re-judged whole.
+        assert_eq!(rejudge_set(&ids(7)).len(), 7);
+    }
+
+    #[test]
+    fn adjudication_replaces_the_first_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("structure.jsonl");
+        let second = dir.path().join("rejudge.jsonl");
+        let line = |id: &str, v: &str, j: &str| {
+            format!("{{\"id\":\"{id}\",\"verdict\":\"{v}\",\"reason\":\"\",\"judge\":\"{j}\"}}\n")
+        };
+        std::fs::write(
+            &first,
+            [
+                line("01", "correct", "a"),
+                line("02", "wrong", "a"),
+                line("03", "correct", "a"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        std::fs::write(
+            &second,
+            [
+                line("01", "correct", "b"),
+                line("02", "correct", "b"),
+                line("03", "wrong", "b"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let ids: BTreeSet<String> = ["01", "02", "03"].iter().map(|s| s.to_string()).collect();
+        let adj = vec![Adjudication {
+            id: "02".to_string(),
+            first: "wrong".to_string(),
+            second: "correct".to_string(),
+            final_verdict: "correct".to_string(),
+        }];
+        let r = resolve_verdicts(
+            std::slice::from_ref(&first),
+            std::slice::from_ref(&second),
+            &adj,
+            &ids,
+            None,
+        )
+        .unwrap();
+        // 01 agrees; 02 is adjudicated; 03 disagrees unadjudicated: unsure.
+        assert_eq!(r.verdicts["01"], "correct");
+        assert_eq!(r.verdicts["02"], "correct");
+        assert_eq!(r.verdicts["03"], "unsure");
+        let a = r.agreement.unwrap();
+        assert_eq!((a.disagreements, a.adjudicated, a.unadjudicated), (2, 1, 1));
+        assert_eq!(a.families.len(), 1);
+        assert_eq!(a.families[0].name, "structure");
+        assert_eq!(a.families[0].agree, 1);
+        // An adjudication whose `first` is not the first verdict is an error.
+        let bad = vec![Adjudication {
+            id: "02".to_string(),
+            first: "correct".to_string(),
+            second: "correct".to_string(),
+            final_verdict: "wrong".to_string(),
+        }];
+        assert!(
+            resolve_verdicts(
+                std::slice::from_ref(&first),
+                std::slice::from_ref(&second),
+                &bad,
+                &ids,
+                None
+            )
+            .unwrap_err()
+            .contains("02")
+        );
+        // A re-judged id with no first verdict is an error.
+        std::fs::write(&second, line("04", "correct", "b")).unwrap();
+        let ids4: BTreeSet<String> = ["01", "02", "03", "04"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            resolve_verdicts(
+                std::slice::from_ref(&first),
+                std::slice::from_ref(&second),
+                &[],
+                &ids4,
+                None
+            )
+            .unwrap_err()
+            .contains("04")
+        );
     }
 }

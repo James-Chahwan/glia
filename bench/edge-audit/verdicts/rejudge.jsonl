@@ -1,0 +1,51 @@
+{"id": "000037731a23e3ed", "verdict": "correct", "reason": "decl is a method inside the `impl Builtin for StartsWith` block", "judge": "FD.3c"}
+{"id": "00004c3ba2dfd022", "verdict": "correct", "reason": "health_connect.c declares the exported fn Activity__getLoaderManager", "judge": "FD.3c"}
+{"id": "000061f0ffcaec0f", "verdict": "correct", "reason": "_objc_msgSend_301 is a method of class PedometerBindings (opened at line 9, still open at 8308)", "judge": "FD.3c"}
+{"id": "00006c26a2d1adf3", "verdict": "correct", "reason": "the test calls the file's own helper fn connects at line 104", "judge": "FD.3c"}
+{"id": "000078ccc35753f3", "verdict": "correct", "reason": "Intent__getStringExtra calls load_method, defined in dartjni.h which health_connect.c includes", "judge": "FD.3c"}
+{"id": "0001242a2010ca46", "verdict": "correct", "reason": "clean_and_cap_doc returns Some(cap_doc(s)), the same file's fn", "judge": "FD.3c"}
+{"id": "00014834337f29ba", "verdict": "correct", "reason": "paths.rs declares the module-level fn glob", "judge": "FD.3c"}
+{"id": "00024054fa95b8a7", "verdict": "correct", "reason": "kcite_line loops over law_cites(..), the one fn of that name in rank_eval.rs", "judge": "FD.3c"}
+{"id": "00025a554a0ab02f", "verdict": "correct", "reason": "the textEditingValue getter is a member of BasicTextInputClientState (class opened at line 61)", "judge": "FD.3c"}
+{"id": "000268b94e414f9a", "verdict": "correct", "reason": "evaluate constructs Outcome::Error(e), the variant declared at line 1018", "judge": "FD.3c"}
+{"id": "0002ed8486eabdce", "verdict": "correct", "reason": "the fn calls load_static_field, defined in the included dartjni.h", "judge": "FD.3c"}
+{"id": "00037beeb10eacf5", "verdict": "correct", "reason": "the test G::new calls RepoId::from_canonical; identity.rs imports glia_core's RepoId and the tests glob super", "judge": "FD.3c"}
+{"id": "000383d1bfe3e9a8", "verdict": "correct", "reason": "classify_call maps a node through text_of, the file's one fn of that name", "judge": "FD.3c"}
+{"id": "00042f7e1acbd75b", "verdict": "correct", "reason": "the alloydb component's container patch declares ALLOYDB_TABLE_NAME under env:", "judge": "FD.3c"}
+{"id": "0004ef8df104bff4", "verdict": "correct", "reason": "junit.rs declares pub fn parse_junit", "judge": "FD.3c"}
+{"id": "0005314661dfb255", "verdict": "correct", "reason": "image_page.dart imports 'context_menu_region.dart' in its own directory", "judge": "FD.3c"}
+{"id": "00063d73556e5998", "verdict": "correct", "reason": "the test calls the file's own chain(N) helper", "judge": "FD.3c"}
+{"id": "00073d333fb77eae", "verdict": "correct", "reason": "rust_lapin_rows passes module_id(), the helper of the file's one tests module (the second `mod tests` text is a fixture string)", "judge": "FD.3c"}
+{"id": "0007694aef4bbc0d", "verdict": "correct", "reason": "intent_ids.rs declares the #[test] fn", "judge": "FD.3c"}
+{"id": "0007ee80c06e817a", "verdict": "correct", "reason": "prepared_test.go declares package var preparedMessageTests", "judge": "FD.3c"}
+{"id": "0007f693ee69f039", "verdict": "correct", "reason": "the test calls route_id, the helper of the same tests module", "judge": "FD.3c"}
+{"id": "00084b7e03f216d8", "verdict": "correct", "reason": "unknown_names calls errors(&p), the helper of the same tests module", "judge": "FD.3c"}
+{"id": "00086dd828949d79", "verdict": "correct", "reason": "the test calls extract_yaml_contracts through the tests module's use super::*", "judge": "FD.3c"}
+{"id": "0008877eab4cc0c2", "verdict": "correct", "reason": "host.rs declares const HOSTS_KEY at module level", "judge": "FD.3c"}
+{"id": "0008998d2306209e", "verdict": "correct", "reason": "build constructs DefaultValuesPage(..), imported from default_values_page.dart", "judge": "FD.3c"}
+{"id": "0008f26b62a233b1", "verdict": "correct", "reason": "three_react_repos calls the file's own write(root, rel, text)", "judge": "FD.3c"}
+{"id": "0009534e10d89cc5", "verdict": "correct", "reason": "the test calls read_paths_at, reached through use super::* in git_rev's tests", "judge": "FD.3c"}
+{"id": "00097d9208ce1074", "verdict": "correct", "reason": "graph_of calls self.graphs(id), a method of the same impl", "judge": "FD.3c"}
+{"id": "0009ef2b294c3f34", "verdict": "correct", "reason": "toy_core calls RepoId::from_canonical; sections.rs imports glia_core's RepoId", "judge": "FD.3c"}
+{"id": "000a8a661711d0c0", "verdict": "correct", "reason": "the fn calls check_exception() from the included dartjni.h", "judge": "FD.3c"}
+{"id": "000af2dc2be05046", "verdict": "correct", "reason": "the test calls qnames(&c), the tests module's helper", "judge": "FD.3c"}
+{"id": "00405601796e4455", "verdict": "correct", "reason": "the section's TS bullet describes resolve_member_reads (getter / setter binding on typed objects), this calls.rs fn", "judge": "FD.3c"}
+{"id": "0040777539e630cb", "verdict": "wrong", "reason": "the bare word `graph` in the layout block bound to a test helper fn graph() in ppr_index's tests", "judge": "FD.3c"}
+{"id": "006a37f3a51dab5e", "verdict": "correct", "reason": "frontend.yaml's container env declares AD_SERVICE_ADDR", "judge": "FD.3c"}
+{"id": "0073966c52450f07", "verdict": "wrong", "reason": "the word `graph` (a flavor value) in the Validation section bound to ppr_index's test helper graph()", "judge": "FD.3c"}
+{"id": "007adbae0edf7630", "verdict": "wrong", "reason": "the edge category name CALLS in the section bound to a test-local const CALLS in classes.rs's tests", "judge": "FD.3c"}
+{"id": "008865a8ead3db93", "verdict": "correct", "reason": "shoppingassistantservice requirements.txt pins idna==3.10", "judge": "FD.3c"}
+{"id": "0090f0f3775c3a3c", "verdict": "wrong", "reason": "the Replacements Layer section only says a wrapper wraps BasicTextField; the field widget is not its subject (passing mention)", "judge": "FD.3c"}
+{"id": "009995846a30003d", "verdict": "correct", "reason": "animations/pubspec.yaml lists flutter_animate under dependencies", "judge": "FD.3c"}
+{"id": "00b6eaf4bd9fbb34", "verdict": "wrong", "reason": "the word `embed` (the glia embed command) bound to a bench/latent model's embed method", "judge": "FD.3c"}
+{"id": "00c77dc37ad0665a", "verdict": "correct", "reason": "web_dashboard's pubspec lists cupertino_icons under dependencies", "judge": "FD.3c"}
+{"id": "00f1bad673f9faef", "verdict": "correct", "reason": "the buildscript block declares classpath org.jetbrains.kotlin:kotlin-gradle-plugin", "judge": "FD.3c"}
+{"id": "00f75faa72d4d381", "verdict": "correct", "reason": "the recommendationservice template's env declares PORT", "judge": "FD.3c"}
+{"id": "00fba4249fae1951", "verdict": "correct", "reason": "the section states SourceKey's role (the RankCache finds an index by SourceKey and PprIndex::matches); it is this enum", "judge": "FD.3c"}
+{"id": "010906133778fbcb", "verdict": "correct", "reason": "paymentservice.yaml's env declares DISABLE_PROFILER", "judge": "FD.3c"}
+{"id": "0119d378b30ca5dc", "verdict": "correct", "reason": "the section names resolve_frame as the code that subtracts 1 from a 1-based line, which this method does", "judge": "FD.3c"}
+{"id": "01598654da857480", "verdict": "wrong", "reason": "`sdk:` is the pubspec environment SDK constraint, not an environment variable", "judge": "FD.3c"}
+{"id": "015a258e09fe68d1", "verdict": "wrong", "reason": "the word `json` (file names commits.jsonl / meta.json) bound to the cohort harness's Glia.json method", "judge": "FD.3c"}
+{"id": "016485aa5e8ea6d3", "verdict": "correct", "reason": "loadgenerator requirements.txt pins flask-login==0.6.3", "judge": "FD.3c"}
+{"id": "01a477c9f70a3235", "verdict": "correct", "reason": "web/animations/pubspec.yaml declares window_size as a path dependency", "judge": "FD.3c"}
+{"id": "01a6721b821f04d8", "verdict": "correct", "reason": "testing_app's pubspec lists test under dev_dependencies", "judge": "FD.3c"}
