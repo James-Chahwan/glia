@@ -1,8 +1,9 @@
 {
  "snapshots": [
-  {"name": "glia", "source": "self", "rev": "HEAD", "public": true, "skips": ["bench/", "dev-notes/", "tests/", "engine/tests/data/"]},
+  {"name": "glia", "source": "self", "rev": "0df1bbbb89b7276e298b301d6c29bdf628d39d53", "public": true, "skips": ["bench/", "dev-notes/", "tests/", "engine/tests/data/"]},
   {"name": "shell", "source": "rank-gate", "skips": []},
   {"name": "websocket", "source": "rank-gate", "skips": []},
-  {"name": "samples", "source": "rank-gate", "skips": []}
+  {"name": "samples", "source": "rank-gate", "skips": []},
+  {"name": "microservices-demo", "source": "cohort", "skips": []}
  ]
 }
