@@ -2,4 +2,4 @@
 //! back as HEURISTIC-tier input; it ranks or annotates and never creates a FACT
 //! / DERIVED row.
 //!
-//! Reserved for 0.5.5 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T6); empty in 0.5.4.

@@ -6,4 +6,4 @@
 //! writes the snapshot this crate reads. It sits under the hashed `parsers`
 //! root, so a change here moves PARSER_STAMP.
 //!
-//! Reserved for 0.5.5 (track T9); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T9); empty in 0.5.4.

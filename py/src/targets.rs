@@ -6,4 +6,4 @@
 //! `py/api_surface/targets.txt` and `py/tests/surface/test_targets.py`; FA.19
 //! never edits `py/src/lib.rs`.
 //!
-//! Reserved for 0.5.5 (track T9); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T9); empty in 0.5.4.

@@ -2,7 +2,7 @@
 
 How often is an edge the graph writes actually true? `bench/substrate-gap` grades hand-keyed
 fixtures (recall, plus forbid rows); this audit samples the edges a real build writes and has
-a judge check each one against the source. It is the precision baseline 0.5.5 measures
+a judge check each one against the source. It is the precision baseline 0.5.6 measures
 against, and every stratum under its floor becomes a packet in the FD precision group.
 
 ## What is measured

@@ -2,4 +2,4 @@
 //! node edges at the weakest tier that supports them. TRACES weighs 0 in PPR
 //! and is in no carry or community list, so a join never moves a walk or a rank.
 //!
-//! Reserved for 0.5.5 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T6); empty in 0.5.4.

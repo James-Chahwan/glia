@@ -1,4 +1,9 @@
-# glia 0.5.5 — proof, plus the tracks moved out of 0.5.4 (scope seed)
+# glia 0.5.6 — proof, plus the tracks moved out of 0.5.4 (scope seed)
+
+**Renumbered 2026-10-31** (was the 0.5.5 seed). James: *"we could a small lua pr 0.5.5 then bump our 0.5.5 to 0.5.6"*:
+0.5.5 is the Lua release (`dev-notes/next-leap-0.5.5.md`), the first community patch, from Brian Ealdwine's glia PR
+#3. Every "0.5.5" below this note, and in the 0.5.4 records (packets, corrections, handoffs, reports), names this
+plan, now 0.5.6. `--release 055` / id prefixes below become `056`.
 
 **Born 2026-10-30.** James cut 0.5.4 to what was built plus two small tracks (*"Nah we can change to option 3 to round of
 0.5.4 now right ?"*, superseding the 2026-10-24 ruling that 0.5.4 ships only after every track). 0.5.4 ships T0 T1 T2 T3
@@ -9,7 +14,7 @@ T5 T10 (+FD.31) T11 TS TH and FH.11c. Everything below moves here.
 The packets are in `dev-notes/leap-054-packets.json` with their corrections in `leap-054-corrections.json`; the track
 lists are in `dev-notes/wave-runner/tracks_054.py`. They were specced against 2026-10-23's tree, so every one needs the
 re-verify pass (`dev-notes/reverify_054.md`'s method) against the shipped 0.5.4 before a wave, and a new id prefix and
-`--release 055` schedule.
+`--release 056` schedule.
 
 | track | what | packets | LOC at spec |
 |---|---|---|---|

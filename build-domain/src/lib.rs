@@ -5,4 +5,4 @@
 //! of code and depends on no code crate (core, activation and store only). It
 //! is a stamp HASHED_ROOTS entry, so a change here moves PARSER_STAMP.
 //!
-//! Reserved for 0.5.5 (track T9); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T9); empty in 0.5.4.

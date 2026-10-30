@@ -2,4 +2,4 @@
 //! with its subject, its candidates in qname order and the evidence that left
 //! it open.
 //!
-//! Reserved for 0.5.5 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.6 (track T6); empty in 0.5.4.

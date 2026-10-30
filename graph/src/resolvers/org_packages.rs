@@ -89,7 +89,7 @@
 //! whose target is absent emits nothing and counts `unrouted` (a package
 //! whose entry sits elsewhere). A class with two PROJECTs names no single
 //! sibling: its rows are unrouted too. Maven / Gradle classes do not form yet
-//! (a pom's label is its bare artifactId, FD.31's handoff; 0.5.5).
+//! (a pom's label is its bare artifactId, FD.31's handoff; 0.5.6).
 //!
 //! fired_on, stderr, once per resolve that saw a `manifest_name` class:
 //!   `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm=<a> go=<b> cargo=<k> pypi=<p>)`
