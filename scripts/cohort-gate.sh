@@ -112,7 +112,9 @@ def reach(key, b, n):
     if b is None:
         return
     if n is None:
-        drops.append(f"{key} {b}->none")
+        # 0.0 -> none: a side with nothing paired lost all its producers / consumers (FH.26 leaves
+        # test-file producers out); nothing paired was lost, so it is no drop
+        (declines if b == 0 else drops).append(f"{key} {b}->none")
         return
     d = round(n - b, 3)
     if d < -tol - 1e-9:

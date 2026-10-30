@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 456,
+  "fixtures": 458,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -136,6 +136,13 @@
       "language": "python",
       "per_category": {
         "READS_CONFIG": 1.0
+      }
+    },
+    "config-pubspec-environment": {
+      "framework": "config-pubspec-environment",
+      "language": "dart",
+      "per_category": {
+        "DEFINES_CONFIG": 1.0
       }
     },
     "contract-annot-nestjs": {
@@ -568,6 +575,13 @@
       "language": "dart",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "doclink-identifier-mentions": {
+      "framework": "doclink-identifier-mentions",
+      "language": "python",
+      "per_category": {
+        "DOCUMENTS": 1.0
       }
     },
     "docs-adr-decision": {

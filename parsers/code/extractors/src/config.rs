@@ -334,7 +334,7 @@ pub fn extract_dotenv_defs(source: &str, module_id: NodeId, repo: RepoId) -> Con
 /// Extract env-var definitions from a YAML manifest (k8s `env:`/`envFrom:`,
 /// docker-compose `environment:`). Caller is responsible for content-gating
 /// or path-gating to YAML files. `path` is the repo-relative path, read only
-/// by [`environment_not_env`]: a file format whose own spec defines an
+/// by `environment_not_env`: a file format whose own spec defines an
 /// `environment:` block as something other than env vars skips the
 /// `environment:` reading (FD.76); every other reader runs unchanged.
 ///
