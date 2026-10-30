@@ -58,6 +58,21 @@ thread_local! {
 /// 1 when unknown); the value is clamped to `1..=256`. `GLIA_THREADS=1` builds
 /// no pool at all: the per-file work runs on the caller's thread, exactly as
 /// before LG.1a.
+///
+/// Why unset stays every core, not the cores the load average leaves free
+/// (FH.22, measured 2026-10-30 on 16 cores, release glia, cold builds of the
+/// cohort's twenty at 8fd53a83, each config twice): one build alone takes
+/// 33.9 / 32.5 s at 16 threads and 46.3 / 43.6 s at 4. Four concurrent
+/// builds' slowest wall is 71.7 / 74.1 s unset (16 threads each) and
+/// 76.9 / 73.2 s at `GLIA_THREADS=4` each, user + sys summed 479 / 487 s
+/// against 498 / 467 s. Four-thread pools cut involuntary context switches
+/// about tenfold (133k / 130k -> 12k / 33k) but buy no wall time: four
+/// concurrent builds keep only about 7 of 16 cores busy, and what doubles is
+/// the TypeScript-family graph build, the last pooled item (language_build
+/// 21 s alone, 30-45 s concurrent unset and 25-50 s at 4), which is
+/// memory-bound, not oversubscribed; the pooled parse phase reads 18-21 s
+/// concurrent unset and 19-20 s at 4. A load-shrunk default would only slow
+/// the common lone build.
 pub(crate) fn threads() -> usize {
     *THREADS.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
