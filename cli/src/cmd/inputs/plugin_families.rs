@@ -1,18 +1,26 @@
-//! `glia plugin-families <repo>` (lua-support) — create the repo's plugin
-//! family declaration `.glia/plugin_families.toml`, the file the build's
-//! runtime discovery reads FIRST (a declared family beats an inferred one).
+//! `glia plugin-families <repo>` (lua-support) — dump a repo's default
+//! plugin family declaration, or write it.
 //!
-//! The written file is the seed architectures rendered as `[[plugin_family]]`
-//! tables, so a person edits rather than writes from nothing. The only
-//! writer of the file: a build never creates it (an undeclared repo is
-//! inferred from the tree), and `--force` is the explicit overwrite.
+//! The declaration lives at `.glia/plugin_families.toml`; the build's
+//! runtime discovery reads that file FIRST (a declared family beats an
+//! inferred one). A build never creates it (an undeclared repo is inferred
+//! from the tree). The default declaration is the seed architectures
+//! rendered as `[[plugin_family]]` tables, so a person edits rather than
+//! writes from nothing.
+//!
+//! Default: dump the declaration to stdout. `--write` writes it to
+//! `<repo>/.glia/plugin_families.toml`; `--write --force` overwrites an
+//! existing declaration.
 
 /// The `glia plugin-families` arguments.
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
-    /// The repo to write `.glia/plugin_families.toml` in.
+    /// The repo whose default plugin-family declaration to dump or write.
     pub(crate) repo: String,
-    /// Overwrite an existing declaration.
+    /// Write the declaration to `<repo>/.glia/plugin_families.toml`.
+    #[arg(long)]
+    pub(crate) write: bool,
+    /// Overwrite `<repo>/.glia/plugin_families.toml` when writing.
     #[arg(long)]
     pub(crate) force: bool,
 }
@@ -23,15 +31,24 @@ pub(crate) fn run(a: Args) -> i32 {
         eprintln!("error: not a directory: {}", a.repo);
         return 2;
     }
+    let text = glia_code_domain::plugin_families::declaration_template();
+    if a.force && !a.write {
+        eprintln!("error: --force requires --write");
+        return 2;
+    }
+    if !a.write {
+        // Dump the default declaration to screen.
+        println!("{text}");
+        return 0;
+    }
     let path = root.join(".glia/plugin_families.toml");
     if path.exists() && !a.force {
         eprintln!(
-            "error: {} already exists; pass --force to overwrite",
+            "error: {} already exists; pass --write --force to overwrite",
             path.display()
         );
         return 2;
     }
-    let text = glia_code_domain::plugin_families::declaration_template();
     if let Err(e) = std::fs::write(&path, text) {
         eprintln!("error: write {}: {e}", path.display());
         return 2;

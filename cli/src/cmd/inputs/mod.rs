@@ -41,12 +41,12 @@ pub(crate) enum InputsCmd {
     /// into .glia/overlay.toml, or removes rules by gap id, after validating
     /// the result. Only accept writes, and only that file.
     Overlay(overlay::Args),
-    /// Plugin family declaration (lua-support): `plugin-families <repo>`
-    /// writes `.glia/plugin_families.toml`, the file the build's runtime
-    /// discovery reads first (a declared family beats an inferred one). The
-    /// written file is the seed architectures as editable `[[plugin_family]]`
-    /// tables. The only writer of the file; a build never creates it. Exits 2
-    /// when the repo is missing or the file exists without `--force`.
+    /// Dump a repo's default plugin-family declaration to stdout, or write
+    /// it to `<repo>/.glia/plugin_families.toml` with `--write` (overwrite
+    /// with `--write --force`). The declaration lives at
+    /// `.glia/plugin_families.toml`; the build reads it first, then infers
+    /// from the tree. Exits 2 when the repo is missing or a write hits an
+    /// existing file without `--write --force`.
     PluginFamilies(plugin_families::Args),
     /// SCIP index snapshot (CE-1): decode a compiler-grade SCIP index
     /// (scip-python, scip-typescript, scip-java, scip-go, rust-analyzer scip)
