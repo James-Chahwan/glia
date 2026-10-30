@@ -31,7 +31,7 @@ TRACKS = {
     "T0": ("wave 0: ids, crates, slots, rustfmt", "F0.1-7"),
     "T1": ("proof: agent before / after (item 11)", "FE.1-4 FE.8"),
     "T2": ("self-graph hygiene, tier vocabulary, rules / docs hygiene, the audit tool", "FD.2 FD.4a FD.4b FD.4c FD.4d FD.5a FD.5b FD.6 FD.7a FD.7b FD.7c FD.7d FD.22 FD.23a FD.23b FD.24 FD.25 FD.27 FD.28 FD.34 FD.65 FD.69 FD.34b"),
-    "T3": ("edge-precision audit, judging + report (item 12)", "FD.3a FD.3d FD.3b FD.3c"),
+    "T3": ("edge-precision audit, judging + report (item 12)", "FD.3a FD.3d FD.3b FD.3c FD.73 FD.74 FD.75 FD.76 FD.77 FD.78 FD.79 FD.80 FD.81"),
     "T4": ("per-language precision and recall residuals", "FD.8 FD.9 FD.10a FD.10b FD.11-21 FD.29 FD.30 FD.32 FD.35-64 FD.68 FD.70 FD.72 FD.33 FD.71"),
     "T5": ("embeddings + the embedding gate (item 13) + Engram data", "FB.1 FB.2 FB.3 FB.4 FB.5a FB.5b FB.5c FB.6 FB.6b FB.11 FB.12a FB.12b FB.13a FB.13b FB.13c FB.13d FB.14"),
     "T6": ("goal-layer connector + clarification queue (§G, §C)", "FC.1 FC.2 FC.3a FC.3b FC.4 FC.5a FC.5b FC.6-14 FC.17a FC.17b FC.18 FC.23 FC.24"),
