@@ -52,9 +52,11 @@ impl PyGraph {
     /// `verdict` the worst row's (`"OK"`, `"DEGRADED"` or `"BLIND"`) and
     /// `reason` `<row>: <reason> (<measure>)`. Each of `mechanisms` (http,
     /// grpc, rpc, graphql, queue, ws, in that order) is `{mechanism,
-    /// producers, external_producers, consumers, pairs, paired_producers,
-    /// reached_consumers, client_reach, server_reach, verdict, reason, reach,
-    /// measure}`, a reach `None` when its side is empty. `parse` is
+    /// producers, external_producers, test_site_producers, consumers, pairs,
+    /// paired_producers, reached_consumers, client_reach, server_reach,
+    /// verdict, reason, reach, measure}`, a reach `None` when its side is
+    /// empty; `producers` and `client_reach` leave out ORIGIN `external` and
+    /// `test_fixture` (test-file sites, FH.26) producers. `parse` is
     /// `{parsed_files, unparsed, docs_unparsed, unparsed_files,
     /// docs_unparsed_files, verdict, reason, measure}` (the two maps by
     /// extension; prose is never a flag); each `workspace_unresolved` row

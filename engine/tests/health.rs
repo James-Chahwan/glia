@@ -3,6 +3,10 @@
 //! - `paired_app_is_ok`: a gin server serving ten routes and a TS client that
 //!   calls each of them: HTTP reaches every client and every route, role
 //!   `app`, verdict OK.
+//! - `test_site_endpoints_counted_apart` (FH.26): the paired app plus a
+//!   `_test.go` helper driving the router through `(method, path)`: its
+//!   test-site ENDPOINTs (ORIGIN `test_fixture`, FH.17) are `test_site_producers`,
+//!   in neither the producers nor client reach, so HTTP stays OK.
 //! - `wrapped_client_is_blind`: the same server, and a client whose calls go
 //!   through a gateway wrapper that prefixes a base the server does not serve
 //!   (`/gw/..`): twelve ENDPOINTs, none paired, HTTP BLIND
@@ -123,6 +127,50 @@ fn paired_app_is_ok() {
             && marker.contains(" role=app http=OK:1.000 grpc=OK:- rpc=OK:- graphql=OK:- queue=OK:- ws=OK:- unparsed=0 workspace_unresolved=0 suspicious=0 dead_share=")
             && marker.ends_with(" docs_unparsed=0 parse=OK verdict=OK surface=cli"),
         "{marker}"
+    );
+}
+
+/// FH.26: the paired app of [`paired_app_is_ok`] plus a `_test.go` helper
+/// that drives the app's own router through `(method, path)`: an inferred
+/// wrapper (FH.17) whose twelve test-file sites mint ENDPOINTs stamped ORIGIN
+/// `test_fixture` that pair nothing by design. They count as test sites, in
+/// neither the producers nor client reach, so HTTP stays OK `paired` over the
+/// ten non-test clients.
+#[test]
+fn test_site_endpoints_counted_apart() {
+    let root = tmp("test_sites");
+    gin_server(&root, 10);
+    web_package(&root);
+    let mut api = String::new();
+    for i in 0..10 {
+        api.push_str(&format!(
+            "export async function load{i}() {{\n  return fetch('/api/r{i}');\n}}\n\n"
+        ));
+    }
+    write(&root, "web/src/api.ts", &api);
+    let mut tests = String::from(
+        "package main\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"testing\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\nfunc PerformRequest(r http.Handler, method, path string) *httptest.ResponseRecorder {\n\treq, _ := http.NewRequest(method, path, nil)\n\tw := httptest.NewRecorder()\n\tr.ServeHTTP(w, req)\n\treturn w\n}\n\nfunc TestRoutes(t *testing.T) {\n\tr := gin.Default()\n",
+    );
+    for i in 0..12 {
+        tests.push_str(&format!("\tPerformRequest(r, \"GET\", \"/api/t{i}\")\n"));
+    }
+    tests.push_str("}\n");
+    write(&root, "server/api_test.go", &tests);
+    let (_, h) = build(&root);
+    let http = h.mechanism("http").expect("http row");
+    assert_eq!(h.role, Role::App, "{h:#?}");
+    assert!(http.test_site_producers >= 12, "{http:#?}");
+    assert_eq!(
+        (http.producers, http.paired_producers, http.consumers),
+        (10, 10, 10),
+        "{http:#?}"
+    );
+    assert_eq!(http.client_reach, Some(1.0), "{http:#?}");
+    assert_eq!((http.verdict, http.reason), (Verdict::Ok, "paired"));
+    assert!(
+        h.marker("").contains(" role=app http=OK:1.000 "),
+        "{}",
+        h.marker("")
     );
 }
 

@@ -17,9 +17,9 @@ from test_build import Checks, params, rg, stderr_of
 
 HEALTH_KEYS = ["repos", "role", "role_basis", "verdict", "reason", "mechanisms", "parse",
                "workspace_unresolved", "suspicious", "dead"]
-MECH_KEYS = ["mechanism", "producers", "external_producers", "consumers", "pairs",
-             "paired_producers", "reached_consumers", "client_reach", "server_reach",
-             "verdict", "reason", "reach", "measure"]
+MECH_KEYS = ["mechanism", "producers", "external_producers", "test_site_producers",
+             "consumers", "pairs", "paired_producers", "reached_consumers", "client_reach",
+             "server_reach", "verdict", "reason", "reach", "measure"]
 PARSE_KEYS = ["parsed_files", "unparsed", "docs_unparsed", "unparsed_files",
               "docs_unparsed_files", "verdict", "reason", "measure"]
 MECHANISMS = ["http", "grpc", "rpc", "graphql", "queue", "ws"]

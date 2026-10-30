@@ -120,17 +120,18 @@ fn render(repo: &str, others: usize, h: &Health) -> String {
 fn mechanisms(rows: &[MechanismHealth]) -> String {
     let mut out = String::from("## mechanisms\n\n");
     out.push_str(
-        "| mechanism | verdict | reason | clients | external | servers | pairs | client reach | server reach | measure |\n",
+        "| mechanism | verdict | reason | clients | external | test sites | servers | pairs | client reach | server reach | measure |\n",
     );
-    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
     for m in rows {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             m.mechanism,
             m.verdict.as_str(),
             m.reason,
             m.producers,
             m.external_producers,
+            m.test_site_producers,
             m.consumers,
             m.pairs,
             pct(m.client_reach),
@@ -298,6 +299,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\nrole: library\n"), "{text}");
+        assert!(
+            text.contains("| clients | external | test sites | servers |"),
+            "{text}"
+        );
         for m in ["http", "grpc", "rpc", "graphql", "queue", "ws"] {
             assert!(
                 text.lines()

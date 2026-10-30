@@ -15,7 +15,10 @@
 //!   Client reach is producers with an outgoing pair edge over producers;
 //!   server reach is consumers with an incoming pair edge over consumers. A
 //!   producer stamped ORIGIN `external` (a call to someone else's service,
-//!   CJ.3 / DF.10) is counted apart and in neither ratio. HTTP's consumers
+//!   CJ.3 / DF.10) is counted apart and in neither ratio, and so is one
+//!   stamped ORIGIN `test_fixture` (a test file's call into the app's own
+//!   router through an inferred wrapper, FH.17, which pairs nothing by
+//!   design; FH.26, `test_site_producers`). HTTP's consumers
 //!   leave out client-router pages (ORIGIN `nav_route`) and ROUTEs only test
 //!   code registers (DT.6a, `passes::test_route_ids`), and a ROUTE a WebSocket
 //!   client connects through counts as reached (DT.3c), so server reach is
@@ -279,10 +282,13 @@ impl Role {
 pub struct MechanismHealth {
     /// [`MechanismSpec::name`].
     pub mechanism: &'static str,
-    /// Distinct producer nodes, external ones left out.
+    /// Distinct producer nodes, external and test-site ones left out.
     pub producers: usize,
     /// Distinct producer nodes stamped ORIGIN `external`.
     pub external_producers: usize,
+    /// Distinct producer nodes stamped ORIGIN `test_fixture` (test-file
+    /// sites, FH.17), in neither ratio (FH.26).
+    pub test_site_producers: usize,
     /// Distinct consumer nodes (for HTTP: no pages, no test-only ROUTEs).
     pub consumers: usize,
     /// Pair edges of the mechanism's category.
@@ -516,6 +522,7 @@ pub fn boundary_health(merged: &MergedGraph) -> Boundary {
     struct Tally {
         producers: usize,
         external: usize,
+        test_sites: usize,
         consumers: usize,
         paired: usize,
         reached: usize,
@@ -549,11 +556,13 @@ pub fn boundary_health(merged: &MergedGraph) -> Boundary {
             }
             for (m, t) in MECHANISMS.iter().zip(tallies.iter_mut()) {
                 if kind == m.producer {
-                    if provenance.as_deref() == Some("external") {
-                        t.external += 1;
-                    } else {
-                        t.producers += 1;
-                        t.paired += usize::from(from.contains(&(n.id, m.pair)));
+                    match provenance.as_deref() {
+                        Some("external") => t.external += 1,
+                        Some("test_fixture") => t.test_sites += 1,
+                        _ => {
+                            t.producers += 1;
+                            t.paired += usize::from(from.contains(&(n.id, m.pair)));
+                        }
                     }
                 }
                 if kind == m.consumer {
@@ -587,6 +596,7 @@ pub fn boundary_health(merged: &MergedGraph) -> Boundary {
                 mechanism: m.name,
                 producers: t.producers,
                 external_producers: t.external,
+                test_site_producers: t.test_sites,
                 consumers: t.consumers,
                 pairs: pairs.get(&m.pair).copied().unwrap_or(0),
                 paired_producers: t.paired,
@@ -1139,6 +1149,7 @@ mod tests {
             mechanism: "http",
             producers: p,
             external_producers: 0,
+            test_site_producers: 0,
             consumers: c,
             pairs: 0,
             paired_producers: paired,
