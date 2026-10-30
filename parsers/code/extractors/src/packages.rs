@@ -52,7 +52,9 @@ pub struct PackageNodes {
     /// FD.31 fired_on, one per manifest of the four ecosystems it reads
     /// (`maven`, `pub`, `hex`, `nuget`), even one that declares nothing:
     /// `[packages] eco=<e> deps=<n> path=<p>` (a Gradle file adds
-    /// `catalog_refs=<c>` before `path=`). `None` for every other manifest.
+    /// `catalog_refs=<c>` before `path=`). FD.77 adds a `Cargo.toml`
+    /// (`eco=cargo`) and a `pyproject.toml` (`eco=pypi`), each with
+    /// `array_tables=<t>` before `path=`. `None` for every other manifest.
     pub marker: Option<String>,
 }
 
@@ -91,7 +93,22 @@ pub fn extract_for_path(source: &str, path: &str, module_id: NodeId, repo: RepoI
             .collect(),
         _ => return extract_deps_beside(source, path, module_id, repo),
     };
-    build_nodes(names_with_eco, module_id, repo)
+    let mut out = build_nodes(names_with_eco, module_id, repo);
+    // FD.77: the two TOML manifests say what they read, and how many
+    // array-of-tables blocks (Cargo targets, Poetry sources) they skipped.
+    let toml_eco = match base {
+        "Cargo.toml" => Some("cargo"),
+        "pyproject.toml" => Some("pypi"),
+        _ => None,
+    };
+    if let Some(eco) = toml_eco {
+        out.marker = Some(format!(
+            "[packages] eco={eco} deps={} array_tables={} path={path}",
+            out.nodes.len(),
+            count_toml_array_tables(source)
+        ));
+    }
+    out
 }
 
 /// FD.31: the dependencies of a pom.xml, a `build.gradle` / `build.gradle.kts`,
@@ -337,7 +354,7 @@ fn extract_top_level_string_keys(body: &str) -> Vec<String> {
 fn scan_pyproject(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let sections = parse_toml_sections(source);
-    for section in &sections {
+    for section in sections.iter().filter(|s| !s.array) {
         match section.name.as_str() {
             "project" => {
                 // PEP-621: `dependencies = ["foo>=1.0", "bar~=2.0"]`.
@@ -376,38 +393,56 @@ fn scan_pyproject(source: &str) -> Vec<String> {
 struct TomlSection {
     name: String,
     body: String,
+    /// FD.77: opened by an array-of-tables header (`[[test]]`,
+    /// `[[tool.poetry.source]]`); its keys belong to one array element, never
+    /// to a dependency table.
+    array: bool,
 }
 
-/// Split a TOML document into sections by `[header]` lines. Returns the
-/// section names + raw body text (between header and next section).
+/// Split a TOML document into sections by `[header]` and `[[header]]` lines.
+/// Returns the section names + raw body text (between header and next
+/// section). FD.77: a `[[..]]` header closes the open section like a `[..]`
+/// one does and opens a section named by its inner text, marked `array`
+/// (with no `]]` it opens an unnamed array section, so its keys still go
+/// nowhere); before, it was skipped and every key of the block landed in the
+/// body of the section before it. A `[..]` header with no `]` opens nothing.
 fn parse_toml_sections(source: &str) -> Vec<TomlSection> {
     let mut out = Vec::new();
-    let mut current_name = String::new();
-    let mut current_body = String::new();
+    let mut current: Option<TomlSection> = None;
     for line in source.lines() {
         let t = line.trim_start();
-        if t.starts_with('[') && !t.starts_with("[[") {
-            if !current_name.is_empty() {
-                out.push(TomlSection {
-                    name: std::mem::take(&mut current_name),
-                    body: std::mem::take(&mut current_body),
-                });
-            }
-            if let Some(end) = t.find(']') {
-                current_name = t[1..end].trim().to_string();
-            }
-        } else if !current_name.is_empty() {
-            current_body.push_str(line);
-            current_body.push('\n');
+        if let Some(inner) = t.strip_prefix("[[") {
+            out.extend(current.take());
+            let name = inner.find("]]").map_or("", |end| inner[..end].trim());
+            current = Some(TomlSection {
+                name: name.to_string(),
+                body: String::new(),
+                array: true,
+            });
+        } else if t.starts_with('[') {
+            out.extend(current.take());
+            current = t.find(']').map(|end| TomlSection {
+                name: t[1..end].trim().to_string(),
+                body: String::new(),
+                array: false,
+            });
+        } else if let Some(section) = current.as_mut() {
+            section.body.push_str(line);
+            section.body.push('\n');
         }
     }
-    if !current_name.is_empty() {
-        out.push(TomlSection {
-            name: current_name,
-            body: current_body,
-        });
-    }
+    out.extend(current);
+    out.retain(|s| s.array || !s.name.is_empty());
     out
+}
+
+/// FD.77: the number of array-of-tables headers a TOML document holds, the
+/// `array_tables=` field of its `[packages]` marker.
+fn count_toml_array_tables(source: &str) -> usize {
+    parse_toml_sections(source)
+        .iter()
+        .filter(|s| s.array)
+        .count()
 }
 
 /// Read `field = ["a", "b"]` from a TOML section body. Returns the inner
@@ -522,7 +557,7 @@ fn scan_requirements(source: &str) -> Vec<String> {
 
 fn scan_cargo_toml(source: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for section in parse_toml_sections(source) {
+    for section in parse_toml_sections(source).into_iter().filter(|s| !s.array) {
         match section.name.as_str() {
             "dependencies" | "dev-dependencies" | "build-dependencies" => {
                 for key in toml_table_keys(&section.body) {
@@ -1697,7 +1732,8 @@ end
         }
         let out = deps_of("anything", "README.md");
         assert!(out.nodes.is_empty() && out.marker.is_none());
-        // The seven earlier manifests keep no marker.
+        // The five earlier manifests other than Cargo.toml / pyproject.toml
+        // (FD.77) keep no marker.
         let repo = RepoId(1);
         let npm = extract_for_path(
             r#"{"dependencies":{"a":"1"}}"#,
@@ -1706,5 +1742,94 @@ end
             repo,
         );
         assert!(npm.marker.is_none());
+    }
+
+    fn manifest_deps(src: &str, path: &str) -> PackageNodes {
+        let repo = RepoId(1);
+        extract_for_path(src, path, module_id(repo), repo)
+    }
+
+    const ARRAY_TABLES_CARGO: &str = "[package]\nname = \"shop\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nserde = \"1\"\n\n[dev-dependencies]\ntempfile = \"3\"\n\n[[test]]\nname = \"smoke\"\npath = \"tests/smoke.rs\"\nharness = false\n\n[[bench]]\nname = \"speed\"\npath = \"benches/speed.rs\"\nharness = false\n\n[[bin]]\nname = \"shopd\"\npath = \"src/main.rs\"\nrequired-features = [\"cli\"]\n\n[[example]]\nname = \"demo\"\npath = \"examples/demo.rs\"\n\n[build-dependencies]\ncc = \"1\"\n";
+
+    /// FD.77: the keys of a `[[test]]` / `[[bench]]` / `[[bin]]` /
+    /// `[[example]]` table are no dependencies of the `[dev-dependencies]`
+    /// table before them; a `[build-dependencies]` after them still is.
+    #[test]
+    fn cargo_array_tables_close_the_dependency_section() {
+        let out = manifest_deps(ARRAY_TABLES_CARGO, "crate/Cargo.toml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:cargo:cc",
+                "package:cargo:serde",
+                "package:cargo:tempfile"
+            ]
+        );
+        assert_eq!(out.edges.len(), 3);
+    }
+
+    /// FD.77: activation/Cargo.toml's shape, `[dependencies]` then a
+    /// `[[bench]]`, reads the one path dependency.
+    #[test]
+    fn cargo_bench_after_dependencies_reads_only_the_dependency() {
+        let src = "[package]\nname = \"glia-activation\"\n\n[dependencies]\nglia-core = { path = \"../core\" }\n\n[[bench]]\nname = \"ppr\"\npath = \"benches/ppr.rs\"\nharness = false\n";
+        let out = manifest_deps(src, "activation/Cargo.toml");
+        assert_eq!(names(&out), ["package:cargo:glia-core"]);
+    }
+
+    /// FD.77: a `[[tool.poetry.source]]` after `[tool.poetry.dependencies]`
+    /// leaks no `name` / `url` / `priority` dependency.
+    #[test]
+    fn poetry_source_array_table_is_no_dependency() {
+        let src = "[tool.poetry]\nname = \"pyapp\"\nversion = \"0.1.0\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\nrequests = \"^2.31\"\n\n[[tool.poetry.source]]\nname = \"internal\"\nurl = \"https://pypi.example.com/simple\"\npriority = \"supplemental\"\n";
+        let out = manifest_deps(src, "pyapp/pyproject.toml");
+        assert_eq!(names(&out), ["package:pypi:requests"]);
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=pypi deps=1 array_tables=1 path=pyapp/pyproject.toml")
+        );
+    }
+
+    /// FD.77: a PEP-621 `[project]` table followed by a `[[project.authors]]`
+    /// style array keeps its dependencies.
+    #[test]
+    fn pep621_dependencies_survive_a_following_array_table() {
+        let src = "[project]\nname = \"pkg\"\ndependencies = [\n  \"httpx>=0.27\",\n  \"click\",\n]\n\n[[project.authors]]\nname = \"Someone\"\nemail = \"someone@example.com\"\n\n[[project.maintainers]]\nname = \"Other\"\n";
+        let out = manifest_deps(src, "pyproject.toml");
+        assert_eq!(names(&out), ["package:pypi:click", "package:pypi:httpx"]);
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=pypi deps=2 array_tables=2 path=pyproject.toml")
+        );
+    }
+
+    /// FD.77: the Cargo.toml marker counts the deps and the array tables.
+    #[test]
+    fn cargo_marker_counts_array_tables() {
+        let out = manifest_deps(ARRAY_TABLES_CARGO, "crate/Cargo.toml");
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=cargo deps=3 array_tables=4 path=crate/Cargo.toml")
+        );
+    }
+
+    /// FD.77: an array-table header opens a section of its own, marked as
+    /// one; one with no `]]` opens an unnamed array section.
+    #[test]
+    fn toml_sections_mark_array_tables() {
+        let src = "[dependencies]\na = \"1\"\n[[bin]]\nname = \"x\"\n[[broken\nb = 1\n[c]\nd = 1\n";
+        let got: Vec<(String, bool)> = parse_toml_sections(src)
+            .into_iter()
+            .map(|s| (s.name, s.array))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("dependencies".to_string(), false),
+                ("bin".to_string(), true),
+                (String::new(), true),
+                ("c".to_string(), false),
+            ]
+        );
     }
 }

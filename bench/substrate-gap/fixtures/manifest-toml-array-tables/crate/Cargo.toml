@@ -1,0 +1,35 @@
+[package]
+name = "shop"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+cli = []
+
+[dependencies]
+serde = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+harness = false
+
+[[bench]]
+name = "speed"
+path = "benches/speed.rs"
+harness = false
+
+[[bin]]
+name = "shopd"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[build-dependencies]
+cc = "1"

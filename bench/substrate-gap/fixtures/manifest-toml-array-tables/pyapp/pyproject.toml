@@ -1,0 +1,13 @@
+[tool.poetry]
+name = "pyapp"
+version = "0.1.0"
+description = "fixture"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31"
+
+[[tool.poetry.source]]
+name = "internal"
+url = "https://pypi.example.com/simple"
+priority = "supplemental"

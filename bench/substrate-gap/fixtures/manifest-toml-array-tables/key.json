@@ -1,0 +1,90 @@
+{
+  "framework": "manifest-toml-array-tables",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.77. Baseline HEAD c4152966: forbid violations expected for every target-table / poetry-source key (name, path, harness, required-features, url, priority).",
+  "expect_nodes": [
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:serde",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:tempfile",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:cc",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:requests",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "crate/Cargo.toml",
+      "to": "package:cargo:serde",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "crate/Cargo.toml",
+      "to": "package:cargo:cc",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "pyapp/pyproject.toml",
+      "to": "package:pypi:requests",
+      "category": "DEPENDS_ON"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:name"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:path"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:harness"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:required-features"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:smoke"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:shopd"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:name"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:url"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:priority"
+    },
+    {
+      "from": "crate/Cargo.toml",
+      "to": "package:cargo:name",
+      "category": "DEPENDS_ON"
+    }
+  ]
+}
