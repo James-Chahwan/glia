@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 447,
+  "fixtures": 449,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1623,10 +1623,19 @@
       "language": "yaml+json",
       "per_category": {}
     },
+    "org-packages-cargo": {
+      "framework": "org-packages",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "org-packages-go": {
       "framework": "org-packages",
       "language": "go",
       "per_category": {
+        "CALLS": 1.0,
         "IMPORTS": 1.0
       }
     },
@@ -1634,6 +1643,15 @@
       "framework": "org-packages",
       "language": "typescript",
       "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "org-packages-pypi": {
+      "framework": "org-packages",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0,
         "IMPORTS": 1.0
       }
     },
