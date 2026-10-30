@@ -1973,8 +1973,8 @@ questions over one graph computes `entrypoint_reachable` once.
   record. A calibrated answer depends on the glia build that calibrated (BUILD_STAMP strict), so
   every repo recalibrates after the upgrade. The version bump is the release step after EZ, never
   inside a packet.
-- **0.5.4 — embeddings and precision: complete on local `main`; the version bump, tag and publish
-  are the release step after the docs (FZ.1, FZ.2).** Scope `dev-notes/next-leap-0.5.4.md`, packets
+- **0.5.4 — embeddings and precision: complete on local `main`, version bumped, awaiting the tag
+  (the docs FZ.1, the handoffs FZ.2; the release close-out 8e6f22c3 ran every gate in full).** Scope `dev-notes/next-leap-0.5.4.md`, packets
   `dev-notes/leap-054-packets.json` (overrides `leap-054-corrections.json`), schedule and LANDED
   waves `dev-notes/wave-runner/schedule_054.py` (runner `--release 054`, ids F*, waves W0-W27),
   tracks `dev-notes/wave-runner/tracks_054.py`. James cut it on 2026-10-30 (ruling OPTION-3:
