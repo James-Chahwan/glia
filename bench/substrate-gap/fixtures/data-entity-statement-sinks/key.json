@@ -1,0 +1,104 @@
+{
+  "framework": "data-entity-statement-sinks",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.74 (edge audit A2, FD.3c; residual of FD.4b). A SQL / Cypher statement literal is a data access only as the argument of a call that runs it: never the content of a file write (`std::fs::write(p, \"CREATE TABLE ..\")`, a local `write(dir, rel, body)` helper, `Path.write_text(..)`, `fs.writeFileSync(..)`), never a query to glia's in-process evaluator (`g.query_gql(\"MATCH ..\")`), and (FD.6's rule completed) never inside a Cargo test / bench target file. Baseline HEAD 77ddc286: forbid violations 8. Controls: Rust `client.query`, Python `conn.execute` / `session.run`, a Dart StringBuffer `sql.write(..)` builder (the content is the FIRST argument, so a buffer write keeps), and a Python test that seeds a table (Python has no test-scope rule).",
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:accounts"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:invoices"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:graph:Customer"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:refunds"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:fixtures_seed"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::repo::load",
+      "to": "data_entity:sql:accounts",
+      "category": "ACCESSES_DATA",
+      "note": "client.query(\"SELECT id FROM accounts\", &[])"
+    },
+    {
+      "from": "app::repo::invoices",
+      "to": "data_entity:sql:invoices",
+      "category": "ACCESSES_DATA",
+      "note": "conn.execute(\"SELECT id FROM invoices\")"
+    },
+    {
+      "from": "app::repo::customers",
+      "to": "data_entity:graph:Customer",
+      "category": "ACCESSES_DATA",
+      "note": "session.run(\"MATCH (u:Customer) RETURN u\")"
+    },
+    {
+      "from": "lib::report::report",
+      "to": "data_entity:sql:refunds",
+      "category": "ACCESSES_DATA",
+      "note": "StringBuffer sql.write(\"SELECT id FROM refunds\") then db.rawQuery"
+    },
+    {
+      "from": "tests::test_seed::test_seed",
+      "to": "data_entity:sql:fixtures_seed",
+      "category": "ACCESSES_DATA",
+      "note": "a Python test seeding a table keeps its access"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:orders",
+      "note": "write(dir, \"db/migrations/V1__init.sql\", \"CREATE TABLE orders ..\") in a Cargo integration test"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:ledgers",
+      "note": "std::fs::write(.., \"INSERT INTO ledgers ..\")"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:helper_rows",
+      "note": "a query in a helper fn of a tests/*.rs file (FD.6 refuses the same text inside a #[test] fn)"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:parcels",
+      "note": "std::fs::write in src/ (non-test code): file content, not a query"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:manifests",
+      "note": "pathlib.Path(..).write_text(\"CREATE TABLE manifests ..\")"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:pallets",
+      "note": "fs.writeFileSync(\"db/init.sql\", \"CREATE TABLE pallets ..\")"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:graph:FUNCTION",
+      "note": "g.query_gql(\"MATCH (a:FUNCTION)-[:CALLS]->(b) ..\")"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:graph:ROUTEE",
+      "note": "lambda: g.query_gql(\"MATCH (a:ROUTEE) RETURN a\") inside c.raises"
+    }
+  ]
+}

@@ -141,6 +141,27 @@ pub(crate) struct CodeGuard<'a> {
     /// FD.6: the byte spans of a Rust file's `#[cfg(test)]` / `#[test]`
     /// items ([`CodeGuard::in_rust_test`]), found on first use.
     test_spans: std::cell::OnceCell<Vec<(usize, usize)>>,
+    /// FD.74: a Rust file under a `tests` / `benches` directory (a Cargo
+    /// test / bench target, or a `src/**/tests/` test module): every byte is
+    /// test code ([`CodeGuard::in_rust_test`]).
+    test_target: bool,
+}
+
+/// FD.74: the call a string literal is a direct argument of
+/// ([`CodeGuard::argument_callee`]): the callee's name (the identifier before
+/// the call's `(`) and whether the literal is the call's first argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArgCallee<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) first: bool,
+}
+
+/// True when `path`'s directory components (not its file name) hold a
+/// `tests` or `benches` directory.
+fn in_test_dir(path: &str) -> bool {
+    let mut parts = path.split(['/', '\\']);
+    parts.next_back();
+    parts.any(|c| c == "tests" || c == "benches")
 }
 
 impl<'a> CodeGuard<'a> {
@@ -157,6 +178,7 @@ impl<'a> CodeGuard<'a> {
             src: source.as_bytes(),
             lang,
             test_spans: std::cell::OnceCell::new(),
+            test_target: lang == "rust" && in_test_dir(path),
         })
     }
 
@@ -350,43 +372,72 @@ impl<'a> CodeGuard<'a> {
         if self.lang == "rust" && self.in_rust_test(lo) {
             return false;
         }
+        self.argument_paren(lo).is_some()
+    }
+
+    /// FD.74: the call the string literal a scanner's own lexer opened at
+    /// `open` (`body` its first content byte) is a direct argument of, read
+    /// the way [`CodeGuard::opens_argument`] reads it (its `(` -> that
+    /// call, first; a `,` or a Python `name=` -> the enclosing call, not
+    /// first) in EVERY guarded language, the test-item rule aside. `None`
+    /// when the literal is no argument, or the call's `(` follows no name
+    /// (a Rust macro's `!`, a generic `>`, a call or index result `)` /
+    /// `]`).
+    pub(crate) fn argument_callee(&self, open: usize, body: usize) -> Option<ArgCallee<'a>> {
+        let lo = self.same_literal(open, body)?;
+        let (paren, first) = self.argument_paren(lo)?;
+        let k = self.prev_code(paren)?;
+        let src: &'a [u8] = self.src;
+        if !is_ident_byte(src[k]) {
+            return None;
+        }
+        let mut s = k;
+        while s > 0 && is_ident_byte(src[s - 1]) {
+            s -= 1;
+        }
+        let name = std::str::from_utf8(&src[s..=k]).ok()?;
+        Some(ArgCallee { name, first })
+    }
+
+    /// The `(` of the call whose argument list the literal starting at `lo`
+    /// stands in, and whether it is the first argument: the code before it
+    /// (blanks, comments and a Rust `&` skipped) is the call's `(`, a `,`
+    /// inside it, or (Python) a keyword argument's `name=`, and the `(`
+    /// follows a callee ([`CodeGuard::is_callee_paren`]).
+    fn argument_paren(&self, lo: usize) -> Option<(usize, bool)> {
         // Any prefix letters glued to the literal belong to it.
         let mut first = lo;
         while first > 0 && lo - first < 3 && self.src[first - 1].is_ascii_alphabetic() {
             first -= 1;
         }
-        let Some(mut at) = self.prev_code(first) else {
-            return false;
-        };
+        let mut at = self.prev_code(first)?;
         if self.lang == "rust" && self.src[at] == b'&' {
-            let Some(p) = self.prev_code(at) else {
-                return false;
-            };
-            at = p;
+            at = self.prev_code(at)?;
         }
         match self.src[at] {
-            b'(' => self.is_callee_paren(at),
+            b'(' => self.is_callee_paren(at).then_some((at, true)),
             b',' => self
                 .enclosing_open(at)
-                .is_some_and(|p| self.is_callee_paren(p)),
+                .filter(|p| self.is_callee_paren(*p))
+                .map(|p| (p, false)),
             b'=' if self.lang == "python" => {
                 // `name=` but not `==` / `<=` / `>=` / `!=` / `x = `'s
                 // statement form outside a call.
-                let Some(k) = self.prev_code(at) else {
-                    return false;
-                };
+                let k = self.prev_code(at)?;
                 let kwarg = is_ident_byte(self.src[k])
                     && self.src.get(at + 1) != Some(&b'=')
                     && !matches!(
                         self.src.get(at.wrapping_sub(1)),
                         Some(b'=' | b'<' | b'>' | b'!')
                     );
-                kwarg
-                    && self
-                        .enclosing_open(k)
-                        .is_some_and(|p| self.is_callee_paren(p))
+                if !kwarg {
+                    return None;
+                }
+                self.enclosing_open(k)
+                    .filter(|p| self.is_callee_paren(*p))
+                    .map(|p| (p, false))
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -420,10 +471,14 @@ impl<'a> CodeGuard<'a> {
     /// annotated `#[cfg(test)]` or a test attribute (`#[test]`,
     /// `#[tokio::test]`, any attribute path ending in `test`), from the
     /// attribute to the item's closing `}` (or `;` for a bodiless item).
-    /// False in every other language.
+    /// FD.74: true at every byte of a Rust file under a `tests` / `benches`
+    /// directory (helpers included). False in every other language.
     pub(crate) fn in_rust_test(&self, pos: usize) -> bool {
         if self.lang != "rust" {
             return false;
+        }
+        if self.test_target {
+            return true;
         }
         self.test_spans
             .get_or_init(|| self.rust_test_spans())
@@ -653,6 +708,17 @@ impl<'a> LazyGuard<'a> {
     /// is counted for [`LazyGuard::report`].
     pub(crate) fn admits_argument(&mut self, open: usize, body: usize) -> bool {
         self.check(open, |g, open| g.opens_argument(open, body))
+    }
+
+    /// FD.74: [`CodeGuard::argument_callee`] of the literal a scanner read
+    /// with its delimiter at `open` and first content byte at `body`; `None`
+    /// when the file has no guard. Counts nothing.
+    pub(crate) fn argument_callee(&mut self, open: usize, body: usize) -> Option<ArgCallee<'a>> {
+        let (path, source) = (self.path, self.source);
+        self.built
+            .get_or_insert_with(|| CodeGuard::for_path(path, source))
+            .as_ref()?
+            .argument_callee(open, body)
     }
 
     /// FD.6: true when the file has no guard, or the literal a scanner read
@@ -991,6 +1057,92 @@ mod tests {
             "#[test]\nfn t() { db.query(\"SELECT 1\"); }\nfn p() { db.query(\"SELECT 2\"); }\n";
         assert!(!argument_at("src/a.rs", rs, "\"SELECT 1"));
         assert!(argument_at("src/a.rs", rs, "\"SELECT 2"));
+    }
+
+    /// FD.74: the callee of the call a literal is a direct argument of, and
+    /// whether it is the first argument, in every guarded language.
+    #[test]
+    fn argument_callee_names_the_call() {
+        let callee = |path: &str, src: &str| -> Option<(String, bool)> {
+            let open = src.find("\"x\"").expect("a literal");
+            let mut guard = LazyGuard::new(path, src);
+            let got = guard
+                .argument_callee(open, open + 1)
+                .map(|c| (c.name.to_string(), c.first));
+            assert_eq!(guard.dropped, 0, "argument_callee counts nothing");
+            got
+        };
+        let some = |name: &str, first: bool| Some((name.to_string(), first));
+        assert_eq!(
+            callee("src/a.rs", "fs::write(p, \"x\");\n"),
+            some("write", false)
+        );
+        assert_eq!(
+            callee("src/a.rs", "write(dir, rel, \"x\");\n"),
+            some("write", false)
+        );
+        assert_eq!(
+            callee(
+                "src/a.rs",
+                "std::fs::write(dir.join(rel), \"x\").unwrap();\n"
+            ),
+            some("write", false)
+        );
+        assert_eq!(
+            callee("a.py", "Path(t).write_text(\"x\")\n"),
+            some("write_text", true)
+        );
+        assert_eq!(
+            callee("a.ts", "fs.writeFileSync(p, \"x\");\n"),
+            some("writeFileSync", false)
+        );
+        assert_eq!(
+            callee("a.py", "g.query_gql(\"x\")\n"),
+            some("query_gql", true)
+        );
+        assert_eq!(
+            callee("a.py", "c.raises(E, lambda: g.query_gql(\"x\"), \"y\")\n"),
+            some("query_gql", true)
+        );
+        assert_eq!(callee("a.py", "f(a, sql=\"x\")\n"), some("f", false));
+        assert_eq!(callee("a.dart", "sql.write(\"x\");\n"), some("write", true));
+        // Test items do not matter here (the argument rule's own business).
+        assert_eq!(
+            callee("tests/a.rs", "fn h() { db.query(\"x\"); }\n"),
+            some("query", true)
+        );
+        assert_eq!(callee("src/a.rs", "let q = \"x\";\n"), None);
+        assert_eq!(callee("src/a.rs", "write!(f, \"x\");\n"), None);
+        assert_eq!(callee("src/a.rs", "f(a)(\"x\");\n"), None);
+        assert_eq!(callee("src/a.rs", "// write(p, \"x\")\n"), None);
+        assert_eq!(callee("a.vue", "write(p, \"x\")\n"), None);
+    }
+
+    /// FD.74: every byte of a Rust file under a `tests` / `benches`
+    /// directory is test code (a Cargo test / bench target or a test module
+    /// directory); a file merely named like one is not.
+    #[test]
+    fn rust_test_targets_are_test_code() {
+        let src = "fn helper() { db.query(\"SELECT 1\"); }\n";
+        for path in [
+            "tests/a.rs",
+            "benches/b.rs",
+            "crates/x/tests/c.rs",
+            "src/tests/mod.rs",
+        ] {
+            let g = CodeGuard::for_path(path, src).expect("a guard");
+            assert!(g.in_rust_test(0), "{path}");
+            assert!(g.in_rust_test(src.len() - 2), "{path}");
+            assert!(!argument_at(path, src, "\"SELECT"), "{path}");
+        }
+        for path in ["src/lib.rs", "src/testsuite.rs", "tests.rs"] {
+            let g = CodeGuard::for_path(path, src).expect("a guard");
+            assert!(!g.in_rust_test(0), "{path}");
+            assert!(argument_at(path, src, "\"SELECT"), "{path}");
+        }
+        // Only Rust: a Python test directory keeps its reading.
+        let py = CodeGuard::for_path("tests/test_a.py", "x = 1\n").expect("a guard");
+        assert!(!py.in_rust_test(0));
     }
 
     /// FD.6: a literal a scanner reads must be one the file holds itself in

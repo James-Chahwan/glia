@@ -72,6 +72,15 @@
 //!   `... 2>&1 | grep '\[code-guard\] data-entities '`
 //!   `[code-guard] data-entities lang=<rust|python> dropped=<n> path=<p>`
 //!   and `[code-guard] migrations lang=<rust|python> dropped=<n> path=<p>`
+//!
+//! FD.74, always on, once per file a statement literal was refused as a
+//! sink's argument (`statement_sink`: file-write content, a query to an
+//! in-process evaluator):
+//!   `... 2>&1 | grep '\[data-entity\] sink-args '`
+//!   `[data-entity] sink-args refused write=<w> in_process=<q> path=<p>`
+//! A statement in a Rust file under `tests/` / `benches/` (a Cargo test or
+//! bench target) is refused by the code guard and counts in the
+//! `[code-guard] data-entities` line.
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -79,7 +88,7 @@ use std::sync::OnceLock;
 use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
-use crate::code_guard::LazyGuard;
+use crate::code_guard::{ArgCallee, LazyGuard};
 
 pub struct DataEntityNodes {
     pub nodes: Vec<Node>,
@@ -299,6 +308,7 @@ pub fn extract_data_entity_access(
     // file-wide `select ` gate read comments, prose strings and Go's
     // `select {` statement as SQL (`copied from the pool` -> table `the`).
     let lit = sql_statements(source, &mut guard);
+    let mut refused = lit.refused;
     let mut stats = ScanStats {
         literals: lit.literals,
         sql: lit.statements.len(),
@@ -381,10 +391,16 @@ pub fn extract_data_entity_access(
     if debug_enabled() && decl.needles > 0 {
         eprintln!("{}", decl.marker());
     }
-    for (label, at, verb) in cypher_label_sites(source, &mut guard) {
+    for (label, at, verb) in cypher_label_sites(source, &mut guard, &mut refused) {
         sink.emit_site(DataEntityFlavor::Graph, &label, at, verb);
     }
     guard.report("data-entities");
+    if refused.write + refused.in_process > 0 {
+        eprintln!(
+            "[data-entity] sink-args refused write={} in_process={} path={path}",
+            refused.write, refused.in_process
+        );
+    }
 
     if debug_enabled() && stats.fired() {
         eprintln!("{}", stats.marker(source));
@@ -906,6 +922,87 @@ pub(crate) struct LiteralSql {
     /// Joined literals that opened with a SQL verb but carry a Go fmt verb no
     /// SQL driver uses (`delete from spaces key=%q: %w`).
     pub(crate) rejected_fmt: usize,
+    /// FD.74: statements refused as a sink's argument ([`statement_sink`]).
+    pub(crate) refused: SinkRefusals,
+}
+
+/// FD.74: statement literals refused because the call they are an argument
+/// of writes a file ([`WRITE_SINKS`], [`WRITE_AFTER_PATH`]) or queries an
+/// in-process evaluator ([`IN_PROCESS_QUERY_APIS`]): the
+/// `[data-entity] sink-args` marker's counts.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SinkRefusals {
+    pub(crate) write: usize,
+    pub(crate) in_process: usize,
+}
+
+/// FD.74: why a statement literal's call runs no statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sink {
+    /// The literal is file content (`std::fs::write(p, sql)`).
+    Write,
+    /// The literal is a query to an evaluator that reads no data store.
+    InProcess,
+}
+
+impl SinkRefusals {
+    fn count(&mut self, sink: Sink) {
+        match sink {
+            Sink::Write => self.write += 1,
+            Sink::InProcess => self.in_process += 1,
+        }
+    }
+}
+
+/// FD.74: file-write APIs whose arguments are file content at any position
+/// (Python `write_text` / `write_bytes` / `writelines`, Rust / Dart / Kotlin
+/// `write_file` / `writeFile`, Node `fs.writeFile[Sync]` / `appendFile[Sync]`,
+/// Go `os.WriteFile`, .NET `File.WriteAllText` / `AppendAllText`, Java
+/// `Files.writeString`, PHP `file_put_contents` / `fwrite`).
+const WRITE_SINKS: &[&str] = &[
+    "write_text",
+    "write_bytes",
+    "writelines",
+    "write_file",
+    "writeFile",
+    "writeFileSync",
+    "appendFile",
+    "appendFileSync",
+    "WriteFile",
+    "WriteAllText",
+    "AppendAllText",
+    "writeString",
+    "file_put_contents",
+    "fwrite",
+];
+
+/// FD.74: write calls that are a sink only when the statement is NOT their
+/// first argument (a path or directory precedes the content: Rust
+/// `std::fs::write(p, sql)`, a `write(dir, rel, sql)` helper). As the first
+/// argument the same call is a builder or handle write (`sb.write(sql)`,
+/// `f.write(sql)`, [`BUILDER_METHODS`]), which keeps its reading.
+const WRITE_AFTER_PATH: &[&str] = &["write", "write_all"];
+
+/// FD.74: query APIs of evaluators that read no data store. A row joins this
+/// table only for such an evaluator: glia's own GQL evaluator
+/// (`glia_py.PyGraph.query_gql`, `glia_engine::rules::query_gql`) runs over
+/// a code graph built in memory. There is no shape that says "in-process"
+/// (an embedded store's `conn.execute("MATCH ..")` is a real store), so the
+/// table names evaluators.
+const IN_PROCESS_QUERY_APIS: &[&str] = &["query_gql"];
+
+/// FD.74: the sink the statement literal `lit` is an argument of, read from
+/// the call it is a direct argument of ([`LazyGuard::argument_callee`]);
+/// `None` when the call may run it (or the file has no guard).
+fn statement_sink(guard: &mut LazyGuard, lit: &Lit) -> Option<Sink> {
+    let ArgCallee { name, first } = guard.argument_callee(lit.outer.start, lit.body.start)?;
+    if IN_PROCESS_QUERY_APIS.contains(&name) {
+        Some(Sink::InProcess)
+    } else if WRITE_SINKS.contains(&name) || (!first && WRITE_AFTER_PATH.contains(&name)) {
+        Some(Sink::Write)
+    } else {
+        None
+    }
 }
 
 /// The string literals of a source file, grouped into the runtime values they
@@ -979,7 +1076,9 @@ fn join_group(source: &str, group: &[Lit], joints: &[Joint]) -> (String, Vec<Pie
 /// ([`has_go_fmt_verb`]).
 ///
 /// FD.4b: a run whose first literal `guard` refuses as a call argument
-/// ([`LazyGuard::admits_argument`]) is no statement.
+/// ([`LazyGuard::admits_argument`]) is no statement. FD.74: nor is one that
+/// is a sink's argument ([`statement_sink`]), counted in
+/// [`LiteralSql::refused`].
 pub(crate) fn sql_statements(source: &str, guard: &mut LazyGuard) -> LiteralSql {
     let joined = joined_literals(source);
     let b = source.as_bytes();
@@ -987,6 +1086,7 @@ pub(crate) fn sql_statements(source: &str, guard: &mut LazyGuard) -> LiteralSql 
         literals: joined.lits.len(),
         statements: Vec::new(),
         rejected_fmt: 0,
+        refused: SinkRefusals::default(),
     };
     for (group, group_joints) in joined.groups() {
         // Cheap first: no allocation unless the first word is a SQL verb or
@@ -1014,10 +1114,16 @@ pub(crate) fn sql_statements(source: &str, guard: &mut LazyGuard) -> LiteralSql 
             out.rejected_fmt += 1;
             continue;
         }
-        if let Some(first) = group.first()
-            && !guard.admits_argument(first.outer.start, first.body.start)
-        {
-            continue;
+        if let Some(first) = group.first() {
+            // FD.74: a sink's argument first, so a write in a test target
+            // counts as a write.
+            if let Some(sink) = statement_sink(guard, first) {
+                out.refused.count(sink);
+                continue;
+            }
+            if !guard.admits_argument(first.outer.start, first.body.start) {
+                continue;
+            }
         }
         out.statements.push(SqlStmt { text, scan, pieces });
     }
@@ -3037,18 +3143,29 @@ fn blank_prefix_len(s: &str) -> usize {
 /// The labels of [`cypher_label_sites`], names only (the tests' reader).
 #[cfg(test)]
 fn scan_cypher_labels(source: &str) -> Vec<String> {
-    cypher_label_sites(source, &mut LazyGuard::new("", source))
-        .into_iter()
-        .map(|(label, _, _)| label)
-        .collect()
+    cypher_label_sites(
+        source,
+        &mut LazyGuard::new("", source),
+        &mut SinkRefusals::default(),
+    )
+    .into_iter()
+    .map(|(label, _, _)| label)
+    .collect()
 }
 
 /// The node labels of every Cypher statement in `source`, in statement order
 /// then label order, each with its source offset and the verb of the clause
 /// its pattern sits in (LE.4a, [`node_label_hits`]). Under `GLIA_DATA_DEBUG`
 /// prints the file's `[data-entity] cypher …` line ([`cypher_marker`]).
-fn cypher_label_sites(source: &str, guard: &mut LazyGuard) -> Vec<(String, usize, AccessVerb)> {
-    let stmts = cypher_statements(source, guard);
+/// FD.74: statements refused as a sink's argument count in `refused`.
+fn cypher_label_sites(
+    source: &str,
+    guard: &mut LazyGuard,
+    refused: &mut SinkRefusals,
+) -> Vec<(String, usize, AccessVerb)> {
+    let (stmts, sinks) = cypher_statements(source, guard);
+    refused.write += sinks.write;
+    refused.in_process += sinks.in_process;
     let mut sites = Vec::new();
     for stmt in &stmts {
         for (label, pos, verb) in node_label_hits(&stmt.text) {
@@ -3089,9 +3206,12 @@ const CYPHER_PATTERN_CLAUSES: &[&str] = &["MATCH", "MERGE", "CREATE"];
 /// The joined literals ([`joined_literals`]) of `source` that are Cypher
 /// statements, in source order. FD.4b: a run whose first literal `guard`
 /// refuses as a call argument ([`LazyGuard::admits_argument`]) is none.
-fn cypher_statements(source: &str, guard: &mut LazyGuard) -> Vec<CypherStmt> {
+/// FD.74: nor is one that is a sink's argument ([`statement_sink`]), counted
+/// in the returned [`SinkRefusals`].
+fn cypher_statements(source: &str, guard: &mut LazyGuard) -> (Vec<CypherStmt>, SinkRefusals) {
     let joined = joined_literals(source);
     let mut out = Vec::new();
+    let mut refused = SinkRefusals::default();
     for (group, joints) in joined.groups() {
         // Cheap first: no allocation unless the run opens with a Cypher word.
         if !group_opens_with_cypher_word(source, group) {
@@ -3102,8 +3222,14 @@ fn cypher_statements(source: &str, guard: &mut LazyGuard) -> Vec<CypherStmt> {
         };
         let (text, pieces) = join_group(source, group, joints);
         let text = blank_escapes(&text);
-        if is_cypher_statement(&text) && guard.admits_argument(first.outer.start, first.body.start)
-        {
+        if !is_cypher_statement(&text) {
+            continue;
+        }
+        if let Some(sink) = statement_sink(guard, first) {
+            refused.count(sink);
+            continue;
+        }
+        if guard.admits_argument(first.outer.start, first.body.start) {
             out.push(CypherStmt {
                 text,
                 span: first.outer.start..last.outer.end,
@@ -3111,7 +3237,7 @@ fn cypher_statements(source: &str, guard: &mut LazyGuard) -> Vec<CypherStmt> {
             });
         }
     }
-    out
+    (out, refused)
 }
 
 fn group_opens_with_cypher_word(source: &str, group: &[Lit]) -> bool {
@@ -3902,7 +4028,7 @@ public interface MovieRepository extends Neo4jRepository<Movie, Long> {
     #[test]
     fn cypher_marker_counts_rejected_keywords() {
         let people = "from neo4j import GraphDatabase\n\ndef find_person(tx, name):\n    return tx.run(\"MATCH (p:Person {name: $name}) RETURN p\", name=name).single()\n\ndef upsert_company(tx, cid):\n    tx.run(\n        \"MERGE (c:Company {id: $id}) \"\n        \"RETURN c\",\n        id=cid,\n    )\n";
-        let stmts = cypher_statements(people, &mut LazyGuard::new("", people));
+        let (stmts, _) = cypher_statements(people, &mut LazyGuard::new("", people));
         let labels = scan_cypher_labels(people);
         assert_eq!(labels, strings(&["Person", "Company"]));
         assert_eq!(
@@ -3912,7 +4038,7 @@ public interface MovieRepository extends Neo4jRepository<Movie, Long> {
             )
         );
         let merged = "// Graph merge helpers. A Rust `match` is not Cypher, and neither is this\n// comment about the Cypher form MATCH (x:Label).\npub fn pick(kind: u32) -> u64 {\n    match kind {\n        _ => 0,\n    }\n}\n";
-        let stmts = cypher_statements(merged, &mut LazyGuard::new("", merged));
+        let (stmts, _) = cypher_statements(merged, &mut LazyGuard::new("", merged));
         assert_eq!(
             cypher_marker(merged, &stmts, &[]).as_deref(),
             Some("[data-entity] cypher statements=0 labels= rejected_outside_literal=3")
@@ -4972,6 +5098,89 @@ mod t {
         assert_eq!(
             qnames_at("app/repo.py", py),
             sql(&["fixture_rows", "users"])
+        );
+    }
+
+    /// FD.74: a statement literal that is file-write content, a query to
+    /// glia's own in-process GQL evaluator, or sits anywhere in a Cargo test
+    /// / bench target is no data access; a statement a client runs is.
+    #[test]
+    fn statement_sinks_mint_nothing() {
+        for (path, src) in [
+            (
+                "src/a.rs",
+                "pub fn s(p: &Path) {\n    std::fs::write(p, \"INSERT INTO ledgers (id) VALUES (1)\").unwrap();\n}\n",
+            ),
+            (
+                "src/a.rs",
+                "pub fn s(dir: &Path) {\n    write(dir, \"V1.sql\", \"CREATE TABLE orders (id INT)\");\n}\n",
+            ),
+            (
+                "tools/a.py",
+                "def s(r):\n    Path(r).write_text(\"CREATE TABLE manifests (id INT)\")\n",
+            ),
+            (
+                "tools/a.ts",
+                "export function s() {\n  fs.writeFileSync(\"init.sql\", \"CREATE TABLE pallets (id INT)\");\n}\n",
+            ),
+            (
+                "tests/q.py",
+                "def main(g):\n    g.query_gql(\"MATCH (a:FUNCTION) RETURN a\")\n",
+            ),
+            (
+                "tests/seed.rs",
+                "fn seed(client: &mut Client) {\n    client.query(\"SELECT id FROM helper_rows\", &[]);\n}\n",
+            ),
+        ] {
+            assert_eq!(qnames_at(path, src), Vec::<String>::new(), "{path}: {src}");
+        }
+    }
+
+    /// FD.74's controls: a statement a client runs keeps its entity, and so
+    /// does the FIRST argument of a bare `write` (a builder or file handle).
+    #[test]
+    fn statement_sink_controls_keep() {
+        assert_eq!(
+            qnames_at(
+                "src/repo.rs",
+                "pub fn load(client: &mut Client) {\n    client.query(\"SELECT id FROM accounts\", &[]);\n}\n"
+            ),
+            sql(&["accounts"])
+        );
+        assert_eq!(
+            qnames_at(
+                "app/repo.py",
+                "def invoices(conn):\n    return conn.execute(\"SELECT id FROM invoices\").fetchall()\n"
+            ),
+            sql(&["invoices"])
+        );
+        assert_eq!(
+            qnames_at(
+                "app/repo.py",
+                "def customers(session):\n    return session.run(\"MATCH (u:Customer) RETURN u\")\n"
+            ),
+            vec!["data_entity:graph:Customer".to_string()]
+        );
+        assert_eq!(
+            qnames_at(
+                "lib/report.dart",
+                "report(db) async {\n  final sql = StringBuffer();\n  sql.write(\"SELECT id FROM refunds\");\n  return db.rawQuery(sql.toString());\n}\n"
+            ),
+            sql(&["refunds"])
+        );
+        assert_eq!(
+            qnames_at(
+                "tests/test_seed.py",
+                "def test_seed(conn):\n    conn.execute(\"INSERT INTO fixtures_seed (id) VALUES (1)\")\n"
+            ),
+            sql(&["fixtures_seed"])
+        );
+        assert_eq!(
+            qnames_at(
+                "tools/dump.py",
+                "def dump(f):\n    f.write(\"SELECT id FROM exports\")\n"
+            ),
+            sql(&["exports"])
         );
     }
 
