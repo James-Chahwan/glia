@@ -12,7 +12,7 @@ Point it at several repos (or a monorepo) and the cross-graph resolvers pair wha
 
 ## Coverage
 
-**17 languages** (tree-sitter): Python, Go, TypeScript / JavaScript, Rust, Java, Kotlin, C#, Ruby, PHP, Swift, C / C++, Scala, Clojure, Dart, Elixir, Solidity, Terraform; plus React, Vue and Angular parsers stacked on TypeScript.
+**18 languages** (tree-sitter): Python, Go, TypeScript / JavaScript, Rust, Java, Kotlin, C#, Ruby, PHP, Swift, C / C++, Scala, Clojure, Dart, Elixir, Solidity, Terraform, Lua (0.5.5, from glia PR #3); plus React, Vue and Angular parsers stacked on TypeScript.
 
 **How much of it is measured.** `bench/substrate-gap/` holds 458 fixture repos, each a small project with a graded key of the nodes, edges and cells it must produce and the ones it must not; none is blind. They fill a 17-language x 30-mechanism coverage matrix ([`COVERAGE.md`](../bench/substrate-gap/COVERAGE.md)): 346 cells full, 0 partial, 0 none, 136 not yet probed and 28 that cannot apply. In 0.5.1 it read 243 full, 34 partial and 69 none: 0.5.2's DF, DG and DH groups measured and closed every none and all but one partial cell, and the tweaks closed the last (Dart's function-level TESTS, through closure calls). Since 0.5.4 a second, real-repo side grades the same cells on the outlier cohort (`bench/cohort/`, 21 public repos) and a synthetic cross-service matrix (`bench/sibyl/`), and both run in every release's close-out beside the fixtures. A partial cell would be a known gap, and `glia coverage` prints the caveats for the repo you point it at.
 
@@ -83,7 +83,7 @@ source files
 
 Workspace crates:
 - `core/`: `Node`, `Edge`, `QName`, `RepoId`, shared primitives.
-- `code-domain/`: code-specific registries (50 NodeKind, 38 EdgeCategory, 27 CellType IDs; 0.5.2 added SAME_AS, 0.5.4 IMPORT_BINDINGS and three ids reserved for 0.5.5's goal layer) and the code domain's profile tables, identity rules included.
+- `code-domain/`: code-specific registries (50 NodeKind, 38 EdgeCategory, 27 CellType IDs; 0.5.2 added SAME_AS, 0.5.4 IMPORT_BINDINGS and three ids reserved for 0.5.6's goal layer) and the code domain's profile tables, identity rules included.
 - `parsers/code/<lang>/`: one crate per language. `parsers/code/extractors/` for cross-cutting (gRPC, queues, WebSocket, EventBus, GraphQL, CLI, data-sources, data-entities, cron, config, IaC, packages, ts-routes, React, Angular and Angular templates, Vue, and the EVM contract clients for TypeScript and Go).
 - `graph/`: per-repo builder, MergedGraph, the 16 cross-graph resolvers (org-internal package routing included), the models pass (client / server contract models: wire shapes, pairs, drift) and the identity resolver, blast radius.
 - `engine/`: orchestration (walk, parse, build, passes, persist), every answer primitive, the rules layer over the code graph, identity collapse, the watch session, the rankings, boundary health and the query-time embedding tier. Used by `py/` and `cli/`.
@@ -94,7 +94,7 @@ Workspace crates:
 - `projection-text/`: dense sigil projection for LLM context.
 - `activation/`: Personalised PageRank (power iteration and push), the pass registry, the domain profile and the generic algorithms (reachability, levelled BFS, graph delta, SCC, communities, cuts, hubs, MinHash, identity classes and their quotient), all domain-agnostic.
 - `doc-sources/`: Confluence ingestion behind `glia docs`. `snapshots/`: the git-history, test-report and identifier-vocabulary snapshot writers. `stamp/`: the build identity that keys the parse cache.
-- `toy-domain/`: a test-only second domain proving the domain seam; never a dependency of a shipped crate. `build-domain/` and `parsers/build/bazel/` are empty slots reserved for 0.5.5's build-target graphs.
+- `toy-domain/`: a test-only second domain proving the domain seam; never a dependency of a shipped crate. `build-domain/` and `parsers/build/bazel/` are empty slots reserved for 0.5.6's build-target graphs.
 
 ## Compared to
 

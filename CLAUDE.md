@@ -76,6 +76,8 @@ rules/              glia-rules (0.5.2, DA): the Datalog evaluator. Depends on gl
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
+  lua/     — 0.5.5, from Brian Ealdwine's glia PR #3 (dev-notes/next-leap-0.5.5.md); graph side
+             glia_graph::build_lua (graph/src/build/lua.rs)
   kotlin/  — own parser (tree-sitter-kotlin-ng), but ONE graph with java/:
              the JVM family joins in engine/src/build/lang_build.rs
   react/   angular/  vue/    — framework parsers stacked on typescript
@@ -109,9 +111,9 @@ embed/              glia-embed (0.5.4, FB.1, FB.14): the Embedder trait, HashEmb
                     opt-in); a GPU failure finishes on an in-process CPU session. The engine reaches the
                     model only through feature `sem-eval` (gate harnesses), py through `embed` (on in
                     the published wheels), the CLI through its default `embed`. docs/embeddings.md
-build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.5's build-target graphs
+build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.6's build-target graphs
                     (track T9); doc-only in 0.5.4, a stamp HASHED_ROOTS entry
-parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.5 (track T9); doc-only in 0.5.4
+parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.6 (track T9); doc-only in 0.5.4
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
                     (the rules layer's own toy proof is inline in rules/tests/toy.rs, so this list is unchanged)
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
@@ -182,11 +184,11 @@ The facade rules:
    (`activation/src/algo/fuse.rs`, `engine/src/{rank,calibrate}/mod.rs`,
    `engine/src/intent/{text,ids,defs,paths,idr}.rs`) and every other tracked `.rs` (EZ.1's scan).
    At 0.5.4 every tracked `.rs` has code except exactly the 16 wave-0 slots of the tracks moved
-   to 0.5.5 (James 2026-10-30, F0.8 dropped: kept, not removed): `build-domain/src/lib.rs`,
+   to 0.5.6 (James 2026-10-30, F0.8 dropped: kept, not removed): `build-domain/src/lib.rs`,
    `code-domain/src/goal.rs`, `engine/src/clarify/{answer,questions}.rs`,
    `engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs`, `engine/src/targets.rs`,
    `parsers/build/bazel/src/lib.rs` and `py/src/{clarify,goal,targets}.rs`, each ending
-   `//! Reserved for 0.5.5 (track T6|T9); empty in 0.5.4.` (FZ.1's scan exempts exactly these).
+   `//! Reserved for 0.5.6 (track T6|T9); empty in 0.5.4.` (FZ.1's scan exempts exactly these).
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -383,9 +385,9 @@ engine/src/   lib.rs        facade (rules above)
                        the dead share; health / health_with / boundary_health; blind_caveats /
                        blind_line, the `blind` row an answer gains for a mechanism it read that
                        health rates BLIND or DEGRADED (FH.9, `BlastRadius.blind`)
-              goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.5 (T6: goal/, clarify/;
+              goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.6 (T6: goal/, clarify/;
                        T9: targets.rs): goal/mod.rs and clarify/mod.rs declare their children,
-                       every child file is doc-only (`Reserved for 0.5.5`)
+                       every child file is doc-only (`Reserved for 0.5.6`)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -406,6 +408,13 @@ graph/src/    lib.rs        facade (rules above)
                             bound in the reader's own scope, emitter graph:reads),
                             provider_type / provider_call (Riverpod provider receivers,
                             emitter graph:dart)
+              build/lua.rs  (0.5.5) a child of build.rs, the passes of the flat `build_lua`:
+                            resolve_requires (beside the file, the ancestor walk under "" / lua /
+                            lib / src, the file before <spec>/init.lua; IMPORTS rules
+                            require_sibling / require_path / require_root), resolve_heritage
+                            (INHERITS_FROM `metatable` / `require_alias`, emitter graph:lua) and
+                            resolve_lua_calls (local_call, module_table, require_alias,
+                            inherited_method up 8 levels), file-local only
               imports/reexports.rs  (DT.1q) a child of imports.rs: TS / JS re-export
                             barrels resolved as ECMA-262 ResolveExport (Barrels::read /
                             materialize), IMPORTS rule `reexport`
@@ -483,7 +492,7 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     glia_config gains Rejection / LoadedConfig.rejections (DT.7c)
                     0.5.4: lib.rs's IMPORT_BINDINGS writers and readers (import_bindings_cell /
                     import_bindings_json, IMPORT_BINDINGS_CAP 256, FA.21; read_import_bindings,
-                    ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.5
+                    ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.6
                     (T6); same_as keys four more ecosystems (FD.31: maven `groupId:artifactId`
                     lowercase, pub, hex, nuget; PROJECT ecosystems dart -> pub, elixir -> hex,
                     dotnet -> nuget, maven / gradle -> maven); glia_config gains ConventionDecl
@@ -514,7 +523,7 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               graph.rs: a PyGraph drop calls memory::release_freed_memory (DE.10)
   0.5.4 private slots (F0.4, F0.7): embed FB.5c (glia_py.embed; the process-wide bge-small
               session; the wheel's `glia-embed-worker` found beside the interpreter, FB.14)
-              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.5 (T6, T9)
+              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.6 (T6, T9)
               vocab_sync (FB.13b) lives in snapshots.rs beside history_sync
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
@@ -604,7 +613,7 @@ snapshot steps (CLI / pyo3, never a build, never a .gmap):
 ```
 
 0.5.4 adds no graph beside the region / project / docs graphs: the goal graph (GOAL_UNIT /
-TRACES) and the build-target graph (targets.gmap) moved to 0.5.5 with tracks T6 and T9.
+TRACES) and the build-target graph (targets.gmap) moved to 0.5.6 with tracks T6 and T9.
 
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
 mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
@@ -904,6 +913,16 @@ only slows the lone build (`parallel::threads` documents the table).
   wheels' `[cli-wheel] check: ok wheel=<w> size_mb=<m>` (FE.5) / `[cli-wheel-ci] <runner> find ok`
   (FE.6).
 
+**The 0.5.5 markers (Lua, the use-pattern axis)**, each on stderr:
+- *Lua.* Per file `[lua] functions=<f> methods=<m> classes=<k> heritage=<h> routes=<r> endpoints=<e> tests=<t>
+  requires=<q> dynamic_requires=<d> calls=<c> file=<p>`; per Lua graph `[imports] lua requires bound=<b> (sibling=<s>
+  path=<p> root=<r> init=<i>) unbound=<u>`, `[lua-classes] heritage bound=<b> (metatable=<m> require_alias=<a>)
+  unbound=<u>` and `[lua-calls] bound=<b> (local=<l> module_table=<m> require_alias=<a> inherited=<i>) unbound=<u>
+  ambiguous=<x>`.
+- *The matrix.* `[matrix] patterns: <L> languages x <P> use patterns, <f> full, <p> partial, <n> none, <u> unknown`
+  after the 30-column line (`bench/substrate-gap/matrix.py`), and a `[matrix] cell <lang>/<pattern> = ..` marker per
+  pattern cell.
+
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
 Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems` with unresolved references (`UnresolvedRef`). The graph builder walks the tree to turn those into concrete edges uniformly across languages.
@@ -1191,7 +1210,7 @@ fields SCHEMA_FIELDS.
 0.5.4 allocates four (F0.1): node GOAL_UNIT 50, edge TRACES 38, cells UNIT 26 and
 IMPORT_BINDINGS 27. IMPORT_BINDINGS is written (FA.21: each MODULE's external imports, specifier,
 name, alias and row, capped at 256). GOAL_UNIT, TRACES and UNIT were allocated for the goal layer
-(track T6), which moved to 0.5.5: they stay registered with no emitter, locked like
+(track T6), which moved to 0.5.6: they stay registered with no emitter, locked like
 SHARES_DEPENDENCY, in no carry, community, entry or embed list.
 The next free ids are node 51 / edge 39 / cell 28.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
@@ -1233,7 +1252,7 @@ the code-domain readings (FileIndex, co-change, IDR, the calibration replay) liv
 0.5.4 keeps the dials too. The one tier type is `glia_activation::profile::Tier` (FD.7a; was
 IdentityTier, the rules crate's Tier, and per-module strings), printed lowercase on every
 surface through `Tier::as_str` (FD.7d). TRACES (38) weighs 0 and GOAL_UNIT (50) is no entry,
-carry or embed kind: both are registered for 0.5.5's goal layer with no emitter. The profile's
+carry or embed kind: both are registered for 0.5.6's goal layer with no emitter. The profile's
 `EMBED_KINDS` (30 declaration kinds) is what `glia embed` embeds. A similarity never reaches a
 walk: the semantic tier only re-orders `find --files`' candidates and picks `pack`'s fallback
 seeds, each marked heuristic beside the lexical absence.
@@ -1365,7 +1384,7 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   Since 0.5.4 gate.json may hold `accepted` rows (row, floor, packet, ruling): a ruled drop
   passes while it stays at or above its floor, printed `[rank-gate] base=<b> accepted <row>
   <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted` (FD.79's four
-  glia impact rows, retired in 0.5.5 by docs as a second graph). The gate measures the shipped
+  glia impact rows, retired in 0.5.6 by docs as a second graph). The gate measures the shipped
   fused `find --files` (FB.7c): `check` builds rank_eval with `--features sem-eval` and a
   `glia-embed-worker` (gpu-webgpu), and needs `~/.cache/glia/fastembed` and
   `$GLIA_RANK_GATE_DIR/sem` to persist (a cold cache re-embeds all six snapshots; glia ~500 s).
@@ -2010,7 +2029,20 @@ questions over one graph computes `entrypoint_reachable` once.
   (188d0192, a86c1372, workflow files only, so the published code is the tag's). Published by the
   dispatched runs wheels-py 41089926548 and wheels-cli 41089922225 (`glia-cli` through its
   pending publisher, owner James-Chahwan, repo glia, workflow wheels-cli.yml).
-- **After 0.5.4:** **0.5.5** (seed `dev-notes/next-leap-0.5.5.md`) — the tracks moved out of 0.5.4,
+- **0.5.5 — Lua and the use-pattern axis: complete on local `main`; the version bump, tag and publish
+  are the release step after the docs.** The first community patch: Brian Ealdwine's glia PR #3, read as
+  text (never checked out or run) and rebuilt on 0.5.4 with its gaps fixed, credited `Co-authored-by`; the old
+  0.5.5 seed is now 0.5.6 (James 2026-10-31: *"we could a small lua pr 0.5.5 then bump our 0.5.5 to 0.5.6"*).
+  Plan and rulings `dev-notes/next-leap-0.5.5.md`. The Lua parser (functions in every form, nested locals keyed
+  under their function, `require` with aliases, busted test functions, metatable classes / inheritance / typed
+  instances, Lapis routes, `socket.http` / `resty.http` clients), `glia_graph::build_lua` (require resolution, heritage,
+  file-local calls, inherited methods), `os.execute` / `io.popen` CLI needles, `.lua` out of health's unparsed list.
+  The matrix gains its 18th row, `lua` (ten cells full), and a second axis, `matrix_vocab.PATTERNS` (host_command,
+  host_event, host_callback, config_table, embedded_script, script_entry; `bench/substrate-gap/patterns/`), graded like
+  a mechanism and kept out of the 30-column totals; Lua's six read three none and three partial, the targets of
+  0.5.6's host-to-plugin graph (PR #3's plugin families, generalised). No registry id, no FORMAT_VERSION /
+  MANIFEST_VERSION change; Cargo.lock gains tree-sitter-lua.
+- **After 0.5.5:** **0.5.6** (seed `dev-notes/next-leap-0.5.6.md`) — the tracks moved out of 0.5.4,
   already specced and to be re-verified against the shipped tree: T4 (the per-language precision
   and recall residuals), T6 (the goal-layer connector and the clarification queue; it fills the
   reserved slots and GOAL_UNIT / TRACES / UNIT), T7 (concept search over flows, PR / issue intent,

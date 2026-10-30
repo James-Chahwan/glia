@@ -34,8 +34,9 @@ that parse differently report different stamps.
 recipe=None, replace=False, limit=None, check=False)` writes
 `<repo>/.glia/vectors.jsonl`, the vectors the semantic tiers read (a snapshot
 step: `generate()` never embeds). `model="test-hash"` is a deterministic test
-model in every wheel. `model="bge-small"` (fastembed, the ONNX Runtime linked
-statically) is in every published wheel but the x86_64 macOS one, which
+model in every wheel. `model="bge-small"` (fastembed; ONNX Runtime linked statically on macOS and
+Windows, and on Linux Microsoft's 1.31.1 build linked dynamically and shipped in
+`glia_py.libs`, so the wheel runs on glibc 2.28) is in every published wheel but the x86_64 macOS one, which
 refuses it: no ONNX Runtime >= 1.24 build exists for x86_64-apple-darwin. The
 model downloads once into `FASTEMBED_CACHE_DIR`, else
 `$XDG_CACHE_HOME/glia/fastembed`, else `~/.cache/glia/fastembed`, never into
@@ -48,6 +49,22 @@ CPU. `GLIA_EMBED_DEVICE=cpu|webgpu` overrides the choice, every vector row
 records its `device`, and stderr names the device on one `[embed] device=..
 backend=.. driver=.. fallback=.. batch=..` line. The devices, fallbacks and
 measured speeds are in docs/embeddings.md.
+
+## What's new in 0.5.5
+
+**Pin exactly: `glia-py==0.5.5`.**
+
+```bash
+pip install glia-py==0.5.5
+```
+
+0.5.5 adds Lua (from Brian Ealdwine's glia PR #3): `generate()` now parses `.lua`
+files, so a Lua repo or a repo with Lua in it gains MODULE / FUNCTION / METHOD /
+CLASS nodes, `require` IMPORTS, CALLS, INHERITS_FROM through metatables, busted
+test functions with TESTS, Lapis ROUTEs and `socket.http` / `resty.http`
+ENDPOINTs. No API, keyword or dict key changes; `health()`'s `unparsed` count no
+longer includes `.lua` files. The build stamp moves (a new parser), so a cached
+layout rebuilds once.
 
 ## What's new in 0.5.4
 
