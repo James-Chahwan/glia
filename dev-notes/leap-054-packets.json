@@ -3912,7 +3912,8 @@
     "out_of_repo_consumers": []
    },
    "depends_on": [
-    "FD.3a"
+    "FD.3a",
+    "FD.3d"
    ],
    "risks": "Some cross-stack strata are censused (N < 30) and still small; the report marks them INSUFFICIENT rather than inventing precision. A judge unsure whether a client reaches a server (no deployment config in the snapshot) records `unsure` with that reason; NOISY strata are named in FD.3c's report.",
    "spec_group": "FD"
@@ -8370,7 +8371,11 @@
     "FH.8b",
     "FH.8c",
     "FH.8d",
-    "FH.9"
+    "FH.9",
+    "FH.21",
+    "FH.22",
+    "FH.23",
+    "FD.3d"
    ],
    "risks": "Runs after the last follow-up wave (seed \u00a74: followups finish inside 0.5.4; the release docs packet runs last). Large prose diff: write per section and keep 0.5.3's text. The version bump is NOT this packet: it is the release step after FZ (James's rule).",
    "spec_group": "FZ"
@@ -8513,7 +8518,11 @@
     "FH.8b",
     "FH.8c",
     "FH.8d",
-    "FH.9"
+    "FH.9",
+    "FH.21",
+    "FH.22",
+    "FH.23",
+    "FD.3d"
    ],
    "risks": "Written after the last follow-up wave from landed results, never from packet text. The Engram ask (dev-notes/engram-ask-0.5.4.md) is James's to send: the handoff references it and changes nothing in it. Never write under another repo.",
    "spec_group": "FZ"
@@ -10224,6 +10233,151 @@
    "risks": "none beyond the scorer's own tests.",
    "batch": "FH",
    "spec_group": "FH"
+  },
+  {
+   "id": "FH.21",
+   "title": "Language-group resolution speed: the TS superclass pass stops walking every unresolved call (measured 8.1 s for 207 edges on twenty), and resolve_calls / resolve_refs run per call site on the engine pool and join in input order, so a large single-language group no longer builds on one core",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH build speed (James 2026-10-30)",
+   "loc": 520,
+   "rationale": "James 2026-10-30: 'Wouldn't be better to use the threads to quick pool and sort everything then quick join ?' and 'we have a general fix to packet'. Measured 2026-10-30 (release, cold, per-second core samples + timestamped stderr markers): twenty (34.6k TS files, cohort pin 8fd53a83) builds in 31 s, of which 0-6 s run on 11-16 cores (walk / parse) and ~24 s on exactly one core. Inside build_ts_like (graph/src/build.rs): merge + symbol table + imports 1.4 s, resolve_calls 8.3 s (9.3 -> 17.6 s, between the `[imports] reexport` and `[recv] constructed receivers` markers), refs / member reads 1.3 s, resolve_inherited_calls + emit_override_implements 8.1 s (19.0 -> 27.1 s, ending at `[ts-inherit] calls bound through superclasses: 207 ..`), then passes 1.2 s and persist 2 s. The engine pool (engine/src/parallel.rs) already sizes itself to every core, but it parallelises ACROSS language groups: one group is one serial graph build, so any repo dominated by one language (TS monorepos first; a large Go, JVM, Python or C++ tree would hit the same path) builds mostly on one core. glia itself (26 groups, 3.5 s) is unaffected. Two different problems: the superclass pass is per-site waste (it re-walks every still-unresolved call, most of which no superclass can bind), the call / ref passes are real work over read-only indexes.",
+   "entry_points": [
+    "graph/src/calls.rs: resolve_inherited_calls (~line 2068: loops over every g.unresolved_calls site, self_lookup / receiver_lookup / nearest_definer per site), emit_override_implements, superclasses, receiver_class",
+    "graph/src/calls.rs: resolve_calls (~line 183: one loop over `calls`, reads g, pushes edges and g.unresolved_calls, keeps stat counters and the BareFieldGate / ConstructedReceivers / StateReads / ClassScopeReceivers / TsReceivers tallies) and resolve_refs (~line 656)",
+    "graph/src/build.rs: build_ts_like and every other builder calling resolve_calls / resolve_refs (build_python, build_go_passes, build_rust, build_dart, build_swift, build_elixir, build_c_cpp, build_ruby, build_dotted)",
+    "engine/src/parallel.rs: par_map_ordered (read only; already nests on a rayon worker, which the language build runs on); engine/src/build/lang_build.rs: the builder calls"
+   ],
+   "files_touched": [
+    "graph/src/calls.rs",
+    "graph/src/build.rs",
+    "engine/src/build/lang_build.rs",
+    "engine/tests/resolve_pool.rs"
+   ],
+   "implementation": "PART A - the superclass pass (do this first; it is the cheaper half and must not be hidden by threads).\n1. Measure before changing anything: profile `target/release/glia build <twenty copy>` (`cargo install samply` then `samply record --save-only`, user-space sampling of your own process works at perf_event_paranoid 2; if it does not, time the pass's helpers with temporary Instant timers you do not commit). Record which of superclasses / enclosing_class_or_struct / receiver_class / BareFieldGate::admits / nearest_definer / push_edge holds the 8.1 s, and how many sites the loop visits. Quote the numbers in the commit body.\n2. Fix the measured cost. The expected shape is an EXACT prefilter: nearest_definer can only succeed for a member name that some ancestor class (a class that is in some `supers` list) declares, so build that name set once and keep a site out of every lookup when its name is not in it (it stays in `kept`, in its original order). If the profile shows a different cost (a linear scan inside a helper, a per-site rebuild of an index), fix that instead. The pass's output must not change: same edges, same order, same kept list, same `[ts-inherit]` counts. Same for emit_override_implements if the profile shows it.\nPART B - pooled resolution, for every builder.\n3. The graph crate gains no dependency (Cargo.toml / Cargo.lock never move in a packet: constraint `lock`). Define in graph/src/calls.rs a small pub trait the engine implements, e.g. `pub trait ResolvePool: Sync { fn map_chunks(&self, n: usize, f: &(dyn Fn(std::ops::Range<usize>) -> ChunkOut + Sync)) -> Vec<ChunkOut>; }` with whatever concrete output type the passes need, plus a sequential impl the graph crate's own callers and tests use. engine/src/build/lang_build.rs implements it over crate::parallel::par_map_ordered (it already nests on the worker the language build runs on); do not edit engine/src/parallel.rs (FH.22 owns it this wave). Keep every existing pub builder signature: add a pooled entry the engine calls (e.g. a `_pooled` variant or a pool argument on the pub(crate) passes) so glia_graph's flat API stays additive; if you must change a pub signature, declare api_signature.\n4. Split resolve_calls into decide (read-only &RepoGraph, per call site: the bound target + branch / evidence, or unresolved, plus that site's stat increments) and apply (in input order: push edges, push unresolved sites, sum the tallies). Chunks of contiguous sites run on the pool; apply walks the chunk outputs in chunk order, so the edge list, g.unresolved_calls and every marker count are byte-for-byte what the serial loop produced. The per-site mutable helpers (BareFieldGate, ConstructedReceivers, ..) become per-chunk and merge, IF they only count; if one caches a decision that later sites read, prove the cache is pure (same answer either way) or keep it serial and say so. extra_hook must be Sync to run pooled: a builder whose hook is not Sync (check GoPackages, rust_paths, CppScope, SwiftModuleTypes, ElixirModules, dart::provider_call) stays serial, listed in the marker. Same split for resolve_refs.\n5. Marker, once per group build that ran pooled: `[resolve-pool] lang=<ext family> calls=<n> refs=<m> chunks=<c> threads=<t> calls_ms=<a> refs_ms=<b> serial_hooks=<list|->`; and `[ts-inherit] .. prefiltered=<k>` gains the count Part A kept out.\n6. engine/tests/resolve_pool.rs: a multi-file TS fixture with classes, receivers, re-exports and inherited calls, plus a Go and a Rust fixture: the merged graph's nodes / edges / unresolved lists are identical under the sequential impl and the pooled one (call the graph passes both ways), and a GLIA_THREADS=1 vs default `generate_one` gives byte-identical persisted layouts (the byte_identical test's helper shape).",
+   "fixtures": [],
+   "acceptance": "(1) `cargo test -p glia-graph` and `cargo test -p glia-engine --test engine_tests resolve_pool::` green; `cargo test -p glia-engine --test byte_identical` green. (2) twenty at the cohort pin (a `git clone --shared ~/.cache/glia-cohort/twenty.git` copy at 8fd53a835fd5b968a5fe858d9439dae6070867f6, never the bare clone): the persisted .glia/graph/ shard bytes are identical before and after this packet and identical at GLIA_THREADS=1 vs default (diff the shard files); the `[ts-inherit]` and `[evidence-graph]` lines are identical before / after. Quote the before / after `[timing] repo=.. language_build=` values and the total wall (before: language_build ~19.3 s, wall ~31 s); the superclass pass and resolve_calls each drop measurably, stated as measured numbers. (3) glia itself (a scratch `git clone --shared` of this repo): same byte-identity check, wall not worse. (4) The rank gate fast tier stays 0 drops (graph content is unchanged, so this is a sanity check).",
+   "fired_on_marker": "[resolve-pool] lang=<l> calls=<n> refs=<m> chunks=<c> threads=<t> calls_ms=<a> refs_ms=<b> serial_hooks=<..>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "Build wall time only. Graph content, ordering and markers' existing fields are byte-identical; two stderr markers gain fields / one new marker.",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "A tally that was secretly order-dependent (a gate that caches by first sight) changes output under chunking: the byte-identity checks on twenty and glia at two thread counts catch it; when in doubt keep that helper serial. Nesting on the language-build worker: other groups' builds are running on the same pool, so the pooled TS passes share cores with them (intended). Do not touch merge_parses / resolve_imports_ts / build_symbol_table here (1.4 s on twenty; not worth the risk this wave)."
+  },
+  {
+   "id": "FH.22",
+   "title": "Engine pool default sized to free cores: unset GLIA_THREADS reads the 1-minute load average and takes the cores not already busy (at least max(2, cores/4)), so concurrent builds during a wave stop oversubscribing; ships only if it measures faster",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH build speed (James 2026-10-30)",
+   "loc": 180,
+   "rationale": "James 2026-10-30: 'Shouldn't we just determine a size for core profile ?', 'Plus available resources', 'Well I imagine while wave running we can have a few builds so contention of cpu cores could occur'. Today an unset GLIA_THREADS means every core (engine/src/parallel.rs threads / threads_from), so four concurrent builds (agents, a gate) start 4 x 16 rayon workers on 16 cores during the parallel phases. Repo size needs no rule of its own: a par_map over n items never uses more than n workers. Output is byte-identical at any pool size (LG.1a-c), so the default is a speed choice only.",
+   "entry_points": [
+    "engine/src/parallel.rs: threads / threads_from / MAX_THREADS and the pool construction (~line 56-81)",
+    "engine/src/parallel.rs tests: glia_threads_parses_and_clamps"
+   ],
+   "files_touched": [
+    "engine/src/parallel.rs"
+   ],
+   "implementation": "1. MEASURE FIRST, on this machine, before changing the default: run 4 concurrent `target/release/glia build` of twenty copies (separate `git clone --shared` copies at the cohort pin, cold: delete each copy's .glia/) with GLIA_THREADS unset, then with GLIA_THREADS=4 each; record the wall of the slowest and the sum of user CPU (`/usr/bin/time -v`). Also one build alone at 16 vs 4. Put the table in the commit body.\n2. If the concurrent runs are not faster with fewer threads each (within noise: repeat each config 2x), STOP: change no default, add a doc paragraph to `threads` stating the measurement, and report it as the packet's result (no marker change).\n3. If they are faster: unset (or unparsable) GLIA_THREADS becomes auto: cores = available_parallelism; busy = round(first field of /proc/loadavg) (0 when unreadable or not Linux); threads = clamp(cores - busy, max(2, cores / 4), cores). An explicit GLIA_THREADS (including `0` = every core, today's meaning) wins unchanged. Keep threads_from pure: a `threads_auto(var, available, load: Option<f64>)` the tests drive with fixed loads. The pool is built once per process (unchanged).\n4. Marker once per process when the pool is built: `[parallel] pool threads=<t> cores=<c> load=<l|-> source=<env|auto>`.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-engine --lib parallel::` green with new cases (load None -> every core; load 0.3 on 16 -> 16; load 12 on 16 -> 4; load 40 on 16 -> 4; env `1` / `0` / `8` unchanged); `cargo test -p glia-engine --test byte_identical` green; the measurement table in the commit body; if the default changed, the 4-concurrent twenty run's slowest wall is lower than before (quote both).",
+   "fired_on_marker": "[parallel] pool threads=<t> cores=<c> load=<l> source=<env|auto>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "Default pool size when GLIA_THREADS is unset (speed only; output byte-identical at any size). One stderr marker.",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "The load average lags (1-minute window) and counts this machine's other work (a game, an IDE), so a build can start smaller than it would have. The floor max(2, cores/4) bounds that. Timings stay noisy: repeat each config."
+  },
+  {
+   "id": "FH.23",
+   "title": "resolver:evm pairs per member when one ABI entry is stale (`abi_partial`, HEURISTIC): a client whose ABI no decl fully covers pairs to the one decl covering the most entries (a majority, at least 2), its stale members missing as not_declared; then the Sibyl evm cases join the default matrix",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH Sibyl matrix / EVM precision (James 2026-10-30)",
+   "loc": 380,
+   "rationale": "FH.11c (w21) found it: when a client's ABI drifts on one member (a renamed function or event), the `abi` rule (graph/src/resolvers/evm.rs identify: a decl must hold EVERY entry) finds no covering decl and the client goes unmatched, losing the pairing of every member that still fits (deposit at S in every evm case). That is the Solidity <-> client drift case James named the best A/B shape ('the best a/b is the contract definitions we found errant between frontend backend and solidity', 2026-10-25): today glia cannot name the stale call site, because nothing pairs. James 2026-10-30: fix it in 0.5.4, and turn the evm cases on in the default matrix.",
+   "entry_points": [
+    "graph/src/resolvers/evm.rs: identify (Scope::Abi with >= 2 entries: the `covering` decls), agree (a >= 2-entry variant that is unmatched while another identifies -> conflict), RULES, the [evm-link] marker (Tally::line), the module doc's Identification / Agreement sections",
+    "engine/src/why.rs: HEURISTIC_PAIRING_RULES (resolver:evm abi_hint / name_hint)",
+    "bench/sibyl/run.py MECH / LANG tables; bench/sibyl/gen.py OPT_IN_TRANSPORTS / AXES['transport']; bench/sibyl/test_gen.py (test_opt_in_matches_run_tables, test_summary_and_marker)"
+   ],
+   "files_touched": [
+    "graph/src/resolvers/evm.rs",
+    "engine/src/why.rs",
+    "engine/tests/evm_partial_abi.rs",
+    "bench/sibyl/run.py",
+    "bench/sibyl/gen.py",
+    "bench/sibyl/test_gen.py",
+    "bench/sibyl/README.md"
+   ],
+   "implementation": "1. identify, Scope::Abi(N) with entries >= 2, when no decl covers every entry (today Unmatched): score each decl by the number of entries it holds; take the decls (concrete preferred, c.prefer_concrete) with the top score. Pair (rule `abi_partial`) only when the top score is >= 2 AND > entries/2 AND exactly one decl has it; on a tie, break by name key of N as `abi_hint` does (exactly one named -> `abi_partial`), else Ambiguous. Below the threshold stays Unmatched (no name-only fallback: 'No rule ever matches on the member name alone' still holds).\n2. RULES gains `abi_partial` after `abi_hint` (rank order: contract, abi, abi_hint, abi_partial, name_hint); confidence Weak like the hints; engine why.rs HEURISTIC_PAIRING_RULES gains (resolver:evm, abi_partial), so check / contract-breaks treat it as advisory, the hints' tier.\n3. agree: a variant that identified through abi_partial counts as identified; the conflict rule is unchanged otherwise.\n4. pair: unchanged. A member the decl does not declare misses `not_declared`, one the ABI lists but the decl lacks is exactly the stale entry; count stale entries in the tally.\n5. Marker: [evm-link] gains `abi_partial=<p>` inside the edges parenthesis after abi_hint, and ` stale_entries=<s>` at the end. Update the module doc's Identification and Agreement sections.\n6. engine/tests/evm_partial_abi.rs: a contract with deposit / withdraw / Deposited; a TS ethers client whose human-readable ABI lists deposit, withdrawFunds (renamed away) and Deposited: deposit and the Deposited subscription pair (rule abi_partial), withdrawFunds is unpaired (not_declared); a client covering only 1 of 3 stays unmatched; two decls tying on the top score with no name match stay ambiguous; a fully-covering client still reads rule `abi` (no regression).\n7. Sibyl: run.py MECH['evm'] = ('evm', 'evm'), LANG['go'] = 'go', LANG['solidity'] = 'solidity'; move 'evm' from gen.OPT_IN_TRANSPORTS into gen.AXES['transport'] in the same commit (test_opt_in_matches_run_tables enforces it); test_summary_and_marker's mechanism set gains 'evm'. Run `python3 bench/sibyl/run.py` over the evm cases before and after step 1-5 and quote the per-case pair / drift_s / client cells (FH.11c's baseline was pair missing at S on the drift cases). Do NOT run `scripts/cohort-gate.sh baseline`: the default Sibyl cover grows 41 -> 46 cases, which the wave close-out sees as drift (exit 2) and rebaselines after checking the drift is exactly those cases. Say so in followups.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-graph` green (evm unit tests updated where a stale-entry client now pairs); `cargo test -p glia-engine --test engine_tests evm_partial_abi::` green; `python3 -m pytest bench/sibyl/test_gen.py` green; the Sibyl evm drift cases read pair present at S and contract-breaks names the stale member's site (quote before / after); `cargo test -p glia-engine --test byte_identical` green; the rank gate fast tier 0 drops.",
+   "fired_on_marker": "[evm-link] .. (contract=<a> abi=<b> abi_hint=<h> abi_partial=<p> name_hint=<k>) .. stale_entries=<s>",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "graph contents: RPC_CALLS / EVENT_FLOWS edges for clients with a partly stale ABI, EVIDENCE rule abi_partial (heuristic tier); the [evm-link] marker gains two fields; the Sibyl default cover gains the evm transport (5 cases).",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [],
+   "risks": "A client whose ABI is a different contract's that happens to share a majority of members pairs wrongly: the threshold (>= 2 and a strict majority, unique top) and the heuristic tier keep it advisory. The TS EVM reader gaps FH.11c also found (method-name wrappers, imported TypeChain instances across files) are 0.5.5, not this packet."
+  },
+  {
+   "id": "FD.3d",
+   "title": "Edge-precision audit panel gains a cross-service repo (ruling FD-2): microservices-demo joins the audited snapshots, the sample is re-drawn with glia pinned at FD.3a's commit, FD.3a's structure verdicts carry over for every unchanged sample id, and the new structure samples are judged",
+   "batch": "FD",
+   "spec_group": "FD",
+   "area": "FD precision audit (seed \u00a7F item 12)",
+   "loc": 300,
+   "rationale": "Ruling FD-2 (James 2026-10-30: yes). The panel (bench/edge-audit/snapshots.json: glia + the rank-gate rows shell, websocket, samples) holds no HTTP / gRPC pairing edges between services, which are glia's distinguishing edges, so FD.3b's mechanism strata would be mostly empty or censused tiny. microservices-demo (bench/cohort/repos.json, public, pinned 38e7348e: eleven services in five languages joined by gRPC, a Go web frontend) supplies them. Sampling is deterministic per (seed, label, category, ..) key with a stratum's n split across repos proportionally (engine/examples/edge_audit.rs), so adding a repo keeps most existing ids; FD.3a's verdicts stay valid for every id that is still sampled, provided glia's row is built at the same commit.",
+   "entry_points": [
+    "scripts/edge-audit.sh rows(): accepts `source: self` (HEAD) and rank-gate rows only",
+    "bench/edge-audit/snapshots.json",
+    "bench/edge-audit/samples/audit.jsonl (FD.3a's, glia rev 0df1bbbb89b7276e298b301d6c29bdf628d39d53)",
+    "bench/edge-audit/verdicts/structure.jsonl (FD.3a's 263 verdicts)",
+    "bench/cohort/repos.json microservices-demo row; bench/cohort/cohort.py ensure_clone (bare clones under ~/.cache/glia-cohort/<label>.git)"
+   ],
+   "files_touched": [
+    "scripts/edge-audit.sh",
+    "bench/edge-audit/snapshots.json",
+    "bench/edge-audit/samples/audit.jsonl",
+    "bench/edge-audit/verdicts/structure.jsonl",
+    "bench/edge-audit/README.md"
+   ],
+   "implementation": "1. scripts/edge-audit.sh rows(): a `source: cohort` row is read by label from bench/cohort/repos.json (public true, https url, 40-hex sha, else refused like a rank-gate row) and archived from the cohort's bare clone (~/.cache/glia-cohort/<label>.git, `git archive <sha>`, the self_copy shape; a missing clone is an error naming `python3 bench/cohort/cohort.py` to fetch it, no network here). A `source: self` row may name a 40-hex `rev` (archived from this repo at that commit) instead of HEAD.\n2. snapshots.json: the glia row pins rev 0df1bbbb89b7276e298b301d6c29bdf628d39d53 (FD.3a's sample rev, so glia's samples do not move); add {\"name\": \"microservices-demo\", \"source\": \"cohort\", \"skips\": []} (skip nothing generated by hand: ORIGIN generated nodes are already counted as the audit counts them; follow README's rule).\n3. `bash scripts/edge-audit.sh sample`; commit the new samples/audit.jsonl with the `[edge-audit] sample` marker lines quoted in the body, and a count: ids kept from FD.3a's sample, ids dropped (reallocation), ids new (per label).\n4. verdicts/structure.jsonl: keep every FD.3a verdict whose id is still sampled, drop those whose id left the sample, and judge every new sample in FD.3a's eleven structure categories under the FD.3a protocol (RUBRIC.md, from SOURCE only, judge `FD.3d` on the new rows). Sorted by id.\n5. README: the panel row and why (ruling FD-2), the self-rev pin.",
+   "fixtures": [],
+   "acceptance": "(1) `bash scripts/edge-audit.sh sample` exits 0 with five snapshot rows, microservices-demo among them; glia's rows in the new sample are byte-identical to FD.3a's for every id still sampled. (2) Every sample in FD.3a's eleven categories has exactly one verdict in structure.jsonl; no verdict names an id outside the sample. (3) `bash scripts/edge-audit.sh report` runs (mechanism strata unjudged until FD.3b); the stratum table lists HTTP / gRPC pairing strata with N > 0 from microservices-demo (quote it).",
+   "fired_on_marker": "[edge-audit] sample label=microservices-demo ..",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [
+     "none"
+    ],
+    "what_changes": "bench data and the audit script: one more panel repo, a re-drawn sample, carried + new structure verdicts.",
+    "in_repo_consumers": [],
+    "out_of_repo_consumers": []
+   },
+   "depends_on": [
+    "FD.3a"
+   ],
+   "risks": "Reallocation can drop a few FD.3a ids from the smaller repos' strata (proportional split); their verdicts leave with them, which is correct. The polyglot repo adds Java / C# / Python structure samples, so judging takes longer than FD.3a's per-row average; FD.3b then judges the mechanism strata on this sample."
   }
  ],
  "deps_patch": {

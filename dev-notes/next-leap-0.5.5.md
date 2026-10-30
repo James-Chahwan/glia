@@ -54,3 +54,9 @@ rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
 - A NestJS verb decorator that shares its line with another decorator (`@UseGuards(X) @Get('a') foo()`) mints no ROUTE (FH.19's handoff).
 - gin-vue-admin: 131 of 196 endpoints pair; the 65 unpaired look like Go router-group prefixes not folded into the route path (checked 2026-10-30).
 - Dropped: a `nest_handler` rule name on Nest HANDLED_BY edges (cosmetic; the binding works through graph:refs).
+
+## 6. From 0.5.4's W21 follow-ups and the 2026-10-30 build profile
+
+- TS EVM reader (DT.10c / DT.10j's shape): a method-name wrapper read the way Go's DT.10f does (a string parameter handed to `getFunction(..)` or viem's `functionName`), and an imported TypeChain / ethers contract instance followed across files. These are the 3 TS wrapper cases and the ts x generated-sdk case in the Sibyl evm matrix (FH.11c's handoff; FH.23 fixed the stale-ABI pairing only).
+- Build profile, the parts FH.21 leaves: on twenty, merge_parses + build_symbol_table + resolve_imports_ts stay serial (1.4 s); persist is serial (2 s). Profile one large Go and one large JVM repo the same way (per-second core samples + timestamped markers) before assuming they share twenty's shape.
+- The full rank gate's glia snapshot (478 s) is rank_eval's history replay, not the build: profile it, then try spreading its PPR solves across the cores. James 2026-10-30 asked whether the GPU could help: not for the build (pointer-chasing, string lookups), possibly for batched PPR replays and for embeddings (already ruled GPU-default after 0.5.4), but only as an accelerator whose output is never the reference (float reduction order breaks the bit-for-bit rank pins).

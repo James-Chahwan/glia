@@ -31,7 +31,7 @@ TRACKS = {
     "T0": ("wave 0: ids, crates, slots, rustfmt", "F0.1-7"),
     "T1": ("proof: agent before / after (item 11)", "FE.1-4 FE.8"),
     "T2": ("self-graph hygiene, tier vocabulary, rules / docs hygiene, the audit tool", "FD.2 FD.4a FD.4b FD.4c FD.4d FD.5a FD.5b FD.6 FD.7a FD.7b FD.7c FD.7d FD.22 FD.23a FD.23b FD.24 FD.25 FD.27 FD.28 FD.34 FD.65 FD.69 FD.34b"),
-    "T3": ("edge-precision audit, judging + report (item 12)", "FD.3a FD.3b FD.3c"),
+    "T3": ("edge-precision audit, judging + report (item 12)", "FD.3a FD.3d FD.3b FD.3c"),
     "T4": ("per-language precision and recall residuals", "FD.8 FD.9 FD.10a FD.10b FD.11-21 FD.29 FD.30 FD.32 FD.35-64 FD.68 FD.70 FD.72 FD.33 FD.71"),
     "T5": ("embeddings + the embedding gate (item 13) + Engram data", "FB.1 FB.2 FB.3 FB.4 FB.5a FB.5b FB.5c FB.6 FB.6b FB.11 FB.12a FB.12b FB.13a FB.13b FB.13c FB.13d FB.14"),
     "T6": ("goal-layer connector + clarification queue (§G, §C)", "FC.1 FC.2 FC.3a FC.3b FC.4 FC.5a FC.5b FC.6-14 FC.17a FC.17b FC.18 FC.23 FC.24"),
@@ -41,7 +41,7 @@ TRACKS = {
     "T10": ("org-internal package routing", "FD.31 FA.21 FA.22 FA.23"),
     "T11": ("distribution: zero-install CLI, skills into glia", "FE.5 FE.6 FE.7"),
     "TS": ("semantic answers in fused form, held until FB.6b (the fusion gate) PASSES", "FB.7a FB.7b FB.7c FB.7d FB.8"),
-    "TH": ("the Sibyl cohort follow-up: cohort, boundary chain fixes, style-agnostic drift, cockpit, Sibyl matrix, cohort gate, agent probes", "FH.1a FH.1b FH.2a FH.2b FH.3 FH.4a FH.4b FH.5 FH.6 FH.7a FH.7b FH.8 FH.9 FH.10 FH.11a FH.11b FH.12 FH.13 FH.14 FH.3b FH.8b FH.14b FH.15 FH.7c FH.8c FH.16 FH.17 FH.18 FH.19 FH.7d FH.16b FH.17b FH.20 FH.1c FH.11c FH.8d FH.1d FH.13b"),
+    "TH": ("the Sibyl cohort follow-up: cohort, boundary chain fixes, style-agnostic drift, cockpit, Sibyl matrix, cohort gate, agent probes", "FH.1a FH.1b FH.2a FH.2b FH.3 FH.4a FH.4b FH.5 FH.6 FH.7a FH.7b FH.8 FH.9 FH.10 FH.11a FH.11b FH.12 FH.13 FH.14 FH.3b FH.8b FH.14b FH.15 FH.7c FH.8c FH.16 FH.17 FH.18 FH.19 FH.7d FH.16b FH.17b FH.20 FH.1c FH.11c FH.8d FH.1d FH.13b FH.21 FH.22 FH.23"),
     "TZ": ("release docs and handoffs (after the tracks that ship)", "FZ.1 FZ.2"),
 }
 

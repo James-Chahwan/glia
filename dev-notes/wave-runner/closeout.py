@@ -108,22 +108,48 @@ def fmt_check():
     return True, "[fmt] check: ok"
 
 
-def rustdoc_check():
+def touched_crates(touched):
+    """The workspace packages whose directories hold a touched path (longest manifest dir wins), or
+    None when a touched path sits in no package dir but could still move docs (the workspace root
+    Cargo.toml / Cargo.lock)."""
+    out, code = sh("cargo metadata --no-deps --format-version 1 2>/dev/null")
+    if code != 0:
+        return None
+    dirs = sorted(((str(Path(p["manifest_path"]).parent.relative_to(ROOT)), p["name"])
+                   for p in json.loads(out)["packages"]), key=lambda d: -len(d[0]))
+    crates = set()
+    for t in touched:
+        if t in ("Cargo.toml", "Cargo.lock"):
+            return None
+        hit = next((name for d, name in dirs if d != "." and t.startswith(d + "/")), None)
+        if hit:
+            crates.add(hit)
+    return sorted(crates)
+
+
+def rustdoc_check(crates=None):
     """FD.23b's rustdoc gate: every workspace crate documents with warnings denied, in the
     workspace's own target dir. `--keep-going` documents every crate a failure does not block,
     so one bad link does not hide the rest. Returns (ok, marker); the marker is the stable
     `[rustdoc] check:` line the close-out prints. `<n>` counts the located `error` lines (the
     per-crate `could not document` / `could not compile` summaries are not errors of their
     own), `<c>` the crates that failed."""
-    out, code = sh("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --keep-going 2>&1",
+    # James 2026-10-30 (close-out speed): a wave documents only the crates it touched (155 s for the
+    # whole workspace after the tests, 42 s warm); every crate on the FULL_GATES_EVERY waves and at
+    # the release. `crates=[]` (no Rust touched) documents nothing.
+    if crates is not None and not crates:
+        return True, "[rustdoc] check: skipped - wave touched no workspace crate"
+    sel = "--workspace" if crates is None else " ".join(f"-p {c}" for c in crates)
+    out, code = sh(f"RUSTDOCFLAGS='-D warnings' cargo doc {sel} --no-deps --keep-going 2>&1",
                    timeout=2400)
+    scope = "" if crates is None else f" (partial: only {','.join(crates)})"
     if code == 0:
-        return True, "[rustdoc] check: ok"
-    crates = set(re.findall(r"^error: could not (?:document|compile) `([^`]+)`", out, re.M))
+        return True, f"[rustdoc] check: ok{scope}"
     errors = [l for l in out.splitlines()
               if re.match(r"^error(\[E\d+\])?:", l)
               and not re.match(r"^error: (could not (document|compile)|aborting|build failed)", l)]
-    return False, f"[rustdoc] check: FAILED ({len(errors)} errors in {len(crates)} crates)"
+    failed = set(re.findall(r"^error: could not (?:document|compile) `([^`]+)`", out, re.M))
+    return False, f"[rustdoc] check: FAILED ({len(errors)} errors in {len(failed)} crates){scope}"
 
 
 def journal_results(run):
@@ -298,7 +324,13 @@ def main():
     say(fmt_marker)
     if not fmt_ok:
         gates.append("fmt")
-    rustdoc_ok, rustdoc_marker = rustdoc_check()
+    touched = set()   # every path the wave's packet commits touch (rustdoc, the rank and cohort gates read it)
+    for r in res:
+        for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
+            o, _ = sh(f"git show --name-only --format= {c}")
+            touched.update(l.strip() for l in o.splitlines() if l.strip())
+    full_doc = not remaining or any(full_due.values()) or os.environ.get("GLIA_RUSTDOC_FULL") == "1"
+    rustdoc_ok, rustdoc_marker = rustdoc_check(None if full_doc else touched_crates(touched))
     say(rustdoc_marker)
     if not rustdoc_ok:
         gates.append("rustdoc")
@@ -320,11 +352,6 @@ def main():
     # has bench/rank-gate/gate.json. A wave whose packet commits touch no ranked path skips it; the
     # release's last close-out (nothing remaining) always checks, then requires full coverage.
     # closeout's sh lets TimeoutExpired escape: catch it so a slow check is a failed gate, not a crash.
-    touched = set()   # every path the wave's packet commits touch (the rank and cohort gates read it)
-    for r in res:
-        for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
-            o, _ = sh(f"git show --name-only --format= {c}")
-            touched.update(l.strip() for l in o.splitlines() if l.strip())
     rank_gate_ok, rank_line = False, ""
     if (ROOT / "bench/rank-gate/gate.json").exists():
         ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
