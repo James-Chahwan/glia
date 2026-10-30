@@ -122,7 +122,7 @@ pub const SUSPICIOUS_EXAMPLES: usize = 20;
 /// Code-looking extensions no parser reads: single-file components, server
 /// templates, module-flavoured JS / TS and a few languages glia does not
 /// parse. A file of one of these with no parser is an `unparsed` file.
-pub const CODE_LIKE_EXTS: [&str; 37] = [
+pub const CODE_LIKE_EXTS: [&str; 36] = [
     "cjs",
     "coffee",
     "cr",
@@ -149,7 +149,6 @@ pub const CODE_LIKE_EXTS: [&str; 37] = [
     "kts",
     "leex",
     "liquid",
-    "lua",
     "marko",
     "mjs",
     "ml",

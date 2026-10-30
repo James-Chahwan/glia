@@ -1,0 +1,50 @@
+{
+  "framework": "lua-impl",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "lua/impl"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "Animal"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Dog"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Dog",
+      "to": "Animal",
+      "category": "INHERITS_FROM",
+      "note": "setmetatable(Dog, { __index = Animal }) across files, through the require alias"
+    },
+    {
+      "from": "Dog.bark",
+      "to": "Animal.speak",
+      "category": "CALLS",
+      "note": "self:speak() inherited through the metatable chain"
+    },
+    {
+      "from": "main",
+      "to": "Dog.bark",
+      "category": "CALLS",
+      "note": "rex = Dog.new(..) types rex"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "from": "Animal",
+      "to": "Dog",
+      "category": "INHERITS_FROM"
+    }
+  ],
+  "note": "0.5.5 Lua: metatable classes. A table with methods, `T.__index = T` or a metatable role is a CLASS; setmetatable(Child, { __index = Base }) is INHERITS_FROM (across files through require); self:m() and an instance's x:m() bind up the chain."
+}

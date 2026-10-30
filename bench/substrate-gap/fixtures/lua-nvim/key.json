@@ -1,0 +1,18 @@
+{
+  "framework": "lua-nvim",
+  "language": "lua",
+  "dirs": ["."],
+  "note": "0.5.5 Lua: a Neovim plugin layout. plugin/ requires the module under lua/ (the runtimepath root, a directory module's init.lua); lua/myplug/init.lua requires its siblings by full dotted name; calls bind through the require aliases into M tables and a returned export table.",
+  "expect_edges": [
+    {"from": "plugin::myplug", "to": "lua::myplug::init", "category": "IMPORTS", "note": "require(\"myplug\") under the lua/ root, ?/init.lua"},
+    {"from": "lua::myplug::init", "to": "lua::myplug::config", "category": "IMPORTS", "note": "require(\"myplug.config\")"},
+    {"from": "lua::myplug::init", "to": "lua::myplug::util", "category": "IMPORTS"},
+    {"from": "plugin::myplug", "to": "M.setup", "category": "CALLS", "note": "myplug.setup() through the alias"},
+    {"from": "M.setup", "to": "apply", "category": "CALLS", "note": "local_call"},
+    {"from": "apply", "to": "M.merge", "category": "CALLS", "note": "util.merge through the alias"},
+    {"from": "apply", "to": "defaults", "category": "CALLS", "note": "config.defaults(): a field of config.lua's returned table"}
+  ],
+  "forbid": [
+    {"from": "apply", "to": "M.setup", "category": "CALLS"}
+  ]
+}

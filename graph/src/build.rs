@@ -31,6 +31,7 @@ use crate::types::{GraphError, RepoGraph, SymbolTable};
 
 mod dart;
 mod go_wire;
+mod lua;
 
 // ============================================================================
 // Public entry point
@@ -669,6 +670,31 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
+    Ok(g)
+}
+
+/// Build a per-repo Lua graph (0.5.5): `require` resolution and file-local
+/// call binding over what the Lua parser read (`build/lua.rs`, from Brian
+/// Ealdwine's glia PR #3): requires, metatable heritage, then calls (an
+/// inherited method binds through the heritage).
+pub fn build_lua(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
+    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let (requires, aliases) = lua::resolve_requires(&mut g, &all_imports);
+    if let Some(line) = requires.marker() {
+        eprintln!("{line}");
+    }
+    let (heritage, bases, other_refs) = lua::resolve_heritage(&mut g, all_refs, &aliases);
+    if let Some(line) = heritage.marker() {
+        eprintln!("{line}");
+    }
+    let calls = lua::resolve_lua_calls(&mut g, &all_calls, &aliases, &bases);
+    if let Some(line) = calls.marker() {
+        eprintln!("{line}");
+    }
+    let mut tally = EvidenceTally::default();
+    resolve_refs(&mut g, &other_refs, &mut tally);
     tally.report();
     Ok(g)
 }

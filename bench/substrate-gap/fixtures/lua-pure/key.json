@@ -1,0 +1,32 @@
+{
+  "framework": "lua-pure",
+  "language": "lua",
+  "dirs": ["."],
+  "note": "0.5.5 Lua (from glia PR #3's design, Brian Ealdwine): every function form, nested locals keyed under their function, requires beside the file / under lib/ / to a directory's init.lua, and file-local call binding (local_call, module_table with self as the method's table, require_alias).",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "App.new"},
+    {"kind": "METHOD", "name": "App.run"},
+    {"kind": "METHOD", "name": "App.step"},
+    {"kind": "FUNCTION", "name": "App.step.tick", "note": "a nested local function, keyed under its function"},
+    {"kind": "FUNCTION", "name": "App.stop", "note": "App.stop = function() .. end"},
+    {"kind": "FUNCTION", "name": "helper::M.greet"},
+    {"kind": "FUNCTION", "name": "lib::mathx::M.add", "note": "M.add = function() .. end"},
+    {"kind": "FUNCTION", "name": "strings::init::upper", "note": "a field of the returned export table"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "helper", "category": "IMPORTS", "note": "require beside the file"},
+    {"from": "main", "to": "lib::mathx", "category": "IMPORTS", "note": "require under the lib/ root"},
+    {"from": "main", "to": "strings::init", "category": "IMPORTS", "note": "require of a directory module, ?/init.lua"},
+    {"from": "App.run", "to": "log", "category": "CALLS", "note": "local_call"},
+    {"from": "App.run", "to": "App.step", "category": "CALLS", "note": "self:step() inside App:run, module_table"},
+    {"from": "App.run", "to": "M.add", "category": "CALLS", "note": "mathx.add through the require alias"},
+    {"from": "App.run", "to": "M.greet", "category": "CALLS", "note": "helper.greet through the require alias"},
+    {"from": "App.run", "to": "strings::init::upper", "category": "CALLS", "note": "strings.upper through the require alias into init.lua"},
+    {"from": "App.step", "to": "App.step.tick", "category": "CALLS", "note": "the nested local"},
+    {"from": "App.step.tick", "to": "log", "category": "CALLS"},
+    {"from": "App.stop", "to": "log", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"from": "App.run", "to": "App.step.tick", "category": "CALLS", "note": "a nested local is not visible outside its function"}
+  ]
+}

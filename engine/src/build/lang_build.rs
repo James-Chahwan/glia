@@ -367,6 +367,7 @@ fn build_solo(
         "elixir" => glia_graph::build_elixir(repo, parses),
         "rust" => glia_graph::build_rust(repo, parses, rust_crates),
         "ruby" => glia_graph::build_ruby(repo, parses),
+        "lua" => glia_graph::build_lua(repo, parses),
         "c_cpp" => {
             let modules = c_cpp_module_qnames(&parses);
             let angle = angle_includes(&parses);

@@ -3750,6 +3750,10 @@ const INVOCATION_PATTERNS: &[&str] = &[
     "Process.start(",
     "System.cmd(",
     "System.shell(",
+    // 0.5.5 — Lua's two launches, each a shell string. The paren-less call
+    // forms (a string literal straight after the name) are not read.
+    "os.execute(",
+    "io.popen(",
 ];
 
 /// Most argv tokens [`scan_argv`] reads from one call site (the binary included).

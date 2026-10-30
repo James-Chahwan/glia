@@ -1,0 +1,11 @@
+[package]
+name = "glia-parser-lua"
+version.workspace = true
+edition = "2024"
+publish = false
+
+[dependencies]
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
+tree-sitter = "0.26"
+tree-sitter-lua = "0.5"

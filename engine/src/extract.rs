@@ -57,6 +57,8 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "ex" | "exs" => Some("elixir"),
         "sol" => Some("solidity"),
         "tf" | "hcl" => Some("terraform"),
+        // 0.5.5: Lua (from Brian Ealdwine's glia PR #3).
+        "lua" => Some("lua"),
         "proto" => Some("proto"),
         // A10.4: a standalone GraphQL schema. Routed to the SDL resolver scan
         // in `route.rs`, never to a language parser. CB.1: `.graphqls` is the
@@ -194,6 +196,8 @@ pub(crate) fn parse_one_as(
         "solidity" => glia_parser_solidity::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "terraform" => glia_parser_terraform::parse_file(source, path, &module_qname, repo)
+            .map_err(|e| e.to_string()),
+        "lua" => glia_parser_lua::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "react" => glia_parser_react::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
