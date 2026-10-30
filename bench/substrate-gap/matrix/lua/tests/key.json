@@ -1,0 +1,35 @@
+{
+  "framework": "lua-tests",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "tests",
+  "cells": [
+    "lua/tests"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "calc::M.add",
+      "note": "unit under test"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "calc_spec",
+      "to": "calc",
+      "category": "TESTS",
+      "note": "module-level, by stem"
+    },
+    {
+      "from": "calc_spec",
+      "to": "M.add",
+      "category": "TESTS",
+      "note": "INTENDED function-level TESTS; MEASURED absent"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "0.5.5 Lua: a busted spec (spec/calc_spec.lua, describe / it) pairs calc.lua by stem (module-level TESTS). INTENDED function-level TESTS to M.add: the spec's calls sit in anonymous it() closures, which attribute to the spec MODULE, so no test FUNCTION exists to carry one."
+}

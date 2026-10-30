@@ -1,6 +1,6 @@
 {
-  "engine": "0.5.3",
-  "fixtures": 458,
+  "engine": "0.5.4",
+  "fixtures": 460,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1521,6 +1521,22 @@
         "HANDLED_BY": 1.0,
         "IMPORTS": 1.0,
         "INJECTS": 1.0
+      }
+    },
+    "lua-nvim": {
+      "framework": "lua-nvim",
+      "language": "lua",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "lua-pure": {
+      "framework": "lua-pure",
+      "language": "lua",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "manifest-toml-array-tables": {

@@ -1,0 +1,27 @@
+{
+  "framework": "lua-script-entry",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "script_entry",
+  "cells": [
+    "lua/script_entry"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "tools::count_lines"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {
+      "kind": "MODULE",
+      "node": "tools::count_lines",
+      "cell": "ENTRYPOINT"
+    }
+  ],
+  "forbid": [],
+  "note": "0.5.5 use pattern: a standalone script run from a shell (#!/usr/bin/env lua, reads arg). INTENDED: its MODULE carries an ENTRYPOINT cell. Not read in 0.5.5."
+}

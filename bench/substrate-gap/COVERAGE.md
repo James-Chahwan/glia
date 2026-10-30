@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.3` · vocabulary digest `f31e7dc48404` · schema 3
+Engine `0.5.4` · vocabulary digest `f31e7dc48404` · schema 3
 
 Columns, left to right (the review's own abbreviations):
 
@@ -93,38 +93,39 @@ rust           ●/-     ●/-     ●/-     ●/-     ●/-     ●/-     ●/-
 solidity       -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     ●/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     -/-     ●/-     ●/-     ?/-     ●/-     ?/-     ?/-     ?/-
 terraform      ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     -/-     ?/-     -/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     -/-     ?/-     -/-     ?/-     -/-     -/-     ?/-     ?/-     ?/-
 kotlin         ●/-     ●/·     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/◐     ●/-     ●/-     ●/-     ?/-     ?/-     ?/-
+lua            ●/-     ●/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ?/-     ●/-     ?/-     ?/-     ?/-     ?/-     ●/-     ●/-     ●/-     ?/-     ●/-     ●/-     ?/-     ?/-
 
-PER-MECHANISM  across 17 languages:
-  http_client  ● 15  ◐ 0   · 0   ? 1   - 1   ! 0
-  http_server  ● 14  ◐ 0   · 0   ? 2   - 1   ! 0
-  kafka        ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  amqp         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  sqs_sns      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  pubsub       ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  azure_sb     ● 7   ◐ 0   · 0   ? 9   - 1   ! 0
-  nats         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  redis        ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
-  mqtt         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  taskq        ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
-  grpc         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  graphql      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  ws           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  eventbus     ● 12  ◐ 0   · 0   ? 5   - 0   ! 0
-  db           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  migrations   ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  config       ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  secrets      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  flags        ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  cron         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  cli_def      ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
-  cli_inv      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
-  calls        ● 16  ◐ 0   · 0   ? 0   - 1   ! 0
-  imports      ● 15  ◐ 0   · 0   ? 2   - 0   ! 0
-  injects      ● 12  ◐ 0   · 0   ? 4   - 1   ! 0
-  impl         ● 13  ◐ 0   · 0   ? 3   - 1   ! 0
-  tests        ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
-  service      ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
-  subproject   ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
+PER-MECHANISM  across 18 languages:
+  http_client  ● 16  ◐ 0   · 0   ? 1   - 1   ! 0
+  http_server  ● 15  ◐ 0   · 0   ? 2   - 1   ! 0
+  kafka        ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  amqp         ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  sqs_sns      ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  pubsub       ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  azure_sb     ● 7   ◐ 0   · 0   ? 10  - 1   ! 0
+  nats         ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  redis        ● 11  ◐ 0   · 0   ? 5   - 2   ! 0
+  mqtt         ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  taskq        ● 11  ◐ 0   · 0   ? 5   - 2   ! 0
+  grpc         ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  graphql      ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  ws           ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  eventbus     ● 12  ◐ 0   · 0   ? 6   - 0   ! 0
+  db           ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  migrations   ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  config       ● 12  ◐ 0   · 0   ? 5   - 1   ! 0
+  secrets      ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  flags        ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  cron         ● 11  ◐ 0   · 0   ? 6   - 1   ! 0
+  cli_def      ● 11  ◐ 0   · 0   ? 5   - 2   ! 0
+  cli_inv      ● 12  ◐ 0   · 0   ? 5   - 1   ! 0
+  calls        ● 17  ◐ 0   · 0   ? 0   - 1   ! 0
+  imports      ● 16  ◐ 0   · 0   ? 2   - 0   ! 0
+  injects      ● 12  ◐ 0   · 0   ? 5   - 1   ! 0
+  impl         ● 14  ◐ 0   · 0   ? 3   - 1   ! 0
+  tests        ● 12  ◐ 0   · 0   ? 6   - 0   ! 0
+  service      ● 11  ◐ 0   · 0   ? 7   - 0   ! 0
+  subproject   ● 11  ◐ 0   · 0   ? 7   - 0   ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
@@ -144,11 +145,12 @@ PER-LANGUAGE  across 30 mechanisms:
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
+  lua          ● 8   ◐ 0   · 0   ? 22  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 346 full, 0 partial, 0 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 354/512 applicable cells have a fixture (69.1%) — 354 full, 0 partial, 0 none, 158 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 293
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 295
 
 ## Cells routed via an alternative mechanism
 
@@ -246,6 +248,41 @@ _None._
 | `terraform/injects` | structural | Terraform declares no types, so nothing is injected |
 | `terraform/redis` | structural | no Terraform construct publishes to or subscribes on a Redis channel or list; ElastiCache resources declare the store only |
 | `terraform/taskq` | structural | no Terraform construct names, enqueues or processes a task; a Cloud Tasks queue resource declares the queue only |
+
+## Use patterns
+
+The second axis (0.5.5): how code is USED rather than how services talk. Graded by the same rules as a mechanism, filed under `patterns/<language>/<pattern>/`, never counted in the totals above (`matrix_vocab.PATTERNS`).
+
+- `h_cmd` — **host_command**: Neovim nvim_create_user_command, a Maki register_tool, a VS Code registerCommand: the host's command -> the script's handler
+- `h_evt` — **host_event**: Neovim autocmds, WoW RegisterEvent + OnEvent, AwesomeWM connect_signal: a host event name -> the script's callback
+- `h_cb` — **host_callback**: LOVE love.load / update / draw, Defold update(self, dt): the host calls the function by its name, so it is an entry (ENTRYPOINT cell), never dead
+- `cfg_tbl` — **config_table**: configuration as code the host reads: WezTerm's returned table, vim.opt
+- `embed` — **embedded_script**: another language's code or config runs the script: nginx content_by_lua_file (a location ROUTE HANDLED_BY the module), a Redis EVAL / register_script
+- `script` — **script_entry**: a standalone script run from a shell (`#!/usr/bin/env lua`, `arg`): its MODULE is an entry
+
+```
+              h_cmd    h_evt     h_cb  cfg_tbl    embed   script
+python            ?        ?        ?        ?        ?        ?
+go                ?        ?        ?        ?        ?        ?
+typescript        ?        ?        ?        ?        ?        ?
+java              ?        ?        ?        ?        ?        ?
+csharp            ?        ?        ?        ?        ?        ?
+ruby              ?        ?        ?        ?        ?        ?
+php               ?        ?        ?        ?        ?        ?
+swift             ?        ?        ?        ?        ?        ?
+c_cpp             ?        ?        ?        ?        ?        ?
+scala             ?        ?        ?        ?        ?        ?
+clojure           ?        ?        ?        ?        ?        ?
+dart              ?        ?        ?        ?        ?        ?
+elixir            ?        ?        ?        ?        ?        ?
+rust              ?        ?        ?        ?        ?        ?
+solidity          ?        ?        ?        ?        ?        ?
+terraform         ?        ?        ?        ?        ?        ?
+kotlin            ?        ?        ?        ?        ?        ?
+lua               ·        ·        ◐        ·        ◐        ◐
+```
+
+USE PATTERNS: 6/108 cells have a fixture — 0 full, 3 partial, 3 none, 102 unknown, 0 error.
 
 ## Cohort grades
 

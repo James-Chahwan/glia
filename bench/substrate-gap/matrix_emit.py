@@ -282,9 +282,62 @@ def build_payload(cells, legacy_only, languages=None, mechanisms=None,
         "not_applicable": {k: not_applicable[k] for k in sorted(not_applicable)},
         "legacy_only": sorted(legacy_only),
         "cohort": cohort_section(cohort, cells, languages, mechanisms),
+        "patterns": patterns_section(cells, languages),
     }
     print(cohort_marker(payload), file=sys.stderr)
     return payload
+
+
+def patterns_section(cells, languages):
+    """The use-pattern axis (0.5.5, matrix_vocab.PATTERNS): its own totals and
+    cells, never counted in the 30-column `totals`."""
+    totals = {level: 0 for level in ("full", "partial", "none", "unknown", "error")}
+    out = {}
+    for lang in languages:
+        for pid in vocab.PATTERN_IDS:
+            slot = cells.get((lang, pid))
+            totals[slot["level"] if slot is not None else "unknown"] += 1
+            if slot is None:
+                continue
+            out[f"{lang}/{pid}"] = {
+                "level": slot["level"], "via": slot.get("via"),
+                "extract": list(slot["extract"]), "literal": list(slot["literal"]),
+                "route": list(slot["route"]), "forbid": list(slot["forbid"]),
+                "fixtures": sorted(slot.get("fixtures", [])),
+                "reasons": sorted(slot.get("reasons", [])),
+            }
+    return {"patterns": list(vocab.PATTERN_IDS), "totals": totals, "cells": out}
+
+
+def _patterns_markdown(payload, languages):
+    sec = payload.get("patterns")
+    if not sec:
+        return []
+    lines = ["## Use patterns", "",
+             "The second axis (0.5.5): how code is USED rather than how services talk. Graded "
+             "by the same rules as a mechanism, filed under `patterns/<language>/<pattern>/`, "
+             "never counted in the totals above (`matrix_vocab.PATTERNS`).", ""]
+    for pid in sec["patterns"]:
+        p = vocab.mechanism(pid)
+        lines.append(f"- `{p['label']}` — **{pid}**: {p['note']}")
+    lines.append("")
+    lines.append("```")
+    lines.append(" " * LANG_W + " ".join(vocab.mechanism(p)["label"].rjust(8)
+                                         for p in sec["patterns"]))
+    for lang in languages:
+        glyphs = []
+        for pid in sec["patterns"]:
+            slot = sec["cells"].get(f"{lang}/{pid}")
+            glyphs.append(GLYPH[slot["level"] if slot else "unknown"])
+        lines.append(lang.ljust(LANG_W) + " ".join(g.rjust(8) for g in glyphs))
+    lines.append("```")
+    lines.append("")
+    t = sec["totals"]
+    lines.append(f"USE PATTERNS: {len(sec['cells'])}/{len(languages) * len(sec['patterns'])} "
+                 f"cells have a fixture — {t['full']} full, {t['partial']} partial, "
+                 f"{t['none']} none, {t['unknown']} unknown, {t['error']} error.")
+    lines.append("")
+    return lines
 
 
 def render_results(payload):
@@ -446,6 +499,7 @@ def render_markdown(payload, languages=None, mechanisms=None):
     else:
         lines.append("_None in this selection._")
     lines.append("")
+    lines.extend(_patterns_markdown(payload, languages))
     lines.extend(_cohort_markdown(payload))
     return "\n".join(lines)
 
@@ -575,6 +629,14 @@ def level_drift(committed, payload):
             was, now = (("unknown" if s == "(absent)" else s) for s in (was, now))
         lines.append(f"{label}: {was} -> {now}")
     lines.extend(_cohort_drift(committed.get("cohort"), payload.get("cohort")))
+    # 0.5.5: use-pattern cells drift the same way, labelled `<lang>/<pattern>`.
+    old_p = (committed.get("patterns") or {}).get("cells") or {}
+    new_p = (payload.get("patterns") or {}).get("cells") or {}
+    for label in sorted(set(old_p) | set(new_p)):
+        was = old_p.get(label, {}).get("level", "(absent)")
+        now = new_p.get(label, {}).get("level", "(absent)")
+        if was != now:
+            lines.append(f"{label}: {was} -> {now}")
     return lines
 
 

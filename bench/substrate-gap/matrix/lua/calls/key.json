@@ -1,0 +1,55 @@
+{
+  "framework": "lua-calls",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "calls",
+  "cells": [
+    "lua/calls"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "Shop.checkout"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Shop.reload"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "M.charge"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Shop.checkout",
+      "to": "main::total",
+      "category": "CALLS",
+      "note": "local_call"
+    },
+    {
+      "from": "Shop.checkout",
+      "to": "lib::M.charge",
+      "category": "CALLS",
+      "note": "lib.charge through the require alias"
+    },
+    {
+      "from": "Shop.refresh",
+      "to": "Shop.reload",
+      "category": "CALLS",
+      "note": "self:reload() inside Shop:refresh"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "from": "Shop.checkout",
+      "to": "M.total",
+      "category": "CALLS",
+      "note": "the bare total() is main.lua's local, never lib.lua's M.total"
+    }
+  ],
+  "note": "0.5.5 Lua (glia PR #3's design): a bare call binds the visible local (local_call), self:m() inside Shop:refresh binds Shop.m (module_table), lib.charge binds through the require alias (require_alias). lib.lua's M.total is a same-name decoy for main.lua's local total."
+}

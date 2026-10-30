@@ -82,13 +82,14 @@ import sys
 # parser (parsers/code/kotlin) and only shares the JVM graph build with java,
 # and rows are per language parser (scala and java are separate rows for the
 # same reason). It is APPENDED so every review row, the column geometry and the
-# review-order diff stay put.
+# review-order diff stay put. The 18th, `lua` (0.5.5, the Lua parser from glia
+# PR #3), is appended after it for the same reason.
 # ---------------------------------------------------------------------------
 
 LANGUAGES = [
     "python", "go", "typescript", "java", "csharp", "ruby", "php", "swift",
     "c_cpp", "scala", "clojure", "dart", "elixir", "rust", "solidity", "terraform",
-    "kotlin",
+    "kotlin", "lua",
 ]
 
 # Spelling variants only. Composite legacy values (`typescript+go`, `proto+go`)
@@ -275,6 +276,60 @@ MECHANISMS = [
 _BY_ID = {m["id"]: m for m in MECHANISMS}
 MECHANISM_IDS = [m["id"] for m in MECHANISMS]
 
+# ---------------------------------------------------------------------------
+# Use patterns (0.5.5) -- the matrix's second axis. The 30 mechanisms are how
+# services talk to each other (a web-service shape: HTTP, brokers, RPC, env
+# config). Much code is not a service: it is embedded in a host (game engines,
+# editors, window managers, nginx, Redis), wired by event names, or run as a
+# script. James 2026-10-31: "the matrix ... doesn't deal with language use
+# patterns breakdown like lua is in game scripting for glue work or processing
+# scripts or Linux stuff". Each pattern is graded per language by the SAME
+# machinery as a mechanism (matrix.derive), filed under patterns/<lang>/<id>/,
+# rendered as its own table, and kept out of the 30-column totals. The keys use
+# today's node / edge / cell vocabulary, so a pattern glia does not read yet
+# grades `none` or `partial` (blindness stated) until 0.5.6's host-to-plugin
+# graph fills it. `proof_cells`: a cell that proves the routing where no edge
+# can (a host-called function is an entry, not an edge's endpoint).
+PATTERNS = [
+    {"id": "host_command", "label": "h_cmd", "family": "host",
+     "kinds": [["CLI_COMMAND"]], "via_labels": ["host_command"],
+     "literal": "the command name the script registers with its host, in the CLI_COMMAND name/qname",
+     "categories": ["HANDLED_BY"], "cross_repo": False,
+     "note": "Neovim nvim_create_user_command, a Maki register_tool, a VS Code registerCommand: "
+             "the host's command -> the script's handler"},
+    {"id": "host_event", "label": "h_evt", "family": "host",
+     "kinds": [["EVENT_HANDLER"]], "via_labels": ["host_event"],
+     "literal": "the host event name in the EVENT_HANDLER name/qname",
+     "categories": ["HANDLED_BY"], "cross_repo": False,
+     "note": "Neovim autocmds, WoW RegisterEvent + OnEvent, AwesomeWM connect_signal: a host "
+             "event name -> the script's callback"},
+    {"id": "host_callback", "label": "h_cb", "family": "host",
+     "kinds": [["FUNCTION", "METHOD"]], "via_labels": ["host_callback"],
+     "literal": "the callback name the host calls by convention (`love.update`)",
+     "categories": [], "proof_cells": ["ENTRYPOINT"], "cross_repo": False,
+     "note": "LOVE love.load / update / draw, Defold update(self, dt): the host calls the "
+             "function by its name, so it is an entry (ENTRYPOINT cell), never dead"},
+    {"id": "config_table", "label": "cfg_tbl", "family": "host",
+     "kinds": [["CONFIG_KEY"]], "via_labels": ["config_table"],
+     "literal": "the setting's key in the CONFIG_KEY qname (`config:<host>:<key>`)",
+     "categories": ["DEFINES_CONFIG"], "cross_repo": False,
+     "note": "configuration as code the host reads: WezTerm's returned table, vim.opt"},
+    {"id": "embedded_script", "label": "embed", "family": "host",
+     "kinds": [["MODULE"]], "via_labels": ["embedded_script"],
+     "literal": "the script's MODULE, as the target of its host's reference",
+     "categories": ["HANDLED_BY", "USES"], "cross_repo": False,
+     "note": "another language's code or config runs the script: nginx content_by_lua_file "
+             "(a location ROUTE HANDLED_BY the module), a Redis EVAL / register_script"},
+    {"id": "script_entry", "label": "script", "family": "host",
+     "kinds": [["MODULE"]], "via_labels": ["script_entry"],
+     "literal": "the script's MODULE",
+     "categories": [], "proof_cells": ["ENTRYPOINT"], "cross_repo": False,
+     "note": "a standalone script run from a shell (`#!/usr/bin/env lua`, `arg`): its "
+             "MODULE is an entry"},
+]
+_PATTERN_BY_ID = {p["id"]: p for p in PATTERNS}
+PATTERN_IDS = [p["id"] for p in PATTERNS]
+
 # The cross-graph categories that appear ONLY when the build has two separate
 # RepoIds: their resolvers pair a shared name across repos and skip same-repo
 # pairs (graph/src/resolvers/mod.rs emit_cross_repo_pairs, and the equivalent
@@ -401,14 +456,22 @@ def normalize_language(name):
 
 
 def mechanism(mid):
-    """Look up a mechanism by id, raising with all 30 valid ids on a miss."""
-    m = _BY_ID.get(str(mid).strip())
+    """Look up a mechanism, or a use pattern (PATTERNS), by id, raising with
+    every valid id on a miss. The grading reads both alike."""
+    key = str(mid).strip()
+    m = _BY_ID.get(key) or _PATTERN_BY_ID.get(key)
     if m is None:
         raise ValueError(
             f"unknown mechanism {mid!r}; "
-            f"the {len(MECHANISMS)} matrix columns are: {', '.join(MECHANISM_IDS)}"
+            f"the {len(MECHANISMS)} matrix columns are: {', '.join(MECHANISM_IDS)}; "
+            f"the {len(PATTERNS)} use patterns are: {', '.join(PATTERN_IDS)}"
         )
     return m
+
+
+def is_pattern(mid):
+    """True for a use-pattern id (PATTERNS), false for a mechanism."""
+    return str(mid).strip() in _PATTERN_BY_ID
 
 
 def not_applicable(lang, mech):
@@ -455,9 +518,9 @@ def _selftest():
         f"mechanism order drifted from review:127\n  got {MECHANISM_IDS}\n  want {expected_ids}"
     )
     assert len(MECHANISMS) == 30, f"expected 30 mechanisms, got {len(MECHANISMS)}"
-    assert len(LANGUAGES) == 17, f"expected 17 languages, got {len(LANGUAGES)}"
+    assert len(LANGUAGES) == 18, f"expected 18 languages, got {len(LANGUAGES)}"
     assert len(set(MECHANISM_IDS)) == 30, "duplicate mechanism id"
-    assert len(set(LANGUAGES)) == 17, "duplicate language row"
+    assert len(set(LANGUAGES)) == 18, "duplicate language row"
 
     known_kinds = set(dict(rg.kind_names()).values())
     known_cats = set(dict(rg.category_names()).values())

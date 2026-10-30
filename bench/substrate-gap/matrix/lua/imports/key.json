@@ -1,0 +1,42 @@
+{
+  "framework": "lua-imports",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "imports",
+  "cells": [
+    "lua/imports"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "app::orders::init"
+    },
+    {
+      "kind": "MODULE",
+      "name": "lib::util"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "main",
+      "to": "app::orders::init",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "main",
+      "to": "lib::util",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "main",
+      "to": "M.place",
+      "category": "CALLS",
+      "note": "orders.place() through the alias"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "0.5.5 Lua: require(\"app.orders\") binds the directory module app/orders/init.lua (?/init.lua), require(\"util\") binds lib/util.lua under the conventional lib/ root."
+}

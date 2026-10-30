@@ -134,10 +134,12 @@ def discover(root=HERE):
     root = Path(root)
     legacy = sorted(glob.glob(str(root / "fixtures" / "*" / "key.json")))
     canonical = sorted(glob.glob(str(root / "matrix" / "*" / "*" / "key.json")))
-    return [Path(p) for p in legacy + canonical]
+    # 0.5.5: the use-pattern axis, patterns/<language>/<pattern>/.
+    patterns = sorted(glob.glob(str(root / "patterns" / "*" / "*" / "key.json")))
+    return [Path(p) for p in legacy + canonical + patterns]
 
 
-def mechanism_from_dir(segment):
+def mechanism_from_dir(segment, ids=None):
     """`kafka` -> kafka; `http_server_composed` -> http_server (variant suffix).
 
     A second fixture for one cell needs a second directory, so a trailing
@@ -145,17 +147,18 @@ def mechanism_from_dir(segment):
     `sqs_sns` is never read as `sqs` + `_sns`.
     """
     seg = str(segment)
-    if seg in vocab.MECHANISM_IDS:
+    ids = vocab.MECHANISM_IDS if ids is None else ids
+    if seg in ids:
         return seg
     best = None
-    for mid in vocab.MECHANISM_IDS:
+    for mid in ids:
         if (seg.startswith(mid) and len(seg) > len(mid) and seg[len(mid)] in SEPARATORS
                 and (best is None or len(mid) > len(best))):
             best = mid
     if best is None:
         raise ValueError(
             f"matrix directory {seg!r} does not name a mechanism; the "
-            f"{len(vocab.MECHANISM_IDS)} columns are: {', '.join(vocab.MECHANISM_IDS)}"
+            f"{len(ids)} columns are: {', '.join(ids)}"
         )
     return best
 
@@ -173,8 +176,9 @@ def declared_cells(key_path, root=HERE):
     key = json.loads(Path(key_path).read_text())
     cells = [parse_cell(c) for c in (key.get("cells") or [])]
     rel = Path(key_path).parent.resolve().relative_to(Path(root).resolve())
-    if rel.parts and rel.parts[0] == "matrix" and len(rel.parts) == 3:
-        want = (vocab.normalize_language(rel.parts[1]), mechanism_from_dir(rel.parts[2]))
+    if rel.parts and rel.parts[0] in ("matrix", "patterns") and len(rel.parts) == 3:
+        ids = vocab.PATTERN_IDS if rel.parts[0] == "patterns" else vocab.MECHANISM_IDS
+        want = (vocab.normalize_language(rel.parts[1]), mechanism_from_dir(rel.parts[2], ids))
         if want not in cells:
             raise ValueError(
                 f"{rel}: directory declares cell {want[0]}/{want[1]} but key.json "
@@ -250,6 +254,11 @@ def derive(mech_id, res, present_kinds):
     literal_n = sum(1 for r in node_rows if r["found"]) + sum(1 for r in role_rows if r["found"])
     literal_d = len(node_rows) + len(role_rows)
     played = {roles[r["contains"].casefold()] for r in role_rows if r["found"]}
+    # A pattern's `proof_cells` (matrix_vocab.PATTERNS): a found cell row of that
+    # type routes the cell where no edge can (a host-called function's ENTRYPOINT).
+    proofs = set(m.get("proof_cells", []))
+    proof_rows = [r for r in res.get("cell_recall", []) if r.get("cell") in proofs]
+    edge_rows = edge_rows + proof_rows
     route_n, route_d = sum(1 for r in edge_rows if r["found"]), len(edge_rows)
     forbid_n, forbid_d = sum(1 for r in forbid_rows if not r["violated"]), len(forbid_rows)
 
@@ -429,6 +438,18 @@ def render(cells, languages, mechanisms, bad, legacy_only, out=None):
         print(f"  - {lang}/{m}: {'; '.join(cells[(lang, m)]['reasons'])}", file=out)
 
 
+def render_patterns(cells, languages, out=None):
+    """The use-pattern grid (0.5.5): languages x matrix_vocab.PATTERNS."""
+    out = sys.stdout if out is None else out
+    pad = max([len(lang) for lang in languages] + [9])
+    labels = [vocab.mechanism(p)["label"] for p in vocab.PATTERN_IDS]
+    print("\nUSE PATTERNS:", file=out)
+    print(" " * pad + "  " + " ".join(lbl.rjust(8) for lbl in labels), file=out)
+    for lang in languages:
+        row = " ".join(GLYPH[_level(cells, (lang, p))].rjust(8) for p in vocab.PATTERN_IDS)
+        print(lang.ljust(pad) + "  " + row, file=out)
+
+
 def cell_marker(pair, slot=None):
     """The per-cell fired_on marker, the grep handle every corpus packet uses.
 
@@ -503,6 +524,12 @@ def main(argv=None):
     print(f"[matrix] {len(languages)} languages x {len(mechanisms)} mechanisms, "
           f"{tally['full']} full, {tally['partial']} partial, {tally['none']} none, "
           f"{tally['unknown']} unknown, {tally[vocab.NA_LEVEL]} n/a", file=sys.stderr)
+    # 0.5.5: the use-pattern axis, its own line (the 30-column line above is a
+    # contract and never counts a pattern cell).
+    ptally = _counts(cells, [(lg, p) for lg in languages for p in vocab.PATTERN_IDS])
+    print(f"[matrix] patterns: {len(languages)} languages x {len(vocab.PATTERN_IDS)} use patterns, "
+          f"{ptally['full']} full, {ptally['partial']} partial, {ptally['none']} none, "
+          f"{ptally['unknown']} unknown", file=sys.stderr)
 
     if args.emit or args.check:
         payload = matrix_emit.build_payload(cells, legacy_only)
@@ -557,9 +584,11 @@ def main(argv=None):
             for contribution in slot["contributions"]:
                 print(f"  fixture  {contribution['fixture']} = {contribution['level']}")
     else:
-        for pair in sorted(p for p in cells if p[0] in languages and p[1] in mechanisms):
+        for pair in sorted(p for p in cells if p[0] in languages
+                           and (p[1] in mechanisms or vocab.is_pattern(p[1]))):
             print(cell_marker(pair, cells[pair]), file=sys.stderr)
         render(cells, languages, mechanisms, bad, legacy_only)
+        render_patterns(cells, languages)
 
     if args.fail_on_error and (bad or tally["error"]):
         return 1

@@ -1,0 +1,37 @@
+{
+  "framework": "lua-cli_inv",
+  "language": "lua",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "lua/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "mytool",
+      "note": "os.execute(\"mytool sync\")"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "mytool",
+      "to": "mytool",
+      "category": "CLI_INVOKES",
+      "note": "invocation -> declaration"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "sync",
+      "max_nodes": 0,
+      "note": "the subcommand must never be minted as its own tool"
+    }
+  ],
+  "note": "0.5.5 Lua: os.execute(\"mytool sync\") invokes the click CLI the Python server declares (pyproject [project.scripts]). INTENDED invocation; MEASURED absent: the CLI invocation extractor does not read Lua's os.execute / io.popen."
+}

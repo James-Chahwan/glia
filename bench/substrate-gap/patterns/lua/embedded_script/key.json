@@ -1,0 +1,41 @@
+{
+  "framework": "lua-embedded-script",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "embedded_script",
+  "cells": [
+    "lua/embedded_script"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "lua::hello"
+    },
+    {
+      "kind": "MODULE",
+      "name": "scripts::rate_limit"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/api/hello"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/api/hello",
+      "to": "lua::hello",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "allow",
+      "to": "scripts::rate_limit",
+      "category": "USES",
+      "note": "through register_script(open(path)) at module level"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "0.5.5 use pattern: another language runs the Lua. nginx's content_by_lua_file serves /api/hello from lua/hello.lua; Python registers scripts/rate_limit.lua as a Redis script. INTENDED: the location ROUTE HANDLED_BY the Lua MODULE, and allow USES the script's MODULE. Not read in 0.5.5."
+}

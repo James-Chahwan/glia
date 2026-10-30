@@ -1,0 +1,37 @@
+{
+  "framework": "lua-host-event",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "host_event",
+  "cells": [
+    "lua/host_event"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "BufWritePost"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "PLAYER_LOGIN"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "BufWritePost",
+      "to": "on_save",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "PLAYER_LOGIN",
+      "to": "on_event",
+      "category": "HANDLED_BY",
+      "note": "RegisterEvent names the event, SetScript(\"OnEvent\", ..) the callback"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "0.5.5 use pattern: host events bound to callbacks, a Neovim autocmd and a WoW frame's RegisterEvent + OnEvent. INTENDED: an EVENT_HANDLER per host event HANDLED_BY the callback. Not read in 0.5.5."
+}

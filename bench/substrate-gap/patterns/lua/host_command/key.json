@@ -1,0 +1,39 @@
+{
+  "framework": "lua-host-command",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "host_command",
+  "cells": [
+    "lua/host_command"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "Greet"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "GreetAll"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Greet",
+      "to": "greet",
+      "category": "HANDLED_BY",
+      "note": "the command -> its named handler"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "nargs",
+      "max_nodes": 0,
+      "note": "an option key is no command"
+    }
+  ],
+  "note": "0.5.5 use pattern: a Neovim plugin registers user commands (nvim_create_user_command). INTENDED: one CLI_COMMAND per command HANDLED_BY its handler (a named function, or the anonymous one's enclosing scope). Not read in 0.5.5; 0.5.6's host-to-plugin graph."
+}

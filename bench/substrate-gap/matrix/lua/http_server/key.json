@@ -1,0 +1,51 @@
+{
+  "framework": "lua-http_server",
+  "language": "lua",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "lua/http_server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /users/:id"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /users/:id",
+      "to": "show_user",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /orders",
+      "to": "server::POST /orders",
+      "category": "HANDLED_BY",
+      "note": "the anonymous handler, minted FUNCTION `POST /orders`"
+    },
+    {
+      "from": "/users/",
+      "to": "GET /users/:id",
+      "category": "HTTP_CALLS",
+      "note": "socket.http client -> Lapis route across repos"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "create_order",
+      "max_nodes": 0,
+      "note": "the Lapis route name is no path"
+    }
+  ],
+  "note": "0.5.5 Lua: Lapis routes (app:get / app:post with a route name first) HANDLED_BY a named local and an anonymous handler; a socket.http client in the other repo calls /users/<id> (a `..` concatenation)."
+}

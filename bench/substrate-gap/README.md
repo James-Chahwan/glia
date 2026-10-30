@@ -199,6 +199,19 @@ Its glyphs: `●` full, `◐` partial, `·` none (a fixture exists, nothing emit
 language cannot express the mechanism; a fixture claiming one is an error) and `!`
 error. The coverage line divides by the applicable cells (grid minus n/a).
 
+## The second axis: use patterns (0.5.5)
+
+The 30 mechanisms describe how services talk to each other. Much code is not a service: it runs inside a host (a game
+engine, an editor, a window manager, nginx, Redis), is wired by event names, or runs as a script. `matrix_vocab.PATTERNS`
+is a second axis for that: `host_command`, `host_event`, `host_callback`, `config_table`, `embedded_script`,
+`script_entry`, each with the same fields as a mechanism (kinds, categories, literal) plus an optional `proof_cells`
+(a cell that routes the pattern where no edge can, e.g. an `ENTRYPOINT` on a function the host calls by name). A pattern
+cell lives at `patterns/<language>/<pattern>/key.json`, declares `"cells": ["<language>/<pattern>"]`, is graded by
+`matrix.derive` exactly like a mechanism cell, prints its own `[matrix] cell` marker, and is counted only on the
+`[matrix] patterns: <L> languages x <P> use patterns, ..` line and in COVERAGE.md's `## Use patterns` table, never in
+the 30-column totals. The keys use today's node / edge / cell vocabulary, so a pattern glia does not read yet grades
+`none` or `partial`: Lua's six are the first row, the targets of 0.5.6's host-to-plugin graph.
+
 ## Two grades per cell: fixture / cohort (FH.10)
 
 Every `COVERAGE.md` cell reads `fixture/cohort`. The first glyph is the fixture grade

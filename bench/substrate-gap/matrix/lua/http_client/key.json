@@ -1,0 +1,42 @@
+{
+  "framework": "lua-http_client",
+  "language": "lua",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "lua/http_client"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "/orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/orders",
+      "to": "POST /orders",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ENDPOINT",
+      "node": "/orders",
+      "cell": "ENDPOINT_HIT",
+      "contains": "orders.internal"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /orders",
+      "max_nodes": 0,
+      "note": "the options-table method wins over the GET default"
+    }
+  ],
+  "note": "0.5.5 Lua: a resty.http request_uri with an options-table method (POST) pairs the Lapis POST /orders route; the host lands on the hit."
+}

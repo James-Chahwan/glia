@@ -1,0 +1,38 @@
+{
+  "framework": "lua-config-table",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "config_table",
+  "cells": [
+    "lua/config_table"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "font_size"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "color_scheme"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "wezterm",
+      "to": "font_size",
+      "category": "DEFINES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "Gruvbox Dark",
+      "max_nodes": 0,
+      "note": "a value is no key"
+    }
+  ],
+  "note": "0.5.5 use pattern: configuration as code. WezTerm reads the table wezterm.lua returns. INTENDED: one CONFIG_KEY per setting (config:wezterm:<key>) DEFINES_CONFIG from the file. Not read in 0.5.5."
+}

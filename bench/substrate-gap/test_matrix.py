@@ -135,9 +135,10 @@ def _write_key(root, rel, cells, framework=None, language="go"):
 def test_vocab_is_the_only_vocabulary():
     src = (HERE / "matrix.py").read_text()
     assert "import matrix_vocab" in src, "matrix.py must consume matrix_vocab"
-    assert len(vocab.LANGUAGES) == 17 and len(vocab.MECHANISM_IDS) == 30
-    # the 17th row (CF.13b) is appended, so the 16 review rows keep their order
-    assert vocab.LANGUAGES[-1] == "kotlin", vocab.LANGUAGES
+    assert len(vocab.LANGUAGES) == 18 and len(vocab.MECHANISM_IDS) == 30
+    # the 17th row (CF.13b) and the 18th (0.5.5, lua) are appended, so the 16
+    # review rows keep their order
+    assert vocab.LANGUAGES[-2:] == ["kotlin", "lua"], vocab.LANGUAGES
     # scaffold.py carries a file template for every row, or a new row's cells
     # would fail to stamp at the `no file template` guard
     import scaffold
@@ -500,9 +501,36 @@ def test_the_fired_on_marker_is_a_whole_line_at_17x30():
         sys.stderr, sys.stdout = real_err, real_out
     assert rc == 0, rc
     hits = [ln for ln in err.getvalue().splitlines()
-            if ln.startswith("[matrix] 17 languages x 30 mechanisms")]
+            if ln.startswith("[matrix] 18 languages x 30 mechanisms")]
     assert len(hits) == 1, err.getvalue()
     assert "full," in hits[0] and "unknown" in hits[0], hits[0]
+
+
+def test_use_patterns_are_their_own_axis():
+    """0.5.5: matrix_vocab.PATTERNS grade like a mechanism, a `proof_cells`
+    cell routes a pattern no edge can, and no pattern cell ever counts in the
+    30-column totals."""
+    assert set(vocab.PATTERN_IDS).isdisjoint(vocab.MECHANISM_IDS)
+    assert vocab.is_pattern("host_command") and not vocab.is_pattern("calls")
+    assert vocab.mechanism("host_callback")["proof_cells"] == ["ENTRYPOINT"]
+    res = {"node_recall": [{"kind": "FUNCTION", "found": True}], "edge_recall": [],
+           "forbid_results": [],
+           "cell_recall": [{"cell": "ENTRYPOINT", "kind": "FUNCTION", "found": True}]}
+    rec = matrix.derive("host_callback", res, {"FUNCTION"})
+    assert rec["level"] == "full" and rec["route"] == [1, 1], rec
+    res["cell_recall"][0]["found"] = False
+    assert matrix.derive("host_callback", res, {"FUNCTION"})["level"] == "partial"
+    cells = {("lua", "host_command"): {"level": "none"}}
+    grid = [(lg, m) for lg in vocab.LANGUAGES for m in vocab.MECHANISM_IDS]
+    assert matrix._counts(cells, grid)["none"] == 0
+    # A patterns/ fixture files under its pattern; a mechanism name there is refused.
+    assert matrix.mechanism_from_dir("host_event", vocab.PATTERN_IDS) == "host_event"
+    try:
+        matrix.mechanism_from_dir("kafka", vocab.PATTERN_IDS)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a mechanism directory under patterns/ must be refused")
 
 
 def test_an_unknown_cell_still_gets_a_marker():

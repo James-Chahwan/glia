@@ -126,7 +126,8 @@ def _validate_vocab(fixture, key):
     """
     import matrix_vocab as _V
 
-    mechs = set(_V.MECHANISM_IDS)
+    # 0.5.5: a use pattern (matrix_vocab.PATTERNS) is a column too.
+    mechs = set(_V.MECHANISM_IDS) | set(_V.PATTERN_IDS)
     langs = set(_V.LANGUAGES)
     mech = key.get("mechanism")
     if mech is not None and mech not in mechs:

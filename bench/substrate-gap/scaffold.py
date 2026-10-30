@@ -88,6 +88,7 @@ LANGS = {
     "solidity":   (".sol",    "//", "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\n"),
     "terraform":  (".tf",     "#",  ""),
     "kotlin":     (".kt",     "//", ""),
+    "lua":        (".lua",    "--", ""),
 }
 
 # family -> ((basename, role), (basename, role)). Index 0 lands in dirs[0].

@@ -1,0 +1,44 @@
+{
+  "framework": "lua-config",
+  "language": "lua",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "config",
+  "cells": [
+    "lua/config"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DATABASE_URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "reader",
+      "to": "DATABASE_URL",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "Dockerfile",
+      "to": "DATABASE_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "DATABASE_URL",
+      "to": "DATABASE_URL",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "postgres://db.internal:5432/app",
+      "max_nodes": 0
+    }
+  ],
+  "note": "0.5.5 Lua: os.getenv(\"DATABASE_URL\") is read by the language-blind config extractor; the Dockerfile ENV defines it."
+}

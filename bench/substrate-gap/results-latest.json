@@ -3962,6 +3962,198 @@
       ],
       "via": "di"
     },
+    "lua/calls": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/lua/calls"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "call"
+    },
+    "lua/cli_inv": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/lua/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
+    "lua/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/lua/config"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
+    "lua/http_client": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/lua/http_client"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "lua/http_server": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/lua/http_server"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "http"
+    },
+    "lua/impl": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/lua/impl"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "type"
+    },
+    "lua/imports": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/lua/imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "import"
+    },
+    "lua/tests": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/lua/tests"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "test"
+    },
     "php/amqp": {
       "extract": [
         2,
@@ -9386,7 +9578,7 @@
       "unknown_graded": 0
     }
   },
-  "engine": "0.5.3",
+  "engine": "0.5.4",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/angular-inline-template-bindings",
@@ -9525,6 +9717,8 @@
     "fixtures/kotlin-flip-guard",
     "fixtures/kotlin-ktor-client",
     "fixtures/kotlin-local-receivers",
+    "fixtures/lua-nvim",
+    "fixtures/lua-pure",
     "fixtures/manifest-toml-array-tables",
     "fixtures/models-dart-dio",
     "fixtures/models-declared-fields",
@@ -9796,22 +9990,191 @@
       "reason": "no Terraform construct names, enqueues or processes a task; a Cloud Tasks queue resource declares the queue only"
     }
   },
+  "patterns": {
+    "cells": {
+      "lua/config_table": {
+        "extract": [
+          0,
+          2
+        ],
+        "fixtures": [
+          "patterns/lua/config_table"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "none",
+        "literal": [
+          0,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          0,
+          1
+        ],
+        "via": null
+      },
+      "lua/embedded_script": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/lua/embedded_script"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          2
+        ],
+        "via": "embedded_script"
+      },
+      "lua/host_callback": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/lua/host_callback"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          3
+        ],
+        "via": "host_callback"
+      },
+      "lua/host_command": {
+        "extract": [
+          0,
+          2
+        ],
+        "fixtures": [
+          "patterns/lua/host_command"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "none",
+        "literal": [
+          0,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          0,
+          1
+        ],
+        "via": null
+      },
+      "lua/host_event": {
+        "extract": [
+          0,
+          2
+        ],
+        "fixtures": [
+          "patterns/lua/host_event"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "none",
+        "literal": [
+          0,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          0,
+          2
+        ],
+        "via": null
+      },
+      "lua/script_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/lua/script_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          1
+        ],
+        "via": "script_entry"
+      }
+    },
+    "patterns": [
+      "host_command",
+      "host_event",
+      "host_callback",
+      "config_table",
+      "embedded_script",
+      "script_entry"
+    ],
+    "totals": {
+      "error": 0,
+      "full": 0,
+      "none": 3,
+      "partial": 3,
+      "unknown": 102
+    }
+  },
   "schema": 3,
   "totals": {
-    "covered": 346,
+    "covered": 354,
     "error": 0,
-    "full": 346,
-    "grid": 510,
+    "full": 354,
+    "grid": 540,
     "n/a": 28,
     "none": 0,
     "partial": 0,
-    "unknown": 136
+    "unknown": 158
   },
   "vocabulary": {
     "chains": 4,
     "chains_digest": "66e622c64fe2",
     "digest": "f31e7dc48404",
-    "languages": 17,
+    "languages": 18,
     "mechanisms": 30,
     "na_digest": "6e1c8eedbe15",
     "not_applicable": 28

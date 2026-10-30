@@ -1,0 +1,44 @@
+{
+  "framework": "lua-host-callback",
+  "language": "lua",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "host_callback",
+  "cells": [
+    "lua/host_callback"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "love.update"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "love.update",
+      "to": "step",
+      "category": "CALLS",
+      "note": "the callback's body still binds"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "love.update",
+      "cell": "ENTRYPOINT"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "love.draw",
+      "cell": "ENTRYPOINT"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "love.load",
+      "cell": "ENTRYPOINT"
+    }
+  ],
+  "forbid": [],
+  "note": "0.5.5 use pattern: LOVE calls love.load / love.update / love.draw by name. INTENDED: each carries an ENTRYPOINT cell (an entry, never a dead_symbol). The functions are read; the entry is not, in 0.5.5."
+}
