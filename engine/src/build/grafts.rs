@@ -199,11 +199,22 @@ pub(super) fn apply_post_cache(
     }
     // A5.3 per-repo extraction marker; the resolver's `[grpc-server]` line
     // reports the pairing.
+    // FD.80: `register=` counts the registration calls by what their
+    // implementation argument names; `deferred_bound=` the HANDLED_BY edges a
+    // Go registration bound to a type in another file of its package.
     if rpc_added.servers > 0 {
+        let r = rpc_added.register;
         eprintln!(
-            "[grpc-server-impl] {} server markers from {} known services repo={repo_label}",
+            "[grpc-server-impl] {} server markers from {} known services register={} (typed={} handlers={} foreign={} unread={} elsewhere={} deferred_bound={}) repo={repo_label}",
             rpc_added.servers,
-            rpc.services.len()
+            rpc.services.len(),
+            r.register,
+            r.typed,
+            r.handlers,
+            r.foreign,
+            r.unread,
+            r.elsewhere,
+            rpc_added.deferred_bound
         );
     }
     // LA.17 fired_on marker, once per repo where the Connect / Twirp pass read

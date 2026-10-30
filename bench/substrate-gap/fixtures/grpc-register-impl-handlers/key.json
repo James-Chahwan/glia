@@ -1,0 +1,84 @@
+{
+  "framework": "grpc-register-impl-handlers",
+  "language": "proto+go",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.80 (edge audit FD.3c, HANDLED_BY|fact clusters H1 + H2), microservices-demo's shapes. Node `server.addService(pkg.S.service, { rpc: Class.Handler.bind(this) })` inside loadAllProtos; Python `add_XServicer_to_server(service, server)` inside start() with `service = DummyEmailService()`; Go `RegisterXServer(srv, svc)` inside run() with `svc := &productCatalog{}` in another file of the package; Go `healthpb.RegisterHealthServer(srv, health.NewServer())` beside an app `server.Check`. Baseline HEAD c4152966 (debug CLI): the 6 forbid rows fire; the ChargeServiceHandler / CheckHandler / SendOrderConfirmation expect rows fail.",
+  "expect_edges": [
+    {
+      "from": "grpc_server:PaymentService @src/paymentservice",
+      "to": "src::paymentservice::server::HipsterShopServer::ChargeServiceHandler",
+      "category": "HANDLED_BY",
+      "note": "the addService map's `charge:` handler"
+    },
+    {
+      "from": "grpc_server:Health @src/paymentservice",
+      "to": "src::paymentservice::server::HipsterShopServer::CheckHandler",
+      "category": "HANDLED_BY",
+      "note": "the addService map's `check:` handler"
+    },
+    {
+      "from": "grpc_server:EmailService @src/emailservice",
+      "to": "src::emailservice::email_server::DummyEmailService::SendOrderConfirmation",
+      "category": "HANDLED_BY",
+      "note": "the registered instance's type"
+    },
+    {
+      "from": "grpc_server:Health @src/emailservice",
+      "to": "src::emailservice::email_server::BaseEmailService::Check",
+      "category": "HANDLED_BY",
+      "note": "control: inherited by the registered DummyEmailService"
+    },
+    {
+      "from": "grpc_server:ProductCatalogService @src/productcatalogservice",
+      "to": "src::productcatalogservice::product_catalog::productCatalog::GetProduct",
+      "category": "HANDLED_BY",
+      "note": "control: kept"
+    },
+    {
+      "from": "grpc_server:ShippingService @src/shippingservice",
+      "to": "src::shippingservice::main::server::GetQuote",
+      "category": "HANDLED_BY",
+      "note": "control: kept"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "grpc_server:PaymentService @src/paymentservice",
+      "to": "src::paymentservice::server::HipsterShopServer::loadAllProtos",
+      "category": "HANDLED_BY",
+      "note": "H1: the registering function"
+    },
+    {
+      "from": "grpc_server:Health @src/paymentservice",
+      "to": "src::paymentservice::server::HipsterShopServer::loadAllProtos",
+      "category": "HANDLED_BY",
+      "note": "H1"
+    },
+    {
+      "from": "grpc_server:EmailService @src/emailservice",
+      "to": "src::emailservice::email_server::start",
+      "category": "HANDLED_BY",
+      "note": "H1: the server bootstrap"
+    },
+    {
+      "from": "grpc_server:ProductCatalogService @src/productcatalogservice",
+      "to": "src::productcatalogservice::server::run",
+      "category": "HANDLED_BY",
+      "note": "H1: the server bootstrap"
+    },
+    {
+      "from": "grpc_server:Health @src/productcatalogservice",
+      "to": "src::productcatalogservice::server::run",
+      "category": "HANDLED_BY",
+      "note": "H1 + H2: a library servicer registered in run()"
+    },
+    {
+      "from": "grpc_server:Health @src/shippingservice",
+      "to": "src::shippingservice::main::server::Check",
+      "category": "HANDLED_BY",
+      "note": "H2: Health is grpc's health.NewServer(); server.Check is never registered for it"
+    }
+  ]
+}

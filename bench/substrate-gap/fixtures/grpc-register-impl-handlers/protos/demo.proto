@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package hipstershop;
+
+option go_package = "github.com/example/demo/genproto/hipstershop";
+
+service PaymentService {
+  rpc Charge(ChargeRequest) returns (ChargeResponse) {}
+}
+
+service EmailService {
+  rpc SendOrderConfirmation(SendOrderConfirmationRequest) returns (Empty) {}
+}
+
+service ProductCatalogService {
+  rpc ListProducts(Empty) returns (ListProductsResponse) {}
+  rpc GetProduct(GetProductRequest) returns (Product) {}
+}
+
+service ShippingService {
+  rpc GetQuote(GetQuoteRequest) returns (GetQuoteResponse) {}
+}
+
+message Empty {}
+message ChargeRequest {}
+message ChargeResponse {}
+message SendOrderConfirmationRequest {}
+message ListProductsResponse {}
+message GetProductRequest {}
+message Product {}
+message GetQuoteRequest {}
+message GetQuoteResponse {}

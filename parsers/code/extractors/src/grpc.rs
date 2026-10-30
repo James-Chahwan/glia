@@ -219,7 +219,7 @@ pub fn extract_grpc_from_proto(source: &str, from: NodeId) -> Vec<GrpcService> {
 
 /// `Clone` (DC.4): the engine's needle memo hands a cached batch back by
 /// clone, since the graft consumes it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GrpcNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
@@ -227,6 +227,49 @@ pub struct GrpcNodes {
     /// The engine attaches them after the data-driven pass too, so both
     /// client passes end up located and owned.
     pub anchors: Vec<Anchor>,
+    /// FD.80: marker lines that locate a marker but take no owner edge (a
+    /// server registration call). A marker with no anchor is POSITIONed at its
+    /// first site and CONTAINED by the file's MODULE; a site never makes the
+    /// function holding it an owner. Empty for the client passes.
+    pub sites: Vec<Anchor>,
+    /// FD.80: a Go registration whose implementation type the file does not
+    /// declare, as (marker, type name, folded rpc names): the engine binds it
+    /// against the other Go files of the package directory (rule
+    /// `register_impl`).
+    pub deferred: Vec<(NodeId, String, Vec<String>)>,
+    /// FD.80: how the server pass read each registration's implementation.
+    pub register: RegisterCounts,
+}
+
+/// FD.80: the server pass's registrations by what their implementation
+/// argument names, summed into the `[grpc-server-impl]` line's `register=`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RegisterCounts {
+    /// Registration hits (`Register<S>Server(`, `add_<S>Servicer_to_server(`,
+    /// `addService(`, tonic `<S>Server::new(`, ScalaPB `bindService(`).
+    pub register: usize,
+    /// ... naming a type (`&T{}`, `T()`, `new T()`, a local bound to them).
+    pub typed: usize,
+    /// ... naming handlers one by one (a Node `{ rpc: handler }` map).
+    pub handlers: usize,
+    /// ... naming another package's servicer (`health.NewServer()`).
+    pub foreign: usize,
+    /// ... naming something the text does not resolve (a field, a parameter).
+    pub unread: usize,
+    /// Typed registrations whose type this file does not declare, outside Go
+    /// (Go defers them to the package pass): left unbound.
+    pub elsewhere: usize,
+}
+
+impl RegisterCounts {
+    pub fn add(&mut self, other: RegisterCounts) {
+        self.register += other.register;
+        self.typed += other.typed;
+        self.handlers += other.handlers;
+        self.foreign += other.foreign;
+        self.unread += other.unread;
+        self.elsewhere += other.elsewhere;
+    }
 }
 
 /// Everything one `.proto` contributes to the graph.
@@ -1081,6 +1124,7 @@ pub fn extract_grpc_client_nodes(
         nodes: Vec::new(),
         nav: CodeNav::default(),
         anchors: Vec::new(),
+        ..Default::default()
     };
     if skips_generated("suffix", path, source) {
         return out;
@@ -1283,6 +1327,7 @@ pub fn extract_known_grpc_client_nodes(
         nodes: Vec::new(),
         nav: CodeNav::default(),
         anchors: Vec::new(),
+        ..Default::default()
     };
     if known.is_empty() || !file_has_grpc_context(source) || skips_generated("known", path, source)
     {
@@ -1510,6 +1555,10 @@ struct ServerHit {
     /// impl block sits outside the struct's span, so the span lookup cannot
     /// find it.
     impl_for: Option<String>,
+    /// FD.80: a Register hit's implementation argument, read by
+    /// [`extract_grpc_server_nodes`] once the file's parse is at hand; `None`
+    /// on a Base hit.
+    impl_arg: Option<ImplArg>,
 }
 
 /// Start of the line holding byte `at`.
@@ -1661,6 +1710,7 @@ fn rust_trait_impl_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) 
             at: at + (line.len() - code.len()),
             shape: ServerShape::Base,
             impl_for: Some(ty.to_string()),
+            impl_arg: None,
         });
     }
     out
@@ -1696,6 +1746,7 @@ fn node_add_service_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>)
                 at: pos,
                 shape: ServerShape::Register,
                 impl_for: None,
+                impl_arg: None,
             });
         }
     }
@@ -1722,6 +1773,7 @@ fn server_hits(
                 at,
                 shape: needle.shape,
                 impl_for: None,
+                impl_arg: None,
             });
         }
     }
@@ -1739,11 +1791,491 @@ fn server_hits(
 
 /// An rpc or method name folded for comparison across bindings: `SayHello`
 /// (Go, C#, Python), `sayHello` (Java, Node) and `say_hello` (Rust, Ruby) agree.
-fn fold_rpc_name(name: &str) -> String {
+/// FD.80: the engine's deferred Go bind folds with it too.
+pub fn fold_rpc_name(name: &str) -> String {
     name.chars()
         .filter(|c| *c != '_')
         .map(|c| c.to_ascii_lowercase())
         .collect()
+}
+
+// ---- FD.80: what a registration names -------------------------------------
+
+/// FD.80: what a server registration call names as the implementation it
+/// binds, read from the call's argument text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImplArg {
+    /// A type, by name: `&T{..}` / `T{..}` / `T()` / `new T(..)` /
+    /// `T::new(..)` / `T::default()`, or a local every assignment of which
+    /// builds one (several assignments, several types; first seen first).
+    Type(Vec<String>),
+    /// A Node handler map `{ rpc: <fn>, .. }`: (rpc key, function name) per
+    /// entry naming a function (`Name`, `X.Name`, `this.Name`,
+    /// `X.Name.bind(..)`, shorthand `{ name }`). An inline function value
+    /// names none.
+    Handlers(Vec<(String, String)>),
+    /// A call into another package (`health.NewServer()`,
+    /// `health_pb2_grpc.HealthServicer()`), or a local bound only to one.
+    Foreign,
+    /// Anything else: a field, a parameter, a returned value.
+    Unread,
+}
+
+/// One expression's reading, before a bare identifier is followed to its
+/// assignments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImplExpr {
+    Type(String),
+    Handlers(Vec<(String, String)>),
+    Foreign,
+    /// `nil` / `None` / `null` / `undefined`: an assignment that builds
+    /// nothing, skipped.
+    Nil,
+    /// A bare identifier.
+    Ident(String),
+    Unread,
+}
+
+/// Which argument of a Register hit names the implementation: Go
+/// `Register<S>Server(<srv>, <impl>)` and Node `addService(<def>, <impl>)`
+/// the second, every other shape the first.
+fn impl_arg_index(source: &str, at: usize) -> usize {
+    let head = &source[at..];
+    if head.starts_with("Register") || head.starts_with("addService(") {
+        1
+    } else {
+        0
+    }
+}
+
+/// The names a file imports, as its code refers to them: Go import aliases
+/// and package names (the path's last segment), Python `import a.b` (`a`) /
+/// `import a as b` / `from m import a, b as c`, JS / TS `const x =
+/// require(..)` / `import x, { a, b as c } from` / `import * as x from`, and
+/// the last segment of a Java-style `import a.b.C` or Rust `use a::b::C`.
+fn imported_names(source: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut add = |name: &str| {
+        let name = name.trim();
+        if !name.is_empty() && name.bytes().all(is_ident_byte) && name != "_" {
+            out.insert(name.to_string());
+        }
+    };
+    let mut in_go_block = false;
+    for raw in source.lines() {
+        let line = strip_line_comment(raw).trim();
+        if in_go_block {
+            if line.starts_with(')') {
+                in_go_block = false;
+            } else if let Some(q) = line.find('"') {
+                go_import_names(line, q, &mut add);
+            }
+            continue;
+        }
+        if line.strip_prefix("import").map(str::trim) == Some("(") {
+            in_go_block = true;
+            continue;
+        }
+        if let Some(rest) = after_keyword(line, "import") {
+            if let Some(q) = rest.find('"').filter(|_| !rest.contains(" from ")) {
+                // Go single `import alias "path"`, or a quoted TS side-effect import.
+                go_import_names(rest, q, &mut add);
+            } else if let Some((clause, _)) = rest.split_once(" from ") {
+                // TS / JS `import x, { a, b as c } from '..'`, `import * as x from`.
+                for piece in clause.split([',', '{', '}']) {
+                    let piece = piece.trim().trim_start_matches("type ").trim();
+                    let name = piece.rsplit(" as ").next().unwrap_or(piece);
+                    add(name);
+                }
+            } else {
+                // Python `import a.b, c as d`; Java / Kotlin / Scala `import a.b.C`.
+                for piece in rest.trim_end_matches(';').split(',') {
+                    let piece = piece.trim();
+                    if let Some((_, alias)) = piece.split_once(" as ") {
+                        add(alias);
+                        continue;
+                    }
+                    let path = piece.trim_start_matches("static ");
+                    add(path.split('.').next().unwrap_or(path));
+                    add(path.rsplit('.').next().unwrap_or(path));
+                }
+            }
+        } else if let Some(rest) = after_keyword(line, "from")
+            && let Some((_, names)) = rest.split_once(" import ")
+        {
+            // Python `from m import a, b as c` / `from m import (a, b)`.
+            for piece in names.split(',') {
+                let piece = piece.trim().trim_matches(['(', ')']).trim();
+                add(piece.rsplit(" as ").next().unwrap_or(piece));
+            }
+        } else if let Some(rest) = after_keyword(line, "use") {
+            // Rust `use a::b::C;` / `use a::b::C as D;`.
+            let path = bare_path(rest);
+            add(path.rsplit("::").next().unwrap_or(path));
+            if let Some((_, alias)) = rest.split_once(" as ") {
+                add(alias.trim_end_matches(';'));
+            }
+        } else if let Some(i) = line.find("require(") {
+            // JS `const x = require('..')` / `const { a, b } = require('..')`.
+            let Some(lhs) = line[..i].trim_end().strip_suffix('=') else {
+                continue;
+            };
+            let lhs = lhs.trim();
+            let lhs = ["const ", "let ", "var "]
+                .iter()
+                .find_map(|kw| lhs.strip_prefix(kw))
+                .unwrap_or(lhs);
+            for piece in lhs.split([',', '{', '}']) {
+                let piece = piece.trim();
+                add(piece.rsplit(':').next().unwrap_or(piece));
+            }
+        }
+    }
+    out
+}
+
+/// One Go import spec whose path quote opens at `q`: its alias, else the
+/// path's last segment (and the one before a `vN` segment).
+fn go_import_names(spec: &str, q: usize, add: &mut impl FnMut(&str)) {
+    let alias = spec[..q].trim();
+    if !alias.is_empty() {
+        if alias != "." {
+            add(alias);
+        }
+        return;
+    }
+    let Some(path) = first_quoted(&spec[q..]) else {
+        return;
+    };
+    let mut segs = path.rsplit('/');
+    let last = segs.next().unwrap_or(path);
+    add(last);
+    let versioned =
+        last.len() > 1 && last.starts_with('v') && last[1..].bytes().all(|b| b.is_ascii_digit());
+    if versioned && let Some(prev) = segs.next() {
+        add(prev);
+    }
+}
+
+/// Read one expression (an argument, or an assignment's right-hand side).
+fn classify_impl_expr(expr: &str, imports: &BTreeSet<String>, go: bool) -> ImplExpr {
+    let e = expr.trim().trim_end_matches([';', ',']).trim();
+    if matches!(e, "nil" | "None" | "null" | "undefined") {
+        return ImplExpr::Nil;
+    }
+    if e.starts_with('{') {
+        return node_handler_map(e);
+    }
+    let bytes = e.as_bytes();
+    let mut i = 0;
+    // Go `new(T)` / `new(pkg.T)`.
+    if go && let Some(inner) = e.strip_prefix("new(") {
+        let path = &inner[..path_end(inner.as_bytes(), 0)];
+        let first = path.split('.').next().unwrap_or("");
+        let ty = path.rsplit('.').next().unwrap_or("");
+        return if path.contains('.') && imports.contains(first) {
+            ImplExpr::Foreign
+        } else if ty.is_empty() {
+            ImplExpr::Unread
+        } else {
+            ImplExpr::Type(ty.to_string())
+        };
+    }
+    if bytes.first() == Some(&b'&') {
+        i = skip_ws(bytes, 1);
+    }
+    let is_new = e[i..].starts_with("new ");
+    if is_new {
+        i = skip_ws(bytes, i + 4);
+    }
+    let start = i;
+    while i < bytes.len() && (is_ident_byte(bytes[i]) || bytes[i] == b'.' || bytes[i] == b':') {
+        i += 1;
+    }
+    let path = &e[start..i];
+    let rest = bytes.get(skip_ws(bytes, i)).copied();
+    let segs: Vec<&str> = path
+        .split("::")
+        .flat_map(|s| s.split('.'))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (Some(&first), Some(&last)) = (segs.first(), segs.last()) else {
+        return ImplExpr::Unread;
+    };
+    if !segs.iter().all(|s| s.bytes().all(is_ident_byte)) || matches!(first, "this" | "self") {
+        return ImplExpr::Unread;
+    }
+    if segs.len() >= 2 {
+        if path.contains("::") && matches!(last, "new" | "default") && rest == Some(b'(') {
+            return ImplExpr::Type(segs[segs.len() - 2].to_string());
+        }
+        if imports.contains(first) {
+            return ImplExpr::Foreign;
+        }
+        if is_new || rest == Some(b'{') {
+            return ImplExpr::Type(last.to_string());
+        }
+        return ImplExpr::Unread;
+    }
+    match rest {
+        _ if imports.contains(first) => ImplExpr::Foreign,
+        Some(b'{') => ImplExpr::Type(first.to_string()),
+        _ if is_new => ImplExpr::Type(first.to_string()),
+        Some(b'(') if !go && first.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            ImplExpr::Type(first.to_string())
+        }
+        None => ImplExpr::Ident(first.to_string()),
+        _ => ImplExpr::Unread,
+    }
+}
+
+/// A Node handler map `{ charge: X.Charge.bind(this), check, ... }`: one
+/// (key, function name) per entry naming a function; an inline function
+/// (`(c, cb) => ..`, `function ..`, a method shorthand) names none.
+fn node_handler_map(e: &str) -> ImplExpr {
+    let bytes = e.as_bytes();
+    let Some(close) = matching_bracket(bytes, 0) else {
+        return ImplExpr::Unread;
+    };
+    let mut out = Vec::new();
+    for entry in split_args(&e[1..close]) {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.starts_with("...") {
+            continue;
+        }
+        let colon = entry
+            .char_indices()
+            .find(|(k, c)| *c == ':' && !entry[*k..].starts_with("::"))
+            .map(|(k, _)| k);
+        let (key, value) = match colon {
+            Some(k) => (&entry[..k], &entry[k + 1..]),
+            None => (entry, entry),
+        };
+        let key = key.trim().trim_matches(['"', '\'', '`']);
+        let value = value.trim();
+        let value = value.split(".bind(").next().unwrap_or(value).trim();
+        if key.is_empty() || !key.bytes().all(is_ident_byte) {
+            continue;
+        }
+        let name = value.rsplit('.').next().unwrap_or(value);
+        let is_path = !value.is_empty()
+            && value
+                .split('.')
+                .all(|s| !s.is_empty() && s.bytes().all(is_ident_byte));
+        if is_path && !matches!(name, "this" | "self") {
+            out.push((key.to_string(), name.to_string()));
+        }
+    }
+    ImplExpr::Handlers(out)
+}
+
+/// Byte offset of the bracket closing the `(` / `{` / `[` at `open`,
+/// skipping quoted literals.
+fn matching_bracket(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(_) if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'"' | b'\'' | b'`' => quote = Some(b),
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every right-hand side `var` is assigned in `source[from..to]`, in source
+/// order: `var :=`, `var =`, `var x = `, `let / const / val var =`, `var: T =`.
+/// An object-literal right-hand side spans its braces.
+fn assignments<'s>(source: &'s str, from: usize, to: usize, var: &str) -> Vec<&'s str> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut at = from;
+    while let Some(rel) = source.get(at..to).and_then(|s| s.find(var)) {
+        let pos = at + rel;
+        at = pos + var.len();
+        if (pos > 0 && is_ident_byte(bytes[pos - 1]))
+            || bytes.get(at).is_some_and(|b| is_ident_byte(*b))
+        {
+            continue;
+        }
+        // The name must open its statement, after an optional keyword.
+        let head = source[line_start(source, pos)..pos].trim();
+        if !matches!(
+            head,
+            "" | "var" | "let" | "const" | "val" | "final" | "auto"
+        ) {
+            continue;
+        }
+        let mut op = skip_ws(bytes, at);
+        if bytes.get(op) == Some(&b':') && bytes.get(op + 1) != Some(&b'=') {
+            // A TS / Kotlin annotation: `var: T = ..`.
+            let line_end = source[op..].find('\n').map_or(source.len(), |k| op + k);
+            match source[op..line_end].find('=') {
+                Some(k) => op += k,
+                None => continue,
+            }
+        } else if bytes.get(op).is_some_and(|b| is_ident_byte(*b)) && head == "var" {
+            // Go `var x T = ..`.
+            let line_end = source[op..].find('\n').map_or(source.len(), |k| op + k);
+            match source[op..line_end].find('=') {
+                Some(k) => op += k,
+                None => continue,
+            }
+        }
+        let rest = &source[op..];
+        let value = if rest.starts_with(":=") {
+            op + 2
+        } else if rest.starts_with('=') && !rest.starts_with("==") {
+            op + 1
+        } else {
+            continue;
+        };
+        let value = skip_ws(bytes, value);
+        let end = if bytes.get(value) == Some(&b'{') {
+            matching_bracket(bytes, value).map_or(source.len(), |c| c + 1)
+        } else {
+            source[value..]
+                .find('\n')
+                .map_or(source.len(), |k| value + k)
+        };
+        out.push(&source[value..end]);
+    }
+    out
+}
+
+/// How far past a registration's `(` its closing `)` may sit: a Node handler
+/// map names every rpc of the service.
+const REGISTER_MAX_ARGS: usize = 8192;
+
+/// FD.80: read the implementation a Register hit at `at` names. `scope` is the
+/// byte offset its enclosing function starts at (0 at module scope): a local's
+/// assignments are read from there to the call.
+fn read_impl_arg(
+    source: &str,
+    at: usize,
+    scope: usize,
+    imports: &BTreeSet<String>,
+    go: bool,
+) -> ImplArg {
+    let Some(open) = source[at..].find('(').map(|k| at + k) else {
+        return ImplArg::Unread;
+    };
+    // A handler map lists every rpc: a wider bound than a dial's arguments.
+    let bound = (open + REGISTER_MAX_ARGS).min(source.len());
+    let Some(args) = matching_paren(&source.as_bytes()[..bound], open)
+        .and_then(|close| source.get(open + 1..close))
+    else {
+        return ImplArg::Unread;
+    };
+    let args = split_args(args);
+    let Some(arg) = args.get(impl_arg_index(source, at)) else {
+        return ImplArg::Unread;
+    };
+    match classify_impl_expr(arg, imports, go) {
+        ImplExpr::Type(t) => ImplArg::Type(vec![t]),
+        ImplExpr::Handlers(h) => ImplArg::Handlers(h),
+        ImplExpr::Foreign => ImplArg::Foreign,
+        ImplExpr::Nil | ImplExpr::Unread => ImplArg::Unread,
+        ImplExpr::Ident(var) => {
+            let mut types: Vec<String> = Vec::new();
+            let (mut foreign, mut handlers, mut other) = (0usize, Vec::new(), 0usize);
+            for rhs in assignments(source, scope, at, &var) {
+                match classify_impl_expr(rhs, imports, go) {
+                    ImplExpr::Type(t) if !types.contains(&t) => types.push(t),
+                    ImplExpr::Type(_) | ImplExpr::Nil => {}
+                    ImplExpr::Foreign => foreign += 1,
+                    ImplExpr::Handlers(h) => handlers.push(h),
+                    ImplExpr::Ident(_) | ImplExpr::Unread => other += 1,
+                }
+            }
+            let built = types.len() + foreign + handlers.len() + other;
+            if built == 0 {
+                // Never assigned here: a parameter or a field, unless the
+                // file imports the name itself.
+                return if imports.contains(&var) {
+                    ImplArg::Foreign
+                } else {
+                    ImplArg::Unread
+                };
+            }
+            if !types.is_empty() && built == types.len() {
+                ImplArg::Type(types)
+            } else if foreign == built {
+                ImplArg::Foreign
+            } else if handlers.len() == built && handlers.len() == 1 {
+                ImplArg::Handlers(handlers.pop().unwrap_or_default())
+            } else {
+                ImplArg::Unread
+            }
+        }
+    }
+}
+
+/// The names in a CLASS / STRUCT's header after its own name (Python
+/// `class D(Base):`, TS / Java `class D extends B implements C {`), plus a Go
+/// struct's embedded fields (a body line that is one type path).
+fn type_base_names(source: &str, name: &str, span: (u32, u32)) -> Vec<String> {
+    let lines: Vec<&str> = source
+        .lines()
+        .skip(span.0 as usize)
+        .take((span.1 - span.0) as usize + 1)
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    let Some(head) = lines.iter().position(|l| {
+        l.match_indices(name).any(|(k, _)| {
+            let b = l.as_bytes();
+            (k == 0 || !is_ident_byte(b[k - 1]))
+                && b.get(k + name.len()).is_none_or(|c| !is_ident_byte(*c))
+        })
+    }) else {
+        return out;
+    };
+    let mut push = |tok: &str| {
+        if !tok.is_empty() && tok != name && !out.iter().any(|o| o == tok) {
+            out.push(tok.to_string());
+        }
+    };
+    let mut header = String::new();
+    for (k, l) in lines.iter().enumerate().skip(head).take(4) {
+        let text = if k == head {
+            l.split_once(name).map_or(*l, |(_, r)| r)
+        } else {
+            l
+        };
+        let end = text.find('{').unwrap_or(text.len());
+        header.push_str(&text[..end]);
+        header.push(' ');
+        if end < text.len() || text.trim_end().ends_with(':') {
+            break;
+        }
+    }
+    for tok in header.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        push(tok);
+    }
+    if header.split_whitespace().next() == Some("struct") {
+        for l in lines.iter().skip(head + 1) {
+            let t = strip_line_comment(l).trim().trim_start_matches('*');
+            if !t.is_empty() && t.bytes().all(|b| is_ident_byte(b) || b == b'.') {
+                push(t.rsplit('.').next().unwrap_or(t));
+            }
+        }
+    }
+    out
 }
 
 /// The server pass (A5.3): one GRPC_SERVER per (proto service, file) for every
@@ -1755,22 +2287,33 @@ fn fold_rpc_name(name: &str) -> String {
 ///   `ServerShape::Base` needle (via [`anchor::build_span_index`]), or the
 ///   type a Rust `impl <Service> for <Type>` names;
 /// - the methods that implement the service's rpcs: methods of that type whose
-///   name folds to an rpc name (`fold_rpc_name`). With no implementing type
-///   (a registration-only file such as Node's `addService`), any METHOD /
-///   FUNCTION in the file whose name folds to an rpc counts.
+///   name folds to an rpc name (`fold_rpc_name`); with a Base hit but no
+///   implementing type found, any METHOD / FUNCTION in the file whose name
+///   folds to an rpc counts.
+///
+/// FD.80: a registration binds what its implementation argument names
+/// (`ImplArg`): a type's rpc methods (and those of the in-file types its
+/// header names as bases, up to 4 levels), a Node handler map's functions
+/// rpc by rpc, nothing for another package's servicer
+/// (`health.NewServer()`), and the any-method fallback only when the argument
+/// is unreadable and no Base hit found a type. A Go type the file does not
+/// declare is handed to the engine ([`GrpcNodes::deferred`]); another
+/// language's is left unbound (`elsewhere`).
 ///
 /// Anchors: every Base needle line (the marker's POSITION lands on the first),
-/// plus each rpc method's first line, so [`anchor::attach`] emits
-/// `grpc_server:<S> --HANDLED_BY--> <method>`. A registration line is anchored
-/// only when no rpc method was found; its enclosing function (`main`,
-/// `serve`) is then the owner, which is what binds the service in.
+/// plus each bound method's first line, so [`anchor::attach`] emits
+/// `grpc_server:<S> --HANDLED_BY--> <method>`. A registration line is never an
+/// anchor: it is a site ([`GrpcNodes::sites`]), so a marker that binds nothing
+/// is located there and CONTAINED by its module, never HANDLED_BY the function
+/// (`main`, `serve`) that registers it.
 ///
 /// Generated gRPC code (a [`generated_by_banner`] header, DE.7) never yields a
 /// server: it declares every base type the needles key on.
 ///
 /// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file a
 /// server needle that starts in a string literal or comment is no hit
-/// (`""` = no guard). fired_on, once per call that refused one:
+/// (`""` = no guard), and FD.80's Go reading (`.go`). fired_on, once per call
+/// that refused one:
 /// `[code-guard] grpc_server lang=<rust|python> dropped=<n> path=<path>`.
 pub fn extract_grpc_server_nodes(
     source: &str,
@@ -1781,11 +2324,7 @@ pub fn extract_grpc_server_nodes(
     nodes: &[Node],
     nav: &CodeNav,
 ) -> GrpcNodes {
-    let mut out = GrpcNodes {
-        nodes: Vec::new(),
-        nav: CodeNav::default(),
-        anchors: Vec::new(),
-    };
+    let mut out = GrpcNodes::default();
     if known.is_empty() || !may_hold_grpc_server(source) || generated_by_banner(source) {
         return out;
     }
@@ -1802,14 +2341,39 @@ pub fn extract_grpc_server_nodes(
             .extend(svc.rpcs.iter().map(|r| fold_rpc_name(r)));
     }
     let mut guard = LazyGuard::new(path, source);
-    let hits = server_hits(source, &by_name, &mut guard);
+    let mut hits = server_hits(source, &by_name, &mut guard);
     guard.report("grpc_server");
     if hits.is_empty() {
         return out;
     }
 
-    let types = anchor::build_span_index(nodes, nav, &[node_kind::CLASS, node_kind::STRUCT]);
-    let kind_of = |id: &NodeId| nav.kind_by_id.get(id).copied();
+    let types = anchor::build_span_index(nodes, nav, TYPE_KINDS);
+    let fns = anchor::build_owner_index(nodes, nav);
+    let is_fn = |id: &NodeId| nav.kind_by_id.get(id).is_some_and(|k| FN_KINDS.contains(k));
+    let span_of = |id: NodeId| {
+        nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(anchor::position_span)
+    };
+
+    // FD.80: read each registration's implementation argument.
+    let go = path.ends_with(".go");
+    if hits.iter().any(|h| h.shape == ServerShape::Register) {
+        let imports = imported_names(source);
+        let line_offsets: Vec<usize> = std::iter::once(0)
+            .chain(source.match_indices('\n').map(|(k, _)| k + 1))
+            .collect();
+        for h in hits.iter_mut().filter(|h| h.shape == ServerShape::Register) {
+            let scope = anchor::owner_of_line(&fns, line_of(source, h.at))
+                .and_then(span_of)
+                .and_then(|(start, _)| line_offsets.get(start as usize).copied())
+                .filter(|&s| s <= h.at)
+                .unwrap_or(0);
+            h.impl_arg = Some(read_impl_arg(source, h.at, scope, &imports, go));
+        }
+    }
+
     let evidence = client_evidence_cell(source);
     let mut grouped: BTreeMap<&str, Vec<&ServerHit>> = BTreeMap::new();
     for h in &hits {
@@ -1818,32 +2382,77 @@ pub fn extract_grpc_server_nodes(
 
     for (name, hits) in grouped {
         let rpcs = by_name.get(name).cloned().unwrap_or_default();
+        let qname = format!("grpc_server:{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_SERVER, &qname);
         // The implementing types (membership only, so order is irrelevant).
         let mut impl_types: Vec<NodeId> = Vec::new();
+        let mut base_hit = false;
         for h in hits.iter().filter(|h| h.shape == ServerShape::Base) {
+            base_hit = true;
             match &h.impl_for {
-                Some(ty) => impl_types.extend(nodes.iter().map(|n| n.id).filter(|id| {
-                    matches!(kind_of(id), Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT)
-                        && nav.name_by_id.get(id).is_some_and(|n| n == ty)
-                })),
+                Some(ty) => impl_types.extend(nodes_named(nodes, nav, ty, TYPE_KINDS)),
                 None => impl_types.extend(anchor::owner_of_line(&types, line_of(source, h.at))),
             }
         }
+        let base_fallback = base_hit && impl_types.is_empty();
+        let mut unread_fallback = false;
+        let mut handlers: Vec<NodeId> = Vec::new();
+        for h in hits.iter().filter(|h| h.shape == ServerShape::Register) {
+            out.register.register += 1;
+            out.sites.push(Anchor {
+                node: id,
+                line: line_of(source, h.at),
+            });
+            match h.impl_arg.as_ref().unwrap_or(&ImplArg::Unread) {
+                ImplArg::Type(names) => {
+                    out.register.typed += 1;
+                    for ty in names {
+                        let found = nodes_named(nodes, nav, ty, TYPE_KINDS);
+                        if !found.is_empty() {
+                            impl_types.extend(with_bases(source, &found, nodes, nav));
+                        } else if go {
+                            out.deferred
+                                .push((id, ty.clone(), rpcs.iter().cloned().collect()));
+                        } else {
+                            out.register.elsewhere += 1;
+                        }
+                    }
+                }
+                ImplArg::Handlers(list) => {
+                    out.register.handlers += 1;
+                    for (rpc, func) in list {
+                        if rpcs.contains(&fold_rpc_name(rpc)) {
+                            handlers.extend(nodes_named(nodes, nav, func, FN_KINDS));
+                        }
+                    }
+                }
+                ImplArg::Foreign => out.register.foreign += 1,
+                ImplArg::Unread => {
+                    out.register.unread += 1;
+                    unread_fallback = true;
+                }
+            }
+        }
+        let any_method = base_fallback || (unread_fallback && impl_types.is_empty());
         let rpc_methods: Vec<u32> = nodes
             .iter()
             .filter(|n| {
-                let is_fn = matches!(kind_of(&n.id), Some(k) if k == node_kind::METHOD || k == node_kind::FUNCTION);
-                let parent_ok = impl_types.is_empty()
-                    || nav.parent_of.get(&n.id).is_some_and(|p| impl_types.contains(p));
-                is_fn
-                    && parent_ok
-                    && nav.name_by_id.get(&n.id).is_some_and(|m| rpcs.contains(&fold_rpc_name(m)))
+                let parent_ok = any_method
+                    || nav
+                        .parent_of
+                        .get(&n.id)
+                        .is_some_and(|p| impl_types.contains(p));
+                let rpc_named = parent_ok
+                    && is_fn(&n.id)
+                    && nav
+                        .name_by_id
+                        .get(&n.id)
+                        .is_some_and(|m| rpcs.contains(&fold_rpc_name(m)));
+                rpc_named || handlers.contains(&n.id)
             })
             .filter_map(|n| anchor::position_span(n).map(|(start, _)| start))
             .collect();
 
-        let qname = format!("grpc_server:{name}");
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_SERVER, &qname);
         out.nodes.push(Node {
             id,
             repo,
@@ -1854,7 +2463,7 @@ pub fn extract_grpc_server_nodes(
             .record(id, name, &qname, node_kind::GRPC_SERVER, Some(module_id));
         let mut lines: Vec<u32> = hits
             .iter()
-            .filter(|h| h.shape == ServerShape::Base || rpc_methods.is_empty())
+            .filter(|h| h.shape == ServerShape::Base)
             .map(|h| line_of(source, h.at))
             .collect();
         lines.extend(rpc_methods);
@@ -1862,6 +2471,63 @@ pub fn extract_grpc_server_nodes(
             .extend(lines.into_iter().map(|line| Anchor { node: id, line }));
     }
     out
+}
+
+/// The node kinds a registration's implementation type may be.
+const TYPE_KINDS: &[glia_core::NodeKindId] = &[node_kind::CLASS, node_kind::STRUCT];
+/// The node kinds a bound handler may be.
+const FN_KINDS: &[glia_core::NodeKindId] = &[node_kind::METHOD, node_kind::FUNCTION];
+
+/// The ids of `nodes` of one of `kinds` named `name`, in parse order.
+fn nodes_named(
+    nodes: &[Node],
+    nav: &CodeNav,
+    name: &str,
+    kinds: &[glia_core::NodeKindId],
+) -> Vec<NodeId> {
+    nodes
+        .iter()
+        .map(|n| n.id)
+        .filter(|id| {
+            nav.kind_by_id.get(id).is_some_and(|k| kinds.contains(k))
+                && nav.name_by_id.get(id).is_some_and(|n| n == name)
+        })
+        .collect()
+}
+
+/// `found` and the in-file CLASS / STRUCTs their headers name as bases,
+/// transitively, up to 4 levels (Python `DummyEmailService(BaseEmailService)`
+/// serves through BaseEmailService's methods).
+fn with_bases(source: &str, found: &[NodeId], nodes: &[Node], nav: &CodeNav) -> Vec<NodeId> {
+    let mut all: Vec<NodeId> = found.to_vec();
+    let mut level: Vec<NodeId> = found.to_vec();
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for id in &level {
+            let (Some(name), Some(span)) = (
+                nav.name_by_id.get(id),
+                nodes
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .and_then(anchor::position_span),
+            ) else {
+                continue;
+            };
+            for base in type_base_names(source, name, span) {
+                for b in nodes_named(nodes, nav, &base, TYPE_KINDS) {
+                    if !all.contains(&b) {
+                        all.push(b);
+                        next.push(b);
+                    }
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    all
 }
 
 // ---- LA.17 (A10.13): Connect / Twirp, proto-service RPC over HTTP ----------
@@ -2899,6 +3565,10 @@ let db = makeDbClient(uri);
         out.anchors.iter().map(|a| a.line).collect()
     }
 
+    fn site_lines(out: &GrpcNodes) -> Vec<u32> {
+        out.sites.iter().map(|a| a.line).collect()
+    }
+
     #[test]
     fn server_pass_matches_each_binding_shape_exactly_once() {
         // (source, 0-indexed line of the needle that must anchor the marker)
@@ -2978,11 +3648,16 @@ let db = makeDbClient(uri);
             assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_SERVER, "{lang}");
             assert_eq!(out.nav.name_by_id[&id], "Greeter", "{lang}");
             assert_eq!(out.nav.parent_of[&id], module_id(), "{lang}");
-            assert_eq!(
-                server_lines(&out),
-                vec![*line],
-                "{lang}: anchored at the needle"
-            );
+            // FD.80: a registration-only shape names no in-file handler here
+            // (no parse): its line is a site, never an owner anchor.
+            let register_only = lang.starts_with("node") || *lang == "scala";
+            let (anchored, sited) = if register_only {
+                (vec![], vec![*line])
+            } else {
+                (vec![*line], vec![])
+            };
+            assert_eq!(server_lines(&out), anchored, "{lang}: anchors");
+            assert_eq!(site_lines(&out), sited, "{lang}: sites");
         }
     }
 
@@ -2992,13 +3667,15 @@ let db = makeDbClient(uri);
         let source = "import grpc\nimport greeter_pb2_grpc\n\n\nclass Greeter(greeter_pb2_grpc.GreeterServicer):\n    def SayHello(self, request, context):\n        return None\n\n\ndef serve():\n    server = grpc.server(None)\n    greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)\n";
         let out = servers(source);
         assert_eq!(out.nodes.len(), 1);
-        // No parse, so no rpc method was found: the registration line anchors too.
-        assert_eq!(server_lines(&out), vec![4, 11]);
+        // FD.80: the registration line is a site, never an owner anchor.
+        assert_eq!(server_lines(&out), vec![4]);
+        assert_eq!(site_lines(&out), vec![11]);
         // Go: embed + `Register…Server(`.
         let go = "import \"google.golang.org/grpc\"\n\ntype server struct {\n\tpb.UnimplementedGreeterServer\n}\n\nfunc main() {\n\ts := grpc.NewServer()\n\tpb.RegisterGreeterServer(s, &server{})\n}\n";
         let out = servers(go);
         assert_eq!(out.nodes.len(), 1);
-        assert_eq!(server_lines(&out), vec![3, 8]);
+        assert_eq!(server_lines(&out), vec![3]);
+        assert_eq!(site_lines(&out), vec![8]);
     }
 
     #[test]
@@ -3228,6 +3905,285 @@ let db = makeDbClient(uri);
             confidence: Confidence::Strong,
             cells: vec![position_cell("svc.cs", span.0, span.1)],
         }
+    }
+
+    // ---- FD.80: what a registration names --------------------------------
+
+    /// `read_impl_arg` for the first `needle` hit in `source`, scoped from the
+    /// file start.
+    fn impl_arg(source: &str, needle: &str, go: bool) -> ImplArg {
+        let at = source.find(needle).expect("needle");
+        read_impl_arg(source, at, 0, &imported_names(source), go)
+    }
+
+    const GO_HEAD: &str = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\t\"google.golang.org/grpc/health\"\n\thealthpb \"google.golang.org/grpc/health/grpc_health_v1\"\n\tpb \"example.com/hello/pb\"\n)\n\n";
+
+    #[test]
+    fn impl_arg_reads_go_struct_literals_locals_and_foreign_servers() {
+        let lit = format!(
+            "{GO_HEAD}func main() {{\n\ts := grpc.NewServer()\n\tpb.RegisterGreeterServer(s, &server{{}})\n}}\n"
+        );
+        assert_eq!(
+            impl_arg(&lit, "RegisterGreeterServer", true),
+            ImplArg::Type(vec!["server".to_string()])
+        );
+        let local = format!(
+            "{GO_HEAD}func run() {{\n\tsrv := grpc.NewServer()\n\tsvc := &productCatalog{{}}\n\tpb.RegisterGreeterServer(srv, svc)\n}}\n"
+        );
+        assert_eq!(
+            impl_arg(&local, "RegisterGreeterServer", true),
+            ImplArg::Type(vec!["productCatalog".to_string()])
+        );
+        let inline_foreign = format!(
+            "{GO_HEAD}func run() {{\n\thealthpb.RegisterHealthServer(srv, health.NewServer())\n}}\n"
+        );
+        assert_eq!(
+            impl_arg(&inline_foreign, "RegisterHealthServer", true),
+            ImplArg::Foreign
+        );
+        let local_foreign = format!(
+            "{GO_HEAD}func main() {{\n\thealthcheck := health.NewServer()\n\thealthpb.RegisterHealthServer(srv, healthcheck)\n}}\n"
+        );
+        assert_eq!(
+            impl_arg(&local_foreign, "RegisterHealthServer", true),
+            ImplArg::Foreign
+        );
+        // A parameter: nothing the text resolves.
+        let param = format!(
+            "{GO_HEAD}func serve(s *grpc.Server, impl pb.GreeterServer) {{\n\tpb.RegisterGreeterServer(s, impl)\n}}\n"
+        );
+        assert_eq!(
+            impl_arg(&param, "RegisterGreeterServer", true),
+            ImplArg::Unread
+        );
+        // A Go call is never a type (`newServer()` returns whatever it returns).
+        let call =
+            format!("{GO_HEAD}func main() {{\n\tpb.RegisterGreeterServer(s, newServer())\n}}\n");
+        assert_eq!(
+            impl_arg(&call, "RegisterGreeterServer", true),
+            ImplArg::Unread
+        );
+    }
+
+    #[test]
+    fn impl_arg_reads_a_python_local_over_two_branches() {
+        let src = "import grpc\nimport demo_pb2_grpc\nfrom grpc_health.v1 import health_pb2_grpc\n\n\ndef start(mode):\n    service = None\n    if mode == 'a':\n        service = DummyService()\n    else:\n        service = RealService()\n    demo_pb2_grpc.add_GreeterServicer_to_server(service, server)\n";
+        assert_eq!(
+            impl_arg(src, "add_GreeterServicer_to_server", false),
+            ImplArg::Type(vec!["DummyService".to_string(), "RealService".to_string()])
+        );
+        // Another module's servicer, by its import.
+        let foreign = "import grpc\nfrom grpc_health.v1 import health_pb2_grpc\nfrom grpc_health.v1 import health\n\n\ndef start():\n    health_pb2_grpc.add_HealthServicer_to_server(health.HealthServicer(), server)\n";
+        assert_eq!(
+            impl_arg(foreign, "add_HealthServicer_to_server", false),
+            ImplArg::Foreign
+        );
+    }
+
+    #[test]
+    fn impl_arg_reads_node_handler_maps() {
+        let bound = "const grpc = require('@grpc/grpc-js');\nclass S {\n  load() {\n    this.server.addService(pkg.PaymentService.service, {\n      charge: S.ChargeServiceHandler.bind(this),\n      'refund': this.refundHandler\n    });\n  }\n}\n";
+        assert_eq!(
+            impl_arg(bound, "addService(", false),
+            ImplArg::Handlers(vec![
+                ("charge".to_string(), "ChargeServiceHandler".to_string()),
+                ("refund".to_string(), "refundHandler".to_string()),
+            ])
+        );
+        let shorthand = "const grpc = require('@grpc/grpc-js');\nserver.addService(GreeterService, { sayHello, sayHelloStream: impl.stream });\n";
+        assert_eq!(
+            impl_arg(shorthand, "addService(", false),
+            ImplArg::Handlers(vec![
+                ("sayHello".to_string(), "sayHello".to_string()),
+                ("sayHelloStream".to_string(), "stream".to_string()),
+            ])
+        );
+        // An inline arrow / function / method shorthand names no function.
+        let inline = "const grpc = require('@grpc/grpc-js');\nserver.addService(GreeterService, {\n  sayHello: (call, cb) => cb(null, {}),\n  sayHelloStream(call) { call.end(); }\n});\n";
+        assert_eq!(
+            impl_arg(inline, "addService(", false),
+            ImplArg::Handlers(vec![])
+        );
+    }
+
+    #[test]
+    fn registration_binds_the_named_type_and_its_in_file_bases() {
+        // `start()` registers a DummyEmailService; Check is inherited from
+        // BaseEmailService, Helper is no rpc, start() is never a handler.
+        let src = "import grpc\nimport demo_pb2_grpc\n\nclass BaseService(demo_pb2_grpc.OtherServicer):\n    def SayHello(self, r, c):\n        return None\n\nclass DummyService(BaseService):\n    def Helper(self):\n        return None\n\ndef start():\n    service = DummyService()\n    demo_pb2_grpc.add_GreeterServicer_to_server(service, server)\n";
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let base = parse_node(
+            &mut nav,
+            node_kind::CLASS,
+            "BaseService",
+            "s::BaseService",
+            (3, 5),
+            m,
+        );
+        let say = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "SayHello",
+            "s::BaseService::SayHello",
+            (4, 5),
+            base.id,
+        );
+        let dummy = parse_node(
+            &mut nav,
+            node_kind::CLASS,
+            "DummyService",
+            "s::DummyService",
+            (7, 9),
+            m,
+        );
+        let helper = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "Helper",
+            "s::DummyService::Helper",
+            (8, 9),
+            dummy.id,
+        );
+        let start = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "start",
+            "s::start",
+            (11, 13),
+            m,
+        );
+        let nodes = vec![base, say, dummy, helper, start];
+        let out = extract_grpc_server_nodes(src, "s.py", m, repo(), &[greeter()], &nodes, &nav);
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(server_lines(&out), vec![4], "SayHello through the base");
+        assert_eq!(site_lines(&out), vec![13]);
+        assert_eq!(out.register.typed, 1);
+    }
+
+    #[test]
+    fn registration_of_a_foreign_servicer_binds_no_same_named_method() {
+        let src = format!(
+            "{GO_HEAD}type app struct{{}}\n\nfunc (a *app) SayHello() {{}}\n\nfunc main() {{\n\tpb.RegisterGreeterServer(srv, health.NewServer())\n}}\n"
+        );
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let app = parse_node(&mut nav, node_kind::STRUCT, "app", "main::app", (9, 9), m);
+        let say = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "SayHello",
+            "main::app::SayHello",
+            (11, 11),
+            app.id,
+        );
+        let main = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "main",
+            "main::main",
+            (13, 15),
+            m,
+        );
+        let out = extract_grpc_server_nodes(
+            &src,
+            "main.go",
+            m,
+            repo(),
+            &[greeter()],
+            &[app, say, main],
+            &nav,
+        );
+        assert_eq!(out.nodes.len(), 1);
+        assert!(server_lines(&out).is_empty(), "{:?}", server_lines(&out));
+        assert_eq!(site_lines(&out), vec![14]);
+        assert_eq!(out.register.foreign, 1);
+        assert!(out.deferred.is_empty());
+    }
+
+    #[test]
+    fn a_go_type_the_file_does_not_declare_is_deferred_and_others_are_elsewhere() {
+        let src = format!(
+            "{GO_HEAD}func run() {{\n\tsvc := &productCatalog{{}}\n\tpb.RegisterGreeterServer(srv, svc)\n}}\n"
+        );
+        let out = extract_grpc_server_nodes(
+            &src,
+            "server.go",
+            module_id(),
+            repo(),
+            &[greeter()],
+            &[],
+            &CodeNav::default(),
+        );
+        assert_eq!(out.deferred.len(), 1);
+        let (marker, ty, rpcs) = &out.deferred[0];
+        assert_eq!(*marker, out.nodes[0].id);
+        assert_eq!(ty, "productCatalog");
+        assert_eq!(
+            rpcs,
+            &vec!["sayhello".to_string(), "sayhellostream".to_string()]
+        );
+        assert!(server_lines(&out).is_empty());
+        // Python: an imported class stays unbound, counted `elsewhere`.
+        let py = "import grpc\nimport demo_pb2_grpc\n\n\ndef start():\n    demo_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)\n";
+        let out = extract_grpc_server_nodes(
+            py,
+            "s.py",
+            module_id(),
+            repo(),
+            &[greeter()],
+            &[],
+            &CodeNav::default(),
+        );
+        assert!(out.deferred.is_empty());
+        assert_eq!(out.register.elsewhere, 1);
+        assert!(server_lines(&out).is_empty());
+    }
+
+    #[test]
+    fn a_node_handler_map_binds_rpc_by_rpc_and_an_inline_handler_binds_nothing() {
+        let src = "const grpc = require('@grpc/grpc-js');\nclass S {\n  static Charge(call, cb) { cb(null, {}); }\n  static sayHello(call, cb) { cb(null, {}); }\n  load() {\n    this.server.addService(pkg.Greeter.service, {\n      sayHello: (call, cb) => cb(null, {}),\n    });\n    this.server.addService(pkg.Greeter.service, { sayHelloStream: S.Charge.bind(this) });\n  }\n}\n";
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let class = parse_node(&mut nav, node_kind::CLASS, "S", "s::S", (1, 10), m);
+        let charge = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "Charge",
+            "s::S::Charge",
+            (2, 2),
+            class.id,
+        );
+        let say = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "sayHello",
+            "s::S::sayHello",
+            (3, 3),
+            class.id,
+        );
+        let load = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "load",
+            "s::S::load",
+            (4, 9),
+            class.id,
+        );
+        let out = extract_grpc_server_nodes(
+            src,
+            "s.js",
+            m,
+            repo(),
+            &[greeter()],
+            &[class, charge, say, load],
+            &nav,
+        );
+        // Charge serves `sayHelloStream`; the inline `sayHello` binds no
+        // same-named static method, and load() is never an owner.
+        assert_eq!(server_lines(&out), vec![2]);
+        assert_eq!(site_lines(&out), vec![5, 8]);
+        assert_eq!(out.register.handlers, 2);
     }
 
     #[test]
@@ -4346,7 +5302,10 @@ let db = makeDbClient(uri);
             &CodeNav::default(),
         );
         assert_eq!(client_qnames(&out), vec!["grpc_server:Greeter".to_string()]);
-        assert_eq!(server_lines(&out), vec![3]);
+        // FD.80: `svc` is a parameter (unread) and no rpc method is parsed
+        // here, so the registration line is a site, not an anchor.
+        assert!(server_lines(&out).is_empty());
+        assert_eq!(site_lines(&out), vec![3]);
 
         // The known pass's `seen` set is the GUARDED suffix names: a suffix
         // name read only from a literal does not hide the real tonic stub.

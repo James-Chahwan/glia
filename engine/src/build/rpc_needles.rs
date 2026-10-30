@@ -6,10 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::evidence::{self, Evidence};
-use glia_code_domain::{FileParse, attach_imports_cell};
+use glia_code_domain::{FileParse, attach_imports_cell, cell_type, edge_category, node_kind};
 use glia_code_extractors::anchor;
 use glia_code_extractors::grpc::{self, ProtoServiceRef};
-use glia_core::{NodeId, RepoId};
+use glia_core::{Confidence, Edge, NodeId, RepoId};
 
 use super::memo::{self, BuildMemo, NeedleHalves, NeedleKey, NeedleMemo};
 use crate::extract::{detect_language, merge_nav};
@@ -156,6 +156,7 @@ pub(super) fn apply_rpc_needles(
         });
         needle_one(&file, modules, &index, parses, lookup)
     });
+    let mut deferred: Vec<DeferredImpls> = Vec::new();
     for ((path, _), step) in files.iter().zip(outs) {
         let out = match step {
             NeedleStep::Skip => continue,
@@ -194,7 +195,18 @@ pub(super) fn apply_rpc_needles(
             None => {}
         }
         match server {
-            Some(Ok(nodes)) => added.servers += graft_rpc_markers(fp, nodes, path, module_id, lang),
+            Some(Ok(mut nodes)) => {
+                added.register.add(nodes.register);
+                let impls = std::mem::take(&mut nodes.deferred);
+                if !impls.is_empty() && lang == "go" {
+                    deferred.push(DeferredImpls {
+                        path: path.clone(),
+                        slot,
+                        impls,
+                    });
+                }
+                added.servers += graft_rpc_markers(fp, nodes, path, module_id, lang);
+            }
             Some(Err(e)) => parse_errors.push(e),
             None => {}
         }
@@ -207,6 +219,7 @@ pub(super) fn apply_rpc_needles(
             None => {}
         }
     }
+    added.deferred_bound = bind_deferred_go(parses_by_lang, files, repo, modules, &index, deferred);
     added
 }
 
@@ -417,6 +430,10 @@ pub(super) struct RpcNeedleCounts {
     pub(super) servers: usize,
     /// LA.17: the Connect / Twirp pass's tallies, summed over the repo.
     pub(super) proto_rpc: grpc::ProtoRpcCounts,
+    /// FD.80: the server pass's registrations by implementation reading.
+    pub(super) register: grpc::RegisterCounts,
+    /// FD.80: HANDLED_BY edges [`bind_deferred_go`] added.
+    pub(super) deferred_bound: usize,
     /// DC.4: eligible files ([`NeedleStep`]) replayed from the memo ...
     memo_hit: usize,
     /// ... and computed now.
@@ -456,6 +473,8 @@ fn graft_rpc_markers(
         nodes,
         nav,
         mut anchors,
+        mut sites,
+        ..
     } = out;
     // Anchor first, then add the IMPORTS cell, so a data-driven client's
     // cells come in the same order as a fallback client's (whose POSITION
@@ -467,6 +486,7 @@ fn graft_rpc_markers(
     // post-cache, are the tail.
     let first_edge = fp.edges.len();
     anchor::attach(fp, path, module_id, &mut anchors);
+    locate_at_sites(fp, path, module_id, &anchors, &mut sites);
     if let Some(added) = fp.edges.get_mut(first_edge..) {
         let ev = Evidence::emitter("extractor:rpc_needles").rule("anchor");
         evidence::stamp_missing_with(added, &ev);
@@ -482,6 +502,152 @@ fn graft_rpc_markers(
     let added = extra.nodes.len();
     fp.nodes.extend(extra.nodes);
     added
+}
+
+/// FD.80: a server marker no anchor located (its registrations bound no
+/// handler in this file) takes its POSITION from its first site and is
+/// CONTAINED by the file's MODULE: the function holding a registration is
+/// never its owner. A marker that has an anchor was located and owned by
+/// [`anchor::attach`] already.
+fn locate_at_sites(
+    fp: &mut FileParse,
+    path: &str,
+    module_id: NodeId,
+    anchors: &[anchor::Anchor],
+    sites: &mut [anchor::Anchor],
+) {
+    if sites.is_empty() {
+        return;
+    }
+    sites.sort_unstable_by_key(|a| (a.line, a.node.0));
+    let anchored: HashSet<NodeId> = anchors.iter().map(|a| a.node).collect();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for site in sites.iter() {
+        if anchored.contains(&site.node) || !seen.insert(site.node) {
+            continue;
+        }
+        if let Some(node) = fp.nodes.iter_mut().find(|n| n.id == site.node)
+            && !node.cells.iter().any(|c| c.kind == cell_type::POSITION)
+        {
+            node.cells.push(anchor::position_cell(path, site.line));
+        }
+        let contained = fp.edges.iter().any(|e| {
+            e.category == edge_category::CONTAINS && e.from == module_id && e.to == site.node
+        });
+        if !contained {
+            fp.edges.push(Edge {
+                from: module_id,
+                to: site.node,
+                category: edge_category::CONTAINS,
+                confidence: Confidence::Medium,
+                cells: Vec::new(),
+            });
+        }
+    }
+}
+
+/// FD.80: one Go file's registrations of a type it does not declare, as its
+/// parse slot and the extractor's (marker, type name, folded rpc names).
+struct DeferredImpls {
+    path: String,
+    slot: usize,
+    impls: Vec<(NodeId, String, Vec<String>)>,
+}
+
+/// FD.80: bind each deferred Go registration (`pb.RegisterXServer(s, svc)`
+/// with `svc := &T{}`, T declared in another file of the package) against the
+/// Go parses of the same package directory: the STRUCT named T and its
+/// METHODs (nav parent) whose names fold to the service's rpcs. Each pair is
+/// pushed as `marker -HANDLED_BY-> method` onto the registering file's parse,
+/// EVIDENCE `extractor:rpc_needles` rule `register_impl`, unless the type's
+/// own file already anchors it (its embedded-base hit). It reads other files,
+/// so it is never memoised: a held cache replays the deferred list with the
+/// halves and this pass re-derives the edges, like a clean build. Returns the
+/// edges added.
+fn bind_deferred_go(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    repo: RepoId,
+    modules: &ModuleQnames,
+    index: &HashMap<ParseKey, usize>,
+    deferred: Vec<DeferredImpls>,
+) -> usize {
+    let dir_of = |p: &str| p.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+    let mut planned: Vec<(usize, Edge)> = Vec::new();
+    if let Some(go) = parses_by_lang.get("go") {
+        for DeferredImpls { path, slot, impls } in &deferred {
+            let dir = dir_of(path);
+            let package: Vec<usize> = files
+                .iter()
+                .filter(|(p, _)| p.ends_with(".go") && p != path && dir_of(p) == dir)
+                .filter_map(|(p, _)| index.get(&("go", modules.module_id(p, repo))).copied())
+                .collect();
+            let Some(own) = go.get(*slot) else { continue };
+            for (marker, ty, rpcs) in impls {
+                for &other in &package {
+                    let Some(fp) = go.get(other) else { continue };
+                    let kind = |id: &NodeId| fp.nav.kind_by_id.get(id).copied();
+                    let structs: Vec<NodeId> = fp
+                        .nodes
+                        .iter()
+                        .map(|n| n.id)
+                        .filter(|id| {
+                            kind(id) == Some(node_kind::STRUCT)
+                                && fp.nav.name_by_id.get(id).is_some_and(|n| n == ty)
+                        })
+                        .collect();
+                    if structs.is_empty() {
+                        continue;
+                    }
+                    for n in &fp.nodes {
+                        let rpc_method = kind(&n.id) == Some(node_kind::METHOD)
+                            && fp
+                                .nav
+                                .parent_of
+                                .get(&n.id)
+                                .is_some_and(|p| structs.contains(p))
+                            && fp
+                                .nav
+                                .name_by_id
+                                .get(&n.id)
+                                .is_some_and(|m| rpcs.contains(&grpc::fold_rpc_name(m)));
+                        let held = |f: &FileParse| {
+                            f.edges.iter().any(|e| {
+                                e.category == edge_category::HANDLED_BY
+                                    && e.from == *marker
+                                    && e.to == n.id
+                            })
+                        };
+                        let planned_already = planned
+                            .iter()
+                            .any(|(s, e)| s == slot && e.from == *marker && e.to == n.id);
+                        if rpc_method && !held(fp) && !held(own) && !planned_already {
+                            let mut edge = Edge {
+                                from: *marker,
+                                to: n.id,
+                                category: edge_category::HANDLED_BY,
+                                confidence: Confidence::Medium,
+                                cells: Vec::new(),
+                            };
+                            let ev =
+                                Evidence::emitter("extractor:rpc_needles").rule("register_impl");
+                            evidence::stamp_missing_with(std::slice::from_mut(&mut edge), &ev);
+                            planned.push((*slot, edge));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let bound = planned.len();
+    if let Some(go) = parses_by_lang.get_mut("go") {
+        for (slot, edge) in planned {
+            if let Some(fp) = go.get_mut(slot) {
+                fp.edges.push(edge);
+            }
+        }
+    }
+    bound
 }
 
 /// LA.17: graft one Connect / Twirp batch onto its file's parse. The nodes
