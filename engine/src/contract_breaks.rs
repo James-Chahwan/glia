@@ -87,6 +87,13 @@
 //! removed node, else `pairing_lost` (tier `derived`: the target survives and
 //! the resolver no longer pairs them, a path / verb / host change). The client
 //! is located in the after graph, the target named from the before graph.
+//! One oriented reading joins them (FH.24): an EVENT_FLOWS edge whose
+//! EVIDENCE emitter is `resolver:evm` runs Solidity event -> `evm_event:`
+//! subscription, so its client is the `to` end and its provider the `from`
+//! end; a stale subscription (the contract renamed or removed its event) is
+//! an orphan located at the subscription's site. Any other EVENT_FLOWS (the
+//! in-process eventbus) is no client / provider contract and is not read, and
+//! [`ContractBreaks::blind`] judges the client categories alone.
 //!
 //! ORDER. Schema rows by (status: breaking < unknown < compatible, kind, key),
 //! `models` rows breaking first, then by (pairing, direction, client, server)
@@ -185,8 +192,9 @@ use std::path::{Path, PathBuf};
 
 use glia_activation::algo::delta::GraphDelta;
 use glia_activation::profile::Tier;
+use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{edge_category, same_as};
-use glia_core::{EdgeCategoryId, NodeId};
+use glia_core::{Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence, BlindCaveat};
@@ -353,6 +361,10 @@ const CLIENT_CATEGORIES: [EdgeCategoryId; 5] = [
     edge_category::GRAPHQL_CALLS,
     edge_category::WS_CONNECTS,
 ];
+
+/// The EVIDENCE emitter whose EVENT_FLOWS edges are read as client ->
+/// provider contracts, subscriber end first (module docs ORPHANED CLIENTS).
+const EVM_EMITTER: &str = "resolver:evm";
 
 const PRIMITIVE: &str = "contract_breaks";
 
@@ -706,19 +718,42 @@ fn breaks_of(
         .collect();
     let served: HashSet<(u64, u32)> = after
         .all_edges()
-        .filter(|e| CLIENT_CATEGORIES.contains(&e.category))
-        .map(|e| (e.from.0, e.category.0))
+        .filter_map(|e| client_end(e).map(|client| (client, e.category.0)))
+        .collect();
+    // The before graph's evm event flows, by (from, to): a removed edge key
+    // carries no cells, so its emitter is read from the edge it was.
+    let evm_events: HashSet<(u64, u64)> = before
+        .all_edges()
+        .filter(|e| is_evm_event_flow(e))
+        .map(|e| (e.from.0, e.to.0))
         .collect();
     let lost: Vec<RemovedCall> = delta
         .removed_edges
         .iter()
-        .filter(|k| CLIENT_CATEGORIES.contains(&k.category))
-        .map(|k| RemovedCall {
-            client: k.from.0,
-            target: k.to.0,
-            category: k.category.0,
+        .filter_map(|k| {
+            if CLIENT_CATEGORIES.contains(&k.category) {
+                Some(RemovedCall {
+                    client: k.from.0,
+                    target: k.to.0,
+                    category: k.category.0,
+                })
+            } else if k.category == edge_category::EVENT_FLOWS
+                && evm_events.contains(&(k.from.0, k.to.0))
+            {
+                Some(RemovedCall {
+                    client: k.to.0,
+                    target: k.from.0,
+                    category: k.category.0,
+                })
+            } else {
+                None
+            }
         })
         .collect();
+    let evm_lost = lost
+        .iter()
+        .filter(|c| c.category == edge_category::EVENT_FLOWS.0)
+        .count();
     let mut orphans: Vec<OrphanedClient> =
         orphaned(&lost, &moved, &present, &served, &removed_nodes)
             .into_iter()
@@ -751,6 +786,15 @@ fn breaks_of(
         (x.category, &x.client_qname, &x.target_qname)
             == (y.category, &y.client_qname, &y.target_qname)
     });
+    if evm_lost > 0 {
+        eprintln!(
+            "[contract-breaks] evm event subscriptions lost={evm_lost} orphaned={}",
+            orphans
+                .iter()
+                .filter(|o| o.category == edge_category::name(edge_category::EVENT_FLOWS))
+                .count(),
+        );
+    }
 
     let count = |f: &dyn Fn(&SchemaChange) -> bool| rows.iter().filter(|r| f(r)).count();
     let (n_breaking, n_compatible, n_unknown) = (
@@ -1569,6 +1613,26 @@ struct Orphan {
     reason: &'static str,
 }
 
+/// Whether `e` is an EVENT_FLOWS edge `resolver:evm` paired (Solidity event
+/// -> `evm_event:` subscription).
+fn is_evm_event_flow(e: &Edge) -> bool {
+    e.category == edge_category::EVENT_FLOWS
+        && Evidence::of(e).is_some_and(|ev| ev.emitter == EVM_EMITTER)
+}
+
+/// The client end of a client -> provider edge: `from` for the
+/// [`CLIENT_CATEGORIES`], `to` (the subscription) for an evm event flow,
+/// `None` for any other edge.
+fn client_end(e: &Edge) -> Option<u64> {
+    if CLIENT_CATEGORIES.contains(&e.category) {
+        Some(e.from.0)
+    } else if is_evm_event_flow(e) {
+        Some(e.to.0)
+    } else {
+        None
+    }
+}
+
 /// The removed calls whose client survives (`present`, directly or through
 /// `moved`) with no edge of the call's category left (`served`, after ids).
 fn orphaned(
@@ -1850,6 +1914,68 @@ mod tests {
                     reason: "pairing_lost"
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn an_evm_event_flow_is_read_from_its_subscriber_end() {
+        let flow = |emitter: &str| {
+            let mut e = Edge::new(
+                NodeId(1),
+                NodeId(2),
+                edge_category::EVENT_FLOWS,
+                glia_core::Confidence::Strong,
+            );
+            e.cells
+                .push(Evidence::emitter(emitter).rule("abi").to_cell());
+            e
+        };
+        let call = Edge::new(
+            NodeId(3),
+            NodeId(4),
+            edge_category::RPC_CALLS,
+            glia_core::Confidence::Strong,
+        );
+        // Event 1 -> subscription 2: the subscription is the client.
+        assert_eq!(client_end(&flow("resolver:evm")), Some(2));
+        assert_eq!(client_end(&call), Some(3));
+        // An eventbus flow is no client / provider contract.
+        assert_eq!(client_end(&flow("resolver:eventbus")), None);
+        let bare = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::EVENT_FLOWS,
+            glia_core::Confidence::Strong,
+        );
+        assert_eq!(client_end(&bare), None);
+
+        // The oriented removed edge: subscription 2 lost event 1, which the
+        // change removed; subscription 5 is still served by another event.
+        let ev = edge_category::EVENT_FLOWS.0;
+        let lost = [
+            RemovedCall {
+                client: 2,
+                target: 1,
+                category: ev,
+            },
+            RemovedCall {
+                client: 5,
+                target: 6,
+                category: ev,
+            },
+        ];
+        let present: HashSet<u64> = [2, 5, 6].into();
+        let served: HashSet<(u64, u32)> = [(5, ev)].into();
+        let removed: HashSet<u64> = [1].into();
+        let got = orphaned(&lost, &HashMap::new(), &present, &served, &removed);
+        assert_eq!(
+            got,
+            vec![Orphan {
+                client: 2,
+                target: 1,
+                category: ev,
+                reason: "target_removed"
+            }]
         );
     }
 
