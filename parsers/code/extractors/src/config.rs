@@ -56,6 +56,13 @@
 //!       `.GetConnectionString("Db")` (= `ConnectionStrings:Db`); a
 //!       `GetSection("A")` chain prefixes the key it is read through. See
 //!       `scan_dotnet_config_reads`.
+//!     - Writes (FD.75): a subscript / property form above that is
+//!       ASSIGNED (`os.environ["X"] = v`, `process.env.X = v`,
+//!       `ENV["X"] = v`, `$_ENV['X'] = v`, `configuration["A:B"] = v`) or
+//!       deleted (`del`, `delete`, `unset(`) is no read and mints nothing
+//!       (no define either); a compound `+=` or a comparison still reads.
+//!       fired_on, once per file with one:
+//!       `[config] env-writes skipped=<w> deleted=<d> path=<p>`.
 //!
 //!   **Defines (separate file types via pipeline bypass):**
 //!     - Dockerfile `ENV KEY=value` / `ENV KEY value`
@@ -248,14 +255,17 @@ pub fn extract_config_reads(
             .map(move |(n, o)| (n, o, Flavor::Env, Some(at)))
     };
     let mut reads: Vec<(String, usize, Flavor, Option<usize>)> = Vec::new();
-    reads.extend(env(scan_python_env(source)));
-    reads.extend(env(scan_js_process_env(source)));
+    // FD.75: an env subscript / property that is assigned or deleted is no
+    // read; the scanners tally it here for the `[config] env-writes` marker.
+    let mut writes = EnvWrites::default();
+    reads.extend(env(scan_python_env(source, &mut writes)));
+    reads.extend(env(scan_js_process_env(source, &mut writes)));
     reads.extend(env(scan_rust_env(source)));
     reads.extend(env(scan_go_env(source)));
-    reads.extend(env(scan_ruby_env(source)));
+    reads.extend(env(scan_ruby_env(source, &mut writes)));
     reads.extend(env(scan_java_system_getenv(source)));
     reads.extend(env(scan_scala_env(source)));
-    reads.extend(env(scan_php_env(source)));
+    reads.extend(env(scan_php_env(source, &mut writes)));
     // DH.5: dart:io `Platform.environment['X']`, Elixir `System.get_env` /
     // `fetch_env!` / `fetch_env`, Laravel's `env('X')` (`.php` files only).
     reads.extend(idiom(IDIOM_DART, scan_dart_env(source)));
@@ -267,7 +277,7 @@ pub fn extract_config_reads(
     // `this.config["apiUrl"]` mints nothing.
     if is_csharp_path(path) {
         reads.extend(
-            scan_dotnet_config_reads(source)
+            scan_dotnet_config_reads(source, &mut writes)
                 .into_iter()
                 .map(|(n, o)| (n, o, Flavor::Setting, None)),
         );
@@ -275,8 +285,13 @@ pub fn extract_config_reads(
     // Each offset is the read needle's start (capture_first_string_arg / the
     // process.env scan), so the guard tests the read expression itself.
     let mut guard = LazyGuard::new(path, source);
+    let env_writes = writes.marker(&mut guard, path);
     reads.retain(|(_, offset, _, _)| guard.admits(*offset));
     guard.report("config");
+    // FD.75 fired_on: once per file with an admitted env write or delete.
+    if let Some(line) = env_writes {
+        eprintln!("{line}");
+    }
     let mut sites = Vec::new();
     let mut defs = Vec::with_capacity(reads.len());
     let mut idiom_reads = [0usize; ENV_READ_IDIOMS.len()];
@@ -940,28 +955,180 @@ pub(crate) fn is_valid_flag_key(s: &str) -> bool {
 // char boundary because it is a `str::find` match.
 // ----------------------------------------------------------------------------
 
-fn scan_python_env(source: &str) -> Vec<(String, usize)> {
+/// FD.75: how an env subscript / property expression is used. Only a
+/// [`EnvAccess::Read`] is a config read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvAccess {
+    /// Read: a value, an argument, a comparison, a compound assignment
+    /// (`+=` reads the old value).
+    Read,
+    /// The target of a plain `=` (`os.environ["X"] = v`, `process.env.X = v`,
+    /// `ENV["X"] = v`, `$_ENV['X'] = v`, `config["A:B"] = v`).
+    Write,
+    /// The operand of Python `del`, JS / TS `delete` or PHP `unset(`.
+    Delete,
+}
+
+/// One env subscript / property hit: the key, the needle's byte offset (the
+/// read site), the byte just past the expression (its `]` or the property
+/// name; overlapping needles of one expression share it) and its access.
+struct EnvHit {
+    name: String,
+    at: usize,
+    end: usize,
+    access: EnvAccess,
+}
+
+/// FD.75: the env writes and deletes the scanners skipped in one file, as
+/// `(needle offset, expression end)` pairs. Overlapping needles
+/// (`os.environ[` / `environ[`, `$_ENV[` / `ENV[`) record one expression
+/// twice; [`EnvWrites::marker`] counts distinct ends.
+#[derive(Default)]
+struct EnvWrites {
+    written: Vec<(usize, usize)>,
+    deleted: Vec<(usize, usize)>,
+}
+
+impl EnvWrites {
+    /// The `[config] env-writes skipped=<w> deleted=<d> path=<p>` line, or
+    /// `None` when the file assigns and deletes no env key. A hit the guard
+    /// refuses (a Rust / Python literal or comment) is not counted, and is
+    /// tallied for `[code-guard] config` exactly as the read it used to be.
+    fn marker(&self, guard: &mut LazyGuard<'_>, path: &str) -> Option<String> {
+        fn admitted(hits: &[(usize, usize)], guard: &mut LazyGuard<'_>) -> usize {
+            let mut ends = std::collections::BTreeSet::new();
+            for &(at, end) in hits {
+                if guard.admits(at) {
+                    ends.insert(end);
+                }
+            }
+            ends.len()
+        }
+        let written = admitted(&self.written, guard);
+        let deleted = admitted(&self.deleted, guard);
+        (written + deleted > 0)
+            .then(|| format!("[config] env-writes skipped={written} deleted={deleted} path={path}"))
+    }
+}
+
+/// The read hits of `hits` as `(name, offset)`; every write and delete goes
+/// to `writes` instead.
+fn split_env(hits: Vec<EnvHit>, writes: &mut EnvWrites) -> Vec<(String, usize)> {
     let mut out = Vec::new();
-    // os.environ['X'], os.environ["X"], os.environ.get('X', ...), os.getenv('X')
-    for needle in [
-        "os.environ[",
-        "os.environ.get(",
-        "os.getenv(",
-        "environ[",
-        "environ.get(",
-        "getenv(",
-    ] {
-        for hit in capture_first_string_arg(source, needle) {
-            out.push(hit);
+    for hit in hits {
+        match hit.access {
+            EnvAccess::Read => out.push((hit.name, hit.at)),
+            EnvAccess::Write => writes.written.push((hit.at, hit.end)),
+            EnvAccess::Delete => writes.deleted.push((hit.at, hit.end)),
         }
     }
     out
 }
 
-fn scan_js_process_env(source: &str) -> Vec<(String, usize)> {
+/// FD.75: every `needle` subscript (`os.environ[`, `ENV[`, `$_ENV[`, ..)
+/// whose first literal is the key, classified by [`env_access`]. A subscript
+/// whose literal is not followed by its `]` (`os.environ["A" + b]`) reads, as
+/// it did before.
+fn capture_env_subscript(source: &str, needle: &str) -> Vec<EnvHit> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(needle) {
+        let at = from + rel;
+        let open = at + needle.len();
+        if let Some((name, close)) = first_quoted_span(&source[open..]) {
+            let (access, end) = env_access(source, at, open + close, true);
+            out.push(EnvHit {
+                name,
+                at,
+                end,
+                access,
+            });
+        }
+        from = open;
+    }
+    out
+}
+
+/// How the env expression whose needle starts at `at` is used, and the byte
+/// just past it. `after` is the byte past the key (its closing quote, or a
+/// property name's last byte); `bracket` asks for the subscript's `]` there,
+/// blanks allowed. A delete is the expression preceded by the word `del` /
+/// `delete` or by `unset(`; a write is the expression followed by `=` that
+/// starts no `==`, `=~` or `=>` (a compound `+=` / `|=` / `??=` starts with
+/// its operator, so it reads).
+fn env_access(source: &str, at: usize, after: usize, bracket: bool) -> (EnvAccess, usize) {
+    let b = source.as_bytes();
+    let skip_blanks = |mut i: usize| {
+        while i < b.len() && matches!(b[i], b' ' | b'\t') {
+            i += 1;
+        }
+        i
+    };
+    let mut end = after;
+    if bracket {
+        let i = skip_blanks(after);
+        if b.get(i) != Some(&b']') {
+            return (EnvAccess::Read, after);
+        }
+        end = i + 1;
+    }
+    if deleted_before(source, at) {
+        return (EnvAccess::Delete, end);
+    }
+    let i = skip_blanks(end);
+    let write = b.get(i) == Some(&b'=') && !matches!(b.get(i + 1), Some(b'=' | b'~' | b'>'));
+    let access = if write {
+        EnvAccess::Write
+    } else {
+        EnvAccess::Read
+    };
+    (access, end)
+}
+
+/// True when the expression holding the needle at `at` (its receiver chain:
+/// `os.`, `$_`, identifiers and dots walked back) is the operand of Python
+/// `del`, JS / TS `delete` or PHP `unset(`, blanks allowed between.
+fn deleted_before(source: &str, at: usize) -> bool {
+    let b = source.as_bytes();
+    let chain = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'$');
+    let mut start = at;
+    while start > 0 && chain(b[start - 1]) {
+        start -= 1;
+    }
+    let mut end = start;
+    while end > 0 && matches!(b[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    let head = &source.as_bytes()[..end];
+    if head.ends_with(b"unset(") {
+        return true;
+    }
+    end < start
+        && ["del", "delete"].iter().any(|word| {
+            head.ends_with(word.as_bytes())
+                && head[..head.len() - word.len()]
+                    .last()
+                    .is_none_or(|&c| !chain(c))
+        })
+}
+
+fn scan_python_env(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    // os.environ['X'], os.environ["X"], os.environ.get('X', ...), os.getenv('X')
+    for needle in ["os.environ[", "environ["] {
+        out.extend(split_env(capture_env_subscript(source, needle), writes));
+    }
+    for needle in ["os.environ.get(", "os.getenv(", "environ.get(", "getenv("] {
+        out.extend(capture_first_string_arg(source, needle));
+    }
+    out
+}
+
+fn scan_js_process_env(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     // process.env.VAR — bare property access. Identifier-shaped name follows.
     let bytes = source.as_bytes();
+    let mut hits = Vec::new();
     for needle in ["process.env.", "import.meta.env."] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
@@ -973,17 +1140,22 @@ fn scan_js_process_env(source: &str) -> Vec<(String, usize)> {
                 j += 1;
             }
             if j > pos {
-                out.push((source[pos..j].to_string(), at));
+                let (access, end) = env_access(source, at, j, false);
+                hits.push(EnvHit {
+                    name: source[pos..j].to_string(),
+                    at,
+                    end,
+                    access,
+                });
             }
             search_from = pos.max(search_from + needle.len());
         }
     }
     // process.env['VAR'] / process.env["VAR"] — bracketed string-literal form.
     for needle in ["process.env[", "import.meta.env["] {
-        for hit in capture_first_string_arg(source, needle) {
-            out.push(hit);
-        }
+        hits.extend(capture_env_subscript(source, needle));
     }
+    out.extend(split_env(hits, writes));
     out
 }
 
@@ -1007,13 +1179,11 @@ fn scan_go_env(source: &str) -> Vec<(String, usize)> {
     out
 }
 
-fn scan_ruby_env(source: &str) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
+fn scan_ruby_env(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
     // ENV['X'] / ENV["X"] / ENV.fetch('X', ...)
-    for needle in ["ENV[", "ENV.fetch(", "ENV.fetch!("] {
-        for hit in capture_first_string_arg(source, needle) {
-            out.push(hit);
-        }
+    let mut out = split_env(capture_env_subscript(source, "ENV["), writes);
+    for needle in ["ENV.fetch(", "ENV.fetch!("] {
+        out.extend(capture_first_string_arg(source, needle));
     }
     out
 }
@@ -1079,7 +1249,7 @@ fn is_csharp_path(path: &str) -> bool {
 /// a section (`stripeSection.GetValue<..>("Key")`, a relative key), reads
 /// nothing. A non-literal or interpolated key reads nothing. The offset is
 /// the receiver's last segment for an indexer and the method name for a call.
-fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
+fn scan_dotnet_config_reads(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
     let named = [
         "IConfiguration",
         "Microsoft.Extensions.Configuration",
@@ -1094,11 +1264,16 @@ fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
     while let Some(rel) = source[from..].find("[") {
         let at = from + rel;
         from = at + 1;
-        let Some(key) = csharp_literal_arg(&source[at + 1..], b"]") else {
+        let Some((key, close)) = csharp_literal_arg(&source[at + 1..], b"]") else {
             continue;
         };
         if let Some((prefix, start)) = dotnet_receiver(source, at, true, 0) {
-            out.push((join_setting(prefix, &key), start));
+            // FD.75: `config["A:B"] = v` sets the key; it reads nothing.
+            match env_access(source, start, at + 1 + close + 1, false) {
+                (EnvAccess::Read, _) => out.push((join_setting(prefix, &key), start)),
+                (EnvAccess::Write, end) => writes.written.push((start, end)),
+                (EnvAccess::Delete, end) => writes.deleted.push((start, end)),
+            }
         }
     }
     for (method, generic) in [
@@ -1115,7 +1290,7 @@ fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
             let Some(args) = dotnet_call_args(&source[from..], generic) else {
                 continue;
             };
-            let Some(key) = csharp_literal_arg(&source[from + args..], b"),") else {
+            let Some((key, _)) = csharp_literal_arg(&source[from + args..], b"),") else {
                 continue;
             };
             let key = match method {
@@ -1178,7 +1353,8 @@ fn dotnet_call_args(after: &str, generic: bool) -> Option<usize> {
 /// A C# string literal (`"A:B"` or verbatim `@"A:B"`) at the start of `after`
 /// (blanks allowed before it), whose next non-blank byte is one of `closers`
 /// — so `config["Stripe:" + x]` and an interpolated `$"..."` read nothing.
-fn csharp_literal_arg(after: &str, closers: &[u8]) -> Option<String> {
+/// Returns the literal's text and the closer's byte index in `after`.
+fn csharp_literal_arg(after: &str, closers: &[u8]) -> Option<(String, usize)> {
     let b = after.as_bytes();
     let mut i = 0;
     while i < b.len() && b[i].is_ascii_whitespace() {
@@ -1198,7 +1374,7 @@ fn csharp_literal_arg(after: &str, closers: &[u8]) -> Option<String> {
     }
     b.get(j)
         .is_some_and(|c| closers.contains(c))
-        .then(|| after[start..end].to_string())
+        .then(|| (after[start..end].to_string(), j))
 }
 
 /// What a .NET config read at byte `pos` (its `[`, or the `.` before its
@@ -1292,13 +1468,11 @@ fn section_call_ending_at(source: &str, close: usize) -> Option<(String, usize)>
     None
 }
 
-fn scan_php_env(source: &str) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
+fn scan_php_env(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
     // getenv('X') and $_ENV['X']
-    for needle in ["getenv(", "$_ENV[", "$_SERVER["] {
-        for hit in capture_first_string_arg(source, needle) {
-            out.push(hit);
-        }
+    let mut out = capture_first_string_arg(source, "getenv(");
+    for needle in ["$_ENV[", "$_SERVER["] {
+        out.extend(split_env(capture_env_subscript(source, needle), writes));
     }
     out
 }
@@ -1763,6 +1937,11 @@ fn capture_first_string_arg(source: &str, needle: &str) -> Vec<(String, usize)> 
 }
 
 fn first_quoted(s: &str) -> Option<String> {
+    first_quoted_span(s).map(|(name, _)| name)
+}
+
+/// [`first_quoted`] plus the byte index just past its closing quote.
+fn first_quoted_span(s: &str) -> Option<(String, usize)> {
     let bytes = s.as_bytes();
     let mut i = 0;
     // Allow leading whitespace before the quote.
@@ -1787,7 +1966,7 @@ fn first_quoted(s: &str) -> Option<String> {
         }
     }
     if j < bytes.len() {
-        Some(s[start..j].to_string())
+        Some((s[start..j].to_string(), j + 1))
     } else {
         None
     }
@@ -3369,5 +3548,122 @@ public class Payments
             repo,
         );
         assert_eq!(config_keys(&out), ["config:env:Stripe__SecretKey"]);
+    }
+
+    /// FD.75: an env subscript or property that is assigned or deleted is no
+    /// read; a compound assignment, a comparison and an argument still read,
+    /// and the right side of an env-to-env copy reads.
+    #[test]
+    fn env_writes_and_deletes_are_no_reads() {
+        let repo = RepoId(1);
+        let keys = |src: &str, path: &str| {
+            let out = extract_config_reads(src, path, module_id(repo), repo);
+            let mut k = config_keys(&out);
+            k.sort();
+            k
+        };
+        let py = concat!(
+            "import os\n",
+            "os.environ[\"A\"] = \"1\"\n",
+            "os.environ['B'] = str(p)\n",
+            "del os.environ[\"C\"]\n",
+            "os.environ[\"PATH\"] += \":/x\"\n",
+            "if os.environ[\"CI\"] == \"true\":\n    pass\n",
+            "x = os.environ[\"D\"]\n",
+            "f(os.environ[\"E\"])\n",
+            "os.environ[\"F\"] = os.environ[\"G\"]\n",
+            "os.environ.pop(\"H\", None)\n",
+        );
+        assert_eq!(
+            keys(py, "tests/t.py"),
+            [
+                "config:env:CI",
+                "config:env:D",
+                "config:env:E",
+                "config:env:G",
+                "config:env:PATH",
+            ]
+        );
+        let js = concat!(
+            "process.env.NODE_ENV = \"test\";\n",
+            "process.env[\"X\"] = \"1\";\n",
+            "delete process.env.Y;\n",
+            "export const port = process.env.PORT;\n",
+            "if (process.env.A === \"1\") {}\n",
+        );
+        assert_eq!(keys(js, "web/env.js"), ["config:env:A", "config:env:PORT"]);
+        let rb = "ENV[\"RACK_ENV\"] = \"test\"\nHOST = ENV[\"HOST\"]\n";
+        assert_eq!(keys(rb, "rb/boot.rb"), ["config:env:HOST"]);
+        let php = "<?php\n$_ENV['K'] = 'v';\nunset($_ENV['K']);\n$v = $_ENV['R'];\n";
+        assert_eq!(keys(php, "app/env.php"), ["config:env:R"]);
+        let cs = concat!(
+            "using Microsoft.Extensions.Configuration;\n",
+            "class S { void M(IConfiguration Configuration) {\n",
+            "    Configuration[\"Feature:On\"] = \"true\";\n",
+            "    var on = Configuration[\"Feature:Read\"];\n",
+            "} }\n",
+        );
+        assert_eq!(keys(cs, "S.cs"), ["config:setting:Feature:Read"]);
+    }
+
+    /// FD.75: the access classifier, one expression at a time.
+    #[test]
+    fn env_access_classifies_the_expression() {
+        let at = |src: &str, needle: &str| {
+            let hits = capture_env_subscript(src, needle);
+            hits.into_iter().map(|h| h.access).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            at("os.environ[\"A\"] = 1", "os.environ["),
+            [EnvAccess::Write]
+        );
+        assert_eq!(
+            at("os.environ[\"A\"]  =  1", "environ["),
+            [EnvAccess::Write]
+        );
+        assert_eq!(
+            at("os.environ[\"A\"] == 1", "os.environ["),
+            [EnvAccess::Read]
+        );
+        assert_eq!(
+            at("os.environ[\"A\"] += 1", "os.environ["),
+            [EnvAccess::Read]
+        );
+        assert_eq!(at("ENV[\"A\"] =~ /x/", "ENV["), [EnvAccess::Read]);
+        assert_eq!(at("h = { ENV[\"A\"] => 1 }", "ENV["), [EnvAccess::Read]);
+        assert_eq!(at("del os.environ[\"A\"]", "environ["), [EnvAccess::Delete]);
+        assert_eq!(
+            at("model.del os.environ[\"A\"]", "environ["),
+            [EnvAccess::Read]
+        );
+        assert_eq!(at("undel os.environ[\"A\"]", "environ["), [EnvAccess::Read]);
+        assert_eq!(at("unset( $_ENV['A'] );", "ENV["), [EnvAccess::Delete]);
+        assert_eq!(
+            at("os.environ[\"A\" + b] = 1", "os.environ["),
+            [EnvAccess::Read]
+        );
+    }
+
+    /// FD.75 fired_on: one `[config] env-writes` line per file with a write
+    /// or delete, overlapping needles (`os.environ[` / `environ[`, `$_ENV[` /
+    /// `ENV[`) counted once.
+    #[test]
+    fn env_writes_marker_counts_each_expression_once() {
+        let mut w = EnvWrites::default();
+        let src = "os.environ[\"A\"] = 1\ndel os.environ[\"B\"]\n$_ENV['C'] = 2;\nx = os.environ[\"D\"]\n";
+        for needle in ["os.environ[", "environ[", "$_ENV[", "ENV["] {
+            let _ = split_env(capture_env_subscript(src, needle), &mut w);
+        }
+        let mut guard = LazyGuard::new("", src);
+        assert_eq!(
+            w.marker(&mut guard, "x.py").as_deref(),
+            Some("[config] env-writes skipped=2 deleted=1 path=x.py")
+        );
+        let mut none = EnvWrites::default();
+        let _ = split_env(
+            capture_env_subscript("x = os.environ[\"D\"]", "os.environ["),
+            &mut none,
+        );
+        assert_eq!(none.marker(&mut guard, "x.py"), None);
     }
 }

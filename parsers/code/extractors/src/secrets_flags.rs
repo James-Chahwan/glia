@@ -30,6 +30,13 @@
 //! concatenation, f-string or variable is skipped), and the flavor validator
 //! in config.rs rejects interpolated secret refs and short flag keys.
 //!
+//! FD.75: the generic Vault `.read(` and `.kv(` rows take a stricter gate,
+//! `VAULT_CLIENT`: a Vault client library NAMED where the guard admits a
+//! name (code, or an import string outside Rust / Python), never the bare
+//! word `vault` (a `Vault.sol` string, a `vault` fn, a comment). fired_on,
+//! once per file whose generic rows skipped a ref for want of one:
+//! `[secrets] vault-client gate refused=<n> path=<p>`.
+//!
 //! CJ.1c: in a Rust or Python file an occurrence whose needle starts inside
 //! a string literal or comment (a scanner's own test source, a doc line) is
 //! no reference (`LazyGuard`); every other language is unchanged. fired_on:
@@ -89,6 +96,26 @@ struct Row {
 }
 
 const VAULT: &[&str] = &["hvac", "vault"];
+/// FD.75: the gate of the generic `.read(` and `.kv(` Vault rows. The bare
+/// word `vault` names a contract, a closure or a comment as often as a
+/// client, so these rows fire only in a file that NAMES a Vault client
+/// library where the guard admits it (`admits_name`: code, or an import
+/// string outside Rust / Python; never a comment): hvac (py), node-vault
+/// (js), hashicorp/vault (go), Spring's VaultTemplate / VaultOperations
+/// (java), VaultSharp (c#), vaultrs (rust), and a quoted `'vault'` /
+/// `"vault"` (Ruby's `require 'vault'`). The Vault-specific needles keep
+/// [`VAULT`].
+const VAULT_CLIENT: &[&str] = &[
+    "hvac",
+    "node-vault",
+    "hashicorp/vault",
+    "vaulttemplate",
+    "vaultoperations",
+    "vaultsharp",
+    "vaultrs",
+    "'vault'",
+    "\"vault\"",
+];
 const AWS_SM: &[&str] = &["secretsmanager", "secrets-manager"];
 const GCP_SM: &[&str] = &["secretmanager"];
 const AZURE_KV: &[&str] = &["keyvault"];
@@ -118,7 +145,7 @@ const SECRET_ROWS: &[Row] = &[
     secret(
         ".read(",
         "vault",
-        VAULT,
+        VAULT_CLIENT,
         Pick::Positional(0),
         &[],
         vault_path,
@@ -185,7 +212,7 @@ const SECRET_ROWS: &[Row] = &[
     secret(
         ".kv(",
         "vault",
-        VAULT,
+        VAULT_CLIENT,
         Pick::MountThen(".read(", 0),
         &[],
         plain,
@@ -688,12 +715,23 @@ pub fn extract_secret_refs(
     repo: RepoId,
 ) -> ConfigNodes {
     let mut guard = LazyGuard::new(path, source);
-    let defs = scan(source, SECRET_ROWS, &mut guard)
+    let mut refused = 0;
+    let defs = scan(source, SECRET_ROWS, &mut guard, &mut refused)
         .into_iter()
         .map(|(name, provider, _)| ConfigDef::secret(name, provider))
         .collect();
     guard.report("secrets");
+    if let Some(line) = vault_gate_marker(refused, path) {
+        eprintln!("{line}");
+    }
     build_nodes(defs, Side::Read, module_id, repo)
+}
+
+/// FD.75 fired_on: `[secrets] vault-client gate refused=<n> path=<p>`, once
+/// per file in which the generic Vault rows ([`VAULT_CLIENT`]) found `n`
+/// refs but no admitted client name, or `None` when they skipped nothing.
+fn vault_gate_marker(refused: usize, path: &str) -> Option<String> {
+    (refused > 0).then(|| format!("[secrets] vault-client gate refused={refused} path={path}"))
 }
 
 /// Feature-flag checks in a code file: `config:flag:<key>`, `READS_CONFIG`
@@ -713,7 +751,8 @@ pub fn extract_feature_flags(
     let mut sites = Vec::new();
     let mut defs = Vec::new();
     let mut guard = LazyGuard::new(path, source);
-    let checks = scan(source, FLAG_ROWS, &mut guard);
+    let mut refused = 0;
+    let checks = scan(source, FLAG_ROWS, &mut guard, &mut refused);
     guard.report("flags");
     for (name, provider, offset) in checks {
         let def = ConfigDef::flag(name, provider);
@@ -781,21 +820,38 @@ pub fn marker(outs: &[&ConfigNodes], src: &str) -> Option<String> {
 /// boundary. A row whose provider tokens are absent from the file never runs.
 /// CJ.1c: an occurrence the guard refuses (a Rust / Python literal or comment)
 /// is skipped.
+///
+/// FD.75: a [`VAULT_CLIENT`] row's gate opens only on a token occurrence the
+/// guard admits as a name ([`LazyGuard::admits_name`]), checked once per
+/// file. When that gate stays shut in a file the old `VAULT` substring gate
+/// would have opened, the row runs dry: each ref it would have captured adds
+/// one to `refused` and none is returned.
 fn scan(
     source: &str,
     rows: &[Row],
     guard: &mut LazyGuard<'_>,
+    refused: &mut usize,
 ) -> Vec<(String, &'static str, usize)> {
     let mut lower: Option<String> = None;
+    let mut client: Option<bool> = None;
     let mut out = Vec::new();
     for row in rows {
         if !source.contains(row.needle) {
             continue;
         }
         let lower = lower.get_or_insert_with(|| source.to_ascii_lowercase());
-        if !row.gate.iter().any(|tok| lower.contains(tok)) {
-            continue;
-        }
+        let client_row = row.gate == VAULT_CLIENT;
+        let dry = if client_row {
+            if !VAULT.iter().any(|tok| lower.contains(tok)) {
+                continue;
+            }
+            !*client.get_or_insert_with(|| names_admitted(lower, VAULT_CLIENT, guard))
+        } else {
+            if !row.gate.iter().any(|tok| lower.contains(tok)) {
+                continue;
+            }
+            false
+        };
         let mut from = 0;
         while let Some(rel) = source[from..].find(row.needle) {
             let at = from + rel;
@@ -812,12 +868,25 @@ fn scan(
                 call_opener(&source[after..]).map(|o| &source[after + o..])
             };
             if let Some(key) = call.and_then(|c| capture(c, row)) {
-                out.push((key, row.provider, at));
+                if dry {
+                    *refused += 1;
+                } else {
+                    out.push((key, row.provider, at));
+                }
             }
             from = after;
         }
     }
     out
+}
+
+/// True when some occurrence of a `tokens` entry in `lower` (the source,
+/// ASCII-lowercased, so byte offsets match it) sits where the guard admits
+/// a library name: code, or an import string outside Rust / Python.
+fn names_admitted(lower: &str, tokens: &[&str], guard: &mut LazyGuard<'_>) -> bool {
+    tokens
+        .iter()
+        .any(|tok| lower.match_indices(tok).any(|(i, _)| guard.admits_name(i)))
 }
 
 /// The key one matched call names, or `None` when it is not a literal.
@@ -1900,5 +1969,100 @@ mod tests {
             out.sites.iter().map(|(_, o)| *o).collect::<Vec<_>>(),
             [py.rfind(".variation(").unwrap()]
         );
+    }
+
+    /// FD.75: the generic `.read(` / `.kv(` rows read a Vault path only in a
+    /// file that names a Vault client where the guard admits it; the bare
+    /// word `vault` (a `Vault.sol` doc line, a `vault` fn, a comment) is no
+    /// client. The Vault-specific needles keep the `VAULT` gate.
+    #[test]
+    fn generic_vault_read_needs_a_named_client() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let refs = |src: &str, path: &str| qnames(&extract_secret_refs(src, path, m, repo));
+        let rs = concat!(
+            "//! Vault.sol moves to contracts/core/ between the two exports.\n",
+            "impl Scratch {\n",
+            "    fn read(&self, rel: &str) -> String { std::fs::read_to_string(rel).unwrap() }\n",
+            "    fn edit(&self) { let orders = self.read(\"svc/orders.py\"); }\n",
+            "}\n",
+            "fn vault(old: &str) -> String { format!(\"contracts::Vault{old}\") }\n",
+        );
+        assert!(
+            refs(rs, "src/t.rs").is_empty(),
+            "{:?}",
+            refs(rs, "src/t.rs")
+        );
+        let py = "# the vault contract\ndef readme(archive):\n    return archive.read(\"docs/readme.md\")\n";
+        assert!(refs(py, "app/archive.py").is_empty());
+        // Controls: a named client keeps the generic row.
+        assert_eq!(
+            refs(
+                "import hvac\nc = hvac.Client()\nc.read(\"secret/data/api\")\n",
+                "app/s.py"
+            ),
+            ["config:secret:vault/secret/data/api"]
+        );
+        let go = concat!(
+            "import vault \"github.com/hashicorp/vault/api\"\n",
+            "s, err := client.KVv2(\"secret\").Get(ctx, \"db\")\n",
+            "r, err := client.Logical().Read(\"secret/data/cache\")\n",
+        );
+        assert_eq!(
+            refs(go, "svc/v.go"),
+            [
+                "config:secret:vault/secret/data/cache",
+                "config:secret:vault/secret/db"
+            ]
+        );
+        assert_eq!(
+            refs(
+                "require \"vault\"\nVault.kv(\"secret\").read(\"db\")\n",
+                "lib/v.rb"
+            ),
+            ["config:secret:vault/secret/db"]
+        );
+        assert_eq!(
+            refs(
+                "const vault = require('node-vault')();\nvault.read('secret/data/x');\n",
+                "web/v.js"
+            ),
+            ["config:secret:vault/secret/data/x"]
+        );
+        assert_eq!(
+            refs(
+                "class A { VaultTemplate t; void m() { t.read(\"secret/app\"); } }\n",
+                "src/A.java"
+            ),
+            ["config:secret:vault/secret/app"]
+        );
+        // An hvac-free wrapper keeps the specific needle (VAULT gate).
+        let wrapped = concat!(
+            "from app.vault import client\n",
+            "client.secrets.kv.v2.read_secret_version(path='api', mount_point='kv')\n",
+            "client.read(\"secret/x\")\n",
+        );
+        assert_eq!(refs(wrapped, "app/w.py"), ["config:secret:vault/kv/api"]);
+    }
+
+    /// FD.75 fired_on: the refs a refused client gate skipped, per file.
+    #[test]
+    fn vault_client_gate_refusal_is_counted() {
+        let py =
+            "# the vault contract\nx = archive.read(\"docs/readme.md\")\ny = a.read(\"b/c\")\n";
+        let mut g = LazyGuard::new("app/archive.py", py);
+        let mut refused = 0;
+        assert!(scan(py, SECRET_ROWS, &mut g, &mut refused).is_empty());
+        assert_eq!(refused, 2);
+        let mut none = 0;
+        let ok = "import hvac\nx = c.read(\"secret/a\")\n";
+        let mut guard = LazyGuard::new("app/settings.py", ok);
+        assert_eq!(scan(ok, SECRET_ROWS, &mut guard, &mut none).len(), 1);
+        assert_eq!(none, 0);
+        assert_eq!(
+            vault_gate_marker(2, "app/archive.py").as_deref(),
+            Some("[secrets] vault-client gate refused=2 path=app/archive.py")
+        );
+        assert_eq!(vault_gate_marker(0, "app/archive.py"), None);
     }
 }

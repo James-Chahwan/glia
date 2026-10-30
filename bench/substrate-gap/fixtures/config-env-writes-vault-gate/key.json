@@ -1,0 +1,90 @@
+{
+  "framework": "config-env-writes-vault-gate",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "secrets",
+  "note": "FD.75 (edge audit E1 + E2, FD.3c). E1: an env subscript or property ASSIGNED (`os.environ[\"X\"] = v`, `process.env.X = v`, `ENV[\"X\"] = v`) or deleted (`del os.environ[\"X\"]`) is no READS_CONFIG; a compound `+=` and a comparison still read. E2: the generic Vault `.read(` row needs a Vault client named in the file (hvac, node-vault, hashicorp/vault, VaultTemplate, VaultSharp, vaultrs, Ruby `require 'vault'`) where the guard admits it, not the bare word `vault` anywhere (a `Vault.sol` string, a `vault` closure, a comment). Baseline HEAD c4152966: forbid violations 7. Controls: real env reads in the same files and two hvac reads.",
+  "expect_edges": [
+    {
+      "from": "app::settings::db_url",
+      "to": "config:env:DATABASE_URL",
+      "category": "READS_CONFIG",
+      "note": "os.environ[\"DATABASE_URL\"] read"
+    },
+    {
+      "from": "tests::surface::test_patterns::main",
+      "to": "config:env:PATH",
+      "category": "READS_CONFIG",
+      "note": "os.environ[\"PATH\"] += .. reads the old value"
+    },
+    {
+      "from": "tests::surface::test_patterns::main",
+      "to": "config:env:CI",
+      "category": "READS_CONFIG",
+      "note": "os.environ[\"CI\"] == \"true\""
+    },
+    {
+      "from": "web::env",
+      "to": "config:env:PORT",
+      "category": "READS_CONFIG",
+      "note": "process.env.PORT read"
+    },
+    {
+      "from": "rb::boot",
+      "to": "config:env:HOST",
+      "category": "READS_CONFIG",
+      "note": "ENV[\"HOST\"] read"
+    },
+    {
+      "from": "app::settings",
+      "to": "config:secret:vault/secret/api",
+      "category": "READS_CONFIG",
+      "note": "hvac read_secret_version(path=\"api\", mount_point=\"secret\")"
+    },
+    {
+      "from": "app::settings",
+      "to": "config:secret:vault/secret/data/billing",
+      "category": "READS_CONFIG",
+      "note": "hvac client.read(\"secret/data/billing\") - the generic row with a client in the file"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:GIT_CONFIG_GLOBAL",
+      "note": "os.environ[..] = str(gitconfig) for a child git process"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:GIT_CONFIG_NOSYSTEM",
+      "note": "os.environ[..] = \"1\""
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:GIT_DIR",
+      "note": "del os.environ[\"GIT_DIR\"]"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:NODE_ENV",
+      "note": "process.env.NODE_ENV = \"test\""
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:RACK_ENV",
+      "note": "ENV[\"RACK_ENV\"] = \"test\""
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:secret:vault/svc/orders.py",
+      "note": "a Rust test helper's self.read(\"svc/orders.py\") in a file whose only `vault` is Vault.sol / a closure"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:secret:vault/docs/readme.md",
+      "note": "archive.read(..) in a file whose only `vault` is a comment"
+    }
+  ]
+}
