@@ -1973,8 +1973,9 @@ questions over one graph computes `entrypoint_reachable` once.
   record. A calibrated answer depends on the glia build that calibrated (BUILD_STAMP strict), so
   every repo recalibrates after the upgrade. The version bump is the release step after EZ, never
   inside a packet.
-- **0.5.4 — embeddings and precision: complete on local `main`, version bumped, awaiting the tag
-  (the docs FZ.1, the handoffs FZ.2; the release close-out 8e6f22c3 ran every gate in full).** Scope `dev-notes/next-leap-0.5.4.md`, packets
+- **0.5.4 — embeddings and precision: released 2026-10-31 (tag `v0.5.4`, `glia-py` 0.5.4 and
+  `glia-cli` 0.5.4 on PyPI; the docs FZ.1, the handoffs FZ.2; the release close-out 8e6f22c3 ran
+  every gate in full).** Scope `dev-notes/next-leap-0.5.4.md`, packets
   `dev-notes/leap-054-packets.json` (overrides `leap-054-corrections.json`), schedule and LANDED
   waves `dev-notes/wave-runner/schedule_054.py` (runner `--release 054`, ids F*, waves W0-W27),
   tracks `dev-notes/wave-runner/tracks_054.py`. James cut it on 2026-10-30 (ruling OPTION-3:
@@ -2000,12 +2001,15 @@ questions over one graph computes `entrypoint_reachable` once.
   additions are `.glia/vectors.jsonl`'s `text_hash` / `device`, `.glia/vocab-snapshot/` and
   engram-export's `<out>.vocab.jsonl`. Handoffs `dev-notes/{repo-graph,engram}-handoff-0.5.4.md`
   (0.5.2 -> 0.5.4) and `neuropil-handoff-0.5.4.md` (0.5.1 -> 0.5.4), pin `=0.5.4` /
-  `glia-py==0.5.4`. Open at the release: the first wheels-py.yml / wheels-cli.yml CI runs (their
-  run ids go in the release notes; they verify the manylinux_2_28 worker staging and the macOS /
-  Windows Dawn staging; the tag's first runs, 41080836302 / 41080836313, failed on Linux: ort
-  rc.13's prebuilt ONNX Runtime needs glibc 2.38, so the Linux jobs now link Microsoft's 1.31.1
-  dynamically, build the WebGPU worker outside the container and test on glibc 2.28), the PyPI pending publisher for `glia-cli` (owner James-Chahwan, repo
-  glia, workflow wheels-cli.yml) before any `publish=true`, and James's confirmation of that name.
+  `glia-py==0.5.4`. The publish (James 2026-10-31: *"Look if it passes then do the pypi repush"*):
+  the tag's own wheels runs (41080836302 / 41080836313) failed on Linux and published nothing, as
+  ort rc.13's prebuilt ONNX Runtime needs glibc 2.38; the Linux jobs now link Microsoft's 1.31.1
+  dynamically (grafted into `<pkg>.libs`), build the WebGPU worker outside the manylinux_2_28
+  container (on an older glibc it fails to load and embedding runs on the CPU), stage the CLI's
+  worker beside the real `glia` (site-packages `glia_cli.scripts/`) and test on glibc 2.28
+  (188d0192, a86c1372, workflow files only, so the published code is the tag's). Published by the
+  dispatched runs wheels-py 41089926548 and wheels-cli 41089922225 (`glia-cli` through its
+  pending publisher, owner James-Chahwan, repo glia, workflow wheels-cli.yml).
 - **After 0.5.4:** **0.5.5** (seed `dev-notes/next-leap-0.5.5.md`) — the tracks moved out of 0.5.4,
   already specced and to be re-verified against the shipped tree: T4 (the per-language precision
   and recall residuals), T6 (the goal-layer connector and the clarification queue; it fills the
