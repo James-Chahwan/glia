@@ -272,3 +272,8 @@ python3 tools/visual_regression.py compare
   embedding stack and the pyo3 / CLI surfaces), FD.2, FD.3a-FD.3d (the audit), FD.22-FD.28, FD.34 / FD.34b
   (engram-export), FD.69 (check markdown), FD.7a-FD.7d (section 4), FE.1-FE.8 (harness, CLI wheel, skills),
   FH.1a-FH.26's answer and bench packets (repo-graph's handoff lists the answer breaks).
+
+## Release-docs addendum (FZ.1, 1ac10500)
+
+- README.md is install / quickstart / CLI only. The long prose moved to docs/overview.md, the release history to docs/history.md and the license rationale to docs/license.md. A link into an old README section now points at one of those files.
+- PARSER_STAMP moves once more: FZ.1 gave the 16 reserved slot files a `//!` line in hashed roots, so every parse cache re-parses once after the upgrade. No graph content changes.

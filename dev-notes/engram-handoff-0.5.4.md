@@ -220,3 +220,8 @@ In Engram, after building the exporter at the tag:
   (vectors), FB.11, FB.12a, FB.12b (corrections), FB.13a / FB.13d (vocab), FD.22 (ties), FD.34 (the
   refusals line), FD.65, FH.17 and every graph-content packet in section 5 (FD.4a-FD.5b, FD.6, FD.31,
   FD.73-FD.81, FH.3b, FH.6). No other landed break names Engram.
+
+## Release-docs addendum (FZ.1, 1ac10500)
+
+- README.md is install / quickstart / CLI only. The long prose moved to docs/overview.md, the release history to docs/history.md and the license rationale to docs/license.md. A link into an old README section now points at one of those files.
+- PARSER_STAMP moves once more: FZ.1 gave the 16 reserved slot files a `//!` line in hashed roots, so every parse cache re-parses once after the upgrade. No graph content changes.

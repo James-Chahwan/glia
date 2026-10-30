@@ -302,3 +302,8 @@ doclink precision costs glia's own snapshot ANS:impact r10 0.2594 -> 0.2550, acc
 (2026-10-30, recorded in `bench/rank-gate/gate.json` `accepted`). FH.1d: the release's full cohort run reads
 review with `--full`, so `files_named` / `truth_named` may rise against the baseline (gains). Integration
 tests run as one binary per crate (FH.18): `cargo test -p <pkg> --test <crate>_tests <file>::`.
+
+## Release-docs addendum (FZ.1, 1ac10500)
+
+- README.md is install / quickstart / CLI only. The long prose moved to docs/overview.md, the release history to docs/history.md and the license rationale to docs/license.md. A link into an old README section now points at one of those files.
+- PARSER_STAMP moves once more: FZ.1 gave the 16 reserved slot files a `//!` line in hashed roots, so every parse cache re-parses once after the upgrade. No graph content changes.
