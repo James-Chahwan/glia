@@ -1,0 +1,19 @@
+stages:
+  - deploy
+
+deploy_staging:
+  stage: deploy
+  script:
+    - echo deploying
+  environment:
+    name: staging
+    url: https://staging.example.com
+    on_stop: stop_staging
+  variables:
+    DEPLOY_REGION: eu-west-1
+
+stop_staging:
+  stage: deploy
+  script:
+    - echo stopping
+  when: manual

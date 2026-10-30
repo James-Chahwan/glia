@@ -1,0 +1,10 @@
+services:
+  api:
+    image: example/api:latest
+    environment:
+      - DATABASE_URL=postgres://db/app
+      - LOG_LEVEL
+  worker:
+    image: example/worker:latest
+    environment:
+      QUEUE_NAME: jobs

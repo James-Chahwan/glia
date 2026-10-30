@@ -333,16 +333,34 @@ pub fn extract_dotenv_defs(source: &str, module_id: NodeId, repo: RepoId) -> Con
 
 /// Extract env-var definitions from a YAML manifest (k8s `env:`/`envFrom:`,
 /// docker-compose `environment:`). Caller is responsible for content-gating
-/// or path-gating to YAML files.
-pub fn extract_yaml_env_defs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
+/// or path-gating to YAML files. `path` is the repo-relative path, read only
+/// by [`environment_not_env`]: a file format whose own spec defines an
+/// `environment:` block as something other than env vars skips the
+/// `environment:` reading (FD.76); every other reader runs unchanged.
+///
+/// fired_on, once per such file whose `environment:` blocks held keys:
+/// `[config] yaml environment not_env=<pubspec|gha_workflow|gitlab_ci> keys=<n> path=<p>`.
+pub fn extract_yaml_env_defs(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ConfigNodes {
     let k8s = scan_k8s_env(source);
     let mut items: Vec<(ConfigDef, Side)> =
         k8s.env.into_iter().map(|d| (d, Side::Define)).collect();
-    items.extend(
-        scan_compose_environment(source)
-            .into_iter()
-            .map(|d| (d, Side::Define)),
-    );
+    let environment = scan_compose_environment(source);
+    match environment_not_env(path) {
+        None => items.extend(environment.into_iter().map(|d| (d, Side::Define))),
+        Some(reason) => {
+            if !environment.is_empty() {
+                eprintln!(
+                    "[config] yaml environment not_env={reason} keys={} path={path}",
+                    environment.len()
+                );
+            }
+        }
+    }
     // A13.8: the Secrets a workload consumes, the Secrets a manifest declares,
     // and the flags a Flipt file declares. One call, so a file that both
     // declares and consumes the same Secret yields ONE node with both edges.
@@ -362,6 +380,34 @@ pub fn extract_yaml_env_defs(source: &str, module_id: NodeId, repo: RepoId) -> C
         eprintln!("{marker}");
     }
     out
+}
+
+/// FD.76: the YAML formats whose own spec defines an `environment:` block as
+/// something other than env vars, by repo-relative path; `Some(reason)`
+/// names the format. Dart pub's `pubspec.yaml` (`environment:` holds the
+/// `sdk` / `flutter` version constraints) is `pubspec`; a `.yml` / `.yaml`
+/// under a `.github/workflows/` directory (a job's `environment:` is its
+/// deployment environment, `name` / `url`; env vars are `env:`) is
+/// `gha_workflow`, a sub-project's workflow directory included; a
+/// `.gitlab-ci.yml` (a job's deployment environment, `name` / `url` /
+/// `on_stop` / `action` ..; env vars are `variables:`) is `gitlab_ci`.
+/// Everything else (docker-compose, serverless, Ansible, Drone ..) is None
+/// and keeps the `environment:` reading.
+fn environment_not_env(path: &str) -> Option<&'static str> {
+    let norm = path.replace('\\', "/");
+    let base = norm.rsplit('/').next().unwrap_or(&norm);
+    if base == "pubspec.yaml" {
+        return Some("pubspec");
+    }
+    if base == ".gitlab-ci.yml" {
+        return Some("gitlab_ci");
+    }
+    let ext = base.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    let yaml = matches!(ext.as_deref(), Some("yml" | "yaml"));
+    if yaml && (norm.starts_with(".github/workflows/") || norm.contains("/.github/workflows/")) {
+        return Some("gha_workflow");
+    }
+    None
 }
 
 /// Most keys one settings file defines (CL.7b); the rest are counted as
@@ -2456,7 +2502,7 @@ spec:
               name: log-config
               key: level
 "#;
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "k8s/deploy.yaml", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:LOG_LEVEL".to_string()));
@@ -2474,7 +2520,7 @@ services:
       - NODE_ENV=production
       - PORT
 "#;
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "docker-compose.yml", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:NODE_ENV".to_string()));
@@ -2491,10 +2537,147 @@ services:
       DATABASE_URL: postgres://db
       LOG_LEVEL: info
 "#;
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "docker-compose.yml", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:LOG_LEVEL".to_string()));
+    }
+
+    // FD.76: an `environment:` block whose file format defines it as
+    // something other than env vars mints no `config:env:<key>`.
+    const PUBSPEC_ENV: &str = concat!(
+        "name: app\n",
+        "environment:\n",
+        "  sdk: ^3.5.0\n",
+        "  flutter: \">=3.24.0\"\n",
+        "dependencies:\n",
+        "  http: ^1.2.0\n",
+    );
+
+    #[test]
+    fn pubspec_environment_is_sdk_constraints_not_env() {
+        let repo = RepoId(1);
+        let out = extract_yaml_env_defs(PUBSPEC_ENV, "app/pubspec.yaml", module_id(repo), repo);
+        let keys = config_keys(&out);
+        assert!(!keys.contains(&"config:env:sdk".to_string()), "{keys:?}");
+        assert!(
+            !keys.contains(&"config:env:flutter".to_string()),
+            "{keys:?}"
+        );
+        assert!(out.nodes.is_empty() && out.edges.is_empty());
+        // A root pubspec too.
+        let out = extract_yaml_env_defs(PUBSPEC_ENV, "pubspec.yaml", module_id(repo), repo);
+        assert!(config_keys(&out).is_empty());
+    }
+
+    #[test]
+    fn environment_gate_is_the_file_format_not_the_key_names() {
+        let repo = RepoId(1);
+        let out = extract_yaml_env_defs(
+            PUBSPEC_ENV,
+            "deploy/docker-compose.yml",
+            module_id(repo),
+            repo,
+        );
+        let keys = config_keys(&out);
+        assert!(keys.contains(&"config:env:sdk".to_string()), "{keys:?}");
+        assert!(keys.contains(&"config:env:flutter".to_string()), "{keys:?}");
+    }
+
+    #[test]
+    fn github_actions_job_environment_is_a_deployment_not_env() {
+        let repo = RepoId(1);
+        let src = concat!(
+            "name: deploy\n",
+            "on: push\n",
+            "jobs:\n",
+            "  ship:\n",
+            "    runs-on: ubuntu-latest\n",
+            "    environment:\n",
+            "      name: production\n",
+            "      url: https://example.com\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+            "      - run: echo shipping\n",
+        );
+        for path in [
+            ".github/workflows/deploy.yml",
+            ".github/workflows/Deploy.YAML",
+            "services/api/.github/workflows/deploy.yaml",
+        ] {
+            let out = extract_yaml_env_defs(src, path, module_id(repo), repo);
+            let keys = config_keys(&out);
+            assert!(
+                !keys.contains(&"config:env:name".to_string()),
+                "{path}: {keys:?}"
+            );
+            assert!(
+                !keys.contains(&"config:env:url".to_string()),
+                "{path}: {keys:?}"
+            );
+        }
+        // A workflow-shaped file outside .github/workflows/ keeps the reading.
+        let out = extract_yaml_env_defs(src, "ci/deploy.yml", module_id(repo), repo);
+        assert!(config_keys(&out).contains(&"config:env:name".to_string()));
+    }
+
+    #[test]
+    fn gitlab_ci_job_environment_is_a_deployment_not_env() {
+        let repo = RepoId(1);
+        let src = concat!(
+            "deploy_staging:\n",
+            "  script:\n",
+            "    - echo deploying\n",
+            "  environment:\n",
+            "    name: staging\n",
+            "    url: https://staging.example.com\n",
+            "    on_stop: stop_staging\n",
+            "stop_staging:\n",
+            "  when: manual\n",
+            "  environment:\n",
+            "    name: staging\n",
+            "    action: stop\n",
+        );
+        let out = extract_yaml_env_defs(src, ".gitlab-ci.yml", module_id(repo), repo);
+        let keys = config_keys(&out);
+        for k in ["name", "url", "on_stop", "action"] {
+            assert!(!keys.contains(&format!("config:env:{k}")), "{k}: {keys:?}");
+        }
+    }
+
+    #[test]
+    fn serverless_provider_environment_keeps_its_env_vars() {
+        let repo = RepoId(1);
+        let src = concat!(
+            "service: orders\n",
+            "provider:\n",
+            "  name: aws\n",
+            "  environment:\n",
+            "    TABLE_NAME: orders\n",
+        );
+        let out = extract_yaml_env_defs(src, "deploy/serverless.yml", module_id(repo), repo);
+        assert!(config_keys(&out).contains(&"config:env:TABLE_NAME".to_string()));
+    }
+
+    #[test]
+    fn environment_not_env_names_the_three_formats() {
+        assert_eq!(environment_not_env("pubspec.yaml"), Some("pubspec"));
+        assert_eq!(environment_not_env("app/pubspec.yaml"), Some("pubspec"));
+        assert_eq!(
+            environment_not_env(".github/workflows/ci.yml"),
+            Some("gha_workflow")
+        );
+        assert_eq!(
+            environment_not_env("pkg/.github/workflows/ci.yaml"),
+            Some("gha_workflow")
+        );
+        assert_eq!(environment_not_env(".gitlab-ci.yml"), Some("gitlab_ci"));
+        assert_eq!(environment_not_env("sub/.gitlab-ci.yml"), Some("gitlab_ci"));
+        assert_eq!(environment_not_env(".github/workflows/README.md"), None);
+        assert_eq!(environment_not_env(".github/dependabot.yml"), None);
+        assert_eq!(environment_not_env("pubspec_overrides.yaml"), None);
+        assert_eq!(environment_not_env("docker-compose.yml"), None);
+        assert_eq!(environment_not_env("serverless.yml"), None);
     }
 
     // ------------------------------------------------------------------
@@ -2594,7 +2777,7 @@ services:
             "              name: db-secret\n",
             "              key: password\n",
         );
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "k8s/deploy.yaml", module_id(repo), repo);
         assert!(
             env_payload(&out, "CACHE_HOST")
                 .unwrap()
@@ -2675,7 +2858,7 @@ services:
             "        - configMapRef:\n",
             "            name: app-config\n",
         );
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "k8s/deploy.yaml", module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
         assert_eq!(
@@ -2730,7 +2913,7 @@ services:
             "                  name: db-secret\n",
             "                  key: password\n",
         );
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "k8s/secret.yaml", module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
         assert_eq!(
@@ -2778,7 +2961,7 @@ services:
             "segments:\n",
             "  - key: beta-users\n",
         );
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "flipt/features.yml", module_id(repo), repo);
         let mut keys = config_keys(&out);
         keys.sort();
         assert_eq!(
@@ -2805,7 +2988,7 @@ services:
             "      - DATABASE_HOST=db.internal\n",
             "      - PORT\n",
         );
-        let out = extract_yaml_env_defs(src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(src, "docker-compose.yml", module_id(repo), repo);
         assert!(
             env_payload(&out, "DATABASE_HOST")
                 .unwrap()
@@ -2820,7 +3003,7 @@ services:
             "    environment:\n",
             "      LOG_LEVEL: info\n",
         );
-        let out = extract_yaml_env_defs(map_src, module_id(repo), repo);
+        let out = extract_yaml_env_defs(map_src, "docker-compose.yml", module_id(repo), repo);
         assert!(
             env_payload(&out, "LOG_LEVEL")
                 .unwrap()
@@ -3500,7 +3683,7 @@ public class Payments
             "        - name: ConnectionStrings__Db\n",
             "          value: Host=db\n",
         );
-        let out = extract_yaml_env_defs(k8s, module_id(repo), repo);
+        let out = extract_yaml_env_defs(k8s, "k8s/deploy.yaml", module_id(repo), repo);
         let edge = out
             .edges
             .iter()
@@ -3517,7 +3700,7 @@ public class Payments
 
         // compose environment map: emitter extractor:yaml too.
         let compose = "services:\n  api:\n    environment:\n      Retry__Max: 5\n";
-        let out = extract_yaml_env_defs(compose, module_id(repo), repo);
+        let out = extract_yaml_env_defs(compose, "docker-compose.yml", module_id(repo), repo);
         let edge = out
             .edges
             .iter()

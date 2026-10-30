@@ -1,0 +1,13 @@
+name: app
+description: A sample Flutter app.
+version: 1.0.0+1
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0

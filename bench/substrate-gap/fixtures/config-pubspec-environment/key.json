@@ -1,0 +1,70 @@
+{
+  "framework": "config-pubspec-environment",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.76. Baseline HEAD c4152966: forbid violations expected for sdk / flutter (pubspec.yaml environment: SDK constraints), name / url (GitHub Actions and GitLab CI deployment environment) and on_stop (GitLab CI).",
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DATABASE_URL"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "LOG_LEVEL"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "QUEUE_NAME"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "TABLE_NAME"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "deploy/docker-compose.yml",
+      "to": "DATABASE_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "deploy/docker-compose.yml",
+      "to": "QUEUE_NAME",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "deploy/serverless.yml",
+      "to": "TABLE_NAME",
+      "category": "DEFINES_CONFIG"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:sdk"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:flutter"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:name"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:url"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "config:env:on_stop"
+    },
+    {
+      "from": "app/pubspec.yaml",
+      "to": "config:env:sdk",
+      "category": "DEFINES_CONFIG"
+    }
+  ]
+}

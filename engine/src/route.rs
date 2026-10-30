@@ -822,7 +822,8 @@ fn route_branches(
         let module_id = synthetic_module_id(repo, path);
         let cron_out =
             glia_code_extractors::cron::extract_cron_nodes(source, path, module_id, repo);
-        let cfg_out = glia_code_extractors::config::extract_yaml_env_defs(source, module_id, repo);
+        let cfg_out =
+            glia_code_extractors::config::extract_yaml_env_defs(source, path, module_id, repo);
         let iac_out = glia_code_extractors::iac::extract_yaml(source, module_id, repo);
         // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
         // API surface. Non-contract yaml takes a cheap sniff-miss here.
