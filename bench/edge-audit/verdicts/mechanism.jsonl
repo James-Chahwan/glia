@@ -1,0 +1,204 @@
+{"id": "00042f7e1acbd75b", "verdict": "correct", "reason": "the kustomize component's container patch declares this name under `env:`", "judge": "FD.3b"}
+{"id": "00405601796e4455", "verdict": "correct", "reason": "the section describes `resolve_member_reads` (TS-family scopes, getter / setter binding) in graph/src/calls.rs, this function", "judge": "FD.3b"}
+{"id": "0040777539e630cb", "verdict": "wrong", "reason": "ambiguous doclink: the bare word `graph` (the crate, the graph) bound to a test helper fn graph() in ppr_index's tests", "judge": "FD.3b"}
+{"id": "006a37f3a51dab5e", "verdict": "correct", "reason": "the frontend Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "0073966c52450f07", "verdict": "wrong", "reason": "ambiguous doclink: `graph` there is a data-entity flavour value (sql / nosql / graph), bound to a test helper fn graph() in ppr_index's tests", "judge": "FD.3b"}
+{"id": "007adbae0edf7630", "verdict": "wrong", "reason": "ambiguous doclink: the section names the CALLS edge category, bound to a test-local const CALLS in algo::classes's tests", "judge": "FD.3b"}
+{"id": "008865a8ead3db93", "verdict": "correct", "reason": "requirements.txt pins this package (pip-compile output)", "judge": "FD.3b"}
+{"id": "0090f0f3775c3a3c", "verdict": "wrong", "reason": "ambiguous doclink: web/simplistic_editor's README names its own BasicTextField; the tie bound the copy in the separate top-level simplistic_editor/ sample", "judge": "FD.3b"}
+{"id": "009995846a30003d", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "00b6eaf4bd9fbb34", "verdict": "wrong", "reason": "ambiguous doclink: the section is about the `glia embed` command and glia-embed builds, bound to a same-named method of a bench/latent model", "judge": "FD.3b"}
+{"id": "00c77dc37ad0665a", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "00f1bad673f9faef", "verdict": "correct", "reason": "the android build.gradle buildscript declares classpath org.jetbrains.kotlin:kotlin-gradle-plugin", "judge": "FD.3b"}
+{"id": "00f75faa72d4d381", "verdict": "correct", "reason": "the helm template's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "00fba4249fae1951", "verdict": "correct", "reason": "the section names rank::RankCache's lookup by `SourceKey`, this enum", "judge": "FD.3b"}
+{"id": "010906133778fbcb", "verdict": "correct", "reason": "the Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "0119d378b30ca5dc", "verdict": "correct", "reason": "the section names `resolve_frame` and its `line_1based - 1` conversion, this method", "judge": "FD.3b"}
+{"id": "01598654da857480", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "015a258e09fe68d1", "verdict": "wrong", "reason": "ambiguous doclink: the word `json` of a file name (meta.json) bound to a method json() of the cohort bench harness", "judge": "FD.3b"}
+{"id": "016485aa5e8ea6d3", "verdict": "correct", "reason": "requirements.txt pins this package (pip-compile output)", "judge": "FD.3b"}
+{"id": "01a477c9f70a3235", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "01a6721b821f04d8", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "01aab9692e965123", "verdict": "wrong", "reason": "ambiguous doclink: the section lists the PyGraph `communities` answer (engine::communities), bound to activation's algo::community::communities", "judge": "FD.3b"}
+{"id": "01ad2524df8e1632", "verdict": "wrong", "reason": "ambiguous doclink: `error` there is a try-status / verdict word, bound to the rules analyser's private Cx::error", "judge": "FD.3b"}
+{"id": "01b7a6cf4a693486", "verdict": "correct", "reason": "the section describes the `effects` answer (the data, config and external calls a function reaches), whose engine entry point is this function", "judge": "FD.3b"}
+{"id": "01dea607ded9a846", "verdict": "wrong", "reason": "unique doclink on a common word: `impact` names repo-graph's MCP tool and a skill, bound to a test helper impact() of the cohort bench", "judge": "FD.3b"}
+{"id": "01ec718e5c9a2e4c", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "0200d24c7d0fa781", "verdict": "wrong", "reason": "ambiguous doclink: `find` is the glia find command, bound to a find() method of a PHP substrate-gap fixture", "judge": "FD.3b"}
+{"id": "0203fbd6f88d8719", "verdict": "correct", "reason": "the android build.gradle buildscript declares classpath org.jetbrains.kotlin:kotlin-gradle-plugin", "judge": "FD.3b"}
+{"id": "02090f5e6b8e1014", "verdict": "correct", "reason": "the service's go.mod requires this module (direct or // indirect)", "judge": "FD.3b"}
+{"id": "024accf37aeb8548", "verdict": "correct", "reason": "the section names the engine answer `splits` as one that builds on activation::algo, this function", "judge": "FD.3b"}
+{"id": "024ddcc7ff348277", "verdict": "correct", "reason": "package.json declares this npm package", "judge": "FD.3b"}
+{"id": "025d89070bc83ce5", "verdict": "wrong", "reason": "ambiguous doclink: `method` is a wrapper-stanza key / plain word, bound to a test helper method() in passes_tests", "judge": "FD.3b"}
+{"id": "0267eec3f486d474", "verdict": "wrong", "reason": "extractor:manifest read the `name =` key of a [[test]] / [[bench]] target table as a dependency named `name`; the manifest declares no such package", "judge": "FD.3b"}
+{"id": "028b865d95fec707", "verdict": "wrong", "reason": "ambiguous doclink: `model_shop` there is engine's shared test helper directory (engine/tests/model_shop/), bound to the cli test method Scratch::model_shop", "judge": "FD.3b"}
+{"id": "02a2ae37727efd3e", "verdict": "correct", "reason": "requirements.txt pins this package (pip-compile output)", "judge": "FD.3b"}
+{"id": "02aa778fa585c8cb", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "02b863dc1f02daf6", "verdict": "wrong", "reason": "extractor:manifest read the `name =` key of a [[test]] / [[bench]] target table as a dependency named `name`; the manifest declares no such package", "judge": "FD.3b"}
+{"id": "02cb5425ae99c86c", "verdict": "wrong", "reason": "extractor:secrets_flags read a test's fixture path literal (a file the test writes) as a `vault/<path>` secret; nothing reads a Vault secret", "judge": "FD.3b"}
+{"id": "02e7c722a2ee6716", "verdict": "correct", "reason": "the section tells a reader to implement `CrossGraphResolver`, this trait", "judge": "FD.3b"}
+{"id": "03121ed9975ada9a", "verdict": "correct", "reason": "the service's go.mod requires this module (direct or // indirect)", "judge": "FD.3b"}
+{"id": "03426691ae866766", "verdict": "wrong", "reason": "unique doclink on a common word: `finding` is an example id word in the [ids] vocabulary, bound to engine::flags::finding", "judge": "FD.3b"}
+{"id": "035a279a137d4dbd", "verdict": "wrong", "reason": "extractor:data_sources matched android.database.sqlite names inside JNI type-descriptor strings of a jnigen-generated binding of the Android Context API; the module opens no database", "judge": "FD.3b"}
+{"id": "036ad04413189d42", "verdict": "wrong", "reason": "unique doclink on a common word: `update` (a watch update) bound to a fixture controller method UserController::update", "judge": "FD.3b"}
+{"id": "036b86763e6f7907", "verdict": "wrong", "reason": "ambiguous doclink: the word `route` (route.rs, route extractors) bound to a substrate-gap fixture fn route()", "judge": "FD.3b"}
+{"id": "037985d065bcdf4f", "verdict": "correct", "reason": "the Cargo.toml [dependencies] table declares this workspace crate by path", "judge": "FD.3b"}
+{"id": "03c3b193e449bf06", "verdict": "correct", "reason": "the Cargo.toml [dependencies] table declares this workspace crate by path", "judge": "FD.3b"}
+{"id": "03d124ef937a87da", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "03d1964fc613d339", "verdict": "correct", "reason": "package.json declares this npm package", "judge": "FD.3b"}
+{"id": "03e662d111ee9b14", "verdict": "correct", "reason": "the section documents the witness `explain` returns per row, which Evaluation::explain produces", "judge": "FD.3b"}
+{"id": "040498c6c5cb0c90", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "0415805511506125", "verdict": "correct", "reason": "the pubspec declares this package under its dependencies / dev_dependencies", "judge": "FD.3b"}
+{"id": "043552c80e395ae6", "verdict": "correct", "reason": "requirements.txt pins this package (pip-compile output)", "judge": "FD.3b"}
+{"id": "046d9f6aa3fd1187", "verdict": "correct", "reason": "the Cargo.toml [dependencies] table declares this crate", "judge": "FD.3b"}
+{"id": "047de628cb3f37a0", "verdict": "correct", "reason": "the Cargo.toml [dependencies] table declares this crate", "judge": "FD.3b"}
+{"id": "048bf2146ed4367d", "verdict": "correct", "reason": "the section names `RepoGraph` as part of the data model the LD.9 rule covers, this struct", "judge": "FD.3b"}
+{"id": "049570c9a98b0197", "verdict": "correct", "reason": "the section names glia's `ActivationConfig` and its three dials, this struct", "judge": "FD.3b"}
+{"id": "04a7123d8e92d3ee", "verdict": "correct", "reason": "the py README section lists the PyGraph `gaps` method, this method", "judge": "FD.3b"}
+{"id": "04d7c87e7b463301", "verdict": "wrong", "reason": "ambiguous doclink: the section names the CALLS edge category, bound to a test-local const CALLS in algo::classes's tests", "judge": "FD.3b"}
+{"id": "04e2c48d14916e57", "verdict": "correct", "reason": "kubernetes-manifests/frontend.yaml's container `env:` list declares PRODUCT_CATALOG_SERVICE_ADDR", "judge": "FD.3b"}
+{"id": "05866a49562a3673", "verdict": "correct", "reason": "the section describes the IMPLEMENTS edges the SCIP stage writes; the target is that category's registry constant", "judge": "FD.3b"}
+{"id": "05927823e6c4fa9d", "verdict": "correct", "reason": "email_server.start registers the servicer with add_EmailServiceServicer_to_server", "judge": "FD.3b"}
+{"id": "05ad42250d2e95d0", "verdict": "correct", "reason": "the Cargo.toml [dependencies] table declares this workspace crate by path", "judge": "FD.3b"}
+{"id": "05bd6f7d99aca023", "verdict": "correct", "reason": "the service's go.mod requires this module (direct or // indirect)", "judge": "FD.3b"}
+{"id": "05d0b1fb740ade15", "verdict": "correct", "reason": "the section names the engine answer `hubs` as one that builds on activation::algo, this function", "judge": "FD.3b"}
+{"id": "060df4d9691f1bf2", "verdict": "correct", "reason": "os.Getenv reads this variable at the site", "judge": "FD.3b"}
+{"id": "06c0047899d1f56e", "verdict": "correct", "reason": "the service's go.mod requires this module (direct or // indirect)", "judge": "FD.3b"}
+{"id": "0721597583d25d1d", "verdict": "correct", "reason": "the kustomize component's container patch declares this name under `env:`", "judge": "FD.3b"}
+{"id": "0726488a0acb6c92", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "0822093af572c4c2", "verdict": "correct", "reason": "the service's go.mod requires this module (direct or // indirect)", "judge": "FD.3b"}
+{"id": "086df3c2094ccdf4", "verdict": "wrong", "reason": "the site assigns os.environ[..] for a child git process; the test never reads the variable (a write classified as a read)", "judge": "FD.3b"}
+{"id": "089adb7c30c1e69b", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "08be40c1be998ee0", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `flutter:` there is the Flutter SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "08de4ab8d444798b", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "09231dc82db8f471", "verdict": "wrong", "reason": "ambiguous doclink: `location` is a Firestore document field of the maps sample, bound to a generated PhotoBuilder.location getter of another sample", "judge": "FD.3b"}
+{"id": "095c8b3faa1b8222", "verdict": "wrong", "reason": "the site assigns os.environ[..] for a child git process; the test never reads the variable (a write classified as a read)", "judge": "FD.3b"}
+{"id": "0a49fa85fb193b09", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "0a77d43b3b336f98", "verdict": "correct", "reason": "appsettings.json defines Logging:LogLevel:Microsoft.Hosting.Lifetime = Information", "judge": "FD.3b"}
+{"id": "0abdf4dbf0a93cb9", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "0acd899da53793e3", "verdict": "correct", "reason": "the Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "0afa05b7e9c35ce8", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "0bae9af6ae669060", "verdict": "correct", "reason": "initTracing reads System.getenv(\"DISABLE_TRACING\")", "judge": "FD.3b"}
+{"id": "0bd04a053332228d", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "0dc1e86808350dc5", "verdict": "correct", "reason": "a package-level var in handlers.go reads it with os.Getenv", "judge": "FD.3b"}
+{"id": "0e4c2570ef091891", "verdict": "correct", "reason": "http.HandleFunc(\"/ws\", <fn>) registers this function for /ws", "judge": "FD.3b"}
+{"id": "0f4843da9ed53fb0", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `flutter:` there is the Flutter SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "10ea79cfec886763", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "10eaa37f474ad9ab", "verdict": "correct", "reason": "the service registers grpc.health.v1.Health (RegisterHealthServer with grpc's health.NewServer())", "judge": "FD.3b"}
+{"id": "13170a37c1cee8b9", "verdict": "wrong", "reason": "extractor:data_sources matched android.database.sqlite names inside JNI type-descriptor strings of jnigen-generated C glue; the file opens no database", "judge": "FD.3b"}
+{"id": "131e40ccf01e2b26", "verdict": "correct", "reason": "release/kubernetes-manifests.yaml declares this name in a container `env:` list", "judge": "FD.3b"}
+{"id": "134ba96bd3864973", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "13b8bda0f6d66e06", "verdict": "correct", "reason": "a productCatalog method, and productCatalog is registered as the ProductCatalogService server", "judge": "FD.3b"}
+{"id": "13bd1dbba923502d", "verdict": "correct", "reason": "Startup maps MapGrpcService<CartService>, a CartService.CartServiceBase subclass", "judge": "FD.3b"}
+{"id": "14ccdb857eceadb7", "verdict": "correct", "reason": "the google-cloud-operations component's container patch declares ENABLE_PROFILER under `env:`", "judge": "FD.3b"}
+{"id": "1523ee9965573729", "verdict": "correct", "reason": "release/kubernetes-manifests.yaml declares this name in a container `env:` list", "judge": "FD.3b"}
+{"id": "154b09062a746c0c", "verdict": "correct", "reason": "the frontend Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "154e9be676c998e7", "verdict": "correct", "reason": "a package-level var in handlers.go reads it with os.Getenv", "judge": "FD.3b"}
+{"id": "156d40db49f466ef", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "15f98329dee56a20", "verdict": "correct", "reason": "release/kubernetes-manifests.yaml declares this name in a container `env:` list", "judge": "FD.3b"}
+{"id": "16ebd785beed6c0f", "verdict": "correct", "reason": "the helm template's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "17e31fc96d56ca8b", "verdict": "correct", "reason": "the helm template's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "180a199ddae170b6", "verdict": "correct", "reason": "index.js reads process.env.OTEL_SERVICE_NAME", "judge": "FD.3b"}
+{"id": "189ddb4b2bb17d68", "verdict": "correct", "reason": "os.Getenv reads this variable at the site", "judge": "FD.3b"}
+{"id": "18fb1d91015359a8", "verdict": "wrong", "reason": "unique doclink on a placeholder: PROJECT_ID in the GKE steps is the reader's Google Cloud project id in a command line, not the shoppingassistant module variable", "judge": "FD.3b"}
+{"id": "1a3a9fc4cb5236dd", "verdict": "correct", "reason": "the AlloyDBCartStore constructor reads configuration[\"..\"] for this key", "judge": "FD.3b"}
+{"id": "1a8dd135c5f98da0", "verdict": "correct", "reason": "currencyservice addService(Health.service, {check})", "judge": "FD.3b"}
+{"id": "1aee1d65866999e4", "verdict": "correct", "reason": "os.Getenv reads this variable at the site", "judge": "FD.3b"}
+{"id": "1c34647aa3f3d5a9", "verdict": "correct", "reason": "client.py builds RecommendationServiceStub on a localhost channel and calls ListRecommendations: the RecommendationService the recommendation server serves", "judge": "FD.3b"}
+{"id": "1c3c552a068a67b2", "verdict": "correct", "reason": "the shoppingassistantservice Deployment's container `env:` list declares ALLOYDB_INSTANCE_NAME", "judge": "FD.3b"}
+{"id": "1c64bf41ad811245", "verdict": "correct", "reason": "paymentservice addService(PaymentService.service, {charge})", "judge": "FD.3b"}
+{"id": "1c9b4b51bd3ef115", "verdict": "correct", "reason": "the Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "1ca3283fb7fadf79", "verdict": "correct", "reason": "the frontend Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "1cc77b0e880510aa", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "1dcb821c203b298f", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "1e3f5249ea24fee0", "verdict": "correct", "reason": "the spanner component's cartservice patch declares SPANNER_CONNECTION_STRING under `env:`", "judge": "FD.3b"}
+{"id": "1eb455147715cac7", "verdict": "correct", "reason": "module level REGION = os.environ[\"REGION\"]", "judge": "FD.3b"}
+{"id": "1ee4631a83457f63", "verdict": "correct", "reason": "the frontend Deployment's container `env:` list declares this name", "judge": "FD.3b"}
+{"id": "1ff0f0f6c369012e", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "21cdeedd814a2524", "verdict": "correct", "reason": "http.HandleFunc(\"/ws\", <fn>) registers this function for /ws", "judge": "FD.3b"}
+{"id": "22b601d4e29d40e0", "verdict": "correct", "reason": "the AlloyDBCartStore constructor reads configuration[\"..\"] for this key", "judge": "FD.3b"}
+{"id": "232d8722e0c033df", "verdict": "wrong", "reason": "extractor:data_sources matched android.database.sqlite names inside JNI type-descriptor strings of jnigen-generated C glue; the file opens no database", "judge": "FD.3b"}
+{"id": "23890931d566a101", "verdict": "correct", "reason": "autobahn's main registers this function with http.HandleFunc for that path", "judge": "FD.3b"}
+{"id": "23d0a3fec92ae7bf", "verdict": "correct", "reason": "an override of CartServiceBase in the mapped CartService", "judge": "FD.3b"}
+{"id": "245524e086756824", "verdict": "correct", "reason": "homeHandler reads os.Getenv(\"BANNER_COLOR\")", "judge": "FD.3b"}
+{"id": "249b7235729aacd2", "verdict": "correct", "reason": "checkoutService.PlaceOrder implements the registered CheckoutService server", "judge": "FD.3b"}
+{"id": "24d8996b75171665", "verdict": "correct", "reason": "main.dart reads Platform.environment['SERVER_SCHEME']", "judge": "FD.3b"}
+{"id": "24e83723b6f0e9f8", "verdict": "correct", "reason": "std::env::var reads this variable at the site", "judge": "FD.3b"}
+{"id": "25cfb6b4b8eb6ba9", "verdict": "wrong", "reason": "the site assigns os.environ[..] for a child git process; the test never reads the variable (a write classified as a read)", "judge": "FD.3b"}
+{"id": "26897ba030258c95", "verdict": "wrong", "reason": "extractor:secrets_flags read a test's fixture path literal (a file the test writes) as a `vault/<path>` secret; nothing reads a Vault secret", "judge": "FD.3b"}
+{"id": "2799d26e082435c9", "verdict": "correct", "reason": "RedisCartStore reads and writes carts through IDistributedCache, which Startup registers as the StackExchange Redis cache", "judge": "FD.3b"}
+{"id": "297f641a4b84223f", "verdict": "wrong", "reason": "the site assigns os.environ[..] for a child git process; the test never reads the variable (a write classified as a read)", "judge": "FD.3b"}
+{"id": "29930423655ffd64", "verdict": "wrong", "reason": "the site assigns os.environ[..] for a child git process; the test never reads the variable (a write classified as a read)", "judge": "FD.3b"}
+{"id": "29c82ac910e98520", "verdict": "correct", "reason": "os.Getenv reads this variable at the site", "judge": "FD.3b"}
+{"id": "29ec61190e644792", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `flutter:` there is the Flutter SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "2ca3da0abdd2890d", "verdict": "correct", "reason": "NewCartServiceClient(..).GetCart on the cart service connection: hipstershop.CartService, served by cartservice", "judge": "FD.3b"}
+{"id": "2cecdfa7895d0c62", "verdict": "correct", "reason": "recommendation_server reads os.getenv(\"COLLECTOR_SERVICE_ADDR\", ..)", "judge": "FD.3b"}
+{"id": "2e986f49ac545e65", "verdict": "correct", "reason": "shippingservice RegisterShippingServiceServer(srv, &server{})", "judge": "FD.3b"}
+{"id": "322b31fa5e3d5d1e", "verdict": "correct", "reason": "NewEmailServiceClient(..).SendOrderConfirmation: hipstershop.EmailService, served by emailservice", "judge": "FD.3b"}
+{"id": "346a8963c7d37da8", "verdict": "wrong", "reason": "extractor:yaml read pubspec's `environment:` block as environment variables: `sdk:` there is the Dart SDK version constraint, not an env var", "judge": "FD.3b"}
+{"id": "370671187e81a4a8", "verdict": "correct", "reason": "a productCatalog method, and productCatalog is registered as the ProductCatalogService server", "judge": "FD.3b"}
+{"id": "37d16cc35f6b5dc6", "verdict": "correct", "reason": "Startup reads REDIS_ADDR and registers AddStackExchangeRedisCache, the Redis connection the cart store uses", "judge": "FD.3b"}
+{"id": "3afc92a6d9275e43", "verdict": "correct", "reason": "a productCatalog method, and productCatalog is registered as the ProductCatalogService server", "judge": "FD.3b"}
+{"id": "3b00d1345ad39896", "verdict": "correct", "reason": "an override of CartServiceBase in the mapped CartService", "judge": "FD.3b"}
+{"id": "3d5401ed19203e53", "verdict": "correct", "reason": "NewAdServiceClient(..).GetAds: hipstershop.AdService, served by adservice", "judge": "FD.3b"}
+{"id": "3d86a703e227429c", "verdict": "correct", "reason": "the function calls upgrader.Upgrade, so it serves the repo's pathless gorilla WS handler ws:ws (one node per repo); the evidence site is that node's first anchor in autobahn, not this function", "judge": "FD.3b"}
+{"id": "428883e3eb6a91aa", "verdict": "correct", "reason": "http.HandleFunc(\"/\", <fn>) registers this function for /", "judge": "FD.3b"}
+{"id": "44b9178f527362eb", "verdict": "correct", "reason": "paymentservice addService(Health.service, {check: CheckHandler})", "judge": "FD.3b"}
+{"id": "47172936f250935a", "verdict": "correct", "reason": "the function calls upgrader.Upgrade, so it serves the repo's pathless gorilla WS handler ws:ws (one node per repo); the evidence site is that node's first anchor in autobahn, not this function", "judge": "FD.3b"}
+{"id": "478a072deabebf6c", "verdict": "correct", "reason": "go.mod requires golang.org/x/net v0.17.0", "judge": "FD.3b"}
+{"id": "4a80808751d7c08f", "verdict": "correct", "reason": "the echo client dials ws://<addr>/echo; the repo's pathless gorilla handler ws:ws inherits /echo from echo/server.go's HandleFunc(\"/echo\", echo), which upgrades, and the default addrs agree", "judge": "FD.3b"}
+{"id": "4e4fcfb751b60ff6", "verdict": "correct", "reason": "Startup maps MapGrpcService<HealthCheckService>, a HealthBase subclass", "judge": "FD.3b"}
+{"id": "4e54f498aba7020d", "verdict": "correct", "reason": "AdService's server builder addService(new AdServiceImpl()), an AdServiceImplBase subclass", "judge": "FD.3b"}
+{"id": "517d677263b99427", "verdict": "wrong", "reason": "extractor:data_sources matched `Redis` inside the word `Redistribution` in a licence text string; the page uses no Redis", "judge": "FD.3b"}
+{"id": "575f4d94ce6c4a16", "verdict": "correct", "reason": "the test builds CartServiceClient on a channel to the in-process cartservice test host and calls GetCart", "judge": "FD.3b"}
+{"id": "58b8df96125cf28a", "verdict": "wrong", "reason": "rpc_needles anchor bound the enclosing registration function loadAllProtos; the code that runs for PaymentService is ChargeServiceHandler", "judge": "FD.3b"}
+{"id": "5b1ba8d7ae26a8ee", "verdict": "correct", "reason": "http.HandleFunc(\"/\", <fn>) registers this function for /", "judge": "FD.3b"}
+{"id": "5d3c95c55f526e8e", "verdict": "correct", "reason": "http.HandleFunc(\"/\", <fn>) registers this function for /", "judge": "FD.3b"}
+{"id": "5d943b1b2b7702eb", "verdict": "correct", "reason": "productcatalogservice RegisterProductCatalogServiceServer(srv, svc)", "judge": "FD.3b"}
+{"id": "5e6ae4fd98017a22", "verdict": "correct", "reason": "http.HandleFunc(\"/echo\", echo) registers echo for /echo", "judge": "FD.3b"}
+{"id": "611d3c925ddb5e7d", "verdict": "correct", "reason": "NewShippingServiceClient(..).GetQuote: hipstershop.ShippingService, served by shippingservice", "judge": "FD.3b"}
+{"id": "662e0b111ccac7dc", "verdict": "correct", "reason": "autobahn's main registers this function with http.HandleFunc for that path", "judge": "FD.3b"}
+{"id": "674351cd2c956fbb", "verdict": "correct", "reason": "autobahn's main registers this function with http.HandleFunc for that path", "judge": "FD.3b"}
+{"id": "687ae8d4260025d0", "verdict": "correct", "reason": "NewRecommendationServiceClient(..).ListRecommendations: hipstershop.RecommendationService, served by recommendationservice", "judge": "FD.3b"}
+{"id": "6931ca356fe3ecdf", "verdict": "wrong", "reason": "rpc_needles anchor bound the server bootstrap start(); the code that runs for EmailService is the servicer's SendOrderConfirmation", "judge": "FD.3b"}
+{"id": "6d75a6f5d0806894", "verdict": "wrong", "reason": "shippingservice registers grpc's health.NewServer() for Health; server.Check is never registered for Health (svc is registered only as ShippingService), so it does not run for the procedure", "judge": "FD.3b"}
+{"id": "6e900c3c8909b0b0", "verdict": "correct", "reason": "autobahn's main registers this function with http.HandleFunc for that path", "judge": "FD.3b"}
+{"id": "707cc4f7ce3e9b79", "verdict": "wrong", "reason": "extractor:data_sources matched android.database.sqlite names inside JNI type-descriptor strings of a jnigen-generated binding of the Android Context API; the module opens no database", "judge": "FD.3b"}
+{"id": "70b29347a6310dbe", "verdict": "correct", "reason": "http.HandleFunc(\"/ws\", <fn>) registers this function for /ws", "judge": "FD.3b"}
+{"id": "7d7e41132d33d33e", "verdict": "wrong", "reason": "ambiguous doclink: `run` is a launcher command prefix in a keybinding table, bound to ecs System::run", "judge": "FD.3b"}
+{"id": "85154925c42e4600", "verdict": "wrong", "reason": "rpc_needles anchor bound the enclosing registration function loadAllProtos; the code that runs for Health is CheckHandler", "judge": "FD.3b"}
+{"id": "8704eb00c38c4194", "verdict": "correct", "reason": "server.GetQuote implements the registered ShippingService server", "judge": "FD.3b"}
+{"id": "8e3978de1e5fb8a8", "verdict": "correct", "reason": "AdServiceImpl.getAds overrides AdServiceImplBase and AdServiceImpl is added to the server", "judge": "FD.3b"}
+{"id": "9144247e499e740e", "verdict": "correct", "reason": "currencyservice registers {check} for Health", "judge": "FD.3b"}
+{"id": "9259c037dce66302", "verdict": "wrong", "reason": "rpc_needles anchor bound the server bootstrap run(); the code that runs is productCatalog's methods", "judge": "FD.3b"}
+{"id": "953177e3464aa2f7", "verdict": "correct", "reason": "RecommendationService.ListRecommendations of the registered servicer", "judge": "FD.3b"}
+{"id": "9657bb6c06349438", "verdict": "correct", "reason": "HealthCheckService.Check overrides HealthBase.Check and the service is mapped", "judge": "FD.3b"}
+{"id": "98b05683e33f28f5", "verdict": "correct", "reason": "the shelf Router registers ..post('/', _incrementHandler)", "judge": "FD.3b"}
+{"id": "995718716735c16a", "verdict": "correct", "reason": "the workflow's `on.schedule` holds cron \"0 0 * * *\"", "judge": "FD.3b"}
+{"id": "a158ed2886603233", "verdict": "correct", "reason": "NewCheckoutServiceClient(..).PlaceOrder: hipstershop.CheckoutService, served by checkoutservice", "judge": "FD.3b"}
+{"id": "a45852f2296ca32b", "verdict": "correct", "reason": "AdServiceClient's constructor builds an AdServiceBlockingStub on host:port and the client calls getAds: hipstershop.AdService", "judge": "FD.3b"}
+{"id": "aa2be67bf09f2cae", "verdict": "correct", "reason": "NewCurrencyServiceClient(..) calls Convert / GetSupportedCurrencies: hipstershop.CurrencyService, served by currencyservice", "judge": "FD.3b"}
+{"id": "aa7a24fee3f57ead", "verdict": "correct", "reason": "NewPaymentServiceClient(..).Charge: hipstershop.PaymentService, served by paymentservice", "judge": "FD.3b"}
+{"id": "aaf52016ec93c01d", "verdict": "correct", "reason": "ProductCatalogServiceStub on PRODUCT_CATALOG_SERVICE_ADDR, used by ListRecommendations: hipstershop.ProductCatalogService", "judge": "FD.3b"}
+{"id": "ab717b807d07d138", "verdict": "wrong", "reason": "extractor:data_entities read SQL text inside a test fixture string literal (a `CREATE TABLE orders` the test writes to a temp tree); parallel_build never accesses an orders table", "judge": "FD.3b"}
+{"id": "abe1e82991ae3b08", "verdict": "correct", "reason": "the service registers grpc.health.v1.Health (RegisterHealthServer with grpc's health.NewServer())", "judge": "FD.3b"}
+{"id": "b177e8436c61f053", "verdict": "correct", "reason": "subscribe reads Firestore collection('entries') under the category doc via .snapshots()", "judge": "FD.3b"}
+{"id": "b26eae56564018f7", "verdict": "correct", "reason": "NewShippingServiceClient(..).GetQuote: hipstershop.ShippingService, served by shippingservice", "judge": "FD.3b"}
+{"id": "b48399ef14d788f2", "verdict": "correct", "reason": "list reads Firestore collection('entries') under the category doc via .get()", "judge": "FD.3b"}
+{"id": "b676fc17ed570c2b", "verdict": "correct", "reason": "list reads Firestore collection('entries') under the category doc via .get()", "judge": "FD.3b"}
+{"id": "b6d2d936fda51195", "verdict": "correct", "reason": "checkoutservice RegisterCheckoutServiceServer(srv, svc)", "judge": "FD.3b"}
+{"id": "b7acfe63df3fcd5c", "verdict": "wrong", "reason": "extractor:data_entities read a Cypher-shaped literal: the string is a GQL query to glia's own in-memory PyGraph (query_gql) in a surface test, not an access to a FUNCTION label of a graph data store", "judge": "FD.3b"}
+{"id": "b8a42bdaa6fa8c55", "verdict": "wrong", "reason": "extractor:data_entities read a Cypher-shaped literal in a test that asserts the query raises (unknown kind ROUTEE); nothing reads a ROUTEE entity", "judge": "FD.3b"}
+{"id": "becdc079bd98cee0", "verdict": "correct", "reason": "email_server.start registers the servicer with add_HealthServicer_to_server", "judge": "FD.3b"}
+{"id": "ce36fe81e7a3801f", "verdict": "correct", "reason": "currencyservice addService(CurrencyService.service, {getSupportedCurrencies, convert})", "judge": "FD.3b"}
+{"id": "d08b4bdcc8fc3361", "verdict": "correct", "reason": "the service registers grpc.health.v1.Health (RegisterHealthServer with grpc's health.NewServer())", "judge": "FD.3b"}
+{"id": "d18b326bdcbe3091", "verdict": "correct", "reason": "SpannerCartStore names TableName = \"CartItems\" and queries / writes that table (a Spanner SQL table; the nosql flavour label is off, the entity is right)", "judge": "FD.3b"}
+{"id": "e37fa244c327d29c", "verdict": "correct", "reason": "recommendation_server registers the servicer with add_HealthServicer_to_server", "judge": "FD.3b"}
+{"id": "e5b213e0c3e09571", "verdict": "correct", "reason": "NewCurrencyServiceClient(..) calls Convert / GetSupportedCurrencies: hipstershop.CurrencyService, served by currencyservice", "judge": "FD.3b"}
+{"id": "e680e26393fd4366", "verdict": "correct", "reason": "NewProductCatalogServiceClient(..) calls GetProduct / ListProducts: hipstershop.ProductCatalogService, served by productcatalogservice", "judge": "FD.3b"}
+{"id": "e93b4fa92f1f92d8", "verdict": "correct", "reason": "email_client builds EmailServiceStub on [::]:8080 (emailservice's default port) and calls SendOrderConfirmation", "judge": "FD.3b"}
+{"id": "e96bd0309a4c5103", "verdict": "correct", "reason": "recommendation_server registers RecommendationService, a RecommendationServiceServicer subclass", "judge": "FD.3b"}
+{"id": "eb95c321dabee9ee", "verdict": "correct", "reason": "NewCartServiceClient(..).GetCart on the cart service connection: hipstershop.CartService, served by cartservice", "judge": "FD.3b"}
+{"id": "f2d2028aa2359beb", "verdict": "correct", "reason": "NewProductCatalogServiceClient(..) calls GetProduct / ListProducts: hipstershop.ProductCatalogService, served by productcatalogservice", "judge": "FD.3b"}
+{"id": "f6eb23b27c604707", "verdict": "correct", "reason": "subscribe reads Firestore collection('entries') under the category doc via .snapshots()", "judge": "FD.3b"}
+{"id": "fe859fe3ef4b7a5c", "verdict": "correct", "reason": "the bufferpool client dials ws://<addr>/ws; ws:ws inherits /ws from bufferpool/server.go's HandleFunc(\"/ws\", handler), which upgrades, and the default addrs agree", "judge": "FD.3b"}
