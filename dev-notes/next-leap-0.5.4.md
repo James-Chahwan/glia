@@ -446,7 +446,7 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W1 (DF.14): a Pub/Sub consumer whose subscription S is bound to topic T ≠ S still pairs exactly with a producer
   publishing to a topic named S; the declared binding contradicts that pair.
 - W1 (DF.17): TS locals from `inject()` (`const auth = inject(AuthService); auth.user()`) have no type, and Angular
-  template reads (`{{ auth.user()?.displayName }}`) bind nothing (Kina guards and templates).
+  template reads (`{{ x.y()?.z }}`) bind nothing (seen in a private app's guards and templates).
 - W1 (DF.18): an OpenAPI YAML `servers:` sequence at indent 0 (`servers:\n- url: /v1`, what yaml.v2 emitters write)
   reads as no servers; fixing it moves those documents' op qnames, so the packet declares a qname break. Flow-style
   `servers: [{url: ..}]` / `variables: {..}` stay unread.
@@ -655,21 +655,20 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   - `glia check` repeats every coverage caveat paragraph under every violation (three long HANDLED_BY paragraphs per
     row); print each caveat once per rule.
   - GQL answers carry no location (`at` is `-`), while the same Datalog query locates every row.
-  - **Smart contracts are not modelled across the stack.** Kina's `EscrowManager` is defined in `contracts/` (Solidity,
-    Hardhat), called from the frontend (ethers, 7+ files) and the backend (`ethclient` in `signer.go` / `indexer.go`);
+  - **Smart contracts are not modelled across the stack.** the demo app's contract is defined in Solidity
+    (Hardhat), called from the frontend (ethers, 7+ files) and the backend (go-ethereum `ethclient`, two files);
     no edge joins a TS / Go contract call to the Solidity function, and identity has no ABI rule. A contract-call
     extractor plus an identity rule (Solidity contract <-> its ABI clients) is the cross-stack link a dApp needs.
   - **The client <-> server contract model is not identified - IN 0.5.4** (James, on Kina's 0 identity classes: *"the
     frontend talks to backend as a service definition somewhere so thats incorrect"*, then *"straight into 0.5.3 for that
-    one"*). Kina has no OpenAPI / proto: its contract
-    is code, the Angular services + `core/models` (`export interface Offer`) and the Go handlers + `models.go`
-    (`type Offer struct` with `json` tags). glia pairs the calls (108 HTTP_CALLS pairs) but not the models, and on
+    one"*). The app has no OpenAPI / proto: its contract
+    is code, Angular services + TS model interfaces and Go handlers + Go structs with `json` tags. glia pairs the calls (108 HTTP_CALLS pairs) but not the models, and on
     quokka-stack the 39 contract_op classes join swagger, the Go annotation and the feature spec, never the web /
     Android client models. Candidate: an identity rule pairing a client model and a server model through the paired
-    endpoint <-> route (the client's typed call `http.get<Offer[]>`, the handler's serialised struct) and their JSON
+    endpoint <-> route (the client's typed call `http.get<T[]>`, the handler's serialised struct) and their JSON
     field names, plus model drift (a field one side has and the other does not serialise) in the contract-fields answer.
-  - quokka-stack's NATS JetStream chat mints **no queue node at all**: `conn.Publish(notifSubject(targetUserID), payload)`
-    on a `*nats.Conn` parameter and JetStream subjects from `config.Appconf.NATS.JetStream.Publish.SubjectTemplate`
+  - quokka-stack's NATS JetStream chat mints **no queue node at all**: a `conn.Publish(<subject fn>(..), payload)` call
+    on a `*nats.Conn` parameter and JetStream subjects read from a config template field
     give 0 QUEUE_PRODUCER / QUEUE_CONSUMER nodes, while the QUEUE_FLOWS caveat says such topics are "extracted as an
     unresolved framework tag". Either mint the unresolved producer / consumer (so the flow is visible and caveated) or
     correct the caveat; then fold config-templated subjects through the config keys.
@@ -678,9 +677,9 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 
 - W15 (DT.1b): TS re-export barrels are not followed: `export * from` / `export { X } from` emit no ImportStmt, so a
   name imported through a barrel gets the IMPORTS edge to the directory's index module (DT.1b) but no binding.
-  Measured: quokka-stack web imports from `@app/core` in 32 files through two levels of barrel (`core/index.ts` ->
-  `./models` -> `models/index.ts` -> `./user.model`); Kina `import { WalletActionSheet } from '../../wallet'`. Kina's
-  `core/models/index.ts` declares its interfaces itself, so DT.1b already binds those. Candidate for a 0.5.2 tweak if
+  Measured: one private app's web imports from a path alias in 32 files through two levels of barrel (an
+  `index.ts` re-exporting a directory whose `index.ts` re-exports a model file); the other imports a component
+  through a directory index. The other's model index declares its interfaces itself, so DT.1b already binds those. Candidate for a 0.5.2 tweak if
   James wants it before the release.
 - W15 (DT.1b): a `'.'`, `'..'` or trailing-slash specifier names only a directory in tsc, but resolve_ts_source maps it to
   the directory's qname, so a same-stem sibling FILE (`src/app.ts` beside `src/app/`) still wins (0 instances in Kina,
@@ -745,7 +744,7 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W19 (DT.5g): the TS parser's collect_calls_in skips a `function f() {}` / `class K {}` declared inside any walked body (a
   describe callback's `async function setup()`, a helper inside a method): only the name is recorded as a shadow, and the
   declaration's calls, endpoints and value references are never read. Walking it (credited to the enclosing scope, as
-  nested arrows are) or minting a nested FUNCTION closes quokka's activities spec providers; an undeclared CALLS change,
+  nested arrows are) or minting a nested FUNCTION closes a private app's spec providers; an undeclared CALLS change,
   so its own packet.
 - W19 (DT.5g): a Bare USES ref bound through a default import to a MODULE could look through to the module's
   default-exported declaration (as heritage_through_module does for heritage); DT.5g drops those refs in the parser.
@@ -770,8 +769,8 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W22 (DT.10j): not read: a spread of a same-file config object (`{ ...escrowContract, functionName: 'x' }`, a common
   wagmi pattern) counts dynamic; viem `encodeFunctionData` / `decodeFunctionResult` / `decodeEventLog` (the TS twin of
   Go's Pack); the standalone `web3-eth-contract` `new Contract(abi, addr)`; truffle's global `web3` without an import.
-- W22 (DT.1l, James's call): quokka's GroupUser / GroupLastMessage read every key through a same-file
-  `_pick(j, ['userID', 'userId', 'UserID'])` helper, so they write no SCHEMA_FIELDS (21 of quokka's 23 fromJson models
+- W22 (DT.1l, James's call): two of a private app's Dart models read every key through a same-file
+  `_pick(json, [<key aliases>])` helper, so they write no SCHEMA_FIELDS (21 of quokka's 23 fromJson models
   do); a same-file key-alias helper rule (a Map plus a List<String> of literals, the body subscripting the map by an
   element) is interprocedural.
 - W23 (DT.1k): a GraphQL document built by string concatenation, or an inline gql`` at the call site, stays unresolved;
@@ -793,7 +792,7 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W26 (DT.13; DT.11c, DT.6b, DT.3c): docs/overlay.md has no text for the implied GraphQL transport exemption and the
   `graphql transport; ` detail, the withheld test-file routes or WS-served routes (the skills and CLAUDE.md carry them).
 - W26 (DT.13, DT.1k): engine/src/contract_fields.rs element_kind reads an envelope-or-array client union
-  (`{ activities: C[] } | C[]`) as no kind, so a pair the models pass confirms stays client_type_unresolved (quokka-stack
+  (`{ items: C[] } | C[]`) as no kind, so a pair the models pass confirms stays client_type_unresolved (quokka-stack
   52 rows); it should read graph::resolvers::models::union_member (made pub(crate) / pub on the graph crate).
 - W26 (DT.13, DT.11z): a WebSocket base bound once per deployment (environment.ts + environment.prod.ts) stays unfolded;
   port endpoint_fold::deployment_hosts to WS_CLIENT.

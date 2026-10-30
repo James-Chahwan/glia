@@ -30,9 +30,11 @@
 //!   `root` or overlay-declared label never matches) and the PACKAGE_DEPs
 //!   naming it, keyed by `same_as::project_dep_key`. A class needs the
 //!   PROJECT and at least one dependency. A .NET project's label is the
-//!   csproj file stem (DD.4 records `manifest` for it) but no ecosystem the
-//!   key maps .NET to extracts a PACKAGE_DEP, so the question of whether a
-//!   stem is a declared name never reaches a class.
+//!   csproj file stem (DD.4 records `manifest` for it), keyed as a `nuget`
+//!   name; since FD.31 a project file's `<PackageReference>` mints a
+//!   `package:nuget:` PACKAGE_DEP, so a stem that another project depends on
+//!   by that name joins a class (as Maven `groupId:artifactId`, pub and Hex
+//!   names do).
 //! - `message_fqname` (FACT): MESSAGE_TYPEs with one qname (flavour and fully
 //!   qualified name are already in it, as the retired `message_schema`
 //!   resolver keyed them).

@@ -239,7 +239,7 @@ python3 test_score.py                    # hermetic: a canned run under a temp D
 `score <run_id>` reads `DIR/runs/<id>/meta.json` and `sessions.jsonl`, each session's patch
 under `DIR/patches/<id>/` (its sha256 checked against the row) and the task rows in `tasks/`
 (refused when a task file's sha256 is not the run's). It prints
-`[agent-ab] score sessions=<n> excluded=<k> tasks=<t>`.
+`[agent-ab] score sessions=<n> excluded=<k> tasks=<t> pairs=<a-b,..|->`.
 
 Per session, with T the truth's code paths (a rename's new path, a deletion's old path) and E
 the non-test code files the patch touches (`tasks.py`'s `CODE_EXTS` / `TEST_RES`; never under
@@ -436,5 +436,5 @@ the probe table, the `missed` paired differences (task-cluster bootstrap, lower 
 the diag verdict counts. score.py's own `PAIRS` are FE.3's (g052 / g053): its `baseline.json`
 from a probe run carries the g053-none pair only, and the g054 pairs are the report's. Markers:
 `[agent-ab] set name=<s> metric=<m> tasks=<n> repos=<r> split=<k> sha256=<12>` (build-set),
-`[agent-ab] score sessions=<n> excluded=<k> tasks=<t>` and `[agent-ab] diag verdicts
+`[agent-ab] score sessions=<n> excluded=<k> tasks=<t> pairs=<a-b,..|->` and `[agent-ab] diag verdicts
 no_skill=<a> skill_only=<b> glia_missed=<c> glia_late=<d> glia_found=<e>` (report).

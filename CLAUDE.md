@@ -102,6 +102,16 @@ stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of ever
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
 py/                 pyo3 bindings — the only Rust crate published to PyPI (as glia-py, module glia_py)
+embed/              glia-embed (0.5.4, FB.1, FB.14): the Embedder trait, HashEmbedder (`test-hash`, 64 dims,
+                    deterministic, every build), FastEmbedder (fastembed =6.0.0 bge-small, 384 dims, fp32,
+                    behind feature `fastembed`), the f32 LE codec, the device probe and the crash-isolated
+                    GPU worker (`glia-embed-worker`, ORT WebGPU, feature `gpu-webgpu`; CUDA `gpu-cuda`,
+                    opt-in); a GPU failure finishes on an in-process CPU session. The engine reaches the
+                    model only through feature `sem-eval` (gate harnesses), py through `embed` (on in
+                    the published wheels), the CLI through its default `embed`. docs/embeddings.md
+build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.5's build-target graphs
+                    (track T9); doc-only in 0.5.4, a stamp HASHED_ROOTS entry
+parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.5 (track T9); doc-only in 0.5.4
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
                     (the rules layer's own toy proof is inline in rules/tests/toy.rs, so this list is unchanged)
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
@@ -133,8 +143,10 @@ The facade rules:
    `coverage`, `extract`; `graph` globs `blast`, `build`, `merged`,
    `resolvers`, `types`. A `pub` item in a globbed module IS public API, so a helper
    another module needs is `pub(crate)`, never `pub`. Modules that declare no free `pub`
-   items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
-   `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
+   items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `imports`/
+   `signal`/`traversal`) are not globbed. Graph `calls` is not globbed either, but since FH.21
+   it declares two free `pub` items, `ResolvePool` and `with_resolve_pool`, re-exported
+   through the `build` glob (`glia_graph::{ResolvePool, with_resolve_pool}`). `engine::arch` and `engine::cache` are
    `pub mod` with an explicit, partial flat list.
 2. **Every new 0.5.0 / 0.5.1 / 0.5.2 / 0.5.3 primitive is a public module slot**, reached by
    module path — `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
@@ -149,7 +161,15 @@ The facade rules:
    added their resolvers' `mod` lines; no tweak touched Cargo.toml or Cargo.lock; in 0.5.3
    only the wave-0 E0.* packets touched a facade (E0.1 `algo::fuse`, E0.2 the engine's
    `rank` / `intent` / `calibrate`) beside EA.1's `ppr_index` lines in activation's lib.rs, and
-   no packet touched Cargo.toml or the workspace Cargo.lock).
+   no packet touched Cargo.toml or the workspace Cargo.lock; in 0.5.4 the wave-0 F0.* packets
+   declared the slots (F0.1 code-domain `goal`, F0.2 the three crates and the one planned
+   Cargo.lock move, F0.3 the engine's `semantic` / `goal` / `clarify` / `targets`, F0.4 py's
+   `clarify` / `embed` / `goal` / `targets`, F0.7 the engine's `health`), and four later packets
+   touched a facade or the lock: FH.2b py's `mod health;`, FA.21 / FA.22 code-domain lib.rs's
+   IMPORT_BINDINGS readers (`import_bindings_cell`, `read_import_bindings`, `ImportBinding`,
+   `import_default_binding`), and FB.14 the CLI's hidden `embed-worker` command (cli/src/main.rs,
+   cmd/mod.rs) with Cargo.lock's second move: fastembed 4.9.1 -> 6.0.0, ort rc.9 -> rc.13, the
+   lock 447 -> 381 packages).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
@@ -161,6 +181,12 @@ The facade rules:
    `rules_query.rs` in DB.5). At 0.5.3 too: the 8 E0 slot files with a body
    (`activation/src/algo/fuse.rs`, `engine/src/{rank,calibrate}/mod.rs`,
    `engine/src/intent/{text,ids,defs,paths,idr}.rs`) and every other tracked `.rs` (EZ.1's scan).
+   At 0.5.4 every tracked `.rs` has code except exactly the 16 wave-0 slots of the tracks moved
+   to 0.5.5 (James 2026-10-30, F0.8 dropped: kept, not removed): `build-domain/src/lib.rs`,
+   `code-domain/src/goal.rs`, `engine/src/clarify/{answer,questions}.rs`,
+   `engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs`, `engine/src/targets.rs`,
+   `parsers/build/bazel/src/lib.rs` and `py/src/{clarify,goal,targets}.rs`, each ending
+   `//! Reserved for 0.5.5 (track T6|T9); empty in 0.5.4.` (FZ.1's scan exempts exactly these).
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -170,8 +196,12 @@ engine/src/   lib.rs        facade (rules above)
                             HOCON `.conf` files akka-quartz names schedules in (DG.7b); sbt
                             sub-projects as PROJECT roots (DG.12); requirements.txt /
                             Pipfile python roots (DE.9); a `[[project]]` label names a
-                            detected root whose manifest names nothing (`relabelled=`)
-              route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache;
+                            detected root whose manifest names nothing (`relabelled=`); a
+                            directory symlink is walked once: an in-repo link at its target,
+                            an outside target once, a cycle cut (FD.78, `[walk] symlinks ..`)
+              route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto; since FD.31
+                            pom.xml, build.gradle(.kts) and .NET project files are manifest
+                            paths, walked and routed to the manifest branch), parse cache;
                             ModuleQnames::plan names each file's MODULE (same-stem code files,
                             LB.9b / LB.13, and every C/C++ file, LB.10a, are named by file
                             name; graph/src/imports.rs `SameStem` picks the importer's
@@ -234,8 +264,9 @@ engine/src/   lib.rs        facade (rules above)
                             changed (`[evidence-split] graphs=..`); test_route_ids (DT.6a), the
                             one test-only-ROUTE predicate the `http` pass, the provenance stamp
                             and (DT.6b) gaps / suspected read
-              profile.rs    CODE_PASSES — every build pass in run order (17 Resolve passes: 15
-                            cross-graph resolvers, then models and identity; 9 post-passes,
+              profile.rs    CODE_PASSES — every build pass in run order (18 Resolve passes: 15
+                            cross-graph resolvers, then models, identity and org_packages
+                            (FA.22); 9 post-passes,
                             evidence fill + determinism sort); run_code_passes_with(merged,
                             &CodeBuildCtx) is the whole build tail (run_code_passes is gone, DD.7);
                             CodeBuildCtx::for_merge passes a layout merge's recorded SCIP roots, so
@@ -326,7 +357,35 @@ engine/src/   lib.rs        facade (rules above)
                        SELs0, SELt2, SELf2t; GROUPS structure / review / find), fusions.rs
                        (the seeded and find banks over algo::fuse), work.rs (W5 / M),
                        step.rs (calibrate / calibrate_snapshot, CalibrateOptions { params,
-                       groups, surface, vocab }, the bootstrap CI)
+                       groups, surface, vocab }, the bootstrap CI); 0.5.4 (FB.7d):
+                       sets::{FIND_CANDIDATES_SEM, specs_with, FindSem} (SELf2t gains
+                       FUSE[T1s,SEMp:t2] and LX[IDR,FUSE[T1s,SEMp:t2]] when the repo holds
+                       vectors) and replay::SemState
+  0.5.4 public slots (F0.3, F0.7), owner (+ extenders):
+              semantic/ FB.4 (+FB.5a, FB.7a, FB.7b, FB.8) — query-time embeddings, never a build
+                       pass: text.rs (EmbedRecipe t1 / t2, DEFAULT_RECIPE t2, embed_text,
+                       text_hash, DOC_CHARS / CODE_CHARS / MAX_IMPORTS), index.rs (VectorIndex over
+                       .glia/vectors.jsonl, VECTORS_FILE, SemanticHit, IndexStats), run.rs
+                       (embed_repo / EmbedOptions / EmbedReport: the `glia embed` run, a locked
+                       bulk writer, only changed text re-embedded; surface_model,
+                       EMBED_MODEL_ENV `GLIA_EMBED_MODEL`), query.rs (SemanticSource: the lazy
+                       query embedder, started on the first query, the last query vector kept;
+                       open_for_surface, recorded_model, QUERY_PREFIX, FUSED_RECIPE). A semantic
+                       row ranks; it never promotes, hides or creates a fact / derived row and
+                       never seeds a walk. find.rs holds FIND_FILES_FUSED
+                       `LX[IDR,FUSE[T1s,SEMp:t2]]` (FB.7a); pack's fallback seeds from it (FB.8)
+              health    F0.7 slot, FH.2a (+FH.9, FH.26) — boundary health: per mechanism
+                       (MECHANISMS: http, grpc, rpc, graphql, queue, ws) clients, external, test
+                       sites (`test_site_producers`, ORIGIN test_fixture producers counted apart,
+                       FH.26), servers, pairs, reach and a Verdict OK / DEGRADED / BLIND; Role
+                       app | library (a library is never judged on reach); ParseHealth (code
+                       files no parser read, docs apart), workspace imports, suspicious qnames,
+                       the dead share; health / health_with / boundary_health; blind_caveats /
+                       blind_line, the `blind` row an answer gains for a mechanism it read that
+                       health rates BLIND or DEGRADED (FH.9, `BlastRadius.blind`)
+              goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.5 (T6: goal/, clarify/;
+                       T9: targets.rs): goal/mod.rs and clarify/mod.rs declare their children,
+                       every child file is doc-only (`Reserved for 0.5.5`)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -365,7 +424,17 @@ graph/src/    lib.rs        facade (rules above)
                             evm.rs (EvmContractResolver, DT.10b) pairs EVM client calls and
                             subscriptions to the Solidity procedure / event of the contract
                             they identify; gqlgen.rs (GqlgenResolver, DT.5f) pairs SDL
-                            GRAPHQL_RESOLVERs with gqlgen's Go resolver methods
+                            GRAPHQL_RESOLVERs with gqlgen's Go resolver methods; 0.5.4:
+                            org_packages.rs (OrgPackageResolver, FA.22, FA.23, public through
+                            the resolvers glob): an npm / gomod / cargo / pypi import of a
+                            package a `manifest_name` SAME_AS class names routes to that
+                            sibling PROJECT's module (IMPORTS rule `org_import`), and the calls
+                            and references through it bind there (CALLS `org_call`, USES /
+                            INJECTS / HANDLED_BY `org_ref`), all Medium; npm entries by
+                            convention plus package.json `main` / `exports` (`entry` /
+                            `subpaths` on the npm PROJECT's ORIGIN); the last Resolve pass;
+                            evm.rs gains `abi_partial` (FH.23: a partly stale ABI paired per
+                            member, HEURISTIC, in why::HEURISTIC_PAIRING_RULES)
   public slots (glia_graph::<slot>::<item>):
               rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
@@ -412,6 +481,14 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     InvokedMembers.{sigs, siblings, owner_bases} with matches_at / gates /
                     checks_signature, and invoked_member_at (DT.5l: rows 12-32);
                     glia_config gains Rejection / LoadedConfig.rejections (DT.7c)
+                    0.5.4: lib.rs's IMPORT_BINDINGS writers and readers (import_bindings_cell /
+                    import_bindings_json, IMPORT_BINDINGS_CAP 256, FA.21; read_import_bindings,
+                    ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.5
+                    (T6); same_as keys four more ecosystems (FD.31: maven `groupId:artifactId`
+                    lowercase, pub, hex, nuget; PROJECT ecosystems dart -> pub, elixir -> hex,
+                    dotnet -> nuget, maven / gradle -> maven); glia_config gains ConventionDecl
+                    (`[[convention]]`, FB.12a); external_inputs validates a CONV `kind`
+                    `convention`; profile's Tier is glia_activation::profile::Tier (FD.7a)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
@@ -435,13 +512,18 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               watch DC.9 (the WatchSession class: apply / poll / snapshot / persist,
               the GIL released while the engine works)
               graph.rs: a PyGraph drop calls memory::release_freed_memory (DE.10)
+  0.5.4 private slots (F0.4, F0.7): embed FB.5c (glia_py.embed; the process-wide bge-small
+              session; the wheel's `glia-embed-worker` found beside the interpreter, FB.14)
+              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.5 (T6, T9)
+              vocab_sync (FB.13b) lives in snapshots.rs beside history_sync
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
                             ImpactDirection)
               hooks.rs      install-hooks + HooksCmd (LG.2's hidden `hook`)
               surface.rs    #[cfg(test)] CLI surface test (LG.6a)
-              cmd/mod.rs    pub(crate) mod lines — never edited again
+              cmd/mod.rs    pub(crate) mod lines (FB.14 added the hidden `embed_worker`: the
+                            WebGPU worker the CLI re-executes itself as, no surface file)
               cmd/<command>.rs   one per pre-0.5.0 command: clap Args + run(a) -> i32
               cmd/<area>/mod.rs  flattened Subcommand enum per area of leap commands:
                   query   pages LA.6e, find LD.3b, flows LD.4b, implementors LD.7c,
@@ -456,7 +538,8 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
                           0.5.1: flags CC.7c
                   store   inspect LC.4, cell LF.1c; 0.5.1: cache/ CE.2c (+CE.2d, CE.2e)
                   inputs  gaps LF.2c, history LF.5d, tests LF.6d; 0.5.1: overlay CE.3e,
-                          scip/ CE.1c
+                          scip/ CE.1c; 0.5.4: embed FB.5b, vocab FB.13b
+                  query   0.5.4: health FH.2b
 ```
 
 - **py:** pyo3 `multiple-pymethods` lets each module carry its own
@@ -486,10 +569,12 @@ source files
    → graph builder (resolves intra-repo references)
    → CODE_PASSES (engine/src/profile.rs): the 15 cross-graph resolvers (HttpStack, gRPC, RPC,
      EVM, Queue, GraphQL, gqlgen, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC),
-     then models (the http_model / graphql_model SAME_AS stars, after http and graphql, DT.1h)
-     and Identity (SAME_AS stars, the last Resolve pass), then the 9 post-passes, the evidence
-     fill (group fills taken at language build, re-filled only where something changed, DC.5)
-     and the determinism sort — `[passes] domain=code resolve=17 post=9 finalize=2`
+     then models (the http_model / graphql_model SAME_AS stars, after http and graphql, DT.1h),
+     Identity (SAME_AS stars) and org_packages (0.5.4, FA.22: imports, calls and references into
+     a sibling package's project through its manifest_name class; the last Resolve pass), then
+     the 9 post-passes, the evidence fill (group fills taken at language build, re-filled only
+     where something changed, DC.5) and the determinism sort —
+     `[passes] domain=code resolve=18 post=9 finalize=2`
    → merged graph
    → .gmap layout at <repo>/.glia/graph/ (rkyv + mmap, sharded)
    → [optional] activation (PPR) / projection-text / pyo3 → Python
@@ -500,22 +585,37 @@ source files
      (a cached PprIndex) -> the calibrated pick, else H10 (pack: its own ranking, never the
      record, ruling EC-9b) -> row order and `files`; review's
      title and find --files' query -> IDR (ids routed at a revision) + BM25 over the stored
-     messages -> LX[IDR, ..] or the calibrated pick
+     messages -> LX[IDR, ..] or the calibrated pick; 0.5.4: with .glia/vectors.jsonl of the
+     surface model, find --files blends the query's similarity into the BM25 key
+     (LX[IDR,FUSE[T1s,SEMp:t2]], FB.7a) and pack seeds from that order when no name matches (FB.8)
+   → [query time] boundary health (0.5.4, engine::health) and its `blind` rows; find's absence
+     and gaps' named_not_modelled read the vocabulary snapshot (FB.13c)
 
 snapshot steps (CLI / pyo3, never a build, never a .gmap):
    git log -> `glia history sync` -> .glia/history-snapshot/ (commits, blame, CO_CHANGES;
      0.5.3: version 2 + messages.jsonl, redacted, trailers dropped)
    history snapshot + a built graph -> `glia history calibrate` (0.5.3) -> the leak-free
      online replay -> .glia/calibration-snapshot/ (meta.json written last, bound to BUILD_STAMP)
+   a built graph + a local model -> `glia embed` (0.5.4, FB.5b) -> .glia/vectors.jsonl (one
+     VectorRow per (qname, kind), `text_hash`, the `device`; gitignored, never in a layout:
+     FB.3 took VECTOR out of the build, so editing it stales nothing)
+   one commit's tracked files -> `glia vocab sync` (0.5.4, FB.13b) -> .glia/vocab-snapshot/
+     (identifiers and the files they occur in; self-gitignored)
 ```
+
+0.5.4 adds no graph beside the region / project / docs graphs: the goal graph (GOAL_UNIT /
+TRACES) and the build-target graph (targets.gmap) moved to 0.5.5 with tracks T6 and T9.
 
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
 mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
 qname, never by the RepoId-derived NodeId, so two clones of one commit (another remote or
 directory name) build the same qname-level graph (DE.1, `engine/tests/repo_id_invariance.rs`;
-`[doclink] tie-break by qname: qualified=<q> bare=<b>`). A node id still hashes the RepoId, and
-RepoId-ordered tie-breaks remain in pick_primary, cochange, overlay bind, declared and cells
-(the 0.5.4 seed, §D).
+`[doclink] tie-break by qname: qualified=<q> bare=<b>`). A node id still hashes the RepoId, but
+since FD.22 no tie falls back to NodeId order: pick_primary, cochange, overlay bind, declared
+anchors and cells break ties by (qname, kind, graph index), then node index
+(`MergedGraph::tie_cmp`), and a fallback MODULE anchor is the least-qname MODULE
+(`[tie-break] by qname site=<pick_primary|declared|cells|cochange|overlay_bind|test_reports>
+ties=<n>`).
 
 **Watch (DC.1-DC.10b).** `engine::watch::WatchSession` keeps one repo's build open: the walk
 table with stat stamps (DC.1), one ParseCache with its in-memory build memos (DC.4) and the last
@@ -564,6 +664,17 @@ once per built repo, `[timing] build repos=<n> resolve=<ms> post=<ms> finalize=<
 once per build (a layout merge prints no `external_cells=`; the stage and per-pass times are
 `PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>` once
 per layout write.
+0.5.4 (FH.21): inside a language group, `resolve_calls` / `resolve_refs` run pooled through the
+`glia_graph::ResolvePool` seam (the engine installs its rayon pool around each language build
+with `with_resolve_pool`; with none installed, or for a language hook that must stay serial,
+one chunk on the calling thread), with one repo-unique name index per pass and an exact
+superclass prefilter for the TS inherited-call pass; byte-identical at any size,
+`[resolve-pool] lang=<l> calls=<c> refs=<r> chunks=<k> threads=<t> calls_ms=<ms> refs_ms=<ms>
+serial_hooks=<h>` per pooled group and `[ts-inherit] .. prefiltered=<k>` (twenty's language
+build 25 s -> 3.1 s serial, 2.3 s pooled). FH.22 measured the pool's default and kept it (every
+core; no new marker): four concurrent cold builds of twenty took 71.7 / 74.1 s at 16 threads
+each and 76.9 / 73.2 s at 4 each, one alone 33 s at 16 and 45 s at 4, so a load-shrunk default
+only slows the lone build (`parallel::threads` documents the table).
 
 **The 0.5.2 tweaks' markers (DT, waves W15-W30)**, each on stderr, grouped by what they watch:
 - *Contract models (T1).* Per file: `[model-schemas] lang=typescript interfaces=<i> classes=<c>
@@ -727,6 +838,71 @@ per layout write.
   `macos-14-arm64`. The release-docs packets' own: `[readme-surface] commands=<n> usage_lines=<u>
   flags_checked=<f>` and `[skill] <name>: <n> invocations checked against cli/surface (<k> stale)`
   (EZ.1), `[check-neuropil]` (scripts/check-neuropil.sh, EZ.2).
+
+**The 0.5.4 markers (F0-FH, waves W0-W26)**, each on stderr unless noted, grouped by what they watch:
+- *Embeddings (FB).* `[embed] device=<adapter> backend=<cpu|webgpu|cuda> driver=<v> fallback=<reason|none>
+  batch=<n>` once a device is settled (again on a later fallback), `[embed] oom device=<d> batch halved
+  to <n>`, `[embed] chunk <i>/<n> texts=<t> ms=<ms>`, `[embed] repo=<l> model=<m> recipe=<r> nodes=<n>
+  cached=<c> reused=<u> embedded=<e> stale_dropped=<s> foreign_kept=<f> rows=<w> ms=<ms>` and `[embed]
+  cli repo=<l> exit=<code>`; `[semantic] index repos=<r> model=<m> recipe=<r> dims=<d> rows=<n> fresh=<f>
+  stale=<s> ..`, `[semantic] query model=<m> recipe=<r> dims=<d> ms=<ms>` (and `query model mismatch`,
+  `query error surface=<s>`); `[find-files] .. rows=<r> sem=<..>` with vectors; `[calibrate] semantic
+  queries=<q> embedded=<e> ms=<t> model=<m>` (FB.7d); `[cells] ls rows=.. vector_issues=<n> models=<m>
+  surface=<s>` and `[cells] rekey skipped foreign=<n> ..` (FB.2, FB.11); `[pack] query=.. notes=<n>
+  conventions=<c> tokens=..` (FB.11, FB.12b), `[review] conventions=<n>`, `[declared] repo=<l>
+  constraint=<c> decision=<d> note=<n> convention=<v> anchored=<a> orphaned=<o> (..)` (FB.12a; the
+  parenthesis gains ` records=<r>`, FD.65); `[vocab] sync rev=<12> files=<f> tokens=<t> common=<c>
+  skipped_binary=<b> skipped_large=<l> ms=<ms>`, `[vocab] surface=<cli|py> ..`, `[gaps] named_not_modelled
+  repo=<l> cited=<c> rows=<r>` (or `skipped: no vocab snapshot ..`) and engram-export's `[engram-export]
+  vocab side: <n> tokens, ..` (FB.13a-d). The fusion gate's `[embedding-gate] verdict=<v> ..` and
+  `[rank-parity] label=<l> shape=find ranking=LX[IDR,FUSE[T1s,SEMp:t2]] queries=<q> key_mismatch=0
+  order_mismatch=0` (FB.7c; `scripts/rank-gate.sh` runs `--engine-parity on`).
+- *Precision and hygiene (FD).* `[tie-break] by qname site=<s> ties=<n>` (FD.22); `[cron] k8s docs=<d>
+  jobs=<j>`, `[cron] celery value rejected=<n>`, `[rust-routes] literal_skipped=<n>`, `[ws] needle
+  boundary rejected=<n>` / `[ws] ratchet routes=..` (FD.4a, FD.4c, FD.4d); `[data-entity] sink-args
+  refused write=<w> in_process=<p>` (FD.4b, FD.74); `[data-sources] refused jvm_descriptor=<j>
+  word_tail=<w>` (FD.73); `[config] env-writes skipped=<s> deleted=<d>` and `[secrets] vault-client gate
+  refused=<n>` (FD.75); `[config] yaml environment not_env=<reason> keys=<k>` (FD.76); `[packages]
+  eco=<maven|pub|hex|nuget|cargo|pypi> deps=<n> ..` (FD.31; TOML ones gain ` array_tables=<a>`, FD.77,
+  Gradle ` catalog_refs=<c>`); `[walk] symlinks root=<r> in_repo_dirs=<i> out_of_repo_dirs=<o> cycles=<c>
+  dangling=<d> file_links=<f>` (FD.78); `[grpc-server-impl] .. register=<n> (typed= handlers= foreign=
+  unread= elsewhere= deferred_bound=)` (FD.80); `[iface] go implicit filtered: .. cross_module=<c>`
+  (FD.81); `[doclink] precision: unshaped=<u> registry=<r> placeholder=<p> test_tree=<t>
+  project_root=<j>` (FD.79); `[contract-breaks] moved_files=<n> paired_ops=<p>` (FD.25);
+  `[implementors] tiers fact=<f> derived=<d> heuristic=<h> source=evidence` (FD.7b); `[check] transitive
+  edge_levels=<e> rules=<r>` (FD.27); `[engram-export] v6 since refusals: hint_refused=<n> (..)`
+  (FD.34); `[body-hash] timing ..` (FD.34b). The close-out gates: `[fmt] check: ok` (F0.5), `[rustdoc]
+  check: ok` (FD.23b) and the edge audit's `[edge-audit] report strata=<s> judged=<j> unsure=<u>
+  under_floor=<f> insufficient=<i> kappa=<k>` (FD.3c).
+- *Org routing (T10).* `[imports] bindings cell modules=<m> rows=<r> capped=<c> repo=<l>` (FA.21);
+  `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm= go= cargo= pypi=)` and
+  `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm= go= cargo= pypi=)`, `[evidence-rules]
+  resolver=org_packages org_import=<i> org_call=<c> org_ref=<r>` (FA.22, FA.23).
+- *The Sibyl cohort follow-up (FH).* `[health] repo=<l> role=<r> <mechanism rows> unparsed=<u>
+  workspace_unresolved=<w> suspicious=<s> dead_share=<d> docs_unparsed=<x> parse=<p> verdict=<v>
+  surface=<s>` (FH.2a, FH.26); `[blind] surface=<s> mechanisms=<m> blind=<b> degraded=<d>` (FH.9);
+  `[path-fold] symbols=<s> folded=<f> unresolved=<u> (enum= object= const=)` and `[path-fold] ops ..`
+  (FH.3, FH.3b); `[endpoint-shape] calls=<c> minted=<m> (..)` (FH.4a); `[http-wrappers] wrappers=<w>
+  sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p> client_by_import=<i>
+  options_object=<o> computed_verb=<v>` (FH.4b, FH.17, FH.17b); `[imports] workspace packages=<p>
+  bound=<b> subpath=<s> unbound=<u>` (FH.5); `[ts-aliases] bundler file=<f> module_roots=<m> aliases=<a>
+  skipped=<s>` (FH.16, FH.16b); `[sfc] files=<f> blocks=<b> (svelte= astro= vue=)` (FH.6); `[http] hostless
+  clients=<c> narrowed=<n> ambiguous=<a> catchall_dropped=<d>` (FH.14, FH.14b); `[java-routes] text
+  scanners skipped=<n> (..)` (FH.15); `[ts-routes] nest handlers bound=<b> unbound=<u>` (FH.19);
+  `[ts-types] aliases=<a> object=<o> type_refs=<t>` (FH.20); `[name-breaks] base=<rev> exchanges=<e>
+  names=<n> renames=<r> clients=<c> rows=<w> fixed=<f> ..` and `[name-breaks] answer rows=<n>
+  blocking=<b> advisory=<a> min_tier=<t> folded_schema_rows=<x>-><y> surface=<s>` (FH.7a-d);
+  `[answer-size] surface=<s> rows=<r> shown=<n> offset=<o> areas=<a> bytes=<b> seeds=<s>
+  seeds_shown=<k> also_in_folded=<f>` (FH.8-FH.8d; review's adds names= / names_shown= / tests_shown=);
+  `[evm-link] .. (contract= abi= abi_hint= abi_partial= name_hint=) .. stale_entries=<s>` (FH.23);
+  `[contract-breaks] evm event subscriptions lost=<l> orphaned=<o>` (FH.24); `[resolve-pool] ..`
+  (FH.21, above). The bench: `[cohort] tasks repo=<l> ..` / `[cohort] run release=<r> repos=<n>
+  tasks=<t> misses=<m> (blind= wrong= noisy=)` (FH.1a-d), `[matrix] cells=<grid> fixture_full=<f> cohort_graded=<g> cohort_full=<c> disagree=<d> chain_cells=<k> created=<n>` (FH.10), `[sibyl] cover
+  cases=<n> pairs=<p>/<t> transports=<..,evm>` (FH.11a-c; evm in the default cover since FH.23),
+  `[cohort-gate] <check|compare>: ok - <r> repos, <t> tasks, <c> cells, <g> gains, 0 drops` (FH.12),
+  `[agent-ab] score sessions=<n> excluded=<k> tasks=<t> pairs=<a-b,..|->` (FE.3, FH.13b) and the
+  wheels' `[cli-wheel] check: ok wheel=<w> size_mb=<m>` (FE.5) / `[cli-wheel-ci] <runner> find ok`
+  (FE.6).
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
@@ -923,6 +1099,18 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   `__MODULE__.f(..)`, nested-module automatic aliases and alias paths, DH.17a,
   `[elixir-calls] full-name remote calls bound=<b> ambiguous=<a>`). Every other builder passes
   `|_, _| None`.
+- 0.5.4 (precision and the cohort's boundary chain): Go implicit IMPLEMENTS stays inside one Go
+  module (FD.81); a gRPC server registration is HANDLED_BY the implementation it names, never
+  the registering function (FD.80); Dart member reads look a type name up through the pass's
+  `GlobalNames` index (FH.25, `resolve_type_name` removed); TS object type aliases are INTERFACE
+  nodes with SCHEMA_FIELDS and a type naming one is a USES (FH.20); NestJS routes are HANDLED_BY
+  their decorated method (FH.19); `.svelte` / `.astro` parse every `<script>` block (and Astro's
+  frontmatter) through the TS parser at the file's own lines (FH.6); symbolic route paths fold
+  through the const table and TS enum members bind (FH.3); a bare import of a workspace package
+  the repo's own manifests declare binds to its in-repo module (FH.5), and webpack / vite /
+  vitest aliases and module roots bind bare specifiers (FH.16, FH.16b); a path-shaped URL plus a
+  method signal mints an ENDPOINT whatever the client library (FH.4a), and an in-repo HTTP
+  wrapper is inferred from parameter flow (FH.4b, FH.17, FH.17b).
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
@@ -999,7 +1187,13 @@ into every `.gmap` on disk, so reusing or renumbering one silently corrupts old 
 center, written by IdentityResolver (DD.5) and, for client <-> server models, ModelResolver
 (DT.1h). The 0.5.2 tweaks (DT) allocate none: EVM procedures and clients reuse RPC_PROCEDURE /
 RPC_CALL / EVENT_HANDLER and RPC_CALLS / EVENT_FLOWS, GraphQL schema types MESSAGE_TYPE, model
-fields SCHEMA_FIELDS. The next free ids are node 50 / edge 38 / cell 26.
+fields SCHEMA_FIELDS.
+0.5.4 allocates four (F0.1): node GOAL_UNIT 50, edge TRACES 38, cells UNIT 26 and
+IMPORT_BINDINGS 27. IMPORT_BINDINGS is written (FA.21: each MODULE's external imports, specifier,
+name, alias and row, capped at 256). GOAL_UNIT, TRACES and UNIT were allocated for the goal layer
+(track T6), which moved to 0.5.5: they stay registered with no emitter, locked like
+SHARES_DEPENDENCY, in no carry, community, entry or embed list.
+The next free ids are node 51 / edge 39 / cell 28.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
 old layout still decodes it.
 
@@ -1035,6 +1229,14 @@ because round 3 measured it -0.035 on one repo and +0.019 on another, so it reac
 a calibrated candidate) and `B0` (carry-edge BFS both ways, `[-depth, file degree]`), each optionally
 behind co-change first (`H10..`). The text and fusion math is domain-free too: `algo::fuse` (EB.2);
 the code-domain readings (FileIndex, co-change, IDR, the calibration replay) live in the engine.
+
+0.5.4 keeps the dials too. The one tier type is `glia_activation::profile::Tier` (FD.7a; was
+IdentityTier, the rules crate's Tier, and per-module strings), printed lowercase on every
+surface through `Tier::as_str` (FD.7d). TRACES (38) weighs 0 and GOAL_UNIT (50) is no entry,
+carry or embed kind: both are registered for 0.5.5's goal layer with no emitter. The profile's
+`EMBED_KINDS` (30 declaration kinds) is what `glia embed` embeds. A similarity never reaches a
+walk: the semantic tier only re-orders `find --files`' candidates and picks `pack`'s fallback
+seeds, each marked heuristic beside the lexical absence.
 
 Identity is a table too (DD.3): `CODE_TABLES.identity_rules` holds the ten ways two nodes are
 one thing, one `IdentityRule` per `same_as::ALL_RULES` name (the kinds it pairs, the key, the tier
@@ -1104,15 +1306,18 @@ its `pub use resolvers::{…}` list only if it must be public. Register it by ad
 pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
 `populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
 and `populates_is_exact` tests pin the order and the declared cell types.
-`resolvers/http.rs` is the canonical example. Shipped: 15 cross-graph resolvers, in pass order
+`resolvers/http.rs` is the canonical example. Shipped: 16 cross-graph resolvers; the first 15, in pass order
 http (a written-out `PassSpec`: it takes the overlay's route mounts and, since DT.6a, leaves the
 test-only ROUTEs out of its index), then 14 `resolver!` rows: grpc, rpc, evm (EvmContractResolver,
 DT.10b), queue, graphql, gqlgen (GqlgenResolver, DT.5f), websocket, eventbus, shared_schema, cli,
 db, cron, config, iac; then `models` (a `PassSpec` with `after: ["http", "graphql"]`, the
 http_model / graphql_model SAME_AS stars, DT.1h / DT.1k) and Identity, the last Resolve pass
-(SAME_AS, DD.5): 17 Resolve passes in all. MessageSchema and Package were removed in 0.5.2
+(SAME_AS, DD.5); then the 16th, `org_packages` (OrgPackageResolver, 0.5.4, FA.22 / FA.23, `after:
+["identity"]`, the last Resolve pass: it reads identity's `manifest_name` classes): 18 Resolve
+passes in all. MessageSchema and Package were removed in 0.5.2
 (DD.16), their pairs now identity classes. `resolver:evm`'s `abi_hint` / `name_hint` pairs are
-HEURISTIC (Weak; `why::HEURISTIC_PAIRING_RULES`), so a check violation through one is advisory;
+HEURISTIC (Weak; `why::HEURISTIC_PAIRING_RULES`), as is FH.23's `abi_partial` (a partly stale
+ABI paired per member), so a check violation through one is advisory;
 its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves Solidity events and
 `evm_event:` handlers to resolver:evm (James's ruling 2, `[eventbus-evm]`). See
 `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
@@ -1157,10 +1362,41 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   six pinned public snapshots, judged against `bench/rank-gate/baseline/0.5.2/` and `current/`,
   each its own Holm family, one-sided, alpha 0.05) is part of every close-out that touches a ranked
   path; a drop fails it, and only `baseline` / `baseline-add` / `ratchet` write the baselines.
-- **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
+  Since 0.5.4 gate.json may hold `accepted` rows (row, floor, packet, ruling): a ruled drop
+  passes while it stays at or above its floor, printed `[rank-gate] base=<b> accepted <row>
+  <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted` (FD.79's four
+  glia impact rows, retired in 0.5.5 by docs as a second graph). The gate measures the shipped
+  fused `find --files` (FB.7c): `check` builds rank_eval with `--features sem-eval` and a
+  `glia-embed-worker` (gpu-webgpu), and needs `~/.cache/glia/fastembed` and
+  `$GLIA_RANK_GATE_DIR/sem` to persist (a cold cache re-embeds all six snapshots; glia ~500 s).
+- **Embeddings rank, never decide (0.5.4).** A vector is a snapshot (`glia embed`), never a build
+  input or a layout cell (FB.3). A semantic row re-orders or annotates; it never promotes, hides
+  or creates a fact / derived row, never seeds a walk, and sits beside the lexical absence. The
+  blend shipped only after the fusion gate's committed rule passed on held-out repos (FB.6b);
+  the semantic tier alone failed its gate (FB.6). CPU vectors agree across devices to < 4e-7.
+- **The cohort gate (0.5.4, FH.12).** Beside the rank gate, every close-out runs
+  `scripts/cohort-gate.sh`: the FH.1 outlier cohort (`bench/cohort/`, 21 public repos pinned by
+  sha, no model), `glia health` per cohort repo and the Sibyl cover (`bench/sibyl/`), compared per
+  repo / task / cell with `bench/cohort/results/baseline/`; a drop fails it. A wave's fast tier is
+  partial and never ratchets; the release's last close-out runs the FULL cohort (about 1 h to
+  1 h 40 min, twenty and medusa most of it) and treats `GLIA_COHORT_GATE_SKIP` as a failure.
+- **Self-scan, fmt and rustdoc gates (0.5.4).** `engine/tests/self_scan.rs` (FD.6) builds glia's
+  own tree and fails on any phantom edge its needles mint from glia's own tables and literals;
+  a new env-var read or `Command::new` in glia's non-fixture code adds a row to
+  `engine/tests/data/self_scan_allow.json` in the same commit. The close-out also runs `cargo fmt
+  --all --check` (F0.5, `rustfmt.toml`, `.git-blame-ignore-revs`) and `RUSTDOCFLAGS=-D warnings
+  cargo doc --no-deps` (FD.23b, the touched crates per wave, the workspace at release).
+- **One test binary per crate (FH.18).** engine, cli, graph, store and rules set `autotests =
+  false`; each crate's build.rs compiles every `tests/*.rs` into one target, `<crate>_tests`
+  (`cargo test -p glia-engine --test engine_tests <file>::`), except a KEEP list of own-binary
+  tests (engine: byte_identical, parallel_build, watch_parity, api_stability, load_or_rebuild;
+  cli: readme_surface, skill_surface; rules: toy, cost), each its own `[[test]]`. So `--test
+  byte_identical`, `--test parallel_build` and `--test toy` above stay correct. A test that sets
+  process-global state goes on the keep-list.
+- **Publish gate.** Only `py/` (as `glia-py`, imported as `glia_py`, `.github/workflows/wheels-py.yml`) and, since 0.5.4, the `glia` binary (as `glia-cli`, a maturin bin wheel, `cli/pyproject.toml`, `.github/workflows/wheels-cli.yml`, artifacts prefixed `cli-wheels-`; FE.5, FE.6) publish to PyPI. Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3, 0.5.4)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -1172,7 +1408,37 @@ caveats of the mechanisms it depended on (LD.8a, `engine::absence`). Rows carry 
 evidence tier — FACT (read at a site), DERIVED (paired by a resolver or pass) or
 HEURISTIC (a name guess, an overlay, git history, a clustering or a model) — never an
 unexplained score; where an answer ranks by two signals (hotspots) it shows both ranks,
-never a blend.
+never a blend. Since 0.5.4 every surface prints the tier lowercase, `fact` / `derived` /
+`heuristic`, through `glia_activation::profile::Tier` (FD.7a-d: absence tiers, feature-flow
+sinks and implementors' rows included; implementors tiers a row by the weakest heritage edge on
+its path, read from each edge's EVIDENCE, FD.7b).
+
+0.5.4 (FB, FH, FD). Boundary health: `glia health` / `PyGraph.health()` (engine::health) rates
+each mechanism OK / DEGRADED / BLIND before any question, and an answer that read a mechanism
+health rates BLIND or DEGRADED carries a fact-tier `blind` row (BlastRadius / DiffImpact /
+Absence / Trace `.blind`, FH.9). Compact answers (FH.8-FH.8d): `blast-radius`, `diff-impact` and
+`review`'s impact default to an overview, 25 rows after the ranking (`--top-k`, review
+`--max-impact`), `areas` (every row by sub-project or directory with the `--scope` that selects
+it, the 10 largest), `truncated` with `next {scope, offset}`, `--offset` pages, 25 seeds and 25
+changed rows, slim rows (`seed_index`, no repeated `name`, a 4-digit `score`), JSON with null /
+empty / default fields left out; `--full` / `full=True` is every row whole; review keeps 25 tests
+(`--max-tests` 50 -> 25) and 25 name rows (`ReviewArgs::max_names`, folded rows first,
+`name_breaks_truncated` counting the rest), and a folded name row renders its sites in both
+renderers. Name drift (FH.7a-d, `contract_breaks::names`): every client site, in any repo of the
+build, still using a name the change removed or renamed on the server side of a paired exchange,
+`names` in contract-breaks and `name_breaks` in review, heuristic (blocking only under
+`--models-min-tier heuristic`, which contract-breaks takes; review never blocks on one), a
+shared-schema change folded to one `schemas` row listing its `operations`; contract-breaks
+orphans read a `resolver:evm` EVENT_FLOWS by its subscriber end (FH.24). The semantic tier (FB.7a,
+FB.7b, FB.8): with `.glia/vectors.jsonl` of the surface model (`GLIA_EMBED_MODEL`, default
+bge-small), `find --files` ranks by `LX[IDR,FUSE[T1s,SEMp:t2]]` (rows gain `sem`; `--no-semantic` /
+`semantic=False` reads no vectors) and `pack`'s seeds come from that order when nothing matches by
+name (heuristic, find's absence kept as `seed_absence`); no other answer reads a vector.
+Corrections and conventions (FB.11, FB.12b): `pack`'s ladder renders a node's DECISION / CONV
+notes (`note[<source>/<id>, <tier>]: ..`, at most 3, `PackedNode.notes`), and `Pack.conventions` /
+`Review.conventions` list the `[[convention]]`s over the packed or changed files (`## conventions`,
+`### Conventions`), never blocking. Named but not modelled (FB.13c): with a vocabulary snapshot,
+find's `no_match` absence gains `named_in` (`Absence.named_in`, `FindOptions.vocab_roots`).
 
 Identity (0.5.2, DD.8-DD.15, Q17). `find`, `blast-radius`, `trace`, `flows`, `tests-for`,
 `serves` and `arch` collapse every FACT / DERIVED identity class to one row, the class's best
@@ -1321,8 +1587,10 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   layer / allow naming a dropped component; a TOML / schema / version error ignores the whole
   file and is one `overlay` row); one the graph does not hold (absent); a rule whose scope no
   located node sits in (empty_scope). A sub-project `[[constraint]]` with no `anchor` anchors on
-  the deepest PROJECT enclosing its scope, else the smallest-id MODULE under it (DT.7a,
-  `[declared] .. anchor_enclosing=`). The markdown prints a rule's coverage caveats once, under
+  the deepest PROJECT enclosing its scope, else the least-qname MODULE under it (DT.7a, FD.22,
+  `[declared] .. anchor_enclosing=`); a `[[decision]]` with a sub-project `scope` anchors the same
+  way (FD.65; before, only a PROJECT exactly at its scope held one), counted as ` records=<r>` in
+  the `[declared]` line's parenthesis. The markdown prints a rule's coverage caveats once, under
   its heading (DT.8a, `[check] caveats rules=<r> lines=<l> folded=<f>`; --json keeps them per
   violation). Exits 0 when nothing blocks, 1 on a blocking violation, 2 on a build error or a
   rule it cannot evaluate (and, under `--strict`, on a rule that checks nothing);
@@ -1346,6 +1614,9 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, CH.1c,
   `[dead-dispatch]`; a `super.m()` call (rule super_method) vouches for nothing there, and TS
   concrete overrides join the dispatch rule through rule concrete_override, DF.22c;
+  `named_not_modelled` (0.5.4, FB.13c), a FACT row per identifier a doc section cites in backticks
+  that the vocabulary snapshot (`glia vocab sync`) finds in a code file and no node models, at the
+  citing line, skipped without a snapshot (`[gaps] named_not_modelled ..`);
   `rotted_rule`, a FACT row per `[[constraint]]` whose `rule` this glia can no longer read,
   suggest `remove`, DB.4; the 0.5.2 tweaks: `unpaired_route` withholds a ROUTE a WebSocket
   client connects through, DT.3c, `glia_graph::WebSocketStackResolver::served_routes`, `[gaps]
@@ -1407,6 +1678,21 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   review, find, every one by default; one line per (set, shape), then `wrote <dir>`; exits 0
   written, 1 on no history snapshot or an unknown group (checked before the build), 2 on a
   build error).
+- 0.5.4: query `health <repo> [--with <repo>].. [--json]` (FH.2b; the mechanism table `| mechanism
+  | verdict | reason | clients | external | test sites | servers | pairs | client reach | server
+  reach | measure |`, then parse, workspace imports, suspicious qnames and the dead share; a
+  report, exits 0, 2 on an error). inputs: `embed <repo> [--model bge-small|test-hash] [--recipe
+  t1|t2] [--replace] [--limit <n>] [--check] [--json]` (FB.5b; writes `.glia/vectors.jsonl`,
+  re-embedding only changed text; `--check` loads no model and writes nothing; exits 1 under
+  `--check` when nodes need embedding, 2 on an error; the hidden `embed-worker` is its GPU child)
+  and `vocab sync <repo> [--rev <rev>] [--json]` (FB.13b; exits 1 when the sync fails). Flags:
+  `--full` and `--offset <n>` on `blast-radius`, `diff-impact` and `review`, `--top-k` / review's
+  `--max-impact` / `--max-tests` default 25 (FH.8-FH.8d); `--no-semantic` on `find` (with
+  `--files`), `pack` and `history calibrate` (FB.7b, FB.8, FB.7d); `contract-breaks
+  --models-min-tier fact|derived|heuristic` (FH.7b: heuristic blocks name rows); `cell ls
+  [--check] [--rekey] [--writer <ns>]` (FB.2: `--check` audits the vector file and exits 1 on an
+  issue; FB.11: `--rekey` leaves another writer's namespaced rows unless `--writer` names it);
+  `gaps --category` and `overlay propose --category` accept `named_not_modelled` (FB.13c).
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
@@ -1460,7 +1746,16 @@ their dicts gain `files` / `selection` (and review's `intent` / `selection_inten
 `history_calibrate(repo_path, max_commits=300, max_seeds=5, sets=None)` (EC.6, the GIL released).
 A PyGraph holds one `Arc<RankCache>` (holder `pygraph`) for its lifetime and reads
 `.glia/history-snapshot/` / `.glia/calibration-snapshot/` under its repo roots; a WatchSession's
-`snapshot()` shares the session's.
+`snapshot()` shares the session's. 0.5.4: `glia_py.embed(repo_path, model="bge-small",
+recipe=None, replace=False, limit=None, check=False)` (FB.5c; the wheels turn `embed` on, the
+x86_64 macOS one refuses bge-small, and the GPU runs in the wheel's `glia-embed-worker`, FB.14),
+`glia_py.vocab_sync(repo_path, rev=None)` (FB.13b), `PyGraph.health()` (FH.2b);
+`find_files(.., semantic=None)`, `pack(.., semantic=None)` and `history_calibrate(..,
+semantic=None)` (FB.7b, FB.8, FB.7d); `blast_radius` / `diff_impact` / `diff_impact_vs_rev(..,
+full=False, offset=0)` and `review_vs_rev(.., max_tests=25, max_impact=25, .., full=False,
+offset=0)` (FH.8-FH.8d); `contract_breaks_vs_rev(.., models_min_tier=)` takes `"heuristic"`
+(FH.7b); `node_cells` / `node_cell_bytes` return no VECTOR and a VECTOR write reports
+`write_through="sidecar_only"` (FB.3).
 Classes: `PyGraph`, and 0.5.2's `WatchSession(repo, overlay=True)` (DC.9: `apply(paths)` /
 `poll()` return a WatchUpdate dict (`poll` None when nothing changed), `snapshot()` a PyGraph of
 the current build, `persist()` writes the layout and cache; the GIL is released while the engine
@@ -1517,6 +1812,16 @@ top_files, select}`, `BlastRadius.{files, selection}`, `PackArgs.{ranking, rank_
 `blast_radius_over_with` (a prebuilt PprIndex) and `closure_config`; the #[doc(hidden)] seams
 `review::intent_files_with` / `IntentHistory` and `find::find_files_with` that rank_eval's gate
 calls with leak-free history (EG.7).
+0.5.4, by module path: `semantic::{embed_repo, EmbedOptions, EmbedReport, VectorIndex,
+SemanticSource, open_for_surface, recorded_model, EmbedRecipe, embed_text, text_hash}`;
+`health::{health, health_with, boundary_health, Health, HealthOptions, Verdict, Role,
+MechanismHealth, blind_caveats, blind_line}`; `contract_breaks::{name_breaks, NameBreak,
+NameBreaks, NameBreakArgs, ChangedName, NAME_MIN_TIERS}`; `find::FIND_FILES_FUSED` with
+`FindFilesOptions.semantic` and `FindOptions.vocab_roots`; `PackArgs.semantic`,
+`Pack.conventions`, `PackedNode.notes`; `Review.{conventions, name_breaks,
+name_breaks_truncated}`, `ReviewArgs.max_names`; `Absence.named_in`; `BlastRadius.{areas,
+truncated, blind}`; `calibrate::sets::{FIND_CANDIDATES_SEM, specs_with, FindSem}`; on the graph
+facade `OrgPackageResolver`, `ResolvePool` / `with_resolve_pool` and `MergedGraph::tie_cmp`.
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -1637,7 +1942,7 @@ questions over one graph computes `entrypoint_reachable` once.
   DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
   dart/tests), 0 none, 136 unknown, 28 n/a, over 419 graded fixtures. No FORMAT_VERSION change
   and no registry id beyond SAME_AS.
-- **0.5.3 — ranking: complete on local `main`, version bumped, awaiting the tag.** James, 2026-10-18:
+- **0.5.3 — ranking: released 2026-10-24 (tag `v0.5.3`, `glia-py` 0.5.3 on PyPI).** James, 2026-10-18:
   the ranking experiments' table becomes 0.5.3, *"it's a small lay up step and has the
   biggest generalised wins"*; items 6-11 and the hygiene confirmed 2026-10-23 (*"yes to all"*). Scope in
   `dev-notes/next-leap-0.5.3.md` (items 1-11, the gate, the hygiene), evidence
@@ -1668,17 +1973,51 @@ questions over one graph computes `entrypoint_reachable` once.
   record. A calibrated answer depends on the glia build that calibrated (BUILD_STAMP strict), so
   every repo recalibrates after the upgrade. The version bump is the release step after EZ, never
   inside a packet.
-- **After 0.5.3:** **0.5.4** scale (seed `dev-notes/next-leap-0.5.4.md`, the old 0.5.3 seed) —
-  Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
-  build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,
-  org-internal package routing on SAME_AS; plus James's 2026-10-16 additions there (local
-  embeddings and `glia embed`, a clarification queue, one tier vocabulary, a watch / rules
-  memory budget, concept search over flows, the self-graph hygiene cluster), the goal-layer connector
-  (§G) and the 0.5.2 waves' leftovers (§D, §E). **0.5.5** proof — precision rate on real repos, agent
-  before/after, big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge`
-  on our own model. Still later from the 0.5.0 list: dominators (once middleware is extracted
-  and the security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6
-  "Gated" items stay out (`SECURITY.md`).
+- **0.5.4 — embeddings and precision: complete on local `main`; the version bump, tag and publish
+  are the release step after the docs (FZ.1, FZ.2).** Scope `dev-notes/next-leap-0.5.4.md`, packets
+  `dev-notes/leap-054-packets.json` (overrides `leap-054-corrections.json`), schedule and LANDED
+  waves `dev-notes/wave-runner/schedule_054.py` (runner `--release 054`, ids F*, waves W0-W27),
+  tracks `dev-notes/wave-runner/tracks_054.py`. James cut it on 2026-10-30 (ruling OPTION-3:
+  *"Nah we can change to option 3 to round of 0.5.4 now right ?"*): it ships T0 (wave 0: the
+  four registry ids, the three crates, the slots, rustfmt), T1 (the agent before / after harness,
+  FE.1-FE.4, FE.8), T2 (self-graph hygiene, the code guard everywhere, the zero-phantom self-scan,
+  one tier vocabulary, checkout-independent tie-breaks, rustdoc), T3 (the edge-precision audit and
+  its fixes FD.73-FD.81), T5 (glia-embed, `glia embed`, the VectorRow contract, vectors
+  query-time, GPU by default, corrections, `[[convention]]`, the vocabulary), T10 (org-internal
+  package routing with FD.31's manifests), T11 (`glia-cli` on PyPI, wheels-cli.yml, the six task
+  skills moved from repo-graph), TS (the fused `find --files` and `pack` fallback) and TH (the
+  Sibyl cohort follow-up: `bench/cohort/`, `glia health`, the boundary-chain fixes, name drift,
+  compact answers, the Sibyl matrix with evm (FH.11c, FH.23), the cohort gate, one test binary per
+  crate, pooled resolution). Measured: FB.6 (the semantic tier alone) `VERDICT: FAIL`; FB.6b (the
+  blend, held-out panel of 9) `VERDICT: PASS` (R1 8/9, R2 8/9), so `glia embed` feeds `find
+  --files` and `pack` instead of shipping as a sidecar; FD.3c edge precision fact 0.998, derived
+  0.599 (DOCUMENTS|derived 0.387), heuristic 0.912 over 503 judged edges of five public repos
+  (the panel ruling FD-2 added microservices-demo, `source: cohort`), kappa 1.000 on the 51
+  re-judged; FE.4's full run replaced by the FH.13 probe sets, built and pinned but not run
+  (`dev-notes/agent-ab-probe-0.5.4.md`: on greppable repos a frontier model finds the same files
+  with or without glia). Not run, moved: FA.1 (T8), FC.6 (T6), FC.19 and FC.21 (T7). No
+  FORMAT_VERSION / MANIFEST_VERSION change; Cargo.lock moved twice (F0.2, FB.14); the on-disk
+  additions are `.glia/vectors.jsonl`'s `text_hash` / `device`, `.glia/vocab-snapshot/` and
+  engram-export's `<out>.vocab.jsonl`. Handoffs `dev-notes/{repo-graph,engram}-handoff-0.5.4.md`
+  (0.5.2 -> 0.5.4) and `neuropil-handoff-0.5.4.md` (0.5.1 -> 0.5.4), pin `=0.5.4` /
+  `glia-py==0.5.4`. Open at the release: the first wheels-py.yml / wheels-cli.yml CI runs (their
+  run ids go in the release notes; they verify the manylinux_2_28 worker staging and the macOS /
+  Windows Dawn staging), the PyPI pending publisher for `glia-cli` (owner James-Chahwan, repo
+  glia, workflow wheels-cli.yml) before any `publish=true`, and James's confirmation of that name.
+- **After 0.5.4:** **0.5.5** (seed `dev-notes/next-leap-0.5.5.md`) — the tracks moved out of 0.5.4,
+  already specced and to be re-verified against the shipped tree: T4 (the per-language precision
+  and recall residuals), T6 (the goal-layer connector and the clarification queue; it fills the
+  reserved slots and GOAL_UNIT / TRACES / UNIT), T7 (concept search over flows, PR / issue intent,
+  placement), T8 (Stack Graphs-style incremental resolution, watch's body-only fast path,
+  multi-repo `glia watch --with`, the watch / rules memory budget) and T9 (build-target graphs,
+  the first non-code domain: build-domain/, parsers/build/bazel/, engine targets.rs); then proof
+  (precision on real repos from FD.3c's baseline, the FH.13 agent probes run, big-repo per-phase
+  timings, calibrated confidence, `decide/`, `glia judge`); plus docs as a second graph (retiring
+  the rank gate's `accepted` rows), wave agents that never run the full gates, and the edge-audit
+  re-run after FD.73-FD.81. An optional `scope` on `[[note]]` (FD.65's follow-up) is listed only if
+  James asks. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
+  security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated" items stay
+  out (`SECURITY.md`).
 
 ## Memory
 

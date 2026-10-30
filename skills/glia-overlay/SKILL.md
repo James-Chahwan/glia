@@ -184,7 +184,20 @@ text = "every function in services/api is reached from an entry point"
 rule = 'violation(f) :- unreached(f), in_scope(f, "services/api").'
 ```
 
-A rule scoped to a directory inside a project (`from = "backend/internal/handlers"`) anchors on the deepest PROJECT enclosing it, else on a MODULE under it (`[declared] .. anchor_enclosing=<e>`), so `glia check` evaluates it; a scope with neither is `orphaned`. `kind = "no_cycle"` (with an optional `scope`) is allowed too. A candidate refuses `kind = "allow"` (waiving a reflexion divergence is a person's decision) and an `invariant` without a `rule` (prose that `try` cannot judge); a person can still write both by hand. A rule stanza takes no `# gap:` line, since no gap row names it.
+A rule scoped to a directory inside a project (`from = "backend/internal/handlers"`) anchors on the deepest PROJECT enclosing it, else on the least-qname MODULE under it (`[declared] .. anchor_enclosing=<e>`), so `glia check` evaluates it; a scope with neither is `orphaned`. A `[[decision]]` with a sub-project `scope` anchors the same way (its `records=<r>` count on the `[declared]` line). `kind = "no_cycle"` (with an optional `scope`) is allowed too. A candidate refuses `kind = "allow"` (waiving a reflexion divergence is a person's decision) and an `invariant` without a `rule` (prose that `try` cannot judge); a person can still write both by hand. A rule stanza takes no `# gap:` line, since no gap row names it.
+
+## Conventions
+
+When the person states a convention for a part of the repo ("modals are centred", "forms validate on blur"), record it as a `[[convention]]`, never as a rule: it is free text over a whole scope, and `glia check` never judges it.
+
+```toml
+[[convention]]
+scope = "web/src/app/modals"     # a repo-relative path or a project label; or component = "<[[component]] name>"
+text = "modals are centred, never bottom-anchored"
+by = "design"                    # optional: who said so
+```
+
+Exactly one of `scope` / `component`, `text` 1..=4096 chars. `glia pack` lists the conventions whose scope holds a packed file (`## conventions`) and `glia review` those over a changed file (`### Conventions`), never blocking. It is user config, as `[walk]` and `[ids]` are: written into `.glia/overlay.toml` by hand, never a candidate stanza, and kept under `--no-overlay`. The schema is the Conventions section of docs/overlay.md.
 
 ## The candidate file
 

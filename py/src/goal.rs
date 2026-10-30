@@ -6,3 +6,5 @@
 //! `inventory::submit!`), and creates `py/api_surface/goal.txt` and
 //! `py/tests/surface/test_goal.py`; neither FC.7 nor FC.8 edits
 //! `py/src/lib.rs`.
+//!
+//! Reserved for 0.5.5 (track T6); empty in 0.5.4.

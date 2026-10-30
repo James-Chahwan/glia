@@ -4,3 +4,5 @@
 //! `#[pymethods] impl PyGraph` block or `#[pyfunction]`s (`register()` plus
 //! `inventory::submit!`), and creates `py/api_surface/clarify.txt` and
 //! `py/tests/surface/test_clarify.py`; FC.14 never edits `py/src/lib.rs`.
+//!
+//! Reserved for 0.5.5 (track T6); empty in 0.5.4.

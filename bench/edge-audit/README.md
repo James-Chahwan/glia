@@ -77,9 +77,16 @@ p = sum W_h p_h, W_h = N_h / N, var = sum W_h^2 p_h (1 - p_h) / n_h (1 - n_h / N
 p +- 1.96 sqrt(var) clipped to [0, 1]; a census stratum (n_h = N_h) adds no variance. The
 per-repo tables are the same restricted to one repo's samples and sizes: reported, not gated.
 
-When several judges rule on one id (FD.3c's blind re-judge) the report uses their shared
-verdict and `unsure` when they disagree; `--judge <name>` reads one judge only. A verdict whose
-id is in no samples file, or two verdicts from one judge on one id, is an error (exit 2).
+A sample's verdict is its first judge's (several first judges on one id: their shared verdict,
+`unsure` when they disagree). FD.3c's blind re-judge (`verdicts/rejudge.jsonl`, a fixed subset)
+only measures agreement: where it agrees nothing changes, and where it disagrees the
+`adjudication.jsonl` row's `final` replaces the first verdict (a disagreement with no
+adjudication row reads `unsure`). Cohen's kappa is reported per family (a first-verdict file) and
+overall, and a family under the low-agreement threshold is flagged provisional. `--judge <name>`
+reads one judge only. A verdict whose id is in no samples file, two verdicts from one judge on
+one id, a re-judged id with no first verdict, or an adjudication row naming no real disagreement
+is an error (exit 2). The report prints `[edge-audit] report strata=<s> judged=<j> unsure=<u>
+under_floor=<f> insufficient=<i> kappa=<k>` on stderr.
 
 ## Statuses
 

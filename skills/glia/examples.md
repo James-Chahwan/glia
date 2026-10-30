@@ -66,6 +66,19 @@ glia find . "SHOP-12 round totals" --files --json
             {"rank":3,"file":"util/money.py","idr":0.0,"text":1.874,"degree":5.0,"ids":[]}],
  "absence":null,"selection":{"set":"SELf2t","shape":"find","pick":"H18x","source":"calibrated","reason":null,"test_commits":9}}
 
+# org-packages-npm as a one-commit git repo: the embedding snapshot step (the deterministic test-hash model here;
+# the default is bge-small, downloaded once into the user cache, never into the repo). Writes .glia/vectors.jsonl,
+# re-embeds only nodes whose text changed ("cached" on a rerun); --check counts what needs embedding and writes nothing.
+# With vectors, find --files adds a "sem" score and ranks by LX[IDR,FUSE[T1s,SEMp:t2]]; --no-semantic ranks without them
+glia embed . --model test-hash --json
+{"repo":"demo","model":"glia-test-hash-v1/64","recipe":"t2","dims":64,"nodes":5,"cached":0,"reused":0,"embedded":5,
+ "ambiguous":0,"deferred":0,"stale_dropped":0,"foreign_kept":0,"rows_written":5,"ms":4}
+
+# the same repo: the identifier vocabulary of one commit (default HEAD) into .glia/vocab-snapshot/; afterwards an empty
+# find names the tracked files a query identifier occurs in (absence.named_in) and gaps lists named_not_modelled rows
+glia vocab sync . --json
+{"rev":"13f25257aab2161e0edbd48fcad680e25dd57675","files":4,"tokens":13,"common":0,"skipped_binary":0,"skipped_large":0,"ms":5}
+
 # shop-ranked with orders/models.py edited: the PR's intent; without --title it is the newest commit subject of <base>..HEAD
 glia review . --title "SHOP-12 round order totals" --json
 {…,"intent":{"title":"SHOP-12 round order totals","title_source":"arg","fusion":"H18s[PT*]",

@@ -59,9 +59,12 @@ impl PyGraph {
     /// then the overlay's own rot —
     /// `orphaned_rule`, `redundant_rule`, `rotted_rule` (DB.4: a
     /// `[[constraint]]` whose `rule` this glia can no longer read; fact),
-    /// `orphaned_cell`. `wrapped_sink` and the last four read each repo's
-    /// files through `repo_roots` (listed in `skipped` for a graph that has
-    /// none).
+    /// `orphaned_cell`, and `named_not_modelled` (FB.13c: an identifier a
+    /// doc section cites in backticks that the repo's vocabulary snapshot,
+    /// `glia_py.vocab_sync`, finds in a code file and no node models; fact;
+    /// listed in `skipped` without a snapshot). `wrapped_sink` and the last
+    /// five read each repo's files through `repo_roots` (listed in `skipped`
+    /// for a graph that has none).
     /// `suggest` names the overlay section that could repair the row;
     /// `tier` is `fact` or `heuristic`. `counts`: the total per computed
     /// category, before `top_k`.

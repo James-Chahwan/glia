@@ -60,6 +60,8 @@ The rest of the CLI:
 - `glia duplicate-flows <repo>`: entry points whose flows reach the same nodes (an aliased route, a v1 / v2 pair, copies drifting apart).
 - `glia timeline build <repo>`, then `glia timeline history <repo> <qname>`: when each edge of a node appeared and went, over the last 20 commits.
 - `glia scip import <repo> <index.scip>`: load a compiler-grade SCIP index; the next answer reads its references as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM.
+- `glia embed <repo> --json`: embed every node's text with a local model (bge-small, on the GPU when one works, else the CPU) into `<repo>/.glia/vectors.jsonl`. A snapshot step like `history sync`: run it once, and again after big changes (it re-embeds only nodes whose text changed). With vectors, `find --files` blends their similarity into its text key and `pack` seeds from that order when no name matches the query; `--no-semantic` on either ranks without them. Vectors never add, hide or seed a row anywhere else.
+- `glia vocab sync <repo> --json`: record every identifier the tracked files hold (`<repo>/.glia/vocab-snapshot/`). Then an empty `find` names the files a query identifier occurs in although no node is named so (`absence.named_in`), and `gaps` lists identifiers the docs cite that no node models (`named_not_modelled`).
 - `glia watch <repo>`: keep the build open in the foreground and print one NDJSON line per change saying what it did to the graph (a ready line first); it rewrites `<repo>/.glia/graph/` on exit and every 60 s. For a long session, not for one question.
 
 `glia <command> --help` lists every flag.
@@ -94,7 +96,7 @@ grep finds what is named; glia also finds what is connected under another name. 
 
 ## Install
 
-1. Put `glia` on PATH: in a glia checkout, `cargo build --release -p glia-cli`, then `cp target/release/glia ~/.local/bin/`. Check it with `glia --version`.
-2. Copy this file to `~/.claude/skills/glia/SKILL.md` (every project) or to `<repo>/.claude/skills/glia/SKILL.md` (one repo).
+1. Put `glia` on PATH: `pipx install glia-cli`, or run it with nothing installed as `uvx --from glia-cli glia <command> ..`; from a glia checkout, `cargo build --release -p glia-cli`, then `cp target/release/glia ~/.local/bin/`. Check it with `glia --version`.
+2. Copy this directory (SKILL.md, reference.md, examples.md) to `~/.claude/skills/glia/` (every project) or to `<repo>/.claude/skills/glia/` (one repo).
 
 For an always-on MCP server over the same graph, see repo-graph: https://github.com/James-Chahwan/repo-graph

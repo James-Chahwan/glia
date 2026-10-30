@@ -41,8 +41,9 @@ const SKILLS_REL: &str = "skills";
 
 /// Per skill directory, the commands its worked examples show with `--json`:
 /// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added, 0.5.2's `query` /
-/// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, and 0.5.3's
-/// `history calibrate`, EZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
+/// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, 0.5.3's
+/// `history calibrate`, EZ.1, and 0.5.4's `health`, `embed` and `vocab sync`,
+/// FZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
 /// A subcommand is its surface section path, `overlay propose`. glia-init's one
 /// `--json` command is `history calibrate`: `build`, `history sync`, `install-hooks`
 /// and `watch` take no `--json`, so they are checked for flags only.
@@ -86,6 +87,11 @@ const EXAMPLED: [(&str, &[&str]); 8] = [
             // 0.5.3 (EZ.1): the calibration step (EC.6). `find --files` (EB.8) is a
             // flag of `find`, already listed: its `--json` example sits in the skill.
             "history calibrate",
+            // 0.5.4 (FZ.1): boundary health (FH.2b) and the two snapshot steps, the
+            // embedding sidecar (FB.5b) and the identifier vocabulary (FB.13b).
+            "health",
+            "embed",
+            "vocab sync",
         ],
     ),
     (

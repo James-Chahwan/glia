@@ -4,3 +4,5 @@
 //! roles a `TRACES` edge carries (defines, cites, names_file, supersedes,
 //! implements, requires), the key types the extractors read, the `UNIT` cell
 //! payload and its validation, and the namespaced unit qnames.
+//!
+//! Reserved for 0.5.5 (track T6); empty in 0.5.4.

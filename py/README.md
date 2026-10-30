@@ -49,6 +49,58 @@ records its `device`, and stderr names the device on one `[embed] device=..
 backend=.. driver=.. fallback=.. batch=..` line. The devices, fallbacks and
 measured speeds are in docs/embeddings.md.
 
+## What's new in 0.5.4
+
+**Pin exactly: `glia-py==0.5.4`.**
+
+```bash
+pip install glia-py==0.5.4
+```
+
+0.5.4 adds embeddings, boundary health and the identifier vocabulary, makes the big answers
+compact by default and prints one tier vocabulary. The store format is unchanged (format 3); a
+build's graph gains new edges and cells (Maven / Gradle / pub / Hex / NuGet dependencies,
+org-internal package routes, the precision fixes), so rebuild, and calibrate again after
+upgrading (`history_calibrate`: a record is read only by the glia build that wrote it).
+
+- **`glia_py.embed(repo_path, ..)`** writes `.glia/vectors.jsonl` (see "Embeddings (0.5.4)"
+  above). With vectors, `PyGraph.find_files(query, top_k=20, semantic=None)` blends their
+  similarity into its text key (the order `LX[IDR,FUSE[T1s,SEMp:t2]]`, each embedded row gaining
+  `sem`; the fusion gate measured it above the text ranking on 8 of 9 held-out public repos,
+  dev-notes/fusion-gate-0.5.4.md), `PyGraph.pack(.., semantic=None)` seeds from that file order
+  when nothing matches the query by name (seeds marked heuristic, find's absence kept as
+  `seed_absence`), and `history_calibrate(.., semantic=None)` measures the blend as a `find`
+  candidate. `semantic=False` never reads the vectors; `True` without vectors falls back with
+  reason `no_vectors`. Vectors are query-time only: `node_cells` / `node_cell_bytes` no longer
+  return VECTOR, and a VECTOR `set_cell` / `write_cell` / `remove_cell` reports
+  `write_through="sidecar_only"` and never rewrites the layout.
+- **`PyGraph.health()`**: per boundary mechanism (http, grpc, rpc, graphql, queue, ws) the
+  clients, servers, pairs and reach with a verdict `OK` / `DEGRADED` / `BLIND`, then the code
+  files no parser read, unbound workspace imports, suspicious qnames and the dead-symbol share.
+  Test-file clients count apart (`test_site_producers`), never as reach. An answer that read a
+  mechanism health rates blind carries a `blind` row naming it.
+- **`glia_py.vocab_sync(repo_path, rev=None)`** writes `.glia/vocab-snapshot/` (one commit's
+  identifiers and the files they occur in). Then `find`'s empty answer carries
+  `absence.named_in` (where a query identifier occurs although no node is named so) and `gaps`
+  lists `named_not_modelled` rows.
+- **Compact answers.** `blast_radius`, `diff_impact` and `diff_impact_vs_rev` default to an
+  overview: 25 rows after the ranking, `areas` (every row grouped by sub-project or directory,
+  with the `scope` that selects it) and `truncated` (with `next`); `offset=` pages and
+  `full=True` returns every row and field whole (both new, appended last). `review_vs_rev`
+  keeps 25 impact rows, 25 tests (`max_tests` 50 -> 25) and 25 name rows
+  (`name_breaks_truncated` counts the rest), with the same `full` / `offset`. JSON-shaped dicts
+  leave out null, empty and default fields.
+- **Name drift.** `contract_breaks_vs_rev` gains `names` and `review_vs_rev` `name_breaks`: each
+  client site, in any repo of the build, still using a name the change removed or renamed on the
+  server side of a paired exchange (heuristic; blocking only under
+  `models_min_tier="heuristic"`, which `contract_breaks_vs_rev` now accepts).
+- **Notes and conventions.** `pack` renders a node's DECISION / CONV notes (`notes` per packed
+  node) and lists the `[[convention]]`s over its files (`conventions`); `review_vs_rev` lists the
+  conventions over the changed files.
+- **One tier vocabulary.** Every tier a dict carries is lowercase `fact` / `derived` /
+  `heuristic` (absence tiers and feature-flow sinks included); `implementors` rows are tiered by
+  the weakest heritage edge on their path.
+
 ## What's new in 0.5.3
 
 **Pin exactly: `glia-py==0.5.3`.**
@@ -374,8 +426,12 @@ Every function and `PyGraph` method follows these rules (since 0.5.0, LD.2):
 ## Platform support
 
 abi3 wheels for CPython 3.11 and newer: Linux x86_64 and aarch64 (manylinux
-2_28), macOS x86_64 and arm64, Windows x86_64, plus an sdist. Building the
-sdist needs a Rust toolchain.
+2_28), macOS x86_64 and arm64 (macOS 13.4 or newer for arm64), Windows x86_64,
+plus an sdist, built by `.github/workflows/wheels-py.yml`. Building the sdist
+needs a Rust toolchain. Embeddings: the GPU on Linux x86_64 (glibc >= 2.38 for
+the worker), Windows x86_64 and macOS arm64, the CPU on Linux aarch64, none on
+Intel macOS (`test-hash` only); docs/embeddings.md. The `glia` CLI itself ships
+separately as `glia-cli` (`.github/workflows/wheels-cli.yml`).
 
 ## License
 

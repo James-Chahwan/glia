@@ -20,6 +20,20 @@ Check the file in. It is an input, not a cache.
 | `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[convention]]`, `[[component]]`, `[[layer]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
 | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay: inference written by a model or a person | by default | skipped |
 
+Beside the overlay, `.glia/` holds the sidecars and snapshots other steps write. None is an
+overlay section, and no build writes any of them:
+
+| file | written by | read by | section |
+|---|---|---|---|
+| `cells.jsonl` (checked in) | `glia cell set\|rm`, pyo3 `set_cell` / `write_cell`, outside writers | the build (CONSTRAINT / DECISION / CONV cells) | "Cell sidecars" |
+| `vectors.jsonl` (gitignored) | `glia embed` (and any writer of the vector-row contract) | query time only: `find --files`, `pack`'s fallback, `history calibrate` | "Cell sidecars" |
+| `vocab-snapshot/` | `glia vocab sync` | query time only: `find`'s absence, `gaps` `named_not_modelled` | "Vocabulary snapshot" |
+| `history-snapshot/` | `glia history sync` | the build (churn, `CO_CHANGES`) and the rankings (messages) | "History snapshot" |
+| `calibration-snapshot/` | `glia history calibrate` | query time only: the ranked answers | "Calibration snapshot" |
+| `scip-snapshot/` | `glia scip import` | the build | "SCIP snapshot" |
+| `test-snapshot/` | `glia tests ingest` | the build (FAIL / COVERAGE cells) | `glia tests ingest --help` |
+| `docs-snapshot/` | `glia docs sync` | the build (synced doc sections) | `glia docs sync --help` |
+
 Provenance: every node, edge or cell the overlay creates carries an ORIGIN cell. An `origin = "llm"`
 stanza (the default) gets `overlay:llm` and `Weak` confidence; an `origin = "human"` stanza gets
 `overlay:human` and `Medium`. Nothing from the overlay is ever `Strong`. Primitives can hide
@@ -129,10 +143,12 @@ node, and an anchor that names no node orphans the stanza (it never falls back t
 `from` of a forbid_edge and the `scope` of a no_cycle / invariant (none is the repo root): on the
 PROJECT at that path, else on the deepest PROJECT above it (`from = "backend/internal/handlers"`
 hangs on `project:backend`; a root PROJECT encloses every path), else, in a repo with no root
-manifest, on the smallest-id MODULE under it. Where a rule hangs only stores it: `glia check`
+manifest, on the least-qname MODULE under it. Where a rule hangs only stores it: `glia check`
 evaluates the rule's own scopes, so a misspelt directory inside a project is reported there (`from
-scope ... matches no located node`), not dropped. A `[[decision]]` without `anchor` hangs on the
-PROJECT at its `scope` only. A stanza that hangs nowhere is orphaned: the build prints
+scope ... matches no located node`), not dropped. A `[[decision]]` without `anchor` hangs by its
+`scope` the same way (0.5.4, FD.65: before, only a PROJECT exactly at the scope held one), and the
+`[declared] repo=..` line counts such decision binds as ` records=<r>` inside its parentheses. A
+`[[convention]]` hangs by the same rule (see "Conventions"). A stanza that hangs nowhere is orphaned: the build prints
 `[declared] orphaned <section> id=<id> <decl> ...` on stderr and writes no cell.
 
 `glia check` (and `PyGraph.check()`) reads each repo's overlay again and binds its
@@ -446,16 +462,20 @@ per non-empty line, compact, sorted keys.
 - `.glia/cells.jsonl`: CONSTRAINT / DECISION / CONV entries, keyed by `(qname, cell, source,
   id)`. Checked in: it is curated knowledge.
 - `.glia/vectors.jsonl`: one VECTOR row per `(qname, kind)`. Local and gitignored: it is
-  regenerable.
+  regenerable (`glia embed` writes it; docs/embeddings.md).
 
 The writers are `glia cell set|rm` (CLI), `PyGraph.set_cell` / `write_cell` (pyo3) and any
 outside tool that writes the files itself. glia's own writers take `.glia/cells.lock` for one
 write (a lock older than 30 s is a crashed writer's and is removed), upsert the row, sort the
-file by its key and replace it through a `.tmp` and a rename. Lifetime: a sidecar is an input,
-fingerprinted into the layout's staleness check, so editing it rebuilds the layout on its next
-load; the build is what applies it, and a cell written into a `.gmap` directly would be dropped
-by the next rebuild. `glia cell ls --check` binds every row against a fresh build and audits the
-vector file.
+file by its key and replace it through a `.tmp` and a rename. Lifetime: `cells.jsonl` is a build
+input, fingerprinted into the layout's staleness check, so editing it rebuilds the layout on its
+next load; the build is what applies it, and a cell written into a `.gmap` directly would be
+dropped by the next rebuild. `vectors.jsonl` is not (0.5.4, FB.3): no layout holds a VECTOR
+cell, editing the file never stales a layout, a VECTOR write through the cell API reports
+`write_through=sidecar_only`, and the vectors are read at query time from the file itself.
+`glia cell ls --check` binds every row against a fresh build and audits the vector file; `--rekey`
+rewrites the rows a moved node re-bound, except another writer's namespaced rows (an id opening
+`<ns>:`, Engram's `engram:`), which only `--writer <ns>` rewrites.
 
 ### The vector-row contract
 
@@ -588,7 +608,7 @@ that resolve to one directory (a label and its path) count as one path claimed t
 build rejects the later component.
 
 Anchors. A component with `anchor` hangs on that qname. Otherwise it hangs on the PROJECT at its
-first path, else the repo root's PROJECT, else (a repo with no root manifest) the smallest-id
+first path, else the repo root's PROJECT, else (a repo with no root manifest) the least-qname
 MODULE under its first path. A layer, and an allow without `anchor`, hang on the repo root's
 PROJECT, else wherever their first named component hung (the layer's first component, the
 allow's `from`).
@@ -850,6 +870,20 @@ When a try has a rule part, a second stderr line follows `[overlay] try ...`:
 also prints check's own `[check]` line (with ` unanchored=<n>` and a `[check] declared not
 checked:` line when a rule checks nothing; a try reads no overlay file, so those count only the
 empty scopes).
+
+## Vocabulary snapshot
+
+`glia vocab sync <repo> [--rev <rev>]` (pyo3: `vocab_sync(repo_path, rev=None)`) reads one
+commit's tracked text files (default HEAD; binary and very large files skipped and counted) into
+`.glia/vocab-snapshot/`: every identifier-like token with the files it occurs in, tokens found in
+very many files kept as `common` with no file list. It is self-gitignored and replaced whole. No
+build reads it; two answers do, at query time: `find`'s `no_match` absence names the tracked files
+a query identifier occurs in when no node is named so (`named_in`), and `glia gaps` lists
+`named_not_modelled` rows, identifiers a doc section cites in backticks that a code file holds
+and no node models. Without a snapshot both are skipped (`[gaps] named_not_modelled skipped: no
+vocab snapshot ..`). The sync prints `[vocab] sync rev=<12 hex> files=<f> tokens=<t> common=<c>
+skipped_binary=<b> skipped_large=<l> ms=<ms>`; engram-export `--vocab` copies the same vocabulary
+beside a gmap (`<out>.vocab.jsonl`).
 
 ## History snapshot
 
