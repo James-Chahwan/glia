@@ -116,17 +116,22 @@ jobs:
           rm ort.tgz
       # The WebGPU embedding worker (x86_64, FB.14; aarch64 ships none) is built on the
       # runner, OUTSIDE the container: it links ort's own WebGPU build (Dawn, glibc 2.38).
-      # A separate process: on an older glibc it exits 127 before its hello and `glia embed`
+      # A separate process: on an older glibc it exits before its hello and `glia embed`
       # runs on the CPU (`fallback=no_worker:..`).
+      # `glia` finds the worker beside its own executable (cli/src/common.rs). Grafting
+      # libonnxruntime makes maturin install the real binary at site-packages/
+      # glia_cli.scripts/glia behind a launcher script in bin/, so on Linux the worker and
+      # Dawn go into that directory (the wheel's platlib), not the scripts directory.
       - name: stage the embedding worker
         if: matrix.target == 'x86_64'
         run: |
           set -eux
           cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
-          mkdir -p glia_cli.data/scripts
-          cp ../target/release/glia-embed-worker glia_cli.data/scripts/
-          strip glia_cli.data/scripts/glia-embed-worker || true
-          cp -L ../target/release/libwebgpu_dawn.so glia_cli.data/scripts/
+          dst=glia_cli.data/platlib/glia_cli.scripts
+          mkdir -p "$dst"
+          cp ../target/release/glia-embed-worker "$dst/"
+          strip "$dst/glia-embed-worker" || true
+          cp -L ../target/release/libwebgpu_dawn.so "$dst/"
           echo 'data = "glia_cli.data"' >> pyproject.toml
           echo "[cli-wheel-ci] linux-x86_64 worker staged"
       # before-script-linux runs in maturin's container, in cli/, in the shell that then
@@ -337,9 +342,13 @@ jobs:
         run: |
           set -euo pipefail
           bin=$(dirname "$GLIA_BIN")
+          # Beside the real `glia`: the scripts directory, or on Linux (a launcher there,
+          # see the linux job) the site-packages glia_cli.scripts directory.
+          real=$(find v -path '*/glia_cli.scripts' -type d | head -1)
+          [ -n "$real" ] || real=$bin
           if [ "$SHIPS_WORKER" = "true" ]; then
-            ls "$bin" | grep -q '^glia-embed-worker' || { echo "no glia-embed-worker in $bin"; ls "$bin"; exit 1; }
-            ls "$bin" | grep -q 'webgpu_dawn' || { echo "no Dawn library in $bin"; ls "$bin"; exit 1; }
+            ls "$real" | grep -q '^glia-embed-worker' || { echo "no glia-embed-worker in $real"; ls "$real"; exit 1; }
+            ls "$real" | grep -q 'webgpu_dawn' || { echo "no Dawn library in $real"; ls "$real"; exit 1; }
           fi
           cp -r tests/go_smoke "$RUNNER_TEMP/embed_smoke"
           "$GLIA_BIN" embed "$RUNNER_TEMP/embed_smoke" --model test-hash
