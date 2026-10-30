@@ -1,0 +1,57 @@
+{
+  "framework": "walk-symlink-once",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.78. web/app -> ../app is an in-repo directory symlink committed as a git symlink (mode 120000; py/LICENSE is the repo's precedent). Baseline HEAD c4152966: the walk reads app/ twice, forbid violations expected for every web::app:: node and both max_nodes rows.",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "app::lib::editor::BasicTextField",
+      "exact": true
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "app::lib::editor::helper",
+      "exact": true
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "app::lib::main::main",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "app::lib::editor::BasicTextField::render",
+      "to": "app::lib::editor::helper",
+      "category": "CALLS",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "BasicTextField",
+      "max_nodes": 1
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "helper",
+      "max_nodes": 1
+    },
+    {
+      "kind": "MODULE",
+      "name": "web::app::lib::editor"
+    },
+    {
+      "kind": "MODULE",
+      "name": "web::app::lib::main"
+    },
+    {
+      "kind": "CLASS",
+      "name": "web::app::lib::editor::BasicTextField"
+    }
+  ]
+}

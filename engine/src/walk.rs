@@ -269,6 +269,105 @@ pub(crate) struct WalkPlan {
     /// The repo-relative path of every `.gitignore` in an entered directory,
     /// whether or not it pushed a layer (a comments-only file pushes none).
     pub(crate) gitignores: Vec<String>,
+    /// The directory-symlink rule's state and tallies (FD.78).
+    symlinks: SymlinkWalk,
+}
+
+/// How the walk treats symlinks (FD.78), and its tallies for the `[walk]
+/// symlinks` line.
+///
+/// A directory symlink whose canonical target lies under the canonical root
+/// is NOT descended: the target is a real directory the walk reaches on its
+/// own, at the path git stores its content under, so the link (one alias of
+/// possibly several) would only mint the same nodes under a second qname
+/// prefix (flutter/samples' `web/<x> -> ../<x>`). A link whose target is an
+/// ancestor of the root, or lies under a directory already entered, is a
+/// cycle and is cut. Any other directory link (its target outside the root,
+/// the only way that content enters the build) is walked once per canonical
+/// target, the first link in name order, and its target joins `entered`, so
+/// nested links met out there follow the same rules: one back into the repo
+/// is an in-repo link, a loop out there a cycle. An outside target that
+/// CONTAINS an earlier one is still walked and re-reads it (only nesting
+/// inside is checked).
+///
+/// A file symlink is read at the link's path, as before FD.78 (code imports a
+/// file link at its own path, so skipping it would unbind the import): a file
+/// link to an in-repo file reads that file twice. It is counted only. A
+/// dangling link is counted and skipped, as before.
+#[derive(Default)]
+struct SymlinkWalk {
+    /// The canonical root (`root` itself when canonicalising fails).
+    canon_root: PathBuf,
+    /// Every canonical directory the walk may not enter again through a
+    /// link: the root, then each outside target walked.
+    entered: Vec<PathBuf>,
+    in_repo_dirs: usize,
+    out_of_repo_dirs: usize,
+    cycles: usize,
+    dangling: usize,
+    file_links: usize,
+}
+
+/// What [`walk_dir`] does with one symlink entry (FD.78).
+enum LinkStep {
+    /// Skip the entry (an in-repo directory link, a cycle, a dangling link).
+    Skip,
+    /// Walk the entry at its own path, as an ordinary file or directory.
+    Follow,
+}
+
+impl SymlinkWalk {
+    fn new(root: &Path) -> Self {
+        let canon_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        Self {
+            entered: vec![canon_root.clone()],
+            canon_root,
+            ..Self::default()
+        }
+    }
+
+    /// Classify the symlink at `path` and tally it.
+    fn step(&mut self, path: &Path) -> LinkStep {
+        let Ok(target) = std::fs::canonicalize(path) else {
+            self.dangling += 1;
+            return LinkStep::Skip;
+        };
+        if !target.is_dir() {
+            self.file_links += 1;
+            return LinkStep::Follow;
+        }
+        if target.starts_with(&self.canon_root) {
+            self.in_repo_dirs += 1;
+            return LinkStep::Skip;
+        }
+        if self.canon_root.starts_with(&target)
+            || self.entered.iter().any(|e| target.starts_with(e))
+        {
+            self.cycles += 1;
+            return LinkStep::Skip;
+        }
+        self.entered.push(target);
+        self.out_of_repo_dirs += 1;
+        LinkStep::Follow
+    }
+
+    fn any(&self) -> bool {
+        self.in_repo_dirs + self.out_of_repo_dirs + self.cycles + self.dangling + self.file_links
+            > 0
+    }
+
+    /// The fired_on line, without its `[walk] ` prefix.
+    fn marker(&self, root: &Path) -> String {
+        format!(
+            "symlinks root={} in_repo_dirs={} out_of_repo_dirs={} cycles={} dangling={} file_links={}",
+            root.display(),
+            self.in_repo_dirs,
+            self.out_of_repo_dirs,
+            self.cycles,
+            self.dangling,
+            self.file_links
+        )
+    }
 }
 
 /// [`read_walk`]'s sequential fold: the texts into `files` / `md` and the
@@ -340,6 +439,7 @@ pub(crate) fn plan_walk(root: &Path) -> WalkPlan {
         dirs: Vec::new(),
         region_dirs: Vec::new(),
         gitignores: Vec::new(),
+        symlinks: SymlinkWalk::new(root),
     };
     let pushed = ignores.push_dir(root);
     walk_dir(root, root, &mut ignores, &mut plan);
@@ -484,6 +584,10 @@ pub(crate) fn read_walk(
     // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
     if plan.counts.total() > 0 {
         eprintln!("[walk] {}", plan.counts.marker());
+    }
+    // FD.78 fired_on: `grep '^\[walk\] symlinks root='`, gated on non-zero.
+    if plan.symlinks.any() {
+        eprintln!("[walk] {}", plan.symlinks.marker(root));
     }
     for line in &plan.ignore_lines {
         eprintln!("[walk] {line}");
@@ -785,6 +889,13 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
         let name = entry.file_name().to_string_lossy().to_string();
         // Also guards FILES: a `.git`/`.hg` file must never be read as source.
         if walk_gating::is_hard_skip(&name) {
+            continue;
+        }
+        // FD.78: an in-repo directory link, a cycle or a dangling link is not
+        // walked; an outside target (once) and a file link fall through.
+        if entry.file_type().is_ok_and(|t| t.is_symlink())
+            && matches!(plan.symlinks.step(&path), LinkStep::Skip)
+        {
             continue;
         }
         if path.is_dir() {
@@ -3361,6 +3472,150 @@ mod walk_tests {
         );
         assert!(plan.pending.iter().any(|p| p.rel == "other/c.go"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// FD.78: the queued paths of `root`'s plan, in walk order.
+    #[cfg(unix)]
+    fn pending_of(plan: &WalkPlan) -> Vec<&str> {
+        plan.pending.iter().map(|p| p.rel.as_str()).collect()
+    }
+
+    #[cfg(unix)]
+    fn touch(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// (i) An in-repo directory link is not descended: its target is walked
+    /// once, where it lies (flutter/samples' `web/<x> -> ../<x>`).
+    #[cfg(unix)]
+    #[test]
+    fn in_repo_directory_link_is_walked_at_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        touch(&root.join("app/a.dart"), "void f() {}\n");
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::os::unix::fs::symlink("../app", root.join("web/app")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["app/a.dart"]);
+        let s = &plan.symlinks;
+        assert_eq!(
+            (
+                s.in_repo_dirs,
+                s.out_of_repo_dirs,
+                s.cycles,
+                s.dangling,
+                s.file_links
+            ),
+            (1, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            s.marker(&root),
+            format!(
+                "symlinks root={} in_repo_dirs=1 out_of_repo_dirs=0 cycles=0 dangling=0 file_links=0",
+                root.display()
+            )
+        );
+    }
+
+    /// (ii) An in-repo cycle (`src/sub/up -> ..`) is just an in-repo link.
+    #[cfg(unix)]
+    #[test]
+    fn in_repo_cycle_is_an_in_repo_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        touch(&root.join("src/a.dart"), "void f() {}\n");
+        std::fs::create_dir_all(root.join("src/sub")).unwrap();
+        std::os::unix::fs::symlink("..", root.join("src/sub/up")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["src/a.dart"]);
+        assert_eq!(plan.symlinks.in_repo_dirs, 1);
+        assert_eq!(plan.symlinks.cycles, 0);
+    }
+
+    /// (iii) An outside target is walked once, through the first link in
+    /// name order; a second link to it and a loop out there are cycles.
+    #[cfg(unix)]
+    #[test]
+    fn out_of_repo_target_is_walked_once_and_cycles_are_cut() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let out = tmp.path().join("out");
+        touch(&root.join("main.dart"), "void main() {}\n");
+        touch(&out.join("lib/b.dart"), "void g() {}\n");
+        std::os::unix::fs::symlink(&out, root.join("ext")).unwrap();
+        std::os::unix::fs::symlink(&out, root.join("ext2")).unwrap();
+        std::os::unix::fs::symlink(out.join("lib"), out.join("lib/again")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["ext/lib/b.dart", "main.dart"]);
+        let s = &plan.symlinks;
+        assert_eq!(
+            (
+                s.in_repo_dirs,
+                s.out_of_repo_dirs,
+                s.cycles,
+                s.dangling,
+                s.file_links
+            ),
+            (0, 1, 2, 0, 0)
+        );
+    }
+
+    /// (iii b) A link from an outside tree back into the repo is an in-repo
+    /// link, and a link to an ancestor of the root is a cycle.
+    #[cfg(unix)]
+    #[test]
+    fn links_back_into_the_repo_and_to_its_ancestor_are_cut() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let out = tmp.path().join("out");
+        touch(&root.join("app/a.dart"), "void f() {}\n");
+        touch(&out.join("b.dart"), "void g() {}\n");
+        std::os::unix::fs::symlink(&out, root.join("ext")).unwrap();
+        std::os::unix::fs::symlink(root.join("app"), out.join("back")).unwrap();
+        std::os::unix::fs::symlink(tmp.path(), root.join("parent")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["app/a.dart", "ext/b.dart"]);
+        let s = &plan.symlinks;
+        assert_eq!((s.in_repo_dirs, s.out_of_repo_dirs, s.cycles), (1, 1, 1));
+    }
+
+    /// (iv) A dangling link is counted and skipped.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_link_is_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        touch(&root.join("a.dart"), "void f() {}\n");
+        std::os::unix::fs::symlink("nowhere", root.join("gone")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["a.dart"]);
+        assert_eq!(plan.symlinks.dangling, 1);
+        assert!(plan.symlinks.any());
+    }
+
+    /// (v) A file link is read at its own path, as before (code imports it
+    /// there), and counted.
+    #[cfg(unix)]
+    #[test]
+    fn file_link_is_still_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        touch(&root.join("app/a.dart"), "void f() {}\n");
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::os::unix::fs::symlink("../app/a.dart", root.join("tools/x.dart")).unwrap();
+        let plan = plan_walk(&root);
+        assert_eq!(pending_of(&plan), ["app/a.dart", "tools/x.dart"]);
+        let s = &plan.symlinks;
+        assert_eq!((s.in_repo_dirs, s.file_links), (0, 1));
+    }
+
+    /// A link-free tree tallies nothing, so it prints no `[walk] symlinks`.
+    #[test]
+    fn link_free_tree_tallies_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.dart"), "void f() {}\n").unwrap();
+        assert!(!plan_walk(tmp.path()).symlinks.any());
     }
 }
 

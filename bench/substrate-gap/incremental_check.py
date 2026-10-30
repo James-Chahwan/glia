@@ -173,7 +173,7 @@ def check(src, work, many_ok):
     if ndirs > 1 and not many_ok:
         say(f"{rel(src)}: SKIP (installed generate_many has no incremental=, needs A1.4)")
         return "SKIP"
-    shutil.copytree(src, work)
+    shutil.copytree(src, work, symlinks=True)
     cold, _ = grade_pass(work, COLD)
     grade_pass(work, warm_build)  # fill: the sidecar is written
     warm, log = grade_pass(work, warm_build)  # read: the sidecar is consulted
@@ -202,7 +202,7 @@ def selftest(name):
         raise SystemExit(f"selftest needs a single-dir fixture: {name}")
     with tempfile.TemporaryDirectory(prefix="glia-incremental-selftest-") as tmp:
         work = Path(tmp).resolve() / src.name
-        shutil.copytree(src, work)
+        shutil.copytree(src, work, symlinks=True)
         cold_a, _ = grade_pass(work, COLD)
         grade_pass(work, warm_build)
         side = work / SIDECAR
