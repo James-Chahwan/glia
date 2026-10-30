@@ -1840,7 +1840,7 @@ fn binding_rows(cell: &str, lang: &str) -> Vec<(Vec<String>, String)> {
                 Some(name) if name != "default" && name != "*" => names.push(name),
                 Some(_) => {}
                 None if alias.is_none() || lang == "python" => {
-                    names.extend(default_binding(&spec, lang));
+                    names.extend(glia_code_domain::import_default_binding(&spec, lang));
                 }
                 None => {}
             }
@@ -1848,36 +1848,6 @@ fn binding_rows(cell: &str, lang: &str) -> Vec<(Vec<String>, String)> {
             Some((names, spec))
         })
         .collect()
-}
-
-/// The name a whole-module import binds when it names no alias.
-fn default_binding(spec: &str, lang: &str) -> Option<String> {
-    let last = |seps: &[char]| {
-        spec.rsplit(seps)
-            .find(|s| !s.is_empty())
-            .filter(|s| *s != "*")
-            .map(str::to_string)
-    };
-    match lang {
-        "go" => {
-            let mut segs = spec.rsplit(['/', ':']).filter(|s| !s.is_empty());
-            let tail = segs.next()?;
-            let versioned = tail.len() > 1
-                && tail.starts_with('v')
-                && tail[1..].bytes().all(|b| b.is_ascii_digit());
-            Some(
-                if versioned {
-                    segs.next().unwrap_or(tail)
-                } else {
-                    tail
-                }
-                .to_string(),
-            )
-        }
-        "python" => spec.split('.').find(|s| !s.is_empty()).map(str::to_string),
-        "rust" | "java" | "kotlin" | "scala" | "csharp" => last(&[':', '.']),
-        _ => None,
-    }
 }
 
 /// A line that is an import statement (or a line of one a statement's own

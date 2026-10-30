@@ -1478,6 +1478,78 @@ pub fn import_bindings_cell(
     Some((format!("[{}]", out.join(",")), written, capped))
 }
 
+/// FA.22: one row of an IMPORT_BINDINGS payload ([`import_bindings_json`]),
+/// read back: the raw specifier, the imported name and the local alias (each
+/// `None` where the row wrote `null`) and the 0-based row of the import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImportBinding {
+    pub spec: String,
+    pub name: Option<String>,
+    pub alias: Option<String>,
+    pub line: u32,
+}
+
+/// FA.22: the rows of an IMPORT_BINDINGS payload, in the order the cell
+/// stores them; the trailing `{"capped":<n>}` row and any row without a
+/// string `spec` and an integer `line` are skipped. Empty for a payload that
+/// is not a JSON array (never panics).
+pub fn read_import_bindings(payload: &str) -> Vec<ImportBinding> {
+    let Ok(rows) = serde_json::from_str::<Vec<serde_json::Value>>(payload) else {
+        return Vec::new();
+    };
+    let field =
+        |r: &serde_json::Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    rows.iter()
+        .filter_map(|r| {
+            Some(ImportBinding {
+                spec: field(r, "spec")?,
+                name: field(r, "name"),
+                alias: field(r, "alias"),
+                line: u32::try_from(r.get("line")?.as_u64()?).ok()?,
+            })
+        })
+        .collect()
+}
+
+/// The name a whole-module import binds when it names no alias (an
+/// IMPORT_BINDINGS row with `name` and `alias` both null): Go, the last path
+/// segment of `spec` (`/` or the parser's `::`), a `/vN` major-version
+/// segment skipped; Python, the first dotted segment; Rust and the JVM /
+/// .NET family (`java`, `kotlin`, `scala`, `csharp`), the last `::` / `.`
+/// segment, never a glob's `*`. `None` for any other language (the TS family
+/// and Dart bind nothing: a side-effect import). Lifted from
+/// `contract_breaks::names` (FA.21's correction) so name_breaks and org
+/// routing read one rule.
+pub fn import_default_binding(spec: &str, lang: &str) -> Option<String> {
+    let last = |seps: &[char]| {
+        spec.rsplit(seps)
+            .find(|s| !s.is_empty())
+            .filter(|s| *s != "*")
+            .map(str::to_string)
+    };
+    match lang {
+        "go" => {
+            let mut segs = spec.rsplit(['/', ':']).filter(|s| !s.is_empty());
+            let tail = segs.next()?;
+            let versioned = tail.len() > 1
+                && tail.starts_with('v')
+                && tail[1..].bytes().all(|b| b.is_ascii_digit());
+            Some(
+                if versioned {
+                    segs.next().unwrap_or(tail)
+                } else {
+                    tail
+                }
+                .to_string(),
+            )
+        }
+        "python" => spec.split('.').find(|s| !s.is_empty()).map(str::to_string),
+        "rust" | "java" | "kotlin" | "scala" | "csharp" => last(&[':', '.']),
+        _ => None,
+    }
+}
+
 /// [`library_names`] without the names that resolve inside the repo (A16.4).
 pub fn library_names_filtered(
     imports: &[ImportStmt],
@@ -4185,6 +4257,54 @@ mod tests {
         assert!(
             json.ends_with(r#"{"spec":"pkg255","name":"n","alias":null,"line":0},{"capped":4}]"#)
         );
+    }
+
+    /// FA.22: the payload reads back row for row (escapes undone, the
+    /// `capped` row and a malformed payload skipped).
+    #[test]
+    fn import_bindings_read_back() {
+        let cell = import_bindings_json(
+            &[symbol_import("we\"ird", "n")],
+            "typescript",
+            &LocalModuleIndex::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_import_bindings(&cell),
+            [ImportBinding {
+                spec: "we\"ird".to_string(),
+                name: Some("n".to_string()),
+                alias: None,
+                line: 0,
+            }]
+        );
+        let capped = r#"[{"spec":"a::b","name":null,"alias":"c","line":7},{"capped":4}]"#;
+        let rows = read_import_bindings(capped);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].alias.as_deref(), rows[0].line), (Some("c"), 7));
+        assert!(read_import_bindings("not json").is_empty());
+    }
+
+    /// The default bound name of a whole-module import, per language (the
+    /// rule name_breaks and org routing share).
+    #[test]
+    fn import_default_binding_per_language() {
+        let cases = [
+            ("example.com::acme::lib::text", "go", Some("text")),
+            ("github.com/a/b/v2", "go", Some("b")),
+            ("numpy.linalg", "python", Some("numpy")),
+            ("serde::de", "rust", Some("de")),
+            ("java.util.List", "java", Some("List")),
+            ("java.util.*", "java", None),
+            ("@acme/lib", "typescript", None),
+        ];
+        for (spec, lang, want) in cases {
+            assert_eq!(
+                import_default_binding(spec, lang).as_deref(),
+                want,
+                "{spec} {lang}"
+            );
+        }
     }
 
     #[test]

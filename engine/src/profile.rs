@@ -52,7 +52,8 @@ use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver, GrpcStackResolver,
     HttpStackResolver, IacResolver, IdentityResolver, MergedGraph, ModelResolver,
-    QueueStackResolver, RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
+    OrgPackageResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
+    WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -209,9 +210,9 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         populates: &[],
         run: |m, _| resolve(m, &ModelResolver, "resolver:models"),
     },
-    // DD.5: SAME_AS identity stars, the last Resolve pass. It reads nodes
-    // only (never another resolver's edges), so its place is a convention:
-    // last. Its `package_name` and `message_fqname` stars replaced the
+    // DD.5: SAME_AS identity stars, the last Resolve pass but FA.22's
+    // org_packages (which reads its edges). It reads nodes only (never
+    // another resolver's edges), so its place is a convention: last. Its `package_name` and `message_fqname` stars replaced the
     // PACKAGE_DEP SHARES_DEPENDENCY clique and the MESSAGE_TYPE SHARES_SCHEMA
     // pairs (DD.16), so a shared package or message is joined here alone (an
     // answer that walks reads the identity quotient). DD.7: plus the SCIP
@@ -230,6 +231,17 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
             scip.sort_by(|a, b| (a.0.0, &a.1).cmp(&(b.0.0, &b.1)));
             resolve(m, &IdentityResolver::with_scip(&scip), "resolver:identity")
         },
+    },
+    // FA.22: org-internal package routing. An importer's IMPORT_BINDINGS row
+    // naming the package of a sibling PROJECT's `manifest_name` class routes
+    // to that project's module (IMPORTS, DERIVED). It reads the SAME_AS edges
+    // the `identity` pass drew, so it runs after it.
+    PassSpec {
+        name: "org_packages",
+        stage: Stage::Resolve,
+        after: &["identity"],
+        populates: &[],
+        run: |m, _| resolve(m, &OrgPackageResolver, "resolver:org_packages"),
     },
     // LF.2b: the external edges (`.glia/overlay.toml` `[[edge]]` stanzas),
     // first of the post-passes so every one of them sees them. They carry
@@ -393,7 +405,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 28] = [
+    const HEAD_ORDER: [&str; 29] = [
         "http",
         "grpc",
         "rpc",
@@ -411,6 +423,7 @@ mod tests {
         "iac",
         "models",
         "identity",
+        "org_packages",
         "external_edges",
         "downgrade_test_paths",
         "demote_unmatched_http_nodes",
@@ -433,7 +446,9 @@ mod tests {
     /// resolvers its stars replaced, leaving fourteen; DT.5f's gqlgen
     /// resolver follows the GraphQL one, making fifteen; DT.10b's evm
     /// resolver follows the RPC one, making sixteen; DT.1h's models resolver
-    /// runs just before identity, making seventeen.
+    /// runs just before identity, making seventeen; FA.22's org_packages
+    /// reads identity's SAME_AS edges and runs right after it, making
+    /// eighteen.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -447,7 +462,7 @@ mod tests {
                 count(Stage::Post),
                 count(Stage::Finalize)
             ),
-            (17, 9, 2)
+            (18, 9, 2)
         );
     }
 

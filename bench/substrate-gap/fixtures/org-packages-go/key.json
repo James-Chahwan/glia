@@ -1,0 +1,9 @@
+{
+  "framework": "org-packages",
+  "language": "go",
+  "dirs": ["app", "lib"],
+  "note": "FA.22: app's go.mod requires example.com/acme/lib, the module lib's go.mod declares (the manifest_name SAME_AS class), so `import \"example.com/acme/lib/text\"` routes to the package directory text/ (its dir-named file text.go, as an in-repo package-directory import binds) as an IMPORTS cross edge, resolver:org_packages rule org_import. Baseline HEAD 18ca1151: only the SAME_AS star. FA.23 adds the Run -> Upper CALLS row (org_call).",
+  "expect_edges": [
+    {"from": "main", "to": "text", "category": "IMPORTS", "note": "org_import"}
+  ]
+}

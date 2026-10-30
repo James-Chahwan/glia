@@ -34,6 +34,9 @@ mod identity;
 // DT.1g: the models pass's inputs (client wires: both sides of every paired
 // HTTP exchange, resolved to models).
 mod models;
+// FA.22: org-internal package routing over the manifest_name SAME_AS class
+// (runs after identity: it reads its edges).
+mod org_packages;
 // CB.12: host narrowing (the service alias index and `narrow_by_host`),
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;
@@ -54,6 +57,7 @@ pub use models::{
     ClientWire, ClientWireStats, ClientWires, ResolvedField, ResolvedShape, RouteHandler,
     RouteSide, ServerSite, WireDirection, client_wires,
 };
+pub use org_packages::OrgPackageResolver;
 pub use queue::QueueStackResolver;
 pub use rpc::RpcStackResolver;
 pub use shared_schema::SharedSchemaResolver;

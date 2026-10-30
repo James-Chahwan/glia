@@ -1,0 +1,12 @@
+{
+  "framework": "org-packages",
+  "language": "typescript",
+  "dirs": ["app", "lib"],
+  "note": "FA.22: org-internal package routing over the manifest_name SAME_AS class. app declares @acme/lib, the package lib's manifest names, so app's `import { greet } from '@acme/lib'` routes to lib's entry module (src/index, by convention) as an IMPORTS cross edge, resolver:org_packages rule org_import. Baseline HEAD 18ca1151: only the SAME_AS star, no IMPORTS edge between the repos. FA.23 adds the run -> greet CALLS row (org_call).",
+  "expect_edges": [
+    {"from": "main", "to": "index", "category": "IMPORTS", "note": "org_import"}
+  ],
+  "forbid": [
+    {"from": "run", "to": "main", "category": "CALLS", "note": "no self-binding"}
+  ]
+}
