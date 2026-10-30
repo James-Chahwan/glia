@@ -22,5 +22,11 @@
   "9": {"exempt": "link precision only, no ranking effect (round 2)"},
   "10": ["ANS:impact@sel", "ANS:pack@sel"],
   "11": ["ANS:find_files@sel"]
- }
+ },
+ "accepted": [
+  {"row": "glia/single/ANS:impact/r10", "floor": 0.254, "packet": "FD.79", "ruling": "James 2026-10-30 \"Okay ship it\": FD.79 removes mostly-wrong doc links; glia alone drops (39% of its 2-30-file commits change docs and code together, the other snapshots 0-10%); docs as a second graph is a 0.5.5 item, which retires these rows"},
+  {"row": "glia/single/ANS:impact/mrr", "floor": 0.4556, "packet": "FD.79", "ruling": "James 2026-10-30 \"Okay ship it\": FD.79 removes mostly-wrong doc links; glia alone drops (39% of its 2-30-file commits change docs and code together, the other snapshots 0-10%); docs as a second graph is a 0.5.5 item, which retires these rows"},
+  {"row": "glia/single/ANS:impact@sel/r10", "floor": 0.2536, "packet": "FD.79", "ruling": "James 2026-10-30 \"Okay ship it\": FD.79 removes mostly-wrong doc links; glia alone drops (39% of its 2-30-file commits change docs and code together, the other snapshots 0-10%); docs as a second graph is a 0.5.5 item, which retires these rows"},
+  {"row": "glia/single/ANS:impact@sel/mrr", "floor": 0.4542, "packet": "FD.79", "ruling": "James 2026-10-30 \"Okay ship it\": FD.79 removes mostly-wrong doc links; glia alone drops (39% of its 2-30-file commits change docs and code together, the other snapshots 0-10%); docs as a second graph is a 0.5.5 item, which retires these rows"}
+ ]
 }

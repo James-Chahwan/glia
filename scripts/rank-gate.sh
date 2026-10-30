@@ -8,6 +8,8 @@
 #   bash scripts/rank-gate.sh baseline <release>  run, then write the trims to baseline/<release>/ (a declared re-baseline)
 #   bash scripts/rank-gate.sh baseline-add        merge the last check's `new` gated rankers into baseline/0.5.2 and current
 #   bash scripts/rank-gate.sh ratchet             copy the last green check's trims over baseline/current (HEAD must match)
+#   gate.json `accepted`: [{row: <label>/<shape>/<ranker>/<metric>, floor, packet, ruling}] - a drop James ruled acceptable
+#                 passes (printed `accepted`) while the row stays at or above its floor; baselines stay as measured
 #   bash scripts/rank-gate.sh coverage            every scope item of gate.json `items` is measured or exempt
 #   bash scripts/rank-gate.sh flags               print the common rank_eval flags (COMMON), one per line (read-only;
 #                                                 scripts/embedding-gate.sh reads them, FB.6)
@@ -182,9 +184,13 @@ do_check() {
       verdicts+=("$base=$out.json:$rc")
     done
   done
-  python3 -I - "$RUN/last-check.json" "$GLIA_RANK_GATE_HEAD" "$ONLY" "${verdicts[@]}" <<'PY'
+  python3 -I - "$RUN/last-check.json" "$GLIA_RANK_GATE_HEAD" "$ONLY" "$GATE" "${verdicts[@]}" <<'PY'
 import json, sys
-dest, head, only, items = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+dest, head, only, gate, items = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
+# gate.json `accepted`: a drop James ruled acceptable, per row with a floor: the row passes as
+# `accepted` while its new value stays at or above the floor, and drops again below it
+accepted = {a["row"]: a for a in json.load(open(gate)).get("accepted", [])}
+taken = []
 partial = f" (partial: only {only})" if only else ""
 rows = gains = 0
 drops, drift, missing, other, labels = [], [], [], [], []
@@ -201,7 +207,12 @@ for it in items:
             for metric, r in ms.items():
                 rows += 1
                 key = f"{lab}/{shape}/{ranker}/{metric}"
-                if r["verdict"] == "drop" and key not in drops:
+                if r["verdict"] == "drop" and key in accepted and r["new"] >= accepted[key]["floor"]:
+                    print(f"[rank-gate] base={base} accepted {key} {r['base']:.4f}->{r['new']:.4f} "
+                          f"floor={accepted[key]['floor']} ({accepted[key]['packet']})")
+                    if key not in taken:
+                        taken.append(key)
+                elif r["verdict"] == "drop" and key not in drops:
                     drops.append(key)
                 if r["verdict"] == "gain":
                     gain_rows.add(key)
@@ -221,14 +232,15 @@ for it in items:
         other.append(f"{lab} vs {base} exit {rc}")
 ok = not (drops or drift or missing or other)
 json.dump({"ok": ok, "partial": bool(only), "glia_head": head, "labels": labels, "rows": rows, "gains": len(gain_rows),
-           "drops": drops, "drift": drift, "missing": missing, "new": new}, open(dest, "w"), indent=1, sort_keys=True)
+           "drops": drops, "accepted": taken, "drift": drift, "missing": missing, "new": new}, open(dest, "w"), indent=1, sort_keys=True)
 if drift:
     print(f"[rank-gate] check: FAILED (drift {', '.join(drift)})"); sys.exit(2)
 if missing or other:
     print(f"[rank-gate] check: FAILED (missing {', '.join(missing + other)})"); sys.exit(2)
 if drops:
     print(f"[rank-gate] check: FAILED ({len(drops)} drops: {', '.join(drops)}){partial}"); sys.exit(1)
-print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops on {len(labels)} snapshots{partial}")
+acc = f", {len(taken)} accepted" if taken else ""
+print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops{acc} on {len(labels)} snapshots{partial}")
 PY
   exit $?
 }

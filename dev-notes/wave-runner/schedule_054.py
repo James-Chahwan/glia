@@ -79,7 +79,7 @@ LANDED = {
     22: "FA.22 FD.3d FH.21 FH.22 FH.23",
     23: "FA.23 FD.3b FH.24 FH.25",
     24: "FD.3c",
-    25: "FD.73 FD.74 FD.75 FD.77 FD.78 FD.80 FD.81",
+    25: "FD.73 FD.74 FD.75 FD.77 FD.78 FD.79 FD.80 FD.81",  # FD.79 landed by hand after the close-out (d22aeaad)
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 SELECTED = "T0 T2 T5 T1 T11 TS TH T3 T10"
