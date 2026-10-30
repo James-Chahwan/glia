@@ -535,6 +535,7 @@ glia cell ls <REPO> [--check] [--json] [--qname <QNAME>] [--rekey] [--writer <NS
 - [docs/overview.md](./docs/overview.md): across services, coverage (languages, frameworks, resolvers, the measured matrix), numbers, architecture, how glia compares, earlier experiments, acknowledgments.
 - [docs/history.md](./docs/history.md): what each release shipped, 0.4.x to 0.5.4.
 - [docs/overlay.md](./docs/overlay.md) (`.glia/overlay.toml`, the sidecars and snapshots), [docs/rules.md](./docs/rules.md) (Datalog and GQL), [docs/embeddings.md](./docs/embeddings.md) (models and devices), [docs/cache.md](./docs/cache.md) (the shared parse cache), [SECURITY.md](./SECURITY.md) (what glia never does).
+- Contributing: [CONTRIBUTING.md](./CONTRIBUTING.md) (issues and fixtures welcome; code PRs are read as designs and rebuilt into a release with credit, for now).
 - Problems: open an issue ([bug](./.github/ISSUE_TEMPLATE/bug.md), [embedding device](./.github/ISSUE_TEMPLATE/embedding-device.md) with your `[embed] device=` line).
 
 ## Roadmap

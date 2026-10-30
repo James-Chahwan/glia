@@ -54,6 +54,24 @@ rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
   a chat paste so far; commit it as docs/dpg.md.
 - Close-out speed: per-step timestamps, then a faster rank gate (about 14 of a close-out's ~20 minutes).
 
+## 4b. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
+
+James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
+code but in 0.5.6 we are doing more graph work and stacking and domains soooo ... Maybe we will think if some way like
+port protocol number system to domain or something else like a domain then allocator number idk ... But yeah we should
+handle this at some point"*. `CONTRIBUTING.md` (0.5.5) states the current model: issues, fixtures, PRs read as designs
+and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph stacking and domains:
+
+- **Id allocation by domain, like port / protocol numbers.** The u32 id spaces (node kinds, edge categories, cell
+  types) split into blocks: a core block, one registered block per domain (code, build targets, goals, later visual
+  domains), and an experimental / private range that never ships, so a branch or a local domain can mint ids without
+  colliding and a release promotes them into the domain's block. An allocator (`glia ids alloc --domain <d>` or a
+  build-time check) hands out the next number in a block and fails CI on an overlap; the header registries a `.gmap`
+  already carries (LC.4) record which block each id came from. Old layouts keep decoding: allocated ids never move.
+- **Contribution seams that stay stable across a leap**: a parser crate behind the `detect_language` / `parse_one_with`
+  / build-group wiring, a fixture, a pattern cell; documented so a PR touching only a seam can merge.
+- **Gates a contributor can run**: a fast tier (minutes) for PRs, the full rank / cohort gates at release only.
+
 ## 5. From 0.5.4's W20 follow-ups (James 2026-10-30: the precision extensions move here)
 
 - Clients reached through class heritage: `this.get(url)` in a class extending an imported `APIService` / `HttpService` (the bulk of the remaining phantom_dropped: plane 43, chatwoot 128; FH.17b's handoff).
