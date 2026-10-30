@@ -41,7 +41,7 @@ TRACKS = {
     "T10": ("org-internal package routing", "FD.31 FA.21 FA.22 FA.23"),
     "T11": ("distribution: zero-install CLI, skills into glia", "FE.5 FE.6 FE.7"),
     "TS": ("semantic answers in fused form, held until FB.6b (the fusion gate) PASSES", "FB.7a FB.7b FB.7c FB.7d FB.8"),
-    "TH": ("the Sibyl cohort follow-up: cohort, boundary chain fixes, style-agnostic drift, cockpit, Sibyl matrix, cohort gate, agent probes", "FH.1a FH.1b FH.2a FH.2b FH.3 FH.4a FH.4b FH.5 FH.6 FH.7a FH.7b FH.8 FH.9 FH.10 FH.11a FH.11b FH.12 FH.13 FH.14 FH.3b FH.8b FH.14b FH.15 FH.7c FH.8c FH.16 FH.17 FH.18 FH.19 FH.7d FH.16b FH.17b FH.20 FH.1c FH.11c FH.8d FH.1d FH.13b FH.21 FH.22 FH.23 FH.24 FH.25"),
+    "TH": ("the Sibyl cohort follow-up: cohort, boundary chain fixes, style-agnostic drift, cockpit, Sibyl matrix, cohort gate, agent probes", "FH.1a FH.1b FH.2a FH.2b FH.3 FH.4a FH.4b FH.5 FH.6 FH.7a FH.7b FH.8 FH.9 FH.10 FH.11a FH.11b FH.12 FH.13 FH.14 FH.3b FH.8b FH.14b FH.15 FH.7c FH.8c FH.16 FH.17 FH.18 FH.19 FH.7d FH.16b FH.17b FH.20 FH.1c FH.11c FH.8d FH.1d FH.13b FH.21 FH.22 FH.23 FH.24 FH.25 FH.26"),
     "TZ": ("release docs and handoffs (after the tracks that ship)", "FZ.1 FZ.2"),
 }
 

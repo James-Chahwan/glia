@@ -8386,7 +8386,8 @@
     "FD.78",
     "FD.79",
     "FD.80",
-    "FD.81"
+    "FD.81",
+    "FH.26"
    ],
    "risks": "Runs after the last follow-up wave (seed \u00a74: followups finish inside 0.5.4; the release docs packet runs last). Large prose diff: write per section and keep 0.5.3's text. The version bump is NOT this packet: it is the release step after FZ (James's rule).",
    "spec_group": "FZ"
@@ -8544,7 +8545,8 @@
     "FD.78",
     "FD.79",
     "FD.80",
-    "FD.81"
+    "FD.81",
+    "FH.26"
    ],
    "risks": "Written after the last follow-up wave from landed results, never from packet text. The Engram ask (dev-notes/engram-ask-0.5.4.md) is James's to send: the handoff references it and changes nothing in it. Never write under another repo.",
    "spec_group": "FZ"
@@ -11097,6 +11099,61 @@
     "output": "| 1 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient | {\"emitter\":\"graph:iface\",\"rule\":\"method_signature\"\n| 2 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient | src::frontend::genproto::demo_grpc.pb::CartServiceClient | {\"emitter\":\"graph:iface\",\"rule\":\"method_signature\"\n| 3 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient::AddItem | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient::AddItem | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 4 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient::AddItem | src::frontend::genproto::demo_grpc.pb::CartServiceClient::AddItem | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 5 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient::GetCart | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient::GetCart | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 6 | src::checkoutservice::genproto::demo_grpc.pb::cartServiceClient::GetCart | src::frontend::genproto::demo_grpc.pb::CartServiceClient::GetCart | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 7 | src::frontend::conn::conn::Price | src::checkoutservice::money::money::Formatter | {\"emitter\":\"graph:iface\",\"rule\":\"method_signature\"\n| 8 | src::frontend::conn::conn::Price::Currency | src::checkoutservice::money::money::Formatter::Currency | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 9 | src::frontend::conn::conn::Price::Format | src::checkoutservice::money::money::Formatter::Format | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 10 | src::frontend::genproto::demo_grpc.pb::cartServiceClient | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient | {\"emitter\":\"graph:iface\",\"rule\":\"method_signature\"\n| 11 | src::frontend::genproto::demo_grpc.pb::cartServiceClient | src::frontend::genproto::demo_grpc.pb::CartServiceClient | {\"emitter\":\"graph:iface\",\"rule\":\"method_signature\"\n| 12 | src::frontend::genproto::demo_grpc.pb::cartServiceClient::AddItem | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient::AddItem | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 13 | src::frontend::genproto::demo_grpc.pb::cartServiceClient::AddItem | src::frontend::genproto::demo_grpc.pb::CartServiceClient::AddItem | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 14 | src::frontend::genproto::demo_grpc.pb::cartServiceClient::GetCart | src::checkoutservice::genproto::demo_grpc.pb::CartServiceClient::GetCart | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n| 15 | src::frontend::genproto::demo_grpc.pb::cartServiceClient::GetCart | src::frontend::genproto::demo_grpc.pb::CartServiceClient::GetCart | {\"emitter\":\"graph:iface\",\"rule\":\"same_name\"\n[go-modules] 2 module roots (src/checkoutservice=github.com/demo/checkoutservice src/frontend=github.com/demo/frontend) repo=<gomods>\n[iface] method-level implements: 10 (interfaces=5)\n[iface] go implicit implements: 5 (interfaces=5 types=3 embedded=0 open=0)\n[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) signature_checked=5\n| IMPLEMENTS | medium | derived | graph:iface | method_signature | src/frontend/genproto/demo_grpc.pb.go:14 | inferred binding (method_signature, medium confidence) |",
     "finding": "G1 reproduces: each genproto client pairs with the other module's CartServiceClient (method_signature) and each method with its twin (same_name), 6 cross-module edges out of 15; the in-module pairs and the imported cross-module Formatter control (Price, predeclared-only signatures) pair too. `[go-modules]` shows the engine knows both roots, but `build_go(repo, parses)` receives none and the R2 scope gate fires only for one-method sets (a first variant's one-method `Closer` control was filtered by it: `scope=2 (one_method=2)`), so the roots must reach the Go group through GroupCtx (and watch's hidden_fp). Gating the type-level pair removes the same_name twins, which ride on it."
    }
+  },
+  {
+   "id": "FH.26",
+   "batch": "FH",
+   "spec_group": "FH",
+   "area": "FH health (W25 follow-up of FH.17)",
+   "title": "glia health counts a test-site ENDPOINT (ORIGIN test_fixture) apart, as it counts ORIGIN external: neither in the producers nor in client reach",
+   "loc": 90,
+   "rationale": "FH.17 (f3829dba) mints an inferred HTTP wrapper's test-file call site as an ENDPOINT stamped ORIGIN test_fixture that pairs nothing by design (gaps' unpaired_endpoint and suspected_edge already withhold it). engine/src/health.rs keeps such an ENDPOINT out of the role basis but still counts it as an HTTP producer, so a repo with many Go API tests reads http BLIND clients_unpaired: photoprism 16 paired of 253 producers (6%), where 208 are test sites; without them 16 of 45 (0.356, the cohort baseline). The W25 full cohort gate caught it; bench/cohort/cohort.py's own client_reach was fixed in 11d1bf1a, the engine's is this packet.",
+   "probe": {
+    "head": "11d1bf1a",
+    "commands": [
+     "git -C ~/.cache/glia-cohort/photoprism.git archive 70e20b5e033f29e4d53b0eb34de44856806637d1 | tar -x -C <copy>",
+     "GLIA_NO_PERSIST=1 target/release/glia health <copy>",
+     "~/.venvs/glia-leap/bin/python: glia_py.generate(<copy>).nodes_json(), ENDPOINT nodes by ORIGIN"
+    ],
+    "output": "# glia health <photoprism@70e20b5e copy>\nverdict: BLIND - http: clients_unpaired (clients paired 6% of 253)\n| http | BLIND | clients_unpaired | 253 | 1 | 166 | 16 | 6% | 9% | clients paired 6% of 253 |\n[http-wrappers] wrappers=7 sites=1123 minted=428 ambiguous=2 test_sites=428 phantom_dropped=25 client_by_import=0 options_object=0 computed_verb=0 repo=..\n[health] repo=pp role=app http=BLIND:0.063 .. queue=DEGRADED:0.250 ..\nglia_py nodes_json on the same copy: 254 ENDPOINT nodes, 208 of them ORIGIN test_fixture (internal/api/*_test.go: AuthenticatedRequestWithBody(app, \"POST\", \"/api/v1/users/uqxetse3cy5eo9z2/passcode/deactivate\", ..)).\nFull cohort gate at W25 close-out: photoprism/http/client_reach 0.356->0.063 (cohort baseline 2026-10-26: endpoints=46, HTTP_CALLS 16).",
+    "finding": "health.rs's producer tally (the MECHANISMS loop) splits only ORIGIN external off; ORIGIN test_fixture producers count in producers and drag client_reach to 0.063, a false BLIND verdict on any app whose tests call its API through an inferred wrapper."
+   },
+   "entry_points": [
+    "engine/src/health.rs: the Tally loop (`if kind == m.producer { if provenance == external ..`), MechanismHealth, the module doc's Client reach paragraph",
+    "cli/src/cmd/query/health.rs: the mechanisms table (clients | external | ..)",
+    "py/src/health.rs: the documented row keys"
+   ],
+   "files_touched": [
+    "engine/src/health.rs",
+    "engine/tests/health.rs",
+    "cli/src/cmd/query/health.rs",
+    "py/src/health.rs",
+    "py/api_surface/health.txt",
+    "py/tests/surface/test_health.py"
+   ],
+   "implementation": "1. In the Tally loop, a producer whose ORIGIN provenance is test_fixture counts in a new `test_sites` tally and in neither producers nor paired (as `external` does). 2. MechanismHealth gains `test_site_producers: usize` (serialized after external_producers); the pyo3 dict and its doc list carry it; regenerate py/api_surface/health.txt if its text names the keys, and extend test_health.py's key check. 3. The CLI table gains a `test sites` column after `external`. 4. The `[health]` marker is unchanged in shape. 5. The module doc's Client reach paragraph names test_fixture producers beside external ones. 6. engine/tests/health.rs: a fixture app whose test file calls its API through an inferred wrapper (a `_test.go` helper taking (method, path)) reads http OK / client reach over the non-test clients only, test_site_producers > 0.",
+   "fixtures": [],
+   "acceptance": "`cargo test -p glia-engine --test engine_tests health::` (or the health test target) green; `GLIA_NO_PERSIST=1 target/release/glia health <photoprism copy>` reads http client reach 0.356 (16 of 45) with 208 test sites, verdict no longer BLIND clients_unpaired; pyo3 surface test_health green; the W26 close-out's full cohort gate has no photoprism drop. WALL TIME: the photoprism health probe is ~15 s on a release build.",
+   "fired_on_marker": "[health] repo=<label> .. http=<verdict>:<client_reach> .. (photoprism: http no longer BLIND:0.063); the table's `test sites` column",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output",
+     "api_signature"
+    ],
+    "what_changes": "glia health / PyGraph health: producers and client_reach leave ORIGIN test_fixture producers out; a new test_site_producers field and a `test sites` column. Additive field; the verdict can move from BLIND to OK / DEGRADED on repos with test-site endpoints.",
+    "in_repo_consumers": [
+     "bench/cohort/cohort.py (already excludes them since 11d1bf1a)",
+     "scripts/cohort-gate.sh (reads client_reach / server_reach from health JSON)"
+    ],
+    "out_of_repo_consumers": [
+     "repo-graph (health surface, FZ.2 note)"
+    ]
+   },
+   "depends_on": [
+    "FH.17"
+   ],
+   "risks": "A test_fixture ROUTE is already left out of consumers (test_routes); keep the server side unchanged. The cohort baseline's http client_reach (0.356) predates FH.17, so the fixed number should land on it; if not, quote both."
   }
  ],
  "deps_patch": {
