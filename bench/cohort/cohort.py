@@ -992,6 +992,14 @@ def run_health(repo, glia_bin, release):
         p = glia.json("query", ".", "--gql", "-e", "MATCH (e:ENDPOINT)-[:HTTP_CALLS]->"
                       "(r:ROUTE) RETURN e.qname, r.qname", *lim)[0]
         ends, routes, pairs = query_rows(e), query_rows(r), query_rows(p)
+        # FH.17's test-site endpoints (ORIGIN test_fixture) pair nothing by design, and
+        # engine/src/health.rs leaves them out of client_reach: so does the harness
+        tfe = {v[0] for v in glia.datalog('tfe(Q) :- node(N, "ENDPOINT"), '
+                                          'origin(N, "test_fixture"), qname(N, Q).\n',
+                                          ["tfe"])["tfe"]}
+        ends = [x for x in ends if x.get("values") and values(x)[0] not in tfe]
+        pairs = [x for x in pairs if x.get("values") and values(x)[0] not in tfe]
+        res["test_fixture_endpoints"] = len(tfe)
         paired_e = {values(x)[0] for x in pairs if x.get("values")}
         paired_r = {values(x)[1] for x in pairs if x.get("values")}
         gp = res["gaps"] or {}

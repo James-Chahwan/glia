@@ -1,6 +1,6 @@
 {
   "engine": "0.5.3",
-  "fixtures": 449,
+  "fixtures": 456,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -129,6 +129,13 @@
       "language": "clojure",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "config-env-writes-vault-gate": {
+      "framework": "config-env-writes-vault-gate",
+      "language": "python",
+      "per_category": {
+        "READS_CONFIG": 1.0
       }
     },
     "contract-annot-nestjs": {
@@ -549,6 +556,20 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "data-entity-statement-sinks": {
+      "framework": "data-entity-statement-sinks",
+      "language": "rust",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "data-source-jni-descriptor-words": {
+      "framework": "data-source-jni-descriptor-words",
+      "language": "dart",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "docs-adr-decision": {
       "framework": "docs-adr-decision",
       "language": "python",
@@ -869,6 +890,13 @@
         "IMPLEMENTS": 1.0
       }
     },
+    "go-implicit-implements-per-module": {
+      "framework": "go-implicit-implements-per-module",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0
+      }
+    },
     "go-imports": {
       "framework": "go-imports",
       "language": "go",
@@ -1093,6 +1121,13 @@
       "language": "go",
       "per_category": {
         "GRPC_CALLS": 1.0
+      }
+    },
+    "grpc-register-impl-handlers": {
+      "framework": "grpc-register-impl-handlers",
+      "language": "proto+go",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "guard-compiled-literals": {
@@ -1472,6 +1507,13 @@
         "HANDLED_BY": 1.0,
         "IMPORTS": 1.0,
         "INJECTS": 1.0
+      }
+    },
+    "manifest-toml-array-tables": {
+      "framework": "manifest-toml-array-tables",
+      "language": "rust",
+      "per_category": {
+        "DEPENDS_ON": 1.0
       }
     },
     "models-dart-dio": {
@@ -2749,6 +2791,13 @@
       "framework": "walk-project-roots",
       "language": "typescript+go+rust",
       "per_category": {}
+    },
+    "walk-symlink-once": {
+      "framework": "walk-symlink-once",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
+      }
     },
     "walk-user-config": {
       "framework": "walk-user-config",
