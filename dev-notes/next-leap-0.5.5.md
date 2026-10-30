@@ -41,7 +41,9 @@ rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
 ## 4. Raised in conversation, not yet specced
 
 - A Claude Code plugin packaging skills/, shaped by FH.13's agent-usage data (James 2026-10-24; ruled after 0.5.4).
-- Native GitHub-release binaries / multi-platform install beyond the PyPI `glia-cli` wheels (2026-10-24; undecided).
+- The Rust-native install (`cargo install` / crates.io, GitHub-release binaries) beyond the PyPI `glia-cli` wheels.
+  James 2026-10-31, on why glia-cli is a PyPI package: *"okay sure go for it we will do the rust part later then"*:
+  glia-cli ships on PyPI with 0.5.4; the Rust channel comes later.
 - An image-embedding space for visual domains (2026-10-24; arrives with the first visual domain; VectorRow already fits).
 - The DPG explainer's future directions (LLM uplift of new graph features, biology-inspired ideas; 2026-10-24): only in
   a chat paste so far; commit it as docs/dpg.md.
