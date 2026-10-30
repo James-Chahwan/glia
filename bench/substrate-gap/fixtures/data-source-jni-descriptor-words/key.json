@@ -1,0 +1,72 @@
+{
+  "framework": "data-source-jni-descriptor-words",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.73 (edge audit A1, FD.3c). extractor:data_sources matches its needles as substrings, and since FD.5a / FD.5b a Dart / C string literal is admitted (a library name in an import string). A jnigen binding's JNI type descriptor `(Ljava/lang/String;ILandroid/database/sqlite/SQLiteDatabase$CursorFactory;)..` therefore mints data_source:sqlite and (through the `database/sql` prefix of `database/sqlite`) data_source:database_sql, and a licence string's `Redistribution` mints data_source:redis, a UI string's `Prismatic` data_source:prisma. Baseline HEAD c4152966: forbid violations 6. The controls keep their edges: a sqlite3 import, a bare `RedisConnection()` (camel tail), Go `database/sql`, Java Redisson (a new table row).",
+  "expect_edges": [
+    {
+      "from": "lib::store",
+      "to": "data_source:sqlite",
+      "category": "ACCESSES_DATA",
+      "note": "import 'package:sqlite3/sqlite3.dart' + sqlite3.open"
+    },
+    {
+      "from": "lib::cache",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "RedisConnection(): the needle ends at a camel boundary"
+    },
+    {
+      "from": "go::repo",
+      "to": "data_source:database_sql",
+      "category": "ACCESSES_DATA",
+      "note": "import \"database/sql\""
+    },
+    {
+      "from": "jvm::Cache",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "Redisson.create() - the new Redisson row keeps it"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "lib::health_connect",
+      "to": "data_source:sqlite",
+      "category": "ACCESSES_DATA",
+      "note": "JNI descriptor in a jnigen Dart binding"
+    },
+    {
+      "from": "lib::health_connect",
+      "to": "data_source:database_sql",
+      "category": "ACCESSES_DATA",
+      "note": "`android/database/sqlite` matched `database/sql`"
+    },
+    {
+      "from": "src::health_connect::health_connect.c",
+      "to": "data_source:sqlite",
+      "category": "ACCESSES_DATA",
+      "note": "descriptor split across adjacent C literals"
+    },
+    {
+      "from": "src::health_connect::health_connect.c",
+      "to": "data_source:database_sql",
+      "category": "ACCESSES_DATA",
+      "note": "same descriptor, the database/sql needle"
+    },
+    {
+      "from": "lib::licence_page",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "`Redistribution` in a licence string"
+    },
+    {
+      "from": "lib::banner",
+      "to": "data_source:prisma",
+      "category": "ACCESSES_DATA",
+      "note": "`Prismatic` in a UI string"
+    }
+  ]
+}

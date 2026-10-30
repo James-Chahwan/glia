@@ -17,6 +17,16 @@
 //! use one. Inside code the match stays a substring
 //! (`QueueFramework::RedisList` still reads as redis); every other language
 //! is unchanged. fired_on: `[code-guard] data_sources lang=.. dropped=..`.
+//!
+//! FD.73: two shape rules on an occurrence, in every language and before the
+//! guard: one inside a JVM type descriptor (`Landroid/database/sqlite/X;`,
+//! jnigen's bindings, whole or split across adjacent literals) names no
+//! client (`in_jvm_descriptor`), and a capitalised word needle (`Redis`,
+//! `Prisma`, `Resend` ..) reads only at a camel or word tail, never inside a
+//! longer word like `Redistribution` (`word_tail_ok`). The rules key on the
+//! text, not on the file: a generated sqlc / Prisma client really opens a
+//! database. fired_on, once per file with a refusal:
+//! `[data-sources] refused jvm_descriptor=<j> word_tail=<w> path=<p>`.
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
@@ -67,6 +77,7 @@ pub fn extract_data_source_nodes(
     let rust = path
         .rsplit_once('.')
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("rs"));
+    let (mut refused_descriptor, mut refused_word) = (0usize, 0usize);
 
     for (pattern, kind, provider) in PATTERNS {
         // A provider already emitted takes nothing more from this file, so
@@ -81,8 +92,18 @@ pub fn extract_data_source_nodes(
         // FD.6: in a Rust file a needle also has to read as a Rust path
         // ([`rust_path_reading`]), so a local `redis.contains(..)` or a
         // type `PrismaSchema` names no library.
+        // FD.73: a JVM type descriptor or a longer word holds no client
+        // name; both refusals are shape rules, decided before the guard.
         let mut crate_named: Option<bool> = None;
         if !source.match_indices(pattern).any(|(at, _)| {
+            if in_jvm_descriptor(source, at) {
+                refused_descriptor += 1;
+                return false;
+            }
+            if !word_tail_ok(source, at, pattern) {
+                refused_word += 1;
+                return false;
+            }
             let reads = !rust
                 || rust_path_occurrence(source, at, pattern)
                 || match crate_named {
@@ -116,6 +137,11 @@ pub fn extract_data_source_nodes(
         });
     }
     guard.report("data_sources");
+    if refused_descriptor > 0 || refused_word > 0 {
+        eprintln!(
+            "[data-sources] refused jvm_descriptor={refused_descriptor} word_tail={refused_word} path={path}"
+        );
+    }
 
     DataSourceNodes { nodes, edges, nav }
 }
@@ -163,6 +189,74 @@ fn rust_names_crate(source: &str, provider: &str, guard: &mut LazyGuard<'_>) -> 
     })
 }
 
+/// A byte of a JVM descriptor token: a class-name character, the inner-class
+/// `$` or the package separator `/`.
+fn is_descriptor_byte(c: u8) -> bool {
+    is_ident_byte(c) || c == b'$' || c == b'/'
+}
+
+/// FD.73: true when the occurrence at byte `at` sits inside a JVM type
+/// descriptor (`(Ljava/lang/String;ILandroid/database/sqlite/X;)V`): JNI
+/// bindings (jnigen's Dart and C, Kotlin / Java JNI glue) name JVM classes
+/// there, never a client library. The token around `at` (bytes of
+/// [`is_descriptor_byte`]) must open after a descriptor delimiter
+/// (`( ) ; [ " '`, or the file start), read `L<pkg>/..` once its leading JVM
+/// primitive letters (`[BCDFIJSZ]`) are stripped, hold a `/` before `at`, and
+/// end at `;` (the class's end) or at a `/` right before a closing quote
+/// (jnigen's C splits one descriptor across adjacent literals). So
+/// `"modernc.org/sqlite"` (the run stops at `.`), `"Lib/sqlite/x.db"` and a Go
+/// `"database/sql"` import (no `L` class start) are no descriptor.
+/// Language-blind: a descriptor is the same text in every language.
+fn in_jvm_descriptor(source: &str, at: usize) -> bool {
+    let b = source.as_bytes();
+    let mut start = at;
+    while start > 0 && is_descriptor_byte(b[start - 1]) {
+        start -= 1;
+    }
+    if start > 0 && !matches!(b[start - 1], b'(' | b')' | b';' | b'[' | b'"' | b'\'') {
+        return false;
+    }
+    let mut class = start;
+    while class < at
+        && matches!(
+            b[class],
+            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z'
+        )
+    {
+        class += 1;
+    }
+    if class >= at || b[class] != b'L' || !b[class..at].contains(&b'/') {
+        return false;
+    }
+    let mut end = at;
+    while end < b.len() && is_descriptor_byte(b[end]) {
+        end += 1;
+    }
+    match b.get(end) {
+        Some(b';') => true,
+        Some(b'"' | b'\'') => b[end - 1] == b'/',
+        _ => false,
+    }
+}
+
+/// FD.73: true unless `pattern` is a capitalised word needle (first byte
+/// ASCII uppercase, last byte an ASCII letter: `Redis`, `Prisma`, `Resend`,
+/// `MongoClient` ..) whose occurrence at `at` runs on into a longer lowercase
+/// word (`Redistribution`, `Prismatic`, `Resending`). A camel tail
+/// (`RedisTemplate`) or any non-lowercase byte (`.`, `(`, `;`, a quote, a
+/// space) ends the word. Lowercase, dotted, `::` and path needles are
+/// unchanged, so `memcache` still reads `memcached` and `psycopg` `psycopg2`.
+fn word_tail_ok(source: &str, at: usize, pattern: &str) -> bool {
+    let p = pattern.as_bytes();
+    let word = p.first().is_some_and(u8::is_ascii_uppercase)
+        && p.last().is_some_and(u8::is_ascii_alphabetic);
+    !word
+        || !source
+            .as_bytes()
+            .get(at + p.len())
+            .is_some_and(u8::is_ascii_lowercase)
+}
+
 const PATTERNS: &[(&str, DataSourceKind, &str)] = &[
     // ----- Database -----
     ("pg.", DataSourceKind::Database, "postgres"),
@@ -182,6 +276,9 @@ const PATTERNS: &[(&str, DataSourceKind, &str)] = &[
     ("gorm.", DataSourceKind::Database, "gorm"),
     ("database/sql", DataSourceKind::Database, "database_sql"),
     // ----- Cache -----
+    // FD.73: Redisson's `Redis` runs on into `s`, which the word-tail rule
+    // refuses, so the JVM client has its own row.
+    ("Redisson", DataSourceKind::Cache, "redis"),
     ("Redis", DataSourceKind::Cache, "redis"),
     ("redis.", DataSourceKind::Cache, "redis"),
     ("Memcached", DataSourceKind::Cache, "memcached"),
@@ -339,5 +436,142 @@ mod tests {
         );
         // `MyRedis::new` starts no path segment named for the library.
         assert!(providers("let c = MyRedis::new();\n", "src/x.rs").is_empty());
+    }
+
+    /// FD.73: a JNI type descriptor names JVM classes, not a client library,
+    /// whole in a Dart raw string or split across adjacent C literals.
+    #[test]
+    fn jvm_descriptor_is_no_access() {
+        let dart = "class Context {\n  static final _id = jni.JMethodIDPtr(r\"openOrCreateDatabase\",\n      \
+                    r\"(Ljava/lang/String;ILandroid/database/sqlite/SQLiteDatabase$CursorFactory;)Landroid/database/sqlite/SQLiteDatabase;\");\n}\n";
+        assert!(
+            providers(dart, "lib/hc.dart").is_empty(),
+            "{:?}",
+            providers(dart, "lib/hc.dart")
+        );
+        let c = "#include \"dartjni.h\"\nvoid f(jclass k) {\n  load_method(k, &_m, \"openOrCreateDatabase\",\n      \
+                 \"(Ljava/lang/String;ILandroid/database/sqlite/\"\n      \
+                 \"SQLiteDatabase$CursorFactory;)Landroid/database/sqlite/SQLiteDatabase;\");\n}\n";
+        assert!(
+            providers(c, "src/hc.c").is_empty(),
+            "{:?}",
+            providers(c, "src/hc.c")
+        );
+    }
+
+    /// FD.73: a capitalised word needle reads only at a camel or word tail,
+    /// never inside a longer lowercase-continued word.
+    #[test]
+    fn word_needles_end_at_a_word_tail() {
+        for src in [
+            "const t = '4. Redistribution. You may reproduce';\n",
+            "String banner() => 'Prismatic colours';\n",
+            "String s() => 'Resending';\n",
+        ] {
+            assert!(
+                providers(src, "lib/l.dart").is_empty(),
+                "{src}: {:?}",
+                providers(src, "lib/l.dart")
+            );
+        }
+    }
+
+    /// FD.73 controls: real imports and constructors keep their providers.
+    #[test]
+    fn client_imports_and_constructors_still_read() {
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "import 'package:sqlite3/sqlite3.dart';\nfinal db = sqlite3.open('a.db');\n",
+                "lib/store.dart",
+                &["data_source:sqlite"],
+            ),
+            (
+                "final c = RedisConnection();\n",
+                "lib/cache.dart",
+                &["data_source:redis"],
+            ),
+            (
+                "package repo\n\nimport \"database/sql\"\n",
+                "go/repo.go",
+                &["data_source:database_sql"],
+            ),
+            (
+                "package repo\n\nimport _ \"modernc.org/sqlite\"\n",
+                "go/db.go",
+                &["data_source:sqlite"],
+            ),
+            (
+                "import org.redisson.Redisson;\nclass C { Object c() { return Redisson.create(); } }\n",
+                "jvm/C.java",
+                &["data_source:redis"],
+            ),
+            (
+                "const r = new IORedis();\n",
+                "src/a.ts",
+                &["data_source:redis"],
+            ),
+            (
+                "const r = Redis.createClient();\n",
+                "src/b.ts",
+                &["data_source:redis"],
+            ),
+            (
+                "using StackExchange.Redis;\n",
+                "src/C.cs",
+                &["data_source:redis"],
+            ),
+            (
+                "import { PrismaClient } from '@prisma/client';\nconst p = new PrismaClient();\n",
+                "src/db.ts",
+                &["data_source:prisma"],
+            ),
+        ];
+        for (src, path, want) in cases {
+            assert_eq!(providers(src, path), *want, "{path}: {src}");
+        }
+    }
+
+    #[test]
+    fn descriptor_shape() {
+        let d = "(Ljava/lang/String;ILandroid/database/sqlite/SQLiteDatabase;)V";
+        let at = d.find("sqlite").unwrap();
+        assert!(in_jvm_descriptor(d, at));
+        let at = d.find("database/sql").unwrap();
+        assert!(in_jvm_descriptor(d, at));
+        // A primitive / array prefix before the class letter.
+        let d = "\"[[Landroid/database/sqlite/X;\"";
+        assert!(in_jvm_descriptor(d, d.find("sqlite").unwrap()));
+        // jnigen's split: the run stops at a `/` before the closing quote.
+        let d = "\"(ILandroid/database/sqlite/\" \"X;)V\"";
+        assert!(in_jvm_descriptor(d, d.find("sqlite").unwrap()));
+        // Paths that are no descriptor.
+        for s in [
+            "\"modernc.org/sqlite\"",
+            "\"Lib/sqlite/x.db\"",
+            "\"database/sql\"",
+            "import 'package:sqlite3/sqlite3.dart';",
+            "\"Lfoo/sqlite\"",
+        ] {
+            let at = s.find("sql").unwrap();
+            assert!(!in_jvm_descriptor(s, at), "{s}");
+        }
+    }
+
+    #[test]
+    fn word_tail_shape() {
+        let ok = |s: &str, p: &str| word_tail_ok(s, s.find(p).unwrap(), p);
+        assert!(ok("RedisTemplate", "Redis"));
+        assert!(ok("Redis.create", "Redis"));
+        assert!(ok("new Redis(", "Redis"));
+        assert!(ok("x Redis", "Redis"));
+        assert!(!ok("Redistribution", "Redis"));
+        assert!(!ok("Prismatic", "Prisma"));
+        assert!(!ok("Resending", "Resend"));
+        // Lowercase / dotted needles are unchanged.
+        assert!(ok("memcached", "memcache"));
+        assert!(ok("psycopg2", "psycopg"));
+        assert!(ok("redis.get", "redis."));
+        assert!(ok("Ecto.Repo.insert", "Ecto.Repo"));
+        assert!(!ok("S3Clients", "S3Client"));
     }
 }
