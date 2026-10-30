@@ -83,7 +83,7 @@ LANDED = {
     26: "FD.76 FH.26",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
-SELECTED = "T0 T2 T5 T1 T11 TS TH T3 T10"
+SELECTED = "T0 T2 T5 T1 T11 TS TH T3 T10 TZ"
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "H": 6, "Z": 9}
 
 # 0.5.3 (the ranking release, ids E*) lands before 0.5.4's W0: its packets are treated
