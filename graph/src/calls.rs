@@ -181,14 +181,15 @@ fn module_exts(g: &RepoGraph) -> BTreeSet<String> {
 /// node, `None` when two distinct nodes share it: exactly the answer of the
 /// scan, which never depended on table order either. Each index is built on
 /// its first lookup, so a pass that never falls back builds nothing.
-struct GlobalNames<'g> {
+/// `pub(crate)` for the Dart member-read pass (`build::dart`, FH.25).
+pub(crate) struct GlobalNames<'g> {
     g: &'g RepoGraph,
     functions: OnceLock<HashMap<&'g str, Option<NodeId>>>,
     types: OnceLock<HashMap<&'g str, Option<NodeId>>>,
 }
 
 impl<'g> GlobalNames<'g> {
-    fn new(g: &'g RepoGraph) -> Self {
+    pub(crate) fn new(g: &'g RepoGraph) -> Self {
         Self {
             g,
             functions: OnceLock::new(),
@@ -1516,7 +1517,7 @@ pub(crate) fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId
 /// ENUM, so a same-named FUNCTION never answers a type lookup (quokka's
 /// FUNCTION `repository_provider::UserRepository` beside the STRUCT
 /// `user_repository::UserRepository`). Two distinct types -> `None`. The Go
-/// call hook's last-resort type lookup (CA.2b); `resolve_type_name` (the
+/// call hook's last-resort type lookup (CA.2b); `resolve_type_name_with` (the
 /// generic A6.2a chain) keeps `unique_global_function`, so no other
 /// language's CALLS move.
 pub(crate) fn unique_global_type(g: &RepoGraph, name: &str) -> Option<NodeId> {
@@ -1635,15 +1636,12 @@ fn receiver_field(receiver: &str) -> Option<&str> {
 
 /// A bare type name -> its node, through the same miss-only, ambiguity-safe
 /// chain `resolve_refs` binds an INJECTS type with: the caller module's import
-/// bindings, then its own symbols, then the repo-unique name
-/// (`unique_global_function`; two distinct same-named types -> `None`).
-pub(crate) fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
-    scoped_type_name(g, from_module, name).or_else(|| unique_global_function(g, name))
-}
-
-/// [`resolve_type_name`] with the repo-unique fallback read from a pass's
-/// [`GlobalNames`] index (FH.21): the same answer, one lookup.
-fn resolve_type_name_with(
+/// bindings, then its own symbols, then the repo-unique name, read from a
+/// pass's [`GlobalNames`] index (FH.21; [`unique_global_function`]'s answer,
+/// one lookup: two distinct same-named types -> `None`). `pub(crate)` for the
+/// Dart member-read pass (`build::dart`, FH.25), which builds one index per
+/// pass as every other caller does.
+pub(crate) fn resolve_type_name_with(
     g: &RepoGraph,
     names: &GlobalNames<'_>,
     from_module: NodeId,
@@ -1652,7 +1650,7 @@ fn resolve_type_name_with(
     scoped_type_name(g, from_module, name).or_else(|| names.function(name))
 }
 
-/// The first two steps of [`resolve_type_name`]: the caller module's import
+/// The first two steps of [`resolve_type_name_with`]: the caller module's import
 /// bindings, then its own symbols.
 fn scoped_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
     g.symbols
@@ -2101,7 +2099,7 @@ fn typed_receiver<'g>(nav: &'g CodeNav, scope: NodeId, receiver: &str) -> Option
 }
 
 /// DT.5k: the type node a receiver's type text names, from the caller module
-/// `from_module`: [`resolve_type_name`] of the text (with `scoped`, or for a
+/// `from_module`: [`resolve_type_name_with`] of the text (with `scoped`, or for a
 /// [`NavFact::ReceiverType`] receiver, [`scope_type`]), except a TS-family
 /// caller's call-result local (`const store = makeStore()`, the text
 /// `makeStore()`), whose type is the declared return type of the FUNCTION
@@ -2819,7 +2817,7 @@ fn has_own_member(g: &RepoGraph, class: NodeId, name: &str) -> bool {
 /// type it constructs ([`constructed_type_id`]) and never falls back to a
 /// variable; any other receiver is [`receiver_type`] (locals first, LA.35a /
 /// DF.22a, then the enclosing type's fields, A6.2a) resolved by
-/// [`resolve_type_name`]. An `Attribute` base that is no local of the caller
+/// [`resolve_type_name_with`]. An `Attribute` base that is no local of the caller
 /// goes through A6.2a's [`BareFieldGate`]: in TS / JS a bare name outside the
 /// constructor is a parameter, local or global, never the field. Only a
 /// CLASS answers (INHERITS_FROM between CLASS nodes is what
@@ -5912,7 +5910,7 @@ mod tests {
     /// repo class `src::legacy::Router`, a ReceiverType receiver, a
     /// call-result local's declared return type and a member read's local
     /// type bind nothing; A6.2a's CALLS through a field of that type keeps
-    /// resolve_type_name's repo-unique bind.
+    /// resolve_type_name_with's repo-unique bind.
     #[test]
     fn dt5k_readings_never_bind_a_repo_unique_class() {
         let mut l = Shape::new();

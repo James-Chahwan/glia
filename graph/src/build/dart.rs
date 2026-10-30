@@ -19,7 +19,8 @@
 //!   constant is no dead_symbol kind).
 //! - Any other receiver (an owner field `this.<f>`, a local the parser
 //!   typed) is typed exactly as a call's receiver is ([`receiver_type`] +
-//!   [`resolve_type_name`]), else by the builder's `hook`, and binds that
+//!   [`resolve_type_name_with`] over one [`GlobalNames`] index per pass,
+//!   FH.25), else by the builder's `hook`, and binds that
 //!   type's METHOD `name` only: a field, a STATE_VAR or an unknown type binds
 //!   nothing and is counted `unbound`.
 //! - A bound METHOD in `RepoGraph::properties` (the Dart parser's getters and
@@ -69,8 +70,8 @@ use glia_code_domain::{CallQualifier, CallSite, NavFact, edge_category, node_kin
 use glia_core::{EdgeCategoryId, NodeId};
 
 use crate::calls::{
-    enclosing_home_module, enclosing_module, graph_evidence, push_edge, receiver_type,
-    resolve_type_name, scope_type, type_method,
+    GlobalNames, enclosing_home_module, enclosing_module, graph_evidence, push_edge, receiver_type,
+    resolve_type_name_with, scope_type, type_method,
 };
 use crate::types::RepoGraph;
 
@@ -140,6 +141,10 @@ where
     let mut edges: Vec<(NodeId, NodeId, ReadKind, u32)> = Vec::new();
     {
         let g: &RepoGraph = g;
+        // FH.25: the repo-unique type fallback, indexed once for the pass
+        // (built on its first lookup) instead of scanning every module's
+        // symbol table per read.
+        let names = GlobalNames::new(g);
         let mut seen: HashSet<(NodeId, NodeId, EdgeCategoryId)> = HashSet::new();
         let mut scopes: HashSet<NodeId> = HashSet::new();
         for node in &g.nodes {
@@ -163,7 +168,8 @@ where
             // The earliest row of each (from, to, category) places its edge.
             reads.sort_by_key(|&(_, _, line)| line);
             for (receiver, name, line) in reads {
-                let Some((to, kind)) = member_read_target(g, node.id, receiver, name, line, &hook)
+                let Some((to, kind)) =
+                    member_read_target(g, &names, node.id, receiver, name, line, &hook)
                 else {
                     stats.unbound += 1;
                     continue;
@@ -191,6 +197,7 @@ where
 /// (module doc).
 fn member_read_target<H>(
     g: &RepoGraph,
+    names: &GlobalNames<'_>,
     from: NodeId,
     receiver: &str,
     name: &str,
@@ -229,7 +236,7 @@ where
         line,
     };
     let ty = receiver_type(g, &site)
-        .and_then(|t| module.and_then(|m| resolve_type_name(g, m, t)))
+        .and_then(|t| module.and_then(|m| resolve_type_name_with(g, names, m, t)))
         .or_else(|| hook(g, &site))?;
     read_of(g, type_method(g, ty, name)?)
 }
