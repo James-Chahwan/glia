@@ -1,4 +1,4 @@
-//! OrgPackageResolver (FA.22): org-internal package routing over the
+//! OrgPackageResolver (FA.22, FA.23): org-internal package routing over the
 //! `manifest_name` identity class.
 //!
 //! IdentityResolver's `manifest_name` rule (FACT) joins a manifest-labelled
@@ -11,6 +11,35 @@
 //! rule), EVIDENCE `resolver:org_packages` rule `org_import`, at the
 //! importer's file and the row's 0-based line.
 //!
+//! **Calls and references (FA.23).** The importer's call sites the language
+//! build left unresolved (`RepoGraph.unresolved_calls`) whose caller's
+//! nearest importing MODULE (its nav parent chain) bound the name are bound
+//! to the sibling's declaration: `Bare(x)` where `x` is a symbol import's
+//! local name (`import { greet }`, `from m import shout`, `use m::helper`)
+//! to the declaration of the imported name in the routed module; and
+//! `Attribute { base, name }` where `base` is a whole-module import's local
+//! name (`import * as lib`, Go `text`, Python `import m as tx`, a Python
+//! `from pkg import mod` or Rust `use crate_name::module` naming a
+//! submodule) to that module's (a Go package directory's, every non-test
+//! file) top-level declaration `name`. Each is a CALLS cross edge from the
+//! caller, Medium, rule `org_call`, at the importer's file and the call's
+//! line; an unresolved USES / INJECTS / HANDLED_BY reference
+//! (`unresolved_refs`, read through its `from_module`) is bound the same way
+//! as an edge of its own category, rule `org_ref`. A whole-module import's
+//! local name is its alias, else the language's default binding
+//! (`glia_code_domain::import_default_binding`: Go's last path segment,
+//! Python's first dotted one, Rust's last); a TS default (`default`) or glob
+//! (`*`) import binds nothing. A declaration is a module's own top-level
+//! name (`SymbolTable.module_symbols`, persisted, so a layout merge reads
+//! what the joint build read); a TS barrel that re-exports it (DT.1q, the
+//! module's IMPORTS edges of EVIDENCE rule `reexport`) is followed one level
+//! at a time, at most 8 levels, and a level naming two distinct
+//! declarations binds nothing (`ambiguous`), as do two Go files of one
+//! package declaring the name. A bound site stays in `unresolved_calls`
+//! (the language build did not bind it; the cross edge is the binding), so
+//! each per-repo graph is unchanged and a layout merge re-running this pass
+//! over the union draws exactly the joint build's edges.
+//!
 //! **Reads another resolver's edges.** The classes are the SAME_AS edges the
 //! `identity` pass drew (EVIDENCE rule `manifest_name` or
 //! `manifest_name/diverged`), so the engine's PassSpec runs this pass after
@@ -20,64 +49,102 @@
 //! **Which rows route.** The importer's repo must hold a PACKAGE_DEP member
 //! of the class (the dependency is DECLARED where the import is: the FACT the
 //! class rests on), and the importer's language must be the class's
-//! ecosystem's (the TS / JS family for npm, Go for gomod). A row matches a
-//! class when its specifier is the package name or starts with `<name>/`
-//! (npm), or is the module path or starts with `<modpath>/` (Go, whose
-//! parser stores the path `::`-joined); of the declared classes a row
-//! matches, the longest name wins (a nested module).
+//! ecosystem's (the TS / JS family for npm, Go for gomod, Rust for cargo,
+//! Python for pypi). A row matches a class when its specifier is the package
+//! name or starts with `<name>/` (npm), or is the module path or starts with
+//! `<modpath>/` (Go, whose parser stores the path `::`-joined); of the
+//! declared classes a row matches, the longest name wins (a nested module).
+//! Cargo: the specifier's first `::` segment is the crate name, matched to
+//! the class's normalised name (`org-lib` and `org_lib` are one). PyPI: the
+//! specifier's first dotted segment, PEP 503-normalised, is the
+//! distribution name (`org_util` -> `org-util`), else the one declared class
+//! whose project holds a top-level package directory of that name
+//! (`<root>/<pkg>` or `<root>/src/<pkg>`, a distribution imported under
+//! another name); a row matching neither routes nothing and is not counted.
 //!
-//! **The target.** npm, by convention only (the graph holds no manifest
-//! text, so package.json `main` / `module` / `types` / `exports` are not
-//! read here; the TS build's workspace pass reads them for an in-repo
-//! package): `name` routes to `<root>/index`, else `<root>/src/index`;
-//! `name/sub/path` to `<root>/sub/path`, `<root>/sub/path/index`,
-//! `<root>/src/sub/path`, then `<root>/src/sub/path/index` - each a TS / JS
-//! file MODULE of the project's repo, matched by its file path without the
-//! extension (two files of one stem: the least path). Go: `modpath/sub` is
-//! the package directory `<root>/sub`, bound as `resolve_imports_go` binds
-//! an in-repo package directory (`GoPackages::import_target`): the file
-//! named after the directory, else the first non-test file by stem, else the
-//! first test file; one edge per imported package.
+//! **The target.** npm: the entry the sibling's `package.json` declares,
+//! recorded on its PROJECT's ORIGIN cell by the walk (`entry`: `exports`
+//! when it is a string or its `"."` entry is one, else `main`; `subpaths`:
+//! an `exports` map's string `"./x"` entries, for `name/x`), mapped back to
+//! source (`dist/index.js` -> `src/index.ts`); else by convention: `name`
+//! routes to `<root>/index`, else `<root>/src/index`; `name/sub/path` to
+//! `<root>/sub/path`, `<root>/sub/path/index`, `<root>/src/sub/path`, then
+//! `<root>/src/sub/path/index` - each a TS / JS file MODULE of the project's
+//! repo, matched by its file path without the extension (two files of one
+//! stem: the least path). Conditional `exports` objects, `module` and
+//! `types` are not read: such a package routes by the convention or stays
+//! `unrouted`. Go: `modpath/sub` is the package directory `<root>/sub`,
+//! bound as `resolve_imports_go` binds an in-repo package directory
+//! (`GoPackages::import_target`): the file named after the directory, else
+//! the first non-test file by stem, else the first test file; one edge per
+//! imported package. Cargo: the crate root `<root>/src/lib.rs`, then each
+//! path segment as a child module (`util` -> `<root>/src/util.rs` or
+//! `<root>/src/util/mod.rs`). PyPI: `pkg.mod` -> `<root>/pkg/mod.py`,
+//! `<root>/pkg/mod/__init__.py`, then the same under `<root>/src/`.
 //!
 //! **Fills only what the build left unbound.** No edge when the importer
 //! already has an IMPORTS edge to the target (the TS workspace pass, a Go
-//! package-directory import or a tsconfig path bound it in-repo); a row
+//! package-directory import or a tsconfig path bound it in-repo), or the
+//! caller already has an edge of that category to the declaration; a row
 //! whose target is absent emits nothing and counts `unrouted` (a package
 //! whose entry sits elsewhere). A class with two PROJECTs names no single
 //! sibling: its rows are unrouted too. Maven / Gradle classes do not form yet
-//! (a pom's label is its bare artifactId, FD.31's handoff); cargo and pypi
-//! routing is FA.23's.
+//! (a pom's label is its bare artifactId, FD.31's handoff; 0.5.5).
 //!
 //! fired_on, stderr, once per resolve that saw a `manifest_name` class:
-//!   `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm=<a> go=<b>)`
+//!   `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm=<a> go=<b> cargo=<k> pypi=<p>)`
+//!   `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm=<n> go=<g> cargo=<k> pypi=<p>)`
 //! (`rows` = rows matching a declared class, `routed` = rows whose target
-//! module exists, `npm` / `go` = routed rows by ecosystem), then, when an
-//! edge was emitted, `[evidence-rules] resolver=org_packages org_import=<n>`.
+//! module exists, the first parenthesis routed rows by ecosystem; `calls` /
+//! `refs` = org_call / org_ref edges drawn, `ambiguous` = sites whose name
+//! two declarations answer, the second parenthesis the edges by the
+//! importer's ecosystem), then, when an edge was emitted,
+//! `[evidence-rules] resolver=org_packages org_import=<n> org_call=<n> org_ref=<n>`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::profile::node_ext;
 use glia_code_domain::same_as::{self, RULE_MANIFEST_NAME};
-use glia_code_domain::{cell_type, edge_category, node_kind, read_import_bindings};
-use glia_core::{CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{
+    CallQualifier, cell_type, edge_category, import_default_binding, node_kind,
+    read_import_bindings,
+};
+use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
 
-use super::host::str_field;
+use super::host::{quoted_body, str_field};
 use super::{CrossGraphResolver, RuleTally};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
 /// The pass name: the EVIDENCE emitter is `resolver:org_packages`.
 const PASS: &str = "org_packages";
-/// The one rule this pass stamps.
+/// An importer -IMPORTS-> sibling module edge (FA.22).
 const RULE_ORG_IMPORT: &str = "org_import";
+/// A caller -CALLS-> sibling declaration edge (FA.23).
+const RULE_ORG_CALL: &str = "org_call";
+/// A USES / INJECTS / HANDLED_BY reference into a sibling (FA.23).
+const RULE_ORG_REF: &str = "org_ref";
 
 /// The TS / JS family's file extensions, an npm package's module files.
 const NPM_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+/// A Python distribution's module files.
+const PY_EXTS: &[&str] = &["py", "pyi"];
+/// The re-export levels a barrel lookup follows (FA.23).
+const REEXPORT_DEPTH: usize = 8;
+/// The nav parent hops from a caller to its importing MODULE, at most.
+const PARENT_HOPS: usize = 64;
+/// The reference categories `org_ref` binds.
+const REF_CATEGORIES: [EdgeCategoryId; 3] = [
+    edge_category::USES,
+    edge_category::INJECTS,
+    edge_category::HANDLED_BY,
+];
 
-/// FA.22: routes an importer's IMPORT_BINDINGS row naming a sibling
+/// FA.22 / FA.23: routes an importer's IMPORT_BINDINGS row naming a sibling
 /// project's package (its `manifest_name` SAME_AS class) to that project's
-/// module (see the module docs).
+/// module, and the importer's unresolved calls and references through the
+/// names it bound to the sibling's declarations (see the module docs).
 pub struct OrgPackageResolver;
 
 impl CrossGraphResolver for OrgPackageResolver {
@@ -93,6 +160,8 @@ impl CrossGraphResolver for OrgPackageResolver {
 enum Eco {
     Npm,
     Go,
+    Cargo,
+    Pypi,
 }
 
 impl Eco {
@@ -101,6 +170,8 @@ impl Eco {
         match key_eco {
             "npm" => Some(Self::Npm),
             "gomod" => Some(Self::Go),
+            "cargo" => Some(Self::Cargo),
+            "pypi" => Some(Self::Pypi),
             _ => None,
         }
     }
@@ -111,20 +182,56 @@ impl Eco {
             Some(Self::Npm)
         } else if ext == "go" {
             Some(Self::Go)
+        } else if ext == "rs" {
+            Some(Self::Cargo)
+        } else if PY_EXTS.contains(&ext) {
+            Some(Self::Pypi)
         } else {
             None
         }
     }
+
+    /// The language name `import_default_binding` reads.
+    fn lang(self) -> &'static str {
+        match self {
+            Self::Npm => "typescript",
+            Self::Go => "go",
+            Self::Cargo => "rust",
+            Self::Pypi => "python",
+        }
+    }
+
+    /// The ecosystem's index in a [`PerEco`] tally.
+    fn slot(self) -> usize {
+        self as usize
+    }
+}
+
+/// A count per ecosystem, in [`Eco`] order.
+type PerEco = [usize; 4];
+
+/// `npm=<a> go=<b> cargo=<k> pypi=<p>`.
+fn per_eco(c: &PerEco) -> String {
+    format!("npm={} go={} cargo={} pypi={}", c[0], c[1], c[2], c[3])
+}
+
+/// The sibling PROJECT a class routes to: its repo, root dir and, for npm,
+/// the entry files its ORIGIN records (FA.23).
+#[derive(Clone)]
+struct Project {
+    repo: RepoId,
+    root: String,
+    entry: Option<String>,
+    subpaths: Vec<(String, String)>,
 }
 
 /// One `manifest_name` class this pass can route: the package name an
-/// importer's specifier starts with, the sibling PROJECT (its repo and
-/// root dir; `None` when the class holds two PROJECTs) and the repos that
-/// declare the dependency.
+/// importer's specifier starts with, the sibling PROJECT (`None` when the
+/// class holds two PROJECTs) and the repos that declare the dependency.
 struct PackageIndex {
     eco: Eco,
     name: String,
-    project: Option<(RepoId, String)>,
+    project: Option<Project>,
     dep_repos: BTreeSet<u64>,
 }
 
@@ -141,7 +248,7 @@ fn name_prefixes(spec: &str) -> impl Iterator<Item = (&str, &str)> {
         .filter(|(name, _)| !name.is_empty())
 }
 
-/// What one resolve found, for the marker.
+/// What one resolve found, for the markers.
 #[derive(Default)]
 struct Report {
     classes: usize,
@@ -149,8 +256,11 @@ struct Report {
     rows: usize,
     routed: usize,
     unrouted: usize,
-    npm: usize,
-    go: usize,
+    routed_by: PerEco,
+    calls: usize,
+    refs: usize,
+    ambiguous: usize,
+    bound_by: PerEco,
     tally: Option<RuleTally>,
 }
 
@@ -158,20 +268,31 @@ impl Report {
     fn line(&self) -> Option<String> {
         (self.classes > 0).then(|| {
             format!(
-                "[org-packages] classes={} importers={} rows={} routed={} unrouted={} (npm={} go={})",
+                "[org-packages] classes={} importers={} rows={} routed={} unrouted={} ({})",
                 self.classes,
                 self.importers,
                 self.rows,
                 self.routed,
                 self.unrouted,
-                self.npm,
-                self.go
+                per_eco(&self.routed_by)
+            )
+        })
+    }
+
+    fn calls_line(&self) -> Option<String> {
+        (self.classes > 0).then(|| {
+            format!(
+                "[org-packages] calls bound={} refs bound={} ambiguous={} ({})",
+                self.calls,
+                self.refs,
+                self.ambiguous,
+                per_eco(&self.bound_by)
             )
         })
     }
 
     fn print(&self) {
-        if let Some(line) = self.line() {
+        for line in [self.line(), self.calls_line()].into_iter().flatten() {
             eprintln!("{line}");
         }
         if let Some(t) = &self.tally {
@@ -188,17 +309,49 @@ fn payload(c: &glia_core::Cell) -> Option<&str> {
     }
 }
 
-/// The repo-relative root dir of a PROJECT, from its ORIGIN `project_root`
-/// cell (`""` for the repo root). A path JSON had to escape is not read.
-fn project_root(n: &Node) -> Option<String> {
+/// A PROJECT's ORIGIN `project_root` payload.
+fn project_origin(n: &Node) -> Option<&str> {
     n.cells
         .iter()
         .filter(|c| c.kind == cell_type::ORIGIN)
         .filter_map(payload)
         .find(|p| str_field(p, "provenance") == Some("project_root"))
-        .and_then(|p| str_field(p, "path"))
+}
+
+/// The repo-relative root dir of a PROJECT, from its ORIGIN `project_root`
+/// cell (`""` for the repo root). A path JSON had to escape is not read.
+fn project_root(origin: &str) -> Option<String> {
+    str_field(origin, "path")
         .filter(|p| !p.contains('\\'))
         .map(|p| p.trim_matches('/').to_string())
+}
+
+/// The ORIGIN's `subpaths` object (`{"./x":"src/x.ts",..}`, written compact
+/// by the walk, FA.23) as `(key, file)` pairs; a pair JSON had to escape is
+/// skipped, and anything unexpected ends the read.
+fn origin_subpaths(origin: &str) -> Vec<(String, String)> {
+    const KEY: &str = "\"subpaths\":{";
+    let Some(start) = origin.find(KEY) else {
+        return Vec::new();
+    };
+    let mut rest = &origin[start + KEY.len()..];
+    let mut out = Vec::new();
+    while let Some(r) = rest.strip_prefix('"') {
+        let Some(key) = quoted_body(r) else { break };
+        let Some(r) = r[key.len() + 1..].strip_prefix(":\"") else {
+            break;
+        };
+        let Some(file) = quoted_body(r) else { break };
+        if !key.contains('\\') && !file.contains('\\') {
+            out.push((key.to_string(), file.to_string()));
+        }
+        rest = &r[file.len() + 1..];
+        match rest.strip_prefix(',') {
+            Some(r) => rest = r,
+            None => break,
+        }
+    }
+    out
 }
 
 /// `dir` joined with `rel` (`/`-separated, either may be empty).
@@ -246,7 +399,8 @@ fn package_classes(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<PackageIndex>, 
     let mut out: Vec<PackageIndex> = Vec::new();
     for ids in members.values() {
         let mut key: Option<String> = None;
-        let mut projects: BTreeSet<(u64, String)> = BTreeSet::new();
+        // (repo, root) -> the npm entry fields of its ORIGIN.
+        let mut projects: BTreeMap<(u64, String), NpmEntry> = BTreeMap::new();
         let mut dep_repos: BTreeSet<u64> = BTreeSet::new();
         for id in ids {
             let Some(&(g, n)) = found.get(id) else {
@@ -254,8 +408,14 @@ fn package_classes(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<PackageIndex>, 
             };
             match g.nav.kind_by_id.get(id) {
                 Some(&k) if k == node_kind::PROJECT => {
-                    if let Some(root) = project_root(n) {
-                        projects.insert((n.repo.0, root));
+                    let Some(origin) = project_origin(n) else {
+                        continue;
+                    };
+                    if let Some(root) = project_root(origin) {
+                        let entry = str_field(origin, "entry")
+                            .filter(|p| !p.contains('\\'))
+                            .map(str::to_string);
+                        projects.insert((n.repo.0, root), (entry, origin_subpaths(origin)));
                     }
                 }
                 Some(&k) if k == node_kind::PACKAGE_DEP => {
@@ -282,7 +442,12 @@ fn package_classes(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<PackageIndex>, 
             1 => projects
                 .into_iter()
                 .next()
-                .map(|(repo, root)| (RepoId(repo), root)),
+                .map(|((repo, root), (entry, subpaths))| Project {
+                    repo: RepoId(repo),
+                    root,
+                    entry,
+                    subpaths,
+                }),
             _ => None,
         };
         out.push(PackageIndex {
@@ -296,6 +461,9 @@ fn package_classes(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<PackageIndex>, 
     (out, total)
 }
 
+/// A PROJECT's recorded npm entry and `exports` subpaths (FA.23).
+type NpmEntry = (Option<String>, Vec<(String, String)>);
+
 /// A Go file MODULE of a package dir: (stem, id, file).
 type GoFile = (String, NodeId, String);
 
@@ -303,13 +471,16 @@ type GoFile = (String, NodeId, String);
 /// file.
 type Route = (NodeId, NodeId, u32, String);
 
-/// The file MODULEs a target can be: npm files by (repo, path without its
-/// extension) -> the least (path, id); Go files by (repo, dir) -> (stem,
-/// id) sorted by stem.
+/// The file MODULEs a target can be: npm, cargo and pypi files by (repo,
+/// ecosystem, path without its extension) -> the least (path, id), and by
+/// (repo, path); Go files by (repo, dir) -> (stem, id) sorted by stem; the
+/// directories holding a Python file, by (repo, dir).
 #[derive(Default)]
 struct Modules {
-    npm: HashMap<(u64, String), (String, NodeId)>,
+    stems: HashMap<(u64, Eco, String), (String, NodeId)>,
+    files: HashMap<(u64, String), NodeId>,
     go: HashMap<(u64, String), Vec<GoFile>>,
+    py_dirs: HashSet<(u64, String)>,
 }
 
 impl Modules {
@@ -334,20 +505,31 @@ impl Modules {
                 if stem_path.ends_with('/') || stem_path.is_empty() {
                     continue;
                 }
-                if NPM_EXTS.contains(&ext) {
-                    let slot = out
-                        .npm
-                        .entry((n.repo.0, stem_path.to_string()))
-                        .or_insert_with(|| (file.clone(), n.id));
-                    if file < slot.0 {
-                        *slot = (file.clone(), n.id);
-                    }
-                } else if ext == "go" {
+                let Some(eco) = Eco::of_ext(ext) else {
+                    continue;
+                };
+                out.files.insert((n.repo.0, file.clone()), n.id);
+                if eco == Eco::Go {
                     let (dir, stem) = stem_path.rsplit_once('/').unwrap_or(("", stem_path));
                     out.go
                         .entry((n.repo.0, dir.to_string()))
                         .or_default()
                         .push((stem.to_string(), n.id, file.clone()));
+                    continue;
+                }
+                if eco == Eco::Pypi {
+                    let mut dir = stem_path;
+                    while let Some((parent, _)) = dir.rsplit_once('/') {
+                        out.py_dirs.insert((n.repo.0, parent.to_string()));
+                        dir = parent;
+                    }
+                }
+                let slot = out
+                    .stems
+                    .entry((n.repo.0, eco, stem_path.to_string()))
+                    .or_insert_with(|| (file.clone(), n.id));
+                if file < slot.0 {
+                    *slot = (file.clone(), n.id);
                 }
             }
         }
@@ -357,9 +539,39 @@ impl Modules {
         out
     }
 
-    /// The npm module `name[/sub]` names in a project at `root` of `repo`
-    /// (the module docs' order), with its file.
-    fn npm_target(&self, repo: RepoId, root: &str, sub: &str) -> Option<(NodeId, String)> {
+    /// The first of `stems` that is a file MODULE of `eco` in `repo`.
+    fn first(&self, repo: RepoId, eco: Eco, stems: &[String]) -> Option<(NodeId, String)> {
+        stems.iter().find_map(|p| {
+            self.stems
+                .get(&(repo.0, eco, p.clone()))
+                .map(|(f, id)| (*id, f.clone()))
+        })
+    }
+
+    /// The file MODULE at exactly `file` of `repo`.
+    fn file(&self, repo: RepoId, file: &str) -> Option<(NodeId, String)> {
+        self.files
+            .get(&(repo.0, file.to_string()))
+            .map(|id| (*id, file.to_string()))
+    }
+
+    /// The npm module `name[/sub]` names in `project` (the module docs'
+    /// order: the recorded entry, then the convention), with its file.
+    fn npm_target(&self, project: &Project, sub: &str) -> Option<(NodeId, String)> {
+        let (repo, root) = (project.repo, project.root.as_str());
+        let declared = if sub.is_empty() {
+            project.entry.clone()
+        } else {
+            let key = format!("./{sub}");
+            project
+                .subpaths
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, f)| f.clone())
+        };
+        if let Some(hit) = declared.and_then(|f| self.file(repo, &f)) {
+            return Some(hit);
+        }
         let candidates: Vec<String> = if sub.is_empty() {
             vec![join(root, "index"), join(root, "src/index")]
         } else {
@@ -372,28 +584,364 @@ impl Modules {
                 format!("{src}/index"),
             ]
         };
-        candidates
+        self.first(repo, Eco::Npm, &candidates)
+    }
+
+    /// The crate module `sub` (`/`-joined path segments, `""` the crate
+    /// root) names in `project`: `src/lib`, else `src/<sub>`, then
+    /// `src/<sub>/mod`.
+    fn cargo_target(&self, project: &Project, sub: &str) -> Option<(NodeId, String)> {
+        let src = join(&project.root, "src");
+        let candidates = if sub.is_empty() {
+            vec![join(&src, "lib")]
+        } else {
+            let p = join(&src, sub);
+            vec![p.clone(), format!("{p}/mod")]
+        };
+        self.first(project.repo, Eco::Cargo, &candidates)
+    }
+
+    /// The Python module of dotted path `path` (`/`-joined, top package
+    /// first) in `project`: `<root>/<path>`, `<root>/<path>/__init__`, then
+    /// both under `<root>/src`.
+    fn pypi_target(&self, project: &Project, path: &str) -> Option<(NodeId, String)> {
+        let candidates: Vec<String> = [project.root.clone(), join(&project.root, "src")]
+            .iter()
+            .flat_map(|base| {
+                let p = join(base, path);
+                [p.clone(), format!("{p}/__init__")]
+            })
+            .collect();
+        self.first(project.repo, Eco::Pypi, &candidates)
+    }
+
+    /// Whether `project` holds a top-level Python package directory `top`.
+    fn has_py_package(&self, project: &Project, top: &str) -> bool {
+        [
+            join(&project.root, top),
+            join(&project.root, &format!("src/{top}")),
+        ]
+        .into_iter()
+        .any(|d| self.py_dirs.contains(&(project.repo.0, d)))
+    }
+
+    /// The Go files of package dir `dir` of `repo` other than `importer`,
+    /// in stem order.
+    fn go_files<'a>(
+        &'a self,
+        repo: RepoId,
+        dir: &str,
+        importer: NodeId,
+    ) -> impl Iterator<Item = &'a GoFile> + 'a {
+        self.go
+            .get(&(repo.0, dir.to_string()))
             .into_iter()
-            .find_map(|p| self.npm.get(&(repo.0, p)).map(|(f, id)| (*id, f.clone())))
+            .flatten()
+            .filter(move |(_, id, _)| *id != importer)
     }
 
     /// The file an import of Go package dir `dir` of `repo` binds
     /// (`GoPackages::import_target`'s choice), never `importer`, with its
     /// file.
     fn go_target(&self, repo: RepoId, dir: &str, importer: NodeId) -> Option<(NodeId, String)> {
-        let files = self.go.get(&(repo.0, dir.to_string()))?;
-        let others = || files.iter().filter(|(_, id, _)| *id != importer);
         let last = dir.rsplit('/').next().filter(|s| !s.is_empty());
+        let others = || self.go_files(repo, dir, importer);
         others()
             .find(|(stem, _, _)| !stem.ends_with("_test") && Some(stem.as_str()) == last)
             .or_else(|| others().find(|(stem, _, _)| !stem.ends_with("_test")))
             .or_else(|| others().next())
             .map(|(_, id, file)| (*id, file.clone()))
     }
+
+    /// The modules whose top-level declarations a whole-module import of Go
+    /// package dir `dir` reaches: its non-test files (every file when it has
+    /// none), never `importer`.
+    fn go_scope(&self, repo: RepoId, dir: &str, importer: NodeId) -> Vec<NodeId> {
+        let code: Vec<NodeId> = self
+            .go_files(repo, dir, importer)
+            .filter(|(stem, _, _)| !stem.ends_with("_test"))
+            .map(|(_, id, _)| *id)
+            .collect();
+        if code.is_empty() {
+            self.go_files(repo, dir, importer)
+                .map(|(_, id, _)| *id)
+                .collect()
+        } else {
+            code
+        }
+    }
 }
 
-/// The org_import edges of `graphs` given the cross edges so far, and the
-/// report behind the markers.
+/// A row's routed target: the module an import edge points at, and the
+/// modules whose declarations its names reach (the module itself; a Go
+/// package directory's files).
+struct Routed {
+    module: (NodeId, String),
+    scope: Vec<NodeId>,
+}
+
+/// One importer's routable package rows matched to their classes.
+struct Matched<'a> {
+    class: &'a PackageIndex,
+    /// The routed path inside the package: npm / Go a `/` subpath, cargo
+    /// the module path after the crate, pypi the whole dotted path
+    /// `/`-joined (top package first).
+    sub: String,
+}
+
+/// The class a row of ecosystem `eco` names, and its routed path.
+fn match_row<'a>(
+    eco: Eco,
+    spec: &str,
+    importer_repo: u64,
+    by_name: &HashMap<(Eco, &str), &'a PackageIndex>,
+    pypi: &[&'a PackageIndex],
+    modules: &Modules,
+) -> Option<Matched<'a>> {
+    let declared = |c: &&'a PackageIndex| c.dep_repos.contains(&importer_repo);
+    match eco {
+        Eco::Npm | Eco::Go => {
+            // Go's parser stores the import path `::`-joined.
+            let spec = match eco {
+                Eco::Go => spec.replace("::", "/"),
+                _ => spec.to_string(),
+            };
+            name_prefixes(&spec).find_map(|(name, sub)| {
+                let class = *by_name.get(&(eco, name))?;
+                declared(&class).then(|| Matched {
+                    class,
+                    sub: sub.to_string(),
+                })
+            })
+        }
+        Eco::Cargo => {
+            let mut segs = spec.split("::").filter(|s| !s.is_empty());
+            let krate = segs.next()?;
+            let key = same_as::dep_identity_key(&format!("package:cargo:{krate}"))?;
+            let class = *by_name.get(&(eco, key.strip_prefix("cargo:")?))?;
+            declared(&class).then(|| Matched {
+                class,
+                sub: segs.collect::<Vec<_>>().join("/"),
+            })
+        }
+        Eco::Pypi => {
+            let segs: Vec<&str> = spec.split('.').filter(|s| !s.is_empty()).collect();
+            let top = *segs.first()?;
+            let key = same_as::dep_identity_key(&format!("package:pypi:{top}"))?;
+            let by_dist = key
+                .strip_prefix("pypi:")
+                .and_then(|name| by_name.get(&(eco, name)).copied())
+                .filter(declared);
+            // A distribution imported under another name: the one declared
+            // class whose project holds a top-level package `top`.
+            let class = by_dist.or_else(|| {
+                let mut dirs = pypi.iter().copied().filter(declared).filter(|c| {
+                    c.project
+                        .as_ref()
+                        .is_some_and(|p| modules.has_py_package(p, top))
+                });
+                let first = dirs.next()?;
+                dirs.next().is_none().then_some(first)
+            })?;
+            Some(Matched {
+                class,
+                sub: segs.join("/"),
+            })
+        }
+    }
+}
+
+/// The module a matched row of `eco` routes to, never `importer`.
+fn route(eco: Eco, project: &Project, sub: &str, importer: NodeId, m: &Modules) -> Option<Routed> {
+    let single = |module: Option<(NodeId, String)>| {
+        module.filter(|t| t.0 != importer).map(|module| Routed {
+            scope: vec![module.0],
+            module,
+        })
+    };
+    match eco {
+        Eco::Npm => single(m.npm_target(project, sub)),
+        Eco::Cargo => single(m.cargo_target(project, sub)),
+        Eco::Pypi => single(m.pypi_target(project, sub)),
+        Eco::Go => {
+            let dir = join(&project.root, sub);
+            let module = m.go_target(project.repo, &dir, importer)?;
+            Some(Routed {
+                module,
+                scope: m.go_scope(project.repo, &dir, importer),
+            })
+        }
+    }
+}
+
+/// What a local name of an importer binds (FA.23).
+#[derive(Clone, PartialEq, Eq)]
+enum Binding {
+    /// A symbol import: the sibling declaration it names.
+    Decl(NodeId),
+    /// A whole-module import (or a submodule named by a symbol import): the
+    /// modules whose top-level declarations `name.f` reaches.
+    Scope(Vec<NodeId>),
+    /// Two declarations answer the name: binds nothing, counted.
+    Ambiguous,
+    /// Two rows bind the name to different targets: binds nothing.
+    Conflict,
+}
+
+/// One importer's bindings: local name -> what it binds, its ecosystem and
+/// file. Looked up only, never iterated into an output.
+struct Bindings {
+    eco: Eco,
+    file: String,
+    names: HashMap<String, Binding>,
+}
+
+impl Bindings {
+    fn bind(&mut self, local: String, b: Binding) {
+        match self.names.get(&local) {
+            Some(old) if *old != b => {
+                self.names.insert(local, Binding::Conflict);
+            }
+            Some(_) => {}
+            None => {
+                self.names.insert(local, b);
+            }
+        }
+    }
+}
+
+/// A declaration lookup's outcome.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lookup {
+    Found(NodeId),
+    Ambiguous,
+    Missing,
+}
+
+/// The top-level declarations of the target repos' modules and the TS
+/// barrels' re-export edges (DT.1q), read from persisted structure only.
+struct Decls<'a> {
+    /// module -> (name -> declaration).
+    symbols: HashMap<NodeId, &'a HashMap<String, NodeId>>,
+    /// barrel module -> the modules it re-exports from, in edge order.
+    reexports: HashMap<NodeId, Vec<NodeId>>,
+}
+
+impl<'a> Decls<'a> {
+    fn of(graphs: &'a [RepoGraph], repos: &BTreeSet<u64>) -> Self {
+        let mut symbols = HashMap::new();
+        let mut reexports: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for g in graphs.iter().filter(|g| repos.contains(&g.repo.0)) {
+            for (m, names) in &g.symbols.module_symbols {
+                symbols.entry(*m).or_insert(names);
+            }
+            for e in g
+                .edges
+                .iter()
+                .filter(|e| e.category == edge_category::IMPORTS)
+            {
+                if Evidence::of(e).and_then(|ev| ev.rule).as_deref() == Some("reexport") {
+                    reexports.entry(e.from).or_default().push(e.to);
+                }
+            }
+        }
+        Self { symbols, reexports }
+    }
+
+    /// The distinct declarations `name` names among `modules`' own
+    /// top-level names.
+    fn level(&self, modules: &[NodeId], name: &str) -> BTreeSet<u64> {
+        modules
+            .iter()
+            .filter_map(|m| self.symbols.get(m)?.get(name))
+            .map(|d| d.0)
+            .collect()
+    }
+
+    /// The declaration `name` names in `scope`: its modules' own top-level
+    /// names, then (npm) the modules they re-export from, one level at a
+    /// time up to [`REEXPORT_DEPTH`]; two distinct declarations on the first
+    /// level naming any is [`Lookup::Ambiguous`].
+    fn lookup(&self, eco: Eco, scope: &[NodeId], name: &str) -> Lookup {
+        let mut level: Vec<NodeId> = scope.to_vec();
+        let mut seen: HashSet<NodeId> = level.iter().copied().collect();
+        for depth in 0..=REEXPORT_DEPTH {
+            let found = self.level(&level, name);
+            match found.len() {
+                0 => {}
+                1 => {
+                    return found
+                        .first()
+                        .map_or(Lookup::Missing, |d| Lookup::Found(NodeId(*d)));
+                }
+                _ => return Lookup::Ambiguous,
+            }
+            if eco != Eco::Npm || depth == REEXPORT_DEPTH {
+                break;
+            }
+            level = level
+                .iter()
+                .filter_map(|m| self.reexports.get(m))
+                .flatten()
+                .copied()
+                .filter(|m| seen.insert(*m))
+                .collect();
+            if level.is_empty() {
+                break;
+            }
+        }
+        Lookup::Missing
+    }
+}
+
+/// The importer MODULE whose bindings a site of `from` reads: the nearest
+/// one on its nav parent chain (itself included).
+fn importer_of(
+    g: &RepoGraph,
+    from: NodeId,
+    importers: &HashMap<NodeId, Bindings>,
+) -> Option<NodeId> {
+    let mut cur = from;
+    for _ in 0..PARENT_HOPS {
+        if importers.contains_key(&cur) {
+            return Some(cur);
+        }
+        cur = *g.nav.parent_of.get(&cur)?;
+    }
+    None
+}
+
+/// What `q` names through an importer's bindings.
+fn resolve_site(b: &Bindings, q: &CallQualifier, decls: &Decls) -> Lookup {
+    match q {
+        CallQualifier::Bare(name) => match b.names.get(name) {
+            Some(Binding::Decl(d)) => Lookup::Found(*d),
+            Some(Binding::Ambiguous) => Lookup::Ambiguous,
+            _ => Lookup::Missing,
+        },
+        CallQualifier::Attribute { base, name } => match b.names.get(base) {
+            Some(Binding::Scope(scope)) => decls.lookup(b.eco, scope, name),
+            Some(Binding::Ambiguous) => Lookup::Ambiguous,
+            _ => Lookup::Missing,
+        },
+        _ => Lookup::Missing,
+    }
+}
+
+/// One call / reference edge to draw: (from, to, category, rule, least line,
+/// importer file, ecosystem).
+type Bound = (
+    NodeId,
+    NodeId,
+    EdgeCategoryId,
+    &'static str,
+    u32,
+    String,
+    Eco,
+);
+
+/// The org_import, org_call and org_ref edges of `graphs` given the cross
+/// edges so far, and the report behind the markers.
 fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
     let mut report = Report::default();
     let (classes, total) = package_classes(graphs, cross);
@@ -403,15 +951,17 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
     }
     let project_repos: BTreeSet<u64> = classes
         .iter()
-        .filter_map(|c| c.project.as_ref().map(|(r, _)| r.0))
+        .filter_map(|c| c.project.as_ref().map(|p| p.repo.0))
         .collect();
     let modules = Modules::of(graphs, &project_repos);
+    let decls = Decls::of(graphs, &project_repos);
     // (ecosystem, package name) -> class: a manifest_name key is one class,
     // so a name names one class per ecosystem. Lookup only.
     let by_name: HashMap<(Eco, &str), &PackageIndex> = classes
         .iter()
         .map(|c| ((c.eco, c.name.as_str()), c))
         .collect();
+    let pypi: Vec<&PackageIndex> = classes.iter().filter(|c| c.eco == Eco::Pypi).collect();
     let existing: HashSet<(NodeId, NodeId)> = graphs
         .iter()
         .flat_map(|g| &g.edges)
@@ -424,6 +974,7 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
     // line, importer file): one edge per importer and target, in importer
     // then target-file order.
     let mut routes: BTreeMap<(usize, usize, String), Route> = BTreeMap::new();
+    let mut importers: HashMap<NodeId, Bindings> = HashMap::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     for (gi, g) in graphs.iter().enumerate() {
         for (ni, n) in g.nodes.iter().enumerate() {
@@ -444,38 +995,39 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
             let Some((file, _)) = evidence::locate(&n.cells) else {
                 continue;
             };
+            let mut bindings = Bindings {
+                eco,
+                file: file.clone(),
+                names: HashMap::new(),
+            };
             let mut counted = false;
             for row in read_import_bindings(cell) {
-                // Go's parser stores the import path `::`-joined.
-                let spec = match eco {
-                    Eco::Go => row.spec.replace("::", "/"),
-                    Eco::Npm => row.spec,
-                };
-                let best = name_prefixes(&spec).find_map(|(name, sub)| {
-                    let class = *by_name.get(&(eco, name))?;
-                    class.dep_repos.contains(&n.repo.0).then_some((class, sub))
-                });
-                let Some((class, sub)) = best else {
+                let Some(m) = match_row(eco, &row.spec, n.repo.0, &by_name, &pypi, &modules) else {
                     continue;
                 };
                 counted = true;
                 report.rows += 1;
-                let target = class
+                let routed = m
+                    .class
                     .project
                     .as_ref()
-                    .and_then(|(repo, root)| match class.eco {
-                        Eco::Npm => modules.npm_target(*repo, root, sub),
-                        Eco::Go => modules.go_target(*repo, &join(root, sub), n.id),
-                    });
-                let Some((target, target_file)) = target.filter(|t| t.0 != n.id) else {
+                    .and_then(|p| route(eco, p, &m.sub, n.id, &modules));
+                let Some(routed) = routed else {
                     report.unrouted += 1;
                     continue;
                 };
                 report.routed += 1;
-                match class.eco {
-                    Eco::Npm => report.npm += 1,
-                    Eco::Go => report.go += 1,
+                report.routed_by[eco.slot()] += 1;
+                if let Some(project) = &m.class.project {
+                    let cx = RowCtx {
+                        eco,
+                        project,
+                        sub: &m.sub,
+                        importer: n.id,
+                    };
+                    bind_row(&mut bindings, &cx, &row, &routed, &modules, &decls);
                 }
+                let (target, target_file) = routed.module;
                 if existing.contains(&(n.id, target)) {
                     continue;
                 }
@@ -485,11 +1037,16 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
                     .or_insert((n.id, target, row.line, file.clone()));
             }
             report.importers += usize::from(counted);
+            if !bindings.names.is_empty() {
+                importers.insert(n.id, bindings);
+            }
         }
     }
 
-    let mut tally = RuleTally::new(PASS, &[RULE_ORG_IMPORT]);
-    let mut edges = Vec::with_capacity(routes.len());
+    let bound = bind_sites(graphs, cross, &importers, &decls, &mut report);
+
+    let mut tally = RuleTally::new(PASS, &[RULE_ORG_IMPORT, RULE_ORG_CALL, RULE_ORG_REF]);
+    let mut edges = Vec::with_capacity(routes.len() + bound.len());
     for (from, to, line, file) in routes.into_values() {
         let ev = tally.evidence(RULE_ORG_IMPORT).at(file, line);
         let mut e = Edge::new(from, to, edge_category::IMPORTS, Confidence::Medium);
@@ -497,8 +1054,188 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
         edges.push(e);
     }
     tally.add(RULE_ORG_IMPORT, edges.len());
+    for (from, to, category, rule, line, file, eco) in bound {
+        let ev = tally.evidence(rule).at(file, line);
+        let mut e = Edge::new(from, to, category, Confidence::Medium);
+        evidence::attach(&mut e, ev);
+        edges.push(e);
+        tally.add(rule, 1);
+        report.bound_by[eco.slot()] += 1;
+        if rule == RULE_ORG_CALL {
+            report.calls += 1;
+        } else {
+            report.refs += 1;
+        }
+    }
     report.tally = Some(tally);
     (edges, report)
+}
+
+/// One routed row's context: the importer's ecosystem, the sibling
+/// project, the row's routed path and the importer MODULE.
+struct RowCtx<'a> {
+    eco: Eco,
+    project: &'a Project,
+    sub: &'a str,
+    importer: NodeId,
+}
+
+/// Record the local names one routed row binds (FA.23): a symbol import's
+/// local name -> the declaration of its imported name in the routed scope
+/// (else, cargo / pypi, the submodule it names); a whole-module import's
+/// alias, else its language's default binding, -> the routed scope (a
+/// Python `import pkg.mod` binds `pkg`, the top package). A TS default or
+/// glob import binds nothing.
+fn bind_row(
+    b: &mut Bindings,
+    cx: &RowCtx,
+    row: &glia_code_domain::ImportBinding,
+    routed: &Routed,
+    modules: &Modules,
+    decls: &Decls,
+) {
+    let (eco, project, sub, importer) = (cx.eco, cx.project, cx.sub, cx.importer);
+    match &row.name {
+        Some(name) if name == "*" || name == "default" => {}
+        Some(name) => {
+            let local = row.alias.clone().unwrap_or_else(|| name.clone());
+            let binding = match decls.lookup(eco, &routed.scope, name) {
+                Lookup::Found(d) => Some(Binding::Decl(d)),
+                Lookup::Ambiguous => Some(Binding::Ambiguous),
+                Lookup::Missing => {
+                    let path = join(sub, name);
+                    match eco {
+                        Eco::Cargo => modules.cargo_target(project, &path),
+                        Eco::Pypi => modules.pypi_target(project, &path),
+                        Eco::Npm | Eco::Go => None,
+                    }
+                    .filter(|t| t.0 != importer)
+                    .map(|t| Binding::Scope(vec![t.0]))
+                }
+            };
+            if let Some(binding) = binding {
+                b.bind(local, binding);
+            }
+        }
+        None => {
+            if let Some(alias) = &row.alias {
+                b.bind(alias.clone(), Binding::Scope(routed.scope.clone()));
+                return;
+            }
+            let Some(local) = import_default_binding(&row.spec, eco.lang()) else {
+                return;
+            };
+            let scope = match eco {
+                // `import pkg.mod` binds `pkg`: the top package's module.
+                Eco::Pypi => {
+                    let top = sub.split('/').next().unwrap_or(sub);
+                    match modules.pypi_target(project, top) {
+                        Some(t) if t.0 != importer => vec![t.0],
+                        _ => return,
+                    }
+                }
+                _ => routed.scope.clone(),
+            };
+            b.bind(local, Binding::Scope(scope));
+        }
+    }
+}
+
+/// The org_call / org_ref edges: every unresolved call site and USES /
+/// INJECTS / HANDLED_BY reference whose importer bound its name, in graph
+/// then site order, one edge per (from, to, category) at its least line,
+/// none where an edge of that category already joins the two.
+fn bind_sites(
+    graphs: &[RepoGraph],
+    cross: &[Edge],
+    importers: &HashMap<NodeId, Bindings>,
+    decls: &Decls,
+    report: &mut Report,
+) -> Vec<Bound> {
+    if importers.is_empty() {
+        return Vec::new();
+    }
+    let importer_repos: BTreeSet<u64> = graphs
+        .iter()
+        .flat_map(|g| &g.nodes)
+        .filter(|n| importers.contains_key(&n.id))
+        .map(|n| n.repo.0)
+        .collect();
+    let wanted = |c: EdgeCategoryId| c == edge_category::CALLS || REF_CATEGORIES.contains(&c);
+    let existing: HashSet<(NodeId, NodeId, EdgeCategoryId)> = graphs
+        .iter()
+        .filter(|g| importer_repos.contains(&g.repo.0))
+        .flat_map(|g| &g.edges)
+        .chain(cross)
+        .filter(|e| wanted(e.category))
+        .map(|e| (e.from, e.to, e.category))
+        .collect();
+    let mut out: Vec<Bound> = Vec::new();
+    // (from, to, category) -> index in `out`. Lookup only.
+    let mut at: HashMap<(NodeId, NodeId, EdgeCategoryId), usize> = HashMap::new();
+    let mut push = |out: &mut Vec<Bound>, bound: Bound| {
+        let key = (bound.0, bound.1, bound.2);
+        if bound.0 == bound.1 || existing.contains(&key) {
+            return;
+        }
+        match at.get(&key) {
+            Some(&i) => out[i].4 = out[i].4.min(bound.4),
+            None => {
+                at.insert(key, out.len());
+                out.push(bound);
+            }
+        }
+    };
+    for g in graphs.iter().filter(|g| importer_repos.contains(&g.repo.0)) {
+        for c in &g.unresolved_calls {
+            let Some(b) = importer_of(g, c.from, importers).and_then(|i| importers.get(&i)) else {
+                continue;
+            };
+            match resolve_site(b, &c.qualifier, decls) {
+                Lookup::Found(to) => push(
+                    &mut out,
+                    (
+                        c.from,
+                        to,
+                        edge_category::CALLS,
+                        RULE_ORG_CALL,
+                        c.line,
+                        b.file.clone(),
+                        b.eco,
+                    ),
+                ),
+                Lookup::Ambiguous => report.ambiguous += 1,
+                Lookup::Missing => {}
+            }
+        }
+        for r in g
+            .unresolved_refs
+            .iter()
+            .filter(|r| REF_CATEGORIES.contains(&r.category))
+        {
+            let Some(b) = importer_of(g, r.from_module, importers).and_then(|i| importers.get(&i))
+            else {
+                continue;
+            };
+            match resolve_site(b, &r.qualifier, decls) {
+                Lookup::Found(to) => push(
+                    &mut out,
+                    (
+                        r.from,
+                        to,
+                        r.category,
+                        RULE_ORG_REF,
+                        r.line,
+                        b.file.clone(),
+                        b.eco,
+                    ),
+                ),
+                Lookup::Ambiguous => report.ambiguous += 1,
+                Lookup::Missing => {}
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -657,7 +1394,7 @@ mod tests {
         );
         assert_eq!(
             report.line().unwrap(),
-            "[org-packages] classes=2 importers=2 rows=5 routed=4 unrouted=1 (npm=3 go=1)"
+            "[org-packages] classes=2 importers=2 rows=5 routed=4 unrouted=1 (npm=3 go=1 cargo=0 pypi=0)"
         );
     }
 

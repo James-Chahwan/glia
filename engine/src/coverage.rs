@@ -196,6 +196,16 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "TypeScript calls bind: a method call on a value (`x.m()`, `this.x.m()`) through the declared class of a field (a typed field, a constructor parameter, `inject(T)`), a parameter, or a local annotated with a class, initialised by `new T(..)` / `inject(T)` / `x as T` or aliasing `this.<field>`: to that class's own method, else to the nearest superclass method (`this.m()` and `super.m()` the same way from the enclosing class). An override is reached from the member a call binds through method-level IMPLEMENTS (dispatch), never as a call edge. Not bound: a receiver typed by an interface (TypeScript interface members are not nodes), by a call's result (`const s = make()`) or by a chain (`a.b.m()`), a module-level const read inside a function, and a name one body binds to two types (callbacks share their enclosing function's scope)",
         verify: "grep the method name",
     },
+    // FA.22 / FA.23: org routing (resolver:org_packages) reads a sibling npm
+    // package's entry from what its manifest declares, recorded on the
+    // PROJECT by the walk; measured on fixtures/org-packages-npm and
+    // engine/tests/org_packages.rs (main / exports, the convention, a barrel).
+    CoverageCaveat {
+        language: "typescript",
+        edge_category: "IMPORTS",
+        note: "an import of an org-internal npm package (one a sibling project of the build declares by `name`, the importer's package.json depending on it) routes to that project's module, and its calls to the module's declarations, only through: `exports` when it is a string or its \".\" entry is one, else `main`, mapped back to source (`dist/index.js` -> `src/index.ts`); for `name/x` an `exports` map's string `./x` entry; else the convention `index` / `src/index` (`name/x`: `x`, `x/index`, `src/x`, `src/x/index`). A conditional `exports` object (`import` / `require` / `types` conditions), a `./*` pattern, `module` and `types` are not read, so a package whose entry only they name stays unrouted; a re-export is followed through `export *` / `export { .. } from` barrels up to 8 levels, and a name two re-exported modules declare binds nothing",
+        verify: "read the sibling's package.json `exports` / `main` and grep the imported name in its sources",
+    },
     // LA.6e: page flow (`glia pages`) judges only the links the LA.6c
     // extractor can read, so the navigations it counts but cannot judge
     // (`dynamic_skipped` in the `[nav-links]` marker) are declared here.

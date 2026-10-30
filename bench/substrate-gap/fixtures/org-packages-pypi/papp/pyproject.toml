@@ -1,0 +1,4 @@
+[project]
+name = "papp"
+version = "0.1.0"
+dependencies = ["org-util"]

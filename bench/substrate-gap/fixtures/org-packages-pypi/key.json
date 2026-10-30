@@ -1,0 +1,10 @@
+{
+  "framework": "org-packages",
+  "language": "python",
+  "dirs": ["papp", "putil"],
+  "note": "FA.23: pypi routing over the manifest_name class. papp's pyproject.toml depends on org-util, the distribution putil's pyproject.toml declares, imported by its top-level package org_util (PEP 503: org_util and org-util are one name), so `from org_util.text import shout` routes to org_util/text.py (IMPORTS, resolver:org_packages rule org_import) and the unresolved call `shout(...)` binds to putil's shout (CALLS, rule org_call, Medium). Baseline HEAD 63255707: only the SAME_AS star; the pypi row was not even counted.",
+  "expect_edges": [
+    {"from": "main", "to": "text", "category": "IMPORTS", "note": "org_import pypi"},
+    {"from": "run", "to": "shout", "category": "CALLS", "note": "org_call pypi"}
+  ]
+}

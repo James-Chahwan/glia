@@ -634,7 +634,9 @@ pub(crate) fn aux_graphs(
         graphs.push(build_region_graph(regions, repo));
     }
     if !roots.is_empty() {
-        graphs.push(build_project_graph(roots, repo));
+        let mut projects = build_project_graph(roots, repo);
+        crate::walk::stamp_npm_entries(&mut projects, root, roots);
+        graphs.push(projects);
     }
     let mut doc_records = FileDocSource(md).collect();
     doc_records.extend(SnapshotDocSource::for_repo(root).collect());

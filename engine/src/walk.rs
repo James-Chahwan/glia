@@ -1411,6 +1411,68 @@ pub(crate) fn package_file(root: &Path, dir: &str, target: &str) -> Option<Strin
     probe(stem).map(|p| join(&p))
 }
 
+/// FA.23: the declared entry points of each npm PROJECT of a project graph
+/// ([`build_project_graph`], in `roots` order), recorded on its ORIGIN cell
+/// so a pass after the build (org routing, `resolver:org_packages`) and a
+/// layout merge read them without the manifest: `entry`, the source file
+/// `exports` names when it is a string or its `"."` entry is one, else
+/// `main`; `subpaths`, each `"./x"` entry of an `exports` map whose target is
+/// a string. Each target is mapped to the repo-relative source file
+/// [`package_file`] finds (`dist/index.js` -> `src/index.ts`); a target
+/// naming no file, a conditions object and a non-npm root record nothing,
+/// and a PROJECT with nothing to record keeps its ORIGIN byte for byte.
+pub(crate) fn stamp_npm_entries(g: &mut glia_graph::RepoGraph, root: &Path, roots: &[ProjectRoot]) {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
+
+    for (node, r) in g.nodes.iter_mut().zip(roots) {
+        if r.ecosystem != "npm" {
+            continue;
+        }
+        let Some(manifest) = std::fs::read_to_string(root.join(&r.manifest))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        else {
+            continue;
+        };
+        fn string(v: &serde_json::Value) -> Option<&str> {
+            v.as_str().map(str::trim).filter(|s| !s.is_empty())
+        }
+        let exports = manifest.get("exports");
+        let dot = exports.and_then(|e| string(e).or_else(|| e.get(".").and_then(string)));
+        let file = |t: &str| package_file(root, &r.rel_path, t);
+        let entry = dot
+            .and_then(file)
+            .or_else(|| manifest.get("main").and_then(string).and_then(file));
+        let subpaths: serde_json::Map<String, serde_json::Value> = exports
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(k, _)| k.starts_with("./") && !k.contains('*'))
+            .filter_map(|(k, v)| Some((k.clone(), string(v).and_then(file)?.into())))
+            .collect();
+        if entry.is_none() && subpaths.is_empty() {
+            continue;
+        }
+        let Some(cell) = node.cells.iter_mut().find(|c| c.kind == cell_type::ORIGIN) else {
+            continue;
+        };
+        let CellPayload::Json(text) = &cell.payload else {
+            continue;
+        };
+        let Ok(serde_json::Value::Object(mut origin)) = serde_json::from_str(text) else {
+            continue;
+        };
+        if let Some(entry) = entry {
+            origin.insert("entry".into(), entry.into());
+        }
+        if !subpaths.is_empty() {
+            origin.insert("subpaths".into(), subpaths.into());
+        }
+        cell.payload = CellPayload::Json(serde_json::Value::Object(origin).to_string());
+    }
+}
+
 /// A target without its JS / TS / declaration extension (`dist/index.d.ts`
 /// -> `dist/index`, `index.mjs` -> `index`); an extensionless one unchanged.
 fn source_stem(rel: &str) -> &str {
