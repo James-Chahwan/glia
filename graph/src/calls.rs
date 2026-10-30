@@ -1,6 +1,10 @@
 //! Call / ref resolution and the nav-walking helpers it needs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Range;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{
@@ -10,6 +14,242 @@ use glia_code_domain::{
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
 use crate::types::RepoGraph;
+
+// ============================================================================
+// Pooled resolution (FH.21)
+// ============================================================================
+
+/// FH.21: where the graph builders' call and ref passes run their per-site
+/// decide step. Both passes cut their sites into contiguous chunks, decide
+/// every site of a chunk against the read-only graph (the bound target and
+/// branch, or a miss, plus that site's counter increments), then apply the
+/// decisions on the calling thread in input order: the edges, the
+/// unresolved lists and every marker count are the ones one sequential loop
+/// writes, whatever ran the chunks and in whichever order.
+///
+/// The engine implements it over its rayon pool and installs it around each
+/// language build ([`with_resolve_pool`]); with none installed (the graph
+/// crate's own callers and tests) every pass runs as one chunk on the
+/// calling thread.
+pub trait ResolvePool: Sync {
+    /// Workers the pool runs jobs on: chunks are sized for about four per
+    /// worker, and the `[resolve-pool]` marker prints it.
+    fn threads(&self) -> usize;
+
+    /// The fewest sites one chunk holds, so a small group is not cut into
+    /// chunks that cost more to schedule than to decide.
+    fn chunk_floor(&self) -> usize {
+        DEFAULT_CHUNK_FLOOR
+    }
+
+    /// Run `job(0)` .. `job(n - 1)`, each exactly once, on any threads and in
+    /// any order, and return once every one has run. A job's panic reaches
+    /// the caller.
+    fn run(&self, n: usize, job: &(dyn Fn(usize) + Sync));
+}
+
+/// [`ResolvePool::chunk_floor`]'s default: a few hundred sites, each a
+/// handful of table lookups.
+const DEFAULT_CHUNK_FLOOR: usize = 256;
+
+thread_local! {
+    /// The pool [`with_resolve_pool`] installed on this thread, if any.
+    static RESOLVE_POOL: RefCell<Option<Arc<dyn ResolvePool>>> = const { RefCell::new(None) };
+}
+
+/// FH.21: run `f` with `pool` as this thread's resolve pool: every graph
+/// build `f` makes on this thread decides its call sites and refs on it
+/// ([`ResolvePool`]). The previous pool (none, outside a call) is restored
+/// when `f` returns or unwinds, so a build the pool steals onto this thread
+/// while it waits installs and restores its own. Graph content never depends
+/// on the pool: only the wall time does.
+pub fn with_resolve_pool<R>(pool: Arc<dyn ResolvePool>, f: impl FnOnce() -> R) -> R {
+    /// Puts the previous pool back on drop, also on unwind.
+    struct Restore(Option<Arc<dyn ResolvePool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            let _ = RESOLVE_POOL.try_with(|p| *p.borrow_mut() = prev);
+        }
+    }
+    let prev = RESOLVE_POOL.with(|p| p.borrow_mut().replace(pool));
+    let _restore = Restore(prev);
+    f()
+}
+
+/// This thread's installed pool, cloned out so no borrow outlives the call.
+fn installed_pool() -> Option<Arc<dyn ResolvePool>> {
+    RESOLVE_POOL.try_with(|p| p.borrow().clone()).ok().flatten()
+}
+
+/// `0..len` cut into contiguous chunks: one with no pool, else about four
+/// per worker and none smaller than the pool's floor (the last may be).
+fn chunk_ranges(len: usize, pool: Option<&dyn ResolvePool>) -> Vec<Range<usize>> {
+    let size = match pool {
+        None => len.max(1),
+        Some(p) => len
+            .div_ceil(p.threads().max(1) * 4)
+            .max(p.chunk_floor())
+            .max(1),
+    };
+    (0..len)
+        .step_by(size)
+        .map(|start| start..(start + size).min(len))
+        .collect()
+}
+
+/// `job` over `0..n`, results in index order: on `pool` when there is one
+/// and more than one job, else on this thread. A slot the pool left unfilled
+/// is computed here, so the result never depends on the pool.
+fn run_chunks<T: Send + Sync>(
+    pool: Option<&dyn ResolvePool>,
+    n: usize,
+    job: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    match pool {
+        Some(pool) if n > 1 => {
+            let slots: Vec<OnceLock<T>> = (0..n).map(|_| OnceLock::new()).collect();
+            pool.run(n, &|i| {
+                if let Some(slot) = slots.get(i) {
+                    let _ = slot.set(job(i));
+                }
+            });
+            slots
+                .into_iter()
+                .enumerate()
+                .map(|(i, slot)| slot.into_inner().unwrap_or_else(|| job(i)))
+                .collect()
+        }
+        _ => (0..n).map(job).collect(),
+    }
+}
+
+/// FH.21: one graph build's pooled-pass tally, printed by
+/// [`EvidenceTally::report`] as the `[resolve-pool]` line.
+#[derive(Default)]
+struct PoolTally {
+    /// Call sites and refs decided on a pool.
+    calls: usize,
+    refs: usize,
+    /// Chunks those ran as (calls and refs together).
+    chunks: usize,
+    /// The pool's workers (the largest seen).
+    threads: usize,
+    /// Wall time of the pooled passes, decide and apply, in milliseconds.
+    calls_ms: f64,
+    refs_ms: f64,
+    /// The extensions of the graph's MODULE files: the build group's
+    /// language family.
+    exts: BTreeSet<String>,
+}
+
+impl PoolTally {
+    /// Record one pooled pass.
+    fn note(&mut self, g: &RepoGraph, pool: &dyn ResolvePool, chunks: usize) {
+        self.chunks += chunks;
+        self.threads = self.threads.max(pool.threads());
+        if self.exts.is_empty() {
+            self.exts = module_exts(g);
+        }
+    }
+}
+
+/// The lowercased extensions of `g`'s MODULE nodes' POSITION files, sorted.
+fn module_exts(g: &RepoGraph) -> BTreeSet<String> {
+    g.nodes
+        .iter()
+        .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+        .filter_map(position_file)
+        .filter_map(|file| {
+            let base = file.rsplit('/').next().unwrap_or(&file);
+            base.rsplit_once('.')
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+// ============================================================================
+// Global name lookups (FH.21)
+// ============================================================================
+
+/// FH.21: the repo-unique top-level names, indexed once per pass instead of
+/// scanned per site. [`unique_global_function`] and [`unique_global_type`]
+/// walk every module's symbol table for one name; on a large TypeScript
+/// group (34k files) the receiver-type fallback asked that ~11k times in
+/// `resolve_calls` and again in `resolve_inherited_calls`, 7-23 s each. A
+/// name maps to `Some(id)` when every table that holds it holds the same
+/// node, `None` when two distinct nodes share it: exactly the answer of the
+/// scan, which never depended on table order either. Each index is built on
+/// its first lookup, so a pass that never falls back builds nothing.
+struct GlobalNames<'g> {
+    g: &'g RepoGraph,
+    functions: OnceLock<HashMap<&'g str, Option<NodeId>>>,
+    types: OnceLock<HashMap<&'g str, Option<NodeId>>>,
+}
+
+impl<'g> GlobalNames<'g> {
+    fn new(g: &'g RepoGraph) -> Self {
+        Self {
+            g,
+            functions: OnceLock::new(),
+            types: OnceLock::new(),
+        }
+    }
+
+    /// [`unique_global_function`] of `name`.
+    fn function(&self, name: &str) -> Option<NodeId> {
+        self.functions
+            .get_or_init(|| unique_names(self.g, |_| true))
+            .get(name)
+            .copied()
+            .flatten()
+    }
+
+    /// [`unique_global_type`] of `name`.
+    fn type_named(&self, name: &str) -> Option<NodeId> {
+        self.types
+            .get_or_init(|| unique_names(self.g, |id| is_type_kind(self.g, id)))
+            .get(name)
+            .copied()
+            .flatten()
+    }
+}
+
+/// Every name in `g`'s module symbol tables whose node `keep` admits, to
+/// `Some(id)` when one node holds it, `None` when two distinct nodes do.
+fn unique_names<'g>(
+    g: &'g RepoGraph,
+    keep: impl Fn(&NodeId) -> bool,
+) -> HashMap<&'g str, Option<NodeId>> {
+    let mut map: HashMap<&'g str, Option<NodeId>> = HashMap::new();
+    for syms in g.symbols.module_symbols.values() {
+        for (name, id) in syms {
+            if !keep(id) {
+                continue;
+            }
+            map.entry(name.as_str())
+                .and_modify(|hit| {
+                    if *hit != Some(*id) {
+                        *hit = None;
+                    }
+                })
+                .or_insert(Some(*id));
+        }
+    }
+    map
+}
+
+/// True for a STRUCT / CLASS / INTERFACE / ENUM: the kinds
+/// [`unique_global_type`] answers with.
+fn is_type_kind(g: &RepoGraph, id: &NodeId) -> bool {
+    matches!(
+        g.nav.kind_by_id.get(id).copied(),
+        Some(k) if k == node_kind::STRUCT
+            || k == node_kind::CLASS
+            || k == node_kind::INTERFACE
+            || k == node_kind::ENUM
+    )
+}
 
 // ============================================================================
 // Resolution evidence (LC.3d)
@@ -131,9 +371,51 @@ pub(crate) struct EvidenceTally {
     calls: [usize; Branch::COUNT],
     extra_hook: usize,
     refs: [usize; Branch::COUNT],
+    /// FH.21: what the pooled passes ran, for the `[resolve-pool]` line.
+    pool: PoolTally,
+    /// FH.21: the name of the builder's `extra_hook`, which runs in the
+    /// apply step on the build's own thread (it may keep state of its own),
+    /// never on the pool; `None` for a builder that passes none.
+    hook: Option<&'static str>,
 }
 
 impl EvidenceTally {
+    /// A tally for a builder whose `resolve_calls` passes the `extra_hook`
+    /// named `hook` (`go_packages`, `rust_paths`, ..).
+    pub(crate) fn with_hook(hook: &'static str) -> Self {
+        Self {
+            hook: Some(hook),
+            ..Self::default()
+        }
+    }
+
+    /// FH.21 fired_on marker, `None` when no pass of this graph ran on a pool:
+    /// `[resolve-pool] lang=<exts> calls=<n> refs=<m> chunks=<c> threads=<t>
+    /// calls_ms=<a> refs_ms=<b> serial_hooks=<hook|->`. `lang` is the build
+    /// group's MODULE file extensions, `,`-joined.
+    fn pool_marker(&self) -> Option<String> {
+        let p = &self.pool;
+        (p.chunks > 0).then(|| {
+            let lang: Vec<&str> = p.exts.iter().map(String::as_str).collect();
+            format!(
+                "[resolve-pool] lang={} calls={} refs={} chunks={} threads={} calls_ms={:.1} \
+                 refs_ms={:.1} serial_hooks={}",
+                if lang.is_empty() {
+                    "?".to_string()
+                } else {
+                    lang.join(",")
+                },
+                p.calls,
+                p.refs,
+                p.chunks,
+                p.threads,
+                p.calls_ms,
+                p.refs_ms,
+                self.hook.unwrap_or("-")
+            )
+        })
+    }
+
     /// LC.3d fired_on marker, fixed order, `None` when no call resolved:
     /// `[evidence-graph] calls import_binding=a module_symbol=b package_symbol=c
     /// attribute=d self_method=e receiver_type=f extra_hook=g refs
@@ -159,8 +441,12 @@ impl EvidenceTally {
         })
     }
 
-    /// Print the marker, once per graph build, after its last resolve pass.
+    /// Print the markers, once per graph build, after its last resolve pass:
+    /// `[resolve-pool]` (FH.21) when a pass ran pooled, then `[evidence-graph]`.
     pub(crate) fn report(&self) {
+        if let Some(line) = self.pool_marker() {
+            eprintln!("{line}");
+        }
         if let Some(line) = self.marker() {
             eprintln!("{line}");
         }
@@ -180,6 +466,15 @@ impl EvidenceTally {
 /// other builder passes `|_, _| None`. A hook hit carries the hook's own
 /// evidence (its mechanism and branch); every generic hit is `graph:calls`
 /// with the [`Branch`] that bound it.
+///
+/// FH.21: the generic lookups run per site in chunks ([`decide_call`], on
+/// the installed [`ResolvePool`] when there is one), then the decisions
+/// apply in input order on this thread: the edges, `unresolved_calls`, the
+/// hook's calls and every marker count match one sequential loop. The hook
+/// runs in the apply step, never on the pool, so it may keep state of its own
+/// and sees every earlier site's edge, as before. A site's receiver-typed
+/// bind is counted toward `recv_stats` here too, on this thread. The repo-
+/// unique fallbacks read one per-pass [`GlobalNames`] index.
 pub(crate) fn resolve_calls<H>(
     g: &mut RepoGraph,
     calls: &[CallSite],
@@ -188,110 +483,68 @@ pub(crate) fn resolve_calls<H>(
 ) where
     H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)>,
 {
-    let mut pkg_base_bound = 0usize;
-    let mut enum_hits = EnumHits::default();
-    let mut gate = BareFieldGate::default();
-    let mut constructed = ConstructedReceivers::default();
-    let mut state_reads = StateReads::default();
-    let mut class_scope = ClassScopeReceivers::default();
-    let mut ts_recv = TsReceivers::default();
-    // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
-    // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
-    let (mut iface_recv, mut iface_static) = (0usize, 0usize);
-    for site in calls {
-        // CB.15: the caller's OWN file, also for a member of a namespace
-        // several files open; `enclosing_package` below still walks the nav.
-        let Some(from_module) = enclosing_home_module(g, site.from) else {
-            g.unresolved_calls.push(site.clone());
-            continue;
-        };
-        let bindings = g.symbols.module_import_bindings.get(&from_module);
-
-        let resolved: Option<(NodeId, Branch)> = match &site.qualifier {
-            CallQualifier::Bare(name) => {
-                bare_call_target(g, bindings, from_module, site.from, name)
-            }
-            CallQualifier::Attribute { base, name } => {
-                let hit = resolve_attribute_target(g, bindings, base, name);
-                if hit.is_some() {
-                    match attribute_base(g, bindings, base) {
-                        Some((_, k)) if k == node_kind::PACKAGE => pkg_base_bound += 1,
-                        Some((base_id, k)) if k == node_kind::ENUM => {
-                            enum_hits.attribute += 1;
-                            enum_hits.enums.push(base_id);
-                        }
-                        Some((_, k)) if k == node_kind::INTERFACE => iface_static += 1,
-                        _ => {}
-                    }
+    let started = Instant::now();
+    let pool = installed_pool();
+    let pool = pool.as_deref();
+    let gate = BareFieldGate::default();
+    // FH.21 decide: every site against the read-only graph, chunk by chunk.
+    // No lookup below reads an edge or an unresolved list, which are all the
+    // apply step writes, so a site decides alike before or after another.
+    let ranges = chunk_ranges(calls.len(), pool);
+    let chunks = {
+        let g: &RepoGraph = g;
+        let names = GlobalNames::new(g);
+        run_chunks(pool, ranges.len(), |i| {
+            let mut gate = gate.sharing();
+            let mut counts = CallCounts::default();
+            let range = ranges.get(i).cloned().unwrap_or_default();
+            let outcomes: Vec<CallOutcome> = calls
+                .get(range)
+                .unwrap_or_default()
+                .iter()
+                .map(|site| decide_call(g, site, &mut gate, &names, &mut counts))
+                .collect();
+            counts.skipped = gate.skipped;
+            (outcomes, counts)
+        })
+    };
+    // FH.21 apply: in input order, on this thread. The hook runs here, so it
+    // sees the edges of every earlier site, as in one sequential loop.
+    let mut counts = CallCounts::default();
+    let mut decided: Vec<CallOutcome> = Vec::with_capacity(calls.len());
+    for (outcomes, chunk_counts) in chunks {
+        counts.merge(chunk_counts);
+        decided.extend(outcomes);
+    }
+    for (site, outcome) in calls.iter().zip(decided) {
+        let resolved = match outcome {
+            CallOutcome::NoModule => None,
+            CallOutcome::Bound { to, branch, recv } => {
+                if recv {
+                    recv_stats::record();
                 }
-                hit.map(|to| (to, Branch::Attribute))
-            }
-            CallQualifier::SelfMethod(name) => {
-                let owner = enclosing_class_or_struct(&g.nav, site.from);
-                let hit = owner.and_then(|parent_id| {
-                    g.symbols
-                        .class_methods
-                        .get(&parent_id)
-                        .and_then(|m| m.get(name).copied())
-                });
-                if let (Some(owner_id), Some(_)) = (owner, hit)
-                    && g.nav.kind_by_id.get(&owner_id) == Some(&node_kind::ENUM)
-                {
-                    enum_hits.self_method += 1;
-                    enum_hits.enums.push(owner_id);
-                }
-                hit.map(|to| (to, Branch::SelfMethod))
-            }
-            // Python `super().m()` — intra-file super calls are resolved by
-            // the Python parser before emitting the CallSite. Anything that
-            // reaches this layer is cross-file (base class imported from
-            // another module) and requires walking the enclosing class's
-            // recorded base-class names through `module_import_bindings`.
-            // Not wired at v0.4.13 — falls through to extra_hook / unresolved.
-            CallQualifier::SuperMethod(_) => None,
-            CallQualifier::ComplexReceiver { .. } => None,
-        };
-
-        // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
-        // declared field of the enclosing type, and CL.5a: `new Calc().add()`
-        // on the type it constructs; DF.17: a TS-family `this.store.draft()`
-        // on a STATE_VAR of the field's type. Strictly AFTER every lookup
-        // above, so an import binding or module symbol that shares the
-        // field's name keeps today's target.
-        let resolved = resolved.or_else(|| {
-            let (to, branch) =
-                resolve_via_receiver_type(g, site, from_module, &mut gate, &mut constructed)?;
-            if is_interface_method(&g.nav, to) {
-                iface_recv += 1;
-            }
-            if let Branch::ReceiverState = branch {
-                state_reads.0 += 1;
-            }
-            match branch {
-                Branch::ReceiverReturn => ts_recv.returned += 1,
-                _ if is_typed_expression(g, site) => ts_recv.expression += 1,
-                _ => {}
-            }
-            Some((to, branch))
-        });
-        if is_class_scope_receiver(g, site) {
-            class_scope.tally(resolved.is_some());
-        }
-
-        let resolved = match resolved {
-            Some((to, branch)) => {
                 tally.calls[branch as usize] += 1;
                 Some((to, graph_evidence("graph:calls", branch.rule())))
             }
-            None => extra_hook(g, site).inspect(|_| tally.extra_hook += 1),
+            CallOutcome::Miss => extra_hook(g, site).inspect(|_| tally.extra_hook += 1),
         };
-
         match resolved {
             // LC.3b: the call expression's own row, basis site.
             Some((to, ev)) => push_edge(g, site.from, to, edge_category::CALLS, ev.line(site.line)),
             None => g.unresolved_calls.push(site.clone()),
         }
     }
+    let CallCounts {
+        pkg_base_bound,
+        enum_hits,
+        skipped,
+        constructed,
+        state_reads,
+        class_scope,
+        mut ts_recv,
+        iface_recv,
+        iface_static,
+    } = counts;
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
@@ -309,6 +562,8 @@ pub(crate) fn resolve_calls<H>(
             iface_recv + iface_static
         );
     }
+    let mut gate = gate.sharing();
+    gate.skipped = skipped;
     if let Some(line) = gate.marker() {
         eprintln!("{line}");
     }
@@ -326,6 +581,161 @@ pub(crate) fn resolve_calls<H>(
     if let Some(line) = ts_recv.marker() {
         eprintln!("{line}");
     }
+    if let Some(pool) = pool.filter(|_| ranges.len() > 1) {
+        tally.pool.note(g, pool, ranges.len());
+        tally.pool.calls += calls.len();
+        tally.pool.calls_ms += started.elapsed().as_secs_f64() * 1000.0;
+    }
+}
+
+/// What [`decide_call`] found for one call site.
+#[derive(Clone, Copy)]
+enum CallOutcome {
+    /// The caller has no enclosing module: unresolved, the hook not asked.
+    NoModule,
+    /// A generic lookup bound it to `to` through `branch`; `recv` counts it
+    /// toward A6.2a's `recv_stats` (a receiver-typed bind).
+    Bound {
+        to: NodeId,
+        branch: Branch,
+        recv: bool,
+    },
+    /// Every generic lookup missed: the `extra_hook`'s turn, in the apply
+    /// step.
+    Miss,
+}
+
+/// The counters [`decide_call`] keeps for the markers [`resolve_calls`]
+/// prints. Each is a count, a sum by key or a set read by its least member
+/// (`EnumHits::enums`), so the chunks merge in any grouping to the one
+/// loop's totals.
+#[derive(Default)]
+struct CallCounts {
+    pkg_base_bound: usize,
+    enum_hits: EnumHits,
+    /// A6.2a's skipped bare-field binds by extension ([`BareFieldGate`]).
+    skipped: HashMap<String, usize>,
+    constructed: ConstructedReceivers,
+    state_reads: StateReads,
+    class_scope: ClassScopeReceivers,
+    ts_recv: TsReceivers,
+    // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
+    // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
+    iface_recv: usize,
+    iface_static: usize,
+}
+
+impl CallCounts {
+    /// Add a later chunk's counters.
+    fn merge(&mut self, other: CallCounts) {
+        self.pkg_base_bound += other.pkg_base_bound;
+        self.enum_hits.merge(other.enum_hits);
+        for (ext, n) in other.skipped {
+            *self.skipped.entry(ext).or_default() += n;
+        }
+        self.constructed.merge(other.constructed);
+        self.state_reads.0 += other.state_reads.0;
+        self.class_scope.bound += other.class_scope.bound;
+        self.class_scope.unbound += other.class_scope.unbound;
+        self.ts_recv.merge(&other.ts_recv);
+        self.iface_recv += other.iface_recv;
+        self.iface_static += other.iface_static;
+    }
+}
+
+/// [`resolve_calls`]' generic lookups for one site, in their fixed priority,
+/// against the read-only graph: the caller module's import bindings, its own
+/// symbols, the enclosing package, a bound attribute base, the enclosing
+/// type's own method, then the receiver's declared type. Counts what the
+/// markers count; never touches an edge.
+fn decide_call(
+    g: &RepoGraph,
+    site: &CallSite,
+    gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
+    counts: &mut CallCounts,
+) -> CallOutcome {
+    // CB.15: the caller's OWN file, also for a member of a namespace
+    // several files open; `enclosing_package` below still walks the nav.
+    let Some(from_module) = enclosing_home_module(g, site.from) else {
+        return CallOutcome::NoModule;
+    };
+    let bindings = g.symbols.module_import_bindings.get(&from_module);
+
+    let resolved: Option<(NodeId, Branch)> = match &site.qualifier {
+        CallQualifier::Bare(name) => bare_call_target(g, bindings, from_module, site.from, name),
+        CallQualifier::Attribute { base, name } => {
+            let hit = resolve_attribute_target(g, bindings, base, name);
+            if hit.is_some() {
+                match attribute_base(g, bindings, base) {
+                    Some((_, k)) if k == node_kind::PACKAGE => counts.pkg_base_bound += 1,
+                    Some((base_id, k)) if k == node_kind::ENUM => {
+                        counts.enum_hits.attribute += 1;
+                        counts.enum_hits.enums.push(base_id);
+                    }
+                    Some((_, k)) if k == node_kind::INTERFACE => counts.iface_static += 1,
+                    _ => {}
+                }
+            }
+            hit.map(|to| (to, Branch::Attribute))
+        }
+        CallQualifier::SelfMethod(name) => {
+            let owner = enclosing_class_or_struct(&g.nav, site.from);
+            let hit = owner.and_then(|parent_id| {
+                g.symbols
+                    .class_methods
+                    .get(&parent_id)
+                    .and_then(|m| m.get(name).copied())
+            });
+            if let (Some(owner_id), Some(_)) = (owner, hit)
+                && g.nav.kind_by_id.get(&owner_id) == Some(&node_kind::ENUM)
+            {
+                counts.enum_hits.self_method += 1;
+                counts.enum_hits.enums.push(owner_id);
+            }
+            hit.map(|to| (to, Branch::SelfMethod))
+        }
+        // Python `super().m()` — intra-file super calls are resolved by
+        // the Python parser before emitting the CallSite. Anything that
+        // reaches this layer is cross-file (base class imported from
+        // another module) and requires walking the enclosing class's
+        // recorded base-class names through `module_import_bindings`.
+        // Not wired at v0.4.13 — falls through to extra_hook / unresolved.
+        CallQualifier::SuperMethod(_) => None,
+        CallQualifier::ComplexReceiver { .. } => None,
+    };
+    let mut recv = false;
+
+    // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
+    // declared field of the enclosing type, and CL.5a: `new Calc().add()`
+    // on the type it constructs; DF.17: a TS-family `this.store.draft()`
+    // on a STATE_VAR of the field's type. Strictly AFTER every lookup
+    // above, so an import binding or module symbol that shares the
+    // field's name keeps today's target.
+    let resolved = resolved.or_else(|| {
+        let (to, branch, typed) =
+            resolve_via_receiver_type(g, site, from_module, gate, names, &mut counts.constructed)?;
+        recv = typed;
+        if is_interface_method(&g.nav, to) {
+            counts.iface_recv += 1;
+        }
+        if let Branch::ReceiverState = branch {
+            counts.state_reads.0 += 1;
+        }
+        match branch {
+            Branch::ReceiverReturn => counts.ts_recv.returned += 1,
+            _ if is_typed_expression(g, site) => counts.ts_recv.expression += 1,
+            _ => {}
+        }
+        Some((to, branch))
+    });
+    if is_class_scope_receiver(g, site) {
+        counts.class_scope.tally(resolved.is_some());
+    }
+    match resolved {
+        Some((to, branch)) => CallOutcome::Bound { to, branch, recv },
+        None => CallOutcome::Miss,
+    }
 }
 
 /// DT.5k's per-graph tally of TS-family receivers typed in this packet's
@@ -342,6 +752,15 @@ struct TsReceivers {
 }
 
 impl TsReceivers {
+    /// Add a later chunk's counts (FH.21).
+    fn merge(&mut self, other: &TsReceivers) {
+        self.expression += other.expression;
+        self.returned += other.returned;
+        self.member_reads += other.member_reads;
+        self.accessor_read += other.accessor_read;
+        self.accessor_write += other.accessor_write;
+    }
+
     /// fired_on, once per graph that met any:
     /// `[recv] ts receivers bound: expression=<e> returned=<r>
     /// accessor_read=<a> accessor_write=<w> member_reads=<m>`.
@@ -383,6 +802,7 @@ fn is_typed_expression(g: &RepoGraph, site: &CallSite) -> bool {
 fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut TsReceivers) {
     let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let mut found: Vec<(NodeId, NodeId, u32, bool)> = Vec::new();
+    let names = GlobalNames::new(g);
     for n in &g.nodes {
         if !seen.insert(n.id) {
             continue;
@@ -442,7 +862,7 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
                 continue;
             };
             let Some((type_id, _)) =
-                receiver_type_node(g, &site, from_module, type_name, gate, true)
+                receiver_type_node(g, &site, from_module, type_name, gate, &names, true)
             else {
                 continue;
             };
@@ -466,6 +886,7 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
             found.push((n.id, member, *line, write));
         }
     }
+    drop(names);
     for (from, to, line, write) in found {
         let rule = if write {
             stats.accessor_write += 1;
@@ -560,6 +981,15 @@ struct EnumHits {
 }
 
 impl EnumHits {
+    /// Add a later chunk's hits (FH.21); `enums` is read by its
+    /// lowest-qname member only, so its order is free.
+    fn merge(&mut self, other: EnumHits) {
+        self.self_method += other.self_method;
+        self.attribute += other.attribute;
+        self.uses += other.uses;
+        self.enums.extend(other.enums);
+    }
+
     /// File extension of the POSITION cell of the lowest-qname ENUM hit, or `?`
     /// when that ENUM carries no POSITION (or its file has no extension).
     fn ext(&self, g: &RepoGraph) -> String {
@@ -653,7 +1083,13 @@ pub(crate) fn position_file(node: &glia_core::Node) -> Option<String> {
 /// moves file-level page-flow endpoints onto their page component. The
 /// partition keeps the other refs in their original order, so every other
 /// edge list is unchanged.
+///
+/// FH.21: as in [`resolve_calls`], each ref is decided in chunks
+/// ([`decide_ref`], on the installed [`ResolvePool`]) and the decisions apply
+/// in input order on this thread; the repo-unique name fallback reads the
+/// pass's [`GlobalNames`] index.
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mut EvidenceTally) {
+    let started = Instant::now();
     let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) = refs
         .iter()
         .partition(|r| r.category == edge_category::NAVIGATES_TO);
@@ -662,162 +1098,49 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     } else {
         SiteFiles::of(g)
     };
-    let mut pkg_base_bound = 0usize;
-    let mut enum_hits = EnumHits::default();
-    let mut iface_extends = IfaceExtends::default();
-    let mut static_member = 0usize;
-    for r in refs {
-        let extends_iface = extends_interface(g, r);
-        let bindings = g.symbols.module_import_bindings.get(&r.from_module);
-        let resolved: Option<(NodeId, Branch)> = match &r.qualifier {
-            CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
-                // A6.3: a supertype is a type, never a file. A TS default
-                // import (`import Base from "./base"`) binds its local name to
-                // the MODULE; heritage looks through it to that module's
-                // same-named def. The name is import-bound, so a miss stays
-                // unresolved instead of falling back to a repo-wide lookup.
-                Some(id) if is_heritage(r.category) => {
-                    heritage_through_module(g, id, name).map(|to| (to, Branch::ImportBinding))
-                }
-                Some(id) => Some((id, Branch::ImportBinding)),
-                None => g
-                    .symbols
-                    .module_symbols
-                    .get(&r.from_module)
-                    .and_then(|s| s.get(name).copied())
-                    .map(|to| (to, Branch::ModuleSymbol))
-                    // Global fallback for HANDLED_BY refs: a route registers
-                    // `r.GET("/p", handler)` where `handler` is a top-level fn
-                    // in the same package — but `bindings` doesn't see local
-                    // package symbols. Scan all module_symbols for a unique
-                    // match. Same-name collisions across the repo skip
-                    // (better unresolved than wrong).
-                    .or_else(|| {
-                        // Global-by-name fallback. HANDLED_BY: route handler is a
-                        // same-package fn (import binding can't see it). INJECTS
-                        // (Pattern E): the injected service TYPE is resolved by its
-                        // unique class name across the repo — DI param types are
-                        // often unresolvable via imports (TS/dotted imports are a
-                        // separate gap), and `module_symbols` registers top-level
-                        // classes by name, so a uniquely-named service binds here.
-                        // DT.5k: an inline `inject(T)` ref (from a function,
-                        // method or field of a TS-family file; A7.1's and
-                        // constructor DI's are the CLASS's) names a named
-                        // import, and one the graph left unbound is
-                        // third-party: no repo-unique name stands in for it.
-                        if r.category == edge_category::INJECTS
-                            && files.is_ts_family(r)
-                            && g.nav.kind_by_id.get(&r.from) != Some(&node_kind::CLASS)
-                        {
-                            return None;
-                        }
-                        if r.category == edge_category::HANDLED_BY
-                            || r.category == edge_category::INJECTS
-                            || r.category == edge_category::INHERITS_FROM
-                            || r.category == edge_category::IMPLEMENTS
-                        {
-                            // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
-                            // type by its bare name; resolve to the uniquely-named class/
-                            // interface across the repo (module_symbols indexes them,
-                            // incl. namespace/PACKAGE members). Ambiguity → None.
-                            unique_global_function(g, name).map(|to| (to, Branch::GlobalUnique))
-                        } else {
-                            None
-                        }
-                    }),
-            },
-            CallQualifier::Attribute { base, name } => {
-                let bound_base = attribute_base(g, bindings, base);
-                let hit = resolve_attribute_target(g, bindings, base, name)
-                    .map(|to| (to, Branch::Attribute));
-                if hit.is_some() && bound_base.map(|(_, k)| k) == Some(node_kind::PACKAGE) {
-                    pkg_base_bound += 1;
-                }
-                // `Enum.MEMBER` / `Enum::Variant` read as a USES ref: bind the
-                // ENUM's own ATTRIBUTE child. USES-only, so a call site
-                // `Color.RED()` (CALLS) can never land on a member.
-                let hit = hit.or_else(|| match bound_base {
-                    Some((base_id, k))
-                        if k == node_kind::ENUM && r.category == edge_category::USES =>
-                    {
-                        let member = enum_member(g, base_id, name);
-                        if member.is_some() {
-                            enum_hits.uses += 1;
-                            enum_hits.enums.push(base_id);
-                        }
-                        member.map(|to| (to, Branch::EnumMember))
-                    }
-                    _ => None,
-                });
-                // DT.5k: a TS-family `T.X` read (a USES ref) whose base binds a
-                // CLASS and whose member bound nothing above (a static data
-                // field, `CountriesService.FALLBACK`) USES the class itself.
-                let hit = hit.or_else(|| match bound_base {
-                    Some((base_id, k))
-                        if k == node_kind::CLASS
-                            && r.category == edge_category::USES
-                            && files.is_ts_family(r) =>
-                    {
-                        static_member += 1;
-                        Some((base_id, Branch::StaticMember))
-                    }
-                    _ => None,
-                });
-                // CA.5a: a HANDLED_BY base naming a STRUCT / CLASS the
-                // registering module itself declares binds that type's own
-                // method. The Go parser writes a receiver method value
-                // (`h.List` inside `func (h *TokensHandler) RegisterRoutes`)
-                // with the receiver's TYPE as its base, so a second type with
-                // a `List` cannot make it ambiguous. A type declared in
-                // another file of its Go package, or a promoted method, was
-                // already bound through the package by the Go pre-pass (CI.4,
-                // `GoPackages::bind_type_handlers`) and never reaches here.
-                let hit = hit.or_else(|| {
-                    if r.category == edge_category::HANDLED_BY {
-                        module_type_method(g, r.from_module, base, name)
-                            .map(|to| (to, Branch::TypeMethod))
-                    } else {
-                        None
-                    }
-                });
-                // Global fallback for HANDLED_BY: in Go, route handlers
-                // are usually written `h.GetProfile` where `h` is a local
-                // struct-receiver variable (`h *Handlers`), not an import
-                // binding. So binding lookup fails. Scan all class_methods
-                // across the graph for a method matching `name`; emit
-                // only when exactly one match exists. A Go receiver type of
-                // the registering package binds through the Go pre-pass
-                // (CI.4) first; only a ref whose method that type lacks
-                // (own or promoted) still lands here.
-                hit.or_else(|| {
-                    if r.category == edge_category::HANDLED_BY {
-                        unique_global_method(g, name).map(|to| (to, Branch::GlobalUniqueMethod))
-                    } else {
-                        None
-                    }
-                })
-            }
-            CallQualifier::SelfMethod(_)
-            | CallQualifier::SuperMethod(_)
-            | CallQualifier::ComplexReceiver { .. } => None,
-        };
-
-        if extends_iface {
-            match resolved {
-                Some(_) => iface_extends.bound += 1,
-                None => iface_extends.unresolved += 1,
-            }
-            iface_extends.ifaces.push(r.from);
-        }
+    let pool = installed_pool();
+    let pool = pool.as_deref();
+    // FH.21 decide: every ref against the read-only graph, chunk by chunk;
+    // apply: in input order, on this thread.
+    let ranges = chunk_ranges(refs.len(), pool);
+    let chunks = {
+        let g: &RepoGraph = g;
+        let names = GlobalNames::new(g);
+        let files = &files;
+        run_chunks(pool, ranges.len(), |i| {
+            let mut counts = RefCounts::default();
+            let range = ranges.get(i).cloned().unwrap_or_default();
+            let decided: Vec<Option<(NodeId, Branch)>> = refs
+                .get(range)
+                .unwrap_or_default()
+                .iter()
+                .map(|r| decide_ref(g, r, files, &names, &mut counts))
+                .collect();
+            (decided, counts)
+        })
+    };
+    let mut counts = RefCounts::default();
+    let mut decided: Vec<Option<(NodeId, Branch)>> = Vec::with_capacity(refs.len());
+    for (chunk, chunk_counts) in chunks {
+        counts.merge(chunk_counts);
+        decided.extend(chunk);
+    }
+    for (r, resolved) in refs.iter().zip(decided) {
         match resolved {
             Some((to, branch)) => {
                 tally.refs[branch as usize] += 1;
                 let ev = files.place(graph_evidence("graph:refs", branch.rule()), r);
                 push_edge(g, r.from, to, r.category, ev);
             }
-            None => g.unresolved_refs.push(r.clone()),
+            None => g.unresolved_refs.push((*r).clone()),
         }
     }
+    let RefCounts {
+        pkg_base_bound,
+        enum_hits,
+        iface_extends,
+        static_member,
+    } = counts;
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
@@ -843,6 +1166,187 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     if nav.fired() {
         eprintln!("{}", nav.marker());
     }
+    if let Some(pool) = pool.filter(|_| ranges.len() > 1) {
+        tally.pool.note(g, pool, ranges.len());
+        tally.pool.refs += refs.len();
+        tally.pool.refs_ms += started.elapsed().as_secs_f64() * 1000.0;
+    }
+}
+
+/// The counters [`decide_ref`] keeps for the markers [`resolve_refs`]
+/// prints: counts, and id sets read by their lowest-qname member, so chunks
+/// merge in any grouping to the one loop's totals (FH.21).
+#[derive(Default)]
+struct RefCounts {
+    pkg_base_bound: usize,
+    enum_hits: EnumHits,
+    iface_extends: IfaceExtends,
+    static_member: usize,
+}
+
+impl RefCounts {
+    /// Add a later chunk's counters.
+    fn merge(&mut self, other: RefCounts) {
+        self.pkg_base_bound += other.pkg_base_bound;
+        self.enum_hits.merge(other.enum_hits);
+        self.iface_extends.bound += other.iface_extends.bound;
+        self.iface_extends.unresolved += other.iface_extends.unresolved;
+        self.iface_extends.ifaces.extend(other.iface_extends.ifaces);
+        self.static_member += other.static_member;
+    }
+}
+
+/// [`resolve_refs`]' lookups for one ref against the read-only graph: the
+/// target and the branch that bound it, or `None`; counts what the markers
+/// count.
+fn decide_ref(
+    g: &RepoGraph,
+    r: &UnresolvedRef,
+    files: &SiteFiles,
+    names: &GlobalNames<'_>,
+    counts: &mut RefCounts,
+) -> Option<(NodeId, Branch)> {
+    let extends_iface = extends_interface(g, r);
+    let bindings = g.symbols.module_import_bindings.get(&r.from_module);
+    let resolved: Option<(NodeId, Branch)> = match &r.qualifier {
+        CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
+            // A6.3: a supertype is a type, never a file. A TS default
+            // import (`import Base from "./base"`) binds its local name to
+            // the MODULE; heritage looks through it to that module's
+            // same-named def. The name is import-bound, so a miss stays
+            // unresolved instead of falling back to a repo-wide lookup.
+            Some(id) if is_heritage(r.category) => {
+                heritage_through_module(g, id, name).map(|to| (to, Branch::ImportBinding))
+            }
+            Some(id) => Some((id, Branch::ImportBinding)),
+            None => g
+                .symbols
+                .module_symbols
+                .get(&r.from_module)
+                .and_then(|s| s.get(name).copied())
+                .map(|to| (to, Branch::ModuleSymbol))
+                // Global fallback for HANDLED_BY refs: a route registers
+                // `r.GET("/p", handler)` where `handler` is a top-level fn
+                // in the same package — but `bindings` doesn't see local
+                // package symbols. Scan all module_symbols for a unique
+                // match. Same-name collisions across the repo skip
+                // (better unresolved than wrong).
+                .or_else(|| {
+                    // Global-by-name fallback. HANDLED_BY: route handler is a
+                    // same-package fn (import binding can't see it). INJECTS
+                    // (Pattern E): the injected service TYPE is resolved by its
+                    // unique class name across the repo — DI param types are
+                    // often unresolvable via imports (TS/dotted imports are a
+                    // separate gap), and `module_symbols` registers top-level
+                    // classes by name, so a uniquely-named service binds here.
+                    // DT.5k: an inline `inject(T)` ref (from a function,
+                    // method or field of a TS-family file; A7.1's and
+                    // constructor DI's are the CLASS's) names a named
+                    // import, and one the graph left unbound is
+                    // third-party: no repo-unique name stands in for it.
+                    if r.category == edge_category::INJECTS
+                        && files.is_ts_family(r)
+                        && g.nav.kind_by_id.get(&r.from) != Some(&node_kind::CLASS)
+                    {
+                        return None;
+                    }
+                    if r.category == edge_category::HANDLED_BY
+                        || r.category == edge_category::INJECTS
+                        || r.category == edge_category::INHERITS_FROM
+                        || r.category == edge_category::IMPLEMENTS
+                    {
+                        // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
+                        // type by its bare name; resolve to the uniquely-named class/
+                        // interface across the repo (module_symbols indexes them,
+                        // incl. namespace/PACKAGE members). Ambiguity → None.
+                        names.function(name).map(|to| (to, Branch::GlobalUnique))
+                    } else {
+                        None
+                    }
+                }),
+        },
+        CallQualifier::Attribute { base, name } => {
+            let bound_base = attribute_base(g, bindings, base);
+            let hit =
+                resolve_attribute_target(g, bindings, base, name).map(|to| (to, Branch::Attribute));
+            if hit.is_some() && bound_base.map(|(_, k)| k) == Some(node_kind::PACKAGE) {
+                counts.pkg_base_bound += 1;
+            }
+            // `Enum.MEMBER` / `Enum::Variant` read as a USES ref: bind the
+            // ENUM's own ATTRIBUTE child. USES-only, so a call site
+            // `Color.RED()` (CALLS) can never land on a member.
+            let hit = hit.or_else(|| match bound_base {
+                Some((base_id, k)) if k == node_kind::ENUM && r.category == edge_category::USES => {
+                    let member = enum_member(g, base_id, name);
+                    if member.is_some() {
+                        counts.enum_hits.uses += 1;
+                        counts.enum_hits.enums.push(base_id);
+                    }
+                    member.map(|to| (to, Branch::EnumMember))
+                }
+                _ => None,
+            });
+            // DT.5k: a TS-family `T.X` read (a USES ref) whose base binds a
+            // CLASS and whose member bound nothing above (a static data
+            // field, `CountriesService.FALLBACK`) USES the class itself.
+            let hit = hit.or_else(|| match bound_base {
+                Some((base_id, k))
+                    if k == node_kind::CLASS
+                        && r.category == edge_category::USES
+                        && files.is_ts_family(r) =>
+                {
+                    counts.static_member += 1;
+                    Some((base_id, Branch::StaticMember))
+                }
+                _ => None,
+            });
+            // CA.5a: a HANDLED_BY base naming a STRUCT / CLASS the
+            // registering module itself declares binds that type's own
+            // method. The Go parser writes a receiver method value
+            // (`h.List` inside `func (h *TokensHandler) RegisterRoutes`)
+            // with the receiver's TYPE as its base, so a second type with
+            // a `List` cannot make it ambiguous. A type declared in
+            // another file of its Go package, or a promoted method, was
+            // already bound through the package by the Go pre-pass (CI.4,
+            // `GoPackages::bind_type_handlers`) and never reaches here.
+            let hit = hit.or_else(|| {
+                if r.category == edge_category::HANDLED_BY {
+                    module_type_method(g, r.from_module, base, name)
+                        .map(|to| (to, Branch::TypeMethod))
+                } else {
+                    None
+                }
+            });
+            // Global fallback for HANDLED_BY: in Go, route handlers
+            // are usually written `h.GetProfile` where `h` is a local
+            // struct-receiver variable (`h *Handlers`), not an import
+            // binding. So binding lookup fails. Scan all class_methods
+            // across the graph for a method matching `name`; emit
+            // only when exactly one match exists. A Go receiver type of
+            // the registering package binds through the Go pre-pass
+            // (CI.4) first; only a ref whose method that type lacks
+            // (own or promoted) still lands here.
+            hit.or_else(|| {
+                if r.category == edge_category::HANDLED_BY {
+                    unique_global_method(g, name).map(|to| (to, Branch::GlobalUniqueMethod))
+                } else {
+                    None
+                }
+            })
+        }
+        CallQualifier::SelfMethod(_)
+        | CallQualifier::SuperMethod(_)
+        | CallQualifier::ComplexReceiver { .. } => None,
+    };
+
+    if extends_iface {
+        match resolved {
+            Some(_) => counts.iface_extends.bound += 1,
+            None => counts.iface_extends.unresolved += 1,
+        }
+        counts.iface_extends.ifaces.push(r.from);
+    }
+    resolved
 }
 
 fn is_heritage(category: EdgeCategoryId) -> bool {
@@ -1134,6 +1638,23 @@ fn receiver_field(receiver: &str) -> Option<&str> {
 /// bindings, then its own symbols, then the repo-unique name
 /// (`unique_global_function`; two distinct same-named types -> `None`).
 pub(crate) fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
+    scoped_type_name(g, from_module, name).or_else(|| unique_global_function(g, name))
+}
+
+/// [`resolve_type_name`] with the repo-unique fallback read from a pass's
+/// [`GlobalNames`] index (FH.21): the same answer, one lookup.
+fn resolve_type_name_with(
+    g: &RepoGraph,
+    names: &GlobalNames<'_>,
+    from_module: NodeId,
+    name: &str,
+) -> Option<NodeId> {
+    scoped_type_name(g, from_module, name).or_else(|| names.function(name))
+}
+
+/// The first two steps of [`resolve_type_name`]: the caller module's import
+/// bindings, then its own symbols.
+fn scoped_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
     g.symbols
         .module_import_bindings
         .get(&from_module)
@@ -1144,7 +1665,6 @@ pub(crate) fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) 
                 .get(&from_module)
                 .and_then(|s| s.get(name).copied())
         })
-        .or_else(|| unique_global_function(g, name))
 }
 
 /// `<field>.m()` where `<field>` is a declared field of the innermost
@@ -1185,13 +1705,19 @@ pub(crate) fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) 
 /// [`Branch::ReceiverState`]; every other hit is [`Branch::ReceiverType`].
 /// A6.2a's gate applies to both, and both count toward `recv_stats`. The
 /// constructed-type arm reads methods only.
+///
+/// FH.21: the hit's bool is true for a bind that counts toward
+/// `recv_stats` (every arm but the constructed one); the caller records it
+/// in [`resolve_calls`]' apply step, on the build's own thread, so a chunk
+/// decided on a pool worker never counts on that worker's counter.
 fn resolve_via_receiver_type(
     g: &RepoGraph,
     site: &CallSite,
     from_module: NodeId,
     gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
     constructed: &mut ConstructedReceivers,
-) -> Option<(NodeId, Branch)> {
+) -> Option<(NodeId, Branch, bool)> {
     let method = match &site.qualifier {
         CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
             name.as_str()
@@ -1202,12 +1728,14 @@ fn resolve_via_receiver_type(
         return None;
     }
     if let Some(ty) = constructed_type(site) {
-        let hit = constructed_type_id(g, from_module, ty).and_then(|t| type_method(g, t, method));
+        let hit =
+            constructed_type_id(g, names, from_module, ty).and_then(|t| type_method(g, t, method));
         constructed.tally(gate.ext(g, site.from), hit.is_some());
-        return hit.map(|to| (to, Branch::ReceiverType));
+        return hit.map(|to| (to, Branch::ReceiverType, false));
     }
     let type_name = receiver_type(g, site)?;
-    let (type_id, returned) = receiver_type_node(g, site, from_module, type_name, gate, false)?;
+    let (type_id, returned) =
+        receiver_type_node(g, site, from_module, type_name, gate, names, false)?;
     let hit = match type_method(g, type_id, method) {
         // DT.5k: a call-result local's receiver is typed by the callee's
         // declared return type (rule `receiver_return`, Go's name for it).
@@ -1229,8 +1757,7 @@ fn resolve_via_receiver_type(
     {
         return None;
     }
-    recv_stats::record();
-    Some(hit)
+    Some((hit.0, hit.1, true))
 }
 
 /// The method `method` of the type `type_id`: its own (`class_methods`, a
@@ -1459,8 +1986,13 @@ fn balanced_end(b: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
 /// ([`scope_binding`]), then the repo-unique type ([`unique_global_type`];
 /// two distinct same-named types -> `None`). Only a STRUCT / CLASS /
 /// INTERFACE / ENUM answers, so a same-named FUNCTION never does.
-fn constructed_type_id(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
-    scope_binding(g, from_module, name).unwrap_or_else(|| unique_global_type(g, name))
+fn constructed_type_id(
+    g: &RepoGraph,
+    names: &GlobalNames<'_>,
+    from_module: NodeId,
+    name: &str,
+) -> Option<NodeId> {
+    scope_binding(g, from_module, name).unwrap_or_else(|| names.type_named(name))
 }
 
 /// The type `name` binds to in `module`'s own scope: the first of the
@@ -1582,6 +2114,7 @@ fn receiver_type_node(
     from_module: NodeId,
     type_name: &str,
     gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
     scoped: bool,
 ) -> Option<(NodeId, bool)> {
     match type_name.strip_suffix("()") {
@@ -1598,7 +2131,7 @@ fn receiver_type_node(
         None if scoped || is_typed_expression(g, site) => {
             scope_type(g, from_module, type_name).map(|t| (t, false))
         }
-        None => resolve_type_name(g, from_module, type_name).map(|t| (t, false)),
+        None => resolve_type_name_with(g, names, from_module, type_name).map(|t| (t, false)),
     }
 }
 
@@ -1682,19 +2215,30 @@ struct BareFieldGate {
     /// NodeId -> index into `g.nodes`, built on the first [`Self::ext`]
     /// lookup only (a bare-field hit, or a CL.5a constructed receiver).
     /// `resolve_calls` pushes edges, never nodes, so the indices stay valid.
-    index: Option<HashMap<NodeId, usize>>,
+    /// Shared by the gates of one pass's chunks ([`Self::sharing`], FH.21),
+    /// so the index is built once whichever chunk asks first.
+    index: Arc<OnceLock<HashMap<NodeId, usize>>>,
     /// Bare-field binds skipped outside a constructor, by file extension.
     skipped: HashMap<String, usize>,
 }
 
 impl BareFieldGate {
+    /// A gate over this one's node index with no skips counted: one per
+    /// chunk of a pooled pass (FH.21), the skips summed afterwards.
+    fn sharing(&self) -> Self {
+        Self {
+            index: Arc::clone(&self.index),
+            skipped: HashMap::new(),
+        }
+    }
+
     /// The lowercased extension of `caller`'s source file, read off its
     /// POSITION cell; `None` when it carries none (or its file has no
     /// extension).
     fn ext(&mut self, g: &RepoGraph, caller: NodeId) -> Option<String> {
         let index = self
             .index
-            .get_or_insert_with(|| g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect());
+            .get_or_init(|| g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect());
         index
             .get(&caller)
             .and_then(|&i| position_file(&g.nodes[i]))
@@ -1754,6 +2298,15 @@ struct ConstructedReceivers {
 }
 
 impl ConstructedReceivers {
+    /// Add a later chunk's tally (FH.21).
+    fn merge(&mut self, other: ConstructedReceivers) {
+        self.bound += other.bound;
+        self.unbound += other.unbound;
+        for (ext, n) in other.by_ext {
+            *self.by_ext.entry(ext).or_default() += n;
+        }
+    }
+
     fn tally(&mut self, ext: Option<String>, bound: bool) {
         if bound {
             self.bound += 1;
@@ -1916,25 +2469,31 @@ pub(crate) struct InheritStats {
     ambiguous: usize,
     implements: usize,
     concrete: usize,
+    /// FH.21: sites kept out of every lookup because no superclass declares
+    /// their name ([`inherited_names`]).
+    prefiltered: usize,
 }
 
 impl InheritStats {
     /// CH.1b / DF.22b / DF.22c fired_on marker, `None` when every count is
     /// 0: `[ts-inherit] calls bound through superclasses: <n> (self=<s>
     /// super=<p> receiver=<r> ambiguous=<a>) abstract implements=<m>
-    /// concrete overrides=<c>`, `<n>` = `<s> + <p> + <r>`.
+    /// concrete overrides=<c> prefiltered=<k>`, `<n>` = `<s> + <p> + <r>`;
+    /// `prefiltered` (FH.21) never makes the line print on its own.
     fn marker(&self) -> Option<String> {
         let bound = self.self_bound + self.super_bound + self.receiver_bound;
         (bound + self.ambiguous + self.implements + self.concrete > 0).then(|| {
             format!(
                 "[ts-inherit] calls bound through superclasses: {bound} (self={} super={} \
-                 receiver={} ambiguous={}) abstract implements={} concrete overrides={}",
+                 receiver={} ambiguous={}) abstract implements={} concrete overrides={} \
+                 prefiltered={}",
                 self.self_bound,
                 self.super_bound,
                 self.receiver_bound,
                 self.ambiguous,
                 self.implements,
-                self.concrete
+                self.concrete,
+                self.prefiltered
             )
         })
     }
@@ -2065,23 +2624,55 @@ fn nearest_definer(
 /// [`crate::build::build_typescript_family`]. Unbound sites go back to
 /// `unresolved_calls` in their original order, so the build stays
 /// byte-identical at any thread count.
+///
+/// FH.21: a lookup can only find a member some superclass declares, so a
+/// site whose name no class in any `extends` chain (a value of
+/// [`superclasses`]) declares is kept without one ([`inherited_names`]):
+/// every lookup would end `Nothing` or `None`, both kept, and the bare-field
+/// gate's skips this pass makes are dropped anyway. Such sites count
+/// `prefiltered` in the `[ts-inherit]` line. On a 34k-file TypeScript group
+/// that kept ~195k of ~196k sites out of the receiver typing (8.1 s, most
+/// of it the repo-unique type scan [`GlobalNames`] now answers in one
+/// lookup).
 pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStats) {
     let pending = std::mem::take(&mut g.unresolved_calls);
-    let supers = superclasses(g);
-    // A6.2a's gate, fresh: its skipped tally is dropped, since
-    // `resolve_calls` already printed this build's `[recv] bare field
-    // receivers skipped` line.
-    let mut gate = BareFieldGate::default();
+    let decided: Vec<Option<(InheritWalk, Definer)>> = {
+        let g: &RepoGraph = g;
+        let supers = superclasses(g);
+        let inheritable = inherited_names(g, &supers);
+        let names = GlobalNames::new(g);
+        // A6.2a's gate, fresh: its skipped tally is dropped, since
+        // `resolve_calls` already printed this build's `[recv] bare field
+        // receivers skipped` line.
+        let mut gate = BareFieldGate::default();
+        pending
+            .iter()
+            .map(|site| {
+                let name = match &site.qualifier {
+                    CallQualifier::SelfMethod(name)
+                    | CallQualifier::SuperMethod(name)
+                    | CallQualifier::Attribute { name, .. }
+                    | CallQualifier::ComplexReceiver { name, .. } => name,
+                    _ => return None,
+                };
+                if !inheritable.contains(name.as_str()) {
+                    stats.prefiltered += 1;
+                    return None;
+                }
+                match &site.qualifier {
+                    CallQualifier::SelfMethod(name) => self_lookup(g, &supers, site, name, false),
+                    CallQualifier::SuperMethod(name) => self_lookup(g, &supers, site, name, true),
+                    CallQualifier::Attribute { name, .. }
+                    | CallQualifier::ComplexReceiver { name, .. } => {
+                        receiver_lookup(g, &supers, site, name, &mut gate, &names)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    };
     let mut kept: Vec<CallSite> = Vec::with_capacity(pending.len());
-    for site in pending {
-        let lookup = match &site.qualifier {
-            CallQualifier::SelfMethod(name) => self_lookup(g, &supers, &site, name, false),
-            CallQualifier::SuperMethod(name) => self_lookup(g, &supers, &site, name, true),
-            CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
-                receiver_lookup(g, &supers, &site, name, &mut gate)
-            }
-            _ => None,
-        };
+    for (site, lookup) in pending.into_iter().zip(decided) {
         let Some((walk, definer)) = lookup else {
             kept.push(site);
             continue;
@@ -2109,6 +2700,19 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
         }
     }
     g.unresolved_calls = kept;
+}
+
+/// FH.21: every member name a superclass declares: the `class_methods` keys
+/// of each class that is some class's direct superclass ([`superclasses`]'
+/// values). [`nearest_definer`] reads `class_methods` of those classes only,
+/// so a name outside this set always comes back `Nothing`.
+fn inherited_names<'g>(g: &'g RepoGraph, supers: &BTreeMap<u64, Vec<NodeId>>) -> HashSet<&'g str> {
+    let bases: BTreeSet<u64> = supers.values().flatten().map(|b| b.0).collect();
+    bases
+        .into_iter()
+        .filter_map(|b| g.symbols.class_methods.get(&NodeId(b)))
+        .flat_map(|methods| methods.keys().map(String::as_str))
+        .collect()
 }
 
 /// EVIDENCE rule of a `super.m()` CALLS (DF.22c), read by engine's
@@ -2178,11 +2782,12 @@ fn receiver_lookup(
     site: &CallSite,
     name: &str,
     gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
 ) -> Option<(InheritWalk, Definer)> {
     if name.is_empty() {
         return None;
     }
-    let (class, constructed) = receiver_class(g, site, gate)?;
+    let (class, constructed) = receiver_class(g, site, gate, names)?;
     if has_own_member(g, class, name) {
         return None;
     }
@@ -2223,16 +2828,17 @@ fn receiver_class(
     g: &RepoGraph,
     site: &CallSite,
     gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
 ) -> Option<(NodeId, bool)> {
     let is_class = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
     let from_module = enclosing_home_module(g, site.from)?;
     if let Some(ty) = constructed_type(site) {
-        return constructed_type_id(g, from_module, ty)
+        return constructed_type_id(g, names, from_module, ty)
             .filter(is_class)
             .map(|t| (t, true));
     }
     let type_name = receiver_type(g, site)?;
-    let (type_id, _) = receiver_type_node(g, site, from_module, type_name, gate, false)
+    let (type_id, _) = receiver_type_node(g, site, from_module, type_name, gate, names, false)
         .filter(|(t, _)| is_class(t))?;
     if let CallQualifier::Attribute { base, .. } = &site.qualifier
         && local_type(g, site.from, base).is_none()
@@ -4614,7 +5220,8 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
-                 ambiguous=0) abstract implements=0 concrete overrides=4"
+                 ambiguous=0) abstract implements=0 concrete overrides=4 \
+                 prefiltered=0"
             )
         );
     }
@@ -4727,7 +5334,8 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 1 (self=1 super=0 receiver=0 \
-                 ambiguous=0) abstract implements=1 concrete overrides=0"
+                 ambiguous=0) abstract implements=1 concrete overrides=0 \
+                 prefiltered=2"
             )
         );
         let before = plain.edges.len();
@@ -4771,7 +5379,8 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
-                 ambiguous=1) abstract implements=0 concrete overrides=0"
+                 ambiguous=1) abstract implements=0 concrete overrides=0 \
+                 prefiltered=0"
             )
         );
     }
@@ -4891,7 +5500,8 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 3 (self=0 super=0 receiver=3 \
-                 ambiguous=0) abstract implements=0 concrete overrides=0"
+                 ambiguous=0) abstract implements=0 concrete overrides=0 \
+                 prefiltered=1"
             )
         );
 
@@ -4925,7 +5535,8 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
-                 ambiguous=1) abstract implements=0 concrete overrides=0"
+                 ambiguous=1) abstract implements=0 concrete overrides=0 \
+                 prefiltered=0"
             )
         );
     }
@@ -5459,5 +6070,148 @@ mod tests {
         let (g, _, _) = build("Countries.FALLBACK", "src/Page.java");
         assert!(edges_of(&g, edge_category::USES).is_empty());
         assert_eq!(g.unresolved_refs.len(), 1);
+    }
+}
+
+/// FH.21: the pooled passes' own pieces.
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+    use crate::test_support::{flow_graph, repo};
+    use glia_code_domain::GRAPH_TYPE;
+
+    /// The per-pass index answers every name exactly as the per-site scans
+    /// do: a name two distinct nodes hold is `None`, one node held by two
+    /// tables (a MODULE and its PACKAGE) is that node, and the type index
+    /// sees type kinds only.
+    #[test]
+    fn global_names_answer_as_the_scans_do() {
+        let r = repo();
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, r, kind, q);
+        let (m1, m2, m3) = (
+            id(node_kind::MODULE, "m1"),
+            id(node_kind::MODULE, "m2"),
+            id(node_kind::MODULE, "m3"),
+        );
+        let x_fn = id(node_kind::FUNCTION, "m1::X");
+        let x_class = id(node_kind::CLASS, "m2::X");
+        let shared = id(node_kind::FUNCTION, "m1::F");
+        let only = id(node_kind::INTERFACE, "m3::T");
+        let mut g = flow_graph();
+        for (n, k) in [
+            (x_fn, node_kind::FUNCTION),
+            (x_class, node_kind::CLASS),
+            (shared, node_kind::FUNCTION),
+            (only, node_kind::INTERFACE),
+        ] {
+            g.nav.kind_by_id.insert(n, k);
+        }
+        let table = |pairs: &[(&str, NodeId)]| {
+            pairs
+                .iter()
+                .map(|(n, id)| (n.to_string(), *id))
+                .collect::<HashMap<String, NodeId>>()
+        };
+        g.symbols
+            .module_symbols
+            .insert(m1, table(&[("X", x_fn), ("F", shared)]));
+        g.symbols
+            .module_symbols
+            .insert(m2, table(&[("X", x_class), ("F", shared)]));
+        g.symbols.module_symbols.insert(m3, table(&[("T", only)]));
+        let names = GlobalNames::new(&g);
+        for name in ["X", "F", "T", "absent"] {
+            assert_eq!(
+                names.function(name),
+                unique_global_function(&g, name),
+                "{name}"
+            );
+            assert_eq!(
+                names.type_named(name),
+                unique_global_type(&g, name),
+                "{name}"
+            );
+        }
+        assert_eq!(names.function("X"), None, "two distinct nodes");
+        assert_eq!(names.function("F"), Some(shared), "one node, two tables");
+        assert_eq!(
+            names.type_named("X"),
+            Some(x_class),
+            "the only type named X"
+        );
+        assert_eq!(names.type_named("F"), None, "a FUNCTION is no type");
+    }
+
+    /// One chunk with no pool; with one, about four per worker, none under
+    /// the floor, covering `0..len` in order.
+    #[test]
+    fn chunks_cover_the_sites_in_order() {
+        struct P(usize, usize);
+        impl ResolvePool for P {
+            fn threads(&self) -> usize {
+                self.0
+            }
+            fn chunk_floor(&self) -> usize {
+                self.1
+            }
+            fn run(&self, n: usize, job: &(dyn Fn(usize) + Sync)) {
+                (0..n).for_each(job);
+            }
+        }
+        assert_eq!(chunk_ranges(10, None), vec![0..10]);
+        assert_eq!(chunk_ranges(0, None), Vec::<Range<usize>>::new());
+        assert_eq!(
+            chunk_ranges(10, Some(&P(2, 1))),
+            vec![0..2, 2..4, 4..6, 6..8, 8..10]
+        );
+        assert_eq!(chunk_ranges(10, Some(&P(2, 4))), vec![0..4, 4..8, 8..10]);
+        assert_eq!(chunk_ranges(1000, Some(&P(16, 256))).len(), 4);
+        let out = run_chunks(Some(&P(4, 1)), 5, |i| i * 10);
+        assert_eq!(out, vec![0, 10, 20, 30, 40]);
+    }
+
+    /// A pool that runs no job still yields every chunk: the caller computes
+    /// a slot the pool left empty.
+    #[test]
+    fn an_unrun_slot_is_computed_here() {
+        struct Idle;
+        impl ResolvePool for Idle {
+            fn threads(&self) -> usize {
+                4
+            }
+            fn run(&self, _n: usize, _job: &(dyn Fn(usize) + Sync)) {}
+        }
+        assert_eq!(run_chunks(Some(&Idle), 3, |i| i + 1), vec![1, 2, 3]);
+    }
+
+    /// The `[resolve-pool]` line prints only after a pooled pass, in its
+    /// fixed field order, `serial_hooks=-` for a builder with no hook.
+    #[test]
+    fn resolve_pool_marker_shape() {
+        let mut tally = EvidenceTally::default();
+        assert_eq!(tally.pool_marker(), None);
+        tally.pool = PoolTally {
+            calls: 10,
+            refs: 4,
+            chunks: 3,
+            threads: 16,
+            calls_ms: 1.25,
+            refs_ms: 0.5,
+            exts: ["ts", "tsx"].iter().map(|e| e.to_string()).collect(),
+        };
+        assert_eq!(
+            tally.pool_marker().as_deref(),
+            Some(
+                "[resolve-pool] lang=ts,tsx calls=10 refs=4 chunks=3 threads=16 calls_ms=1.2 \
+                 refs_ms=0.5 serial_hooks=-"
+            )
+        );
+        let mut go = EvidenceTally::with_hook("go_packages");
+        go.pool.chunks = 2;
+        assert!(
+            go.pool_marker()
+                .is_some_and(|l| l.starts_with("[resolve-pool] lang=? ")
+                    && l.ends_with(" serial_hooks=go_packages")),
+        );
     }
 }

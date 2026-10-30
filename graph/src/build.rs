@@ -16,6 +16,7 @@ use crate::calls::{
     enclosing_module, graph_evidence, push_edge, resolve_calls, resolve_inherited_calls,
     resolve_refs, unique_global_type,
 };
+pub use crate::calls::{ResolvePool, with_resolve_pool};
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
 use crate::imports::{
@@ -261,7 +262,7 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let mut packages = GoPackages::build(&g, &all_imports, package_names);
     packages.promoted = GoPromoted::build(&g, &embed_binds.bound);
     let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("go_packages");
     let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
     resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
     let package_stats = packages.stats(import_stats);
@@ -445,7 +446,7 @@ where
     let mut same = same_stem_table(&g);
     resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
     same.report();
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("dart_provider");
     let bound = std::cell::Cell::new(0usize);
     resolve_calls(
         &mut g,
@@ -486,7 +487,7 @@ where
     same.report();
     let types = SwiftModuleTypes::new(&g);
     let rewritten = implicit_self(&g, &types, &mut all_calls);
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("swift_scope");
     resolve_calls(
         &mut g,
         &all_calls,
@@ -549,7 +550,7 @@ fn elixir_passes(
     resolve_imports_python(&mut g, &all_imports, &mut same);
     same.report();
     let modules = ElixirModules::new(&g, &all_imports);
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("elixir_modules");
     resolve_calls(
         &mut g,
         &all_calls,
@@ -614,7 +615,7 @@ pub fn build_rust(
             None => rest.push(site),
         }
     }
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("rust_paths");
     resolve_calls(
         &mut g,
         &rest,
@@ -689,7 +690,7 @@ where
     let cpp = CppScope::new(&g, &defining);
     let rewritten = implicit_this(&g, &cpp, &mut all_calls);
     let scope = CppCallScope::new(&g, defining);
-    let mut tally = EvidenceTally::default();
+    let mut tally = EvidenceTally::with_hook("cpp_scope");
     resolve_calls(
         &mut g,
         &all_calls,

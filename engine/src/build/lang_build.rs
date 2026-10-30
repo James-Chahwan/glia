@@ -445,9 +445,13 @@ impl LangBuild {
 /// Run one language's graph build on THIS thread, tally it and print its
 /// LC.3b `[evidence-lines]` line, then decide its evidence fill (DC.5,
 /// [`fill_group_evidence`]; after the tally, which counts basis `site` before
-/// the fill). `recv_stats` is per thread (LG.1c) and the graph crate spawns no
-/// threads, so the `reset` .. `take` bracket holds exactly this build's
-/// receiver-typed binds.
+/// the fill). `recv_stats` is per thread (LG.1c) and the graph crate counts
+/// on the build's own thread only (FH.21: a pooled pass records its chunks'
+/// binds in its apply step, and [`EngineResolvePool`] keeps the count across
+/// a build rayon runs on this thread while it waits), so the `reset` ..
+/// `take` bracket holds exactly this build's receiver-typed binds. FH.21:
+/// the build runs under [`EngineResolvePool`] when more than one worker can
+/// take its chunks.
 fn build_one(
     lang: &'static str,
     parses: Vec<FileParse>,
@@ -455,7 +459,11 @@ fn build_one(
 ) -> LangBuild {
     let unattributed = unattributed_parse_edges(&parses);
     recv_stats::reset();
-    let graph = build(parses);
+    let graph = if EngineResolvePool::threads_here() > 1 {
+        glia_graph::with_resolve_pool(std::sync::Arc::new(EngineResolvePool), || build(parses))
+    } else {
+        build(parses)
+    };
     let recv_bound = recv_stats::take();
     let graph = match graph {
         Ok(mut g) => {
@@ -473,6 +481,61 @@ fn build_one(
         lang,
         graph,
         recv_bound,
+    }
+}
+
+/// FH.21: the engine pool as the graph crate's [`glia_graph::ResolvePool`]:
+/// a language build's call / ref passes decide their sites in chunks through
+/// [`crate::parallel::par_map_ordered`], which runs on the pool the build
+/// itself runs on (a nested map on its worker) or on the engine pool, so one
+/// large group (a TypeScript monorepo) no longer resolves on one core while
+/// the others idle. [`build_one`] installs it only where more than one
+/// worker can run ([`Self::threads_here`]); under `GLIA_THREADS=1` the passes
+/// run as one chunk on the build's thread, as before.
+///
+/// While this thread waits for the chunks, rayon may run another queued job
+/// on it, which can be another group's whole [`build_one`]: its `recv_stats`
+/// reset .. take bracket would eat this build's count so far. [`Self::run`]
+/// takes the count before the wait and puts it back after, and the graph
+/// crate counts a chunk's receiver binds on the build's thread, never on the
+/// worker that decided them. A chunk's panic is caught quietly on its
+/// worker ([`crate::parallel::quiet`]) and re-raised here, on the build's
+/// thread, inside the build's own quiet scope.
+struct EngineResolvePool;
+
+impl EngineResolvePool {
+    /// The workers a map from this thread runs on: the current rayon pool's
+    /// on one of its workers, else the engine pool's ([`crate::parallel::threads`]).
+    fn threads_here() -> usize {
+        if rayon::current_thread_index().is_some() {
+            rayon::current_num_threads()
+        } else {
+            crate::parallel::threads()
+        }
+    }
+}
+
+impl glia_graph::ResolvePool for EngineResolvePool {
+    fn threads(&self) -> usize {
+        Self::threads_here()
+    }
+
+    fn run(&self, n: usize, job: &(dyn Fn(usize) + Sync)) {
+        let saved = recv_stats::take();
+        let jobs: Vec<usize> = (0..n).collect();
+        let (results, _) =
+            crate::parallel::par_map_ordered(&jobs, |&i| crate::parallel::quiet(|| job(i)));
+        // Whatever a build run on this thread during the wait left behind
+        // is its own (it took it); this build's count is `saved`.
+        recv_stats::reset();
+        for _ in 0..saved {
+            recv_stats::record();
+        }
+        for result in results {
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
     }
 }
 
