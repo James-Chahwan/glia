@@ -3,8 +3,9 @@
 expressible axis pair and no unexpressible one, every transport's cases render deterministically
 with their drift by construction, the git form has P / S / C, every rendered file parses where a
 parse-only toolchain is present (each checker first proven to reject a broken file), and run.py
-grades a case end to end against a canned glia; the opt-in evm transport (FH.11c) renders its
-drift by construction and leaves every default cover as it was. No real glia, no network.
+grades a case end to end against a canned glia; the evm transport (FH.11c, in the default cover
+since FH.23) renders its drift by construction, and a cover without it is the one FH.11a / FH.11b
+wrote. No real glia, no network.
 
   python3 bench/sibyl/test_gen.py
 
@@ -35,6 +36,9 @@ from templates.common import NEW, OLD  # noqa: E402
 
 ALL = ",".join(gen.AXES["transport"])
 EVERY = ",".join(gen.ALL_TRANSPORTS)
+# The transports whose case is the `User` field exchange (RenderTest's shape); an evm case is a
+# contract with a member drift, tested by EvmTest.
+CHANNEL = [t for t in gen.AXES["transport"] if t != "evm"]
 
 
 def tmpdir():
@@ -115,12 +119,13 @@ class CoverTest(unittest.TestCase):
             if c["axes"]["client"] == "go":
                 self.assertTrue(on_chain, c["id"])
 
-    def test_opt_in_leaves_default_axes(self):
-        """evm's values (go, solidity) join an axis only when evm is selected, so the default
-        covers (run.py's and the cohort gate's) are the ones FH.11a / FH.11b wrote."""
-        self.assertNotIn("evm", gen.AXES["transport"])
+    def test_narrowed_values_join_only_with_their_transport(self):
+        """evm's values (go, solidity) join an axis only when evm is selected, so a cover without
+        evm is the one FH.11a / FH.11b wrote; the default cover (evm in it since FH.23) holds
+        them."""
+        self.assertIn("evm", gen.AXES["transport"])
         self.assertIn("evm", gen.ALL_TRANSPORTS)
-        for ts in [gen.AXES["transport"]] + [[t] for t in gen.AXES["transport"]]:
+        for ts in [CHANNEL] + [[t] for t in CHANNEL]:
             axes = gen.axes_for(ts)
             for k in ("client", "server"):
                 self.assertEqual(axes[k], [v for v in gen.AXES[k]
@@ -130,11 +135,12 @@ class CoverTest(unittest.TestCase):
             self.assertNotIn("solidity", axes["server"])
         self.assertEqual(gen.axes_for(["evm"])["client"], ["ts", "go"])
         self.assertEqual(gen.axes_for(gen.ALL_TRANSPORTS)["client"], gen.AXES["client"] + ["go"])
+        self.assertEqual(gen.axes_for(gen.AXES["transport"])["server"],
+                         gen.AXES["server"] + ["solidity"])
 
     def test_opt_in_matches_run_tables(self):
-        """evm stays out of the default run while run.py's cell tables have no row for it; once
-        run.py gains MECH["evm"] / LANG["go"] / LANG["solidity"], evm moves into AXES["transport"]
-        (gen.py's module doc) and this test says so."""
+        """evm is in the default run exactly when run.py's cell tables have its rows (MECH["evm"],
+        LANG["go"], LANG["solidity"]; FH.23 added both together, gen.py's module doc)."""
         import run
         ready = "evm" in run.MECH and {"go", "solidity"} <= set(run.LANG)
         self.assertEqual(ready, "evm" in gen.AXES["transport"],
@@ -201,10 +207,10 @@ def holds(text, names):
 
 
 def every_case():
-    """The all-transport cover plus each transport's own (a pairwise cover inside one transport
-    reaches every pair of its template variants), deduplicated by id."""
+    """The channel transports' cover plus each one's own (a pairwise cover inside one transport
+    reaches every pair of its template variants), deduplicated by id; evm's are EvmTest's."""
     out = {}
-    for ts in [gen.AXES["transport"]] + [[t] for t in gen.AXES["transport"]]:
+    for ts in [CHANNEL] + [[t] for t in CHANNEL]:
         for c in gen.cover(ts, quiet=True):
             out.setdefault(c["id"] + ("" if len(ts) > 1 else "@" + ts[0]), c)
     return list(out.values())
@@ -223,7 +229,7 @@ class RenderTest(unittest.TestCase):
 
     def test_every_value_renders(self):
         """Every axis value a transport can express appears in that transport's cover."""
-        for t in gen.AXES["transport"]:
+        for t in CHANNEL:
             axes = gen.axes_for([t])
             forbid = [(a, b) for a, b, _ in gen.unexpressible()]
             want = {p for p in brute_pairs(axes, forbid)}
@@ -237,7 +243,7 @@ class RenderTest(unittest.TestCase):
                 self.assertEqual(seen[k], held, (t, k))
 
     def test_render_is_deterministic(self):
-        for t in gen.AXES["transport"]:
+        for t in CHANNEL:
             c, r = next((c, r) for c, r in self.renders if c["axes"]["transport"] == t)
             self.assertEqual(gen.render_case(c), r, t)
 
@@ -504,6 +510,8 @@ class RunTest(unittest.TestCase):
         sfile = (srv.get("pair_files") or [srv["route_file"]])[0]
         if exp["transport"] == "rest":
             qa, qb = "endpoint:GET:/api/v1/users/${…} @c", "GET /api/v1/users/:id @s"
+        elif exp["transport"] == "evm":  # the server end is the procedure, as glia names it
+            qa, qb = "client_of " + exp["exchange"]["key"], exp["exchange"]["procedure"]
         else:
             qa, qb = "client_of " + exp["exchange"]["key"], "server_of " + exp["exchange"]["key"]
         rows = [] if not edge else [{"values": [
@@ -531,6 +539,9 @@ class RunTest(unittest.TestCase):
                 if case is None:
                     continue
                 row = self.grade(case)
+                if t == "evm":
+                    self.assertEqual(row["cells"], sorted({
+                        f"{self.R.LANG[case['axes']['client']]}/evm", "solidity/evm"}))
                 self.assertEqual(row["checks"], {c: True for c in self.R.CHECKS},
                                  (case["id"], row["evidence"]))
                 self.assertTrue(row["pass"])
@@ -538,21 +549,12 @@ class RunTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "git absent")
     def test_evm_case_grades_with_run_tables(self):
-        """An evm case follows run.py's grading interface: with the cell-table rows run.py does
-        not have yet (gen.py's module doc), a right answer passes every check."""
-        from unittest import mock
+        """An evm-only cover's case follows run.py's grading interface with run.py's own cell
+        tables (FH.23): a right answer passes every check."""
         cases = gen.cover(["evm"], quiet=True)
         for pack in ("single", "multi-repo"):
             case = next(c for c in cases if c["axes"]["packaging"] == pack)
-            _, exp = gen.render_case(case)
-            self.answer(exp)
-            # the canned pair names the procedure the way glia does
-            q = json.loads((self.answers / "query.json").read_text())
-            q["results"][0]["values"][1]["node"]["qname"] = exp["exchange"]["procedure"]
-            (self.answers / "query.json").write_text(json.dumps(q))
-            with mock.patch.dict(self.R.MECH, {"evm": ("evm", "evm")}), \
-                    mock.patch.dict(self.R.LANG, {"go": "go", "solidity": "solidity"}):
-                row = self.R.run_case(self.glia, case, self.tmp / "work")
+            row = self.grade(case)
             self.assertEqual(row["checks"], {c: True for c in self.R.CHECKS},
                              (case["id"], row["evidence"]))
             self.assertIn(row["cells"][0].split("/")[1], {"evm"})
@@ -602,7 +604,9 @@ class RunTest(unittest.TestCase):
                          f"drift_s={k} clear_c={k} client={k})")
         for cell in s["cells"]:
             lang, mech = cell.split("/")
-            self.assertIn(mech, {"http_client", "http_server", "grpc", "graphql", "kafka", "ws"})
+            self.assertIn(mech, {"http_client", "http_server", "grpc", "graphql", "kafka", "ws",
+                                 "evm"})
+        self.assertTrue(any(c.endswith("/evm") for c in s["cells"]), sorted(s["cells"]))
 
 
 # ---------------------------------------------------------------------------- syntax checks

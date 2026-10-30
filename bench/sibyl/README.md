@@ -26,7 +26,7 @@ the coverage matrix (FH.10): the cohort says which combos occur, this matrix say
 |---|---|
 | `client` | `ts`, `dart`, `kotlin`, `swift`, `python`; `go` (evm only) |
 | `server` | `go-gin`, `ts-nest`, `ts-express`, `java-spring`, `python-fastapi`, `rust-axum`, `csharp-aspnet`; `solidity` (evm only) |
-| `transport` | `rest`, `grpc`, `graphql`, `queue`, `websocket`; `evm` (opt-in) |
+| `transport` | `rest`, `grpc`, `graphql`, `queue`, `websocket`, `evm` |
 | `wiring_source` | `literal`, `const`, `enum-prefix` |
 | `wiring_call` | `direct`, `wrapper`, `generated-sdk` |
 | `packaging` | `single`, `workspace`, `multi-repo` |
@@ -52,11 +52,10 @@ the coverage matrix (FH.10): the cohort says which combos occur, this matrix say
 The server values are one framework each: Go is gin, Python is FastAPI, Rust is axum, Java is
 Spring Boot, C# is ASP.NET Core controllers.
 
-`evm` (FH.11c) is an opt-in transport: `gen.py` / `run.py --transports evm` (or a list naming it)
-cover it, but it is not in `gen.AXES["transport"]`, so the default cover, run.py's default run and
-the cohort gate's Sibyl step stay the five transports above, case for case (`gen.OPT_IN_TRANSPORTS`;
-why, and how it joins the default, under `## Running`). A transport module may narrow the client /
-server values it renders (`VALUES`):
+`evm` (FH.11c) was opt-in until FH.23 gave run.py its cell-table rows and moved it into
+`gen.AXES["transport"]`: the default cover, run.py's default run and the cohort gate's Sibyl step
+hold the six transports (`gen.OPT_IN_TRANSPORTS` is empty; `## Running` has the numbers). A
+transport module may narrow the client / server values it renders (`VALUES`):
 
 | transport | client values | server values |
 |---|---|---|
@@ -110,11 +109,12 @@ pairs the cases hold, `t` all of them; the two are always equal). The algorithm 
 uncovered pairs, vertical growth for the rest, every step kept extendable to a full case with
 no unexpressible pair; ties go to a `random.Random(54)`, so the cover is a function of the
 axes, the table and the seed. A case id is `<transport>-<nnn>-<client>-<server>`. Over REST it
-is 37 cases holding 272 pairs (the floor is client x server = 35); over all five transports,
-41 cases holding 361 pairs. A one-transport cover (`--transports grpc`) reaches every pair of
-that transport's variants: grpc 25 cases, graphql 36, queue 28, websocket 36, evm 11 (92 pairs).
-All six (`--transports rest,grpc,graphql,queue,websocket,evm`) are 46 cases holding 399 pairs,
-the marker ending `transports=rest,grpc,graphql,queue,websocket,evm implied_unexpressible=15`.
+is 37 cases holding 272 pairs (the floor is client x server = 35); over the five channel
+transports (`--transports rest,grpc,graphql,queue,websocket`, the default before FH.23), 41 cases
+holding 361 pairs. A one-transport cover (`--transports grpc`) reaches every pair of that
+transport's variants: grpc 25 cases, graphql 36, queue 28, websocket 36, evm 11 (92 pairs). All
+six, the default since FH.23, are 46 cases holding 399 pairs, the marker ending
+`transports=rest,grpc,graphql,queue,websocket,evm implied_unexpressible=15`.
 
 ## A case
 
@@ -229,24 +229,40 @@ each check alone (a chain's `pair` level is how far glia reaches through it). `r
 `p` the expressible pairs the run's cases hold, `t` all of them for the transports run. Exits 0
 when every glia call answered (whatever it scored), 2 when one did not.
 
-`evm` is not in run.py's default run yet: run.py's cell tables (`MECH` by transport, `LANG` by
-client / server value) have no row for `evm`, `go` or `solidity`, so `run.py --transports evm`
-stops at a KeyError in `cells_of`. Once they do (`MECH["evm"] = ("evm", "evm")`, `LANG["go"] =
-"go"`, `LANG["solidity"] = "solidity"`), `evm` moves from `gen.OPT_IN_TRANSPORTS` into
-`gen.AXES["transport"]` (the test `test_opt_in_matches_run_tables` fails until both move
-together) and the cohort gate's Sibyl cells are rebaselined (`scripts/cohort-gate.sh
-baseline`). Its baseline, measured with those three rows supplied from outside the tree (the
-debug glia `0.5.3+p54f568830b8d5ad5`, 11 cases):
+`evm` is in run.py's default run since FH.23: run.py's cell tables carry `MECH["evm"] = ("evm",
+"evm")`, `LANG["go"] = "go"` and `LANG["solidity"] = "solidity"`, and `evm` moved from
+`gen.OPT_IN_TRANSPORTS` into `gen.AXES["transport"]` in the same commit (the test
+`test_opt_in_matches_run_tables` holds the two together). The cohort gate's Sibyl cells grow from
+41 to 46 cases; the wave close-out rebaselines them (`scripts/cohort-gate.sh baseline`) once the
+drift is exactly those five cases.
+
+FH.11c's baseline (the debug glia `0.5.3+p54f568830b8d5ad5`, the three rows supplied from outside
+the tree, `--transports evm`, 11 cases):
 
     [sibyl] cases=11 pairs_covered=92/92 pass=0 fail=11 (pair=0 drift_s=9 clear_c=9 client=9)
 
-`pair` reads 0 because glia pairs a client whose ABI it read only while every entry of that
-ABI fits the contract (`[evm-link] .. abi=<n>`): at S the stale `release` / `Released` entry
-leaves the whole client unmatched (`unmatched=4`), the never-drifting `deposit` with it. At P
-seven of the eleven pair all four members (every Go case, DT.10f reading Go's method-name
-wrapper, and the ethers `direct` one); the three TypeScript `wrapper` cases pair the getter and
-the event only (their writes name the method through a variable: `dynamic=1`), and the TypeChain
-instance the app imports (`ts` x `generated-sdk`) mints no client node.
+`pair` read 0 because glia paired a client whose ABI it read only while every entry of that ABI
+fit the contract (`[evm-link] .. abi=<n>`): at S the stale `release` / `Released` entry left the
+whole client unmatched (`unmatched=4`), the never-drifting `deposit` with it, and `drift_s` /
+`client` passed on that collateral loss (contract-breaks' `pairing_lost` rows for `deposit` and
+the getter, in the same client file). FH.23's `abi_partial` (resolver:evm, HEURISTIC) pairs such a
+client to the one contract holding a strict majority (at least two) of its ABI's entries, so the
+stale member is the one client left unpaired (`[evm-link] .. abi_partial=<q> .. stale_entries=<s>`).
+After it (`--transports evm`, the same 11 cases):
+
+    [sibyl] cases=11 pairs_covered=92/92 pass=3 fail=8 (pair=7 drift_s=3 clear_c=3 client=3)
+
+`pair` passes on all seven cases whose `deposit` has a client node; the other four have none (the
+three TypeScript `wrapper` cases' writes name the method through a variable, `dynamic=1`, and the
+TypeChain instance the app imports, `ts` x `generated-sdk`, mints no client node). `drift_s` now
+reads only the stale member itself: a renamed or re-aritied function with a client node is a
+`target_removed` / `pairing_lost` orphan at its own call site (three cases). A renamed event
+(four cases) is not: contract-breaks' orphaned clients read the client as an edge's `from` end
+and an EVENT_FLOWS edge runs emitter -> subscription, so a stale subscription is named only as an
+advisory, heuristic `names` row (three of the four), which `drift_s` (breaking rows) does not
+count; and the TypeScript `wrapper` cases' stale writes have no client node to orphan. The default
+run (46 cases) reads `pass=3 fail=43 (pair=14 drift_s=3 clear_c=3 client=4)` against
+`pass=0 fail=46 (pair=10 drift_s=5 clear_c=5 client=6)` with the glia before FH.23.
 
 ## The tests
 

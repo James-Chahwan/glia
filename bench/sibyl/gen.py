@@ -12,16 +12,14 @@ repository with three commits, P (base), S (the server renamed the field) and C 
 followed), each also at refs/sibyl/<state>; `--trees` writes plain DIR/<id>/<state>/<repo>/
 trees instead. No glia runs here: run.py (FH.11b) builds and grades the rendered cases.
 
-`evm` (FH.11c) is an OPT-IN transport (`OPT_IN_TRANSPORTS`): `--transports evm` (or a list naming
-it) covers and renders it, but it is not in `AXES["transport"]`, the default run.py and the cohort
-gate (scripts/cohort-gate.sh) read. run.py's matrix-cell table `MECH` is keyed by transport and
-its `LANG` by client / server value, and neither has a row for `evm`, `go` or `solidity`, so a
-default run holding evm cases would stop at a KeyError. Removal path: once run.py carries
-`MECH["evm"]` and `LANG["go"]` / `LANG["solidity"]`, move "evm" from OPT_IN_TRANSPORTS into
-AXES["transport"] and rebaseline the cohort gate's Sibyl cells (`cohort-gate.sh baseline`).
+`evm` (FH.11c) was an OPT-IN transport until run.py's matrix-cell tables (`MECH` by transport,
+`LANG` by client / server value) gained its rows; FH.23 added `MECH["evm"]`, `LANG["go"]` and
+`LANG["solidity"]` and moved "evm" into `AXES["transport"]` in the same commit, so the default
+cover, run.py's default run and the cohort gate (scripts/cohort-gate.sh) hold the evm cases.
+`OPT_IN_TRANSPORTS` stays, empty, for a transport whose run.py rows are not written yet.
 
 A transport module may declare `VALUES`, the client / server values its templates render (evm:
-clients ts and go, server solidity). A value no default transport renders (`go`, `solidity`)
+clients ts and go, server solidity). A value only one transport renders (`go`, `solidity`)
 joins an axis only when a selected transport declares it, so a cover without evm is the cover
 FH.11a / FH.11b wrote, case for case; `unrendered()` turns each (transport, value) a module does
 not render into a forbidden pair beside the UNEXPRESSIBLE ones."""
@@ -47,7 +45,7 @@ AXES = {
     "client": ["ts", "dart", "kotlin", "swift", "python"],
     "server": ["go-gin", "ts-nest", "ts-express", "java-spring", "python-fastapi",
                "rust-axum", "csharp-aspnet"],
-    "transport": ["rest", "grpc", "graphql", "queue", "websocket"],
+    "transport": ["rest", "grpc", "graphql", "queue", "websocket", "evm"],
     # How a side builds its path / channel name: a literal, a constant prefix, an enum segment.
     "wiring_source": ["literal", "const", "enum-prefix"],
     # How the client reaches the transport: at the use site, through a hand-written helper, or
@@ -95,8 +93,9 @@ UNEXPRESSIBLE = [
 ]
 
 
-# Transports gen.py covers and renders only when asked by name (see the module doc).
-OPT_IN_TRANSPORTS = ["evm"]
+# Transports gen.py covers and renders only when asked by name (see the module doc): none since
+# FH.23 moved evm into AXES["transport"].
+OPT_IN_TRANSPORTS = []
 ALL_TRANSPORTS = AXES["transport"] + OPT_IN_TRANSPORTS
 # The axes a template module may narrow with `VALUES`.
 VALUE_AXES = ("client", "server")

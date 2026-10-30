@@ -3,7 +3,7 @@
 test, and grade four things per case against its expected answer (gen.py, by construction):
 
   pair     at S, an edge of the case's category (HTTP_CALLS / GRPC_CALLS / GRAPHQL_CALLS /
-           QUEUE_FLOWS / WS_CONNECTS) joins a node in the client's pair file to a node in one of
+           QUEUE_FLOWS / WS_CONNECTS / RPC_CALLS for evm) joins a node in the client's pair file to a node in one of
            the server's pair files (expected pair.server.pair_files; a REST case's route or
            handler file, where glia locates the ROUTE), and one end names the exchange's channel:
            a REST path compared with gen.norm_path, so `${…}`, `:id` and `{id}` agree (`exact`),
@@ -59,11 +59,11 @@ DEFAULT_WORK = Path.home() / ".cache" / "glia-sibyl" / "run"
 # The transport's mechanism columns in the coverage matrix: (client column, server column).
 MECH = {"rest": ("http_client", "http_server"), "grpc": ("grpc", "grpc"),
         "graphql": ("graphql", "graphql"), "queue": ("kafka", "kafka"),
-        "websocket": ("ws", "ws")}
+        "websocket": ("ws", "ws"), "evm": ("evm", "evm")}
 LANG = {"ts": "typescript", "dart": "dart", "kotlin": "kotlin", "swift": "swift",
         "python": "python", "go-gin": "go", "ts-nest": "typescript",
         "ts-express": "typescript", "java-spring": "java", "python-fastapi": "python",
-        "rust-axum": "rust", "csharp-aspnet": "csharp"}
+        "rust-axum": "rust", "csharp-aspnet": "csharp", "go": "go", "solidity": "solidity"}
 
 
 def chains_of(axes):

@@ -28,6 +28,7 @@
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //! | `resolver:evm` rules `abi_hint` / `name_hint` | heuristic — a contract identified by its name key, not by the site or a covering ABI (DT.10b); note `name-matched contract (<rule>)` |
+//! | `resolver:evm` rule `abi_partial` | heuristic — a contract identified by a strict majority of a drifted ABI's entries, not by a covering one (FH.23); note `majority-ABI contract (abi_partial)` |
 //!
 //! Two emitters are tiered by their rule, not their stage: a SAME_AS edge of
 //! the identity resolver (`resolver:identity`, DD.5) or of the models
@@ -108,12 +109,16 @@ const NAME_ONLY_RULES: &[(&str, &str)] = &[
     ("graph:nav", "href_suffix"),
 ];
 
-/// `(emitter, rule)` pairs of a derived-stage resolver that identify their
-/// target by a name key alone (DT.10b): the EVM resolver's contract named
-/// like the client's ABI binding or receiver, not named at the site
+/// `(emitter, rule, note)` of a derived-stage resolver's pairings that
+/// identify their target by a name key alone (DT.10b: the EVM resolver's
+/// contract named like the client's ABI binding or receiver) or by a strict
+/// majority of a drifted ABI (FH.23, `abi_partial`), not named at the site
 /// (`contract`) or the one covering its ABI (`abi`).
-const HEURISTIC_PAIRING_RULES: &[(&str, &str)] =
-    &[("resolver:evm", "abi_hint"), ("resolver:evm", "name_hint")];
+const HEURISTIC_PAIRING_RULES: &[(&str, &str, &str)] = &[
+    ("resolver:evm", "abi_hint", "name-matched contract"),
+    ("resolver:evm", "abi_partial", "majority-ABI contract"),
+    ("resolver:evm", "name_hint", "name-matched contract"),
+];
 
 /// Where an edge was asserted: repo-relative `file` and its 1-based `line`
 /// (LD.1), `None` when the evidence names the file only.
@@ -559,14 +564,11 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (Tier, Option<String>)
     }
     if tier == Tier::Derived
         && let Some(rule) = rule
-        && HEURISTIC_PAIRING_RULES
+        && let Some(&(_, _, note)) = HEURISTIC_PAIRING_RULES
             .iter()
-            .any(|&(em, r)| em == ev.emitter && r == rule)
+            .find(|&&(em, r, _)| em == ev.emitter && r == rule)
     {
-        return (
-            Tier::Heuristic,
-            Some(format!("name-matched contract ({rule})")),
-        );
+        return (Tier::Heuristic, Some(format!("{note} ({rule})")));
     }
     if tier == Tier::Fact && ev.basis == Basis::None {
         return (Tier::Derived, Some("no location recorded".to_string()));
@@ -700,7 +702,7 @@ mod tests {
 
     #[test]
     fn heuristic_pairing_rules_belong_to_derived_stages() {
-        for (emitter, _) in HEURISTIC_PAIRING_RULES {
+        for (emitter, _, _) in HEURISTIC_PAIRING_RULES {
             let stage = emitter.split(':').next().unwrap_or("");
             assert_eq!(stage_tier(stage), Some(Tier::Derived), "{emitter}");
         }
@@ -739,6 +741,23 @@ mod tests {
         );
         let ev = Evidence::emitter("resolver:evm").rule("name_hint");
         assert_eq!(tier_of(Some(&ev), &flows).0, Tier::Heuristic);
+    }
+
+    /// FH.23: a pairing by a strict majority of a drifted ABI is heuristic,
+    /// located or not, on either edge category.
+    #[test]
+    fn abi_partial_is_heuristic() {
+        let note = Some("majority-ABI contract (abi_partial)".to_string());
+        for category in [edge_category::RPC_CALLS, edge_category::EVENT_FLOWS] {
+            let edge = Edge::new(NodeId(1), NodeId(2), category, Confidence::Weak);
+            let bare = Evidence::emitter("resolver:evm").rule("abi_partial");
+            assert_eq!(tier_of(Some(&bare), &edge), (Tier::Heuristic, note.clone()));
+            let placed = bare.at("web/src/pay.ts", 11);
+            assert_eq!(
+                tier_of(Some(&placed), &edge),
+                (Tier::Heuristic, note.clone())
+            );
+        }
     }
 
     /// DT.10b: a contract named at the site or the one covering an ABI stays

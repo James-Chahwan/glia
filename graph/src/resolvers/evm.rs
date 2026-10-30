@@ -52,8 +52,18 @@
 //!   a function entry needs that member with that arity (`/?` any arity), an
 //!   event entry an event of that name (event arity is not recorded server
 //!   side). Two or more covering: `abi_hint` (HEURISTIC) when exactly one of
-//!   them has the name key (`evm::name_key`) of `N`, else ambiguous. None
-//!   covering: unmatched, with no fall-back to the name.
+//!   them has the name key (`evm::name_key`) of `N`, else ambiguous.
+//! - `abi_partial` (HEURISTIC, FH.23): `Scope::Abi(N)` with an ABI of two or
+//!   more entries that no decl covers - the ABI drifted from the contract on
+//!   a member (a renamed function or event). Each decl scores the entries its
+//!   visible ABI holds; the decls with the top score (concrete preferred)
+//!   pair when that score is at least two AND a strict majority of the
+//!   entries, and exactly one decl has it, or exactly one of the tied decls
+//!   has the name key of `N`; a tie the name key does not break is
+//!   ambiguous. Below the threshold: unmatched, with no fall-back to the
+//!   name. The entries the paired decl does not hold are its STALE entries:
+//!   the client of a stale member misses `not_declared`, which is the site
+//!   to fix, while every member that still fits pairs.
 //! - `name_hint` (HEURISTIC): `Scope::Abi(N)` with no ABI or a one-entry ABI,
 //!   and `Scope::Recv(R)` - the one decl (concrete preferred) whose name key
 //!   is that of `N` / `R` (three characters at least) and that holds every
@@ -64,9 +74,10 @@
 //!
 //! # Agreement
 //!
-//! Every variant that identified something must name the same decl set, and
-//! no variant with two or more ABI entries may be unmatched or ambiguous
-//! while another identifies a decl; otherwise the client pairs nothing
+//! Every variant that identified something (by any rule, `abi_partial`
+//! included) must name the same decl set, and no variant with two or more
+//! ABI entries may be unmatched or ambiguous while another identifies a
+//! decl; otherwise the client pairs nothing
 //! (`conflict`). Two files that reuse one ABI binding name for two contracts
 //! share one client node (the qname has no file), so pairing each variant on
 //! its own would route each file's caller to the other's contract. The
@@ -91,23 +102,25 @@
 //! Edges: RPC_CALLS client -> procedure, EVENT_FLOWS emitter -> client (the
 //! EventBus direction, which leaves `evm_event:` handlers and Solidity events
 //! to this resolver). Confidence: the weaker end for `contract` / `abi`, Weak
-//! for `abi_hint` / `name_hint`. One edge per `(from, to)`, each with the
-//! EVIDENCE `resolver:evm` + its rule (engine `why` tiers the two hint rules
-//! heuristic). Every index iterated is a Vec or BTreeMap in graph order then
+//! for `abi_hint` / `abi_partial` / `name_hint`. One edge per `(from, to)`,
+//! each with the EVIDENCE `resolver:evm` + its rule (engine `why` tiers those
+//! three rules heuristic). Every index iterated is a Vec or BTreeMap in graph order then
 //! node order; the hash maps are lookup-only.
 //!
 //! # Marker
 //!
 //! Once per resolve with procedures or clients:
 //! `[evm-link] calls=<c> events=<e> paired=<p> edges=<n> (contract=<a> abi=<b>
-//! abi_hint=<h> name_hint=<k>) unmatched=<u> ambiguous=<m> conflict=<f>
-//! not_declared=<d> arity_mismatch=<x> not_in_abi=<i> procedures=<P>
-//! contracts=<K>`. c / e / p / u / m / f / d / x / i count distinct client
-//! nodes (one client may pair one decl and miss another), the parenthesis
-//! counts edges by rule, P the procedures and K the indexed decls. Grep
+//! abi_hint=<h> abi_partial=<q> name_hint=<k>) unmatched=<u> ambiguous=<m>
+//! conflict=<f> not_declared=<d> arity_mismatch=<x> not_in_abi=<i>
+//! procedures=<P> contracts=<K> stale_entries=<s>`. c / e / p / u / m / f /
+//! d / x / i count distinct client nodes (one client may pair one decl and
+//! miss another), the parenthesis counts edges by rule, P the procedures, K
+//! the indexed decls and s the distinct (decl, ABI entry) stale entries of
+//! every `abi_partial` identification a client agreed on. Grep
 //! `^\[evm-link\] `. RuleTally adds `[evidence-rules] resolver=evm ..`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::evm::{
@@ -123,8 +136,15 @@ use crate::types::RepoGraph;
 pub struct EvmContractResolver;
 
 /// The pairing rules, strongest first: `contract` and `abi` are DERIVED,
-/// `abi_hint` and `name_hint` HEURISTIC.
-const RULES: [&str; 4] = ["contract", "abi", "abi_hint", "name_hint"];
+/// `abi_hint`, `abi_partial` and `name_hint` HEURISTIC.
+const RULES: [&str; 5] = ["contract", "abi", "abi_hint", "abi_partial", "name_hint"];
+
+/// The rules that pair at Weak confidence (the HEURISTIC ones).
+const WEAK_RULES: [&str; 3] = ["abi_hint", "abi_partial", "name_hint"];
+
+/// The fewest ABI entries a decl must hold to pair a client by
+/// `abi_partial` (besides a strict majority of the client's entries).
+const PARTIAL_MIN: usize = 2;
 
 /// The most INHERITS_FROM / IMPLEMENTS hops a decl's bases are followed.
 const MAX_BASE_DEPTH: usize = 8;
@@ -657,24 +677,10 @@ fn identify(scope: &Scope, variant: &Variant, c: &Contracts) -> Identified {
                 .filter(|&d| entries.iter().all(|e| c.holds(d, e)))
                 .collect();
             let covering = c.prefer_concrete(covering);
-            if covering.len() < 2 {
-                return one(covering, "abi");
-            }
-            let key = evm::name_key(name);
-            if key.len() < NAME_MIN {
-                return Identified::Ambiguous;
-            }
-            let named: Vec<usize> = covering
-                .into_iter()
-                .filter(|&d| evm::name_key(&c.decls[d].name) == key)
-                .collect();
-            if named.len() == 1 {
-                Identified::Decls {
-                    decls: named,
-                    rule: "abi_hint",
-                }
-            } else {
-                Identified::Ambiguous
+            match covering.len() {
+                0 => partial(name, entries, c),
+                1 => one(covering, "abi"),
+                _ => by_name_key(name, covering, c, "abi_hint"),
             }
         }
         Scope::Abi(name) | Scope::Recv(name) => {
@@ -688,6 +694,47 @@ fn identify(scope: &Scope, variant: &Variant, c: &Contracts) -> Identified {
                 .collect();
             one(c.prefer_concrete(named), "name_hint")
         }
+    }
+}
+
+/// Of `decls` (two or more), the one whose name key is that of `name`, as
+/// `rule`; ambiguous when none or several are, or the key is too short.
+fn by_name_key(name: &str, decls: Vec<usize>, c: &Contracts, rule: &'static str) -> Identified {
+    let key = evm::name_key(name);
+    if key.len() < NAME_MIN {
+        return Identified::Ambiguous;
+    }
+    let named: Vec<usize> = decls
+        .into_iter()
+        .filter(|&d| evm::name_key(&c.decls[d].name) == key)
+        .collect();
+    if named.len() == 1 {
+        Identified::Decls { decls: named, rule }
+    } else {
+        Identified::Ambiguous
+    }
+}
+
+/// `abi_partial` (module doc): no decl holds every one of `entries` (two or
+/// more); the decl holding the most of them, when that is at least
+/// [`PARTIAL_MIN`] and a strict majority.
+fn partial(name: &str, entries: &[AbiEntry], c: &Contracts) -> Identified {
+    let scores: Vec<usize> = (0..c.decls.len())
+        .map(|d| entries.iter().filter(|e| c.holds(d, e)).count())
+        .collect();
+    let top = scores.iter().copied().max().unwrap_or(0);
+    if top < PARTIAL_MIN || top * 2 <= entries.len() {
+        return Identified::Unmatched;
+    }
+    let best: Vec<usize> = (0..c.decls.len()).filter(|&d| scores[d] == top).collect();
+    let best = c.prefer_concrete(best);
+    if best.len() == 1 {
+        Identified::Decls {
+            decls: best,
+            rule: "abi_partial",
+        }
+    } else {
+        by_name_key(name, best, c, "abi_partial")
     }
 }
 
@@ -784,7 +831,7 @@ struct Tally {
     events: usize,
     paired: usize,
     edges: usize,
-    by_rule: [usize; 4],
+    by_rule: [usize; 5],
     unmatched: usize,
     ambiguous: usize,
     conflict: usize,
@@ -793,6 +840,7 @@ struct Tally {
     not_in_abi: usize,
     procedures: usize,
     contracts: usize,
+    stale_entries: usize,
 }
 
 impl Tally {
@@ -801,11 +849,11 @@ impl Tally {
         if self.procedures + self.calls + self.events == 0 {
             return None;
         }
-        let [a, b, h, k] = self.by_rule;
+        let [a, b, h, q, k] = self.by_rule;
         Some(format!(
-            "[evm-link] calls={} events={} paired={} edges={} (contract={a} abi={b} abi_hint={h} name_hint={k}) \
+            "[evm-link] calls={} events={} paired={} edges={} (contract={a} abi={b} abi_hint={h} abi_partial={q} name_hint={k}) \
              unmatched={} ambiguous={} conflict={} not_declared={} arity_mismatch={} not_in_abi={} \
-             procedures={} contracts={}",
+             procedures={} contracts={} stale_entries={}",
             self.calls,
             self.events,
             self.paired,
@@ -818,6 +866,7 @@ impl Tally {
             self.not_in_abi,
             self.procedures,
             self.contracts,
+            self.stale_entries,
         ))
     }
 }
@@ -838,6 +887,8 @@ fn link(graphs: &[RepoGraph]) -> Linked {
     };
     let mut rules = RuleTally::new("evm", &RULES);
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
+    // (decl, ABI entry key) of every agreed abi_partial identification.
+    let mut stale: BTreeSet<(usize, String)> = BTreeSet::new();
     let mut edges = Vec::new();
     for client in clients(graphs) {
         match client.side {
@@ -870,6 +921,19 @@ fn link(graphs: &[RepoGraph]) -> Linked {
             }
         };
         let (mut paired, mut misses) = (false, [false; 3]);
+        for (v, (_, r)) in variants.iter().zip(&results) {
+            if let Identified::Decls {
+                decls: found,
+                rule: "abi_partial",
+            } = r
+            {
+                for &d in found {
+                    for e in v.entries().iter().filter(|e| !contracts.holds(d, e)) {
+                        stale.insert((d, e.to_key()));
+                    }
+                }
+            }
+        }
         for d in decls {
             let target = match pair(&contracts, &client, d, &variants) {
                 Ok(t) => t,
@@ -886,7 +950,7 @@ fn link(graphs: &[RepoGraph]) -> Linked {
             if !seen.insert((from.0, to.0)) {
                 continue;
             }
-            let confidence = if matches!(rule, "abi_hint" | "name_hint") {
+            let confidence = if WEAK_RULES.contains(&rule) {
                 Confidence::Weak
             } else {
                 weakest(client.confidence, target.confidence)
@@ -902,6 +966,7 @@ fn link(graphs: &[RepoGraph]) -> Linked {
         tally.not_in_abi += usize::from(misses[Miss::NotInAbi as usize]);
     }
     tally.edges = edges.len();
+    tally.stale_entries = stale.len();
     Linked {
         edges,
         tally,
@@ -1255,9 +1320,9 @@ mod tests {
         assert_eq!(
             tally.line().as_deref(),
             Some(
-                "[evm-link] calls=2 events=0 paired=2 edges=2 (contract=0 abi=2 abi_hint=0 name_hint=0) \
+                "[evm-link] calls=2 events=0 paired=2 edges=2 (contract=0 abi=2 abi_hint=0 abi_partial=0 name_hint=0) \
                  unmatched=0 ambiguous=0 conflict=0 not_declared=0 arity_mismatch=0 not_in_abi=0 \
-                 procedures=4 contracts=2"
+                 procedures=4 contracts=2 stale_entries=0"
             )
         );
     }
@@ -1291,7 +1356,7 @@ mod tests {
                 Weak
             )]
         );
-        assert_eq!((tally.unmatched, tally.by_rule), (1, [0, 0, 0, 1]));
+        assert_eq!((tally.unmatched, tally.by_rule), (1, [0, 0, 0, 0, 1]));
     }
 
     /// Kina's ERC20_ABI against `contract MockERC20 is ERC20`: the members
@@ -1743,6 +1808,185 @@ mod tests {
         assert_eq!(tally.ambiguous, 1, "SHOP_ABI names neither");
     }
 
+    /// FH.23: the client's ABI renamed `release` to `settle`; no decl covers
+    /// it, Escrow holds 2 of its 3 entries, so `deposit` and the `Deposited`
+    /// subscription pair (`abi_partial`, Weak) and `settle`, the stale
+    /// entry, misses `not_declared`.
+    #[test]
+    fn abi_partial_pairs_the_members_that_still_fit() {
+        let mut s = escrow_and_vault();
+        let escrow =
+            s.g.nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == "contracts::Escrow::Escrow")
+                .map(|(k, _)| *k)
+                .unwrap();
+        s.event(escrow, "Deposited");
+        let stale: &[&str] = &["e:Deposited/?", "f:deposit/1", "f:settle/1"];
+        let mut web = channel_graph("evm-web", &[]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(stale))],
+        );
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "settle",
+            &[("ethers", &[1], Some(stale))],
+        );
+        subscribe(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "Deposited",
+            &[("ethers", &[], Some(stale))],
+        );
+        let (rows, tally) = run(&[s.g, web]);
+        assert_eq!(
+            rows,
+            [
+                row(
+                    "contracts::Escrow::Escrow::Deposited",
+                    "evm_event:abi:ESCROW_ABI.Deposited",
+                    "EVENT_FLOWS",
+                    "abi_partial",
+                    Weak
+                ),
+                row(
+                    "evm_call:abi:ESCROW_ABI.deposit",
+                    "evm:Escrow.deposit",
+                    "RPC_CALLS",
+                    "abi_partial",
+                    Weak
+                ),
+            ]
+        );
+        assert_eq!(
+            tally.line().as_deref(),
+            Some(
+                "[evm-link] calls=2 events=1 paired=2 edges=2 (contract=0 abi=0 abi_hint=0 abi_partial=2 name_hint=0) \
+                 unmatched=0 ambiguous=0 conflict=0 not_declared=1 arity_mismatch=0 not_in_abi=0 \
+                 procedures=4 contracts=2 stale_entries=1"
+            )
+        );
+    }
+
+    /// FH.23's threshold: at least two entries held, and a strict majority.
+    #[test]
+    fn abi_partial_needs_two_entries_and_a_majority() {
+        let s = escrow_and_vault();
+        let mut web = channel_graph("evm-web", &[]);
+        // Escrow holds 1 of 3.
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[(
+                "ethers",
+                &[1],
+                Some(&["f:deposit/1", "f:refund/1", "f:settle/1"]),
+            )],
+        );
+        // Escrow holds 2 of 4: half is no majority.
+        call(
+            &mut web,
+            &abi("ESCROW_V2_ABI"),
+            "deposit",
+            &[(
+                "ethers",
+                &[1],
+                Some(&["f:deposit/1", "f:refund/1", "f:release/1", "f:settle/1"]),
+            )],
+        );
+        let (rows, tally) = run(&[s.g, web]);
+        assert_eq!(rows, []);
+        assert_eq!(
+            (tally.unmatched, tally.stale_entries, tally.by_rule),
+            (2, 0, [0; 5])
+        );
+    }
+
+    /// Two decls tied on the top score: the name key of the ABI breaks the
+    /// tie, else the client is ambiguous.
+    #[test]
+    fn abi_partial_tie_breaks_by_name_key_else_ambiguous() {
+        let mut s = Sol::new("evm-sol");
+        for name in ["Escrow", "Vault"] {
+            let d = s.contract(&format!("contracts/{name}.sol"), name);
+            s.f(d, "deposit", &[1]);
+            s.f(d, "release", &[1]);
+        }
+        let stale: &[&str] = &["f:deposit/1", "f:release/1", "f:settle/1"];
+        let mut web = channel_graph("evm-web", &[]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(stale))],
+        );
+        call(
+            &mut web,
+            &abi("SHOP_ABI"),
+            "deposit",
+            &[("ethers", &[1], Some(stale))],
+        );
+        let (rows, tally) = run(&[s.g, web]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:ESCROW_ABI.deposit",
+                "evm:Escrow.deposit",
+                "RPC_CALLS",
+                "abi_partial",
+                Weak
+            )]
+        );
+        assert_eq!((tally.ambiguous, tally.stale_entries), (1, 1));
+    }
+
+    /// A variant identified through `abi_partial` agrees with a covering
+    /// variant on the same decl (the stronger rule wins), and conflicts with
+    /// one that names another decl.
+    #[test]
+    fn abi_partial_variants_agree_and_conflict() {
+        let s = escrow_and_vault();
+        let stale: &[&str] = &["f:deposit/1", "f:release/1", "f:settle/1"];
+        let vault: &[&str] = &["f:release/1", "f:withdraw/1"];
+        let mut web = channel_graph("evm-web", &[]);
+        call(
+            &mut web,
+            &abi("ESCROW_ABI"),
+            "deposit",
+            &[
+                ("ethers", &[1], Some(ESCROW_ABI)),
+                ("ethers", &[1], Some(stale)),
+            ],
+        );
+        call(
+            &mut web,
+            &abi("PAY_ABI"),
+            "release",
+            &[("ethers", &[1], Some(stale)), ("ethers", &[1], Some(vault))],
+        );
+        let (rows, tally) = run(&[s.g, web]);
+        assert_eq!(
+            rows,
+            [row(
+                "evm_call:abi:ESCROW_ABI.deposit",
+                "evm:Escrow.deposit",
+                "RPC_CALLS",
+                "abi",
+                Medium
+            )]
+        );
+        assert_eq!(
+            tally.conflict, 1,
+            "PAY_ABI's variants name Escrow and Vault"
+        );
+    }
+
     #[test]
     fn ethers_overrides_allow_one_extra_argument() {
         let build = |lib: &str| {
@@ -2046,9 +2290,9 @@ mod tests {
         assert_eq!(
             tally.line().as_deref(),
             Some(
-                "[evm-link] calls=0 events=0 paired=0 edges=0 (contract=0 abi=0 abi_hint=0 name_hint=0) \
+                "[evm-link] calls=0 events=0 paired=0 edges=0 (contract=0 abi=0 abi_hint=0 abi_partial=0 name_hint=0) \
                  unmatched=0 ambiguous=0 conflict=0 not_declared=0 arity_mismatch=0 not_in_abi=0 \
-                 procedures=4 contracts=2"
+                 procedures=4 contracts=2 stale_entries=0"
             )
         );
     }
