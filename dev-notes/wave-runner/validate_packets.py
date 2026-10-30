@@ -12,7 +12,16 @@ Usage:
 Prints `OK <n> packets, <loc> LOC` and exits 0, or one line per problem and exits 1.
 Warnings (a files_touched path that does not exist and is not declared new) print
 as `WARN` and do not fail.
+
+From 0.5.4 (`--release 0.5.4` or later) every packet carries a `probe` (James 2026-10-30,
+"i believed we maybe didn't explore"): the spec writer's own run at HEAD before the spec, so
+the spec rests on what the tree does, not on a reading of it. Either
+  {"head": "<sha>", "commands": ["<cmd>", ..], "output": "<verbatim>", "finding": "<what it
+   showed that shaped this spec>"}
+or, for a packet with nothing to run (docs, a handoff), {"none": "<why nothing can be run>"},
+which prints a WARN. `head` must be a commit this repo holds.
 """
+import subprocess
 import json
 import re
 import sys
@@ -26,7 +35,8 @@ REQUIRED = {
     "implementation": str, "acceptance": str, "fired_on_marker": str,
     "breaking": dict, "depends_on": list, "risks": str,
 }
-OPTIONAL = {"fixtures": list, "spec_group": str, "research": str}
+OPTIONAL = {"fixtures": list, "spec_group": str, "research": str, "probe": dict}
+PROBE_FROM = (0, 5, 4)
 BREAK_KINDS = {
     "none", "qname_shape", "node_id", "edge_removal", "cell_value",
     "api_signature", "format", "cli_output", "out_of_repo",
@@ -43,9 +53,43 @@ FACADES = {"engine/src/lib.rs", "graph/src/lib.rs"}
 LOC_MIN, LOC_MAX = 10, 600
 
 
-def check_packet(p, prefix, errs, warns):
+def check_probe(p, where, errs, warns):
+    """The `probe` rule (module docs): a run at a real head, verbatim output, and what it showed."""
+    pr = p.get("probe")
+    if not isinstance(pr, dict):
+        errs.append(f"{where} missing `probe` (run it at HEAD before writing the spec)")
+        return
+    if set(pr) == {"none"}:
+        if not isinstance(pr["none"], str) or len(pr["none"].strip()) < 40:
+            errs.append(f"{where} probe.none needs a reason (>= 40 chars)")
+        else:
+            warns.append(f"{where} no probe: {pr['none'].strip()[:80]}")
+        return
+    extra = set(pr) - {"head", "commands", "output", "finding"}
+    if extra:
+        errs.append(f"{where} probe has unknown fields {sorted(extra)}")
+    head = pr.get("head")
+    if not (isinstance(head, str) and re.fullmatch(r"[0-9a-f]{7,40}", head)):
+        errs.append(f"{where} probe.head must be a commit sha")
+    elif subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{head}^{{commit}}"],
+                        capture_output=True).returncode:
+        errs.append(f"{where} probe.head {head} is no commit in this repo")
+    cmds = pr.get("commands")
+    if not (isinstance(cmds, list) and cmds and all(isinstance(c, str) and c.strip() for c in cmds)):
+        errs.append(f"{where} probe.commands must list the commands run")
+    out = pr.get("output")
+    if not isinstance(out, str) or len(out.strip()) < 80:
+        errs.append(f"{where} probe.output must be the verbatim output (>= 80 chars)")
+    fnd = pr.get("finding")
+    if not isinstance(fnd, str) or len(fnd.strip()) < 40:
+        errs.append(f"{where} probe.finding must say what the run showed (>= 40 chars)")
+
+
+def check_packet(p, prefix, errs, warns, probe=False):
     pid = p.get("id", "<no id>")
     where = f"{pid}:"
+    if probe:
+        check_probe(p, where, errs, warns)
     for k, t in REQUIRED.items():
         if k not in p:
             errs.append(f"{where} missing field `{k}`")
@@ -132,6 +176,14 @@ def main(argv):
         print(__doc__)
         return 2
     path, prefix = Path(argv[2]), argv[3]
+    probe = False
+    if "--release" in argv:
+        rel = argv[argv.index("--release") + 1] if argv.index("--release") + 1 < len(argv) else ""
+        try:
+            probe = tuple(int(x) for x in rel.split(".")) >= PROBE_FROM
+        except ValueError:
+            print(f"--release takes a version like 0.5.4, not {rel!r}")
+            return 2
     try:
         doc = json.loads(path.read_text())
     except (OSError, ValueError) as e:
@@ -150,7 +202,7 @@ def main(argv):
         if p.get("id") in seen:
             errs.append(f"{p.get('id')}: duplicate id")
         seen.add(p.get("id"))
-        check_packet(p, prefix, errs, warns)
+        check_packet(p, prefix, errs, warns, probe)
     ids = {p.get("id") for p in packets if isinstance(p, dict)}
     for p in packets:
         if isinstance(p, dict) and p.get("id") in (p.get("depends_on") or []):

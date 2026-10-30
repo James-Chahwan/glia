@@ -55,6 +55,7 @@ Probing another repo: use `GLIA_NO_PERSIST=1 ./target/debug/glia <cmd> <copy>` o
 
 === ORDER OF WORK ===
 1. Verify your anchors by symbol name (an E* API in the landed 0.5.3 code; a harness function in rank_eval.rs). If your spec is wrong, say so and work from reality.
+1b. PROBE (James 2026-10-30): a packet carrying `probe` was specced from that run at `probe.head`. Re-run its `commands` first. Same output: the spec's premise holds. Different output (the tree moved, or the run shows something else): work from the new output, and put the old and new lines in `surprises`.
 2. A gated (b) packet reads its (a) report first. Otherwise write the parity or behaviour test first and RECORD ITS FAILING BASELINE (paste it). A test that already passes proves nothing.
 3. Implement.
 4. Run your gate. Paste verbatim output.

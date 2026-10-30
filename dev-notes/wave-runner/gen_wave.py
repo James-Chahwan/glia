@@ -46,7 +46,7 @@ import schedule  # noqa: E402
 
 FIELDS = ["id", "title", "batch", "area", "loc", "rationale", "entry_points", "files_touched",
           "implementation", "fixtures", "acceptance", "fired_on_marker", "depends_on",
-          "breaking", "risks"]
+          "breaking", "risks", "probe"]
 
 RESULT_SCHEMA = {
     "type": "object",
