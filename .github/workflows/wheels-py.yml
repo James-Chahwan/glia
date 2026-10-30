@@ -70,8 +70,43 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
-      # before-script-linux runs in maturin's container, in py/: on x86_64 it builds and
-      # stages the WebGPU embedding worker (header); aarch64 ships none (no ORT webgpu build).
+      # ONNX Runtime for the extension (0.5.4 release fix): Microsoft's release build, linked
+      # dynamically (ort-sys ORT_LIB_LOCATION + ORT_PREFER_DYNAMIC_LINK) and grafted into the
+      # wheel by maturin's repair. ort's own prebuilt (ort-sys rc.13, ONNX Runtime 1.28) is
+      # compiled against glibc 2.38 (__isoc23_strtol, GLIBCXX_3.4.30), so it cannot link in
+      # the manylinux_2_28 container; Microsoft's 1.31.1 needs GLIBC_2.28 / GLIBCXX_3.4.22 at
+      # most. ort asks for C API 24, which 1.31 serves. Pinned by sha256.
+      - name: fetch ONNX Runtime (Microsoft 1.31.1)
+        working-directory: .
+        run: |
+          set -eux
+          case "${{ matrix.target }}" in
+            x86_64)  arch=x64;     sum=c849e36a1ef3e22d4ff217b9d1ce4a3cf5b9467b975610913ae959ad5b16bdc9 ;;
+            aarch64) arch=aarch64; sum=5317505e2da99be65f8e2775ba3c2afd6d2961fd78aba1bd8f56159f48820c78 ;;
+          esac
+          curl -sSfL -o ort.tgz "https://github.com/microsoft/onnxruntime/releases/download/v1.31.1/onnxruntime-linux-${arch}-1.31.1.tgz"
+          echo "${sum}  ort.tgz" | sha256sum -c -
+          tar xzf ort.tgz
+          mv "onnxruntime-linux-${arch}-1.31.1" ort-linux
+          rm ort.tgz
+      # The WebGPU embedding worker (x86_64; aarch64 ships none, no ORT webgpu build) is built
+      # on the runner, OUTSIDE the container: it links ort's own WebGPU build (Dawn), which
+      # needs glibc 2.38. It is a separate process, so the wheel's manylinux_2_28 extension
+      # does not depend on it: on an older glibc it exits 127 before its hello and glia_py
+      # embeds on the CPU (`fallback=no_worker:..`, embed/src/worker.rs).
+      - name: stage the embedding worker
+        if: matrix.target == 'x86_64'
+        run: |
+          set -eux
+          cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
+          mkdir -p glia_py.data/scripts
+          cp ../target/release/glia-embed-worker glia_py.data/scripts/
+          strip glia_py.data/scripts/glia-embed-worker || true
+          cp -L ../target/release/libwebgpu_dawn.so glia_py.data/scripts/
+          echo 'data = "glia_py.data"' >> pyproject.toml
+          echo "[wheels-ci] linux-x86_64 worker staged"
+      # before-script-linux runs in maturin's container, in py/, in the shell that then runs
+      # `maturin build`, so its exports reach the build and the repair.
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
@@ -80,15 +115,9 @@ jobs:
           manylinux: "2_28"
           before-script-linux: |
             set -eux
-            if [ "${{ matrix.target }}" = "x86_64" ]; then
-              cargo build --release --locked -p glia-embed --features gpu-webgpu --bin glia-embed-worker
-              mkdir -p glia_py.data/scripts
-              cp ../target/release/glia-embed-worker glia_py.data/scripts/
-              strip glia_py.data/scripts/glia-embed-worker || true
-              cp -L ../target/release/libwebgpu_dawn.so glia_py.data/scripts/
-              echo 'data = "glia_py.data"' >> pyproject.toml
-              echo "[wheels-ci] linux-x86_64 worker staged"
-            fi
+            export ORT_LIB_LOCATION="$PWD/../ort-linux/lib" ORT_PREFER_DYNAMIC_LINK=1
+            export LD_LIBRARY_PATH="$PWD/../ort-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            echo "[wheels-ci] linux-${{ matrix.target }} onnxruntime=microsoft-1.31.1 link=dynamic"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -241,6 +270,22 @@ jobs:
           v/bin/python -I -c "import glia_py, sys; r = glia_py.embed(sys.argv[1]); assert r['embedded'] > 0, r" "$RUNNER_TEMP/embed_icd" 2> "$RUNNER_TEMP/embed_icd.err"
           grep -q '^\[embed\] device=.* backend=cpu .* fallback=no_adapter:' "$RUNNER_TEMP/embed_icd.err" || { cat "$RUNNER_TEMP/embed_icd.err"; exit 1; }
           echo "[wheels-ci] embed-no-icd ok"
+      # The oldest glibc the manylinux_2_28 tag admits (0.5.4 release fix): the wheel must
+      # import and embed there with bge-small through its grafted ONNX Runtime, the staged
+      # WebGPU worker failing to load (it needs glibc 2.38) and the CPU taking over.
+      - name: embed on glibc 2.28
+        run: |
+          set -euo pipefail
+          cp -r tests/go_smoke "$RUNNER_TEMP/embed_old"
+          docker run --rm -v "$PWD/wheel:/wheel:ro" -v "$RUNNER_TEMP/embed_old:/repo" -e GLIA_NO_PERSIST=1 \
+            quay.io/pypa/manylinux_2_28_x86_64@sha256:e0adf18521ad35192df733a6c62d35df7801957d24e0470238aacecfab2188a3 bash -euo pipefail -c '
+              ldd --version | head -1
+              /opt/python/cp311-cp311/bin/python -m venv /v
+              /v/bin/python -m pip install -q /wheel/glia_py-*-cp311-abi3-*.whl
+              /v/bin/python -I -c "import glia_py, sys; r = glia_py.embed(sys.argv[1]); assert r[\"embedded\"] > 0, r" /repo 2> /tmp/err || { cat /tmp/err; exit 1; }
+              grep "^\[embed\] device=" /tmp/err
+              grep -q "^\[embed\] device=.* backend=cpu .* fallback=no_worker:" /tmp/err || { cat /tmp/err; exit 1; }'
+          echo "[wheels-ci] glibc-2.28 embed ok"
 
   # Publishes the full wheel matrix + sdist to PyPI.
   #

@@ -2002,7 +2002,9 @@ questions over one graph computes `entrypoint_reachable` once.
   (0.5.2 -> 0.5.4) and `neuropil-handoff-0.5.4.md` (0.5.1 -> 0.5.4), pin `=0.5.4` /
   `glia-py==0.5.4`. Open at the release: the first wheels-py.yml / wheels-cli.yml CI runs (their
   run ids go in the release notes; they verify the manylinux_2_28 worker staging and the macOS /
-  Windows Dawn staging), the PyPI pending publisher for `glia-cli` (owner James-Chahwan, repo
+  Windows Dawn staging; the tag's first runs, 41080836302 / 41080836313, failed on Linux: ort
+  rc.13's prebuilt ONNX Runtime needs glibc 2.38, so the Linux jobs now link Microsoft's 1.31.1
+  dynamically, build the WebGPU worker outside the container and test on glibc 2.28), the PyPI pending publisher for `glia-cli` (owner James-Chahwan, repo
   glia, workflow wheels-cli.yml) before any `publish=true`, and James's confirmation of that name.
 - **After 0.5.4:** **0.5.5** (seed `dev-notes/next-leap-0.5.5.md`) — the tracks moved out of 0.5.4,
   already specced and to be re-verified against the shipped tree: T4 (the per-language precision
