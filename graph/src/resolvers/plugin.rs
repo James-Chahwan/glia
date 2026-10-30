@@ -115,8 +115,8 @@ impl CrossGraphResolver for PluginResolver {
         // one RepoId, three graphs, so the per-repo view groups them.
         let mut repos: Vec<RepoView> = Vec::new();
         for g in &merged.graphs {
-            let view = match repos.iter_mut().find(|v| v.repo == g.repo) {
-                Some(v) => v,
+            let view = match repos.iter().position(|v| v.repo == g.repo) {
+                Some(i) => &mut repos[i],
                 None => {
                     repos.push(RepoView {
                         repo: g.repo,
@@ -125,7 +125,8 @@ impl CrossGraphResolver for PluginResolver {
                         graphs: Vec::new(),
                         modules: std::collections::HashMap::new(),
                     });
-                    repos.last_mut().unwrap()
+                    let last = repos.len() - 1;
+                    &mut repos[last]
                 }
             };
             view.graphs.push(g);

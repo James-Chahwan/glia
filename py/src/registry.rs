@@ -92,7 +92,7 @@ mod tests {
         let kinds = entry_kinds();
         let ids: Vec<u32> = kinds.iter().map(|(i, _)| *i).collect();
         // L3 (lua-support): PLUGIN_TOOL (50) joins the entry kinds.
-    assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28, 50]);
+        assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28, 50]);
         assert!(kinds.contains(&(13, "QUEUE_CONSUMER".to_string())), "{kinds:?}");
         for (id, name) in &kinds {
             assert_eq!(node_kind::name(glia_core::NodeKindId(*id)), name);

@@ -444,7 +444,10 @@ impl<'a> Walk<'a> {
                         && keys.iter().any(|key| key.as_str() == text_of(k, self.src))
                 });
                 if keyed && value.kind() == "function_definition" {
-                    let key = text_of(field.child_by_field_name("name").unwrap(), self.src);
+                    let Some(name) = field.child_by_field_name("name") else {
+                        continue;
+                    };
+                    let key = text_of(name, self.src);
                     self.mint_handler(tool_id, &format!("{tool_name}.{key}"), value, line);
                 } else {
                     self.visit(value, owner);

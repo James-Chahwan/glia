@@ -19,13 +19,10 @@ pub use glia_parser_go::GoModules;
 /// through the route so a parser gains a context by adding a field, never a
 /// parameter; `context_key` is what a parse cache keys its entries by.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ParseContext {
     pub go: GoModules,
     pub plugin_families: PluginFamilies,
-    /// Private: the context grows by adding fields, never by a caller
-    /// constructing it — `new` / `default` are the constructors, so a new
-    /// context input cannot break one.
-    _sealed: (),
 }
 
 impl ParseContext {
@@ -33,7 +30,6 @@ impl ParseContext {
         Self {
             go,
             plugin_families,
-            _sealed: (),
         }
     }
 
