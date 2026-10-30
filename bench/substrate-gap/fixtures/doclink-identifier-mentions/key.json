@@ -1,0 +1,90 @@
+{
+  "framework": "doclink-identifier-mentions",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.79 (edge audit FD.3c, DOCUMENTS|derived clusters D1 + D2). A README names a class, a call, a snake_case function and a SCREAMING_SNAKE constant (bound), and also lone words (`run`, `graph`, `json`), an edge-category name (`CALLS`), a test helper (`make_registry`) and a placeholder (`PROJECT_ID`, also written `/PROJECT_ID/` in the section's fenced command): none binds. samples/maps' README names `MapMarker`, which samples/aphotos (sorting first) declares too: the doc's own project root wins the tie. Baseline HEAD c4152966 (debug CLI) and ae494fb0 (leap wheel, grade.py): all 8 forbid rows fire (FORBID VIOLATIONS: 8); the MapMarker expect row fails (bound to samples::aphotos::lib::photo::MapMarker), DOCUMENTS 4/5.",
+  "expect_edges": [
+    {
+      "from": "docs::README::usage",
+      "to": "app::registry::ServiceRegistry",
+      "category": "DOCUMENTS",
+      "note": "a PascalCase mention: unique"
+    },
+    {
+      "from": "docs::README::usage",
+      "to": "app::config::MAX_RETRIES",
+      "category": "DOCUMENTS",
+      "note": "SCREAMING_SNAKE with `_`, no placeholder use in its section"
+    },
+    {
+      "from": "docs::README::lookup",
+      "to": "app::registry::ServiceRegistry::lookup",
+      "category": "DOCUMENTS",
+      "note": "qualified (tier 1)"
+    },
+    {
+      "from": "docs::README::lookup",
+      "to": "app::registry::lookup_service",
+      "category": "DOCUMENTS",
+      "note": "a call form `lookup_service()`"
+    },
+    {
+      "from": "docs::samples::maps::README::fields",
+      "to": "samples::maps::store::MapMarker",
+      "category": "DOCUMENTS",
+      "note": "D2: the tie goes to the copy under the doc's own project root (samples/maps), not the least qname"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "docs::README::usage",
+      "to": "bench::harness::runner::Harness::run",
+      "category": "DOCUMENTS",
+      "note": "a lone lowercase word; bench code"
+    },
+    {
+      "from": "docs::README::usage",
+      "to": "bench::harness::runner::Harness::json",
+      "category": "DOCUMENTS",
+      "note": "a lone lowercase word; bench code"
+    },
+    {
+      "from": "docs::README::usage",
+      "to": "tests::test_registry::graph",
+      "category": "DOCUMENTS",
+      "note": "a lone lowercase word; a test helper"
+    },
+    {
+      "from": "docs::README::usage",
+      "to": "tests::test_registry::CALLS",
+      "category": "DOCUMENTS",
+      "note": "an edge-category name"
+    },
+    {
+      "from": "docs::README::usage",
+      "to": "tests::test_registry::make_registry",
+      "category": "DOCUMENTS",
+      "note": "identifier-shaped, but a test-tree candidate and README.md is not under tests/"
+    },
+    {
+      "from": "docs::README::deploy",
+      "to": "app::config::PROJECT_ID",
+      "category": "DOCUMENTS",
+      "note": "a placeholder: the section also writes it as a path segment `/PROJECT_ID/`"
+    },
+    {
+      "from": "docs::samples::maps::README::fields",
+      "to": "samples::aphotos::lib::photo::MapMarker",
+      "category": "DOCUMENTS",
+      "note": "D2: another sample's copy"
+    },
+    {
+      "from": "docs::samples::maps::README::fields",
+      "to": "samples::aphotos::lib::photo::MapMarker::location",
+      "category": "DOCUMENTS",
+      "note": "a lone lowercase word bound across samples"
+    }
+  ]
+}

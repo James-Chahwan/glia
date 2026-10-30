@@ -12,7 +12,8 @@ use glia_graph::MergedGraph;
 use glia_store::write_merged_sharded;
 
 /// The five-file shape: an intra-repo Python call through an import, a flask
-/// route, a TS fetch on line 2 of its file, and a README mentioning `bar`.
+/// route, a TS fetch on line 2 of its file, and a README mentioning `bar()`
+/// (FD.79: a lone lowercase word binds only as a call).
 fn write_fixture(dir: &Path) {
     std::fs::write(dir.join("a.py"), "def bar():\n    return 1\n").unwrap();
     std::fs::write(
@@ -31,7 +32,11 @@ fn write_fixture(dir: &Path) {
         "export function load() {\n  return fetch(\"/users\");\n}\n",
     )
     .unwrap();
-    std::fs::write(dir.join("README.md"), "# Guide\n\nCall `bar` to get one.\n").unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "# Guide\n\nCall `bar()` to get one.\n",
+    )
+    .unwrap();
 }
 
 fn build() -> (tempfile::TempDir, MergedGraph) {

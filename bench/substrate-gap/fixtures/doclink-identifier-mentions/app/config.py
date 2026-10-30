@@ -1,0 +1,2 @@
+PROJECT_ID = "demo"
+MAX_RETRIES = 3

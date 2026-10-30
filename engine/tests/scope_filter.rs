@@ -31,7 +31,8 @@ use glia_graph::{MergedGraph, Reach};
 /// HANDLED_BY — A3.6) and an ENDPOINT node (located via its ENDPOINT_HIT
 /// `file`). A Django `path(...)` registration names no handler, so its ROUTE
 /// is genuinely unlocatable. Two markdown docs, one at the root and one under
-/// `docs/`, both name `handle` so `governing_docs` has something to narrow.
+/// `docs/`, both name `handle()` (FD.79: a lone word binds only as a call)
+/// so `governing_docs` has something to narrow.
 fn write_fixture(dir: &Path) {
     for d in ["services/api", "shared", "web", "docs"] {
         std::fs::create_dir_all(dir.join(d)).unwrap();
@@ -80,12 +81,12 @@ fn write_fixture(dir: &Path) {
     .unwrap();
     std::fs::write(
         dir.join("README.md"),
-        "# Readme\n\nThe `handle` entrypoint is described here.\n",
+        "# Readme\n\nThe `handle()` entrypoint is described here.\n",
     )
     .unwrap();
     std::fs::write(
         dir.join("docs/rules.md"),
-        "# Rules\n\nRules governing `handle` live here.\n",
+        "# Rules\n\nRules governing `handle()` live here.\n",
     )
     .unwrap();
 }

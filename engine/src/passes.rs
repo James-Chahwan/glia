@@ -600,16 +600,35 @@ pub(crate) fn fill_evidence_sites_split(
 /// which hashes the RepoId, so one README documented a different symbol under
 /// another remote or directory name. `[doclink] tie-break by qname:` counts
 /// those binds.
+///
+/// FD.79 (edge audit FD.3c, DOCUMENTS|derived): a bare mention binds only an
+/// identifier-shaped token (a call `x()`, an inner `_`, mixed case), never a
+/// lone word (`run`, `json`), a registry name (`CALLS`, `SAME_AS`) or a
+/// placeholder the section also writes as `/X/`, `[X]`, `<X>`, `{X}` or `$X`;
+/// a test / fixture / bench candidate binds, in every tier, only from a doc
+/// under its tree ([`doc_tree`]); and among several eligible candidates the
+/// least one under the doc's own project root (the deepest PROJECT path of
+/// the doc's repo holding its file) wins before DE.1's least qname. Still a
+/// pure function of repo-relative content. `[doclink] precision:` counts the
+/// refusals per reason and the ties the project root decided.
 pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     use glia_code_domain::cell_type;
     use glia_core::CellPayload;
 
-    let mut idx = DocSymbolIndex::default();
+    let mut idx = DocSymbolIndex::new();
+    // FD.79: every PROJECT root, as (repo, repo-relative path, "" = `.`).
+    let mut roots: Vec<(RepoId, String)> = Vec::new();
     for (graph, g) in merged.graphs.iter().enumerate() {
         for n in &g.nodes {
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
                 continue;
             };
+            if kind == node_kind::PROJECT {
+                if let Some(path) = project_root_path(&n.cells, g.nav.qname_by_id.get(&n.id)) {
+                    roots.push((n.repo, path));
+                }
+                continue;
+            }
             if !is_doc_linkable_symbol(kind) {
                 continue;
             }
@@ -617,6 +636,7 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                 continue;
             };
             let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
+            let file = position_file_str(&n.cells);
             idx.add(
                 name,
                 DocCand {
@@ -624,6 +644,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                     qname,
                     kind: kind.0,
                     graph,
+                    repo: n.repo,
+                    file,
+                    tree: doc_tree(file, qname),
                 },
             );
         }
@@ -631,12 +654,16 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     if idx.by_name.is_empty() {
         return;
     }
+    idx.finish();
 
     const MAX_LINKS_PER_DOC: usize = 25;
     let mut new_edges: Vec<Edge> = Vec::new();
     let (mut strong, mut medium, mut weak, mut doc_sections) = (0usize, 0usize, 0usize, 0usize);
     // DE.1: binds whose mention had several candidates, per tier.
     let (mut tie_qualified, mut tie_bare) = (0usize, 0usize);
+    // FD.79: mentions refused per reason, and ties the project root decided.
+    let (mut unshaped, mut registry, mut placeholder, mut test_tree, mut project_root) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     // CG.3: sections whose links stopped at MAX_LINKS_PER_DOC. A section's CODE
     // is its whole text now (not its first 500 bytes), so the cap can bind.
     let mut capped = 0usize;
@@ -652,6 +679,20 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             }) else {
                 continue;
             };
+            let file = position_file_str(&n.cells);
+            // The deepest project root of the doc's repo holding its file.
+            let root = file.and_then(|f| {
+                roots
+                    .iter()
+                    .filter(|(repo, path)| *repo == n.repo && path_under(f, path))
+                    .map(|(_, path)| path.as_str())
+                    .max_by_key(|path| path.len())
+            });
+            let doc = DocCtx {
+                repo: n.repo,
+                file,
+                root,
+            };
             let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             // Iterate RAW spans: `identifier_from_span` would throw away the
             // qualifier the doc author supplied, which is the whole signal.
@@ -662,9 +703,25 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                 if span.contains('\n') {
                     continue;
                 }
-                let Some((sym, confidence, rule)) = resolve_doc_mention(span, &idx) else {
-                    continue;
+                let bind = match resolve_doc_mention(span, text, &idx, &doc) {
+                    Ok(bind) => bind,
+                    Err(refusal) => {
+                        match refusal {
+                            Some(DocRefusal::Unshaped) => unshaped += 1,
+                            Some(DocRefusal::Registry) => registry += 1,
+                            Some(DocRefusal::Placeholder) => placeholder += 1,
+                            Some(DocRefusal::TestTree) => test_tree += 1,
+                            None => {}
+                        }
+                        continue;
+                    }
                 };
+                let DocBind {
+                    id: sym,
+                    confidence,
+                    rule,
+                    root_decided,
+                } = bind;
                 if sym == n.id || !seen.insert(sym) {
                     continue;
                 }
@@ -672,6 +729,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                     Confidence::Strong => strong += 1,
                     Confidence::Medium => medium += 1,
                     Confidence::Weak => weak += 1,
+                }
+                if root_decided {
+                    project_root += 1;
                 }
                 match (rule, confidence) {
                     ("qualified", Confidence::Medium) => tie_qualified += 1,
@@ -695,6 +755,10 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
              weak={weak} ambiguous) over {doc_sections} doc sections",
             new_edges.len()
         );
+        eprintln!(
+            "[doclink] precision: unshaped={unshaped} registry={registry} \
+             placeholder={placeholder} test_tree={test_tree} project_root={project_root}"
+        );
     }
     if tie_qualified + tie_bare > 0 {
         eprintln!("[doclink] tie-break by qname: qualified={tie_qualified} bare={tie_bare}");
@@ -703,6 +767,38 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
         eprintln!("[doclink] {capped} sections reached the {MAX_LINKS_PER_DOC}-link cap");
     }
     merged.cross_edges.extend(new_edges);
+}
+
+/// FD.79: a PROJECT node's repo-relative root (`""` for the repo root `.`):
+/// its ORIGIN `path`, else its qname after `project:` (the reading
+/// `answers::project_roots` takes).
+fn project_root_path(cells: &[glia_core::Cell], qname: Option<&String>) -> Option<String> {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
+    let origin = cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ORIGIN)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => {
+                serde_json::from_str::<serde_json::Value>(s).ok()
+            }
+            CellPayload::Bytes(_) => None,
+        })
+        .filter(serde_json::Value::is_object)?;
+    let path = origin
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            qname
+                .and_then(|q| q.strip_prefix("project:"))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Some(match path.as_str() {
+        "." => String::new(),
+        p => p.trim_end_matches('/').to_string(),
+    })
 }
 
 /// A10.2: pair each contract operation — a DOC_SECTION whose ORIGIN cell says
@@ -1185,32 +1281,52 @@ fn is_http_verb(method: &str) -> bool {
 }
 
 /// Doc→code mention index. `by_tail2` keys the last two qname segments so a
-/// qualified mention (`Class.method`) binds to the right member; `by_name` keeps
-/// today's bare-name lookup but carries the collision count so an ambiguous hit
-/// can be graded. Each key keeps the least (qname, kind, graph index) candidate
-/// (DE.1, [`DocCand::key`]), never the lowest NodeId, so the pick is the same
-/// under any RepoId. Both maps are only ever LOOKED UP, never iterated
-/// (CODE_RULES §3).
+/// qualified mention (`Class.method`) binds to the right member; `by_name` keys
+/// the bare name. Each key holds EVERY candidate (FD.79: a doc may only bind
+/// the candidates eligible for it), sorted by [`DocCand::key`] once the index
+/// is built, so the least eligible candidate is the first (DE.1: never the
+/// lowest NodeId, so the pick is the same under any RepoId). Both maps are
+/// only ever LOOKED UP, never iterated into an output (CODE_RULES §3).
 #[derive(Default)]
-struct DocSymbolIndex {
-    /// `name`            → the least candidate, and how many share the name
-    by_name: HashMap<String, DocPick>,
-    /// `"Class::method"` → the least candidate, and how many share the tail
-    by_tail2: HashMap<String, DocPick>,
+struct DocSymbolIndex<'a> {
+    /// `name`            → every candidate of that name, least first
+    by_name: HashMap<String, Vec<DocCand<'a>>>,
+    /// `"Class::method"` → every candidate of that tail, least first
+    by_tail2: HashMap<String, Vec<DocCand<'a>>>,
+    /// FD.79: the node-kind, edge-category and cell-type registry names
+    /// (`CALLS`, `SAME_AS`, `ROUTE`): a bare mention of one names the
+    /// registry entry, never a same-named symbol. Lookup only.
+    registry: HashSet<&'static str>,
+}
+
+/// FD.79: the tree a doc-link candidate is confined to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocTree<'a> {
+    /// App code: any doc may bind it.
+    Any,
+    /// Test, fixture or bench code: only a doc of its repo whose file sits
+    /// under this repo-relative directory (`""` = the repo root) binds it.
+    Under(&'a str),
+    /// Test code by qname with no POSITION file: no doc binds it.
+    Nowhere,
 }
 
 /// One doc-linkable symbol offered to [`DocSymbolIndex::add`]: its id, qname,
-/// kind id and the index of its graph in `merged.graphs` (argument order).
+/// kind id, the index of its graph in `merged.graphs` (argument order), its
+/// repo, its POSITION file and (FD.79) the tree it is confined to.
 #[derive(Debug, Clone, Copy)]
 struct DocCand<'a> {
     id: NodeId,
     qname: Option<&'a str>,
     kind: u32,
     graph: usize,
+    repo: RepoId,
+    file: Option<&'a str>,
+    tree: DocTree<'a>,
 }
 
 impl<'a> DocCand<'a> {
-    /// The order the index keeps a candidate by: the least qname (a symbol with
+    /// The order the index keeps candidates in: the least qname (a symbol with
     /// none sorts last), then the kind id (a CLASS / COMPONENT twin sharing a
     /// qname), then the graph index (one qname in two repos of a multi-repo
     /// build). Content only: the NodeId hashes the RepoId and never decides.
@@ -1222,62 +1338,102 @@ impl<'a> DocCand<'a> {
             self.graph,
         )
     }
-}
 
-/// A [`DocSymbolIndex`] value: the kept candidate and how many candidates
-/// share its key (`count > 1` is an ambiguous mention).
-#[derive(Debug)]
-struct DocPick {
-    id: NodeId,
-    qname: Option<String>,
-    kind: u32,
-    graph: usize,
-    count: usize,
-}
-
-impl DocPick {
-    fn new(c: DocCand<'_>, count: usize) -> Self {
-        DocPick {
-            id: c.id,
-            qname: c.qname.map(str::to_string),
-            kind: c.kind,
-            graph: c.graph,
-            count,
-        }
-    }
-
-    fn cand(&self) -> DocCand<'_> {
-        DocCand {
-            id: self.id,
-            qname: self.qname.as_deref(),
-            kind: self.kind,
-            graph: self.graph,
-        }
-    }
-}
-
-impl DocSymbolIndex {
-    /// Count `cand` under `key`, keeping it when its [`DocCand::key`] is less
-    /// than the kept one's. The qname is cloned only when a candidate is kept.
-    fn record(map: &mut HashMap<String, DocPick>, key: String, cand: DocCand<'_>) {
-        match map.entry(key) {
-            std::collections::hash_map::Entry::Occupied(mut slot) => {
-                let cur = slot.get_mut();
-                let count = cur.count + 1;
-                if cand.key() < cur.cand().key() {
-                    *cur = DocPick::new(cand, count);
-                } else {
-                    cur.count = count;
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(DocPick::new(cand, 1));
+    /// FD.79: may a doc at `doc` bind this candidate? App code always; a
+    /// test / fixture / bench candidate only from a doc of its own repo under
+    /// its tree.
+    fn eligible(&self, doc: &DocCtx<'_>) -> bool {
+        match self.tree {
+            DocTree::Any => true,
+            DocTree::Nowhere => false,
+            DocTree::Under(tree) => {
+                self.repo == doc.repo && doc.file.is_some_and(|f| path_under(f, tree))
             }
         }
     }
 
-    fn add(&mut self, name: &str, cand: DocCand<'_>) {
-        Self::record(&mut self.by_name, name.to_string(), cand);
+    /// FD.79: does this candidate sit under the doc's project root?
+    fn under_root(&self, doc: &DocCtx<'_>) -> bool {
+        doc.root.is_some_and(|root| {
+            self.repo == doc.repo && self.file.is_some_and(|f| path_under(f, root))
+        })
+    }
+}
+
+/// FD.79: the doc section a mention is resolved for: its repo, its POSITION
+/// file and the deepest project root of that repo holding the file (`""` for
+/// the repo root `.`; `None` when no PROJECT holds it).
+#[derive(Debug, Clone, Copy)]
+struct DocCtx<'a> {
+    repo: RepoId,
+    file: Option<&'a str>,
+    root: Option<&'a str>,
+}
+
+/// FD.79: a repo-relative `path` sits at or under directory `dir` (segment
+/// boundary; `""` holds every path).
+fn path_under(path: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+}
+
+/// FD.79: the tree a candidate at `file` with `qname` is confined to. A file
+/// with a CG.2a test-tree directory segment, or a `bench` / `benches` one (a
+/// doclink rule only: CG.2a deliberately counts bench as real tooling), is
+/// confined to the path through the first such segment (`cli/tests`,
+/// `bench`); a test file by name (`_test.go`, `test_*.py`, ..) or a test
+/// qname (`::tests::`) to its file's directory.
+fn doc_tree<'a>(file: Option<&'a str>, qname: Option<&str>) -> DocTree<'a> {
+    let test_qname = qname.is_some_and(is_test_qname);
+    let Some(file) = file else {
+        return if test_qname {
+            DocTree::Nowhere
+        } else {
+            DocTree::Any
+        };
+    };
+    let mut start = 0;
+    for (i, c) in file.char_indices() {
+        if c != '/' && c != '\\' {
+            continue;
+        }
+        let seg = &file[start..i];
+        if seg.eq_ignore_ascii_case("bench")
+            || seg.eq_ignore_ascii_case("benches")
+            || TEST_DIR_SEGMENTS
+                .iter()
+                .any(|d| seg.eq_ignore_ascii_case(d))
+        {
+            return DocTree::Under(&file[..i]);
+        }
+        start = i + 1;
+    }
+    if test_qname || is_test_path(file).is_some() {
+        let dir = file.rfind(['/', '\\']).map_or("", |i| &file[..i]);
+        return DocTree::Under(dir);
+    }
+    DocTree::Any
+}
+
+impl<'a> DocSymbolIndex<'a> {
+    /// An empty index holding the registry names.
+    fn new() -> Self {
+        let registry = node_kind::ALL
+            .iter()
+            .map(|(_, n)| *n)
+            .chain(edge_category::ALL.iter().map(|(_, n)| *n))
+            .chain(cell_type::ALL.iter().map(|(_, n)| *n))
+            .collect();
+        DocSymbolIndex {
+            registry,
+            ..Default::default()
+        }
+    }
+
+    fn add(&mut self, name: &str, cand: DocCand<'a>) {
+        self.by_name.entry(name.to_string()).or_default().push(cand);
         // Same identifier rules as the lookup side, so a key is never stored
         // that `resolve_doc_mention` could not ask for.
         if let Some(q) = cand.qname {
@@ -1286,44 +1442,169 @@ impl DocSymbolIndex {
                 && is_identifier(prev)
                 && is_identifier(last)
             {
-                Self::record(&mut self.by_tail2, format!("{prev}::{last}"), cand);
+                self.by_tail2
+                    .entry(format!("{prev}::{last}"))
+                    .or_default()
+                    .push(cand);
             }
+        }
+    }
+
+    /// Sort every key's candidates by [`DocCand::key`] (DE.1's order). Each
+    /// vector is sorted in place, so the map's iteration order decides
+    /// nothing.
+    fn finish(&mut self) {
+        for cands in self.by_name.values_mut().chain(self.by_tail2.values_mut()) {
+            cands.sort_by(|a, b| a.key().cmp(&b.key()));
         }
     }
 }
 
-/// (target, confidence, evidence rule) for one inline-code span, or `None`
-/// when it names nothing in the graph. The rule is the tier that matched:
-/// `qualified` (tier 1), `unique` / `ambiguous` (the bare-name tiers 2 / 3).
+/// FD.79: why a mention that names a symbol bound nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocRefusal {
+    /// A lone word: no call, no inner `_`, not mixed case (`run`, `json`, `CALLS`).
+    Unshaped,
+    /// A node-kind, edge-category or cell-type registry name (`SAME_AS`).
+    Registry,
+    /// A SCREAMING_SNAKE name the section also writes as a placeholder
+    /// (`/PROJECT_ID/`, `[X]`, `<X>`, `{X}`, `$X`).
+    Placeholder,
+    /// Every candidate is test / fixture / bench code outside the doc's tree.
+    TestTree,
+}
+
+/// One bound mention: target, confidence, EVIDENCE rule, and whether the
+/// doc's project root (not the least qname) decided a tie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DocBind {
+    id: NodeId,
+    confidence: Confidence,
+    rule: &'static str,
+    root_decided: bool,
+}
+
+/// FD.79: the eligible candidates' pick: the least candidate under the doc's
+/// project root when one sits there, else the least eligible (DE.1), with
+/// the eligible count. `None` when no candidate is eligible.
+fn pick_doc_cand(cands: &[DocCand<'_>], doc: &DocCtx<'_>) -> Option<(NodeId, usize, bool)> {
+    let mut eligible = cands.iter().filter(|c| c.eligible(doc));
+    let first = eligible.next()?;
+    let mut n = 1;
+    let mut rooted = first.under_root(doc).then_some(first);
+    for c in eligible {
+        n += 1;
+        if rooted.is_none() && c.under_root(doc) {
+            rooted = Some(c);
+        }
+    }
+    let pick = rooted.unwrap_or(first);
+    Some((pick.id, n, pick.id != first.id))
+}
+
+/// FD.79: a bare mention is identifier-shaped: the raw span is a call
+/// (`x()`, `x(args)`), or the identifier holds `_` between two alphanumerics
+/// (`lookup_service`, `MAX_RETRIES`), or both an upper- and a lower-case
+/// ASCII letter (`ServiceRegistry`, `fromJson`).
+fn is_identifier_shaped(raw: &str, ident: &str) -> bool {
+    let call = raw.ends_with(')') && raw.contains('(');
+    let b = ident.as_bytes();
+    let inner_underscore = b
+        .windows(3)
+        .any(|w| w[1] == b'_' && w[0].is_ascii_alphanumeric() && w[2].is_ascii_alphanumeric());
+    let mixed = b.iter().any(u8::is_ascii_uppercase) && b.iter().any(u8::is_ascii_lowercase);
+    call || inner_underscore || mixed
+}
+
+/// FD.79: an all-caps identifier the section text (fenced bodies included)
+/// also writes as a placeholder: `/X/`, `[X]`, `<X>`, `{X}` (so `${X}`) or
+/// `$X` not followed by an identifier character.
+fn is_placeholder(ident: &str, section: &str) -> bool {
+    let b = ident.as_bytes();
+    if !b.iter().any(u8::is_ascii_uppercase) || b.iter().any(u8::is_ascii_lowercase) {
+        return false;
+    }
+    let wrapped = [('/', '/'), ('[', ']'), ('<', '>'), ('{', '}')]
+        .iter()
+        .any(|(open, close)| section.contains(&format!("{open}{ident}{close}")));
+    wrapped
+        || section.match_indices(&format!("${ident}")).any(|(i, m)| {
+            section[i + m.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
+}
+
+/// The bind for one inline-code span of `section`, resolved for the doc
+/// `doc`. `Err(None)` when it names nothing in the graph, `Err(Some(r))` when
+/// it names something FD.79 refuses. The rule is the tier that matched:
+/// `qualified` (tier 1), `unique` / `ambiguous` (the bare-name tiers 2 / 3);
+/// the counts are of the candidates ELIGIBLE for the doc.
 fn resolve_doc_mention(
     span: &str,
-    idx: &DocSymbolIndex,
-) -> Option<(NodeId, Confidence, &'static str)> {
-    let norm = span.trim().trim_end_matches("()").replace('.', "::");
+    section: &str,
+    idx: &DocSymbolIndex<'_>,
+    doc: &DocCtx<'_>,
+) -> Result<DocBind, Option<DocRefusal>> {
+    let raw = span.trim();
+    let norm = raw.trim_end_matches("()").replace('.', "::");
+    // FD.79: a tier-1 key whose candidates are all outside the doc's tree.
+    let mut out_of_tree = None;
     // Tier 1 — qualified mention, e.g. `PaymentGateway.charge` / `mod::Thing`.
     if norm.contains("::") {
         let mut segs = norm.rsplit("::");
         if let (Some(last), Some(prev)) = (segs.next(), segs.next())
             && is_identifier(prev)
             && is_identifier(last)
-            && let Some(&DocPick { id, count: n, .. }) =
-                idx.by_tail2.get(&format!("{prev}::{last}"))
+            && let Some(cands) = idx.by_tail2.get(&format!("{prev}::{last}"))
         {
-            let confidence = if n == 1 {
-                Confidence::Strong
-            } else {
-                Confidence::Medium
-            };
-            return Some((id, confidence, "qualified"));
+            match pick_doc_cand(cands, doc) {
+                Some((id, n, root_decided)) => {
+                    let confidence = if n == 1 {
+                        Confidence::Strong
+                    } else {
+                        Confidence::Medium
+                    };
+                    return Ok(DocBind {
+                        id,
+                        confidence,
+                        rule: "qualified",
+                        root_decided,
+                    });
+                }
+                None => out_of_tree = Some(DocRefusal::TestTree),
+            }
         }
     }
-    // Tiers 2/3 — bare tail name (the pre-A16.3 behaviour), graded by ambiguity.
-    let ident = identifier_from_span(span)?;
-    let &DocPick { id, count: n, .. } = idx.by_name.get(&ident)?;
-    Some(if n == 1 {
-        (id, Confidence::Medium, "unique")
+    // Tiers 2/3 — bare tail name, graded by ambiguity; FD.79 binds only an
+    // identifier-shaped one that is no registry name and no placeholder.
+    let Some(ident) = identifier_from_span(span) else {
+        return Err(out_of_tree);
+    };
+    let Some(cands) = idx.by_name.get(&ident) else {
+        return Err(out_of_tree);
+    };
+    if idx.registry.contains(ident.as_str()) {
+        return Err(Some(DocRefusal::Registry));
+    }
+    if !is_identifier_shaped(raw, &ident) {
+        return Err(Some(DocRefusal::Unshaped));
+    }
+    if is_placeholder(&ident, section) {
+        return Err(Some(DocRefusal::Placeholder));
+    }
+    let (id, n, root_decided) = pick_doc_cand(cands, doc).ok_or(Some(DocRefusal::TestTree))?;
+    let (confidence, rule) = if n == 1 {
+        (Confidence::Medium, "unique")
     } else {
-        (id, Confidence::Weak, "ambiguous")
+        (Confidence::Weak, "ambiguous")
+    };
+    Ok(DocBind {
+        id,
+        confidence,
+        rule,
+        root_decided,
     })
 }
 
@@ -1830,6 +2111,12 @@ impl ProvenanceStats {
 /// scan of the `{"file":"...","start_line":..}` payload — avoids a serde_json
 /// dependency in the engine crate.
 fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
+    position_file_str(cells).map(str::to_string)
+}
+
+/// [`position_file`], borrowed from the cell (FD.79's doc-link candidates
+/// keep their file for the life of the index).
+fn position_file_str(cells: &[glia_core::Cell]) -> Option<&str> {
     use glia_code_domain::cell_type;
     use glia_core::CellPayload;
     for c in cells {
@@ -1840,7 +2127,7 @@ fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
             && let Some(rest) = j.split("\"file\":\"").nth(1)
             && let Some(end) = rest.find('"')
         {
-            return Some(rest[..end].to_string());
+            return Some(&rest[..end]);
         }
     }
     None
@@ -2930,31 +3217,56 @@ fn strip_camel_test_affixes(name: &str) -> &str {
 mod passes_tests {
     use super::*;
 
-    /// A METHOD candidate in graph 0.
+    /// The repo every hand-built doc-link candidate and doc sits in.
+    const UT_REPO: RepoId = RepoId(1);
+
+    /// A METHOD candidate in graph 0, app code with no file.
     fn method(id: u64, qname: &str) -> DocCand<'_> {
         DocCand {
             id: NodeId(id),
             qname: Some(qname),
             kind: node_kind::METHOD.0,
             graph: 0,
+            repo: UT_REPO,
+            file: None,
+            tree: DocTree::Any,
         }
     }
 
-    /// `(kept id, count)` of one index entry.
-    fn pick(map: &HashMap<String, DocPick>, key: &str) -> (NodeId, usize) {
-        let p = &map[key];
-        (p.id, p.count)
+    /// A doc at the repo root's README, under no project root.
+    const UT_DOC: DocCtx<'static> = DocCtx {
+        repo: UT_REPO,
+        file: Some("README.md"),
+        root: None,
+    };
+
+    /// `(least id, count)` of one index entry.
+    fn pick(map: &HashMap<String, Vec<DocCand<'_>>>, key: &str) -> (NodeId, usize) {
+        let c = &map[key];
+        (c[0].id, c.len())
+    }
+
+    /// `resolve_doc_mention` for [`UT_DOC`], with the span as the section
+    /// text, as `(target, confidence, rule)`.
+    fn resolve(span: &str, idx: &DocSymbolIndex<'_>) -> Option<(NodeId, Confidence, &'static str)> {
+        resolve_doc_mention(span, span, idx, &UT_DOC)
+            .ok()
+            .map(|b| (b.id, b.confidence, b.rule))
     }
 
     /// A16.3 — hand-built index, no MergedGraph needed. Mirrors the doc-link
     /// fixture: `PaymentGateway::charge` is a unique member, `charge` is a
-    /// unique bare name, `save` is shared by two classes.
-    fn fixture_index() -> DocSymbolIndex {
-        let mut idx = DocSymbolIndex::default();
+    /// unique bare name, `save_order` is shared by two classes.
+    fn fixture_index() -> DocSymbolIndex<'static> {
+        let mut idx = DocSymbolIndex::new();
         idx.add("charge", method(7, "ordering::PaymentGateway::charge"));
         idx.add("get_user", method(3, "users::get_user"));
-        idx.add("save", method(11, "ordering::OrderService::save"));
-        idx.add("save", method(4, "users::UserRepo::save"));
+        idx.add(
+            "save_order",
+            method(11, "ordering::OrderService::save_order"),
+        );
+        idx.add("save_order", method(4, "users::UserRepo::save_order"));
+        idx.finish();
         idx
     }
 
@@ -2966,12 +3278,12 @@ mod passes_tests {
             (NodeId(7), 1)
         );
         assert_eq!(
-            resolve_doc_mention("PaymentGateway.charge", &idx),
+            resolve("PaymentGateway.charge", &idx),
             Some((NodeId(7), Confidence::Strong, "qualified"))
         );
         // The `::` spelling and a trailing `()` reach the same tier-1 answer.
         assert_eq!(
-            resolve_doc_mention("PaymentGateway::charge()", &idx),
+            resolve("PaymentGateway::charge()", &idx),
             Some((NodeId(7), Confidence::Strong, "qualified"))
         );
     }
@@ -2980,20 +3292,30 @@ mod passes_tests {
     fn doc_mention_bare_unique_is_medium() {
         let idx = fixture_index();
         assert_eq!(
-            resolve_doc_mention("get_user", &idx),
+            resolve("get_user", &idx),
             Some((NodeId(3), Confidence::Medium, "unique"))
+        );
+        // FD.79: a lone lowercase word binds only as a call.
+        assert_eq!(
+            resolve("charge()", &idx),
+            Some((NodeId(7), Confidence::Medium, "unique"))
+        );
+        assert_eq!(
+            resolve_doc_mention("charge", "charge", &idx, &UT_DOC),
+            Err(Some(DocRefusal::Unshaped))
         );
     }
 
     #[test]
     fn doc_mention_bare_ambiguous_is_weak() {
         let idx = fixture_index();
-        // Two symbols named `save`: no longer claiming Medium for a coin flip,
-        // and (DE.1) the least qname, `ordering::OrderService::save`, not the
-        // lowest NodeId (4, `users::UserRepo::save`).
-        assert_eq!(pick(&idx.by_name, "save"), (NodeId(11), 2));
+        // Two symbols named `save_order`: no longer claiming Medium for a coin
+        // flip, and (DE.1) the least qname,
+        // `ordering::OrderService::save_order`, not the lowest NodeId (4,
+        // `users::UserRepo::save_order`).
+        assert_eq!(pick(&idx.by_name, "save_order"), (NodeId(11), 2));
         assert_eq!(
-            resolve_doc_mention("save", &idx),
+            resolve("save_order", &idx),
             Some((NodeId(11), Confidence::Weak, "ambiguous"))
         );
     }
@@ -3002,15 +3324,17 @@ mod passes_tests {
     fn doc_mention_qualified_miss_falls_back_to_bare() {
         let idx = fixture_index();
         // No `Invoice::charge` member — tier 1 misses, tiers 2/3 answer with
-        // the unique bare `charge`.
+        // the unique bare `charge`, a call.
         assert!(!idx.by_tail2.contains_key("Invoice::charge"));
         assert_eq!(
-            resolve_doc_mention("Invoice.charge", &idx),
+            resolve("Invoice.charge()", &idx),
             Some((NodeId(7), Confidence::Medium, "unique"))
         );
+        // FD.79: the fallback's lone word is refused.
+        assert_eq!(resolve("Invoice.charge", &idx), None);
         // Ambiguous bare fallback still degrades to Weak.
         assert_eq!(
-            resolve_doc_mention("Whatever.save", &idx),
+            resolve("Whatever.save_order", &idx),
             Some((NodeId(11), Confidence::Weak, "ambiguous"))
         );
     }
@@ -3026,6 +3350,9 @@ mod passes_tests {
             qname: Some("ui::Card"),
             kind: node_kind::CLASS.0,
             graph: 1,
+            repo: UT_REPO,
+            file: None,
+            tree: DocTree::Any,
         };
         let component = DocCand {
             kind: node_kind::COMPONENT.0,
@@ -3047,21 +3374,24 @@ mod passes_tests {
             qname: None,
             kind: 0,
             graph: 0,
+            ..class
         };
         for order in [
             [unnamed, hi, lo, other_repo],
             [other_repo, lo, unnamed, hi],
             [lo, other_repo, hi, unnamed],
         ] {
-            let mut idx = DocSymbolIndex::default();
+            let mut idx = DocSymbolIndex::new();
             for c in order {
                 idx.add("Card", c);
             }
+            idx.finish();
             assert_eq!(pick(&idx.by_name, "Card"), (lo.id, 4), "{order:?}");
         }
-        let mut idx = DocSymbolIndex::default();
+        let mut idx = DocSymbolIndex::new();
         idx.add("Card", hi);
         idx.add("Card", other_repo);
+        idx.finish();
         assert_eq!(
             pick(&idx.by_name, "Card"),
             (other_repo.id, 2),
@@ -3072,9 +3402,203 @@ mod passes_tests {
     #[test]
     fn doc_mention_unknown_is_none() {
         let idx = fixture_index();
-        assert_eq!(resolve_doc_mention("npm install", &idx), None);
-        assert_eq!(resolve_doc_mention("--flag", &idx), None);
-        assert_eq!(resolve_doc_mention("nothing_here", &idx), None);
+        assert_eq!(resolve("npm install", &idx), None);
+        assert_eq!(resolve("--flag", &idx), None);
+        assert_eq!(resolve("nothing_here", &idx), None);
+        assert_eq!(
+            resolve_doc_mention("nothing_here", "", &idx, &UT_DOC),
+            Err(None),
+            "a name the graph lacks is no refusal"
+        );
+    }
+
+    /// FD.79: the shape rule on bare mentions.
+    #[test]
+    fn doclink_identifier_shape() {
+        for (raw, ident) in [
+            ("lookup_service()", "lookup_service"),
+            ("run()", "run"),
+            ("lookup(name)", "lookup"),
+            ("lookup_service", "lookup_service"),
+            ("MAX_RETRIES", "MAX_RETRIES"),
+            ("ServiceRegistry", "ServiceRegistry"),
+            ("fromJson", "fromJson"),
+            ("Wallet", "Wallet"),
+            ("x_1y", "x_1y"),
+        ] {
+            assert!(is_identifier_shaped(raw, ident), "{raw}");
+        }
+        for (raw, ident) in [
+            ("run", "run"),
+            ("graph", "graph"),
+            ("meta.json", "json"),
+            ("CALLS", "CALLS"),
+            ("JSON", "JSON"),
+            ("_private", "_private"),
+            ("__init__", "__init__"),
+        ] {
+            assert!(!is_identifier_shaped(raw, ident), "{raw}");
+        }
+    }
+
+    /// FD.79: a SCREAMING_SNAKE name the section also writes as a placeholder.
+    #[test]
+    fn doclink_placeholder_forms() {
+        for section in [
+            "docker push gcr.io/PROJECT_ID/app",
+            "set [PROJECT_ID] first",
+            "pass <PROJECT_ID>",
+            "echo ${PROJECT_ID}",
+            "echo $PROJECT_ID.",
+            "echo $PROJECT_ID",
+            "url {PROJECT_ID}",
+        ] {
+            assert!(is_placeholder("PROJECT_ID", section), "{section}");
+        }
+        for section in [
+            "Set `PROJECT_ID` to your project.",
+            "echo $PROJECT_IDS",
+            "path a/PROJECT_ID_X/b",
+        ] {
+            assert!(!is_placeholder("PROJECT_ID", section), "{section}");
+        }
+        assert!(
+            !is_placeholder("ProjectId", "a/ProjectId/b"),
+            "mixed case is never a placeholder"
+        );
+    }
+
+    /// FD.79: a candidate's tree and which docs it is eligible for.
+    #[test]
+    fn doclink_test_tree() {
+        assert_eq!(doc_tree(Some("app/x.py"), Some("app::x::f")), DocTree::Any);
+        assert_eq!(
+            doc_tree(Some("cli/tests/fixtures/x.rs"), Some("cli::tests::x::f")),
+            DocTree::Under("cli/tests")
+        );
+        assert_eq!(
+            doc_tree(Some("bench/cohort/cohort.py"), Some("bench::cohort::f")),
+            DocTree::Under("bench")
+        );
+        assert_eq!(
+            doc_tree(Some("pkg/store_test.go"), Some("pkg::store_test::f")),
+            DocTree::Under("pkg")
+        );
+        assert_eq!(
+            doc_tree(Some("test_top.py"), Some("test_top::f")),
+            DocTree::Under("")
+        );
+        assert_eq!(
+            doc_tree(
+                Some("activation/src/ppr_index.rs"),
+                Some("activation::src::ppr_index::tests::graph")
+            ),
+            DocTree::Under("activation/src")
+        );
+        assert_eq!(doc_tree(None, Some("a::tests::f")), DocTree::Nowhere);
+        assert_eq!(doc_tree(None, Some("a::f")), DocTree::Any);
+
+        assert!(path_under("cli/tests/README.md", "cli/tests"));
+        assert!(path_under("README.md", ""));
+        assert!(!path_under("cli/testsuite/README.md", "cli/tests"));
+        assert!(!path_under("README.md", "cli/tests"));
+
+        let helper = DocCand {
+            file: Some("tests/test_registry.py"),
+            tree: DocTree::Under("tests"),
+            ..method(5, "tests::test_registry::make_registry")
+        };
+        let mut idx = DocSymbolIndex::new();
+        idx.add("make_registry", helper);
+        idx.finish();
+        assert_eq!(
+            resolve_doc_mention("make_registry", "", &idx, &UT_DOC),
+            Err(Some(DocRefusal::TestTree))
+        );
+        let in_tree = DocCtx {
+            file: Some("tests/README.md"),
+            ..UT_DOC
+        };
+        assert_eq!(
+            resolve_doc_mention("make_registry", "", &idx, &in_tree).map(|b| b.rule),
+            Ok("unique")
+        );
+        let other_repo = DocCtx {
+            repo: RepoId(2),
+            ..in_tree
+        };
+        assert_eq!(
+            resolve_doc_mention("make_registry", "", &idx, &other_repo),
+            Err(Some(DocRefusal::TestTree)),
+            "a tree is repo-relative: another repo's tests/ is not it"
+        );
+    }
+
+    /// FD.79: registry names never bind, whatever their shape.
+    #[test]
+    fn doclink_registry_names_refused() {
+        let mut idx = DocSymbolIndex::new();
+        idx.add("SAME_AS", method(1, "app::consts::SAME_AS"));
+        idx.add("HTTP_CALLS", method(2, "app::consts::HTTP_CALLS"));
+        idx.add("CODE_PASSES", method(3, "engine::profile::CODE_PASSES"));
+        idx.finish();
+        for name in ["SAME_AS", "HTTP_CALLS"] {
+            assert_eq!(
+                resolve_doc_mention(name, "", &idx, &UT_DOC),
+                Err(Some(DocRefusal::Registry)),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            resolve("CODE_PASSES", &idx),
+            Some((NodeId(3), Confidence::Medium, "unique"))
+        );
+    }
+
+    /// FD.79: the doc's own project root decides a tie before the least qname.
+    #[test]
+    fn doclink_project_root_breaks_ties() {
+        let photo = DocCand {
+            file: Some("samples/aphotos/lib/photo.py"),
+            ..method(1, "samples::aphotos::lib::photo::MapMarker")
+        };
+        let maps = DocCand {
+            file: Some("samples/maps/store.py"),
+            ..method(2, "samples::maps::store::MapMarker")
+        };
+        let mut idx = DocSymbolIndex::new();
+        idx.add("MapMarker", maps);
+        idx.add("MapMarker", photo);
+        idx.finish();
+        let doc = DocCtx {
+            repo: UT_REPO,
+            file: Some("samples/maps/README.md"),
+            root: Some("samples/maps"),
+        };
+        assert_eq!(
+            resolve_doc_mention("MapMarker", "", &idx, &doc),
+            Ok(DocBind {
+                id: NodeId(2),
+                confidence: Confidence::Weak,
+                rule: "ambiguous",
+                root_decided: true,
+            })
+        );
+        let at_top = DocCtx {
+            file: Some("README.md"),
+            root: Some(""),
+            ..doc
+        };
+        assert_eq!(
+            resolve_doc_mention("MapMarker", "", &idx, &at_top),
+            Ok(DocBind {
+                id: NodeId(1),
+                confidence: Confidence::Weak,
+                rule: "ambiguous",
+                root_decided: false,
+            }),
+            "both copies sit under `.`: the least qname decides"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -3281,18 +3805,18 @@ mod passes_tests {
         let feed = h.add_at(
             NodeId(20),
             node_kind::METHOD,
-            "refresh",
-            "a::feed::Feed::refresh",
+            "refresh_cache",
+            "a::feed::Feed::refresh_cache",
             vec![],
         );
         let wallet = h.add_at(
             NodeId(10),
             node_kind::METHOD,
-            "refresh",
-            "b::wallet::Wallet::refresh",
+            "refresh_cache",
+            "b::wallet::Wallet::refresh_cache",
             vec![],
         );
-        let doc = doc_at(&mut h, 30, "Call `refresh` after a write.");
+        let doc = doc_at(&mut h, 30, "Call `refresh_cache` after a write.");
         let mut merged = MergedGraph::new(vec![h.graph()]);
 
         link_doc_sections(&mut merged);

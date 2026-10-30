@@ -147,40 +147,86 @@ fn write(root: &Path, rel: &str, text: &str) {
     std::fs::write(p, text).expect("write file");
 }
 
-/// The minimal repro: one bare `refresh` (two candidates) and one qualified
-/// `Feed.refresh` (one candidate). Before DE.1 the bare mention bound to
-/// whichever `refresh` hashed lowest under the directory's RepoId; when that
-/// was `Feed.refresh` the qualified mention was deduped and the section held
-/// one edge, else two.
+/// The minimal repro: one bare `refresh_cache` (two candidates) and one
+/// qualified `Feed.refresh_cache` (one candidate). Before DE.1 the bare
+/// mention bound to whichever `refresh_cache` hashed lowest under the
+/// directory's RepoId; when that was `Feed.refresh_cache` the qualified
+/// mention was deduped and the section held one edge, else two. (FD.79: the
+/// mention is `refresh_cache`, identifier-shaped; a lone `refresh` binds
+/// nothing now.)
 #[test]
 fn doclink_target_is_independent_of_the_repo_identity() {
-    let scratch = Scratch::new("doclink");
-    let names = [
-        "doclink-a",
-        "doclink-b",
-        "doclink-c",
-        "doclink-d",
-        "doclink-e",
-        "doclink-f",
+    let expected = vec![
+        (
+            "docs::README::caching".to_string(),
+            "billing::wallet::Wallet::refresh_cache".to_string(),
+            "Weak".to_string(),
+            "ambiguous".to_string(),
+        ),
+        (
+            "docs::README::caching".to_string(),
+            "web::feed::Feed::refresh_cache".to_string(),
+            "Strong".to_string(),
+            "qualified".to_string(),
+        ),
     ];
+    doclink_invariant("doclink", "README.md", &[], &expected);
+}
+
+/// FD.79: the same tie across two project roots (billing/ and web/ each a
+/// pyproject.toml, the README under web/) binds web's copy, the doc's own
+/// project root, under every RepoId: the root is repo-relative content.
+#[test]
+fn doclink_project_root_tie_is_independent_of_the_repo_identity() {
+    // The bare mention comes first and binds web's copy, so the qualified
+    // `Feed.refresh_cache` (the same symbol) is deduped: one edge.
+    let expected = vec![(
+        "docs::web::README::caching".to_string(),
+        "web::feed::Feed::refresh_cache".to_string(),
+        "Weak".to_string(),
+        "ambiguous".to_string(),
+    )];
+    doclink_invariant(
+        "doclink-roots",
+        "web/README.md",
+        &["billing/pyproject.toml", "web/pyproject.toml"],
+        &expected,
+    );
+}
+
+/// Build the doclink tree (`readme` holding the mentions, a pyproject.toml at
+/// each of `manifests`) under six directory names, each its own RepoId, and
+/// require the same DOCUMENTS edges from every one.
+fn doclink_invariant(
+    tag: &str,
+    readme: &str,
+    manifests: &[&str],
+    expected: &[(String, String, String, String)],
+) {
+    let scratch = Scratch::new(tag);
+    let names = ["a", "b", "c", "d", "e", "f"].map(|s| format!("{tag}-{s}"));
     let mut keys = Vec::new();
-    for name in names {
+    for name in &names {
         let root = scratch.path(name);
         write(
             &root,
-            "README.md",
-            "# Notes\n\n## Caching\n\nCall `refresh` after a write; `Feed.refresh` reloads the feed.\n",
+            readme,
+            "# Notes\n\n## Caching\n\nCall `refresh_cache` after a write; \
+             `Feed.refresh_cache` reloads the feed.\n",
         );
         write(
             &root,
             "billing/wallet.py",
-            "class Wallet:\n    def refresh(self):\n        return 1\n",
+            "class Wallet:\n    def refresh_cache(self):\n        return 1\n",
         );
         write(
             &root,
             "web/feed.py",
-            "class Feed:\n    def refresh(self):\n        return 2\n",
+            "class Feed:\n    def refresh_cache(self):\n        return 2\n",
         );
+        for (i, m) in manifests.iter().enumerate() {
+            write(&root, m, &format!("[project]\nname = \"part{i}\"\n"));
+        }
         keys.push(repo_identity(&root).key);
     }
     let mut distinct = keys.clone();
@@ -192,24 +238,10 @@ fn doclink_target_is_independent_of_the_repo_identity() {
         "each copy has its own RepoId: {keys:?}"
     );
 
-    let expected = vec![
-        (
-            "docs::README::caching".to_string(),
-            "billing::wallet::Wallet::refresh".to_string(),
-            "Weak".to_string(),
-            "ambiguous".to_string(),
-        ),
-        (
-            "docs::README::caching".to_string(),
-            "web::feed::Feed::refresh".to_string(),
-            "Strong".to_string(),
-            "qualified".to_string(),
-        ),
-    ];
     let wrong: Vec<_> = names
         .iter()
-        .map(|name| (*name, documents(&build(&scratch.path(name)))))
-        .filter(|(_, got)| *got != expected)
+        .map(|name| (name, documents(&build(&scratch.path(name)))))
+        .filter(|(_, got)| got.as_slice() != expected)
         .collect();
     assert!(
         wrong.is_empty(),
