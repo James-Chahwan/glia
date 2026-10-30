@@ -282,3 +282,4 @@
 {"wave": "R054-W22", "event": "end", "pct": 6, "resets_at": 1793346600, "ts": 1793342230}
 {"wave": "R054-W23", "event": "start", "pct": 6, "resets_at": 1793346600, "ts": 1793342524}
 {"wave": "R054-W23", "event": "end", "pct": 8, "resets_at": 1793346600, "ts": 1793345022}
+{"wave": "R054-W24", "event": "end", "pct": 1, "resets_at": 1793364600, "ts": 1793347740}
