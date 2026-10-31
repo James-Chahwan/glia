@@ -13,16 +13,17 @@ use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, Repo
 
 use crate::calls::{
     EvidenceTally, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
-    emit_method_level_implements_with, emit_override_implements, enclosing_class_or_struct,
-    enclosing_module, graph_evidence, push_edge, resolve_calls, resolve_calls_pooled,
-    resolve_inherited_calls, resolve_refs, unique_global_types,
+    emit_method_level_implements_for, emit_method_level_implements_with, emit_override_implements,
+    enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge, resolve_calls,
+    resolve_calls_pooled, resolve_inherited_calls, resolve_refs, unique_global_types,
 };
 pub use crate::calls::{ResolvePool, with_resolve_pool};
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
 use crate::imports::{
-    GoImportStats, SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
-    resolve_imports_ts, same_stem_table,
+    GoImportStats, ImportEdge, SameStem, push_import_edges, python_import_bindings,
+    resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
+    same_stem_table,
 };
 use crate::rust_paths::{
     MOD_ITEM, RustCrate, RustIndex, TYPE_REF_CATEGORIES, resolve_imports_rust, rust_ev,
@@ -33,6 +34,9 @@ use crate::types::{GraphError, RepoGraph, SymbolTable};
 mod dart;
 mod go_wire;
 mod lua;
+mod partial;
+
+pub use partial::{BodyEdit, RebodyStats, Refused};
 
 // ============================================================================
 // Public entry point
@@ -43,18 +47,95 @@ mod lua;
 /// Every builder ends with the LC.3d `[evidence-graph]` marker
 /// (`EvidenceTally::report`): which branch of `resolve_calls` /
 /// `resolve_refs` bound how many edges of this graph.
+///
+/// GA.3: two phases, so a body-only edit can re-run the second for the
+/// edited files alone ([`rebuild_python_bodies`]): `python_surface` (the
+/// merge, the symbol table and the import BINDINGS) and `python_stitch`
+/// (the IMPORTS edges, calls, refs and method-level IMPLEMENTS of the files
+/// handed to it). A clean build stitches every file at once, so its edges,
+/// unresolved lists and markers are the single-pass build's, in its order.
 pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
-    build_symbol_table(&mut g);
-    let mut same = same_stem_table(&g);
-    resolve_imports_python(&mut g, &all_imports, &mut same);
-    same.report();
+    let (mut g, surface, body) = python_surface(repo, parses);
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
-    resolve_refs(&mut g, &all_refs, &mut tally);
-    emit_method_level_implements(&mut g);
+    python_stitch(&mut g, &surface.imports, &body, None, &mut tally);
     tally.report();
     Ok(g)
+}
+
+/// GA.3: what [`python_surface`] decided for the stitch phase: every IMPORTS
+/// edge, in statement order (bound, not yet drawn).
+struct PySurface {
+    imports: Vec<ImportEdge>,
+}
+
+/// GA.3: the body stubs [`python_stitch`] resolves: call sites and refs, in
+/// parse order.
+#[derive(Default)]
+struct PyBody {
+    calls: Vec<CallSite>,
+    refs: Vec<UnresolvedRef>,
+}
+
+/// GA.3: the SURFACE phase of [`build_python`]: [`merge_parses`],
+/// [`build_symbol_table`] and the binding half of the Python import pass
+/// (`module_import_bindings`, the same-stem picks), with their markers. What
+/// it builds is the group's surface index, which [`python_stitch`] reads and
+/// never writes.
+fn python_surface(repo: RepoId, parses: Vec<FileParse>) -> (RepoGraph, PySurface, PyBody) {
+    let (mut g, all_imports, calls, refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    let imports = python_import_bindings(&mut g, &all_imports, &mut same);
+    same.report();
+    (g, PySurface { imports }, PyBody { calls, refs })
+}
+
+/// GA.3: the STITCH phase of [`build_python`]: draw `imports` (the IMPORTS
+/// edges of the files stitched), resolve `body`'s calls and refs against the
+/// surface index, then pair methods with the interface members they
+/// implement, for the implementing types in `types` only when given (`None`:
+/// every type, a clean build). `tally` sums every stitch of one graph.
+fn python_stitch(
+    g: &mut RepoGraph,
+    imports: &[ImportEdge],
+    body: &PyBody,
+    types: Option<&HashSet<NodeId>>,
+    tally: &mut EvidenceTally,
+) {
+    push_import_edges(g, imports);
+    resolve_calls(g, &body.calls, |_, _| None, tally);
+    resolve_refs(g, &body.refs, tally);
+    match types {
+        Some(types) => emit_method_level_implements_for(g, types),
+        None => emit_method_level_implements(g),
+    }
+}
+
+/// GA.3: re-stitch the files `edits` changed in their bodies only, against
+/// the unchanged surface index of `g` (a Python group graph [`build_python`]
+/// built), then put `g` in its canonical order: the result equals a clean
+/// [`build_python`] of the edited tree after [`RepoGraph::canonicalize`].
+///
+/// Each edit is a fresh parse of one Python file. The caller (the watch)
+/// checks the declaration surface fingerprint first; this re-checks what the
+/// graph crate can see (the file's nodes, kinds, qnames, nav tree, field /
+/// return types, properties, module-level locals and its import bindings)
+/// and refuses, leaving `g` untouched, when one moved
+/// ([`Refused::SurfaceMoved`]), when the file is not one of `g`'s MODULEs
+/// ([`Refused::UnknownFile`]), or when the file holds something this seam
+/// does not re-derive ([`Refused::Unsupported`]: a node another file shares
+/// cells with, a page-navigation link, ..). The model and why no other file's
+/// output moves are in `build/partial.rs`.
+///
+/// fired_on, once per call on stderr:
+///   `[rebody] lang=python files=<f> edges -<r> +<a> calls_bound=<c> refs_bound=<n> names_ms=<ms> refused=<reason|none>`
+pub fn rebuild_python_bodies(
+    g: &mut RepoGraph,
+    edits: Vec<BodyEdit>,
+) -> Result<RebodyStats, Refused> {
+    let result = partial::rebuild_bodies(g, edits);
+    eprintln!("{}", partial::marker("python", &result));
+    result
 }
 
 /// Build a per-repo Go graph. The engine gives every Go file its own MODULE
@@ -833,6 +914,21 @@ fn merge_parses(
     Vec<CallSite>,
     Vec<UnresolvedRef>,
 ) {
+    merge_parses_with(repo, parses, true)
+}
+
+/// [`merge_parses`], its `[home-module]` and `[roles]` markers printed only
+/// when `report` is set (GA.3: a re-stitched file's own merge is quiet).
+fn merge_parses_with(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    report: bool,
+) -> (
+    RepoGraph,
+    Vec<ImportStmt>,
+    Vec<CallSite>,
+    Vec<UnresolvedRef>,
+) {
     let mut g = RepoGraph {
         repo,
         nodes: Vec::new(),
@@ -873,7 +969,7 @@ fn merge_parses(
         all_refs.extend(p.refs);
         g.properties.extend(p.properties);
     }
-    if !shared.is_empty() {
+    if report && !shared.is_empty() {
         eprintln!(
             "[home-module] shared packages={} members={}",
             shared.len(),
@@ -886,7 +982,7 @@ fn merge_parses(
     // table, so module symbols, INJECTS and CALLS bind to the declaration and
     // never to an edgeless marker. Every `build_*` goes through here.
     let stats = crate::roles::fold_role_overlays(&mut g, &mut all_calls, &mut all_refs);
-    if stats.saw_role_nodes() {
+    if report && stats.saw_role_nodes() {
         eprintln!("{}", stats.marker());
     }
 

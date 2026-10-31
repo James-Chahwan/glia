@@ -527,6 +527,90 @@ pub(crate) fn resolve_imports_python(
     }
 }
 
+/// GA.3: the BINDING half of [`resolve_imports_python`], the Python builder's
+/// surface phase. Every statement is decided and its `module_import_bindings`
+/// insert applied, the same markers print, and the IMPORTS edges come back
+/// undrawn, in statement order, for the stitch phase to push
+/// ([`push_import_edges`]). Surface, then pushing every edge, writes what
+/// [`resolve_imports_python`] writes.
+pub(crate) fn python_import_bindings(
+    g: &mut RepoGraph,
+    imports: &[ImportStmt],
+    same: &mut SameStem,
+) -> Vec<ImportEdge> {
+    let mut stars = PyStars::read(g, imports);
+    let (out, ns) = decide_imports_dotted(g, imports, same, &mut stars);
+    out.apply_bindings(g);
+    if let Some(line) = ns.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = stars.marker() {
+        eprintln!("{line}");
+    }
+    out.edges
+}
+
+/// GA.3: why [`python_rebind`] could not re-derive a file's IMPORTS edges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RebindRefusal {
+    /// The file's statements bind other names than the graph holds for its
+    /// MODULE: its import surface moved (index into the `files` slice).
+    BindingsMoved(usize),
+    /// Two star imports of one importer share a row, so the graph's edges no
+    /// longer say which came first (the order a star walk reads).
+    StarRowTie,
+}
+
+/// GA.3: the IMPORTS edges of each `(MODULE, statements)` in `files`,
+/// re-derived against a graph whose import bindings are already in place
+/// (the body-only fast path, `build::rebuild_python_bodies`). Read-only: the
+/// bindings each file's statements decide are compared with the ones the
+/// graph holds for its MODULE, and any difference is
+/// [`RebindRefusal::BindingsMoved`], since the file's import surface then
+/// moved and every importer's stitching may have with it.
+///
+/// The star sources a `from m import name` follows (GD.9) are read from the
+/// graph's `star_import` IMPORTS edges for every importer not in `files`
+/// (their statements are not at hand; a body-only edit moved none of them),
+/// each importer's sources ordered by the edge row, which is statement order;
+/// an importer with two star edges at one row is [`RebindRefusal::StarRowTie`].
+/// The files' own sources come from their statements, as
+/// [`resolve_imports_python`] reads them. Markers stay quiet: the caller
+/// prints one `[rebody]` line.
+pub(crate) fn python_rebind(
+    g: &RepoGraph,
+    files: &[(NodeId, &[ImportStmt])],
+) -> Result<Vec<Vec<ImportEdge>>, RebindRefusal> {
+    let mut stars = PyStars::rebuilt(g, files)?;
+    let mut same = same_stem_table(g);
+    let mut out = Vec::with_capacity(files.len());
+    for (at, (module, imports)) in files.iter().enumerate() {
+        let (decided, _) = decide_imports_dotted(g, imports, &mut same, &mut stars);
+        let mut bound: HashMap<&str, NodeId> = HashMap::new();
+        for (from, name, to) in &decided.bindings {
+            if from != module {
+                return Err(RebindRefusal::BindingsMoved(at));
+            }
+            bound.insert(name.as_str(), *to);
+        }
+        let held = g.symbols.module_import_bindings.get(module);
+        let same_bindings = match held {
+            Some(map) => {
+                map.len() == bound.len()
+                    && map
+                        .iter()
+                        .all(|(name, to)| bound.get(name.as_str()) == Some(to))
+            }
+            None => bound.is_empty(),
+        };
+        if !same_bindings || decided.edges.iter().any(|e| e.from != *module) {
+            return Err(RebindRefusal::BindingsMoved(at));
+        }
+        out.push(decided.edges);
+    }
+    Ok(out)
+}
+
 /// [`resolve_imports_python`] without the GD.9 star marker, returning the
 /// star counts it prints.
 fn resolve_imports_dotted(
@@ -534,8 +618,84 @@ fn resolve_imports_dotted(
     imports: &[ImportStmt],
     same: &mut SameStem,
 ) -> PyStars {
-    let mut ns = Namespaces::default();
     let mut stars = PyStars::read(g, imports);
+    let (out, ns) = decide_imports_dotted(g, imports, same, &mut stars);
+    out.apply_bindings(g);
+    push_import_edges(g, &out.edges);
+    if let Some(line) = ns.marker() {
+        eprintln!("{line}");
+    }
+    stars
+}
+
+/// GA.3: one IMPORTS edge a dotted import statement asserts, decided before
+/// it is pushed, so the Python builder can bind every import first (its
+/// surface phase) and push each file's edges in its stitch phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportEdge {
+    pub(crate) from: NodeId,
+    to: NodeId,
+    rule: &'static str,
+    line: u32,
+}
+
+/// GA.3: what [`decide_imports_dotted`] found for a list of statements: the
+/// IMPORTS edges and the `module_import_bindings` inserts, each in statement
+/// order.
+#[derive(Debug, Default)]
+struct DottedImports {
+    edges: Vec<ImportEdge>,
+    bindings: Vec<(NodeId, String, NodeId)>,
+}
+
+impl DottedImports {
+    fn edge(&mut self, from: NodeId, to: NodeId, rule: &'static str, line: u32) {
+        self.edges.push(ImportEdge {
+            from,
+            to,
+            rule,
+            line,
+        });
+    }
+
+    fn bind(&mut self, from: NodeId, name: String, to: NodeId) {
+        self.bindings.push((from, name, to));
+    }
+
+    /// Insert the bindings into `g`, in statement order (a later statement
+    /// binding one name again wins, as one loop inserting them would).
+    fn apply_bindings(&self, g: &mut RepoGraph) {
+        for (from, name, to) in &self.bindings {
+            g.symbols
+                .module_import_bindings
+                .entry(*from)
+                .or_default()
+                .insert(name.clone(), *to);
+        }
+    }
+}
+
+/// GA.3: push `edges` onto `g`, in order.
+pub(crate) fn push_import_edges(g: &mut RepoGraph, edges: &[ImportEdge]) {
+    for e in edges {
+        import_edge(g, e.from, e.to, e.rule, e.line);
+    }
+}
+
+/// The dotted import decisions of [`resolve_imports_dotted`] against a
+/// read-only graph (GA.3). No lookup here reads a binding or an IMPORTS edge
+/// (the module and symbol tables, the star sources, the same-stem table and
+/// the namespace index are all read from the merged parses), so deciding
+/// every statement first and applying after writes what one loop applying as
+/// it went wrote.
+fn decide_imports_dotted(
+    g: &RepoGraph,
+    imports: &[ImportStmt],
+    same: &mut SameStem,
+    stars: &mut PyStars,
+) -> (DottedImports, Namespaces) {
+    let mut ns = Namespaces::default();
+    let mut out = DottedImports::default();
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
@@ -553,15 +713,11 @@ fn resolve_imports_dotted(
                     },
                 };
                 if let Some((target_id, rule)) = found {
-                    import_edge(g, from_mod_id, target_id, rule, stmt.line);
+                    out.edge(from_mod_id, target_id, rule, stmt.line);
                     let bound_name = alias
                         .clone()
                         .unwrap_or_else(|| path.split('.').next().unwrap_or(path).to_string());
-                    g.symbols
-                        .module_import_bindings
-                        .entry(from_mod_id)
-                        .or_default()
-                        .insert(bound_name, target_id);
+                    out.bind(from_mod_id, bound_name, target_id);
                 } else {
                     // Tail fallback (Pattern B): `import com.example.util.Helper`
                     // (class) or `require app.util` (module) where the file layout
@@ -578,12 +734,12 @@ fn resolve_imports_dotted(
                     let guess = unique_global_function(g, tail)
                         .or_else(|| (!refused).then(|| unique_global_module(g, tail)).flatten());
                     if let Some(target_id) = guess {
-                        import_edge(g, from_mod_id, target_id, "tail_unique", stmt.line);
-                        g.symbols
-                            .module_import_bindings
-                            .entry(from_mod_id)
-                            .or_default()
-                            .insert(alias.clone().unwrap_or_else(|| tail.to_string()), target_id);
+                        out.edge(from_mod_id, target_id, "tail_unique", stmt.line);
+                        out.bind(
+                            from_mod_id,
+                            alias.clone().unwrap_or_else(|| tail.to_string()),
+                            target_id,
+                        );
                     } else if refused {
                         same.unresolved();
                     }
@@ -605,7 +761,7 @@ fn resolve_imports_dotted(
                     if let Some(source) = py_module(g, &target_module_qname)
                         && source != from_mod_id
                     {
-                        import_edge(g, from_mod_id, source, RULE_STAR_IMPORT, stmt.line);
+                        out.edge(from_mod_id, source, RULE_STAR_IMPORT, stmt.line);
                     }
                     continue;
                 }
@@ -624,12 +780,8 @@ fn resolve_imports_dotted(
                 if let Some(submodule_id) = g.symbols.module_by_qname.get(&submodule_qname).copied()
                 {
                     // `from pkg import mod` where mod is a submodule.
-                    import_edge(g, from_mod_id, submodule_id, "submodule", stmt.line);
-                    g.symbols
-                        .module_import_bindings
-                        .entry(from_mod_id)
-                        .or_default()
-                        .insert(bound, submodule_id);
+                    out.edge(from_mod_id, submodule_id, "submodule", stmt.line);
+                    out.bind(from_mod_id, bound, submodule_id);
                 } else if let Some((target_mod_id, rule)) =
                     match g.symbols.module_by_qname.get(&target_module_qname) {
                         Some(id) => Some((*id, "symbol")),
@@ -646,7 +798,7 @@ fn resolve_imports_dotted(
                     }
                 {
                     // `from pkg.mod import Name` — target is a symbol inside pkg.mod.
-                    import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
+                    out.edge(from_mod_id, target_mod_id, rule, stmt.line);
                     // GD.9: a name the module only star-imports binds through
                     // the star (the IMPORTS edge stays on the module).
                     if let Some(symbol_id) = g
@@ -657,11 +809,7 @@ fn resolve_imports_dotted(
                         .copied()
                         .or_else(|| stars.through(g, target_mod_id, name))
                     {
-                        g.symbols
-                            .module_import_bindings
-                            .entry(from_mod_id)
-                            .or_default()
-                            .insert(bound, symbol_id);
+                        out.bind(from_mod_id, bound, symbol_id);
                     }
                 } else {
                     // DF.2: the module is a declared namespace PACKAGE (PHP /
@@ -674,12 +822,8 @@ fn resolve_imports_dotted(
                         && let Some((symbol_id, rule)) =
                             stars.package_name(g, &target_module_qname, name)
                     {
-                        import_edge(g, from_mod_id, symbol_id, rule, stmt.line);
-                        g.symbols
-                            .module_import_bindings
-                            .entry(from_mod_id)
-                            .or_default()
-                            .insert(bound, symbol_id);
+                        out.edge(from_mod_id, symbol_id, rule, stmt.line);
+                        out.bind(from_mod_id, bound, symbol_id);
                         continue;
                     }
                     let step = if sym_refused {
@@ -697,12 +841,8 @@ fn resolve_imports_dotted(
                         NsStep::Fallthrough => (unique_global_function(g, name), "tail_unique"),
                     };
                     if let Some(symbol_id) = target {
-                        import_edge(g, from_mod_id, symbol_id, rule, stmt.line);
-                        g.symbols
-                            .module_import_bindings
-                            .entry(from_mod_id)
-                            .or_default()
-                            .insert(bound, symbol_id);
+                        out.edge(from_mod_id, symbol_id, rule, stmt.line);
+                        out.bind(from_mod_id, bound, symbol_id);
                     } else if sym_refused {
                         same.unresolved();
                     }
@@ -710,10 +850,7 @@ fn resolve_imports_dotted(
             }
         }
     }
-    if let Some(line) = ns.marker() {
-        eprintln!("{line}");
-    }
-    stars
+    (out, ns)
 }
 
 /// GD.9: the imported name of a star import (`from m import *`), the form
@@ -799,6 +936,54 @@ impl PyStars {
             }
         }
         stars
+    }
+
+    /// GA.3: the star sources of a built graph, for [`python_rebind`]: the
+    /// importers in `files` read from their statements ([`Self::read`]),
+    /// every other importer from its `star_import` IMPORTS edges ordered by
+    /// row (statement order). Two star edges of one importer at one row:
+    /// [`RebindRefusal::StarRowTie`].
+    fn rebuilt(g: &RepoGraph, files: &[(NodeId, &[ImportStmt])]) -> Result<PyStars, RebindRefusal> {
+        let edited: std::collections::HashSet<NodeId> = files.iter().map(|(m, _)| *m).collect();
+        let mut stars = PyStars::default();
+        for (_, imports) in files {
+            let own = PyStars::read(g, imports);
+            for (from, list) in own.sources {
+                stars.sources.insert(from, list);
+            }
+        }
+        // (importer, row, edge index, source): edge index only breaks the
+        // sort's ties; an importer's two sources at one row refuse.
+        let mut rows: Vec<(NodeId, u32, usize, NodeId)> = Vec::new();
+        for (at, e) in g.edges.iter().enumerate() {
+            if e.category != edge_category::IMPORTS || edited.contains(&e.from) {
+                continue;
+            }
+            let Some(ev) = evidence::Evidence::of(e) else {
+                continue;
+            };
+            if ev.emitter != "graph:imports" || ev.rule.as_deref() != Some(RULE_STAR_IMPORT) {
+                continue;
+            }
+            rows.push((e.from, ev.line.unwrap_or(0), at, e.to));
+        }
+        rows.sort_unstable_by_key(|&(from, row, at, _)| (from.0, row, at));
+        for pair in rows.windows(2) {
+            if let [a, b] = pair
+                && a.0 == b.0
+                && a.1 == b.1
+                && a.3 != b.3
+            {
+                return Err(RebindRefusal::StarRowTie);
+            }
+        }
+        for (from, _, _, source) in rows {
+            let list = stars.sources.entry(from).or_default();
+            if !list.contains(&source) {
+                list.push(source);
+            }
+        }
+        Ok(stars)
     }
 
     /// `name` as `module` re-exports it through its stars (not its own

@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -186,6 +187,10 @@ pub(crate) struct GlobalNames<'g> {
     g: &'g RepoGraph,
     functions: OnceLock<HashMap<&'g str, Option<NodeId>>>,
     types: OnceLock<HashMap<&'g str, Option<NodeId>>>,
+    /// GA.3: nanoseconds spent building the two indexes, for the `[rebody]`
+    /// line's `names_ms=` (a per-file stitch builds them only when a site
+    /// falls back to a repo-unique name).
+    built_ns: AtomicU64,
 }
 
 impl<'g> GlobalNames<'g> {
@@ -194,13 +199,14 @@ impl<'g> GlobalNames<'g> {
             g,
             functions: OnceLock::new(),
             types: OnceLock::new(),
+            built_ns: AtomicU64::new(0),
         }
     }
 
     /// [`unique_global_function`] of `name`.
     fn function(&self, name: &str) -> Option<NodeId> {
         self.functions
-            .get_or_init(|| unique_names(self.g, |_| true))
+            .get_or_init(|| self.timed(|| unique_names(self.g, |_| true)))
             .get(name)
             .copied()
             .flatten()
@@ -209,10 +215,24 @@ impl<'g> GlobalNames<'g> {
     /// `unique_global_type` of `name`.
     fn type_named(&self, name: &str) -> Option<NodeId> {
         self.types
-            .get_or_init(|| unique_names(self.g, |id| is_type_kind(self.g, id)))
+            .get_or_init(|| self.timed(|| unique_names(self.g, |id| is_type_kind(self.g, id))))
             .get(name)
             .copied()
             .flatten()
+    }
+
+    /// `build()`, its wall time added to [`Self::built_ns`].
+    fn timed<T>(&self, build: impl FnOnce() -> T) -> T {
+        let started = Instant::now();
+        let built = build();
+        let ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.built_ns.fetch_add(ns, AtomicOrdering::Relaxed);
+        built
+    }
+
+    /// GA.3: the time spent building this pass's indexes so far, in ms.
+    fn built_ms(&self) -> f64 {
+        self.built_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0
     }
 }
 
@@ -389,6 +409,8 @@ pub(crate) struct EvidenceTally {
     /// never on the pool; `None` for a builder that passes none or whose hook
     /// runs on the pool ([`resolve_calls_pooled`], GA.19: Go's).
     hook: Option<&'static str>,
+    /// GA.3: ms the passes spent building their [`GlobalNames`] indexes.
+    names_ms: f64,
 }
 
 impl EvidenceTally {
@@ -399,6 +421,21 @@ impl EvidenceTally {
             hook: Some(hook),
             ..Self::default()
         }
+    }
+
+    /// GA.3: the calls bound so far, by a generic branch or the hook.
+    pub(crate) fn calls_bound(&self) -> usize {
+        self.calls.iter().sum::<usize>() + self.extra_hook
+    }
+
+    /// GA.3: the refs bound so far.
+    pub(crate) fn refs_bound(&self) -> usize {
+        self.refs.iter().sum()
+    }
+
+    /// GA.3: ms the passes spent building their repo-unique name indexes.
+    pub(crate) fn names_ms(&self) -> f64 {
+        self.names_ms
     }
 
     /// FH.21 fired_on marker, `None` when no pass of this graph ran on a pool:
@@ -560,10 +597,10 @@ where
     // No lookup below reads an edge or an unresolved list, which are all the
     // apply step writes, so a site decides alike before or after another.
     let ranges = chunk_ranges(calls.len(), pool);
-    let chunks = {
+    let (chunks, names_ms) = {
         let g: &RepoGraph = g;
         let names = GlobalNames::new(g);
-        run_chunks(pool, ranges.len(), |i| {
+        let chunks = run_chunks(pool, ranges.len(), |i| {
             let mut gate = gate.sharing();
             let mut counts = CallCounts::default();
             let mut hook_counts = C::default();
@@ -585,8 +622,10 @@ where
                 .collect();
             counts.skipped = gate.skipped;
             (outcomes, counts, hook_counts)
-        })
+        });
+        (chunks, names.built_ms())
     };
+    tally.names_ms += names_ms;
     // FH.21 apply: in input order, on this thread. The apply-step hook runs
     // here, so it sees the edges of every earlier site, as in one sequential
     // loop.
@@ -1178,11 +1217,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     // FH.21 decide: every ref against the read-only graph, chunk by chunk;
     // apply: in input order, on this thread.
     let ranges = chunk_ranges(refs.len(), pool);
-    let chunks = {
+    let (chunks, names_ms) = {
         let g: &RepoGraph = g;
         let names = GlobalNames::new(g);
         let files = &files;
-        run_chunks(pool, ranges.len(), |i| {
+        let chunks = run_chunks(pool, ranges.len(), |i| {
             let mut counts = RefCounts::default();
             let range = ranges.get(i).cloned().unwrap_or_default();
             let decided: Vec<Option<(NodeId, Branch)>> = refs
@@ -1192,8 +1231,10 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                 .map(|r| decide_ref(g, r, files, &names, &mut counts))
                 .collect();
             (decided, counts)
-        })
+        });
+        (chunks, names.built_ms())
     };
+    tally.names_ms += names_ms;
     let mut counts = RefCounts::default();
     let mut decided: Vec<Option<(NodeId, Branch)>> = Vec::with_capacity(refs.len());
     for (chunk, chunk_counts) in chunks {
@@ -2494,6 +2535,26 @@ pub(crate) fn emit_method_level_implements_with(
     g: &mut RepoGraph,
     extra: impl Fn(&RepoGraph, NodeId, &str) -> Option<NodeId>,
 ) -> usize {
+    method_level_implements(g, extra, None)
+}
+
+/// GA.3: [`emit_method_level_implements`] for the class-level IMPLEMENTS
+/// edges whose implementing type is in `types` only (a re-stitched file's
+/// types): the pairs those edges give, filtered against every IMPLEMENTS
+/// edge of the graph, as a whole-graph run filters them. Since a type's
+/// methods are its own children, the pairs drawn are exactly the ones whose
+/// implementing METHOD lies in the types' file.
+pub(crate) fn emit_method_level_implements_for(g: &mut RepoGraph, types: &HashSet<NodeId>) {
+    method_level_implements(g, |_, _, _| None, Some(types));
+}
+
+/// [`emit_method_level_implements_with`], the class-level edges limited to
+/// implementing types in `only` when given.
+fn method_level_implements(
+    g: &mut RepoGraph,
+    extra: impl Fn(&RepoGraph, NodeId, &str) -> Option<NodeId>,
+    only: Option<&HashSet<NodeId>>,
+) -> usize {
     let mut existing: std::collections::HashSet<(NodeId, NodeId)> =
         std::collections::HashSet::new();
     // (implementing METHOD, interface METHOD, confidence, found by `extra`).
@@ -2503,7 +2564,9 @@ pub(crate) fn emit_method_level_implements_with(
             continue;
         }
         existing.insert((e.from, e.to));
-        if g.nav.kind_by_id.get(&e.to) != Some(&node_kind::INTERFACE) {
+        if g.nav.kind_by_id.get(&e.to) != Some(&node_kind::INTERFACE)
+            || only.is_some_and(|types| !types.contains(&e.from))
+        {
             continue;
         }
         let Some(iface_ms) = g.symbols.interface_methods.get(&e.to) else {
