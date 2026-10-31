@@ -9667,6 +9667,7 @@
     "fixtures/go-ethereum-method-wrappers",
     "fixtures/go-generic-instantiation-calls",
     "fixtures/go-gorm",
+    "fixtures/go-handler-bases",
     "fixtures/go-implicit-implements-per-module",
     "fixtures/go-local-method-handlers",
     "fixtures/go-nats-consumer-callbacks",
@@ -9826,6 +9827,7 @@
     "fixtures/ts-http-wrapper-forward",
     "fixtures/ts-http-wrapper-precision",
     "fixtures/ts-inherited-calls",
+    "fixtures/ts-inherited-receivers",
     "fixtures/ts-interface-receivers",
     "fixtures/ts-method-by-value",
     "fixtures/ts-query-suffix-endpoints",
@@ -10129,7 +10131,7 @@
           "routing edge missing"
         ],
         "route": [
-          0,
+          1,
           2
         ],
         "via": "embedded_script"

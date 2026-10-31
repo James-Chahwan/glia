@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 474,
+  "fixtures": 476,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -900,6 +900,13 @@
     },
     "go-handled-by": {
       "framework": "go-handled-by",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "go-handler-bases": {
+      "framework": "go-handler-bases",
       "language": "go",
       "per_category": {
         "HANDLED_BY": 1.0
@@ -2728,6 +2735,14 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPLEMENTS": 1.0
+      }
+    },
+    "ts-inherited-receivers": {
+      "framework": "ts-inherited-receivers",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-interface-receivers": {
