@@ -518,10 +518,45 @@ pub const CODE_TABLES: DomainTables = DomainTables {
 /// owner must extend or implement: the owner's file imports `library` (its
 /// IMPORTS cell lists it exactly) and the owner's heritage clause names
 /// `name`, unbound in the repo (no in-repo type of that name took the ref).
+///
+/// GD.10 (FD.39) widens what "names" means, read by the engine's liveness
+/// (`answers::invoked_members_counted`):
+/// - **aliased**: the heritage clause names a local alias the owner's file
+///   imported the base under (`import { TranslocoLoader as TL } from
+///   '@jsverse/transloco'; class X implements TL`), read off the file
+///   MODULE's IMPORT_BINDINGS rows through [`Self::aliased_by`];
+/// - **intermediate**: the owner extends or implements an in-repo type
+///   (a bound INHERITS_FROM / IMPLEMENTS edge) that itself extends or
+///   implements the base, directly or aliased, at most
+///   [`EXTERNAL_BASE_DEPTH`] in-repo hops up (`class AppHandler extends
+///   BaseHandler`, `class BaseHandler extends ErrorHandler`). The library
+///   check then reads the IMPORTS cell of the type whose clause names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExternalBase {
     pub library: &'static str,
     pub name: &'static str,
+}
+
+/// GD.10: how many in-repo heritage hops (INHERITS_FROM / IMPLEMENTS edges)
+/// an owner's walk to an [`ExternalBase`] climbs before it gives up: the
+/// owner's own clause is hop 0, its in-repo base's hop 1.
+pub const EXTERNAL_BASE_DEPTH: usize = 8;
+
+impl ExternalBase {
+    /// GD.10: does a heritage clause naming `local` mean this base through an
+    /// import alias? True when one of the file's IMPORT_BINDINGS rows
+    /// ([`crate::read_import_bindings`]) imported exactly `name` from exactly
+    /// `library` under the alias `local` (and `local` is not `name` itself,
+    /// the direct case DT.5l already reads). A namespace or default import
+    /// (no `name`) never aliases a named base.
+    pub fn aliased_by(&self, bindings: &[crate::ImportBinding], local: &str) -> bool {
+        local != self.name
+            && bindings.iter().any(|b| {
+                b.spec == self.library
+                    && b.name.as_deref() == Some(self.name)
+                    && b.alias.as_deref() == Some(local)
+            })
+    }
 }
 
 /// DT.5d: one row of [`INVOKED_MEMBERS`]: METHODs a framework or the runtime
@@ -1953,5 +1988,38 @@ mod tests {
                 "preset {name:?} is the base"
             );
         }
+    }
+
+    /// GD.10: an aliased import names the base; another library, another
+    /// name, a namespace import or the base's own name never does.
+    #[test]
+    fn external_base_aliased_by_reads_import_bindings() {
+        let rows = crate::read_import_bindings(
+            r#"[{"spec":"@jsverse/transloco","name":"TranslocoLoader","alias":"TL","line":0},
+                {"spec":"@jsverse/transloco","name":"Translation","alias":null,"line":0},
+                {"spec":"other-lib","name":"TranslocoMissingHandler","alias":"MH","line":1},
+                {"spec":"@jsverse/transloco","name":null,"alias":"t","line":2}]"#,
+        );
+        assert_eq!(rows.len(), 4);
+        let loader = ExternalBase {
+            library: "@jsverse/transloco",
+            name: "TranslocoLoader",
+        };
+        assert!(loader.aliased_by(&rows, "TL"));
+        assert!(
+            !loader.aliased_by(&rows, "TranslocoLoader"),
+            "the direct case"
+        );
+        assert!(!loader.aliased_by(&rows, "t"), "a namespace import");
+        assert!(!loader.aliased_by(&rows, "Translation"));
+        let handler = ExternalBase {
+            library: "@jsverse/transloco",
+            name: "TranslocoMissingHandler",
+        };
+        assert!(
+            !handler.aliased_by(&rows, "MH"),
+            "imported from another library"
+        );
+        assert!(!loader.aliased_by(&[], "TL"));
     }
 }

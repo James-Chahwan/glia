@@ -1,0 +1,17 @@
+{
+  "framework": "liveness-close-out-residuals",
+  "language": "dart+go+typescript",
+  "dirs": ["."],
+  "note": "FD.39 / GD.10: the DT.5l / DT.5e liveness residuals. Dart: Home extends the in-repo BaseScreen, which extends Flutter's StatelessWidget, so Home gets ROLE COMPONENT too (graph::roles rule inherited_widget) and Home / its constructor / build are live; Plain (no Flutter base) stays dead. Go: orphan's `func init()` is no entry, since no package imports orphan (`[live] .. init_gated=1`); used's init stays live (main imports used). TS: AliasLoader implements Transloco's TranslocoLoader under an import alias (`TranslocoLoader as TL`, read through the MODULE's IMPORT_BINDINGS) and AppErrorHandler extends the in-repo BaseHandler, which extends Angular's ErrorHandler, so getTranslation and handleError are invoked members (`[invoked] .. aliased=1 intermediate=1`). Liveness is not graph content, so the dead rows are asserted by engine/tests/liveness_residuals.rs; this key pins the ROLE cells. Base 0.5.6 wave 0 (debug CLI, `glia gaps . --category dead_symbol`): 7 dead_symbol rows (Home, Home::Home, Home::build, Plain, Plain::build, AppErrorHandler::handleError, AliasLoader::getTranslation; orphan::init and orphan::setup live), `[live] profile=code entrypoints=5 (kind=3 role=2 declared=0) owners=0 implementers=0 invoked=2 reached=13/35`.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "app::lib::home::Home", "exact": true},
+    {"kind": "FUNCTION", "name": "go::orphan::orphan::init", "exact": true}
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "app::lib::home::Home", "cell": "ROLE", "contains": "COMPONENT",
+     "note": "the in-repo base's Flutter widget role, lifted by graph::roles rule inherited_widget"},
+    {"kind": "CLASS", "node": "app::lib::base::BaseScreen", "cell": "ROLE", "contains": "COMPONENT",
+     "note": "DT.5e's direct Flutter base, a regression guard"}
+  ]
+}

@@ -441,7 +441,10 @@ where
 /// `dart::provider_type`. Prints `[dart-scope] provider receivers
 /// bound=<n>` when the hook bound a call, then `[reads] member reads
 /// accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` once, then
-/// the LC.3d `[evidence-graph]` line.
+/// (GD.10, when the graph holds a COMPONENT) `[roles] inherited_widget=<n>
+/// components=<c>`: after the passes a class whose in-repo INHERITS_FROM
+/// chain reaches a Flutter widget / State class gains ROLE COMPONENT
+/// (`roles::lift_inherited_widgets`), then the LC.3d `[evidence-graph]` line.
 pub fn build_dart<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -450,11 +453,16 @@ pub fn build_dart<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (g, reads, tally, bound) = dart_passes(repo, parses, resolve_source);
+    let (mut g, reads, tally, bound) = dart_passes(repo, parses, resolve_source);
+    // GD.10: a class over an in-repo Flutter widget base is a widget too.
+    let widgets = crate::roles::lift_inherited_widgets(&mut g);
     if let Some(line) = dart::provider_marker(bound) {
         eprintln!("{line}");
     }
     eprintln!("{}", reads.marker());
+    if let Some(line) = widgets.marker() {
+        eprintln!("{line}");
+    }
     tally.report();
     Ok(g)
 }

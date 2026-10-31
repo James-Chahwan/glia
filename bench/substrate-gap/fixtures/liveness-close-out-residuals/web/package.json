@@ -1,0 +1,1 @@
+{ "name": "web", "dependencies": { "@angular/core": "^17.3.0", "@jsverse/transloco": "^7.4.0" } }

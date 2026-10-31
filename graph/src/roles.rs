@@ -372,6 +372,124 @@ pub(crate) fn fold_role_overlays(
     stats
 }
 
+/// GD.10 (FD.39): how many in-repo INHERITS_FROM hops [`lift_inherited_widgets`]
+/// climbs from a class to a COMPONENT base.
+const INHERITED_WIDGET_DEPTH: usize = 8;
+
+/// What one [`lift_inherited_widgets`] call did: `components`, the classes
+/// that carried the COMPONENT role before it ran (DT.5e's direct Flutter
+/// subclasses), and `lifted`, the classes it gave the role.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InheritedWidgets {
+    pub(crate) components: usize,
+    pub(crate) lifted: usize,
+}
+
+impl InheritedWidgets {
+    /// The fired_on marker, once per Dart graph that holds a COMPONENT:
+    /// `[roles] inherited_widget=<lifted> components=<components>`. `None`
+    /// for a graph with no component, where the pass has nothing to follow.
+    pub(crate) fn marker(&self) -> Option<String> {
+        (self.components > 0).then(|| {
+            format!(
+                "[roles] inherited_widget={} components={}",
+                self.lifted, self.components
+            )
+        })
+    }
+}
+
+/// GD.10 (FD.39, the DT.5e residual): a CLASS whose in-repo INHERITS_FROM
+/// chain reaches a class carrying the COMPONENT role gets ROLE COMPONENT too
+/// (rule `inherited_widget`). The Dart parser tags a class whose `extends`
+/// head is a Flutter widget / State base (`class BaseScreen extends
+/// StatelessWidget`); a screen through an in-repo base (`class Home extends
+/// BaseScreen`) names no Flutter type, yet Flutter builds it just the same.
+/// The role is what makes it an entry and its `build` / `createState` /
+/// `initState` .. invoked members (the code domain's `flutter`
+/// INVOKED_MEMBERS row).
+///
+/// Reads only bound INHERITS_FROM edges (the graph's `resolve_refs` bound
+/// them in-repo; an unbound base is nobody's role), at most
+/// [`INHERITED_WIDGET_DEPTH`] hops up, cycle-safe. The bases are the classes
+/// that carried the role BEFORE the pass, so a lifted class never vouches for
+/// another (the walk climbs the whole chain itself). Runs once, after
+/// `resolve_refs`, in `build_dart` only: an Angular `@Component`'s subclass
+/// without its own decorator is no component, so other languages keep their
+/// roles as their parsers wrote them. A class's existing ROLE cell keeps its
+/// slot and gains COMPONENT; a class with none gets one appended. Walks
+/// `g.nodes` and `g.edges` in Vec order; the maps are only looked up.
+pub(crate) fn lift_inherited_widgets(g: &mut RepoGraph) -> InheritedWidgets {
+    let mut stats = InheritedWidgets::default();
+    let is_class = |g: &RepoGraph, id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
+    let components: HashSet<NodeId> = g
+        .nodes
+        .iter()
+        .filter(|n| is_class(g, &n.id))
+        .filter(|n| {
+            roles_in(g.nav.kind_by_id.get(&n.id).copied(), &n.cells).contains(&node_kind::COMPONENT)
+        })
+        .map(|n| n.id)
+        .collect();
+    stats.components = components.len();
+    if components.is_empty() {
+        return stats;
+    }
+    let mut bases: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in g
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::INHERITS_FROM)
+    {
+        bases.entry(e.from).or_default().push(e.to);
+    }
+    let reaches_component = |start: NodeId| -> bool {
+        let mut seen: HashSet<NodeId> = HashSet::from([start]);
+        let mut frontier = vec![start];
+        for _ in 0..INHERITED_WIDGET_DEPTH {
+            let mut next = Vec::new();
+            for id in &frontier {
+                for &b in bases.get(id).map(Vec::as_slice).unwrap_or(&[]) {
+                    if components.contains(&b) {
+                        return true;
+                    }
+                    if seen.insert(b) {
+                        next.push(b);
+                    }
+                }
+            }
+            if next.is_empty() {
+                return false;
+            }
+            frontier = next;
+        }
+        false
+    };
+    let lift: Vec<usize> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| is_class(g, &n.id) && !components.contains(&n.id))
+        .filter(|(_, n)| reaches_component(n.id))
+        .map(|(i, _)| i)
+        .collect();
+    for i in lift {
+        let node = &mut g.nodes[i];
+        let mut roles = roles_in(None, &node.cells);
+        roles.push(node_kind::COMPONENT);
+        let cell = role_cell(&roles);
+        match node.cells.iter().position(|c| c.kind == cell_type::ROLE) {
+            Some(at) => {
+                node.cells.retain(|c| c.kind != cell_type::ROLE);
+                node.cells.insert(at.min(node.cells.len()), cell);
+            }
+            None => node.cells.push(cell),
+        }
+        stats.lifted += 1;
+    }
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,5 +848,88 @@ mod tests {
         assert_eq!(g.nodes.len(), 1);
         assert!(g.nodes[0].cells.is_empty());
         assert_eq!(g.nav.kind_by_id[&comp], node_kind::COMPONENT);
+    }
+    /// GD.10: a class whose in-repo INHERITS_FROM chain reaches a COMPONENT
+    /// gains ROLE COMPONENT, up to the depth cap, cycle-safe; an existing ROLE
+    /// cell keeps its other roles and slot; a class off the chain stays bare.
+    #[test]
+    fn inherited_widget_lifts_classes_over_an_in_repo_component_base() {
+        let mut g = empty_graph();
+        let class = |g: &mut RepoGraph, q: &str, cells: Vec<Cell>| -> NodeId {
+            let n = id(node_kind::CLASS, q);
+            let name = q.rsplit("::").next().unwrap_or(q);
+            g.nav.record(n, name, q, node_kind::CLASS, None);
+            g.nodes.push(Node { cells, ..node(n) });
+            n
+        };
+        let base = class(
+            &mut g,
+            "lib::base::BaseScreen",
+            vec![role_cell(&[node_kind::COMPONENT])],
+        );
+        let pos = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json("{}".into()),
+        };
+        let home = class(&mut g, "lib::home::Home", vec![pos.clone()]);
+        let mid = class(&mut g, "lib::mid::Mid", vec![]);
+        let deep = class(
+            &mut g,
+            "lib::deep::Deep",
+            vec![role_cell(&[node_kind::SERVICE]), pos.clone()],
+        );
+        let plain = class(&mut g, "lib::plain::Plain", vec![]);
+        let other = class(&mut g, "lib::plain::Other", vec![]);
+        let (c1, c2) = (
+            class(&mut g, "lib::cyc::A", vec![]),
+            class(&mut g, "lib::cyc::B", vec![]),
+        );
+        // A chain one hop past the cap never reaches the base.
+        let mut far = base;
+        for i in 0..=INHERITED_WIDGET_DEPTH {
+            let next = class(&mut g, &format!("lib::far::F{i}"), vec![]);
+            g.edges.push(edge(next, far, edge_category::INHERITS_FROM));
+            far = next;
+        }
+        g.edges.push(edge(home, base, edge_category::INHERITS_FROM));
+        g.edges.push(edge(mid, base, edge_category::INHERITS_FROM));
+        g.edges.push(edge(deep, mid, edge_category::INHERITS_FROM));
+        g.edges
+            .push(edge(plain, other, edge_category::INHERITS_FROM));
+        g.edges.push(edge(c1, c2, edge_category::INHERITS_FROM));
+        g.edges.push(edge(c2, c1, edge_category::INHERITS_FROM));
+        // An IMPLEMENTS of the base is no widget subclass.
+        let impl_only = class(&mut g, "lib::impl::Impl", vec![]);
+        g.edges
+            .push(edge(impl_only, base, edge_category::IMPLEMENTS));
+
+        let stats = lift_inherited_widgets(&mut g);
+        let roles = |id: NodeId| {
+            let n = g.nodes.iter().find(|n| n.id == id).expect("node");
+            roles_in(Some(node_kind::CLASS), &n.cells)
+        };
+        assert_eq!(roles(home), vec![node_kind::COMPONENT]);
+        assert_eq!(roles(mid), vec![node_kind::COMPONENT]);
+        let mut deep_roles = vec![node_kind::COMPONENT, node_kind::SERVICE];
+        deep_roles.sort_by_key(|k| k.0);
+        assert_eq!(roles(deep), deep_roles);
+        let deep_node = g.nodes.iter().find(|n| n.id == deep).expect("deep");
+        assert_eq!(
+            deep_node.cells[0].kind,
+            cell_type::ROLE,
+            "the ROLE cell keeps its slot"
+        );
+        assert_eq!(deep_node.cells.len(), 2);
+        for bare in [plain, other, c1, c2, impl_only, far] {
+            assert!(roles(bare).is_empty());
+        }
+        // F0..F7 are within 8 hops of the base; F8 is the 9th.
+        assert_eq!(stats.components, 1);
+        assert_eq!(stats.lifted, 3 + INHERITED_WIDGET_DEPTH);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[roles] inherited_widget=11 components=1")
+        );
+        assert_eq!(InheritedWidgets::default().marker(), None);
     }
 }
