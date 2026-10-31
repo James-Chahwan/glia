@@ -2370,7 +2370,8 @@ mod tests {
                 "mechanism",
                 "data_entity",
                 "external_host",
-                "doc"
+                "doc",
+                "semantic"
             ]
         );
         assert!(ConceptTier::ALL.windows(2).all(|w| w[0] < w[1]));

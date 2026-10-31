@@ -46,8 +46,8 @@
 //! `find --files`' fused order ranks with a `sem` score answer at tier
 //! `semantic` (heuristic), ordered by that file rank then the hop's depth;
 //! the table's `similarity` column is the matched node's cosine, an
-//! annotation. The table then opens with `_(no flow touches `<w>` by name
-//! ..; ranked by the fused file order: heuristic)_`, the lexical miss kept
+//! annotation. The table then opens with `_(no flow touches <w> by name ..;
+//! ranked by the fused file order: heuristic)_`, the lexical miss kept
 //! beside the rows. The source loads as `find --files` loads it
 //! (`semantic::open_for_surface`); `--no-semantic` never reads the sidecar.
 //! The engine prints `[flows] semantic query=..` when the tier runs.

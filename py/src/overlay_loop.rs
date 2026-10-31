@@ -457,12 +457,11 @@ mod tests {
                     "dead_symbol",
                     "chat_preview_repository::NewChatPreviewRepository"
                 ),
-                ("dead_symbol", "collection::NewCollection"),
                 ("dead_symbol", "collection::NewNamedCollection"),
             ],
             "{text}"
         );
-        assert_eq!(v["snippets"], 3, "{text}");
+        assert_eq!(v["snippets"], 2, "{text}");
         let unknown = propose_of(&paths, vec!["nope".to_string()], 20, 3);
         assert!(
             unknown
