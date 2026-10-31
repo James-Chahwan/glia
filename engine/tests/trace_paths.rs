@@ -29,7 +29,10 @@ const BILLING_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n
 /// function, as `(depth, mechanism, cross_service, from, to)`. Its
 /// `cross_service` was the repo boundary, now `cross_repo`. (The spec's
 /// measurement counted 10 hops; since the marker-anchor pass `enqueue` USES
-/// the `queue_producer:orders` it sends on, the 11th.)
+/// the `queue_producer:orders` it sends on, the 11th.) GA.2: the hops of one
+/// depth follow the stored edge order, canonical since GA.2 (by qname), so
+/// `create_order`'s three calls read bill, enqueue, save (emission order read
+/// enqueue, bill, save); only that order moved.
 const HEAD_HOPS: [(usize, &str, bool, &str, &str); 11] = [
     (
         1,
@@ -46,11 +49,11 @@ const HEAD_HOPS: [(usize, &str, bool, &str, &str); 11] = [
         "POST /orders",
     ),
     (3, "HANDLED_BY", false, "POST /orders", "app::create_order"),
-    (4, "CALLS", false, "app::create_order", "app::enqueue"),
     (4, "CALLS", false, "app::create_order", "app::bill"),
+    (4, "CALLS", false, "app::create_order", "app::enqueue"),
     (4, "CALLS", false, "app::create_order", "app::save"),
-    (5, "USES", false, "app::enqueue", "queue_producer:orders"),
     (5, "CALLS", false, "app::bill", "endpoint:POST:/charge"),
+    (5, "USES", false, "app::enqueue", "queue_producer:orders"),
     (5, "CALLS", false, "app::save", "app::audit"),
     (
         6,

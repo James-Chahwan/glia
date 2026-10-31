@@ -1,0 +1,75 @@
+## graph 0 nodes=7 edges=6 unresolved_calls=1 unresolved_refs=1
+N endpoint:GET:/users[ENDPOINT] medium | ENDPOINT_HIT=json:{"method":"GET","path":"/users","file":"users.service.ts","line":10,"col":12,"confidence":"medium","template":"${environment.apiUrl}/users","folded_from":"${…}/users","host":"users-service:8080"} ; IMPORTS=json:["@angular/common","@angular/core"]
+N environment::environment[STATE_VAR] strong | CODE=text:environment = {
+  production: false,
+  apiUrl: 'http://users-service:8080',
+} ; POSITION=json:{"file":"environment.ts","start_line":0,"end_line":3} ; IMPORTS=json:[]
+N environment[MODULE] strong | CODE=text:export const environment = {
+  production: false,
+  apiUrl: 'http://users-service:8080',
+};
+ ; POSITION=json:{"file":"environment.ts","start_line":0,"end_line":4} ; IMPORTS=json:[]
+N users.service::UsersService::constructor[METHOD] strong | CODE=text:constructor(private http: HttpClient) {} ; POSITION=json:{"file":"users.service.ts","start_line":6,"end_line":6} ; IMPORTS=json:["@angular/common","@angular/core"]
+N users.service::UsersService::getUsers[METHOD] strong | CODE=text:getUsers() {
+    return this.http.get(`${environment.apiUrl}/users`);
+  } ; POSITION=json:{"file":"users.service.ts","start_line":8,"end_line":10} ; IMPORTS=json:["@angular/common","@angular/core"]
+N users.service::UsersService[CLASS] strong | CODE=text:class UsersService {
+  constructor(private http: HttpClient) {}
+
+  getUsers() {
+    return this.http.get(`${environment.apiUrl}/users`);
+  }
+} ; POSITION=json:{"file":"users.service.ts","start_line":5,"end_line":11} ; IMPORTS=json:["@angular/common","@angular/core"] ; ROLE=json:{"roles":["SERVICE"]}
+N users.service[MODULE] strong | CODE=text:import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { environment } from './environment';
+
+@Injectable({ providedIn: 'root' })
+export class UsersService {
+  constructor(private http: HttpClient) {}
+
+  getUsers() {
+    return this.http.get(`${environment.apiUrl}/users`);
+  }
+}
+ ; POSITION=json:{"file":"users.service.ts","start_line":0,"end_line":12} ; IMPORTS=json:["@angular/common","@angular/core"] ; IMPORT_BINDINGS=json:[{"spec":"@angular/common/http","name":"HttpClient","alias":null,"line":1},{"spec":"@angular/core","name":"Injectable","alias":null,"line":0}]
+E environment[MODULE] -> environment::environment[STATE_VAR] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"environment.ts","line":0,"basis":"to_node"}
+E users.service::UsersService::getUsers[METHOD] -> endpoint:GET:/users[ENDPOINT] CALLS medium | EVIDENCE=json:{"emitter":"parser:typescript","file":"users.service.ts","line":9,"basis":"to_node"}
+E users.service::UsersService[CLASS] -> users.service::UsersService::constructor[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"users.service.ts","line":6,"basis":"to_node"}
+E users.service::UsersService[CLASS] -> users.service::UsersService::getUsers[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"users.service.ts","line":8,"basis":"to_node"}
+E users.service[MODULE] -> environment[MODULE] IMPORTS strong | EVIDENCE=json:{"emitter":"graph:imports","rule":"symbol","file":"users.service.ts","line":2,"basis":"site"}
+E users.service[MODULE] -> users.service::UsersService[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"users.service.ts","line":5,"basis":"to_node"}
+C users.service::UsersService::getUsers[METHOD] complex(this.http.get) 9
+R users.service::UsersService[CLASS] users.service[MODULE] INJECTS bare(HttpClient) 6
+## graph 1 nodes=4 edges=3 unresolved_calls=3 unresolved_refs=0
+N GET /users[ROUTE] strong | POSITION=json:{"file":"main.go","start_line":12,"end_line":12} ; ROUTE_METHOD=json:{"method":"GET","handler":"listUsers","file":"main.go","line":13,"col":2} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main::listUsers[FUNCTION] strong | CODE=text:func listUsers(w http.ResponseWriter, r *http.Request) {} ; POSITION=json:{"file":"main.go","start_line":8,"end_line":8} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main::main[FUNCTION] strong | CODE=text:func main() {
+	r := chi.NewRouter()
+	r.Get("/users", listUsers)
+	http.ListenAndServe(":8080", r)
+} ; POSITION=json:{"file":"main.go","start_line":10,"end_line":14} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main[MODULE] strong | CODE=text:package main
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
+
+func listUsers(w http.ResponseWriter, r *http.Request) {}
+
+func main() {
+	r := chi.NewRouter()
+	r.Get("/users", listUsers)
+	http.ListenAndServe(":8080", r)
+}
+ ; POSITION=json:{"file":"main.go","start_line":0,"end_line":15} ; IMPORTS=json:["github.com/go-chi/chi"] ; IMPORT_BINDINGS=json:[{"spec":"github.com::go-chi::chi::v5","name":null,"alias":null,"line":5}]
+E GET /users[ROUTE] -> main::listUsers[FUNCTION] HANDLED_BY strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"module_symbol","file":"main.go","line":12,"basis":"site"}
+E main[MODULE] -> main::listUsers[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":8,"basis":"to_node"}
+E main[MODULE] -> main::main[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":10,"basis":"to_node"}
+C main::main[FUNCTION] attr(chi.NewRouter) 11
+C main::main[FUNCTION] attr(http.ListenAndServe) 13
+C main::main[FUNCTION] attr(r.Get) 12
+## cross edges=1
+E endpoint:GET:/users[ENDPOINT] -> GET /users[ROUTE] HTTP_CALLS medium | EVIDENCE=json:{"emitter":"resolver:http","rule":"exact","file":"users.service.ts","line":9,"basis":"from_node"}

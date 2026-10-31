@@ -1,0 +1,63 @@
+## graph 0 nodes=3 edges=2 unresolved_calls=3 unresolved_refs=0
+N client::FetchUsers[FUNCTION] strong | CODE=text:func FetchUsers() ([]byte, error) {
+	resp, err := http.Get("http://api.example.com/users")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+} ; POSITION=json:{"file":"client.go","start_line":7,"end_line":14} ; IMPORTS=json:[]
+N client[MODULE] strong | CODE=text:package client
+
+import (
+	"io"
+	"net/http"
+)
+
+func FetchUsers() ([]byte, error) {
+	resp, err := http.Get("http://api.example.com/users")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+ ; POSITION=json:{"file":"client.go","start_line":0,"end_line":15} ; IMPORTS=json:[]
+N endpoint:GET:/users[ENDPOINT] strong | ENDPOINT_HIT=json:{"method":"GET","path":"/users","file":"client.go","line":9,"col":15,"confidence":"strong","host":"api.example.com"} ; IMPORTS=json:[]
+E client::FetchUsers[FUNCTION] -> endpoint:GET:/users[ENDPOINT] CALLS strong | EVIDENCE=json:{"emitter":"parser:go","file":"client.go","line":8,"basis":"to_node"}
+E client[MODULE] -> client::FetchUsers[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"client.go","line":7,"basis":"to_node"}
+C client::FetchUsers[FUNCTION] attr(http.Get) 8
+C client::FetchUsers[FUNCTION] attr(io.ReadAll) 13
+C client::FetchUsers[FUNCTION] complex(resp.Body.Close) 12
+## graph 1 nodes=4 edges=3 unresolved_calls=3 unresolved_refs=0
+N GET /users[ROUTE] strong | POSITION=json:{"file":"main.go","start_line":12,"end_line":12} ; ROUTE_METHOD=json:{"method":"GET","handler":"listUsers","file":"main.go","line":13,"col":2} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main::listUsers[FUNCTION] strong | CODE=text:func listUsers(w http.ResponseWriter, r *http.Request) {} ; POSITION=json:{"file":"main.go","start_line":8,"end_line":8} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main::main[FUNCTION] strong | CODE=text:func main() {
+	r := chi.NewRouter()
+	r.Get("/users", listUsers)
+	http.ListenAndServe(":8080", r)
+} ; POSITION=json:{"file":"main.go","start_line":10,"end_line":14} ; IMPORTS=json:["github.com/go-chi/chi"]
+N main[MODULE] strong | CODE=text:package main
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
+
+func listUsers(w http.ResponseWriter, r *http.Request) {}
+
+func main() {
+	r := chi.NewRouter()
+	r.Get("/users", listUsers)
+	http.ListenAndServe(":8080", r)
+}
+ ; POSITION=json:{"file":"main.go","start_line":0,"end_line":15} ; IMPORTS=json:["github.com/go-chi/chi"] ; IMPORT_BINDINGS=json:[{"spec":"github.com::go-chi::chi::v5","name":null,"alias":null,"line":5}]
+E GET /users[ROUTE] -> main::listUsers[FUNCTION] HANDLED_BY strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"module_symbol","file":"main.go","line":12,"basis":"site"}
+E main[MODULE] -> main::listUsers[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":8,"basis":"to_node"}
+E main[MODULE] -> main::main[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":10,"basis":"to_node"}
+C main::main[FUNCTION] attr(chi.NewRouter) 11
+C main::main[FUNCTION] attr(http.ListenAndServe) 13
+C main::main[FUNCTION] attr(r.Get) 12
+## cross edges=1
+E endpoint:GET:/users[ENDPOINT] -> GET /users[ROUTE] HTTP_CALLS strong | EVIDENCE=json:{"emitter":"resolver:http","rule":"exact","file":"client.go","line":8,"basis":"from_node"}

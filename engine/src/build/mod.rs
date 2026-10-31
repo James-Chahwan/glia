@@ -71,7 +71,7 @@ use crate::walk::{
 
 use assemble::{RepoBuildCtx, build_graphs_for_repo};
 use c_includes::IncludeRoots;
-use lang_build::TsAliasSet;
+use lang_build::{CanonicalTally, TsAliasSet};
 use rpc_needles::RpcContext;
 use timing::BuildTimes;
 
@@ -254,6 +254,8 @@ fn generate_one_inner(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let started = Instant::now();
+    // GA.2: a fresh `[canonical]` tally for this build (`finish_build` prints it).
+    CanonicalTally::take();
     let root = PathBuf::from(repo_path);
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
@@ -478,6 +480,8 @@ pub(crate) fn assemble_many_with(
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<Assembled, String> {
+    // GA.2: a fresh `[canonical]` tally for this build (`finish_build` prints it).
+    CanonicalTally::take();
     let mut all_graphs = Vec::new();
     let mut all_fills: Vec<Option<GroupFill>> = Vec::new();
     let mut all_errors = Vec::new();
@@ -621,7 +625,9 @@ pub(crate) fn assemble_many_with(
 /// the `glia docs sync` snapshot under `root`, when either holds a doc). They
 /// follow the repo's language graphs, and the slot order fixes the shard
 /// index, so every build appends them through here (`generate_one_inner`,
-/// `assemble_many_with`, and the watch session of DC.7a).
+/// `assemble_many_with`, and the watch session of DC.7a). GA.2: each is put
+/// in its canonical order ([`RepoGraph::canonicalize`]) and counted into the
+/// build's `[canonical]` tally.
 pub(crate) fn aux_graphs(
     root: &Path,
     repo: RepoId,
@@ -642,6 +648,9 @@ pub(crate) fn aux_graphs(
     doc_records.extend(SnapshotDocSource::for_repo(root).collect());
     if let Some(docs) = build_docs_graph(&doc_records, repo, roots) {
         graphs.push(docs);
+    }
+    for g in &mut graphs {
+        CanonicalTally::record(g.canonicalize());
     }
     graphs
 }
@@ -676,6 +685,11 @@ pub(crate) struct Finished {
 /// the rest `None`), and the Finalize evidence fill applies them. `repos`
 /// (the repos built) and `started` (the build's start) are the returned
 /// [`BuildTimes`]' `repos` and `total`.
+///
+/// GA.2 fired_on marker, once per build, before the passes: the graphs the
+/// build canonicalized ([`CanonicalTally`], taken here, so a watch update
+/// prints its own) and what the sorts moved:
+///   `[canonical] graphs=<g> edges_moved=<m> unresolved_moved=<u>`
 pub(crate) fn finish_build(
     graphs: Vec<RepoGraph>,
     fills: Vec<Option<GroupFill>>,
@@ -684,6 +698,7 @@ pub(crate) fn finish_build(
     repos: usize,
     started: Instant,
 ) -> Finished {
+    eprintln!("{}", CanonicalTally::take().marker());
     let mut merged = MergedGraph::new(graphs);
     let ctx = CodeBuildCtx::new(inputs, opts).with_group_fills(fills);
     let report = run_code_passes_with(&mut merged, &ctx);

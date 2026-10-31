@@ -1,0 +1,57 @@
+## graph 0 nodes=3 edges=3 unresolved_calls=0 unresolved_refs=0
+N m::F[FUNCTION] strong | CODE=text:func F() int { return G() } ; POSITION=json:{"file":"m.go","start_line":3,"end_line":3} ; DOC=text:F does a thing. ; IMPORTS=json:[]
+N m::G[FUNCTION] strong | CODE=text:func G() int { return 1 } ; POSITION=json:{"file":"m.go","start_line":5,"end_line":5} ; IMPORTS=json:[]
+N m[MODULE] strong | CODE=text:package m
+
+// F does a thing.
+func F() int { return G() }
+
+func G() int { return 1 }
+ ; POSITION=json:{"file":"m.go","start_line":0,"end_line":6} ; IMPORTS=json:[]
+E m::F[FUNCTION] -> m::G[FUNCTION] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"module_symbol","file":"m.go","line":3,"basis":"site"}
+E m[MODULE] -> m::F[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"m.go","line":3,"basis":"to_node"}
+E m[MODULE] -> m::G[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"m.go","line":5,"basis":"to_node"}
+## graph 1 nodes=6 edges=5 unresolved_calls=0 unresolved_refs=0
+N a::bar[FUNCTION] strong | CODE=text:def bar():
+    return 1 ; POSITION=json:{"file":"a.py","start_line":4,"end_line":5} ; IMPORTS=json:[]
+N a::foo[FUNCTION] strong | CODE=text:def foo():
+    """Frobnicates."""
+    return bar() ; POSITION=json:{"file":"a.py","start_line":0,"end_line":2} ; DOC=text:Frobnicates. ; IMPORTS=json:[]
+N a[MODULE] strong | CODE=text:def foo():
+    """Frobnicates."""
+    return bar()
+
+def bar():
+    return 1
+ ; POSITION=json:{"file":"a.py","start_line":0,"end_line":6} ; IMPORTS=json:[]
+N b::Widget::spin[METHOD] strong | CODE=text:def spin(self):
+        return 2 ; POSITION=json:{"file":"b.py","start_line":1,"end_line":2} ; IMPORTS=json:[]
+N b::Widget[CLASS] strong | CODE=text:class Widget:
+    def spin(self):
+        return 2 ; POSITION=json:{"file":"b.py","start_line":0,"end_line":2} ; IMPORTS=json:[]
+N b[MODULE] strong | CODE=text:class Widget:
+    def spin(self):
+        return 2
+ ; POSITION=json:{"file":"b.py","start_line":0,"end_line":3} ; IMPORTS=json:[]
+E a::foo[FUNCTION] -> a::bar[FUNCTION] CALLS strong | EVIDENCE=json:{"emitter":"parser:python","rule":"intra_file","file":"a.py","line":2,"basis":"site"}
+E a[MODULE] -> a::bar[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"a.py","line":4,"basis":"to_node"}
+E a[MODULE] -> a::foo[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"a.py","line":0,"basis":"to_node"}
+E b::Widget[CLASS] -> b::Widget::spin[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"b.py","line":1,"basis":"to_node"}
+E b[MODULE] -> b::Widget[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"b.py","line":0,"basis":"to_node"}
+## graph 2 nodes=2 edges=1 unresolved_calls=0 unresolved_refs=0
+N c::tsEntry[FUNCTION] strong | CODE=text:function tsEntry(): number {
+  return 3;
+} ; POSITION=json:{"file":"c.ts","start_line":0,"end_line":2} ; IMPORTS=json:[]
+N c[MODULE] strong | CODE=text:export function tsEntry(): number {
+  return 3;
+}
+ ; POSITION=json:{"file":"c.ts","start_line":0,"end_line":3} ; IMPORTS=json:[]
+E c[MODULE] -> c::tsEntry[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"c.ts","line":0,"basis":"to_node"}
+## graph 3 nodes=1 edges=0 unresolved_calls=0 unresolved_refs=0
+N project:.[PROJECT] strong | ORIGIN=json:{"ecosystem":"go","label":"example.com/fixture","label_source":"manifest","manifest":"go.mod","path":"","provenance":"project_root"}
+## graph 4 nodes=1 edges=0 unresolved_calls=0 unresolved_refs=0
+N docs::README::fixture[DOC_SECTION] weak | CODE=text:# Fixture
+
+Use `foo` and `Widget.spin`. ; POSITION=json:{"file":"README.md","start_line":0,"end_line":2} ; ORIGIN=json:{"provenance":"documentation"}
+## cross edges=1
+E docs::README::fixture[DOC_SECTION] -> b::Widget::spin[METHOD] DOCUMENTS strong | EVIDENCE=json:{"emitter":"pass:doclink","rule":"qualified","file":"README.md","line":0,"basis":"from_node"}

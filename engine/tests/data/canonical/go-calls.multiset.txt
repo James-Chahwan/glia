@@ -1,0 +1,33 @@
+## graph 0 nodes=4 edges=5 unresolved_calls=1 unresolved_refs=0
+N main::compute[FUNCTION] strong | CODE=text:func compute(n int) int {
+	return helper(n) + 1
+} ; POSITION=json:{"file":"main.go","start_line":8,"end_line":10} ; IMPORTS=json:[]
+N main::helper[FUNCTION] strong | CODE=text:func helper(x int) int {
+	return x * 2
+} ; POSITION=json:{"file":"main.go","start_line":4,"end_line":6} ; IMPORTS=json:[]
+N main::main[FUNCTION] strong | CODE=text:func main() {
+	fmt.Println(compute(21))
+} ; POSITION=json:{"file":"main.go","start_line":12,"end_line":14} ; IMPORTS=json:[]
+N main[MODULE] strong | CODE=text:package main
+
+import "fmt"
+
+func helper(x int) int {
+	return x * 2
+}
+
+func compute(n int) int {
+	return helper(n) + 1
+}
+
+func main() {
+	fmt.Println(compute(21))
+}
+ ; POSITION=json:{"file":"main.go","start_line":0,"end_line":15} ; IMPORTS=json:[]
+E main::compute[FUNCTION] -> main::helper[FUNCTION] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"module_symbol","file":"main.go","line":9,"basis":"site"}
+E main::main[FUNCTION] -> main::compute[FUNCTION] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"module_symbol","file":"main.go","line":13,"basis":"site"}
+E main[MODULE] -> main::compute[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":8,"basis":"to_node"}
+E main[MODULE] -> main::helper[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":4,"basis":"to_node"}
+E main[MODULE] -> main::main[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:go","file":"main.go","line":12,"basis":"to_node"}
+C main::main[FUNCTION] attr(fmt.Println) 13
+## cross edges=0

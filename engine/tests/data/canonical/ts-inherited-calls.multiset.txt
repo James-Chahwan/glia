@@ -1,0 +1,168 @@
+## graph 0 nodes=3 edges=2 unresolved_calls=0 unresolved_refs=0
+N package.json[MODULE] strong | 
+N package:npm:@nestjs/common[PACKAGE_DEP] medium | ORIGIN=json:{"provenance":"dependency"}
+N package:npm:@nestjs/event-emitter[PACKAGE_DEP] medium | ORIGIN=json:{"provenance":"dependency"}
+E package.json[MODULE] -> package:npm:@nestjs/common[PACKAGE_DEP] DEPENDS_ON medium | EVIDENCE=json:{"emitter":"extractor:manifest","file":"package.json","basis":"file"}
+E package.json[MODULE] -> package:npm:@nestjs/event-emitter[PACKAGE_DEP] DEPENDS_ON medium | EVIDENCE=json:{"emitter":"extractor:manifest","file":"package.json","basis":"file"}
+## graph 1 nodes=19 edges=30 unresolved_calls=1 unresolved_refs=0
+N event_handle:user.requested[EVENT_HANDLER] weak | POSITION=json:{"file":"src/users.listener.ts","start_line":8,"end_line":8} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"] ; ORIGIN=json:{"provenance":"synthetic"}
+N src::admin-repo::AdminRepo::audit[METHOD] strong | CODE=text:audit(): void {
+    this.missing();
+  } ; POSITION=json:{"file":"src/admin-repo.ts","start_line":9,"end_line":11} ; IMPORTS=json:["@nestjs/common"]
+N src::admin-repo::AdminRepo::findAdmin[METHOD] strong | CODE=text:findAdmin(id: string): string {
+    return this.load(id) + this.find(id) + this.describe();
+  } ; POSITION=json:{"file":"src/admin-repo.ts","start_line":5,"end_line":7} ; IMPORTS=json:["@nestjs/common"]
+N src::admin-repo::AdminRepo[CLASS] strong | CODE=text:class AdminRepo extends UserRepo {
+  findAdmin(id: string): string {
+    return this.load(id) + this.find(id) + this.describe();
+  }
+
+  audit(): void {
+    this.missing();
+  }
+} ; POSITION=json:{"file":"src/admin-repo.ts","start_line":4,"end_line":12} ; IMPORTS=json:["@nestjs/common"] ; ROLE=json:{"roles":["SERVICE"]}
+N src::admin-repo[MODULE] strong | CODE=text:import { Injectable } from '@nestjs/common';
+import { UserRepo } from './user-repo';
+
+@Injectable()
+export class AdminRepo extends UserRepo {
+  findAdmin(id: string): string {
+    return this.load(id) + this.find(id) + this.describe();
+  }
+
+  audit(): void {
+    this.missing();
+  }
+}
+ ; POSITION=json:{"file":"src/admin-repo.ts","start_line":0,"end_line":13} ; IMPORTS=json:["@nestjs/common"] ; IMPORT_BINDINGS=json:[{"spec":"@nestjs/common","name":"Injectable","alias":null,"line":0}]
+N src::base-repo::BaseRepo::describe[METHOD] strong | CODE=text:describe(): string {
+    return 'repo';
+  } ; POSITION=json:{"file":"src/base-repo.ts","start_line":7,"end_line":9} ; IMPORTS=json:[]
+N src::base-repo::BaseRepo::fetchOne[METHOD] strong | CODE=text:abstract fetchOne(id: string): string ; POSITION=json:{"file":"src/base-repo.ts","start_line":5,"end_line":5} ; IMPORTS=json:[]
+N src::base-repo::BaseRepo::load[METHOD] strong | CODE=text:protected load(id: string): string {
+    return this.fetchOne(id);
+  } ; POSITION=json:{"file":"src/base-repo.ts","start_line":1,"end_line":3} ; IMPORTS=json:[]
+N src::base-repo::BaseRepo[CLASS] strong | CODE=text:abstract class BaseRepo {
+  protected load(id: string): string {
+    return this.fetchOne(id);
+  }
+
+  abstract fetchOne(id: string): string;
+
+  describe(): string {
+    return 'repo';
+  }
+} ; POSITION=json:{"file":"src/base-repo.ts","start_line":0,"end_line":10} ; IMPORTS=json:[]
+N src::base-repo[MODULE] strong | CODE=text:export abstract class BaseRepo {
+  protected load(id: string): string {
+    return this.fetchOne(id);
+  }
+
+  abstract fetchOne(id: string): string;
+
+  describe(): string {
+    return 'repo';
+  }
+}
+ ; POSITION=json:{"file":"src/base-repo.ts","start_line":0,"end_line":11} ; IMPORTS=json:[]
+N src::user-repo::UserRepo::describe[METHOD] strong | CODE=text:describe(): string {
+    return `users: ${super.describe()}`;
+  } ; POSITION=json:{"file":"src/user-repo.ts","start_line":9,"end_line":11} ; IMPORTS=json:["@nestjs/common"]
+N src::user-repo::UserRepo::fetchOne[METHOD] strong | CODE=text:fetchOne(id: string): string {
+    return `user-${id}`;
+  } ; POSITION=json:{"file":"src/user-repo.ts","start_line":5,"end_line":7} ; IMPORTS=json:["@nestjs/common"]
+N src::user-repo::UserRepo::find[METHOD] strong | CODE=text:find(id: string): string {
+    return this.load(id);
+  } ; POSITION=json:{"file":"src/user-repo.ts","start_line":13,"end_line":15} ; IMPORTS=json:["@nestjs/common"]
+N src::user-repo::UserRepo[CLASS] strong | CODE=text:class UserRepo extends BaseRepo {
+  fetchOne(id: string): string {
+    return `user-${id}`;
+  }
+
+  describe(): string {
+    return `users: ${super.describe()}`;
+  }
+
+  find(id: string): string {
+    return this.load(id);
+  }
+} ; POSITION=json:{"file":"src/user-repo.ts","start_line":4,"end_line":16} ; IMPORTS=json:["@nestjs/common"] ; ROLE=json:{"roles":["SERVICE"]}
+N src::user-repo[MODULE] strong | CODE=text:import { Injectable } from '@nestjs/common';
+import { BaseRepo } from './base-repo';
+
+@Injectable()
+export class UserRepo extends BaseRepo {
+  fetchOne(id: string): string {
+    return `user-${id}`;
+  }
+
+  describe(): string {
+    return `users: ${super.describe()}`;
+  }
+
+  find(id: string): string {
+    return this.load(id);
+  }
+}
+ ; POSITION=json:{"file":"src/user-repo.ts","start_line":0,"end_line":17} ; IMPORTS=json:["@nestjs/common"] ; IMPORT_BINDINGS=json:[{"spec":"@nestjs/common","name":"Injectable","alias":null,"line":0}]
+N src::users.listener::UsersListener::constructor[METHOD] strong | CODE=text:constructor(private readonly repo: UserRepo) {} ; POSITION=json:{"file":"src/users.listener.ts","start_line":6,"end_line":6} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"]
+N src::users.listener::UsersListener::onRequested[METHOD] strong | CODE=text:@OnEvent('user.requested')
+  onRequested(id: string): string {
+    return this.repo.find(id);
+  } ; POSITION=json:{"file":"src/users.listener.ts","start_line":8,"end_line":11} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"]
+N src::users.listener::UsersListener[CLASS] strong | CODE=text:class UsersListener {
+  constructor(private readonly repo: UserRepo) {}
+
+  @OnEvent('user.requested')
+  onRequested(id: string): string {
+    return this.repo.find(id);
+  }
+} ; POSITION=json:{"file":"src/users.listener.ts","start_line":5,"end_line":12} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"] ; ROLE=json:{"roles":["SERVICE"]}
+N src::users.listener[MODULE] strong | CODE=text:import { Injectable } from '@nestjs/common';
+import { OnEvent } from '@nestjs/event-emitter';
+import { UserRepo } from './user-repo';
+
+@Injectable()
+export class UsersListener {
+  constructor(private readonly repo: UserRepo) {}
+
+  @OnEvent('user.requested')
+  onRequested(id: string): string {
+    return this.repo.find(id);
+  }
+}
+ ; POSITION=json:{"file":"src/users.listener.ts","start_line":0,"end_line":13} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"] ; IMPORT_BINDINGS=json:[{"spec":"@nestjs/common","name":"Injectable","alias":null,"line":0},{"spec":"@nestjs/event-emitter","name":"OnEvent","alias":null,"line":1}]
+E event_handle:user.requested[EVENT_HANDLER] -> src::users.listener::UsersListener::onRequested[METHOD] HANDLED_BY medium | EVIDENCE=json:{"emitter":"extractor:anchor","file":"src/users.listener.ts","line":8,"basis":"from_node"}
+E src::admin-repo::AdminRepo::findAdmin[METHOD] -> src::base-repo::BaseRepo::load[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"inherited_method","file":"src/admin-repo.ts","line":6,"basis":"site"}
+E src::admin-repo::AdminRepo::findAdmin[METHOD] -> src::user-repo::UserRepo::describe[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"inherited_method","file":"src/admin-repo.ts","line":6,"basis":"site"}
+E src::admin-repo::AdminRepo::findAdmin[METHOD] -> src::user-repo::UserRepo::find[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"inherited_method","file":"src/admin-repo.ts","line":6,"basis":"site"}
+E src::admin-repo::AdminRepo[CLASS] -> src::admin-repo::AdminRepo::audit[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/admin-repo.ts","line":9,"basis":"to_node"}
+E src::admin-repo::AdminRepo[CLASS] -> src::admin-repo::AdminRepo::findAdmin[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/admin-repo.ts","line":5,"basis":"to_node"}
+E src::admin-repo::AdminRepo[CLASS] -> src::user-repo::UserRepo[CLASS] INHERITS_FROM strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"import_binding","file":"src/admin-repo.ts","line":4,"basis":"site"}
+E src::admin-repo[MODULE] -> src::admin-repo::AdminRepo[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/admin-repo.ts","line":4,"basis":"to_node"}
+E src::admin-repo[MODULE] -> src::user-repo[MODULE] IMPORTS strong | EVIDENCE=json:{"emitter":"graph:imports","rule":"symbol","file":"src/admin-repo.ts","line":1,"basis":"site"}
+E src::base-repo::BaseRepo::load[METHOD] -> src::base-repo::BaseRepo::fetchOne[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"parser:typescript","rule":"intra_file","file":"src/base-repo.ts","line":2,"basis":"site"}
+E src::base-repo::BaseRepo[CLASS] -> src::base-repo::BaseRepo::describe[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/base-repo.ts","line":7,"basis":"to_node"}
+E src::base-repo::BaseRepo[CLASS] -> src::base-repo::BaseRepo::fetchOne[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/base-repo.ts","line":5,"basis":"to_node"}
+E src::base-repo::BaseRepo[CLASS] -> src::base-repo::BaseRepo::load[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/base-repo.ts","line":1,"basis":"to_node"}
+E src::base-repo[MODULE] -> src::base-repo::BaseRepo[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/base-repo.ts","line":0,"basis":"to_node"}
+E src::user-repo::UserRepo::describe[METHOD] -> src::base-repo::BaseRepo::describe[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"super_method","file":"src/user-repo.ts","line":10,"basis":"site"}
+E src::user-repo::UserRepo::describe[METHOD] -> src::base-repo::BaseRepo::describe[METHOD] IMPLEMENTS strong | EVIDENCE=json:{"emitter":"graph:iface","rule":"concrete_override","file":"src/user-repo.ts","line":9,"basis":"from_node"}
+E src::user-repo::UserRepo::fetchOne[METHOD] -> src::base-repo::BaseRepo::fetchOne[METHOD] IMPLEMENTS strong | EVIDENCE=json:{"emitter":"graph:iface","rule":"abstract_override","file":"src/user-repo.ts","line":5,"basis":"from_node"}
+E src::user-repo::UserRepo::find[METHOD] -> src::base-repo::BaseRepo::load[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"inherited_method","file":"src/user-repo.ts","line":14,"basis":"site"}
+E src::user-repo::UserRepo[CLASS] -> src::base-repo::BaseRepo[CLASS] INHERITS_FROM strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"import_binding","file":"src/user-repo.ts","line":4,"basis":"site"}
+E src::user-repo::UserRepo[CLASS] -> src::user-repo::UserRepo::describe[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":9,"basis":"to_node"}
+E src::user-repo::UserRepo[CLASS] -> src::user-repo::UserRepo::fetchOne[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":5,"basis":"to_node"}
+E src::user-repo::UserRepo[CLASS] -> src::user-repo::UserRepo::find[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":13,"basis":"to_node"}
+E src::user-repo[MODULE] -> src::base-repo[MODULE] IMPORTS strong | EVIDENCE=json:{"emitter":"graph:imports","rule":"symbol","file":"src/user-repo.ts","line":1,"basis":"site"}
+E src::user-repo[MODULE] -> src::user-repo::UserRepo[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":4,"basis":"to_node"}
+E src::users.listener::UsersListener::onRequested[METHOD] -> src::user-repo::UserRepo::find[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"receiver_type","file":"src/users.listener.ts","line":10,"basis":"site"}
+E src::users.listener::UsersListener[CLASS] -> src::user-repo::UserRepo[CLASS] INJECTS strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"import_binding","file":"src/users.listener.ts","line":6,"basis":"site"}
+E src::users.listener::UsersListener[CLASS] -> src::users.listener::UsersListener::constructor[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/users.listener.ts","line":6,"basis":"to_node"}
+E src::users.listener::UsersListener[CLASS] -> src::users.listener::UsersListener::onRequested[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/users.listener.ts","line":8,"basis":"to_node"}
+E src::users.listener[MODULE] -> src::user-repo[MODULE] IMPORTS strong | EVIDENCE=json:{"emitter":"graph:imports","rule":"symbol","file":"src/users.listener.ts","line":2,"basis":"site"}
+E src::users.listener[MODULE] -> src::users.listener::UsersListener[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/users.listener.ts","line":5,"basis":"to_node"}
+C src::admin-repo::AdminRepo::audit[METHOD] self(missing) 10
+## graph 2 nodes=1 edges=0 unresolved_calls=0 unresolved_refs=0
+N project:.[PROJECT] strong | ORIGIN=json:{"ecosystem":"npm","label":"inherited-calls","label_source":"manifest","manifest":"package.json","path":"","provenance":"project_root"}
+## cross edges=0

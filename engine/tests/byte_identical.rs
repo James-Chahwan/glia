@@ -119,3 +119,40 @@ fn incremental_build_is_byte_identical_to_clean_on_disk() {
     write_merged_sharded(&clean.merged, &out_clean).unwrap();
     assert_dirs_byte_identical(&out_incr, &out_clean, "incremental vs clean");
 }
+
+/// GA.2: a built graph is in its canonical order (a second
+/// `RepoGraph::canonicalize` moves nothing), and the bytes a graph writes do
+/// not depend on the order its builder emitted in: every graph's intra edges
+/// and unresolved lists reversed, then canonicalized, write the clean
+/// build's bytes.
+#[test]
+fn any_emission_order_writes_one_byte_form() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    write_fixture(&repo);
+    let built = generate_one(repo.to_str().unwrap()).unwrap();
+
+    let mut shuffled = built.merged.clone();
+    for g in &mut shuffled.graphs {
+        assert_eq!(
+            g.clone().canonicalize(),
+            glia_graph::CanonicalMoves::default(),
+            "a built graph is already canonical"
+        );
+        g.edges.reverse();
+        g.unresolved_calls.reverse();
+        g.unresolved_refs.reverse();
+        g.canonicalize();
+    }
+    assert!(
+        built.merged.graphs.iter().any(|g| g.edges.len() > 1),
+        "fixture must hold a graph with more than one edge"
+    );
+
+    let out_built = tmp.path().join("out_built");
+    let out_shuffled = tmp.path().join("out_shuffled");
+    write_merged_sharded(&built.merged, &out_built).unwrap();
+    write_merged_sharded(&shuffled, &out_shuffled).unwrap();
+    assert_dirs_byte_identical(&out_built, &out_shuffled, "emission order vs canonical");
+}

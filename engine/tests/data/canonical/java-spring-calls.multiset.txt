@@ -1,0 +1,33 @@
+## graph 0 nodes=4 edges=4 unresolved_calls=0 unresolved_refs=0
+N App::compute[METHOD] strong | CODE=text:public int compute(int x) {
+        return helper(x) + 1;
+    } ; POSITION=json:{"file":"App.java","start_line":3,"end_line":5} ; IMPORTS=json:[]
+N App::helper[METHOD] strong | CODE=text:public int helper(int x) {
+        return x * 2;
+    } ; POSITION=json:{"file":"App.java","start_line":7,"end_line":9} ; IMPORTS=json:[]
+N App[CLASS] strong | CODE=text:public class App {
+    public int compute(int x) {
+        return helper(x) + 1;
+    }
+
+    public int helper(int x) {
+        return x * 2;
+    }
+} ; POSITION=json:{"file":"App.java","start_line":2,"end_line":10} ; IMPORTS=json:[]
+N App[MODULE] strong | CODE=text:package com.example;
+
+public class App {
+    public int compute(int x) {
+        return helper(x) + 1;
+    }
+
+    public int helper(int x) {
+        return x * 2;
+    }
+}
+ ; POSITION=json:{"file":"App.java","start_line":0,"end_line":11} ; IMPORTS=json:[]
+E App::compute[METHOD] -> App::helper[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"self_method","file":"App.java","line":4,"basis":"site"}
+E App[CLASS] -> App::compute[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:java","file":"App.java","line":3,"basis":"to_node"}
+E App[CLASS] -> App::helper[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:java","file":"App.java","line":7,"basis":"to_node"}
+E App[MODULE] -> App[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:java","file":"App.java","line":2,"basis":"to_node"}
+## cross edges=0

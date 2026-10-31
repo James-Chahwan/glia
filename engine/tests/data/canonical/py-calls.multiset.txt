@@ -1,0 +1,26 @@
+## graph 0 nodes=3 edges=3 unresolved_calls=1 unresolved_refs=0
+N app::compute[FUNCTION] strong | CODE=text:def compute(n):
+    total = 0
+    for i in range(n):
+        total = helper(total)  # CALLS compute -> helper
+    return total ; POSITION=json:{"file":"app.py","start_line":7,"end_line":11} ; IMPORTS=json:[]
+N app::helper[FUNCTION] strong | CODE=text:def helper(x):
+    return x + 1 ; POSITION=json:{"file":"app.py","start_line":3,"end_line":4} ; IMPORTS=json:[]
+N app[MODULE] strong | CODE=text:"""Positive control: intra-file CALLS extraction (Python)."""
+
+
+def helper(x):
+    return x + 1
+
+
+def compute(n):
+    total = 0
+    for i in range(n):
+        total = helper(total)  # CALLS compute -> helper
+    return total
+ ; POSITION=json:{"file":"app.py","start_line":0,"end_line":12} ; DOC=text:Positive control: intra-file CALLS extraction (Python). ; IMPORTS=json:[]
+E app::compute[FUNCTION] -> app::helper[FUNCTION] CALLS strong | EVIDENCE=json:{"emitter":"parser:python","rule":"intra_file","file":"app.py","line":10,"basis":"site"}
+E app[MODULE] -> app::compute[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"app.py","line":7,"basis":"to_node"}
+E app[MODULE] -> app::helper[FUNCTION] DEFINES strong | EVIDENCE=json:{"emitter":"parser:python","file":"app.py","line":3,"basis":"to_node"}
+C app::compute[FUNCTION] bare(range) 9
+## cross edges=0

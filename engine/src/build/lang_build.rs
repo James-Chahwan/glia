@@ -21,7 +21,7 @@ use glia_code_domain::project_roots::{LABEL_MANIFEST, ProjectRoot};
 use glia_code_domain::{FileParse, cell_type, edge_category, evidence, node_kind, recv_stats};
 use glia_core::{EdgeCategoryId, NodeId, RepoId};
 use glia_graph::rust_paths::RustCrate;
-use glia_graph::{GraphError, RepoGraph};
+use glia_graph::{CanonicalMoves, GraphError, RepoGraph};
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 use crate::passes::{GroupFill, fill_group_evidence};
@@ -403,6 +403,10 @@ pub(crate) struct LangBuild {
     graph: Result<(RepoGraph, HeritageTally, GroupFill), String>,
     /// The receiver-typed binds `recv_stats` counted during the build.
     recv_bound: usize,
+    /// GA.2: what [`RepoGraph::canonicalize`] moved in this build's graph
+    /// (zero for a failed build), recorded into the build's `[canonical]`
+    /// tally when the build is folded ([`CanonicalTally::record`]).
+    canonical: CanonicalMoves,
 }
 
 impl LangBuild {
@@ -421,6 +425,7 @@ impl LangBuild {
             lang: key,
             graph: Err(line.to_string()),
             recv_bound: 0,
+            canonical: CanonicalMoves::default(),
         }
     }
 
@@ -438,6 +443,7 @@ impl LangBuild {
         recv_bound.push((self.lang, self.recv_bound));
         match self.graph {
             Ok((g, h, fill)) => {
+                CanonicalTally::record(self.canonical);
                 heritage.push(h);
                 graphs.push(g);
                 keys.push(self.lang);
@@ -457,7 +463,9 @@ impl LangBuild {
 /// a build rayon runs on this thread while it waits), so the `reset` ..
 /// `take` bracket holds exactly this build's receiver-typed binds. FH.21:
 /// the build runs under [`EngineResolvePool`] when more than one worker can
-/// take its chunks.
+/// take its chunks. GA.2: the graph is put in its canonical order
+/// ([`RepoGraph::canonicalize`]) right after the stamp, before the tallies and
+/// the evidence fill, whose per-edge records are indexed by edge position.
 fn build_one(
     lang: &'static str,
     parses: Vec<FileParse>,
@@ -471,9 +479,11 @@ fn build_one(
         build(parses)
     };
     let recv_bound = recv_stats::take();
+    let mut canonical = CanonicalMoves::default();
     let graph = match graph {
         Ok(mut g) => {
             stamp_graph_edges(&mut g, unattributed);
+            canonical = g.canonicalize();
             let h = HeritageTally::of(lang, &g);
             if let Some(line) = LineTally::of(&g).marker(lang) {
                 eprintln!("{line}");
@@ -487,6 +497,63 @@ fn build_one(
         lang,
         graph,
         recv_bound,
+        canonical,
+    }
+}
+
+/// GA.2: the build's `[canonical]` line, tallied on the thread that folds the
+/// build's graphs and runs its tail: each folded language graph
+/// ([`LangBuild::fold`], with what its own group build moved: a group a watch
+/// session reuses brings the count of the build that made it) and each region
+/// / project / docs graph (`super::aux_graphs`). `super::finish_build` takes
+/// it and prints the line; a build entry point resets it first
+/// ([`CanonicalTally::take`]), so a build that never reached its tail leaves
+/// nothing behind. Per thread, because the language graphs are built on pool
+/// workers but folded, with the aux graphs and the tail, on the build's own.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CanonicalTally {
+    /// Graphs canonicalized.
+    pub(crate) graphs: usize,
+    /// Intra edges whose index the sort changed, summed over the graphs.
+    pub(crate) edges_moved: usize,
+    /// Unresolved call sites and refs whose index changed, summed.
+    pub(crate) unresolved_moved: usize,
+}
+
+thread_local! {
+    static CANONICAL: Cell<CanonicalTally> = const {
+        Cell::new(CanonicalTally {
+            graphs: 0,
+            edges_moved: 0,
+            unresolved_moved: 0,
+        })
+    };
+}
+
+impl CanonicalTally {
+    /// Add one canonicalized graph's moves to this thread's tally.
+    pub(crate) fn record(moves: CanonicalMoves) {
+        CANONICAL.with(|t| {
+            let mut tally = t.get();
+            tally.graphs += 1;
+            tally.edges_moved = tally.edges_moved.saturating_add(moves.edges);
+            tally.unresolved_moved = tally.unresolved_moved.saturating_add(moves.unresolved);
+            t.set(tally);
+        });
+    }
+
+    /// This thread's tally, reset to zero.
+    pub(crate) fn take() -> Self {
+        CANONICAL.with(|t| t.replace(Self::default()))
+    }
+
+    /// The GA.2 fired_on marker, once per build:
+    ///   `[canonical] graphs=<g> edges_moved=<m> unresolved_moved=<u>`
+    pub(crate) fn marker(&self) -> String {
+        format!(
+            "[canonical] graphs={} edges_moved={} unresolved_moved={}",
+            self.graphs, self.edges_moved, self.unresolved_moved
+        )
     }
 }
 
