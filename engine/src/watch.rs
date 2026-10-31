@@ -76,6 +76,38 @@
 //!   re-read, a listing or input fingerprinted, or one reported for want of
 //!   a fingerprint).
 //!
+//! - `[watch] rss seq=<s> rss_mb=<m> budget_mb=<b|none> cached_groups=<k>/<g> evicted=<e> memo_cleared=<0|1> repo=<label>`
+//!   (GA.12) once at open, once per update that rebuilt and once per
+//!   [`WatchSession::set_memory_budget`], after the memory budget was
+//!   enforced (module doc, "Memory budget"): the process's resident set then
+//!   (`?` when unreadable), the budget, the cached language groups left of
+//!   the plan's, the groups evicted and whether the build memos were cleared
+//!   by this enforcement.
+//!
+//! Memory budget (GA.12). What a session holds beyond its graph is about
+//! three graphs' worth (R2-watch section 13): every group's cached pre-pass
+//! build, the parse cache's entries and DC.4 build memos, and the result.
+//! The cached groups and the memos are pure caches (a hit replays exactly
+//! what a miss computes), so dropping one changes an update's time, never its
+//! bytes. With a [`MemoryBudget`] (`GLIA_MEMORY_BUDGET_MB`, read at
+//! [`WatchSession::open`], or [`WatchSession::set_memory_budget`]) the
+//! session reads the process's RSS after each update's trim (and at open):
+//! while it is over the budget it evicts (a) one cached group at a time, the
+//! least recently built or reused first (`CachedGroup::last_used`, the `seq`
+//! of that update; ties by repo, then plan order), then (b) every repo's
+//! build memos at once, trimming (`release_freed_memory("watch_budget")`)
+//! and re-reading RSS after each step, until it is within the budget or
+//! nothing evictable is left. The parse cache's entries are never evicted:
+//! they are what [`WatchSession::save_cache`] writes and a re-parse is the
+//! dearest miss. Neither is the ranking cache (EA.7): it is replaced after
+//! every update that changed the graph and holds at most 8 PPR indexes. An
+//! evicted group has no reuse slot at the next update and rebuilds
+//! (`[groups] built=` and `groups_rebuilt` show it). The budget is a process
+//! target: RSS counts whatever else the process holds (memory.rs's module
+//! doc), so a budget below the floor (one graph, the parse cache, the host)
+//! evicts everything at every update. Without an RSS reading nothing is
+//! evicted. [`WatchSession::memory`] reports what is held.
+//!
 //! An update also prints the stage markers of what it ran (`[timing] repo=`,
 //! `[timing] build`, `[graft-memo]`, the walk's lines on a re-plan, ...): never
 //! gate on marker equality with a clean build (R2-watch section 8).
@@ -117,8 +149,9 @@ use crate::delta::{
 };
 use crate::external::{RepoInputs, repo_inputs};
 use crate::extract::{GoModules, TS_FAMILY, detect_language};
+use crate::memory::{self, MemoryBudget};
 use crate::passes::GroupFill;
-use crate::rank::RankCache;
+use crate::rank::{RankCache, RankCacheStats};
 use crate::walk::{
     FileStamp, Pending, Read, ReadRecord, RegionAnchor, Reuse, WalkPlan, WalkedDir, plan_walk,
     read_one, read_walk,
@@ -358,6 +391,33 @@ pub struct WatchSession {
     /// swaps `result`, so it never serves an index of an older graph; a noop
     /// update keeps it, since the graph did not change.
     rank: Arc<RankCache>,
+    /// GA.12: the memory budget the caches are evicted against (module
+    /// doc, "Memory budget"): [`MemoryBudget::from_env`] at open.
+    budget: MemoryBudget,
+    /// GA.12: cached groups evicted for the budget since open.
+    evictions: u64,
+    /// GA.12: times the build memos were cleared for the budget since open.
+    memo_clears: u64,
+}
+
+/// GA.12: what a [`WatchSession`] holds, from [`WatchSession::memory`]:
+/// the process's resident set (`None` where `/proc/self/status` does not
+/// give it), the budget, the cached language group builds of the plan's
+/// groups, the parse cache's entries and the paths its DC.4 build memos
+/// hold (summed over the session's repos), the evictions the budget made
+/// since open, and the ranking cache's counters (EA.7; never evicted).
+#[non_exhaustive]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchMemory {
+    pub rss_kb: Option<u64>,
+    pub budget_mb: Option<u64>,
+    pub cached_groups: usize,
+    pub groups: usize,
+    pub cache_entries: usize,
+    pub memo_paths: usize,
+    pub evictions: u64,
+    pub memo_clears: u64,
+    pub rank: RankCacheStats,
 }
 
 /// One repo of a [`WatchSession`]: its walk plan and file table, the
@@ -384,8 +444,11 @@ struct RepoWatch {
     services_fp: u64,
     cache: ParseCache,
     /// DC.7b: every language group's last pre-pass build whose fingerprint
-    /// could be taken, in plan order.
+    /// could be taken, in plan order; GA.12 evicts from it past the budget.
     groups: Vec<CachedGroup>,
+    /// GA.12: the language groups of the last build's plan (the `<g>` of
+    /// `[watch] rss .. cached_groups=<k>/<g>`).
+    group_count: usize,
     /// The plan key of each language graph of the session's `result.merged`,
     /// index for index (`LanguageGraphs::keys`); the region / project / docs
     /// graphs follow them.
@@ -510,6 +573,9 @@ struct CachedGroup {
     key: &'static str,
     fingerprint: u64,
     build: LangBuild,
+    /// GA.12: the session `seq` of the update (0: open) that last built or
+    /// reused this group: the memory budget evicts the lowest first.
+    last_used: u64,
 }
 
 /// Where the refreshed group cache takes a group's entry from
@@ -739,20 +805,115 @@ impl WatchSession {
             setup,
             services_fp,
             cache,
-            groups: refresh_groups(Vec::new(), built.slots),
+            groups: refresh_groups(Vec::new(), built.slots, 0),
+            group_count: built.groups.len(),
             graph_keys: built.graph_keys,
             watched: BTreeMap::new(),
             baselines: BTreeMap::new(),
         };
         repo.refresh_watch(Consumed::ALL, BTreeMap::new());
-        Ok(Self {
+        let mut session = Self {
             repos: vec![repo],
             opts: opts.clone(),
             result: built.result,
             seq: 0,
             scanned_at: Mutex::new(scanned_at),
             rank,
-        })
+            budget: MemoryBudget::from_env(),
+            evictions: 0,
+            memo_clears: 0,
+        };
+        session.enforce_budget();
+        Ok(session)
+    }
+
+    /// GA.12: bound the session's caches by `budget` from now on (module
+    /// doc, "Memory budget"), replacing the one [`WatchSession::open`] read
+    /// from `GLIA_MEMORY_BUDGET_MB`; [`MemoryBudget::none`] lifts it. The
+    /// budget is enforced right away (one `[watch] rss` line) and after
+    /// every update that rebuilds.
+    pub fn set_memory_budget(&mut self, budget: MemoryBudget) {
+        self.budget = budget;
+        self.enforce_budget();
+    }
+
+    /// GA.12: the budget the session evicts against.
+    pub fn memory_budget(&self) -> MemoryBudget {
+        self.budget
+    }
+
+    /// GA.12: what the session holds now ([`WatchMemory`]); reads the
+    /// process's RSS, evicts nothing.
+    pub fn memory(&self) -> WatchMemory {
+        WatchMemory {
+            rss_kb: memory::rss_kb(),
+            budget_mb: self.budget.budget_mb(),
+            cached_groups: self.repos.iter().map(|r| r.groups.len()).sum(),
+            groups: self.repos.iter().map(|r| r.group_count).sum(),
+            cache_entries: self.repos.iter().map(|r| r.cache.len()).sum(),
+            memo_paths: self.repos.iter().map(|r| r.cache.memo().len()).sum(),
+            evictions: self.evictions,
+            memo_clears: self.memo_clears,
+            rank: self.rank.stats(),
+        }
+    }
+
+    /// GA.12: evict cached groups, then the build memos, while the process's
+    /// RSS is over the budget (module doc, "Memory budget"), trimming and
+    /// re-reading RSS after each step; then print each repo's `[watch] rss`
+    /// line. Nothing is evicted without a reading or a budget.
+    fn enforce_budget(&mut self) {
+        let mut evicted = vec![0usize; self.repos.len()];
+        let mut cleared = vec![false; self.repos.len()];
+        let mut rss = memory::rss_kb();
+        while rss.is_some_and(|kb| self.budget.exceeded(kb)) {
+            if let Some((r, i)) = self.oldest_group() {
+                if let Some(repo) = self.repos.get_mut(r) {
+                    drop(repo.groups.remove(i));
+                }
+                if let Some(n) = evicted.get_mut(r) {
+                    *n += 1;
+                }
+                self.evictions += 1;
+            } else {
+                let mut any = false;
+                for (repo, c) in self.repos.iter_mut().zip(cleared.iter_mut()) {
+                    if repo.cache.clear_memo() {
+                        *c = true;
+                        any = true;
+                    }
+                }
+                if !any {
+                    break;
+                }
+                self.memo_clears += 1;
+            }
+            memory::release_freed_memory("watch_budget");
+            rss = memory::rss_kb();
+        }
+        for ((repo, evicted), cleared) in self.repos.iter().zip(evicted).zip(cleared) {
+            eprintln!(
+                "{}",
+                rss_marker(self.seq, rss, self.budget, repo, evicted, cleared)
+            );
+        }
+    }
+
+    /// GA.12: the cached group the budget evicts next: the lowest
+    /// `last_used`, ties by repo order, then plan order (each repo's cache is
+    /// in plan order). `(repo index, group index)`.
+    fn oldest_group(&self) -> Option<(usize, usize)> {
+        self.repos
+            .iter()
+            .enumerate()
+            .flat_map(|(r, repo)| {
+                repo.groups
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, g)| (g.last_used, r, i))
+            })
+            .min()
+            .map(|(_, r, i)| (r, i))
     }
 
     /// Bring the session up to date with `changed`, the paths the caller saw
@@ -917,7 +1078,8 @@ impl WatchSession {
         repo.commit_tree(tree, setup);
         repo.refresh_watch(consumed, captured);
         repo.services_fp = services_fp;
-        repo.groups = refresh_groups(std::mem::take(&mut repo.groups), slots);
+        repo.groups = refresh_groups(std::mem::take(&mut repo.groups), slots, self.seq + 1);
+        repo.group_count = groups.len();
         repo.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
@@ -963,6 +1125,7 @@ impl WatchSession {
             "{}",
             update_marker(&update, groups.len(), started.elapsed(), &repo.label)
         );
+        self.enforce_budget();
         Ok(update)
     }
 
@@ -1791,6 +1954,7 @@ fn cache_slots(
                     key: build.key(),
                     fingerprint,
                     build: build.clone(),
+                    last_used: 0,
                 }))
             }),
         })
@@ -1799,14 +1963,19 @@ fn cache_slots(
 
 /// DC.7b: the refreshed group cache: `slots` in plan order, a kept slot
 /// moving its entry out of `old` (the previous cache); a group that vanished
-/// from the plan is dropped with `old`.
-fn refresh_groups(old: Vec<CachedGroup>, slots: Vec<Slot>) -> Vec<CachedGroup> {
+/// from the plan is dropped with `old`. Every entry it keeps was built or
+/// reused by the update `seq` (GA.12's `last_used`).
+fn refresh_groups(old: Vec<CachedGroup>, slots: Vec<Slot>, seq: u64) -> Vec<CachedGroup> {
     let mut old: Vec<Option<CachedGroup>> = old.into_iter().map(Some).collect();
     slots
         .into_iter()
         .filter_map(|slot| match slot {
             Slot::Kept(i) => old.get_mut(i).and_then(Option::take),
             Slot::Fresh(group) => Some(*group),
+        })
+        .map(|mut group| {
+            group.last_used = seq;
+            group
         })
         .collect()
 }
@@ -2166,6 +2335,28 @@ fn poll_marker(scan: &Scan, label: &str) -> String {
 }
 
 /// The `[watch] update` line (module doc).
+/// GA.12: `repo`'s `[watch] rss` line (module doc): `evicted` groups and
+/// `memo_cleared` by the enforcement that just ran.
+fn rss_marker(
+    seq: u64,
+    rss_kb: Option<u64>,
+    budget: MemoryBudget,
+    repo: &RepoWatch,
+    evicted: usize,
+    memo_cleared: bool,
+) -> String {
+    let (cached, groups, label) = (repo.groups.len(), repo.group_count, &repo.label);
+    let rss = rss_kb.map_or_else(|| "?".to_string(), |kb| (kb / 1024).to_string());
+    let budget = budget
+        .budget_mb()
+        .map_or_else(|| "none".to_string(), |mb| mb.to_string());
+    format!(
+        "[watch] rss seq={seq} rss_mb={rss} budget_mb={budget} cached_groups={cached}/{groups} \
+         evicted={evicted} memo_cleared={} repo={label}",
+        u8::from(memo_cleared)
+    )
+}
+
 fn update_marker(u: &WatchUpdate, groups: usize, took: Duration, label: &str) -> String {
     let c = &u.counts;
     format!(
@@ -3170,6 +3361,119 @@ mod tests {
     }
 
     /// A session moves between threads (a pyo3 class, a watcher thread).
+    /// GA.12: a 1 MB budget (below any process) evicts every cached group
+    /// and then the memos, at once and after every update; each update
+    /// rebuilds every plan group and still equals a clean build byte for
+    /// byte. Lifting the budget caches again, and the next edit reuses.
+    #[test]
+    fn budget_evicts_and_stays_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        let m = s.memory();
+        assert_eq!(m.budget_mb, None);
+        assert!(m.groups > 1, "{m:?}");
+        assert_eq!(m.cached_groups, m.groups, "no budget keeps every group");
+        assert!(m.memo_paths > 0, "the build memoised something: {m:?}");
+        assert!(m.cache_entries > 0, "{m:?}");
+        assert_eq!((m.evictions, m.memo_clears), (0, 0));
+        s.set_memory_budget(MemoryBudget::mb(1));
+        assert_eq!(s.memory_budget(), MemoryBudget::mb(1));
+        let readable = memory::rss_kb().is_some();
+        let m = s.memory();
+        assert_eq!(m.budget_mb, Some(1));
+        if readable {
+            assert_eq!((m.cached_groups, m.memo_paths), (0, 0), "{m:?}");
+            assert_eq!(m.evictions, m.groups as u64, "{m:?}");
+            assert_eq!(m.memo_clears, 1, "{m:?}");
+        }
+        let entries = m.cache_entries;
+        assert!(entries > 0, "the parse cache entries are never evicted");
+        for edit in edits() {
+            let u = run_edit(&mut s, &dir, &edit);
+            let m = s.memory();
+            if readable {
+                assert_eq!(
+                    u.groups_rebuilt.len(),
+                    m.groups,
+                    "{}: nothing cached, every group rebuilds",
+                    edit.0
+                );
+                assert_eq!((m.cached_groups, m.memo_paths), (0, 0), "{}: {m:?}", edit.0);
+            }
+            assert!(m.cache_entries > 0, "{}", edit.0);
+            assert_clean(&s, &dir, tmp.path(), &format!("budget_{}", edit.0));
+        }
+        s.set_memory_budget(MemoryBudget::none());
+        let python = edits().remove(0);
+        let mut again = python.clone();
+        again.1 = vec![(
+            "a.py",
+            "def foo():\n    return bar() + 2\n\ndef bar():\n    return 1\n".into(),
+        )];
+        run_edit(&mut s, &dir, &again);
+        let m = s.memory();
+        assert_eq!(m.cached_groups, m.groups, "no budget caches again: {m:?}");
+        let u = run_edit(&mut s, &dir, &python);
+        assert_eq!(u.groups_rebuilt, ["python"], "the cache serves again");
+        assert_clean(&s, &dir, tmp.path(), "budget_lifted");
+    }
+
+    /// GA.12: the eviction order: the lowest `last_used` first, ties by plan
+    /// order; every group an update built or reused carries its `seq`.
+    #[test]
+    fn budget_evicts_least_recently_used_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        assert!(s.repos[0].groups.iter().all(|g| g.last_used == 0));
+        assert_eq!(s.oldest_group(), Some((0, 0)), "ties go by plan order");
+        run_edit(&mut s, &dir, &edits()[0]);
+        assert!(
+            s.repos[0].groups.iter().all(|g| g.last_used == 1),
+            "built or reused at seq 1"
+        );
+        let last = s.repos[0].groups.len() - 1;
+        if let Some(g) = s.repos[0].groups.get_mut(last) {
+            g.last_used = 0;
+        }
+        assert_eq!(s.oldest_group(), Some((0, last)));
+        s.repos[0].groups.clear();
+        assert_eq!(s.oldest_group(), None);
+    }
+
+    #[test]
+    fn rss_marker_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let s = open(&dir);
+        let repo = &s.repos[0];
+        let (k, g) = (repo.groups.len(), repo.group_count);
+        assert_eq!(
+            rss_marker(
+                3,
+                Some(700 * 1024 + 5),
+                MemoryBudget::mb(512),
+                repo,
+                2,
+                true
+            ),
+            format!(
+                "[watch] rss seq=3 rss_mb=700 budget_mb=512 cached_groups={k}/{g} evicted=2 \
+                 memo_cleared=1 repo={}",
+                repo.label
+            )
+        );
+        assert_eq!(
+            rss_marker(0, None, MemoryBudget::none(), repo, 0, false),
+            format!(
+                "[watch] rss seq=0 rss_mb=? budget_mb=none cached_groups={k}/{g} evicted=0 \
+                 memo_cleared=0 repo={}",
+                repo.label
+            )
+        );
+    }
+
     #[test]
     fn session_is_send() {
         fn send<T: Send>() {}

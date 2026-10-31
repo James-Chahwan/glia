@@ -2,7 +2,9 @@
 """pyo3 surface, py/src/watch.rs (DC.9): `glia_py.WatchSession`, one repo's
 incremental build held open over `glia_engine::watch` (DC.7a-c).
 
-- `WatchSession(repo, overlay=True)`; ValueError when `repo` is no directory.
+- `WatchSession(repo, overlay=True, memory_budget_mb=None)`; ValueError when
+  `repo` is no directory. `memory_budget_mb` (GA.12) bounds the session's
+  caches by the process's RSS (0: none; None keeps GLIA_MEMORY_BUDGET_MB's).
 - `apply(paths)` -> dict {seq, files: {added, modified, removed, reparsed,
   reused}, groups_rebuilt, full_rebuild, total_nodes, total_edges, counts,
   nodes, edges, phase_ms}; an unchanged file keeps `seq`, with no rows.
@@ -11,6 +13,10 @@ incremental build held open over `glia_engine::watch` (DC.7a-c).
   session's ranking cache (EA.7, `[rank-cache] holder=watch`).
 - `persist()` writes `<repo>/.glia/graph/` (manifest + parse cache);
   ValueError, writing nothing, for an `overlay=False` session.
+- `memory()` -> dict {rss_kb, budget_mb, cached_groups, groups, cache_entries,
+  memo_paths, evictions, memo_clears, rank: {holder, entries, hits, built}}
+  (GA.12); `memory_budget_mb=1` evicts every cached group and still applies an
+  edit like a clean generate.
 
 Marker: `[watch] session repo=<repo> overlay=<true|false> surface=py`. The
 repo is two Python files in a TemporaryDirectory: never a real repo. Shared
@@ -28,6 +34,9 @@ from test_build import Checks, params, rg, stderr_of, tree
 KEYS = ["seq", "files", "groups_rebuilt", "full_rebuild", "total_nodes", "total_edges",
         "counts", "nodes", "edges", "phase_ms"]
 FILES_KEYS = ["added", "modified", "removed", "reparsed", "reused"]
+MEMORY_KEYS = ["rss_kb", "budget_mb", "cached_groups", "groups", "cache_entries", "memo_paths",
+               "evictions", "memo_clears", "rank"]
+RANK_KEYS = ["holder", "entries", "hits", "built"]
 A_PY = "def foo():\n    return bar()\n\ndef bar():\n    return 1\n"
 # One more function: the graph gains nodes, so a snapshot's count can tell.
 A_EDIT = A_PY + "\ndef baz():\n    return foo() + 2\n"
@@ -57,7 +66,8 @@ def watch_repo(tmp: str, name: str = "dc9app") -> str:
 def main() -> int:
     c = Checks("watch")
     c.check("WatchSession is a class", isinstance(getattr(rg, "WatchSession", None), type))
-    c.check("constructor params", params(rg.WatchSession) == [("repo", None), ("overlay", True)],
+    c.check("constructor params",
+            params(rg.WatchSession) == [("repo", None), ("overlay", True), ("memory_budget_mb", None)],
             params(rg.WatchSession))
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-watch-") as tmp:
@@ -146,6 +156,33 @@ def main() -> int:
         before_refusal = tree(other)
         c.raises("persist() refuses an overlay=False session", ValueError, bare.persist, "overlay=False")
         c.check("the refusal wrote nothing", tree(other) == before_refusal, tree(other))
+
+        # GA.12: memory() and a 1 MB budget (below any process): every
+        # cached group and the memos evicted, an edit still applied exactly.
+        m = s.memory()
+        c.check("memory() is a dict", isinstance(m, dict), type(m))
+        m = m if isinstance(m, dict) else {}
+        c.check("memory keys, in order", list(m) == MEMORY_KEYS, list(m))
+        c.check("memory rank keys", list(m.get("rank") or {}) == RANK_KEYS, m.get("rank"))
+        c.check("no budget keeps every group cached",
+                m.get("budget_mb") is None and m.get("cached_groups") == m.get("groups"), m)
+        tight = watch_repo(tmp, "ga12budget")
+        b, err = stderr_of(lambda: rg.WatchSession(tight, memory_budget_mb=1))
+        c.check("[watch] rss marker with the budget", "[watch] rss seq=0 " in err and " budget_mb=1 " in err,
+                err[-800:])
+        bm = b.memory()
+        c.check("memory_budget_mb=1 is the budget", bm.get("budget_mb") == 1, bm)
+        if bm.get("rss_kb") is not None:
+            c.check("a 1 MB budget evicts every group and memo",
+                    bm.get("cached_groups") == 0 and bm.get("memo_paths") == 0
+                    and bm.get("evictions") == bm.get("groups"), bm)
+        (pathlib.Path(tight) / "a.py").write_text(A_EDIT)
+        bu = b.apply(["a.py"])
+        clean = rg.generate(tight)
+        c.check("a budgeted session applies an edit like a clean generate",
+                bu.get("seq") == 1
+                and (bu.get("total_nodes"), bu.get("total_edges")) == (clean.node_count(), clean.edge_count()),
+                (bu.get("seq"), bu.get("total_nodes"), clean.node_count()))
 
         c.raises("WatchSession on a missing dir", ValueError,
                  lambda: rg.WatchSession(os.path.join(tmp, "missing")), "not a directory")

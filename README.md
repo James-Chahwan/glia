@@ -411,7 +411,7 @@ glia timeline history <REPO> <QNAME> [--category <CATEGORY>] [--json]
 glia timeline as-of <REPO> <REV> [--json]
     The graph at one rev of the window (an index, or a commit id prefix of 7+ hex
     chars): its counts by category. history and as-of read the sidecar, never rebuild.
-glia watch <REPO> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]
+glia watch <REPO> [--debounce-ms <N>] [--memory-budget-mb <MB>] [--persist-every <S>] [--poll-ms <N>]
     Keep one repo's build open and stream what each change does to the graph: a
     foreground loop, no daemon, socket or pidfile. Prints a ready line, then one NDJSON
     object per update on stdout (the files that moved, the groups rebuilt, the totals,
@@ -419,7 +419,9 @@ glia watch <REPO> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]
     stays still for --debounce-ms (200), and writes <repo>/.glia/graph/ and the parse
     cache every --persist-every seconds (60; 0 = only on exit) and on exit. Stops on
     SIGINT, SIGTERM or stdin EOF with exit 0; refuses --no-overlay; 2 on a bad repo or
-    a build error, 5 when a persist fails.
+    a build error, 5 when a persist fails. --memory-budget-mb (else
+    GLIA_MEMORY_BUDGET_MB; 0 = none) is a process RSS target: past it the session
+    evicts its cached group builds, then its build memos (time, never bytes).
 
 # Rules
 glia check <REPO> [--json] [--strict] [--with <WITH>]...

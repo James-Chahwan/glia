@@ -55,6 +55,9 @@
 //!   process's resident set after it (`VmRSS`; `?` where `/proc/self/status`
 //!   does not give it), the series a long watch's memory is read from;
 //! - `[watch] persisted seq=<s> reason=interval|exit`;
+//! - the engine's `[watch] rss ..` line (GA.12) at open, per update and once
+//!   more when `--memory-budget-mb` replaces the budget the session read from
+//!   `GLIA_MEMORY_BUDGET_MB` (`0`: no budget);
 //! - `[watch] exit reason=sigint|sigterm|stdin_eof|stdout_closed`, once the
 //!   loop stops, before the exit persist.
 //!
@@ -67,6 +70,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use glia_engine::memory::{MemoryBudget, rss_kb};
 use glia_engine::persist::default_layout_dir;
 use glia_engine::watch::{WatchSession, WatchUpdate};
 
@@ -87,6 +91,11 @@ pub(crate) struct Args {
     /// applied as one update.
     #[arg(long, value_name = "N", default_value_t = 200)]
     debounce_ms: u64,
+    /// Process RSS budget in MB for the session's caches (cached language
+    /// group builds, build memos), evicted past it; overrides
+    /// GLIA_MEMORY_BUDGET_MB (0: no budget).
+    #[arg(long, value_name = "MB")]
+    memory_budget_mb: Option<u64>,
 }
 
 /// The shortest `--poll-ms` honoured, and the slice every wait is cut into
@@ -191,17 +200,10 @@ fn stat(p: &Path) -> Stat {
         .map(|m| (m.len(), m.modified().ok()))
 }
 
-/// The process's resident set in MB (`VmRSS` of `/proc/self/status`), `?`
-/// where that file does not give it.
+/// The process's resident set in MB (`VmRSS` of `/proc/self/status`,
+/// `memory::rss_kb`), `?` where that file does not give it.
 fn rss_mb() -> String {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("VmRSS:"))
-                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
-        })
-        .map_or_else(|| "?".to_string(), |kb| (kb / 1024).to_string())
+    rss_kb().map_or_else(|| "?".to_string(), |kb| (kb / 1024).to_string())
 }
 
 /// How a step of the loop failed: the exit code and its message.
@@ -307,13 +309,16 @@ pub(crate) fn run(a: Args) -> i32 {
         );
         return 2;
     }
-    let session = match WatchSession::open(&a.repo, &opts) {
+    let mut session = match WatchSession::open(&a.repo, &opts) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
             return 2;
         }
     };
+    if let Some(mb) = a.memory_budget_mb {
+        session.set_memory_budget(MemoryBudget::mb(mb));
+    }
     if !sig::install() {
         eprintln!(
             "warning: watch: SIGINT / SIGTERM handlers not installed; a signal ends the watch without the exit persist"

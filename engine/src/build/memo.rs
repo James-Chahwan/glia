@@ -16,7 +16,9 @@
 //! longer walked are dropped ([`BuildMemo::retain`]), and the whole memo is
 //! cleared with the cache's entries when the build context (repo identity or
 //! go.mod module set) changes: the values carry the RepoId in their NodeIds,
-//! and the parses the needles read depend on the go context.
+//! and the parses the needles read depend on the go context. A watch session
+//! past its memory budget clears it too (GA.12, `[watch] rss .. memo_cleared=1`):
+//! the next build recomputes every value as a miss does.
 //!
 //! Lookups run on pool workers against `&BuildMemo`, read-only; misses are
 //! computed as before; inserts happen in each stage's sequential fold, after
@@ -102,7 +104,6 @@ impl<K: PartialEq, V> PathMemo<K, V> {
     }
 
     /// Paths held.
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
@@ -249,8 +250,7 @@ impl BuildMemo {
     }
 
     /// Paths held across the three path memos (a path may be in several) plus
-    /// the files of the imports memo.
-    #[cfg(test)]
+    /// the files of the imports memo: `WatchMemory.memo_paths` (GA.12).
     pub(crate) fn len(&self) -> usize {
         self.consts.len() + self.needles.len() + self.noncode.len() + self.imports.files.len()
     }

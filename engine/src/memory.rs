@@ -25,7 +25,8 @@
 //! Who calls it. glia-py's `PyGraph` runs [`release_freed_memory`] from a
 //! drop guard declared after every other field, so the trim runs once the
 //! graph is freed (site `pygraph_drop`); DC's `WatchSession` runs it after it
-//! replaces its graph (`watch_update`). An in-process Rust consumer may call it
+//! replaces its graph (`watch_update`) and after each cache it evicts for its
+//! [`MemoryBudget`] (`watch_budget`, GA.12). An in-process Rust consumer may call it
 //! after dropping a `GenerateResult`. A one-shot CLI build does not creep and
 //! does not call it.
 //!
@@ -37,6 +38,22 @@
 //! Opt-out: `GLIA_MALLOC_TRIM=0`. fired_on, on stderr, once per trim:
 //! `[memory] malloc_trim site=<site> rss_mb=<before>-><after>` (`?` for a
 //! reading `/proc/self/status` did not give).
+//!
+//! One memory budget (0.5.6, GA.12): [`MemoryBudget`] is the one value that
+//! bounds what a long-lived holder keeps beyond its graph, read from
+//! [`BUDGET_ENV`] (`GLIA_MEMORY_BUDGET_MB`) or given explicitly (`glia watch
+//! --memory-budget-mb`, pyo3 `WatchSession(memory_budget_mb=)`). The same
+//! value bounds a watch session's caches (its cached language group builds
+//! and DC.4 build memos, evicted past it: `watch::WatchSession`) and a rules
+//! evaluation's working set (FA.14). It is compared with the PROCESS's
+//! resident set ([`rss_kb`]), not a session's own size: a host process (an
+//! MCP server, a `PyGraph` held beside the session, an embedder) counts too,
+//! so the budget is a process target. A budget below what the process needs
+//! with every cache dropped (one graph, its parse cache, the host) evicts
+//! every cache at every update and costs time, never bytes: an evicted cache
+//! is rebuilt by the next update exactly as a miss computes it. fired_on, on
+//! stderr: `[memory] budget ignored value=<v>` once per unparseable
+//! `GLIA_MEMORY_BUDGET_MB` read.
 
 use std::io::Write as _;
 
@@ -46,6 +63,78 @@ pub const TRIM_ENV: &str = "GLIA_MALLOC_TRIM";
 
 /// Whether this build of the engine can trim at all: Linux glibc only.
 const TRIMS: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
+
+/// GA.12: the environment variable [`MemoryBudget::from_env`] reads, in MB:
+/// unset, empty or `0` is no budget; anything that is not a whole number is
+/// no budget plus one `[memory] budget ignored value=<v>` line.
+pub const BUDGET_ENV: &str = "GLIA_MEMORY_BUDGET_MB";
+
+/// GA.12: the one memory budget (module doc): a resident-set target in MB
+/// for the whole process, or none. `Default` is none.
+///
+/// A holder compares it with [`rss_kb`] after freeing what it can
+/// ([`release_freed_memory`]) and drops caches while [`Self::exceeded`]
+/// holds; it never drops anything without a reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemoryBudget {
+    mb: Option<u64>,
+}
+
+impl MemoryBudget {
+    /// No budget: nothing is ever evicted for memory.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A budget of `n` MB of process RSS; `0` is no budget, as in
+    /// [`BUDGET_ENV`].
+    pub fn mb(n: u64) -> Self {
+        Self {
+            mb: (n > 0).then_some(n),
+        }
+    }
+
+    /// The budget [`BUDGET_ENV`] sets (see there); none when it is unset.
+    pub fn from_env() -> Self {
+        Self::from_value(std::env::var(BUDGET_ENV).ok().as_deref())
+    }
+
+    /// [`Self::from_env`]'s reading of the variable's value.
+    fn from_value(value: Option<&str>) -> Self {
+        let Some(raw) = value else {
+            return Self::none();
+        };
+        let v = raw.trim();
+        if v.is_empty() {
+            return Self::none();
+        }
+        match v.parse::<u64>() {
+            Ok(n) => Self::mb(n),
+            Err(_) => {
+                // Not `eprintln!`: a closed stderr must not panic a holder.
+                let _ = writeln!(std::io::stderr(), "[memory] budget ignored value={v}");
+                Self::none()
+            }
+        }
+    }
+
+    /// The budget in MB, `None` for no budget.
+    pub fn budget_mb(&self) -> Option<u64> {
+        self.mb
+    }
+
+    /// The budget in kB (the unit [`rss_kb`] reads), `None` for no budget.
+    pub fn limit_kb(&self) -> Option<u64> {
+        self.mb.map(|mb| mb.saturating_mul(1024))
+    }
+
+    /// Whether a resident set of `rss_kb` kB is over the budget (never
+    /// without one).
+    pub fn exceeded(&self, rss_kb: u64) -> bool {
+        self.limit_kb().is_some_and(|limit| rss_kb > limit)
+    }
+}
 
 /// One trim's effect: the process's resident set (`VmRSS`, kB) read just
 /// before and just after `malloc_trim(0)`.
@@ -99,8 +188,9 @@ fn trim_enabled(env: Option<&str>) -> bool {
 }
 
 /// This process's resident set in kB, from `/proc/self/status`; `None` where
-/// there is no procfs.
-fn rss_kb() -> Option<u64> {
+/// there is no procfs. Public since GA.12: the budget's reading, and the one
+/// a holder's RSS series is printed from.
+pub fn rss_kb() -> Option<u64> {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .as_deref()
@@ -143,7 +233,43 @@ mod sys {
 
 #[cfg(test)]
 mod tests {
-    use super::{Trim, parse_vm_rss, trim_enabled};
+    use super::{MemoryBudget, Trim, parse_vm_rss, trim_enabled};
+
+    #[test]
+    fn budget_reads_unset_empty_and_zero_as_none() {
+        for v in [None, Some(""), Some("  "), Some("0"), Some(" 0\n")] {
+            assert_eq!(MemoryBudget::from_value(v), MemoryBudget::none(), "{v:?}");
+        }
+        assert_eq!(MemoryBudget::from_value(Some("512")), MemoryBudget::mb(512));
+        assert_eq!(
+            MemoryBudget::from_value(Some(" 2048\n")).budget_mb(),
+            Some(2048)
+        );
+        assert_eq!(MemoryBudget::mb(0), MemoryBudget::default());
+    }
+
+    #[test]
+    fn unparseable_budget_is_none() {
+        for v in ["lots", "-1", "1.5", "512MB"] {
+            assert_eq!(
+                MemoryBudget::from_value(Some(v)),
+                MemoryBudget::none(),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_limit_and_exceeded() {
+        let b = MemoryBudget::mb(2);
+        assert_eq!(b.limit_kb(), Some(2048));
+        assert!(!b.exceeded(2048), "at the budget is within it");
+        assert!(b.exceeded(2049));
+        let none = MemoryBudget::none();
+        assert_eq!(none.limit_kb(), None);
+        assert!(!none.exceeded(u64::MAX), "no budget is never exceeded");
+        assert_eq!(MemoryBudget::mb(u64::MAX).limit_kb(), Some(u64::MAX));
+    }
 
     #[test]
     fn trim_is_on_unless_the_env_says_0() {

@@ -19,6 +19,8 @@ const KEEP: &[&str] = &[
     "load_or_rebuild",
     // named by tooling: CLAUDE.md, the parallel build gate
     "parallel_build",
+    // reads the process's resident set (GA.12's RSS gate): a neighbour would move it
+    "watch_memory",
     // named by tooling: the watch parity gate (DC.10a/b)
     "watch_parity",
 ];

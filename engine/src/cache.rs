@@ -913,6 +913,16 @@ impl ParseCache {
         &mut self.memo
     }
 
+    /// GA.12: drop every DC.4 build memo, keeping the entries (a watch
+    /// session past its memory budget: the entries are what `save` writes and
+    /// the dearest miss). Whether the memo held anything. The next build
+    /// recomputes each value as a miss does, so the graph is unchanged.
+    pub(crate) fn clear_memo(&mut self) -> bool {
+        let held = self.memo.len() > 0 || self.memo.imports.index.is_some();
+        self.memo.clear();
+        held
+    }
+
     /// Drop entries for files no longer present this build (deletions / files
     /// that stopped being parseable). Records the count in `stats.evicted`.
     pub fn retain_paths(&mut self, live: &HashSet<String>) {

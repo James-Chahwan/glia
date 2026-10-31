@@ -3,10 +3,14 @@
 //! module's own `ModuleFns`. The engine does the work (DC.7a-c); this module
 //! is transport.
 //!
-//! - `WatchSession(repo, overlay=True)` opens the session: it loads the repo's
-//!   parse cache sidecar once, walks and builds (`WatchSession::open`).
-//!   `ValueError` when it cannot (the path is not a directory), as `generate`
-//!   raises for a build error.
+//! - `WatchSession(repo, overlay=True, memory_budget_mb=None)` opens the
+//!   session: it loads the repo's parse cache sidecar once, walks and builds
+//!   (`WatchSession::open`). `ValueError` when it cannot (the path is not a
+//!   directory), as `generate` raises for a build error. `memory_budget_mb`
+//!   (GA.12) replaces the budget the engine read from
+//!   `GLIA_MEMORY_BUDGET_MB` (`0`: none; `None` keeps the env's): a process
+//!   RSS target past which the session evicts its cached group builds, then
+//!   its build memos (an update's time moves, never its graph).
 //! - `apply(paths)` -> dict: the update for the paths the caller saw change
 //!   (absolute under the repo, or repo-relative; a `str` or `os.PathLike`
 //!   each), the engine's `WatchUpdate` as a native dict (LD.2): `{seq, files:
@@ -27,6 +31,11 @@
 //!   writes nothing, as `PyGraph.save_to_default` refuses an
 //!   `overlay=False` graph: the default dir holds the overlay-applied graph.
 //!   A write error is an `OSError`.
+//!
+//! - `memory()` -> dict (GA.12): what the session holds, the engine's
+//!   `WatchMemory`: `{rss_kb, budget_mb, cached_groups, groups,
+//!   cache_entries, memo_paths, evictions, memo_clears, rank: {holder,
+//!   entries, hits, built}}`.
 //!
 //! Nothing is written under the repo but by `persist()`.
 //!
@@ -53,8 +62,9 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use glia_engine::BuildOptions;
+use glia_engine::memory::MemoryBudget;
 use glia_engine::persist::default_layout_dir;
-use glia_engine::watch::{WatchSession, WatchUpdate};
+use glia_engine::watch::{WatchMemory, WatchSession, WatchUpdate};
 
 use crate::convert::to_py;
 use crate::graph::{PyGraph, default_dir_refusal};
@@ -65,14 +75,28 @@ fn session_marker(repo: &str, overlay: bool) -> String {
     format!("[watch] session repo={repo} overlay={overlay} surface=py")
 }
 
-/// Open the session behind `WatchSession(repo, overlay)`, minus pyo3: the
-/// engine's open with the overlay switched as asked, then the marker. `Err`
-/// is the engine's message.
-fn open_session(repo: &str, overlay: bool) -> Result<WatchSession, String> {
+/// Open the session behind `WatchSession(repo, overlay, memory_budget_mb)`,
+/// minus pyo3: the engine's open with the overlay switched as asked, the
+/// budget replaced when one is given, then the marker. `Err` is the engine's
+/// message.
+fn open_session(
+    repo: &str,
+    overlay: bool,
+    memory_budget_mb: Option<u64>,
+) -> Result<WatchSession, String> {
     let opts = BuildOptions::default().with_overlay(overlay);
-    let session = WatchSession::open(repo, &opts)?;
+    let mut session = WatchSession::open(repo, &opts)?;
+    if let Some(mb) = memory_budget_mb {
+        session.set_memory_budget(MemoryBudget::mb(mb));
+    }
     eprintln!("{}", session_marker(repo, overlay));
     Ok(session)
+}
+
+/// `memory()`'s dict as JSON text: the `WatchMemory`'s serde fields in
+/// declaration order.
+pub(crate) fn memory_json(m: &WatchMemory) -> Result<String, serde_json::Error> {
+    serde_json::to_string(m)
 }
 
 /// One update as the JSON text [`to_py`] turns into the native dict: the
@@ -124,7 +148,9 @@ fn persist_default(
 /// writes under the repo. The GIL is released while the engine works; drive
 /// one session from one thread (a concurrent second call raises
 /// RuntimeError "Already borrowed"). ValueError when `repo` is not a
-/// directory.
+/// directory. `memory_budget_mb` bounds the session's caches by the
+/// process's RSS (0: none; None keeps GLIA_MEMORY_BUDGET_MB's); `memory()`
+/// reports what the session holds.
 #[pyclass(name = "WatchSession")]
 pub(crate) struct PyWatchSession {
     session: WatchSession,
@@ -137,10 +163,15 @@ pub(crate) struct PyWatchSession {
 #[pymethods]
 impl PyWatchSession {
     #[new]
-    #[pyo3(signature = (repo, overlay=true))]
-    fn new(py: Python<'_>, repo: &str, overlay: bool) -> PyResult<Self> {
+    #[pyo3(signature = (repo, overlay=true, memory_budget_mb=None))]
+    fn new(
+        py: Python<'_>,
+        repo: &str,
+        overlay: bool,
+        memory_budget_mb: Option<u64>,
+    ) -> PyResult<Self> {
         let session = py
-            .detach(|| open_session(repo, overlay))
+            .detach(|| open_session(repo, overlay, memory_budget_mb))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             session,
@@ -195,6 +226,17 @@ impl PyWatchSession {
             .with_overlay_applied(self.overlay)
     }
 
+    /// What the session holds now, as a dict: `rss_kb` (the process's
+    /// resident set, None where unreadable), `budget_mb` (None: no budget),
+    /// `cached_groups` of `groups` (the language groups' cached builds),
+    /// `cache_entries` (parse cache), `memo_paths` (build memos), the
+    /// `evictions` and `memo_clears` the budget made since open, and `rank`
+    /// (the ranking cache's `holder`, `entries`, `hits`, `built`). Evicts
+    /// nothing.
+    fn memory(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, memory_json(&self.session.memory()))
+    }
+
     /// Write the current graph as the repo's layout `<repo>/.glia/graph/`
     /// (what `load_from_gmap` reads), then the session's parse cache beside
     /// it. ValueError, writing nothing, for a session opened with
@@ -218,7 +260,9 @@ inventory::submit! { ModuleFns { name: "watch", add: register } }
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistError, open_session, persist_default, session_marker, update_json};
+    use super::{
+        PersistError, memory_json, open_session, persist_default, session_marker, update_json,
+    };
     use std::path::{Path, PathBuf};
 
     /// The keys of `apply()`'s dict, in order (`WatchUpdate`'s fields).
@@ -282,7 +326,7 @@ mod tests {
     fn update_json_keys() {
         let root = python_repo("keys");
         let path = root.to_str().expect("utf-8 temp path").to_string();
-        let mut s = open_session(&path, true).expect("open");
+        let mut s = open_session(&path, true, None).expect("open");
         std::fs::write(
             root.join("a.py"),
             "def foo():\n    return bar() + 1\n\ndef bar():\n    return 1\n\ndef baz():\n    return 3\n",
@@ -330,14 +374,14 @@ mod tests {
         let path = root.to_str().expect("utf-8 temp path").to_string();
         let before = tree(&root);
 
-        let bare = open_session(&path, false).expect("open overlay=false");
+        let bare = open_session(&path, false, None).expect("open overlay=false");
         match persist_default(&bare, &path, false) {
             Err(PersistError::Refused(why)) => assert!(why.contains("overlay=False"), "{why}"),
             other => panic!("an overlay=false session must be refused: {other:?}"),
         }
         assert_eq!(tree(&root), before, "the refusal wrote nothing");
 
-        let mut s = open_session(&path, true).expect("open");
+        let mut s = open_session(&path, true, None).expect("open");
         s.apply(&[root.join("b.py")]).expect("apply");
         assert_eq!(
             tree(&root),
@@ -350,7 +394,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         let missing = std::env::temp_dir().join(format!("glia-dc9-missing-{}", std::process::id()));
-        assert!(open_session(missing.to_str().expect("utf-8"), true).is_err());
+        assert!(open_session(missing.to_str().expect("utf-8"), true, None).is_err());
+    }
+
+    /// GA.12: `memory()`'s keys, in order, and a budget of 1 MB (below any
+    /// process) evicting every cached group and the memos at open and after
+    /// an update that still carries the edit.
+    #[test]
+    fn memory_keys_and_budget() {
+        const KEYS: [&str; 9] = [
+            "rss_kb",
+            "budget_mb",
+            "cached_groups",
+            "groups",
+            "cache_entries",
+            "memo_paths",
+            "evictions",
+            "memo_clears",
+            "rank",
+        ];
+        let root = python_repo("memory");
+        let path = root.to_str().expect("utf-8 temp path").to_string();
+        let mut s = open_session(&path, true, Some(1)).expect("open");
+        let text = memory_json(&s.memory()).expect("serialises");
+        let order = key_order(&text, &KEYS);
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(v.as_object().map(|o| o.len()), Some(KEYS.len()), "{text}");
+        assert_eq!(v["budget_mb"], 1, "{text}");
+        assert!(v["groups"].as_u64().is_some_and(|g| g > 0), "{text}");
+        assert_eq!(v["cache_entries"], 2, "{text}");
+        if v["rss_kb"].is_u64() {
+            assert_eq!(
+                v["cached_groups"], 0,
+                "a 1 MB budget evicts every group: {text}"
+            );
+            assert_eq!(v["memo_paths"], 0, "and the memos: {text}");
+        }
+        std::fs::write(
+            root.join("b.py"),
+            "def b():\n    return 2\n\ndef c():\n    return b()\n",
+        )
+        .expect("edit b.py");
+        let u = s.apply(&[PathBuf::from("b.py")]).expect("apply");
+        assert_eq!(u.seq, 1);
+        assert!(
+            u.nodes.iter().any(|n| n.qname.ends_with('c')),
+            "{:?}",
+            u.nodes
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

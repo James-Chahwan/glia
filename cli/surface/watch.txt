@@ -2,6 +2,7 @@
 cmd glia watch
   arg debounce_ms pos=- long=debounce-ms short=- required=false num_args=1 action=Set default=200 value_names=N global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg memory_budget_mb pos=- long=memory-budget-mb short=- required=false num_args=1 action=Set default=- value_names=MB global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg persist_every pos=- long=persist-every short=- required=false num_args=1 action=Set default=60 value_names=S global=false hidden=false
   arg poll_ms pos=- long=poll-ms short=- required=false num_args=1 action=Set default=500 value_names=N global=false hidden=false

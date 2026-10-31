@@ -58,6 +58,11 @@
 //! a scoped delta taken with a SCIP snapshot present at the first TS edit
 //! after one ([`write_snapshot`]). Each step also prints
 //! `[watch-parity] seed=<s> step=<i> op=<name> path=<p> via=<route>`.
+//!
+//! GA.12, the memory budget ([`scripted_budgeted`]): every scripted sequence
+//! re-run with a 1 MB budget, which evicts every cached group and the build
+//! memos at every update: checks 1-3 hold unchanged (an eviction is a cache
+//! drop, never a change of bytes).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -69,6 +74,7 @@ use glia_code_domain::snapshots::{
     write_scip,
 };
 use glia_engine::delta::located_delta;
+use glia_engine::memory::{MemoryBudget, rss_kb};
 use glia_engine::persist::persist_result;
 use glia_engine::watch::{WatchSession, WatchUpdate};
 use glia_engine::{BuildOptions, GenerateResult, generate_one};
@@ -585,6 +591,7 @@ fn assert_rows(
     prev: &GenerateResult,
     clean: &GenerateResult,
     step: &Step,
+    budgeted: bool,
     at: &str,
 ) {
     let moved = assert_delta(u, prev, clean, at);
@@ -594,7 +601,9 @@ fn assert_rows(
     } else {
         assert!(moved, "{at}: the step moves the graph");
     }
-    if let Some(exact) = e.rebuilt_exact {
+    // A budgeted run's evictions decide what rebuilds ([`run_with`]); a
+    // group the step must rebuild still does.
+    if let Some(exact) = e.rebuilt_exact.filter(|_| !budgeted) {
         assert_eq!(u.groups_rebuilt, exact, "{at}: groups rebuilt");
     }
     for key in e.rebuilt_contains {
@@ -604,7 +613,7 @@ fn assert_rows(
             u.groups_rebuilt
         );
     }
-    for key in e.rebuilt_excludes {
+    for key in e.rebuilt_excludes.iter().filter(|_| !budgeted) {
         assert!(
             !u.groups_rebuilt.iter().any(|g| g == key),
             "{at}: {key} reused: {:?}",
@@ -670,6 +679,16 @@ fn settle(dir: &Path) {
 
 /// Run `steps` on a fresh fixture and session; returns every update.
 fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
+    run_with(sequence, steps, None)
+}
+
+/// [`run`], the session's memory budget set to `budget` right after open
+/// when one is given (GA.12). A budgeted run checks parity, rows and files
+/// exactly as [`run`] does, but not which groups rebuilt: the budget's
+/// evictions decide that (with a 1 MB budget every update rebuilds every
+/// plan group, checked when RSS is readable, and leaves no cached group or
+/// memo behind).
+fn run_with(sequence: &str, steps: &[Step], budget: Option<MemoryBudget>) -> Vec<WatchUpdate> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = write_fixture(tmp.path());
     let root = repo.to_str().expect("utf-8 root");
@@ -677,6 +696,10 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
         settle(&repo);
     }
     let mut s = WatchSession::open(root, &BuildOptions::default()).expect("open");
+    if let Some(b) = budget {
+        s.set_memory_budget(b);
+    }
+    let evicts_all = budget == Some(MemoryBudget::mb(1)) && rss_kb().is_some();
     let mut prev = generate_one(root).expect("clean build");
     assert!(
         !prev.merged.pass_undo.is_empty(),
@@ -716,7 +739,22 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
             .join("out")
             .join(format!("{}-{}", i + 1, step.name));
         assert_parity(&s, &clean, &out, &at);
-        assert_rows(&u, &prev, &clean, step, &at);
+        assert_rows(&u, &prev, &clean, step, budget.is_some(), &at);
+        if evicts_all {
+            let m = s.memory();
+            assert_eq!(
+                (m.cached_groups, m.memo_paths),
+                (0, 0),
+                "{at}: a 1 MB budget leaves no cache: {m:?}"
+            );
+            if !step.expect.noop {
+                assert_eq!(
+                    u.groups_rebuilt.len(),
+                    m.groups,
+                    "{at}: every group rebuilds"
+                );
+            }
+        }
         prev = clean;
         updates.push(u);
     }
@@ -741,88 +779,83 @@ fn scripted_body() {
     run("body", &[BODY]);
 }
 
+const SEQ_DECLARATION: &[Step] = &[Step {
+    name: "declaration",
+    edit: declaration_edit,
+    via: Via::Apply(&["api/user.py", "api/svc.py"]),
+    expect: Expect {
+        rebuilt_exact: Some(&["python"]),
+        files_modified: &["api/svc.py", "api/user.py"],
+        ..EXPECT
+    },
+}];
+
 #[test]
 fn scripted_declaration() {
-    run(
-        "declaration",
-        &[Step {
-            name: "declaration",
-            edit: declaration_edit,
-            via: Via::Apply(&["api/user.py", "api/svc.py"]),
-            expect: Expect {
-                rebuilt_exact: Some(&["python"]),
-                files_modified: &["api/svc.py", "api/user.py"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("declaration", SEQ_DECLARATION);
 }
+
+const SEQ_ADD_DELETE_RENAME: &[Step] = &[
+    Step {
+        name: "add",
+        edit: add_go,
+        via: Via::Apply(&["grpc/client/extra.go"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["go"]),
+            files_added: &["grpc/client/extra.go"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "delete",
+        edit: delete_go,
+        via: Via::Apply(&["grpc/client/extra.go"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["go"]),
+            files_removed: &["grpc/client/extra.go"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "rename",
+        edit: rename_py,
+        via: Via::Apply(&["api/svc.py", "api/service.py"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["python"]),
+            files_added: &["api/service.py"],
+            files_removed: &["api/svc.py"],
+            row_changes: &["moved"],
+            ..EXPECT
+        },
+    },
+];
 
 #[test]
 fn scripted_add_delete_rename() {
-    run(
-        "add_delete_rename",
-        &[
-            Step {
-                name: "add",
-                edit: add_go,
-                via: Via::Apply(&["grpc/client/extra.go"]),
-                expect: Expect {
-                    rebuilt_exact: Some(&["go"]),
-                    files_added: &["grpc/client/extra.go"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "delete",
-                edit: delete_go,
-                via: Via::Apply(&["grpc/client/extra.go"]),
-                expect: Expect {
-                    rebuilt_exact: Some(&["go"]),
-                    files_removed: &["grpc/client/extra.go"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "rename",
-                edit: rename_py,
-                via: Via::Apply(&["api/svc.py", "api/service.py"]),
-                expect: Expect {
-                    rebuilt_exact: Some(&["python"]),
-                    files_added: &["api/service.py"],
-                    files_removed: &["api/svc.py"],
-                    row_changes: &["moved"],
-                    ..EXPECT
-                },
-            },
-        ],
-    );
+    run("add_delete_rename", SEQ_ADD_DELETE_RENAME);
 }
 
 /// LB.9b: `api/user.ts` beside `api/user.py` renames the python MODULE.
+const SEQ_SAME_STEM: &[Step] = &[Step {
+    name: "same_stem_add",
+    edit: same_stem_add,
+    via: Via::Apply(&["api/user.ts"]),
+    expect: Expect {
+        rebuilt_contains: &["python", "typescript"],
+        files_added: &["api/user.ts"],
+        row_changes: &["moved"],
+        ..EXPECT
+    },
+}];
+
 #[test]
 fn scripted_same_stem() {
-    run(
-        "same_stem",
-        &[Step {
-            name: "same_stem_add",
-            edit: same_stem_add,
-            via: Via::Apply(&["api/user.ts"]),
-            expect: Expect {
-                rebuilt_contains: &["python", "typescript"],
-                files_added: &["api/user.ts"],
-                row_changes: &["moved"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("same_stem", SEQ_SAME_STEM);
 }
 
-/// A client of the `/users` route, then gone again: the set-dependent HTTP
-/// demotion and its undo record move both ways.
-#[test]
-fn scripted_client() {
-    let client = |name: &'static str, edit: fn(&Path)| Step {
+/// One step of [`SEQ_CLIENT`].
+const fn client_step(name: &'static str, edit: fn(&Path)) -> Step {
+    Step {
         name,
         edit,
         via: Via::Apply(&["web/src/app/core/api.ts"]),
@@ -832,170 +865,167 @@ fn scripted_client() {
             moves_pass_undo: true,
             ..EXPECT
         },
-    };
-    run(
-        "client",
-        &[
-            client("client_add", client_add),
-            client("client_remove", client_remove),
-        ],
-    );
+    }
 }
+
+/// A client of the `/users` route, then gone again: the set-dependent HTTP
+/// demotion and its undo record move both ways.
+const SEQ_CLIENT: &[Step] = &[
+    client_step("client_add", client_add),
+    client_step("client_remove", client_remove),
+];
+
+#[test]
+fn scripted_client() {
+    run("client", SEQ_CLIENT);
+}
+
+const SEQ_GO_MOD: &[Step] = &[Step {
+    name: "module_line",
+    edit: go_mod_edit,
+    via: Via::Apply(&["go.mod"]),
+    expect: Expect {
+        rebuilt_contains: &["go"],
+        full_rebuild: Some("go_modules"),
+        files_modified: &["go.mod"],
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_go_mod() {
-    run(
-        "go_mod",
-        &[Step {
-            name: "module_line",
-            edit: go_mod_edit,
-            via: Via::Apply(&["go.mod"]),
-            expect: Expect {
-                rebuilt_contains: &["go"],
-                full_rebuild: Some("go_modules"),
-                files_modified: &["go.mod"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("go_mod", SEQ_GO_MOD);
 }
+
+const SEQ_TSCONFIG: &[Step] = &[Step {
+    name: "paths",
+    edit: tsconfig_edit,
+    via: Via::Apply(&["web/tsconfig.json"]),
+    expect: Expect {
+        rebuilt_contains: &["typescript"],
+        rebuilt_excludes: &["rust"],
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_tsconfig() {
-    run(
-        "tsconfig",
-        &[Step {
-            name: "paths",
-            edit: tsconfig_edit,
-            via: Via::Apply(&["web/tsconfig.json"]),
-            expect: Expect {
-                rebuilt_contains: &["typescript"],
-                rebuilt_excludes: &["rust"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("tsconfig", SEQ_TSCONFIG);
 }
+
+const SEQ_CARGO_MEMBER: &[Step] = &[Step {
+    name: "member_add",
+    edit: cargo_member_add,
+    via: Via::Apply(&["rs/Cargo.toml", "rs/util/Cargo.toml", "rs/util/src/lib.rs"]),
+    expect: Expect {
+        rebuilt_contains: &["rust"],
+        files_added: &["rs/util/Cargo.toml", "rs/util/src/lib.rs"],
+        files_modified: &["rs/Cargo.toml"],
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_cargo_member() {
-    run(
-        "cargo_member",
-        &[Step {
-            name: "member_add",
-            edit: cargo_member_add,
-            via: Via::Apply(&["rs/Cargo.toml", "rs/util/Cargo.toml", "rs/util/src/lib.rs"]),
-            expect: Expect {
-                rebuilt_contains: &["rust"],
-                files_added: &["rs/util/Cargo.toml", "rs/util/src/lib.rs"],
-                files_modified: &["rs/Cargo.toml"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("cargo_member", SEQ_CARGO_MEMBER);
 }
 
 /// The `[constants]` pin re-keys the env-built `${GATEWAY}/things` ENDPOINT.
+const SEQ_OVERLAY: &[Step] = &[Step {
+    name: "constants_pin",
+    edit: overlay_edit,
+    via: Via::Apply(&[".glia/overlay.toml"]),
+    expect: Expect {
+        rebuilt_exact: Some(EVERY_GROUP),
+        full_rebuild: Some("overlay"),
+        row_kinds: &["ENDPOINT"],
+        ..EXPECT
+    },
+}];
+
 #[test]
 fn scripted_overlay() {
-    run(
-        "overlay",
-        &[Step {
-            name: "constants_pin",
-            edit: overlay_edit,
-            via: Via::Apply(&[".glia/overlay.toml"]),
-            expect: Expect {
-                rebuilt_exact: Some(EVERY_GROUP),
-                full_rebuild: Some("overlay"),
-                row_kinds: &["ENDPOINT"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("overlay", SEQ_OVERLAY);
 }
 
 /// An rpc moves the proto service set (every group rebuilds); a message
 /// field alone does not.
+const SEQ_PROTO: &[Step] = &[
+    Step {
+        name: "rpc_add",
+        edit: proto_rpc_add,
+        via: Via::Apply(&["grpc/server/user.proto"]),
+        expect: Expect {
+            rebuilt_exact: Some(EVERY_GROUP),
+            full_rebuild: Some("proto_services"),
+            files_modified: &["grpc/server/user.proto"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "field_edit",
+        edit: proto_field_edit,
+        via: Via::Apply(&["grpc/server/user.proto"]),
+        expect: Expect {
+            rebuilt_contains: &["proto"],
+            files_modified: &["grpc/server/user.proto"],
+            ..EXPECT
+        },
+    },
+];
+
 #[test]
 fn scripted_proto() {
-    run(
-        "proto",
-        &[
-            Step {
-                name: "rpc_add",
-                edit: proto_rpc_add,
-                via: Via::Apply(&["grpc/server/user.proto"]),
-                expect: Expect {
-                    rebuilt_exact: Some(EVERY_GROUP),
-                    full_rebuild: Some("proto_services"),
-                    files_modified: &["grpc/server/user.proto"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "field_edit",
-                edit: proto_field_edit,
-                via: Via::Apply(&["grpc/server/user.proto"]),
-                expect: Expect {
-                    rebuilt_contains: &["proto"],
-                    files_modified: &["grpc/server/user.proto"],
-                    ..EXPECT
-                },
-            },
-        ],
-    );
+    run("proto", SEQ_PROTO);
 }
+
+const SEQ_MARKDOWN: &[Step] = &[Step {
+    name: "readme",
+    edit: markdown_edit,
+    via: Via::Apply(&["README.md"]),
+    expect: Expect {
+        rebuilt_exact: Some(&[]),
+        files_modified: &["README.md"],
+        row_kinds: &["DOC_SECTION"],
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_markdown() {
-    run(
-        "markdown",
-        &[Step {
-            name: "readme",
-            edit: markdown_edit,
-            via: Via::Apply(&["README.md"]),
-            expect: Expect {
-                rebuilt_exact: Some(&[]),
-                files_modified: &["README.md"],
-                row_kinds: &["DOC_SECTION"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("markdown", SEQ_MARKDOWN);
 }
 
 /// `cpp/third` joins the search roots, so `<tp.hpp>` binds.
+const SEQ_INCLUDE_ROOTS: &[Step] = &[Step {
+    name: "cmake_dir",
+    edit: include_root_add,
+    via: Via::Apply(&["cpp/CMakeLists.txt"]),
+    expect: Expect {
+        rebuilt_exact: Some(&["c_cpp"]),
+        ..EXPECT
+    },
+}];
+
 #[test]
 fn scripted_include_roots() {
-    run(
-        "include_roots",
-        &[Step {
-            name: "cmake_dir",
-            edit: include_root_add,
-            via: Via::Apply(&["cpp/CMakeLists.txt"]),
-            expect: Expect {
-                rebuilt_exact: Some(&["c_cpp"]),
-                ..EXPECT
-            },
-        }],
-    );
+    run("include_roots", SEQ_INCLUDE_ROOTS);
 }
+
+const SEQ_GITIGNORE: &[Step] = &[Step {
+    name: "ignore_docs",
+    edit: gitignore_docs,
+    via: Via::Apply(&[".gitignore"]),
+    expect: Expect {
+        rebuilt_exact: Some(&[]),
+        files_removed: &["docs/guide.md"],
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_gitignore() {
-    run(
-        "gitignore",
-        &[Step {
-            name: "ignore_docs",
-            edit: gitignore_docs,
-            via: Via::Apply(&[".gitignore"]),
-            expect: Expect {
-                rebuilt_exact: Some(&[]),
-                files_removed: &["docs/guide.md"],
-                ..EXPECT
-            },
-        }],
-    );
+    run("gitignore", SEQ_GITIGNORE);
 }
 
 /// GA.20: the A16.4 IMPORTS filter's memo. `api/svc.py` imports `yaml`, then
@@ -1004,70 +1034,68 @@ fn scripted_gitignore() {
 /// repo's index fingerprint, not only the file's imports), and take it back
 /// when the module goes. Falsifiable: a key without the index replays the
 /// stale cell at `local_module_add` (layout bytes).
+const SEQ_IMPORTS_MEMO: &[Step] = &[
+    Step {
+        name: "import_lib_add",
+        edit: import_lib_add,
+        via: Via::Apply(&["api/svc.py"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["python"]),
+            files_modified: &["api/svc.py"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "local_module_add",
+        edit: local_module_add,
+        via: Via::Apply(&["yaml.py"]),
+        expect: Expect {
+            rebuilt_contains: &["python"],
+            files_added: &["yaml.py"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "body_after",
+        edit: body_edit,
+        via: Via::Apply(&["api/svc.py"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["python"]),
+            files_modified: &["api/svc.py"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "local_module_remove",
+        edit: local_module_remove,
+        via: Via::Apply(&["yaml.py"]),
+        expect: Expect {
+            rebuilt_contains: &["python"],
+            files_removed: &["yaml.py"],
+            ..EXPECT
+        },
+    },
+];
+
 #[test]
 fn scripted_imports_memo() {
-    run(
-        "imports_memo",
-        &[
-            Step {
-                name: "import_lib_add",
-                edit: import_lib_add,
-                via: Via::Apply(&["api/svc.py"]),
-                expect: Expect {
-                    rebuilt_exact: Some(&["python"]),
-                    files_modified: &["api/svc.py"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "local_module_add",
-                edit: local_module_add,
-                via: Via::Apply(&["yaml.py"]),
-                expect: Expect {
-                    rebuilt_contains: &["python"],
-                    files_added: &["yaml.py"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "body_after",
-                edit: body_edit,
-                via: Via::Apply(&["api/svc.py"]),
-                expect: Expect {
-                    rebuilt_exact: Some(&["python"]),
-                    files_modified: &["api/svc.py"],
-                    ..EXPECT
-                },
-            },
-            Step {
-                name: "local_module_remove",
-                edit: local_module_remove,
-                via: Via::Apply(&["yaml.py"]),
-                expect: Expect {
-                    rebuilt_contains: &["python"],
-                    files_removed: &["yaml.py"],
-                    ..EXPECT
-                },
-            },
-        ],
-    );
+    run("imports_memo", SEQ_IMPORTS_MEMO);
 }
+
+const SEQ_NOOP: &[Step] = &[Step {
+    name: "unchanged",
+    edit: untouched,
+    via: Via::Apply(&["api/svc.py"]),
+    expect: Expect {
+        rebuilt_exact: Some(&[]),
+        noop: true,
+        ..EXPECT
+    },
+}];
 
 #[test]
 fn scripted_noop() {
-    run(
-        "noop",
-        &[Step {
-            name: "unchanged",
-            edit: untouched,
-            via: Via::Apply(&["api/svc.py"]),
-            expect: Expect {
-                rebuilt_exact: Some(&[]),
-                noop: true,
-                ..EXPECT
-            },
-        }],
-    );
+    run("noop", SEQ_NOOP);
 }
 
 /// `step` through `apply` and, on a second fresh fixture, through the stat
@@ -1152,6 +1180,40 @@ fn scripted_poll_conf() {
 #[test]
 fn scripted_poll_sbt() {
     poll_matches_apply("sbt", SBT, sbt_member_add);
+}
+
+/// GA.12: every scripted sequence again with a 1 MB memory budget, below any
+/// process, so each update evicts every cached group and the build memos:
+/// the eviction is a cache drop, so every step still equals a clean build
+/// byte for byte, with the same rows and files ([`run_with`]).
+#[test]
+fn scripted_budgeted() {
+    let sequences: &[(&str, &[Step])] = &[
+        ("body", &[BODY]),
+        ("declaration", SEQ_DECLARATION),
+        ("add_delete_rename", SEQ_ADD_DELETE_RENAME),
+        ("same_stem", SEQ_SAME_STEM),
+        ("client", SEQ_CLIENT),
+        ("go_mod", SEQ_GO_MOD),
+        ("tsconfig", SEQ_TSCONFIG),
+        ("cargo_member", SEQ_CARGO_MEMBER),
+        ("overlay", SEQ_OVERLAY),
+        ("proto", SEQ_PROTO),
+        ("markdown", SEQ_MARKDOWN),
+        ("include_roots", SEQ_INCLUDE_ROOTS),
+        ("gitignore", SEQ_GITIGNORE),
+        ("imports_memo", SEQ_IMPORTS_MEMO),
+        ("noop", SEQ_NOOP),
+        ("conf", &[CONF]),
+        ("sbt", &[SBT]),
+    ];
+    for (name, steps) in sequences {
+        run_with(
+            &format!("budgeted_{name}"),
+            steps,
+            Some(MemoryBudget::mb(1)),
+        );
+    }
 }
 
 // ---- the random sequences (DC.10b) ------------------------------------------

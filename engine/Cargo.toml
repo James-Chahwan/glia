@@ -112,5 +112,9 @@ name = "parallel_build"
 path = "tests/parallel_build.rs"
 
 [[test]]
+name = "watch_memory"
+path = "tests/watch_memory.rs"
+
+[[test]]
 name = "watch_parity"
 path = "tests/watch_parity.rs"
