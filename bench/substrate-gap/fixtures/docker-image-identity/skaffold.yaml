@@ -1,0 +1,12 @@
+apiVersion: skaffold/v3
+kind: Config
+metadata:
+  name: app
+build:
+  artifacts:
+  - image: frontend
+    context: src/frontend
+  - image: cartservice
+    context: src/cartservice/src
+    docker:
+      dockerfile: Dockerfile

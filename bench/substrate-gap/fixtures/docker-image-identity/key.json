@@ -1,0 +1,25 @@
+{
+  "framework": "docker-image-identity",
+  "language": "dockerfile+yaml",
+  "dirs": ["."],
+  "note": "GH.13 Dockerfile image identity (legacy-only, no matrix cell: no matrix column grades INFRA_RESOURCE). A FROM's `--platform=$BUILDPLATFORM` flag is skipped (before: `infra:image:--platform=$BUILDPLATFORM`), every stage's FROM is read (the runtime base `static` / `runtime-deps`, not only the builder's), a FROM naming an earlier stage (`builder`) mints nothing, a global ARG fills `${GO_VERSION}`, and src/cartservice/src/Dockerfile is named by the nearest non-generic directory, `cartservice` (before: `infra:image:src`), so the k8s Deployment's image and the Dockerfile's image are one node. skaffold.yaml declares the same names; a declared build context is not read for naming yet (the marker's compose= / skaffold= read 0).",
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:cartservice", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:frontend", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:runtime-deps", "exact": true, "note": "the final stage's base"}
+  ],
+  "expect_edges": [
+    {"from": "src::cartservice::src::Dockerfile", "to": "infra:image:cartservice", "category": "DEFINES", "exact": true, "note": "walked up past the generic `src` directory"},
+    {"from": "infra:deployment:cartservice", "to": "infra:image:cartservice", "category": "INFRA_REFERENCES", "exact": true, "note": "the k8s Deployment and the Dockerfile meet on one image node"},
+    {"from": "infra:image:cartservice", "to": "infra:image:sdk", "category": "INFRA_REFERENCES", "exact": true, "note": "builder stage base, its --platform flag skipped"},
+    {"from": "infra:image:cartservice", "to": "infra:image:runtime-deps", "category": "INFRA_REFERENCES", "exact": true, "note": "runtime stage base"},
+    {"from": "infra:image:frontend", "to": "infra:image:golang", "category": "INFRA_REFERENCES", "exact": true, "note": "`golang:${GO_VERSION}-alpine` with the global ARG filled"},
+    {"from": "infra:image:frontend", "to": "infra:image:static", "category": "INFRA_REFERENCES", "exact": true, "note": "gcr.io/distroless/static, the final stage's base"}
+  ],
+  "forbid": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:--platform=$BUILDPLATFORM", "note": "a FROM flag is no image"},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:src", "note": "a generic directory names no image"},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:builder", "note": "a stage parent is not an image"},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:tested"}
+  ]
+}
