@@ -21,6 +21,7 @@
 //! | Lapis `app:get("/users/:id", function(self) .. end)` (verbs get / post / put / delete / patch, `match` = ANY; a route name first is skipped) in a file requiring `lapis` | `ROUTE` `<METHOD> <path>` + a `HANDLED_BY` ref to the handler (an anonymous one minted as `FUNCTION` `<METHOD> <path>`) |
 //! | `socket.http`'s `http.request("http://h/p")` (POST with a body) / `http.request{ url = .., method = .. }`, `resty.http`'s `httpc:request_uri("http://h/p", { method = .. })` | an `ENDPOINT` from the caller (code-domain's client helpers, `host` on the hit) |
 //! | busted `it("adds", function() .. end)` in a test file ([`is_test_file`]) | `FUNCTION`, key `<describe ..> adds` (space-joined, as Elixir's ExUnit tests), its calls its own |
+//! | a host registration (0.5.6, GH.2, code-domain [`hosts`]): Neovim `vim.api.nvim_create_user_command("Name", h, ..)` / `nvim_buf_create_user_command(buf, "Name", h, ..)`, Maki `maki.api.register_tool{ name = "t", execute = .., restore = .. }` / `register_command`, the callee rooted at the unshadowed global `vim` / `maki` or a local alias of it (`local api = vim.api`), the name a string literal | `CLI_COMMAND` `host_cmd:<host>:<name>` (no parent: the host's) + a `HANDLED_BY` ref to each handler (an anonymous one minted as `FUNCTION` `command <name>`, a second table handler `command <name> <key>`, each owning its calls) |
 //!
 //! The qname of a symbol is `<module>::<key>`; a key two declarations of one
 //! file would share gets `@<line>` (1-based) on the later one, so every node
@@ -30,12 +31,17 @@
 //! defined in another file. `build_lua` (graph) binds the calls and requires.
 //!
 //! fired_on, per parsed file:
-//! `[lua] functions=<f> methods=<m> classes=<k> heritage=<h> routes=<r> endpoints=<e> tests=<t> requires=<q> dynamic_requires=<d> calls=<c> file=<p>`.
+//! `[lua] functions=<f> methods=<m> classes=<k> heritage=<h> routes=<r> endpoints=<e> tests=<t> requires=<q> dynamic_requires=<d> calls=<c> file=<p>`,
+//! then, per file holding a host registration (GH.2):
+//! `[host] lang=lua commands=<c> events=<e> callbacks=<k> config=<g> minted=<m> aux=<a> unread=<u> hosts=<h:n,..> file=<p>`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with, route_qname,
+};
+use glia_code_domain::hosts::{
+    self, HostSink, HostSite, HostTally, Pattern, Shape, push_registration, registration_for,
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -89,6 +95,8 @@ pub fn parse_file(
         endpoints: HashSet::new(),
         tests: is_test_file(file_rel_path).then(Vec::new),
         counts: Counts::default(),
+        host_bindings: vec![HashMap::new()],
+        host: HostTally::default(),
     };
     w.nodes.push(Node {
         id: module_id,
@@ -122,6 +130,9 @@ pub fn parse_file(
         w.counts.dynamic_requires,
         w.calls.len(),
     );
+    if let Some(line) = w.host.marker("lua", file_rel_path) {
+        eprintln!("{line}");
+    }
 
     Ok(FileParse {
         nodes: w.nodes,
@@ -202,6 +213,12 @@ struct Walk<'a> {
     /// In a test file, the enclosing busted `describe` names; `None` elsewhere.
     tests: Option<Vec<String>>,
     counts: Counts,
+    /// Locals that matter to a host global, scoped with `scopes`: name ->
+    /// `Some(<host path>)` for an alias of a host global or one of its fields
+    /// (`local api = vim.api`), `None` for any other local or parameter,
+    /// which shadows a global of its name.
+    host_bindings: Vec<HashMap<String, Option<String>>>,
+    host: HostTally,
 }
 
 impl<'a> Walk<'a> {
@@ -224,6 +241,14 @@ impl<'a> Walk<'a> {
                     if child.kind() == "assignment_statement" {
                         self.assignment(child, ctx, true);
                     } else {
+                        if child.kind() == "variable_list" {
+                            // `local x`: declared, no value.
+                            let mut c = child.walk();
+                            let names: Vec<TsNode<'a>> = child.named_children(&mut c).collect();
+                            for name in names.iter().filter(|n| n.kind() == "identifier") {
+                                self.bind_host(text(*name, self.src), None);
+                            }
+                        }
                         self.visit(child, ctx);
                     }
                 }
@@ -302,6 +327,7 @@ impl<'a> Walk<'a> {
             if local {
                 // Visible in its own body (recursion) and after.
                 self.bind_local(&dotted, &key);
+                self.bind_host(&dotted, None);
             } else {
                 self.globals.entry(dotted).or_insert_with(|| key.clone());
             }
@@ -338,6 +364,22 @@ impl<'a> Walk<'a> {
                 l.named_children(&mut c).collect::<Vec<_>>()
             })
             .collect();
+        // A local's host binding: read before the values walk (`local vim =
+        // vim` reads the global), bound after it (the new local is not in
+        // scope inside its own initialiser).
+        let host_bound: Vec<(String, Option<String>)> = if local {
+            names
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.kind() == "identifier")
+                .map(|(i, n)| {
+                    let path = values.get(i).and_then(|v| self.host_path(*v, ctx));
+                    (text(*n, self.src).to_string(), path)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         for (i, value) in values.iter().enumerate() {
             if let Some(name) = names.get(i) {
                 if let Some(dotted) = self.dotted(*name, ctx) {
@@ -386,6 +428,9 @@ impl<'a> Walk<'a> {
                 _ => self.visit(*value, ctx),
             }
         }
+        for (name, path) in host_bound {
+            self.bind_host(&name, path);
+        }
     }
 
     /// A table constructor's `key = function() end` fields, minted under
@@ -430,6 +475,13 @@ impl<'a> Walk<'a> {
     /// A function's parameters and body in a fresh scope.
     fn scoped_body(&mut self, node: TsNode<'a>, ctx: &Ctx) {
         self.push_scope();
+        if let Some(params) = node.child_by_field_name("parameters") {
+            let mut c = params.walk();
+            let names: Vec<TsNode<'a>> = params.named_children(&mut c).collect();
+            for name in names.iter().filter(|n| n.kind() == "identifier") {
+                self.bind_host(text(*name, self.src), None);
+            }
+        }
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_children(body, ctx);
         }
@@ -439,11 +491,13 @@ impl<'a> Walk<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.types.push(HashMap::new());
+        self.host_bindings.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.types.pop();
+        self.host_bindings.pop();
     }
 
     fn call(&mut self, node: TsNode<'a>, ctx: &Ctx) {
@@ -455,6 +509,9 @@ impl<'a> Walk<'a> {
             return;
         }
         if self.lapis_route(node, ctx) {
+            return;
+        }
+        if self.host_registration(node, ctx) {
             return;
         }
         self.http_client(node, ctx);
@@ -901,6 +958,141 @@ impl<'a> Walk<'a> {
         true
     }
 
+    /// A host registration (code-domain [`hosts`]): a call whose dotted
+    /// callee, rooted at an unshadowed host global, matches a row's
+    /// registration, with the name a string literal. Mints the CLI_COMMAND /
+    /// EVENT_HANDLER and a HANDLED_BY ref to each handler; an anonymous
+    /// handler is minted as FUNCTION `command <name>` (`on <event>`) and owns
+    /// its calls, as a Lapis route's does. The call's other arguments walk
+    /// from the enclosing scope. A prefix match that registers nothing
+    /// (`aux=`) and a name that is no literal (`unread=`) fall through to
+    /// the ordinary call.
+    fn host_registration(&mut self, node: TsNode<'a>, ctx: &Ctx) -> bool {
+        let Some(callee) = node
+            .child_by_field_name("name")
+            .filter(|c| c.kind() == "dot_index_expression")
+        else {
+            return false;
+        };
+        let Some(path) = self.host_path(callee, ctx) else {
+            return false;
+        };
+        let Some(found) = registration_for("lua", &path) else {
+            return false;
+        };
+        let host = found.host.name;
+        let pattern = found.registration.pattern;
+        self.host.hit(host);
+        if !found.mints {
+            self.host.aux += 1;
+            return false;
+        }
+        let read = node
+            .child_by_field_name("arguments")
+            .and_then(|args| read_registration(args, found.registration.shape, self.src));
+        let Some(read) = read else {
+            self.host.unread += 1;
+            return false;
+        };
+        let mut handlers = Vec::new();
+        for (i, (field, handler)) in read.handlers.iter().enumerate() {
+            // The first handler is the registration's own: `command <name>`.
+            let field = if i == 0 { None } else { *field };
+            if let Some(q) = self.host_handler(*handler, pattern, &read.name, field, ctx) {
+                handlers.push(q);
+            }
+        }
+        for rest in read.rest {
+            self.visit(rest, ctx);
+        }
+        let cells: Vec<Cell> = cells(&node, self.src, self.file_rel_path)
+            .into_iter()
+            .skip(1)
+            .collect();
+        let site = HostSite::new(self.repo, self.module_id, host, row(node), cells);
+        let mut sink = HostSink::new(&mut self.nodes, &mut self.nav, &mut self.refs);
+        push_registration(&site, pattern, &read.name, &handlers, &mut sink);
+        self.host.registered(pattern);
+        true
+    }
+
+    /// The HANDLED_BY qualifier of a registration's handler: an anonymous
+    /// function minted under [`Pattern::handler_key`], a local or global
+    /// function by name, a table field as an attribute. A string (Neovim's
+    /// `":cmd"` form) names no handler; anything else walks and names none.
+    fn host_handler(
+        &mut self,
+        handler: TsNode<'a>,
+        pattern: Pattern,
+        name: &str,
+        field: Option<&str>,
+        ctx: &Ctx,
+    ) -> Option<CallQualifier> {
+        match handler.kind() {
+            "function_definition" => {
+                let key = self.unique(pattern.handler_key(name, field), handler);
+                let id = self.mint(&key, node_kind::FUNCTION, handler);
+                self.host.minted += 1;
+                let inner = Ctx {
+                    owner: id,
+                    key: Some(key.clone()),
+                    self_table: ctx.self_table.clone(),
+                };
+                self.scoped_body(handler, &inner);
+                Some(CallQualifier::Bare(key))
+            }
+            "identifier" => {
+                let name = text(handler, self.src).to_string();
+                Some(CallQualifier::Bare(
+                    self.lookup_local(&name).unwrap_or(name),
+                ))
+            }
+            "dot_index_expression" => self.dotted(handler, ctx).and_then(|d| {
+                let (base, name) = d.rsplit_once('.')?;
+                Some(CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                })
+            }),
+            "string" => None,
+            _ => {
+                self.visit(handler, ctx);
+                None
+            }
+        }
+    }
+
+    /// The dotted path of an identifier / `a.b` chain rooted at a host
+    /// global ([`hosts::is_host_global`]), a local alias of one expanded
+    /// (`api.x` with `local api = vim.api` is `vim.api.x`); `None` when the
+    /// root is any other name or a local shadows the global.
+    fn host_path(&self, node: TsNode<'a>, ctx: &Ctx) -> Option<String> {
+        if !matches!(node.kind(), "identifier" | "dot_index_expression") {
+            return None;
+        }
+        let dotted = self.dotted(node, ctx)?;
+        let (root, rest) = match dotted.split_once('.') {
+            Some((r, t)) => (r, Some(t)),
+            None => (dotted.as_str(), None),
+        };
+        let base = match self.host_bindings.iter().rev().find_map(|s| s.get(root)) {
+            Some(Some(path)) => path.clone(),
+            Some(None) => return None,
+            None if hosts::is_host_global("lua", root) => root.to_string(),
+            None => return None,
+        };
+        Some(match rest {
+            Some(t) => format!("{base}.{t}"),
+            None => base,
+        })
+    }
+
+    fn bind_host(&mut self, name: &str, path: Option<String>) {
+        if let Some(scope) = self.host_bindings.last_mut() {
+            scope.insert(name.to_string(), path);
+        }
+    }
+
     /// A client call: `socket.http`'s `http.request(url[, body])` /
     /// `http.request{ url = .., method = .. }`, `resty.http`'s
     /// `x:request_uri(url[, { method = .. }])`. The URL must be a string
@@ -1119,6 +1311,141 @@ impl<'a> Walk<'a> {
         self.nav.record(id, key, &qname, kind, Some(self.module_id));
         id
     }
+}
+
+/// A registration's name, handlers and other arguments, by its shape.
+/// `None` when the name is no string literal, the arguments do not have
+/// the shape, or the shape is not one a Lua call can hold.
+fn read_registration<'t>(args: TsNode<'t>, shape: Shape, src: &[u8]) -> Option<HostRead<'t>> {
+    let argv: Vec<TsNode<'t>> = if args.kind() == "arguments" {
+        let mut cursor = args.walk();
+        args.named_children(&mut cursor).collect()
+    } else {
+        // `f{ .. }` / `f"x"`: the one argument is the node itself.
+        vec![args]
+    };
+    match shape {
+        Shape::Table {
+            name_key,
+            handler_keys,
+        } => {
+            let [table] = argv.as_slice() else {
+                return None;
+            };
+            let (fields, mut rest) = table_fields(*table, src)?;
+            let name = fields
+                .iter()
+                .find(|(k, _)| k == name_key)
+                .and_then(|(_, v)| string_literal(*v, src))?;
+            let mut handlers = Vec::new();
+            for key in handler_keys {
+                if let Some((_, v)) = fields.iter().find(|(k, _)| k == key) {
+                    handlers.push((Some(*key), *v));
+                }
+            }
+            rest.extend(
+                fields
+                    .iter()
+                    .filter(|(k, _)| k != name_key && !handler_keys.contains(&k.as_str()))
+                    .map(|(_, v)| *v),
+            );
+            Some(HostRead {
+                name,
+                handlers,
+                rest,
+            })
+        }
+        Shape::Positional {
+            name_arg,
+            handler_arg,
+            handler_table,
+        } => {
+            let name = argv
+                .get(name_arg.checked_sub(1)?)
+                .and_then(|a| string_literal(*a, src))?;
+            let mut handlers = Vec::new();
+            let mut rest = Vec::new();
+            let handler_at = match handler_table {
+                Some((arg, keys)) => {
+                    if let Some(table) = argv.get(arg.checked_sub(1)?) {
+                        let (fields, other) = table_fields(*table, src)?;
+                        rest.extend(other);
+                        for (k, v) in &fields {
+                            match keys.iter().find(|key| **key == k.as_str()) {
+                                Some(key) => handlers.push((Some(*key), *v)),
+                                None => rest.push(*v),
+                            }
+                        }
+                    }
+                    arg
+                }
+                None => {
+                    if let Some(h) = argv.get(handler_arg.checked_sub(1)?) {
+                        handlers.push((None, *h));
+                    }
+                    handler_arg
+                }
+            };
+            rest.extend(
+                argv.iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i + 1 != name_arg && *i + 1 != handler_at)
+                    .map(|(_, a)| *a),
+            );
+            Some(HostRead {
+                name,
+                handlers,
+                rest,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A table constructor's `key = value` fields with identifier keys, and
+/// the values of its other fields; `None` when `node` is no table.
+fn table_fields<'t>(node: TsNode<'t>, src: &[u8]) -> Option<TableFields<'t>> {
+    if node.kind() != "table_constructor" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let mut keyed = Vec::new();
+    let mut other = Vec::new();
+    for field in node.named_children(&mut cursor) {
+        let Some(value) = field.child_by_field_name("value") else {
+            other.push(field);
+            continue;
+        };
+        match field
+            .child_by_field_name("name")
+            .filter(|n| n.kind() == "identifier")
+        {
+            Some(key) => keyed.push((text(key, src).to_string(), value)),
+            None => other.push(value),
+        }
+    }
+    Some((keyed, other))
+}
+
+/// A host registration as read: its literal name, its handlers (each with
+/// the table key it sat at) and the arguments that are neither.
+struct HostRead<'t> {
+    name: String,
+    handlers: Vec<(Option<&'static str>, TsNode<'t>)>,
+    rest: Vec<TsNode<'t>>,
+}
+
+/// A table constructor's identifier-keyed fields `(key, value)`, and the
+/// values of its other fields.
+type TableFields<'t> = (Vec<(String, TsNode<'t>)>, Vec<TsNode<'t>>);
+
+/// A non-empty string literal's text.
+fn string_literal(node: TsNode, src: &[u8]) -> Option<String> {
+    (node.kind() == "string")
+        .then(|| node.child_by_field_name("content"))
+        .flatten()
+        .map(|c| text(c, src).to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// A busted test file: `*_spec.lua` / `*_test.lua` / `test_*.lua`, or any
@@ -1512,5 +1839,203 @@ mod tests {
             .map(|(id, _)| *id)
             .unwrap();
         assert!(fp.calls.iter().all(|c| c.from == run));
+    }
+
+    /// `(command name, handler ref)` for every HANDLED_BY ref from a
+    /// CLI_COMMAND, in emission order.
+    fn host_commands(fp: &FileParse) -> Vec<(String, String)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter(|r| fp.nav.kind_by_id.get(&r.from) == Some(&node_kind::CLI_COMMAND))
+            .map(|r| {
+                (
+                    fp.nav.qname_by_id[&r.from].clone(),
+                    format!("{:?}", r.qualifier),
+                )
+            })
+            .collect()
+    }
+
+    fn commands(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::CLI_COMMAND))
+            .map(|(_, q)| q.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn neovim_user_commands_are_host_commands() {
+        let fp = parse(
+            "local function greet(opts)\n  print(\"hi \" .. opts.args)\nend\n\
+             vim.api.nvim_create_user_command(\"Greet\", greet, { nargs = 1 })\n\
+             vim.api.nvim_create_user_command(\"GreetAll\", function()\n  greet({ args = \"all\" })\nend, {})\n",
+        );
+        assert_eq!(
+            commands(&fp),
+            ["host_cmd:neovim:Greet", "host_cmd:neovim:GreetAll"]
+        );
+        assert_eq!(
+            host_commands(&fp),
+            [
+                (
+                    "host_cmd:neovim:Greet".to_string(),
+                    "Bare(\"greet\")".to_string()
+                ),
+                (
+                    "host_cmd:neovim:GreetAll".to_string(),
+                    "Bare(\"command GreetAll\")".to_string()
+                ),
+            ]
+        );
+        // The anonymous handler is its own FUNCTION and owns its calls.
+        assert_eq!(
+            keys(&fp, node_kind::FUNCTION),
+            ["command GreetAll", "greet"]
+        );
+        let handler = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.ends_with("::command GreetAll"))
+            .map(|(id, _)| *id)
+            .unwrap();
+        let greet_calls: Vec<_> = fp
+            .calls
+            .iter()
+            .filter(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "greet"))
+            .collect();
+        assert_eq!(greet_calls.len(), 1);
+        assert_eq!(greet_calls[0].from, handler);
+        // The command is the host's, located at its registration, parentless.
+        let greet = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "host_cmd:neovim:Greet")
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(!fp.nav.parent_of.contains_key(&greet));
+        let node = fp.nodes.iter().find(|n| n.id == greet).unwrap();
+        assert!(node.cells.iter().any(|c| c.kind == cell_type::POSITION
+            && matches!(&c.payload, CellPayload::Json(j) if j.contains("\"start_line\":3"))));
+        // An option key is no command.
+        assert!(!commands(&fp).iter().any(|c| c.contains("nargs")));
+    }
+
+    #[test]
+    fn maki_tools_and_commands_mint_other_registrations_are_aux() {
+        let fp = parse(
+            "local function summarize_text(s) return s end\n\
+             maki.api.register_tool({\n  name = \"summarize\",\n  execute = function(args)\n    return summarize_text(args.text)\n  end,\n  restore = function() end,\n})\n\
+             maki.api.register_command{ name = \"clear\", execute = summarize_text }\n\
+             maki.api.register_hook({ name = \"after\", execute = function() summarize_text(1) end })\n",
+        );
+        assert_eq!(
+            commands(&fp),
+            ["host_cmd:maki:clear", "host_cmd:maki:summarize"]
+        );
+        assert_eq!(
+            host_commands(&fp),
+            [
+                (
+                    "host_cmd:maki:summarize".to_string(),
+                    "Bare(\"command summarize\")".to_string()
+                ),
+                (
+                    "host_cmd:maki:summarize".to_string(),
+                    "Bare(\"command summarize restore\")".to_string()
+                ),
+                (
+                    "host_cmd:maki:clear".to_string(),
+                    "Bare(\"summarize_text\")".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            keys(&fp, node_kind::FUNCTION),
+            [
+                "command summarize",
+                "command summarize restore",
+                "summarize_text"
+            ]
+        );
+        // The aux hook mints nothing; its closure's call stays the module's.
+        assert!(!commands(&fp).iter().any(|c| c.contains("after")));
+        let module = fp.nodes[0].id;
+        assert!(fp.calls.iter().any(|c| c.from == module
+            && matches!(&c.qualifier, CallQualifier::Bare(n) if n == "summarize_text")));
+    }
+
+    #[test]
+    fn host_globals_read_through_aliases_and_never_through_shadows() {
+        let fp = parse(
+            "local api = vim.api\n\
+             local v = vim\n\
+             api.nvim_create_user_command(\"A\", \":echo a\", {})\n\
+             v.api.nvim_buf_create_user_command(0, \"B\", function() end, {})\n\
+             local function setup(vim)\n  vim.api.nvim_create_user_command(\"Shadowed\", function() end, {})\nend\n\
+             do\n  local vim = { api = {} }\n  vim.api.nvim_create_user_command(\"Local\", function() end, {})\nend\n\
+             local name = \"C\"\n\
+             vim.api.nvim_create_user_command(name, function() end, {})\n\
+             vim.keymap.set(\"n\", \"<leader>g\", function() end)\n",
+        );
+        assert_eq!(commands(&fp), ["host_cmd:neovim:A", "host_cmd:neovim:B"]);
+        // A string command is no handler; the anonymous one is minted.
+        assert_eq!(
+            host_commands(&fp),
+            [(
+                "host_cmd:neovim:B".to_string(),
+                "Bare(\"command B\")".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_positional_handler_table_reads_its_keys_and_leaves_the_rest() {
+        // No 0.5.6 Lua row uses `handler_table` yet (Neovim autocmds will):
+        // read a call against the shape directly.
+        let src =
+            "f(\"BufWritePost\", { pattern = \"*.lua\", callback = function() end, desc = g() })";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_lua::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let mut call = tree.root_node();
+        while call.kind() != "function_call" {
+            call = call.named_child(0).unwrap();
+        }
+        let args = call.child_by_field_name("arguments").unwrap();
+        let shape = Shape::Positional {
+            name_arg: 1,
+            handler_arg: 2,
+            handler_table: Some((2, &["callback"])),
+        };
+        let read = read_registration(args, shape, src.as_bytes()).unwrap();
+        assert_eq!(read.name, "BufWritePost");
+        let handlers: Vec<(Option<&str>, &str)> =
+            read.handlers.iter().map(|(k, v)| (*k, v.kind())).collect();
+        assert_eq!(handlers, [(Some("callback"), "function_definition")]);
+        let mut rest: Vec<&str> = read.rest.iter().map(|n| n.kind()).collect();
+        rest.sort_unstable();
+        assert_eq!(rest, ["function_call", "string"]);
+        // A computed name is unread.
+        let shape_name_2 = Shape::Positional {
+            name_arg: 2,
+            handler_arg: 1,
+            handler_table: None,
+        };
+        assert!(read_registration(args, shape_name_2, src.as_bytes()).is_none());
+        // A table shape needs exactly one table argument.
+        let table = Shape::Table {
+            name_key: "pattern",
+            handler_keys: &["callback"],
+        };
+        assert!(read_registration(args, table, src.as_bytes()).is_none());
     }
 }

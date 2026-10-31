@@ -33,7 +33,9 @@
 //! kinds are prefixed by mechanism: QUEUE_CONSUMER `queue-<topic>`,
 //! EVENT_HANDLER `event-<channel>`, GRPC_SERVICE `grpc-<last segment of the
 //! service>`, GRAPHQL_RESOLVER `graphql`, CLI_COMMAND `cli-<first word>`,
-//! CRON_JOB `cron-<channel>`, anything else `<kind lower-cased>-<name>`.
+//! CRON_JOB `cron-<channel>`, anything else `<kind lower-cased>-<name>`. A
+//! host command or event (`host_cmd:<host>:<name>`, `host_event:..`, GH.2)
+//! keys by its name, the host dropped (`cli-greet`, `event-bufwritepost`).
 //!
 //! Every key is slugged to `[a-z0-9._-]`: other characters become `-`, runs of
 //! `-` collapse, `-` and `.` are trimmed from both ends (no hidden file, no
@@ -704,9 +706,14 @@ fn is_version(seg: &str) -> bool {
 }
 
 /// The owner segment and a kind's own qname prefix, off a channel literal
-/// [`channel_of`] fell back to the qname for.
+/// [`channel_of`] fell back to the qname for. A host command or event
+/// (`host_cmd:<host>:<name>`, `host_event:<host>:<event>`, GH.2) loses its
+/// host too: its key is its name's, as a `cli:` command's is.
 fn strip_kind_prefix(s: &str) -> &str {
     let s = split_owner(s).0;
+    if let Some((_, name)) = glia_code_domain::hosts::split_host_qname(s) {
+        return name;
+    }
     for p in ["page:", "route:", "ws:", "event_handle:", "cli:"] {
         if let Some(rest) = s.strip_prefix(p) {
             return rest;
@@ -1197,6 +1204,25 @@ mod tests {
         assert!(is_key("orders") && is_key("queue-orders.created"));
         assert!(!is_key("") && !is_key(".x") && !is_key("..") && !is_key("a/b") && !is_key("A"));
         assert!(is_version("v2") && !is_version("v") && !is_version("vx1"));
+    }
+
+    #[test]
+    fn host_commands_and_events_key_by_their_name() {
+        // GH.2: a host command's nav name is its command name; a name-less
+        // one falls back to its qname, the host dropped.
+        assert_eq!(
+            feature_key(nk::CLI_COMMAND, "host_cmd:neovim:Greet", "Greet"),
+            "cli-greet"
+        );
+        assert_eq!(
+            feature_key(nk::CLI_COMMAND, "host_cmd:maki:summarize", ""),
+            "cli-summarize"
+        );
+        assert_eq!(
+            feature_key(nk::EVENT_HANDLER, "host_event:neovim:BufWritePost", ""),
+            "event-bufwritepost"
+        );
+        assert_eq!(feature_key(nk::CLI_COMMAND, "cli:sync", ""), "cli-sync");
     }
 
     #[test]

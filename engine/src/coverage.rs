@@ -367,6 +367,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Kotlin client ENDPOINTs come from Retrofit interface methods, Spring RestTemplate / WebClient / RestClient calls and Ktor-client verb calls (`client.get(url)`, `client.request(url) { method = HttpMethod.Post }`, in a file importing io.ktor.client) with a literal or templated URL. OkHttp, java.net.http and Fuel calls emit no ENDPOINT; a Ktor builder call without a positional URL (`client.get { url(..) }`), a Ktor `request` whose `method =` is not an `HttpMethod.<X>` constant, and a URL held in a variable are not read; the Retrofit builder's `baseUrl(...)` is not read, so a Retrofit path is taken as root-relative and a base URL carrying a path prefix (`baseUrl(\"https://x/api/\")`) pairs only through the resolver's route-prefix fallback (Medium), or not at all for a prefix outside its API-prefix list",
         verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( / url( across *.kt",
     },
+    // GH.2: the host table's Lua rows (code_domain::hosts), measured on
+    // patterns/lua/host_command and the Lua parser's host tests.
+    CoverageCaveat {
+        language: "lua",
+        edge_category: "HANDLED_BY",
+        note: "Lua host commands are read for two hosts only: Neovim `vim.api.nvim_create_user_command(\"Name\", h, ..)` / `nvim_buf_create_user_command(buf, \"Name\", h, ..)` and Maki `maki.api.register_tool` / `register_command` with a `name` and `execute` / `restore` fields, each a CLI_COMMAND `host_cmd:<host>:<name>` HANDLED_BY its handler (an anonymous one is the FUNCTION `command <name>`). The callee must be rooted at the global `vim` / `maki`, directly or through a local alias of it or of one of its fields (`local api = vim.api`); a host table passed as a parameter, stored in a table field or reached through `require`, a local that shadows the global, a name that is not a string literal, a keymap (`vim.keymap.set`, `nvim_set_keymap`: no command), other `maki.api.register_*` calls and every other host (WezTerm, LOVE, AwesomeWM, WoW, OpenResty) register nothing",
+        verify: "grep nvim_create_user_command / register_tool / register_command in *.lua",
+    },
 ];
 
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
@@ -457,7 +465,7 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
                 if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload
                     && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
                     && let Some(file) = v.get("file").and_then(|f| f.as_str())
-                    && let Some(lang) = ext_to_language(file)
+                    && let Some(lang) = caveat_language(file)
                 {
                     langs.insert(lang);
                 }
@@ -465,6 +473,14 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
         }
     }
     langs
+}
+
+/// The caveat language of a file: [`ext_to_language`]'s, and `lua` for a
+/// `.lua` file (GH.2), which only the caveat rows key on: the other readers
+/// of [`ext_to_language`] (arch's service languages, absence narrowing,
+/// effects, gaps' cross-language pairs) keep their 0.5.5 answer.
+fn caveat_language(path: &str) -> Option<&'static str> {
+    ext_to_language(path).or_else(|| path.ends_with(".lua").then_some("lua"))
 }
 
 /// Map a file path's extension to the analyzer language name used in caveats.
@@ -966,6 +982,21 @@ mod tests {
             .find(|n| n.language == lang && n.edge_category == category)
             .map(|n| n.note)
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn lua_files_get_the_host_command_row() {
+        // GH.2: a Lua repo is told which hosts' commands are read; the other
+        // readers of `ext_to_language` still see no language for `.lua`.
+        assert_eq!(
+            lang_rows("plugin/greet.lua", "lua"),
+            [("lua", "HANDLED_BY")]
+        );
+        let note = row_note("plugin/greet.lua", "lua", "HANDLED_BY");
+        assert!(note.contains("nvim_create_user_command") && note.contains("register_tool"));
+        assert!(note.contains("keymap"));
+        assert!(lang_rows("src/app.py", "lua").is_empty());
+        assert_eq!(ext_to_language("plugin/greet.lua"), None);
     }
 
     #[test]

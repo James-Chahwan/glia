@@ -69,6 +69,12 @@ pub mod evm;
 /// server-site MESSAGE_TYPE cells and JSON kinds. (DT.1a)
 pub mod wire;
 
+// 0.5.6 (GH.2): no wave 0; the packet declares its own module.
+
+/// The host table: the programs that load plugin code and how a plugin
+/// registers with each (PR #3's plugin families, generalised). (GH.2)
+pub mod hosts;
+
 // ============================================================================
 // Node kinds
 // ============================================================================

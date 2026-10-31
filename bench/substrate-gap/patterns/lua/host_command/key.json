@@ -16,6 +16,10 @@
     {
       "kind": "CLI_COMMAND",
       "name": "GreetAll"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "summarize"
     }
   ],
   "expect_edges": [
@@ -24,6 +28,18 @@
       "to": "greet",
       "category": "HANDLED_BY",
       "note": "the command -> its named handler"
+    },
+    {
+      "from": "summarize",
+      "to": "command summarize",
+      "category": "HANDLED_BY",
+      "note": "the tool -> its anonymous execute handler, minted as FUNCTION `command summarize`"
+    },
+    {
+      "from": "GreetAll",
+      "to": "command GreetAll",
+      "category": "HANDLED_BY",
+      "note": "the command -> its anonymous handler, minted as FUNCTION `command GreetAll`"
     }
   ],
   "expect_cells": [],
@@ -35,5 +51,5 @@
       "note": "an option key is no command"
     }
   ],
-  "note": "0.5.5 use pattern: a Neovim plugin registers user commands (nvim_create_user_command). INTENDED: one CLI_COMMAND per command HANDLED_BY its handler (a named function, or the anonymous one's enclosing scope). Not read in 0.5.5; 0.5.6's host-to-plugin graph."
+  "note": "0.5.5 use pattern: a Neovim plugin registers user commands (nvim_create_user_command), and a Maki plugin registers a tool (maki.api.register_tool with name / execute / restore; the Maki case is glia PR #3's, by Brian Ealdwine). Read since 0.5.6 (GH.2, the host table code_domain::hosts): one CLI_COMMAND host_cmd:<host>:<name> per registration HANDLED_BY its handler, a named function or the anonymous one minted as FUNCTION `command <name>`."
 }
