@@ -1,0 +1,15 @@
+{
+  "framework": "go-generic-instantiation-calls",
+  "language": "go",
+  "dirs": ["."],
+  "note": "GD.1 (0.5.4 FD.8). A single-type-argument instantiation parses as a call through an index_expression (two arguments: util.Map[int](xs, f)) or as a generic_type conversion (one argument: Keep[string](\"a\")). Baseline HEAD 12375a67: both CALLS missing (USES id only).",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "Map", "note": "generic callee in another package"},
+    {"kind": "FUNCTION", "name": "Keep", "note": "generic callee in the same file"},
+    {"kind": "FUNCTION", "name": "main", "note": "caller"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "Map", "category": "CALLS", "note": "util.Map[int]([]int{1}, id)"},
+    {"from": "main", "to": "Keep", "category": "CALLS", "note": "Keep[string](\"a\")"}
+  ]
+}

@@ -495,8 +495,10 @@ fn data_wrapper_repo(tag: &str, overlay: &str) -> PathBuf {
 
 /// CE.3a (2): a stanza that pairs no orphan still shows every effect: one
 /// DATA_ENTITY and its ACCESSES_DATA edge, the graph gaps unchanged
-/// (dead_symbol 3 both ways), verdict keep. Pre-CE.3a the only verdict was
+/// (dead_symbol 2 both ways), verdict keep. Pre-CE.3a the only verdict was
 /// "orphans did not fall" (0 -> 0). A stanza binding nothing is a drop.
+/// GD.1: `NewCollection[ChatPreview](..)` is a CALLS of NewCollection, so
+/// NewCollection is no dead_symbol (3 -> 2).
 #[test]
 fn overlay_delta_measures_every_category() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -523,10 +525,10 @@ fn overlay_delta_measures_every_category() {
     assert_eq!(d.without.gaps_by_category, d.with.gaps_by_category, "{d:?}");
     assert_eq!(
         d.without.gaps_by_category.get(DEAD_SYMBOL),
-        Some(&3),
+        Some(&2),
         "{d:?}"
     );
-    assert_eq!((d.without.total_gaps(), d.with.total_gaps()), (3, 3));
+    assert_eq!((d.without.total_gaps(), d.with.total_gaps()), (2, 2));
     assert_eq!((d.orphans_without, d.orphans_with), (0, 0));
     assert_eq!(d.without.nodes_by_kind.get("DATA_ENTITY"), None, "{d:?}");
     assert_eq!(d.verdict, KEEP);

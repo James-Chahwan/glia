@@ -224,7 +224,7 @@ fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
     assert!(
         stderr
             .lines()
-            .any(|l| l == "[overlay] 1 rules, +1 edges, orphans 0→0, gaps 3→3, verdict=keep"),
+            .any(|l| l == "[overlay] 1 rules, +1 edges, orphans 0→0, gaps 2→2, verdict=keep"),
         "{stderr}"
     );
     let d: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON object");
@@ -243,7 +243,7 @@ fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
     let out = text(&table.stdout);
     assert_eq!(table.status.code(), Some(0), "{}", text(&table.stderr));
     for line in [
-        "| gaps | 3 | 3 |",
+        "| gaps | 2 | 2 |",
         "- node kind DATA_ENTITY: 0→1 (+1)",
         "- edge category ACCESSES_DATA: 0→1 (+1)",
         "verdict: keep - a gap category fell or the graph grew, none rose",

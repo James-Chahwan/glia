@@ -143,6 +143,7 @@ pub fn parse_file_with_modules(
         }
     }
     acc.file_consts = FileConsts::scan(root, src, module_id, &mut acc.nav);
+    acc.file_values = file_value_names(root, src);
 
     // CB.11: the router groups this file assigns to struct fields, read before
     // any route walk so a registration on `s.v1` finds the group whatever
@@ -213,6 +214,13 @@ pub fn parse_file_with_modules(
         eprintln!(
             "[go-calls] func-literal bodies={} calls={} route-literal bodies skipped={} in {file_rel_path}",
             acc.closure_bodies, acc.closure_calls, acc.route_literals_skipped
+        );
+    }
+    // GD.1 fired_on: the explicitly instantiated generic calls minted.
+    if acc.generic_instantiations > 0 {
+        eprintln!(
+            "[go-calls] generic instantiations={} file={file_rel_path}",
+            acc.generic_instantiations
         );
     }
     if acc.var_init_calls + acc.var_literal_bodies > 0 {
@@ -456,6 +464,15 @@ struct Acc {
     /// package-level func as a local does, but record no `local_types` entry
     /// (the receiver pass reads them as before). Read by [`flush_value_refs`].
     value_shadows: HashMap<NodeId, std::collections::HashSet<String>>,
+    /// GD.1: the names this file's package-level `var` / `const` specs
+    /// declare, read before any function: an indexed call through one
+    /// (`table[k](..)`) is a call through a value, never a generic
+    /// instantiation. Only looked up, never iterated.
+    file_values: std::collections::HashSet<String>,
+    /// GD.1: the CallSites minted from an explicitly instantiated generic
+    /// call ([`classify_instantiation`]), the `[go-calls] generic
+    /// instantiations` marker's count.
+    generic_instantiations: usize,
 }
 
 /// DT.5j: one value ref [`record_value_refs`] or [`queue_composite_ref`]
@@ -2166,8 +2183,25 @@ fn collect_calls_at<'t>(
     record_body_locals(node, src, from, receiver_var, acc);
     // DT.1e: and the wire shapes their declarations give them.
     record_wire_locals(node, src, from, receiver_var, acc);
+    // GD.1: a one-argument instantiation `F[T](x)` parses as a conversion
+    // to a generic type; it is the call `F(x)` when F names a callee.
+    if node.kind() == "type_conversion_expression"
+        && let Some(q) = classify_instantiation(node, src, from, receiver_var, acc)
+    {
+        acc.generic_instantiations += 1;
+        acc.calls.push(CallSite {
+            from,
+            qualifier: q,
+            line: line_at(node),
+        });
+    }
     if node.kind() == "call_expression" {
-        if let Some(q) = classify_call(node, src, receiver_var) {
+        let q = classify_call(node, src, receiver_var).or_else(|| {
+            let q = classify_instantiation(node, src, from, receiver_var, acc);
+            acc.generic_instantiations += usize::from(q.is_some());
+            q
+        });
+        if let Some(q) = q {
             acc.calls.push(CallSite {
                 from,
                 qualifier: q,
@@ -2531,6 +2565,182 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
         }
         _ => None,
     }
+}
+
+/// GD.1: the callee of an explicitly instantiated generic call with one
+/// type argument, which tree-sitter-go reads as one of two ambiguous shapes
+/// (a call with two or more type arguments carries a `type_arguments` field
+/// over an identifier / selector, which [`classify_call`] already reads):
+///
+/// - a `call_expression` whose function is an `index_expression`
+///   (`Map[int](xs, f)`, `util.F[T]()`, `New[T]()`): the operand is the
+///   callee, the index its type argument;
+/// - a `type_conversion_expression` to a `generic_type` (`Keep[string]("a")`,
+///   `util.One[int](1)`, any one-argument form): the generic type's base is
+///   the callee, its `type_arguments` the type arguments.
+///
+/// Both shapes are also how an indexed call through a value reads
+/// (`fs[0](x)`, `handlers[name](x)`, `s.fs[i](x)`), so the callee is taken
+/// only when nothing says it is a value: a bare operand that is no local,
+/// parameter, named result, body const, receiver or package-level var /
+/// const of this file; a qualified one whose base is an import of this file
+/// and no local; every type argument type-shaped (an identifier, `pkg.T`,
+/// `*T` or a composite type; never a literal or an expression) and naming
+/// no local. The callee is then [`CallQualifier::Bare`] or
+/// [`CallQualifier::Attribute`], exactly the plain call's qualifier, so the
+/// graph binds it only to a symbol it finds; `None` for every other shape.
+fn classify_instantiation(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    acc: &Acc,
+) -> Option<CallQualifier> {
+    let locals = acc.nav.local_types.get(&from);
+    let shadows = acc.value_shadows.get(&from);
+    let is_value = |name: &str| {
+        Some(name) == receiver_var
+            || locals.is_some_and(|l| l.contains_key(name))
+            || shadows.is_some_and(|s| s.contains(name))
+    };
+    let is_import =
+        |name: &str| acc.import_dirs.contains_key(name) || acc.external_pkgs.contains(name);
+    let (callee, type_args) = match node.kind() {
+        "call_expression" => {
+            let func = node.child_by_field_name("function")?;
+            if func.kind() != "index_expression" {
+                return None;
+            }
+            let index = func.child_by_field_name("index")?;
+            (func.child_by_field_name("operand")?, vec![index])
+        }
+        "type_conversion_expression" => {
+            let ty = node.child_by_field_name("type")?;
+            if ty.kind() != "generic_type" {
+                return None;
+            }
+            let args = ty.child_by_field_name("type_arguments")?;
+            let mut c = args.walk();
+            let elems: Vec<TsNode> = args.named_children(&mut c).collect();
+            (ty.child_by_field_name("type")?, elems)
+        }
+        _ => return None,
+    };
+    if type_args.is_empty() || !type_args.iter().all(|&a| type_shaped(a, src, &is_value)) {
+        return None;
+    }
+    match callee.kind() {
+        "identifier" | "type_identifier" => {
+            let name = text_of(callee, src);
+            (!name.is_empty() && !is_value(name) && !acc.file_values.contains(name))
+                .then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "selector_expression" | "qualified_type" => {
+            let (base, field) = if callee.kind() == "selector_expression" {
+                (
+                    callee.child_by_field_name("operand")?,
+                    callee.child_by_field_name("field")?,
+                )
+            } else {
+                (
+                    callee.child_by_field_name("package")?,
+                    callee.child_by_field_name("name")?,
+                )
+            };
+            if !matches!(base.kind(), "identifier" | "package_identifier") {
+                return None;
+            }
+            let base = text_of(base, src);
+            let name = text_of(field, src);
+            (!name.is_empty() && is_import(base) && !is_value(base)).then(|| {
+                CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// GD.1: whether `arg`, one type argument of [`classify_instantiation`]
+/// (an index expression or a `type_elem`), reads as a type: an identifier
+/// or `pkg.T` whose name (or package) `is_value` does not claim, `*T` of
+/// one, or a composite type (slice, array, map, channel, func, struct,
+/// interface, generic). A literal, call, binary or any other expression is
+/// an index, never a type.
+fn type_shaped(arg: TsNode, src: &[u8], is_value: &dyn Fn(&str) -> bool) -> bool {
+    match arg.kind() {
+        "type_elem" => {
+            let mut c = arg.walk();
+            let terms: Vec<TsNode> = arg.named_children(&mut c).collect();
+            terms.len() == 1 && type_shaped(terms[0], src, is_value)
+        }
+        "identifier" | "type_identifier" => !is_value(text_of(arg, src)),
+        "selector_expression" | "qualified_type" => {
+            let base = arg
+                .child_by_field_name("operand")
+                .or_else(|| arg.child_by_field_name("package"));
+            base.is_some_and(|b| {
+                matches!(b.kind(), "identifier" | "package_identifier")
+                    && !is_value(text_of(b, src))
+            })
+        }
+        "unary_expression" => {
+            arg.child_by_field_name("operator")
+                .is_some_and(|o| text_of(o, src) == "*")
+                && arg
+                    .child_by_field_name("operand")
+                    .is_some_and(|o| type_shaped(o, src, is_value))
+        }
+        "pointer_type" => {
+            let mut c = arg.walk();
+            let inner: Vec<TsNode> = arg.named_children(&mut c).collect();
+            inner.len() == 1 && type_shaped(inner[0], src, is_value)
+        }
+        "slice_type" | "array_type" | "map_type" | "channel_type" | "function_type"
+        | "struct_type" | "interface_type" | "generic_type" => true,
+        _ => false,
+    }
+}
+
+/// GD.1: the names the package-level `var` / `const` specs of `root`
+/// declare ([`Acc::file_values`]).
+fn file_value_names(root: TsNode, src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut cursor = root.walk();
+    for decl in root.named_children(&mut cursor) {
+        if !matches!(decl.kind(), "var_declaration" | "const_declaration") {
+            continue;
+        }
+        let mut specs = Vec::new();
+        let mut dc = decl.walk();
+        for child in decl.named_children(&mut dc) {
+            match child.kind() {
+                "var_spec" | "const_spec" => specs.push(child),
+                // A grouped `var ( .. )` block.
+                "var_spec_list" => {
+                    let mut lc = child.walk();
+                    specs.extend(
+                        child
+                            .named_children(&mut lc)
+                            .filter(|s| s.kind() == "var_spec"),
+                    );
+                }
+                _ => {}
+            }
+        }
+        for spec in specs {
+            let mut nc = spec.walk();
+            for name in spec.children_by_field_name("name", &mut nc) {
+                let name = text_of(name, src);
+                if !name.is_empty() && name != "_" {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 // ============================================================================
@@ -14595,5 +14805,157 @@ var Handler = func(c *gin.Context) {{
             })
             .sum();
         assert_eq!(total, 3);
+    }
+}
+
+/// GD.1: an explicitly instantiated generic call is a CallSite like the
+/// plain call; an indexed call through a value is none.
+#[cfg(test)]
+mod gd1_instantiation_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://go_gd1")
+    }
+
+    fn calls_of(src: &str) -> Vec<CallQualifier> {
+        let parse = parse_file(src, "main.go", "main", "example.com/g", repo()).unwrap();
+        let main = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "main::main");
+        parse
+            .calls
+            .iter()
+            .filter(|c| c.from == main)
+            .map(|c| c.qualifier.clone())
+            .collect()
+    }
+
+    fn bare(n: &str) -> CallQualifier {
+        CallQualifier::Bare(n.to_string())
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    const INSTANTIATED: &str = r#"package main
+
+import (
+	"slices"
+
+	"example.com/g/util"
+)
+
+type User struct{}
+
+func Keep[T any](x T) T { return x }
+
+func Map[T any](xs []T, f func(T) T) []T { return xs }
+
+func New[T any]() *util.Runner { return nil }
+
+func id(x int) int { return x }
+
+func main() {
+	Map[int]([]int{1}, id)
+	util.One[int](1)
+	Keep[string]("a")
+	Map[*User](nil, nil)
+	util.F[User]()
+	slices.Clone[[]int](nil)
+	New[User]().Run()
+	defer util.Stop[int](1)
+}
+"#;
+
+    /// Every single-type-argument form: the index_expression callee (two or
+    /// zero arguments) and the generic_type conversion (one argument).
+    #[test]
+    fn single_type_argument_instantiations_are_callsites() {
+        let calls = calls_of(INSTANTIATED);
+        for want in [
+            bare("Map"),
+            attr("util", "One"),
+            bare("Keep"),
+            attr("util", "F"),
+            attr("slices", "Clone"),
+            bare("New"),
+            attr("util", "Stop"),
+        ] {
+            assert!(calls.contains(&want), "missing {want:?} in {calls:?}");
+        }
+        assert_eq!(
+            calls.iter().filter(|q| **q == bare("Map")).count(),
+            2,
+            "{calls:?}"
+        );
+        // The chained call on the instantiation's result stays as before.
+        assert!(
+            calls.iter().any(|q| matches!(q,
+                CallQualifier::ComplexReceiver { name, .. } if name == "Run")),
+            "{calls:?}"
+        );
+    }
+
+    const INDEXED: &str = r#"package main
+
+var table = map[string]func(){}
+
+var (
+	group = map[string]func(int){}
+)
+
+const Key = "k"
+
+type S struct{ fs []func(int) }
+
+func (s *S) run(i int) {
+	s.fs[i](1)
+	s.fs[i](1, 2)
+}
+
+func main() {
+	fs := []func(int){}
+	fs[0](1)
+	handlers := map[string]func(int){}
+	name := "a"
+	handlers[name](1)
+	handlers[name](1, 2)
+	table[Key]()
+	table[Key](1)
+	group[Key](1)
+	group[Key](1, 2)
+	var ptr *string
+	handlers[*ptr](1)
+}
+
+func withParam(fns []func(int), i int) {
+	fns[i](1)
+	fns[i](1, 2)
+}
+"#;
+
+    /// An indexed call through a local, parameter, receiver field or
+    /// file-level var names no callee.
+    #[test]
+    fn indexed_calls_through_values_are_no_callsites() {
+        let parse = parse_file(INDEXED, "main.go", "main", "example.com/g", repo()).unwrap();
+        let named = |q: &CallQualifier| match q {
+            CallQualifier::Bare(n) => Some(n.clone()),
+            CallQualifier::Attribute { base, .. } => Some(base.clone()),
+            CallQualifier::SelfMethod(n) => Some(n.clone()),
+            CallQualifier::ComplexReceiver { receiver, .. } => Some(receiver.clone()),
+            _ => None,
+        };
+        let names: Vec<String> = parse
+            .calls
+            .iter()
+            .filter_map(|c| named(&c.qualifier))
+            .collect();
+        for value in ["fs", "handlers", "table", "group", "fns", "s", "self"] {
+            assert!(!names.iter().any(|n| n == value), "{value} in {names:?}");
+        }
     }
 }

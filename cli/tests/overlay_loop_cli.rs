@@ -129,10 +129,18 @@ fn propose_try_accept_round_trip() {
         assert!(id.starts_with("gap:") && id.len() == 20, "{row}");
         assert_ne!(row["category"], "wrapped_sink", "{row}");
     }
+    // GD.1: `NewCollection[ChatPreview](..)` and `NewCollection[T](..)` are
+    // CALLS of NewCollection, so NewNamedCollection is the uncalled one.
     let dead = rows
         .iter()
-        .find(|row| row["qname"] == "collection::NewCollection")
-        .expect("NewCollection is a dead_symbol row");
+        .find(|row| row["qname"] == "collection::NewNamedCollection")
+        .expect("NewNamedCollection is a dead_symbol row");
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["qname"] == "collection::NewCollection"),
+        "{p}"
+    );
     assert_eq!(dead["snippet"]["file"], "collection.go", "{dead}");
     assert!(
         p["guide"]
@@ -161,7 +169,7 @@ fn propose_try_accept_round_trip() {
     assert!(stdout.contains("```go\n"), "{stdout}");
     assert!(
         stdout.contains(
-            ">15 | func NewCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {"
+            ">20 | func NewNamedCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {"
         ),
         "{stdout}"
     );
@@ -192,7 +200,7 @@ fn propose_try_accept_round_trip() {
     );
     assert!(
         stderr.contains(&format!(
-            "[overlay] try repo={r} stanzas=2 builds=4 verdicts keep=1 review=0 drop=1 gaps 3→3 closed=0 surface=cli"
+            "[overlay] try repo={r} stanzas=2 builds=4 verdicts keep=1 review=0 drop=1 gaps 2→2 closed=0 surface=cli"
         )),
         "{stderr}"
     );

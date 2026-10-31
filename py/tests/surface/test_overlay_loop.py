@@ -43,8 +43,9 @@ FIXTURE_OVERLAY = (FIXTURE / ".glia" / "overlay.toml").read_text()
 CAND = FIXTURE_OVERLAY[FIXTURE_OVERLAY.index("[[wrapper]]"):] + "\n" + USELESS_EDGE
 # Refused by the loader: the wrapper's `flavor` misspelt.
 BAD = CAND.replace('flavor = "nosql"', 'flavour = "nosql"')
+# GD.1: `NewCollection[ChatPreview](..)` and `NewCollection[T](..)` are CALLS
+# of NewCollection, which is no dead_symbol row.
 DEAD = [("dead_symbol", "chat_preview_repository::NewChatPreviewRepository"),
-        ("dead_symbol", "collection::NewCollection"),
         ("dead_symbol", "collection::NewNamedCollection")]
 CANDIDATE_MARKER = ("[overlay] candidate file=- stanzas=2 (route_prefix=0 wrapper=1 edge=1 "
                     "constants=0 entrypoints=0 constraint=0) gap_links=0 errors=0")
@@ -122,20 +123,20 @@ def main() -> int:
                 and list(p) == ["rows", "counts", "snippets", "ambiguous_root", "guide"],
                 type(p) is dict and list(p))
         rows = p.get("rows", []) if type(p) is dict else []
-        c.check("three dead_symbol rows",
+        c.check("two dead_symbol rows",
                 [(r.get("category"), r.get("qname")) for r in rows] == DEAD,
                 [(r.get("category"), r.get("qname")) for r in rows])
         c.check("row keys in field order, snippet last",
                 bool(rows) and list(rows[0]) == ["id", "category", "qname", "kind", "file",
                                                  "line", "detail", "suggest", "tier", "snippet"],
                 rows[:1])
-        coll = [r for r in rows if r.get("qname") == "collection::NewCollection"]
+        coll = [r for r in rows if r.get("qname") == "collection::NewNamedCollection"]
         snip = coll[0].get("snippet") if coll else None
-        c.check("NewCollection snippet: its file, an int start_line",
+        c.check("NewNamedCollection snippet: its file, an int start_line",
                 type(snip) is dict and snip.get("file") == "collection.go"
                 and type(snip.get("start_line")) is int, snip)
         c.check("propose marker",
-                f"[overlay] propose repo={repo} rows=3 snippets=3 ambiguous_root=0 surface=py"
+                f"[overlay] propose repo={repo} rows=2 snippets=2 ambiguous_root=0 surface=py"
                 in err, err[-600:])
 
         # Try: base, with and one build per stanza; writes only the parse cache.
@@ -156,7 +157,7 @@ def main() -> int:
         c.check("candidate marker", CANDIDATE_MARKER in err, err[-600:])
         c.check("try marker",
                 f"[overlay] try repo={repo} stanzas=2 builds=4 verdicts keep=1 review=0 drop=1 "
-                "gaps 3→3 closed=0 surface=py" in err, err[-600:])
+                "gaps 2→2 closed=0 surface=py" in err, err[-600:])
         two = rg.overlay_try([repo], CAND, leave_one_out=False)
         c.check("leave_one_out=False: two builds, no stanza rows",
                 two.get("builds") == 2 and two.get("stanzas") == [], two)

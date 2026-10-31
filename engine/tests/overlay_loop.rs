@@ -614,9 +614,11 @@ fn try_attributes_each_stanza() {
     assert_eq!(edge.verdict, DROP);
 
     assert_eq!(report.verdict, KEEP);
-    assert_eq!(report.base.gaps_by_category.get("dead_symbol"), Some(&4));
-    assert_eq!(report.with.gaps_by_category.get("dead_symbol"), Some(&3));
-    assert_eq!((report.base.total_gaps(), report.with.total_gaps()), (4, 3));
+    // GD.1: `NewCollection[ChatPreview](..)` is a CALLS of NewCollection,
+    // which is no dead_symbol (base 4 -> 3, with 3 -> 2).
+    assert_eq!(report.base.gaps_by_category.get("dead_symbol"), Some(&3));
+    assert_eq!(report.with.gaps_by_category.get("dead_symbol"), Some(&2));
+    assert_eq!((report.base.total_gaps(), report.with.total_gaps()), (3, 2));
     assert_eq!(
         report.delta.nodes,
         map(&[("DATA_ENTITY", 1)]),
@@ -766,7 +768,7 @@ fn parses_once() {
     assert_eq!(
         marker,
         [&format!(
-            "[overlay] try repo={repo} stanzas=3 builds=5 verdicts keep=2 review=0 drop=1 gaps 4→3 closed=0 surface=engine"
+            "[overlay] try repo={repo} stanzas=3 builds=5 verdicts keep=2 review=0 drop=1 gaps 3→2 closed=0 surface=engine"
         )]
     );
     assert!(
