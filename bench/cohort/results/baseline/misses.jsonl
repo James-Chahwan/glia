@@ -156,8 +156,6 @@
 {"check": "rest", "class": "glia_blind", "repo": "medusa", "scope": "symptom", "task": "medusa-f373c17dd60c", "why": "packages/core/core-flows/src/draft-order/workflows/update-draft-order-action-shipping-method.ts: no path (no boundary node in the file); packages/core/js-sdk/src/admin/user.ts: unpaired ENDPOINT; packages/core/utils/src/core-flows/events.ts: no path (no boundary node in the file); packages/medusa/src/api/admin/users/[id]/auth-providers/route.ts: no path (no boundary node in the file); packages/medusa/src/api/admin/users/[id]/reset-password/route.ts: no path (no boundary node in the file)"}
 {"check": "locate", "class": "glia_wrong", "repo": "medusa", "scope": "symptom", "task": "medusa-f8dce55556a1", "why": "no truth file in find's top 10 (first at >20)"}
 {"check": "rest", "class": "noisy", "repo": "medusa", "scope": "symptom", "task": "medusa-f8dce55556a1", "why": "2 of 6 rest files in 200 rows, first ranked file at >20"}
-{"check": "health", "class": "glia_blind", "repo": "microservices-demo", "scope": "repo", "task": null, "why": "clients_unpaired"}
-{"check": "health", "class": "glia_blind", "repo": "microservices-demo", "scope": "repo", "task": null, "why": "routes_unreached"}
 {"check": "gate", "class": "glia_wrong", "repo": "microservices-demo", "scope": "drift", "task": "microservices-demo-1c8abe204b55", "why": "0 breaking on a breaking change"}
 {"check": "gate", "class": "glia_wrong", "repo": "microservices-demo", "scope": "drift", "task": "microservices-demo-4d8848bc5eeb", "why": "0 breaking on a breaking change"}
 {"check": "gate", "class": "glia_wrong", "repo": "microservices-demo", "scope": "drift", "task": "microservices-demo-577eeb38c8c2", "why": "0 breaking on a breaking change"}

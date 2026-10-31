@@ -2,10 +2,10 @@
  "errors": 0,
  "glia": "glia 0.5.3 (build 0.5.3+p6ebc23fbd28cc0fa)",
  "misses": {
-  "glia_blind": 165,
+  "glia_blind": 163,
   "glia_wrong": 144,
   "noisy": 22,
-  "total": 331
+  "total": 329
  },
  "release": "baseline",
  "repos": {
@@ -519,20 +519,17 @@
     }
    },
    "health": {
-    "blind": [
-     "routes_unreached",
-     "clients_unpaired"
-    ],
-    "client_reach": 0.0,
+    "blind": [],
+    "client_reach": 1.0,
     "dead_symbol": 78,
     "endpoints": 7,
     "error": null,
-    "http_pairs": 0,
-    "route_reach": 0.0,
-    "routes": 2
+    "http_pairs": 7,
+    "route_reach": 0.389,
+    "routes": 18
    },
    "misses": {
-    "glia_blind": 2,
+    "glia_blind": 0,
     "glia_wrong": 5,
     "noisy": 0
    },
