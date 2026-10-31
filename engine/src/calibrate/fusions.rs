@@ -47,18 +47,31 @@
 //! C0x. The replay ranks it through [`FindSeeded`], the `find --files`
 //! answer through [`find_signals_at_head`]; both through [`find_keys`].
 //!
+//! GP.5: neither depends on anything the online loop mutates (a test
+//! commit's corpus is a prefix of the commit stream, its route reads its own
+//! parent tree and the older subjects), so both are computed ahead of the
+//! loop, one chunk of test commits at a time
+//! ([`super::replay::prefetch_chunk`]), in an order-preserving parallel map:
+//! [`TextState`] builds a chunk's indexes when the chunk's first commit
+//! begins, `IdrState::prefetch` routes the chunk's commits whose queries
+//! read IDR. Each precomputed value carries the prefix it was built from and
+//! is used only when the loop's own prefix matches it (else the commit is
+//! built in place, as before), so the record is the same bits at any
+//! `GLIA_THREADS`.
+//!
 //! Fired_on, stderr: `[calibrate] text builds=<b> docs_max=<d>
-//! messages=<yes|no> ms=<ms>` once per calibrate run that replays the
-//! `review` or `find` group ([`TextState::log_summary`]); then (EC.13) one
-//! `[idr] replay surface=calibrate sides=<s> routed=<r> resolved=<x>
-//! unavailable=<u> ms=<t>` ([`IdrState::log_summary`]: the replay routes
+//! messages=<yes|no> ms=<ms> threads=<t>` once per calibrate run that
+//! replays the `review` or `find` group ([`TextState::log_summary`]); then
+//! (EC.13) one `[idr] replay surface=calibrate sides=<s> routed=<r>
+//! resolved=<x> unavailable=<u> ms=<t> threads=<n>`
+//! ([`IdrState::log_summary`]: the replay routes
 //! each subject through a quiet side, so no per-commit `[ids]` / `[id-defs]`
 //! / `[id-ns]` / `[id-paths]` / `[idr]` line prints), and `[calibrate] idr
 //! unavailable commits=<n>` when n test commits had no readable parent (no
 //! git, an unknown sha, a root commit).
 
 use std::any::Any;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
@@ -70,7 +83,9 @@ use glia_graph::MergedGraph;
 
 use super::bank::structure_keys;
 use super::candidate::{Candidate, QueryCtx, RankKey, StateHook};
-use super::replay::{Replay, ReplayCommit, find_top, find_top_scores};
+use super::replay::{
+    PREFETCH_BUDGET, Replay, ReplayCommit, find_top, find_top_scores, prefetch_chunk,
+};
 use super::work::{m_scores, w5_scores, work_at_head};
 use crate::answers::project_roots;
 use crate::git_rev::{Tree, resolve_rev};
@@ -207,6 +222,53 @@ pub fn needs(name: &str) -> Option<Needs> {
         "ALL5" => n(false, true, true, true),
         _ => None,
     }
+}
+
+/// What a candidate named `name` reads of the look-ahead's signals (GP.5):
+/// the pooled P1 / PT* vectors and the IDR route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Reads {
+    pub(crate) p1: bool,
+    pub(crate) pt: bool,
+    pub(crate) idr: bool,
+}
+
+impl Reads {
+    /// Both sides' reads.
+    pub(crate) fn or(self, o: Reads) -> Reads {
+        Reads {
+            p1: self.p1 || o.p1,
+            pt: self.pt || o.pt,
+            idr: self.idr || o.idr,
+        }
+    }
+}
+
+/// What a candidate named `name` reads on a query of the find shape (`find`)
+/// or a seeded one, by name: a structure-bank ranker its PPR, a seeded fusion
+/// ([`needs`], P1 always) or a find fusion ([`find_needs`]) its signals. Only
+/// a hint for what to compute ahead of the loop: a name it misjudges is
+/// computed in place, so no answer depends on it.
+pub(crate) fn reads(name: &str, find: bool) -> Reads {
+    let structure = Reads {
+        p1: matches!(name, "P1" | "H10"),
+        pt: matches!(name, "PT*" | "H10[PT*]"),
+        idr: false,
+    };
+    let fused = if find {
+        find_needs(name).map_or(Reads::default(), |n| Reads {
+            p1: n.px1,
+            pt: n.pxt,
+            idr: n.idr,
+        })
+    } else {
+        needs(name).map_or(Reads::default(), |n| Reads {
+            p1: true,
+            pt: n.pt,
+            idr: n.idr,
+        })
+    };
+    structure.or(fused)
 }
 
 fn at(v: &[f64], i: usize) -> f64 {
@@ -391,6 +453,26 @@ pub struct TextState {
     builds: usize,
     docs_max: usize,
     ms: f64,
+    /// GP.5: the look-ahead's memory budget (0 builds each index only when
+    /// its commit begins).
+    budget: usize,
+    /// GP.5: test commit -> its index's scores, built ahead of the loop.
+    pre: BTreeMap<usize, TextPre>,
+    /// The most threads one look-ahead ran on (1 with none).
+    threads: usize,
+}
+
+/// One test commit's text scores computed ahead of the loop, with the corpus
+/// prefix they were built from.
+#[derive(Debug, Clone)]
+struct TextPre {
+    /// The corpus's document count (observed commits) the index read.
+    docs_len: usize,
+    /// The sha of its newest document.
+    last_sha: Option<String>,
+    scores: Arc<Vec<f64>>,
+    /// The index's own document count (`TextIndex::stats().docs`).
+    indexed: usize,
 }
 
 impl TextState {
@@ -406,7 +488,17 @@ impl TextState {
             builds: 0,
             docs_max: 0,
             ms: 0.0,
+            budget: PREFETCH_BUDGET,
+            pre: BTreeMap::new(),
+            threads: 1,
         }
+    }
+
+    /// The same corpus with another look-ahead budget (0: none).
+    #[cfg(test)]
+    pub(crate) fn with_prefetch_budget(mut self, budget: usize) -> TextState {
+        self.budget = budget;
+        self
     }
 
     /// Indexes built (one per test commit with messages).
@@ -414,15 +506,69 @@ impl TextState {
         self.builds
     }
 
+    /// Whether the replay read commit messages (else nothing scores).
+    pub(crate) fn messages(&self) -> bool {
+        self.messages
+    }
+
+    /// Test commit `t`'s scores when the look-ahead holds them.
+    pub(crate) fn prefetched(&self, t: usize) -> Option<&[f64]> {
+        self.pre.get(&t).map(|p| p.scores.as_slice())
+    }
+
     /// The `[calibrate] text ..` marker, once after the replay.
     pub fn log_summary(&self) {
         eprintln!(
-            "[calibrate] text builds={} docs_max={} messages={} ms={:.1}",
+            "[calibrate] text builds={} docs_max={} messages={} ms={:.1} threads={}",
             self.builds,
             self.docs_max,
             if self.messages { "yes" } else { "no" },
             (self.ms * 10.0).trunc() / 10.0,
+            self.threads,
         );
+    }
+
+    /// Build every index of the look-ahead chunk starting at commit `k`
+    /// (`prefetch_chunk`) in parallel, in order: test commit t's corpus is
+    /// the observed documents plus `replay.commits[k..t]` (never t itself, as
+    /// `observe` runs after t's queries).
+    fn prefetch(&mut self, replay: &Replay, k: usize) {
+        let chunk = prefetch_chunk(replay, k, self.n_files, self.budget);
+        if chunk.is_empty() {
+            return;
+        }
+        let t0 = Instant::now();
+        let (docs, n) = (&self.docs, self.n_files);
+        let (rows, threads) = crate::parallel::par_map_ordered(&chunk, |&t| {
+            let tail = replay.commits.get(k..t).unwrap_or(&[]);
+            let idx = TextIndex::from_docs(
+                n,
+                docs.iter()
+                    .map(|(s, m, f)| (s.as_str(), m.as_str(), f.clone()))
+                    .chain(
+                        tail.iter()
+                            .map(|c| (c.sha.as_str(), c.message.as_str(), c.files.clone())),
+                    ),
+            );
+            let scores = replay
+                .commits
+                .get(t)
+                .map_or_else(|| vec![0.0; n], |c| idx.scores(subject(&c.message)));
+            TextPre {
+                docs_len: docs.len() + tail.len(),
+                last_sha: tail
+                    .last()
+                    .map(|c| c.sha.clone())
+                    .or_else(|| docs.last().map(|d| d.0.clone())),
+                scores: Arc::new(scores),
+                indexed: idx.stats().docs,
+            }
+        });
+        for (t, p) in chunk.into_iter().zip(rows) {
+            self.pre.insert(t, p);
+        }
+        self.threads = self.threads.max(threads);
+        self.ms += t0.elapsed().as_secs_f64() * 1000.0;
     }
 }
 
@@ -438,6 +584,21 @@ impl StateHook for TextState {
         self.cur_sha = c.sha.clone();
         if !self.messages {
             self.cur = Arc::new(vec![0.0; self.n_files]);
+            return;
+        }
+        self.pre.retain(|&t, _| t >= k);
+        if !self.pre.contains_key(&k) {
+            self.prefetch(replay, k);
+        }
+        // Kept until the next test commit begins: the driver's PPR
+        // look-ahead reads this commit's scores through `prefetched` too.
+        if let Some(p) = self.pre.get(&k)
+            && p.docs_len == self.docs.len()
+            && p.last_sha.as_deref() == self.docs.last().map(|d| d.0.as_str())
+        {
+            self.cur = Arc::clone(&p.scores);
+            self.builds += 1;
+            self.docs_max = self.docs_max.max(p.indexed);
             return;
         }
         let t0 = Instant::now();
@@ -472,27 +633,22 @@ const RECENT_MAX_FILES: usize = 30;
 /// What every routed test commit shares: the `[ids]` vocabulary (the
 /// caller's override, `CalibrateOptions.vocab`, EC.14, else the working
 /// tree's, EB.4, as EB.7 reads it), the graph's PROJECT dirs, and the
-/// path resolver over the candidates and the history snapshot's renames.
-struct IdrCtx {
+/// history snapshot's renames the path resolver folds.
+struct IdrBase {
     label: String,
     vocab: IdVocab,
     dirs: Vec<String>,
-    paths: PathResolver,
+    renames: Vec<(String, String)>,
 }
 
-impl IdrCtx {
-    /// The context of `root`'s repo over `cands`. The renames are the
-    /// on-disk history snapshot's ([`rename_pairs`]), none without one. The
-    /// vocabulary is `vocab` when given (EC.14), printing once
-    /// `[ids] vocab repo=<r> surface=calibrate patterns=<n> source=override
-    /// trackers=<t> rejected=<x> markdown=<m>`, else [`IdVocab::for_root`]
-    /// (no line: the replay's routes are quiet, EC.13).
-    fn new(
-        root: &Path,
-        merged: &MergedGraph,
-        cands: &Candidates,
-        vocab: Option<IdVocab>,
-    ) -> IdrCtx {
+impl IdrBase {
+    /// The shared inputs of `root`'s repo. The renames are the on-disk
+    /// history snapshot's ([`rename_pairs`]), none without one. The
+    /// vocabulary is `vocab` when given (EC.14), printing once `[ids] vocab
+    /// repo=<r> surface=calibrate patterns=<n> source=override trackers=<t>
+    /// rejected=<x> markdown=<m>`, else [`IdVocab::for_root`] (no line: the
+    /// replay's routes are quiet, EC.13).
+    fn new(root: &Path, merged: &MergedGraph, vocab: Option<IdVocab>) -> IdrBase {
         let renames = read_history(root)
             .as_ref()
             .map(rename_pairs)
@@ -514,7 +670,7 @@ impl IdrCtx {
             }
             None => IdVocab::for_root(root),
         };
-        IdrCtx {
+        IdrBase {
             label,
             vocab,
             dirs: project_roots(merged)
@@ -522,8 +678,24 @@ impl IdrCtx {
                 .map(|p| p.path)
                 .filter(|p| p != ".")
                 .collect(),
-            paths: PathResolver::new(cands, &renames),
+            renames,
         }
+    }
+}
+
+/// One router: the shared inputs and a path resolver over the candidates and
+/// the renames. The resolver counts its lookups for a marker (a `RefCell`),
+/// so each parallel worker of the look-ahead builds its own (GP.5).
+struct IdrCtx {
+    base: Arc<IdrBase>,
+    paths: PathResolver,
+}
+
+impl IdrCtx {
+    /// A router over `cands` with `base`'s inputs.
+    fn new(base: Arc<IdrBase>, cands: &Candidates) -> IdrCtx {
+        let paths = PathResolver::new(cands, &base.renames);
+        IdrCtx { base, paths }
     }
 
     /// The IDR of `subj` read at commit `sha`'s parent: Err when the parent
@@ -541,8 +713,9 @@ impl IdrCtx {
         older_newest_first: &[&str],
         quiet: bool,
     ) -> Result<ParentRoute, String> {
+        let base = &self.base;
         let parent = resolve_rev(root, &format!("{sha}^"))?;
-        if self.vocab.mentions(subj).is_empty() && conventional_scopes(subj).is_empty() {
+        if base.vocab.mentions(subj).is_empty() && conventional_scopes(subj).is_empty() {
             return Ok(ParentRoute {
                 idr: vec![0.0; cands.len()],
                 side: false,
@@ -553,13 +726,13 @@ impl IdrCtx {
             repo: root,
             sha: parent.sha,
         };
-        let dirs: Vec<&str> = self.dirs.iter().map(String::as_str).collect();
-        let defs = read_defs(&tree, &dirs, &self.vocab, None);
-        let ns = defs.namespaces(&self.vocab.local_words);
-        let side = IdrSide::new(cands, &self.paths, &defs, &ns, &self.vocab, &tree)
-            .labelled(&self.label, "calibrate");
+        let dirs: Vec<&str> = base.dirs.iter().map(String::as_str).collect();
+        let defs = read_defs(&tree, &dirs, &base.vocab, None);
+        let ns = defs.namespaces(&base.vocab.local_words);
+        let side = IdrSide::new(cands, &self.paths, &defs, &ns, &base.vocab, &tree)
+            .labelled(&base.label, "calibrate");
         let side = if quiet { side.quiet() } else { side };
-        let recent = recent_scopes(older_newest_first, &ns, &self.vocab);
+        let recent = recent_scopes(older_newest_first, &ns, &base.vocab);
         let routed = route(subj, &side, &recent);
         Ok(ParentRoute {
             idr: routed.idr,
@@ -593,36 +766,53 @@ pub fn idr_at_parent(
     subj: &str,
     older_subjects_newest_first: &[&str],
 ) -> Result<Vec<f64>, String> {
-    IdrCtx::new(root, merged, cands, None)
+    IdrCtx::new(Arc::new(IdrBase::new(root, merged, None)), cands)
         .route_at_parent(root, cands, sha, subj, older_subjects_newest_first, false)
         .map(|r| r.idr)
 }
 
+/// One test commit's route computed ahead of the loop (GP.5), with the
+/// older-subject prefix it read.
+struct IdrPre {
+    /// How many older subjects the route read.
+    older_len: usize,
+    /// The newest of them.
+    newest: Option<String>,
+    got: Result<ParentRoute, String>,
+}
+
 /// The replay's id router (EC.12, module docs): per test commit, the subject
-/// routed at the parent revision ([`idr_at_parent`]), computed by the first
-/// query that reads IDR and shared by the commit's every query and candidate
-/// (memo [`MEMO_IDR`]).
+/// routed at the parent revision ([`idr_at_parent`]), routed ahead of the
+/// loop for the commits `IdrState::prefetch` names (GP.5), else by the
+/// first query that reads IDR, and shared by the commit's every query and
+/// candidate (memo [`MEMO_IDR`]).
 #[non_exhaustive]
 pub struct IdrState {
     n_files: usize,
     /// The observed commits' subjects shaped like a test commit (2..=30
     /// files, a subject), oldest first.
     subjects: Vec<String>,
+    cur_k: Option<usize>,
     cur_sha: String,
     cur_subject: String,
     /// The subjects strictly older than the current test commit, newest first.
     cur_older: Vec<String>,
     /// The current test commit's IDR, once computed.
     cur: Mutex<Option<Arc<Vec<f64>>>>,
-    /// Built by the first routed commit.
+    /// The shared router inputs, built by the first route or look-ahead.
+    base: Mutex<Option<Arc<IdrBase>>>,
+    /// The in-loop router, built by the first commit routed in the loop.
     ctx: Mutex<Option<IdrCtx>>,
+    /// GP.5: test commit -> its route, computed ahead of the loop.
+    pre: Mutex<BTreeMap<usize, IdrPre>>,
     /// The caller's `[ids]` vocabulary (`CalibrateOptions.vocab`, EC.14),
-    /// read when `ctx` is built; unset reads the root's.
+    /// read when `base` is built; unset reads the root's.
     vocab: OnceLock<IdVocab>,
     /// (routed, unavailable) test commits.
     counts: Mutex<(usize, usize)>,
-    /// (sides read, subjects whose id or scope resolved, milliseconds).
-    work: Mutex<(usize, usize, f64)>,
+    /// (sides read, subjects whose id or scope resolved, milliseconds, the
+    /// most threads one look-ahead ran on).
+    work: Mutex<(usize, usize, f64, usize)>,
 }
 
 impl std::fmt::Debug for IdrState {
@@ -643,14 +833,17 @@ impl IdrState {
         IdrState {
             n_files,
             subjects: Vec::new(),
+            cur_k: None,
             cur_sha: String::new(),
             cur_subject: String::new(),
             cur_older: Vec::new(),
             cur: Mutex::new(None),
+            base: Mutex::new(None),
             ctx: Mutex::new(None),
+            pre: Mutex::new(BTreeMap::new()),
             vocab: OnceLock::new(),
             counts: Mutex::new((0, 0)),
-            work: Mutex::new((0, 0, 0.0)),
+            work: Mutex::new((0, 0, 0.0, 1)),
         }
     }
 
@@ -667,23 +860,124 @@ impl IdrState {
         *self.counts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The shared router inputs, built on first use.
+    fn base(&self, root: &Path, merged: &MergedGraph) -> Arc<IdrBase> {
+        let mut base = self.base.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(
+            base.get_or_insert_with(|| {
+                Arc::new(IdrBase::new(root, merged, self.vocab.get().cloned()))
+            }),
+        )
+    }
+
     /// The replay's routing in one line, once after it (EC.13; the routes
     /// themselves are quiet): `[idr] replay surface=calibrate sides=<s>
-    /// routed=<r> resolved=<x> unavailable=<u> ms=<t>`, `sides` the parent
-    /// trees read (a subject with no id and no scope reads none), `routed`
-    /// the test commits routed at a readable parent, `resolved` those whose
-    /// id or scope resolved. Then `[calibrate] idr unavailable commits=<n>`
-    /// when n > 0.
+    /// routed=<r> resolved=<x> unavailable=<u> ms=<t> threads=<n>`, `sides`
+    /// the parent trees read (a subject with no id and no scope reads none),
+    /// `routed` the test commits routed at a readable parent, `resolved`
+    /// those whose id or scope resolved, `threads` the most one look-ahead
+    /// ran on (GP.5; 1 with none). Then `[calibrate] idr unavailable
+    /// commits=<n>` when n > 0.
     pub fn log_summary(&self) {
         let (routed, unavailable) = self.counts();
-        let (sides, resolved, ms) = *self.work.lock().unwrap_or_else(PoisonError::into_inner);
+        let (sides, resolved, ms, threads) =
+            *self.work.lock().unwrap_or_else(PoisonError::into_inner);
         eprintln!(
-            "[idr] replay surface=calibrate sides={sides} routed={routed} resolved={resolved} unavailable={unavailable} ms={:.1}",
+            "[idr] replay surface=calibrate sides={sides} routed={routed} resolved={resolved} unavailable={unavailable} ms={:.1} threads={threads}",
             (ms * 10.0).trunc() / 10.0
         );
         if unavailable > 0 {
             eprintln!("[calibrate] idr unavailable commits={unavailable}");
         }
+    }
+
+    /// Route the test commits `tests` (indices into `replay.commits`, each
+    /// at or after `k`, the commit the loop is at) ahead of the loop, in
+    /// parallel, in order (GP.5): commit t's older subjects are the observed
+    /// ones plus those of `replay.commits[k..t]`, its own never. Each worker
+    /// routes a contiguous run of commits with its own path resolver. A
+    /// route is counted (sides, routed, ..) only when the loop reads it, so
+    /// the marker is the in-loop routing's; the look-ahead's wall time joins
+    /// `ms`.
+    pub(crate) fn prefetch(
+        &self,
+        root: &Path,
+        merged: &MergedGraph,
+        cands: &Candidates,
+        replay: &Replay,
+        k: usize,
+        tests: &[usize],
+    ) {
+        let todo: Vec<usize> = {
+            let pre = self.pre.lock().unwrap_or_else(PoisonError::into_inner);
+            tests
+                .iter()
+                .copied()
+                .filter(|&t| t >= k && t < replay.commits.len() && !pre.contains_key(&t))
+                .collect()
+        };
+        let Some(&last) = todo.last() else {
+            return;
+        };
+        let t0 = Instant::now();
+        let base = self.base(root, merged);
+        // The observed subjects, then those the loop will observe before
+        // the last commit routed here.
+        let mut all: Vec<&str> = self.subjects.iter().map(String::as_str).collect();
+        let mut upto: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut next = 0;
+        for i in k..=last {
+            while next < todo.len() && todo[next] == i {
+                upto.insert(i, all.len());
+                next += 1;
+            }
+            let c = &replay.commits[i];
+            if !c.subject.is_empty() && (2..=RECENT_MAX_FILES).contains(&c.files.len()) {
+                all.push(c.subject.as_str());
+            }
+        }
+        let groups = (crate::parallel::threads() * 4).clamp(1, todo.len());
+        let per = todo.len().div_ceil(groups);
+        let runs: Vec<&[usize]> = todo.chunks(per).collect();
+        let (out, threads) = crate::parallel::par_map_ordered(&runs, |run| {
+            let ctx = IdrCtx::new(Arc::clone(&base), cands);
+            run.iter()
+                .map(|&t| {
+                    let c = &replay.commits[t];
+                    let len = upto.get(&t).copied().unwrap_or(0);
+                    let older: Vec<&str> = all[..len].iter().rev().copied().collect();
+                    let got = ctx.route_at_parent(root, cands, &c.sha, &c.subject, &older, true);
+                    IdrPre {
+                        older_len: len,
+                        newest: older.first().map(|s| s.to_string()),
+                        got,
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        {
+            let mut pre = self.pre.lock().unwrap_or_else(PoisonError::into_inner);
+            for (t, p) in todo.iter().copied().zip(out.into_iter().flatten()) {
+                pre.insert(t, p);
+            }
+        }
+        let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
+        work.2 += t0.elapsed().as_secs_f64() * 1000.0;
+        work.3 = work.3.max(threads);
+    }
+
+    /// The current commit's look-ahead route, when one was computed for the
+    /// prefix the loop is at.
+    fn take_prefetched(&self) -> Option<Result<ParentRoute, String>> {
+        let k = self.cur_k?;
+        let p = self
+            .pre
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&k)?;
+        (p.older_len == self.cur_older.len()
+            && p.newest.as_deref() == self.cur_older.first().map(String::as_str))
+        .then_some(p.got)
     }
 
     /// The current test commit's IDR over `q.cands` (zeros when its parent
@@ -698,20 +992,23 @@ impl IdrState {
             return v.to_vec();
         }
         let t0 = Instant::now();
-        let got = {
-            let mut ctx = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
-            let ctx = ctx.get_or_insert_with(|| {
-                IdrCtx::new(q.repo_root, q.merged, q.cands, self.vocab.get().cloned())
-            });
-            let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
-            ctx.route_at_parent(
-                q.repo_root,
-                q.cands,
-                &self.cur_sha,
-                &self.cur_subject,
-                &older,
-                true,
-            )
+        let (got, timed) = match self.take_prefetched() {
+            Some(got) => (got, false),
+            None => {
+                let mut ctx = self.ctx.lock().unwrap_or_else(PoisonError::into_inner);
+                let ctx = ctx
+                    .get_or_insert_with(|| IdrCtx::new(self.base(q.repo_root, q.merged), q.cands));
+                let older: Vec<&str> = self.cur_older.iter().map(String::as_str).collect();
+                let got = ctx.route_at_parent(
+                    q.repo_root,
+                    q.cands,
+                    &self.cur_sha,
+                    &self.cur_subject,
+                    &older,
+                    true,
+                );
+                (got, true)
+            }
         };
         {
             let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
@@ -719,7 +1016,9 @@ impl IdrState {
                 work.0 += usize::from(r.side);
                 work.1 += usize::from(r.has_id);
             }
-            work.2 += t0.elapsed().as_secs_f64() * 1000.0;
+            if timed {
+                work.2 += t0.elapsed().as_secs_f64() * 1000.0;
+            }
         }
         let v = {
             let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
@@ -749,10 +1048,15 @@ impl StateHook for IdrState {
         let Some(c) = replay.commits.get(k) else {
             return;
         };
+        self.cur_k = Some(k);
         self.cur_sha = c.sha.clone();
         self.cur_subject = c.subject.clone();
         self.cur_older = self.subjects.iter().rev().cloned().collect();
         *self.cur.get_mut().unwrap_or_else(PoisonError::into_inner) = None;
+        self.pre
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|&t, _| t >= k);
     }
 
     fn observe(&mut self, c: &ReplayCommit, _train: bool) {
@@ -1715,12 +2019,15 @@ mod tests {
             paths: (0..4).map(|i| format!("f{i}.py")).collect(),
             ..Candidates::default()
         };
-        let ctx = IdrCtx {
-            label: "t".into(),
-            vocab: IdVocab::default(),
-            dirs: Vec::new(),
-            paths: PathResolver::new(&cands, &[]),
-        };
+        let ctx = IdrCtx::new(
+            Arc::new(IdrBase {
+                label: "t".into(),
+                vocab: IdVocab::default(),
+                dirs: Vec::new(),
+                renames: Vec::new(),
+            }),
+            &cands,
+        );
         assert!(
             ctx.route_at_parent(dir.path(), &cands, "e", "T003 third", &[], true)
                 .is_err()

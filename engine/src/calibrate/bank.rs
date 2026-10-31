@@ -239,20 +239,62 @@ pub fn bfs_files(idx: &StructIndex, merged: &MergedGraph, seeds: &[NodeId]) -> V
     idx.by_position(&base_keys(merged, &idx.cache, &pers, RankBase::Bfs))
 }
 
-/// The query's personalisation: weighted for a find query, else uniform.
-fn query_pers(idx: &StructIndex, q: &QueryCtx<'_>) -> Vec<(NodeId, f64)> {
-    if q.query.shape == Shape::Find {
-        let top: Vec<(u32, f64)> = q
-            .query
-            .seeds
+/// The memo key of a query's pooled P1 vector (PPR d0.5, max pool).
+pub(crate) const MEMO_P1: &str = "p1";
+/// The memo key of a query's pooled PT* vector (PPR d0.85, sum pool).
+pub(crate) const MEMO_PT: &str = "pt";
+
+/// A query's personalisation from its parts: weighted (`seeds[i]` carrying
+/// `weights[i]`, a missing weight 0) for a find query, else uniform.
+fn pers_for(
+    idx: &StructIndex,
+    merged: &MergedGraph,
+    find: bool,
+    seeds: &[u32],
+    weights: &[f64],
+) -> Vec<(NodeId, f64)> {
+    if find {
+        let top: Vec<(u32, f64)> = seeds
             .iter()
             .enumerate()
-            .map(|(i, &f)| (f, q.query.weights.get(i).copied().unwrap_or(0.0)))
+            .map(|(i, &f)| (f, weights.get(i).copied().unwrap_or(0.0)))
             .collect();
         weighted_seed_nodes(idx, &top)
     } else {
-        uniform_seed_nodes(idx, q.merged, &q.query.seeds)
+        uniform_seed_nodes(idx, merged, seeds)
     }
+}
+
+/// The query's personalisation: weighted for a find query, else uniform.
+fn query_pers(idx: &StructIndex, q: &QueryCtx<'_>) -> Vec<(NodeId, f64)> {
+    pers_for(
+        idx,
+        q.merged,
+        q.query.shape == Shape::Find,
+        &q.query.seeds,
+        &q.query.weights,
+    )
+}
+
+/// The pooled P1 (`wide` false) or PT* (`wide` true) vector of a query with
+/// these seeds, exactly what [`structure_keys`] memoises under [`MEMO_P1`] /
+/// [`MEMO_PT`] (the same personalisation, the same solve): a replay that
+/// solves its queries ahead of the online loop (GP.5,
+/// [`super::select::run_sets`]) reads the same bits.
+pub(crate) fn query_ppr(
+    idx: &StructIndex,
+    merged: &MergedGraph,
+    find: bool,
+    seeds: &[u32],
+    weights: &[f64],
+    wide: bool,
+) -> Vec<f64> {
+    ppr_files(
+        idx,
+        merged,
+        &pers_for(idx, merged, find, seeds, weights),
+        wide,
+    )
 }
 
 /// The keys of the structure ranker `name` (`P1`, `PT*`, `B0`, `H10`,
@@ -267,13 +309,14 @@ pub fn structure_keys(name: &str, q: &QueryCtx<'_>) -> Option<Vec<RankKey>> {
     let idx = q.state.hook::<StructIndex>()?;
     let m = idx.len();
     let p1 = || {
-        q.memo.get_or("p1", || {
+        q.memo.get_or(MEMO_P1, || {
             ppr_files(idx, q.merged, &query_pers(idx, q), false)
         })
     };
     let pt = || {
-        q.memo
-            .get_or("pt", || ppr_files(idx, q.merged, &query_pers(idx, q), true))
+        q.memo.get_or(MEMO_PT, || {
+            ppr_files(idx, q.merged, &query_pers(idx, q), true)
+        })
     };
     let b0 = || {
         q.memo.get_or("b0", || {

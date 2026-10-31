@@ -24,22 +24,41 @@
 //! the pool (`parallel::par_map_ordered`), so a record is byte-identical at
 //! any `GLIA_THREADS`.
 //!
+//! GP.5: what no online state feeds is computed ahead of the loop, one chunk
+//! of test commits at a time ([`super::replay::prefetch_chunk`]): the text
+//! corpus's indexes (in [`super::fusions::TextState`]), the IDR routes of
+//! the commits whose queries read one (`IdrState::prefetch`)
+//! and every query's P1 / PT* vectors (`bank::query_ppr`, one solve
+//! per distinct seeding, a find query's seeding from its precomputed text
+//! scores). Each pass is an order-preserving parallel map of the same
+//! function the loop would call, keyed by its input, so a query reads the
+//! same bits either way; a value the look-ahead could not supply is computed
+//! in place, as before.
+//!
 //! Fired_on, stderr, one line per row: `[calibrate] set=<SET> shape=<k>
 //! candidates=<n> test_commits=<t> queries=<q> pick=<name>
 //! last_online_pick=<name> selection_r10=<x.xxx> fallback_r10=<y.yyy>
 //! refused=<no|below_fallback>`; a candidate whose ranking has the wrong
 //! length: `[calibrate] candidate <name> returned <n> keys of <m>` (its set's
-//! rows are not written).
+//! rows are not written); after the replay, when a look-ahead solved PPRs:
+//! `[calibrate] ppr prefetch chunks=<c> queries=<q> distinct=<d> solves=<s>
+//! threads=<t> ms=<ms>`.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use glia_graph::MergedGraph;
 
+use super::bank::{MEMO_P1, MEMO_PT, StructIndex, query_ppr};
 use super::candidate::{Candidate, Memo, QueryCtx, RankKey, ReplayState};
+use super::fusions::{IdrState, Reads, TextState, reads};
 use super::record::{CalibratedSet, CommitScore, OnlineReplay, Shape, set_digest};
-use super::replay::{Replay, ReplayQuery, find_top, find_top_scores};
+use super::replay::{
+    PREFETCH_BUDGET, Replay, ReplayQuery, find_top, find_top_scores, prefetch_chunk,
+};
 use crate::intent::text::Candidates;
 
 /// rank_eval's `better`: `a` (at position `ia`) ranks before `b` (at `ib`):
@@ -225,6 +244,143 @@ fn score_query(
         .collect()
 }
 
+/// A query's PPR seeding, the key of the look-ahead's solves: a find query's
+/// weighted top files (weights as bits), else its seed files (uniform).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PprKey {
+    find: bool,
+    seeds: Vec<u32>,
+    weights: Vec<u64>,
+}
+
+impl PprKey {
+    fn of(q: &ReplayQuery) -> PprKey {
+        let find = q.shape == Shape::Find;
+        PprKey {
+            find,
+            seeds: q.seeds.clone(),
+            weights: if find {
+                q.weights.iter().map(|w| w.to_bits()).collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
+/// What the look-ahead reads of the replay's plan: the queries by commit, the
+/// candidate count, and per shape what the live specs covering it read.
+struct Plan<'a> {
+    by_commit: &'a BTreeMap<usize, Vec<&'a ReplayQuery>>,
+    m: usize,
+    shape_reads: BTreeMap<Shape, Reads>,
+}
+
+impl Plan<'_> {
+    fn reads(&self, shape: Shape) -> Reads {
+        self.shape_reads.get(&shape).copied().unwrap_or_default()
+    }
+}
+
+/// One seeding's look-ahead vectors: P1 and PT*, each when a candidate reads it.
+type PprPre = (Option<Arc<Vec<f64>>>, Option<Arc<Vec<f64>>>);
+
+/// The look-ahead's PPR counters, for the marker.
+#[derive(Default)]
+struct PprStats {
+    chunks: usize,
+    queries: usize,
+    distinct: usize,
+    solves: usize,
+    threads: usize,
+    ms: f64,
+}
+
+/// What the live specs covering `shape` read, over every candidate and a
+/// scored-only fallback ([`reads`]).
+fn shape_reads(specs: &[SetSpec], live: &[Option<FallbackSource>], shape: Shape) -> Reads {
+    let find = shape == Shape::Find;
+    let mut r = Reads::default();
+    for (spec, src) in specs.iter().zip(live) {
+        if src.is_none() || !spec.shapes.contains(&shape) {
+            continue;
+        }
+        for c in &spec.candidates {
+            r = r.or(reads(c.name(), find));
+        }
+        if let Some(c) = &spec.fallback_candidate {
+            r = r.or(reads(c.name(), find));
+        }
+    }
+    r
+}
+
+/// Solve the P1 / PT* vectors of every query of the test commits `chunk`
+/// ahead of the loop (GP.5): one [`query_ppr`] per distinct seeding, in an
+/// order-preserving parallel map. A find query's seeding is its text's top
+/// files ([`find_top`]) from the corpus's precomputed scores, exactly as the
+/// loop fills it (zeros without messages); a commit whose scores the corpus
+/// did not precompute is left to the loop.
+fn prefetch_ppr(
+    merged: &MergedGraph,
+    state: &ReplayState,
+    plan: &Plan<'_>,
+    chunk: &[usize],
+    stats: &mut PprStats,
+) -> BTreeMap<PprKey, PprPre> {
+    let m = plan.m;
+    let Some(idx) = state.hook::<StructIndex>() else {
+        return BTreeMap::new();
+    };
+    let t0 = Instant::now();
+    let text = state.hook::<TextState>();
+    let mut want: BTreeMap<PprKey, Reads> = BTreeMap::new();
+    for &t in chunk {
+        for &q in plan.by_commit.get(&t).map(Vec::as_slice).unwrap_or(&[]) {
+            let r = plan.reads(q.shape);
+            if !(r.p1 || r.pt) {
+                continue;
+            }
+            let key = if q.shape == Shape::Find {
+                let t1s = match text {
+                    Some(ts) if ts.messages() => match ts.prefetched(t) {
+                        Some(v) if v.len() == m => v.to_vec(),
+                        Some(_) => vec![0.0; m],
+                        None => continue,
+                    },
+                    _ => vec![0.0; m],
+                };
+                let top = find_top(&t1s);
+                PprKey {
+                    find: true,
+                    seeds: top.iter().map(|x| x.0).collect(),
+                    weights: top.iter().map(|x| x.1.to_bits()).collect(),
+                }
+            } else {
+                PprKey::of(q)
+            };
+            stats.queries += 1;
+            let e = want.entry(key).or_default();
+            *e = e.or(r);
+        }
+    }
+    let items: Vec<(PprKey, Reads)> = want.into_iter().collect();
+    let (vals, threads) = crate::parallel::par_map_ordered(&items, |(k, r)| -> PprPre {
+        let weights: Vec<f64> = k.weights.iter().map(|&b| f64::from_bits(b)).collect();
+        let solve = |wide: bool| Arc::new(query_ppr(idx, merged, k.find, &k.seeds, &weights, wide));
+        (r.p1.then(|| solve(false)), r.pt.then(|| solve(true)))
+    });
+    stats.chunks += 1;
+    stats.distinct += items.len();
+    stats.solves += items
+        .iter()
+        .map(|(_, r)| usize::from(r.p1) + usize::from(r.pt))
+        .sum::<usize>();
+    stats.threads = stats.threads.max(threads);
+    stats.ms += t0.elapsed().as_secs_f64() * 1000.0;
+    items.into_iter().map(|(k, _)| k).zip(vals).collect()
+}
+
 /// Replay `replay` over `specs`: one [`CalibratedSet`] per (spec, shape), in
 /// spec order then the spec's shape order. `state` must hold no commit yet
 /// (it is folded forward through every commit, oldest first). A spec with a
@@ -237,6 +393,22 @@ pub fn run_sets(
     replay: &Replay,
     state: &mut ReplayState,
     specs: &[SetSpec],
+) -> Vec<CalibratedSet> {
+    run_sets_with(merged, cands, root, replay, state, specs, PREFETCH_BUDGET)
+}
+
+/// [`run_sets`] with the look-ahead's memory `budget` in bytes
+/// ([`prefetch_chunk`]; 0 computes everything in the loop). The text
+/// corpus's look-ahead follows its own budget
+/// (`TextState::with_prefetch_budget`).
+pub(crate) fn run_sets_with(
+    merged: &MergedGraph,
+    cands: &Candidates,
+    root: &Path,
+    replay: &Replay,
+    state: &mut ReplayState,
+    specs: &[SetSpec],
+    budget: usize,
 ) -> Vec<CalibratedSet> {
     let live: Vec<Option<FallbackSource>> = specs
         .iter()
@@ -283,10 +455,43 @@ pub fn run_sets(
     }
     let tests: BTreeSet<usize> = replay.tests.iter().copied().collect();
     let m = cands.len();
+    let plan = Plan {
+        by_commit: &by_commit,
+        m,
+        shape_reads: replay
+            .queries
+            .iter()
+            .map(|q| (q.shape, shape_reads(specs, &live, q.shape)))
+            .collect(),
+    };
+    let mut covered: BTreeSet<usize> = BTreeSet::new();
+    let mut pre_ppr: BTreeMap<PprKey, PprPre> = BTreeMap::new();
+    let mut ppr_stats = PprStats::default();
 
     for (k, commit) in replay.commits.iter().enumerate() {
         if tests.contains(&k) {
+            let chunk = if budget > 0 && !covered.contains(&k) {
+                prefetch_chunk(replay, k, m, budget)
+            } else {
+                Vec::new()
+            };
             state.begin_test_commit(replay, k);
+            if !chunk.is_empty() {
+                covered = chunk.iter().copied().collect();
+                if let Some(idr) = state.hook::<IdrState>() {
+                    let need: Vec<usize> = chunk
+                        .iter()
+                        .copied()
+                        .filter(|t| {
+                            plan.by_commit
+                                .get(t)
+                                .is_some_and(|qs| qs.iter().any(|q| plan.reads(q.shape).idr))
+                        })
+                        .collect();
+                    idr.prefetch(root, merged, cands, replay, k, &need);
+                }
+                pre_ppr = prefetch_ppr(merged, state, &plan, &chunk, &mut ppr_stats);
+            }
             let qs: Vec<Cow<'_, ReplayQuery>> = by_commit
                 .get(&k)
                 .map(|v| {
@@ -321,6 +526,14 @@ pub fn run_sets(
                     }
                 }
                 let memo = Memo::new();
+                if let Some((p1, pt)) = pre_ppr.get(&PprKey::of(q)) {
+                    if let Some(v) = p1 {
+                        memo.get_or(MEMO_P1, || v.to_vec());
+                    }
+                    if let Some(v) = pt {
+                        memo.get_or(MEMO_PT, || v.to_vec());
+                    }
+                }
                 let ctx = QueryCtx {
                     merged,
                     cands,
@@ -388,6 +601,17 @@ pub fn run_sets(
             }
         }
         state.observe(commit, replay.train.get(k).copied().unwrap_or(false));
+    }
+    if ppr_stats.chunks > 0 {
+        eprintln!(
+            "[calibrate] ppr prefetch chunks={} queries={} distinct={} solves={} threads={} ms={:.1}",
+            ppr_stats.chunks,
+            ppr_stats.queries,
+            ppr_stats.distinct,
+            ppr_stats.solves,
+            ppr_stats.threads,
+            (ppr_stats.ms * 10.0).trunc() / 10.0,
+        );
     }
 
     let mut out = Vec::new();
@@ -854,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_byte_identical_at_1_and_4_threads() {
+    fn rows_are_byte_identical_at_1_4_and_8_threads() {
         use crate::calibrate::replay::{ReplayParams, build_replay};
         use glia_code_domain::snapshots::{
             HistoryCommit, HistoryFile, HistoryMeta, HistorySnapshot,
@@ -913,7 +1137,314 @@ mod tests {
             serde_json::to_vec(&rows).unwrap()
         };
         let one = at(1);
-        let four = at(4);
-        assert_eq!(one, four);
+        assert_eq!(one, at(4));
+        assert_eq!(one, at(8));
+    }
+
+    // ---- GP.5: the look-ahead over a real tree, history and git ----------
+
+    /// Run git hermetically in `dir` (no system or global config, `HOME`
+    /// inside the fixture), returning stdout.
+    fn git(dir: &Path, home: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", home.join("gitconfig"))
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    const MODS: usize = 8;
+
+    /// Eight importing modules and a task list, committed 22 times: commit i
+    /// touches two or three modules, adds task T(i) and marks T(i-1) done;
+    /// odd subjects name the task just done (an id IDR routes at the
+    /// parent), even ones a conventional scope, every fifth neither. Returns
+    /// the tree, the snapshot (newest first) and its messages.
+    fn gp5_tree() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        glia_code_domain::snapshots::HistorySnapshot,
+        Vec<glia_code_domain::snapshots::HistoryMessage>,
+    ) {
+        use glia_code_domain::snapshots::{
+            HistoryCommit, HistoryFile, HistoryMessage, HistoryMeta, HistorySnapshot,
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("gp5");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::create_dir_all(&home).expect("home");
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d).expect("mkdir");
+            }
+            std::fs::write(p, body).expect("write");
+        };
+        let module = |j: usize, rev: usize| {
+            let next = (j + 1) % MODS;
+            format!(
+                "from pkg.m{next} import f{next}\n\ndef f{j}():\n    return f{next}() + {rev}\n"
+            )
+        };
+        git(&root, &home, &["init", "-q"]);
+        let mut revs = [0usize; MODS];
+        for (j, r) in revs.iter().enumerate() {
+            write(&format!("pkg/m{j}.py"), &module(j, *r));
+        }
+        write("pkg/__init__.py", "");
+        let mut tasks: Vec<String> = Vec::new();
+        let mut commits: Vec<HistoryCommit> = Vec::new();
+        let mut msgs: Vec<HistoryMessage> = Vec::new();
+        for i in 0..22usize {
+            let touched: Vec<usize> = (0..2 + i % 2).map(|x| (i * 3 + x * 5) % MODS).collect();
+            for &j in &touched {
+                revs[j] += 1;
+                write(&format!("pkg/m{j}.py"), &module(j, revs[j]));
+            }
+            if let Some(last) = tasks.last_mut() {
+                *last = last.replacen("- [ ]", "- [x]", 1);
+            }
+            tasks.push(format!(
+                "- [ ] T{:03} work in pkg/m{}.py",
+                i + 1,
+                touched[0]
+            ));
+            write(
+                "specs/001-work/tasks.md",
+                &format!("# Tasks\n\n{}\n", tasks.join("\n")),
+            );
+            let subject = if i % 5 == 4 {
+                format!("tidy round {i}")
+            } else if i % 2 == 1 {
+                format!("T{i:03} work in m{}", touched[0])
+            } else {
+                format!("feat(pkg): tweak m{}", touched[0])
+            };
+            git(&root, &home, &["add", "-A"]);
+            git(&root, &home, &["commit", "-q", "-m", &subject]);
+            let sha = git(&root, &home, &["rev-parse", "HEAD"]);
+            let t = 1_700_000_000 + 100 * i as i64;
+            let mut files: Vec<HistoryFile> = touched
+                .iter()
+                .map(|j| HistoryFile {
+                    p: format!("pkg/m{j}.py"),
+                    a: Some(1),
+                    d: Some(1),
+                    from: None,
+                })
+                .collect();
+            files.push(HistoryFile {
+                p: "specs/001-work/tasks.md".into(),
+                a: Some(1),
+                d: Some(0),
+                from: None,
+            });
+            commits.push(HistoryCommit {
+                c: sha.clone(),
+                t,
+                files,
+            });
+            msgs.push(HistoryMessage {
+                c: sha,
+                at: t,
+                s: subject.clone(),
+                b: format!("body of {subject}"),
+                br: None,
+            });
+        }
+        commits.reverse();
+        msgs.reverse();
+        let head = commits[0].c.clone();
+        let snap = HistorySnapshot {
+            meta: HistoryMeta::new(head, commits.len(), None, String::new()),
+            commits,
+            blame: Vec::new(),
+        };
+        (tmp, root, snap, msgs)
+    }
+
+    /// Per test commit: (sha, text scores as bits, IDR as bits), and per
+    /// seeded query whether the P1 / PT* vectors were already in the memo
+    /// when the first candidate ranked.
+    type SpyLog = Arc<Mutex<Vec<(String, Vec<u64>, Vec<u64>, bool)>>>;
+
+    struct Spy(SpyLog);
+    impl Candidate for Spy {
+        fn name(&self) -> &'static str {
+            "spy"
+        }
+        fn rank(&self, q: &QueryCtx<'_>) -> Vec<RankKey> {
+            let keys = q.memo.keys();
+            let pre = keys.contains(&MEMO_P1) && keys.contains(&MEMO_PT);
+            let t1s = q.state.subject_scores(q.commit).unwrap_or_default();
+            let idr = q
+                .state
+                .hook::<IdrState>()
+                .map(|r| r.scores(q))
+                .unwrap_or_default();
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+            self.0
+                .lock()
+                .unwrap()
+                .push((q.commit.sha.clone(), bits(&t1s), bits(&idr), pre));
+            vec![[0.0; 3]; q.cands.len()]
+        }
+    }
+
+    /// What one replay of the GP.5 tree wrote and measured.
+    struct Gp5Run {
+        rows: Vec<u8>,
+        spy: Vec<(String, Vec<u64>, Vec<u64>, bool)>,
+        idr_counts: (usize, usize),
+        text_builds: usize,
+    }
+
+    fn gp5_run(
+        merged: &MergedGraph,
+        root: &Path,
+        snap: &glia_code_domain::snapshots::HistorySnapshot,
+        msgs: &[glia_code_domain::snapshots::HistoryMessage],
+        threads: usize,
+        budget: usize,
+    ) -> Gp5Run {
+        use crate::calibrate::bank::StructIndex;
+        use crate::calibrate::replay::{ReplayParams, build_replay};
+        use crate::calibrate::sets::specs;
+        use crate::calibrate::work::WorkState;
+        use crate::rank::RankCache;
+        let repo = merged.graphs[0].repo.0;
+        let roots = BTreeMap::from([(repo, root.display().to_string())]);
+        let labels = BTreeMap::from([(repo, "gp5".to_string())]);
+        let cache = Arc::new(RankCache::new("calibrate", &roots, &labels));
+        let cands = Candidates::of(&cache.files(merged), repo);
+        let all = [Shape::K1, Shape::K2, Shape::K3, Shape::Half, Shape::Find];
+        let replay = build_replay(snap, Some(msgs), &cands, &ReplayParams::default(), &all);
+        assert!(replay.tests.len() >= 15, "{}", replay.tests.len());
+        let log: SpyLog = Arc::new(Mutex::new(Vec::new()));
+        let mut set_specs = vec![SetSpec::new(
+            "SPY",
+            &[Shape::K1, Shape::K2, Shape::K3, Shape::Half, Shape::Find],
+            "spy",
+            vec![Box::new(Spy(Arc::clone(&log)))],
+        )];
+        set_specs.extend(specs(&["structure", "review", "find"]).expect("specs"));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut st = ReplayState::new(cands.len(), 30);
+            st.register(Box::new(StructIndex::build(
+                merged,
+                &cands,
+                Arc::clone(&cache),
+            )));
+            st.register(Box::new(
+                TextState::for_replay(&replay, cands.len()).with_prefetch_budget(budget),
+            ));
+            st.register(Box::new(WorkState::for_replay(&replay, cands.len(), 30)));
+            st.register(Box::new(IdrState::for_replay(&replay, cands.len())));
+            let rows = run_sets_with(merged, &cands, root, &replay, &mut st, &set_specs, budget);
+            assert!(rows.iter().any(|r| r.set == "SELt2"));
+            assert!(rows.iter().any(|r| r.set == "SELf2t"));
+            let mut spy = log.lock().unwrap().clone();
+            // queries run in parallel within a commit: order the log
+            spy.sort();
+            Gp5Run {
+                rows: serde_json::to_vec(&rows).unwrap(),
+                spy,
+                idr_counts: st.hook::<IdrState>().map(IdrState::counts).unwrap(),
+                text_builds: st.hook::<TextState>().map(TextState::builds).unwrap(),
+            }
+        })
+    }
+
+    /// GP.5: the look-ahead (text indexes, IDR routes, P1 / PT* solves
+    /// computed per chunk in parallel) writes the record of the in-loop
+    /// replay byte for byte, at 1, 4 and 8 threads and any chunking; every
+    /// test commit's text scores and IDR route are the same bits; the
+    /// look-ahead's P1 / PT* are in the memo before any candidate ranks; and
+    /// no precomputed value reads its own commit (the IDR of a subject naming
+    /// the task its own commit adds is 0, as in the loop).
+    #[test]
+    fn prefetch_writes_the_in_loop_record_at_any_threads_and_chunking() {
+        let (_tmp, root, snap, msgs) = gp5_tree();
+        let built = crate::generate_one(root.to_str().expect("utf-8")).expect("build");
+        let lazy = gp5_run(&built.merged, &root, &snap, &msgs, 1, 0);
+        // The baseline computes everything in the loop: nothing prefetched.
+        assert!(lazy.spy.iter().all(|e| !e.3), "lazy run saw a prefetch");
+        assert!(!lazy.spy.is_empty());
+        // Ids resolved at some parents, and text scored somewhere.
+        assert!(
+            lazy.spy
+                .iter()
+                .any(|e| e.2.iter().any(|&b| f64::from_bits(b) > 0.0)),
+            "no IDR routed: the fixture tests nothing"
+        );
+        assert!(
+            lazy.spy
+                .iter()
+                .any(|e| e.1.iter().any(|&b| f64::from_bits(b) > 0.0)),
+            "no text scored"
+        );
+        assert_eq!(lazy.idr_counts.1, 1, "the root commit has no parent");
+        for (threads, budget) in [(8, PREFETCH_BUDGET), (4, 1), (1, PREFETCH_BUDGET)] {
+            let run = gp5_run(&built.merged, &root, &snap, &msgs, threads, budget);
+            assert_eq!(
+                String::from_utf8_lossy(&run.rows),
+                String::from_utf8_lossy(&lazy.rows),
+                "threads={threads} budget={budget}"
+            );
+            let strip = |v: &[(String, Vec<u64>, Vec<u64>, bool)]| {
+                v.iter()
+                    .map(|e| (e.0.clone(), e.1.clone(), e.2.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(strip(&run.spy), strip(&lazy.spy), "threads={threads}");
+            assert!(
+                run.spy.iter().all(|e| e.3),
+                "a query's PPR was not prefetched (threads={threads} budget={budget})"
+            );
+            assert_eq!(run.idr_counts, lazy.idr_counts);
+            assert_eq!(run.text_builds, lazy.text_builds);
+        }
+    }
+
+    /// GP.5's chunk planner: tests from k on, within the budget, never empty
+    /// while one is left, nothing at budget 0.
+    #[test]
+    fn prefetch_chunks_follow_the_budget() {
+        let replay = scripted_replay();
+        // 16 files, one query per test commit: 16 * 8 * 4 = 512 bytes each.
+        assert_eq!(
+            prefetch_chunk(&replay, 0, N, PREFETCH_BUDGET),
+            [1, 2, 3, 4, 5]
+        );
+        assert_eq!(prefetch_chunk(&replay, 3, N, PREFETCH_BUDGET), [3, 4, 5]);
+        assert_eq!(prefetch_chunk(&replay, 2, N, 1024), [2, 3]);
+        assert_eq!(prefetch_chunk(&replay, 2, N, 1), [2]);
+        assert!(prefetch_chunk(&replay, 2, N, 0).is_empty());
+        assert!(prefetch_chunk(&replay, 6, N, PREFETCH_BUDGET).is_empty());
     }
 }

@@ -125,6 +125,44 @@ pub struct Replay {
     pub test_eligible: usize,
 }
 
+/// The memory the replay's look-ahead may hold at once (GP.5): the text
+/// scores, IDR routes and P1 / PT* vectors of one chunk of test commits,
+/// computed in parallel before the online loop reaches them. 256 MiB is every
+/// test commit of glia's 300 (2549 files) in one chunk; a repo with many more
+/// candidate files takes several.
+pub const PREFETCH_BUDGET: usize = 256 << 20;
+
+/// The test commits one look-ahead chunk covers (GP.5): `replay.tests` from
+/// the first test at or after commit `k`, oldest first, as many as fit
+/// `budget` bytes at an estimate of `n_files` f64 per test commit for its
+/// text scores and its IDR route plus two (P1, PT*) per query, and always at
+/// least one. Empty when `budget` is 0 (no look-ahead) or no test is left.
+/// Depends on the replay alone, never on a thread count, so a chunked replay
+/// is the same at any `GLIA_THREADS`.
+pub fn prefetch_chunk(replay: &Replay, k: usize, n_files: usize, budget: usize) -> Vec<usize> {
+    if budget == 0 {
+        return Vec::new();
+    }
+    let start = replay.tests.partition_point(|&t| t < k);
+    let mut per: BTreeMap<usize, usize> = BTreeMap::new();
+    for q in &replay.queries {
+        *per.entry(q.commit).or_default() += 1;
+    }
+    let row = n_files.max(1).saturating_mul(std::mem::size_of::<f64>());
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for &t in &replay.tests[start..] {
+        let vectors = 2 + 2 * per.get(&t).copied().unwrap_or(0);
+        let cost = row.saturating_mul(vectors);
+        if !out.is_empty() && used.saturating_add(cost) > budget {
+            break;
+        }
+        used = used.saturating_add(cost);
+        out.push(t);
+    }
+    out
+}
+
 /// The online co-change state: rank_eval's `cnt` / `co`, counted over the
 /// commits observed so far.
 #[non_exhaustive]
