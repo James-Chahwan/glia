@@ -17,7 +17,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::Hash;
 
 use glia_core::NodeId;
 
@@ -67,26 +67,41 @@ impl ValueRef<'_> {
 /// A value's index into the [`ValueTable`] of the evaluation that interned it.
 pub(crate) type Handle = u32;
 
-/// The end of a collision chain. No value gets this handle: interning stops one short
-/// of it, a bound no evaluation reaches (the row budget caps derived rows at millions
-/// and a fact source holding four billion distinct values does not fit in memory).
-const CHAIN_END: Handle = Handle::MAX;
+/// The empty slot of a [`SlotIndex`]. No value gets this handle: interning stops one
+/// short of it, a bound no evaluation reaches (the row budget caps derived rows at
+/// millions and a fact source holding four billion distinct values does not fit in
+/// memory).
+const EMPTY_SLOT: Handle = Handle::MAX;
 
 /// The per-evaluation value interner. Each distinct value is stored once, so a
 /// qname attribute column holds handles, not a second copy of every qname.
 ///
-/// The index maps a 64-bit digest of the value to the newest handle with that
-/// digest; `next` chains older handles that share it, so a digest collision costs a
-/// longer chain, never a wrong handle. The digest is std's SipHash under
-/// `DefaultHasher::new()` (fixed keys), not a randomly seeded hasher, so the chains
-/// are the same on every run.
-#[derive(Clone, Debug, Default)]
+/// The index ([`SlotIndex`]) holds each handle once, at a slot its value's 64-bit
+/// digest picks, probing on; a lookup compares the values it meets, so a digest
+/// collision costs a longer probe, never a wrong handle. The digest is a fixed mix
+/// ([`mix64`], no random seed), so the slots are the same on every run (GA.13: 4 bytes
+/// a slot, where a digest-keyed map with collision chains held about 30 a value).
+#[derive(Clone, Debug)]
 pub(crate) struct ValueTable {
     data: Vec<Value>,
-    chains: Lookup<u64, Handle>,
-    next: Vec<Handle>,
-    /// Per handle: the cached rendered key of a node or int; a string is its own key.
+    index: SlotIndex,
+    /// The digest every lookup and every slot uses ([`digest`]; tests force
+    /// collisions with another).
+    digest: fn(ValueRef<'_>) -> u64,
+    /// Per handle, filled on first use: the cached rendered key of a node or int; a
+    /// string is its own key.
     rendered: Vec<Option<Box<str>>>,
+}
+
+impl Default for ValueTable {
+    fn default() -> Self {
+        ValueTable {
+            data: Vec::new(),
+            index: SlotIndex::default(),
+            digest,
+            rendered: Vec::new(),
+        }
+    }
 }
 
 /// The type rank output order uses: Int < Str < Node.
@@ -98,25 +113,90 @@ fn type_rank(v: ValueRef<'_>) -> u8 {
     }
 }
 
+/// splitmix64's finaliser: a fixed, well-spread 64-bit mix (no seed, so a digest is
+/// the same on every run). A [`SlotIndex`] picks its slot from the low bits.
+pub(crate) fn mix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// The interning digest: a type tag, then the payload, so `Str("3")` and `Int(3)`
-/// differ before their bytes are read.
+/// start apart before their bytes are read (equal digests only chain, never merge).
 fn digest(v: ValueRef<'_>) -> u64 {
-    let mut h = DefaultHasher::new();
     match v {
-        ValueRef::Node(n) => {
-            h.write_u8(0);
-            h.write_u64(n.0);
-        }
+        ValueRef::Node(n) => mix64(n.0 ^ 0x4E4F_4445),
+        ValueRef::Int(i) => mix64(i.cast_unsigned() ^ 0x494E_5400_0000_0000),
         ValueRef::Str(s) => {
-            h.write_u8(1);
-            h.write(s.as_bytes());
-        }
-        ValueRef::Int(i) => {
-            h.write_u8(2);
-            h.write_i64(i);
+            let bytes = s.as_bytes();
+            let mut h = mix64(0x5354_5200 ^ bytes.len() as u64);
+            for chunk in bytes.chunks(8) {
+                let mut word = [0u8; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                h = mix64(h ^ u64::from_le_bytes(word));
+            }
+            h
         }
     }
-    h.finish()
+}
+
+/// An open-addressing index of `u32` entries whose keys live with its caller (GA.13):
+/// a power-of-two slot table, linear probing from the slot a key's [`mix64`]-spread
+/// digest picks, at most three quarters full. It stores no key and no digest; a lookup
+/// asks the caller whether an entry is the one sought, and a growth asks it for each
+/// entry's digest again. No entry is [`EMPTY_SLOT`]. Never iterated into an output.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlotIndex {
+    slots: Vec<u32>,
+    len: usize,
+}
+
+impl SlotIndex {
+    /// The entry under digest `d` that `is` accepts.
+    pub(crate) fn find(&self, d: u64, mut is: impl FnMut(u32) -> bool) -> Option<u32> {
+        let mask = self.slots.len().checked_sub(1)?;
+        let mut i = (d as usize) & mask;
+        loop {
+            let e = self.slots[i];
+            if e == EMPTY_SLOT {
+                return None;
+            }
+            if is(e) {
+                return Some(e);
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    /// Add entry `e` (never [`EMPTY_SLOT`]) under digest `d`, the caller having found
+    /// it absent; `digest_of` gives each held entry's digest when the slots grow.
+    pub(crate) fn insert(&mut self, d: u64, e: u32, digest_of: impl Fn(u32) -> u64) {
+        debug_assert_ne!(e, EMPTY_SLOT);
+        if (self.len + 1) * 4 > self.slots.len() * 3 {
+            let old = std::mem::take(&mut self.slots);
+            self.slots = vec![EMPTY_SLOT; (old.len() * 2).max(16)];
+            for held in old.into_iter().filter(|&h| h != EMPTY_SLOT) {
+                self.place(digest_of(held), held);
+            }
+        }
+        self.place(d, e);
+        self.len += 1;
+    }
+
+    fn place(&mut self, d: u64, e: u32) {
+        let mask = self.slots.len() - 1;
+        let mut i = (d as usize) & mask;
+        while self.slots[i] != EMPTY_SLOT {
+            i = (i + 1) & mask;
+        }
+        self.slots[i] = e;
+    }
+
+    /// Heap bytes held (the slot table's capacity).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.slots.capacity() * std::mem::size_of::<u32>()
+    }
 }
 
 impl ValueTable {
@@ -127,12 +207,22 @@ impl ValueTable {
     /// The handle of `v`, interning it on first sight. Idempotent: the same value
     /// always gets the same handle within one table.
     pub(crate) fn intern(&mut self, v: ValueRef<'_>) -> Handle {
-        self.intern_at(digest(v), v)
+        let d = (self.digest)(v);
+        if let Some(h) = self.find_at(d, v) {
+            return h;
+        }
+        debug_assert!(self.data.len() < EMPTY_SLOT as usize, "value table full");
+        let h = self.data.len() as Handle;
+        self.data.push(v.to_owned());
+        let (data, digest) = (&self.data, self.digest);
+        self.index
+            .insert(d, h, |e| digest(data[e as usize].as_ref()));
+        h
     }
 
     /// The handle of `v` if it was interned, without interning it.
     pub(crate) fn find(&self, v: ValueRef<'_>) -> Option<Handle> {
-        self.find_at(digest(v), v)
+        self.find_at((self.digest)(v), v)
     }
 
     /// The value behind `h`. `h` must come from this table.
@@ -149,6 +239,10 @@ impl ValueTable {
     /// cached), an int's decimal, a string itself.
     pub(crate) fn rendered(&mut self, h: Handle, render: &dyn Fn(NodeId) -> String) -> &str {
         let i = h as usize;
+        if self.rendered.len() <= i {
+            self.rendered
+                .resize_with(self.data.len().max(i + 1), || None);
+        }
         let slot = &mut self.rendered[i];
         match &self.data[i] {
             Value::Str(s) => s.as_str(),
@@ -196,43 +290,35 @@ impl ValueTable {
         }
     }
 
-    /// [`ValueTable::intern`] under a given digest (tests force collisions with it).
-    fn intern_at(&mut self, d: u64, v: ValueRef<'_>) -> Handle {
-        if let Some(h) = self.find_at(d, v) {
-            return h;
-        }
-        debug_assert!(self.data.len() < CHAIN_END as usize, "value table full");
-        let h = self.data.len() as Handle;
-        self.data.push(v.to_owned());
-        self.rendered.push(None);
-        match self.chains.get_mut(&d) {
-            Some(head) => {
-                self.next.push(*head);
-                *head = h;
-            }
-            None => {
-                self.next.push(CHAIN_END);
-                self.chains.insert(d, h);
-            }
-        }
-        h
+    /// Heap bytes held, by capacity: the value column, every interned string, the
+    /// render cache and its keys, and the slot index. Read-only accounting for
+    /// `[rules] mem` (GA.13).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let strings: usize = self
+            .data
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.capacity(),
+                Value::Node(_) | Value::Int(_) => 0,
+            })
+            .sum();
+        let rendered: usize = self.rendered.iter().flatten().map(|r| r.len()).sum();
+        self.data.capacity() * size_of::<Value>()
+            + strings
+            + self.rendered.capacity() * size_of::<Option<Box<str>>>()
+            + rendered
+            + self.index.heap_bytes()
     }
 
-    /// [`ValueTable::find`] under a given digest: walks the digest's chain.
+    /// The handle of `v` under digest `d` (this table's digest of `v`).
     fn find_at(&self, d: u64, v: ValueRef<'_>) -> Option<Handle> {
-        let mut h = *self.chains.get(&d)?;
-        while h != CHAIN_END {
-            if self.data[h as usize].as_ref() == v {
-                return Some(h);
-            }
-            h = self.next[h as usize];
-        }
-        None
+        self.index.find(d, |h| self.data[h as usize].as_ref() == v)
     }
 }
 
-/// A hash map with lookups only: get, get_mut, insert, get_or_insert_with,
-/// contains_key, len. It has no iter / keys / values / drain and no IntoIterator, so
+/// A hash map with lookups only: get, insert, get_or_insert_with, contains_key,
+/// len. It has no iter / keys / values / drain and no IntoIterator, so
 /// its order cannot reach an output. The inner HashMap is a private field: no module
 /// but this one can reach it. Debug prints the length only.
 #[derive(Clone)]
@@ -263,14 +349,6 @@ impl<K: Hash + Eq, V> Lookup<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         self.0.get(k)
-    }
-
-    pub(crate) fn get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.0.get_mut(k)
     }
 
     /// Inserts `v` at `k`, returning the value it replaced.
@@ -365,8 +443,11 @@ mod tests {
             assert_eq!(t.get(*h), ValueRef::Str(w.as_str()));
         }
 
-        // Forced collisions: 1,000 values over 3 digests, chains ~333 long.
-        let mut c = ValueTable::new();
+        // Forced collisions: 1,000 values over 3 digests, probes ~333 long.
+        let mut c = ValueTable {
+            digest: |v| digest(v) % 3,
+            ..ValueTable::new()
+        };
         let vals: Vec<Value> = (0..1_000)
             .map(|i| match i % 3 {
                 0 => Value::Str(i.to_string()),
@@ -374,18 +455,13 @@ mod tests {
                 _ => Value::Node(NodeId(i as u64)),
             })
             .collect();
-        let hs: Vec<Handle> = vals
-            .iter()
-            .enumerate()
-            .map(|(i, v)| c.intern_at(i as u64 % 3, v.as_ref()))
-            .collect();
+        let hs: Vec<Handle> = vals.iter().map(|v| c.intern(v.as_ref())).collect();
         assert_eq!(hs, (0..1_000).collect::<Vec<Handle>>());
         for (i, v) in vals.iter().enumerate() {
-            assert_eq!(c.find_at(i as u64 % 3, v.as_ref()), Some(hs[i]));
-            assert_eq!(c.intern_at(i as u64 % 3, v.as_ref()), hs[i]);
-            assert_eq!(c.find_at(i as u64 % 3 + 3, v.as_ref()), None);
+            assert_eq!(c.find(v.as_ref()), Some(hs[i]));
+            assert_eq!(c.intern(v.as_ref()), hs[i]);
         }
-        assert_eq!(c.find_at(0, ValueRef::Str("1001")), None);
+        assert_eq!(c.find(ValueRef::Str("1001")), None);
         assert_eq!(c.len(), 1_000);
     }
 
@@ -464,6 +540,36 @@ mod tests {
     }
 
     #[test]
+    fn slot_index_and_digests() {
+        // Keys live with the caller: here entry e's key is e * 7.
+        let key = |e: u32| u64::from(e) * 7;
+        let mut ix = SlotIndex::default();
+        assert_eq!(ix.find(mix64(0), |_| true), None, "empty");
+        for e in 0..1_000u32 {
+            assert_eq!(ix.find(mix64(key(e)), |h| key(h) == key(e)), None);
+            ix.insert(mix64(key(e)), e, |h| mix64(key(h)));
+        }
+        for e in 0..1_000u32 {
+            assert_eq!(ix.find(mix64(key(e)), |h| key(h) == key(e)), Some(e));
+        }
+        assert_eq!(ix.find(mix64(key(1_000)), |h| key(h) == key(1_000)), None);
+        // At most three quarters full: 1,000 entries take 2,048 slots.
+        assert_eq!(ix.heap_bytes(), 2_048 * 4);
+        // The digest is fixed (the same on every run) and typed.
+        assert_eq!(mix64(0), 0xE220_A839_7B1D_CDAF);
+        let (n, i, st) = (
+            digest(ValueRef::Node(NodeId(3))),
+            digest(ValueRef::Int(3)),
+            digest(ValueRef::Str("3")),
+        );
+        assert!(n != i && i != st && n != st);
+        assert_ne!(
+            digest(ValueRef::Str("abcdefgh")),
+            digest(ValueRef::Str("abcdefgh\0"))
+        );
+    }
+
+    #[test]
     fn lookup_is_a_map() {
         let mut m: Lookup<u32, u32> = Lookup::new();
         assert_eq!(m.len(), 0);
@@ -477,9 +583,8 @@ mod tests {
         }
         assert_eq!(m.get(&1_000), None);
         assert!(!m.contains_key(&1_000));
-        assert_eq!(m.get_mut(&1_000), None);
         for k in (0..1_000u32).step_by(2) {
-            *m.get_mut(&k).expect("present") += 1;
+            *m.get_or_insert_with(k, || 0) += 1;
         }
         assert_eq!(m.get(&4), Some(&9));
         assert_eq!(m.get(&5), Some(&10));

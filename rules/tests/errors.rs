@@ -143,7 +143,7 @@ fn cases() -> Vec<Case> {
     budget.opts.max_rows = 20;
     budget.want = Err(
         "Budget",
-        "rule evaluation stopped: `tc/2` (rules:1) reached 22 derived rows against a row budget \
+        "rule evaluation stopped: `tc/2` (rules:1) reached 22 bindings against a row budget \
          of 20. Its recursion is probably unseeded: bind an argument from a small relation \
          (`tc(x, y) :- seed(x), ...`), use reaches(x, y, \"CATS\") for reachability, or raise the \
          budget.",

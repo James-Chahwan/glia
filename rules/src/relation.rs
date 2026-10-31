@@ -9,9 +9,10 @@
 //! so a lookup key is a prefix of the permuted columns. A partition holds stable runs
 //! (oldest first) and `recent`, the last round's new rows. Each batch is row-major,
 //! sorted lexicographically and free of duplicates, with its rows' heights and rule
-//! indexes in separate columns and, on the identity index of a loaded relation, the
-//! witness edge ordinals ([`NO_ORDINAL`] for none): `arity` x 4 + 6 bytes a row per
-//! index, plus 4 for an ordinal. Another index's scans report [`NO_ORDINAL`]; the
+//! indexes (one shared (height, rule) while every row of the batch has it, as every
+//! EDB batch does, else a column each; GA.13) and, on the identity index of a loaded
+//! relation, the witness edge ordinals ([`NO_ORDINAL`] for none): `arity` x 4 bytes a
+//! row per index, plus 6 when the batch's metas differ, plus 4 for an ordinal. Another index's scans report [`NO_ORDINAL`]; the
 //! ordinal of a row read there comes from [`Relation::contains`].
 //!
 //! [`Relation::insert_round`] first advances, then drops every row already present
@@ -70,9 +71,94 @@ pub(crate) type Visit<'f> = dyn FnMut(&[Handle], Tier, RowMeta, u32) + 'f;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Batch {
     rows: Vec<Handle>,
-    heights: Vec<u32>,
-    rules: Vec<u16>,
+    metas: Metas,
     ordinals: Option<Vec<u32>>,
+}
+
+/// A batch's provenance column (GA.13): one [`RowMeta`] for every row while they all
+/// share it (every EDB, scc and builtin-loaded batch, and a rule's rows of one height),
+/// else one height and one rule a row. A batch stays `Uniform` until its first row
+/// with another meta, which turns it `Per` for good.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Metas {
+    Uniform { len: usize, meta: RowMeta },
+    Per { heights: Vec<u32>, rules: Vec<u16> },
+}
+
+impl Default for Metas {
+    fn default() -> Self {
+        Metas::Uniform {
+            len: 0,
+            meta: RowMeta {
+                height: 0,
+                rule: EDB_RULE,
+            },
+        }
+    }
+}
+
+impl Metas {
+    fn len(&self) -> usize {
+        match self {
+            Metas::Uniform { len, .. } => *len,
+            Metas::Per { heights, .. } => heights.len(),
+        }
+    }
+
+    /// Row `i`'s meta (`i < len`).
+    fn get(&self, i: usize) -> RowMeta {
+        match self {
+            Metas::Uniform { meta, .. } => *meta,
+            Metas::Per { heights, rules } => RowMeta {
+                height: heights[i],
+                rule: rules[i],
+            },
+        }
+    }
+
+    /// Append one row's meta; the first row that differs from a uniform meta copies
+    /// it out (reserving `hint` rows in all).
+    fn push(&mut self, m: RowMeta, hint: usize) {
+        match self {
+            Metas::Uniform { len, meta } if *len == 0 || *meta == m => {
+                *meta = m;
+                *len += 1;
+            }
+            Metas::Uniform { len, meta } => {
+                let cap = hint.max(*len + 1);
+                let mut heights = Vec::with_capacity(cap);
+                let mut rules = Vec::with_capacity(cap);
+                heights.resize(*len, meta.height);
+                rules.resize(*len, meta.rule);
+                heights.push(m.height);
+                rules.push(m.rule);
+                *self = Metas::Per { heights, rules };
+            }
+            Metas::Per { heights, rules } => {
+                heights.push(m.height);
+                rules.push(m.rule);
+            }
+        }
+    }
+
+    /// The uniform meta, when every row shares one.
+    fn uniform(&self) -> Option<RowMeta> {
+        match self {
+            Metas::Uniform { meta, .. } => Some(*meta),
+            Metas::Per { .. } => None,
+        }
+    }
+
+    /// Heap bytes held (capacity).
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Metas::Uniform { .. } => 0,
+            Metas::Per { heights, rules } => {
+                heights.capacity() * std::mem::size_of::<u32>()
+                    + rules.capacity() * std::mem::size_of::<u16>()
+            }
+        }
+    }
 }
 
 /// One level's rows in one index.
@@ -120,7 +206,7 @@ pub(crate) struct Cursor<'r> {
 
 impl Batch {
     fn len(&self) -> usize {
-        self.heights.len()
+        self.metas.len()
     }
 
     fn row(&self, arity: usize, i: usize) -> &[Handle] {
@@ -128,10 +214,17 @@ impl Batch {
     }
 
     fn meta(&self, i: usize) -> RowMeta {
-        RowMeta {
-            height: self.heights[i],
-            rule: self.rules[i],
-        }
+        self.metas.get(i)
+    }
+
+    /// Heap bytes held: rows, metas and ordinals, by capacity.
+    fn heap_bytes(&self) -> usize {
+        self.rows.capacity() * std::mem::size_of::<Handle>()
+            + self.metas.heap_bytes()
+            + self
+                .ordinals
+                .as_ref()
+                .map_or(0, |o| o.capacity() * std::mem::size_of::<u32>())
     }
 
     fn ordinal(&self, i: usize) -> u32 {
@@ -188,27 +281,31 @@ impl Batch {
         self.search(arity, lo + 1, hi, key)
     }
 
-    fn push_from(&mut self, src: &Batch, arity: usize, i: usize) {
+    /// Append row `i` of `src`; `hint` is the row count this batch is built to.
+    fn push_from(&mut self, src: &Batch, arity: usize, i: usize, hint: usize) {
         self.rows.extend_from_slice(src.row(arity, i));
-        self.heights.push(src.heights[i]);
-        self.rules.push(src.rules[i]);
+        self.metas.push(src.meta(i), hint);
         if let Some(o) = &mut self.ordinals {
             o.push(src.ordinal(i));
         }
     }
 
-    /// A batch of rows given in sorted order; ordinals kept when any row has one.
+    /// A batch of the `n` rows given in sorted order; ordinals kept when any row has
+    /// one.
     fn collect<'a>(
         arity: usize,
+        n: usize,
         rows: impl Iterator<Item = (&'a [Handle], RowMeta, u32)>,
     ) -> Batch {
-        let mut b = Batch::default();
-        let mut ords = Vec::new();
+        let mut b = Batch {
+            rows: Vec::with_capacity(n * arity),
+            ..Batch::default()
+        };
+        let mut ords = Vec::with_capacity(n);
         for (row, meta, ord) in rows {
             debug_assert_eq!(row.len(), arity);
             b.rows.extend_from_slice(row);
-            b.heights.push(meta.height);
-            b.rules.push(meta.rule);
+            b.metas.push(meta, n);
             ords.push(ord);
         }
         b.ordinals = ords.iter().any(|&o| o != NO_ORDINAL).then_some(ords);
@@ -226,11 +323,24 @@ impl Batch {
         let at = |i: usize| &flat[i * arity..(i + 1) * arity];
         let mut order: Vec<usize> = (0..self.len()).collect();
         order.sort_unstable_by(|&a, &b| at(a).cmp(at(b)));
-        let mut out = Batch::default();
+        let n = self.len();
+        let mut out = Batch {
+            rows: Vec::with_capacity(flat.len()),
+            metas: match self.metas.uniform() {
+                Some(meta) => Metas::Uniform { len: n, meta },
+                None => Metas::Per {
+                    heights: Vec::with_capacity(n),
+                    rules: Vec::with_capacity(n),
+                },
+            },
+            ordinals: None,
+        };
+        let per = out.metas.uniform().is_none();
         for i in order {
             out.rows.extend_from_slice(at(i));
-            out.heights.push(self.heights[i]);
-            out.rules.push(self.rules[i]);
+            if per {
+                out.metas.push(self.meta(i), n);
+            }
         }
         out
     }
@@ -243,20 +353,26 @@ impl Batch {
         if b.len() == 0 {
             return a;
         }
+        let n = a.len() + b.len();
+        let metas = match (a.metas.uniform(), b.metas.uniform()) {
+            (Some(x), Some(y)) if x == y => Metas::default(),
+            _ => Metas::Per {
+                heights: Vec::with_capacity(n),
+                rules: Vec::with_capacity(n),
+            },
+        };
         let mut out = Batch {
             rows: Vec::with_capacity(a.rows.len() + b.rows.len()),
-            heights: Vec::with_capacity(a.len() + b.len()),
-            rules: Vec::with_capacity(a.len() + b.len()),
-            ordinals: (a.ordinals.is_some() || b.ordinals.is_some())
-                .then(|| Vec::with_capacity(a.len() + b.len())),
+            metas,
+            ordinals: (a.ordinals.is_some() || b.ordinals.is_some()).then(|| Vec::with_capacity(n)),
         };
         let (mut i, mut j) = (0, 0);
         while i < a.len() || j < b.len() {
             if j == b.len() || (i < a.len() && a.row(arity, i) < b.row(arity, j)) {
-                out.push_from(&a, arity, i);
+                out.push_from(&a, arity, i, n);
                 i += 1;
             } else {
-                out.push_from(&b, arity, j);
+                out.push_from(&b, arity, j, n);
                 j += 1;
             }
         }
@@ -419,17 +535,19 @@ impl Relation {
         order.sort_unstable_by(|&a, &b| {
             row(a)
                 .cmp(row(b))
-                .then(rows.levels[a].cmp(&rows.levels[b]))
-                .then(height(a).cmp(&height(b)))
-                .then(ord(a).cmp(&ord(b)))
+                .then_with(|| rows.levels[a].cmp(&rows.levels[b]))
+                .then_with(|| height(a).cmp(&height(b)))
+                .then_with(|| ord(a).cmp(&ord(b)))
         });
         order.dedup_by(|later, earlier| row(*later) == row(*earlier));
         self.drop_present(&rows.rows, &mut order);
         let mut added = 0;
         for level in Tier::ALL {
             let picked = order.iter().filter(|&&i| rows.levels[i] == level);
+            let n = picked.clone().count();
             let batch = Batch::collect(
                 arity,
+                n,
                 picked.map(|&i| {
                     (
                         row(i),
@@ -467,12 +585,16 @@ impl Relation {
         order.sort_unstable_by(|&a, &b| {
             row(a)
                 .cmp(row(b))
-                .then(metas[a].height.cmp(&metas[b].height))
-                .then(metas[a].rule.cmp(&metas[b].rule))
+                .then_with(|| metas[a].height.cmp(&metas[b].height))
+                .then_with(|| metas[a].rule.cmp(&metas[b].rule))
         });
         order.dedup_by(|later, earlier| row(*later) == row(*earlier));
         self.drop_present(to_add, &mut order);
-        let batch = Batch::collect(arity, order.iter().map(|&i| (row(i), metas[i], NO_ORDINAL)));
+        let batch = Batch::collect(
+            arity,
+            order.len(),
+            order.iter().map(|&i| (row(i), metas[i], NO_ORDINAL)),
+        );
         let added = batch.len();
         self.store(level, batch, true);
         to_add.clear();
@@ -582,7 +704,7 @@ impl Relation {
         let arity = self.arity;
         for (b, tier) in self.selected(index, &view) {
             for i in 0..b.len() {
-                if view.max_height.is_none_or(|h| b.heights[i] < h) {
+                if view.max_height.is_none_or(|h| b.meta(i).height < h) {
                     f(b.row(arity, i), tier, b.meta(i), b.ordinal(i));
                 }
             }
@@ -592,6 +714,23 @@ impl Relation {
     /// Rows at every level: the row budget's count (DA.14b).
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    /// Heap bytes held by every index (rows, metas, ordinals, permutations and run
+    /// lists), by capacity: the `[rules] mem` accounting (GA.13).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let index = |ix: &Index| -> usize {
+            ix.perm.capacity()
+                + ix.parts
+                    .iter()
+                    .map(|p| {
+                        p.stable.capacity() * std::mem::size_of::<Batch>()
+                            + p.batches().map(Batch::heap_bytes).sum::<usize>()
+                    })
+                    .sum::<usize>()
+        };
+        self.indexes.capacity() * std::mem::size_of::<Index>()
+            + self.indexes.iter().map(index).sum::<usize>()
     }
 
     /// Rows in the last round.
@@ -619,7 +758,7 @@ impl Cursor<'_> {
             };
             let mut i = run.pos;
             while i < b.len() && b.has_prefix(arity, i, key) {
-                if max_height.is_none_or(|h| b.heights[i] < h) {
+                if max_height.is_none_or(|h| b.meta(i).height < h) {
                     f(b.row(arity, i), run.tier, b.meta(i), b.ordinal(i));
                 }
                 i += 1;
@@ -705,7 +844,9 @@ mod tests {
             assert_eq!(shape(ix), shape(&rel.indexes[0]), "index {k}");
             for b in ix.parts.iter().flat_map(Part::batches) {
                 assert_eq!(b.rows.len(), b.len() * a);
-                assert_eq!(b.rules.len(), b.len());
+                if let Metas::Per { heights, rules } = &b.metas {
+                    assert_eq!(heights.len(), rules.len());
+                }
                 assert!(k == 0 || b.ordinals.is_none());
                 assert!(b.ordinals.as_ref().is_none_or(|o| o.len() == b.len()));
                 for i in 1..b.len() {
@@ -1191,5 +1332,129 @@ mod tests {
         assert_eq!(r.insert_round(Tier::Fact, &mut to_add, &mut metas), 0);
         assert_eq!(r.len(), 1);
         check(&r);
+    }
+
+    /// Every batch of every index, with its index number.
+    fn batches(r: &Relation) -> Vec<(usize, &Batch)> {
+        r.indexes
+            .iter()
+            .enumerate()
+            .flat_map(|(k, ix)| ix.parts.iter().flat_map(Part::batches).map(move |b| (k, b)))
+            .filter(|(_, b)| b.len() > 0)
+            .collect()
+    }
+
+    fn edb(rows: &[[Handle; 2]]) -> EdbRows {
+        EdbRows {
+            arity: 2,
+            rows: rows.iter().flatten().copied().collect(),
+            levels: vec![Tier::Fact; rows.len()],
+            ordinals: (0..rows.len() as u32).collect(),
+        }
+    }
+
+    #[test]
+    fn edb_batches_stay_uniform_through_merge_and_permutation() {
+        // Two loads at FACT, merged by the geometric rule and by seal, in both indexes.
+        let mut r = Relation::new(2, &[vec![1, 0]]);
+        assert_eq!(r.load(edb(&[[3, 1], [1, 2], [2, 9]]), None), 3);
+        assert_eq!(r.load(edb(&[[5, 5], [0, 7], [4, 4]]), None), 3);
+        r.seal();
+        let all = batches(&r);
+        assert_eq!(all.len(), 2, "one sealed run in each index");
+        for (k, b) in &all {
+            assert_eq!(
+                b.metas,
+                Metas::Uniform {
+                    len: 6,
+                    meta: m(0, EDB_RULE)
+                },
+                "index {k}"
+            );
+            assert_eq!(b.metas.heap_bytes(), 0);
+        }
+        // An index built on request permutes a uniform batch into a uniform one.
+        let i = r.ensure_index(&[1, 0]).expect("planned");
+        assert_eq!(i, 1);
+        let mut built = Relation::new(2, &[]);
+        built.load(edb(&[[3, 1], [1, 2]]), None);
+        let j = built.ensure_index(&[1, 0]).expect("valid");
+        let b = built.indexes[j].parts[0].stable[0].clone();
+        assert_eq!(
+            b.metas,
+            Metas::Uniform {
+                len: 2,
+                meta: m(0, EDB_RULE)
+            }
+        );
+        assert_eq!(b.row(2, 0), [1, 3]);
+        check(&r);
+        check(&built);
+    }
+
+    #[test]
+    fn a_uniform_merge_with_per_rows_keeps_every_meta() {
+        let mut r = Relation::new(1, &[vec![0]]);
+        r.load(
+            EdbRows {
+                arity: 1,
+                rows: vec![2, 4],
+                levels: vec![Tier::Fact; 2],
+                ordinals: Vec::new(),
+            },
+            None,
+        );
+        // A round of two heights: Per from its second row on.
+        insert(&mut r, Tier::Fact, &[(&[1], 3, 0), (&[3], 5, 1)]);
+        let recent = &r.indexes[0].parts[0].recent;
+        assert!(
+            matches!(recent.metas, Metas::Per { .. }),
+            "{:?}",
+            recent.metas
+        );
+        r.seal();
+        let b = &r.indexes[0].parts[0].stable[0];
+        let Metas::Per { heights, rules } = &b.metas else {
+            panic!("a merge with a Per run is Per: {:?}", b.metas)
+        };
+        assert_eq!(heights, &[3, 0, 5, 0]);
+        assert_eq!(rules, &[0, EDB_RULE, 1, EDB_RULE]);
+        let want = [
+            (vec![1], Tier::Fact, m(3, 0), NO_ORDINAL),
+            (vec![2], Tier::Fact, m(0, EDB_RULE), NO_ORDINAL),
+            (vec![3], Tier::Fact, m(5, 1), NO_ORDINAL),
+            (vec![4], Tier::Fact, m(0, EDB_RULE), NO_ORDINAL),
+        ];
+        assert_eq!(scanned(&r, 0, all()), want);
+        // A round whose rows share one meta stays Uniform.
+        let mut u = Relation::new(1, &[]);
+        insert(
+            &mut u,
+            Tier::Derived,
+            &[(&[7], 2, 4), (&[8], 2, 4), (&[9], 2, 4)],
+        );
+        assert_eq!(
+            u.indexes[0].parts[1].recent.metas,
+            Metas::Uniform {
+                len: 3,
+                meta: m(2, 4)
+            }
+        );
+        check(&r);
+        check(&u);
+    }
+
+    #[test]
+    fn heap_bytes_counts_capacity() {
+        let mut r = Relation::new(2, &[vec![1, 0]]);
+        let empty = r.heap_bytes();
+        r.load(edb(&[[1, 2], [3, 4], [5, 6]]), None);
+        // Identity: 6 handles + 3 ordinals; the [1, 0] index: 6 handles; uniform
+        // metas cost nothing.
+        let rows = (6 + 3 + 6) * 4;
+        assert!(r.heap_bytes() >= empty + rows, "{} {empty}", r.heap_bytes());
+        insert(&mut r, Tier::Derived, &[(&[9, 9], 1, 0), (&[8, 8], 2, 0)]);
+        // Two indexes x (4 handles + 2 x 6 bytes of Per metas) at least.
+        assert!(r.heap_bytes() >= empty + rows + 2 * (16 + 12));
     }
 }

@@ -48,15 +48,20 @@
 //! **Aggregates** run their one body over every level at once and hand the projected
 //! bindings to `aggregate::aggregate`, ordered by `ValueTable::cmp_rendered`.
 //!
-//! **Budget.** exec counts emitted bindings and builtin / closure rows; this module adds
-//! every inserted IDB and aggregate row. Past `Options::max_rows` evaluation stops with
+//! **Budget.** exec counts every binding each body step emits (GA.13: intermediate
+//! bindings included, not only complete ones) and builtin / closure rows; this module
+//! adds every inserted IDB and aggregate row. Past `Options::max_rows` evaluation stops with
 //! `RulesError::Budget` naming the head being derived (a magic copy names its user
 //! predicate) and prints `[rules] budget pred=<name>/<arity> rows=<n> cap=<cap>`.
 //!
 //! **Markers**, once per evaluation, on stderr: `[rules] eval strata=<n> rules=<r>
 //! variants=<v> edb=<rows> derived=<rows> rounds=<k> aggregates=<a> magic=<m>
-//! values=<h> warnings=<w> ms=<t>`, then one `[rules] closure cats=<..> mode=<..>
-//! bfs=<n> rows=<r>` per category set a closure builtin walked.
+//! values=<h> warnings=<w> ms=<t>`, then `[rules] mem relations=<n> bytes=<b>
+//! top=<pred>:<kb>,.. values=<b> memo=<b>` (GA.13: the heap the relations, the value
+//! table and the builtin memo hold, by capacity; the three largest relations by bytes,
+//! ties by name; [`Evaluation::heap_bytes`](crate::eval::Evaluation::heap_bytes) is
+//! `bytes`), then one `[rules] closure cats=<..> mode=<..> bfs=<n> rows=<r>` per
+//! category set a closure builtin walked.
 //!
 //! **Answers.** [`Evaluation::rows`](crate::eval::Evaluation::rows) answers the outputs only: magic keeps the answers
 //! of the predicates that read a rewritten one, never the rewritten predicate's full
@@ -344,6 +349,14 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
         warnings,
     };
     eprintln!("{}", eval_line(&ev.stats, ev.warnings.len()));
+    eprintln!(
+        "{}",
+        mem_line(
+            &ev.relation_bytes(),
+            ev.values.heap_bytes(),
+            ev.memo.heap_bytes()
+        )
+    );
     for line in closure_lines(&ev.closure_stats, &ev.declared.catalog.registries) {
         eprintln!("{line}");
     }
@@ -440,6 +453,32 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
         &self.stats
     }
 
+    /// Heap bytes the evaluation's relations (every predicate's and every scc
+    /// relation's: rows, metas, ordinals and index permutations), its value table and
+    /// its builtin memo hold, by capacity (GA.13). Read-only accounting: the `[rules]
+    /// mem` marker's `bytes`.
+    pub fn heap_bytes(&self) -> usize {
+        self.relation_bytes().iter().map(|(_, b)| b).sum::<usize>()
+            + self.values.heap_bytes()
+            + self.memo.heap_bytes()
+    }
+
+    /// `(name, heap bytes)` of every relation holding any: a predicate as
+    /// `name/arity`, an scc relation as `scc/2#<k>` in first-use order.
+    pub(crate) fn relation_bytes(&self) -> Vec<(String, usize)> {
+        let preds = self
+            .relations
+            .iter()
+            .zip(&self.analysis.preds)
+            .map(|(r, info)| (info.signature(), r.heap_bytes()));
+        let scc = self
+            .scc
+            .iter()
+            .enumerate()
+            .map(|(k, (_, r))| (format!("scc/2#{k}"), r.heap_bytes()));
+        preds.chain(scc).filter(|(_, b)| *b > 0).collect()
+    }
+
     /// The catalog's declaration conflicts, then the original program's analysis
     /// warnings (never the rewrite's).
     pub fn warnings(&self) -> &[Diagnostic] {
@@ -463,6 +502,25 @@ pub(crate) fn eval_line(s: &EvalStats, warnings: usize) -> String {
         s.values,
         warnings,
         (s.elapsed_ms * 10.0).trunc() / 10.0
+    )
+}
+
+/// The `[rules] mem` marker line (GA.13): the relations holding heap, the total
+/// (relations, the value table and the builtin memo), the three largest relations in
+/// KiB (rounded up; ties by name), then the value table's and the memo's bytes.
+pub(crate) fn mem_line(relations: &[(String, usize)], values: usize, memo: usize) -> String {
+    let mut top: Vec<&(String, usize)> = relations.iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let total = relations.iter().map(|(_, b)| b).sum::<usize>() + values + memo;
+    let listed: Vec<String> = top
+        .iter()
+        .take(3)
+        .map(|(name, b)| format!("{name}:{}", b.div_ceil(1024)))
+        .collect();
+    format!(
+        "[rules] mem relations={} bytes={total} top={} values={values} memo={memo}",
+        relations.len(),
+        listed.join(",")
     )
 }
 
@@ -1713,6 +1771,40 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
             closure_lines(&ev.closure_stats, &registries),
             ["[rules] closure cats=CALLS mode=multi bfs=1 rows=4"]
         );
+    }
+
+    #[test]
+    fn mem_marker_line() {
+        // Top three by bytes, ties by name; KiB rounded up; bytes is the whole total.
+        let rels = [
+            ("node/2".to_string(), 4096),
+            ("edge/3".to_string(), 10_000),
+            ("b/1".to_string(), 4096),
+            ("a/1".to_string(), 100),
+        ];
+        assert_eq!(
+            mem_line(&rels, 1000, 24),
+            "[rules] mem relations=4 bytes=19316 top=edge/3:10,b/1:4,node/2:4 values=1000 memo=24"
+        );
+        assert_eq!(
+            mem_line(&[], 0, 0),
+            "[rules] mem relations=0 bytes=0 top= values=0 memo=0"
+        );
+        // An evaluation's accounting: every relation holding heap is listed, and the
+        // total is what heap_bytes reports.
+        let g = mixed();
+        let ev = eval(MIXED, &g, &Options::default());
+        let listed = ev.relation_bytes();
+        assert!(
+            listed.iter().any(|(p, b)| p == "edge/3" && *b > 0),
+            "{listed:?}"
+        );
+        let sum: usize = listed.iter().map(|(_, b)| b).sum();
+        assert_eq!(
+            ev.heap_bytes(),
+            sum + ev.values.heap_bytes() + ev.memo.heap_bytes()
+        );
+        assert!(ev.values.heap_bytes() > 0);
     }
 
     /// Spec test 7's program over a chain: n00000 seeds q, n00001 seeds r.

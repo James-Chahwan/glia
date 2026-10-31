@@ -3,13 +3,42 @@
 //! - `cost_check20_glia`: the 20 check-shaped rules of [`CHECK20`] over glia x1, median
 //!   of 5 evaluations under 200 ms;
 //! - `cost_check20_x10_rss`: [`CHECK20`] over glia x10 (`testkit::scaled`) evaluates,
-//!   with the evaluator's own peak under 320 MB ([`X10_RSS_GATE_KB`], 327,680 kB). R1's
-//!   150 MB (153,600 kB) was restated by James's ruling of 2026-10-16 (option A): the
-//!   first run measured 287,408 kB at defff629, so the gate is that plus headroom, and the
-//!   evaluator's memory work moves to 0.5.4 (`dev-notes/next-leap-0.5.4.md` §F.3);
+//!   with the evaluator's own peak under 240 MiB ([`X10_RSS_GATE_KB`], 245,760 kB; its
+//!   history below);
 //! - `cost_blowup_x10`: the unseeded carry closure over glia x10 (R1's 7.25 M-row case;
 //!   13,551,390 rows at 22c65ee) stops at the default budget as `RulesError::Budget`
 //!   for `tcc/2`, the evaluator's peak under 512 MB.
+//!
+//! **The memory budget, rules half (GA.13).** The x10 gate was 150 MB (153,600 kB) in R1,
+//! restated to 327,680 kB by James's ruling of 2026-10-16 (option A) after the first run
+//! measured 287,408 kB at defff629 (glia then about 25,700 nodes). At cb9334e5 glia's own
+//! dump is 42,698 nodes / 144,132 edges (x10: 426,980 / 1,455,733), and the three gates
+//! read, before GA.13 and after it, over the same dump:
+//!
+//! ```text
+//!               before (cb9334e5)                    after (GA.13)
+//! check20-glia  ms=213.1 rss_kb=46,520               ms=185.7 rss_kb=30,732
+//! check20-x10   ms=3,740.6 rss_kb=457,888            ms=2,843 - 4,273 rss_kb=221,120 - 221,420
+//! blowup-x10    ms=1,755.5 rss_kb=221,092 rows=5,000,001   ms=1,033.4 rss_kb=142,692 rows=5,000,001
+//! ```
+//!
+//! (times on a desktop shared with parallel builds, load 5 to 40; twelve interleaved
+//! runs of each binary at load 14 to 20 gave the x1 median 255.1 ms before, 243.1 ms
+//! after, the fastest 198.1 and 177.6 ms: the 200 ms gate holds on a quiet machine, not
+//! a loaded one, before and after alike). The spec
+//! named the relations' per-row metas as the cost; measured, the relations held 39 MB of
+//! the 458 MB, and the builtin memo (one heap-allocated key and row vector per
+//! per-binding `in_scope` call, 1,059,195 calls, about 180 MB with its hash table) and the
+//! value table's chained digest map were most of it. GA.13 keeps one meta for a batch whose
+//! rows share it (every EDB batch), the memo in one arena behind a 4-byte-slot index, and
+//! the value table behind the same index with a render cache filled on first use. The
+//! gate is the measured 221,420 kB plus 10 %, rounded up to a multiple of 10,240 kB. What
+//! the `[rules] mem` marker reads at x10 after it: `bytes=98,205,880`, top
+//! `edge/3:31116,node/2:6674,dead_function/1:227` KiB, `values=16,777,953`,
+//! `memo=41,943,040`. The rest of the increment (about 120 MB) is the closure's per
+//! category set indexes (carry, IMPORTS, CALLS: the adjacency plus each kept edge's level
+//! and ordinal) and per-source reach memo, and heap the allocator keeps after the EDB
+//! load's transients; the 204,800 kB target sits there, outside the relations.
 //!
 //! **Run.** Every test is `#[ignore]`d: timings mean nothing in a debug build, and
 //! VmHWM is per process, so each gate runs alone, in release, over a fresh dump of the
@@ -757,11 +786,13 @@ fn cost_check20_glia() {
     );
 }
 
-/// The x10 evaluator-peak gate, 320 MB. R1 section 9 spike 1 set 150 MB (153,600 kB);
-/// the first DA.17 run (40959286, HEAD defff629) measured 287,408 kB, and James's ruling
-/// of 2026-10-16 (option A) restated the gate to that number plus headroom. Shrinking the
-/// evaluator's peak is 0.5.4 work (`dev-notes/next-leap-0.5.4.md` §F.3), not this test's.
-const X10_RSS_GATE_KB: u64 = 327_680;
+/// The x10 evaluator-peak gate, 245,760 kB (240 MiB). R1 section 9 spike 1 set 150 MB
+/// (153,600 kB); the first DA.17 run (40959286, HEAD defff629) measured 287,408 kB, and
+/// James's ruling of 2026-10-16 (option A) restated the gate to 327,680 kB. GA.13 (0.5.6)
+/// measured 457,888 kB at cb9334e5 (glia's graph had grown to 1.7x) and 221,420 kB after
+/// its memo, value-table and uniform-meta work; this is that plus 10 %, rounded up to a
+/// multiple of 10,240 kB (module doc). Lowered only, never raised.
+const X10_RSS_GATE_KB: u64 = 245_760;
 
 #[test]
 #[ignore = "release cost gate: GLIA_RULES_DUMP=<dump> cargo test --release --test cost -- --ignored --exact"]
@@ -780,7 +811,7 @@ fn cost_check20_x10_rss() {
     assert!(
         inc < X10_RSS_GATE_KB,
         "CHECK20 over glia x10: evaluator peak {inc} kB, gate {X10_RSS_GATE_KB} kB \
-         (320 MB, restated from R1's 153,600 kB by James's 2026-10-16 ruling)"
+         (GA.13's measured 221,420 kB plus 10 %; R1's target 153,600 kB)"
     );
     drop((g10, g1, dump));
 }

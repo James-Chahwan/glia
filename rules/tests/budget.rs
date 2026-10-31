@@ -192,9 +192,10 @@ fn one_round_explosion() {
         err.to_string()
             .starts_with("rule evaluation stopped: `p/2` (rules:1) reached ")
     );
-    // Under a budget that holds it (160,000 bindings emitted, then 160,000 rows
-    // inserted), the round is all 160,000 rows.
-    let ev = evaluated("p(x, y) :- node(x, _), node(y, _).", &g, &capped(320_000));
+    // Under a budget that holds it (every step's bindings: 400 from the first scan and
+    // 160,000 from the second, GA.13; then 160,000 rows inserted), the round is all
+    // 160,000 rows.
+    let ev = evaluated("p(x, y) :- node(x, _), node(y, _).", &g, &capped(320_400));
     assert_eq!(ev.rows("p").map(|r| r.len()).ok(), Some(160_000));
 }
 

@@ -23,7 +23,7 @@
 //!
 //! **Builtins.** A domain or string builtin is called through [`Builtin::call`] once
 //! per (builtin, bound arguments) and its interned rows kept in the evaluation's
-//! [`Memo`], a `Lookup` that is never iterated; an untiered builtin's rows read FACT
+//! [`Memo`] (flat, digest-indexed, never iterated); an untiered builtin's rows read FACT
 //! whatever it reports (the plan never makes it a delta, so a weaker row would be
 //! lost). `scc` reads the relation DA.14b materialised for its category set from
 //! `Closure::scc_rows`. A per-binding `reaches` is `Closure::reach` (memoised there);
@@ -32,7 +32,11 @@
 //! variant of its rule reaches it, and keeps the seed set ([`MultiState`]) for
 //! explain.
 //!
-//! **Budget.** In evaluation every emitted binding counts 1 and every builtin memo,
+//! **Budget.** In evaluation every binding a step emits into the next step counts 1
+//! (GA.13: each step's alternatives, charged as the step is expanded, so a join that
+//! multiplies intermediate bindings trips the cap while it grows, not only once full
+//! bindings reach the head; a body's last step's alternatives are its complete
+//! bindings, and a body with no step charges its one binding), and every builtin memo,
 //! closure memo, unbound-reaches and hoisted row counts too; past the cap
 //! [`Budget::tripped`] is set and the run returns `Ok` early, DA.14b turning it into
 //! `RulesError::Budget`. Explain counts nothing. Single-threaded; no map is iterated.
@@ -49,7 +53,7 @@ use crate::ir::{BuiltinDecl, CmpOp};
 use crate::plan::{Bind, Check, KeyPart, Src, Step};
 use crate::relation::{Cursor, EDB_RULE, Relation, RowMeta, View, Which};
 use crate::source::{Builtin, FactSource, NO_ORDINAL};
-use crate::value::{Handle, Lookup, Tier, ValueRef, ValueTable};
+use crate::value::{Handle, Lookup, SlotIndex, Tier, ValueRef, ValueTable, mix64};
 
 /// An unbound variable, or a free builtin argument in a memo key. No value gets this
 /// handle (value.rs stops interning one short of it).
@@ -65,8 +69,118 @@ const LOADED: RowMeta = RowMeta {
 const ID2: [u8; 2] = [0, 1];
 const SWAP: [u8; 2] = [1, 0];
 
-/// Builtin rows per (catalog index, argument handles with [`FREE`] for unbound).
-pub(crate) type Memo = Lookup<(usize, Vec<Handle>), Vec<(Vec<Handle>, Tier)>>;
+/// Builtin rows per (catalog index, argument handles with [`FREE`] for unbound), kept
+/// flat (GA.13): every call is one record in one arena (a header of [`MEMO_HEADER`]
+/// handles: catalog index, width, row count; then its arguments; then each row's
+/// handles followed by its tier's level), found through a [`SlotIndex`] of record
+/// starts keyed by the call's 64-bit digest, so a call costs no allocation of its own
+/// and the index 4 bytes a slot. A call past the arena's `u32` reach is not memoised
+/// (it is made again when next met). Never iterated; a record is read only by the call
+/// that finds it.
+#[derive(Debug, Default)]
+pub(crate) struct Memo {
+    index: SlotIndex,
+    arena: Vec<Handle>,
+}
+
+/// A memo record's header: catalog index, width, row count.
+const MEMO_HEADER: usize = 3;
+
+/// A builtin call's digest: its catalog index, then its arguments, each folded in
+/// through [`mix64`] (fixed, so the same on every run).
+fn memo_digest(builtin: usize, args: &[Handle]) -> u64 {
+    let mut h = mix64(builtin as u64 ^ 0x4D45_4D4F);
+    for &a in args {
+        h = mix64(h.rotate_left(29) ^ u64::from(a));
+    }
+    h
+}
+
+impl Memo {
+    pub(crate) fn new() -> Self {
+        Memo::default()
+    }
+
+    /// The record of call (`builtin`, `args`), when memoised.
+    fn find(&self, builtin: usize, args: &[Handle]) -> Option<usize> {
+        let at = self.index.find(memo_digest(builtin, args), |at| {
+            self.is_call(at, builtin, args)
+        })?;
+        Some(at as usize)
+    }
+
+    /// The call record `at` holds: its catalog index and arguments.
+    fn call_at(&self, at: u32) -> Option<(usize, &[Handle])> {
+        let at = at as usize;
+        let head = self.arena.get(at..at + MEMO_HEADER)?;
+        let from = at + MEMO_HEADER;
+        let args = self.arena.get(from..from + head[1] as usize)?;
+        Some((head[0] as usize, args))
+    }
+
+    fn is_call(&self, at: u32, builtin: usize, args: &[Handle]) -> bool {
+        self.call_at(at) == Some((builtin, args))
+    }
+
+    /// Memoise call (`builtin`, `args`), absent so far, with `rows` (each
+    /// `args.len()` handles wide) and return its record, or `None` when it is not
+    /// memoised (struct doc).
+    fn insert(
+        &mut self,
+        builtin: usize,
+        args: &[Handle],
+        rows: &[(Vec<Handle>, Tier)],
+    ) -> Option<usize> {
+        let size = MEMO_HEADER + args.len() + rows.len() * (args.len() + 1);
+        let at = u32::try_from(self.arena.len())
+            .ok()
+            .filter(|_| u32::try_from(self.arena.len() + size).is_ok_and(|end| end < u32::MAX))?;
+        let (Ok(b), Ok(width), Ok(n)) = (
+            Handle::try_from(builtin),
+            Handle::try_from(args.len()),
+            Handle::try_from(rows.len()),
+        ) else {
+            return None;
+        };
+        self.arena.extend_from_slice(&[b, width, n]);
+        self.arena.extend_from_slice(args);
+        for (row, tier) in rows {
+            self.arena.extend_from_slice(row);
+            self.arena.push(Handle::from(tier.level()));
+        }
+        let Memo { index, arena } = self;
+        let digest_of = |held: u32| {
+            let head = &arena[held as usize..];
+            let from = MEMO_HEADER;
+            memo_digest(head[0] as usize, &head[from..from + head[1] as usize])
+        };
+        index.insert(memo_digest(builtin, args), at, digest_of);
+        Some(at as usize)
+    }
+
+    /// Record `at`'s rows and their tiers, in the builtin's order.
+    fn rows(&self, at: usize) -> impl Iterator<Item = (&[Handle], Tier)> {
+        let (width, n) = self
+            .arena
+            .get(at..at + MEMO_HEADER)
+            .map_or((0, 0), |h| (h[1] as usize, h[2] as usize));
+        let from = at + MEMO_HEADER + width;
+        let span = self.arena.get(from..from + n * (width + 1)).unwrap_or(&[]);
+        span.chunks_exact(width + 1).map(move |c| {
+            let tier = Tier::ALL
+                .get(c[width] as usize)
+                .copied()
+                .unwrap_or(Tier::Heuristic);
+            (&c[..width], tier)
+        })
+    }
+
+    /// Heap bytes held, by capacity (the arena and the slot index): the `[rules]
+    /// mem` marker's `memo`.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.arena.capacity() * std::mem::size_of::<Handle>() + self.index.heap_bytes()
+    }
+}
 
 /// What one evaluation lends the interpreter.
 pub(crate) struct Ctx<'e, 's, S: FactSource + ?Sized> {
@@ -89,7 +203,8 @@ pub(crate) struct Ctx<'e, 's, S: FactSource + ?Sized> {
     pub(crate) budget: &'e mut Budget,
 }
 
-/// The raw-row budget: rows counted so far against `cap`.
+/// The row budget: bindings charged so far (every step's emitted bindings, inserted
+/// rows and builtin / closure rows; module doc) against `cap`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Budget {
     pub(crate) cap: usize,
@@ -429,6 +544,11 @@ fn walk<'e, S: FactSource + ?Sized>(
                 if !expand(ctx, &mut run, k, step, &vars, &mut out)? {
                     return Ok(());
                 }
+                // Every binding a step emits into the next step counts (GA.13), so a
+                // join that multiplies intermediate bindings is budgeted as it grows.
+                if vis.count && ctx.budget.charge(out.alts.len() - from) {
+                    return Ok(());
+                }
                 frames.push(Frame {
                     from,
                     next: from,
@@ -440,7 +560,9 @@ fn walk<'e, S: FactSource + ?Sized>(
                 });
             }
             None => {
-                if vis.count && ctx.budget.charge(1) {
+                // The last step's charge covered every binding it hands here; a body
+                // with no step emits one binding of its own.
+                if vis.count && steps.is_empty() && ctx.budget.charge(1) {
                     return Ok(());
                 }
                 emit(&Binding {
@@ -898,37 +1020,58 @@ fn call<S: FactSource + ?Sized>(
         }
         return Ok(true);
     };
-    let key = (b, key);
-    if !ctx.memo.contains_key(&key) && !fill_memo(ctx, &key, imp, vis.count)? {
-        return Ok(false);
-    }
-    for (row, tier) in ctx.memo.get(&key).map_or(&[][..], Vec::as_slice) {
-        if vis.admits(src, *tier) {
-            out.push(row, &wants, *tier, LOADED);
+    let found = match ctx.memo.find(b, &key) {
+        Some(e) => Rows::Memo(e),
+        None => match fill_memo(ctx, b, &key, imp, vis.count)? {
+            Some(rows) => rows,
+            None => return Ok(false),
+        },
+    };
+    match found {
+        Rows::Memo(e) => {
+            for (row, tier) in ctx.memo.rows(e) {
+                if vis.admits(src, tier) {
+                    out.push(row, &wants, tier, LOADED);
+                }
+            }
+        }
+        Rows::Owned(rows) => {
+            for (row, tier) in rows {
+                if vis.admits(src, tier) {
+                    out.push(&row, &wants, tier, LOADED);
+                }
+            }
         }
     }
     Ok(true)
 }
 
-/// Call builtin `key.0` once and memoise its interned rows; `Ok(false)` when they
-/// trip the budget.
+/// A builtin call's rows: its memo entry, or (when the memo is full) the rows the
+/// call just returned.
+enum Rows {
+    Memo(usize),
+    Owned(Vec<(Vec<Handle>, Tier)>),
+}
+
+/// Call builtin `b` once with `key` and memoise its interned rows; `Ok(None)` when
+/// they trip the budget.
 fn fill_memo<S: FactSource + ?Sized>(
     ctx: &mut Ctx<'_, '_, S>,
-    key: &(usize, Vec<Handle>),
+    b: usize,
+    key: &[Handle],
     imp: &dyn Builtin,
     count: bool,
-) -> Result<bool, RulesError> {
+) -> Result<Option<Rows>, RulesError> {
     let mut found = Vec::new();
     let called = {
         let values = &*ctx.values;
         let args: Vec<Option<ValueRef<'_>>> = key
-            .1
             .iter()
             .map(|&h| (h != FREE).then(|| values.get(h)))
             .collect();
         imp.call(&args, &mut found)
     };
-    let decl = ctx.decls.get(key.0);
+    let decl = ctx.decls.get(b);
     if let Err(message) = called {
         let name = decl.map_or_else(|| imp.decl().signature(), BuiltinDecl::signature);
         return Err(RulesError::Builtin { name, message });
@@ -936,7 +1079,7 @@ fn fill_memo<S: FactSource + ?Sized>(
     let tiered = decl.is_none_or(|d| d.tiered);
     let rows: Vec<(Vec<Handle>, Tier)> = found
         .iter()
-        .filter(|r| r.values.len() == key.1.len())
+        .filter(|r| r.values.len() == key.len())
         .map(|r| {
             let row = r
                 .values
@@ -947,8 +1090,11 @@ fn fill_memo<S: FactSource + ?Sized>(
         })
         .collect();
     let n = rows.len();
-    ctx.memo.insert(key.clone(), rows);
-    Ok(!(count && ctx.budget.charge(n)))
+    let found = match ctx.memo.insert(b, key, &rows) {
+        Some(e) => Rows::Memo(e),
+        None => Rows::Owned(rows),
+    };
+    Ok((!(count && ctx.budget.charge(n))).then_some(found))
 }
 
 /// The `(x, rep)` rows of an scc relation with `x` / `rep` bound or [`FREE`]: by
@@ -1555,6 +1701,39 @@ mod tests {
     }
 
     #[test]
+    fn memo_records_round_trip() {
+        let mut m = Memo::new();
+        assert_eq!(m.find(0, &[1, FREE]), None);
+        let rows = vec![(vec![1, 7], Tier::Derived), (vec![1, 8], Tier::Fact)];
+        let a = m.insert(0, &[1, FREE], &rows).expect("memoised");
+        let none = m.insert(2, &[3, 4], &[]).expect("memoised");
+        let nullary = m
+            .insert(5, &[], &[(vec![], Tier::Heuristic)])
+            .expect("memoised");
+        assert_eq!(m.find(0, &[1, FREE]), Some(a));
+        assert_eq!(m.find(1, &[1, FREE]), None, "another builtin");
+        assert_eq!(m.find(0, &[1, 2]), None, "other arguments");
+        let got: Vec<(Vec<Handle>, Tier)> = m.rows(a).map(|(r, t)| (r.to_vec(), t)).collect();
+        assert_eq!(got, rows, "the builtin's order and tiers");
+        assert_eq!(m.find(2, &[3, 4]), Some(none));
+        assert_eq!(m.rows(none).count(), 0);
+        let got: Vec<(Vec<Handle>, Tier)> = m.rows(nullary).map(|(r, t)| (r.to_vec(), t)).collect();
+        assert_eq!(got, [(vec![], Tier::Heuristic)]);
+        // Many calls of one builtin: each found again, none confused.
+        for x in 10..2_000 {
+            assert_eq!(m.find(7, &[x, x + 1]), None);
+            m.insert(7, &[x, x + 1], &[(vec![x, x + 1], Tier::Fact)]);
+        }
+        for x in 10..2_000 {
+            let at = m.find(7, &[x, x + 1]).expect("memoised");
+            let got: Vec<Vec<Handle>> = m.rows(at).map(|(r, _)| r.to_vec()).collect();
+            assert_eq!(got, [vec![x, x + 1]]);
+        }
+        assert_eq!(m.find(0, &[1, FREE]), Some(a));
+        assert!(m.heap_bytes() >= (3 + 2 + 2 * 3 + 3 + 2 + 3 + 1) * 4);
+    }
+
+    #[test]
     fn builtin_memo_and_error() {
         let mut g = nodes(4);
         edge(&mut g, 0, 2, "CALLS", Tier::Fact);
@@ -1764,17 +1943,20 @@ mod tests {
         w.budget = Budget::new(1000);
         let plan = w.plan("v");
         let b = base(&plan, 0);
+        // Every step's bindings count (GA.13): the first scan charges 100, each `a`'s
+        // second scan 100 more, so nine `a`s (900 bindings emitted) bring the count to
+        // 1,000 and the tenth's scan trips it at 1,100 before it emits.
         assert_eq!(
             w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap().len(),
-            1000
+            900
         );
-        assert_eq!(w.budget.tripped, Some(1001));
+        assert_eq!(w.budget.tripped, Some(1100));
         assert_eq!(
             w.run(&b.steps, &b.head, eval(Tier::Fact)).unwrap().len(),
             0,
             "a tripped budget emits no more"
         );
-        assert_eq!(w.budget.tripped, Some(1001));
+        assert_eq!(w.budget.tripped, Some(1100));
     }
 
     #[test]

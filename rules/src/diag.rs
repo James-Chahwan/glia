@@ -136,8 +136,10 @@ pub enum RulesError {
     Parse(Vec<Diagnostic>),
     /// Analysis errors (names, arity, safety, stratification, aggregates).
     Invalid(Vec<Diagnostic>),
-    /// Evaluation stopped: `predicate` (`name/arity`, its first rule at
-    /// `source:line`) had derived `rows` rows against the budget `cap`.
+    /// Evaluation stopped: deriving `predicate` (`name/arity`, its first rule at
+    /// `source:line`) took the bindings charged to `rows` against the budget `cap`
+    /// (every binding each body step emits, every inserted row and every builtin /
+    /// closure row counts one; GA.13).
     Budget {
         predicate: String,
         source: String,
@@ -221,12 +223,9 @@ impl fmt::Display for RulesError {
                     "rule evaluation stopped: `{predicate}` ({source}:{line}) "
                 )?;
                 if rows == cap {
-                    write!(f, "reached {rows} derived rows, the row budget.")?;
+                    write!(f, "reached {rows} bindings, the row budget.")?;
                 } else {
-                    write!(
-                        f,
-                        "reached {rows} derived rows against a row budget of {cap}."
-                    )?;
+                    write!(f, "reached {rows} bindings against a row budget of {cap}.")?;
                 }
                 write!(
                     f,
@@ -307,7 +306,7 @@ mod tests {
         };
         assert_eq!(
             e.to_string(),
-            "rule evaluation stopped: `tc/2` (rules:3) reached 5000000 derived rows, the row \
+            "rule evaluation stopped: `tc/2` (rules:3) reached 5000000 bindings, the row \
              budget. Its recursion is probably unseeded: bind an argument from a small relation \
              (`tc(x, y) :- seed(x), ...`), use reaches(x, y, \"CATS\") for reachability, or raise \
              the budget."
@@ -323,7 +322,7 @@ mod tests {
         };
         assert_eq!(
             over.to_string(),
-            "rule evaluation stopped: `path/3` (check:7) reached 1001 derived rows against a row \
+            "rule evaluation stopped: `path/3` (check:7) reached 1001 bindings against a row \
              budget of 1000. Its recursion is probably unseeded: bind an argument from a small \
              relation (`path(x, y, z) :- seed(x), ...`), use reaches(x, y, \"CATS\") for \
              reachability, or raise the budget."
