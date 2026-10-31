@@ -1583,8 +1583,8 @@ struct UseLeaf<'a> {
 }
 
 /// A leaf whose path resolved: what it binds (`None` when the member it
-/// names is not found there), the MODULE / PACKAGE its file's IMPORTS edge
-/// points at, and the EVIDENCE rule of that edge (LC.3d): the path's start
+/// names is not found there), the MODULE / PACKAGE its IMPORTS edge points
+/// at, and the EVIDENCE rule of that edge (LC.3d): the path's start
 /// rule, `unique_in_crate` when a crate-root name fallback supplied a step,
 /// or `tail_unique` for HEAD's repo-unique tail fallback.
 #[derive(Clone, Copy)]
@@ -1710,11 +1710,13 @@ struct UseStats {
 /// Storage: a file MODULE's or inline PACKAGE's bindings go in
 /// `module_import_bindings` (the generic resolver reads them, and the store
 /// persists them); a fn's, and every glob, in the returned [`RustBindings`].
-/// IMPORTS edges run from the leaf's file MODULE to the MODULE / PACKAGE the
+/// IMPORTS edges run from the scope that holds the leaf when it is an inline
+/// PACKAGE (GD.35: the scope its binding is stored under), else from the
+/// leaf's file MODULE (a fn-body `use` included), to the MODULE / PACKAGE the
 /// path names (the member when it is a module, else its parent path), one per
-/// (from, to), in statement order. A `crate::` / `super::` symbol in a file
-/// whose crate is unknown (loose `.rs` files) that resolves to nothing keeps
-/// HEAD's tail fallback (a repo-unique fn / module of that name); an external
+/// (from, to), in statement order, each at its `use` statement's line. A
+/// `crate::` / `super::` symbol in a file whose crate is unknown (loose `.rs`
+/// files) that resolves to nothing keeps HEAD's tail fallback (a repo-unique fn / module of that name); an external
 /// crate's path binds nothing and draws no edge.
 ///
 /// fired_on marker, once per graph with a `use`:
@@ -1854,7 +1856,7 @@ pub(crate) fn resolve_imports_rust(
         else {
             continue;
         };
-        let Some(from) = enclosing(&g.nav, leaf.scope, false) else {
+        let Some(from) = import_from(&g.nav, leaf.scope) else {
             continue;
         };
         if from != *to && drawn.insert((from, *to)) {
@@ -2435,6 +2437,19 @@ fn joined_by(code: &str, base: &str, sep: &str, name: &str) -> bool {
         let j = skip_ws(i + sep.len());
         code[j..].starts_with(name) && !bytes.get(j + name.len()).is_some_and(|b| ident_byte(*b))
     })
+}
+
+/// The node a `use` leaf's IMPORTS edge runs from (GD.35): the inline
+/// PACKAGE that holds it (`mod endpoint { use super::node_kind; }` is
+/// `endpoint`'s import, the scope its binding is stored under), else the
+/// file MODULE. A `use` in a fn body keeps the file MODULE, even inside an
+/// inline mod: the fn is no import scope of the graph, and its binding lives
+/// only in the build-time [`RustBindings`].
+fn import_from(nav: &CodeNav, scope: NodeId) -> Option<NodeId> {
+    if nav.kind_by_id.get(&scope) == Some(&node_kind::PACKAGE) {
+        return Some(scope);
+    }
+    enclosing(nav, scope, false)
 }
 
 /// Nearest ancestor-or-self MODULE, or MODULE / PACKAGE when `or_package`.
@@ -3456,6 +3471,87 @@ mod tests {
             unbound,
             vec!["src::routes::scoped".to_string()],
             "sqlx's PgPool is dropped as external; the fn-body use binds no signature type"
+        );
+    }
+
+    /// Every IMPORTS edge as `(from qname, to qname, 0-based EVIDENCE line)`,
+    /// sorted.
+    fn imports_at(g: &RepoGraph) -> Vec<(String, String, u32)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String, u32)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+            .map(|e| {
+                let ev = Evidence::of(e).expect("an IMPORTS edge carries EVIDENCE");
+                assert_eq!(ev.emitter, "graph:rust_paths");
+                (q(&e.from), q(&e.to), ev.line.expect("a site line"))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// GD.35: a `use` inside an inline `mod` is that mod's import. Its
+    /// IMPORTS edge runs from the inline PACKAGE (the scope its binding is
+    /// stored under), never from the file MODULE, at the `use`'s own line; a
+    /// file-level `use` and a fn-body `use` keep the file MODULE.
+    #[test]
+    fn inline_mod_use_imports_from_the_inline_package() {
+        // src/lib.rs:
+        //   pub mod node_kind { pub const MODULE: u32 = 1; }
+        //   pub mod endpoint {
+        //       use super::node_kind;                 (row 5)
+        //       pub mod inner { use crate::node_kind::MODULE; }   (row 8)
+        //       pub fn kind() { use crate::node_kind; }           (row 11)
+        //   }
+        //   pub mod other {}
+        //   use other::*;                             (row 15)
+        let mut lib = File::new("src::lib");
+        let m = lib.module;
+        let nk = lib.add(node_kind::PACKAGE, "src::lib::node_kind", Some(m));
+        lib.add(
+            node_kind::STATE_VAR,
+            "src::lib::node_kind::MODULE",
+            Some(nk),
+        );
+        let ep = lib.add(node_kind::PACKAGE, "src::lib::endpoint", Some(m));
+        lib.add(node_kind::PACKAGE, "src::lib::endpoint::inner", Some(ep));
+        lib.add(node_kind::FUNCTION, "src::lib::endpoint::kind", Some(ep));
+        lib.add(node_kind::PACKAGE, "src::lib::other", Some(m));
+        let at = |f: &mut File, scope: &str, module: &str, name: &str, row: u32| {
+            f.use_in(scope, module, name);
+            if let Some(last) = f.imports.last_mut() {
+                last.line = row;
+            }
+        };
+        at(&mut lib, "src::lib::endpoint", "super", "node_kind", 5);
+        at(
+            &mut lib,
+            "src::lib::endpoint::inner",
+            "crate::node_kind",
+            "MODULE",
+            8,
+        );
+        at(
+            &mut lib,
+            "src::lib::endpoint::kind",
+            "crate",
+            "node_kind",
+            11,
+        );
+        at(&mut lib, "src::lib", "other", "*", 15);
+        let g = build_rust(repo(), vec![lib.parse()], &[krate("shop", "")]).expect("builds");
+        let t = |f: &str, to: &str, line: u32| (f.to_string(), to.to_string(), line);
+        assert_eq!(
+            imports_at(&g),
+            vec![
+                t("src::lib", "src::lib::node_kind", 11),
+                t("src::lib", "src::lib::other", 15),
+                t("src::lib::endpoint", "src::lib::node_kind", 5),
+                t("src::lib::endpoint::inner", "src::lib::node_kind", 8),
+            ],
+            "an inline mod's use is the mod's import; a fn-body use stays the file's"
         );
     }
 

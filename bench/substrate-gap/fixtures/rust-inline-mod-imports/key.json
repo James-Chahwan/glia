@@ -1,0 +1,18 @@
+{
+  "framework": "rust-inline-mod-imports",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "imports",
+  "cells": ["rust/imports"],
+  "expect_nodes": [
+    {"kind": "PACKAGE", "name": "src::lib::endpoint", "exact": true, "note": "inline `pub mod endpoint {}`"},
+    {"kind": "PACKAGE", "name": "src::lib::node_kind", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "src::lib::endpoint", "to": "src::lib::node_kind", "category": "IMPORTS", "exact": true, "note": "`use super::node_kind;` inside `mod endpoint` is endpoint's import: the edge runs from the inline PACKAGE that holds the binding, at the use's line (src/lib.rs:6)"}
+  ],
+  "forbid": [
+    {"from": "src::lib", "to": "src::lib::node_kind", "category": "IMPORTS", "note": "PRECISION (edge-audit I2): the file MODULE writes no `use` here; an inline mod's `use` is never the file's import"}
+  ],
+  "note": "GD.35 (edge-precision-0.5.4.md I2). src/lib.rs `pub mod node_kind { .. } pub mod endpoint { use super::node_kind; .. }`, the shape of glia's own code-domain/src/lib.rs. Baseline HEAD 12375a67 (debug CLI on a copy, `glia query <copy> -e 'out(A,B) :- imports(A,B).' --explain`): one IMPORTS src::lib -> src::lib::node_kind (fact, graph:rust_paths rule super, site src/lib.rs:6), so the expect edge misses and the forbid fires; `[rust-uses] scopes=1 bindings=1 (reexport_hops=0 alias=0 fn_scoped=0 glob=0) unresolved=0 imports_edges=1`."
+}
