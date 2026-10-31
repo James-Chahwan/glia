@@ -1670,6 +1670,14 @@
    ],
    "risks": "Pass ordering: http runs before resolver:host in CODE_PASSES; this needs the start edges before http, so either the start rules become their own Resolve pass before http (`after: []`, first) or http reads the start cells itself. Decide with plug's pass placement.",
    "note": ""
+  },
+  {
+   "from": "0.5.6 spec pass t4a (FD.41's probe)",
+   "class": "precision_backlog",
+   "title": "Go: a URL built with fmt.Sprintf (`fmt.Sprintf(\"%s/api/x/%d\", base, id)` handed to http.Get / NewRequest) mints no ENDPOINT at all",
+   "note": "Found while re-verifying FD.41 at 06012cc6: glia reads no Go Sprintf-built URL, so there is no Go endpoint to trim a query suffix from. James 2026-10-31: \"yeah precision backlog\" until a public example turns up.",
+   "loc": null,
+   "depends_on": []
   }
  ]
 }

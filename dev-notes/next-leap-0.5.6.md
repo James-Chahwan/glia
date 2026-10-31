@@ -126,3 +126,16 @@ Rulings (James 2026-10-31):
   - JVM projects keep their label and gain a coordinate field;
   - Neovim keymaps are not commands;
   - the semantic flow tier is fused only.
+
+## 7. Rulings after wave 0 (James 2026-10-31)
+
+- The shell PT* mrr drop (0.5957 -> 0.5935, one query, a non-default ranker) is accepted with floor 0.5930
+  (*"okay accept the floor"*), in `bench/rank-gate/gate.json`.
+- Docs as a second graph measured FAIL (GP.9: `[doc-ties] verdict=FAIL glia r10=0.2551`), so GP.10 / GP.11 are not
+  needed. The four FD.79 accepted rows stay, and section-level doc ties are parked for 0.5.7 (*"okay fine"*).
+- New packets for 0.5.6:
+  - React components with no file position / edges in files importing React (*"yeah do it"*).
+  - Django `include()` route prefixes (plane's 470 routes), generalised to every include-style route mount
+    (*"yeah thats an annoying case to generalise"*).
+  - GA.20b, the watch grafts' wrapper stages (an agreed follow-up).
+- Go `fmt.Sprintf` URLs go to the precision backlog (*"yeah precision backlog"*).
