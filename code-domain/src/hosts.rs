@@ -29,6 +29,19 @@
 //!
 //! fired_on, per file holding a registration ([`HostTally::marker`](crate::hosts::HostTally::marker)):
 //! `[host] lang=<l> commands=<c> events=<e> callbacks=<k> config=<g> minted=<m> aux=<a> unread=<u> hosts=<h:n,..> file=<p>`.
+//!
+//! **The process layer (GH.14).** Environment hosts (a Dockerfile, compose,
+//! Kubernetes, a Procfile, systemd) each declare an argv, and the same
+//! launchers recur under all of them. [`LAUNCHERS`](crate::hosts::LAUNCHERS) holds one row per
+//! launcher (`python`, `node`, `gunicorn`, `celery`, `yarn`, `java`, `dotnet`,
+//! the wrappers `tini --` / `gosu <user>` / `env K=V` / `bundle exec` / `npx`,
+//! `sh -c`, the framework runners), and [`normalise_argv`](crate::hosts::normalise_argv) reads an argv
+//! through its assignments, wrappers and `sh -c` strings (at most
+//! [`MAX_LAUNCH_DEPTH`](crate::hosts::MAX_LAUNCH_DEPTH) hops) to a [`StartTarget`](crate::hosts::StartTarget): how the started target is
+//! named ([`TargetForm`](crate::hosts::TargetForm)) and the name, or why none can be stood behind
+//! ([`Refusal`](crate::hosts::Refusal): `dynamic`, `inline`, `depth`, `no_target`). A table and
+//! one pure function: it mints nothing and prints nothing; its readers (the
+//! host-start resolver) print the form counts in `[host-start]`.
 
 use std::collections::BTreeMap;
 
@@ -603,6 +616,1546 @@ pub fn validate() -> Vec<String> {
     validate_rows(HOSTS)
 }
 
+// ---------------------------------------------------------------------------
+// The process layer (GH.14): LAUNCHERS and the one argv normaliser.
+// ---------------------------------------------------------------------------
+
+/// How a launcher names the target it starts. A [`Launcher`] row's form is how
+/// its reader starts; the [`StartTarget`]'s form is what the reader found
+/// (the `python` row is [`TargetForm::Script`] and reads `python -m a.b` as
+/// [`TargetForm::PyModule`]). The `<host>:<form>` rule names read
+/// [`TargetForm::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum TargetForm {
+    /// The first non-flag argument is a source file (`python email_server.py`,
+    /// `node server.js`, `sh start.sh`).
+    Script,
+    /// `python -m a.b`: a module path.
+    PyModule,
+    /// A WSGI / ASGI server's first `a.b:c` argument (`uvicorn server:app`):
+    /// target `a.b`, attr `c`.
+    ModuleAttr,
+    /// `celery -A|--app a.b[:x] worker|beat`.
+    CeleryApp,
+    /// `flask --app x run` (or `FLASK_APP=x flask run`).
+    FlaskApp,
+    /// A package-manager script name (`npm run x`, `yarn x`, `pnpm x`,
+    /// `deno task x`), looked up in the package manifest by a later reader.
+    PkgScript,
+    /// `java [-opts] -jar x.jar`.
+    Jar,
+    /// `java -cp .. a.b.Main` (or `-m mod/a.b.Main`): a main class.
+    JavaMain,
+    /// `dotnet X.dll` (or `dotnet run --project P`).
+    Dll,
+    /// A launcher that starts its argument as a command (`tini --`, `gosu
+    /// <user>`, `env K=V`, `bundle exec`, `npx`): stripped and re-read.
+    Wrapper,
+    /// `sh|bash [-l]c "<str>"`: the string is split with shell-word rules and
+    /// the last simple command of its `&&` / `;` chain is re-read.
+    Shell,
+    /// A framework's own runner (`rails`, `puma`, `sidekiq`, `manage.py`):
+    /// recorded for the app layer to bind.
+    Framework,
+    /// Anything else: `argv[0]` itself.
+    Binary,
+}
+
+impl TargetForm {
+    /// The lowercase name a rule and a marker print (`py_module`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TargetForm::Script => "script",
+            TargetForm::PyModule => "py_module",
+            TargetForm::ModuleAttr => "module_attr",
+            TargetForm::CeleryApp => "celery_app",
+            TargetForm::FlaskApp => "flask_app",
+            TargetForm::PkgScript => "pkg_script",
+            TargetForm::Jar => "jar",
+            TargetForm::JavaMain => "java_main",
+            TargetForm::Dll => "dll",
+            TargetForm::Wrapper => "wrapper",
+            TargetForm::Shell => "shell",
+            TargetForm::Framework => "framework",
+            TargetForm::Binary => "binary",
+        }
+    }
+}
+
+/// Why [`normalise_argv`] named no target it can stand behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// The target is a runtime value (`$APP`, `${X}`, `"$@"`, a command
+    /// substitution) or the shell string holds what a line scanner does not
+    /// read (a heredoc, a function, a conditional or loop, a subshell, an
+    /// unterminated quote).
+    Dynamic,
+    /// The code is inline (`python -c`, `node -e`, `-` for stdin).
+    Inline,
+    /// More than [`MAX_LAUNCH_DEPTH`] wrappers and shells deep.
+    Depth,
+    /// The launcher names no target (`exec` alone, `celery worker` with no
+    /// `-A`, an empty argv).
+    NoTarget,
+}
+
+impl Refusal {
+    /// The lowercase reason a marker and an unresolved count print.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refusal::Dynamic => "dynamic",
+            Refusal::Inline => "inline",
+            Refusal::Depth => "depth",
+            Refusal::NoTarget => "no_target",
+        }
+    }
+}
+
+/// One launcher: an `argv[0]` (or `argv[0]` + a subcommand) and how the target it
+/// starts is named in the rest of the argv.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Launcher {
+    /// The names it is started by. A name is matched against `argv[0]`'s
+    /// basename, or, holding a `/`, against `argv[0]` whole (`/init`); a
+    /// trailing `*` also matches the name followed by a version
+    /// (`python*`: `python3`, `python3.11`); a second word must be `argv[1]`
+    /// (`bundle exec`). The matched name, without its `*`, is what
+    /// [`StartTarget::launcher`] and [`StartTarget::chain`] hold.
+    pub names: &'static [&'static str],
+    /// Flags whose value is the next argument (`-k` in `gunicorn -k
+    /// uvicorn.workers.UvicornWorker`). A `--flag=value` token is one
+    /// argument whatever the list says.
+    pub value_flags: &'static [&'static str],
+    /// Flags that hand the launcher inline code (`-c`, `-e`): refused
+    /// [`Refusal::Inline`].
+    pub inline_flags: &'static [&'static str],
+    /// Words skipped where the target would be (`bun run x.ts`, `tsx watch
+    /// x.ts`, `dotnet exec X.dll`).
+    pub skip_words: &'static [&'static str],
+    /// Positional arguments a wrapper consumes before the command it starts
+    /// (`gosu <user> cmd`: 1).
+    pub positional: usize,
+    /// How its reader starts.
+    pub form: TargetForm,
+    /// The language the started target is written in, as glia's parsers
+    /// name it (`python`, `typescript`); `None` for a wrapper.
+    pub lang: Option<&'static str>,
+}
+
+impl Launcher {
+    const fn new(names: &'static [&'static str], form: TargetForm) -> Self {
+        Launcher {
+            names,
+            value_flags: &[],
+            inline_flags: &[],
+            skip_words: &[],
+            positional: 0,
+            form,
+            lang: None,
+        }
+    }
+
+    const fn lang(mut self, lang: &'static str) -> Self {
+        self.lang = Some(lang);
+        self
+    }
+
+    const fn values(mut self, flags: &'static [&'static str]) -> Self {
+        self.value_flags = flags;
+        self
+    }
+
+    const fn inline(mut self, flags: &'static [&'static str]) -> Self {
+        self.inline_flags = flags;
+        self
+    }
+
+    const fn skip(mut self, words: &'static [&'static str]) -> Self {
+        self.skip_words = words;
+        self
+    }
+
+    const fn positional(mut self, n: usize) -> Self {
+        self.positional = n;
+        self
+    }
+}
+
+/// The deepest chain of wrappers and shells [`normalise_argv`] reads through
+/// (`bash -lc 'dotenv bundle exec sidekiq'` is 3); a fifth hop is refused
+/// [`Refusal::Depth`].
+pub const MAX_LAUNCH_DEPTH: usize = 4;
+
+/// The launcher table: one row per launcher, read by [`normalise_argv`].
+/// These literals live in a `.rs` file, which no needle reads (code_guard).
+pub static LAUNCHERS: &[Launcher] = &[
+    // Script: the first non-flag argument is a file.
+    Launcher::new(&["python*"], TargetForm::Script)
+        .lang("python")
+        .values(&["-W", "-X", "--check-hash-based-pycs"])
+        .inline(&["-c", "-"]),
+    Launcher::new(&["node", "nodejs"], TargetForm::Script)
+        .lang("typescript")
+        .values(&[
+            "-r",
+            "--require",
+            "--import",
+            "--loader",
+            "--experimental-loader",
+            "--env-file",
+            "-C",
+            "--conditions",
+            "--title",
+        ])
+        .inline(&["-e", "--eval", "-p", "--print"]),
+    Launcher::new(&["deno run"], TargetForm::Script)
+        .lang("typescript")
+        .values(&[
+            "-c",
+            "--config",
+            "--import-map",
+            "--lock",
+            "--cert",
+            "--location",
+            "--seed",
+        ]),
+    Launcher::new(&["bun"], TargetForm::Script)
+        .lang("typescript")
+        .values(&["--cwd", "-r", "--preload", "--env-file", "-c", "--config"])
+        .inline(&["-e", "--eval", "-p", "--print"])
+        .skip(&["run"]),
+    Launcher::new(&["tsx"], TargetForm::Script)
+        .lang("typescript")
+        .values(&["--tsconfig", "--import", "-r", "--require"])
+        .inline(&["-e", "--eval", "-p", "--print"])
+        .skip(&["watch"]),
+    Launcher::new(&["ts-node"], TargetForm::Script)
+        .lang("typescript")
+        .values(&[
+            "-P",
+            "--project",
+            "-r",
+            "--require",
+            "-C",
+            "--compiler",
+            "-O",
+            "--compiler-options",
+            "--cwd",
+            "-I",
+            "--ignore",
+        ])
+        .inline(&["-e", "--eval", "-p", "--print"]),
+    Launcher::new(&["ruby*"], TargetForm::Script)
+        .lang("ruby")
+        .values(&["-I", "-r", "-C", "-E"])
+        .inline(&["-e"]),
+    Launcher::new(&["php*"], TargetForm::Script)
+        .lang("php")
+        .values(&["-d", "-c", "-z", "-S", "-t"])
+        .inline(&["-r", "-a"]),
+    Launcher::new(&["lua*", "luajit"], TargetForm::Script)
+        .lang("lua")
+        .values(&["-l", "-j", "-O"])
+        .inline(&["-e", "-"]),
+    // Shell: `-c "<str>"`, else a script file.
+    Launcher::new(
+        &["sh", "bash", "dash", "ash", "zsh", "ksh"],
+        TargetForm::Shell,
+    )
+    .lang("shell")
+    .values(&["-o", "-O", "--rcfile", "--init-file"]),
+    // ModuleAttr: the first `a.b:c` argument.
+    Launcher::new(&["gunicorn"], TargetForm::ModuleAttr)
+        .lang("python")
+        .values(&[
+            "-b",
+            "--bind",
+            "-c",
+            "--config",
+            "-w",
+            "--workers",
+            "-k",
+            "--worker-class",
+            "-t",
+            "--timeout",
+            "--threads",
+            "--log-level",
+            "--access-logfile",
+            "--error-logfile",
+            "--log-config",
+            "-n",
+            "--name",
+            "--chdir",
+            "--pythonpath",
+            "-e",
+            "--env",
+            "-u",
+            "--user",
+            "-g",
+            "--group",
+            "-p",
+            "--pid",
+            "--max-requests",
+            "--max-requests-jitter",
+            "--graceful-timeout",
+            "--keep-alive",
+            "--worker-connections",
+            "--forwarded-allow-ips",
+            "--certfile",
+            "--keyfile",
+            "--backlog",
+            "--paste",
+        ]),
+    Launcher::new(&["uvicorn"], TargetForm::ModuleAttr)
+        .lang("python")
+        .values(&[
+            "--host",
+            "--port",
+            "--uds",
+            "--fd",
+            "--workers",
+            "--loop",
+            "--http",
+            "--ws",
+            "--lifespan",
+            "--env-file",
+            "--log-config",
+            "--log-level",
+            "--root-path",
+            "--app-dir",
+            "--forwarded-allow-ips",
+            "--ssl-keyfile",
+            "--ssl-certfile",
+            "--reload-dir",
+            "--limit-concurrency",
+            "--timeout-keep-alive",
+            "--backlog",
+            "--limit-max-requests",
+            "--header",
+        ]),
+    Launcher::new(&["hypercorn"], TargetForm::ModuleAttr)
+        .lang("python")
+        .values(&[
+            "-b",
+            "--bind",
+            "-w",
+            "--workers",
+            "-k",
+            "--worker-class",
+            "-c",
+            "--config",
+            "--access-logfile",
+            "--error-logfile",
+            "--log-level",
+            "--root-path",
+            "--certfile",
+            "--keyfile",
+            "--keep-alive",
+            "-g",
+            "--group",
+            "-u",
+            "--user",
+            "--insecure-bind",
+            "--quic-bind",
+        ]),
+    Launcher::new(&["daphne"], TargetForm::ModuleAttr)
+        .lang("python")
+        .values(&[
+            "-b",
+            "--bind",
+            "-p",
+            "--port",
+            "-u",
+            "--unix-socket",
+            "--fd",
+            "-e",
+            "--endpoint",
+            "--root-path",
+            "--access-log",
+            "-t",
+            "--http-timeout",
+            "-v",
+            "--verbosity",
+            "--ping-interval",
+            "--ping-timeout",
+            "--application-close-timeout",
+        ]),
+    Launcher::new(&["waitress-serve"], TargetForm::ModuleAttr)
+        .lang("python")
+        .values(&[
+            "--host",
+            "--port",
+            "--listen",
+            "--threads",
+            "--url-scheme",
+            "--url-prefix",
+            "--ident",
+            "--unix-socket",
+            "--channel-timeout",
+            "--connection-limit",
+        ]),
+    // CeleryApp: `-A|--app a.b[:x]`.
+    Launcher::new(&["celery"], TargetForm::CeleryApp)
+        .lang("python")
+        .values(&[
+            "-b",
+            "--broker",
+            "--result-backend",
+            "--loader",
+            "--config",
+            "--workdir",
+            "-l",
+            "--loglevel",
+            "-c",
+            "--concurrency",
+            "-Q",
+            "--queues",
+            "-n",
+            "--hostname",
+            "-P",
+            "--pool",
+            "-f",
+            "--logfile",
+            "--pidfile",
+            "-s",
+            "--schedule",
+            "-S",
+            "--scheduler",
+            "--max-tasks-per-child",
+        ]),
+    // FlaskApp: `--app|-A x`, else FLASK_APP.
+    Launcher::new(&["flask"], TargetForm::FlaskApp)
+        .lang("python")
+        .values(&[
+            "-e",
+            "--env-file",
+            "-h",
+            "--host",
+            "-p",
+            "--port",
+            "--cert",
+            "--key",
+        ]),
+    // PkgScript: a package.json / deno.json script name.
+    Launcher::new(&["npm"], TargetForm::PkgScript)
+        .lang("typescript")
+        .values(&["--prefix", "-w", "--workspace"]),
+    Launcher::new(&["yarn"], TargetForm::PkgScript)
+        .lang("typescript")
+        .values(&["--cwd"]),
+    Launcher::new(&["pnpm"], TargetForm::PkgScript)
+        .lang("typescript")
+        .values(&["--filter", "-F", "-C", "--dir"]),
+    Launcher::new(&["deno task"], TargetForm::PkgScript)
+        .lang("typescript")
+        .values(&["--cwd", "-c", "--config"]),
+    // Jar / JavaMain.
+    Launcher::new(&["java"], TargetForm::Jar)
+        .lang("java")
+        .values(&[
+            "-cp",
+            "-classpath",
+            "--class-path",
+            "-p",
+            "--module-path",
+            "--add-opens",
+            "--add-exports",
+            "--add-modules",
+            "--add-reads",
+            "--upgrade-module-path",
+            "--limit-modules",
+            "--patch-module",
+        ]),
+    // Dll.
+    Launcher::new(&["dotnet"], TargetForm::Dll)
+        .lang("csharp")
+        .values(&[
+            "--roll-forward",
+            "--fx-version",
+            "--additionalprobingpath",
+            "--depsfile",
+            "--runtimeconfig",
+            "--additional-deps",
+        ])
+        .skip(&["exec"]),
+    // Wrapper: strip and re-read.
+    Launcher::new(&["tini"], TargetForm::Wrapper).values(&["-p", "-e"]),
+    Launcher::new(&["dumb-init"], TargetForm::Wrapper).values(&["-r", "--rewrite"]),
+    Launcher::new(&["gosu", "su-exec"], TargetForm::Wrapper).positional(1),
+    Launcher::new(&["/init"], TargetForm::Wrapper),
+    Launcher::new(&["exec"], TargetForm::Wrapper).values(&["-a"]),
+    Launcher::new(&["env"], TargetForm::Wrapper).values(&["-u", "--unset", "-C", "--chdir"]),
+    Launcher::new(&["nohup"], TargetForm::Wrapper),
+    Launcher::new(&["dotenv"], TargetForm::Wrapper).values(&["-f", "-e", "-c", "-v"]),
+    Launcher::new(&["bundle exec"], TargetForm::Wrapper).values(&["--gemfile"]),
+    Launcher::new(&["poetry run"], TargetForm::Wrapper).values(&[
+        "-C",
+        "--directory",
+        "-P",
+        "--project",
+    ]),
+    Launcher::new(&["uv run"], TargetForm::Wrapper).values(&[
+        "--with",
+        "--with-requirements",
+        "--with-editable",
+        "--project",
+        "--directory",
+        "--python",
+        "-p",
+        "--env-file",
+        "--extra",
+        "--group",
+        "--package",
+        "--index",
+        "--index-url",
+    ]),
+    Launcher::new(&["pipenv run"], TargetForm::Wrapper),
+    Launcher::new(&["npx"], TargetForm::Wrapper)
+        .values(&["-p", "--package"])
+        .inline(&["-c", "--call"]),
+    // Framework: the app layer's to bind.
+    Launcher::new(&["rails"], TargetForm::Framework).lang("ruby"),
+    Launcher::new(&["puma"], TargetForm::Framework).lang("ruby"),
+    Launcher::new(&["sidekiq"], TargetForm::Framework).lang("ruby"),
+    Launcher::new(&["manage.py"], TargetForm::Framework).lang("python"),
+];
+
+/// What started process an argv names: [`normalise_argv`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StartTarget {
+    /// What the target is.
+    pub form: TargetForm,
+    /// The target as written: a file path, a module path, a script name, a
+    /// jar, a main class, a binary. When refused, the text refused (`$APP`,
+    /// `"$@"` as `$@`, the shell string), empty for [`Refusal::NoTarget`].
+    pub target: String,
+    /// The attribute after the target's `:` (`app` of `server:app`, a
+    /// factory's name without its call), for [`TargetForm::ModuleAttr`],
+    /// [`TargetForm::CeleryApp`] and [`TargetForm::FlaskApp`].
+    pub attr: Option<String>,
+    /// The arguments after the target (for a celery / flask app, every
+    /// argument but the app's flag).
+    pub args: Vec<String>,
+    /// The launcher row that named the target (its matched name: `python`,
+    /// `uvicorn`, `bundle exec`), `None` for a plain [`TargetForm::Binary`].
+    pub launcher: Option<&'static str>,
+    /// The wrappers and shells read through on the way, outermost first
+    /// (`tini -- python -m x`: `["tini"]`; `python -m uvicorn a:b`:
+    /// `["python"]`).
+    pub chain: Vec<&'static str>,
+    /// The language the target is written in (the launcher's `lang`).
+    pub lang: Option<&'static str>,
+    /// Set when no target could be named.
+    pub refused: Option<Refusal>,
+}
+
+impl StartTarget {
+    /// The reason it was refused, lowercase (`dynamic`), or `None`.
+    pub fn refusal(&self) -> Option<&'static str> {
+        self.refused.map(Refusal::as_str)
+    }
+}
+
+/// How an argv starts its target: leading `K=V` assignments, wrappers and
+/// `sh -c` strings are read through (at most [`MAX_LAUNCH_DEPTH`] hops) to the
+/// launcher that names the target, and that launcher's [`TargetForm`] says how
+/// it is named. A `$VAR` / `${..}` target is refused [`Refusal::Dynamic`].
+/// Shell strings are read by a line scanner, not a shell: heredocs,
+/// functions, conditionals, loops and subshells are refused, never guessed.
+pub fn normalise_argv(argv: &[String]) -> StartTarget {
+    let mut chain = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut argv: Vec<String> = argv.to_vec();
+    loop {
+        // Leading `K=V` assignments (a shell's, or `env`'s).
+        let assigns = argv.iter().take_while(|t| assignment(t).is_some()).count();
+        for t in &argv[..assigns] {
+            if let Some((k, v)) = assignment(t) {
+                env.push((k.to_string(), v.to_string()));
+            }
+        }
+        argv.drain(..assigns);
+        let Some(head) = argv.first() else {
+            return refused(
+                TargetForm::Binary,
+                String::new(),
+                Refusal::NoTarget,
+                chain,
+                None,
+                None,
+            );
+        };
+        if is_dynamic(head) {
+            let head = head.clone();
+            return refused(
+                TargetForm::Binary,
+                head,
+                Refusal::Dynamic,
+                chain,
+                None,
+                None,
+            );
+        }
+        let Some((row, name, words)) = launcher_for(&argv) else {
+            let target = argv.remove(0);
+            return done(TargetForm::Binary, target, None, argv, None, chain, None);
+        };
+        let rest = argv[words..].to_vec();
+        let step = match row.form {
+            TargetForm::Wrapper => read_wrapper(row, name, &rest),
+            TargetForm::Shell => read_shell(row, name, &rest),
+            TargetForm::Script => read_script(row, name, &rest),
+            TargetForm::ModuleAttr => Step::Done(read_module_attr(row, name, &rest)),
+            TargetForm::CeleryApp => Step::Done(read_celery(row, name, &rest)),
+            TargetForm::FlaskApp => Step::Done(read_flask(row, name, &rest, &env)),
+            TargetForm::PkgScript => read_pkg_script(row, name, words, &rest),
+            TargetForm::Jar | TargetForm::JavaMain => Step::Done(read_java(row, name, &rest)),
+            TargetForm::Dll => Step::Done(read_dotnet(row, name, &rest)),
+            TargetForm::Framework => {
+                let target = argv[0].clone();
+                Step::Done(partial(
+                    TargetForm::Framework,
+                    target,
+                    None,
+                    rest,
+                    row,
+                    name,
+                ))
+            }
+            // A launcher row never declares these two forms; read as Binary.
+            TargetForm::PyModule | TargetForm::Binary => {
+                let target = argv[0].clone();
+                Step::Done(partial(TargetForm::Binary, target, None, rest, row, name))
+            }
+        };
+        match step {
+            Step::Done(mut t) => {
+                t.chain = chain;
+                return t;
+            }
+            Step::Again(next) => {
+                if chain.len() >= MAX_LAUNCH_DEPTH {
+                    let target = next.first().cloned().unwrap_or_default();
+                    return refused(
+                        row.form,
+                        target,
+                        Refusal::Depth,
+                        chain,
+                        Some(name),
+                        row.lang,
+                    );
+                }
+                chain.push(name);
+                argv = next;
+            }
+        }
+    }
+}
+
+/// One reader's answer: the target, or the argv to re-read.
+enum Step {
+    Done(StartTarget),
+    Again(Vec<String>),
+}
+
+fn done(
+    form: TargetForm,
+    target: String,
+    attr: Option<String>,
+    args: Vec<String>,
+    launcher: Option<&'static str>,
+    chain: Vec<&'static str>,
+    lang: Option<&'static str>,
+) -> StartTarget {
+    let refused = is_dynamic(&target).then_some(Refusal::Dynamic);
+    StartTarget {
+        form,
+        target,
+        attr,
+        args,
+        launcher,
+        chain,
+        lang,
+        refused,
+    }
+}
+
+fn refused(
+    form: TargetForm,
+    target: String,
+    why: Refusal,
+    chain: Vec<&'static str>,
+    launcher: Option<&'static str>,
+    lang: Option<&'static str>,
+) -> StartTarget {
+    StartTarget {
+        form,
+        target,
+        attr: None,
+        args: Vec::new(),
+        launcher,
+        chain,
+        lang,
+        refused: Some(why),
+    }
+}
+
+/// A reader's target, its chain filled in by [`normalise_argv`].
+fn partial(
+    form: TargetForm,
+    target: String,
+    attr: Option<String>,
+    args: Vec<String>,
+    row: &Launcher,
+    name: &'static str,
+) -> StartTarget {
+    done(form, target, attr, args, Some(name), Vec::new(), row.lang)
+}
+
+fn refuse(
+    form: TargetForm,
+    target: &str,
+    why: Refusal,
+    row: &Launcher,
+    name: &'static str,
+) -> StartTarget {
+    refused(
+        form,
+        target.to_string(),
+        why,
+        Vec::new(),
+        Some(name),
+        row.lang,
+    )
+}
+
+/// `K=V` as a shell assignment word.
+fn assignment(t: &str) -> Option<(&str, &str)> {
+    let (k, v) = t.split_once('=')?;
+    let mut bytes = k.bytes();
+    let first = bytes.next()?;
+    ((first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+    .then_some((k, v))
+}
+
+/// A runtime value: a parameter expansion or a command substitution.
+fn is_dynamic(t: &str) -> bool {
+    t.contains('$') || t.contains('`')
+}
+
+/// The launcher row an argv starts with: its row, the matched name (without
+/// a trailing `*`) and how many argv words it took. A two-word name wins over
+/// a one-word one; table order breaks a tie.
+fn launcher_for(argv: &[String]) -> Option<(&'static Launcher, &'static str, usize)> {
+    let head = argv.first()?;
+    let base = head.rsplit('/').next().unwrap_or(head);
+    let mut best: Option<(&'static Launcher, &'static str, usize)> = None;
+    for row in LAUNCHERS {
+        for &pattern in row.names {
+            let mut words = pattern.split(' ');
+            let first = words.next().unwrap_or(pattern);
+            let against = if first.contains('/') {
+                head.as_str()
+            } else {
+                base
+            };
+            if !name_matches(first, against) {
+                continue;
+            }
+            let more: Vec<&str> = words.collect();
+            let n = 1 + more.len();
+            if argv.len() < n || more.iter().zip(&argv[1..]).any(|(w, a)| w != a) {
+                continue;
+            }
+            if best.is_none_or(|(_, _, m)| n > m) {
+                best = Some((row, pattern.strip_suffix('*').unwrap_or(pattern), n));
+            }
+        }
+    }
+    best
+}
+
+/// `python*` matches `python`, `python3`, `python3.11`; any other name only
+/// itself.
+fn name_matches(pattern: &str, word: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(stem) => word
+            .strip_prefix(stem)
+            .is_some_and(|v| v.bytes().all(|b| b.is_ascii_digit() || b == b'.')),
+        None => pattern == word,
+    }
+}
+
+/// Where a launcher's options end.
+enum Scan {
+    /// The first positional argument's index.
+    Positional(usize),
+    /// One of the caller's stop flags, at its index.
+    Stop(usize),
+    /// An inline-code flag.
+    Inline,
+    /// No positional argument.
+    End,
+}
+
+/// Skip `row`'s options in `args`: `--` ends them, a value flag takes the
+/// next argument, any other `-x` / `--x=v` token is one argument; `stops` are
+/// flags the caller reads itself.
+fn scan(args: &[String], row: &Launcher, stops: &[&str]) -> Scan {
+    let mut i = 0;
+    while i < args.len() {
+        let t = args[i].as_str();
+        if t == "--" {
+            return if i + 1 < args.len() {
+                Scan::Positional(i + 1)
+            } else {
+                Scan::End
+            };
+        }
+        if row.inline_flags.contains(&t) {
+            return Scan::Inline;
+        }
+        if stops.contains(&t) {
+            return Scan::Stop(i);
+        }
+        if t.len() > 1 && t.starts_with('-') {
+            i += if row.value_flags.contains(&t) { 2 } else { 1 };
+            continue;
+        }
+        if row.skip_words.contains(&t) {
+            i += 1;
+            continue;
+        }
+        return Scan::Positional(i);
+    }
+    Scan::End
+}
+
+fn read_wrapper(row: &Launcher, name: &'static str, rest: &[String]) -> Step {
+    match scan(rest, row, &[]) {
+        Scan::Positional(i) if i + row.positional < rest.len() => {
+            Step::Again(rest[i + row.positional..].to_vec())
+        }
+        Scan::Inline => Step::Done(refuse(TargetForm::Wrapper, "", Refusal::Inline, row, name)),
+        _ => Step::Done(refuse(
+            TargetForm::Wrapper,
+            "",
+            Refusal::NoTarget,
+            row,
+            name,
+        )),
+    }
+}
+
+fn read_shell(row: &Launcher, name: &'static str, rest: &[String]) -> Step {
+    let mut i = 0;
+    let mut command = false;
+    while i < rest.len() {
+        let t = rest[i].as_str();
+        if t == "--" {
+            i += 1;
+            break;
+        }
+        if !(t.len() > 1 && (t.starts_with('-') || t.starts_with('+'))) {
+            break;
+        }
+        if row.value_flags.contains(&t) {
+            i += 2;
+            continue;
+        }
+        if !t.starts_with("--") && t[1..].contains('c') {
+            command = true;
+        }
+        i += 1;
+    }
+    let Some(first) = rest.get(i) else {
+        return Step::Done(refuse(TargetForm::Shell, "", Refusal::NoTarget, row, name));
+    };
+    if !command {
+        let target = first.clone();
+        return Step::Done(partial(
+            TargetForm::Script,
+            target,
+            None,
+            rest[i + 1..].to_vec(),
+            row,
+            name,
+        ));
+    }
+    match split_shell(first) {
+        Some(words) if !words.is_empty() => Step::Again(words),
+        Some(_) => Step::Done(refuse(
+            TargetForm::Shell,
+            first,
+            Refusal::NoTarget,
+            row,
+            name,
+        )),
+        None => Step::Done(refuse(
+            TargetForm::Shell,
+            first,
+            Refusal::Dynamic,
+            row,
+            name,
+        )),
+    }
+}
+
+fn read_script(row: &Launcher, name: &'static str, rest: &[String]) -> Step {
+    let python = row.lang == Some("python");
+    let stops: &[&str] = if python { &["-m"] } else { &[] };
+    let i = match scan(rest, row, stops) {
+        Scan::Positional(i) => i,
+        Scan::Stop(i) => {
+            // `python -m a.b`: a module, or a launcher run as one
+            // (`python -m uvicorn a:b`).
+            let Some(module) = rest.get(i + 1) else {
+                return Step::Done(refuse(
+                    TargetForm::PyModule,
+                    "",
+                    Refusal::NoTarget,
+                    row,
+                    name,
+                ));
+            };
+            let again: Vec<String> = rest[i + 1..].to_vec();
+            if let Some((next, _, _)) = launcher_for(&again)
+                && next.lang == Some("python")
+                && next.form != TargetForm::Script
+            {
+                return Step::Again(again);
+            }
+            let args = rest[i + 2..].to_vec();
+            return Step::Done(partial(
+                TargetForm::PyModule,
+                module.clone(),
+                None,
+                args,
+                row,
+                name,
+            ));
+        }
+        Scan::Inline => {
+            return Step::Done(refuse(TargetForm::Script, "", Refusal::Inline, row, name));
+        }
+        Scan::End => {
+            return Step::Done(refuse(TargetForm::Script, "", Refusal::NoTarget, row, name));
+        }
+    };
+    let file = &rest[i];
+    // A framework runner started through its interpreter (`python
+    // manage.py runserver`, `ruby bin/rails server`).
+    let again: Vec<String> = rest[i..].to_vec();
+    if let Some((next, _, _)) = launcher_for(&again)
+        && next.form == TargetForm::Framework
+    {
+        return Step::Again(again);
+    }
+    // `bun x` with no extension or path is a package script.
+    if name == "bun" && !file.contains('.') && !file.contains('/') {
+        return Step::Done(partial(
+            TargetForm::PkgScript,
+            file.clone(),
+            None,
+            rest[i + 1..].to_vec(),
+            row,
+            name,
+        ));
+    }
+    Step::Done(partial(
+        TargetForm::Script,
+        file.clone(),
+        None,
+        rest[i + 1..].to_vec(),
+        row,
+        name,
+    ))
+}
+
+/// `a.b:c` (or `a.b:c()`): the module and the attribute's name.
+fn module_attr(t: &str) -> Option<(&str, &str)> {
+    let (module, attr) = t.split_once(':')?;
+    let attr = attr.split('(').next().unwrap_or(attr);
+    (is_dotted_identifier(module) && is_dotted_identifier(attr)).then_some((module, attr))
+}
+
+fn is_dotted_identifier(t: &str) -> bool {
+    !t.is_empty()
+        && t.split('.').all(|seg| {
+            let mut b = seg.bytes();
+            b.next()
+                .is_some_and(|f| f.is_ascii_alphabetic() || f == b'_')
+                && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        })
+}
+
+/// The positional arguments of `args`, skipping `row`'s options.
+fn positionals<'a>(args: &'a [String], row: &Launcher) -> Vec<(usize, &'a str)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match scan(&args[i..], row, &[]) {
+            Scan::Positional(j) => {
+                out.push((i + j, args[i + j].as_str()));
+                i += j + 1;
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+fn read_module_attr(row: &Launcher, name: &'static str, rest: &[String]) -> StartTarget {
+    let pos = positionals(rest, row);
+    let without = |i: usize| -> Vec<String> {
+        rest.iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, t)| t.clone())
+            .collect()
+    };
+    if let Some((i, (module, attr))) = pos
+        .iter()
+        .find_map(|(i, t)| module_attr(t).map(|m| (*i, m)))
+    {
+        let (module, attr) = (module.to_string(), attr.to_string());
+        return partial(
+            TargetForm::ModuleAttr,
+            module,
+            Some(attr),
+            without(i),
+            row,
+            name,
+        );
+    }
+    match pos.first() {
+        Some((_, t)) if is_dynamic(t) => {
+            refuse(TargetForm::ModuleAttr, t, Refusal::Dynamic, row, name)
+        }
+        Some((i, t)) if is_dotted_identifier(t) => partial(
+            TargetForm::ModuleAttr,
+            t.to_string(),
+            None,
+            without(*i),
+            row,
+            name,
+        ),
+        _ => refuse(TargetForm::ModuleAttr, "", Refusal::NoTarget, row, name),
+    }
+}
+
+/// The value of `short` / `long` in `args` (`-A x`, `--app x`, `--app=x`),
+/// and `args` without it.
+fn take_flag(args: &[String], short: &str, long: &str) -> Option<(String, Vec<String>)> {
+    let eq = format!("{long}=");
+    for (i, t) in args.iter().enumerate() {
+        if t == short || t == long {
+            let value = args.get(i + 1)?.clone();
+            let mut rest = args[..i].to_vec();
+            rest.extend_from_slice(&args[i + 2..]);
+            return Some((value, rest));
+        }
+        if let Some(v) = t.strip_prefix(&eq) {
+            let mut rest = args[..i].to_vec();
+            rest.extend_from_slice(&args[i + 1..]);
+            return Some((v.to_string(), rest));
+        }
+    }
+    None
+}
+
+/// `a.b:x` -> (`a.b`, `x`); `a.b` -> (`a.b`, None).
+fn split_app(value: &str) -> (String, Option<String>) {
+    match value.split_once(':') {
+        Some((m, a)) => (
+            m.to_string(),
+            Some(a.split('(').next().unwrap_or(a).to_string()),
+        ),
+        None => (value.to_string(), None),
+    }
+}
+
+fn read_celery(row: &Launcher, name: &'static str, rest: &[String]) -> StartTarget {
+    match take_flag(rest, "-A", "--app") {
+        Some((app, args)) => {
+            let (module, attr) = split_app(&app);
+            partial(TargetForm::CeleryApp, module, attr, args, row, name)
+        }
+        None => refuse(TargetForm::CeleryApp, "", Refusal::NoTarget, row, name),
+    }
+}
+
+fn read_flask(
+    row: &Launcher,
+    name: &'static str,
+    rest: &[String],
+    env: &[(String, String)],
+) -> StartTarget {
+    let (app, args) = match take_flag(rest, "-A", "--app") {
+        Some(found) => found,
+        None => match env.iter().rev().find(|(k, _)| k == "FLASK_APP") {
+            Some((_, v)) => (v.clone(), rest.to_vec()),
+            None => return refuse(TargetForm::FlaskApp, "", Refusal::NoTarget, row, name),
+        },
+    };
+    let (module, attr) = split_app(&app);
+    partial(TargetForm::FlaskApp, module, attr, args, row, name)
+}
+
+fn read_pkg_script(row: &Launcher, name: &'static str, words: usize, rest: &[String]) -> Step {
+    let Scan::Positional(i) = scan(rest, row, &[]) else {
+        return Step::Done(refuse(
+            TargetForm::PkgScript,
+            "",
+            Refusal::NoTarget,
+            row,
+            name,
+        ));
+    };
+    let script = |j: usize| -> Step {
+        let Some(tail) = rest.get(j..) else {
+            return Step::Done(refuse(
+                TargetForm::PkgScript,
+                "",
+                Refusal::NoTarget,
+                row,
+                name,
+            ));
+        };
+        match scan(tail, row, &[]) {
+            Scan::Positional(k) => {
+                let at = j + k;
+                let args = rest[at + 1..]
+                    .iter()
+                    .filter(|t| *t != "--")
+                    .cloned()
+                    .collect();
+                Step::Done(partial(
+                    TargetForm::PkgScript,
+                    rest[at].clone(),
+                    None,
+                    args,
+                    row,
+                    name,
+                ))
+            }
+            _ => Step::Done(refuse(
+                TargetForm::PkgScript,
+                "",
+                Refusal::NoTarget,
+                row,
+                name,
+            )),
+        }
+    };
+    // `deno task x`: the subcommand is the name's second word.
+    if words > 1 {
+        return script(i);
+    }
+    match rest[i].as_str() {
+        "run" | "run-script" => script(i + 1),
+        // `npm exec` / `pnpm exec` / `yarn exec`: a wrapper.
+        "exec" | "x" => match scan(&rest[i + 1..], row, &[]) {
+            Scan::Positional(k) => Step::Again(rest[i + 1 + k..].to_vec()),
+            _ => Step::Done(refuse(
+                TargetForm::Wrapper,
+                "",
+                Refusal::NoTarget,
+                row,
+                name,
+            )),
+        },
+        // `yarn workspace <name> <script>`.
+        "workspace" if name == "yarn" => script(i + 2),
+        // npm runs only these lifecycle scripts without `run`.
+        "start" | "test" | "stop" | "restart" if name == "npm" => Step::Done(partial(
+            TargetForm::PkgScript,
+            rest[i].clone(),
+            None,
+            rest[i + 1..].to_vec(),
+            row,
+            name,
+        )),
+        _ if name == "npm" => Step::Done(partial(
+            TargetForm::Binary,
+            name.to_string(),
+            None,
+            rest.to_vec(),
+            row,
+            name,
+        )),
+        _ => {
+            let args = rest[i + 1..]
+                .iter()
+                .filter(|t| *t != "--")
+                .cloned()
+                .collect();
+            Step::Done(partial(
+                TargetForm::PkgScript,
+                rest[i].clone(),
+                None,
+                args,
+                row,
+                name,
+            ))
+        }
+    }
+}
+
+fn read_java(row: &Launcher, name: &'static str, rest: &[String]) -> StartTarget {
+    match scan(rest, row, &["-jar", "-m", "--module"]) {
+        Scan::Stop(i) => {
+            let form = if rest[i] == "-jar" {
+                TargetForm::Jar
+            } else {
+                TargetForm::JavaMain
+            };
+            match rest.get(i + 1) {
+                Some(t) => partial(form, t.clone(), None, rest[i + 2..].to_vec(), row, name),
+                None => refuse(form, "", Refusal::NoTarget, row, name),
+            }
+        }
+        Scan::Positional(i) => partial(
+            TargetForm::JavaMain,
+            rest[i].clone(),
+            None,
+            rest[i + 1..].to_vec(),
+            row,
+            name,
+        ),
+        _ => refuse(TargetForm::JavaMain, "", Refusal::NoTarget, row, name),
+    }
+}
+
+fn read_dotnet(row: &Launcher, name: &'static str, rest: &[String]) -> StartTarget {
+    let Scan::Positional(i) = scan(rest, row, &[]) else {
+        return refuse(TargetForm::Dll, "", Refusal::NoTarget, row, name);
+    };
+    let t = &rest[i];
+    if t.to_ascii_lowercase().ends_with(".dll") {
+        return partial(
+            TargetForm::Dll,
+            t.clone(),
+            None,
+            rest[i + 1..].to_vec(),
+            row,
+            name,
+        );
+    }
+    if t == "run" {
+        let after = &rest[i + 1..];
+        return match take_flag(after, "-p", "--project") {
+            Some((project, args)) => partial(TargetForm::Dll, project, None, args, row, name),
+            None => refuse(TargetForm::Dll, "", Refusal::NoTarget, row, name),
+        };
+    }
+    partial(
+        TargetForm::Binary,
+        name.to_string(),
+        None,
+        rest.to_vec(),
+        row,
+        name,
+    )
+}
+
+/// Shell words that open or close a compound command or a function: a line
+/// scanner cannot say which command such a string runs last.
+const SHELL_CONTROL: &[&str] = &[
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until", "do", "done",
+    "function", "select", "{", "}", "[[",
+];
+
+/// One simple command while splitting.
+#[derive(Default)]
+struct ShellCommand {
+    words: Vec<String>,
+    /// A command substitution sits in it.
+    dynamic: bool,
+}
+
+/// Split a `sh -c` string with shell-word rules (quotes, backslashes,
+/// comments, redirections dropped) and return the command it starts: the
+/// first command of the last pipeline of its `;` / `&&` / `||` / `&` /
+/// newline chain. `None` when the string holds what a line scanner does not
+/// read (a heredoc, a subshell or function, a compound command, a command
+/// substitution in the chosen command, an unterminated quote).
+fn split_shell(s: &str) -> Option<Vec<String>> {
+    // Pipelines in order; each a list of commands.
+    let mut pipelines: Vec<Vec<ShellCommand>> = vec![vec![ShellCommand::default()]];
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut redirect_target = false;
+    let mut chars = s.chars().peekable();
+
+    fn current(p: &mut [Vec<ShellCommand>]) -> Option<&mut ShellCommand> {
+        p.last_mut()?.last_mut()
+    }
+    fn end_word(
+        p: &mut [Vec<ShellCommand>],
+        word: &mut String,
+        in_word: &mut bool,
+        redirect_target: &mut bool,
+    ) {
+        if *in_word {
+            if *redirect_target {
+                *redirect_target = false;
+            } else if let Some(c) = current(p) {
+                c.words.push(std::mem::take(word));
+            }
+        }
+        word.clear();
+        *in_word = false;
+    }
+
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' | '\r' => end_word(
+                &mut pipelines,
+                &mut word,
+                &mut in_word,
+                &mut redirect_target,
+            ),
+            '\n' | ';' => {
+                if c == ';' && chars.peek() == Some(&';') {
+                    return None;
+                }
+                end_word(
+                    &mut pipelines,
+                    &mut word,
+                    &mut in_word,
+                    &mut redirect_target,
+                );
+                pipelines.push(vec![ShellCommand::default()]);
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(n) => {
+                    word.push(n);
+                    in_word = true;
+                }
+                None => {}
+            },
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        n => word.push(n),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            '\n' => {}
+                            n @ ('"' | '\\' | '$' | '`') => word.push(n),
+                            n => {
+                                word.push('\\');
+                                word.push(n);
+                            }
+                        },
+                        '`' => {
+                            current(&mut pipelines)?.dynamic = true;
+                            word.push('`');
+                        }
+                        '$' if chars.peek() == Some(&'(') => {
+                            current(&mut pipelines)?.dynamic = true;
+                            word.push('$');
+                        }
+                        n => word.push(n),
+                    }
+                }
+            }
+            '`' => {
+                current(&mut pipelines)?.dynamic = true;
+                word.push('`');
+                in_word = true;
+            }
+            '$' if matches!(chars.peek(), Some('(') | Some('{')) => {
+                // A substitution or a parameter expansion, kept whole.
+                let open = chars.next()?;
+                let close = if open == '(' { ')' } else { '}' };
+                if open == '(' {
+                    current(&mut pipelines)?.dynamic = true;
+                }
+                word.push('$');
+                word.push(open);
+                in_word = true;
+                let mut depth = 1usize;
+                while depth > 0 {
+                    let n = chars.next()?;
+                    if n == open {
+                        depth += 1;
+                    } else if n == close {
+                        depth -= 1;
+                    }
+                    word.push(n);
+                }
+            }
+            '#' if !in_word => {
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+            }
+            '&' => {
+                if chars.peek() == Some(&'>') {
+                    // `&>file` / `&>>file`.
+                    end_word(
+                        &mut pipelines,
+                        &mut word,
+                        &mut in_word,
+                        &mut redirect_target,
+                    );
+                    chars.next();
+                    if chars.peek() == Some(&'>') {
+                        chars.next();
+                    }
+                    redirect_target = true;
+                } else {
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                    }
+                    end_word(
+                        &mut pipelines,
+                        &mut word,
+                        &mut in_word,
+                        &mut redirect_target,
+                    );
+                    pipelines.push(vec![ShellCommand::default()]);
+                }
+            }
+            '|' => {
+                let or = chars.peek() == Some(&'|');
+                if or || chars.peek() == Some(&'&') {
+                    chars.next();
+                }
+                end_word(
+                    &mut pipelines,
+                    &mut word,
+                    &mut in_word,
+                    &mut redirect_target,
+                );
+                if or {
+                    pipelines.push(vec![ShellCommand::default()]);
+                } else if let Some(p) = pipelines.last_mut() {
+                    p.push(ShellCommand::default());
+                }
+            }
+            '>' | '<' => {
+                if c == '<' && chars.peek() == Some(&'<') {
+                    return None;
+                }
+                // `2>` / `2>&1`: the fd digits are the redirection's.
+                if in_word && !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) {
+                    word.clear();
+                    in_word = false;
+                } else {
+                    end_word(
+                        &mut pipelines,
+                        &mut word,
+                        &mut in_word,
+                        &mut redirect_target,
+                    );
+                }
+                if matches!(chars.peek(), Some('>') | Some('&') | Some('|')) {
+                    chars.next();
+                }
+                redirect_target = true;
+            }
+            '(' | ')' => return None,
+            n => {
+                word.push(n);
+                in_word = true;
+            }
+        }
+    }
+    end_word(
+        &mut pipelines,
+        &mut word,
+        &mut in_word,
+        &mut redirect_target,
+    );
+
+    let heads = pipelines.iter().flatten().filter_map(|c| c.words.first());
+    for head in heads {
+        if SHELL_CONTROL.contains(&head.as_str()) {
+            return None;
+        }
+    }
+    let Some(last) = pipelines
+        .into_iter()
+        .rev()
+        .find(|p| p.iter().any(|c| !c.words.is_empty()))
+    else {
+        return Some(Vec::new());
+    };
+    let first = last.into_iter().find(|c| !c.words.is_empty())?;
+    (!first.dynamic).then_some(first.words)
+}
+
+/// Every problem in a launcher table: an empty or repeated name, a `*` not at
+/// a name's end, a name of more than two words, a flag not starting `-` or
+/// both a value and an inline flag, a positional count on a non-wrapper, and a
+/// language on a wrapper. Empty = valid.
+pub fn validate_launcher_rows(rows: &[Launcher]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for row in rows {
+        let at = format!("launcher {:?}", row.names.first().copied().unwrap_or(""));
+        if row.names.is_empty() {
+            problems.push(format!("{at}: no names"));
+        }
+        for &n in row.names {
+            let words: Vec<&str> = n.split(' ').collect();
+            if n.is_empty() || words.len() > 2 || words.iter().any(|w| w.is_empty()) {
+                problems.push(format!("{at}: name {n:?} must be one or two words"));
+            }
+            if n.trim_end_matches('*').contains('*') || (n.ends_with('*') && words.len() > 1) {
+                problems.push(format!("{at}: name {n:?} may end in `*` only as one word"));
+            }
+            if seen.contains(&n) {
+                problems.push(format!("{at}: duplicate name {n:?}"));
+            }
+            seen.push(n);
+        }
+        for f in row.value_flags.iter().chain(row.inline_flags) {
+            if !f.starts_with('-') {
+                problems.push(format!("{at}: flag {f:?} must start with `-`"));
+            }
+        }
+        if row.value_flags.iter().any(|f| row.inline_flags.contains(f)) {
+            problems.push(format!("{at}: a flag is both a value and an inline flag"));
+        }
+        if row.positional > 0 && row.form != TargetForm::Wrapper {
+            problems.push(format!("{at}: only a wrapper consumes positionals"));
+        }
+        if row.form == TargetForm::Wrapper && row.lang.is_some() {
+            problems.push(format!("{at}: a wrapper has no language"));
+        }
+        if matches!(row.form, TargetForm::PyModule | TargetForm::Binary) {
+            problems.push(format!(
+                "{at}: {} is a reader's answer, not a row's form",
+                row.form.as_str()
+            ));
+        }
+    }
+    problems
+}
+
+/// [`validate_launcher_rows`] over [`LAUNCHERS`].
+pub fn validate_launchers() -> Vec<String> {
+    validate_launcher_rows(LAUNCHERS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,5 +2333,686 @@ mod tests {
                 "[host] lang=lua commands=2 events=0 callbacks=0 config=0 minted=1 aux=0 unread=0 hosts=neovim:2 file=plugin/greet.lua"
             )
         );
+    }
+}
+
+/// The process layer's tests (GH.14): `cargo test -p glia-code-domain
+/// hosts::launchers`.
+#[cfg(test)]
+mod launchers {
+    use super::*;
+
+    fn argv(s: &[&str]) -> Vec<String> {
+        s.iter().map(|t| t.to_string()).collect()
+    }
+
+    fn norm(s: &[&str]) -> StartTarget {
+        normalise_argv(&argv(s))
+    }
+
+    /// (form, target, attr, launcher, chain, refusal) of one argv.
+    type Seen<'t> = (
+        &'static str,
+        &'t str,
+        Option<&'t str>,
+        Option<&'static str>,
+        Vec<&'static str>,
+        Option<&'static str>,
+    );
+
+    fn shape(t: &StartTarget) -> Seen<'_> {
+        (
+            t.form.as_str(),
+            t.target.as_str(),
+            t.attr.as_deref(),
+            t.launcher,
+            t.chain.clone(),
+            t.refusal(),
+        )
+    }
+
+    #[test]
+    fn the_table_is_valid() {
+        assert_eq!(validate_launchers(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn validate_names_each_problem() {
+        let bad = [
+            Launcher::new(&["a*b", "x y z"], TargetForm::Script)
+                .values(&["q"])
+                .inline(&["q"])
+                .positional(1),
+            Launcher::new(&["w"], TargetForm::Wrapper).lang("python"),
+            Launcher::new(&["w"], TargetForm::PyModule),
+            Launcher::new(&[], TargetForm::Binary),
+        ];
+        let problems = validate_launcher_rows(&bad);
+        let has = |s: &str| problems.iter().any(|p| p.contains(s));
+        assert!(has("may end in `*` only"), "{problems:?}");
+        assert!(has("must be one or two words"));
+        assert!(has("must start with `-`"));
+        assert!(has("both a value and an inline flag"));
+        assert!(has("only a wrapper consumes positionals"));
+        assert!(has("a wrapper has no language"));
+        assert!(has("duplicate name \"w\""));
+        assert!(has("py_module is a reader's answer"));
+        assert!(has("no names"));
+        assert!(has("binary is a reader's answer"));
+        assert_eq!(problems.len(), 11, "{problems:?}");
+    }
+
+    /// The argvs the packet was specced from: one per public repo line.
+    #[test]
+    fn the_quoted_starts() {
+        // microservices-demo emailservice / currencyservice Dockerfiles.
+        let t = norm(&["python", "email_server.py"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "script",
+                "email_server.py",
+                None,
+                Some("python"),
+                vec![],
+                None
+            )
+        );
+        assert_eq!(t.lang, Some("python"));
+        let t = norm(&["node", "server.js"]);
+        assert_eq!(
+            shape(&t),
+            ("script", "server.js", None, Some("node"), vec![], None)
+        );
+        assert_eq!(t.lang, Some("typescript"));
+        // prefect scripts/proxy-test/Dockerfile.
+        let t = norm(&["uvicorn", "server:app"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "module_attr",
+                "server",
+                Some("app"),
+                Some("uvicorn"),
+                vec![],
+                None
+            )
+        );
+        // plane's worker and api entrypoints.
+        let t = norm(&["celery", "-A", "plane", "worker", "-l", "info"]);
+        assert_eq!(
+            shape(&t),
+            ("celery_app", "plane", None, Some("celery"), vec![], None)
+        );
+        assert_eq!(t.args, argv(&["worker", "-l", "info"]));
+        let t = norm(&[
+            "sh",
+            "-c",
+            "exec gunicorn -w \"$GUNICORN_WORKERS\" -k uvicorn.workers.UvicornWorker plane.asgi:application --bind 0.0.0.0:\"${PORT:-8000}\" --max-requests 1200",
+        ]);
+        assert_eq!(
+            shape(&t),
+            (
+                "module_attr",
+                "plane.asgi",
+                Some("application"),
+                Some("gunicorn"),
+                vec!["sh", "exec"],
+                None
+            )
+        );
+        // twenty packages/twenty-docker/docker-compose.yml.
+        let t = norm(&["yarn", "worker:prod"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "pkg_script",
+                "worker:prod",
+                None,
+                Some("yarn"),
+                vec![],
+                None
+            )
+        );
+        // squidex Dockerfile.
+        let t = norm(&["dotnet", "Squidex.dll"]);
+        assert_eq!(
+            shape(&t),
+            ("dll", "Squidex.dll", None, Some("dotnet"), vec![], None)
+        );
+        assert_eq!(t.lang, Some("csharp"));
+        // immich machine-learning: ENTRYPOINT ["tini", "--"] ++ CMD.
+        let t = norm(&["tini", "--", "python", "-m", "immich_ml"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "py_module",
+                "immich_ml",
+                None,
+                Some("python"),
+                vec!["tini"],
+                None
+            )
+        );
+        // chatwoot deployment/chatwoot-worker.1.service ExecStart.
+        let t = norm(&[
+            "/bin/bash",
+            "-lc",
+            "dotenv bundle exec sidekiq -C config/sidekiq.yml",
+        ]);
+        assert_eq!(
+            shape(&t),
+            (
+                "framework",
+                "sidekiq",
+                None,
+                Some("sidekiq"),
+                vec!["bash", "dotenv", "bundle exec"],
+                None
+            )
+        );
+        assert_eq!(t.args, argv(&["-C", "config/sidekiq.yml"]));
+    }
+
+    /// One argv per launcher row; the test fails when a row has none.
+    #[test]
+    fn every_row_reads_its_target() {
+        type Case = (
+            &'static [&'static str],
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+        );
+        let cases: &[Case] = &[
+            (
+                &["python3.11", "-u", "app/main.py", "--x"],
+                "script",
+                "app/main.py",
+                None,
+            ),
+            (
+                &[
+                    "/usr/local/bin/node",
+                    "--require",
+                    "dd-trace/init",
+                    "dist/index.js",
+                ],
+                "script",
+                "dist/index.js",
+                None,
+            ),
+            (
+                &["deno", "run", "--allow-net", "-c", "deno.json", "main.ts"],
+                "script",
+                "main.ts",
+                None,
+            ),
+            (
+                &["bun", "run", "src/index.ts"],
+                "script",
+                "src/index.ts",
+                None,
+            ),
+            (
+                &["tsx", "watch", "src/server.ts"],
+                "script",
+                "src/server.ts",
+                None,
+            ),
+            (
+                &["ts-node", "-P", "tsconfig.json", "src/main.ts"],
+                "script",
+                "src/main.ts",
+                None,
+            ),
+            (
+                &["ruby", "-I", "lib", "bin/worker.rb"],
+                "script",
+                "bin/worker.rb",
+                None,
+            ),
+            (
+                &["php8.2", "-d", "memory_limit=-1", "artisan", "queue:work"],
+                "script",
+                "artisan",
+                None,
+            ),
+            (
+                &["luajit", "-l", "jit.opt", "main.lua"],
+                "script",
+                "main.lua",
+                None,
+            ),
+            (
+                &["bash", "-e", "scripts/start.sh"],
+                "script",
+                "scripts/start.sh",
+                None,
+            ),
+            (
+                &[
+                    "gunicorn",
+                    "-b",
+                    "0.0.0.0:8000",
+                    "-k",
+                    "gevent",
+                    "app.wsgi:application",
+                ],
+                "module_attr",
+                "app.wsgi",
+                Some("application"),
+            ),
+            (
+                &[
+                    "uvicorn",
+                    "--app-dir",
+                    "src",
+                    "--factory",
+                    "api.main:create_app",
+                    "--port",
+                    "80",
+                ],
+                "module_attr",
+                "api.main",
+                Some("create_app"),
+            ),
+            (
+                &["hypercorn", "--bind", "0.0.0.0:80", "main:app"],
+                "module_attr",
+                "main",
+                Some("app"),
+            ),
+            (
+                &[
+                    "daphne",
+                    "-b",
+                    "0.0.0.0",
+                    "-p",
+                    "8001",
+                    "project.asgi:application",
+                ],
+                "module_attr",
+                "project.asgi",
+                Some("application"),
+            ),
+            (
+                &["waitress-serve", "--port=8080", "--call", "app:create_app"],
+                "module_attr",
+                "app",
+                Some("create_app"),
+            ),
+            (
+                &["celery", "--app=proj.celery:app", "beat"],
+                "celery_app",
+                "proj.celery",
+                Some("app"),
+            ),
+            (
+                &[
+                    "flask",
+                    "--app",
+                    "hello:create_app()",
+                    "run",
+                    "--host",
+                    "0.0.0.0",
+                ],
+                "flask_app",
+                "hello",
+                Some("create_app"),
+            ),
+            (
+                &["npm", "run", "start:prod", "--", "--port", "3000"],
+                "pkg_script",
+                "start:prod",
+                None,
+            ),
+            (
+                &["yarn", "--cwd", "packages/api", "run", "serve"],
+                "pkg_script",
+                "serve",
+                None,
+            ),
+            (
+                &["pnpm", "--filter", "web", "start"],
+                "pkg_script",
+                "start",
+                None,
+            ),
+            (&["deno", "task", "dev"], "pkg_script", "dev", None),
+            (
+                &[
+                    "java",
+                    "-Xmx512m",
+                    "-Dspring.profiles.active=prod",
+                    "-jar",
+                    "/app/app.jar",
+                ],
+                "jar",
+                "/app/app.jar",
+                None,
+            ),
+            (
+                &["dotnet", "exec", "Api.dll", "--urls", "http://+:80"],
+                "dll",
+                "Api.dll",
+                None,
+            ),
+            (
+                &["dumb-init", "--", "node", "server.js"],
+                "script",
+                "server.js",
+                None,
+            ),
+            (
+                &["gosu", "app", "python", "worker.py"],
+                "script",
+                "worker.py",
+                None,
+            ),
+            (&["/init", "node", "index.js"], "script", "index.js", None),
+            (
+                &["exec", "-a", "svc", "node", "svc.js"],
+                "script",
+                "svc.js",
+                None,
+            ),
+            (&["nohup", "ruby", "jobs.rb"], "script", "jobs.rb", None),
+            (
+                &["poetry", "run", "python", "-m", "app.cli"],
+                "py_module",
+                "app.cli",
+                None,
+            ),
+            (
+                &["uv", "run", "--with", "rich", "python", "main.py"],
+                "script",
+                "main.py",
+                None,
+            ),
+            (
+                &["pipenv", "run", "gunicorn", "site:app"],
+                "module_attr",
+                "site",
+                Some("app"),
+            ),
+            (
+                &["npx", "-y", "tsx", "src/worker.ts"],
+                "script",
+                "src/worker.ts",
+                None,
+            ),
+            (
+                &["bundle", "exec", "rails", "server", "-b", "0.0.0.0"],
+                "framework",
+                "rails",
+                None,
+            ),
+            (
+                &["bundle", "exec", "puma", "-C", "config/puma.rb"],
+                "framework",
+                "puma",
+                None,
+            ),
+            (
+                &["python", "manage.py", "runserver", "0.0.0.0:8000"],
+                "framework",
+                "manage.py",
+                None,
+            ),
+            (&["sidekiq", "-q", "default"], "framework", "sidekiq", None),
+            (
+                &["tini", "-g", "--", "env", "A=1", "node", "s.js"],
+                "script",
+                "s.js",
+                None,
+            ),
+            (
+                &["su-exec", "node", "sh", "-c", "node server.js"],
+                "script",
+                "server.js",
+                None,
+            ),
+            (
+                &["dotenv", "-e", ".env", "--", "node", "app.js"],
+                "script",
+                "app.js",
+                None,
+            ),
+        ];
+        let mut covered: Vec<&'static str> = Vec::new();
+        for (input, form, target, attr) in cases {
+            let t = norm(input);
+            assert_eq!(
+                (
+                    t.form.as_str(),
+                    t.target.as_str(),
+                    t.attr.as_deref(),
+                    t.refusal()
+                ),
+                (*form, *target, *attr, None),
+                "{input:?} -> {t:?}"
+            );
+            covered.extend(t.chain.iter().copied());
+            covered.extend(t.launcher);
+        }
+        for row in LAUNCHERS {
+            assert!(
+                row.names
+                    .iter()
+                    .any(|n| covered.contains(&n.strip_suffix('*').unwrap_or(n))),
+                "no case reads launcher {:?}",
+                row.names
+            );
+        }
+    }
+
+    #[test]
+    fn wrappers_and_shells() {
+        let t = norm(&["sh", "-c", "a && exec b"]);
+        assert_eq!(
+            shape(&t),
+            ("binary", "b", None, None, vec!["sh", "exec"], None)
+        );
+        let t = norm(&["env", "A=1", "node", "s.js"]);
+        assert_eq!(
+            shape(&t),
+            ("script", "s.js", None, Some("node"), vec!["env"], None)
+        );
+        let t = norm(&["tini", "--", "python", "-m", "x"]);
+        assert_eq!(
+            shape(&t),
+            ("py_module", "x", None, Some("python"), vec!["tini"], None)
+        );
+        // `python -m` a launcher: re-read as that launcher.
+        let t = norm(&["python", "-m", "uvicorn", "app.main:app", "--port", "80"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "module_attr",
+                "app.main",
+                Some("app"),
+                Some("uvicorn"),
+                vec!["python"],
+                None
+            )
+        );
+        assert_eq!(t.args, argv(&["--port", "80"]));
+        // Leading assignments, and FLASK_APP from them.
+        let t = norm(&["FLASK_APP=web.app", "flask", "run"]);
+        assert_eq!(
+            shape(&t),
+            ("flask_app", "web.app", None, Some("flask"), vec![], None)
+        );
+        // A plain binary keeps its args.
+        let t = norm(&["/bin/server", "--port", "80"]);
+        assert_eq!(
+            shape(&t),
+            ("binary", "/bin/server", None, None, vec![], None)
+        );
+        assert_eq!(t.args, argv(&["--port", "80"]));
+        // java -cp: a main class.
+        let t = norm(&["java", "-cp", "app.jar:lib/*", "hipstershop.AdService"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "java_main",
+                "hipstershop.AdService",
+                None,
+                Some("java"),
+                vec![],
+                None
+            )
+        );
+        // Shell chains: the last command of `;` / `&&` / `||` / `&`, the
+        // first of its pipeline; redirections, comments and quotes read.
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "cd /app; python app.py 2>&1 | tee /var/log/app.log",
+                &["python", "app.py"],
+            ),
+            (
+                "set -e\n# start\nexec node 'dist/main.js' >/dev/null",
+                &["exec", "node", "dist/main.js"],
+            ),
+            (
+                "npm ci || true && node \"srv/a b.js\"",
+                &["node", "srv/a b.js"],
+            ),
+            (
+                "export X=$(cat v) && exec ruby run.rb &>log",
+                &["exec", "ruby", "run.rb"],
+            ),
+            ("python a.py \\\n  --flag", &["python", "a.py", "--flag"]),
+        ];
+        for (s, words) in cases {
+            assert_eq!(split_shell(s), Some(argv(words)), "{s:?}");
+        }
+        let t = norm(&["bash", "-c", "cd /app; python app.py 2>&1 | tee x.log"]);
+        assert_eq!(
+            shape(&t),
+            ("script", "app.py", None, Some("python"), vec!["bash"], None)
+        );
+    }
+
+    #[test]
+    fn refusals() {
+        let t = norm(&["$APP"]);
+        assert_eq!(
+            shape(&t),
+            ("binary", "$APP", None, None, vec![], Some("dynamic"))
+        );
+        let t = norm(&["python", "${ENTRY}"]);
+        assert_eq!(t.refusal(), Some("dynamic"));
+        assert_eq!(t.target, "${ENTRY}");
+        // `exec "$@"`: the start's own argv handed on, a later reader's.
+        let t = norm(&["sh", "-c", "exec \"$@\""]);
+        assert_eq!(
+            shape(&t),
+            (
+                "binary",
+                "$@",
+                None,
+                None,
+                vec!["sh", "exec"],
+                Some("dynamic")
+            )
+        );
+        let t = norm(&["gunicorn", "$APP_MODULE"]);
+        assert_eq!(t.refusal(), Some("dynamic"));
+        // What a line scanner does not read.
+        for s in [
+            "if [ -f x ]; then exec a; else exec b; fi",
+            "f() { exec a; }; f",
+            "(cd x && exec a)",
+            "cat <<EOF\nx\nEOF",
+            "exec $(which node) a.js",
+            "exec node 'a.js",
+            "case $1 in a) x;; esac",
+        ] {
+            let t = norm(&["sh", "-c", s]);
+            assert_eq!(t.refusal(), Some("dynamic"), "{s:?} -> {t:?}");
+            assert_eq!(t.form, TargetForm::Shell, "{s:?}");
+        }
+        // Inline code.
+        assert_eq!(
+            norm(&["python", "-c", "print(1)"]).refusal(),
+            Some("inline")
+        );
+        assert_eq!(norm(&["node", "-e", "x()"]).refusal(), Some("inline"));
+        assert_eq!(norm(&["npx", "-c", "x"]).refusal(), Some("inline"));
+        // No target.
+        assert_eq!(norm(&[]).refusal(), Some("no_target"));
+        assert_eq!(norm(&["A=1"]).refusal(), Some("no_target"));
+        assert_eq!(norm(&["exec"]).refusal(), Some("no_target"));
+        assert_eq!(norm(&["celery", "worker"]).refusal(), Some("no_target"));
+        assert_eq!(norm(&["flask", "run"]).refusal(), Some("no_target"));
+        assert_eq!(
+            norm(&["yarn", "workspace", "api"]).refusal(),
+            Some("no_target")
+        );
+        assert_eq!(
+            norm(&["sh", "-c", "# nothing"]).refusal(),
+            Some("no_target")
+        );
+        // Depth: four hops read, a fifth refused.
+        let four = norm(&["tini", "--", "gosu", "u", "env", "nohup", "node", "a.js"]);
+        assert_eq!(
+            shape(&four),
+            (
+                "script",
+                "a.js",
+                None,
+                Some("node"),
+                vec!["tini", "gosu", "env", "nohup"],
+                None
+            )
+        );
+        let five = norm(&[
+            "tini", "--", "gosu", "u", "env", "nohup", "exec", "node", "a.js",
+        ]);
+        assert_eq!(five.refusal(), Some("depth"));
+        assert_eq!(five.chain, vec!["tini", "gosu", "env", "nohup"]);
+        assert_eq!(five.target, "node");
+    }
+
+    #[test]
+    fn forms_name_their_rules() {
+        let names: Vec<&str> = [
+            TargetForm::Script,
+            TargetForm::PyModule,
+            TargetForm::ModuleAttr,
+            TargetForm::CeleryApp,
+            TargetForm::FlaskApp,
+            TargetForm::PkgScript,
+            TargetForm::Jar,
+            TargetForm::JavaMain,
+            TargetForm::Dll,
+            TargetForm::Wrapper,
+            TargetForm::Shell,
+            TargetForm::Framework,
+            TargetForm::Binary,
+        ]
+        .iter()
+        .map(|f| f.as_str())
+        .collect();
+        assert_eq!(
+            names,
+            [
+                "script",
+                "py_module",
+                "module_attr",
+                "celery_app",
+                "flask_app",
+                "pkg_script",
+                "jar",
+                "java_main",
+                "dll",
+                "wrapper",
+                "shell",
+                "framework",
+                "binary"
+            ]
+        );
+        assert_eq!(Refusal::Depth.as_str(), "depth");
     }
 }
