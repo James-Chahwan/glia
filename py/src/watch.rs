@@ -1,12 +1,17 @@
 //! pyo3 surface for `glia_engine::watch` (DC.9): the `WatchSession` class, one
-//! repo's incremental build held open in the process, registered through this
-//! module's own `ModuleFns`. The engine does the work (DC.7a-c); this module
-//! is transport.
+//! repo's (GA.11: or several repos') incremental build held open in the
+//! process, registered through this module's own `ModuleFns`. The engine does
+//! the work (DC.7a-c, GA.9); this module is transport.
 //!
-//! - `WatchSession(repo, overlay=True, memory_budget_mb=None)` opens the
-//!   session: it loads the repo's parse cache sidecar once, walks and builds
-//!   (`WatchSession::open`). `ValueError` when it cannot (the path is not a
-//!   directory), as `generate` raises for a build error. `memory_budget_mb`
+//! - `WatchSession(repo, overlay=True, memory_budget_mb=None, with_repos=None,
+//!   out=None)` opens the session: it loads the repo's parse cache sidecar
+//!   once, walks and builds (`WatchSession::open_many` of `[repo, *with_repos]`,
+//!   one joint build in that order, as `generate_many` builds them).
+//!   `ValueError` when it cannot (a path is not a directory, two roots are one
+//!   directory or one lies inside another), as `generate` raises for a build
+//!   error, and before anything is read when `with_repos` is given without
+//!   `out` (GA.11: a joint layout never overwrites a repo's own
+//!   `.glia/graph`). `memory_budget_mb`
 //!   (GA.12) replaces the budget the engine read from
 //!   `GLIA_MEMORY_BUDGET_MB` (`0`: none; `None` keeps the env's): a process
 //!   RSS target past which the session evicts its cached group builds, then
@@ -27,11 +32,15 @@
 //!   costs), marked with the session's `overlay`. A later `apply` never
 //!   changes a snapshot the caller still serves.
 //! - `persist()`: writes the current graph as the repo's layout
-//!   `<repo>/.glia/graph/` (writer `watch`), then the held parse cache beside
-//!   it. A session opened with `overlay=False` is refused (`ValueError`) and
-//!   writes nothing, as `PyGraph.save_to_default` refuses an
-//!   `overlay=False` graph: the default dir holds the overlay-applied graph.
-//!   A write error is an `OSError`.
+//!   `<repo>/.glia/graph/` (writer `watch`), or as the layout at `out` when the
+//!   session was opened with one (GA.11), then each repo's held parse cache
+//!   beside that repo's root. A default-dir persist of a session opened with
+//!   `overlay=False` is refused (`ValueError`) and writes nothing, as
+//!   `PyGraph.save_to_default` refuses an `overlay=False` graph: the default
+//!   dir holds the overlay-applied graph (an explicit `out`, like
+//!   `save_to(dir)`, takes either). A write error is an `OSError`.
+//! - `roots` (GA.11, a read-only property): the session's roots as given,
+//!   `repo` first, then `with_repos` in order.
 //!
 //! - `memory()` -> dict (GA.12): what the session holds, the engine's
 //!   `WatchMemory`: `{rss_kb, budget_mb, cached_groups, groups,
@@ -50,7 +59,8 @@
 //!
 //! fired_on, on stderr: `[watch] session repo=<repo> overlay=<true|false>
 //! surface=py` once per constructed session (CK.1's `surface=py`
-//! convention), after the engine's `[watch] open ...` line. The engine's
+//! convention; GA.11: ` repos=<n> out=<dir>` before `surface=py` when
+//! `with_repos` is given), after the engine's `[watch] open ...` line. The engine's
 //! `[watch] update` / `noop` / `poll` lines follow per call.
 //!
 //! The pyfunction-free helpers ([`open_session`], [`update_json`],
@@ -71,26 +81,43 @@ use crate::convert::to_py;
 use crate::graph::{PyGraph, default_dir_refusal};
 use crate::registry::ModuleFns;
 
-/// The fired_on line a constructed session prints.
-fn session_marker(repo: &str, overlay: bool) -> String {
-    format!("[watch] session repo={repo} overlay={overlay} surface=py")
+/// The fired_on line a constructed session prints; `joint` is the root count
+/// and `out` dir of a `with_repos` session.
+fn session_marker(repo: &str, overlay: bool, joint: Option<(usize, &str)>) -> String {
+    let joint = joint.map_or_else(String::new, |(n, out)| format!(" repos={n} out={out}"));
+    format!("[watch] session repo={repo} overlay={overlay}{joint} surface=py")
 }
 
-/// Open the session behind `WatchSession(repo, overlay, memory_budget_mb)`,
-/// minus pyo3: the engine's open with the overlay switched as asked, the
-/// budget replaced when one is given, then the marker. `Err` is the engine's
-/// message.
+/// GA.11: the refusal of `with_repos` without `out`.
+const WITH_NEEDS_OUT: &str =
+    "with_repos needs out; a joint layout never overwrites a repo's own .glia/graph";
+
+/// Open the session behind `WatchSession(repo, overlay, memory_budget_mb,
+/// with_repos, out)`, minus pyo3: `with_repos` without `out` refused before
+/// anything is read, then the engine's open of `[repo, *with_repos]` with the
+/// overlay switched as asked, the budget replaced when one is given, then
+/// the marker. `Err` is the refusal or the engine's message.
 fn open_session(
     repo: &str,
     overlay: bool,
     memory_budget_mb: Option<u64>,
+    with_repos: &[String],
+    out: Option<&str>,
 ) -> Result<WatchSession, String> {
+    let joint = match (with_repos.is_empty(), out) {
+        (true, _) => None,
+        (false, Some(out)) => Some((with_repos.len() + 1, out)),
+        (false, None) => return Err(WITH_NEEDS_OUT.to_string()),
+    };
+    let roots: Vec<String> = std::iter::once(repo.to_string())
+        .chain(with_repos.iter().cloned())
+        .collect();
     let opts = BuildOptions::default().with_overlay(overlay);
-    let mut session = WatchSession::open(repo, &opts)?;
+    let mut session = WatchSession::open_many(&roots, &opts)?;
     if let Some(mb) = memory_budget_mb {
         session.set_memory_budget(MemoryBudget::mb(mb));
     }
-    eprintln!("{}", session_marker(repo, overlay));
+    eprintln!("{}", session_marker(repo, overlay, joint));
     Ok(session)
 }
 
@@ -115,21 +142,29 @@ enum PersistError {
     Write(String),
 }
 
-/// `persist()` minus pyo3: the layout at the repo's default dir, then the
-/// parse cache beside it; refused before any write for an overlay-free
+/// `persist()` minus pyo3: the layout at `out` when given (GA.11), else at
+/// the repo's default dir, then each repo's parse cache beside its root; a
+/// default-dir persist is refused before any write for an overlay-free
 /// session. Returns the layout dir.
 fn persist_default(
     session: &WatchSession,
     repo: &str,
     overlay: bool,
+    out: Option<&str>,
 ) -> Result<PathBuf, PersistError> {
-    let dir = default_layout_dir(Path::new(repo));
-    if let Some(why) = default_dir_refusal(overlay) {
-        return Err(PersistError::Refused(format!(
-            "persist({}): {why}",
-            dir.display()
-        )));
-    }
+    let dir = match out {
+        Some(out) => PathBuf::from(out),
+        None => {
+            let dir = default_layout_dir(Path::new(repo));
+            if let Some(why) = default_dir_refusal(overlay) {
+                return Err(PersistError::Refused(format!(
+                    "persist({}): {why}",
+                    dir.display()
+                )));
+            }
+            dir
+        }
+    };
     session
         .persist(&dir)
         .map_err(|e| PersistError::Write(format!("persist({}): {e}", dir.display())))?;
@@ -151,7 +186,11 @@ fn persist_default(
 /// RuntimeError "Already borrowed"). ValueError when `repo` is not a
 /// directory. `memory_budget_mb` bounds the session's caches by the
 /// process's RSS (0: none; None keeps GLIA_MEMORY_BUDGET_MB's); `memory()`
-/// reports what the session holds.
+/// reports what the session holds. `with_repos` watches more repos with
+/// `repo` as one joint build (`roots` lists them) and needs `out`, the dir
+/// `persist()` writes the joint layout to (ValueError without it): a joint
+/// layout never overwrites a repo's own .glia/graph. `out` alone moves a
+/// one-repo session's persist there.
 #[pyclass(name = "WatchSession")]
 pub(crate) struct PyWatchSession {
     session: WatchSession,
@@ -159,26 +198,43 @@ pub(crate) struct PyWatchSession {
     repo: String,
     /// Whether the session's builds apply `.glia/overlay.toml`.
     overlay: bool,
+    /// GA.11: the layout dir `persist()` writes, when not the default.
+    out: Option<String>,
 }
 
 #[pymethods]
 impl PyWatchSession {
     #[new]
-    #[pyo3(signature = (repo, overlay=true, memory_budget_mb=None))]
+    #[pyo3(signature = (repo, overlay=true, memory_budget_mb=None, with_repos=None, out=None))]
     fn new(
         py: Python<'_>,
         repo: &str,
         overlay: bool,
         memory_budget_mb: Option<u64>,
+        with_repos: Option<Vec<String>>,
+        out: Option<String>,
     ) -> PyResult<Self> {
+        let with_repos = with_repos.unwrap_or_default();
         let session = py
-            .detach(|| open_session(repo, overlay, memory_budget_mb))
+            .detach(|| open_session(repo, overlay, memory_budget_mb, &with_repos, out.as_deref()))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             session,
             repo: repo.to_string(),
             overlay,
+            out,
         })
+    }
+
+    /// The session's roots as given: `repo`, then each of `with_repos` in
+    /// order (the build order).
+    #[getter]
+    fn roots(&self) -> Vec<String> {
+        self.session
+            .roots()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Bring the session up to date with `paths`, the files and directories
@@ -239,12 +295,14 @@ impl PyWatchSession {
     }
 
     /// Write the current graph as the repo's layout `<repo>/.glia/graph/`
-    /// (what `load_from_gmap` reads), then the session's parse cache beside
-    /// it. ValueError, writing nothing, for a session opened with
-    /// `overlay=False`; OSError when a write fails.
+    /// (what `load_from_gmap` reads), or as the layout at `out` when the
+    /// session was opened with one, then each repo's parse cache beside its
+    /// root. ValueError, writing nothing, for a default-dir persist of a
+    /// session opened with `overlay=False`; OSError when a write fails.
     fn persist(&self, py: Python<'_>) -> PyResult<()> {
         let (session, repo, overlay) = (&self.session, self.repo.as_str(), self.overlay);
-        match py.detach(|| persist_default(session, repo, overlay)) {
+        let out = self.out.as_deref();
+        match py.detach(|| persist_default(session, repo, overlay, out)) {
             Ok(_) => Ok(()),
             Err(PersistError::Refused(why)) => Err(PyValueError::new_err(why)),
             Err(PersistError::Write(why)) => Err(PyOSError::new_err(why)),
@@ -262,7 +320,8 @@ inventory::submit! { ModuleFns { name: "watch", add: register } }
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistError, memory_json, open_session, persist_default, session_marker, update_json,
+        PersistError, WITH_NEEDS_OUT, memory_json, open_session, persist_default, session_marker,
+        update_json,
     };
     use std::path::{Path, PathBuf};
 
@@ -328,7 +387,7 @@ mod tests {
     fn update_json_keys() {
         let root = python_repo("keys");
         let path = root.to_str().expect("utf-8 temp path").to_string();
-        let mut s = open_session(&path, true, None).expect("open");
+        let mut s = open_session(&path, true, None, &[], None).expect("open");
         std::fs::write(
             root.join("a.py"),
             "def foo():\n    return bar() + 1\n\ndef bar():\n    return 1\n\ndef baz():\n    return 3\n",
@@ -376,27 +435,27 @@ mod tests {
         let path = root.to_str().expect("utf-8 temp path").to_string();
         let before = tree(&root);
 
-        let bare = open_session(&path, false, None).expect("open overlay=false");
-        match persist_default(&bare, &path, false) {
+        let bare = open_session(&path, false, None, &[], None).expect("open overlay=false");
+        match persist_default(&bare, &path, false, None) {
             Err(PersistError::Refused(why)) => assert!(why.contains("overlay=False"), "{why}"),
             other => panic!("an overlay=false session must be refused: {other:?}"),
         }
         assert_eq!(tree(&root), before, "the refusal wrote nothing");
 
-        let mut s = open_session(&path, true, None).expect("open");
+        let mut s = open_session(&path, true, None, &[], None).expect("open");
         s.apply(&[root.join("b.py")]).expect("apply");
         assert_eq!(
             tree(&root),
             before,
             "open and apply write nothing under the repo"
         );
-        let dir = persist_default(&s, &path, true).expect("persist");
+        let dir = persist_default(&s, &path, true, None).expect("persist");
         assert!(dir.join("manifest.json").is_file(), "{:?}", tree(&root));
         assert!(dir.join("parse_cache.bin").is_file(), "{:?}", tree(&root));
         let _ = std::fs::remove_dir_all(&root);
 
         let missing = std::env::temp_dir().join(format!("glia-dc9-missing-{}", std::process::id()));
-        assert!(open_session(missing.to_str().expect("utf-8"), true, None).is_err());
+        assert!(open_session(missing.to_str().expect("utf-8"), true, None, &[], None).is_err());
     }
 
     /// GA.12: `memory()`'s keys, in order, and a budget of 1 MB (below any
@@ -417,7 +476,7 @@ mod tests {
         ];
         let root = python_repo("memory");
         let path = root.to_str().expect("utf-8 temp path").to_string();
-        let mut s = open_session(&path, true, Some(1)).expect("open");
+        let mut s = open_session(&path, true, Some(1), &[], None).expect("open");
         let text = memory_json(&s.memory()).expect("serialises");
         let order = key_order(&text, &KEYS);
         assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
@@ -451,8 +510,63 @@ mod tests {
     #[test]
     fn marker_text() {
         assert_eq!(
-            session_marker("/r", false),
+            session_marker("/r", false, None),
             "[watch] session repo=/r overlay=false surface=py"
         );
+        assert_eq!(
+            session_marker("/r", true, Some((2, "/o"))),
+            "[watch] session repo=/r overlay=true repos=2 out=/o surface=py"
+        );
+    }
+
+    /// GA.11: `with_repos` without `out` is refused before anything is read
+    /// (nothing written under either repo); with `out`, the session holds
+    /// both roots in order, an edit in the second repo is one update naming
+    /// it `<root>:<rel>`, and `persist()` writes the joint layout to `out`,
+    /// never a repo's own layout (each repo's parse cache beside its root).
+    #[test]
+    fn with_repos_needs_out_and_persists_there() {
+        let first = python_repo("with-a");
+        let second = python_repo("with-b");
+        let (a, b) = (
+            first.to_str().expect("utf-8 temp path").to_string(),
+            second.to_str().expect("utf-8 temp path").to_string(),
+        );
+        let (before_a, before_b) = (tree(&first), tree(&second));
+        match open_session(&a, true, None, std::slice::from_ref(&b), None) {
+            Err(e) => assert_eq!(e, WITH_NEEDS_OUT),
+            Ok(_) => panic!("with_repos without out must be refused"),
+        }
+        assert_eq!((tree(&first), tree(&second)), (before_a, before_b.clone()));
+
+        let out = std::env::temp_dir().join(format!("glia-ga11-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let out_str = out.to_str().expect("utf-8 temp path").to_string();
+        let mut s = open_session(&a, true, None, std::slice::from_ref(&b), Some(&out_str))
+            .expect("open two repos");
+        assert_eq!(s.roots(), vec![a.as_str(), b.as_str()]);
+        std::fs::write(
+            second.join("b.py"),
+            "def b():\n    return 2\n\ndef c():\n    return b()\n",
+        )
+        .expect("edit b.py");
+        let u = s.apply(&[second.join("b.py")]).expect("apply");
+        assert_eq!(u.seq, 1);
+        assert_eq!(u.files.modified, vec![format!("{b}:b.py")]);
+        assert_eq!(tree(&second), before_b, "apply writes nothing");
+        let dir = persist_default(&s, &a, true, Some(&out_str)).expect("persist");
+        assert_eq!(dir, out);
+        assert!(out.join("manifest.json").is_file());
+        for root in [&first, &second] {
+            let own = root.join(".glia/graph");
+            assert!(!own.join("manifest.json").exists(), "{:?}", tree(root));
+            assert!(own.join("parse_cache.bin").is_file(), "{:?}", tree(root));
+        }
+        // An explicit out takes an overlay-free session too, as save_to(dir).
+        let bare = open_session(&a, false, None, &[], Some(&out_str)).expect("open");
+        assert!(persist_default(&bare, &a, false, Some(&out_str)).is_ok());
+        for d in [&first, &second, &out] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 }

@@ -1,15 +1,21 @@
 //! `glia watch` (DC.8): a foreground loop over `engine::watch::WatchSession`
 //! printing one NDJSON object per update on stdout. No daemon, socket or
-//! pidfile: the process dies with its terminal or its parent, and watches one
-//! repo.
+//! pidfile: the process dies with its terminal or its parent. It watches one
+//! repo, or (GA.11) the repo and every `--with` repo as one joint build
+//! (`WatchSession::open_many`, in argument order, as `generate_many` builds
+//! them).
 //!
 //! stdout, one JSON object per line: first the ready line
 //! `{"ready":true,"seq":0,"repo":<path>,"total_nodes":N,"total_edges":E}`
-//! once the session is open (the signal handlers are in place by then), then
+//! (with `--with`, `"repos":[<path>,..]` after `repo`: every root as given,
+//! in build order) once the session is open (the signal handlers are in place
+//! by then), then
 //! one `WatchUpdate` per update that changed the graph (`seq` moved: a
 //! touched file or a re-plan that found nothing new prints nothing), its
 //! `nodes` / `edges` rows in the delta's order (`delta::located_delta_*`). A
-//! full rebuild is one line too, however many rows it carries.
+//! full rebuild is one line too, however many rows it carries. Under `--with`
+//! the update names each file `<root>:<rel>` and each rebuilt group
+//! `<root>:<key>` (the engine's multi-repo naming).
 //!
 //! The loop. Every `--poll-ms` (at least 10; slept in 10 ms slices that check
 //! the stop flags) it runs the session's stat scan (`changed_paths`) and adds
@@ -18,17 +24,28 @@
 //! is not activity: a tick is active when the pending set grew or a pending
 //! path's (len, mtime) moved since the tick before. Once the set is non-empty
 //! and no tick was active for `--debounce-ms`, it is applied as one update
-//! and cleared.
+//! and cleared. GA.11, the max-latency cap: a set that has been non-empty for
+//! `--max-latency-ms` (default 2000) is applied at that tick even when it is
+//! still moving, so a path rewritten every tick (a log, a build output under
+//! the tree) can no longer hold every other change back for ever; a path that
+//! moves again after the update is simply pending again.
 //!
-//! Persisting. The layout (`<repo>/.glia/graph`, writer `watch`) and the
-//! parse cache are written on exit, always (the store skips unchanged
-//! shards), and every `--persist-every` seconds (0: only on exit) while the
+//! Persisting. The layout (`<repo>/.glia/graph`, writer `watch`; the
+//! `--out <dir>` when given) and the parse cache are written on exit, always
+//! (the store skips unchanged shards), and every `--persist-every` seconds (0: only on exit) while the
 //! graph holds something the last write did not: the opened build, or an
 //! update since. An interval write waits for an empty pending set and runs
 //! right after that tick's scan and update, so the graph it writes matches
 //! the disk (CD.7c stores a CODE cell as a span only when the file still
 //! matches its text). `GLIA_NO_PERSIST` is not read: like `glia build`,
 //! writing the layout is what the command is for.
+//!
+//! `--with` needs `--out` (exit 2 before anything is read: `error: --with
+//! needs --out; a joint layout never overwrites a repo's own .glia/graph`):
+//! a repo's own `.glia/graph` is its single-repo layout, which the MCP and the
+//! hooks read, so the joint layout goes only to the dir named. Each repo's
+//! parse cache is still saved beside its own root (`WatchSession::save_cache`,
+//! the sidecar a single-repo build of that repo reuses).
 //!
 //! Stopping. SIGINT and SIGTERM (unix: `signal(2)` through the libc std
 //! links, the handler only stores the signal number into an atomic), stdin
@@ -48,13 +65,15 @@
 //!
 //! fired_on markers, on stderr (besides the engine's `[watch] open` /
 //! `update` / `noop` / `poll` lines and the stages an update runs):
-//! - `[watch] listening repo=<path> poll_ms=<p> debounce_ms=<d> persist_every=<s>`
-//!   once, right before the ready line;
+//! - `[watch] listening repo=<path> poll_ms=<p> debounce_ms=<d>
+//!   max_latency_ms=<m> persist_every=<s>` (with `--with`, ` repos=<n>`
+//!   after it, the first repo included) once, right before the ready line;
 //! - `[watch] emitted seq=<s> nodes=<n> edges=<e> bytes=<b> rss_mb=<m>` per
 //!   update line printed: its node and edge rows, the line's bytes and the
 //!   process's resident set after it (`VmRSS`; `?` where `/proc/self/status`
 //!   does not give it), the series a long watch's memory is read from;
-//! - `[watch] persisted seq=<s> reason=interval|exit`;
+//! - `[watch] persisted seq=<s> reason=interval|exit` (with `--out`,
+//!   ` out=<dir>` after it, the dir as given);
 //! - the engine's `[watch] rss ..` line (GA.12) at open, per update and once
 //!   more when `--memory-budget-mb` replaces the budget the session read from
 //!   `GLIA_MEMORY_BUDGET_MB` (`0`: no budget);
@@ -80,6 +99,14 @@ use crate::common::build_options;
 pub(crate) struct Args {
     /// Path to the repo root.
     repo: String,
+    /// Another repo to watch with this one as one joint build (repeatable,
+    /// in build order); needs --out.
+    #[arg(long = "with", value_name = "REPO")]
+    with: Vec<String>,
+    /// Layout directory to persist to (default `<repo>/.glia/graph`);
+    /// required with --with, so a joint layout never overwrites a repo's own.
+    #[arg(long, value_name = "DIR")]
+    out: Option<String>,
     /// Persist the layout and parse cache every this many seconds while the
     /// graph holds unsaved updates (0: only on exit).
     #[arg(long, value_name = "S", default_value_t = 60)]
@@ -91,6 +118,10 @@ pub(crate) struct Args {
     /// applied as one update.
     #[arg(long, value_name = "N", default_value_t = 200)]
     debounce_ms: u64,
+    /// Milliseconds a pending change may wait: once the pending set is this
+    /// old it is applied even while a path keeps moving.
+    #[arg(long, value_name = "N", default_value_t = 2000)]
+    max_latency_ms: u64,
     /// Process RSS budget in MB for the session's caches (cached language
     /// group builds, build memos), evicted past it; overrides
     /// GLIA_MEMORY_BUDGET_MB (0: no budget).
@@ -216,10 +247,16 @@ struct Loop {
     pending: BTreeMap<PathBuf, Stat>,
     /// When a tick last saw activity (the pending set grew or moved).
     last_activity: Instant,
+    /// GA.11: when the pending set last went from empty to non-empty (`None`
+    /// while it is empty): the max-latency cap's clock.
+    pending_since: Option<Instant>,
     /// The graph holds something the last persist did not write.
     dirty: bool,
     last_persist: Instant,
     layout: PathBuf,
+    /// The `--out` dir as given, for the persisted marker (`None`: the
+    /// repo's default layout).
+    out: Option<String>,
 }
 
 impl Loop {
@@ -241,7 +278,20 @@ impl Loop {
                 active = true;
             }
         }
+        if !self.pending.is_empty() && self.pending_since.is_none() {
+            self.pending_since = Some(Instant::now());
+        }
         active
+    }
+
+    /// GA.11: whether the pending set is due: non-empty, and either still
+    /// for `debounce` or pending for `max_latency` (the cap).
+    fn due(&self, debounce: Duration, max_latency: Duration) -> bool {
+        !self.pending.is_empty()
+            && (self.last_activity.elapsed() >= debounce
+                || self
+                    .pending_since
+                    .is_some_and(|t| t.elapsed() >= max_latency))
     }
 
     /// Apply the pending set as one update and print it when `seq` moved.
@@ -251,6 +301,7 @@ impl Loop {
             return Ok(true);
         }
         let paths: Vec<PathBuf> = std::mem::take(&mut self.pending).into_keys().collect();
+        self.pending_since = None;
         let seq = self.session.seq();
         let update = self.session.apply(&paths).map_err(|e| Fail(2, e))?;
         if update.seq == seq {
@@ -268,8 +319,12 @@ impl Loop {
             .map_err(|e| Fail(5, format!("watch: save the parse cache: {e}")))?;
         self.dirty = false;
         self.last_persist = Instant::now();
+        let out = self
+            .out
+            .as_deref()
+            .map_or_else(String::new, |o| format!(" out={o}"));
         eprintln!(
-            "[watch] persisted seq={} reason={reason}",
+            "[watch] persisted seq={} reason={reason}{out}",
             self.session.seq()
         );
         Ok(())
@@ -309,7 +364,16 @@ pub(crate) fn run(a: Args) -> i32 {
         );
         return 2;
     }
-    let mut session = match WatchSession::open(&a.repo, &opts) {
+    if !a.with.is_empty() && a.out.is_none() {
+        eprintln!(
+            "error: --with needs --out; a joint layout never overwrites a repo's own .glia/graph"
+        );
+        return 2;
+    }
+    let roots: Vec<String> = std::iter::once(a.repo.clone())
+        .chain(a.with.iter().cloned())
+        .collect();
+    let mut session = match WatchSession::open_many(&roots, &opts) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -330,33 +394,52 @@ pub(crate) fn run(a: Args) -> i32 {
     }
     let poll = Duration::from_millis(a.poll_ms.max(SLICE_MS));
     let debounce = Duration::from_millis(a.debounce_ms);
+    let max_latency = Duration::from_millis(a.max_latency_ms);
     let interval = Duration::from_secs(a.persist_every);
     let mut w = Loop {
-        layout: default_layout_dir(Path::new(&a.repo)),
+        layout: a
+            .out
+            .as_ref()
+            .map_or_else(|| default_layout_dir(Path::new(&a.repo)), PathBuf::from),
+        out: a.out.clone(),
         pending: BTreeMap::new(),
         last_activity: Instant::now(),
+        pending_since: None,
         // The opened build is not on disk as far as this process knows.
         dirty: true,
         last_persist: Instant::now(),
         session,
     };
+    let multi = !a.with.is_empty();
+    let repos_field = if multi {
+        format!(" repos={}", roots.len())
+    } else {
+        String::new()
+    };
     eprintln!(
-        "[watch] listening repo={} poll_ms={} debounce_ms={} persist_every={}",
+        "[watch] listening repo={} poll_ms={} debounce_ms={} max_latency_ms={} persist_every={}{repos_field}",
         a.repo,
         poll.as_millis(),
         a.debounce_ms,
+        a.max_latency_ms,
         a.persist_every
     );
     let result = w.session.result();
+    let repos_json = if multi {
+        let listed = serde_json::Value::from(w.session.roots());
+        format!(",\"repos\":{listed}")
+    } else {
+        String::new()
+    };
     let ready = format!(
-        "{{\"ready\":true,\"seq\":{},\"repo\":{},\"total_nodes\":{},\"total_edges\":{}}}",
+        "{{\"ready\":true,\"seq\":{},\"repo\":{}{repos_json},\"total_nodes\":{},\"total_edges\":{}}}",
         w.session.seq(),
         serde_json::Value::String(a.repo.clone()),
         result.total_nodes,
         result.total_edges
     );
     let reason = if print_line(&ready) {
-        match watch_loop(&mut w, poll, debounce, interval) {
+        match watch_loop(&mut w, poll, debounce, max_latency, interval) {
             Ok(r) => r,
             Err(Fail(code, e)) => {
                 eprintln!("error: {e}");
@@ -381,6 +464,7 @@ fn watch_loop(
     w: &mut Loop,
     poll: Duration,
     debounce: Duration,
+    max_latency: Duration,
     interval: Duration,
 ) -> Result<&'static str, Fail> {
     loop {
@@ -390,7 +474,7 @@ fn watch_loop(
         if w.scan() {
             w.last_activity = Instant::now();
         }
-        if !w.pending.is_empty() && w.last_activity.elapsed() >= debounce && !w.apply()? {
+        if w.due(debounce, max_latency) && !w.apply()? {
             return Ok("stdout_closed");
         }
         if !interval.is_zero()

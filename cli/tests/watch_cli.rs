@@ -7,10 +7,13 @@
 //! child's stderr goes to a file in the scratch dir (never a pipe nobody
 //! drains), read once the child is gone.
 //!
-//! The fired_on markers are this surface's `[watch] listening ...`,
-//! `[watch] emitted ...`, `[watch] persisted seq=<s> reason=interval|exit` and
+//! The fired_on markers are this surface's `[watch] listening ...` (GA.11:
+//! `max_latency_ms=<m>`, and `repos=<n>` under `--with`), `[watch] emitted
+//! ...`, `[watch] persisted seq=<s> reason=interval|exit [out=<dir>]` and
 //! `[watch] exit reason=...` lines; asserting them here makes them a tested
-//! contract. Grep them from a run of the binary:
+//! contract. GA.11's tests: `--with` / `--out` over two scratch repos, the
+//! `--out` requirement, and the `--max-latency-ms` cap applying a path that
+//! never stops moving. Grep them from a run of the binary:
 //! `glia watch <repo> 2>&1 >/dev/null </dev/null | grep '^\[watch\] '`.
 
 use std::collections::BTreeMap;
@@ -27,6 +30,10 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const A_PY: &str = "def foo():\n    return bar()\n\n\ndef bar():\n    return 1\n";
 /// `foo`'s body edited; a different length, so the stat alone shows it.
 const A_PY_EDITED: &str = "def foo():\n    return bar() + 22\n\n\ndef bar():\n    return 1\n";
+
+const B_PY: &str = "def b():\n    return 2\n";
+/// `b`'s body edited, a different length.
+const B_PY_EDITED: &str = "def b():\n    return 2 + 333\n";
 
 /// A scratch dir holding a repo (`repo/`, one Python file); removed on drop
 /// (`cli` has no dev-dependencies, so no `tempfile`). Canonical, so the
@@ -49,6 +56,18 @@ impl Scratch {
 
     fn repo_str(&self) -> String {
         self.repo()
+            .to_str()
+            .expect("utf-8 scratch path")
+            .to_string()
+    }
+
+    /// GA.11: a second repo beside the first, `repo2/` with one Python
+    /// file; its path as the CLI is handed it.
+    fn second(&self) -> String {
+        std::fs::create_dir_all(self.0.join("repo2")).expect("second repo dir");
+        std::fs::write(self.0.join("repo2/b.py"), B_PY).expect("write b.py");
+        self.0
+            .join("repo2")
             .to_str()
             .expect("utf-8 scratch path")
             .to_string()
@@ -224,7 +243,7 @@ fn streams_an_update_and_persists_on_eof() {
     let err = s.stderr();
     assert!(
         err.contains(&format!(
-            "[watch] listening repo={} poll_ms=20 debounce_ms=20 persist_every=0",
+            "[watch] listening repo={} poll_ms=20 debounce_ms=20 max_latency_ms=2000 persist_every=0\n",
             s.repo_str()
         )),
         "{err}"
@@ -352,4 +371,179 @@ fn missing_dir_exits_2() {
     assert!(err.contains("error: not a directory:"), "{err}");
     assert!(out.stdout.is_empty());
     assert!(!s.0.join("nope").exists());
+}
+
+/// GA.11: `--with` watches both repos as one joint build: the ready line
+/// lists them, an edit in the second repo is one update naming its file
+/// `<label>:<rel>`, and the exit persist writes the joint layout to `--out`,
+/// never to either repo's own `.glia/graph` (each repo's parse cache is saved
+/// beside its own root, as a single-repo watch saves it).
+#[test]
+fn with_repos_persist_to_out() {
+    let s = Scratch::new("with");
+    let second = s.second();
+    let out = s.0.join("joint");
+    let out_str = out.to_str().expect("utf-8 scratch path").to_string();
+    let mut w = Watch::spawn(
+        &s,
+        &[
+            "--poll-ms",
+            "20",
+            "--debounce-ms",
+            "20",
+            "--persist-every",
+            "0",
+            "--with",
+            &second,
+            "--out",
+            &out_str,
+        ],
+    );
+    let r = ready(&mut w, &s);
+    assert_eq!(
+        r["repos"],
+        serde_json::json!([s.repo_str(), second.clone()]),
+        "{r}"
+    );
+    let staged = s.0.join("b.py.new");
+    std::fs::write(&staged, B_PY_EDITED).expect("stage the edit");
+    std::fs::rename(&staged, s.0.join("repo2/b.py")).expect("edit b.py");
+    let u = w.next_json(&s, "the update");
+    assert_eq!(u["seq"], 1, "{u}");
+    assert_eq!(
+        u["files"]["modified"],
+        serde_json::json!([format!("{second}:b.py")]),
+        "{u}"
+    );
+    assert!(u["total_nodes"].as_u64().is_some_and(|n| n > 0), "{u}");
+    drop(w.stdin.take());
+    assert_eq!(w.wait(&s), 0, "stderr:\n{}", s.stderr());
+    let err = s.stderr();
+    assert!(
+        err.contains(&format!(
+            "[watch] listening repo={} poll_ms=20 debounce_ms=20 max_latency_ms=2000 persist_every=0 repos=2\n",
+            s.repo_str()
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "[watch] persisted seq=1 reason=exit out={out_str}\n"
+        )),
+        "{err}"
+    );
+    assert!(out.join("manifest.json").is_file(), "the joint layout");
+    for root in [s.repo(), s.0.join("repo2")] {
+        let own = root.join(".glia/graph");
+        assert!(
+            !own.join("manifest.json").exists(),
+            "no layout in {}",
+            own.display()
+        );
+        assert!(
+            own.join("parse_cache.bin").is_file(),
+            "the parse cache beside {}",
+            root.display()
+        );
+    }
+}
+
+/// GA.11: `--with` without `--out` exits 2 before anything is read or
+/// written.
+#[test]
+fn with_needs_out() {
+    let s = Scratch::new("with-no-out");
+    let second = s.second();
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(["watch", &s.repo_str(), "--with", &second])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run glia watch");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(
+            "error: --with needs --out; a joint layout never overwrites a repo's own .glia/graph"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("[watch] open"), "nothing opened: {err}");
+    assert!(out.stdout.is_empty());
+    assert!(!s.repo().join(".glia").exists(), "nothing written");
+    assert!(!s.0.join("repo2/.glia").exists(), "nothing written");
+}
+
+/// GA.11, the debounce cap (0.5.2 W9's DC.8 follow-up): a file rewritten
+/// every 50 ms never stays still for `--debounce-ms`, so before the cap it was
+/// never applied while it kept moving; with `--max-latency-ms 500` the pending
+/// set is applied once it is that old, while the writer still runs.
+#[test]
+fn max_latency_applies_a_moving_path() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let s = Scratch::new("latency");
+    let mut w = Watch::spawn(
+        &s,
+        &[
+            "--poll-ms",
+            "20",
+            "--debounce-ms",
+            "200",
+            "--max-latency-ms",
+            "500",
+            "--persist-every",
+            "0",
+        ],
+    );
+    ready(&mut w, &s);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        let dir = s.0.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut i = 0usize;
+            // Bounded: a hung watch never leaves the writer running.
+            while !stop.load(Ordering::SeqCst) && started.elapsed() < TIMEOUT {
+                // Two edits of different lengths, neither the opened text,
+                // renamed in so no scan reads a half-written file.
+                let text = if i.is_multiple_of(2) {
+                    A_PY_EDITED.to_string()
+                } else {
+                    format!("{A_PY_EDITED}\n# {i}\n")
+                };
+                let staged = dir.join("a.py.new");
+                let _ = std::fs::write(&staged, text);
+                let _ = std::fs::rename(&staged, dir.join("repo/a.py"));
+                i += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let started = Instant::now();
+    let line = w.lines.recv_timeout(Duration::from_secs(8));
+    let waited = started.elapsed();
+    let still_writing = !writer.is_finished();
+    stop.store(true, Ordering::SeqCst);
+    let _ = writer.join();
+    let line = line.unwrap_or_else(|e| {
+        let _ = w.child.kill();
+        panic!(
+            "no update within 8 s of a path moving every 50 ms ({e}); stderr:\n{}",
+            s.stderr()
+        )
+    });
+    assert!(still_writing, "applied while the path was still moving");
+    let u: Value = serde_json::from_str(&line).expect("an update line");
+    assert_eq!(u["seq"], 1, "{u}");
+    assert_eq!(u["files"]["modified"], serde_json::json!(["a.py"]), "{u}");
+    drop(w.stdin.take());
+    assert_eq!(w.wait(&s), 0, "stderr:\n{}", s.stderr());
+    let err = s.stderr();
+    assert!(
+        err.contains(" max_latency_ms=500 persist_every=0\n"),
+        "{err}"
+    );
+    eprintln!("[ga11-test] first update after {} ms", waited.as_millis());
 }

@@ -411,13 +411,17 @@ glia timeline history <REPO> <QNAME> [--category <CATEGORY>] [--json]
 glia timeline as-of <REPO> <REV> [--json]
     The graph at one rev of the window (an index, or a commit id prefix of 7+ hex
     chars): its counts by category. history and as-of read the sidecar, never rebuild.
-glia watch <REPO> [--debounce-ms <N>] [--memory-budget-mb <MB>] [--persist-every <S>] [--poll-ms <N>]
+glia watch <REPO> [--debounce-ms <N>] [--max-latency-ms <N>] [--memory-budget-mb <MB>] [--out <DIR>] [--persist-every <S>] [--poll-ms <N>] [--with <REPO>]...
     Keep one repo's build open and stream what each change does to the graph: a
     foreground loop, no daemon, socket or pidfile. Prints a ready line, then one NDJSON
     object per update on stdout (the files that moved, the groups rebuilt, the totals,
     the located delta rows). Stat-polls every --poll-ms (500), applies a batch once it
-    stays still for --debounce-ms (200), and writes <repo>/.glia/graph/ and the parse
-    cache every --persist-every seconds (60; 0 = only on exit) and on exit. Stops on
+    stays still for --debounce-ms (200) or has waited --max-latency-ms (2000; a path
+    that never stops moving is applied all the same), and writes <repo>/.glia/graph/
+    (--out <DIR> instead) and the parse cache every --persist-every seconds (60; 0 =
+    only on exit) and on exit. --with <REPO> (repeatable) watches the repos as one
+    joint build and needs --out: a joint layout never overwrites a repo's own
+    .glia/graph (each repo's parse cache still sits beside its root). Stops on
     SIGINT, SIGTERM or stdin EOF with exit 0; refuses --no-overlay; 2 on a bad repo or
     a build error, 5 when a persist fails. --memory-budget-mb (else
     GLIA_MEMORY_BUDGET_MB; 0 = none) is a process RSS target: past it the session

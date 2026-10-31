@@ -2,9 +2,13 @@
 """pyo3 surface, py/src/watch.rs (DC.9): `glia_py.WatchSession`, one repo's
 incremental build held open over `glia_engine::watch` (DC.7a-c).
 
-- `WatchSession(repo, overlay=True, memory_budget_mb=None)`; ValueError when
-  `repo` is no directory. `memory_budget_mb` (GA.12) bounds the session's
-  caches by the process's RSS (0: none; None keeps GLIA_MEMORY_BUDGET_MB's).
+- `WatchSession(repo, overlay=True, memory_budget_mb=None, with_repos=None,
+  out=None)`; ValueError when `repo` is no directory. `memory_budget_mb`
+  (GA.12) bounds the session's caches by the process's RSS (0: none; None
+  keeps GLIA_MEMORY_BUDGET_MB's). GA.11: `with_repos` watches more repos as
+  one joint build (`roots`, a read-only property, lists them in order) and
+  needs `out` (ValueError before anything is read); `persist()` then writes
+  the joint layout to `out`, never a repo's own `.glia/graph`.
 - `apply(paths)` -> dict {seq, files: {added, modified, removed, reparsed,
   reused}, groups_rebuilt, body_only, full_rebuild, total_nodes, total_edges, counts,
   nodes, edges, phase_ms}; an unchanged file keeps `seq`, with no rows.
@@ -67,7 +71,8 @@ def main() -> int:
     c = Checks("watch")
     c.check("WatchSession is a class", isinstance(getattr(rg, "WatchSession", None), type))
     c.check("constructor params",
-            params(rg.WatchSession) == [("repo", None), ("overlay", True), ("memory_budget_mb", None)],
+            params(rg.WatchSession) == [("repo", None), ("overlay", True), ("memory_budget_mb", None),
+                                        ("with_repos", None), ("out", None)],
             params(rg.WatchSession))
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-watch-") as tmp:
@@ -189,6 +194,30 @@ def main() -> int:
 
         c.raises("WatchSession on a missing dir", ValueError,
                  lambda: rg.WatchSession(os.path.join(tmp, "missing")), "not a directory")
+
+        # GA.11: two repos as one session.
+        c.check("roots of a one-repo session", s.roots == [repo], s.roots)
+        left, right = watch_repo(tmp, "ga11left"), watch_repo(tmp, "ga11right")
+        before_pair = (tree(left), tree(right))
+        c.raises("with_repos without out", ValueError,
+                 lambda: rg.WatchSession(left, with_repos=[right]), "with_repos needs out")
+        c.check("the refusal read and wrote nothing", (tree(left), tree(right)) == before_pair)
+        out = os.path.join(tmp, "ga11joint")
+        pair, err = stderr_of(lambda: rg.WatchSession(left, with_repos=[right], out=out))
+        c.check("the joint marker",
+                f"[watch] session repo={left} overlay=true repos=2 out={out} surface=py" in err, err[-600:])
+        c.check("roots is both paths, in order", pair.roots == [left, right], pair.roots)
+        (pathlib.Path(right) / "b.py").write_text("def b():\n    return 2\n\ndef c():\n    return b()\n")
+        pu = pair.apply([os.path.join(right, "b.py")])
+        c.check("an edit in the second repo is an update", pu.get("seq") == 1, pu)
+        c.check("it names the file <root>:<rel>",
+                (pu.get("files") or {}).get("modified") == [f"{right}:b.py"], pu.get("files"))
+        pair.persist()
+        c.check("persist() writes the joint layout to out",
+                os.path.isfile(os.path.join(out, "manifest.json")), tree(tmp))
+        c.check("no repo's own layout is written",
+                not any(os.path.exists(os.path.join(r, ".glia", "graph", "manifest.json"))
+                        for r in (left, right)), (tree(left), tree(right)))
     return c.done()
 
 
