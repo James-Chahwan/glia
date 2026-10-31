@@ -14,7 +14,10 @@
 #   bash scripts/rank-gate.sh flags               print the common rank_eval flags (COMMON), one per line (read-only;
 #                                                 scripts/embedding-gate.sh reads them, FB.6)
 #
-# Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the clones, the copies, run/ and sem/), CARGO_TARGET_DIR
+# Env: GLIA_RANK_GATE_JOBS (snapshots run n at a time, default 1), GLIA_RANK_GATE_FIRST (the label started first, default
+# glia: the longest run, ~70% of a serial full check, so with JOBS=3 it runs as its own job while the other snapshots run
+# 2 at a time beside it; GP.7), GLIA_RANK_GATE_ONLY (below),
+# GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the clones, the copies, run/ and sem/), CARGO_TARGET_DIR
 # (where rank_eval is built; default <this checkout>/target), FASTEMBED_CACHE_DIR (default ~/.cache/glia/fastembed;
 # never a repo dir). GLIA_RANK_PRIVATE is unset: the gate runs public modes only, and only https snapshots marked
 # `"public": true` are ever fetched.
@@ -93,9 +96,15 @@ if [ -n "$ONLY" ]; then
   done <<< "$ROWS")
   [ -n "$ROWS" ] || { say "check: FAILED (GLIA_RANK_GATE_ONLY matched no snapshot: $ONLY)"; exit 2; }
 fi
-# GLIA_RANK_GATE_JOBS=<n>: snapshots run n at a time (default 1, the measured order).
+# GLIA_RANK_GATE_JOBS=<n>: snapshots run n at a time (default 1, the measured order). closeout.py passes 3 for the
+# fast tier and the full tier alike.
 JOBS=${GLIA_RANK_GATE_JOBS:-1}
 [[ "$JOBS" =~ ^[1-9]$ ]] || { say "check: FAILED (GLIA_RANK_GATE_JOBS takes 1..9)"; exit 2; }
+# GLIA_RANK_GATE_FIRST=<label>: the snapshot the run queue starts first (GP.7). It occupies one job slot for its whole
+# run, so the others share the remaining JOBS-1 slots beside it; the run order never reaches a verdict (each snapshot
+# is its own rank_eval process with its own output files), and the verdicts are read in snapshots.json order.
+FIRST=${GLIA_RANK_GATE_FIRST:-glia}
+[[ "$FIRST" =~ ^[A-Za-z0-9._-]*$ ]] || { say "check: FAILED (GLIA_RANK_GATE_FIRST takes a label)"; exit 2; }
 
 do_fetch() {
   exec 8>"$DIR/.fetch.lock"
@@ -156,12 +165,21 @@ do_run() {
     say "run label=$label queries=$q s=$(( $(date +%s) - t0 ))"
   }
   rm -f "$RUN/.failed"
+  # The queue: the FIRST label's row, then every other row in snapshots.json order.
+  local queue order="" wall0
+  queue=$(while read -r name url rev label flags; do
+      [ "$label" = "$FIRST" ] && echo "$name $url $rev $label $flags"; done <<< "$ROWS"
+    while read -r name url rev label flags; do
+      [ "$label" = "$FIRST" ] || echo "$name $url $rev $label $flags"; done <<< "$ROWS")
+  wall0=$(date +%s)
   while read -r name url rev label flags; do
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+    order+="${order:+,}$label"
     # shellcheck disable=SC2086
     run_one "$name" "$url" "$rev" "$label" $flags &
-  done <<< "$ROWS"
+  done <<< "$queue"
   wait
+  say "run wall s=$(( $(date +%s) - wall0 )) jobs=$JOBS order=$order"
   [ ! -f "$RUN/.failed" ] || exit 2
 }
 

@@ -22,8 +22,14 @@ schedule --verify, render the next wave, commit.
 
 Prints a DELTA against the previous baseline so an unexpected blind spot,
 partial, forbid violation or missing cell is visible instead of buried.
+
+Every line it prints ends `[t+<n>s, step <m>s]` (elapsed, and since the line before), on stdout, in the
+recorded log (WF/closeout-<tag>w<wave>.log) and in the commit body, and the close-out ends on
+`[closeout] timing fmt=<s> clippy=<s> tests=<s> rustdoc=<s> rank_gate=<s> cohort_gate=<s> wheel=<s>
+bench=<s> engram=<s> total=<s>` (GP.7; a step that did not run reads `-`).
 """
 import glob, json, os, re, shutil, subprocess, sys, time
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -59,6 +65,14 @@ RANK_CODE_PATHS = ("engine/src/rank/", "engine/src/intent/", "engine/src/calibra
                    "code-domain/src/profile.rs", "engine/examples/rank_eval.rs", "bench/rank-gate/",
                    "scripts/rank-gate.sh")
 RANK_FAST = "shell,websocket,samples,commons-lang,commons-io"
+# GP.7: both tiers run the rank gate's snapshots 3 at a time (an explicit GLIA_RANK_GATE_JOBS wins). In the full tier
+# rank-gate.sh starts the glia snapshot first (GLIA_RANK_GATE_FIRST, W20-W27: 475-516 s of a ~690 s serial run), so it
+# runs as its own job while the other five run 2 at a time beside it. To go back to the serial full tier, set
+# GLIA_RANK_GATE_JOBS=1 (or drop the `if fast` guard below).
+RANK_GATE_JOBS = "3"
+# GP.7: the `[closeout] timing` steps, in the order the line prints them. clippy is in the line but no close-out
+# step runs it yet, so it reads `-` until one does.
+TIMING_STEPS = ("fmt", "clippy", "tests", "rustdoc", "rank_gate", "cohort_gate", "wheel", "bench", "engram")
 # James 2026-10-30 ("it's not small repos all the time ... we've built enough waves we might wanna do the full"):
 # the fast tiers are per wave, but every FULL_GATES_EVERY waves since a gate's last full check it runs in full,
 # so a big-repo regression surfaces within a few waves of its cause. baseline.json `gates_last_full` holds
@@ -269,9 +283,34 @@ def main():
     full_due = {g: wave - int(last_full.get(g, wave)) >= FULL_GATES_EVERY for g in ("rank", "cohort")}
     gates, lines = [], []
     t0 = time.time()
-    # stdout carries each step's elapsed wall time (James 2026-10-30: see where a close-out's time goes);
-    # the recorded lines stay as they were.
-    say = lambda s: (print(f"{s}  [t+{int(time.time() - t0)}s]"), lines.append(s))
+    # Each line carries the close-out's elapsed wall time and the time since the line before it, on stdout AND in
+    # the recorded lines (the WF log and the commit body; James 2026-10-30: see where a close-out's time goes, GP.7).
+    said_at = [t0]
+
+    def say(s):
+        now = time.time()
+        s = f"{s}  [t+{int(now - t0)}s, step {int(now - said_at[0])}s]"
+        said_at[0] = now
+        print(s)
+        lines.append(s)
+
+    # GP.7: seconds per named close-out step (TIMING_STEPS), summed over every block of that step.
+    timing = {}
+
+    @contextmanager
+    def step(name):
+        s0 = time.time()
+        try:
+            yield
+        finally:
+            timing[name] = timing.get(name, 0.0) + time.time() - s0
+
+    tag = f"r{release}-" if release else "leap-" if leap else ""
+    record = WF / f"closeout-{tag}w{wave}.log"
+
+    def write_record():
+        WF.mkdir(parents=True, exist_ok=True)
+        record.write_text("\n".join(lines) + "\n")
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
     py = LEAP_PY if (leap or release) else "python3"   # every command that imports the wheel (glia_py)
 
@@ -313,7 +352,8 @@ def main():
         gates.append(f"repo disk free {free_repo:.1f}G < 40G")
     # --no-fail-fast: without it cargo stops at the first failing test binary, so one red binary hides
     # every other and the passed count is a fraction of the suite (0.5.1 W2: 262 of ~3,400 ran).
-    out, _ = sh("cargo test --workspace --no-fail-fast --quiet 2>&1", timeout=2400)
+    with step("tests"):
+        out, _ = sh("cargo test --workspace --no-fail-fast --quiet 2>&1", timeout=2400)
     # Keep the full output: a one-line count cannot say which test or crate failed.
     WF.mkdir(parents=True, exist_ok=True)
     (WF / f"ws-test-{f'r{release}-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
@@ -323,7 +363,8 @@ def main():
     say(f"== cargo test --workspace: {passed} passed, {failed} failed, {comp} compile errors")
     if failed or comp:
         gates.append("workspace tests")
-    fmt_ok, fmt_marker = fmt_check()
+    with step("fmt"):
+        fmt_ok, fmt_marker = fmt_check()
     say(fmt_marker)
     if not fmt_ok:
         gates.append("fmt")
@@ -333,12 +374,14 @@ def main():
             o, _ = sh(f"git show --name-only --format= {c}")
             touched.update(l.strip() for l in o.splitlines() if l.strip())
     full_doc = not remaining or any(full_due.values()) or os.environ.get("GLIA_RUSTDOC_FULL") == "1"
-    rustdoc_ok, rustdoc_marker = rustdoc_check(None if full_doc else touched_crates(touched))
+    with step("rustdoc"):
+        rustdoc_ok, rustdoc_marker = rustdoc_check(None if full_doc else touched_crates(touched))
     say(rustdoc_marker)
     if not rustdoc_ok:
         gates.append("rustdoc")
     # byte_identical stays its own test target (FH.18's keep-list, engine/build.rs KEEP).
-    out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
+    with step("tests"):
+        out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
     bi = "2 passed; 0 failed" in out
     say(f"== byte_identical: {'green' if bi else 'RED'}")
     if not bi:
@@ -346,7 +389,8 @@ def main():
     # engram-export is outside the workspace, so the workspace tests above never compile it (LG.13).
     # Gate on its own last-line prefix (scripts/check-neuropil.sh prints `[neuropil-check] ...`).
     # SKIPPED fails too: here Engram is the sibling checkout, so a skip means nothing was checked.
-    out, _ = sh("bash scripts/check-engram-export.sh 2>&1", timeout=1800)
+    with step("engram"):
+        out, _ = sh("bash scripts/check-engram-export.sh 2>&1", timeout=1800)
     last = (out.strip().splitlines() or [""])[-1]
     say(f"== {last}")
     if not last.startswith("[engram-export] check: ok"):
@@ -355,117 +399,122 @@ def main():
     # has bench/rank-gate/gate.json. A wave whose packet commits touch no ranked path skips it; the
     # release's last close-out (nothing remaining) always checks, then requires full coverage.
     # closeout's sh lets TimeoutExpired escape: catch it so a slow check is a failed gate, not a crash.
-    rank_gate_ok, rank_line = False, ""
-    if (ROOT / "bench/rank-gate/gate.json").exists():
-        ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
-        if remaining and not ranked:
-            say("== [rank-gate] check: skipped - wave touched no ranked path")
-        else:
-            try:
-                fast = (remaining and not full_due["rank"] and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
-                        and not any(p.startswith(RANK_CODE_PATHS) for p in touched))
-                if not fast:
-                    last_full["rank"] = wave
-                env = f"GLIA_RANK_GATE_ONLY={RANK_FAST} GLIA_RANK_GATE_JOBS=3 " if fast else ""
-                out, _ = sh(f"{env}bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
-                (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
-                last = rank_line = (out.strip().splitlines() or [""])[-1]
-                say(f"== {last}")
-                rank_gate_ok = last.startswith("[rank-gate] check: ok")
-                if not rank_gate_ok:
-                    gates.append("rank gate")
-            except subprocess.TimeoutExpired:
-                say(f"== [rank-gate] check: FAILED (timeout after {RANK_GATE_TIMEOUT}s)")
-                gates.append("rank gate (timeout)")
-            if not remaining:
-                out, _ = sh("bash scripts/rank-gate.sh coverage 2>&1")
-                last = (out.strip().splitlines() or [""])[-1]
-                say(f"== {last}")
-                if not last.startswith("[rank-gate] coverage: ok"):
-                    gates.append("rank gate coverage")
-    cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release, full_due["cohort"])
+    with step("rank_gate"):
+        rank_gate_ok, rank_line = False, ""
+        if (ROOT / "bench/rank-gate/gate.json").exists():
+            ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
+            if remaining and not ranked:
+                say("== [rank-gate] check: skipped - wave touched no ranked path")
+            else:
+                try:
+                    fast = (remaining and not full_due["rank"] and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
+                            and not any(p.startswith(RANK_CODE_PATHS) for p in touched))
+                    if not fast:
+                        last_full["rank"] = wave
+                    jobs = os.environ.get("GLIA_RANK_GATE_JOBS", RANK_GATE_JOBS)
+                    env = (f"GLIA_RANK_GATE_ONLY={RANK_FAST} " if fast else "") + f"GLIA_RANK_GATE_JOBS={jobs} "
+                    out, _ = sh(f"{env}bash scripts/rank-gate.sh check 2>&1", timeout=RANK_GATE_TIMEOUT)
+                    (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+                    last = rank_line = (out.strip().splitlines() or [""])[-1]
+                    say(f"== {last}")
+                    rank_gate_ok = last.startswith("[rank-gate] check: ok")
+                    if not rank_gate_ok:
+                        gates.append("rank gate")
+                except subprocess.TimeoutExpired:
+                    say(f"== [rank-gate] check: FAILED (timeout after {RANK_GATE_TIMEOUT}s)")
+                    gates.append("rank gate (timeout)")
+                if not remaining:
+                    out, _ = sh("bash scripts/rank-gate.sh coverage 2>&1")
+                    last = (out.strip().splitlines() or [""])[-1]
+                    say(f"== {last}")
+                    if not last.startswith("[rank-gate] coverage: ok"):
+                        gates.append("rank gate coverage")
+    with step("cohort_gate"):
+        cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release, full_due["cohort"])
     if "(partial: only" not in cohort_line and "skipped" not in cohort_line:
         last_full["cohort"] = wave
     say(cohort_line)
     if cohort_fail:
         gates.append(cohort_fail)
 
-    sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
-    out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
-    wheels = sorted(WHEELS.glob(WHEEL_GLOB), key=lambda p: p.stat().st_mtime)
-    if wheels:
-        sh(f"{py} -m pip install --force-reinstall --no-deps -q {wheels[-1]}")
-    so, _ = sh(f"{py} -c \"import glia_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(glia_py.__file__),'*.so'))[0])\"")
-    stale, _ = sh(f"find {' '.join(CRATES)} -name '*.rs' -newer {so.strip()}")
-    stamp, _ = sh(f"{py} -c 'import glia_py as r; print(r.build_stamp())'")
-    say(f"== wheel: {wheels[-1].name if wheels else f'NO {WHEEL_GLOB}'} build rc={rc}, "
-        f"stale={len(stale.split())}, stamp {stamp.strip()}")
-    if rc or not wheels or stale.strip():
-        gates.append("wheel rebuild/stale")
-    # LG.6a: the installed wheel's surface (module name included: py/api_surface/lib.txt's
-    # `pymodule` line) against the committed snapshots.
-    out, rc = sh(f"{py} py/check_api_surface.py 2>&1")
-    say(f"== api surface: {(out.strip().splitlines() or ['(no output)'])[-1]}")
-    if rc:
-        gates.append("py/check_api_surface.py")
-    # A12: the CLI and the installed wheel report the same message contracts.
-    out, rc = sh(f"PYTHON={py} bash bench/message-contracts/check.sh 2>&1")
-    say(f"== message-contracts: {(out.strip().splitlines() or ['(no output)'])[-1]}")
-    if rc:
-        gates.append("bench/message-contracts/check.sh")
-    # LD.2: the pyo3 surface behaves as its convention says, over the wheel just installed.
-    # One file per py/src module; each ends on `[surface] <module>: N checks, M failed`.
-    for t in sorted((ROOT / "py/tests/surface").glob("test_*.py")):
-        out, rc = sh(f"{py} {t.relative_to(ROOT)} 2>&1")
-        say(f"== pyo3 surface {t.stem}: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+    with step("wheel"):
+        sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
+        out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
+        wheels = sorted(WHEELS.glob(WHEEL_GLOB), key=lambda p: p.stat().st_mtime)
+        if wheels:
+            sh(f"{py} -m pip install --force-reinstall --no-deps -q {wheels[-1]}")
+        so, _ = sh(f"{py} -c \"import glia_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(glia_py.__file__),'*.so'))[0])\"")
+        stale, _ = sh(f"find {' '.join(CRATES)} -name '*.rs' -newer {so.strip()}")
+        stamp, _ = sh(f"{py} -c 'import glia_py as r; print(r.build_stamp())'")
+        say(f"== wheel: {wheels[-1].name if wheels else f'NO {WHEEL_GLOB}'} build rc={rc}, "
+            f"stale={len(stale.split())}, stamp {stamp.strip()}")
+        if rc or not wheels or stale.strip():
+            gates.append("wheel rebuild/stale")
+        # LG.6a: the installed wheel's surface (module name included: py/api_surface/lib.txt's
+        # `pymodule` line) against the committed snapshots.
+        out, rc = sh(f"{py} py/check_api_surface.py 2>&1")
+        say(f"== api surface: {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
-            gates.append(f"pyo3 surface ({t.stem})")
+            gates.append("py/check_api_surface.py")
+        # A12: the CLI and the installed wheel report the same message contracts.
+        out, rc = sh(f"PYTHON={py} bash bench/message-contracts/check.sh 2>&1")
+        say(f"== message-contracts: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+        if rc:
+            gates.append("bench/message-contracts/check.sh")
+        # LD.2: the pyo3 surface behaves as its convention says, over the wheel just installed.
+        # One file per py/src module; each ends on `[surface] <module>: N checks, M failed`.
+        for t in sorted((ROOT / "py/tests/surface").glob("test_*.py")):
+            out, rc = sh(f"{py} {t.relative_to(ROOT)} 2>&1")
+            say(f"== pyo3 surface {t.stem}: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+            if rc:
+                gates.append(f"pyo3 surface ({t.stem})")
 
-    rp, _ = sh(f"{py} run.py --no-log 2>/dev/null", cwd=SG)
-    fixtures = len([p for p in (SG / "fixtures").iterdir() if (p / "key.json").exists()])
-    bs, bsl = section(rp, "BLIND SPOTS (recall 0.00)")
-    mn, mnl = section(rp, "MISSING NODES")
-    pa, pal = section(rp, "PARTIAL (0 < recall < 1)")
-    fv, fvl = section(rp, "FORBID VIOLATIONS")
-    mc, mcl = section(rp, "MISSING CELLS")
-    ge, gel = section(rp, "GRADER ERRORS (fixture NOT in the matrix)")
-    say(f"== run.py: {fixtures} fixtures | blind {bs} | missing nodes {mn} | partial {pa} | forbid {fv} | missing cells {mc} | grader errors {ge}")
-    old = base["run_py"]
-    for label, now, prev in (("blind", bsl, old.get("blind_list", [])), ("partial", pal, old.get("partial_list", [])),
-                             ("forbid", fvl, old.get("forbid_list", [])), ("missing cells", mcl, old.get("missing_cells_list", [])),
-                             ("missing nodes", mnl, old.get("missing_nodes_list", []))):
-        new, gone = sorted(set(now) - set(prev)), sorted(set(prev) - set(now))
-        if new:
-            say(f"   NEW {label}: {new}")
-        if gone:
-            say(f"   cleared {label}: {gone}")
-    if ge:
-        gates.append(f"grader errors: {gel}")
+    with step("bench"):
+        rp, _ = sh(f"{py} run.py --no-log 2>/dev/null", cwd=SG)
+        fixtures = len([p for p in (SG / "fixtures").iterdir() if (p / "key.json").exists()])
+        bs, bsl = section(rp, "BLIND SPOTS (recall 0.00)")
+        mn, mnl = section(rp, "MISSING NODES")
+        pa, pal = section(rp, "PARTIAL (0 < recall < 1)")
+        fv, fvl = section(rp, "FORBID VIOLATIONS")
+        mc, mcl = section(rp, "MISSING CELLS")
+        ge, gel = section(rp, "GRADER ERRORS (fixture NOT in the matrix)")
+        say(f"== run.py: {fixtures} fixtures | blind {bs} | missing nodes {mn} | partial {pa} | forbid {fv} | missing cells {mc} | grader errors {ge}")
+        old = base["run_py"]
+        for label, now, prev in (("blind", bsl, old.get("blind_list", [])), ("partial", pal, old.get("partial_list", [])),
+                                 ("forbid", fvl, old.get("forbid_list", [])), ("missing cells", mcl, old.get("missing_cells_list", [])),
+                                 ("missing nodes", mnl, old.get("missing_nodes_list", []))):
+            new, gone = sorted(set(now) - set(prev)), sorted(set(prev) - set(now))
+            if new:
+                say(f"   NEW {label}: {new}")
+            if gone:
+                say(f"   cleared {label}: {gone}")
+        if ge:
+            gates.append(f"grader errors: {gel}")
 
-    sh(f"{py} run.py --no-log --emit >/dev/null 2>&1", cwd=SG)
-    _, lchk = sh(f"{py} run.py --no-log --check >/dev/null 2>&1", cwd=SG)
-    if lchk:
-        gates.append("run.py --check (legacy-latest.json)")
-    mo, _ = sh(f"{py} matrix.py --emit 2>&1", cwd=SG)
-    # CF.13a: the summary APPENDS `, <n> n/a` (matrix_vocab.NOT_APPLICABLE cells with no fixture);
-    # optional, so a pre-CF.13a matrix.py still parses as 0 n/a.
-    m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown(?:, (\d+) n/a)?", mo)
-    _, chk = sh(f"{py} matrix.py --check >/dev/null 2>&1", cwd=SG)
-    tm, _ = sh(f"{py} test_matrix.py 2>&1 | tail -1", cwd=SG)
-    tg, _ = sh(f"{py} test_grade.py 2>&1 | tail -1", cwd=SG)
-    full, part, none_, unk = map(int, m.groups()[:4]) if m else (0, 0, 0, 0)
-    na = int(m.group(5) or 0) if m else 0
-    # grid = the APPLICABLE cells: the n/a cells are neither covered nor work left, so they stay
-    # out of both numbers and are reported alongside.
-    grid = full + part + none_ + unk
-    covered = full + part + none_
-    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown, {na} n/a = {covered}/{grid} | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
-    if chk:
-        gates.append("matrix --check")
-    if " 0 failed" not in tm:
-        gates.append("test_matrix")
-    if "all passed" not in tg:
-        gates.append("test_grade")
+        sh(f"{py} run.py --no-log --emit >/dev/null 2>&1", cwd=SG)
+        _, lchk = sh(f"{py} run.py --no-log --check >/dev/null 2>&1", cwd=SG)
+        if lchk:
+            gates.append("run.py --check (legacy-latest.json)")
+        mo, _ = sh(f"{py} matrix.py --emit 2>&1", cwd=SG)
+        # CF.13a: the summary APPENDS `, <n> n/a` (matrix_vocab.NOT_APPLICABLE cells with no fixture);
+        # optional, so a pre-CF.13a matrix.py still parses as 0 n/a.
+        m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown(?:, (\d+) n/a)?", mo)
+        _, chk = sh(f"{py} matrix.py --check >/dev/null 2>&1", cwd=SG)
+        tm, _ = sh(f"{py} test_matrix.py 2>&1 | tail -1", cwd=SG)
+        tg, _ = sh(f"{py} test_grade.py 2>&1 | tail -1", cwd=SG)
+        full, part, none_, unk = map(int, m.groups()[:4]) if m else (0, 0, 0, 0)
+        na = int(m.group(5) or 0) if m else 0
+        # grid = the APPLICABLE cells: the n/a cells are neither covered nor work left, so they stay
+        # out of both numbers and are reported alongside.
+        grid = full + part + none_ + unk
+        covered = full + part + none_
+        say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown, {na} n/a = {covered}/{grid} | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
+        if chk:
+            gates.append("matrix --check")
+        if " 0 failed" not in tm:
+            gates.append("test_matrix")
+        if "all passed" not in tg:
+            gates.append("test_grade")
 
     # fold followups into remaining packets
     rem = {p for w in remaining for p in w}
@@ -529,7 +578,6 @@ def main():
 
     if remaining:
         flag = f"--release {release} " if release else "--leap " if leap else ""
-        tag = f"r{release}-" if release else "leap-" if leap else ""
         out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{tag}wave{wave+1}.js")
         say("== " + out.strip().replace("\n", " | "))
 
@@ -550,7 +598,8 @@ def main():
     if not gates and rank_gate_ok and "(partial: only" not in rank_line:
         # The ratchet: the green check's trims become baseline/current (only the moved ones); a
         # fast-tier (partial) check never ratchets.
-        out, rc = sh("bash scripts/rank-gate.sh ratchet 2>&1")
+        with step("rank_gate"):
+            out, rc = sh("bash scripts/rank-gate.sh ratchet 2>&1")
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
             gates.append("rank gate ratchet")
@@ -558,12 +607,18 @@ def main():
         # FH.12's ratchet: the green full check's results become the baseline when they moved (held
         # while a reach decline sits inside the tolerance, so the baseline never creeps down). A
         # wave's fast-tier check is partial and never ratchets; the release's full check does.
-        out, rc = sh("bash scripts/cohort-gate.sh ratchet 2>&1")
+        with step("cohort_gate"):
+            out, rc = sh("bash scripts/cohort-gate.sh ratchet 2>&1")
         say(f"== {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
             gates.append("cohort gate ratchet")
+    # GP.7: where the close-out's time went, one line on stdout, in the WF log and in the commit body.
+    say("[closeout] timing " + " ".join(f"{k}={int(timing[k]) if k in timing else '-'}" for k in TIMING_STEPS)
+        + f" total={int(time.time() - t0)}")
+    write_record()
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")
+        write_record()
         sys.exit(1)
     what = f"0.{release[1]}.{release[2]} wave W{wave}" if release else f"leap wave W{wave}" if leap else f"wave {wave}"
     msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/{grid}"
@@ -579,6 +634,7 @@ def main():
                  + "dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
+    write_record()
     # Build caches grow by tens of GB a wave (0.5.1: target/ reached 219G and engram-export/target 59G,
     # and W1's gate died on "No space left on device"). rustc's incremental cache is the bulk and is
     # safe to drop: the next build is slower, never different. Every third landed wave, drop it.
