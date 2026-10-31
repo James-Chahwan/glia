@@ -522,7 +522,20 @@ pub(crate) fn resolve_imports_python(
     imports: &[ImportStmt],
     same: &mut SameStem,
 ) {
+    if let Some(line) = resolve_imports_dotted(g, imports, same).marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// [`resolve_imports_python`] without the GD.9 star marker, returning the
+/// star counts it prints.
+fn resolve_imports_dotted(
+    g: &mut RepoGraph,
+    imports: &[ImportStmt],
+    same: &mut SameStem,
+) -> PyStars {
     let mut ns = Namespaces::default();
+    let mut stars = PyStars::read(g, imports);
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
@@ -585,6 +598,18 @@ pub(crate) fn resolve_imports_python(
                 let target_module_qname =
                     resolve_module_reference(&stmt.from_module, module, *level);
 
+                // GD.9: `from m import *` names no symbol: the importer
+                // IMPORTS the module (or package `__init__`) it reads, and
+                // `PyStars` follows the star for the names imported through it.
+                if name == STAR {
+                    if let Some(source) = py_module(g, &target_module_qname)
+                        && source != from_mod_id
+                    {
+                        import_edge(g, from_mod_id, source, RULE_STAR_IMPORT, stmt.line);
+                    }
+                    continue;
+                }
+
                 // Try `module::name` as a submodule first — matches Python's
                 // `from pkg import mod` → edge to pkg.mod if submodule exists.
                 let submodule_qname = if target_module_qname.is_empty() {
@@ -622,12 +647,15 @@ pub(crate) fn resolve_imports_python(
                 {
                     // `from pkg.mod import Name` — target is a symbol inside pkg.mod.
                     import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
+                    // GD.9: a name the module only star-imports binds through
+                    // the star (the IMPORTS edge stays on the module).
                     if let Some(symbol_id) = g
                         .symbols
                         .module_symbols
                         .get(&target_mod_id)
                         .and_then(|t| t.get(name))
                         .copied()
+                        .or_else(|| stars.through(g, target_mod_id, name))
                     {
                         g.symbols
                             .module_import_bindings
@@ -640,6 +668,20 @@ pub(crate) fn resolve_imports_python(
                     // C#): bind its member, never another namespace's
                     // same-named type. A same-stem pair no rule picked from
                     // keeps the tail's class guess, as before.
+                    // GD.9: `from pkg import name` where `pkg` is a package:
+                    // its `__init__` defines the name or star-imports it.
+                    if !sym_refused
+                        && let Some((symbol_id, rule)) =
+                            stars.package_name(g, &target_module_qname, name)
+                    {
+                        import_edge(g, from_mod_id, symbol_id, rule, stmt.line);
+                        g.symbols
+                            .module_import_bindings
+                            .entry(from_mod_id)
+                            .or_default()
+                            .insert(bound, symbol_id);
+                        continue;
+                    }
                     let step = if sym_refused {
                         NsStep::Fallthrough
                     } else {
@@ -670,6 +712,175 @@ pub(crate) fn resolve_imports_python(
     }
     if let Some(line) = ns.marker() {
         eprintln!("{line}");
+    }
+    stars
+}
+
+/// GD.9: the imported name of a star import (`from m import *`), the form
+/// the Python parser records it in.
+const STAR: &str = "*";
+/// GD.9: IMPORTS rule of a star import's edge to the module it reads.
+const RULE_STAR_IMPORT: &str = "star_import";
+/// GD.9: IMPORTS rule of `from pkg import name` bound through a star
+/// re-export (`pkg/__init__.py`: `from .core import *`).
+const RULE_STAR_REEXPORT: &str = "star_reexport";
+/// GD.9: IMPORTS rule of `from pkg import name` bound to a name
+/// `pkg/__init__.py` defines itself.
+const RULE_PACKAGE_INIT: &str = "package_init";
+/// GD.9: the longest star chain followed (`a` star-imports `b`, which
+/// star-imports `c`, ..).
+const MAX_STAR_DEPTH: usize = 8;
+
+/// The MODULE a Python module path names: the module file `qname`, else the
+/// package's `__init__` (`pkg` -> `pkg::__init__`).
+fn py_module(g: &RepoGraph, qname: &str) -> Option<NodeId> {
+    if qname.is_empty() {
+        return None;
+    }
+    g.symbols
+        .module_by_qname
+        .get(qname)
+        .or_else(|| g.symbols.module_by_qname.get(&format!("{qname}::__init__")))
+        .copied()
+}
+
+/// GD.9: every star import of one [`resolve_imports_python`] call, read
+/// before any statement binds so statement order never matters.
+///
+/// A star import gives its importer every public name of its source
+/// (Python's rule: no leading `_`; `__all__` is not read, so a module that
+/// narrows its star with `__all__` still re-exports its every public
+/// top-level def). A name is looked up in a source's own top-level defs, then
+/// through that source's stars, the later star statement first (a later
+/// star rebinds the name), at most [`MAX_STAR_DEPTH`] hops, each module
+/// once (cycle guard). A name a module binds by a named import
+/// (`from .core import helper`) is not followed.
+///
+/// fired_on, once per call that read a star import:
+///   `[imports] python star reexports=<star imports bound to an in-repo module> bound=<names bound through one>`
+#[derive(Debug, Default)]
+struct PyStars {
+    /// Importer MODULE -> the in-repo modules it star-imports, in statement
+    /// order, each once.
+    sources: HashMap<NodeId, Vec<NodeId>>,
+    /// Star imports whose source is an in-repo module.
+    reexports: usize,
+    /// Symbol imports bound through a star.
+    bound: usize,
+}
+
+impl PyStars {
+    fn read(g: &RepoGraph, imports: &[ImportStmt]) -> PyStars {
+        let mut stars = PyStars::default();
+        for stmt in imports {
+            let ImportTarget::Symbol {
+                module,
+                name,
+                level,
+                ..
+            } = &stmt.target
+            else {
+                continue;
+            };
+            if name != STAR {
+                continue;
+            }
+            let Some(from) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
+                continue;
+            };
+            let qname = resolve_module_reference(&stmt.from_module, module, *level);
+            let Some(source) = py_module(g, &qname).filter(|s| *s != from) else {
+                continue;
+            };
+            stars.reexports += 1;
+            let list = stars.sources.entry(from).or_default();
+            if !list.contains(&source) {
+                list.push(source);
+            }
+        }
+        stars
+    }
+
+    /// `name` as `module` re-exports it through its stars (not its own
+    /// defs: the caller looks those up first). Counts a hit as bound.
+    fn through(&mut self, g: &RepoGraph, module: NodeId, name: &str) -> Option<NodeId> {
+        if self.sources.is_empty() || name.starts_with('_') {
+            return None;
+        }
+        let mut seen = vec![module];
+        let hit = self.walk(g, module, name, 0, &mut seen);
+        if hit.is_some() {
+            self.bound += 1;
+        }
+        hit
+    }
+
+    fn walk(
+        &self,
+        g: &RepoGraph,
+        module: NodeId,
+        name: &str,
+        depth: usize,
+        seen: &mut Vec<NodeId>,
+    ) -> Option<NodeId> {
+        if depth >= MAX_STAR_DEPTH {
+            return None;
+        }
+        for &source in self.sources.get(&module)?.iter().rev() {
+            if seen.contains(&source) {
+                continue;
+            }
+            seen.push(source);
+            if let Some(id) = g
+                .symbols
+                .module_symbols
+                .get(&source)
+                .and_then(|t| t.get(name))
+            {
+                return Some(*id);
+            }
+            if let Some(id) = self.walk(g, source, name, depth + 1, seen) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// `from <package> import <name>` where `<package>` names no module
+    /// file: the package `__init__`'s own def (rule `package_init`), else
+    /// the name through its stars (rule `star_reexport`).
+    fn package_name(
+        &mut self,
+        g: &RepoGraph,
+        package: &str,
+        name: &str,
+    ) -> Option<(NodeId, &'static str)> {
+        if package.is_empty() {
+            return None;
+        }
+        let init = *g
+            .symbols
+            .module_by_qname
+            .get(&format!("{package}::__init__"))?;
+        if let Some(id) = g
+            .symbols
+            .module_symbols
+            .get(&init)
+            .and_then(|t| t.get(name))
+        {
+            return Some((*id, RULE_PACKAGE_INIT));
+        }
+        self.through(g, init, name)
+            .map(|id| (id, RULE_STAR_REEXPORT))
+    }
+
+    fn marker(&self) -> Option<String> {
+        (self.reexports > 0).then(|| {
+            format!(
+                "[imports] python star reexports={} bound={}",
+                self.reexports, self.bound
+            )
+        })
     }
 }
 
@@ -1383,7 +1594,7 @@ fn resolve_module_reference(from_module: &str, module_ref: &str, level: u32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{build_dotted, build_typescript, build_typescript_family};
+    use crate::build::{build_dotted, build_python, build_typescript, build_typescript_family};
     use crate::test_support::repo;
     use glia_code_domain::evidence::Evidence;
     use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, cell_type};
@@ -3997,6 +4208,200 @@ mod tests {
             pre.edges
                 .iter()
                 .all(|e| e.category != edge_category::IMPORTS)
+        );
+    }
+
+    // ---- GD.9: Python star re-exports through a package `__init__` ----------
+
+    /// `from <module> import <name>` (`level` dots) in `fp`.
+    fn py_import(mut fp: FileParse, from: &str, module: &str, name: &str, level: u32) -> FileParse {
+        fp.imports.push(ImportStmt {
+            from_module: from.to_string(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: name.to_string(),
+                alias: None,
+                level,
+            },
+            line: 0,
+        });
+        fp
+    }
+
+    /// `main.py`: `from pkg import <name>` and `run()` calling `<name>()`.
+    fn py_main(name: &str) -> FileParse {
+        let mut fp = py_import(
+            file("main.py", "main", "main", &["run"]),
+            "main",
+            "pkg",
+            name,
+            0,
+        );
+        fp.calls.push(CallSite {
+            from: func("main::run"),
+            qualifier: CallQualifier::Bare(name.to_string()),
+            line: 3,
+        });
+        fp
+    }
+
+    fn py_star_build(parses: Vec<FileParse>) -> (RepoGraph, Option<String>) {
+        let imports = all_imports(&parses);
+        let g = build_python(repo(), parses).expect("build");
+        // The resolver's own count, replayed on the built symbol table.
+        let mut replay = g.clone();
+        replay.edges.clear();
+        replay.symbols.module_import_bindings.clear();
+        let mut same = same_stem_table(&replay);
+        let marker = resolve_imports_dotted(&mut replay, &imports, &mut same).marker();
+        (g, marker)
+    }
+
+    #[test]
+    fn python_star_reexport_through_package_init_binds_as_fact() {
+        let parses = vec![
+            py_import(
+                file("pkg/__init__.py", "pkg::__init__", "__init__", &[]),
+                "pkg::__init__",
+                "core",
+                "*",
+                1,
+            ),
+            file("pkg/core.py", "pkg::core", "core", &["helper"]),
+            py_main("helper"),
+        ];
+        let (g, marker) = py_star_build(parses);
+        let helper = func("pkg::core::helper");
+        assert_eq!(
+            imports_of(&g, "main"),
+            [(helper, RULE_STAR_REEXPORT.to_string())]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS, func("main::run")),
+            [helper]
+        );
+        // The star statement itself IMPORTS the module it reads.
+        assert_eq!(
+            imports_of(&g, "pkg::__init__"),
+            [(module("pkg::core"), RULE_STAR_IMPORT.to_string())]
+        );
+        assert_eq!(
+            marker.as_deref(),
+            Some("[imports] python star reexports=1 bound=1")
+        );
+    }
+
+    #[test]
+    fn python_star_chain_later_star_wins_and_private_names_stay_out() {
+        // pkg/__init__: `from .a import *` then `from .b import *`; a stars
+        // c. `f` is in a (through c) and in b: the later star (b) wins.
+        // `deep` is only in c, two hops down. `_hidden` is private: a star
+        // never re-exports it, so the tail fallback binds it, as before.
+        let init = py_import(
+            py_import(
+                file("pkg/__init__.py", "pkg::__init__", "__init__", &[]),
+                "pkg::__init__",
+                "a",
+                "*",
+                1,
+            ),
+            "pkg::__init__",
+            "b",
+            "*",
+            1,
+        );
+        let a = py_import(file("pkg/a.py", "pkg::a", "a", &[]), "pkg::a", "c", "*", 1);
+        let parses = vec![
+            init,
+            a,
+            file("pkg/b.py", "pkg::b", "b", &["f"]),
+            file("pkg/c.py", "pkg::c", "c", &["f", "deep", "_hidden"]),
+            py_import(
+                py_import(py_main("f"), "main", "pkg", "deep", 0),
+                "main",
+                "pkg",
+                "_hidden",
+                0,
+            ),
+        ];
+        let (g, _) = py_star_build(parses);
+        let mut got = imports_of(&g, "main");
+        got.sort_by_key(|(id, rule)| (id.0, rule.clone()));
+        let mut want = vec![
+            (func("pkg::b::f"), RULE_STAR_REEXPORT.to_string()),
+            (func("pkg::c::deep"), RULE_STAR_REEXPORT.to_string()),
+            (func("pkg::c::_hidden"), "tail_unique".to_string()),
+        ];
+        want.sort_by_key(|(id, rule)| (id.0, rule.clone()));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn python_star_cycle_ends_and_package_init_def_binds() {
+        // a and b star-import each other; neither defines `missing`, so the
+        // import binds nothing (no tail candidate either). `own` is defined
+        // in the package `__init__` itself: rule package_init.
+        let parses = vec![
+            py_import(
+                file("pkg/__init__.py", "pkg::__init__", "__init__", &["own"]),
+                "pkg::__init__",
+                "a",
+                "*",
+                1,
+            ),
+            py_import(file("pkg/a.py", "pkg::a", "a", &[]), "pkg::a", "b", "*", 1),
+            py_import(file("pkg/b.py", "pkg::b", "b", &[]), "pkg::b", "a", "*", 1),
+            py_import(py_main("own"), "main", "pkg", "missing", 0),
+        ];
+        let (g, marker) = py_star_build(parses);
+        assert_eq!(
+            imports_of(&g, "main"),
+            [(func("pkg::__init__::own"), RULE_PACKAGE_INIT.to_string())]
+        );
+        assert_eq!(
+            marker.as_deref(),
+            Some("[imports] python star reexports=3 bound=0")
+        );
+    }
+
+    #[test]
+    fn python_name_a_module_only_star_imports_binds_through_the_star() {
+        // `from pkg.api import helper` where pkg/api.py does `from .core
+        // import *`: the edge stays on pkg.api (rule symbol), the binding
+        // reaches pkg.core's helper, so the call binds.
+        let parses = vec![
+            py_import(
+                file("pkg/api.py", "pkg::api", "api", &[]),
+                "pkg::api",
+                "core",
+                "*",
+                1,
+            ),
+            file("pkg/core.py", "pkg::core", "core", &["helper"]),
+            {
+                let mut fp = py_import(
+                    file("main.py", "main", "main", &["run"]),
+                    "main",
+                    "pkg.api",
+                    "helper",
+                    0,
+                );
+                fp.calls.push(CallSite {
+                    from: func("main::run"),
+                    qualifier: CallQualifier::Bare("helper".to_string()),
+                    line: 3,
+                });
+                fp
+            },
+        ];
+        let (g, _) = py_star_build(parses);
+        assert_eq!(
+            imports_of(&g, "main"),
+            [(module("pkg::api"), "symbol".to_string())]
+        );
+        assert_eq!(
+            edges_of(&g, edge_category::CALLS, func("main::run")),
+            [func("pkg::core::helper")]
         );
     }
 }

@@ -36,6 +36,15 @@
 //! GRPC_SERVER (A5.3) finds its implementing type through [`build_span_index`]
 //! and anchors through [`attach`].
 //!
+//! GD.9: a Python decorator is a registration of the def it decorates, so a
+//! site on a decorator row (`@ee.on("x")`, `@sent.connect`,
+//! `@receiver(sig)`) belongs to that def, not to the module the row sits in
+//! (the def's own POSITION starts at its `def` row, below its decorators).
+//! [`attach`] reads a `.py` / `.pyi` file's decorator blocks from its MODULE's
+//! CODE text ([`PyDecorators`]) and prefers the decorated def for a site on
+//! one. Rows outside a decorator block, and every other language, keep the
+//! span lookup.
+//!
 //! LE.4c: the queue markers (A2.8's QUEUE_PRODUCER / QUEUE_CONSUMER) are
 //! marker kinds too. The queue extractor already ties every topic node to its
 //! MODULE with CONTAINS (structural, so the publishing file does not fan the
@@ -307,6 +316,8 @@ pub fn attach(
     anchors.dedup();
 
     let idx = build_owner_index(&fp.nodes, &fp.nav);
+    let decorators = PyDecorators::read(fp, path, module_id, &idx);
+    let mut decorator_sites = 0usize;
     let mut existing: HashSet<(NodeId, NodeId, EdgeCategoryId)> = fp
         .edges
         .iter()
@@ -336,7 +347,11 @@ pub fn attach(
             order.push((a.node, a.line, kind));
             false
         });
-        if let Some(owner) = owner_of_line(&idx, a.line)
+        let decorated = decorators.as_ref().and_then(|d| d.owner(a.line));
+        if decorated.is_some() {
+            decorator_sites += 1;
+        }
+        if let Some(owner) = decorated.or_else(|| owner_of_line(&idx, a.line))
             && owner != a.node
             && let Some(edge) = owner_edge(kind, a.node, owner)
         {
@@ -370,7 +385,162 @@ pub fn attach(
         }
     }
     stats.unanchored += bogus.len();
+    if decorator_sites > 0 {
+        eprintln!("[anchor] python decorator sites attached={decorator_sites} path={path}");
+    }
     stats
+}
+
+/// GD.9: the decorator blocks of one Python file's METHODs / FUNCTIONs, as
+/// `(first decorator row, last row before the def, def id)`, 0-indexed file
+/// rows. A block is the rows directly above a def's `def` row (its POSITION
+/// start) that are decorator rows at the def's indentation, the continuation
+/// rows of a decorator's open bracket or string, blank rows and comment rows,
+/// from the topmost decorator row down; it ends at the first other row.
+///
+/// Read from the MODULE's CODE text (the Python parser stores the whole file
+/// there, its POSITION giving the first row), so it is a function of the
+/// file alone, like the rest of [`attach`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PyDecorators(Vec<(u32, u32, NodeId)>);
+
+impl PyDecorators {
+    /// The blocks of `fp`'s defs when `path` is a `.py` / `.pyi` file whose
+    /// MODULE `module_id` carries its source as CODE text; `None` otherwise,
+    /// or when no def is decorated.
+    pub fn read(
+        fp: &FileParse,
+        path: &str,
+        module_id: NodeId,
+        idx: &OwnerIndex,
+    ) -> Option<PyDecorators> {
+        let ext = path.rsplit_once('.').map(|(_, e)| e)?;
+        if !ext.eq_ignore_ascii_case("py") && !ext.eq_ignore_ascii_case("pyi") {
+            return None;
+        }
+        let module = fp.nodes.iter().find(|n| n.id == module_id)?;
+        let source = module
+            .cells
+            .iter()
+            .filter(|c| c.kind == cell_type::CODE)
+            .find_map(|c| match &c.payload {
+                CellPayload::Text(s) => Some(s.as_str()),
+                _ => None,
+            })?;
+        let first_row = position_span(module).map_or(0, |(s, _)| s);
+        Some(PyDecorators::from_source(source, first_row, idx)).filter(|d| !d.0.is_empty())
+    }
+
+    /// The blocks of the defs in `idx` over `source`, whose first line is
+    /// file row `first_row`.
+    pub fn from_source(source: &str, first_row: u32, idx: &OwnerIndex) -> PyDecorators {
+        let lines: Vec<&str> = source.split('\n').collect();
+        let open = open_rows(source);
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let mut blocks = Vec::new();
+        for &(start, _, id) in &idx.0 {
+            let Some(def_row) = start.checked_sub(first_row).map(|r| r as usize) else {
+                continue;
+            };
+            let Some(def_line) = lines.get(def_row) else {
+                continue;
+            };
+            let def_indent = indent(def_line);
+            let mut top: Option<usize> = None;
+            for r in (0..def_row).rev() {
+                if open.get(r).copied().unwrap_or(false) {
+                    continue;
+                }
+                let line = lines.get(r).copied().unwrap_or("");
+                let t = line.trim_start();
+                if t.starts_with('@') && indent(line) == def_indent {
+                    top = Some(r);
+                } else if !(t.is_empty() || t.starts_with('#')) {
+                    break;
+                }
+            }
+            if let (Some(top), Some(last)) = (top, def_row.checked_sub(1)) {
+                let row = |r: usize| first_row.saturating_add(u32::try_from(r).unwrap_or(u32::MAX));
+                blocks.push((row(top), row(last), id));
+            }
+        }
+        blocks.sort_unstable_by_key(|&(d, e, id)| (d, e, id.0));
+        PyDecorators(blocks)
+    }
+
+    /// The def whose decorator block holds file row `line`.
+    pub fn owner(&self, line: u32) -> Option<NodeId> {
+        self.0
+            .iter()
+            .find(|(d, e, _)| *d <= line && line <= *e)
+            .map(|(_, _, id)| *id)
+    }
+}
+
+/// Per line of `source`: does it start inside an open bracket, a string or a
+/// backslash continuation (a continuation row, never a statement's first
+/// row)? A `#` comment runs to the end of its line outside a string.
+fn open_rows(source: &str) -> Vec<bool> {
+    let mut rows = vec![false];
+    let mut depth: u32 = 0;
+    let mut quote: Option<(char, bool)> = None;
+    let mut comment = false;
+    let mut escaped = false;
+    let mut cont = false;
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            comment = false;
+            // A one-quote string never spans a row without a backslash.
+            if quote.is_some_and(|(_, triple)| !triple) && !escaped {
+                quote = None;
+            }
+            rows.push(depth > 0 || quote.is_some() || cont || escaped);
+            cont = false;
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if comment {
+            i += 1;
+            continue;
+        }
+        if let Some((q, triple)) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                if !triple {
+                    quote = None;
+                } else if chars.get(i + 1) == Some(&q) && chars.get(i + 2) == Some(&q) {
+                    quote = None;
+                    i += 2;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        cont = false;
+        match c {
+            '#' => comment = true,
+            '\'' | '"' => {
+                let triple = chars.get(i + 1) == Some(&c) && chars.get(i + 2) == Some(&c);
+                quote = Some((c, triple));
+                if triple {
+                    i += 2;
+                }
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '\\' => cont = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    rows
 }
 
 /// Classify every marker node in `fp` by the edges the parse now carries:
@@ -1855,5 +2025,194 @@ mod tests {
             report_flag_read_line(expected, "r").as_deref(),
             Some("[flag-read] rehomed fn=0 module_kept=1 repo=r")
         );
+    }
+
+    /// GD.9: a Python parse of `source`: the MODULE (CODE = the source,
+    /// POSITION from row 0) plus `entries`.
+    fn py_parse(source: &str, entries: &[Entry<'_>]) -> (FileParse, NodeId) {
+        let (mut fp, module) = parse_with(entries);
+        let rows = u32::try_from(source.lines().count()).unwrap_or(0);
+        fp.nodes[0].cells = vec![
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text(source.to_string()),
+            },
+            span_cell(0, rows),
+        ];
+        (fp, module)
+    }
+
+    fn handled_by(fp: &FileParse, marker: NodeId) -> Vec<NodeId> {
+        fp.edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY && e.from == marker)
+            .map(|e| e.to)
+            .collect()
+    }
+
+    fn contains(fp: &FileParse, module: NodeId, marker: NodeId) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.category == edge_category::CONTAINS && e.from == module && e.to == marker)
+    }
+
+    #[test]
+    fn python_decorator_site_is_handled_by_the_decorated_def() {
+        // pyee: `@ee.on("x")` on row 4, the def on row 5.
+        let src = "from pyee.base import EventEmitter\n\nee = EventEmitter()\n\n\
+                   @ee.on(\"x\")\ndef on_x(order):\n    print(order)\n";
+        let (mut fp, module) = py_parse(
+            src,
+            &[
+                (node_kind::FUNCTION, "on_x", Some((5, 6))),
+                (node_kind::EVENT_HANDLER, "event_handle:x", None),
+            ],
+        );
+        let handler = id(node_kind::EVENT_HANDLER, "event_handle:x");
+        let mut anchors = vec![Anchor {
+            node: handler,
+            line: 4,
+        }];
+        let stats = attach(&mut fp, "orders.py", module, &mut anchors);
+        assert_eq!(
+            handled_by(&fp, handler),
+            vec![id(node_kind::FUNCTION, "on_x")]
+        );
+        assert!(!contains(&fp, module, handler));
+        assert_eq!(stats.to_method, 1);
+        assert_eq!(stats.to_module, 0);
+        // The marker's POSITION stays at its decorator row.
+        assert!(position_of(&fp, handler).is_some_and(|p| p.contains("\"start_line\":4")));
+    }
+
+    #[test]
+    fn python_decorator_block_spans_stacked_multiline_blank_and_comment_rows() {
+        // Rows 1-7 are one block: a stacked decorator, a decorator whose
+        // arguments run over three rows (a `)` inside a string included), a
+        // comment and a blank row; the def is on row 8.
+        let src = "import blinker\n\
+                   @other\n\
+                   @bus.on(\n\
+                   \x20   \"x)\",\n\
+                   )\n\
+                   # a comment\n\
+                   \n\
+                   @sent.connect\n\
+                   def on_sent(sender):\n\
+                   \x20   pass\n";
+        let blocks = PyDecorators::from_source(
+            src,
+            0,
+            &OwnerIndex(vec![(8, 9, id(node_kind::FUNCTION, "on_sent"))]),
+        );
+        assert_eq!(
+            blocks,
+            PyDecorators(vec![(1, 7, id(node_kind::FUNCTION, "on_sent"))])
+        );
+        for row in 1..=7 {
+            assert_eq!(blocks.owner(row), Some(id(node_kind::FUNCTION, "on_sent")));
+        }
+        assert_eq!(blocks.owner(0), None);
+        assert_eq!(blocks.owner(8), None);
+    }
+
+    #[test]
+    fn python_method_decorator_inside_a_class_takes_the_method() {
+        let src = "class Svc:\n    @bus.on(\"x\")\n    def h(self):\n        pass\n";
+        let (mut fp, module) = py_parse(
+            src,
+            &[
+                (node_kind::CLASS, "Svc", Some((0, 3))),
+                (node_kind::METHOD, "Svc::h", Some((2, 3))),
+                (node_kind::EVENT_HANDLER, "event_handle:x", None),
+            ],
+        );
+        let handler = id(node_kind::EVENT_HANDLER, "event_handle:x");
+        let mut anchors = vec![Anchor {
+            node: handler,
+            line: 1,
+        }];
+        attach(&mut fp, "svc.py", module, &mut anchors);
+        assert_eq!(
+            handled_by(&fp, handler),
+            vec![id(node_kind::METHOD, "Svc::h")]
+        );
+        assert!(!contains(&fp, module, handler));
+    }
+
+    #[test]
+    fn python_nested_decorated_def_wins_over_its_enclosing_function() {
+        let src = "def setup(ee):\n    @ee.on(\"x\")\n    def h():\n        pass\n";
+        let (mut fp, module) = py_parse(
+            src,
+            &[
+                (node_kind::FUNCTION, "setup", Some((0, 3))),
+                (node_kind::FUNCTION, "setup::h", Some((2, 3))),
+                (node_kind::EVENT_HANDLER, "event_handle:x", None),
+            ],
+        );
+        let handler = id(node_kind::EVENT_HANDLER, "event_handle:x");
+        let mut anchors = vec![Anchor {
+            node: handler,
+            line: 1,
+        }];
+        attach(&mut fp, "svc.py", module, &mut anchors);
+        assert_eq!(
+            handled_by(&fp, handler),
+            vec![id(node_kind::FUNCTION, "setup::h")]
+        );
+    }
+
+    #[test]
+    fn python_module_call_above_a_def_and_other_languages_keep_the_module() {
+        // `ee.on("x", h)` is a call, not a decorator: the module keeps it.
+        let src = "ee.on(\"x\", h)\ndef h():\n    pass\n";
+        let entries = [
+            (node_kind::FUNCTION, "h", Some((1, 2))),
+            (node_kind::EVENT_HANDLER, "event_handle:x", None),
+        ];
+        let handler = id(node_kind::EVENT_HANDLER, "event_handle:x");
+        let (mut fp, module) = py_parse(src, &entries);
+        let mut anchors = vec![Anchor {
+            node: handler,
+            line: 0,
+        }];
+        attach(&mut fp, "svc.py", module, &mut anchors);
+        assert!(handled_by(&fp, handler).is_empty());
+        assert!(contains(&fp, module, handler));
+
+        // A TS file with a decorator row above a function is untouched.
+        let src = "@on(\"x\")\nfunction h() {\n}\n";
+        let (mut fp, module) = py_parse(src, &entries);
+        let mut anchors = vec![Anchor {
+            node: handler,
+            line: 0,
+        }];
+        attach(&mut fp, "svc.ts", module, &mut anchors);
+        assert!(handled_by(&fp, handler).is_empty());
+        assert!(contains(&fp, module, handler));
+    }
+
+    #[test]
+    fn python_decorator_rows_need_the_defs_indentation() {
+        // A `@` row at another indentation (a matrix-multiply continuation,
+        // say) is no decorator of the def below it.
+        let src = "x = (a\n     @ b)\n@dec\ndef f():\n    pass\n";
+        let blocks = PyDecorators::from_source(
+            src,
+            0,
+            &OwnerIndex(vec![(3, 4, id(node_kind::FUNCTION, "f"))]),
+        );
+        assert_eq!(
+            blocks,
+            PyDecorators(vec![(2, 2, id(node_kind::FUNCTION, "f"))])
+        );
+        let src = "    @ b\ndef f():\n    pass\n";
+        let blocks = PyDecorators::from_source(
+            src,
+            0,
+            &OwnerIndex(vec![(1, 2, id(node_kind::FUNCTION, "f"))]),
+        );
+        assert_eq!(blocks, PyDecorators::default());
     }
 }

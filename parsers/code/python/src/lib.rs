@@ -1204,6 +1204,23 @@ fn collect_import_from(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) 
                     line: line_at(n),
                 });
             }
+            // GD.9: `from m import *` binds every public name of `m` (its
+            // `__all__` when it declares one); the statement is recorded as
+            // the name `*`, the glob form the Rust parser's `use m::*` uses,
+            // and the graph reads it as a star re-export through a package's
+            // `__init__.py`.
+            "wildcard_import" => {
+                acc.imports.push(ImportStmt {
+                    from_module: from_module.to_string(),
+                    target: ImportTarget::Symbol {
+                        module: module.clone(),
+                        name: "*".to_string(),
+                        alias: None,
+                        level,
+                    },
+                    line: line_at(n),
+                });
+            }
             "aliased_import" => {
                 let Some(name_n) = child.child_by_field_name("name") else {
                     continue;
@@ -3794,6 +3811,37 @@ mod tests {
             ImportTarget::Symbol { module, name, level, .. }
                 if module == "helpers" && name == "hash_password" && *level == 1
         )));
+    }
+
+    #[test]
+    fn star_import_is_recorded_as_the_glob_name() {
+        // GD.9: `from .core import *` (relative) and `from os.path import *`
+        // (absolute) are each one ImportStmt naming `*`, at the statement row.
+        let src = "\"\"\"pkg.\"\"\"\nfrom .core import *\nfrom os.path import *\n";
+        let parse = parse_file(src, "pkg/__init__.py", "pkg::__init__", repo()).unwrap();
+        let stars: Vec<(String, u32, u32)> = parse
+            .imports
+            .iter()
+            .filter_map(|i| match &i.target {
+                ImportTarget::Symbol {
+                    module,
+                    name,
+                    alias: None,
+                    level,
+                } if name == "*" => Some((module.clone(), *level, i.line)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stars,
+            vec![("core".to_string(), 1, 1), ("os.path".to_string(), 0, 2)]
+        );
+        assert!(
+            parse
+                .imports
+                .iter()
+                .all(|i| i.from_module == "pkg::__init__")
+        );
     }
 
     #[test]

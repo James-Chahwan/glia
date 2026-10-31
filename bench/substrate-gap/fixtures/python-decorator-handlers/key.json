@@ -1,0 +1,19 @@
+{
+  "framework": "python-decorator-handlers",
+  "language": "python",
+  "dirs": ["."],
+  "note": "GD.9 (FD.21). A decorator-registered blinker handler (`@sent.connect`) is HANDLED_BY the decorated def (anchor::attach reads the decorator block), and `from pkg import helper` binds through pkg/__init__.py's `from .core import *` as an import fact (rule star_reexport). Baseline HEAD cb9334e5 (debug CLI): event_handle:sent had no HANDLED_BY (module CONTAINS instead); main IMPORTS pkg::core::helper was heuristic (tail_unique).",
+  "expect_nodes": [
+    {"kind": "EVENT_HANDLER", "name": "sent", "note": "@sent.connect"},
+    {"kind": "FUNCTION", "name": "on_sent", "note": "the decorated def"},
+    {"kind": "FUNCTION", "name": "helper", "note": "pkg/core.py, re-exported by pkg/__init__.py"}
+  ],
+  "expect_edges": [
+    {"from": "event_handle:sent", "to": "on_sent", "category": "HANDLED_BY", "note": "the decorator row belongs to the def below it"},
+    {"from": "main", "to": "pkg::core::helper", "category": "IMPORTS", "note": "from pkg import helper, through pkg/__init__.py's star (rule star_reexport, fact)"},
+    {"from": "pkg::__init__", "to": "pkg::core", "category": "IMPORTS", "note": "from .core import * (rule star_import)"}
+  ],
+  "forbid": [
+    {"from": "main", "to": "event_handle:sent", "category": "CONTAINS", "note": "the handler is no longer module-anchored"}
+  ]
+}

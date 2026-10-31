@@ -225,20 +225,27 @@ fn blinker_signal_pairs_across_files() {
             .collect::<Vec<_>>(),
         vec![pair("orders::place", "event_emit:order-placed")]
     );
-    // A decorator site sits above its `def`, outside the function's span,
-    // so the handler falls back to its module, as pyee's `@ee.on("x")` does.
+    // GD.9: a decorator site sits above its `def`, outside the function's
+    // span, and belongs to the def it decorates (as pyee's `@ee.on("x")`
+    // does): HANDLED_BY the def, no module CONTAINS.
     assert_eq!(
+        edges(m, edge_category::HANDLED_BY)
+            .into_iter()
+            .filter(|(from, _)| from.starts_with("event_"))
+            .collect::<Vec<_>>(),
+        vec![pair("event_handle:order-placed", "orders::send_receipt")]
+    );
+    assert!(
         edges(m, edge_category::CONTAINS)
             .into_iter()
-            .filter(|(_, to)| to.starts_with("event_"))
-            .collect::<Vec<_>>(),
-        vec![pair("orders", "event_handle:order-placed")]
+            .all(|(_, to)| !to.starts_with("event_"))
     );
     // Both anchor edges name the binding as their rule.
     let rules: Vec<_> = m
         .all_edges()
         .filter(|e| {
             e.to == id_of(m, "event_emit:order-placed")
+                || e.from == id_of(m, "event_handle:order-placed")
                 || e.to == id_of(m, "event_handle:order-placed")
         })
         .filter(|e| e.category != edge_category::EVENT_FLOWS)
@@ -297,12 +304,21 @@ fn django_signal_pairs_across_files() {
             .collect::<Vec<_>>(),
         vec![pair("receivers::place", "event_emit:signals.order_placed")]
     );
+    // GD.9: `@receiver(sig)` is HANDLED_BY the def it decorates.
     assert_eq!(
+        edges(m, edge_category::HANDLED_BY)
+            .into_iter()
+            .filter(|(from, _)| from.starts_with("event_"))
+            .collect::<Vec<_>>(),
+        vec![pair(
+            "event_handle:signals.order_placed",
+            "receivers::send_receipt"
+        )]
+    );
+    assert!(
         edges(m, edge_category::CONTAINS)
             .into_iter()
-            .filter(|(_, to)| to.starts_with("event_"))
-            .collect::<Vec<_>>(),
-        vec![pair("receivers", "event_handle:signals.order_placed")]
+            .all(|(_, to)| !to.starts_with("event_"))
     );
 }
 
