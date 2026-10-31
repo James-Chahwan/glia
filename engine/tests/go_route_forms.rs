@@ -374,3 +374,133 @@ fn local_method_handlers_bind() {
         .count();
     assert_eq!(into_users, 0, "a HANDLED_BY edge into UsersHandler");
 }
+
+/// GD.28: the substrate-gap fixture `go-route-group-use`, written into a
+/// tempdir with its directory layout.
+fn build_group_use() -> (tempfile::TempDir, MergedGraph) {
+    const FILES: [(&str, &str); 5] = [
+        (
+            "server/go.mod",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-group-use/server/go.mod"),
+        ),
+        (
+            "server/main.go",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-group-use/server/main.go"),
+        ),
+        (
+            "server/router/authority.go",
+            include_str!(
+                "../../bench/substrate-gap/fixtures/go-route-group-use/server/router/authority.go"
+            ),
+        ),
+        (
+            "server/router/logs.go",
+            include_str!(
+                "../../bench/substrate-gap/fixtures/go-route-group-use/server/router/logs.go"
+            ),
+        ),
+        (
+            "web/src/api.ts",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-group-use/web/src/api.ts"),
+        ),
+    ];
+    let td = tempfile::tempdir().expect("tempdir");
+    for (rel, text) in FILES {
+        let path = td.path().join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+        std::fs::write(&path, text).expect("write fixture file");
+    }
+    let root = td.path().to_string_lossy().into_owned();
+    let merged = generate_one(&root).expect("generate_one").merged;
+    (td, merged)
+}
+
+/// A qname without the ` @<project>` label a multi-project layout appends
+/// (`POST /menu/addMenu @server`).
+fn unlabelled(q: &str) -> &str {
+    q.split_once(" @").map_or(q, |(bare, _)| bare)
+}
+
+/// The one node whose unlabelled qname is `q`.
+fn node_unlabelled(m: &MergedGraph, q: &str) -> NodeId {
+    let mut ids: Vec<NodeId> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.nav.qname_by_id.iter())
+        .filter(|(_, qname)| unlabelled(qname) == q)
+        .map(|(id, _)| *id)
+        .collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 1, "nodes named `{q}`: {}", ids.len());
+    ids[0]
+}
+
+/// The unlabelled qname of the ROUTE every HTTP_CALLS edge from the ENDPOINT
+/// `endpoint` reaches, sorted.
+fn called_routes(m: &MergedGraph, endpoint: &str) -> Vec<String> {
+    let from = node_unlabelled(m, endpoint);
+    let mut out: Vec<String> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.edges.iter())
+        .chain(m.cross_edges.iter())
+        .filter(|e| e.from == from && e.category == edge_category::HTTP_CALLS)
+        .filter_map(|e| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&e.to))
+                .map(|q| unlabelled(q).to_string())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// GD.28 acceptance: a gin group chained through middleware
+/// (`Router.Group("authority").Use(mw)`, one or two `.Use` links, or stored
+/// on a struct field another method registers on) keeps the group's prefix,
+/// so each route pairs with the client that calls the prefixed path. Before
+/// GD.28 the chained groups registered at the root (`POST /createAuthority`,
+/// `POST /addMenu`, `GET /getLogList`) and only the un-chained
+/// `POST /authority/getAuthorityList` paired.
+#[test]
+fn use_chained_groups_keep_their_prefix() {
+    let (_td, m) = build_group_use();
+    let routes: Vec<String> = route_qnames(&m)
+        .iter()
+        .map(|q| unlabelled(q).to_string())
+        .collect();
+    assert_eq!(
+        routes,
+        vec![
+            "GET /sysLog/getLogList".to_string(),
+            "POST /authority/createAuthority".to_string(),
+            "POST /authority/getAuthorityList".to_string(),
+            "POST /menu/addMenu".to_string(),
+        ]
+    );
+    for (endpoint, route_q) in [
+        (
+            "endpoint:POST:/authority/createAuthority",
+            "POST /authority/createAuthority",
+        ),
+        (
+            "endpoint:POST:/authority/getAuthorityList",
+            "POST /authority/getAuthorityList",
+        ),
+        ("endpoint:POST:/menu/addMenu", "POST /menu/addMenu"),
+        ("endpoint:GET:/sysLog/getLogList", "GET /sysLog/getLogList"),
+    ] {
+        assert_eq!(
+            called_routes(&m, endpoint),
+            vec![route_q.to_string()],
+            "{endpoint}"
+        );
+    }
+    assert_eq!(
+        handler_qnames(&m, node_unlabelled(&m, "GET /sysLog/getLogList")),
+        vec!["server::router::logs::getLogList".to_string()]
+    );
+}

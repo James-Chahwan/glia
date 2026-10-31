@@ -244,9 +244,11 @@ pub fn parse_file_with_modules(
     }
     let forms = &acc.route_forms;
     let mounts = &acc.mounts;
-    if forms.registrations > 0 || mounts.args + mounts.assigns > 0 {
+    // GD.28: `use_chains=`, the `.Use(..)` chains read as a router mount.
+    let use_chains = acc.field_prefixes.use_chains.borrow().len();
+    if forms.registrations > 0 || mounts.args + mounts.assigns + use_chains > 0 {
         eprintln!(
-            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={} field={}) mounts(param={} field={} args={} assigns={}) consts={} in {file_rel_path} nodes={} paths={}",
+            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={} field={}) mounts(param={} field={} args={} assigns={} use_chains={}) consts={} in {file_rel_path} nodes={} paths={}",
             forms.registrations,
             forms.positioned,
             forms.handle,
@@ -258,6 +260,7 @@ pub fn parse_file_with_modules(
             mounts.field,
             mounts.args,
             mounts.assigns,
+            use_chains,
             acc.file_consts.values.len(),
             acc.route_qnames.len(),
             acc.route_paths.len()
@@ -6029,6 +6032,11 @@ struct FieldPrefixes {
     /// CB.23: every `(struct, field)` this file assigns a group or a router
     /// root to, agreeing or not (the keys `known` is resolved from).
     assigned: BTreeSet<(String, String)>,
+    /// GD.28: the start byte of every `.Use(..)` chain the field scan or the
+    /// route walk read as a router mount ([`strip_use_chain`]), so a chain
+    /// both read counts once in the `[go-routes] .. use_chains=` marker.
+    /// Written through `&self` by both readers; only counted.
+    use_chains: std::cell::RefCell<BTreeSet<usize>>,
 }
 
 impl FieldPrefixes {
@@ -6124,6 +6132,7 @@ fn scan_field_prefixes(
         let read = GroupRead {
             types: &types,
             prefix: &prefix,
+            use_chains: &out.use_chains,
         };
         scan_field_groups(body, src, &read, &mut groups, &mut facts);
         out.scopes.insert(body.start_byte(), types);
@@ -6203,6 +6212,9 @@ fn declared_router_fields(root: TsNode, src: &[u8]) -> BTreeMap<(String, String)
 struct GroupRead<'r, 'a> {
     types: &'r BTreeMap<String, String>,
     prefix: &'r PrefixScope<'a>,
+    /// GD.28: the file's `.Use(..)` chains read as a group
+    /// ([`FieldPrefixes::use_chains`]).
+    use_chains: &'r std::cell::RefCell<BTreeSet<usize>>,
 }
 
 /// CB.11: one body's field-group facts, in source order. Local groups
@@ -6277,6 +6289,43 @@ fn scan_field_groups(
     }
 }
 
+/// GD.28: the operand under the `.Use(..)` links `value` is made of (any
+/// count, through parentheses), or `None` when `value` is no `.Use(..)`
+/// call. gin's `RouterGroup.Use` returns the group itself (IRoutes on the
+/// same base path) and fiber's `Router.Use` the router, so
+/// `Router.Group("authority").Use(mw)` holds the mount of
+/// `Router.Group("authority")`. Only `Use` is unwrapped: any other chained
+/// call keeps its reading (no mount).
+fn strip_use_chain<'t>(value: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let mut cur = value;
+    let mut links = 0usize;
+    loop {
+        let inner = match cur.kind() {
+            "parenthesized_expression" => cur.named_child(0),
+            "call_expression" => {
+                let link = cur
+                    .child_by_field_name("function")
+                    .filter(|f| f.kind() == "selector_expression")
+                    .filter(|f| {
+                        f.child_by_field_name("field")
+                            .is_some_and(|field| text_of(field, src) == "Use")
+                    })
+                    .and_then(|f| f.child_by_field_name("operand"));
+                if link.is_some() {
+                    links += 1;
+                }
+                link
+            }
+            _ => None,
+        };
+        match inner {
+            Some(next) => cur = next,
+            None => break,
+        }
+    }
+    (links > 0).then_some(cur)
+}
+
 /// CB.11: the group a field is assigned: a `.Group("<lit>")` call, or a local
 /// group var; CB.23: or a router constructor (`gin.New()`, the root, `""`);
 /// CI.5: or a group-typed parameter (its `Mount::Param`). Anything else (the
@@ -6305,6 +6354,12 @@ fn group_call_path(
     read: &GroupRead,
     groups: &HashMap<String, GroupPath>,
 ) -> Option<GroupPath> {
+    // GD.28: `<x>.Use(mw)` (any count of links) is `<x>`'s group.
+    if let Some(inner) = strip_use_chain(call, src) {
+        let group = group_value(inner, src, read, groups)?;
+        read.use_chains.borrow_mut().insert(call.start_byte());
+        return Some(group);
+    }
     if call.kind() != "call_expression" {
         return None;
     }
@@ -6318,14 +6373,36 @@ fn group_call_path(
     // DF.7: a literal, or a prefix held in a constant.
     let lit = read.prefix.prefix_text(args.named_child(0)?, src)?;
     let recv = func.child_by_field_name("operand")?;
-    let base = match recv.kind() {
+    Some(group_base(recv, src, read, groups).then(lit))
+}
+
+/// CB.11: the group a `.Group(..)` receiver continues: a local group var
+/// (CI.5: or a group-typed parameter), `x.f` with a typed `x` from field
+/// `(type of x, f)`, anything else the root. GD.28: a `.Use(..)` chain is
+/// its operand's group (a `.Group(..)` call's included).
+fn group_base(
+    recv: TsNode,
+    src: &[u8],
+    read: &GroupRead,
+    groups: &HashMap<String, GroupPath>,
+) -> GroupPath {
+    if let Some(inner) = strip_use_chain(recv, src) {
+        let base = match inner.kind() {
+            "call_expression" => group_value(inner, src, read, groups),
+            _ => Some(group_base(inner, src, read, groups)),
+        };
+        if base.is_some() {
+            read.use_chains.borrow_mut().insert(recv.start_byte());
+        }
+        return base.unwrap_or_default();
+    }
+    match recv.kind() {
         "identifier" => groups.get(text_of(recv, src)).cloned().unwrap_or_default(),
         _ => GroupPath {
             field: field_key(recv, src, read.types),
             ..GroupPath::default()
         },
-    };
-    Some(base.then(lit))
+    }
 }
 
 /// CB.11: `x.f` with an `x` this scope types -> `(type of x, f)`.
@@ -7231,9 +7308,13 @@ impl RouteScope<'_> {
         let first = call.child_by_field_name("arguments")?.named_child(0)?;
         // DF.7: a literal, or a prefix held in a constant.
         let lit = self.prefix.prefix_text(first, src)?;
+        // GD.28: a `.Use(..)` chain receiver is its operand's mount.
         let base = func
             .child_by_field_name("operand")
-            .and_then(|operand| self.receiver_mount(operand, src))
+            .and_then(|operand| match strip_use_chain(operand, src) {
+                Some(_) => self.value_mount(operand, src, true),
+                None => self.receiver_mount(operand, src),
+            })
             .unwrap_or_else(|| Mount::Const(String::new()));
         Some(mount_then(base, &lit))
     }
@@ -7241,9 +7322,18 @@ impl RouteScope<'_> {
     /// CB.23: the router mount an argument or an assigned value carries: a
     /// local that holds one, a `.Group("<lit>")` call, a router constructor
     /// (the root) or, with `fields`, a struct field this file declares
-    /// router-typed or assigns a group. Anything else (an identifier of
-    /// unknown origin included) carries none.
+    /// router-typed or assigns a group. GD.28: a `.Use(..)` chain
+    /// ([`strip_use_chain`]) carries its operand's mount. Anything else (an
+    /// identifier of unknown origin included) carries none.
     fn value_mount(&self, value: TsNode, src: &[u8], fields: bool) -> Option<Mount> {
+        if let Some(inner) = strip_use_chain(value, src) {
+            let mount = self.value_mount(inner, src, fields)?;
+            self.fields
+                .use_chains
+                .borrow_mut()
+                .insert(value.start_byte());
+            return Some(mount);
+        }
         match value.kind() {
             "identifier" => self.groups.get(text_of(value, src)).cloned(),
             "parenthesized_expression" => self.value_mount(value.named_child(0)?, src, fields),
@@ -7391,6 +7481,8 @@ fn walk_routes(
 
 /// `y := x.Group("/p")` binds `y` to `x`'s mount then `/p` (CB.11: `x` may
 /// be a struct field); CB.23: `r := gin.Default()` binds `r` to the root.
+/// GD.28: `y := x.Group("/p").Use(mw)` binds `y` as `x.Group("/p")`, and
+/// `y := g.Use(mw)` as the group local / field `g`.
 fn record_group_assignment(decl: TsNode, src: &[u8], scope: &mut RouteScope) {
     let names = named_kids(decl.child_by_field_name("left"));
     let values = named_kids(decl.child_by_field_name("right"));
@@ -7402,6 +7494,8 @@ fn record_group_assignment(decl: TsNode, src: &[u8], scope: &mut RouteScope) {
     }
     let mount = if is_router_ctor(*rhs, src) {
         Some(Mount::Const(String::new()))
+    } else if strip_use_chain(*rhs, src).is_some() {
+        scope.value_mount(*rhs, src, true)
     } else {
         scope.group_mount(*rhs, src)
     };
@@ -9709,6 +9803,109 @@ func setup(r *gin.Engine) {
         assert_eq!(route_qnames(&parse), vec!["PATCH /users/:id".to_string()]);
         assert_eq!(route_methods(&parse, route), vec!["PATCH".to_string()]);
         assert_eq!(handled_by(&parse, route), vec![bare("patchUser")]);
+    }
+
+    // ------------------------------------------------------------------------
+    // GD.28: a group chained through middleware keeps its prefix.
+    // ------------------------------------------------------------------------
+
+    /// `x := r.Group("/p").Use(mw)` is `r.Group("/p")`: gin's
+    /// `RouterGroup.Use` returns the group itself. Before GD.28 every chained
+    /// local below registered at the root (`POST /create`, `POST /add`,
+    /// `GET /x`, `GET /users/list`).
+    #[test]
+    fn use_chain_keeps_group_prefix() {
+        const SRC: &str = r#"package server
+
+func setup() {
+    r := gin.Default()
+    a := r.Group("/authority").Use(record())
+    a.POST("/create", create)
+    m := r.Group("/menu").Use(record()).Use(casbin())
+    m.POST("/add", add)
+    p := (r.Group("/p")).Use(record())
+    p.GET("/x", x)
+    u := r.Use(record())
+    u.GET("/health", health)
+    n := r.Group("/v1").Use(record()).Group("/users")
+    n.GET("/list", list)
+    plain := r.Group("/authority")
+    plain.POST("/list", listAuthority)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /health".to_string(),
+                "GET /p/x".to_string(),
+                "GET /v1/users/list".to_string(),
+                "POST /authority/create".to_string(),
+                "POST /authority/list".to_string(),
+                "POST /menu/add".to_string(),
+            ]
+        );
+        let create = route_id(repo(), "POST", "/authority/create");
+        assert_eq!(handled_by(&parse, create), vec![bare("create")]);
+    }
+
+    /// GD.28: only `Use` is unwrapped. A group chained through any other call
+    /// carries no mount, so its routes register at the root as before.
+    #[test]
+    fn non_use_chain_keeps_root_reading() {
+        const SRC: &str = r#"package server
+
+func setup() {
+    r := gin.Default()
+    o := r.Group("/other").Clone()
+    o.GET("/clone", clone)
+    w := r.Group("/wrapped").With(record())
+    w.GET("/with", with)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /clone".to_string(), "GET /with".to_string()]
+        );
+    }
+
+    /// GD.28: a chained group stored on a struct field (assigned, or keyed in
+    /// a composite literal) holds the group's prefix for a registration in
+    /// another method.
+    #[test]
+    fn use_chain_on_struct_field_keeps_prefix() {
+        const SRC: &str = r#"package server
+
+type S struct {
+    v1 gin.IRoutes
+}
+
+type T struct {
+    v2 gin.IRoutes
+}
+
+func (s *S) init(r *gin.Engine) {
+    s.v1 = r.Group("/v1").Use(record())
+}
+
+func (s *S) routes() {
+    s.v1.GET("/a", a)
+}
+
+func newT(r *gin.Engine) *T {
+    return &T{v2: r.Group("/v2").Use(record()).Use(casbin())}
+}
+
+func (t *T) routes() {
+    t.v2.GET("/b", b)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /v1/a".to_string(), "GET /v2/b".to_string()]
+        );
     }
 
     #[test]

@@ -1,0 +1,79 @@
+{
+  "framework": "go-route-group-use",
+  "language": "go",
+  "dirs": [
+    "web",
+    "server"
+  ],
+  "note": "GD.28: gin's RouterGroup.Use returns the group itself, so `x := Router.Group(\"authority\").Use(mw)` keeps the group's prefix (the gin-vue-admin shape: 61 of its 65 unpaired endpoints). Before GD.28 (2fc4daa9, debug CLI) a chained group carried no mount and registered at the root: POST /createAuthority, POST /addMenu, GET /getLogList, while the un-chained Router.Group(\"authority\") minted POST /authority/getAuthorityList; [http] paired=1 of 4. Covers one Use link, two Use links, a chained group stored on a struct field another method registers on, and the plain group beside the chained one.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "POST /authority/createAuthority"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /authority/getAuthorityList"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /menu/addMenu"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /sysLog/getLogList"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "POST /authority/createAuthority",
+      "to": "createAuthority",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /menu/addMenu",
+      "to": "addMenu",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /sysLog/getLogList",
+      "to": "getLogList",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "endpoint:POST:/authority/createAuthority",
+      "to": "POST /authority/createAuthority",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:POST:/authority/getAuthorityList",
+      "to": "POST /authority/getAuthorityList",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:POST:/menu/addMenu",
+      "to": "POST /menu/addMenu",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/sysLog/getLogList",
+      "to": "GET /sysLog/getLogList",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "POST /createAuthority",
+      "note": "the chained group's route rooted at \"\""
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /addMenu"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /getLogList"
+    }
+  ]
+}
