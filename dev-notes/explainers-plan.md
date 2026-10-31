@@ -83,3 +83,11 @@ The 0.5.6 waves (`dev-notes/leap-056-packets.json`, `schedule_056.py`) run up to
 3. **On a TTY.** Interactive keys by default (next / back / quit), or print the whole walkthrough?
 
 Ask James before building past the defaults on any of these. Whichever session hears his answer first records it here.
+
+## The spec
+
+The explainer session's full spec is `dev-notes/explainers-spec.md` on branch `explainer` (worktree
+`/home/ivy/Code/glia-explainer`; cf0ebaa7 and later). It holds packets X0-X4 and settles the three open questions above
+by default: data, not hand-drawn SVG; no terminal frames; a TTY prints the whole walkthrough. It lists four rulings left
+open for James. X3.1 / X3.2 (the `--explain` engine fills) rebase on main right before merging, because GB.1 / GB.3 edit
+trace.rs.

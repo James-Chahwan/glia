@@ -126,7 +126,13 @@
   "NEW.envhost.5": "GH.17",
   "NEW.envhost.6": "GH.18",
   "NEW.envhost.7": "GH.19",
-  "NEW.envhost.9": "GH.20"
+  "NEW.envhost.9": "GH.20",
+  "NEW.w0f.1": "GD.38",
+  "NEW.w0f.2": "GD.39",
+  "NEW.w0f.3": "GD.40",
+  "NEW.w0f.4": "GD.41",
+  "NEW.w0f.5": "GD.42",
+  "NEW.w0f.6": "GA.21"
  },
  "dropped": [
   {
@@ -319,7 +325,8 @@
     ]
    },
    "depends_on": [
-    "GD.2"
+    "GD.2",
+    "GD.38"
    ],
    "risks": "Several new bindings in one resolver: each gated by an exact type and an exact member name, never a repo-unique name (DT.5k's rule). The member-kind walk does NOT wait for heritage edges: it reads the CLASS's recorded heritage names through the module's imports (the entry_points rule), so no TS group pass is reordered. Same file as FD.9 / FD.10b / FD.13 (graph/src/calls.rs): serialised.",
    "id": "GD.3",
@@ -374,7 +381,8 @@
     ]
    },
    "depends_on": [
-    "GD.3"
+    "GD.3",
+    "GD.38"
    ],
    "risks": "Walking nested declarations credits their calls to the enclosing scope (the arrow precedent), not to a nested FUNCTION node: a nested function's own dead_symbol status is unchanged because it mints no node today.",
    "id": "GD.4",
@@ -761,6 +769,7 @@
     ]
    },
    "depends_on": [
+    "GD.38",
     "GD.4",
     "GD.9"
    ],
@@ -813,7 +822,8 @@
     ]
    },
    "depends_on": [
-    "GD.11"
+    "GD.11",
+    "GD.38"
    ],
    "risks": "TS parser chain: after FD.40.",
    "id": "GD.12",
@@ -1178,7 +1188,8 @@
     ]
    },
    "depends_on": [
-    "GD.12"
+    "GD.12",
+    "GD.38"
    ],
    "risks": "graphql.rs after FD.58; TS parser after FD.42.",
    "id": "GD.19",
@@ -2617,7 +2628,9 @@
    "acceptance": "`cargo test -p glia-parser-typescript`, `cargo test -p glia-graph`, `cargo test -p glia-engine --test engine_tests ts_type_alias_nodes:: ts_imported_type_refs::` green; clippy / rustdoc -D warnings clean for the touched crates. Debug CLI on the probe repo: all four `glia why` pairs above read `USES .. type_ref`. Debug CLI on a git-archive copy of plane @d9726d5c: `glia blast-radius <copy> packages::types::src::workspace-views::IWorkspaceView` has rows (was the no_edges absence) and `[ts-types] imported type refs bound=<b> ..` printed; record bound / unbound and the edge-count change in the commit body. Close-out: rank gate (USES is a carry edge and shell is a TS snapshot, so impact rankings may move), cohort gate.",
    "fired_on_marker": "[ts-types] imported type refs bound=<b> unbound=<u> non_type=<n>",
    "breaking": "none (graph contents only: new USES type_ref edges; blast radius / trace / liveness walk them)",
-   "depends_on": [],
+   "depends_on": [
+    "GD.38"
+   ],
    "risks": "Edge volume on DTO-heavy repos (plane's packages/types is imported everywhere): one edge per (scope, type), never per occurrence. USES is a carry edge, so a DTO's blast radius grows to every function naming it; that is the intended reading (a field rename breaks them) but rank-gate rows on shell can move: the close-out judges it.",
    "files_note": [
     "bench/substrate-gap/fixtures/ts-imported-type-refs/"
@@ -2677,7 +2690,8 @@
    "fired_on_marker": "[endpoint-fold] class_resource classes=<c> subclasses=<s> hits=<h> folded=<f> unread=<u> repo=<label>",
    "breaking": "none (graph contents only)",
    "depends_on": [
-    "GD.26"
+    "GD.26",
+    "GD.38"
    ],
    "risks": "This reads a constructor argument into a URL through a getter: a bounded, literal-only fold of the kind LA.4's const fold and the endpoint fold already do (one class chain, literal super() arguments, at most one method hop), not value flow; SECURITY.md forbids a value-flow relation, so James should confirm the shape is on the right side of that line (open question). If not, drop it: chatwoot then stays BLIND.",
    "files_note": [
@@ -3741,6 +3755,7 @@
    "fired_on_marker": "[host] lang=typescript .. ; [host-manifest] host=<h> commands=<c> config=<g> path=<p>",
    "breaking": "CLI_COMMAND / EVENT_HANDLER / CONFIG_KEY nodes and ENTRYPOINT cells in VS Code extension repos.",
    "depends_on": [
+    "GD.38",
     "GH.2",
     "GH.5"
    ],
@@ -3776,6 +3791,7 @@
    "fired_on_marker": "[host] lang=typescript ..",
    "breaking": "as NEW.plug.7, for Obsidian and webpack plugin repos.",
    "depends_on": [
+    "GD.38",
     "GH.9"
    ],
    "risks": "tapable is used outside webpack (rspack, html-webpack-plugin's own hooks); the event qname names `webpack` for all of them: acceptable, a tapable host.",
@@ -3807,6 +3823,7 @@
    "fired_on_marker": "[host] lang=typescript .. script=<s> ..",
    "breaking": "ENTRYPOINT cells on script MODULEs.",
    "depends_on": [
+    "GD.38",
     "GH.4",
     "GH.9"
    ],
@@ -4136,6 +4153,7 @@
     "GA.19",
     "GA.2",
     "GA.20",
+    "GA.21",
     "GA.3",
     "GA.4",
     "GA.5",
@@ -4179,7 +4197,12 @@
     "GD.35",
     "GD.36",
     "GD.37",
+    "GD.38",
+    "GD.39",
     "GD.4",
+    "GD.40",
+    "GD.41",
+    "GD.42",
     "GD.5",
     "GD.6",
     "GD.7",
@@ -4260,6 +4283,7 @@
     "GA.19",
     "GA.2",
     "GA.20",
+    "GA.21",
     "GA.3",
     "GA.4",
     "GA.5",
@@ -4303,7 +4327,12 @@
     "GD.35",
     "GD.36",
     "GD.37",
+    "GD.38",
+    "GD.39",
     "GD.4",
+    "GD.40",
+    "GD.41",
+    "GD.42",
     "GD.5",
     "GD.6",
     "GD.7",
@@ -4347,6 +4376,276 @@
     "GP.9"
    ],
    "risks": ""
+  },
+  {
+   "id": "GD.38",
+   "from": "NEW.w0f.1",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GD",
+   "title": "TSX / JSX files parse with tree-sitter's TSX grammar: the TS parser hard-codes LANGUAGE_TYPESCRIPT for every file, so a .tsx / .jsx / .js file's JSX is a syntax error, error recovery drops or hoists its declarations, and a React component ends as an edgeless, unlocated COMPONENT marker (or no node at all)",
+   "area": "TypeScript parser / React (James 2026-10-31: \"yeah do it\")",
+   "loc": 200,
+   "rationale": "Found re-verifying FD.40 (GD.11, TS value positions). Cause, read at HEAD: parsers/code/typescript/src/lib.rs parse_file_stats (~73) sets `tree_sitter_typescript::LANGUAGE_TYPESCRIPT` for every file; LANGUAGE_TSX is used nowhere in the workspace (`git grep LANGUAGE_TSX` empty) and no TS-parser code reads a jsx_* node. The plain TypeScript grammar has no JSX, so `<Comp ...>` is parsed as type-assertion / comparison soup and error recovery decides what survives. There is no separate React parse path: engine/src/extract.rs detect_language maps tsx / jsx / js to \"typescript\" (only `.component.ts` -> angular), so the `\"react\"` arm of parse_one_as and glia_parser_react::parse_file / is_react_file are unreachable; the React extractor (parsers/code/extractors/src/react.rs scan_component_names, a line scan) runs for every TS file and mints COMPONENT / HOOK overlays with no cells, which LB.3a's fold (graph/src/roles.rs fold_role_overlays) merges into a same-qname FUNCTION when the parser minted one and otherwise leaves standalone. GD.11's rationale ('a file the React parser takes (`import React from 'react'`)') names the wrong trigger: the trigger is JSX the TS grammar's recovery cannot absorb, React import or not. Probes at HEAD with target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit): (1) a tiny tree (probe-w0f/react1, react2: src/Btn.tsx `export function Btn() { return <div><Child /><button onClick={handle} /></div>; }` + src/Child.tsx `export const Child = () => { return <span>child</span>; };`, with and without `import React`): both build `FUNCTION 4, MODULE 2; DEFINES 4, CALLS 1, IMPORTS 1` - no USES Btn->handle, no edge Btn->Child, in either. (2) twenty's own files copied alone (probe-w0f/react3: EmailField.tsx + AiChatThreadRow.tsx from packages/twenty-front/src/modules/...): nodes `FUNCTION src::EmailField::handleStartEditing / handleCancelEditing / handleSave` (three locals of the component body hoisted to module level), `COMPONENT src::EmailField::EmailField ['COMPONENT']` (the marker, no FUNCTION), and for AiChatThreadRow.tsx only `INTERFACE ..AiChatThreadRowProps` and `FUNCTION ..stopPropagation`: the component `export const AiChatThreadRow = ({` (line 130) has no node at all. Bisect on EmailField.tsx: replacing the one JSX attribute `instanceId={`user-email-${currentUserId}`}` with a plain string makes the parser mint `FUNCTION EmailField` and drop the hoisted locals, i.e. recovery-dependent; minimal JSX files parse 'correctly' by luck. (3) twenty @8fd53a83 (cohort, git-archive copy probe-w0f/twenty, `glia build`): `[roles] folded 4859 overlays into declarations (COMPONENT=1489 HOOK=1026 SERVICE=1313 DIRECTIVE=0 PIPE=0 GUARD=5 COMPOSABLE=1026) standalone=1202`; `glia find <twenty> e --kind COMPONENT --top-k 0 --json` -> 1172 COMPONENT rows, every one `file: null`, in-edges only (USES 404 bound by name to the marker, HANDLED_BY 1, DOCUMENTS 5), no out-edge. A regex survey of the 5,895 .tsx / .jsx files (top-level capitalised `function X` / `const X = (..` / `= async (` declarations, merge JSON of the same build): 2,936 have a FUNCTION node, 946 only a role marker (no POSITION, no edge), 970 no node at all; 1,760 files hold at least one such miss. twenty is 22,860 `<Upper` element-shaped sites and 3,761 `on<Event>={ident}` handler sites in .tsx / .jsx. The TSX grammar is tree-sitter-typescript 0.23's own second language (already in Cargo.lock): no dependency move. Needs a build probe to confirm the counts after (no cargo here).",
+   "entry_points": [
+    "parsers/code/typescript/src/lib.rs parse_file_stats (~66-80): pick the grammar from `file_rel_path`'s extension: `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs` -> LANGUAGE_TSX; `.ts`, `.mts`, `.cts` and every other path (a Vue / Svelte / Astro script block the vue crate hands over with its own path, an Angular `.component.ts`) -> LANGUAGE_TYPESCRIPT, unchanged. ASCII-case-insensitive.",
+    "same file: count the tree's ERROR / MISSING nodes; print `[ts-parse] grammar=<tsx|typescript> error_nodes=<n> file=<p>` only when n > 0 (one line per broken file, so a clean repo prints nothing)",
+    "parsers/code/react/src/lib.rs: delete the dead `is_react_file` (no caller) and say in the crate doc that the engine never routes a file to `react` (TS parse with the TSX grammar is the React parse)"
+   ],
+   "files_touched": [
+    "parsers/code/typescript/src/lib.rs",
+    "parsers/code/react/src/lib.rs",
+    "bench/substrate-gap/fixtures/react-tsx-components"
+   ],
+   "implementation": "1. Grammar by extension, as above; nothing else in the parser changes in this packet (the JSX reading is NEW.w0f.2). The TSX grammar is the TypeScript grammar plus JSX minus `<T>expr` angle-bracket assertions, which TS forbids in .tsx anyway, and which no .js / .jsx file can hold; generic arrows in .tsx are written `<T,>(..)` by their authors already. 2. Unit tests in the parser: a twenty-shaped component (an arrow component with locals, a JSX attribute holding a template literal, a JSX ternary) parses with zero error nodes and mints exactly one top-level FUNCTION for the component and none for its locals; the same text in a `.ts` path keeps today's TYPESCRIPT grammar; a `.js` file with JSX parses clean; a `.ts` file with `<T>x` assertions parses clean (TYPESCRIPT kept). 3. Fixture bench/substrate-gap/fixtures/react-tsx-components: src/EmailField.tsx (the bisected shape, trimmed), src/Row.tsx (a multi-line `export const Row = ({ a, b }: Props) => {` component), src/Child.tsx; key: expect_nodes FUNCTION EmailField, FUNCTION Row, FUNCTION Child; expect_cells ROLE contains COMPONENT on EmailField and Child (the line-scanner still supplies the role where it fires); forbid FUNCTION handleSave at module level (spelled as grade.py --dump spells it at the base) and forbid a standalone COMPONENT EmailField. 4. PARSER_STAMP moves (parsers). Record twenty's before / after numbers in the commit body.",
+   "fixtures": "bench/substrate-gap/fixtures/react-tsx-components (above; legacy-only like react-hook: no 30-mechanism column)",
+   "acceptance": "PRE-FIX: the fixture's expect rows fail and its forbid rows fire on the base (grade.py --dump on a copy, AUTHORING.md steps 3-4). AFTER: (1) `cargo test -p glia-parser-typescript` green with the new tests (each fails on the base); `cargo test -p glia-engine --test engine_tests` green (existing TS / React / Angular / Vue tests; a test that pinned recovered-garbage output is corrected and named in the commit body). (2) Debug CLI on a fixture copy (`GLIA_NO_PERSIST=1 cargo run -q -p glia-cli -- merge <copy> --out ..`): every expect / forbid row by qname. (3) Debug CLI on a git-archive copy of twenty @8fd53a83: `[roles] folded .. standalone=1202` -> standalone <= 150, and `glia find <copy> e --kind COMPONENT --top-k 0 --json` rows with `file: null` 1172 -> <= 150 (the remainder named by shape in the commit body, e.g. `memo(..)` / `forwardRef(..)` STATE_VARs, GD.11's item 2); `glia find <copy> components::EmailField::EmailField --no-collapse --json` -> a FUNCTION at packages/twenty-front/src/modules/settings/profile/components/EmailField.tsx:40 (today a COMPONENT with file null); `glia find <copy> components::AiChatThreadRow::AiChatThreadRow` -> a FUNCTION at AiChatThreadRow.tsx:130 (today no match); `grep -c '^\\[ts-parse\\] grammar=tsx'` over the build's stderr recorded (the residual broken .tsx files, each named or sampled in the commit body). (4) CLOSE-OUT: matrix.py --check (no cell down; typescript cells that move are declared), run.py before / after, `bash scripts/rank-gate.sh check` ends `[rank-gate] check: ok` (graph content moves on every TS repo), cohort gate (twenty, hoppscotch, documenso, immich, medusa web halves move).",
+   "fired_on_marker": "[ts-parse] grammar=<tsx|typescript> error_nodes=<n> file=<p> (per file with a broken tree) | [roles] folded .. standalone=<s> (existing; drops)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "node_id"
+    ],
+    "what_changes": "Graph content of every .tsx / .jsx / .js file whose JSX the TypeScript grammar's recovery mangled: component FUNCTIONs appear (with POSITION, CODE and their CALLS / USES), standalone COMPONENT / HOOK markers fold into them (their NodeIds disappear), locals hoisted to module-level FUNCTIONs by recovery disappear (their edges move to the enclosing component). No qname of a correctly parsed declaration changes.",
+    "in_repo_consumers": [
+     "bench/substrate-gap ts / react fixtures - run.py before / after",
+     "engine/tests TS / React tests that pinned recovered output"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph - its answers for TS / React repos change; no code change",
+     "/home/ivy/Code/neuropil - persisted view state keyed by qname: hoisted locals orphan, components appear",
+     "/home/ivy/Code/Engram - facts keyed by identity hint: hoisted locals orphan, new component facts (engram-export needs no code change)"
+    ]
+   },
+   "depends_on": [],
+   "risks": "Every TS-parser packet's probe and fixture runs on the corrected trees afterwards, so this packet goes FIRST in the TS parser chain: GD.3, GD.4, GD.11, GD.12, GD.19, GD.27, GD.29, GH.9, GH.10, GH.11 all touch parsers/code/typescript/src/lib.rs and should add NEW.w0f.1 to depends_on (their HEAD probes were taken on recovered trees). Text-scanning extractors (ts_routes, nav_links, react.rs, the wrapper inference) do not read the tree and are unaffected; any parser code that happened to rely on recovered shapes (an `as_expression` or `type_assertion` where JSX was) is found by the existing tests. A .js file with Flow generics parses under TSX as under TYPESCRIPT. The rank-gate snapshots that hold TS re-measure; a drop is this packet's defect. Overlaps (un-landed G packets): parsers/code/typescript/src/lib.rs - GD.3, GD.4, GD.11, GD.12, GD.19, GD.27, GD.29, GH.9, GH.10, GH.11; parsers/code/react/src/lib.rs - GD.11."
+  },
+  {
+   "id": "GD.39",
+   "from": "NEW.w0f.2",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GD",
+   "title": "JSX is read: a `<Child />` / `<Ns.Child>` element is a USES of the component it names, a JSX attribute expression (`onClick={handle}`, `render={Row}`) is a value position, and a capitalised function or arrow whose body returns JSX gets ROLE COMPONENT from the AST, replacing react.rs's line scan for components",
+   "area": "TypeScript parser / React (James 2026-10-31: \"yeah do it\"), with GD.11's JSX item",
+   "loc": 340,
+   "rationale": "NEW.w0f.1 makes JSX parse; nothing reads it yet: `git grep -n 'jsx_' -- parsers/code/typescript/src/lib.rs` is empty at HEAD, so even in a file the TS grammar happens to recover, a JSX element or attribute binds nothing. Probe at HEAD (target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit), probe-w0f/react1 and react2, src/Btn.tsx `return <div><Child /><button onClick={handle} /></div>` with `import { Child } from './Child'`): merge output `DEFINES 4, CALLS 1, IMPORTS 1` in both trees, no USES Btn->Child, no USES Btn->handle, `handle` reported `live: false`. On twenty @8fd53a83 (cohort): packages/twenty-front/src/modules/ai/components/AiChatThreadRow.tsx:217-218 and 229-230 `onClick={stopPropagation} onContextMenu={stopPropagation}` -> `[ts-value-refs] refs=0 in_file=0 imported=0 const_inits=11 .. file=..AiChatThreadRow.tsx` and FUNCTION `..AiChatThreadRow::stopPropagation` `live: False`; repo-wide 3,761 `on<Event>={ident}` sites and ~22.9k `<Upper` element-shaped sites in .tsx / .jsx (an upper bound: TS generics included). GD.11 (FD.40) holds the attribute half as one of five items and says the TS parser 'already binds `onClick={handle}` in a file it reads': it does not in any .tsx probed (react2 has no React import). The component role today comes from react.rs scan_component_names, a line scan that needs `=>` on the declaration's first line, so a multi-line arrow component (`export const AiChatThreadRow = ({` .. `}) => {`, AiChatThreadRow.tsx:130) gets no ROLE even once NEW.w0f.1 mints its FUNCTION.",
+   "entry_points": [
+    "parsers/code/typescript/src/lib.rs: the value-ref walk (DT.5g, `value_ref` emission ~7990) gains JSX positions: `jsx_opening_element` / `jsx_self_closing_element` name (an identifier starting uppercase, or a `member_expression` `Ns.Comp` read as its leftmost identifier through the namespace import) -> a value ref from the enclosing callable (in-file FUNCTION / CLASS / STATE_VAR -> USES rule `jsx_element`; an imported name -> the Bare USES ref the graph binds through the named / default import, rule `jsx_element`); lowercase intrinsic tags (`div`) and `<this.X>` read nothing. A `jsx_expression` attribute value or child that is a bare identifier or a `member_expression` on `this` is a value ref (rule `jsx_attribute`), the DT.5g walk's rules otherwise (calls inside `{..}` are already calls once the tree parses).",
+    "same file: ROLE COMPONENT from the AST - a top-level FUNCTION, or a `const X = (..) => ..` / `function` value, whose name starts uppercase and whose body contains a JSX element or fragment, records the COMPONENT overlay (same qname, folded by LB.3a); `memo(..)` / `forwardRef(..)` wrappers stay GD.11's measured item",
+    "parsers/code/extractors/src/react.rs: scan_component_names retired for TS-family sources (the parser owns the component role); the HOOK scan stays",
+    "marker: `[ts-jsx] elements=<e> (in_file= imported= intrinsic=) attributes=<a> components=<c> file=<p>` per file with any JSX"
+   ],
+   "files_touched": [
+    "parsers/code/typescript/src/lib.rs",
+    "parsers/code/extractors/src/react.rs",
+    "bench/substrate-gap/fixtures/react-jsx-refs"
+   ],
+   "implementation": "1. JSX element names and attribute expressions as value refs, from the enclosing callable (the component), deduped per (from, name) like DT.5g's refs; first row as the evidence line. 2. Component role from the AST, as above; the react.rs line scan drops its component half for TS-family languages and its tests move to the parser. 3. GD.11 is rewritten to drop its JSX-attribute item (it lives here) and keeps the default-import look-through, `export default {..}`, CommonJS and directory-specifier items. 4. Fixture react-jsx-refs: src/Btn.tsx (`<Child />`, `<Icons.Plus />` through `import * as Icons`, `onClick={handle}`, `render={Row}`), src/Child.tsx, src/Row.tsx (multi-line arrow), src/icons.tsx; expect USES Btn->Child, Btn->Plus, Btn->handle, Btn->Row; ROLE COMPONENT on Row; forbid a USES to `div`. PARSER_STAMP moves.",
+   "fixtures": "bench/substrate-gap/fixtures/react-jsx-refs (above)",
+   "acceptance": "PRE-FIX: every expect row of the fixture fails on the base (NEW.w0f.1 landed). AFTER: (1) `cargo test -p glia-parser-typescript`, `-p glia-code-extractors` green with new tests (element in-file / imported / namespace, intrinsic ignored, attribute identifier, multi-line arrow role, a hook still a HOOK). (2) Debug CLI on a fixture copy: every expect / forbid row. (3) Debug CLI on a git-archive copy of twenty @8fd53a83: `[ts-value-refs] .. file=..AiChatThreadRow.tsx` -> USES `..AiChatThreadRow::AiChatThreadRow` -> `..AiChatThreadRow::stopPropagation` (glia why), `stopPropagation` live; `[ts-jsx]` lines summed over the build (elements, attributes) and the count of COMPONENT-role FUNCTIONs with zero in-edges before / after in the commit body; `glia gaps <copy>` dead_symbol count before / after (expected to fall: handlers and components passed by JSX were dead). (4) CLOSE-OUT: matrix.py --check, run.py before / after, rank gate `check: ok`, cohort gate.",
+   "fired_on_marker": "[ts-jsx] elements=<e> (in_file=<i> imported=<m> intrinsic=<x>) attributes=<a> components=<c> file=<p>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "node_id"
+    ],
+    "what_changes": "Graph content (TSX / JSX): USES edges from components to the components they render and the handlers they pass; ROLE COMPONENT on multi-line arrow components; no COMPONENT marker from the line scan in TS-family files (its role now comes from the parser, same qname).",
+    "in_repo_consumers": [
+     "bench/substrate-gap ts / react fixtures - run.py before / after"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph - answers for React repos gain edges; no code change",
+     "/home/ivy/Code/neuropil - more edges in views; no code change",
+     "/home/ivy/Code/Engram - more facts; engram-export needs no code change"
+    ]
+   },
+   "depends_on": [
+    "GD.11",
+    "GD.38"
+   ],
+   "risks": "A JSX element name that is a local variable (`const Comp = cond ? A : B; <Comp />`) binds only when the name is a top-level declaration or import (DT.5g's rule), never a guess. ~22.9k element sites on twenty add edges: rank-gate snapshots with React re-measure. Overlaps (un-landed G packets): parsers/code/typescript/src/lib.rs - GD.3, GD.4, GD.11, GD.12, GD.19, GD.27, GD.29, GH.9, GH.10, GH.11 (after GD.11, last in the TS chain); parsers/code/extractors/src/react.rs - none."
+  },
+  {
+   "id": "GD.40",
+   "from": "NEW.w0f.3",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GD",
+   "title": "Include-style route mounts, the mechanism and Django: a route file mounted under a prefix BY REFERENCE to its module (`path(\"api/\", include(\"plane.app.urls\"))`, nested includes, a urlpatterns list imported by name and spread) gives each of its routes the full path `/<prefix><path>`, through CB.20's mount fixpoint generalised with a module slot; Django routes gain their POSITION and the include() line stops minting a ROUTE",
+   "area": "HTTP routes / route mounts (James 2026-10-31: \"yeah thats an annoying case to generalise\")",
+   "loc": 520,
+   "rationale": "next-leap-0.5.6.md §7 lists it. Probe at HEAD (target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit), git-archive copy of cohort repo plane @d9726d5c under probe-w0f/plane, `glia build`): `[http] routes=384 endpoints=483 paired=0 (exact=0 any=0 eprefix=0 ..)`, `[http-qname] routes=384 endpoints=503 noncanonical=357 ..`, first three `[\"ANY admins/ @apps/api\", \"ANY admins/<uuid:pk>/ @apps/api\", \"ANY admins/me/ @apps/api\"]` (GD.26 landed: `[http-wrappers] .. heritage_minted=470`, so plane's client side now exists and the server side is what is missing). `glia find <plane> / --kind ROUTE --top-k 0 --json`: 357 of 384 ROUTEs have `file: null`. Cause, read at HEAD: parsers/code/python/src/lib.rs scan_django_routes (~3358) emits every `path` / `re_path` / `url` call's first string literal through emit_route_no_handler as `ANY <literal>`: no POSITION, no leading `/`, no module, the include() prefix lost, and `path(\"api/\", include(..))` itself minted as a ROUTE `ANY api/`. plane: apps/api/plane/urls.py:19-24 `path(\"api/\", include(\"plane.app.urls\"))`, `api/public/` -> plane.space.urls, `api/instances/` -> plane.license.urls, `api/v1/` -> plane.api.urls, `auth/` -> plane.authentication.urls, `\"\"` -> plane.web.urls; apps/api/plane/app/urls/__init__.py imports `from .issue import urlpatterns as issue_urls` (20 such) and lists `*issue_urls`. A simulation of the fold over plane's url modules (probe-w0f/djsim.py: literal includes and spread imports only) gives 380 routes, and 378 of plane's 477 non-test ENDPOINTs match a folded route path exactly (the rest: `/api/..` endpoints of views no urlconf lists, `<unresolved>` 19). Tiny-tree probe (probe-w0f/mounts/dj: proj/urls.py include of app.urls and app.auth_urls, app/urls/__init__.py spreading `from .issue import urlpatterns as issue_urls` and including app.urls.nested): `[http] routes=6 endpoints=3 paired=0`, ROUTEs `ANY v2/`, `ANY api/`, `ANY auth/`, `ANY login/`, `ANY things/`, `ANY workspaces/<str:slug>/issues/`, every one `file: None`. What glia already folds (same probes, mounts/*): Go groups across files (CB.20 graph/src/go_mounts.rs: `api.Register(r.Group(\"/svc/v9\"))` -> `GET /svc/v9/things` internal/api/routes.go:4, paired exact); Rails `namespace :api` / `scope '/v9'` in routes.rb (`ANY /api/users`, `GET /v9/things`); Flask `Blueprint(url_prefix=)` and FastAPI `APIRouter(prefix=)` + same-file `include_router(prefix=)` (scan_router_prefixes ~3149, whose doc says cross-file include_router is 'deliberately OUT of scope'); NestJS `@Controller(prefix)`. Not folded: Django include(), Flask `register_blueprint(bp, url_prefix=)` across files (`GET /items` bp.py:4), FastAPI cross-file `include_router(users.router, prefix=\"/api\")` (`GET /users`), Express `app.use('/api/users', require('./routes/users'))` and `app.use('/api/items', items)` (`GET /list`, `GET /all`, paired=0), even same-file `app.use('/zz/users', router)` (`GET /list`), NestJS `setGlobalPrefix('svc')` and `RouterModule.register([{ path: 'backoffice', module: AdminModule }])` (`GET /users/all`, paired=0). The Flask / FastAPI probes pair only because `api` is in the resolver's default strip list (graph/src/resolvers/http.rs API_PREFIXES, tier eprefix). This packet builds the mechanism with Django on it; NEW.w0f.4 (Python) and NEW.w0f.5 (TS) put the other shapes on the same facts.",
+   "entry_points": [
+    "code-domain/src/lib.rs: `Mount::Module { module: String, var: String, suffix: String }` (a route registered on router value `var` of MODULE `module`; `var` = `urlpatterns` for Django) and `NavFact::IncludeMount { line: u32, target: IncludeTarget, prefix: String, via: String }` with `IncludeTarget::Spec(String)` (a dotted module path / relative specifier as written) and `IncludeTarget::Import { local: String }` (a name the file imports), both appended at the END of their enums (bincode tags); `endpoint::mount_route_qname` / `parse_mount_route_qname` learn `<mount:module:<module>#<var>>`",
+    "parsers/code/python/src/lib.rs scan_django_routes: a `path` / `re_path` / `url` call in a module that holds `urlpatterns` is minted under the provisional `ANY <mount:module:<module qname>#urlpatterns><literal>` with a POSITION cell at the call row; `include(\"<dotted>\")` records IncludeMount{Spec} and mints no ROUTE; `*name` inside the urlpatterns list (or `urlpatterns += name`) where `name` is imported as `from <m> import urlpatterns as name` records IncludeMount{Import, prefix \"\"}; `include(<non-literal>)` (DRF `router.urls`, a variable) is counted `dynamic` and mints nothing",
+    "graph/src/build/route_mounts.rs (new child module of build.rs, like build/go_wire.rs): `bind_module_mounts(g, refs, lang)` - resolves each IncludeMount's target to a MODULE (Spec: a dotted path matched to a file MODULE by qname tail, `pkg` -> `pkg::__init__`; Import: the importing file's IMPORTS binding of `local`), runs CB.20's fixpoint over module slots (a slot's prefixes = each includer's own prefixes joined with the include literal; cycles and > 32 prefixes stop as in go_mounts), then re-keys each provisional ROUTE to `<METHOD> /<prefix><path>` once per prefix, an unmounted one to `<METHOD> /<path>`",
+    "graph/src/go_mounts.rs: factor the provisional-ROUTE re-key (rename_nodes for the first prefix, clone_route ~599 for each further one, refs carried) into one fn both passes call",
+    "graph/src/build.rs: `mod route_mounts;` and the call in build_python after resolve_imports_python and resolve_calls, before resolve_refs (where build_go_passes calls go_mounts::bind)"
+   ],
+   "files_touched": [
+    "code-domain/src/lib.rs",
+    "parsers/code/python/src/lib.rs",
+    "graph/src/build.rs",
+    "graph/src/build/route_mounts.rs",
+    "graph/src/go_mounts.rs",
+    "engine/tests/route_mounts.rs",
+    "bench/substrate-gap/fixtures/py-django-include"
+   ],
+   "implementation": "1. The facts and the provisional qname (code-domain), with round-trip tests of mount_route_qname / parse_mount_route_qname for the module slot. 2. Django in the parser as above; the urlconf test is 'the module assigns `urlpatterns`'. 3. route_mounts.rs: target resolution, the module-slot fixpoint, the shared re-key; deterministic (BTreeMaps, modules by qname). A route module nobody includes is a root (Django's ROOT_URLCONF is the one such module in a sane project; the setting is not read). 4. `[route-mounts] lang=python includes=<i> spreads=<s> dynamic=<d> unresolved=<u> modules=<m> routes=<r> mounted=<k> copies=<c> roots=<o> capped=<x>` once per Python graph that has a mount fact. 5. engine/tests/route_mounts.rs: the probe tree (nested include, spread import, two includes of one module = two prefixes, a cycle, an unresolved include, a dynamic include). 6. Fixture py-django-include with a TS client: expect HTTP_CALLS for `/api/workspaces/{}/issues/`, `/api/v2/things/`, `/auth/login/`; forbid ROUTE `ANY api/`. PARSER_STAMP moves.",
+   "fixtures": "bench/substrate-gap/fixtures/py-django-include (the probe tree mounts/dj: proj/urls.py, app/urls/__init__.py, app/urls/issue.py, app/urls/nested.py, app/auth_urls.py, web/api.ts); python/http_calls cell evidence",
+   "acceptance": "PRE-FIX: the fixture's expect rows fail and its forbid row fires on the base. AFTER: (1) `cargo test -p glia-code-domain`, `-p glia-parser-python`, `-p glia-graph` green with new tests; `cargo test -p glia-engine --test engine_tests route_mounts::` and `go_route_forms::` green (Go mounts unchanged through the factored re-key; `[go-mounts]` lines byte-identical on the Go fixtures). (2) Debug CLI on the probe tree: `[route-mounts] lang=python includes=3 spreads=1 ..`, ROUTEs `ANY /api/workspaces/<str:slug>/issues/` (app/urls/issue.py:4), `ANY /api/v2/things/`, `ANY /auth/login/`, no `ANY api/`; `[http] routes=3 endpoints=3 paired=3`. (3) Debug CLI on a git-archive copy of plane @d9726d5c: `[http] routes=384 endpoints=483 paired=0` -> paired >= 300 (the simulation says ~378 endpoints), `[http-qname] .. noncanonical=357` -> <= 30, ROUTE rows with `file: null` 357 -> 0 for Django; `glia health <copy>` http row leaves BLIND; numbers in the commit body. (4) CLOSE-OUT: matrix.py --check, run.py before / after, rank gate `check: ok`, cohort gate (plane's health http row, route / client reach rise).",
+   "fired_on_marker": "[route-mounts] lang=python includes=<i> spreads=<s> dynamic=<d> unresolved=<u> modules=<m> routes=<r> mounted=<k> copies=<c> roots=<o> capped=<x>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "node_id"
+    ],
+    "what_changes": "Django ROUTE qnames gain their leading `/` and include prefixes (`ANY workspaces/<str:slug>/views/` -> `ANY /api/workspaces/<str:slug>/views/`), so their NodeIds move; a module included under two prefixes yields two ROUTEs; `ANY <include prefix>` ROUTEs disappear; Django ROUTEs gain POSITION cells; new HTTP_CALLS pairs.",
+    "in_repo_consumers": [
+     "bench/substrate-gap python fixtures - run.py before / after",
+     "bench/cohort plane rows"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph - Django route names change; no code change",
+     "/home/ivy/Code/neuropil - persisted view state keyed by qname: old Django route qnames orphan",
+     "/home/ivy/Code/Engram - facts keyed by identity hint: old Django routes orphan (engram-export needs no code change)"
+    ]
+   },
+   "depends_on": [
+    "GA.7",
+    "GD.14"
+   ],
+   "risks": "go_mounts.rs is GD.14's (Go route residuals) and GA.7's (Go body re-stitching) too, and graph/src/build.rs is touched by GD.14, GD.17, GA.3, GA.5, GA.6, GA.7, GA.19, GP.2, GP.3: the re-key factoring lands after GD.14 and GA.7 (hence depends_on) and keeps `[go-mounts]` byte-identical. GA.3 splits build_python into surface and stitch: if it lands first, the mount pass is a whole-graph step after stitching (a watch fast path must refuse a body edit that changes an IncludeMount fact or a provisional route; GA.3's owner adds it to the surface fingerprint). code-domain/src/lib.rs is GD.8, GD.31, GH.2, GH.6's too (new variants at the END of each enum). parsers/code/python/src/lib.rs is GH.7, GH.8's too. A dotted include naming a module outside the repo (`include(\"django.contrib.admin.urls\")`) is `unresolved` and mints nothing. plane's 24 `PATCH /plane.utils..` ROUTEs from `@patch(\"..\")` mock decorators in tests are a separate precision defect (see open questions)."
+  },
+  {
+   "id": "GD.41",
+   "from": "NEW.w0f.4",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GD",
+   "title": "Include-style mounts, Python second: Flask `register_blueprint(bp, url_prefix=..)` and FastAPI `include_router(<mod>.router, prefix=..)` across files, a router's own prefix composed through router-into-router includes, and router classes that subclass APIRouter (`PrefectRouter(prefix=\"/flows\")`, `UserAPIRouter(prefix=..)`) read as routers",
+   "area": "HTTP routes / route mounts (James 2026-10-31)",
+   "loc": 360,
+   "rationale": "On NEW.w0f.3's facts. Probes at HEAD (target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit)): tiny trees probe-w0f/mounts/fl (bp.py `bp = Blueprint(\"items\", __name__)` + `@bp.route(\"/items\")`; app.py `app.register_blueprint(bp, url_prefix=\"/api\")`) -> ROUTE `GET /items` bp.py:4; mounts/fa (routers/users.py `router = APIRouter()` + `@router.get(\"/users\")`; main.py `app.include_router(users.router, prefix=\"/api\")`) -> `GET /users` routers/users.py:4. Both pair only through the resolver's default `api` strip (eprefix=2 / eprefix=1); any other prefix pairs nothing. Cohort, git-archive copies under probe-w0f: mealie @0b2801bf `[http] routes=204 endpoints=26 paired=3`, its routes rooted at their own file (`GET /self` mealie/routes/groups/controller_group_self_service.py:27, `GET /{item_id}` mealie/routes/households/controller_mealplan_rules.py:43) while mealie/routes/__init__.py:20-32 builds `router = APIRouter(prefix=\"/api\")` and `router.include_router(households.router)` etc., and 12 routers are `UserAPIRouter(prefix=..)` / `AdminAPIRouter(prefix=..)` (subclasses of APIRouter, mealie/routes/_base/routers.py:13,20); prefect @fa93ba25 `[http] routes=167 endpoints=415 paired=22`, its server routes lose their router prefix because the router is `PrefectRouter(prefix=\"/flows\")` (src/prefect/server/api/flows.py:22; 15 files, 179 route decorators in src/prefect/server/api): ROUTE `POST /filter` src/prefect/server/api/artifacts.py:89 where the client calls `POST /flows/filter` / `/artifacts/filter`. scan_router_prefixes matches the constructor tail `APIRouter` / `Blueprint` only. A simulation of the router-prefix fold over src/prefect/server/api (probe: each file's `*Router(prefix=..)` joined to its `@router.<verb>(..)` paths, 179 routes) matches 217 of prefect's 417 ENDPOINTs exactly by (verb, path), 107 of them outside tests/.",
+   "entry_points": [
+    "parsers/code/python/src/lib.rs scan_router_prefixes: a router constructor is `APIRouter` / `Blueprint` or any call whose tail ends in `Router` and that passes `prefix=` (or, for a class the file declares or imports whose bases name APIRouter, any call of it); routes on a module-level router var with no same-file mount mint the provisional `<METHOD> <mount:module:<module>#<var>><prefix+path>`",
+    "same file: `<x>.register_blueprint(<ref>, url_prefix=\"..\")` and `<x>.include_router(<ref>, prefix=\"..\")` where `<ref>` is `<imported module>.<var>` or an imported name record IncludeMount{Import} with `var`; an include with no prefix records prefix \"\"; the INCLUDING router's own prefix flows through its own slot (a router var included elsewhere is itself a Module slot)",
+    "graph/src/build/route_mounts.rs: Import targets resolved through the Python IMPORTS bindings (module attribute `users.router`, `from routers.users import router`), `via` flask / fastapi counted apart"
+   ],
+   "files_touched": [
+    "parsers/code/python/src/lib.rs",
+    "graph/src/build/route_mounts.rs",
+    "engine/tests/route_mounts.rs",
+    "bench/substrate-gap/fixtures/py-fastapi-include-router",
+    "bench/substrate-gap/fixtures/py-flask-register-blueprint"
+   ],
+   "implementation": "1. Router-class rule and cross-file mount facts in the parser, unit-tested (prefect's and mealie's shapes, a non-router `XRouter(prefix=)` from a non-web library stays a router only if a route decorator uses it). 2. The resolver of Import targets in route_mounts.rs. 3. `[route-mounts] lang=python .. via(flask=<f> fastapi=<a> django=<d>) ..`. 4. Fixtures with TS clients calling non-default prefixes (`/svc/items`, `/core/users`) so the strip tier cannot pair them. PARSER_STAMP moves.",
+   "fixtures": "py-fastapi-include-router (router in routers/users.py, two-level include_router chain with prefixes, a PrefectRouter-style subclass), py-flask-register-blueprint (blueprint mounted at `/svc` in app.py)",
+   "acceptance": "PRE-FIX: the fixtures' expect rows fail on the base. AFTER: (1) `cargo test -p glia-parser-python`, `-p glia-graph`, `cargo test -p glia-engine --test engine_tests route_mounts::` green with new cases. (2) Debug CLI on the probe trees with the prefix changed to `/svc`: `GET /svc/items`, `GET /svc/users`, paired exact. (3) Debug CLI on git-archive copies: prefect @fa93ba25 `[http] .. paired=22` -> paired >= 150 (the simulation: 217), ROUTE `POST /artifacts/filter` at src/prefect/server/api/artifacts.py:89; mealie @0b2801bf `paired=3` -> recorded with the reason for every unpaired client in the commit body (mealie's frontend calls `/api/..` through a class-held base, GD.29's shape). (4) CLOSE-OUT: matrix.py --check, run.py before / after, rank gate, cohort gate (prefect, mealie health http rows).",
+   "fired_on_marker": "[route-mounts] lang=python .. via(flask=<f> fastapi=<a> django=<d>) ..",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "node_id"
+    ],
+    "what_changes": "Python ROUTE qnames gain their mount and router-class prefixes (`POST /filter` -> `POST /artifacts/filter`), so NodeIds move; new HTTP_CALLS pairs.",
+    "in_repo_consumers": [
+     "bench/substrate-gap python fixtures - run.py before / after"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph - route names change; no code change",
+     "/home/ivy/Code/neuropil - old route qnames orphan",
+     "/home/ivy/Code/Engram - old route facts orphan; no exporter change"
+    ]
+   },
+   "depends_on": [
+    "GD.40"
+   ],
+   "risks": "A `prefix=` keyword on a non-router call ending in `Router` is excluded unless a route decorator registers on it. Overlaps (un-landed G packets): parsers/code/python/src/lib.rs - GH.7, GH.8; graph/src/build/route_mounts.rs and engine/tests/route_mounts.rs - NEW.w0f.3, NEW.w0f.5 only."
+  },
+  {
+   "id": "GD.42",
+   "from": "NEW.w0f.5",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GD",
+   "title": "Include-style mounts, TypeScript third: Express / Koa `app.use('/p', <router>)`, Hono `app.route('/p', <sub>)` (same file, imported, `require(..)`d) and NestJS `app.setGlobalPrefix('p', { exclude })` / `RouterModule.register([{ path, module }])` prefix the routes of the router or module they name",
+   "area": "HTTP routes / route mounts (James 2026-10-31)",
+   "loc": 420,
+   "rationale": "On NEW.w0f.3's facts. Probes at HEAD (target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit)): probe-w0f/mounts/ex (routes/users.js `router.get('/list', ..)` + `module.exports = router`; routes/items.ts `router.get('/all', ..)` + `export default router`; app.ts `app.use('/api/users', require('./routes/users'))`, `app.use('/api/items', items)`) -> ROUTEs `GET /list` routes/users.js:3, `GET /all` routes/items.ts:3, `[http] routes=2 endpoints=2 paired=0`; mounts/ex2 (one file, `app.use('/zz/users', router)`) -> `GET /list` app.js:4; mounts/ne (NestJS `@Controller('users')` `@Get('all')`, `app.setGlobalPrefix('svc')`, `RouterModule.register([{ path: 'backoffice', module: AdminModule }])`) -> `GET /users/all`, paired=0 against `/svc/backoffice/users/all`. Nothing in parsers/code/extractors/src/ts_routes.rs reads `.use(` / `.route(` mounts or setGlobalPrefix (`git grep -n setGlobalPrefix -- '*.rs'` empty). Cohort: documenso @8707e33c (git-archive copy) `[http] routes=40 endpoints=22 paired=0`; apps/remix/server/router.ts:123-135 `app.route('/api/auth', auth)`, `app.route('/api/files', filesRoute)`, `app.route('/api/ai', aiRoute)` (Hono), while ROUTE `POST /upload-pdf` sits at apps/remix/server/api/files/files.ts:29 and the client calls `POST /api/files/upload-pdf` (packages/lib/universal/upload/put-file.ts); immich @256eb55d server/src/app.common.ts:65 `app.setGlobalPrefix('api', { exclude: excludePaths })` (immich pairs 291 of 300 today only through the default `api` strip, tier eprefix). Express `app.use(prefix, router)`: no cohort or examples-glia case found (searched every cohort pin with `git grep -E '(app|router|server)\\.(use|route|register)\\(..'` and ~/Code/examples-glia); documenso's `app.use('/api/v2/*', middleware)` lines are middleware, which the target rule below ignores.",
+   "entry_points": [
+    "parsers/code/extractors/src/ts_routes.rs: an Express / Koa / Hono route site `<recv>.<verb>('/p', ..)` whose receiver is a module-level router value (`express.Router()`, `Router()`, `new Router()`, `new Hono()`) that the file does not mount itself mints the provisional `<VERB> <mount:module:<module>#<recv>>/p`; `<x>.use('/p', <ref>)` / `<x>.route('/p', <ref>)` record IncludeMount with target the ref (a same-file router var, an imported name, `require('<spec>')`, `<sub>.routes()` for Koa); a default / `module.exports` export of a router var is recorded so an importer's name resolves to it",
+    "same file: NestJS `setGlobalPrefix('<p>'[, { exclude: [..] }])` records an IncludeMount of every controller of the project (via `nest_global`), excluded literal paths honoured; `RouterModule.register([{ path, module, children }])` records IncludeMount{Import module} for each entry, and a controller's routes ride their module's slot (`@Module({ controllers: [..] })`, read in the same scan)",
+    "graph/src/build/route_mounts.rs: TS Import targets resolved through ts_target and the import bindings (default, named, require), the call in build_ts_like after resolve_imports_ts / resolve_calls and before resolve_refs",
+    "graph/src/build.rs: the call in build_ts_like"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/ts_routes.rs",
+    "graph/src/build.rs",
+    "graph/src/build/route_mounts.rs",
+    "engine/tests/route_mounts.rs",
+    "bench/substrate-gap/fixtures/ts-express-use-mount",
+    "bench/substrate-gap/fixtures/ts-hono-route-mount",
+    "bench/substrate-gap/fixtures/ts-nest-global-prefix"
+   ],
+   "implementation": "1. Router values, mount sites and exports in ts_routes.rs (text scan, the extractor's style), unit-tested: a middleware `.use('/p', fn)` mounts nothing (its target holds no route slot), a mount of an unknown import is `unresolved`. 2. NestJS global prefix and RouterModule. 3. route_mounts.rs TS resolution. 4. `[route-mounts] lang=typescript .. via(express= hono= koa= nest_global= nest_router=) ..`. 5. Fixtures with clients on non-default prefixes. PARSER_STAMP moves.",
+   "fixtures": "ts-express-use-mount, ts-hono-route-mount (documenso's shape), ts-nest-global-prefix (setGlobalPrefix + RouterModule)",
+   "acceptance": "PRE-FIX: fixtures fail on the base. AFTER: (1) `cargo test -p glia-code-extractors`, `-p glia-graph`, `cargo test -p glia-engine --test engine_tests route_mounts::` green with new cases. (2) Debug CLI on the probe trees: `GET /api/users/list`, `GET /api/items/all`, `GET /zz/users/list`, `GET /svc/backoffice/users/all`, each paired exact. (3) Debug CLI on a git-archive copy of documenso @8707e33c: `[http] routes=40 endpoints=22 paired=0` -> ROUTE `POST /api/files/upload-pdf` and the put-file.ts client paired; immich @256eb55d: paired >= 291 with the eprefix count moved to exact. Numbers in the commit body. (4) CLOSE-OUT: matrix.py --check, run.py before / after, rank gate, cohort gate.",
+   "fired_on_marker": "[route-mounts] lang=typescript .. via(express=<e> hono=<h> koa=<k> nest_global=<g> nest_router=<r>) ..",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "node_id"
+    ],
+    "what_changes": "TS ROUTE qnames gain their mount prefixes, so NodeIds move; new HTTP_CALLS pairs; NestJS routes gain a global prefix.",
+    "in_repo_consumers": [
+     "bench/substrate-gap ts route fixtures - run.py before / after"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph - route names change; no code change",
+     "/home/ivy/Code/neuropil - old route qnames orphan",
+     "/home/ivy/Code/Engram - old route facts orphan; no exporter change"
+    ]
+   },
+   "depends_on": [
+    "GD.40"
+   ],
+   "risks": "setGlobalPrefix applies to the whole Nest app: a repo with two Nest apps scopes it to the app's PROJECT root. Overlaps (un-landed G packets): graph/src/build.rs - GD.14, GD.17, GA.3, GA.5, GA.6, GA.7, GA.19, GP.2, GP.3 (GA.6 splits build_typescript_family into surface / stitch: the mount pass runs after stitching, and a watch fast path refuses an edit that changes a mount fact); parsers/code/extractors/src/ts_routes.rs - none; route_mounts.rs - NEW.w0f.3 / NEW.w0f.4."
+  },
+  {
+   "id": "GA.21",
+   "from": "NEW.w0f.6",
+   "spec_pass": "w0f",
+   "class": "coverage",
+   "batch": "GA",
+   "title": "GA.20b: watch's wrapper stages per file - the direct wrapper candidates (direct_http, direct_candidates) and each file's call-site scan memoized per file in BuildMemo, and one needle pass per file per forwarding depth instead of calls x files `contains`, so a one-file update stops paying ~500 ms (twenty) / ~850 ms (prefect) of repo-wide wrapper inference",
+   "area": "T8 / watch latency (agreed follow-up of GA.20)",
+   "loc": 380,
+   "rationale": "GA.20 (17e5cfb8) timed every graft and memoized the A16.4 IMPORTS filter, and its body says the halving was NOT met: 'the two steps left on top are the wrapper inference (external::infer_entity_wrappers: per HTTP family a direct_http pass over every file, then a forwarding pass scanning every file per frontier call) and the wrapper call-site scan (external::WrapperPass::scan: every stanza's call text searched in every file before scan_file) .. their files belong to GD.26 this wave.' GD.26 (72605887) has landed and added heritage_scopes (every TS CLASS of every file, per build) and scan_heritage. Probe at HEAD (target/release/glia (glia 0.5.5 (build 0.5.5+p1aa31748d5678ab4), rebuilt 20:54 / 21:15 after every W0 code commit), git-archive copies of the cohort pins under probe-w0f, `glia watch <copy> --persist-every 0 --poll-ms 100 --debounce-ms 100`, one comment line appended per update, probe-w0f/watchprobe.sh): twenty @8fd53a83 per update `[timing] grafts repo=twenty modules=52.9ms infer_wrappers=389.9ms wrapper_scan=134.2ms wrappers_http=9.6ms evm_abi=31.1ms endpoint_fold=50.1ms .. owner=55.6ms .. imports_filter=100.1ms` (infer_wrappers 350-394, wrapper_scan 131-141 over 3 updates), phase_ms.grafts 963 / 1,031 / 1,048; prefect @fa93ba25 `infer_wrappers=550.5ms wrapper_scan=308.5ms .. imports_filter=21.0ms` (519-551 and 305-319 over 4 updates), phase_ms.grafts 908 / 936 / 937 / 949, with `[graft-memo] const hit=3686/3687 .. imports hit=3687/3687 index=hit repo=prefect` and `[http-wrappers] wrappers=75 sites=19 ..`. Every other step sums to ~520 ms on twenty and ~100 ms on prefect, so the wrapper pair is what stands between today and GA.20's target. Code read at HEAD: engine/src/external/infer_wrappers.rs infer_http (~842: per family, catch_unwind(direct_http(f)) for every file, then per depth `for (call, shape) in frontier { for f in code.filter(|f| f.source.contains(call)) }`), infer_collections (~330, the Go twin with direct_candidates / forwarding_candidates), heritage_scopes (~1936); engine/src/external/wrappers.rs WrapperPass::scan (~558: per file `pass.stanzas.iter().any(|s| .. source.contains(s.decl.call))` then scan_file + scan_heritage). direct_http reads only its own CodeFile (path, source, lang, parse) and returns strings (HttpCandidate: call, shape, def_file, def_line0, via, class), so its output is a pure per-file value.",
+   "entry_points": [
+    "engine/src/build/memo.rs: `WrapperMemo` (one entry per walked path): key `WrapperKey { lang, source digest (xxh3-128 of the text), module qname }` -> the file's DirectHttp (cands, unparsed, gate) per HTTP family, its Go direct candidates, its heritage ClassFile record (classes, spans, bases, imports) and its needle hits (below); and `ScanMemo`: key (WrapperKey, stanza-set digest, the file's heritage-scope digest) -> the file's sites and ambiguous count; the module doc's CONTRACT gains both",
+    "engine/src/external/infer_wrappers.rs: infer_http / infer_collections read the per-file outputs from the memo and compute only misses (on the pool, folded in walk order, as DC.4's memos do); the forwarding loop runs one pass per file per depth over the frontier's call texts (exact `str::contains` semantics per call, so the hit set is the same set of (file, call) pairs), hits memoized per (WrapperKey, call) so an unchanged file answers from the memo; heritage_scopes joins memoized per-file class records",
+    "engine/src/external/wrappers.rs WrapperPass::scan: the per-file stanza gate and scan_file / scan_heritage output replayed from ScanMemo on a hit",
+    "engine/src/build/grafts.rs apply_post_cache: hands `memo` to the two stages (it already holds it for the imports filter); `[graft-memo]` gains ` wrappers hit=<h>/<n> scan hit=<h>/<n>` before ` repo=`"
+   ],
+   "files_touched": [
+    "engine/src/external/infer_wrappers.rs",
+    "engine/src/external/wrappers.rs",
+    "engine/src/build/memo.rs",
+    "engine/src/build/grafts.rs",
+    "engine/tests/watch_parity.rs",
+    "engine/tests/inferred_wrappers.rs"
+   ],
+   "implementation": "1. The two memos and their keys, documented in memo.rs's CONTRACT (a later packet that gives direct_http, the forwarding reader or scan_file a new input adds it to the key in the same commit). 2. Misses computed on the engine pool, inserts in the sequential fold, hits cloned: byte-identical by construction. 3. The forwarding needle pass: per depth, each file is visited once and tested against every frontier call; no new crate (aho-corasick is in Cargo.lock only transitively; adding it as a direct dependency moves engine/Cargo.toml and is not needed for the target). 4. watch_parity: scripted cases - an edit that creates a wrapper (a new direct candidate in the edited file: every caller elsewhere must mint), an edit that adds a call site of an existing wrapper, an edit that removes a heritage base, a rename that moves a file's module qname (the key must miss); each falsified by dropping one key part. 5. Measure as GA.20 did (same command, same pins) and put the per-step medians in the commit body.",
+   "fixtures": "watch_parity's scripted / seeded fixtures plus the new scripted cases; inferred_wrappers' fixtures unchanged",
+   "acceptance": "`cargo test -p glia-engine --test watch_parity --test byte_identical --test parallel_build` green; `cargo test -p glia-engine --test engine_tests inferred_wrappers::` green and unchanged; `cargo test -p glia-engine --lib` green (memo / grafts unit tests: replay == fresh for the two memos, warm / cold / edited / removed file). Measured with the release binary, `glia watch <copy> --persist-every 0 --poll-ms 100 --debounce-ms 100`, one comment line per update, median of >= 3 updates, git-archive copies of twenty @8fd53a83 and prefect @fa93ba25: GA.20's original target, phase_ms.grafts <= 820 ms on twenty and <= 508 ms on prefect (half of GA.20's pre-change medians 1,641 / 1,016; today 1,031 / 937); `[timing] grafts` infer_wrappers + wrapper_scan <= 60 ms on each; `[graft-memo] .. wrappers hit=<n-1>/<n> scan hit=<n-1>/<n>` on a one-file update; every answer byte-identical (the watch_parity gate) and `[http-wrappers]` lines identical to a cold build's.",
+   "fired_on_marker": "[graft-memo] .. wrappers hit=<h>/<n> scan hit=<h>/<n> repo=<label> | [timing] grafts .. infer_wrappers=<ms> wrapper_scan=<ms> ..",
+   "breaking": "none (stderr marker gains two fields; graph, cells, layout and answers unchanged)",
+   "depends_on": [
+    "GA.12"
+   ],
+   "risks": "A key missing an input replays a stale wrapper set in silence: the CONTRACT entry plus one falsifying watch_parity case per key part are the guard. The memo holds strings, not NodeIds, but is cleared with DC.4's memos on a context change all the same. Memory: one DirectHttp + one site list per file (small next to the parse cache). Overlaps (un-landed G packets): engine/src/build/memo.rs - GA.12 (the watch memory budget, which accounts BuildMemo: depends_on so the budget counts the new memos); engine/tests/watch_parity.rs - GA.4, GA.5, GA.6, GA.7, GA.12, GA.17 (new scripted cases only, appended); infer_wrappers.rs, wrappers.rs, grafts.rs, inferred_wrappers.rs - no un-landed packet."
   }
  ]
 }
