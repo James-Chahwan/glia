@@ -64,6 +64,12 @@ pub fn parse_file(
     // DT.5i: read before the walk, which records a provider's value types
     // and a state holder's `state` type only in a file importing Riverpod.
     acc.riverpod_import = imports_any(root, src, RIVERPOD_IMPORT_PREFIXES);
+    // GD.22: read before the walk, which records a generated provider only
+    // in a file importing riverpod_annotation, and types a BuildContext read
+    // only in a file importing provider / flutter_bloc.
+    acc.riverpod_gen_import = imports_any(root, src, RIVERPOD_GENERATOR_IMPORT_PREFIXES);
+    acc.provider_import = imports_any(root, src, PROVIDER_IMPORT_PREFIXES);
+    acc.bloc_import = imports_any(root, src, BLOC_IMPORT_PREFIXES);
     // DT.1l: read before the class walk, which writes no model schema in a
     // generated file.
     acc.generated = dart_generated(file_rel_path, source);
@@ -90,6 +96,12 @@ pub fn parse_file(
     }
     if let Some(line) = acc.riverpod.marker(file_rel_path) {
         eprintln!("{line}");
+    }
+    if acc.bloc_receivers > 0 {
+        eprintln!(
+            "[dart-bloc] receivers={} file={file_rel_path}",
+            acc.bloc_receivers
+        );
     }
     let shelf = scan_dart_routes(source, repo, module_id, &mut acc);
     if let Some(line) = shelf.marker(file_rel_path) {
@@ -252,6 +264,21 @@ struct Acc {
     /// DT.5i: the provider facts, provider-read locals and state holders
     /// this file recorded, for the `[dart-riverpod]` marker.
     riverpod: RiverpodStats,
+    /// GD.22: this file imports riverpod_annotation
+    /// ([`RIVERPOD_GENERATOR_IMPORT_PREFIXES`]), so an `@riverpod` function
+    /// or class declares a generated provider ([`generated_provider`]).
+    riverpod_gen_import: bool,
+    /// GD.22: this file imports package:provider, so `context.read<C>()`,
+    /// `context.watch<C>()` and `Provider.of<C>(..)` are reads of a C
+    /// ([`context_read_type`]).
+    provider_import: bool,
+    /// GD.22: this file imports package:flutter_bloc (which re-exports
+    /// provider's BuildContext reads), so `context.read<C>()`,
+    /// `context.watch<C>()` and `BlocProvider.of<C>(..)` are reads of a C.
+    bloc_import: bool,
+    /// GD.22: the context-read receivers this file typed, for the
+    /// `[dart-bloc]` marker.
+    bloc_receivers: usize,
     /// DT.5e: the getter / setter METHODs and FUNCTIONs this file declares,
     /// which a name passed by value reads rather than uses. Lookup-only.
     accessor_ids: HashSet<NodeId>,
@@ -337,6 +364,9 @@ struct RiverpodStats {
     /// Top-level providers given a `NavFact::RiverpodProvider`
     /// ([`riverpod_provider`]).
     providers: usize,
+    /// GD.22: `@riverpod` functions / classes given a
+    /// `NavFact::RiverpodProvider` ([`generated_provider`]).
+    generated: usize,
     /// Locals typed as a provider read ([`record_provider_local`]).
     locals: usize,
     /// State holder classes given their inherited `state` / `value` field
@@ -346,10 +376,10 @@ struct RiverpodStats {
 
 impl RiverpodStats {
     fn marker(&self, file_rel: &str) -> Option<String> {
-        (self.providers + self.locals + self.holders > 0).then(|| {
+        (self.providers + self.generated + self.locals + self.holders > 0).then(|| {
             format!(
-                "[dart-riverpod] providers={} locals={} holders={} file={file_rel}",
-                self.providers, self.locals, self.holders
+                "[dart-riverpod] providers={} generated={} locals={} holders={} file={file_rel}",
+                self.providers, self.generated, self.locals, self.holders
             )
         })
     }
@@ -504,8 +534,20 @@ fn visit_top(
     if !names.is_empty() {
         acc.nav.record_fact(parent_id, NavFact::Exports { names });
     }
+    // GD.22: a top-level `@riverpod` annotation is the SIBLING before the
+    // function it annotates (a class holds its own).
+    let mut riverpod_annotated = false;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "annotation" => {
+                riverpod_annotated |= is_riverpod_annotation(child, src);
+                continue;
+            }
+            "comment" | "documentation_comment" => continue,
+            _ => {}
+        }
+        let annotated = std::mem::take(&mut riverpod_annotated);
         match child.kind() {
             "import_or_export" => {
                 collect_import(child, src, parent_qname, acc);
@@ -550,6 +592,9 @@ fn visit_top(
                     repo,
                     acc,
                 );
+                if annotated && child.kind() == "function_signature" && acc.riverpod_gen_import {
+                    generated_function_provider(child, src, parent_qname, repo, acc);
+                }
             }
             // G19 — library-level `const`/`final NAME = expr;`. The hidden
             // `_top_level_definition` rule inlines the keyword + this list as
@@ -634,6 +679,11 @@ fn visit_class(
     // `implements I` and `with M` → IMPLEMENTS (interface/mixin). A6.5: emitted
     // as refs from this file's MODULE (`parent_id`), bound by the graph crate.
     visit_class_heritage(node, src, id, parent_id, acc);
+
+    // GD.22: an `@riverpod` class is the notifier of a generated provider.
+    if acc.riverpod_gen_import {
+        generated_class_provider(node, src, &name, id, acc);
+    }
 
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
@@ -2221,6 +2271,7 @@ fn collect_calls_in(
                 record_name_ref(n, src, from, scope, acc);
             }
             "initialized_variable_definition" => record_provider_local(n, src, from, scope, acc),
+            "relational_expression" => push_context_read_misparse(n, src, from, acc),
             _ => {}
         }
         let mut cursor = n.walk();
@@ -2624,6 +2675,7 @@ fn push_selector_chain_calls(
             }
         }
         push_chain_reads(primary, &selectors, src, from, scope, acc);
+        type_context_read_chain(primary, &selectors, src, from, acc);
         type_element_closure(primary, &selectors, src, from, scope, acc);
     }
 }
@@ -2696,7 +2748,14 @@ fn push_chain_reads(
         if j > 0 {
             // DT.5i: a member read on a provider read (`ref.watch(p).isReady`),
             // its receiver the read's text as a ComplexReceiver spells it.
-            if let Some(receiver) = provider_read_text(primary, &selectors[..j], src) {
+            // GD.22: or on a BuildContext read (`context.read<C>().ready`).
+            let receiver = provider_read_text(primary, &selectors[..j], src).or_else(|| {
+                (j == 3)
+                    .then(|| context_read_chain(primary, selectors, src, acc))
+                    .flatten()
+                    .map(|(text, _)| text)
+            });
+            if let Some(receiver) = receiver {
                 acc.member_reads.push(PendingRead {
                     from,
                     receiver,
@@ -3939,6 +3998,16 @@ fn record_provider_local(def: TsNode, src: &[u8], from: NodeId, scope: &CallScop
         .children_by_field_name("value", &mut cursor)
         .filter(|k| k.kind() != "comment")
         .collect();
+    if let [rel] = value.as_slice()
+        && rel.kind() == "relational_expression"
+    {
+        if let Some(ty) = context_read_local(&value, src, acc) {
+            // GD.22: `final vm = context.watch<C>();`, misparsed.
+            acc.nav.record_local_type(from, name, &ty);
+            acc.bloc_receivers += 1;
+        }
+        return;
+    }
     let Some((primary, sels)) = value.split_first() else {
         return;
     };
@@ -3948,6 +4017,10 @@ fn record_provider_local(def: TsNode, src: &[u8], from: NodeId, scope: &CallScop
     if let Some(text) = provider_read_text(*primary, sels, src) {
         acc.nav.record_local_type(from, name, &text);
         acc.riverpod.locals += 1;
+    } else if let Some(ty) = context_read_local(&value, src, acc) {
+        // GD.22: `final vm = context.watch<C>();` is a C.
+        acc.nav.record_local_type(from, name, &ty);
+        acc.bloc_receivers += 1;
     }
 }
 
@@ -4009,6 +4082,385 @@ fn state_holder_field(class: TsNode, src: &[u8], id: NodeId, acc: &mut Acc) {
     };
     acc.nav.record_field_type(id, field, &ty);
     acc.riverpod.holders += 1;
+}
+
+// ============================================================================
+// GD.22: generated Riverpod providers and BuildContext state reads
+// ============================================================================
+//
+// riverpod_generator writes a provider for each `@riverpod` / `@Riverpod(..)`
+// function or class into the library's `.g.dart` part, named the
+// declaration's name lower-camel + `Provider` (`repo` -> `repoProvider`,
+// `Counter` -> `counterProvider`): a function provider reads its return type,
+// a class provider reads its `build()`'s and its notifier is the class. The
+// part is generated and often not committed, so the parser never reads it:
+// the annotated FUNCTION / CLASS itself carries the
+// `NavFact::RiverpodProvider { read, notifier }` ([`generated_function_provider`],
+// [`generated_class_provider`]), and the Dart graph build binds
+// `ref.read(xProvider)` to it through the reader's own scope when no
+// `xProvider` variable carries one (`graph/src/build/dart.rs`,
+// `provider_type`). A `Future<T>` / `FutureOr<T>` / `Stream<T>` value is an
+// AsyncValue: typed nowhere, on purpose (an AsyncNotifier class still types
+// its notifier).
+//
+// package:provider's BuildContext extension reads `context.read<C>()` /
+// `context.watch<C>()` (re-exported by flutter_bloc), `Provider.of<C>(..)`
+// (provider) and `BlocProvider.of<C>(..)` (flutter_bloc) return the C their
+// type argument names ([`context_read_type`]), so a call or a member read on
+// one, and a local bound to one, is typed C: a [`NavFact::ReceiverType`] for
+// the read's text, or the local's type (`CodeNav::record_local_type`), read
+// by the graph's typed-receiver path (CALLS rule `receiver_type`).
+// `context.select<C, R>(..)` returns an R and is not read. tree-sitter-dart
+// 0.1.0 reads a non-nullable one-argument `<C>(..)` after a member as two
+// relational expressions, `(context.read < C) > ()`
+// ([`push_context_read_misparse`]); `<C?>` and a local's whole `<C>()`
+// initialiser parse as selectors.
+
+/// GD.22: a file importing one of these declares riverpod_generator
+/// providers.
+const RIVERPOD_GENERATOR_IMPORT_PREFIXES: &[&str] = &["package:riverpod_annotation/"];
+
+/// GD.22: package:provider, whose BuildContext extension and `Provider.of`
+/// read a C.
+const PROVIDER_IMPORT_PREFIXES: &[&str] = &["package:provider/"];
+
+/// GD.22: package:flutter_bloc, which re-exports provider's BuildContext
+/// extension and adds `BlocProvider.of`.
+const BLOC_IMPORT_PREFIXES: &[&str] = &["package:flutter_bloc/"];
+
+/// GD.22: an annotation `@riverpod` / `@Riverpod(..)`.
+fn is_riverpod_annotation(annotation: TsNode, src: &[u8]) -> bool {
+    annotation
+        .child_by_field_name("name")
+        .is_some_and(|n| matches!(text_of(n, src).trim(), "riverpod" | "Riverpod"))
+}
+
+/// GD.22: the simple type a generated provider's value is, from a
+/// `function_signature`'s `return_type` children: the last type identifier
+/// before any type arguments (`p.Repo` -> `Repo`, `Repo?` -> `Repo`); `""`
+/// for an AsyncValue (`Future` / `FutureOr` / `Stream`), a builtin, `void`, a
+/// function or record type, or no written type.
+fn generated_value_type(sig: TsNode, src: &[u8]) -> String {
+    let mut cursor = sig.walk();
+    let mut name: Option<&str> = None;
+    for part in sig.children_by_field_name("return_type", &mut cursor) {
+        match part.kind() {
+            "type_identifier" => name = Some(text_of(part, src).trim()),
+            "." | "?" => {}
+            "type_arguments" => break,
+            _ => return String::new(),
+        }
+    }
+    match name {
+        Some(t) if is_dart_class_name(t) && !DART_BUILTIN_TYPES.contains(&t) => t.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// GD.22: an `@riverpod` top-level function `sig` declares the generated
+/// provider `<name>Provider` whose value is its return type
+/// ([`generated_value_type`]); recorded on the FUNCTION when it has one.
+fn generated_function_provider(
+    sig: TsNode,
+    src: &[u8],
+    parent_qname: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name) = find_method_name(sig, src) else {
+        return;
+    };
+    let read = generated_value_type(sig, src);
+    if read.is_empty() {
+        return;
+    }
+    let qname = format!("{parent_qname}::{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+    acc.nav.record_fact(
+        id,
+        NavFact::RiverpodProvider {
+            read,
+            notifier: String::new(),
+        },
+    );
+    acc.riverpod.generated += 1;
+}
+
+/// GD.22: an `@riverpod` class `class` (`name`, node `id`) is the notifier of
+/// the generated provider `<name lower-camel>Provider`, whose value is its
+/// `build()`'s return type ([`generated_value_type`]).
+fn generated_class_provider(class: TsNode, src: &[u8], name: &str, id: NodeId, acc: &mut Acc) {
+    let annotated = named_kids(class)
+        .into_iter()
+        .any(|a| a.kind() == "annotation" && is_riverpod_annotation(a, src));
+    if !annotated {
+        return;
+    }
+    let read = class
+        .child_by_field_name("body")
+        .and_then(|body| build_signature(body, src))
+        .map(|sig| generated_value_type(sig, src))
+        .unwrap_or_default();
+    acc.nav.record_fact(
+        id,
+        NavFact::RiverpodProvider {
+            read,
+            notifier: name.to_string(),
+        },
+    );
+    acc.riverpod.generated += 1;
+}
+
+/// GD.22: the `function_signature` of the `build` method a class body
+/// declares.
+fn build_signature<'a>(body: TsNode<'a>, src: &[u8]) -> Option<TsNode<'a>> {
+    named_kids(body)
+        .into_iter()
+        .filter(|m| m.kind() == "class_member")
+        .flat_map(named_kids)
+        .filter(|p| p.kind() == "method_signature")
+        .flat_map(named_kids)
+        .find(|sig| {
+            sig.kind() == "function_signature"
+                && sig
+                    .child_by_field_name("name")
+                    .is_some_and(|n| text_of(n, src).trim() == "build")
+        })
+}
+
+/// GD.22: whether `head.method<C>(args)` is a BuildContext state read in this
+/// file (its import present): `<id>.read` / `<id>.watch` with no argument
+/// (provider or flutter_bloc), `Provider.of` (provider) or `BlocProvider.of`
+/// (flutter_bloc) with one. `select` (whose value is its second type
+/// argument) is not.
+fn context_read_type(head: &str, method: &str, has_args: bool, acc: &Acc) -> bool {
+    match method {
+        "read" | "watch" => !has_args && (acc.provider_import || acc.bloc_import),
+        "of" => {
+            has_args
+                && match head {
+                    "Provider" => acc.provider_import,
+                    "BlocProvider" => acc.bloc_import,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// GD.22: the one simple class a `type_arguments` node names (`<C>`, `<C?>`),
+/// `None` for a builtin, a generic, a prefixed or several arguments.
+fn single_type_argument(type_arguments: TsNode, src: &[u8]) -> Option<String> {
+    let heads = type_argument_heads(type_arguments, src);
+    match heads.as_slice() {
+        [ty] if is_dart_class_name(ty) => Some(ty.clone()),
+        _ => None,
+    }
+}
+
+/// GD.22: a BuildContext read as `primary` + its first three `selectors`
+/// (`.read`, `<C>`, `()`): (the read's text, as [`chain_call_sites`] spells
+/// a ComplexReceiver, C).
+fn context_read_chain(
+    primary: TsNode,
+    selectors: &[TsNode],
+    src: &[u8],
+    acc: &Acc,
+) -> Option<(String, String)> {
+    if primary.kind() != "identifier" {
+        return None;
+    }
+    let [member, args, call, ..] = selectors else {
+        return None;
+    };
+    let SelectorPart::Member(method) = selector_part(*member, src) else {
+        return None;
+    };
+    if !matches!(selector_part(*args, src), SelectorPart::TypeArgs)
+        || !matches!(selector_part(*call, src), SelectorPart::Call)
+    {
+        return None;
+    }
+    let has_args = call
+        .named_child(0)
+        .and_then(|part| named_child_of_kind(part, "arguments"))
+        .is_some_and(|a| a.named_child_count() > 0);
+    let head = text_of(primary, src).trim();
+    if !context_read_type(head, method, has_args, acc) {
+        return None;
+    }
+    let ty = single_type_argument(args.named_child(0)?, src)?;
+    let mut text = text_of(primary, src).to_string();
+    for sel in [member, args, call] {
+        text.push_str(text_of(*sel, src));
+    }
+    Some((text, ty))
+}
+
+/// GD.22: tree-sitter-dart 0.1.0's reading of `p.m<C>(args)` as `(p.m < C) >
+/// (args)`: `rel`'s named children are [inner `relational_expression`, `>`,
+/// the arguments (`()` a `record_literal`, `(context)` a
+/// `parenthesized_expression`), then the selectors after the read], the
+/// inner's [`p` (or `await p`'s `unary_expression`), `.m`, `<`, `C`].
+/// Returns (the read's text `p.m<C>(args)`, C, the selectors after it).
+fn context_read_misparse<'a>(
+    rel: TsNode<'a>,
+    src: &[u8],
+    acc: &Acc,
+) -> Option<(String, String, Vec<TsNode<'a>>)> {
+    let outer = named_kids(rel);
+    let [inner, close, args, rest @ ..] = outer.as_slice() else {
+        return None;
+    };
+    if inner.kind() != "relational_expression"
+        || close.kind() != "relational_operator"
+        || text_of(*close, src) != ">"
+        || rest.iter().any(|s| s.kind() != "selector")
+    {
+        return None;
+    }
+    let has_args = match args.kind() {
+        "record_literal" => args.named_child_count() > 0,
+        "parenthesized_expression" => true,
+        _ => return None,
+    };
+    let inner_kids = named_kids(*inner);
+    let [read @ .., open, ty] = inner_kids.as_slice() else {
+        return None;
+    };
+    if open.kind() != "relational_operator"
+        || text_of(*open, src) != "<"
+        || ty.kind() != "identifier"
+    {
+        return None;
+    }
+    // `await p.m<C>()..`: the await holds the read's head.
+    let read: Vec<TsNode> = match read {
+        [unary] if unary.kind() == "unary_expression" => {
+            let await_expr = named_child_of_kind(*unary, "await_expression")?;
+            named_kids(await_expr)
+        }
+        _ => read.to_vec(),
+    };
+    let [primary, member] = read.as_slice() else {
+        return None;
+    };
+    if primary.kind() != "identifier" || member.kind() != "selector" {
+        return None;
+    }
+    let SelectorPart::Member(method) = selector_part(*member, src) else {
+        return None;
+    };
+    let head = text_of(*primary, src).trim();
+    if !context_read_type(head, method, has_args, acc) {
+        return None;
+    }
+    let ty = text_of(*ty, src).trim();
+    if !is_dart_class_name(ty) || DART_BUILTIN_TYPES.contains(&ty) {
+        return None;
+    }
+    let text = format!(
+        "{}{}<{ty}>{}",
+        text_of(*primary, src),
+        text_of(*member, src),
+        text_of(*args, src)
+    );
+    Some((text, ty.to_string(), rest.to_vec()))
+}
+
+/// GD.22: record that `receiver` (a BuildContext read's text) is a `ty` in
+/// `from`'s scope, once, for the graph's typed-receiver path.
+fn record_context_receiver(from: NodeId, receiver: &str, ty: &str, acc: &mut Acc) {
+    let fact = NavFact::ReceiverType {
+        receiver: receiver.to_string(),
+        ty: ty.to_string(),
+    };
+    if !acc
+        .nav
+        .nav_facts
+        .get(&from)
+        .is_some_and(|f| f.contains(&fact))
+    {
+        acc.nav.record_fact(from, fact);
+    }
+}
+
+/// GD.22: a call or member read on a correctly parsed BuildContext read
+/// (`context.watch<C?>()?.m()`, [`context_read_chain`]): its call site is
+/// [`chain_call_sites`]' ComplexReceiver and its member read
+/// [`push_chain_reads`]'; here the read's text is typed C.
+fn type_context_read_chain(
+    primary: TsNode,
+    selectors: &[TsNode],
+    src: &[u8],
+    from: NodeId,
+    acc: &mut Acc,
+) {
+    let Some((text, ty)) = context_read_chain(primary, selectors, src, acc) else {
+        return;
+    };
+    let Some(SelectorPart::Member(_)) = selectors.get(3).map(|s| selector_part(*s, src)) else {
+        return;
+    };
+    if matches!(
+        selectors.get(4).map(|s| selector_part(*s, src)),
+        Some(SelectorPart::TypeArgs)
+    ) {
+        return;
+    }
+    record_context_receiver(from, &text, &ty, acc);
+    acc.bloc_receivers += 1;
+}
+
+/// GD.22: a call or member read on a misparsed BuildContext read
+/// ([`context_read_misparse`]): `.m()` is the call site ComplexReceiver
+/// { read, m }, a `.m` no call follows a member read of the read, and the
+/// read's text is typed C. A local's whole initialiser (nothing after the
+/// read) is [`record_provider_local`]'s.
+fn push_context_read_misparse(rel: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some((text, ty, rest)) = context_read_misparse(rel, src, acc) else {
+        return;
+    };
+    let parts: Vec<SelectorPart> = rest.iter().map(|s| selector_part(*s, src)).collect();
+    let (Some(SelectorPart::Member(name)), Some(sel)) = (parts.first(), rest.first()) else {
+        return;
+    };
+    let line = line_at(*sel);
+    match parts.get(1) {
+        Some(SelectorPart::TypeArgs) => return,
+        Some(SelectorPart::Call) => acc.calls.push(CallSite {
+            from,
+            qualifier: CallQualifier::ComplexReceiver {
+                receiver: text.clone(),
+                name: name.to_string(),
+            },
+            line,
+        }),
+        _ => acc.member_reads.push(PendingRead {
+            from,
+            receiver: text.clone(),
+            name: name.to_string(),
+            line,
+            local: false,
+        }),
+    }
+    record_context_receiver(from, &text, &ty, acc);
+    acc.bloc_receivers += 1;
+}
+
+/// GD.22: the C a local's whole initialiser reads (`final vm =
+/// context.watch<C>();`), either parse.
+fn context_read_local(value: &[TsNode], src: &[u8], acc: &Acc) -> Option<String> {
+    match value {
+        [rel] if rel.kind() == "relational_expression" => {
+            let (_, ty, rest) = context_read_misparse(*rel, src, acc)?;
+            rest.is_empty().then_some(ty)
+        }
+        [primary, sels @ ..] if sels.len() == 3 => {
+            context_read_chain(*primary, sels, src, acc).map(|(_, ty)| ty)
+        }
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -11911,6 +12363,227 @@ class Ints extends StateNotifier<int> {}
             fp.nav.field_types.get(&id).and_then(|t| t.get("state")),
             None,
             "no import"
+        );
+    }
+
+    /// GD.22: the RiverpodProvider fact on `kind` `lib::p::<name>`.
+    fn fact_on(
+        fp: &FileParse,
+        kind: glia_core::NodeKindId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, &format!("lib::p::{name}"));
+        fp.nav.nav_facts.get(&id)?.iter().find_map(|f| match f {
+            NavFact::RiverpodProvider { read, notifier } => Some((read.clone(), notifier.clone())),
+            _ => None,
+        })
+    }
+
+    /// GD.22: an `@riverpod` / `@Riverpod(..)` function records its return
+    /// type, a class its `build()`'s and itself as the notifier, in a file
+    /// importing riverpod_annotation; a Future / Stream / builtin value
+    /// records no read (a Future function nothing at all), an unannotated
+    /// declaration and a file without the import nothing.
+    #[test]
+    fn generated_providers_record_their_value_types() {
+        let source = r#"import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'p.g.dart';
+
+/// Docs between are fine.
+@riverpod
+Repo repo(RepoRef ref) => Repo();
+
+@Riverpod(keepAlive: true)
+api.Client client(ClientRef ref) => api.Client();
+
+@riverpod
+Future<Repo> slow(SlowRef ref) async => Repo();
+
+@riverpod
+Stream<int> ticks(TicksRef ref) => Stream.empty();
+
+Repo plain() => Repo();
+
+@riverpod
+class Counter extends _$Counter {
+  @override
+  int build() => 0;
+  void inc() {}
+}
+
+@Riverpod(keepAlive: true)
+class Todos extends _$Todos {
+  @override
+  Future<List<String>> build() async => [];
+}
+
+@riverpod
+class Session extends _$Session {
+  @override
+  User? build() => null;
+}
+
+class Repo {}
+"#;
+        let fp = parse_file(source, "lib/p.dart", "lib::p", repo()).unwrap();
+        let func = |n: &str| fact_on(&fp, node_kind::FUNCTION, n);
+        let class = |n: &str| fact_on(&fp, node_kind::CLASS, n);
+        assert_eq!(func("repo"), pair("Repo", ""));
+        assert_eq!(func("client"), pair("Client", ""));
+        for none in ["slow", "ticks", "plain"] {
+            assert_eq!(func(none), None, "{none}");
+        }
+        assert_eq!(class("Counter"), pair("", "Counter"));
+        assert_eq!(class("Todos"), pair("", "Todos"));
+        assert_eq!(class("Session"), pair("User", "Session"));
+        assert_eq!(class("Repo"), None);
+
+        let other = source.replace(
+            "import 'package:riverpod_annotation/riverpod_annotation.dart';",
+            "import 'package:meta/meta.dart';",
+        );
+        let fp = parse_file(&other, "lib/p.dart", "lib::p", repo()).unwrap();
+        assert!(
+            !fp.nav
+                .nav_facts
+                .values()
+                .flatten()
+                .any(|f| matches!(f, NavFact::RiverpodProvider { .. })),
+            "no riverpod_annotation import"
+        );
+    }
+
+    /// GD.22: BuildContext reads in a provider / flutter_bloc file: a call
+    /// or a member read on one is typed by a ReceiverType of the read's text
+    /// (both parses: the misparsed `<C>()`, `await`ed too, and `<C?>()`), a
+    /// local bound to one is a C; `select`, a builtin argument, a read with
+    /// arguments and `Provider.of` without package:provider type nothing.
+    #[test]
+    fn context_reads_type_their_receivers() {
+        let source = r#"import 'package:flutter_bloc/flutter_bloc.dart';
+
+class View {
+  void a(BuildContext context) {
+    context.read<CartCubit>().add();
+    BlocProvider.of<CartCubit>(context).clear();
+    final vm = context.watch<PromptVm>();
+    final b = BlocProvider.of<Bloc1>(context);
+    context.watch<Ads?>()?.show();
+    if (context.read<Auth>().signedIn) {}
+    context.select<CartCubit, int>((c) => c.count);
+    context.read<int>().abs();
+    Provider.of<Repo>(context).load();
+  }
+
+  Future<void> c(BuildContext context) async {
+    await context.read<Saver>().save();
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/view.dart", "lib::view", repo()).unwrap();
+        let m = |n: &str| {
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::METHOD,
+                &format!("lib::view::View::{n}"),
+            )
+        };
+        let typed = |scope: NodeId| {
+            let mut out: Vec<(String, String)> = fp
+                .nav
+                .nav_facts
+                .get(&scope)
+                .into_iter()
+                .flatten()
+                .filter_map(|f| match f {
+                    NavFact::ReceiverType { receiver, ty } => Some((receiver.clone(), ty.clone())),
+                    _ => None,
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            typed(m("a")),
+            pairs(&[
+                ("BlocProvider.of<CartCubit>(context)", "CartCubit"),
+                ("context.read<Auth>()", "Auth"),
+                ("context.read<CartCubit>()", "CartCubit"),
+                ("context.watch<Ads?>()", "Ads"),
+            ])
+        );
+        assert_eq!(typed(m("c")), pairs(&[("context.read<Saver>()", "Saver")]));
+        assert_eq!(
+            local_type_of(&fp, m("a"), "vm").as_deref(),
+            Some("PromptVm")
+        );
+        assert_eq!(local_type_of(&fp, m("a"), "b").as_deref(), Some("Bloc1"));
+        let calls: Vec<(String, String)> = fp
+            .calls
+            .iter()
+            .filter_map(|c| match &c.qualifier {
+                CallQualifier::ComplexReceiver { receiver, name } => {
+                    Some((receiver.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for want in [
+            ("context.read<CartCubit>()", "add"),
+            ("BlocProvider.of<CartCubit>(context)", "clear"),
+            ("context.watch<Ads?>()", "show"),
+            ("context.read<Saver>()", "save"),
+        ] {
+            assert!(
+                calls.contains(&(want.0.to_string(), want.1.to_string())),
+                "{want:?} in {calls:?}"
+            );
+        }
+        assert!(
+            member_reads_of(&fp, m("a"))
+                .contains(&("context.read<Auth>()".to_string(), "signedIn".to_string())),
+            "{:?}",
+            member_reads_of(&fp, m("a"))
+        );
+
+        let ungated = source.replace(
+            "import 'package:flutter_bloc/flutter_bloc.dart';",
+            "import 'package:get/get.dart';",
+        );
+        let fp = parse_file(&ungated, "lib/view.dart", "lib::view", repo()).unwrap();
+        assert!(
+            !fp.nav
+                .nav_facts
+                .values()
+                .flatten()
+                .any(|f| matches!(f, NavFact::ReceiverType { .. })),
+            "no provider / flutter_bloc import"
+        );
+        assert_eq!(local_type_of(&fp, m("a"), "vm"), None);
+
+        // package:provider: `Provider.of<C>(context, listen: false)` too.
+        let provider = "import 'package:provider/provider.dart';
+
+void f(BuildContext context) {
+  Provider.of<Repo>(context, listen: false).load();
+}
+";
+        let fp = parse_file(provider, "lib/p.dart", "lib::p", repo()).unwrap();
+        assert!(
+            fp.nav.nav_facts.values().flatten().any(|f| matches!(
+                f,
+                NavFact::ReceiverType { receiver, ty }
+                    if receiver == "Provider.of<Repo>(context, listen: false)" && ty == "Repo"
+            )),
+            "{:?}",
+            fp.nav.nav_facts
         );
     }
 }

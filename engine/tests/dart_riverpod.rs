@@ -15,6 +15,15 @@
 //!
 //! At HEAD ad3064f0 the fixture had CALLS 0/9, ROLE 0/1 and 12 dead_symbol
 //! rows (`[live] ... reached=8/44`).
+//!
+//! GD.22 — the state receivers DT.5i did not read, built from
+//! `bench/substrate-gap/fixtures/dart-riverpod-generator-bloc`: riverpod_generator
+//! `@riverpod` functions and classes (their `xProvider` lives in the absent
+//! `.g.dart` part) type `ref.read(xProvider)` / `.notifier`, a Future
+//! provider's value stays untyped; package:provider / flutter_bloc
+//! `context.read<C>()`, `context.watch<C>()` and `BlocProvider.of<C>(..)` are
+//! a C, directly, through a local and through a getter read, only in a file
+//! importing one of them. At HEAD d67f2698 the fixture had CALLS 0/8.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,9 +43,17 @@ const TOKEN: &str = "lib::core::token_storage::TokenStorage";
 const INTERCEPTOR: &str = "lib::core::auth_interceptor::AuthInterceptor";
 
 fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../bench/substrate-gap/fixtures/dart-riverpod-receivers")
+    fixture("dart-riverpod-receivers")
 }
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(name)
+}
+
+/// GD.22's fixture.
+const GENERATED: &str = "dart-riverpod-generator-bloc";
 
 /// Copy a fixture's sources (never its key.json or a stray `.ai/` / `.glia/`).
 fn copy_tree(from: &Path, to: &Path) {
@@ -54,7 +71,11 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn build_in(dir: &Path) -> MergedGraph {
-    copy_tree(&fixture_dir(), dir);
+    build_fixture_in(&fixture_dir(), dir)
+}
+
+fn build_fixture_in(from: &Path, dir: &Path) -> MergedGraph {
+    copy_tree(from, dir);
     generate_one(&dir.display().to_string())
         .expect("fixture builds")
         .merged
@@ -261,17 +282,21 @@ fn dead_symbol_is_the_look_alikes_and_the_unread() {
 /// Set by [`markers_count_providers_and_reads`] on its child run.
 const CHILD_ENV: &str = "GLIA_DT5I_CHILD_DIR";
 
+/// GD.22: the fixture [`child_build_for_stderr`] builds (DT.5i's when unset).
+const CHILD_FIXTURE_ENV: &str = "GLIA_DT5I_CHILD_FIXTURE";
+
 /// A no-op unless run as the child of [`markers_count_providers_and_reads`],
 /// whose stderr carries the parser's, the extractor's and the graph's markers.
 #[test]
 fn child_build_for_stderr() {
     if let Ok(dir) = std::env::var(CHILD_ENV) {
-        build_in(Path::new(&dir));
+        let from = std::env::var(CHILD_FIXTURE_ENV).map_or_else(|_| fixture_dir(), |f| fixture(&f));
+        build_fixture_in(&from, Path::new(&dir));
     }
 }
 
-#[test]
-fn markers_count_providers_and_reads() {
+/// The stderr of one child build of `fixture_name` at `GLIA_THREADS=1`.
+fn child_stderr(fixture_name: &str) -> String {
     let tmp = tempfile::tempdir().expect("tempdir");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
@@ -282,6 +307,7 @@ fn markers_count_providers_and_reads() {
             "--test-threads=1",
         ])
         .env(CHILD_ENV, tmp.path())
+        .env(CHILD_FIXTURE_ENV, fixture_name)
         .env("GLIA_THREADS", "1")
         .output()
         .expect("re-run the test binary");
@@ -290,14 +316,22 @@ fn markers_count_providers_and_reads() {
         "child failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let lines = |prefix: &str| -> Vec<String> {
-        stderr
-            .lines()
-            .filter(|l| l.starts_with(prefix))
-            .map(String::from)
-            .collect()
-    };
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The lines of `stderr` starting with `prefix`, in order.
+fn lines_of(stderr: &str, prefix: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with(prefix))
+        .map(String::from)
+        .collect()
+}
+
+#[test]
+fn markers_count_providers_and_reads() {
+    let stderr = child_stderr("dart-riverpod-receivers");
+    let lines = |prefix: &str| lines_of(&stderr, prefix);
     assert_eq!(
         lines("[dart-scope]"),
         ["[dart-scope] provider receivers bound=7"]
@@ -308,9 +342,9 @@ fn markers_count_providers_and_reads() {
     );
     let riverpod = lines("[dart-riverpod]");
     for want in [
-        "[dart-riverpod] providers=1 locals=1 holders=1 file=lib/core/auth_service.dart",
-        "[dart-riverpod] providers=0 locals=2 holders=0 file=lib/features/login_page.dart",
-        "[dart-riverpod] providers=1 locals=0 holders=0 file=lib/core/token_storage.dart",
+        "[dart-riverpod] providers=1 generated=0 locals=1 holders=1 file=lib/core/auth_service.dart",
+        "[dart-riverpod] providers=0 generated=0 locals=2 holders=0 file=lib/features/login_page.dart",
+        "[dart-riverpod] providers=1 generated=0 locals=0 holders=0 file=lib/core/token_storage.dart",
     ] {
         assert!(riverpod.iter().any(|l| l == want), "{want}: {riverpod:?}");
     }
@@ -323,6 +357,114 @@ fn markers_count_providers_and_reads() {
     assert_eq!(
         lines("[services] dart"),
         ["[services] dart classified=1 rules=dio_interceptor:1 module=lib::core::auth_interceptor"]
+    );
+}
+
+/// GD.22: CALLS edges by (from, to) with their (emitter, rule), the
+/// generated-provider calls through DT.5i's hook (`graph:dart`
+/// `provider_receiver`), the context reads through the generic typed
+/// receiver (`graph:calls` `receiver_type`), the getter read through the
+/// member reads (`graph:reads` `accessor_read`).
+#[test]
+fn generated_providers_and_context_reads_bind() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let m = build_fixture_in(&fixture(GENERATED), tmp.path());
+    let calls = edges(&m, edge_category::CALLS);
+    let ev = |e: &str, r: &str| (e.to_string(), Some(r.to_string()));
+    for (from, to, want) in [
+        (
+            "lib::page::Page::build",
+            "lib::counter::Counter::inc",
+            ev("graph:dart", "provider_receiver"),
+        ),
+        (
+            "lib::page::Page::build",
+            "lib::counter::Repo::load",
+            ev("graph:dart", "provider_receiver"),
+        ),
+        (
+            "lib::page::Page::build",
+            "lib::counter::Todos::add",
+            ev("graph:dart", "provider_receiver"),
+        ),
+        (
+            "lib::view::CartView::build",
+            "lib::cart_cubit::CartCubit::add",
+            ev("graph:calls", "receiver_type"),
+        ),
+        (
+            "lib::view::CartView::reset",
+            "lib::cart_cubit::CartCubit::clear",
+            ev("graph:calls", "receiver_type"),
+        ),
+        (
+            "lib::prompt_screen::PromptScreen::build",
+            "lib::prompt_view_model::PromptViewModel::addBasicIngredients",
+            ev("graph:calls", "receiver_type"),
+        ),
+        (
+            "lib::prompt_screen::PromptScreen::filter",
+            "lib::prompt_view_model::PromptViewModel::addCategoryFilters",
+            ev("graph:calls", "receiver_type"),
+        ),
+        (
+            "lib::prompt_screen::PromptScreen::ready",
+            "lib::prompt_view_model::PromptViewModel::ready",
+            ev("graph:reads", "accessor_read"),
+        ),
+    ] {
+        assert_eq!(evidence_of(&calls, from, to), want, "{from} -> {to}");
+    }
+    for (from, to) in [
+        ("lib::page::Page::poll", "lib::counter::Repo::load"),
+        (
+            "lib::view::CartView::build",
+            "lib::cart_cubit::WishCubit::add",
+        ),
+        (
+            "lib::view::CartView::reset",
+            "lib::cart_cubit::WishCubit::clear",
+        ),
+        (
+            "lib::prompt_screen::PromptScreen::build",
+            "lib::prompt_view_model::SavedViewModel::addBasicIngredients",
+        ),
+        ("lib::ungated::undoAll", "lib::cart_cubit::CartCubit::undo"),
+    ] {
+        assert!(!has(&calls, from, to), "{from} -> {to}");
+    }
+}
+
+/// GD.22's markers: `[dart-riverpod] .. generated=<g>` on the file
+/// declaring the generated providers (the Future provider records none),
+/// `[dart-bloc] receivers=<n>` per file typing a context read, none in the
+/// file importing neither library, and the hook's three generated-provider
+/// calls.
+#[test]
+fn markers_count_generated_providers_and_context_reads() {
+    let stderr = child_stderr(GENERATED);
+    let lines = |prefix: &str| lines_of(&stderr, prefix);
+    let mut riverpod = lines("[dart-riverpod]");
+    riverpod.sort();
+    assert_eq!(
+        riverpod,
+        [
+            "[dart-riverpod] providers=0 generated=0 locals=1 holders=0 file=lib/page.dart",
+            "[dart-riverpod] providers=0 generated=3 locals=0 holders=0 file=lib/counter.dart",
+        ]
+    );
+    let mut bloc = lines("[dart-bloc]");
+    bloc.sort();
+    assert_eq!(
+        bloc,
+        [
+            "[dart-bloc] receivers=2 file=lib/view.dart",
+            "[dart-bloc] receivers=3 file=lib/prompt_screen.dart",
+        ]
+    );
+    assert_eq!(
+        lines("[dart-scope]"),
+        ["[dart-scope] provider receivers bound=3"]
     );
 }
 

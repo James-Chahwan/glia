@@ -61,6 +61,20 @@
 //! getter read on a provider read runs (`auth.isAuthenticated`, CALLS rule
 //! `accessor_read`). fired_on, once per Dart graph whose hook bound a call:
 //! `[dart-scope] provider receivers bound=<n>`.
+//!
+//! GD.22: riverpod_generator providers. The `xProvider` of an `@riverpod`
+//! function or class lives in the library's `.g.dart` part, which the parser
+//! never reads; the annotated FUNCTION / CLASS carries the
+//! [`NavFact::RiverpodProvider`] instead (a function: its return type read; a
+//! class: its `build()`'s read and itself as the notifier). When no
+//! `xProvider` the reader's scope binds carries a fact, [`provider_type`]
+//! binds the declaration riverpod_generator named it after
+//! ([`generated_provider_names`]: `repo` / `Counter` for `repoProvider` /
+//! `counterProvider`) through that same scope, never repo-wide, and the rule
+//! stays `provider_receiver`. BuildContext reads (`context.read<C>()`,
+//! `BlocProvider.of<C>(..)`) need no hook: the parser types them as a
+//! [`NavFact::ReceiverType`] or a local's type, bound by the generic typed
+//! receiver path (`graph:calls` rule `receiver_type`).
 
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -370,7 +384,10 @@ fn close_of(b: &[u8], open: usize) -> Option<usize> {
 /// import bindings, then its own declarations; `alias.p` through the alias's
 /// MODULE symbols) to a STATE_VAR carrying a [`NavFact::RiverpodProvider`],
 /// and its read (or `.notifier`) type name resolves in the provider's own
-/// file ([`scope_type`]). Any miss -> None.
+/// file ([`scope_type`]). GD.22: when `p` binds no STATE_VAR with a fact, the
+/// FUNCTION / CLASS riverpod_generator named it after
+/// ([`generated_provider_names`]), bound the same way and carrying the fact,
+/// stands for it. Any miss -> None.
 pub(crate) fn provider_type(g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
     let text = match &site.qualifier {
         CallQualifier::ComplexReceiver { receiver, .. } => receiver.as_str(),
@@ -381,39 +398,70 @@ pub(crate) fn provider_type(g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
     };
     let read = provider_read(text)?;
     let module = enclosing_home_module(g, site.from)?;
-    let provider = match &read.alias {
-        Some(alias) => {
-            let lib = *g.symbols.module_import_bindings.get(&module)?.get(alias)?;
-            if g.nav.kind_by_id.get(&lib) != Some(&node_kind::MODULE) {
-                return None;
+    // `name` as the reader's file binds it: through the alias's MODULE
+    // symbols, else its import bindings, then its own declarations.
+    let bind = |name: &str| -> Option<NodeId> {
+        match &read.alias {
+            Some(alias) => {
+                let lib = *g.symbols.module_import_bindings.get(&module)?.get(alias)?;
+                if g.nav.kind_by_id.get(&lib) != Some(&node_kind::MODULE) {
+                    return None;
+                }
+                g.symbols.module_symbols.get(&lib)?.get(name).copied()
             }
-            *g.symbols.module_symbols.get(&lib)?.get(&read.provider)?
+            None => g
+                .symbols
+                .module_import_bindings
+                .get(&module)
+                .and_then(|b| b.get(name))
+                .or_else(|| g.symbols.module_symbols.get(&module)?.get(name))
+                .copied(),
         }
-        None => g
-            .symbols
-            .module_import_bindings
-            .get(&module)
-            .and_then(|b| b.get(&read.provider))
-            .or_else(|| g.symbols.module_symbols.get(&module)?.get(&read.provider))
-            .copied()?,
     };
-    if g.nav.kind_by_id.get(&provider) != Some(&node_kind::STATE_VAR) {
-        return None;
-    }
-    let (value, notifier) = g
-        .nav
-        .nav_facts
-        .get(&provider)?
-        .iter()
-        .find_map(|f| match f {
-            NavFact::RiverpodProvider { read, notifier } => Some((read, notifier)),
+    let provider_fact = |id: NodeId, kinds: &[glia_core::NodeKindId]| {
+        if !kinds.contains(g.nav.kind_by_id.get(&id)?) {
+            return None;
+        }
+        g.nav.nav_facts.get(&id)?.iter().find_map(|f| match f {
+            NavFact::RiverpodProvider { read, notifier } => Some((id, read, notifier)),
             _ => None,
+        })
+    };
+    // GD.22: no provider variable carries a fact: a riverpod_generator
+    // provider, whose FUNCTION / CLASS the reader's scope binds
+    // ([`generated_provider_names`]).
+    let (provider, value, notifier) = bind(&read.provider)
+        .and_then(|id| provider_fact(id, &[node_kind::STATE_VAR]))
+        .or_else(|| {
+            generated_provider_names(&read.provider)?
+                .into_iter()
+                .find_map(|name| {
+                    provider_fact(bind(&name)?, &[node_kind::FUNCTION, node_kind::CLASS])
+                })
         })?;
     let name = if read.notifier { notifier } else { value };
     if name.is_empty() {
         return None;
     }
     scope_type(g, enclosing_module(&g.nav, provider)?, name)
+}
+
+/// GD.22: the declarations riverpod_generator names the provider `provider`
+/// after: its name without the `Provider` suffix, as a function (`repo` for
+/// `repoProvider`) and as a class (`Counter` for `counterProvider`, the
+/// first letter after any leading `_` upper-cased). `None` for a name with
+/// no such suffix or an empty stem.
+pub(crate) fn generated_provider_names(provider: &str) -> Option<[String; 2]> {
+    let stem = provider.strip_suffix("Provider")?;
+    let body = stem.trim_start_matches('_');
+    let first = body.chars().next().filter(|c| c.is_ascii_lowercase())?;
+    let class = format!(
+        "{}{}{}",
+        &stem[..stem.len() - body.len()],
+        first.to_ascii_uppercase(),
+        &body[first.len_utf8()..]
+    );
+    Some([stem.to_string(), class])
 }
 
 /// DT.5i: `resolve_calls`' extra hook for the Dart build: a call on a
@@ -929,5 +977,138 @@ mod tests {
             )]
         );
         assert_eq!(reads.accessor_read, 1);
+    }
+
+    /// GD.22: the declarations a generated provider is named after.
+    #[test]
+    fn generated_provider_names_lower_camel() {
+        let names = |p: &str| generated_provider_names(p).map(|n| n.to_vec());
+        assert_eq!(
+            names("repoProvider"),
+            Some(vec!["repo".to_string(), "Repo".to_string()])
+        );
+        assert_eq!(
+            names("todoListProvider"),
+            Some(vec!["todoList".to_string(), "TodoList".to_string()])
+        );
+        assert_eq!(
+            names("_counterProvider"),
+            Some(vec!["_counter".to_string(), "_Counter".to_string()])
+        );
+        assert_eq!(names("Provider"), None);
+        assert_eq!(names("authService"), None);
+        assert_eq!(names("FooProvider"), None);
+    }
+
+    /// GD.22: a read of a riverpod_generator provider (no `xProvider`
+    /// variable anywhere) binds through the FUNCTION / CLASS the reader's
+    /// scope binds by the generator's name: a function's value type, a
+    /// class's notifier; a class's empty value (an int `build()`) and a
+    /// declaration with no fact bind nothing.
+    #[test]
+    fn generated_providers_bind_through_their_declaration() {
+        let mut lib = FileParse::default();
+        let module = node(&mut lib, node_kind::MODULE, "lib::gen", None);
+        let repo_cls = node(&mut lib, node_kind::CLASS, "lib::gen::Repo", Some(module));
+        let load = node(
+            &mut lib,
+            node_kind::METHOD,
+            "lib::gen::Repo::load",
+            Some(repo_cls),
+        );
+        let repo_fn = node(
+            &mut lib,
+            node_kind::FUNCTION,
+            "lib::gen::repo",
+            Some(module),
+        );
+        lib.nav.record_fact(
+            repo_fn,
+            NavFact::RiverpodProvider {
+                read: "Repo".into(),
+                notifier: String::new(),
+            },
+        );
+        let counter = node(
+            &mut lib,
+            node_kind::CLASS,
+            "lib::gen::Counter",
+            Some(module),
+        );
+        let inc = node(
+            &mut lib,
+            node_kind::METHOD,
+            "lib::gen::Counter::inc",
+            Some(counter),
+        );
+        lib.nav.record_fact(
+            counter,
+            NavFact::RiverpodProvider {
+                read: String::new(),
+                notifier: "Counter".into(),
+            },
+        );
+        node(
+            &mut lib,
+            node_kind::FUNCTION,
+            "lib::gen::plain",
+            Some(module),
+        );
+
+        let mut page = FileParse::default();
+        let page_mod = node(&mut page, node_kind::MODULE, "lib::page", None);
+        let build = node(
+            &mut page,
+            node_kind::FUNCTION,
+            "lib::page::build",
+            Some(page_mod),
+        );
+        for name in ["repo", "Counter", "plain"] {
+            page.imports.push(ImportStmt {
+                from_module: "lib::page".into(),
+                target: ImportTarget::Symbol {
+                    module: "lib::gen".into(),
+                    name: name.into(),
+                    alias: None,
+                    level: 0,
+                },
+                line: 0,
+            });
+        }
+        for (i, (receiver, name)) in [
+            ("ref.read(repoProvider)", "load"),
+            ("ref.read(counterProvider.notifier)", "inc"),
+            ("ref.read(counterProvider)", "inc"),
+            ("ref.read(plainProvider)", "load"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            page.calls.push(CallSite {
+                from: build,
+                qualifier: CallQualifier::ComplexReceiver {
+                    receiver: receiver.into(),
+                    name: name.into(),
+                },
+                line: i as u32 + 3,
+            });
+        }
+        let (g, _, _, bound) =
+            super::super::dart_passes(repo(), vec![lib, page], |_, spec| Some(spec.to_string()));
+        let mut got: Vec<(NodeId, NodeId, Option<u32>)> = g
+            .edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::CALLS
+                    && Evidence::of(e).is_some_and(|ev| {
+                        ev.emitter == "graph:dart"
+                            && ev.rule.as_deref() == Some("provider_receiver")
+                    })
+            })
+            .map(|e| (e.from, e.to, Evidence::of(e).and_then(|ev| ev.line)))
+            .collect();
+        got.sort_by_key(|r| r.2);
+        assert_eq!(got, vec![(build, load, Some(3)), (build, inc, Some(4))]);
+        assert_eq!(bound, 2);
     }
 }
