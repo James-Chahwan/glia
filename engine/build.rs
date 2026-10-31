@@ -23,6 +23,8 @@ const KEEP: &[&str] = &[
     "watch_memory",
     // named by tooling: the watch parity gate (DC.10a/b)
     "watch_parity",
+    // named by tooling: the multi-repo watch parity gate (GA.10)
+    "watch_parity_many",
 ];
 
 /// The `[[test]]` target every other tests/*.rs compiles into, and its root file.

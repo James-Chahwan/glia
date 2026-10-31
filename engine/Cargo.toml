@@ -118,3 +118,7 @@ path = "tests/watch_memory.rs"
 [[test]]
 name = "watch_parity"
 path = "tests/watch_parity.rs"
+
+[[test]]
+name = "watch_parity_many"
+path = "tests/watch_parity_many.rs"
