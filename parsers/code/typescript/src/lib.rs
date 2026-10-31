@@ -14,7 +14,7 @@
 //! All code-domain primitives live in `glia-code-domain` and are
 //! re-exported from this crate for convenience.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::NavFact;
 use glia_code_domain::data_entity;
@@ -522,6 +522,11 @@ struct Acc {
     type_shadows: HashSet<(NodeId, String)>,
     /// FH.20: the `[ts-types]` counters.
     type_alias_stats: TypeAliasStats,
+    /// GD.3: each module-level `const x = <value>` whose value names a class
+    /// ([`module_const_type`]), by name -> its type text (`T`, a call-result
+    /// `f()`, a static call `T.m()`). A name declared twice keeps `""`. Read
+    /// by [`record_module_const_aliases`].
+    module_consts: BTreeMap<String, String>,
 }
 
 /// FH.20: a type name read in a type position by `from` (an annotation, a
@@ -3088,6 +3093,11 @@ fn visit_method(
     // the receivers of its body (a parameter property records its field's
     // type, so A6.2b's constructor binds keep their target).
     record_param_types(n, src, method_id, acc);
+    // GD.3: a static method's declared class return type types a module
+    // const built by it (`const repo = Repo.create()`).
+    if has_token(n, "static") {
+        record_return_class(n, src, method_id, acc);
+    }
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
     }
@@ -3209,6 +3219,15 @@ fn visit_lexical(
         };
         let name_n = declarator.child_by_field_name("name");
         if !matches!(value.kind(), "arrow_function" | "function_expression") {
+            // GD.3: a module-level `const x = new T(..)` is an instance every
+            // function of the file may read.
+            if is_const && let Some(nn) = name_n.filter(|nn| nn.kind() == "identifier") {
+                let ty = module_const_type(declarator, value, src).unwrap_or_default();
+                acc.module_consts
+                    .entry(text(nn, src).to_string())
+                    .and_modify(|t| t.clear())
+                    .or_insert(ty);
+            }
             // DT.5g: a module-level `const X = <value>` runs its initialiser
             // at load: `export const appConfig = { providers: [provideI18n()]
             // }`, `const WIZARD = ROUTES.filter(r => isWizard(r.path))`. Its
@@ -3243,6 +3262,118 @@ fn visit_lexical(
             acc,
         );
     }
+}
+
+/// GD.3: the class a module-level `const` declarator's binding holds, as
+/// DF.22a's [`record_declarator_type`] reads a local: its annotation's class
+/// type ([`annotated_class_type`]), else a `new T(..)`'s constructor
+/// ([`new_type`]), an `x as T`'s `T`, a bare call `f(..)` as the call-result
+/// form `f()` (typed by `f`'s declared return type in the graph, DT.5k), or a
+/// static call `T.m(..)` on a capitalised identifier as `T.m()` (typed by the
+/// static METHOD's declared return type, [`visit_method`]). Anything else (a
+/// literal, an object, a chain, an `await`, a non-class annotation) is
+/// `None`.
+fn module_const_type(decl: TsNode, value: TsNode, src: &[u8]) -> Option<String> {
+    if let Some(ann) = decl.child_by_field_name("type") {
+        return annotated_class_type(ann, src).map(str::to_string);
+    }
+    match value.kind() {
+        "new_expression" => new_type(value, src).map(str::to_string),
+        "as_expression" => {
+            let mut cursor = value.walk();
+            value
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() != "comment")
+                .nth(1)
+                .and_then(|t| class_type_name(t, src))
+                .map(str::to_string)
+        }
+        "call_expression" => {
+            if inject_shape(value, src).is_some() {
+                return None;
+            }
+            let f = value.child_by_field_name("function")?;
+            match f.kind() {
+                "identifier" => Some(format!("{}()", text(f, src))),
+                "member_expression" => {
+                    let object = f.child_by_field_name("object")?;
+                    let property = f.child_by_field_name("property")?;
+                    let class = text(object, src);
+                    (object.kind() == "identifier"
+                        && property.kind() == "property_identifier"
+                        && class.starts_with(|c: char| c.is_ascii_uppercase()))
+                    .then(|| format!("{class}.{}()", text(property, src)))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// GD.3: the prefix of a local recorded as an alias of a module-level const
+/// (`module.<type>`): the graph crate types the receiver by `<type>` and
+/// tells the bind apart (rule `module_const_receiver`). A recorded type never
+/// holds a `.` otherwise ([`annotated_class_type`] keeps a chain's last
+/// segment), except DF.22a's `self.<field>` alias.
+const MODULE_CONST_ALIAS: &str = "module.";
+
+/// GD.3: a scope that reads a module-level const `x` (`module_consts`,
+/// [`Acc::module_consts`])
+/// as a receiver (`x.m()`, an `Attribute` call site of `calls`, or a member
+/// access `x.f` of [`Acc::member_reads`]) and binds no `x` of its own (no
+/// local or parameter, a nested callback's included, and no nested
+/// `function` / `class x`) records the local `x` as `module.<type>`
+/// ([`MODULE_CONST_ALIAS`]). The MODULE itself is such a scope for its
+/// top-level statements and a spec file's `describe` / `it` callbacks.
+/// Runs after DT.5g's value references read the scopes' locals, so an alias
+/// shadows none of them. Returns the aliases recorded.
+fn record_module_const_aliases(
+    module_consts: &BTreeMap<String, String>,
+    member_reads: &[MemberReadCand],
+    nested_decls: &HashSet<(NodeId, String)>,
+    calls: &[CallSite],
+    nav: &mut CodeNav,
+) -> usize {
+    if module_consts.values().all(String::is_empty) {
+        return 0;
+    }
+    let reads = calls
+        .iter()
+        .filter_map(|c| match &c.qualifier {
+            CallQualifier::Attribute { base, .. } => Some((c.from, base.as_str())),
+            _ => None,
+        })
+        .chain(
+            member_reads
+                .iter()
+                .filter(|m| m.shape == RecvShape::Local)
+                .map(|m| (m.from, m.receiver.as_str())),
+        );
+    // Every scope's own bindings are decided before any alias is recorded,
+    // so one scope's alias never reads as another read's own local.
+    let mut aliases: Vec<(NodeId, &str, String)> = Vec::new();
+    let mut seen: HashSet<(NodeId, &str)> = HashSet::new();
+    for (from, base) in reads {
+        let Some(ty) = module_consts.get(base).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        if !seen.insert((from, base)) {
+            continue;
+        }
+        let own = nav
+            .local_types
+            .get(&from)
+            .is_some_and(|l| l.contains_key(base))
+            || nested_decls.contains(&(from, base.to_string()));
+        if !own {
+            aliases.push((from, base, format!("{MODULE_CONST_ALIAS}{ty}")));
+        }
+    }
+    for (from, base, alias) in &aliases {
+        nav.record_local_type(*from, base, alias);
+    }
+    aliases.len()
 }
 
 /// G19: surface module-level exported data constants
@@ -8233,6 +8364,24 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             line: cand.line,
         });
         di_stats::record(DiShape::TsInjectFn);
+    }
+
+    // GD.3: a scope reading a module-level instance const it does not bind
+    // itself types the receiver through the const (after DT.5g's value
+    // references, which an alias must not shadow; before the member reads,
+    // whose bare receivers it types).
+    let module_const_aliases = record_module_const_aliases(
+        &acc.module_consts,
+        &acc.member_reads,
+        &acc.nested_decls,
+        &out.calls,
+        &mut out.nav,
+    );
+    if module_const_aliases > 0 {
+        eprintln!(
+            "[ts-locals] module const receivers={module_const_aliases} file={}",
+            acc.file_rel
+        );
     }
 
     // DT.5k: a member access on a receiver of known type may run a getter
@@ -16004,5 +16153,167 @@ mod tsx_grammar_tests {
         assert_eq!(errors(src, Grammar::Tsx), 0);
         let parse = parse_file(src, "src/first.tsx", "src::first", repo()).unwrap();
         assert!(has(&parse, fn_id("src::first::first")));
+    }
+}
+
+/// GD.3 (FD.10a): module-level instance consts typed for the scopes that read
+/// them, and static methods' declared return classes.
+#[cfg(test)]
+mod module_const_tests {
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+    use std::collections::BTreeMap;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts_module_const")
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/use.ts", "src::use", repo()).unwrap()
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn locals(p: &FileParse, scope: NodeId) -> BTreeMap<String, String> {
+        p.nav
+            .local_types
+            .get(&scope)
+            .map(|l| l.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> BTreeMap<String, String> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const SRC: &str = "\
+import { Parent, Store, inject } from './base';
+const shared = new Parent();
+const typed: Parent = make();
+export const single = Store.create();
+const built = make();
+let later = new Parent();
+const plain = { a: 1 };
+const svcRef = inject(Parent);
+shared.count();
+export function g() {
+  shared.count();
+  typed.go();
+  single.save();
+  built.go();
+  later.go();
+  plain.a;
+  svcRef.go();
+  return shared.state;
+}
+export function h(shared: Store) {
+  return shared.size();
+}
+export function k() {
+  const inner = () => { const shared = 1; return shared; };
+  return shared.state + inner();
+}
+export function n() {
+  return shared;
+}
+describe('d', () => {
+  it('i', async () => { await shared.count(); });
+});
+";
+
+    /// A function reading a typed module const it does not bind records the
+    /// alias `module.<type>` (a `new T()`, an annotation, a static factory, a
+    /// call result); a `let`, an untyped const and an `inject(T)` const
+    /// record none; a parameter or a nested callback's local shadows it; the
+    /// MODULE's own top-level reads alias too; a const read by value alone
+    /// (`return shared`) records nothing.
+    #[test]
+    fn module_const_receivers_alias_their_type() {
+        let p = parse(SRC);
+        let g = id(node_kind::FUNCTION, "src::use::g");
+        assert_eq!(
+            locals(&p, g),
+            pairs(&[
+                ("built", "module.make()"),
+                ("shared", "module.Parent"),
+                ("single", "module.Store.create()"),
+                ("typed", "module.Parent"),
+            ])
+        );
+        let h = id(node_kind::FUNCTION, "src::use::h");
+        assert_eq!(locals(&p, h), pairs(&[("shared", "Store")]));
+        let k = id(node_kind::FUNCTION, "src::use::k");
+        assert_eq!(locals(&p, k), pairs(&[("inner", ""), ("shared", "")]));
+        let n = id(node_kind::FUNCTION, "src::use::n");
+        assert!(locals(&p, n).is_empty());
+        let module = id(node_kind::MODULE, "src::use");
+        assert_eq!(
+            locals(&p, module).get("shared").map(String::as_str),
+            Some("module.Parent")
+        );
+        // `shared.state` in g is a member read now: its receiver is typed.
+        assert!(
+            p.nav
+                .nav_facts
+                .get(&g)
+                .is_some_and(|f| f.contains(&NavFact::MemberRead {
+                    receiver: "shared".to_string(),
+                    name: "state".to_string(),
+                    line: 17,
+                })),
+            "{:?}",
+            p.nav.nav_facts.get(&g)
+        );
+    }
+
+    /// An alias never shadows a value reference: an exported instance const
+    /// passed by value at the top level still USES its STATE_VAR (DT.5g).
+    #[test]
+    fn alias_shadows_no_value_ref() {
+        let src = "\
+import { Svc, register } from './svc';
+export const svc = new Svc();
+svc.start();
+register(svc);
+";
+        let p = parse(src);
+        let module = id(node_kind::MODULE, "src::use");
+        let state = id(node_kind::STATE_VAR, "src::use::svc");
+        let value_refs: Vec<NodeId> = p
+            .edges
+            .iter()
+            .filter(|e| e.from == module && e.category == edge_category::USES)
+            .filter(|e| Evidence::of(e).and_then(|ev| ev.rule).as_deref() == Some("value_ref"))
+            .map(|e| e.to)
+            .collect();
+        assert_eq!(value_refs, vec![state]);
+        assert_eq!(
+            locals(&p, module).get("svc").map(String::as_str),
+            Some("module.Svc")
+        );
+    }
+
+    /// A `static` method's declared class return type is recorded (what a
+    /// `const x = T.create()` reads); an instance method's is not.
+    #[test]
+    fn static_method_return_class_recorded() {
+        let src = "\
+export class Store {
+  static create(): Store { return new Store(); }
+  clone(): Store { return new Store(); }
+}
+";
+        let p = parse(src);
+        let create = id(node_kind::METHOD, "src::use::Store::create");
+        let clone = id(node_kind::METHOD, "src::use::Store::clone");
+        assert_eq!(
+            p.nav.return_types.get(&create).map(String::as_str),
+            Some("Store")
+        );
+        assert_eq!(p.nav.return_types.get(&clone), None);
     }
 }

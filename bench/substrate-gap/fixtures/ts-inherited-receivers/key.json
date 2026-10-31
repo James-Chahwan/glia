@@ -1,0 +1,20 @@
+{
+  "framework": "ts-inherited-receivers",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "GD.3 (FD.10a): members reached through a default-imported class type, a static method named through a subclass, a superclass STATE_VAR and getter read through a typed receiver, and a module-level instance const read in a function or in a spec file's describe / it callback bind their edges. Parent::state is call-initialised so it is a STATE_VAR (CH.2; a literal-initialised field mints no node). Baseline HEAD 7af8407e (debug CLI on a copy): only DEFINES, the two IMPORTS, INHERITS_FROM Kid -> Parent and TESTS use.spec -> use; no edge from f, g, h or use.spec to a base member.",
+  "expect_edges": [
+    {"from": "use::f", "to": "base::Repo::size", "category": "CALLS", "exact": true, "note": "r: Repo, a default import (rule default_import_type)"},
+    {"from": "use::f", "to": "base::Parent::make", "category": "CALLS", "exact": true, "note": "Kid.make(), static make on the superclass (rule inherited_static)"},
+    {"from": "use::f", "to": "base::Parent::state", "category": "USES", "exact": true, "note": "k.state, Kid extends Parent (rule inherited_state)"},
+    {"from": "use::f", "to": "base::Parent::ready", "category": "CALLS", "exact": true, "note": "k.ready runs the superclass getter (rule inherited_accessor_read)"},
+    {"from": "use::g", "to": "base::Parent::count", "category": "CALLS", "exact": true, "note": "shared.count(), a module-level const new Parent() (rule module_const_receiver)"},
+    {"from": "use::g", "to": "base::Parent::state", "category": "USES", "exact": true, "note": "shared.state (rule module_const_receiver)"},
+    {"from": "use::h", "to": "base::Repo::size", "category": "CALLS", "exact": true, "note": "the parameter shared: Repo shadows the module const"},
+    {"from": "use.spec", "to": "base::Parent::count", "category": "CALLS", "exact": true, "note": "svc.count() inside describe / it, svc a module-level const"}
+  ],
+  "forbid": [
+    {"from": "use::h", "to": "base::Parent::count", "category": "CALLS", "note": "shadowed: h's parameter is a Repo"},
+    {"from": "use::h", "to": "base::Parent::state", "category": "USES", "note": "shadowed"}
+  ]
+}

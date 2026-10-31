@@ -929,26 +929,7 @@ fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut
                 _ => continue,
             };
             stats.member_reads += 1;
-            let plain = !receiver.is_empty()
-                && receiver
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$');
-            let qualifier = if plain {
-                CallQualifier::Attribute {
-                    base: receiver.clone(),
-                    name: name.clone(),
-                }
-            } else {
-                CallQualifier::ComplexReceiver {
-                    receiver: receiver.clone(),
-                    name: name.clone(),
-                }
-            };
-            let site = CallSite {
-                from: n.id,
-                qualifier,
-                line: *line,
-            };
+            let site = member_site(n.id, receiver, name, *line);
             let Some(from_module) = enclosing_home_module(g, n.id) else {
                 continue;
             };
@@ -2144,7 +2125,9 @@ pub(crate) fn scope_type(g: &RepoGraph, module: NodeId, name: &str) -> Option<No
 /// of unknown type (`""`) returns `None` rather than fall through to a
 /// same-named field (it shadows it), and a local recorded as `self.<f>`
 /// aliases field `f`. A receiver no local claims falls through to A6.2a's
-/// field lookup, so parsers that record no locals see A6.2a exactly.
+/// field lookup, so parsers that record no locals see A6.2a exactly. A local
+/// recorded as a module-level const's alias (`module.<T>`, GD.3) answers
+/// `None` here: [`receiver_type_via`] reads it.
 ///
 /// DT.5c: when the caller is itself a CLASS / STRUCT / ENUM and the receiver
 /// is `this.<f>` / `self.<f>`, the field is `f` of the caller
@@ -2173,7 +2156,9 @@ pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g
         return own_field_type(g, site.from, name);
     }
     if !is_self && let Some(ty) = local_type(g, site.from, name) {
-        if ty.is_empty() {
+        // GD.3: a module-level const's alias ([`MODULE_CONST_ALIAS`]) is typed
+        // only by [`receiver_type_via`], whose binds carry their own rule.
+        if ty.is_empty() || ty.starts_with(MODULE_CONST_ALIAS) {
             return None;
         }
         return match ty.strip_prefix("self.") {
@@ -2216,7 +2201,12 @@ fn receiver_type_node(
             if !gate.ext(g, site.from).as_deref().is_some_and(is_ts_family) {
                 return None;
             }
-            returned_type(g, from_module, site.from, callee).map(|t| (t, true))
+            match callee.split_once('.') {
+                // GD.3: a module const built by a static call (`T.create()`).
+                Some((class, method)) => static_returned_type(g, from_module, class, method),
+                None => returned_type(g, from_module, site.from, callee),
+            }
+            .map(|t| (t, true))
         }
         // DT.5k's own readings resolve through the caller's scope only
         // ([`scope_type`]): an import the graph left unbound names a
@@ -2252,6 +2242,25 @@ fn returned_type(g: &RepoGraph, from_module: NodeId, from: NodeId, callee: &str)
     }
     let ret = g.nav.return_types.get(&f)?;
     scope_type(g, enclosing_home_module(g, f)?, ret)
+}
+
+/// GD.3: the class a static call `class.method()` returns: the CLASS
+/// `class` names in `from_module`'s own scope ([`scope_type`]), its own
+/// METHOD `method`, then that method's declared class return type
+/// (`CodeNav::return_types`, recorded by the TS parser for a `static`
+/// method), resolved from the method's own file. Only a module-level
+/// const's alias carries this text (`const repo = Repo.create()`).
+fn static_returned_type(
+    g: &RepoGraph,
+    from_module: NodeId,
+    class: &str,
+    method: &str,
+) -> Option<NodeId> {
+    let class = scope_type(g, from_module, class)
+        .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::CLASS))?;
+    let m = g.symbols.class_methods.get(&class)?.get(method).copied()?;
+    let ret = g.nav.return_types.get(&m)?;
+    scope_type(g, enclosing_home_module(g, m)?, ret)
 }
 
 /// True when `id` is a CLASS / STRUCT / ENUM: a type that owns fields and
@@ -2566,6 +2575,49 @@ pub(crate) struct InheritStats {
     /// FH.21: sites kept out of every lookup because no superclass declares
     /// their name ([`inherited_names`]).
     prefiltered: usize,
+    /// GD.3: the `[recv] ts inherited` counts.
+    ts: TsInherited,
+}
+
+/// GD.3's per-graph tally of the TS-family binds [`resolve_inherited_calls`]
+/// adds: a static method named through a subclass (`static`), a superclass
+/// STATE_VAR called or read through a typed receiver (`state`), a superclass
+/// getter / setter run by a member access (`accessor`), and the calls /
+/// accesses whose receiver was typed through a default import
+/// (`default_import`) or a module-level instance const (`module_const`),
+/// own member or inherited. One bind may count in two.
+#[derive(Default)]
+struct TsInherited {
+    statics: usize,
+    state: usize,
+    accessor: usize,
+    default_import: usize,
+    module_const: usize,
+}
+
+impl TsInherited {
+    /// Count a bind's receiver: through a default import or a module const.
+    fn via(&mut self, via: Via) {
+        match via {
+            Via::DefaultImport => self.default_import += 1,
+            Via::ModuleConst => self.module_const += 1,
+            Via::Plain => {}
+        }
+    }
+
+    /// GD.3 fired_on marker, `None` when every count is 0: `[recv] ts
+    /// inherited: static=<s> state=<v> accessor=<a> default_import=<d>
+    /// module_const=<c>`.
+    fn marker(&self) -> Option<String> {
+        (self.statics + self.state + self.accessor + self.default_import + self.module_const > 0)
+            .then(|| {
+                format!(
+                    "[recv] ts inherited: static={} state={} accessor={} default_import={} \
+                     module_const={}",
+                    self.statics, self.state, self.accessor, self.default_import, self.module_const
+                )
+            })
+    }
 }
 
 impl InheritStats {
@@ -2592,9 +2644,13 @@ impl InheritStats {
         })
     }
 
-    /// Print the marker, once per graph build, after both passes ran.
+    /// Print the markers, once per graph build, after both passes ran: the
+    /// `[ts-inherit]` line, then GD.3's `[recv] ts inherited` line.
     pub(crate) fn report(&self) {
         if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+        if let Some(line) = self.ts.marker() {
             eprintln!("{line}");
         }
     }
@@ -2623,9 +2679,9 @@ fn superclasses(g: &RepoGraph) -> BTreeMap<u64, Vec<NodeId>> {
 /// The nearest superclass member a lookup of `name` above `owner` finds.
 #[derive(Debug, PartialEq, Eq)]
 enum Definer {
-    /// Exactly one METHOD at the first level that defines the name.
+    /// Exactly one member at the first level that defines the name.
     One(NodeId),
-    /// Two or more distinct METHODs at that level (a class whose heritage
+    /// Two or more distinct members at that level (a class whose heritage
     /// bound two bases, e.g. a mixin): no guess.
     Ambiguous,
     /// No superclass defines it, or the chain left the graph.
@@ -2645,6 +2701,21 @@ fn nearest_definer(
     owner: NodeId,
     name: &str,
 ) -> Definer {
+    nearest_member(g, supers, owner, name, false)
+}
+
+/// [`nearest_definer`]'s walk, member-kind aware (GD.3): with `state`, a
+/// base's STATE_VAR child `name` ([`state_member`], DF.17's shape) defines
+/// the name too, so a typed receiver's inherited field (`k.state`, a
+/// `draft = signal(..)` called `k.draft()`) is found where the runtime finds
+/// it. A METHOD and a STATE_VAR of one name at one level are two definers.
+fn nearest_member(
+    g: &RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    owner: NodeId,
+    name: &str,
+    state: bool,
+) -> Definer {
     let mut visited: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     visited.insert(owner.0);
     let mut level: Vec<NodeId> = supers.get(&owner.0).cloned().unwrap_or_default();
@@ -2661,6 +2732,7 @@ fn nearest_definer(
                     .get(b)
                     .and_then(|m| m.get(name))
                     .copied()
+                    .or_else(|| state.then(|| state_member(g, *b, name)).flatten())
             })
             .collect();
         hits.sort_unstable_by_key(|h| h.0);
@@ -2708,7 +2780,7 @@ fn nearest_definer(
 /// prototype chain, so the nearest superclass of `T` defining `m` is the
 /// member the call names, EVIDENCE `graph:calls` / `inherited_receiver`.
 /// The receiver is typed exactly as `resolve_via_receiver_type` types it
-/// ([`receiver_class`]), behind the same A6.2a bare-field gate, and only a
+/// ([`receiver_type_id`]), behind the same A6.2a bare-field gate, and only a
 /// CLASS walks. A subclass of `T` overriding `m` is reached by dispatch
 /// (DF.22c), never by a second CALLS here. A receiver class with an own
 /// member `m` (a METHOD that did not bind for another reason, or a
@@ -2730,9 +2802,9 @@ fn nearest_definer(
 /// lookup).
 pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStats) {
     let pending = std::mem::take(&mut g.unresolved_calls);
+    let supers = superclasses(g);
     let decided: Vec<Option<(InheritWalk, Definer)>> = {
         let g: &RepoGraph = g;
-        let supers = superclasses(g);
         let inheritable = inherited_names(g, &supers);
         let names = GlobalNames::new(g);
         // A6.2a's gate, fresh: its skipped tally is dropped, since
@@ -2749,16 +2821,28 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
                     | CallQualifier::ComplexReceiver { name, .. } => name,
                     _ => return None,
                 };
-                if !inheritable.contains(name.as_str()) {
-                    stats.prefiltered += 1;
-                    return None;
-                }
+                let inherited = inheritable.contains(name.as_str());
                 match &site.qualifier {
+                    CallQualifier::SelfMethod(_) | CallQualifier::SuperMethod(_) if !inherited => {
+                        stats.prefiltered += 1;
+                        None
+                    }
                     CallQualifier::SelfMethod(name) => self_lookup(g, &supers, site, name, false),
                     CallQualifier::SuperMethod(name) => self_lookup(g, &supers, site, name, true),
                     CallQualifier::Attribute { name, .. }
                     | CallQualifier::ComplexReceiver { name, .. } => {
-                        receiver_lookup(g, &supers, site, name, &mut gate, &names)
+                        // GD.3: `Kid.make()`, a static named through a subclass.
+                        if inherited && let Some(hit) = static_lookup(g, &supers, site, name) {
+                            return Some(hit);
+                        }
+                        // GD.3: a receiver typed through a default import or a
+                        // module const binds its own member here too, so its
+                        // site is never prefiltered.
+                        if !inherited && !special_receiver(g, site) {
+                            stats.prefiltered += 1;
+                            return None;
+                        }
+                        receiver_lookup(g, &supers, site, name, inherited, &mut gate, &names)
                     }
                     _ => None,
                 }
@@ -2773,16 +2857,27 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
         };
         match definer {
             Definer::One(to) => {
-                let ev = graph_evidence("graph:calls", walk.rule()).line(site.line);
+                let is_state = g.nav.kind_by_id.get(&to) == Some(&node_kind::STATE_VAR);
+                let ev = graph_evidence("graph:calls", walk.rule(is_state)).line(site.line);
                 push_edge(g, site.from, to, edge_category::CALLS, ev);
                 match walk {
                     InheritWalk::SelfCall => stats.self_bound += 1,
                     InheritWalk::SuperCall => stats.super_bound += 1,
-                    InheritWalk::Receiver { constructed } => {
-                        stats.receiver_bound += 1;
+                    InheritWalk::Static => stats.ts.statics += 1,
+                    InheritWalk::Receiver { constructed, via } => {
+                        if is_state {
+                            stats.ts.state += 1;
+                        } else {
+                            stats.receiver_bound += 1;
+                        }
+                        stats.ts.via(via);
                         if !constructed {
                             recv_stats::record();
                         }
+                    }
+                    InheritWalk::Own { via } => {
+                        stats.ts.via(via);
+                        recv_stats::record();
                     }
                 }
             }
@@ -2794,19 +2889,33 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
         }
     }
     g.unresolved_calls = kept;
+    resolve_inherited_member_reads(g, &supers, &mut stats.ts);
 }
 
 /// FH.21: every member name a superclass declares: the `class_methods` keys
 /// of each class that is some class's direct superclass ([`superclasses`]'
-/// values). [`nearest_definer`] reads `class_methods` of those classes only,
-/// so a name outside this set always comes back `Nothing`.
+/// values), and (GD.3) the names of their STATE_VAR children, which a typed
+/// receiver's lookup finds too ([`nearest_member`]). [`nearest_definer`]
+/// reads those classes only, so a name outside this set always comes back
+/// `Nothing`.
 fn inherited_names<'g>(g: &'g RepoGraph, supers: &BTreeMap<u64, Vec<NodeId>>) -> HashSet<&'g str> {
     let bases: BTreeSet<u64> = supers.values().flatten().map(|b| b.0).collect();
-    bases
-        .into_iter()
-        .filter_map(|b| g.symbols.class_methods.get(&NodeId(b)))
-        .flat_map(|methods| methods.keys().map(String::as_str))
-        .collect()
+    let mut names: HashSet<&'g str> = HashSet::new();
+    for b in bases {
+        let b = NodeId(b);
+        if let Some(methods) = g.symbols.class_methods.get(&b) {
+            names.extend(methods.keys().map(String::as_str));
+        }
+        if let Some(children) = g.nav.children_of.get(&b) {
+            names.extend(
+                children
+                    .iter()
+                    .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR))
+                    .filter_map(|c| g.nav.name_by_id.get(c).map(String::as_str)),
+            );
+        }
+    }
+    names
 }
 
 /// EVIDENCE rule of a `super.m()` CALLS (DF.22c), read by engine's
@@ -2814,6 +2923,25 @@ fn inherited_names<'g>(g: &'g RepoGraph, supers: &BTreeMap<u64, Vec<NodeId>>) ->
 /// engine/tests/dead_dispatch.rs `super_call_vouches_for_no_override` pins
 /// both ends.
 const SUPER_METHOD: &str = "super_method";
+
+/// GD.3: the prefix of a local the TS parser records as the alias of a
+/// module-level const (`const shared = new Parent()` read in a function that
+/// binds no `shared` of its own: the local `shared` is `module.Parent`). The
+/// parser's `MODULE_CONST_ALIAS` writes it; [`receiver_type_via`] reads it.
+const MODULE_CONST_ALIAS: &str = "module.";
+
+/// GD.3: how a receiver's type was reached, for the EVIDENCE rule and the
+/// `[recv] ts inherited` counts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Via {
+    /// A local, a parameter, a field or a constructor call, as before.
+    Plain,
+    /// A type name bound by a default import (`import Repo from './base'`):
+    /// the module's default-exported class ([`default_class`]).
+    DefaultImport,
+    /// A module-level instance const ([`MODULE_CONST_ALIAS`]).
+    ModuleConst,
+}
 
 /// Which of [`resolve_inherited_calls`]' lookups a site took.
 #[derive(Clone, Copy)]
@@ -2823,18 +2951,42 @@ enum InheritWalk {
     /// `super.m()`, from the caller's enclosing CLASS (CH.1b).
     SuperCall,
     /// A typed receiver, from its declared CLASS (DF.22b); `constructed`
-    /// when the receiver is a constructor call (CL.5a).
-    Receiver { constructed: bool },
+    /// when the receiver is a constructor call (CL.5a); `via` how the type
+    /// was reached (GD.3).
+    Receiver { constructed: bool, via: Via },
+    /// GD.3: `T.m()` on a CLASS `T` without its own `m`, from `T`.
+    Static,
+    /// GD.3: a typed receiver's own member, reached through a default import
+    /// or a module const (the generic pass binds every other own member).
+    Own { via: Via },
 }
 
 impl InheritWalk {
-    /// The EVIDENCE rule of the CALLS edge the lookup binds.
-    fn rule(self) -> &'static str {
+    /// The EVIDENCE rule of the CALLS edge the lookup binds; `state` when the
+    /// target is a STATE_VAR (GD.3: a receiver's inherited field).
+    fn rule(self, state: bool) -> &'static str {
         match self {
             InheritWalk::SelfCall => "inherited_method",
             InheritWalk::SuperCall => SUPER_METHOD,
+            InheritWalk::Receiver { .. } if state => INHERITED_STATE,
             InheritWalk::Receiver { .. } => "inherited_receiver",
+            InheritWalk::Static => "inherited_static",
+            InheritWalk::Own { via } => via_rule(via),
         }
+    }
+}
+
+/// GD.3's EVIDENCE rule of a superclass STATE_VAR called or read through a
+/// typed receiver.
+const INHERITED_STATE: &str = "inherited_state";
+
+/// GD.3's EVIDENCE rule of a receiver's own member reached through a default
+/// import (`default_import_type`) or a module const
+/// (`module_const_receiver`).
+fn via_rule(via: Via) -> &'static str {
+    match via {
+        Via::ModuleConst => "module_const_receiver",
+        Via::DefaultImport | Via::Plain => "default_import_type",
     }
 }
 
@@ -2866,28 +3018,84 @@ fn self_lookup(
     Some((walk, nearest_definer(g, supers, owner, name)))
 }
 
+/// GD.3's lookup for `T.m()` where `T` names a CLASS in the caller's own
+/// scope ([`scope_type`]: its import bindings, a default import's same-name
+/// class included, then its own symbols, never a repo-wide name) and is no
+/// local of the caller: a CLASS without its own member `m` finds a static
+/// `m` on its superclasses, the nearest METHOD ([`nearest_definer`]).
+/// `None` (kept) for any other site.
+fn static_lookup(
+    g: &RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    site: &CallSite,
+    name: &str,
+) -> Option<(InheritWalk, Definer)> {
+    let CallQualifier::Attribute { base, .. } = &site.qualifier else {
+        return None;
+    };
+    if name.is_empty() || local_type(g, site.from, base).is_some() {
+        return None;
+    }
+    let class = scope_type(g, enclosing_home_module(g, site.from)?, base)
+        .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::CLASS))?;
+    if has_own_member(g, class, name) {
+        return None;
+    }
+    Some((InheritWalk::Static, nearest_definer(g, supers, class, name)))
+}
+
+/// GD.3: true when `site`'s receiver is typed through a module const's alias
+/// or names a type a default import binds (the module a default import
+/// binds, [`default_import_binding`]): a site whose own member may bind in
+/// [`receiver_lookup`] whatever the superclasses declare.
+fn special_receiver(g: &RepoGraph, site: &CallSite) -> bool {
+    if let CallQualifier::Attribute { base, .. } = &site.qualifier
+        && local_type(g, site.from, base).is_some_and(|t| t.starts_with(MODULE_CONST_ALIAS))
+    {
+        return true;
+    }
+    receiver_type(g, site).is_some_and(|t| {
+        enclosing_home_module(g, site.from)
+            .and_then(|m| default_import_binding(g, m, t))
+            .is_some()
+    })
+}
+
 /// DF.22b's lookup for a typed-receiver site: the receiver's declared CLASS
-/// ([`receiver_class`]), `None` (kept) for an empty name, an untyped or
+/// ([`receiver_type_id`]), `None` (kept) for an empty name, an untyped or
 /// gated receiver, or a class with an own member `name`
-/// ([`has_own_member`]).
+/// ([`has_own_member`]). GD.3: the walk finds a superclass STATE_VAR too
+/// ([`nearest_member`]), and only for a name some superclass declares
+/// (`inherited`); a receiver typed through a default import or a module
+/// const binds its type's own member ([`InheritWalk::Own`]: a METHOD, an
+/// INTERFACE's included, or a STATE_VAR), which the generic pass leaves to
+/// this one.
 fn receiver_lookup(
     g: &RepoGraph,
     supers: &BTreeMap<u64, Vec<NodeId>>,
     site: &CallSite,
     name: &str,
+    inherited: bool,
     gate: &mut BareFieldGate,
     names: &GlobalNames<'_>,
 ) -> Option<(InheritWalk, Definer)> {
     if name.is_empty() {
         return None;
     }
-    let (class, constructed) = receiver_class(g, site, gate, names)?;
-    if has_own_member(g, class, name) {
+    let (ty, constructed, via) = receiver_type_id(g, site, gate, names, false)?;
+    if has_own_member(g, ty, name) || type_method(g, ty, name).is_some() {
+        if via == Via::Plain {
+            return None;
+        }
+        let own = type_method(g, ty, name).or_else(|| state_member(g, ty, name))?;
+        return Some((InheritWalk::Own { via }, Definer::One(own)));
+    }
+    if !inherited || g.nav.kind_by_id.get(&ty) != Some(&node_kind::CLASS) {
         return None;
     }
     Some((
-        InheritWalk::Receiver { constructed },
-        nearest_definer(g, supers, class, name),
+        InheritWalk::Receiver { constructed, via },
+        nearest_member(g, supers, ty, name, true),
     ))
 }
 
@@ -2907,40 +3115,265 @@ fn has_own_member(g: &RepoGraph, class: NodeId, name: &str) -> bool {
         })
 }
 
-/// DF.22b: the declared CLASS of a call's receiver, typed as
-/// [`resolve_via_receiver_type`] types it, with its helpers, called not
-/// copied: a constructor-call receiver ([`constructed_type`], CL.5a) is the
-/// type it constructs ([`constructed_type_id`]) and never falls back to a
-/// variable; any other receiver is [`receiver_type`] (locals first, LA.35a /
-/// DF.22a, then the enclosing type's fields, A6.2a) resolved by
-/// [`resolve_type_name_with`]. An `Attribute` base that is no local of the caller
-/// goes through A6.2a's [`BareFieldGate`]: in TS / JS a bare name outside the
-/// constructor is a parameter, local or global, never the field. Only a
-/// CLASS answers (INHERITS_FROM between CLASS nodes is what
-/// [`superclasses`] walks). The bool is true for a constructed receiver.
-fn receiver_class(
+/// GD.3: the receiver's type text and how it was reached: a module const's
+/// alias local (`module.<T>`, [`MODULE_CONST_ALIAS`]) is `T` through
+/// [`Via::ModuleConst`]; every other receiver is [`receiver_type`]'s answer.
+fn receiver_type_via<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<(&'g str, Via)> {
+    if let CallQualifier::Attribute { base, .. } = &site.qualifier
+        && let Some(ty) = local_type(g, site.from, base)
+        && let Some(t) = ty.strip_prefix(MODULE_CONST_ALIAS)
+    {
+        return (!t.is_empty()).then_some((t, Via::ModuleConst));
+    }
+    receiver_type(g, site).map(|t| (t, Via::Plain))
+}
+
+/// DF.22b: the declared type of a call's (or, GD.3, a member access's)
+/// receiver, typed as [`resolve_via_receiver_type`] types it, with its
+/// helpers, called not copied: a constructor-call receiver
+/// ([`constructed_type`], CL.5a) is the type it constructs
+/// ([`constructed_type_id`]) and never falls back to a variable; any other
+/// receiver is [`receiver_type_via`] (a module const's alias, then locals
+/// first, LA.35a / DF.22a, then the enclosing type's fields, A6.2a) resolved
+/// by [`receiver_type_node`] (`scoped` as DT.5k's member reads resolve). An
+/// `Attribute` base that is no local of the caller goes through A6.2a's
+/// [`BareFieldGate`]: in TS / JS a bare name outside the constructor is a
+/// parameter, local or global, never the field.
+///
+/// GD.3: a type name a default import binds names the importer's MODULE
+/// binding; it resolves to the module's default-exported class
+/// ([`default_class`]) as [`Via::DefaultImport`]. The answer is a CLASS, or
+/// for a default import or a module const an INTERFACE too; the bool is true
+/// for a constructed receiver.
+fn receiver_type_id(
     g: &RepoGraph,
     site: &CallSite,
     gate: &mut BareFieldGate,
     names: &GlobalNames<'_>,
-) -> Option<(NodeId, bool)> {
-    let is_class = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
+    scoped: bool,
+) -> Option<(NodeId, bool, Via)> {
+    let kind = |id: &NodeId| g.nav.kind_by_id.get(id).copied();
     let from_module = enclosing_home_module(g, site.from)?;
     if let Some(ty) = constructed_type(site) {
         return constructed_type_id(g, names, from_module, ty)
-            .filter(is_class)
-            .map(|t| (t, true));
+            .filter(|t| kind(t) == Some(node_kind::CLASS))
+            .map(|t| (t, true, Via::Plain));
     }
-    let type_name = receiver_type(g, site)?;
-    let (type_id, _) = receiver_type_node(g, site, from_module, type_name, gate, names, false)
-        .filter(|(t, _)| is_class(t))?;
+    let (type_name, mut via) = receiver_type_via(g, site)?;
+    let (mut type_id, _) =
+        receiver_type_node(g, site, from_module, type_name, gate, names, scoped)?;
+    if let Some(module) = default_import_binding(g, from_module, type_name) {
+        if type_id == module {
+            type_id = default_class(g, module, type_name)?;
+        }
+        if via == Via::Plain && default_exports(g, module) {
+            via = Via::DefaultImport;
+        }
+    }
+    let admitted = match kind(&type_id) {
+        Some(k) if k == node_kind::CLASS => true,
+        Some(k) if k == node_kind::INTERFACE => via != Via::Plain,
+        _ => false,
+    };
+    if !admitted {
+        return None;
+    }
     if let CallQualifier::Attribute { base, .. } = &site.qualifier
         && local_type(g, site.from, base).is_none()
         && !gate.admits(g, site.from)
     {
         return None;
     }
-    Some((type_id, false))
+    Some((type_id, false, via))
+}
+
+/// GD.3: the MODULE `module`'s import bindings give `name`, when that is a
+/// MODULE: a TS default import (`import Repo from './base'`) binds the file
+/// (A6.3's convention), unless a barrel's `default` entry named its
+/// declaration (DT.1q).
+fn default_import_binding(g: &RepoGraph, module: NodeId, name: &str) -> Option<NodeId> {
+    g.symbols
+        .module_import_bindings
+        .get(&module)?
+        .get(name)
+        .copied()
+        .filter(|b| g.nav.kind_by_id.get(b) == Some(&node_kind::MODULE))
+}
+
+/// GD.3: true when `module`'s own `export` declarations export `default`
+/// (DT.1q's [`NavFact::Exports`]).
+fn default_exports(g: &RepoGraph, module: NodeId) -> bool {
+    g.nav.nav_facts.get(&module).is_some_and(|facts| {
+        facts.iter().any(
+            |f| matches!(f, NavFact::Exports { names } if names.iter().any(|n| n == "default")),
+        )
+    })
+}
+
+/// GD.3: the class a default import names in `module`: the module exports
+/// `default` ([`default_exports`]) and holds a top-level CLASS or INTERFACE
+/// of the imported name (`export default class Repo`, read as A6.3's
+/// heritage reads a default import, [`heritage_through_module`]). A default
+/// import under another name, or a module with no default export, names
+/// none.
+fn default_class(g: &RepoGraph, module: NodeId, name: &str) -> Option<NodeId> {
+    if !default_exports(g, module) {
+        return None;
+    }
+    g.symbols
+        .module_symbols
+        .get(&module)?
+        .get(name)
+        .copied()
+        .filter(|c| {
+            matches!(g.nav.kind_by_id.get(c), Some(&k)
+                if k == node_kind::CLASS || k == node_kind::INTERFACE)
+        })
+}
+
+/// GD.3: bind each TS member access ([`NavFact::MemberRead`] /
+/// [`NavFact::MemberWrite`]) DT.5k's [`resolve_member_reads`] could not: the
+/// receiver typed as a call's is ([`receiver_type_id`], scoped as DT.5k
+/// scopes it), then
+/// - a superclass member, when the receiver's CLASS declares none of the
+///   name ([`nearest_member`]): a getter read / setter write is a CALLS rule
+///   `inherited_accessor_read` / `inherited_accessor_write`, a STATE_VAR read
+///   a USES rule `inherited_state`;
+/// - the receiver's own member, when it was typed through a module const
+///   (DT.5k leaves an alias to this pass): a getter read / setter write is a
+///   CALLS, a STATE_VAR read a USES, rule `module_const_receiver`.
+///
+/// A plain METHOD read by value, a STATE_VAR write and an own member reached
+/// any other way bind nothing here. Runs after `resolve_refs`, so the
+/// heritage edges exist. Scopes in `g.nodes` order, each once, accesses in
+/// the order the parser recorded them.
+fn resolve_inherited_member_reads(
+    g: &mut RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    stats: &mut TsInherited,
+) {
+    let mut found: Vec<(NodeId, NodeId, EdgeCategoryId, &'static str, u32, Via)> = Vec::new();
+    {
+        let g: &RepoGraph = g;
+        let names = GlobalNames::new(g);
+        let mut gate = BareFieldGate::default();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        for n in &g.nodes {
+            if !seen.insert(n.id) {
+                continue;
+            }
+            let Some(facts) = g.nav.nav_facts.get(&n.id) else {
+                continue;
+            };
+            if !facts
+                .iter()
+                .any(|f| matches!(f, NavFact::MemberRead { .. } | NavFact::MemberWrite { .. }))
+                || !gate.ext(g, n.id).as_deref().is_some_and(is_ts_family)
+            {
+                continue;
+            }
+            for fact in facts {
+                let (receiver, name, line, write) = match fact {
+                    NavFact::MemberRead {
+                        receiver,
+                        name,
+                        line,
+                    } => (receiver, name, *line, false),
+                    NavFact::MemberWrite {
+                        receiver,
+                        name,
+                        line,
+                    } => (receiver, name, *line, true),
+                    _ => continue,
+                };
+                let site = member_site(n.id, receiver, name, line);
+                let Some((ty, _, via)) = receiver_type_id(g, &site, &mut gate, &names, true) else {
+                    continue;
+                };
+                let (member, inherited) =
+                    if has_own_member(g, ty, name) || type_method(g, ty, name).is_some() {
+                        if via != Via::ModuleConst {
+                            continue;
+                        }
+                        match type_method(g, ty, name).or_else(|| state_member(g, ty, name)) {
+                            Some(m) => (m, false),
+                            None => continue,
+                        }
+                    } else {
+                        if g.nav.kind_by_id.get(&ty) != Some(&node_kind::CLASS) {
+                            continue;
+                        }
+                        match nearest_member(g, supers, ty, name, true) {
+                            Definer::One(m) => (m, true),
+                            _ => continue,
+                        }
+                    };
+                if member == n.id {
+                    continue;
+                }
+                let bind = if g.nav.kind_by_id.get(&member) == Some(&node_kind::STATE_VAR) {
+                    (!write).then_some((edge_category::USES, INHERITED_STATE))
+                } else {
+                    let (wanted, rule) = if write {
+                        (NavFact::Setter, "inherited_accessor_write")
+                    } else {
+                        (NavFact::Getter, "inherited_accessor_read")
+                    };
+                    g.nav
+                        .nav_facts
+                        .get(&member)
+                        .is_some_and(|f| f.contains(&wanted))
+                        .then_some((edge_category::CALLS, rule))
+                };
+                let Some((category, rule)) = bind else {
+                    continue;
+                };
+                let rule = if inherited { rule } else { via_rule(via) };
+                found.push((n.id, member, category, rule, line, via));
+            }
+        }
+    }
+    for (from, to, category, rule, line, via) in found {
+        match rule {
+            INHERITED_STATE => stats.state += 1,
+            "inherited_accessor_read" | "inherited_accessor_write" => stats.accessor += 1,
+            _ => {}
+        }
+        stats.via(via);
+        push_edge(
+            g,
+            from,
+            to,
+            category,
+            graph_evidence("graph:calls", rule).line(line),
+        );
+    }
+}
+
+/// DT.5k: the CallSite a member access `<receiver>.<name>` at `line` of
+/// `from` is typed as: a plain identifier receiver as an `Attribute` base, any
+/// other text as a `ComplexReceiver`.
+fn member_site(from: NodeId, receiver: &str, name: &str, line: u32) -> CallSite {
+    let plain = !receiver.is_empty()
+        && receiver
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$');
+    let qualifier = if plain {
+        CallQualifier::Attribute {
+            base: receiver.to_string(),
+            name: name.to_string(),
+        }
+    } else {
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
+    };
+    CallSite {
+        from,
+        qualifier,
+        line,
+    }
 }
 
 /// True when the TS parser recorded `id` as an `abstract` member declared
@@ -6306,6 +6739,279 @@ mod pool_tests {
             rust.pool_marker()
                 .is_some_and(|l| l.starts_with("[resolve-pool] lang=? ")
                     && l.ends_with(" serial_hooks=rust_paths")),
+        );
+    }
+}
+
+/// GD.3 (FD.10a), end to end through the TS parser and the TS family's build:
+/// receivers typed through a default import, a static named through a
+/// subclass, a superclass STATE_VAR or accessor read through a typed
+/// receiver, and a module-level instance const read in a function or a spec
+/// file's `describe` / `it` callback.
+#[cfg(test)]
+mod gd3_tests {
+    use super::*;
+    use glia_code_domain::GRAPH_TYPE;
+    use glia_core::RepoId;
+    use glia_parser_typescript::{FileParse, parse_file};
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://gd3")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str, rel: &str, qname: &str) -> FileParse {
+        parse_file(src, rel, qname, repo()).unwrap()
+    }
+
+    fn resolve(_: &str, spec: &str) -> Option<String> {
+        spec.strip_prefix("./").map(str::to_string)
+    }
+
+    /// `build_typescript` plus the family's two passes, so the test reads the
+    /// stats [`InheritStats::report`] prints.
+    fn build(files: Vec<FileParse>) -> (RepoGraph, InheritStats) {
+        let mut g = crate::build::build_typescript(repo(), files, resolve).unwrap();
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut g, &mut stats);
+        emit_override_implements(&mut g, &mut stats);
+        (g, stats)
+    }
+
+    /// Every `category` edge `graph:calls` drew with `rule`, as `(from, to,
+    /// 0-based line)`.
+    fn ruled(
+        g: &RepoGraph,
+        category: EdgeCategoryId,
+        rule: &str,
+    ) -> Vec<(NodeId, NodeId, Option<u32>)> {
+        g.edges
+            .iter()
+            .filter(|e| e.category == category)
+            .filter_map(|e| {
+                let ev = Evidence::of(e)?;
+                (ev.emitter == "graph:calls" && ev.rule.as_deref() == Some(rule))
+                    .then_some((e.from, e.to, ev.line))
+            })
+            .collect()
+    }
+
+    fn has(g: &RepoGraph, category: EdgeCategoryId, from: NodeId, to: NodeId) -> bool {
+        g.edges
+            .iter()
+            .any(|e| e.category == category && e.from == from && e.to == to)
+    }
+
+    const BASE: &str = "\
+export default class Repo {
+  size(): number { return 1; }
+}
+function initial(): number { return 0; }
+export class Parent {
+  state = initial();
+  static make(): Parent { return new Parent(); }
+  get ready(): boolean { return true; }
+  set label(v: string) {}
+  count(): number { return 2; }
+}
+";
+
+    const USE: &str = "\
+import Repo from './base';
+import { Parent } from './base';
+class Kid extends Parent {}
+const shared = new Parent();
+export function f(r: Repo, k: Kid) {
+  r.size();
+  Kid.make();
+  k.label = 'x';
+  return k.state + (k.ready ? 1 : 0);
+}
+export function g() {
+  shared.count();
+  return shared.state + (shared.ready ? 1 : 0);
+}
+export function h(shared: Repo) {
+  return shared.size();
+}
+";
+
+    const SPEC: &str = "\
+import { Parent } from './base';
+const svc = new Parent();
+describe('parent', () => {
+  it('counts', async () => {
+    await svc.count();
+  });
+});
+";
+
+    /// The fixture's shape (bench/substrate-gap/fixtures/ts-inherited-receivers):
+    /// each binding with its own rule at its own row, the parameter that
+    /// shadows the module const binding its own type, and the marker.
+    #[test]
+    fn inherited_default_static_and_module_const_receivers_bind() {
+        let (g, stats) = build(vec![
+            parse(BASE, "base.ts", "base"),
+            parse(USE, "use.ts", "use"),
+            parse(SPEC, "use.spec.ts", "use.spec"),
+        ]);
+        let m = |name: &str| id(node_kind::METHOD, &format!("base::Parent::{name}"));
+        let size = id(node_kind::METHOD, "base::Repo::size");
+        let state = id(node_kind::STATE_VAR, "base::Parent::state");
+        let f = id(node_kind::FUNCTION, "use::f");
+        let gf = id(node_kind::FUNCTION, "use::g");
+        let h = id(node_kind::FUNCTION, "use::h");
+        let spec = id(node_kind::MODULE, "use.spec");
+
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "default_import_type"),
+            vec![(f, size, Some(5)), (h, size, Some(15))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "inherited_static"),
+            vec![(f, m("make"), Some(6))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::USES, "inherited_state"),
+            vec![(f, state, Some(8))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "inherited_accessor_read"),
+            vec![(f, m("ready"), Some(8))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "inherited_accessor_write"),
+            vec![(f, m("label"), Some(7))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "module_const_receiver"),
+            vec![
+                (gf, m("count"), Some(11)),
+                (spec, m("count"), Some(4)),
+                (gf, m("ready"), Some(12)),
+            ]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::USES, "module_const_receiver"),
+            vec![(gf, state, Some(12))]
+        );
+        assert!(!has(&g, edge_category::CALLS, h, m("count")));
+        assert!(!has(&g, edge_category::USES, h, state));
+        assert_eq!(
+            stats.ts.marker().as_deref(),
+            Some(
+                "[recv] ts inherited: static=1 state=1 accessor=2 default_import=2 \
+                 module_const=4"
+            )
+        );
+    }
+
+    /// Fails closed: a default import under another name than the class it
+    /// names, or of a module with no default export, types nothing; a
+    /// module-level `let` is no const; a function-local of unknown type
+    /// shadows the module const.
+    #[test]
+    fn unnamed_default_let_and_shadowed_consts_bind_nothing() {
+        let named = "export class Named { go(): number { return 1; } }\n";
+        let dflt = "export default class Repo { go(): number { return 1; } }\n";
+        let user = "\
+import R from './dflt';
+import Named from './named';
+import { Named as N } from './named';
+let later = new N();
+const kept = new N();
+export function a(r: R, n: Named) { r.go(); n.go(); later.go(); }
+export function b() { const kept = make(); kept.go(); }
+";
+        let (g, stats) = build(vec![
+            parse(named, "named.ts", "named"),
+            parse(dflt, "dflt.ts", "dflt"),
+            parse(user, "user.ts", "user"),
+        ]);
+        let a = id(node_kind::FUNCTION, "user::a");
+        let b = id(node_kind::FUNCTION, "user::b");
+        for (from, to) in [
+            (a, id(node_kind::METHOD, "dflt::Repo::go")),
+            (a, id(node_kind::METHOD, "named::Named::go")),
+            (b, id(node_kind::METHOD, "named::Named::go")),
+        ] {
+            assert!(
+                !has(&g, edge_category::CALLS, from, to),
+                "{from:?} -> {to:?}: {:?}",
+                edges_out(&g, from)
+            );
+        }
+        assert_eq!(stats.ts.marker(), None);
+    }
+
+    fn edges_out(g: &RepoGraph, from: NodeId) -> Vec<(EdgeCategoryId, NodeId)> {
+        g.edges
+            .iter()
+            .filter(|e| e.from == from)
+            .map(|e| (e.category, e.to))
+            .collect()
+    }
+
+    /// A module const built by a static factory with a declared class return
+    /// type (`const repo = Store.create()`) types its readers; an inherited
+    /// signal-style STATE_VAR called through a typed receiver
+    /// (`k.draft()`) binds rule `inherited_state`; a subclass that declares
+    /// the static itself is no inherited call.
+    #[test]
+    fn static_factory_const_and_inherited_state_call() {
+        let store = "\
+export class Store {
+  static create(): Store { return new Store(); }
+  draft = signal(0);
+  save(): void {}
+}
+export class Sub extends Store {
+  static create(): Sub { return new Sub(); }
+}
+";
+        let user = "\
+import { Store, Sub } from './store';
+const repo = Store.create();
+export function run(s: Sub) {
+  repo.save();
+  s.draft();
+  Sub.create();
+}
+";
+        let (g, stats) = build(vec![
+            parse(store, "store.ts", "store"),
+            parse(user, "user.ts", "user"),
+        ]);
+        let run = id(node_kind::FUNCTION, "user::run");
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, "module_const_receiver"),
+            vec![(run, id(node_kind::METHOD, "store::Store::save"), Some(3))]
+        );
+        assert_eq!(
+            ruled(&g, edge_category::CALLS, INHERITED_STATE),
+            vec![(
+                run,
+                id(node_kind::STATE_VAR, "store::Store::draft"),
+                Some(4)
+            )]
+        );
+        assert!(ruled(&g, edge_category::CALLS, "inherited_static").is_empty());
+        assert!(!has(
+            &g,
+            edge_category::CALLS,
+            run,
+            id(node_kind::METHOD, "store::Store::create")
+        ));
+        assert_eq!(
+            stats.ts.marker().as_deref(),
+            Some(
+                "[recv] ts inherited: static=0 state=1 accessor=0 default_import=0 \
+                 module_const=1"
+            )
         );
     }
 }
