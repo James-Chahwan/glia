@@ -39,6 +39,9 @@ mod models;
 mod org_packages;
 // GH.6: host-run scripts (nginx `*_by_lua_file`) -> the MODULE of the file.
 mod host_scripts;
+// GH.20: the start rules of resolver:host (manifest binaries), called from
+// host_scripts' HostResolver.
+mod host_start;
 // CB.12: host narrowing (the service alias index and `narrow_by_host`),
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;

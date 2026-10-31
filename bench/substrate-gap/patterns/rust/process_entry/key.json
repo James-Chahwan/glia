@@ -10,12 +10,14 @@
   ],
   "expect_edges": [
     {"from": "infra:image:rsapi", "to": "rsapi::src::bin::api::main", "category": "HANDLED_BY", "exact": true,
-     "note": "RUN cargo build --release --bin api, COPY --from=build .../release/api, CMD [\"api\"]: Cargo.toml's [[bin]] api at src/bin/api.rs"}
+     "note": "RUN cargo build --release --bin api, COPY --from=build .../release/api, CMD [\"api\"]: Cargo.toml's [[bin]] api at src/bin/api.rs"},
+    {"from": "cli:api", "to": "rsapi::src::bin::api::main", "category": "HANDLED_BY", "exact": true,
+     "note": "GH.20: the manifest's [[bin]] api, path src/bin/api.rs, bound by resolver:host (rule manifest_bin)"}
   ],
   "expect_cells": [],
   "forbid": [
     {"from": "infra:image:rsapi", "to": "rsapi::src::bin::seed::main", "category": "HANDLED_BY",
      "note": "the seed [[bin]] is never built into the image"}
   ],
-  "note": "0.5.6 use pattern (GH.12): a container starts a Rust binary. The binding is `--bin api` through Cargo.toml's [[bin]] path to src/bin/api.rs's main; a second [[bin]] (seed) is the name-only control. The CLI_COMMAND `cli:api` the manifest mints is no substitute: it has no HANDLED_BY (a manifest is a synthetic parse) and no link from the image. At HEAD 12375a67: partial (the image node, no edge to code)."
+  "note": "0.5.6 use pattern (GH.12): a container starts a Rust binary. The binding is `--bin api` through Cargo.toml's [[bin]] path to src/bin/api.rs's main; a second [[bin]] (seed) is the name-only control. The CLI_COMMAND `cli:api` the manifest mints is no substitute: since GH.20 it is HANDLED_BY main (resolver:host, rule manifest_bin), but nothing links the image to it. At HEAD 12375a67: partial (the image node, no edge to code)."
 }

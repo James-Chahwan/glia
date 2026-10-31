@@ -248,13 +248,16 @@ pub fn extract_cli_command_nodes(
         _ => {}
     }
 
-    if lang == "python" && source.contains("console_scripts") {
-        decls.extend(
-            scan_setup_py_console_scripts(source)
-                .into_iter()
-                .map(|name| CliDecl::new(CliFramework::Manifest, name, None)),
-        );
-    }
+    let setup_bins = if lang == "python" && source.contains("console_scripts") {
+        scan_setup_py_console_scripts(source)
+    } else {
+        Vec::new()
+    };
+    decls.extend(
+        setup_bins
+            .iter()
+            .map(|bin| CliDecl::new(CliFramework::Manifest, bin.name.clone(), None)),
+    );
 
     let mut out = CliNodes::default();
     let mut minted: std::collections::HashMap<String, NodeId> = std::collections::HashMap::new();
@@ -299,6 +302,27 @@ pub fn extract_cli_command_nodes(
                 category: edge_category::HANDLED_BY,
                 line,
             });
+        }
+    }
+    // GH.20: a setup.py binary carries its target for resolver:host (no
+    // `file`: its parent MODULE is the located setup.py). The first entry of
+    // a name wins, as it minted the command.
+    for bin in &setup_bins {
+        let (Some(target), Some(&id)) = (bin.target.as_deref(), minted.get(&bin.name)) else {
+            continue;
+        };
+        if let Some(node) = out.nodes.iter_mut().find(|n| n.id == id)
+            && !node
+                .cells
+                .iter()
+                .any(|c| parse_manifest_bin_cell(c).is_some())
+        {
+            node.cells.push(manifest_bin_cell(
+                ManifestForm::SetupPy.label(),
+                None,
+                bin.line,
+                target,
+            ));
         }
     }
     out.per_framework.sort();
@@ -3351,8 +3375,10 @@ fn scan_mix_tasks(source: &str, code: &CodeMap) -> Vec<CliDecl> {
 // (the crate has no TOML dependency), deliberately narrow: the three Python
 // script tables, Cargo's `[[bin]]` name, npm's `bin`, setuptools'
 // `console_scripts`, and (DH.10) composer.json's `bin` and a gemspec's
-// `executables`. No HANDLED_BY: a manifest is a synthetic parse in the
-// `manifest` language group, and refs never resolve across language graphs.
+// `executables`. No HANDLED_BY ref here: a manifest is a synthetic parse in
+// the `manifest` language group, and refs never resolve across language
+// graphs. GH.20: each binary instead carries the target its manifest names
+// (a [`manifest_bin_cell`]), which `resolver:host` binds across graphs.
 // ----------------------------------------------------------------------------
 
 /// The manifest form that declared a binary: the `[cli-decl] manifest`
@@ -3370,6 +3396,19 @@ enum ManifestForm {
 }
 
 impl ManifestForm {
+    /// GH.20: the form's word in a [`manifest_bin_cell`] and the
+    /// `[host-start]` marker.
+    fn label(self) -> &'static str {
+        match self {
+            ManifestForm::Pyproject => "pyproject",
+            ManifestForm::SetupPy => "setup",
+            ManifestForm::Npm => "npm",
+            ManifestForm::Cargo => "cargo",
+            ManifestForm::Composer => "composer",
+            ManifestForm::Gemspec => "gemspec",
+        }
+    }
+
     /// The form a manifest path's basename names. Never [`ManifestForm::SetupPy`]:
     /// setup.py is Python source, routed to the python arm of
     /// [`extract_cli_command_nodes`], not to the manifest branch.
@@ -3387,6 +3426,94 @@ impl ManifestForm {
 
 /// Longest `console_scripts` list (or `entry_points` string) the setup.py scan reads.
 const MAX_SCRIPTS_SPAN: usize = 16 * 1024;
+
+/// GH.20: one binary a manifest declares, the target it names (a Cargo /
+/// npm / composer / gemspec path as written, or Cargo's default; a Python
+/// `pkg.mod:attr` object reference) and the 0-based line that declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestBin {
+    name: String,
+    target: Option<String>,
+    line: u32,
+}
+
+impl ManifestBin {
+    fn new(name: impl Into<String>, target: Option<String>, line: u32) -> Self {
+        ManifestBin {
+            name: name.into(),
+            target: target.filter(|t| !t.is_empty()),
+            line,
+        }
+    }
+}
+
+/// The [`manifest_bin_cell`] JSON shape. Field order is the serialised
+/// order, so the payload is byte-stable.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ManifestBinPayload<'a> {
+    #[serde(borrow)]
+    manifest: std::borrow::Cow<'a, str>,
+    #[serde(borrow, default, skip_serializing_if = "Option::is_none")]
+    file: Option<std::borrow::Cow<'a, str>>,
+    line: u32,
+    #[serde(borrow)]
+    target: std::borrow::Cow<'a, str>,
+}
+
+/// GH.20: what one [`manifest_bin_cell`] says about a manifest-declared
+/// `cli:<bin>` CLI_COMMAND (read by [`parse_manifest_bin_cell`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ManifestBinTarget {
+    /// The manifest form: `cargo`, `pyproject`, `setup`, `npm`, `gemspec`
+    /// or `composer`.
+    pub manifest: String,
+    /// The repo-relative manifest path; `None` for a setup.py binary, whose
+    /// CLI_COMMAND's parent is the (located) setup.py MODULE itself.
+    pub file: Option<String>,
+    /// The 0-based line of the declaration in the manifest.
+    pub line: u32,
+    /// The target as the manifest names it, relative to the manifest's
+    /// directory: a file path (cargo, npm, composer, gemspec) or a Python
+    /// object reference `pkg.mod[:attr[.sub]]` (pyproject, setup).
+    pub target: String,
+}
+
+/// GH.20: the CODE cell a manifest-declared CLI_COMMAND carries, e.g.
+/// `{"manifest":"cargo","file":"svc/Cargo.toml","line":7,"target":"src/bin/api.rs"}`
+/// ([`ManifestBinTarget`] names the fields). The sibling of [`argv_cell`]:
+/// written only here and read only by [`parse_manifest_bin_cell`], so the
+/// format lives in one place; neither reader parses the other's payload.
+pub fn manifest_bin_cell(manifest: &str, file: Option<&str>, line: u32, target: &str) -> Cell {
+    let payload = ManifestBinPayload {
+        manifest: std::borrow::Cow::Borrowed(manifest),
+        file: file.map(std::borrow::Cow::Borrowed),
+        line,
+        target: std::borrow::Cow::Borrowed(target),
+    };
+    Cell {
+        kind: cell_type::CODE,
+        payload: CellPayload::Json(serde_json::to_string(&payload).unwrap_or_default()),
+    }
+}
+
+/// The [`ManifestBinTarget`] of one [`manifest_bin_cell`]; `None` for any
+/// other cell (an [`argv_cell`] included) or a payload that does not parse.
+pub fn parse_manifest_bin_cell(cell: &Cell) -> Option<ManifestBinTarget> {
+    let CellPayload::Json(json) = &cell.payload else {
+        return None;
+    };
+    if cell.kind != cell_type::CODE {
+        return None;
+    }
+    let p = serde_json::from_str::<ManifestBinPayload>(json).ok()?;
+    Some(ManifestBinTarget {
+        manifest: p.manifest.into_owned(),
+        file: p.file.map(std::borrow::Cow::into_owned),
+        line: p.line,
+        target: p.target.into_owned(),
+    })
+}
 
 /// LA.20c: every binary a packaging manifest declares, as a flat `cli:<bin>`
 /// CLI_COMMAND parented to the manifest's MODULE, so it is located at the
@@ -3406,15 +3533,16 @@ pub fn extract_manifest_binaries(
     repo: RepoId,
 ) -> CliNodes {
     let mut residuals = Residuals::default();
-    let names = match ManifestForm::of_path(path) {
+    let form = ManifestForm::of_path(path);
+    let bins = match form {
         Some(ManifestForm::Pyproject) => scan_pyproject_scripts(source),
         Some(ManifestForm::Npm) => scan_package_json_bin(source),
         Some(ManifestForm::Cargo) => scan_cargo_bins(source),
         Some(ManifestForm::Composer) => scan_composer_bin(source),
         Some(ManifestForm::Gemspec) => {
-            let (names, concat) = scan_gemspec_executables(source);
+            let (bins, concat) = scan_gemspec_executables(source);
             residuals.gemspec_concat = concat;
-            names
+            bins
         }
         Some(ManifestForm::SetupPy) | None => Vec::new(),
     };
@@ -3424,9 +3552,20 @@ pub fn extract_manifest_binaries(
     }
     let mut out = CliNodes::default();
     let mut seen = std::collections::HashSet::new();
-    for name in names {
-        if is_bin_name(&name) && seen.insert(name.clone()) {
-            add_cli_command(&mut out.nodes, &mut out.nav, &name, module_id, repo);
+    for bin in bins {
+        if is_bin_name(&bin.name) && seen.insert(bin.name.clone()) {
+            add_cli_command(&mut out.nodes, &mut out.nav, &bin.name, module_id, repo);
+            // GH.20: the target rides on the command for resolver:host.
+            if let (Some(form), Some(target), Some(node)) =
+                (form, bin.target.as_deref(), out.nodes.last_mut())
+            {
+                node.cells.push(manifest_bin_cell(
+                    form.label(),
+                    Some(path),
+                    bin.line,
+                    target,
+                ));
+            }
         }
     }
     if !out.nodes.is_empty() {
@@ -3537,12 +3676,15 @@ fn inline_table_depth(text: &str, mut depth: usize) -> usize {
 /// `[project.gui-scripts]` and `[tool.poetry.scripts]`, up to the next header.
 /// A poetry table value (`x = { reference = "m:f", type = "console" }`) still
 /// names the binary by its key; the continuation lines of a multi-line inline
-/// table are stepped over, never read as keys.
-fn scan_pyproject_scripts(source: &str) -> Vec<String> {
+/// table are stepped over, never read as keys. GH.20: the target is the
+/// string value (`"pkg.mod:attr"`), or an inline table's `callable` /
+/// `reference` string unless its `type` is `"file"` (a script path, not an
+/// object reference).
+fn scan_pyproject_scripts(source: &str) -> Vec<ManifestBin> {
     let mut out = Vec::new();
     let mut in_scripts = false;
     let mut depth = 0usize;
-    for line in source.lines() {
+    for (row, line) in (0u32..).zip(source.lines()) {
         let t = line.trim();
         if depth > 0 {
             depth = inline_table_depth(t, depth);
@@ -3560,55 +3702,130 @@ fn scan_pyproject_scripts(source: &str) -> Vec<String> {
         }
         if let Some((key, value)) = toml_key_value(t) {
             depth = inline_table_depth(value, 0);
-            out.push(key.to_string());
+            out.push(ManifestBin::new(key, pyproject_script_target(value), row));
         }
     }
     out
 }
 
-/// Cargo.toml: the `name` of each `[[bin]]` table.
-fn scan_cargo_bins(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut in_bin = false;
-    for line in source.lines() {
+/// GH.20: the object reference a pyproject script entry's value names (see
+/// [`scan_pyproject_scripts`]), only off the entry's own line.
+fn pyproject_script_target(value: &str) -> Option<String> {
+    if let Some(table) = value.strip_prefix('{') {
+        if inline_table_string(table, "type").as_deref() == Some("file") {
+            return None;
+        }
+        return inline_table_string(table, "callable")
+            .or_else(|| inline_table_string(table, "reference"));
+    }
+    quoted_literal(value).map(str::to_string)
+}
+
+/// The string value of `key = "..."` inside one line of an inline table's
+/// text (`reference = "m:f", type = "console" }`).
+fn inline_table_string(table: &str, key: &str) -> Option<String> {
+    table.split(',').find_map(|part| {
+        let (k, v) = toml_key_value(part.trim())?;
+        (k == key)
+            .then(|| quoted_literal(v.trim_end_matches('}').trim()))?
+            .map(str::to_string)
+    })
+}
+
+/// Cargo.toml: the `name` of each `[[bin]]` table. GH.20: the target is the
+/// table's `path`, else Cargo's default: `src/main.rs` for the bin named
+/// like the `[package]`, `src/bin/<name>.rs` for any other (resolver:host
+/// also tries `src/bin/<name>/main.rs`).
+fn scan_cargo_bins(source: &str) -> Vec<ManifestBin> {
+    // One `[[bin]]` table: its `name` (with the line) and its `path`.
+    #[derive(Default)]
+    struct Table {
+        name: Option<(String, u32)>,
+        path: Option<String>,
+    }
+    let mut tables: Vec<Table> = Vec::new();
+    let mut package: Option<String> = None;
+    let mut section = "";
+    for (row, line) in (0u32..).zip(source.lines()) {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("[[") {
-            in_bin = rest
+            let is_bin = rest
                 .split_once("]]")
                 .is_some_and(|(name, _)| name.trim() == "bin");
+            section = if is_bin { "bin" } else { "" };
+            if is_bin {
+                tables.push(Table::default());
+            }
             continue;
         }
         if t.starts_with('[') {
-            in_bin = false;
+            section = if toml_table_header(t).as_deref() == Some("package") {
+                "package"
+            } else {
+                ""
+            };
             continue;
         }
-        if in_bin
-            && let Some(("name", value)) = toml_key_value(t)
-            && let Some(name) = extract_quoted(value)
-        {
-            out.push(name);
+        let Some((key, value)) = toml_key_value(t) else {
+            continue;
+        };
+        match (section, key) {
+            ("package", "name") => package = extract_quoted(value),
+            ("bin", "name") => {
+                if let (Some(slot), Some(name)) = (tables.last_mut(), extract_quoted(value)) {
+                    slot.name = Some((name, row));
+                }
+            }
+            ("bin", "path") => {
+                if let (Some(slot), Some(path)) = (tables.last_mut(), quoted_literal(value)) {
+                    slot.path = Some(path.to_string());
+                }
+            }
+            _ => {}
         }
     }
-    out
+    tables
+        .into_iter()
+        .filter_map(|Table { name, path }| {
+            let (name, row) = name?;
+            let target = path.unwrap_or_else(|| {
+                if package.as_deref() == Some(name.as_str()) {
+                    "src/main.rs".to_string()
+                } else {
+                    format!("src/bin/{name}.rs")
+                }
+            });
+            Some(ManifestBin::new(name, Some(target), row))
+        })
+        .collect()
 }
 
 /// package.json: `bin` as an object names each binary by its key; `bin` as one
-/// path names it after the package, `@scope/` removed.
-fn scan_package_json_bin(source: &str) -> Vec<String> {
+/// path names it after the package, `@scope/` removed. GH.20: the target is
+/// the path each names.
+fn scan_package_json_bin(source: &str) -> Vec<ManifestBin> {
     use serde_json::Value;
     let Ok(Value::Object(pkg)) = serde_json::from_str::<Value>(source) else {
         return Vec::new();
     };
     match pkg.get("bin") {
-        Some(Value::Object(bins)) => bins.keys().cloned().collect(),
-        Some(Value::String(_)) => pkg
+        Some(Value::Object(bins)) => bins
+            .iter()
+            .map(|(name, path)| {
+                let path = path.as_str().map(str::to_string);
+                let row = json_line(source, path.as_deref().unwrap_or(name));
+                ManifestBin::new(name.clone(), path, row)
+            })
+            .collect(),
+        Some(Value::String(path)) => pkg
             .get("name")
             .and_then(Value::as_str)
             .map(|name| {
-                name.strip_prefix('@')
+                let bare = name
+                    .strip_prefix('@')
                     .and_then(|scoped| scoped.split_once('/'))
-                    .map_or(name, |(_, bare)| bare)
-                    .to_string()
+                    .map_or(name, |(_, bare)| bare);
+                ManifestBin::new(bare, Some(path.clone()), json_line(source, path))
             })
             .into_iter()
             .collect(),
@@ -3616,9 +3833,21 @@ fn scan_package_json_bin(source: &str) -> Vec<String> {
     }
 }
 
+/// GH.20: the 0-based line of the first `"<text>"` string after the manifest's
+/// `"bin"` key (the line of `"bin"` when there is none, 0 with no `"bin"`).
+fn json_line(source: &str, text: &str) -> u32 {
+    let Some(bin) = source.find("\"bin\"") else {
+        return 0;
+    };
+    let needle = format!("\"{text}\"");
+    let at = source[bin..].find(&needle).map_or(bin, |i| bin + i);
+    line_of(source, at)
+}
+
 /// DH.10 composer.json: `bin` is a list of paths (or one path), each
 /// installed under `vendor/bin/` by its basename (`bin/mytool` -> `mytool`).
-fn scan_composer_bin(source: &str) -> Vec<String> {
+/// GH.20: the target is the path itself.
+fn scan_composer_bin(source: &str) -> Vec<ManifestBin> {
     use serde_json::Value;
     let Ok(Value::Object(pkg)) = serde_json::from_str::<Value>(source) else {
         return Vec::new();
@@ -3630,8 +3859,14 @@ fn scan_composer_bin(source: &str) -> Vec<String> {
     };
     paths
         .into_iter()
-        .filter_map(|p| p.rsplit(['/', '\\']).next())
-        .map(str::to_string)
+        .filter_map(|p| {
+            let name = p.rsplit(['/', '\\']).next()?;
+            Some(ManifestBin::new(
+                name,
+                Some(p.to_string()),
+                json_line(source, p),
+            ))
+        })
         .collect()
 }
 
@@ -3643,8 +3878,10 @@ fn scan_composer_bin(source: &str) -> Vec<String> {
 /// "a"`; GD.21: `+= [..]` / `+= %w[..]` and `.concat([..])` / `.concat(%w[..])`
 /// (or paren-less `.concat %w[..]`), whose names the second value counts. A
 /// computed list (`spec.files.grep(%r{^exe/}) { .. }`, `Dir[..]`) names no
-/// literal binary and reads nothing. In source order.
-fn scan_gemspec_executables(source: &str) -> (Vec<String>, usize) {
+/// literal binary and reads nothing. In source order. GH.20: each target is
+/// `<bindir>/<name>`, the spec's literal `bindir = "exe"` or RubyGems'
+/// default `bin`.
+fn scan_gemspec_executables(source: &str) -> (Vec<ManifestBin>, usize) {
     let b = source.as_bytes();
     let code = CodeMap::script(source, Script::Ruby);
     let mut found: Vec<(usize, String)> = Vec::new();
@@ -3681,7 +3918,35 @@ fn scan_gemspec_executables(source: &str) -> (Vec<String>, usize) {
         }
     }
     found.sort_by_key(|(at, _)| *at);
-    (found.into_iter().map(|(_, name)| name).collect(), concat)
+    let bindir = gemspec_bindir(source, &code).unwrap_or_else(|| "bin".to_string());
+    let bins = found
+        .into_iter()
+        .map(|(at, name)| {
+            let target = format!("{bindir}/{name}");
+            ManifestBin::new(name, Some(target), line_of(source, at))
+        })
+        .collect();
+    (bins, concat)
+}
+
+/// GH.20: the literal a gemspec assigns to `<spec>.bindir` (trailing `/`
+/// dropped); `None` when it assigns none, or a non-literal.
+fn gemspec_bindir(source: &str, code: &CodeMap) -> Option<String> {
+    let b = source.as_bytes();
+    code_words(source, code, 0, source.len(), "bindir")
+        .into_iter()
+        .find_map(|at| {
+            if at < 2 || b[at - 1] != b'.' || ident_before(source, at - 1).is_empty() {
+                return None;
+            }
+            let op = skip_ws(b, at + "bindir".len());
+            if b.get(op) != Some(&b'=') || matches!(b.get(op + 1), Some(b'=' | b'~' | b'>')) {
+                return None;
+            }
+            let lit = quoted_literal(source.get(skip_ws(b, op + 1)..)?)?;
+            let dir = lit.trim_end_matches('/');
+            (!dir.is_empty()).then(|| dir.to_string())
+        })
 }
 
 /// GD.21: every executable a `pubspec.yaml` declares, as a flat `cli:<name>`
@@ -3848,12 +4113,26 @@ fn ruby_string_list(source: &str, code: &CodeMap, at: usize) -> Vec<String> {
     }
 }
 
-/// The binary an entry-point spec declares: `name = pkg.mod:func` (spaces
-/// optional) -> `name`. `None` when it is not `<bin-name> = <target>`.
-fn entry_point_name(spec: &str) -> Option<String> {
+/// The binary an entry-point spec declares and its target: `name =
+/// pkg.mod:func` (spaces optional) -> (`name`, `pkg.mod:func`). `None` when it
+/// is not `<bin-name> = <target>`.
+fn entry_point(spec: &str) -> Option<(String, String)> {
     let (name, target) = spec.split_once('=')?;
     let (name, target) = (name.trim(), target.trim());
-    (is_bin_name(name) && !target.is_empty() && !target.starts_with('=')).then(|| name.to_string())
+    (is_bin_name(name) && !target.is_empty() && !target.starts_with('='))
+        .then(|| (name.to_string(), target.to_string()))
+}
+
+/// GH.20: the [`ManifestBin`] of each entry-point line of `text`, which
+/// starts at 0-based line `row` of the source.
+fn entry_point_lines(text: &str, row: u32) -> impl Iterator<Item = ManifestBin> + '_ {
+    (0u32..)
+        .zip(text.lines())
+        .map_while(|(i, l)| (!l.trim().starts_with('[')).then_some((i, l)))
+        .filter_map(move |(i, l)| {
+            let (name, target) = entry_point(l.trim())?;
+            Some(ManifestBin::new(name, Some(target), row + i))
+        })
 }
 
 /// LA.20c setup.py: every binary a setuptools `console_scripts` group
@@ -3863,8 +4142,8 @@ fn entry_point_name(spec: &str) -> Option<String> {
 /// `'name = pkg.mod:func'` / `'name=pkg.mod:func'` literal (or INI line)
 /// declares `name`. A `'console_scripts'` literal that is not followed by `:`
 /// (`entry_points(group='console_scripts')`, `eps['console_scripts']`) is a
-/// lookup, not a declaration.
-fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
+/// lookup, not a declaration. GH.20: with each entry's target and line.
+fn scan_setup_py_console_scripts(source: &str) -> Vec<ManifestBin> {
     const GROUP: &str = "console_scripts";
     let b = source.as_bytes();
     let code = CodeMap::script(source, Script::Python);
@@ -3883,12 +4162,7 @@ fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
             (Some(b'['), Some(b']')) if !code.is_code(at) => {
                 let stop = code.next_code(at).min(end.saturating_add(MAX_SCRIPTS_SPAN));
                 let body = source.get(end + 1..stop).unwrap_or("");
-                out.extend(
-                    body.lines()
-                        .map(str::trim)
-                        .take_while(|l| !l.starts_with('['))
-                        .filter_map(entry_point_name),
-                );
+                out.extend(entry_point_lines(body, line_of(source, end)));
                 continue;
             }
             // `console_scripts=[...]` — a keyword argument.
@@ -3906,7 +4180,14 @@ fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
         if matches!(b.get(open), Some(b'"' | b'\'')) {
             // One string for the whole group, one entry per line.
             if let Some(lit) = source.get(open..).and_then(quoted_literal) {
-                out.extend(lit.lines().map(str::trim).filter_map(entry_point_name));
+                out.extend((0u32..).zip(lit.lines()).filter_map(|(k, l)| {
+                    let (name, target) = entry_point(l.trim())?;
+                    Some(ManifestBin::new(
+                        name,
+                        Some(target),
+                        line_of(source, open) + k,
+                    ))
+                }));
             }
             continue;
         }
@@ -3923,12 +4204,12 @@ fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
                 i += 1;
                 continue;
             }
-            if let Some(name) = source
+            if let Some((name, target)) = source
                 .get(i..stop)
                 .and_then(quoted_literal)
-                .and_then(entry_point_name)
+                .and_then(entry_point)
             {
-                out.push(name);
+                out.push(ManifestBin::new(name, Some(target), line_of(source, i)));
             }
             i = next;
         }
@@ -6375,6 +6656,152 @@ end
 
     fn manifest_bins(source: &str, path: &str) -> CliNodes {
         extract_manifest_binaries(source, path, module_id(), repo())
+    }
+
+    /// GH.20: `(name, manifest, file, line, target)` of every command's
+    /// manifest-bin cell, in emission order.
+    /// `(name, manifest, file, line, target)`.
+    type BinRow = (String, String, Option<String>, u32, String);
+
+    fn bin_targets(out: &CliNodes) -> Vec<BinRow> {
+        out.nodes
+            .iter()
+            .flat_map(|n| {
+                let name = out.nav.name_by_id.get(&n.id).cloned().unwrap_or_default();
+                n.cells
+                    .iter()
+                    .filter_map(parse_manifest_bin_cell)
+                    .map(move |t| (name.clone(), t.manifest, t.file, t.line, t.target))
+            })
+            .collect()
+    }
+
+    fn bt(name: &str, form: &str, file: Option<&str>, line: u32, target: &str) -> BinRow {
+        (
+            name.into(),
+            form.into(),
+            file.map(str::to_string),
+            line,
+            target.into(),
+        )
+    }
+
+    #[test]
+    fn manifest_bins_carry_their_targets() {
+        let cargo = "[package]\nname = \"svc\"\n\n[[bin]]\nname = \"api\"\npath = \"src/bin/api.rs\"\n\n[[bin]]\nname = \"seed\"\n\n[[bin]]\nname = \"svc\"\n";
+        assert_eq!(
+            bin_targets(&manifest_bins(cargo, "svc/Cargo.toml")),
+            [
+                bt("api", "cargo", Some("svc/Cargo.toml"), 4, "src/bin/api.rs"),
+                bt(
+                    "seed",
+                    "cargo",
+                    Some("svc/Cargo.toml"),
+                    8,
+                    "src/bin/seed.rs"
+                ),
+                bt("svc", "cargo", Some("svc/Cargo.toml"), 11, "src/main.rs"),
+            ]
+        );
+        let pyproject = "[project]\nname = \"x\"\n\n[project.scripts]\naliases = \"aliases:cli\"\nextra = \"pkg.cli:main [fancy]\"\n\n[tool.poetry.scripts]\npoe = { callable = \"pkg.poe:run\" }\nold = { reference = \"pkg.old:go\", type = \"console\" }\nfile = { reference = \"bin/run.sh\", type = \"file\" }\n";
+        let py = Some("examples/a/pyproject.toml");
+        assert_eq!(
+            bin_targets(&manifest_bins(pyproject, "examples/a/pyproject.toml")),
+            [
+                bt("aliases", "pyproject", py, 4, "aliases:cli"),
+                bt("extra", "pyproject", py, 5, "pkg.cli:main [fancy]"),
+                bt("poe", "pyproject", py, 8, "pkg.poe:run"),
+                bt("old", "pyproject", py, 9, "pkg.old:go"),
+            ],
+            "a `type = \"file\"` script names no object reference"
+        );
+        let npm = "{\n  \"name\": \"@acme/tool\",\n  \"bin\": {\n    \"tool\": \"./bin/tool.js\",\n    \"t2\": \"bin/t2.js\"\n  }\n}\n";
+        assert_eq!(
+            bin_targets(&manifest_bins(npm, "package.json")),
+            [
+                bt("t2", "npm", Some("package.json"), 4, "bin/t2.js"),
+                bt("tool", "npm", Some("package.json"), 3, "./bin/tool.js"),
+            ]
+        );
+        let one = "{\"name\": \"@acme/solo\", \"bin\": \"cli.js\"}";
+        assert_eq!(
+            bin_targets(&manifest_bins(one, "web/package.json")),
+            [bt("solo", "npm", Some("web/package.json"), 0, "cli.js")]
+        );
+        let composer = "{\n  \"bin\": [\"bin/mytool\"]\n}\n";
+        assert_eq!(
+            bin_targets(&manifest_bins(composer, "composer.json")),
+            [bt(
+                "mytool",
+                "composer",
+                Some("composer.json"),
+                1,
+                "bin/mytool"
+            )]
+        );
+        let gemspec = "Gem::Specification.new do |spec|\n  spec.bindir = \"exe\"\n  spec.executables = [\"mytool\"]\nend\n";
+        assert_eq!(
+            bin_targets(&manifest_bins(gemspec, "mytool.gemspec")),
+            [bt(
+                "mytool",
+                "gemspec",
+                Some("mytool.gemspec"),
+                2,
+                "exe/mytool"
+            )]
+        );
+        let default_bindir = "Gem::Specification.new do |s|\n  s.executables << \"x\"\nend\n";
+        assert_eq!(
+            bin_targets(&manifest_bins(default_bindir, "x.gemspec")),
+            [bt("x", "gemspec", Some("x.gemspec"), 1, "bin/x")]
+        );
+    }
+
+    #[test]
+    fn setup_py_bins_carry_targets_without_a_file() {
+        let src = "from setuptools import setup\nsetup(\n    entry_points={\n        'console_scripts': [\n            'mytool = mytool.cli:main',\n        ],\n    },\n)\n";
+        assert_eq!(
+            bin_targets(&decls(src, "python")),
+            [bt("mytool", "setup", None, 4, "mytool.cli:main")]
+        );
+        let ini = "from setuptools import setup\nsetup(\n    entry_points='''\n    [console_scripts]\n    inimytool = pkg.cli:main\n    [paste.app_factory]\n    main = pkg:app\n    ''',\n)\n";
+        assert_eq!(
+            bin_targets(&decls(ini, "python")),
+            [bt("inimytool", "setup", None, 4, "pkg.cli:main")]
+        );
+        let one = "setup(entry_points={'console_scripts': 'solo = pkg:main'})\n";
+        assert_eq!(
+            bin_targets(&decls(one, "python")),
+            [bt("solo", "setup", None, 0, "pkg:main")]
+        );
+    }
+
+    #[test]
+    fn manifest_bin_cell_round_trips_and_is_no_argv_cell() {
+        let cell = manifest_bin_cell("cargo", Some("Cargo.toml"), 3, "src/main.rs");
+        assert_eq!(
+            cell.payload,
+            CellPayload::Json(
+                r#"{"manifest":"cargo","file":"Cargo.toml","line":3,"target":"src/main.rs"}"#
+                    .into()
+            )
+        );
+        let t = parse_manifest_bin_cell(&cell).expect("parses");
+        assert_eq!(
+            (
+                t.manifest.as_str(),
+                t.file.as_deref(),
+                t.line,
+                t.target.as_str()
+            ),
+            ("cargo", Some("Cargo.toml"), 3, "src/main.rs")
+        );
+        assert!(parse_argv_cell(&cell).is_empty());
+        assert!(parse_manifest_bin_cell(&argv_cell("x", &[vec!["a".into()]])).is_none());
+        assert_eq!(
+            manifest_bin_cell("setup", None, 0, "m:f").payload,
+            CellPayload::Json(r#"{"manifest":"setup","line":0,"target":"m:f"}"#.into())
+        );
     }
 
     /// Every node is a CLI_COMMAND parented to the manifest MODULE; returns

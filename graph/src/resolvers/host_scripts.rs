@@ -53,6 +53,8 @@ enum Bound {
 
 impl CrossGraphResolver for HostResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
+        // GH.20: the start rules' manifest binaries (`host_start`).
+        super::host_start::bind_manifest_bins(merged);
         let refs = collect_refs(merged);
         if refs.is_empty() {
             return;
@@ -213,7 +215,7 @@ fn bind(files: &BTreeMap<String, (String, NodeId)>, conf: &str, path: &str) -> B
 
 /// `path` joined to the repo-relative directory `base`, `.` and `..` folded;
 /// `None` when it climbs above the repo root or names nothing.
-fn normalise(base: &str, path: &str) -> Option<String> {
+pub(super) fn normalise(base: &str, path: &str) -> Option<String> {
     let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
     for seg in path.split('/') {
         match seg {

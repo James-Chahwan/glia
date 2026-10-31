@@ -1,0 +1,37 @@
+{
+  "framework": "manifest-bins",
+  "language": "python+node+rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLI_COMMAND", "name": "cli:pytool", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "cli:setuptool", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "cli:jstool", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "cli:rstool", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "cli:rsextra", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "cli:pytool", "to": "pytool::src::pytool::cli::main", "category": "HANDLED_BY", "exact": true,
+     "note": "pyproject [project.scripts] `pytool = \"pytool.cli:main\"`: the module under the manifest dir's src/, then the attr"},
+    {"from": "cli:pytool-sync", "to": "pytool::src::pytool::cli::Sync::run", "category": "HANDLED_BY", "exact": true,
+     "note": "`pytool.cli:Sync.run`: each attr segment walks one child"},
+    {"from": "cli:setuptool", "to": "setuptool::setuptool::app::run", "category": "HANDLED_BY", "exact": true,
+     "note": "setup.py console_scripts `setuptool = setuptool.app:run`, resolved from setup.py's directory"},
+    {"from": "cli:jstool", "to": "jstool::bin::jstool", "category": "HANDLED_BY", "exact": true,
+     "note": "package.json bin map `./bin/jstool.js`: the script's MODULE"},
+    {"from": "cli:jst-admin", "to": "jstool::bin::admin", "category": "HANDLED_BY", "exact": true},
+    {"from": "cli:rstool", "to": "rstool::src::main::main", "category": "HANDLED_BY", "exact": true,
+     "note": "Cargo [[bin]] named like the package with no path: Cargo's default src/main.rs"},
+    {"from": "cli:rsextra", "to": "rstool::src::bin::rsextra::main", "category": "HANDLED_BY", "exact": true,
+     "note": "Cargo [[bin]] rsextra with no path: Cargo's default src/bin/rsextra.rs"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "cli:setuptool", "to": "setuptool::setuptool::app::unused", "category": "HANDLED_BY",
+     "note": "precision: only the attr the entry point names"},
+    {"from": "cli:jstool", "to": "jstool::bin::admin", "category": "HANDLED_BY",
+     "note": "precision: each bin key binds its own path"},
+    {"from": "cli:rstool", "to": "rstool::src::bin::rsextra::main", "category": "HANDLED_BY",
+     "note": "precision: the package-named bin is src/main.rs, not another bin's file"}
+  ],
+  "note": "0.5.6 GH.20: a binary a packaging manifest declares (pyproject scripts, setup.py console_scripts, npm bin, Cargo [[bin]]) HANDLED_BY the code its manifest names, drawn by resolver:host (rule manifest_bin) from the target the manifest extractor writes on the CLI_COMMAND. Before GH.20 each `cli:<bin>` had no edge: a manifest is a synthetic parse and refs never resolve across language graphs."
+}

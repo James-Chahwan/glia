@@ -1,0 +1,8 @@
+{
+  "name": "jstool",
+  "version": "1.0.0",
+  "bin": {
+    "jstool": "./bin/jstool.js",
+    "jst-admin": "bin/admin.js"
+  }
+}
