@@ -369,9 +369,17 @@ fn section_value(text: &str, sections: &[&str], key: &str, quoted: bool) -> Opti
 }
 
 /// The project's own `<artifactId>`: a child of `<project>` (or top level),
-/// never the one inside `<parent>`, `<dependencies>` or a plugin. A tag-level
-/// scan with an element stack — no XML dependency.
+/// never the one inside `<parent>`, `<dependencies>` or a plugin.
 fn pom_artifact_id(text: &str) -> Option<String> {
+    pom_element(text, "artifactId", &[&[], &["project"]])
+}
+
+/// The text of the first `<tag>` element whose enclosing element names are
+/// one of `stacks` (outermost first: `["project", "parent"]` is a
+/// `<parent>` child of `<project>`). A tag-level scan with an element stack
+/// — no XML dependency; comments, processing instructions and empty
+/// elements are skipped.
+fn pom_element(text: &str, tag_name: &str, stacks: &[&[&str]]) -> Option<String> {
     let mut stack: Vec<&str> = Vec::new();
     let mut rest = text;
     while let Some(open) = rest.find('<') {
@@ -393,12 +401,275 @@ fn pom_artifact_id(text: &str) -> Option<String> {
             continue;
         }
         let name = tag.split_whitespace().next().unwrap_or("");
-        if name == "artifactId" && (stack.is_empty() || stack == ["project"]) {
+        if name == tag_name && stacks.contains(&stack.as_slice()) {
             return rest.split('<').next().map(|v| v.trim().to_string());
         }
         stack.push(name);
     }
     None
+}
+
+/// GD.32: the Maven coordinate `groupId:artifactId` a project manifest
+/// declares, as written (the identity key, `same_as::project_dep_key`
+/// with ecosystem `maven`, folds its case). `pom.xml`: the project's own
+/// `<groupId>` (a child of `<project>`), else the one its `<parent>`
+/// declares (Maven's inheritance: a module pom usually names no group of
+/// its own), joined with its own `<artifactId>`; a group or artifact that
+/// is a property (`${project.groupId}`), holds `:` or whitespace, or is
+/// missing gives `None`. Any other manifest gives `None`: a Gradle project's
+/// coordinate needs its build tree, [`gradle_coordinate`]. sbt projects are
+/// out: they are their own [`SBT_ECOSYSTEM`].
+pub fn manifest_coordinate(manifest_basename: &str, text: &str) -> Option<String> {
+    if manifest_basename != "pom.xml" {
+        return None;
+    }
+    let group = pom_element(text, "groupId", &[&[], &["project"]])
+        .or_else(|| pom_element(text, "groupId", &[&["parent"], &["project", "parent"]]))?;
+    coordinate(&group, &pom_artifact_id(text)?)
+}
+
+/// `group:artifact` when both are clean coordinate parts: a
+/// [`clean_label`], no `:` and no whitespace.
+fn coordinate(group: &str, artifact: &str) -> Option<String> {
+    let part = |s: &str| {
+        clean_label(s).filter(|p| !p.contains(':') && !p.chars().any(char::is_whitespace))
+    };
+    Some(format!("{}:{}", part(group)?, part(artifact)?))
+}
+
+/// The Gradle settings files that mark a build's root directory.
+const GRADLE_SETTINGS: &[&str] = &["settings.gradle.kts", "settings.gradle"];
+/// The Gradle build files, Kotlin DSL first.
+const GRADLE_BUILDS: &[&str] = &["build.gradle.kts", "build.gradle"];
+
+/// GD.32: the Maven coordinate `group:artifact` of the Gradle project at
+/// repo-relative dir `rel_path` whose build file is the repo-relative
+/// `manifest`; `read` returns a repo-relative file's text (`None` when it
+/// does not exist). The build root is the nearest directory at or above
+/// `rel_path` holding a `settings.gradle(.kts)`, else `rel_path` itself.
+///
+/// - The artifact is Gradle's project name: for the build root
+///   `rootProject.name` from its settings file; for a sub-project a
+///   `project(':a:b').name = 'y'` override in the settings, else the
+///   directory's basename. A build root with no settings name has no
+///   artifact (`None`): Gradle would take the checkout directory's name,
+///   which graph content never depends on.
+/// - The group is the project's own build file's top-level `group = '<g>'`
+///   (`group "<g>"`, `project.group = ..`), else the build root's build
+///   file's `allprojects { group = .. }` (or, for a sub-project,
+///   `subprojects { group = .. }`), else `group=` in the project's own
+///   `gradle.properties`, then the build root's.
+///
+/// Only string literals are read: an interpolated (`"${x}"`) or computed
+/// value is no group. `None` when either part is missing.
+pub fn gradle_coordinate(
+    rel_path: &str,
+    manifest: &str,
+    mut read: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    let join = |dir: &str, base: &str| {
+        if dir.is_empty() {
+            base.to_string()
+        } else {
+            format!("{dir}/{base}")
+        }
+    };
+    let mut dirs = vec![rel_path];
+    let mut d = rel_path;
+    while !d.is_empty() {
+        d = d.rsplit_once('/').map_or("", |(parent, _)| parent);
+        dirs.push(d);
+    }
+    let (root, settings) = dirs
+        .iter()
+        .find_map(|dir| {
+            GRADLE_SETTINGS
+                .iter()
+                .find_map(|s| read(&join(dir, s)))
+                .map(|t| (*dir, t))
+        })
+        .unwrap_or((rel_path, String::new()));
+    let is_root = root == rel_path;
+    let artifact = if is_root {
+        gradle_settings_name(&settings, None)?
+    } else {
+        let sub = rel_path
+            .strip_prefix(root)
+            .map(|r| r.trim_start_matches('/'))
+            .unwrap_or(rel_path);
+        let path = format!(":{}", sub.replace('/', ":"));
+        gradle_settings_name(&settings, Some(&path))
+            .or_else(|| sub.rsplit('/').next().map(str::to_string))?
+    };
+    let own = read(manifest).unwrap_or_default();
+    let groups = gradle_groups(&own);
+    let top = |gs: &[(Vec<String>, String)], block: &[&str]| {
+        gs.iter()
+            .find(|(path, _)| path.iter().map(String::as_str).eq(block.iter().copied()))
+            .map(|(_, g)| g.clone())
+    };
+    let shared = |read: &mut dyn FnMut(&str) -> Option<String>| {
+        let text = GRADLE_BUILDS.iter().find_map(|b| read(&join(root, b)))?;
+        let gs = gradle_groups(&text);
+        top(&gs, &["allprojects"]).or_else(|| (!is_root).then(|| top(&gs, &["subprojects"]))?)
+    };
+    let group = top(&groups, &[])
+        .or_else(|| shared(&mut read))
+        .or_else(|| read(&join(rel_path, "gradle.properties")).and_then(|t| properties_group(&t)))
+        .or_else(|| {
+            (!is_root)
+                .then(|| read(&join(root, "gradle.properties")))
+                .flatten()
+                .and_then(|t| properties_group(&t))
+        })?;
+    coordinate(&group, &artifact)
+}
+
+/// A Gradle settings file's project name: `rootProject.name = '<n>'` for
+/// `path` `None` (the build root), else the `project('<path>').name =
+/// '<n>'` override for that project path (`:a:b`).
+fn gradle_settings_name(settings: &str, path: Option<&str>) -> Option<String> {
+    for line in settings.lines().map(strip_line_comment) {
+        let line = line.trim();
+        let rest = match path {
+            None => line.strip_prefix("rootProject.name"),
+            Some(p) => line
+                .strip_prefix("project(")
+                .map(str::trim_start)
+                .and_then(|r| {
+                    let (q, r) = r.split_at_checked(1)?;
+                    let r = r.strip_prefix(p)?.strip_prefix(q)?;
+                    ["'", "\""].contains(&q).then_some(r)
+                })
+                .and_then(|r| r.trim_start().strip_prefix(')'))
+                .and_then(|r| r.trim_start().strip_prefix(".name")),
+        };
+        if let Some(v) = rest.and_then(|r| assigned_literal(r, true)) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// `line` without a trailing `//` comment outside a string literal.
+fn strip_line_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q && prev != '\\' => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '/' && prev == '/' => return &line[..i - 1],
+            None => {}
+        }
+        prev = c;
+    }
+    line
+}
+
+/// The string literal assigned after a property name: ` = '<v>'` / ` =
+/// "<v>"`, or (Groovy's method-call form, when `call` holds) ` '<v>'`.
+/// An interpolated (`$`) or unterminated literal is `None`.
+fn assigned_literal(rest: &str, call: bool) -> Option<String> {
+    let r = rest.trim_start();
+    let r = match r.strip_prefix('=') {
+        Some(r) => r.trim_start(),
+        None if call && rest.starts_with(char::is_whitespace) => r,
+        None => return None,
+    };
+    let q = r.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let body = r[1..].split(q).next()?;
+    let ok = r[1..].len() > body.len() && !body.contains('$') && !body.contains('\\');
+    ok.then(|| body.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Every `group` assignment of a Gradle build file (Groovy or Kotlin DSL)
+/// with the block path it sits in (`[]` top level, `["allprojects"]`,
+/// `["subprojects"]`, ..): `group = '<g>'`, `group '<g>'`,
+/// `project.group = ..`. A statement ends at a line end, `;`, `{` or `}`
+/// outside a string literal (so `allprojects { group = 'g' }` on one line
+/// reads); `//` and `/* */` comments are skipped; a block's name is the
+/// first word of the statement text before its `{`.
+fn gradle_groups(text: &str) -> Vec<(Vec<String>, String)> {
+    let mut out = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut in_block_comment = false;
+    let statement = |seg: &str, stack: &[String], out: &mut Vec<(Vec<String>, String)>| {
+        let t = seg.trim();
+        let t = t.strip_prefix("project.").unwrap_or(t);
+        if let Some(v) = t
+            .strip_prefix("group")
+            .and_then(|r| assigned_literal(r, true))
+        {
+            out.push((stack.to_vec(), v));
+        }
+    };
+    for raw in text.lines() {
+        let mut line = raw;
+        if in_block_comment {
+            match line.split_once("*/") {
+                Some((_, r)) => {
+                    in_block_comment = false;
+                    line = r;
+                }
+                None => continue,
+            }
+        }
+        let mut line = strip_line_comment(line);
+        if let Some((head, tail)) = line.split_once("/*") {
+            match tail.split_once("*/") {
+                Some(_) => {}
+                None => {
+                    in_block_comment = true;
+                    line = head;
+                }
+            }
+        }
+        let mut quote: Option<char> = None;
+        let mut prev = ' ';
+        let mut start = 0;
+        for (i, c) in line.char_indices() {
+            match quote {
+                Some(q) if c == q && prev != '\\' => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '{' || c == '}' || c == ';' => {
+                    let seg = &line[start..i];
+                    statement(seg, &stack, &mut out);
+                    if c == '{' {
+                        let name: String = seg
+                            .trim()
+                            .chars()
+                            .take_while(|c| c.is_alphanumeric() || *c == '_')
+                            .collect();
+                        stack.push(name);
+                    } else if c == '}' {
+                        stack.pop();
+                    }
+                    start = i + 1;
+                }
+                None => {}
+            }
+            prev = c;
+        }
+        statement(&line[start..], &stack, &mut out);
+    }
+    out
+}
+
+/// `group=<g>` (or `group = <g>` / `group: <g>`) in a `gradle.properties`
+/// file; `#` / `!` lines are comments.
+fn properties_group(text: &str) -> Option<String> {
+    text.lines().map(str::trim).find_map(|l| {
+        if l.starts_with('#') || l.starts_with('!') {
+            return None;
+        }
+        let r = l.strip_prefix("group")?.trim_start();
+        let v = r.strip_prefix('=').or_else(|| r.strip_prefix(':'))?.trim();
+        (!v.is_empty() && !v.contains('$')).then(|| v.to_string())
+    })
 }
 
 /// `app: :my_app` from a mix.exs `project/0` keyword list.
@@ -1083,6 +1354,173 @@ mod tests {
             Some("Api.Gateway".into())
         );
         assert_eq!(manifest_label("Gemfile", "source 'x'\n"), None);
+    }
+
+    #[test]
+    fn manifest_coordinate_reads_own_then_parent_group() {
+        // Own groupId wins over the parent's.
+        let own = "<project><parent><groupId>org.parent</groupId><artifactId>p</artifactId>\
+                   </parent><groupId>com.acme</groupId><artifactId>acme-lib</artifactId></project>";
+        assert_eq!(
+            manifest_coordinate("pom.xml", own),
+            Some("com.acme:acme-lib".into())
+        );
+        // No own groupId: the parent's (commons-lang3's shape).
+        let inherited = r#"<?xml version="1.0"?>
+<project xmlns="x">
+  <!-- <groupId>no.comment</groupId> -->
+  <parent>
+    <groupId>org.apache.commons</groupId>
+    <artifactId>commons-parent</artifactId>
+  </parent>
+  <dependencies><dependency><groupId>junit</groupId><artifactId>junit</artifactId></dependency></dependencies>
+  <artifactId>commons-lang3</artifactId>
+</project>
+"#;
+        assert_eq!(
+            manifest_coordinate("pom.xml", inherited),
+            Some("org.apache.commons:commons-lang3".into())
+        );
+        // No groupId anywhere, or one that is a property: no coordinate.
+        assert_eq!(
+            manifest_coordinate("pom.xml", "<project><artifactId>a</artifactId></project>"),
+            None
+        );
+        assert_eq!(
+            manifest_coordinate(
+                "pom.xml",
+                "<project><groupId>${org}</groupId><artifactId>a</artifactId></project>"
+            ),
+            None
+        );
+        assert_eq!(
+            manifest_coordinate("pom.xml", "<project><groupId>g</groupId></project>"),
+            None
+        );
+        // Not a pom: a Gradle coordinate needs its tree.
+        assert_eq!(manifest_coordinate("build.gradle", "group = 'g'"), None);
+    }
+
+    /// A Gradle tree as `(repo-relative path, text)` files.
+    fn gradle(files: &[(&str, &str)], rel: &str, manifest: &str) -> Option<String> {
+        let files: BTreeMap<String, String> = files
+            .iter()
+            .map(|(p, t)| (p.to_string(), t.to_string()))
+            .collect();
+        gradle_coordinate(rel, manifest, |p| files.get(p).cloned())
+    }
+
+    #[test]
+    fn gradle_coordinate_group_and_name_sources() {
+        // A single-project build: settings name + top-level group.
+        assert_eq!(
+            gradle(
+                &[
+                    ("settings.gradle", "rootProject.name = 'glib' // the lib\n"),
+                    (
+                        "build.gradle",
+                        "plugins { id 'java' }\ngroup = 'com.acme'\nversion = '1.0'\n"
+                    ),
+                ],
+                "",
+                "build.gradle"
+            ),
+            Some("com.acme:glib".into())
+        );
+        // Kotlin DSL, Groovy call form and `project.group`.
+        for build in [
+            "group = \"com.acme\"\n",
+            "group 'com.acme'\n",
+            "project.group = 'com.acme'\n",
+        ] {
+            assert_eq!(
+                gradle(
+                    &[
+                        ("settings.gradle.kts", "rootProject.name = \"glib\"\n"),
+                        ("build.gradle.kts", build),
+                    ],
+                    "",
+                    "build.gradle.kts"
+                ),
+                Some("com.acme:glib".into()),
+                "{build}"
+            );
+        }
+        // A group inside a block other than allprojects / subprojects, an
+        // interpolated one and `groupId` are no group.
+        for build in [
+            "publishing { group = 'x' }\n",
+            "group = \"${base}.lib\"\n",
+            "groupId = 'x'\n",
+        ] {
+            assert_eq!(
+                gradle(
+                    &[
+                        ("settings.gradle", "rootProject.name = 'glib'"),
+                        ("build.gradle", build)
+                    ],
+                    "",
+                    "build.gradle"
+                ),
+                None,
+                "{build}"
+            );
+        }
+        // No settings name at the build root: no artifact.
+        assert_eq!(
+            gradle(&[("build.gradle", "group = 'g'")], "", "build.gradle"),
+            None
+        );
+        // Sub-projects: the root's allprojects / subprojects group, the dir
+        // name, a settings name override, and gradle.properties.
+        let tree = [
+            (
+                "settings.gradle",
+                "rootProject.name = 'acme'\ninclude 'core', 'libs:util'\nproject(':libs:util').name = 'acme-util'\n",
+            ),
+            ("build.gradle", "allprojects { group = 'com.acme' }\n"),
+            ("core/build.gradle", "dependencies { }\n"),
+            ("libs/util/build.gradle", "group = 'com.acme.util'\n"),
+        ];
+        assert_eq!(
+            gradle(&tree, "", "build.gradle"),
+            Some("com.acme:acme".into())
+        );
+        assert_eq!(
+            gradle(&tree, "core", "core/build.gradle"),
+            Some("com.acme:core".into())
+        );
+        assert_eq!(
+            gradle(&tree, "libs/util", "libs/util/build.gradle"),
+            Some("com.acme.util:acme-util".into())
+        );
+        let subs = [
+            ("settings.gradle.kts", "rootProject.name = \"acme\""),
+            (
+                "build.gradle.kts",
+                "subprojects {\n    group = \"org.sub\"\n}\n",
+            ),
+            ("app/build.gradle.kts", ""),
+        ];
+        assert_eq!(gradle(&subs, "", "build.gradle.kts"), None);
+        assert_eq!(
+            gradle(&subs, "app", "app/build.gradle.kts"),
+            Some("org.sub:app".into())
+        );
+        let props = [
+            ("settings.gradle", "rootProject.name = 'acme'"),
+            ("build.gradle", ""),
+            ("gradle.properties", "# group\ngroup=io.props\nversion=1\n"),
+            ("svc/build.gradle", ""),
+        ];
+        assert_eq!(
+            gradle(&props, "", "build.gradle"),
+            Some("io.props:acme".into())
+        );
+        assert_eq!(
+            gradle(&props, "svc", "svc/build.gradle"),
+            Some("io.props:svc".into())
+        );
     }
 
     #[test]

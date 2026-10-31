@@ -1650,11 +1650,18 @@ pub(crate) fn package_file(root: &Path, dir: &str, target: &str) -> Option<Strin
 /// with the import's `*` text. A target naming no file and a non-npm root
 /// record nothing, and a PROJECT with nothing to record keeps its ORIGIN
 /// byte for byte.
+///
+/// GD.32: a `maven` / `gradle` PROJECT records `coordinate` instead, its
+/// Maven `groupId:artifactId` ([`jvm_coordinate`]), which the identity pass
+/// keys its `manifest_name` class by; the label is unchanged.
 pub(crate) fn stamp_npm_entries(g: &mut glia_graph::RepoGraph, root: &Path, roots: &[ProjectRoot]) {
-    use glia_code_domain::cell_type;
-    use glia_core::CellPayload;
-
     for (node, r) in g.nodes.iter_mut().zip(roots) {
+        if let Some(coordinate) = jvm_coordinate(root, r) {
+            stamp_origin(node, |origin| {
+                origin.insert("coordinate".into(), coordinate.into());
+            });
+            continue;
+        }
         if r.ecosystem != "npm" {
             continue;
         }
@@ -1680,23 +1687,58 @@ pub(crate) fn stamp_npm_entries(g: &mut glia_graph::RepoGraph, root: &Path, root
         if entry.is_none() && subpaths.is_empty() {
             continue;
         }
-        let Some(cell) = node.cells.iter_mut().find(|c| c.kind == cell_type::ORIGIN) else {
-            continue;
-        };
-        let CellPayload::Json(text) = &cell.payload else {
-            continue;
-        };
-        let Ok(serde_json::Value::Object(mut origin)) = serde_json::from_str(text) else {
-            continue;
-        };
-        if let Some(entry) = entry {
-            origin.insert("entry".into(), entry.into());
-        }
-        if !subpaths.is_empty() {
-            origin.insert("subpaths".into(), subpaths.into());
-        }
-        cell.payload = CellPayload::Json(serde_json::Value::Object(origin).to_string());
+        stamp_origin(node, |origin| {
+            if let Some(entry) = entry {
+                origin.insert("entry".into(), entry.into());
+            }
+            if !subpaths.is_empty() {
+                origin.insert("subpaths".into(), subpaths.into());
+            }
+        });
     }
+}
+
+/// GD.32: the Maven coordinate of a `maven` / `gradle` root, read from its
+/// manifest (`project_roots::manifest_coordinate`: a pom's own or parent
+/// groupId with its artifactId) or its Gradle build tree
+/// (`project_roots::gradle_coordinate`: the group from the build file,
+/// the root's `allprojects` / `subprojects` or `gradle.properties`, the
+/// artifact from the settings name or the directory). `None` for any other
+/// ecosystem or an unreadable coordinate.
+fn jvm_coordinate(root: &Path, r: &ProjectRoot) -> Option<String> {
+    match r.ecosystem {
+        "maven" => {
+            let text = std::fs::read_to_string(root.join(&r.manifest)).ok()?;
+            project_roots::manifest_coordinate("pom.xml", &text)
+        }
+        "gradle" => project_roots::gradle_coordinate(&r.rel_path, &r.manifest, |p| {
+            std::fs::read_to_string(root.join(p)).ok()
+        }),
+        _ => None,
+    }
+}
+
+/// Rewrite a PROJECT node's ORIGIN JSON object through `edit` (keys stay
+/// sorted: serde_json's map). A node with no JSON-object ORIGIN is left as
+/// it is.
+fn stamp_origin(
+    node: &mut glia_core::Node,
+    edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
+
+    let Some(cell) = node.cells.iter_mut().find(|c| c.kind == cell_type::ORIGIN) else {
+        return;
+    };
+    let CellPayload::Json(text) = &cell.payload else {
+        return;
+    };
+    let Ok(serde_json::Value::Object(mut origin)) = serde_json::from_str(text) else {
+        return;
+    };
+    edit(&mut origin);
+    cell.payload = CellPayload::Json(serde_json::Value::Object(origin).to_string());
 }
 
 /// A target without its JS / TS / declaration extension (`dist/index.d.ts`
@@ -4029,6 +4071,76 @@ mod npm_entry_tests {
             panic!("ORIGIN is JSON");
         };
         serde_json::from_str(text).unwrap()
+    }
+
+    /// GD.32: the ORIGIN of each root of `roots` (`(rel_path, ecosystem,
+    /// manifest basename)`) after stamping, in a scratch tree of `files`.
+    fn jvm_origins(
+        files: &[(&str, &str)],
+        roots: &[(&str, &'static str, &str)],
+    ) -> Vec<serde_json::Value> {
+        let tmp = tempfile::tempdir().unwrap();
+        for (rel, text) in files {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let roots: Vec<ProjectRoot> = roots
+            .iter()
+            .map(|(rel, eco, base)| ProjectRoot::new(rel.to_string(), eco, base, None))
+            .collect();
+        let mut g = build_project_graph(&roots, RepoId(7));
+        stamp_npm_entries(&mut g, tmp.path(), &roots);
+        g.nodes
+            .iter()
+            .map(|n| {
+                let cell = n
+                    .cells
+                    .iter()
+                    .find(|c| c.kind == glia_code_domain::cell_type::ORIGIN)
+                    .unwrap();
+                let glia_core::CellPayload::Json(text) = &cell.payload else {
+                    panic!("ORIGIN is JSON");
+                };
+                serde_json::from_str(text).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn maven_and_gradle_roots_record_their_coordinate() {
+        let o = jvm_origins(
+            &[
+                (
+                    "lib/pom.xml",
+                    "<project><parent><groupId>com.acme</groupId><artifactId>p</artifactId></parent><artifactId>acme-lib</artifactId></project>",
+                ),
+                (
+                    "bare/pom.xml",
+                    "<project><artifactId>bare</artifactId></project>",
+                ),
+                ("settings.gradle", "rootProject.name = 'acme'\n"),
+                ("build.gradle", "allprojects { group = 'com.acme' }\n"),
+                ("glib/build.gradle", "dependencies { }\n"),
+                ("web/package.json", r#"{"name":"web"}"#),
+            ],
+            &[
+                ("lib", "maven", "pom.xml"),
+                ("bare", "maven", "pom.xml"),
+                ("", "gradle", "build.gradle"),
+                ("glib", "gradle", "build.gradle"),
+                ("web", "npm", "package.json"),
+            ],
+        );
+        assert_eq!(o[0]["coordinate"], "com.acme:acme-lib");
+        assert_eq!(o[0]["label"], "lib", "the label is the walk's, unchanged");
+        assert!(
+            o[1].get("coordinate").is_none(),
+            "no groupId: no coordinate"
+        );
+        assert_eq!(o[2]["coordinate"], "com.acme:acme");
+        assert_eq!(o[3]["coordinate"], "com.acme:glib");
+        assert!(o[4].get("coordinate").is_none());
     }
 
     #[test]

@@ -1,0 +1,6 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.9.0'
+}
+
+group = 'com.acme'
+version = '1.0'

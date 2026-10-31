@@ -1,0 +1,15 @@
+{
+  "framework": "org-packages",
+  "language": "java",
+  "dirs": ["app", "lib", "gapp", "glib"],
+  "note": "GD.32: org routing for the JVM. lib's pom declares no groupId of its own: it inherits com.acme from <parent>, so the walk records its PROJECT's coordinate com.acme:acme-lib (the label stays the bare artifactId acme-lib); glib's build.gradle sets `group = 'com.acme'` and settings.gradle `rootProject.name = 'glib'`, coordinate com.acme:glib. Identity keys each PROJECT by its coordinate, so app's pom dependency (package:maven:com.acme:acme-lib) and gapp's `implementation 'com.acme:glib:1.0'` each form one manifest_name class. app's Main.java `import com.acme.lib.Greeter` routes to lib's Greeter.java (IMPORTS, resolver:org_packages rule org_import) and `Greeter.shout(..)` binds through the CLASS to its METHOD (CALLS, rule org_call, Medium); gapp's App.kt `import com.acme.glib.Util` and `Util.twice(..)` the same. Baseline HEAD 2fc4daa9 (this fixture, debug CLI): `[identity] report classes=0`, no [org-packages] line, no edge between the repos.",
+  "expect_edges": [
+    {"from": "Main", "to": "Greeter", "category": "IMPORTS", "note": "org_import maven (pom, parent groupId)"},
+    {"from": "main", "to": "shout", "category": "CALLS", "note": "org_call maven through the CLASS"},
+    {"from": "App", "to": "Util", "category": "IMPORTS", "note": "org_import maven (Gradle group + settings name)"},
+    {"from": "main", "to": "twice", "category": "CALLS", "note": "org_call maven, Kotlin object member"}
+  ],
+  "forbid": [
+    {"from": "main", "to": "main", "category": "CALLS", "note": "no self-binding"}
+  ]
+}

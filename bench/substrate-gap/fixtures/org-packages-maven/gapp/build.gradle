@@ -1,0 +1,9 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.9.0'
+}
+
+group = 'com.acme'
+
+dependencies {
+    implementation 'com.acme:glib:1.0'
+}

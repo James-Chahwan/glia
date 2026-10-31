@@ -33,8 +33,12 @@
 //!   csproj file stem (DD.4 records `manifest` for it), keyed as a `nuget`
 //!   name; since FD.31 a project file's `<PackageReference>` mints a
 //!   `package:nuget:` PACKAGE_DEP, so a stem that another project depends on
-//!   by that name joins a class (as Maven `groupId:artifactId`, pub and Hex
-//!   names do).
+//!   by that name joins a class (as pub and Hex names do). A Maven / Gradle
+//!   PROJECT is keyed by its ORIGIN `coordinate` (GD.32: the walk reads a
+//!   pom's own or parent `groupId` with its `artifactId`, or a Gradle
+//!   project's group and project name) whatever its `label_source`: its
+//!   label stays the bare artifactId, while `package:maven:<g>:<a>` names
+//!   the coordinate.
 //! - `message_fqname` (FACT): MESSAGE_TYPEs with one qname (flavour and fully
 //!   qualified name are already in it, as the retired `message_schema`
 //!   resolver keyed them).
@@ -463,6 +467,15 @@ fn manifest_classes(rule: &IdentityRule, cands: &[Candidate]) -> BTreeMap<String
 /// walker records unescaped (the graph crate stays off serde_json).
 fn manifest_project_key(c: &Candidate) -> Option<String> {
     let origin = origins(c.cells).find(|p| str_field(p, "provenance") == Some("project_root"))?;
+    let ecosystem = str_field(origin, "ecosystem")?;
+    // GD.32: a Maven / Gradle PROJECT is keyed by the coordinate its build
+    // declares (`groupId:artifactId`, the walk's ORIGIN `coordinate`), the
+    // name its dependants write, whatever its label's source.
+    if matches!(ecosystem, "maven" | "gradle")
+        && let Some(coordinate) = str_field(origin, "coordinate").filter(|c| !c.contains('\\'))
+    {
+        return same_as::project_dep_key("maven", coordinate);
+    }
     if str_field(origin, "label_source") != Some(LABEL_MANIFEST) {
         return None;
     }
@@ -470,7 +483,7 @@ fn manifest_project_key(c: &Candidate) -> Option<String> {
         Some(l) if !l.contains('\\') => l,
         _ => c.name?,
     };
-    same_as::project_dep_key(str_field(origin, "ecosystem")?, label)
+    same_as::project_dep_key(ecosystem, label)
 }
 
 /// DT.1j: the qname prefix of a GraphQL SDL type. A GraphQL type name has no
@@ -1081,6 +1094,23 @@ mod tests {
             self
         }
 
+        /// GD.32: a Maven / Gradle PROJECT whose ORIGIN records its
+        /// `coordinate`; its label stays the bare artifactId (source `dir`
+        /// here, to show the coordinate keys it whatever the label's source).
+        fn jvm_project(mut self, rel: &str, eco: &str, label: &str, coordinate: &str) -> Self {
+            let qname = format!("project:{}", if rel.is_empty() { "." } else { rel });
+            let origin = format!(
+                r#"{{"coordinate":"{coordinate}","ecosystem":"{eco}","label":"{label}","label_source":"dir","manifest":"pom.xml","path":"{rel}","provenance":"project_root"}}"#
+            );
+            self.add(
+                node_kind::PROJECT,
+                &qname,
+                label,
+                vec![json(cell_type::ORIGIN, &origin)],
+            );
+            self
+        }
+
         fn message(mut self, qname: &str, fields: &str) -> Self {
             self.add(
                 node_kind::MESSAGE_TYPE,
@@ -1308,6 +1338,49 @@ mod tests {
                 .build(),
         ]);
         assert!(stars(&alone).is_empty());
+    }
+
+    #[test]
+    fn manifest_maven_coordinate() {
+        // A pom whose label is its bare artifactId and a Gradle project:
+        // each keyed by its coordinate, case-folded as maven keys are.
+        let m = run(vec![
+            G::new("lib")
+                .jvm_project("", "maven", "acme-lib", "com.acme:acme-lib")
+                .build(),
+            G::new("glib")
+                .jvm_project("", "gradle", "glib", "Com.Acme:glib")
+                .build(),
+            G::new("app")
+                .dep("package:maven:com.acme:acme-lib")
+                .dep("package:maven:com.acme:glib")
+                .build(),
+        ]);
+        assert_eq!(
+            stars(&m),
+            [
+                row(
+                    "project:.",
+                    "package:maven:com.acme:acme-lib",
+                    "manifest_name",
+                    Confidence::Strong
+                ),
+                row(
+                    "project:.",
+                    "package:maven:com.acme:glib",
+                    "manifest_name",
+                    Confidence::Strong
+                ),
+            ]
+        );
+        // Without a coordinate the bare artifactId keys nothing.
+        let bare = run(vec![
+            G::new("lib")
+                .project("", "maven", "acme-lib", "manifest")
+                .build(),
+            G::new("app").dep("package:maven:com.acme:acme-lib").build(),
+        ]);
+        assert!(stars(&bare).is_empty());
     }
 
     #[test]

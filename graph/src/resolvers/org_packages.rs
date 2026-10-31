@@ -54,7 +54,7 @@
 //! of the class (the dependency is DECLARED where the import is: the FACT the
 //! class rests on), and the importer's language must be the class's
 //! ecosystem's (the TS / JS family for npm, Go for gomod, Rust for cargo,
-//! Python for pypi). A row matches a class when its specifier is the package
+//! Python for pypi, Java / Kotlin for maven). A row matches a class when its specifier is the package
 //! name or starts with `<name>/` (npm), or is the module path or starts with
 //! `<modpath>/` (Go, whose parser stores the path `::`-joined); of the
 //! declared classes a row matches, the longest name wins (a nested module).
@@ -94,12 +94,33 @@
 //! caller already has an edge of that category to the declaration; a row
 //! whose target is absent emits nothing and counts `unrouted` (a package
 //! whose entry sits elsewhere). A class with two PROJECTs names no single
-//! sibling: its rows are unrouted too. Maven / Gradle classes do not form yet
-//! (a pom's label is its bare artifactId, FD.31's handoff; 0.5.6).
+//! sibling: its rows are unrouted too.
+//!
+//! **Maven / Gradle (GD.32).** A Maven or Gradle PROJECT's class is keyed by
+//! the coordinate the walk records on its ORIGIN (`coordinate`: a pom's own
+//! or parent `groupId` with its `artifactId`; a Gradle project's group and
+//! project name), joined with the `package:maven:<g>:<a>` PACKAGE_DEPs. A
+//! JVM import names a Java package, never a coordinate, so a Java / Kotlin
+//! row (the parsers write `com::acme::lib` + `Greeter`, or for a static
+//! import `..::StringUtils` + `isBlank`) matches the declared maven class
+//! whose project holds a Java / Kotlin file in the row's package (its
+//! specifier, or the specifier without its last segment), and routes to
+//! the one file MODULE of that project whose path ends with the FQN
+//! (`<spec>.<name>`, else `<spec>`; any source root: `src/main/java/..`,
+//! `src/..`). A wildcard import, a Kotlin top-level function import and a
+//! class held by two files count unrouted; two declared classes holding
+//! the package route only when one of their projects holds the class. A
+//! class import binds its local name (alias, else the class name) to the
+//! file's top-level CLASS: a bare use is that CLASS (org_ref) and
+//! `Greeter.shout(..)` its member METHOD (`SymbolTable.class_methods`,
+//! persisted; one hop more than a module's top-level names, org_call); a
+//! static import binds the member itself. A Kotlin file whose name is not
+//! its class's routes nothing. sbt projects are their own ecosystem and
+//! out (`project_roots::SBT_ECOSYSTEM`).
 //!
 //! fired_on, stderr, once per resolve that saw a `manifest_name` class:
-//!   `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm=<a> go=<b> cargo=<k> pypi=<p>)`
-//!   `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm=<n> go=<g> cargo=<k> pypi=<p>)`
+//!   `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm=<a> go=<b> cargo=<k> pypi=<p> maven=<m>)`
+//!   `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm=<n> go=<g> cargo=<k> pypi=<p> maven=<m>)`
 //! (`rows` = rows matching a declared class, `routed` = rows whose target
 //! module exists, the first parenthesis routed rows by ecosystem; `calls` /
 //! `refs` = org_call / org_ref edges drawn, `ambiguous` = sites whose name
@@ -132,6 +153,9 @@ const RULE_ORG_CALL: &str = "org_call";
 /// A USES / INJECTS / HANDLED_BY reference into a sibling (FA.23).
 const RULE_ORG_REF: &str = "org_ref";
 
+/// The JVM file extensions a Maven / Gradle artifact's classes are routed
+/// through (GD.32): Java and Kotlin, one JVM graph (lang_build's JVM group).
+const JVM_EXTS: &[&str] = &["java", "kt"];
 /// The TS / JS family's file extensions, an npm package's module files.
 const NPM_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
 /// A Python distribution's module files.
@@ -168,6 +192,7 @@ enum Eco {
     Go,
     Cargo,
     Pypi,
+    Maven,
 }
 
 impl Eco {
@@ -178,6 +203,7 @@ impl Eco {
             "gomod" => Some(Self::Go),
             "cargo" => Some(Self::Cargo),
             "pypi" => Some(Self::Pypi),
+            "maven" => Some(Self::Maven),
             _ => None,
         }
     }
@@ -192,6 +218,8 @@ impl Eco {
             Some(Self::Cargo)
         } else if PY_EXTS.contains(&ext) {
             Some(Self::Pypi)
+        } else if JVM_EXTS.contains(&ext) {
+            Some(Self::Maven)
         } else {
             None
         }
@@ -204,6 +232,7 @@ impl Eco {
             Self::Go => "go",
             Self::Cargo => "rust",
             Self::Pypi => "python",
+            Self::Maven => "java",
         }
     }
 
@@ -214,11 +243,14 @@ impl Eco {
 }
 
 /// A count per ecosystem, in [`Eco`] order.
-type PerEco = [usize; 4];
+type PerEco = [usize; 5];
 
-/// `npm=<a> go=<b> cargo=<k> pypi=<p>`.
+/// `npm=<a> go=<b> cargo=<k> pypi=<p> maven=<m>`.
 fn per_eco(c: &PerEco) -> String {
-    format!("npm={} go={} cargo={} pypi={}", c[0], c[1], c[2], c[3])
+    format!(
+        "npm={} go={} cargo={} pypi={} maven={}",
+        c[0], c[1], c[2], c[3], c[4]
+    )
 }
 
 /// The sibling PROJECT a class routes to: its repo, root dir and, for npm,
@@ -360,6 +392,21 @@ fn origin_subpaths(origin: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Whether repo-relative `path` lies under the project root dir `root`
+/// (`""`, the repo root, holds every path).
+fn in_root(root: &str, path: &str) -> bool {
+    root.is_empty()
+        || path
+            .strip_prefix(root)
+            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+}
+
+/// Whether `/`-separated `path` ends with the whole segments of `tail`.
+fn ends_with_path(path: &str, tail: &str) -> bool {
+    path.strip_suffix(tail)
+        .is_some_and(|head| head.is_empty() || head.ends_with('/'))
+}
+
 /// `dir` joined with `rel` (`/`-separated, either may be empty).
 fn join(dir: &str, rel: &str) -> String {
     match (dir.is_empty(), rel.is_empty()) {
@@ -480,13 +527,18 @@ type Route = (NodeId, NodeId, u32, String);
 /// The file MODULEs a target can be: npm, cargo and pypi files by (repo,
 /// ecosystem, path without its extension) -> the least (path, id), and by
 /// (repo, path); Go files by (repo, dir) -> (stem, id) sorted by stem; the
-/// directories holding a Python file, by (repo, dir).
+/// directories holding a Python file, by (repo, dir); Java / Kotlin files
+/// by (repo, file stem) -> (path without extension, id, file) sorted by
+/// path, and the directories holding one by (repo, last dir segment)
+/// (GD.32).
 #[derive(Default)]
 struct Modules {
     stems: HashMap<(u64, Eco, String), (String, NodeId)>,
     files: HashMap<(u64, String), NodeId>,
     go: HashMap<(u64, String), Vec<GoFile>>,
     py_dirs: HashSet<(u64, String)>,
+    jvm: HashMap<(u64, String), Vec<GoFile>>,
+    jvm_dirs: HashMap<(u64, String), BTreeSet<String>>,
 }
 
 impl Modules {
@@ -523,6 +575,19 @@ impl Modules {
                         .push((stem.to_string(), n.id, file.clone()));
                     continue;
                 }
+                if eco == Eco::Maven {
+                    let (dir, stem) = stem_path.rsplit_once('/').unwrap_or(("", stem_path));
+                    out.jvm
+                        .entry((n.repo.0, stem.to_string()))
+                        .or_default()
+                        .push((stem_path.to_string(), n.id, file.clone()));
+                    let last = dir.rsplit('/').next().unwrap_or(dir);
+                    out.jvm_dirs
+                        .entry((n.repo.0, last.to_string()))
+                        .or_default()
+                        .insert(dir.to_string());
+                    continue;
+                }
                 if eco == Eco::Pypi {
                     let mut dir = stem_path;
                     while let Some((parent, _)) = dir.rsplit_once('/') {
@@ -542,7 +607,40 @@ impl Modules {
         for files in out.go.values_mut() {
             files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
         }
+        for files in out.jvm.values_mut() {
+            files.sort_by(|a, b| a.2.cmp(&b.2));
+            files.dedup_by(|a, b| a.1 == b.1);
+        }
         out
+    }
+
+    /// GD.32: whether `project` holds a Java / Kotlin file in a directory
+    /// whose path ends with the `/`-joined package `pkg` (any source root:
+    /// `src/main/java/<pkg>`, `src/<pkg>`, ..).
+    fn has_jvm_package(&self, project: &Project, pkg: &str) -> bool {
+        let last = pkg.rsplit('/').next().unwrap_or(pkg);
+        self.jvm_dirs
+            .get(&(project.repo.0, last.to_string()))
+            .is_some_and(|dirs| {
+                dirs.iter()
+                    .any(|d| in_root(&project.root, d) && ends_with_path(d, pkg))
+            })
+    }
+
+    /// GD.32: the one Java / Kotlin file MODULE of `project` whose path
+    /// without its extension ends with the `/`-joined FQN `fqn`
+    /// (`com/acme/lib/Greeter` -> `lib/src/main/java/com/acme/lib/Greeter.java`),
+    /// with its file; two such files (a class in two source roots) name
+    /// none.
+    fn jvm_target(&self, project: &Project, fqn: &str) -> Option<(NodeId, String)> {
+        let stem = fqn.rsplit('/').next().filter(|s| !s.is_empty())?;
+        let mut hits = self
+            .jvm
+            .get(&(project.repo.0, stem.to_string()))?
+            .iter()
+            .filter(|(path, _, _)| in_root(&project.root, path) && ends_with_path(path, fqn));
+        let (_, id, file) = hits.next()?;
+        hits.next().is_none().then(|| (*id, file.clone()))
     }
 
     /// The first of `stems` that is a file MODULE of `eco` in `repo`.
@@ -727,21 +825,100 @@ struct Matched<'a> {
     class: &'a PackageIndex,
     /// The routed path inside the package: npm / Go a `/` subpath, cargo
     /// the module path after the crate, pypi the whole dotted path
-    /// `/`-joined (top package first).
+    /// `/`-joined (top package first), maven the class's FQN `/`-joined
+    /// (`""` when no single class answers: routes nothing).
     sub: String,
+}
+
+/// GD.32: the `/`-joined segments of a JVM import specifier (the Java and
+/// Kotlin parsers write `::`, a dotted one is read too).
+fn jvm_path(spec: &str) -> String {
+    spec.split("::")
+        .flat_map(|s| s.split('.'))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// GD.32: the maven class a JVM row names and the FQN of the class it
+/// routes to. The row's package is its specifier (a class import
+/// `import com.acme.lib.Greeter`, row `com::acme::lib` + `Greeter`, or a
+/// wildcard) or the specifier without its last segment (a static import
+/// `import static ..StringUtils.isBlank`, row `..::StringUtils` +
+/// `isBlank`); the row names the declared class whose project holds a Java
+/// / Kotlin file in that package. The routed FQN is `<spec>.<name>`, else
+/// `<spec>`, the first naming one file MODULE of the project (`""`: none,
+/// a wildcard or a Kotlin top-level function import). Two declared classes
+/// holding the package (a split package): the one whose project holds the
+/// routed class, else the row routes nothing.
+fn match_jvm<'a>(
+    spec: &str,
+    name: Option<&str>,
+    maven: &[&'a PackageIndex],
+    declared: impl Fn(&&'a PackageIndex) -> bool,
+    modules: &Modules,
+) -> Option<Matched<'a>> {
+    let path = jvm_path(spec);
+    let parent = path.rsplit_once('/').map(|(p, _)| p);
+    let packages: Vec<&str> = std::iter::once(path.as_str()).chain(parent).collect();
+    let fqns: Vec<String> = name
+        .filter(|n| *n != "*")
+        .map(|n| join(&path, n))
+        .into_iter()
+        .chain(std::iter::once(path.clone()))
+        .collect();
+    let holders: Vec<(&'a PackageIndex, &Project)> = maven
+        .iter()
+        .copied()
+        .filter(&declared)
+        .filter_map(|c| Some((c, c.project.as_ref()?)))
+        .filter(|(_, p)| packages.iter().any(|pkg| modules.has_jvm_package(p, pkg)))
+        .collect();
+    let routed = |p: &Project| {
+        fqns.iter()
+            .find(|f| modules.jvm_target(p, f).is_some())
+            .cloned()
+    };
+    match holders.as_slice() {
+        [] => None,
+        [(class, p)] => Some(Matched {
+            class,
+            sub: routed(p).unwrap_or_default(),
+        }),
+        [(first, _), ..] => {
+            let mut hit = holders.iter().filter_map(|(c, p)| Some((*c, routed(p)?)));
+            match (hit.next(), hit.next()) {
+                (Some((class, sub)), None) => Some(Matched { class, sub }),
+                _ => Some(Matched {
+                    class: first,
+                    sub: String::new(),
+                }),
+            }
+        }
+    }
+}
+
+/// The pypi and maven classes, which a row matches by the sibling's files
+/// rather than by name alone.
+struct ByEco<'a> {
+    pypi: Vec<&'a PackageIndex>,
+    maven: Vec<&'a PackageIndex>,
 }
 
 /// The class a row of ecosystem `eco` names, and its routed path.
 fn match_row<'a>(
     eco: Eco,
-    spec: &str,
+    row: &glia_code_domain::ImportBinding,
     importer_repo: u64,
     by_name: &HashMap<(Eco, &str), &'a PackageIndex>,
-    pypi: &[&'a PackageIndex],
+    by_eco: &ByEco<'a>,
     modules: &Modules,
 ) -> Option<Matched<'a>> {
+    let spec = row.spec.as_str();
     let declared = |c: &&'a PackageIndex| c.dep_repos.contains(&importer_repo);
+    let pypi = by_eco.pypi.as_slice();
     match eco {
+        Eco::Maven => match_jvm(spec, row.name.as_deref(), &by_eco.maven, declared, modules),
         Eco::Npm | Eco::Go => {
             // Go's parser stores the import path `::`-joined.
             let spec = match eco {
@@ -805,6 +982,7 @@ fn route(eco: Eco, project: &Project, sub: &str, importer: NodeId, m: &Modules) 
         Eco::Npm => single(m.npm_target(project, sub)),
         Eco::Cargo => single(m.cargo_target(project, sub)),
         Eco::Pypi => single(m.pypi_target(project, sub)),
+        Eco::Maven => single(m.jvm_target(project, sub)),
         Eco::Go => {
             let dir = join(&project.root, sub);
             let module = m.go_target(project.repo, &dir, importer)?;
@@ -825,6 +1003,10 @@ enum Binding {
     /// modules whose top-level declarations `name.f` reaches, and (cargo)
     /// the crate's `src` dir their `pub use` re-exports must stay inside.
     Scope(Vec<NodeId>, Option<String>),
+    /// GD.32: a JVM class import: the sibling CLASS, which a bare use names
+    /// and whose member METHOD `Class.m(..)` names, one hop more than a
+    /// module's top-level names.
+    Class(NodeId),
     /// Two declarations answer the name: binds nothing, counted.
     Ambiguous,
     /// Two rows bind the name to different targets: binds nothing.
@@ -874,6 +1056,9 @@ struct Decls<'a> {
     uses: HashMap<NodeId, &'a HashMap<String, NodeId>>,
     /// The file of each `use` binding's target.
     use_files: HashMap<NodeId, String>,
+    /// GD.32: CLASS -> (method name -> METHOD) (`class_methods`,
+    /// persisted).
+    methods: HashMap<NodeId, &'a HashMap<String, NodeId>>,
 }
 
 impl<'a> Decls<'a> {
@@ -882,9 +1067,13 @@ impl<'a> Decls<'a> {
         let mut reexports: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut uses: HashMap<NodeId, &'a HashMap<String, NodeId>> = HashMap::new();
         let mut use_files: HashMap<NodeId, String> = HashMap::new();
+        let mut methods = HashMap::new();
         for g in graphs.iter().filter(|g| repos.contains(&g.repo.0)) {
             for (m, names) in &g.symbols.module_symbols {
                 symbols.entry(*m).or_insert(names);
+            }
+            for (c, names) in &g.symbols.class_methods {
+                methods.entry(*c).or_insert(names);
             }
             let rust_modules: HashSet<NodeId> = g
                 .nodes
@@ -920,7 +1109,22 @@ impl<'a> Decls<'a> {
             reexports,
             uses,
             use_files,
+            methods,
         }
+    }
+
+    /// GD.32: the METHOD `name` of CLASS `class`.
+    fn member(&self, class: NodeId, name: &str) -> Lookup {
+        self.methods
+            .get(&class)
+            .and_then(|m| m.get(name))
+            .map_or(Lookup::Missing, |d| Lookup::Found(*d))
+    }
+
+    /// GD.32: the top-level declaration `name` of `module` (a JVM file's
+    /// CLASS).
+    fn top(&self, module: NodeId, name: &str) -> Option<NodeId> {
+        self.symbols.get(&module)?.get(name).copied()
     }
 
     /// The distinct declarations `name` names among `modules`' own
@@ -1019,7 +1223,7 @@ fn importer_of(
 fn resolve_site(b: &Bindings, q: &CallQualifier, decls: &Decls) -> Lookup {
     match q {
         CallQualifier::Bare(name) => match b.names.get(name) {
-            Some(Binding::Decl(d)) => Lookup::Found(*d),
+            Some(Binding::Decl(d) | Binding::Class(d)) => Lookup::Found(*d),
             Some(Binding::Ambiguous) => Lookup::Ambiguous,
             _ => Lookup::Missing,
         },
@@ -1027,6 +1231,7 @@ fn resolve_site(b: &Bindings, q: &CallQualifier, decls: &Decls) -> Lookup {
             Some(Binding::Scope(scope, krate)) => {
                 decls.lookup(b.eco, scope, name, krate.as_deref())
             }
+            Some(Binding::Class(c)) => decls.member(*c, name),
             Some(Binding::Ambiguous) => Lookup::Ambiguous,
             _ => Lookup::Missing,
         },
@@ -1067,7 +1272,10 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
         .iter()
         .map(|c| ((c.eco, c.name.as_str()), c))
         .collect();
-    let pypi: Vec<&PackageIndex> = classes.iter().filter(|c| c.eco == Eco::Pypi).collect();
+    let by_eco = ByEco {
+        pypi: classes.iter().filter(|c| c.eco == Eco::Pypi).collect(),
+        maven: classes.iter().filter(|c| c.eco == Eco::Maven).collect(),
+    };
     let existing: HashSet<(NodeId, NodeId)> = graphs
         .iter()
         .flat_map(|g| &g.edges)
@@ -1108,7 +1316,7 @@ fn org_edges(graphs: &[RepoGraph], cross: &[Edge]) -> (Vec<Edge>, Report) {
             };
             let mut counted = false;
             for row in read_import_bindings(cell) {
-                let Some(m) = match_row(eco, &row.spec, n.repo.0, &by_name, &pypi, &modules) else {
+                let Some(m) = match_row(eco, &row, n.repo.0, &by_name, &by_eco, &modules) else {
                     continue;
                 };
                 counted = true;
@@ -1201,6 +1409,10 @@ fn bind_row(
     decls: &Decls,
 ) {
     let (eco, project, sub, importer) = (cx.eco, cx.project, cx.sub, cx.importer);
+    if eco == Eco::Maven {
+        bind_jvm_row(b, row, sub, routed, decls);
+        return;
+    }
     let krate = (eco == Eco::Cargo).then(|| join(&project.root, "src"));
     match &row.name {
         Some(name) if name == "*" || name == "default" => {}
@@ -1214,7 +1426,7 @@ fn bind_row(
                     match eco {
                         Eco::Cargo => modules.cargo_target(project, &path),
                         Eco::Pypi => modules.pypi_target(project, &path),
-                        Eco::Npm | Eco::Go => None,
+                        Eco::Npm | Eco::Go | Eco::Maven => None,
                     }
                     .filter(|t| t.0 != importer)
                     .map(|t| Binding::Scope(vec![t.0], krate.clone()))
@@ -1245,6 +1457,38 @@ fn bind_row(
             };
             b.bind(local, Binding::Scope(scope, krate));
         }
+    }
+}
+
+/// GD.32: the local name a routed JVM row binds. The routed module is the
+/// class's file (`sub` its FQN); its CLASS is the file's top-level
+/// declaration of the FQN's last segment. A class import (`sub` is
+/// `<spec>/<name>`) binds its local name (the alias, else the class name)
+/// to the CLASS; a static import (`sub` is `<spec>`, the row's name a
+/// member) binds the name to the CLASS's METHOD of that name. A wildcard
+/// binds nothing.
+fn bind_jvm_row(
+    b: &mut Bindings,
+    row: &glia_code_domain::ImportBinding,
+    sub: &str,
+    routed: &Routed,
+    decls: &Decls,
+) {
+    let Some(name) = row.name.as_deref().filter(|n| *n != "*") else {
+        return;
+    };
+    let Some(class) = sub
+        .rsplit('/')
+        .next()
+        .and_then(|c| decls.top(routed.module.0, c))
+    else {
+        return;
+    };
+    let local = row.alias.clone().unwrap_or_else(|| name.to_string());
+    if sub == join(&jvm_path(&row.spec), name) {
+        b.bind(local, Binding::Class(class));
+    } else if let Lookup::Found(m) = decls.member(class, name) {
+        b.bind(local, Binding::Decl(m));
     }
 }
 
@@ -1501,7 +1745,7 @@ mod tests {
         );
         assert_eq!(
             report.line().unwrap(),
-            "[org-packages] classes=2 importers=2 rows=5 routed=4 unrouted=1 (npm=3 go=1 cargo=0 pypi=0)"
+            "[org-packages] classes=2 importers=2 rows=5 routed=4 unrouted=1 (npm=3 go=1 cargo=0 pypi=0 maven=0)"
         );
     }
 
@@ -1633,7 +1877,7 @@ mod tests {
         );
         assert_eq!(
             report.line().unwrap(),
-            "[org-packages] classes=1 importers=1 rows=4 routed=3 unrouted=1 (npm=3 go=0 cargo=0 pypi=0)"
+            "[org-packages] classes=1 importers=1 rows=4 routed=3 unrouted=1 (npm=3 go=0 cargo=0 pypi=0 maven=0)"
         );
     }
 
@@ -1746,8 +1990,167 @@ mod tests {
         );
         assert_eq!(
             report.calls_line().unwrap(),
-            "[org-packages] calls bound=2 refs bound=0 ambiguous=0 (npm=0 go=0 cargo=2 pypi=0)"
+            "[org-packages] calls bound=2 refs bound=0 ambiguous=0 (npm=0 go=0 cargo=2 pypi=0 maven=0)"
         );
+    }
+
+    /// GD.32: app (declares `package:maven:com.acme:acme-lib`) importing
+    /// through `rows` from its Main.java, whose `main` calls `calls` and
+    /// references `refs` unresolved; lib (the maven PROJECT at `lib`)
+    /// holding Greeter.java with CLASS Greeter and METHODs greet / shout.
+    fn maven_pair(
+        rows: &str,
+        calls: &[CallQualifier],
+        refs: &[CallQualifier],
+    ) -> (Vec<RepoGraph>, Vec<Edge>) {
+        let mut app = G::new("app");
+        let main_mod = app.module("app/src/main/java/com/acme/app/Main.java", Some(rows));
+        let main = app.add(
+            node_kind::METHOD,
+            "app::src::main::java::com::acme::app::Main::main",
+            vec![],
+        );
+        app.nav.parent_of.insert(main, main_mod);
+        let d = app.dep("package:maven:com.acme:acme-lib");
+        let mut lib = G::new("lib");
+        let module = lib.module("lib/src/main/java/com/acme/lib/Greeter.java", None);
+        lib.module("lib/src/test/java/com/acme/lib/GreeterTest.java", None);
+        let q = "lib::src::main::java::com::acme::lib::Greeter";
+        let class = lib.add(node_kind::CLASS, q, vec![]);
+        let greet = lib.add(node_kind::METHOD, &format!("{q}::greet"), vec![]);
+        let shout = lib.add(node_kind::METHOD, &format!("{q}::shout"), vec![]);
+        let origin = r#"{"coordinate":"com.acme:acme-lib","ecosystem":"maven","label":"acme-lib","label_source":"manifest","path":"lib","provenance":"project_root"}"#;
+        let p = lib.add(
+            node_kind::PROJECT,
+            "project:lib",
+            vec![json(cell_type::ORIGIN, origin)],
+        );
+        let mut lib = lib.build();
+        lib.symbols
+            .module_symbols
+            .insert(module, HashMap::from([("Greeter".to_string(), class)]));
+        lib.symbols.class_methods.insert(
+            class,
+            HashMap::from([("greet".to_string(), greet), ("shout".to_string(), shout)]),
+        );
+        let mut app = app.build();
+        for c in calls {
+            app.unresolved_calls.push(glia_code_domain::CallSite {
+                from: main,
+                qualifier: c.clone(),
+                line: 7,
+            });
+        }
+        for r in refs {
+            app.unresolved_refs.push(glia_code_domain::UnresolvedRef {
+                from: main,
+                from_module: main_mod,
+                qualifier: r.clone(),
+                category: edge_category::USES,
+                line: 6,
+            });
+        }
+        (vec![app, lib], vec![same_as(p, d)])
+    }
+
+    #[test]
+    fn maven_routes_class_and_static_imports_and_binds_members() {
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        };
+        let (graphs, cross) = maven_pair(
+            r#"[{"spec":"com::acme::lib","name":null,"alias":null,"line":4},{"spec":"com::acme::lib","name":"Greeter","alias":null,"line":2},{"spec":"com::acme::lib","name":"twice","alias":null,"line":5},{"spec":"com::acme::lib::Greeter","name":"shout","alias":null,"line":3},{"spec":"java::util","name":"List","alias":null,"line":1}]"#,
+            &[
+                attr("Greeter", "greet"),
+                CallQualifier::Bare("shout".to_string()),
+                attr("Greeter", "missing"),
+                attr("Other", "greet"),
+            ],
+            &[CallQualifier::Bare("Greeter".to_string())],
+        );
+        let (edges, report) = org_edges(&graphs, &cross);
+        let imports: Vec<Edge> = edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+            .cloned()
+            .collect();
+        assert_eq!(
+            rows(&graphs, &imports),
+            [(
+                "app/src/main/java/com/acme/app/Main.java".to_string(),
+                "lib/src/main/java/com/acme/lib/Greeter.java".to_string(),
+                "org_import".to_string(),
+                2
+            )]
+        );
+        let main = "app::src::main::java::com::acme::app::Main::main".to_string();
+        let greeter = "lib::src::main::java::com::acme::lib::Greeter";
+        assert_eq!(
+            calls(&graphs, &edges),
+            [
+                (
+                    main.clone(),
+                    format!("{greeter}::greet"),
+                    "org_call".to_string()
+                ),
+                (
+                    main.clone(),
+                    format!("{greeter}::shout"),
+                    "org_call".to_string()
+                ),
+            ]
+        );
+        let uses: Vec<&Edge> = edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .collect();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(
+            Evidence::of(uses[0]).unwrap().rule.as_deref(),
+            Some("org_ref")
+        );
+        assert_eq!(
+            report.line().unwrap(),
+            "[org-packages] classes=1 importers=1 rows=4 routed=2 unrouted=2 (npm=0 go=0 cargo=0 pypi=0 maven=2)"
+        );
+        assert_eq!(
+            report.calls_line().unwrap(),
+            "[org-packages] calls bound=2 refs bound=1 ambiguous=0 (npm=0 go=0 cargo=0 pypi=0 maven=3)"
+        );
+    }
+
+    #[test]
+    fn maven_needs_the_package_in_the_sibling_and_the_dependency_declared() {
+        // A row whose package the sibling does not hold is no row; an
+        // aliased Kotlin class import binds the alias.
+        let (graphs, cross) = maven_pair(
+            r#"[{"spec":"com::acme::libx","name":"Greeter","alias":null,"line":2},{"spec":"com::acme::lib","name":"Greeter","alias":"G","line":3}]"#,
+            &[CallQualifier::Attribute {
+                base: "G".to_string(),
+                name: "greet".to_string(),
+            }],
+            &[],
+        );
+        let (edges, report) = org_edges(&graphs, &cross);
+        assert_eq!((report.rows, report.routed), (1, 1));
+        assert_eq!(calls(&graphs, &edges).len(), 1);
+        // Undeclared: the class's dependency lives in another repo.
+        let (mut graphs, cross) = maven_pair(
+            r#"[{"spec":"com::acme::lib","name":"Greeter","alias":null,"line":2}]"#,
+            &[],
+            &[],
+        );
+        let app_dep = cross[0].to;
+        graphs[0].nodes.retain(|n| n.id != app_dep);
+        let mut other = G::new("other");
+        let d = other.dep("package:maven:com.acme:acme-lib");
+        graphs.push(other.build());
+        let mut cross = cross;
+        cross[0].to = d;
+        let (edges, report) = org_edges(&graphs, &cross);
+        assert!(edges.is_empty());
+        assert_eq!(report.rows, 0);
     }
 
     #[test]
