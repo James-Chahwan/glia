@@ -43,6 +43,74 @@ pub fn parse_file(
     parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, ..)| parse)
 }
 
+/// GD.38: the tree-sitter grammar a file parses with, by its extension.
+///
+/// tree-sitter-typescript ships two languages: TypeScript, which has no JSX,
+/// and TSX, which is TypeScript plus JSX minus the `<T>expr` angle-bracket
+/// assertion. A `.tsx`, `.jsx`, `.js`, `.mjs` or `.cjs` file can hold JSX and
+/// no angle-bracket assertion (TypeScript forbids one in `.tsx`, and no
+/// JavaScript file holds one), so it parses with TSX; under the TypeScript
+/// grammar its JSX is a syntax error and error recovery decided which
+/// declarations survived. A `.ts`, `.mts` or `.cts` file, and every other path
+/// (a Vue / Svelte / Astro script block handed over under its own file's path,
+/// an Angular `.component.ts`), keeps the TypeScript grammar, where `<T>x` is
+/// an assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grammar {
+    TypeScript,
+    Tsx,
+}
+
+impl Grammar {
+    /// The grammar for `path`, by its file name's last extension, compared
+    /// ignoring ASCII case.
+    fn of_path(path: &str) -> Grammar {
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        let Some((_, ext)) = name.rsplit_once('.') else {
+            return Grammar::TypeScript;
+        };
+        const TSX_EXTS: [&str; 5] = ["tsx", "jsx", "js", "mjs", "cjs"];
+        if TSX_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            Grammar::Tsx
+        } else {
+            Grammar::TypeScript
+        }
+    }
+
+    fn language(self) -> tree_sitter::Language {
+        match self {
+            Grammar::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Grammar::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        }
+    }
+
+    /// The `[ts-parse] grammar=` word.
+    fn as_str(self) -> &'static str {
+        match self {
+            Grammar::TypeScript => "typescript",
+            Grammar::Tsx => "tsx",
+        }
+    }
+}
+
+/// GD.38: the ERROR and MISSING nodes of `tree`. Only a subtree that
+/// `has_error` is descended into, so a clean tree costs one check.
+fn error_node_count(tree: &tree_sitter::Tree) -> usize {
+    let mut count = 0;
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if !n.has_error() {
+            continue;
+        }
+        if n.is_error() || n.is_missing() {
+            count += 1;
+        }
+        let mut c = n.walk();
+        stack.extend(n.children(&mut c));
+    }
+    count
+}
+
 /// [`parse_file_stats`]'s answer: the parse, then each marker's counters in
 /// the order the doc there lists them.
 type FileStats = (
@@ -70,12 +138,21 @@ fn parse_file_stats(
     repo: RepoId,
 ) -> Result<FileStats, ParseError> {
     let mut parser = Parser::new();
-    let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+    let grammar = Grammar::of_path(file_rel_path);
     parser
-        .set_language(&lang)
+        .set_language(&grammar.language())
         .map_err(|e| ParseError::LanguageInit(e.to_string()))?;
     let tree = parser.parse(source, None).ok_or(ParseError::NoTree)?;
     let src = source.as_bytes();
+    // GD.38: one line per file whose tree still holds a syntax error, so a
+    // clean repo prints nothing.
+    let error_nodes = error_node_count(&tree);
+    if error_nodes > 0 {
+        eprintln!(
+            "[ts-parse] grammar={} error_nodes={error_nodes} file={file_rel_path}",
+            grammar.as_str()
+        );
+    }
 
     let mut acc = Acc {
         file_rel: file_rel_path.to_string(),
@@ -15721,5 +15798,211 @@ class C {
             !rejected_url("/v1/metadata:batch"),
             "a custom method is no data: URL"
         );
+    }
+}
+
+#[cfg(test)]
+mod tsx_grammar_tests {
+    //! GD.38: a `.tsx` / `.jsx` / `.js` / `.mjs` / `.cjs` file parses with
+    //! tree-sitter's TSX grammar, every other path with the TypeScript one.
+    //! Under the TypeScript grammar JSX is a syntax error, and error recovery
+    //! decided which declarations survived.
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-tsx-grammar")
+    }
+
+    fn fn_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    fn has(parse: &FileParse, id: NodeId) -> bool {
+        parse.nodes.iter().any(|n| n.id == id)
+    }
+
+    /// A component in the shape a large React front end writes: locals in the
+    /// body, a JSX attribute holding a template literal, a multi-line element
+    /// and an element-valued attribute.
+    const COMPONENT: &str = "import { useState } from 'react';\n\
+        import { Button, IconPencil, TextInput, Tooltip } from './ui';\n\
+        \n\
+        export const EmailField = ({ userId }: { userId: string }) => {\n  \
+          const [isEditing, setIsEditing] = useState(false);\n\
+        \n  \
+          const handleStartEditing = () => {\n    \
+            setIsEditing(true);\n  \
+          };\n\
+        \n  \
+          const handleSave = async () => {\n    \
+            setIsEditing(false);\n  \
+          };\n\
+        \n  \
+          return (\n    \
+            <div>\n      \
+              <TextInput\n        \
+                instanceId={`user-email-${userId}`}\n        \
+                onEnter={handleSave}\n      \
+              />\n      \
+              {isEditing ? (\n        \
+                <span>editing</span>\n      \
+              ) : (\n        \
+                <Tooltip\n          \
+                  disabled={!isEditing}\n        \
+                >\n          \
+                  <Button\n            \
+                    startIcon={<IconPencil />}\n            \
+                    onClick={handleStartEditing}\n          \
+                  />\n        \
+                </Tooltip>\n      \
+              )}\n    \
+            </div>\n  \
+          );\n\
+        };\n";
+
+    /// A multi-line destructured-props arrow component with render-prop JSX
+    /// and a fragment: under the TypeScript grammar it minted no node at all.
+    const ROW: &str = "\n\
+        type RowProps = {\n  \
+        id: string;\n  \
+        title: ReactNode;\n  \
+        isEditing?: boolean;\n  \
+        onClick: () => void;\n\
+        };\n\
+        \n\
+        export const Row = ({\n  \
+        id,\n  \
+        title,\n  \
+        isEditing = false,\n  \
+        onClick,\n\
+        }: RowProps) => {\n  \
+        return (\n    \
+        <ListItem\n      \
+        render={\n        \
+        <div\n          \
+        data-id={id}\n          \
+        onKeyDown={(event) => {\n            \
+        if (event.key !== ' ') {\n              \
+        return;\n            \
+        }\n            \
+        event.preventDefault();\n          \
+        }}\n          \
+        onClick={isEditing ? undefined : onClick}\n        \
+        />\n      \
+        }\n      \
+        description={\n        \
+        <>\n          \
+        <Child title={`${id}`} />\n        \
+        </>\n      \
+        }\n    \
+        >\n      \
+        {title}\n    \
+        </ListItem>\n  \
+        );\n\
+        };\n";
+
+    #[test]
+    fn a_tsx_component_is_one_function_and_its_locals_stay_inside() {
+        let parse = parse_file(COMPONENT, "src/EmailField.tsx", "src::EmailField", repo()).unwrap();
+        assert!(has(&parse, fn_id("src::EmailField::EmailField")));
+        for local in ["handleSave", "handleStartEditing"] {
+            assert!(
+                !has(&parse, fn_id(&format!("src::EmailField::{local}"))),
+                "{local} hoisted to module level"
+            );
+        }
+        let fns = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::FUNCTION))
+            .count();
+        assert_eq!(fns, 1, "exactly the component");
+    }
+
+    #[test]
+    fn a_multi_line_props_component_mints_its_function() {
+        let parse = parse_file(ROW, "src/Row.tsx", "src::Row", repo()).unwrap();
+        assert!(has(&parse, fn_id("src::Row::Row")));
+    }
+
+    #[test]
+    fn a_js_or_jsx_file_with_jsx_mints_its_function() {
+        // The same component with its type annotations taken out.
+        let start = ROW.find("export const Row").unwrap();
+        let src = ROW[start..].replace("}: RowProps) => {", "}) => {");
+        assert!(!src.contains("RowProps"));
+        for path in ["src/Row.js", "src/Row.jsx", "src/Row.mjs", "src/Row.cjs"] {
+            let parse = parse_file(&src, path, "src::Row", repo()).unwrap();
+            assert!(has(&parse, fn_id("src::Row::Row")), "{path}");
+        }
+    }
+
+    fn errors(src: &str, grammar: Grammar) -> usize {
+        let mut parser = Parser::new();
+        parser.set_language(&grammar.language()).unwrap();
+        error_node_count(&parser.parse(src, None).unwrap())
+    }
+
+    #[test]
+    fn the_grammar_follows_the_extension_ignoring_case() {
+        for path in [
+            "src/A.tsx",
+            "src/A.jsx",
+            "src/a.js",
+            "src/a.mjs",
+            "src/a.cjs",
+            "src/A.TSX",
+            "src/a.Js",
+            "c:\\web\\A.tsx",
+        ] {
+            assert_eq!(Grammar::of_path(path), Grammar::Tsx, "{path}");
+        }
+        for path in [
+            "src/a.ts",
+            "src/a.mts",
+            "src/a.cts",
+            "src/a.d.ts",
+            "src/app.component.ts",
+            "src/App.vue",
+            "src/App.svelte",
+            "src/page.astro",
+            "src/a.TS",
+            "Makefile",
+            "src.tsx/a.ts",
+        ] {
+            assert_eq!(Grammar::of_path(path), Grammar::TypeScript, "{path}");
+        }
+        assert_eq!(Grammar::Tsx.as_str(), "tsx");
+        assert_eq!(Grammar::TypeScript.as_str(), "typescript");
+    }
+
+    #[test]
+    fn jsx_parses_clean_under_tsx_and_breaks_the_typescript_grammar() {
+        assert_eq!(errors(COMPONENT, Grammar::of_path("src/EmailField.tsx")), 0);
+        assert_eq!(errors(ROW, Grammar::of_path("src/Row.tsx")), 0);
+        // The same text under a `.ts` path keeps the TypeScript grammar,
+        // where the JSX is a syntax error.
+        assert_eq!(Grammar::of_path("src/EmailField.ts"), Grammar::TypeScript);
+        assert!(errors(COMPONENT, Grammar::TypeScript) > 0);
+        assert!(errors(ROW, Grammar::TypeScript) > 0);
+    }
+
+    #[test]
+    fn a_ts_file_keeps_its_angle_bracket_assertions() {
+        let src = "function f(x: unknown) {\n  const n = <number>x;\n  return (<string>x).length + n;\n}\n";
+        assert_eq!(errors(src, Grammar::of_path("src/cast.ts")), 0);
+        // Under TSX the same assertions are no TypeScript: that is why a
+        // `.ts` file keeps its grammar.
+        assert!(errors(src, Grammar::Tsx) > 0);
+        let parse = parse_file(src, "src/cast.ts", "src::cast", repo()).unwrap();
+        assert!(has(&parse, fn_id("src::cast::f")));
+    }
+
+    #[test]
+    fn a_generic_arrow_in_tsx_parses_clean() {
+        let src = "export const first = <T,>(xs: T[]): T => xs[0];\n";
+        assert_eq!(errors(src, Grammar::Tsx), 0);
+        let parse = parse_file(src, "src/first.tsx", "src::first", repo()).unwrap();
+        assert!(has(&parse, fn_id("src::first::first")));
     }
 }

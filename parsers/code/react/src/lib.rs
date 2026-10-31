@@ -1,3 +1,13 @@
+//! glia-parser-react — React files through the TypeScript parser.
+//!
+//! The engine never routes a file to `react`: `detect_language` maps `.tsx`,
+//! `.jsx` and `.js` to `typescript`, and the TypeScript parser reads such a
+//! file with tree-sitter's TSX grammar (GD.38), so the TypeScript parse IS the
+//! React parse. Components and hooks get their roles from the cross-cutting
+//! React extractor (`glia_parser_extractors::react`), folded into the
+//! declarations by the graph's role fold. [`parse_file`] stays as the
+//! `"react"` arm of the engine's explicit-language dispatch.
+
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -11,16 +21,6 @@ pub fn parse_file(
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
     glia_parser_typescript::parse_file(source, file_rel_path, module_qname, repo)
-}
-
-pub fn is_react_file(source: &str) -> bool {
-    source.contains("from 'react'")
-        || source.contains("from \"react\"")
-        || source.contains("from 'react-")
-        || source.contains("require('react')")
-        || source.contains("useState")
-        || source.contains("useEffect")
-        || source.contains("</>")
 }
 
 #[cfg(test)]
@@ -44,11 +44,5 @@ export default App;
 "#;
         let fp = parse_file(source, "src/App.tsx", "src::App", repo()).unwrap();
         assert!(fp.nav.name_by_id.values().any(|n| n == "App"));
-    }
-
-    #[test]
-    fn detect_react() {
-        assert!(is_react_file("import { useState } from 'react';"));
-        assert!(!is_react_file("const x = 1;"));
     }
 }

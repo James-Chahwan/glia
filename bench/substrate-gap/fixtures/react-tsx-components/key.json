@@ -1,0 +1,60 @@
+{
+  "framework": "react-tsx-components",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.38: .tsx / .jsx / .js files parse with tree-sitter's TSX grammar. Deliberately legacy-only like react-hook (no `cells`: component extraction has no column in the 30-mechanism vocabulary). Under the plain TypeScript grammar JSX is a syntax error and error recovery decides what survives. Baseline at HEAD 12375a67 (the W0 wheel): EmailField (a JSX attribute holding a template literal, a multi-line element, an element-valued attribute) is a standalone COMPONENT marker with its two locals hoisted to module-level FUNCTIONs (three forbid rows violated, its ROLE row misses); Row (a multi-line destructured-props arrow, element-valued attributes, a fragment) mints no node at all. Child is the control that parses by luck under either grammar.",
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "src::EmailField::EmailField",
+      "exact": true,
+      "note": "arrow component with locals, a template-literal JSX attribute and an element-valued attribute"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Row::Row",
+      "exact": true,
+      "note": "multi-line destructured-props arrow component with render-prop JSX and a fragment"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Child::Child",
+      "exact": true,
+      "note": "arrow component (control: parses under either grammar)"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "src::EmailField::EmailField",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "src::Child::Child",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "FUNCTION",
+      "name": "src::EmailField::handleSave",
+      "note": "a component-body local hoisted to module level by error recovery"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::EmailField::handleStartEditing",
+      "note": "a component-body local hoisted to module level by error recovery"
+    },
+    {
+      "kind": "COMPONENT",
+      "name": "EmailField",
+      "note": "the role overlay folds into the component FUNCTION"
+    }
+  ]
+}
