@@ -8240,7 +8240,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
                 let code_lines = git_grep(env.git, &p, Some(&prv().keys_code_pat), &[]);
                 let bm = ke.blobs.index(&p, nf);
                 let known = ke.known.as_ref().expect("--keys kina needs the law");
-                let km = kina_model(
+                let km = key_model(
                     &docs,
                     &code_lines,
                     &ke.kp,
@@ -8252,7 +8252,7 @@ fn build_layer(env: &VEnv, sha: &str, msg: &str) -> VLayer {
                     false,
                 );
                 // round 2: the same revision with namespaced bare ids
-                let km_ns = kina_model(
+                let km_ns = key_model(
                     &docs,
                     &code_lines,
                     &ke.kp,
@@ -15348,7 +15348,7 @@ fn kina_page(m: &mut KinaModel, pi: usize, lines: &[&str], known: &LawKnown, pr:
 /// Builds the key model of one revision: pass A over every doc page and code file, pass B
 /// the id scopes, pass C every mention resolved, pass D the text fallback.
 #[allow(clippy::too_many_arguments)]
-fn kina_model(
+fn key_model(
     docs: &[(String, String)],
     code_lines: &[(String, String)],
     kp: &KPaths,
@@ -18093,7 +18093,7 @@ fn keys_law(x: &KLawIn) {
     let code_lines = git_grep(&x.args.git, x.start, Some(&prv().keys_code_pat), &[]);
     let blobs = KBlobs::load(&x.args.git, &[x.start.to_string()], &kp);
     let bm = blobs.index(x.start, nf);
-    let km = kina_model(
+    let km = key_model(
         x.docs,
         &code_lines,
         &kp,
@@ -18104,7 +18104,7 @@ fn keys_law(x: &KLawIn) {
         true,
         false,
     );
-    let km_ns = kina_model(
+    let km_ns = key_model(
         x.docs,
         &code_lines,
         &kp,
@@ -21125,8 +21125,7 @@ fn r2_build(
                         docs.extend(lines.iter().cloned());
                     }
                     let code_lines = git_grep(&args.git, &p, Some(&prv().keys_code_pat), &[]);
-                    let m =
-                        kina_model(&docs, &code_lines, &kp, &pr, &known, None, nf, false, false);
+                    let m = key_model(&docs, &code_lines, &kp, &pr, &known, None, nf, false, false);
                     let (c, r, h) = r2_kina_commit(&m, subject(&commits[k].msg));
                     kbump(
                         &mut st,
@@ -21565,7 +21564,7 @@ fn r3_keys(
                         docs.extend(lines.iter().cloned());
                     }
                     let code_lines = git_grep(&args.git, &p, Some(&prv().keys_code_pat), &[]);
-                    let m = kina_model(
+                    let m = key_model(
                         &docs,
                         &code_lines,
                         &kp,
