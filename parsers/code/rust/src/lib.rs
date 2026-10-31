@@ -221,6 +221,10 @@ fn visit_type(
     if kind == node_kind::STRUCT {
         record_struct_fields(node, src, id, acc);
     }
+    if kind == node_kind::INTERFACE {
+        visit_trait_methods(node, &qname, id, src, file_rel, repo, acc);
+        return;
+    }
     if kind != node_kind::ENUM {
         return;
     }
@@ -252,6 +256,60 @@ fn visit_type(
         });
         acc.nav
             .record(vid, vname, &vq, node_kind::ATTRIBUTE, Some(id));
+    }
+}
+
+/// GD.5: every fn a trait declares is a METHOD `<trait qname>::<fn>`, a
+/// DEFINES child of the trait's INTERFACE (so the symbol table lists it in
+/// `interface_methods`, A6.6, and an impl's same-named method pairs to it as
+/// a method-level IMPLEMENTS): a bodiless `function_signature_item` and a
+/// default-bodied `function_item` alike, each with its POSITION and CODE. A
+/// default body is walked like an impl method's (calls, local types, client
+/// endpoints); `Self` names no single type there, so it types nothing.
+fn visit_trait_methods(
+    node: TsNode,
+    trait_q: &str,
+    trait_id: NodeId,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if !matches!(child.kind(), "function_signature_item" | "function_item") {
+            continue;
+        }
+        let Some(name_node) = child.child_by_field_name("name") else {
+            continue;
+        };
+        let name = text_of(name_node, src);
+        let qname = format!("{trait_q}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&child, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: trait_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::METHOD, Some(trait_id));
+        if let Some(fn_body) = child.child_by_field_name("body") {
+            collect_local_types(child, fn_body, src, id, None, acc);
+            collect_calls_in(fn_body, src, id, &qname, acc);
+            let n = collect_client_endpoints_in(fn_body, src, id, repo, file_rel, acc);
+            acc.client_endpoints += n;
+        }
     }
 }
 
@@ -371,13 +429,22 @@ fn visit_impl(
     let impl_params = type_params(node, src);
 
     // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
-    // the `trait` field. A trait of the same container is an IMPLEMENTS edge
-    // (Type → trait) here; any other trait is a ref the graph crate binds by
-    // Rust path rules (DG.13a, `trait_impl_ref`).
+    // the `trait` field. With the self type in the same container, a trait of
+    // that container is an IMPLEMENTS edge (Type → trait) here and any other
+    // trait is a ref the graph crate binds by Rust path rules (DG.13a,
+    // `trait_impl_ref`). With the self type declared elsewhere (another file,
+    // a foreign crate), the self type and the trait both go to the graph
+    // crate as one cross-file impl ref (GD.5, `cross_file_impl_ref`); the
+    // file MODULE is never the implementer.
     if let Some(trait_node) = node.child_by_field_name("trait") {
         let trait_name = text_of(trait_node, src);
         let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
-        if let Some(&trait_id) = type_ids.get(trait_base) {
+        let self_here = type_ids.contains_key(base_name);
+        if is_negative_impl(node) {
+            // `impl !Trait for Type` says the type does NOT implement it.
+        } else if !self_here {
+            cross_file_impl_ref(node, type_node, trait_node, src, scope.id, acc);
+        } else if let Some(&trait_id) = type_ids.get(trait_base) {
             acc.edges.push(Edge {
                 from: parent_id,
                 to: trait_id,
@@ -385,7 +452,7 @@ fn visit_impl(
                 confidence: Confidence::Strong,
                 cells: Vec::new(),
             });
-        } else if type_ids.contains_key(base_name) && !is_negative_impl(node) {
+        } else {
             trait_impl_ref(trait_node, src, parent_id, acc);
         }
     }
@@ -466,6 +533,71 @@ fn trait_impl_ref(trait_node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
         from,
         from_module,
         qualifier,
+        category: edge_category::IMPLEMENTS,
+        line: line_at(trait_node),
+    });
+}
+
+/// GD.5: the IMPLEMENTS ref of `impl Trait for Type` whose self type is not
+/// declared in the impl's container (another file of the crate, an inline
+/// mod's parent, a foreign crate), from `scope` (the impl's file MODULE or
+/// inline-mod PACKAGE, which parents the impl's methods as
+/// `<scope>::<Type>::<m>`). The qualifier is `ComplexReceiver { receiver:
+/// <self type path>, name: <trait path> }`, each as written with its generic
+/// arguments stripped (`Sq`, `crate::a::Sq`, `Vec` for `Vec<T>`): the one
+/// Rust ref shape that carries two paths, read only by
+/// `RustIndex::resolve_type_refs`, which binds both by Rust path rules and
+/// draws the class-level edge self -> trait and, for an in-repo trait, each
+/// impl method's METHOD-level IMPLEMENTS to the trait's same-named METHOD.
+///
+/// Only a nameable self type is a ref: a `type_identifier`, a
+/// `scoped_type_identifier` or a `generic_type` over one (`Box<T>` / `Arc<T>`
+/// are not unwrapped: the self type is `Box`). A reference (`&T`), a tuple,
+/// an array or slice, a `dyn` / `impl` type, a pointer, a primitive and a
+/// blanket impl's own type parameter (`impl<T: X> Y for T`) name no single
+/// node, so they stay unbound by design and push nothing.
+fn cross_file_impl_ref(
+    impl_node: TsNode,
+    self_node: TsNode,
+    trait_node: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    acc: &mut Acc,
+) {
+    let Some(from_module) = acc.file_module else {
+        return;
+    };
+    let self_path = match self_node.kind() {
+        "generic_type" => self_node.child_by_field_name("type"),
+        _ => Some(self_node),
+    };
+    let Some(self_path) =
+        self_path.filter(|p| matches!(p.kind(), "type_identifier" | "scoped_type_identifier"))
+    else {
+        return;
+    };
+    let self_text = text_of(self_path, src);
+    if self_path.kind() == "type_identifier" && type_params(impl_node, src).contains(&self_text) {
+        return;
+    }
+    let trait_path = match trait_node.kind() {
+        "generic_type" => trait_node.child_by_field_name("type"),
+        _ => Some(trait_node),
+    };
+    let Some(trait_path) =
+        trait_path.filter(|p| matches!(p.kind(), "type_identifier" | "scoped_type_identifier"))
+    else {
+        return;
+    };
+    let full = text_of(self_node, src);
+    let receiver = full.split('<').next().unwrap_or(full).trim().to_string();
+    acc.refs.push(UnresolvedRef {
+        from: scope,
+        from_module,
+        qualifier: CallQualifier::ComplexReceiver {
+            receiver,
+            name: text_of(trait_path, src).to_string(),
+        },
         category: edge_category::IMPLEMENTS,
         line: line_at(trait_node),
     });
@@ -2742,8 +2874,9 @@ impl Display for Foo {
     /// DG.13a: a trait the impl's container does not declare is an
     /// IMPLEMENTS ref from the in-container self type, Bare or a path with
     /// its generic arguments stripped; an in-container trait keeps its direct
-    /// edge and pushes no ref; a foreign self type, a reference, a blanket
-    /// impl and a negative impl push nothing.
+    /// edge and pushes no ref; a reference, a blanket impl and a negative
+    /// impl push nothing. A self type declared elsewhere is GD.5's cross-file
+    /// ref (`cross_file_self_type_emits_one_impl_ref`), left out here.
     #[test]
     fn trait_impl_of_an_imported_trait_emits_a_ref() {
         let source = r#"
@@ -2770,6 +2903,7 @@ impl !Send for SqlRepo {}
             .refs
             .iter()
             .filter(|r| r.category == edge_category::IMPLEMENTS)
+            .filter(|r| !matches!(r.qualifier, CallQualifier::ComplexReceiver { .. }))
             .map(|r| {
                 assert_eq!(r.from_module, module);
                 (r.from, &r.qualifier, r.line)
@@ -2800,6 +2934,123 @@ impl !Send for SqlRepo {}
             direct,
             vec![(sql, local)],
             "the in-file trait keeps HEAD's direct edge"
+        );
+    }
+
+    /// GD.5: an impl whose self type the container does not declare is one
+    /// IMPLEMENTS ref from the file MODULE carrying both paths
+    /// (`ComplexReceiver { receiver: self type, name: trait }`, generic
+    /// arguments stripped, `Box<T>` not unwrapped), whether the trait is the
+    /// file's own or not; the MODULE never gets a direct IMPLEMENTS edge.
+    /// References, tuples, slices, `dyn` types, primitives, a blanket impl's
+    /// own type parameter and a negative impl push nothing.
+    #[test]
+    fn cross_file_self_type_emits_one_impl_ref() {
+        let source = r#"
+use crate::a::Sq;
+use crate::Shape;
+pub trait Local { fn go(&self); }
+impl Shape for Sq { fn area(&self) -> f64 { 1.0 } }
+impl<T: Clone> Shape for Vec<T> {}
+impl crate::Shape for crate::a::Circle<u8> {}
+impl Local for String {}
+impl Local for &Sq {}
+impl<T: Local> Local for T {}
+impl Local for (u8, u8) {}
+impl Local for [u8] {}
+impl Local for dyn Shape {}
+impl Local for u8 {}
+impl !Send for Sq {}
+impl Shape for Box<Sq> {}
+"#;
+        let fp = parse_file(source, "src/b.rs", "src::b", repo()).unwrap();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::b");
+        let refs: Vec<(String, String, u32)> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::IMPLEMENTS)
+            .map(|r| {
+                assert_eq!((r.from, r.from_module), (module, module));
+                match &r.qualifier {
+                    CallQualifier::ComplexReceiver { receiver, name } => {
+                        (receiver.clone(), name.clone(), r.line)
+                    }
+                    other => panic!("not a cross-file impl ref: {other:?}"),
+                }
+            })
+            .collect();
+        let row = |s: &str, t: &str, line: u32| (s.to_string(), t.to_string(), line);
+        assert_eq!(
+            refs,
+            vec![
+                row("Sq", "Shape", 4),
+                row("Vec", "Shape", 5),
+                row("crate::a::Circle", "crate::Shape", 6),
+                row("String", "Local", 7),
+                row("Box", "Shape", 15),
+            ],
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .all(|e| e.category != edge_category::IMPLEMENTS),
+            "no MODULE -IMPLEMENTS-> edge"
+        );
+        // The impl's method keeps its `<module>::<Type>::<m>` qname.
+        let area = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "src::b::Sq::area");
+        assert_eq!(fp.nav.parent_of.get(&area), Some(&module));
+    }
+
+    /// GD.5: every fn of a trait body is a METHOD `<trait>::<fn>`, a DEFINES
+    /// child of the INTERFACE with POSITION and CODE, bodiless or with a
+    /// default body (whose calls are the METHOD's); associated types and
+    /// consts are not.
+    #[test]
+    fn trait_fns_are_methods_of_the_trait() {
+        let source = r#"
+pub trait Shape {
+    fn area(&self) -> f64;
+    fn name(&self) -> &str {
+        helper()
+    }
+    type Out;
+    const N: u8;
+}
+"#;
+        let fp = parse_file(source, "src/lib.rs", "src::lib", repo()).unwrap();
+        let shape = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "src::lib::Shape");
+        let mut methods: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::METHOD)
+            .map(|(id, _)| {
+                assert_eq!(fp.nav.parent_of.get(id), Some(&shape));
+                assert!(fp.edges.iter().any(|e| e.category == edge_category::DEFINES
+                    && e.from == shape
+                    && e.to == *id));
+                let node = fp.nodes.iter().find(|n| n.id == *id).expect("node");
+                assert!(node.cells.iter().any(|c| c.kind == cell_type::POSITION));
+                assert!(node.cells.iter().any(|c| c.kind == cell_type::CODE));
+                fp.nav.qname_by_id[id].as_str()
+            })
+            .collect();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec!["src::lib::Shape::area", "src::lib::Shape::name"]
+        );
+        let name = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::lib::Shape::name",
+        );
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.from == name && c.qualifier == CallQualifier::Bare("helper".to_string())),
+            "a default body's calls are the trait METHOD's"
         );
     }
 

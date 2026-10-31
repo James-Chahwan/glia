@@ -268,6 +268,12 @@ struct Stats {
     type_bound: [Cell<usize>; TYPE_ROWS],
     type_external: Cell<usize>,
     type_unbound: Cell<usize>,
+    /// GD.5: the trait METHODs (METHOD children of an INTERFACE) the graph holds.
+    trait_methods: Cell<usize>,
+    /// GD.5: cross-file impl refs whose self type and trait both bound.
+    cross_file_self: Cell<usize>,
+    /// GD.5: METHOD-level IMPLEMENTS drawn for cross-file impls.
+    method_implements: Cell<usize>,
 }
 
 impl Stats {
@@ -1988,6 +1994,21 @@ impl RustIndex {
         refs: &[UnresolvedRef],
         rb: &RustBindings,
     ) {
+        let trait_methods = g
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(id, k)| {
+                **k == node_kind::METHOD
+                    && g.nav
+                        .parent_of
+                        .get(id)
+                        .and_then(|p| g.nav.kind_by_id.get(p))
+                        == Some(&node_kind::INTERFACE)
+            })
+            .count();
+        self.stats.trait_methods.set(trait_methods);
+        let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
         for r in refs {
             let Some(row) = TYPE_REF_CATEGORIES
                 .iter()
@@ -1998,6 +2019,20 @@ impl RustIndex {
             };
             let (category, want, rule) = TYPE_REF_CATEGORIES[row];
             Stats::bump(&self.stats.type_refs[row]);
+            if let (true, CallQualifier::ComplexReceiver { receiver, name }) =
+                (category == edge_category::IMPLEMENTS, &r.qualifier)
+            {
+                if seen.is_empty() {
+                    seen = g
+                        .edges
+                        .iter()
+                        .filter(|e| e.category == edge_category::IMPLEMENTS)
+                        .map(|e| (e.from, e.to))
+                        .collect();
+                }
+                self.resolve_cross_file_impl(g, rb, r, (receiver, name), &mut seen);
+                continue;
+            }
             match self.resolve_type(g, rb, r.from, &r.qualifier, want) {
                 TypeHit::Bound(to) => {
                     Stats::bump(&self.stats.type_bound[row]);
@@ -2008,6 +2043,116 @@ impl RustIndex {
                     Stats::bump(&self.stats.type_unbound);
                     g.unresolved_refs.push(r.clone());
                 }
+            }
+        }
+    }
+
+    /// GD.5: one cross-file impl ref (the Rust parser's `cross_file_impl_ref`:
+    /// `from` is the impl's scope, `receiver` the self type's path, `trait_path`
+    /// the trait's), both paths bound in that scope by the same rules as any
+    /// type ref. Self type and trait bound: the class-level IMPLEMENTS self ->
+    /// trait (rule `trait_impl`, counted in `cross_file_self`). Trait bound to
+    /// an in-repo INTERFACE: each of its METHODs whose name an impl method
+    /// shares (`<scope>::<receiver>::<name>`, the qname the parser gave the
+    /// impl's method) gets a METHOD-level IMPLEMENTS impl method -> trait
+    /// METHOD (rule `trait_impl_method`), also when the self type is foreign
+    /// (`impl Label for String`): the method implements the trait's member
+    /// whatever type it is on. Either path external: no class edge (an
+    /// external trait draws nothing at all); either unbound: the ref is kept
+    /// in `g.unresolved_refs`. `seen` holds every IMPLEMENTS pair already in
+    /// the graph, so two impls sharing qnames (`impl X for W<u8>` and `for
+    /// W<u16>`) draw one edge.
+    fn resolve_cross_file_impl(
+        &self,
+        g: &mut RepoGraph,
+        rb: &RustBindings,
+        r: &UnresolvedRef,
+        (receiver, trait_path): (&str, &str),
+        seen: &mut HashSet<(NodeId, NodeId)>,
+    ) {
+        let row = TYPE_REF_CATEGORIES
+            .iter()
+            .position(|(c, _, _)| *c == edge_category::IMPLEMENTS)
+            .unwrap_or_default();
+        let self_hit = self.resolve_type(
+            g,
+            rb,
+            r.from,
+            &path_qualifier(receiver),
+            &[node_kind::STRUCT, node_kind::ENUM],
+        );
+        let trait_hit = self.resolve_type(
+            g,
+            rb,
+            r.from,
+            &path_qualifier(trait_path),
+            &[node_kind::INTERFACE],
+        );
+        let TypeHit::Bound(trait_id) = trait_hit else {
+            if trait_hit == TypeHit::External || self_hit == TypeHit::External {
+                Stats::bump(&self.stats.type_external);
+            } else {
+                Stats::bump(&self.stats.type_unbound);
+                g.unresolved_refs.push(r.clone());
+            }
+            return;
+        };
+        match self_hit {
+            TypeHit::Bound(self_id) => {
+                Stats::bump(&self.stats.type_bound[row]);
+                Stats::bump(&self.stats.cross_file_self);
+                if seen.insert((self_id, trait_id)) {
+                    push_edge(
+                        g,
+                        self_id,
+                        trait_id,
+                        edge_category::IMPLEMENTS,
+                        rust_ev("trait_impl").line(r.line),
+                    );
+                }
+            }
+            TypeHit::External => Stats::bump(&self.stats.type_external),
+            TypeHit::Unbound => {
+                Stats::bump(&self.stats.type_unbound);
+                g.unresolved_refs.push(r.clone());
+            }
+        }
+        let Some(scope_q) = g.nav.qname_by_id.get(&r.from).cloned() else {
+            return;
+        };
+        let mut members: Vec<(String, NodeId)> = g
+            .symbols
+            .interface_methods
+            .get(&trait_id)
+            .map(|ms| ms.iter().map(|(n, id)| (n.clone(), *id)).collect())
+            .unwrap_or_default();
+        members.sort_by(|a, b| a.0.cmp(&b.0));
+        let impl_methods: HashMap<&str, NodeId> = g
+            .nav
+            .children_of
+            .get(&r.from)
+            .into_iter()
+            .flatten()
+            .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::METHOD))
+            .filter_map(|c| Some((g.nav.qname_by_id.get(c)?.as_str(), *c)))
+            .collect();
+        let pairs: Vec<(NodeId, NodeId)> = members
+            .iter()
+            .filter_map(|(name, tm)| {
+                let q = format!("{scope_q}::{receiver}::{name}");
+                impl_methods.get(q.as_str()).map(|&im| (im, *tm))
+            })
+            .collect();
+        for (im, tm) in pairs {
+            if seen.insert((im, tm)) {
+                Stats::bump(&self.stats.method_implements);
+                push_edge(
+                    g,
+                    im,
+                    tm,
+                    edge_category::IMPLEMENTS,
+                    rust_ev("trait_impl_method").line(r.line),
+                );
             }
         }
     }
@@ -2177,13 +2322,19 @@ impl RustIndex {
         }
     }
 
-    /// DG.13a fired_on marker, once per `build_rust` with any type ref:
-    /// `[rust-types] implements=<bound>/<refs> injects=<bound>/<refs>
-    /// external=<e> unbound=<u>`. A category with no [`TYPE_REF_CATEGORIES`]
-    /// row reads `0/0`; `external` and `unbound` sum over every row.
+    /// DG.13a fired_on marker, once per `build_rust` with any type ref or
+    /// trait METHOD: `[rust-types] implements=<bound>/<refs>
+    /// injects=<bound>/<refs> trait_methods=<m> cross_file_self=<x>
+    /// method_implements=<k> external=<e> unbound=<u>`. A category with no
+    /// [`TYPE_REF_CATEGORIES`] row reads `0/0`; `external` and `unbound` sum
+    /// over every row. GD.5's three: the trait METHODs the graph holds, the
+    /// cross-file impls whose self type bound (inside `implements`' bound
+    /// count), and the METHOD-level IMPLEMENTS drawn for cross-file impls
+    /// (a same-file self type's method pairs come from A6.6, the `[iface]
+    /// method-level implements:` line).
     fn report_types(&self) {
         let seen: usize = self.stats.type_refs.iter().map(Cell::get).sum();
-        if seen == 0 {
+        if seen == 0 && self.stats.trait_methods.get() == 0 {
             return;
         }
         let of = |category: EdgeCategoryId| {
@@ -2200,7 +2351,11 @@ impl RustIndex {
         let (ib, ir) = of(edge_category::IMPLEMENTS);
         let (jb, jr) = of(edge_category::INJECTS);
         eprintln!(
-            "[rust-types] implements={ib}/{ir} injects={jb}/{jr} external={} unbound={}",
+            "[rust-types] implements={ib}/{ir} injects={jb}/{jr} trait_methods={} \
+             cross_file_self={} method_implements={} external={} unbound={}",
+            self.stats.trait_methods.get(),
+            self.stats.cross_file_self.get(),
+            self.stats.method_implements.get(),
             self.stats.type_external.get(),
             self.stats.type_unbound.get(),
         );
@@ -2208,6 +2363,20 @@ impl RustIndex {
 }
 
 // ---- free helpers ----------------------------------------------------------
+
+/// A type path as written (`Sq`, `crate::a::Sq`, `::a::Sq`) as the type-ref
+/// qualifier [`RustIndex::resolve_type`] reads: a bare name is `Bare`, a path
+/// `Attribute { base: <all but the last segment>, name: <the last> }` (GD.5).
+fn path_qualifier(path: &str) -> CallQualifier {
+    match path.rsplit_once("::") {
+        Some((base, name)) if !base.trim().is_empty() => CallQualifier::Attribute {
+            base: base.trim().to_string(),
+            name: name.trim().to_string(),
+        },
+        Some((_, name)) => CallQualifier::Bare(name.trim().to_string()),
+        None => CallQualifier::Bare(path.trim().to_string()),
+    }
+}
 
 /// `base` split into path segments: a leading `::` dropped, generic arguments
 /// (`Vec::<u32>`, `HashMap::<K, a::V>`) removed, `r#` stripped. `None` for a
@@ -2963,6 +3132,144 @@ mod tests {
             vec!["src::e::plain::P".to_string()],
             "an inline mod sees its parent's trait only through a use"
         );
+    }
+
+    /// Every IMPLEMENTS edge as `(from qname, to qname, EVIDENCE rule)`,
+    /// sorted (GD.5: class-level `trait_impl`, method-level
+    /// `trait_impl_method`).
+    fn implements_with_rule(g: &RepoGraph) -> Vec<(String, String, String)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .map(|e| {
+                let ev = Evidence::of(e).expect("an IMPLEMENTS edge carries EVIDENCE");
+                (q(&e.from), q(&e.to), ev.rule.unwrap_or_default())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `impl <trait_path> for <receiver>` written in `f` (whose self type the
+    /// file does not declare), as the parser's cross-file impl ref (GD.5).
+    fn cross_impl(f: &mut File, receiver: &str, trait_path: &str) {
+        let m = f.module;
+        f.implements(
+            m,
+            CallQualifier::ComplexReceiver {
+                receiver: receiver.to_string(),
+                name: trait_path.to_string(),
+            },
+        );
+    }
+
+    fn triple(from: &str, to: &str, rule: &str) -> (String, String, String) {
+        (from.to_string(), to.to_string(), rule.to_string())
+    }
+
+    /// `trait Shape { fn area; fn name }` in the crate root, with its METHODs.
+    fn shape_lib() -> File {
+        let mut lib = File::new("src::lib");
+        let m = lib.module;
+        let shape = lib.add(node_kind::INTERFACE, "src::lib::Shape", Some(m));
+        lib.add(node_kind::METHOD, "src::lib::Shape::area", Some(shape));
+        lib.add(node_kind::METHOD, "src::lib::Shape::name", Some(shape));
+        lib
+    }
+
+    /// GD.5: `impl Shape for Sq` whose self type sits in another file binds
+    /// class-level Sq -> Shape and each impl method to the trait's same-named
+    /// METHOD, through `use` and through written paths; a foreign self type
+    /// (`Vec<T>`) draws no class edge, its methods still implement the trait.
+    #[test]
+    fn cross_file_self_type_binds_class_and_method_implements() {
+        let lib = shape_lib();
+        let mut a = File::new("src::a");
+        let m = a.module;
+        a.add(node_kind::STRUCT, "src::a::Sq", Some(m));
+        a.add(node_kind::ENUM, "src::a::Circle", Some(m));
+        // `use crate::a::Sq; use crate::Shape; impl Shape for Sq { fn area }
+        //  impl<T: Clone> Shape for Vec<T> { fn area }`
+        let mut b = File::new("src::b");
+        let m = b.module;
+        b.use_item("crate::a", "Sq");
+        b.use_item("crate", "Shape");
+        b.add(node_kind::METHOD, "src::b::Sq::area", Some(m));
+        cross_impl(&mut b, "Sq", "Shape");
+        b.add(node_kind::METHOD, "src::b::Vec::area", Some(m));
+        cross_impl(&mut b, "Vec", "Shape");
+        // `impl crate::Shape for crate::a::Circle { fn name; fn extra }`
+        let mut c = File::new("src::c");
+        let m = c.module;
+        c.add(node_kind::METHOD, "src::c::crate::a::Circle::name", Some(m));
+        c.add(
+            node_kind::METHOD,
+            "src::c::crate::a::Circle::extra",
+            Some(m),
+        );
+        cross_impl(&mut c, "crate::a::Circle", "crate::Shape");
+        let parses = vec![lib.parse(), a.parse(), b.parse(), c.parse()];
+        let g = build_rust(repo(), parses, &[krate("shapes", "")]).expect("builds");
+        assert_eq!(
+            implements_with_rule(&g),
+            vec![
+                triple("src::a::Circle", "src::lib::Shape", "trait_impl"),
+                triple("src::a::Sq", "src::lib::Shape", "trait_impl"),
+                triple(
+                    "src::b::Sq::area",
+                    "src::lib::Shape::area",
+                    "trait_impl_method"
+                ),
+                triple(
+                    "src::b::Vec::area",
+                    "src::lib::Shape::area",
+                    "trait_impl_method"
+                ),
+                triple(
+                    "src::c::crate::a::Circle::name",
+                    "src::lib::Shape::name",
+                    "trait_impl_method",
+                ),
+            ],
+        );
+        assert!(unbound(&g).is_empty(), "{:?}", unbound(&g));
+    }
+
+    /// GD.5: a trait of the impl's own file implemented for a foreign type
+    /// (`impl Label for String`) draws no class-level edge (the file MODULE is
+    /// never the implementer, FD.3c's R1) but pairs the method; a trait the
+    /// scope cannot name and an external trait draw nothing, the first kept
+    /// unbound; `impl Shape for Sq` with no `use` of Sq keeps the ref.
+    #[test]
+    fn cross_file_impl_never_credits_the_module() {
+        let lib = shape_lib();
+        let mut a = File::new("src::a");
+        let m = a.module;
+        a.add(node_kind::STRUCT, "src::a::Sq", Some(m));
+        let mut c = File::new("src::c");
+        let m = c.module;
+        let label = c.add(node_kind::INTERFACE, "src::c::Label", Some(m));
+        c.add(node_kind::METHOD, "src::c::Label::label", Some(label));
+        c.add(node_kind::METHOD, "src::c::String::label", Some(m));
+        cross_impl(&mut c, "String", "Label");
+        // `use std::fmt::Display; impl Display for crate::a::Sq`: external.
+        c.use_item("std::fmt", "Display");
+        cross_impl(&mut c, "crate::a::Sq", "Display");
+        // `impl Shape for Sq`: neither is in scope here.
+        cross_impl(&mut c, "Sq", "Shape");
+        let parses = vec![lib.parse(), a.parse(), c.parse()];
+        let g = build_rust(repo(), parses, &[krate("shapes", "")]).expect("builds");
+        assert_eq!(
+            implements_with_rule(&g),
+            vec![triple(
+                "src::c::String::label",
+                "src::c::Label::label",
+                "trait_impl_method"
+            )],
+        );
+        assert_eq!(unbound(&g), vec!["src::c".to_string()]);
     }
 
     #[test]

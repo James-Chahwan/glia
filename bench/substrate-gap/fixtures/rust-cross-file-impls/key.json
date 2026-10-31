@@ -1,0 +1,20 @@
+{
+  "framework": "rust-cross-file-impls",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "Shape::area", "note": "a bodiless trait fn is a METHOD of the trait"},
+    {"kind": "METHOD", "name": "Shape::name", "note": "a default-bodied trait fn is a METHOD of the trait"}
+  ],
+  "expect_edges": [
+    {"from": "a::Sq", "to": "Shape", "category": "IMPLEMENTS", "note": "impl in b.rs, self type in a.rs, trait in lib.rs: both bound through b.rs's uses"},
+    {"from": "area", "to": "Shape::area", "category": "IMPLEMENTS", "note": "method-level: the impl's area to the trait's area"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "src::c", "to": "src::c::Label", "category": "IMPLEMENTS", "note": "FD.3c R1: `impl Label for String` - a foreign self type; the file MODULE is never the implementer"},
+    {"from": "src::c", "to": "src::c::Scoped", "category": "IMPLEMENTS", "note": "FD.3c R1: blanket `impl<T: Scoped> Scoped for &T` names no single self type; the file MODULE is never the implementer"},
+    {"from": "src::b", "to": "src::lib::Shape", "category": "IMPLEMENTS", "note": "the impl's file MODULE is never the implementer"}
+  ],
+  "note": "GD.5 (0.5.4's FD.11). A Cargo crate: trait Shape in lib.rs, struct Sq in a.rs, `impl Shape for Sq` in b.rs through `use crate::a::Sq; use crate::Shape;`. Trait fns are METHOD nodes of the trait, the cross-file impl binds class-level Sq -> Shape and method-level area -> Shape::area by Rust path rules (RustIndex::resolve_type_refs), and the R1 shapes of c.rs (a foreign self type, a blanket impl for &T) credit no MODULE. Legacy-only (no cells). Baseline HEAD cb9334e5 (debug CLI on a copy, `glia merge`): no METHOD under Shape, no Sq IMPLEMENTS Shape, and the false src::c IMPLEMENTS src::c::Label / src::c::Scoped (forbid 2 violations)."
+}

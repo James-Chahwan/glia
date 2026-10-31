@@ -541,17 +541,24 @@ fn trait_impl_fixture() -> String {
 /// than the trait is an IMPLEMENTS edge bound through the `use`, with
 /// EVIDENCE `graph:rust_paths` / `trait_impl` at the impl's line, while
 /// `use std::fmt::Display; impl Display for SqlRepo` names std's trait and
-/// never binds the crate's own `trait Display`.
+/// never binds the crate's own `trait Display`. GD.5: the trait's `get` is a
+/// METHOD, so A6.6 pairs the impl's `get` to it (method-level IMPLEMENTS).
 #[test]
 fn trait_impl_across_files() {
     let r = generate_one(&trait_impl_fixture()).expect("fixture builds");
     let implements = edges_of(&r, edge_category::IMPLEMENTS);
     assert_eq!(
         implements,
-        vec![(
-            "src::sql::SqlRepo".to_string(),
-            "src::repo::Repo".to_string()
-        )],
+        vec![
+            (
+                "src::sql::SqlRepo".to_string(),
+                "src::repo::Repo".to_string()
+            ),
+            (
+                "src::sql::SqlRepo::get".to_string(),
+                "src::repo::Repo::get".to_string()
+            ),
+        ],
         "IMPLEMENTS = {implements:?}"
     );
     let qname = qnames(&r);
