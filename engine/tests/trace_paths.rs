@@ -505,3 +505,70 @@ fn path_enumeration_stops_at_its_budget_and_says_so() {
     assert!(!small.truncated);
     assert!(small.paths.iter().all(|p| p.length == 3));
 }
+
+/// GB.1: where LD.4a / LD.4b ended in an absence (no node, or a dead end no
+/// entry key names), the seed is the entry of the top concept-search hit
+/// (`resolved_by = "concept"`); every answer that resolved before is
+/// unchanged. The fixtures are `concept_flows.rs`'.
+#[test]
+fn an_unresolved_or_dead_end_word_resolves_through_the_flow_that_touches_it() {
+    let (_td, r) = crate::concept_flows::shop();
+    let m = &r.merged;
+
+    // No node is named `IssueComment` and no entry key holds it (LD.4b:
+    // resolved_by `none`, an unknown_symbol absence); the comments route's
+    // flow reaches the `issue_comments` table.
+    let a = cross_stack_trace(m, "IssueComment", &TraceOptions::default());
+    assert_eq!(a.resolved_by, "concept");
+    let seed = a.seed.as_ref().expect("the concept hit's entry");
+    assert_eq!(
+        (seed.kind, seed.qname.as_str()),
+        ("ROUTE", "GET /orders/<oid>/comments")
+    );
+    assert!(a.absence.is_none(), "{:?}", a.absence);
+    assert_eq!(a.paths.len(), 1);
+    assert_eq!(last_qname(&a, 0), "data_entity:sql:issue_comments");
+
+    // The table itself is a dead end found by name (LD.4b: resolved_by
+    // `name`, a no_edges absence): now its flow.
+    let b = cross_stack_trace(m, "issue_comments", &TraceOptions::default());
+    assert_eq!(b.resolved_by, "concept");
+    assert_eq!(b.seed.as_ref().map(|s| s.qname.as_str()), seed_q(&a));
+    assert!(!b.paths.is_empty());
+
+    // What resolved before resolves exactly as before.
+    let c = cross_stack_trace(m, "create_order", &TraceOptions::default());
+    assert_eq!(c.resolved_by, "name");
+    let d = cross_stack_trace(m, "app::list_comments", &TraceOptions::default());
+    assert_eq!(d.resolved_by, "qname");
+    // An exact qname names the node itself: its dead end stays the answer.
+    let q = cross_stack_trace(
+        m,
+        "data_entity:sql:issue_comments",
+        &TraceOptions::default(),
+    );
+    assert_eq!(q.resolved_by, "qname");
+    assert_eq!(q.absence.map(|x| x.reason), Some("no_edges"));
+
+    // A word no flow touches stays an absence; two-node mode never seeds
+    // through a flow.
+    let none = cross_stack_trace(m, "zebra", &TraceOptions::default());
+    assert_eq!(none.resolved_by, "none");
+    assert_eq!(none.absence.map(|x| x.reason), Some("unknown_symbol"));
+    let two = cross_stack_trace(m, "IssueComment", &opts_to(6, "app::health"));
+    assert_eq!(two.resolved_by, "none");
+
+    // A CACHE a route's flow reads (`concept_flows::cached`).
+    let cached = crate::concept_flows::cached();
+    let e = cross_stack_trace(&cached, "cache", &TraceOptions::default());
+    assert_eq!(e.resolved_by, "concept");
+    assert_eq!(
+        e.seed.as_ref().map(|s| s.qname.as_str()),
+        Some("POST /orders")
+    );
+    assert_eq!(last_qname(&e, 0), "data_source:redis");
+}
+
+fn seed_q(a: &TraceAnswer) -> Option<&str> {
+    a.seed.as_ref().map(|s| s.qname.as_str())
+}

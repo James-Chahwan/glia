@@ -77,8 +77,19 @@
 //! then the larger reach within `depth`, then key, qname and id ascending.
 //! Only entries reaching at least one node count. Keys come from names alone,
 //! so only the matching entries are walked. A hit a carry edge leaves is never
-//! replaced; with no matching key the LD.4a answer stands. This is the
-//! repo-graph wrapper's `nodes_for_feature` fallback, now explainable.
+//! replaced. This is the repo-graph wrapper's `nodes_for_feature` fallback,
+//! now explainable.
+//!
+//! The concept tier (GB.1): when that entry-flow tier matched no key, and the
+//! feature did not name an exact qname (an exact qname is the node itself, and
+//! its dead end stays the answer), the seed is the entry of the top
+//! [`concept_flows`] hit over the trace's own depth and identity option
+//! (`"concept"`): the flow that TOUCHES the word (`IssueComment` reaching the
+//! `issue_comments` table) rather than one named by it. It walks every entry
+//! flow, so it runs only where the answer before it was an absence; with no
+//! hit the LD.4a answer stands. The `[trace]` marker then reads
+//! `resolved_by=concept concept_tier=<tier>`, after the search's own
+//! `[concept] .. surface=trace` line.
 //!
 //! # Entry flows
 //!
@@ -100,11 +111,55 @@
 //! `[flows] entries=<n> flows=<kept> cross_service=<n> depth<=<d>` — grep
 //! `[flows] entries=`. It follows LD.6's `[live] annotate surface=flows` line.
 //!
+//! # Concept search
+//!
+//! [`concept_flows`] (GB.1, §F item 6): the entry flows that touch a word,
+//! never only the flows named by it (`cache` finds the flows that read a
+//! CACHE). A word is a run of letters and digits split again at each
+//! lower -> upper case step, lower-cased, two characters or more
+//! (`IssueComment` -> issue, comment); a query word matches a fact word when
+//! they are equal or one is the other plus `s` / `es` (no stemmer). Per flow
+//! (one [`entry_flows`] walk), a word's best match is the least (tier, depth)
+//! over the entry (depth 0) and the hops in BFS order, the tiers best first
+//! ([`ConceptTier`]):
+//!
+//! 1. `entry`: the entry's key or name;
+//! 2. `hop_name`: a hop node's name (a DATA_ENTITY, DATABASE, CACHE,
+//!    BLOB_STORE or SEARCH_INDEX hop by its own name too);
+//! 3. `hop_qname`: a word of a node's qname;
+//! 4. `kind`: a node's kind name (`CACHE`, `QUEUE_PRODUCER` -> queue,
+//!    producer);
+//! 5. `mechanism`: the hop's edge category (`ACCESSES_DATA` -> accesses,
+//!    data);
+//! 6. `data_entity`: the name of a data node of those five kinds a node has
+//!    an ACCESSES_DATA / USES edge to, read one hop out, never walked;
+//! 7. `external_host`: a host of a node stamped ORIGIN `external` (CJ.3,
+//!    the reader `effects` and `serves` share);
+//! 8. `doc`: the heading of a DOC_SECTION with a DOCUMENTS edge into a node
+//!    (the heading only, never the section's text: a typed link, not text
+//!    similarity).
+//!
+//! The entry node's own qname, kind, data, host and doc facts count at depth
+//! 0. A multi-word query matches a flow when EVERY word matches; the row's
+//! tier is the weakest of the words' best tiers, its `hop` / `depth` the
+//! deepest of their matches (`None` / 0 when that is the entry). Rows rank by
+//! (tier, depth asc, reach desc, key, entry qname), then the flow's position
+//! in [`entry_flows`]' order, never a NodeId; `limit` keeps the first. Facts
+//! are computed once per shown node per call. An empty answer is a FACT
+//! `no_match` absence. Lexical and typed only: no similarity tier here.
+//!
+//! fired_on marker, one line per search:
+//! `[concept] word=<w> flows=<f> hits=<h> tiers=<tier:n,..> surface=<s> ms=<t>`
+//! (`tiers=-` with no hit; `hits` before the limit; `ms` the search's wall
+//! time, flows walk included) — grep `^\[concept\] word=`. The search walks
+//! the flows quietly: no `[flows]` / `[live]` / `[blind]` line of its own.
+//!
 //! # Trace marker
 //!
 //! fired_on marker, one line per [`cross_stack_trace`] call:
 //! `[trace] seed=<query> resolved_by=<r> paths=<n> expanded=<n> truncated=<bool>`
-//! (two-node mode appends `to=<query> directed=<true|false|->`, `-` when no
+//! (`resolved_by=concept` is followed by ` concept_tier=<tier>`; two-node mode
+//! appends `to=<query> directed=<true|false|->`, `-` when no
 //! path was found) — grep `[trace] seed=`.
 //! The LD.6 `[live] annotate surface=trace` line still prints once per call.
 //!
@@ -152,18 +207,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::profile::node_ext;
-use glia_code_domain::{edge_category, endpoint};
+use glia_code_domain::{edge_category, endpoint, node_kind};
 use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::roles::roles_in;
 use glia_graph::{MergedGraph, Reach};
 
-use crate::absence::{self, Absence, BlindCaveat};
+use crate::absence::{self, Absence, Answer, BlindCaveat};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
 use crate::arch::{ServiceKeying, default_keying, service_of};
 use crate::find::{self, FindOptions, FoundNode};
 use crate::health;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
+use crate::serves::external_hosts;
 
 /// `TraceOptions::default().depth`.
 pub const DEFAULT_DEPTH: usize = 6;
@@ -265,7 +321,9 @@ pub struct TraceAnswer {
     pub target: Option<Located>,
     /// How the seed resolved: `qname`, `name`, `find`, `entry_flow` (a dead
     /// end or an unresolved word yielded to the entry flow its key names,
-    /// LD.4b) or `none`.
+    /// LD.4b), `concept` (no key named it, and the entry of the top
+    /// [`concept_flows`] hit, the flow that touches the word, seeds instead,
+    /// GB.1) or `none`.
     pub resolved_by: &'static str,
     /// The seed's forward BFS tree over the carry edges, in discovery order.
     pub hops: Vec<TraceHop>,
@@ -383,21 +441,31 @@ fn trace_answer(
         ),
     };
     // The entry-flow tier (LD.4b, module doc): one-node mode, a dead end or
-    // nothing resolved, and an entry key naming the feature.
-    if opts.to.is_none()
-        && !seed.id.is_some_and(|id| leaves(&succ, view.walk_rep(id)))
-        && let Some(entry) = entry_seed(merged, &view, &adj, feature, opts.depth)
-    {
-        seed = Resolved {
-            id: Some(entry),
-            by: "entry_flow",
-            near: Vec::new(),
-        };
+    // nothing resolved, and an entry key naming the feature; else the concept
+    // tier (GB.1): the top entry flow touching the feature.
+    let mut concept: Option<ConceptTier> = None;
+    if opts.to.is_none() && !seed.id.is_some_and(|id| leaves(&succ, view.walk_rep(id))) {
+        if let Some(entry) = entry_seed(merged, &view, &adj, feature, opts.depth) {
+            seed = Resolved {
+                id: Some(entry),
+                by: "entry_flow",
+                near: Vec::new(),
+            };
+        } else if seed.by != "qname"
+            && let Some((entry, tier)) = concept_seed(merged, live, feature, opts)
+        {
+            seed = Resolved {
+                id: Some(entry),
+                by: "concept",
+                near: Vec::new(),
+            };
+            concept = Some(tier);
+        }
     }
     let Some(seed_id) = seed.id else {
         live_marker("trace", 0, 0);
         let absence = absence::unknown_symbol(merged, "trace", feature, &[], &seed.near);
-        marker(feature, seed.by, 0, 0, false, opts, None);
+        marker(feature, (seed.by, concept), 0, 0, false, opts, None);
         view.collapse_marker("trace", 0, 0);
         return TraceAnswer {
             seed: None,
@@ -453,7 +521,7 @@ fn trace_answer(
         });
         marker(
             feature,
-            seed.by,
+            (seed.by, concept),
             paths.len(),
             walked.expanded,
             walked.truncated,
@@ -477,7 +545,7 @@ fn trace_answer(
     let target = resolve(merged, to_query);
     let Some(target_id) = target.id else {
         let absence = absence::unknown_symbol(merged, "trace", to_query, &[], &target.near);
-        marker(feature, seed.by, 0, 0, false, opts, None);
+        marker(feature, (seed.by, concept), 0, 0, false, opts, None);
         collapse_marker();
         return TraceAnswer {
             seed: Some(seed_at),
@@ -552,7 +620,7 @@ fn trace_answer(
     });
     marker(
         feature,
-        seed.by,
+        (seed.by, concept),
         paths.len(),
         expanded,
         truncated,
@@ -610,6 +678,33 @@ pub fn entry_flows_with_live(
     depth: usize,
     collapse: &Collapse,
 ) -> Vec<EntryFlow> {
+    walk_flows(merged, live, repo_labels, depth, collapse, true)
+        .into_iter()
+        .map(|w| w.flow)
+        .collect()
+}
+
+/// One walked entry flow with the nodes its rows show: the entry and, per
+/// hop, the node the hop's `to_*` fields name ([`show`] of the walk node).
+/// Concept search (GB.1) reads those nodes' facts.
+struct WalkedFlow {
+    flow: EntryFlow,
+    entry_id: NodeId,
+    hop_ids: Vec<NodeId>,
+}
+
+/// [`entry_flows_with_live`]'s walk, keeping each flow's shown node ids.
+/// `markers`: print the `[live] annotate`, `[blind]`, `[flows] entries=` and
+/// `[identity] collapse` lines (`entry_flows`); concept search, which prints
+/// its own `[concept]` line, passes `false`.
+fn walk_flows(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    repo_labels: &BTreeMap<u64, String>,
+    depth: usize,
+    collapse: &Collapse,
+    markers: bool,
+) -> Vec<WalkedFlow> {
     let entries = entries(merged);
     let view = IdentityView::new(merged, collapse);
     let quotient = view.quotient(merged);
@@ -634,7 +729,7 @@ pub fn entry_flows_with_live(
             }
         }
     }
-    let mut flows: Vec<EntryFlow> = Vec::new();
+    let mut flows: Vec<WalkedFlow> = Vec::new();
     let mut folded = 0usize;
     for (w, members) in &groups {
         let reached = reach::bfs(&adj, &[*w], Walk::Forward, depth).reached;
@@ -674,22 +769,27 @@ pub fn entry_flows_with_live(
             }
         }
         let entry = loc.locate(e.id);
-        flows.push(EntryFlow {
-            key: slug(e.name),
-            reach: hops.len(),
-            cross_service: services.len() > 1,
-            mechanisms,
-            services,
-            blind: Vec::new(),
-            hops,
-            entry,
+        flows.push(WalkedFlow {
+            flow: EntryFlow {
+                key: slug(e.name),
+                reach: hops.len(),
+                cross_service: services.len() > 1,
+                mechanisms,
+                services,
+                blind: Vec::new(),
+                hops,
+                entry,
+            },
+            entry_id: e.id,
+            hop_ids: reached.iter().map(|r| show(&view, r.id)).collect(),
         });
     }
     // FH.9: one health pass for every flow, run only when one read a
     // mechanism; each flow's rows from its own mechanisms.
     let read: Vec<Vec<&'static str>> = flows
         .iter()
-        .map(|f| {
+        .map(|w| {
+            let f = &w.flow;
             health::mechanisms_read(
                 f.hops.iter().map(|h| h.mechanism),
                 std::iter::once(f.entry.kind).chain(f.hops.iter().map(|h| h.to_kind)),
@@ -705,31 +805,576 @@ pub fn entry_flows_with_live(
     } else {
         health::boundary_health(merged).mechanisms
     };
-    for (f, mechs) in flows.iter_mut().zip(&read) {
-        f.blind = health::caveats_in(&rows, mechs);
+    for (w, mechs) in flows.iter_mut().zip(&read) {
+        w.flow.blind = health::caveats_in(&rows, mechs);
     }
-    health::blind_marker("flows", &union, &health::caveats_in(&rows, &union));
+    if markers {
+        health::blind_marker("flows", &union, &health::caveats_in(&rows, &union));
+    }
     flows.sort_by(|a, b| {
+        let (a, b) = (&a.flow, &b.flow);
         a.key
             .cmp(&b.key)
             .then_with(|| a.entry.qname.cmp(&b.entry.qname))
             .then_with(|| a.entry.id.cmp(&b.entry.id))
     });
-    let (rows, live_rows) = flows.iter().fold((0, 0), |(n, l), f| {
-        (
-            n + f.hops.len(),
-            l + f.hops.iter().filter(|h| h.to_live).count(),
-        )
-    });
-    live_marker("flows", rows, live_rows);
-    eprintln!(
-        "[flows] entries={} flows={} cross_service={} depth<={depth}",
-        entries.len(),
-        flows.len(),
-        flows.iter().filter(|f| f.cross_service).count()
-    );
-    view.collapse_marker("flows", rows + folded, rows);
+    if markers {
+        let (rows, live_rows) = flows.iter().fold((0, 0), |(n, l), w| {
+            (
+                n + w.flow.hops.len(),
+                l + w.flow.hops.iter().filter(|h| h.to_live).count(),
+            )
+        });
+        live_marker("flows", rows, live_rows);
+        eprintln!(
+            "[flows] entries={} flows={} cross_service={} depth<={depth}",
+            entries.len(),
+            flows.len(),
+            flows.iter().filter(|w| w.flow.cross_service).count()
+        );
+        view.collapse_marker("flows", rows + folded, rows);
+    }
     flows
+}
+
+// ============================================================================
+// Concept search (GB.1)
+// ============================================================================
+
+/// `ConceptOptions::default().limit`.
+pub const DEFAULT_CONCEPT_LIMIT: usize = 20;
+
+/// How a flow touches a query word, best first (module doc "Concept
+/// search"). A row's tier is the weakest of its words' best tiers.
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ConceptTier {
+    /// The entry's key or name.
+    Entry,
+    /// A hop node's name (a DATA_ENTITY / DATABASE / CACHE .. hop included).
+    HopName,
+    /// A segment of a hop node's qname.
+    HopQname,
+    /// A hop node's kind name (`CACHE`, `QUEUE_PRODUCER`).
+    Kind,
+    /// A hop's edge category (`ACCESSES_DATA`, `QUEUE_FLOWS`).
+    Mechanism,
+    /// The name of a data node (DATA_ENTITY, DATABASE, CACHE, BLOB_STORE,
+    /// SEARCH_INDEX) a hop node has an ACCESSES_DATA / USES edge to, one hop
+    /// out, not walked.
+    DataEntity,
+    /// A host of an ENDPOINT (or client) the hop reaches that is stamped
+    /// ORIGIN `external` (CJ.3).
+    ExternalHost,
+    /// The heading of a DOC_SECTION with a DOCUMENTS edge into a hop node.
+    Doc,
+}
+
+impl ConceptTier {
+    /// The snake_case name the JSON and the markers print.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConceptTier::Entry => "entry",
+            ConceptTier::HopName => "hop_name",
+            ConceptTier::HopQname => "hop_qname",
+            ConceptTier::Kind => "kind",
+            ConceptTier::Mechanism => "mechanism",
+            ConceptTier::DataEntity => "data_entity",
+            ConceptTier::ExternalHost => "external_host",
+            ConceptTier::Doc => "doc",
+        }
+    }
+
+    const ALL: [ConceptTier; 8] = [
+        ConceptTier::Entry,
+        ConceptTier::HopName,
+        ConceptTier::HopQname,
+        ConceptTier::Kind,
+        ConceptTier::Mechanism,
+        ConceptTier::DataEntity,
+        ConceptTier::ExternalHost,
+        ConceptTier::Doc,
+    ];
+}
+
+/// What [`concept_flows`] walks and keeps. Start from `default()` and set
+/// fields: `#[non_exhaustive]` rules out a struct literal outside this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConceptOptions {
+    /// Maximum hops each entry flow follows ([`DEFAULT_DEPTH`]).
+    pub depth: usize,
+    /// Keep the first `limit` ranked rows ([`DEFAULT_CONCEPT_LIMIT`]); `0`
+    /// keeps every one.
+    pub limit: usize,
+    /// Identity classes, as [`entry_flows_with_live`] takes them: on by
+    /// default, with no repo labels.
+    pub collapse: Collapse,
+    /// The surface the `[concept]` marker names (`cli`, `py`, `trace`;
+    /// `lib` by default).
+    pub surface: &'static str,
+}
+
+impl Default for ConceptOptions {
+    fn default() -> Self {
+        ConceptOptions {
+            depth: DEFAULT_DEPTH,
+            limit: DEFAULT_CONCEPT_LIMIT,
+            collapse: Collapse::default(),
+            surface: "lib",
+        }
+    }
+}
+
+/// One entry flow that touches the query, with what matched and where.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConceptHit {
+    /// 1-based position in the rank order.
+    pub rank: usize,
+    /// The flow's key ([`EntryFlow::key`]).
+    pub key: String,
+    /// The flow's entry, located.
+    pub entry: Located,
+    /// The weakest of the query words' best tiers.
+    pub tier: ConceptTier,
+    /// Per query word, in query order, what it matched:
+    /// `cache -> kind CACHE`, `orders -> entry POST /orders`.
+    pub matched: Vec<String>,
+    /// The matching hop: the deepest of the words' matches. `None` when every
+    /// word matched the entry itself (depth 0).
+    pub hop: Option<TraceHop>,
+    /// The matching hop's depth, 0 for the entry.
+    pub depth: usize,
+    /// Nodes the flow reaches ([`EntryFlow::reach`]).
+    pub reach: usize,
+    /// The flow's distinct mechanisms ([`EntryFlow::mechanisms`]).
+    pub mechanisms: Vec<&'static str>,
+    /// The flow's FH.9 caveats, copied from [`EntryFlow::blind`]; empty, and
+    /// not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
+}
+
+/// **concept_flows** (GB.1): the entry flows that touch `word` — by entry
+/// name, hop name or qname, node kind, mechanism, data entity, external host
+/// or the heading of a doc section documenting a hop — ranked by (tier, the
+/// matching hop's depth asc, reach desc, key, entry qname), see the module
+/// doc's "Concept search". An empty answer is a FACT `no_match` absence.
+///
+/// The flows are [`entry_flows`]' (one walk per entry, the identity quotient
+/// as `opts.collapse` says); each hop's `to_live` is read off one
+/// [`entrypoint_reachable`] walk, run once per call;
+/// [`concept_flows_with_live`] takes the set instead.
+pub fn concept_flows(
+    merged: &MergedGraph,
+    repo_labels: &BTreeMap<u64, String>,
+    word: &str,
+    opts: &ConceptOptions,
+) -> Answer<ConceptHit> {
+    concept_flows_with_live(
+        merged,
+        &entrypoint_reachable(merged),
+        repo_labels,
+        word,
+        opts,
+    )
+}
+
+/// [`concept_flows`] over a live set the caller already holds: `live` must be
+/// [`entrypoint_reachable`] of `merged`.
+pub fn concept_flows_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    repo_labels: &BTreeMap<u64, String>,
+    word: &str,
+    opts: &ConceptOptions,
+) -> Answer<ConceptHit> {
+    let mut hits = concept_search(merged, live, repo_labels, word, opts);
+    if opts.limit > 0 {
+        hits.truncate(opts.limit);
+    }
+    Answer::from_results(hits, || {
+        let note = if words(word).is_empty() {
+            format!(
+                "`{}` holds no word of two or more letters or digits",
+                word.trim()
+            )
+        } else {
+            format!(
+                "no entry flow touches `{}` by name, kind, mechanism, data entity, host or doc heading",
+                word.trim()
+            )
+        };
+        absence::empty(merged, "concept", word, "no_match", note, &[], None)
+    })
+}
+
+/// Every hit for `word`, ranked, uncut; prints the `[concept]` marker.
+fn concept_search(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    repo_labels: &BTreeMap<u64, String>,
+    word: &str,
+    opts: &ConceptOptions,
+) -> Vec<ConceptHit> {
+    let started = std::time::Instant::now();
+    let query = words(word);
+    let flows = if query.is_empty() {
+        Vec::new()
+    } else {
+        walk_flows(merged, live, repo_labels, opts.depth, &opts.collapse, false)
+    };
+    let facts = NodeFacts::index(merged, &flows);
+    let mut ranked: Vec<(ConceptTier, usize, usize, ConceptHit)> = Vec::new();
+    for (i, w) in flows.iter().enumerate() {
+        if let Some(hit) = match_flow(w, &facts, &query) {
+            ranked.push((hit.tier, hit.depth, i, hit));
+        }
+    }
+    // (tier, depth asc, reach desc, key, entry qname), then the flow's
+    // position in entry_flows' order: never a NodeId.
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| b.3.reach.cmp(&a.3.reach))
+            .then_with(|| a.3.key.cmp(&b.3.key))
+            .then_with(|| a.3.entry.qname.cmp(&b.3.entry.qname))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let mut counts = [0usize; ConceptTier::ALL.len()];
+    for (t, ..) in &ranked {
+        counts[*t as usize] += 1;
+    }
+    let tiers: Vec<String> = ConceptTier::ALL
+        .iter()
+        .zip(counts)
+        .filter(|(_, n)| *n > 0)
+        .map(|(t, n)| format!("{}:{n}", t.as_str()))
+        .collect();
+    eprintln!(
+        "[concept] word={} flows={} hits={} tiers={} surface={} ms={}",
+        word.trim(),
+        flows.len(),
+        ranked.len(),
+        if tiers.is_empty() {
+            "-".to_string()
+        } else {
+            tiers.join(",")
+        },
+        opts.surface,
+        started.elapsed().as_millis()
+    );
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(i, (.., mut hit))| {
+            hit.rank = i + 1;
+            hit
+        })
+        .collect()
+}
+
+/// The words of `s`: runs of letters and digits, split again at each
+/// lower-case -> upper-case step (`IssueComment` -> issue, comment),
+/// lower-cased, tokens under two characters dropped, each once in order.
+fn words(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        if cur.chars().count() >= 2 && !out.contains(cur) {
+            out.push(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+    };
+    for c in s.chars() {
+        if !c.is_alphanumeric() {
+            flush(&mut cur, &mut out);
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            flush(&mut cur, &mut out);
+        }
+        prev_lower = c.is_lowercase();
+        cur.extend(c.to_lowercase());
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// A query word matches a fact word when they are equal or one is the other
+/// plus a trailing `s` / `es` (no stemmer).
+fn word_matches(q: &str, f: &str) -> bool {
+    fn plural_of(a: &str, b: &str) -> bool {
+        b.strip_prefix(a)
+            .is_some_and(|rest| rest == "s" || rest == "es")
+    }
+    q == f || plural_of(q, f) || plural_of(f, q)
+}
+
+fn any_match(q: &str, ws: &[String]) -> bool {
+    ws.iter().any(|f| word_matches(q, f))
+}
+
+/// The facts one shown node offers a query word, computed once per node per
+/// call (module doc "Concept search").
+struct NodeFacts {
+    name: String,
+    name_words: Vec<String>,
+    qname: String,
+    qname_words: Vec<String>,
+    kind: &'static str,
+    kind_words: Vec<String>,
+    /// (qname, name words) of each data node it ACCESSES_DATA / USES.
+    data: Vec<(String, Vec<String>)>,
+    /// (host, words) of each host its external stamp names.
+    hosts: Vec<(String, Vec<String>)>,
+    /// (heading, words) of each DOC_SECTION that DOCUMENTS it.
+    docs: Vec<(String, Vec<String>)>,
+}
+
+/// The data kinds a hop's one-hop neighbour is read from (DataEntity tier).
+const DATA_KINDS: [NodeKindId; 5] = [
+    node_kind::DATA_ENTITY,
+    node_kind::DATABASE,
+    node_kind::CACHE,
+    node_kind::BLOB_STORE,
+    node_kind::SEARCH_INDEX,
+];
+
+impl NodeFacts {
+    /// The facts of every node the flows show (entries and hops): one pass
+    /// over the nodes and one over the edges. A HashMap looked up, never
+    /// iterated into an output.
+    fn index(merged: &MergedGraph, flows: &[WalkedFlow]) -> HashMap<NodeId, NodeFacts> {
+        let mut want: HashSet<NodeId> = HashSet::new();
+        for w in flows {
+            want.insert(w.entry_id);
+            want.extend(w.hop_ids.iter().copied());
+        }
+        let mut out: HashMap<NodeId, NodeFacts> = HashMap::new();
+        if want.is_empty() {
+            return out;
+        }
+        // Kind, name and qname: the first graph naming a node.
+        let mut kind_of: HashMap<NodeId, NodeKindId> = HashMap::new();
+        let mut name_of: HashMap<NodeId, &str> = HashMap::new();
+        let mut cells: HashMap<NodeId, Vec<&glia_core::Cell>> = HashMap::new();
+        for g in &merged.graphs {
+            for (id, k) in &g.nav.kind_by_id {
+                kind_of.entry(*id).or_insert(*k);
+            }
+            for n in &g.nodes {
+                if want.contains(&n.id) {
+                    cells.entry(n.id).or_default().extend(n.cells.iter());
+                    if let Some(name) = g.nav.name_by_id.get(&n.id) {
+                        name_of.entry(n.id).or_insert(name.as_str());
+                    }
+                }
+            }
+        }
+        let qname_of = |id: NodeId| -> &str {
+            merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).map(String::as_str))
+                .unwrap_or("")
+        };
+        let mut data: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut docs: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in merged.all_edges() {
+            if (e.category == edge_category::ACCESSES_DATA || e.category == edge_category::USES)
+                && want.contains(&e.from)
+                && kind_of.get(&e.to).is_some_and(|k| DATA_KINDS.contains(k))
+            {
+                let v = data.entry(e.from).or_default();
+                if !v.contains(&e.to) {
+                    v.push(e.to);
+                }
+            } else if e.category == edge_category::DOCUMENTS
+                && want.contains(&e.to)
+                && kind_of.get(&e.from) == Some(&node_kind::DOC_SECTION)
+            {
+                let v = docs.entry(e.to).or_default();
+                if !v.contains(&e.from) {
+                    v.push(e.from);
+                }
+            }
+        }
+        let name_for = |id: NodeId, name_of: &HashMap<NodeId, &str>| -> String {
+            name_of
+                .get(&id)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    merged
+                        .graphs
+                        .iter()
+                        .find_map(|g| g.nav.name_by_id.get(&id).cloned())
+                })
+                .unwrap_or_default()
+        };
+        for &id in &want {
+            let name = name_for(id, &name_of);
+            let qname = qname_of(id).to_string();
+            let kind = kind_of
+                .get(&id)
+                .map(|k| node_kind::name(*k))
+                .unwrap_or("UNKNOWN");
+            let data_rows = data
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .map(|&d| (qname_of(d).to_string(), words(&name_for(d, &name_of))))
+                .collect();
+            let doc_rows = docs
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .map(|&d| {
+                    let heading = name_for(d, &name_of);
+                    let ws = words(&heading);
+                    (heading, ws)
+                })
+                .collect();
+            let hosts = cells
+                .get(&id)
+                .and_then(|c| external_hosts(c.iter().copied()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|h| {
+                    let ws = words(&h);
+                    (h, ws)
+                })
+                .collect();
+            out.insert(
+                id,
+                NodeFacts {
+                    name_words: words(&name),
+                    qname_words: words(&qname),
+                    kind_words: words(kind),
+                    name,
+                    qname,
+                    kind,
+                    data: data_rows,
+                    hosts,
+                    docs: doc_rows,
+                },
+            );
+        }
+        out
+    }
+
+    /// The best tier at which this node matches `q`, and what matched.
+    /// `entry`: the node is the flow's entry, whose name is the Entry tier
+    /// (matched by the caller), so HopName is skipped. `mechanism` is the
+    /// edge category of the hop into it (None for the entry).
+    fn best(
+        &self,
+        q: &str,
+        entry: bool,
+        mechanism: Option<&'static str>,
+    ) -> Option<(ConceptTier, String)> {
+        if !entry && any_match(q, &self.name_words) {
+            return Some((ConceptTier::HopName, format!("{q} -> name {}", self.name)));
+        }
+        if any_match(q, &self.qname_words) {
+            return Some((
+                ConceptTier::HopQname,
+                format!("{q} -> qname {}", self.qname),
+            ));
+        }
+        if any_match(q, &self.kind_words) {
+            return Some((ConceptTier::Kind, format!("{q} -> kind {}", self.kind)));
+        }
+        if let Some(m) = mechanism
+            && any_match(q, &words(m))
+        {
+            return Some((ConceptTier::Mechanism, format!("{q} -> mechanism {m}")));
+        }
+        if let Some((d, _)) = self.data.iter().find(|(_, ws)| any_match(q, ws)) {
+            return Some((ConceptTier::DataEntity, format!("{q} -> data entity {d}")));
+        }
+        if let Some((h, _)) = self.hosts.iter().find(|(_, ws)| any_match(q, ws)) {
+            return Some((ConceptTier::ExternalHost, format!("{q} -> host {h}")));
+        }
+        if let Some((d, _)) = self.docs.iter().find(|(_, ws)| any_match(q, ws)) {
+            return Some((ConceptTier::Doc, format!("{q} -> doc {d}")));
+        }
+        None
+    }
+}
+
+/// Match one flow against every query word (module doc): each word's best
+/// (tier, depth) over the entry and the hops in order; the flow is a hit when
+/// every word matched. `None` otherwise.
+fn match_flow(
+    w: &WalkedFlow,
+    facts: &HashMap<NodeId, NodeFacts>,
+    query: &[String],
+) -> Option<ConceptHit> {
+    let f = &w.flow;
+    let entry_words = {
+        let mut ws = words(&f.key);
+        for x in words(&f.entry.name) {
+            if !ws.contains(&x) {
+                ws.push(x);
+            }
+        }
+        ws
+    };
+    // Per word: (tier, depth, hop index or None, detail).
+    let mut best: Vec<(ConceptTier, usize, Option<usize>, String)> = Vec::new();
+    for q in query {
+        let mut b: Option<(ConceptTier, usize, Option<usize>, String)> = None;
+        let mut offer = |t: ConceptTier, d: usize, hop: Option<usize>, detail: String| {
+            if b.as_ref().is_none_or(|(bt, bd, ..)| (t, d) < (*bt, *bd)) {
+                b = Some((t, d, hop, detail));
+            }
+        };
+        if any_match(q, &entry_words) {
+            offer(
+                ConceptTier::Entry,
+                0,
+                None,
+                format!("{q} -> entry {}", f.entry.name),
+            );
+        } else if let Some((t, detail)) = facts.get(&w.entry_id).and_then(|n| n.best(q, true, None))
+        {
+            offer(t, 0, None, detail);
+        }
+        for (i, (h, id)) in f.hops.iter().zip(&w.hop_ids).enumerate() {
+            if let Some((t, detail)) = facts
+                .get(id)
+                .and_then(|n| n.best(q, false, Some(h.mechanism)))
+            {
+                offer(t, h.depth, Some(i), detail);
+            }
+        }
+        best.push(b?);
+    }
+    let tier = best.iter().map(|b| b.0).max()?;
+    // The deepest word's match speaks for the hop (the first such word).
+    let deepest = best
+        .iter()
+        .enumerate()
+        .max_by(|(ia, a), (ib, b)| a.1.cmp(&b.1).then_with(|| ib.cmp(ia)))
+        .map(|(_, b)| b)?;
+    Some(ConceptHit {
+        rank: 0,
+        key: f.key.clone(),
+        entry: f.entry.clone(),
+        tier,
+        matched: best.iter().map(|b| b.3.clone()).collect(),
+        hop: deepest.2.map(|i| f.hops[i].clone()),
+        depth: deepest.1,
+        reach: f.reach,
+        mechanisms: f.mechanisms.clone(),
+        blind: f.blind.clone(),
+    })
 }
 
 /// An entry key or a feature word as a slug: lower-cased, spaces and hyphens
@@ -839,9 +1484,11 @@ fn entry_seed(
 }
 
 /// The LD.4a fired_on line.
+/// `(by, concept)`: how the seed resolved, and the concept tier when `by`
+/// is `concept`.
 fn marker(
     q: &str,
-    by: &str,
+    (by, concept): (&str, Option<ConceptTier>),
     paths: usize,
     expanded: usize,
     truncated: bool,
@@ -853,9 +1500,33 @@ fn marker(
         (Some(to), None) => format!(" to={to} directed=-"),
         (None, _) => String::new(),
     };
+    let tier = concept
+        .map(|t| format!(" concept_tier={}", t.as_str()))
+        .unwrap_or_default();
     eprintln!(
-        "[trace] seed={q} resolved_by={by} paths={paths} expanded={expanded} truncated={truncated}{two_node}"
+        "[trace] seed={q} resolved_by={by}{tier} paths={paths} expanded={expanded} truncated={truncated}{two_node}"
     );
+}
+
+/// The concept tier's pick for `feature` (GB.1, module doc "Seeds"): the
+/// entry of the top [`concept_flows`] hit over the trace's own depth and
+/// identity option, with its tier. Walks every entry flow, so it runs only
+/// where the LD.4b tier matched no key.
+fn concept_seed(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    feature: &str,
+    opts: &TraceOptions,
+) -> Option<(NodeId, ConceptTier)> {
+    let c = ConceptOptions {
+        depth: opts.depth,
+        collapse: opts.collapse.clone(),
+        surface: "trace",
+        ..ConceptOptions::default()
+    };
+    concept_search(merged, live, &opts.collapse.repo_labels, feature, &c)
+        .first()
+        .map(|h| (NodeId(h.entry.id), h.tier))
 }
 
 /// A seed query, resolved: the node (if any), how, and find's nearest rows
@@ -1390,6 +2061,57 @@ fn path_of(rank: usize, hops: Vec<TraceHop>, directed: bool) -> TracePath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn words_split_camel_steps_and_separators() {
+        assert_eq!(words("IssueComment"), ["issue", "comment"]);
+        assert_eq!(
+            words("data_entity:sql:issue_comments"),
+            ["data", "entity", "sql", "issue", "comments"]
+        );
+        assert_eq!(words("POST /orders/<oid>"), ["post", "orders", "oid"]);
+        // One-character tokens drop; an all-caps run is one word.
+        assert_eq!(words("a HTTPServer x2"), ["httpserver", "x2"]);
+        assert_eq!(words("QUEUE_PRODUCER"), ["queue", "producer"]);
+        assert!(words(" - ").is_empty());
+    }
+
+    #[test]
+    fn a_word_matches_its_plural_by_s_or_es() {
+        assert!(word_matches("cache", "caches"));
+        assert!(word_matches("caches", "cache"));
+        assert!(word_matches("box", "boxes"));
+        assert!(word_matches("order", "order"));
+        assert!(!word_matches("cache", "caching"));
+        assert!(!word_matches("cache", "cachex"));
+    }
+
+    #[test]
+    fn concept_tiers_order_best_first_and_print_snake_case() {
+        let names: Vec<&str> = ConceptTier::ALL.iter().map(|t| t.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "entry",
+                "hop_name",
+                "hop_qname",
+                "kind",
+                "mechanism",
+                "data_entity",
+                "external_host",
+                "doc"
+            ]
+        );
+        assert!(ConceptTier::ALL.windows(2).all(|w| w[0] < w[1]));
+        for t in ConceptTier::ALL {
+            assert_eq!(
+                serde_json::to_string(&t).expect("json"),
+                format!("\"{}\"", t.as_str())
+            );
+        }
+        let o = ConceptOptions::default();
+        assert_eq!((o.depth, o.limit, o.surface), (6, 20, "lib"));
+    }
 
     #[test]
     fn default_options() {

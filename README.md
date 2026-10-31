@@ -174,11 +174,15 @@ glia contracts <REPO> [--breaking-only] [--fields] [--json] [--mismatch-only] [-
     nothing is unknown, saying why (ambiguous_server, client_type_unresolved, ...).
 glia pages <REPO> [--dead-only] [--json] [--with <WITH>]...
     Frontend router pages, the links between them, dead deep links, unlinked pages.
-glia flows <REPO> [--depth <DEPTH>] [--feature <FEATURE>] [--features] [--group-by feature|entry] [--json] [--no-collapse] [--out <OUT>] [--scope <SCOPE>] [--with <WITH>]...
+glia flows <REPO> [--concept <CONCEPT>] [--depth <DEPTH>] [--feature <FEATURE>] [--features] [--group-by feature|entry] [--json] [--no-collapse] [--out <OUT>] [--scope <SCOPE>] [--with <WITH>]...
     Every entry point's forward flow: reach, mechanisms, whether it crosses a service,
     keyed by the feature word `glia trace` takes. --features / --out group them into
     per-feature records (<feature>.yaml + index.json). A hop through an identity class
     shows its best member; --no-collapse (not with --features / --out) walks the raw graph.
+    --concept <word> lists the flows that TOUCH the word instead (by entry name, a hop's
+    name or qname, a node kind such as cache, a mechanism, a data entity, an external
+    host or a doc heading), best tier then shallowest matching hop first, the hop shown;
+    exits 1 when none does. `glia trace` falls back to it when a word names no flow.
 glia spec-status <REPO> [--feature <FEATURE>] [--json] [--status implemented|declared_missing|undeclared] [--with <WITH>]...
     Per feature, the declared API ops (OpenAPI, feature.yaml) a route implements, the
     ones still missing, and routes no op declares. Each implemented row says how it

@@ -343,3 +343,65 @@ fn feature_flags_need_features_or_out() {
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
     assert!(!s.out().exists());
 }
+
+/// GB.1: `--concept <word>` is the engine's `concept_flows` (the flows that
+/// touch the word), exit 0 with rows, 1 on the `no_match` absence, 2 beside
+/// `--features` / `--out`. The `[concept] word=.. surface=cli` line is the
+/// fired_on marker.
+#[test]
+fn concept_lists_the_flows_that_touch_a_word() {
+    let s = Scratch::new("concept");
+    let out = s.flows(&["--concept", "orders", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let built = glia_engine::generate_many(&[s.web(), s.api()]).expect("build");
+    let mut opts = glia_engine::trace::ConceptOptions::default();
+    opts.collapse = glia_engine::identity::Collapse::with_labels(&built.repo_labels);
+    let want =
+        glia_engine::trace::concept_flows(&built.merged, &built.repo_labels, "orders", &opts);
+    assert!(!want.results.is_empty());
+    assert_eq!(
+        stdout(&out),
+        format!("{}\n", serde_json::to_string(&want).expect("serialises"))
+    );
+    let marker = stderr(&out)
+        .lines()
+        .find(|l| l.starts_with("[concept] word=orders "))
+        .unwrap_or_else(|| panic!("no [concept] line:\n{}", stderr(&out)))
+        .to_string();
+    assert!(marker.contains(" surface=cli "), "{marker}");
+    assert!(
+        marker.contains(&format!(" hits={} ", want.results.len())) || want.results.len() == 20,
+        "{marker}"
+    );
+
+    // The table: one row per hit, the matched hop shown.
+    let table = s.flows(&["--concept", "orders"]);
+    assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
+    let text = stdout(&table);
+    assert!(
+        text.contains("| # | key | entry | tier | matched | hop | depth | location |"),
+        "{text}"
+    );
+
+    // Nothing touches the word: the absence, exit 1.
+    let none = s.flows(&["--concept", "zebra", "--json"]);
+    assert_eq!(none.status.code(), Some(1), "{}", stderr(&none));
+    let v: Value = serde_json::from_str(&stdout(&none)).expect("json");
+    assert_eq!(v["results"], Value::Array(Vec::new()));
+    assert_eq!(v["absence"]["reason"], "no_match");
+    assert_eq!(v["absence"]["tier"], "fact");
+    let none_table = s.flows(&["--concept", "zebra"]);
+    assert_eq!(none_table.status.code(), Some(1));
+    assert!(
+        stdout(&none_table).contains("_(no flow touches `zebra`)_"),
+        "{}",
+        stdout(&none_table)
+    );
+
+    // Not with the feature records.
+    let features = s.flows(&["--concept", "orders", "--features"]);
+    assert_eq!(features.status.code(), Some(2), "{}", stderr(&features));
+    let both = s.flows_out(&["--concept", "orders"]);
+    assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
+    assert!(!s.out().exists());
+}

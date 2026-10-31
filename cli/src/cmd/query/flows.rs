@@ -29,6 +29,17 @@
 //! entry over the raw graph. Feature records (`--features` / `--out`) group
 //! the raw entries, so the flag conflicts with them.
 //!
+//! **Concept search (GB.1).** `--concept <word>` switches to the engine's
+//! `trace::concept_flows`: the flows that TOUCH the word (by entry name, a
+//! hop's name or qname, node kind, mechanism, data entity, external host or
+//! the heading of a doc section documenting a hop), ranked by match tier then
+//! the matching hop's depth, at most 20 rows. The table is
+//! `| # | key | entry | tier | matched | hop | depth | location |`; `--json`
+//! is the `{results, absence}` envelope. Exit 0 with rows, 1 on the
+//! `no_match` absence (printed as `_(no flow touches ..)_` and its FACT),
+//! 2 on a build failure. It conflicts with `--features` / `--out`; the
+//! `[concept] word=.. surface=cli` line is printed inside the engine.
+//!
 //! Exit 0 with zero features too (an empty `index.json` is an answer). Exit
 //! 2 for a build failure, a `--group-by` other than `feature` / `entry`, an
 //! `--out` inside a built repo but not under its `.glia/` (the next build
@@ -37,11 +48,15 @@
 
 use std::path::{Path, PathBuf};
 
+use glia_engine::absence::Answer;
 use glia_engine::feature_flows::{
     FlowGrouping, FlowOptions, INDEX_FILE, default_flows_dir, feature_flows, write_feature_flows,
 };
 use glia_engine::identity::Collapse;
-use glia_engine::trace::{DEFAULT_DEPTH, EntryFlow, entry_flows_with_live};
+use glia_engine::trace::{
+    ConceptHit, ConceptOptions, DEFAULT_DEPTH, EntryFlow, concept_flows_with_live,
+    entry_flows_with_live,
+};
 use glia_engine::{GenerateResult, entrypoint_reachable};
 
 use crate::common::generate_for;
@@ -88,6 +103,12 @@ pub(crate) struct Args {
     /// or --out.
     #[arg(long, requires = "feature_mode")]
     scope: Option<String>,
+    /// The flows that touch this word (an entry name, a hop's name or qname,
+    /// a node kind such as cache, a mechanism, a data entity, an external
+    /// host, a doc heading), best match first, at most 20. Every word of a
+    /// multi-word query must match. Exits 1 when no flow touches it.
+    #[arg(long, conflicts_with = "feature_mode")]
+    concept: Option<String>,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -101,12 +122,15 @@ pub(crate) fn run(args: Args) -> i32 {
     if args.features || args.out.is_some() {
         return run_features(&args, &result);
     }
-    // The `[flows] entries=` fired_on marker is printed inside the engine.
     let collapse = if args.no_collapse {
         Collapse::off()
     } else {
         Collapse::with_labels(&result.repo_labels)
     };
+    if let Some(word) = &args.concept {
+        return run_concept(&args, &result, word, collapse);
+    }
+    // The `[flows] entries=` fired_on marker is printed inside the engine.
     let flows = entry_flows_with_live(
         &result.merged,
         &entrypoint_reachable(&result.merged),
@@ -120,6 +144,77 @@ pub(crate) fn run(args: Args) -> i32 {
     }
     render(&args, &flows);
     0
+}
+
+/// `--concept <word>`: the flows that touch the word (module doc).
+fn run_concept(args: &Args, result: &GenerateResult, word: &str, collapse: Collapse) -> i32 {
+    let mut opts = ConceptOptions::default();
+    opts.depth = args.depth;
+    opts.collapse = collapse;
+    opts.surface = "cli";
+    let mut answer = concept_flows_with_live(
+        &result.merged,
+        &entrypoint_reachable(&result.merged),
+        &result.repo_labels,
+        word,
+        &opts,
+    );
+    if let Some(a) = answer.absence.as_mut() {
+        a.unparsed_files = result.parse_errors.len();
+    }
+    let code = if answer.results.is_empty() { 1 } else { 0 };
+    if args.json {
+        return match serde_json::to_string(&answer) {
+            Ok(text) => {
+                println!("{text}");
+                code
+            }
+            Err(e) => {
+                eprintln!("error: concept flows: {e}");
+                2
+            }
+        };
+    }
+    render_concept(args, word, &answer);
+    code
+}
+
+fn render_concept(args: &Args, word: &str, answer: &Answer<ConceptHit>) {
+    println!(
+        "# glia flows `{}` --concept `{word}` (depth ≤ {})",
+        args.repo, args.depth
+    );
+    println!();
+    if let Some(a) = &answer.absence {
+        println!("_(no flow touches `{word}`)_");
+        println!();
+        crate::cmd::resolve::print_absence(a);
+        return;
+    }
+    println!("| # | key | entry | tier | matched | hop | depth | location |");
+    println!("|--:|---|---|---|---|---|--:|---|");
+    for h in &answer.results {
+        let hop = h
+            .hop
+            .as_ref()
+            .map(|x| format!("`{}` ({}) via {}", x.to_qname, x.to_kind, x.mechanism))
+            .unwrap_or_else(|| "—".to_string());
+        let location = match &h.hop {
+            Some(x) => at(x.to_file.as_deref(), x.to_line),
+            None => at(h.entry.file.as_deref(), h.entry.line),
+        };
+        println!(
+            "| {} | `{}` | `{}` | {} | {} | {} | {} | {} |",
+            h.rank,
+            h.key,
+            h.entry.qname,
+            h.tier.as_str(),
+            h.matched.join("; "),
+            hop,
+            h.depth,
+            location
+        );
+    }
 }
 
 /// `--features` / `--out`: the feature records, printed or written.

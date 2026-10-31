@@ -8,7 +8,11 @@ bool `to_live`. An unknown feature is an absence, never a ValueError. LD.4b:
 a feature word naming a dead end or nothing yields to the entry flow its key
 names (`resolved_by == "entry_flow"`). DD.11: both take `collapse=True` last
 (identity classes walk as one node; a hop into a class carries `to_identity`,
-absent on the single-repo fixture here). Shared helpers: test_build.py."""
+absent on the single-repo fixture here). GB.1: `concept_flows(word, depth=6,
+limit=20, collapse=True)` returns the flows that touch a word as `{results,
+absence}`, and a dead end found by name, or an unknown word, that no entry key
+names yields to the flow that touches it (`resolved_by == "concept"`); an exact
+qname's dead end stays an absence. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -21,6 +25,7 @@ HOP_KEYS = ["depth", "mechanism", "cross_service", "cross_repo", "from_qname", "
             "to_live", "to_file", "to_line"]
 PATH_KEYS = ["rank", "hops", "cross_service_hops", "mechanisms", "length", "directed"]
 FLOW_KEYS = ["key", "entry", "reach", "cross_service", "mechanisms", "services", "hops"]
+CONCEPT_KEYS = ["rank", "key", "entry", "tier", "matched", "hop", "depth", "reach", "mechanisms"]
 
 
 def main() -> int:
@@ -31,6 +36,10 @@ def main() -> int:
             params(rg.PyGraph.cross_stack_trace))
     c.check("entry_flows signature", params(rg.PyGraph.entry_flows) == [("depth", 6), ("collapse", True)],
             params(rg.PyGraph.entry_flows))
+    c.check("concept_flows signature",
+            params(rg.PyGraph.concept_flows)
+            == [("word", None), ("depth", 6), ("limit", 20), ("collapse", True)],
+            params(rg.PyGraph.concept_flows))
     with tempfile.TemporaryDirectory(prefix="glia-surface-trace-") as tmp:
         g = rg.generate(fixture_repo(tmp))
         t, err = stderr_of(lambda: g.cross_stack_trace("app::main"))
@@ -96,10 +105,39 @@ def main() -> int:
         c.check("a word naming no node yields to the entry flow its key names",
                 word.get("resolved_by") == "entry_flow" and (word.get("seed") or {}).get("qname") == "app::main",
                 {k: word.get(k) for k in ("resolved_by", "seed")})
-        dead = g.cross_stack_trace("helper")
-        c.check("a dead end no key names stays an absence",
-                dead.get("resolved_by") == "name" and (dead.get("absence") or {}).get("reason") == "no_edges",
-                {k: dead.get(k) for k in ("resolved_by", "absence")})
+        dead, err = stderr_of(lambda: g.cross_stack_trace("helper"))
+        c.check("a dead end found by name yields to the flow that touches it",
+                dead.get("resolved_by") == "concept" and (dead.get("seed") or {}).get("qname") == "app::main"
+                and dead.get("absence") is None and bool(dead.get("paths")),
+                {k: dead.get(k) for k in ("resolved_by", "seed", "absence")})
+        c.check("concept trace marker",
+                "[trace] seed=helper resolved_by=concept concept_tier=hop_name paths=1" in err, err[-400:])
+        exact = g.cross_stack_trace("app::helper")
+        c.check("an exact qname's dead end stays an absence",
+                exact.get("resolved_by") == "qname" and (exact.get("absence") or {}).get("reason") == "no_edges",
+                {k: exact.get(k) for k in ("resolved_by", "absence")})
+
+        hits, err = stderr_of(lambda: g.concept_flows("helper"))
+        c.check("concept_flows -> dict {results, absence}",
+                type(hits) is dict and list(hits) == ["results", "absence"], type(hits))
+        rows = (hits or {}).get("results") or []
+        c.check("one hit: main's flow, through helper's name",
+                len(rows) == 1 and rows[0]["key"] == "main" and rows[0]["tier"] == "hop_name"
+                and rows[0]["matched"] == ["helper -> name helper"] and rows[0]["depth"] == 1
+                and (rows[0]["hop"] or {}).get("to_qname") == "app::helper", rows)
+        c.check("concept row keys in engine field order", rows and list(rows[0]) == CONCEPT_KEYS,
+                rows and list(rows[0]))
+        c.check("concept hop is a trace hop", rows and list(rows[0]["hop"]) == HOP_KEYS,
+                rows and list(rows[0]["hop"]))
+        c.check("concept fired_on marker",
+                "[concept] word=helper flows=1 hits=1 tiers=hop_name:1 surface=py ms=" in err, err[-400:])
+        c.check("an entry name matches at the entry tier",
+                [r["tier"] for r in g.concept_flows("main")["results"]] == ["entry"])
+        none = g.concept_flows("zebra")
+        c.check("a word nothing touches is a no_match absence, not a raise",
+                none.get("results") == [] and (none.get("absence") or {}).get("reason") == "no_match"
+                and (none.get("absence") or {}).get("tier") == "fact", none)
+        c.check("depth=0 walks no flow", g.concept_flows("helper", depth=0)["results"] == [])
     return c.done()
 
 

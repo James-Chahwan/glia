@@ -1,5 +1,6 @@
 # CLI surface of `glia flows`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
 cmd glia flows
+  arg concept pos=- long=concept short=- required=false num_args=1 action=Set default=- value_names=CONCEPT global=false hidden=false
   arg depth pos=- long=depth short=- required=false num_args=1 action=Set default=6 value_names=DEPTH global=false hidden=false
   arg feature pos=- long=feature short=- required=false num_args=1 action=Set default=- value_names=FEATURE global=false hidden=false
   arg features pos=- long=features short=- required=false num_args=0 action=SetTrue default=false value_names=FEATURES global=false hidden=false
