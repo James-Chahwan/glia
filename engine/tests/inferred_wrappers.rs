@@ -367,3 +367,196 @@ fn inferred_builds_are_byte_identical() {
     );
     std::fs::remove_dir_all(&root).ok();
 }
+
+// ---------------------------------------------------------------------------
+// GD.26: TS clients reached through class heritage.
+//
+// Pre-fix baseline (HEAD 681d9b4a's release binary 0.5.4+p21138d09640c984e,
+// `glia analyze` on the fixture): `[http-wrappers] wrappers=0 sites=0
+// minted=0 ambiguous=2 test_sites=0 phantom_dropped=1 ..`, `[http] routes=8
+// endpoints=0 paired=0`: APIService.get / post were dropped as verb names and
+// no `this.<verb>(` call minted an ENDPOINT.
+// ---------------------------------------------------------------------------
+
+/// GD.26's fixture.
+fn heritage_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/ts-heritage-client-wrapper")
+}
+
+/// Every qname of `kind`, sorted.
+fn qnames_of(r: &GenerateResult, kind: glia_core::NodeKindId) -> Vec<String> {
+    let mut out: Vec<String> = r
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes.iter().filter_map(move |n| {
+                (g.nav.kind_by_id.get(&n.id) == Some(&kind))
+                    .then(|| g.nav.qname_by_id.get(&n.id).cloned())
+                    .flatten()
+            })
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// `(from qname, to qname)` of every `category` edge, sorted.
+fn pairs_of(r: &GenerateResult, category: glia_core::EdgeCategoryId) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = r
+        .merged
+        .all_edges()
+        .filter(|e| e.category == category)
+        .map(|e| (qname_of(r, e.from), qname_of(r, e.to)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+const VIEW_GET: &str = "endpoint:GET:/api/views/${…}/";
+const VIEW_POST: &str = "endpoint:POST:/api/views/";
+
+/// A `this.<verb>(<literal>)` in a class extending the in-repo APIService
+/// mints the ENDPOINT its literal names through the wrapper member, with
+/// EVIDENCE `pass:inferred_wrapper` / `heritage_wrapper_call` (Weak) at the
+/// site, from the calling method, and it pairs the Go route. Each such edge
+/// sits where the graph's own `inherited_method` CALLS binds the call to the
+/// base's member (the cross-check). The override's `this.get(..)`, the
+/// package base's, the commented call and the non-literal mint nothing.
+#[test]
+fn heritage_sites_mint_endpoints_that_pair() {
+    let r = generate_one(&s(&heritage_fixture())).expect("fixture builds");
+    let endpoints: Vec<String> = qnames_of(&r, node_kind::ENDPOINT)
+        .into_iter()
+        .filter(|q| !q.ends_with("<unresolved>"))
+        .collect();
+    assert_eq!(
+        endpoints,
+        [VIEW_GET, VIEW_POST],
+        "no cached / orphans / legacy"
+    );
+    let http = pairs_of(&r, edge_category::HTTP_CALLS);
+    assert_eq!(
+        http,
+        [
+            (VIEW_GET.to_string(), "GET /api/views/{id}".to_string()),
+            (VIEW_POST.to_string(), "POST /api/views".to_string()),
+        ],
+        "the Express scan's phantom `POST /api/views/` is released, so nothing self-pairs"
+    );
+    assert!(
+        !qnames_of(&r, node_kind::ROUTE).contains(&"POST /api/views/".to_string()),
+        "the phantom ROUTE at the heritage site is gone"
+    );
+
+    for (ep, owner, verb, line0, def) in [
+        (VIEW_GET, "ViewService::fetchView", "get", 8u32, 15),
+        (VIEW_POST, "ViewService::createView", "post", 12, 19),
+    ] {
+        let n = node(&r, ep).expect("endpoint");
+        assert_eq!(n.confidence, Confidence::Weak, "{ep}");
+        assert_eq!(
+            json_cells(&n.cells, cell_type::ORIGIN),
+            [serde_json::json!({
+                "provenance": "inferred:wrapper",
+                "rule": format!("inferred:APIService.{verb}"),
+                "def": format!("web/src/services/api.service.ts:{def}")
+            })],
+            "{ep}"
+        );
+        let calls: Vec<&Edge> = r
+            .merged
+            .all_edges()
+            .filter(|e| e.category == edge_category::CALLS && qname_of(&r, e.to) == ep)
+            .collect();
+        assert_eq!(calls.len(), 1, "{ep}");
+        let e = calls[0];
+        assert!(
+            qname_of(&r, e.from).ends_with(owner),
+            "{}",
+            qname_of(&r, e.from)
+        );
+        assert_eq!(e.confidence, Confidence::Weak);
+        let ev = Evidence::of(e).expect("EVIDENCE");
+        assert_eq!(
+            (
+                ev.emitter.as_str(),
+                ev.rule.as_deref(),
+                ev.file.as_deref(),
+                ev.line
+            ),
+            (
+                "pass:inferred_wrapper",
+                Some("heritage_wrapper_call"),
+                Some("web/src/services/view.service.ts"),
+                Some(line0)
+            ),
+            "{ep}"
+        );
+        // The cross-check: the graph binds the same call to APIService's
+        // member by inheritance, at the same site.
+        let member = format!("APIService::{verb}");
+        let inherited = r.merged.all_edges().any(|x| {
+            x.category == edge_category::CALLS
+                && x.from == e.from
+                && qname_of(&r, x.to).ends_with(&member)
+                && Evidence::of(x).is_some_and(|v| {
+                    v.rule.as_deref() == Some("inherited_method") && v.line == Some(line0)
+                })
+        });
+        assert!(inherited, "{ep}: no inherited_method CALLS to {member}");
+    }
+}
+
+/// A heritage site in test code mints a test-site ENDPOINT (ORIGIN
+/// `test_fixture`, `"test_site":true`) that pairs nothing; a heritage build
+/// is byte-identical clean vs clean and warm cache vs clean.
+#[test]
+fn heritage_test_sites_and_byte_identity() {
+    let root = tmp("heritage");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    copy_tree(&heritage_fixture(), &repo);
+    std::fs::write(
+        repo.join("web/src/services/view.service.spec.ts"),
+        "import { APIService } from \"./api.service\";\n\nclass SpecService extends APIService {\n  probe() {\n    return this.get(\"/api/cached/\");\n  }\n}\n",
+    )
+    .expect("write");
+    let path = s(&repo);
+    let r = generate_one(&path).expect("build");
+    let ep = "endpoint:GET:/api/cached/";
+    let n = node(&r, ep).expect("the test site's endpoint");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN)[0]["provenance"],
+        "test_fixture"
+    );
+    let hits = json_cells(&n.cells, cell_type::ENDPOINT_HIT);
+    assert!(hits.len() == 1 && hits[0]["test_site"] == true, "{hits:?}");
+    assert!(
+        !pairs_of(&r, edge_category::HTTP_CALLS)
+            .iter()
+            .any(|(from, _)| from == ep),
+        "a test site pairs nothing"
+    );
+
+    let bytes = store_bytes(&r, &root.join("a"));
+    let again = generate_one(&path).expect("build again");
+    assert_eq!(
+        bytes,
+        store_bytes(&again, &root.join("b")),
+        "clean vs clean"
+    );
+    let mut cache = ParseCache::new();
+    let _cold = generate_one_with_cache(&path, &mut cache).expect("cold");
+    let warm = generate_one_with_cache(&path, &mut cache).expect("warm");
+    assert!(cache.stats.reused > 0, "the parse came from the cache");
+    assert_eq!(
+        bytes,
+        store_bytes(&warm, &root.join("warm")),
+        "warm vs clean"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}

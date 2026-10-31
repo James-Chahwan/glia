@@ -141,7 +141,19 @@
 //! and once per repo where the HTTP inference found a candidate (FH.4b, FH.17),
 //!   `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p> client_by_import=<i> options_object=<o> computed_verb=<c> repo=<label>`
 //! (`wrappers` counts the kept inferred wrappers, shadowed ones included;
-//! see `infer_wrappers` for the last three). In both,
+//! see `infer_wrappers` for the last three); GD.26 adds, before ` repo=`,
+//! when the inference kept a heritage wrapper (a TS class's HTTP-verb member,
+//! `infer_wrappers::HeritageWrapper`) or read a heritage site,
+//!   ` heritage=<classes> heritage_sites=<s> heritage_minted=<m> ambiguous_base=<a> routes_released=<r>`
+//! (`heritage` the distinct (class, file) pairs holding one; `heritage_sites`
+//! / `heritage_minted` the `this.<verb>(` / `super.<verb>(` sites
+//! [`scan_heritage`] read, counted like any stanza's; `ambiguous_base` the
+//! live calls whose base chains disagree; `routes_released` the Express-scan
+//! ROUTEs [`release_heritage_routes`] dropped), and `test_sites` counts
+//! the heritage ones too. A heritage stanza is never shadowed by an overlay
+//! stanza (it has no plain sites); its edges carry rule
+//! [`HERITAGE_WRAPPER_RULE`] and its nodes the ORIGIN rule
+//! `inferred:<class>.<verb>`. In both,
 //! `sites = minted + duplicate + skipped_*`; `minted` counts sites that added
 //! a sink (a node, or an edge to one), split by kind; `receiver` counts the
 //! http ones read through a client receiver; `skipped_invalid` also counts
@@ -164,7 +176,9 @@ use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
 
-use super::infer_wrappers::{HttpShape, HttpSite, InferredWrappers, read_http_site};
+use super::infer_wrappers::{
+    HeritageScope, HeritageTarget, HttpShape, HttpSite, InferredWrappers, read_http_site,
+};
 use crate::extract::detect_language;
 use crate::route::ModuleQnames;
 
@@ -181,6 +195,10 @@ pub(crate) const INFERRED_PROVENANCE: &str = "inferred:wrapper";
 
 /// The EVIDENCE rule of every edge an inferred HTTP stanza adds (FH.4b).
 pub(crate) const WRAPPER_CALL_RULE: &str = "wrapper_call";
+
+/// GD.26: the EVIDENCE rule of every edge a heritage wrapper's site adds (a
+/// `this.<verb>(` call reaching a class's HTTP wrapper member).
+pub(crate) const HERITAGE_WRAPPER_RULE: &str = "heritage_wrapper_call";
 
 /// FH.17: the ORIGIN provenance of a node an inferred HTTP stanza mints at a
 /// site in test code (the provenance stamp's own word for test code).
@@ -242,6 +260,10 @@ struct Stanza<'c> {
     /// FH.4b: an inferred HTTP wrapper's composition (its sites read through
     /// `infer_wrappers::read_http_site`); `None` for every other stanza.
     shape: Option<HttpShape>,
+    /// GD.26: a heritage wrapper's class: its sites are the `this.<verb>(` /
+    /// `super.<verb>(` calls its [`HeritageScope`]s reach, never a plain
+    /// `<verb>(` hit.
+    heritage: Option<String>,
 }
 
 impl Stanza<'_> {
@@ -250,7 +272,10 @@ impl Stanza<'_> {
     fn rule(&self) -> String {
         match &self.source {
             StanzaSource::Overlay { ordinal } => format!("wrapper#{ordinal}"),
-            StanzaSource::Inferred { .. } => format!("inferred:{}", self.decl.call),
+            StanzaSource::Inferred { .. } => match &self.heritage {
+                Some(class) => format!("inferred:{class}.{}", self.decl.call),
+                None => format!("inferred:{}", self.decl.call),
+            },
         }
     }
 
@@ -307,7 +332,9 @@ impl Stanza<'_> {
             StanzaSource::Overlay { .. } => EMITTER,
             StanzaSource::Inferred { .. } => INFERRED_EMITTER,
         };
-        let rule = if self.shape.is_some() {
+        let rule = if self.heritage.is_some() {
+            HERITAGE_WRAPPER_RULE.to_string()
+        } else if self.shape.is_some() {
             WRAPPER_CALL_RULE.to_string()
         } else {
             self.rule()
@@ -395,6 +422,9 @@ pub(crate) struct WrapperTally {
     pub(crate) receiver: usize,
     /// FH.17: minted sites of an inferred HTTP stanza in test code.
     pub(crate) test_sites: usize,
+    /// GD.26: Express-scan ROUTEs released because every registration row
+    /// is a heritage site ([`release_heritage_routes`]).
+    pub(crate) routes_released: usize,
 }
 
 impl WrapperTally {
@@ -418,6 +448,7 @@ impl WrapperTally {
         self.data_entity += m.data_entity;
         self.receiver += m.receiver;
         self.test_sites += m.test_sites;
+        self.routes_released += m.routes_released;
     }
 }
 
@@ -429,11 +460,15 @@ struct Tallies {
     inferred: WrapperTally,
     /// FH.4b: the inferred HTTP wrappers' sites (`[http-wrappers]`).
     http: WrapperTally,
+    /// GD.26: the heritage wrappers' sites (`[http-wrappers] .. heritage_*`).
+    heritage: WrapperTally,
 }
 
 impl Tallies {
     fn of(&mut self, st: &Stanza<'_>) -> &mut WrapperTally {
-        if st.shape.is_some() {
+        if st.heritage.is_some() {
+            &mut self.heritage
+        } else if st.shape.is_some() {
             &mut self.http
         } else if st.is_inferred() {
             &mut self.inferred
@@ -446,6 +481,7 @@ impl Tallies {
         self.overlay.add_mint(m.overlay);
         self.inferred.add_mint(m.inferred);
         self.http.add_mint(m.http);
+        self.heritage.add_mint(m.heritage);
     }
 }
 
@@ -474,6 +510,10 @@ struct InferenceCounts {
     http_client_by_import: usize,
     http_options_object: usize,
     http_computed: usize,
+    /// GD.26: the distinct (class, file) pairs holding a heritage wrapper,
+    /// and the heritage sites whose base chains disagree (`ambiguous_base`).
+    heritage_classes: usize,
+    heritage_ambiguous: usize,
 }
 
 impl InferenceCounts {
@@ -489,6 +529,7 @@ impl InferenceCounts {
             + self.http_unparsed
             + self.http_phantom
             + self.http_client_by_import
+            + self.heritage_classes
             > 0
     }
 }
@@ -516,7 +557,7 @@ impl<'c> WrapperPass<'c> {
     /// found no candidate.
     pub(crate) fn scan(
         config: Option<&'c LoadedConfig>,
-        inferred: InferredWrappers,
+        mut inferred: InferredWrappers,
         files: &[(String, String)],
         parse_errors: &mut Vec<String>,
     ) -> Option<Self> {
@@ -538,6 +579,7 @@ impl<'c> WrapperPass<'c> {
                             kind: s.get_ref().wrapper_kind()?,
                             source: StanzaSource::Overlay { ordinal },
                             shape: None,
+                            heritage: None,
                         })
                     }),
             );
@@ -556,8 +598,20 @@ impl<'c> WrapperPass<'c> {
             http_client_by_import: inferred.http_client_by_import,
             http_options_object: inferred.http_options_object,
             http_computed: inferred.http_computed,
+            heritage_classes: {
+                let mut keys: Vec<(&str, &str)> = inferred
+                    .heritage
+                    .iter()
+                    .map(|h| (h.class.as_str(), h.def_file.as_str()))
+                    .collect();
+                keys.sort_unstable();
+                keys.dedup();
+                keys.len()
+            },
             ..InferenceCounts::default()
         };
+        let heritage = std::mem::take(&mut inferred.heritage);
+        let scopes = std::mem::take(&mut inferred.heritage_scopes);
         for w in inferred.wrappers.into_iter().chain(inferred.http) {
             if stanzas
                 .iter()
@@ -580,6 +634,22 @@ impl<'c> WrapperPass<'c> {
                     def_line0: w.def_line0,
                 },
                 shape: w.http,
+                heritage: None,
+            });
+        }
+        // GD.26: the heritage wrappers follow, in their sorted order, so a
+        // scope's `HeritageTarget::Wrapper(i)` is stanza `heritage_base + i`.
+        let heritage_base = stanzas.len();
+        for h in heritage {
+            stanzas.push(Stanza {
+                decl: Cow::Owned(h.decl),
+                kind: WrapperKind::Http,
+                source: StanzaSource::Inferred {
+                    def_file: h.def_file,
+                    def_line0: h.def_line0,
+                },
+                shape: Some(h.shape),
+                heritage: Some(h.class),
             });
         }
         if cfg.is_none() && !inference.any() && !inference.http_any() {
@@ -596,6 +666,7 @@ impl<'c> WrapperPass<'c> {
                     ..WrapperTally::default()
                 },
                 http: WrapperTally::default(),
+                heritage: WrapperTally::default(),
             },
             stanzas,
             files: Vec::new(),
@@ -603,20 +674,40 @@ impl<'c> WrapperPass<'c> {
             inference,
             tests,
         };
+        // Looked up by path, never iterated.
+        let mut scopes_of: HashMap<&str, Vec<&HeritageScope>> = HashMap::new();
+        for sc in &scopes {
+            scopes_of.entry(sc.file.as_str()).or_default().push(sc);
+        }
         for (i, (path, source)) in files.iter().enumerate() {
             let Some(lang) = detect_language(path) else {
                 continue;
             };
+            let file_scopes = scopes_of.get(path.as_str()).map_or(&[][..], Vec::as_slice);
             if NOT_CODE.contains(&lang)
-                || !pass
-                    .stanzas
-                    .iter()
-                    .any(|s| s.applies_to(lang) && source.contains(s.decl.call.as_str()))
+                || (file_scopes.is_empty()
+                    && !pass.stanzas.iter().any(|s| {
+                        s.heritage.is_none()
+                            && s.applies_to(lang)
+                            && source.contains(s.decl.call.as_str())
+                    }))
             {
                 continue;
             }
-            match catch_unwind(AssertUnwindSafe(|| scan_file(source, lang, &pass.stanzas))) {
-                Ok(sites) if !sites.is_empty() => {
+            let read = catch_unwind(AssertUnwindSafe(|| {
+                let mut sites = scan_file(source, lang, &pass.stanzas);
+                let (heritage_sites, ambiguous) =
+                    scan_heritage(source, file_scopes, heritage_base, &pass.stanzas);
+                sites.extend(heritage_sites);
+                sites.sort_by_key(|s| (s.offset, s.stanza));
+                (sites, ambiguous)
+            }));
+            match read {
+                Ok((sites, ambiguous)) => {
+                    pass.inference.heritage_ambiguous += ambiguous;
+                    if sites.is_empty() {
+                        continue;
+                    }
                     for s in &sites {
                         if let Some(st) = pass.stanzas.get(s.stanza) {
                             pass.tally.of(st).count_read(&s.read);
@@ -628,7 +719,6 @@ impl<'c> WrapperPass<'c> {
                         sites,
                     });
                 }
-                Ok(_) => {}
                 Err(_) => parse_errors.push(format!("{path}: PANIC (overlay wrappers)")),
             }
         }
@@ -748,13 +838,28 @@ impl<'c> WrapperPass<'c> {
         }
         if inf.http_any() {
             let t = &self.tally.http;
+            let h = &self.tally.heritage;
+            // GD.26: the heritage fields only where a heritage wrapper or
+            // site exists, so every other repo's line is unchanged.
+            let heritage = if inf.heritage_classes + h.sites + inf.heritage_ambiguous > 0 {
+                format!(
+                    " heritage={} heritage_sites={} heritage_minted={} ambiguous_base={} routes_released={}",
+                    inf.heritage_classes,
+                    h.sites,
+                    h.minted,
+                    inf.heritage_ambiguous,
+                    h.routes_released
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} test_sites={} phantom_dropped={} client_by_import={} options_object={} computed_verb={} repo={repo_label}",
+                "[http-wrappers] wrappers={} sites={} minted={} ambiguous={} test_sites={} phantom_dropped={} client_by_import={} options_object={} computed_verb={}{heritage} repo={repo_label}",
                 inf.http_wrappers,
                 t.sites,
                 t.minted,
                 inf.http_ambiguous,
-                t.test_sites,
+                t.test_sites + h.test_sites,
                 inf.http_phantom,
                 inf.http_client_by_import,
                 inf.http_options_object,
@@ -784,11 +889,13 @@ fn rejected_wrapper_lines(cfg: &LoadedConfig) -> Vec<u32> {
 // Scanning: text only, no graph.
 // ---------------------------------------------------------------------------
 
-/// Every site of every stanza that applies to `lang`, in source order.
+/// Every site of every stanza that applies to `lang`, in source order. A
+/// heritage stanza has no plain sites ([`scan_heritage`] reads them).
 fn scan_file(source: &str, lang: &str, stanzas: &[Stanza<'_>]) -> Vec<Site> {
     let mut out = Vec::new();
     for (si, st) in stanzas.iter().enumerate() {
-        if !st.applies_to(lang) {
+        if !st.applies_to(lang) || st.heritage.is_some() || !source.contains(st.decl.call.as_str())
+        {
             continue;
         }
         for hit in call_hits(source, &st.decl.call, st.decl.receiver) {
@@ -799,6 +906,57 @@ fn scan_file(source: &str, lang: &str, stanzas: &[Stanza<'_>]) -> Vec<Site> {
     }
     out.sort_by_key(|s| (s.offset, s.stanza));
     out
+}
+
+/// GD.26: the heritage sites of one file: every `this.<verb>(` /
+/// `super.<verb>(` call (the plain site rules: generic list allowed, not a
+/// definition; a commented call is a site, never minted) on a line of a
+/// [`HeritageScope`] that is no nested class's, read through the wrapper
+/// the scope's verb reaches (stanza `base + i`). A live call whose verb is
+/// [`HeritageTarget::Ambiguous`] there is no site, counted (the second value).
+fn scan_heritage(
+    source: &str,
+    scopes: &[&HeritageScope],
+    base: usize,
+    stanzas: &[Stanza<'_>],
+) -> (Vec<Site>, usize) {
+    let mut out = Vec::new();
+    let mut ambiguous = 0usize;
+    for sc in scopes {
+        for (verb, target) in &sc.targets {
+            for recv in ["this", "super"] {
+                for hit in call_hits(source, &format!("{recv}.{verb}"), false) {
+                    let line = anchor::line_of(source, hit.start);
+                    if line < sc.start_line0
+                        || line > sc.end_line0
+                        || sc.inner.iter().any(|(s, e)| *s <= line && line <= *e)
+                    {
+                        continue;
+                    }
+                    match *target {
+                        HeritageTarget::Wrapper(i) => {
+                            let si = base + i;
+                            if let Some(site) = stanzas
+                                .get(si)
+                                .and_then(|st| read_site(source, &hit, si, st))
+                            {
+                                out.push(site);
+                            }
+                        }
+                        HeritageTarget::Ambiguous => {
+                            let prefix = line_prefix(source, hit.start).1;
+                            let (region, close) = arg_region(source, hit.open + 1);
+                            let after = close.and_then(|c| source.get(c + 1..)).unwrap_or("");
+                            if !is_definition(prefix, region, after) && !is_commented(prefix) {
+                                ambiguous += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (out, ambiguous)
 }
 
 pub(super) fn is_ident_byte(b: u8) -> bool {
@@ -1437,6 +1595,7 @@ fn mint_http(
     at: &FileAt<'_>,
 ) -> Tallies {
     let mut t = Tallies::default();
+    t.heritage.routes_released = release_heritage_routes(fp, sites, stanzas);
     let released = release_shape_reads(fp, sites);
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
     let endpoints: Vec<&Node> = fp
@@ -1520,6 +1679,74 @@ fn mint_http(
     }
     graft_nodes(fp, fresh, at.lang);
     t
+}
+
+/// GD.26: a heritage site is an outbound call through the class's HTTP
+/// client wrapper, so the Express scan's reading of the same call as a
+/// server registration (`this.post('/api/x', data)` read like
+/// `app.post('/x', handler)`) is a phantom ROUTE: a ROUTE of the file's parse
+/// EVERY POSITION row of which is the line of a heritage site this file reads
+/// as a path goes, with its nav entries, its refs and any edge naming it. A
+/// ROUTE with one other registration row stays whole. Returns how many went.
+fn release_heritage_routes(fp: &mut FileParse, sites: &[&Site], stanzas: &[Stanza<'_>]) -> usize {
+    let lines: HashSet<u32> = sites
+        .iter()
+        .filter(|s| {
+            matches!(s.read, Read::Http { .. })
+                && stanzas
+                    .get(s.stanza)
+                    .is_some_and(|st| st.heritage.is_some())
+        })
+        .map(|s| s.line0)
+        .collect();
+    if lines.is_empty() {
+        return 0;
+    }
+    let phantom: HashSet<NodeId> = fp
+        .nodes
+        .iter()
+        .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE))
+        .filter(|n| {
+            let rows: Vec<Option<u64>> = n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::POSITION)
+                .map(|c| match &c.payload {
+                    CellPayload::Json(j) | CellPayload::Text(j) => {
+                        serde_json::from_str::<serde_json::Value>(j)
+                            .ok()
+                            .and_then(|v| v.get("start_line").and_then(serde_json::Value::as_u64))
+                    }
+                    CellPayload::Bytes(_) => None,
+                })
+                .collect();
+            !rows.is_empty()
+                && rows.iter().all(|r| {
+                    r.and_then(|l| u32::try_from(l).ok())
+                        .is_some_and(|l| lines.contains(&l))
+                })
+        })
+        .map(|n| n.id)
+        .collect();
+    if phantom.is_empty() {
+        return 0;
+    }
+    fp.nodes.retain(|n| !phantom.contains(&n.id));
+    fp.edges
+        .retain(|e| !phantom.contains(&e.from) && !phantom.contains(&e.to));
+    fp.refs.retain(|r| !phantom.contains(&r.from));
+    for id in &phantom {
+        fp.nav.name_by_id.remove(id);
+        fp.nav.qname_by_id.remove(id);
+        fp.nav.kind_by_id.remove(id);
+        if let Some(parent) = fp.nav.parent_of.remove(id)
+            && let Some(kids) = fp.nav.children_of.get_mut(&parent)
+        {
+            kids.retain(|k| k != id);
+        }
+        fp.nav.children_of.remove(id);
+    }
+    phantom.len()
 }
 
 /// FH.4a's handoff: a call the shape rule already read (a CALLS edge to an

@@ -1,0 +1,26 @@
+{
+  "framework": "ts-heritage-client-wrapper",
+  "language": "typescript+go",
+  "dirs": ["web", "server"],
+  "note": "GD.26 TS clients reached through class heritage, with no overlay. `APIService.get(url)` / `post(url)` hand their own `url` to `this.axiosInstance.<verb>(url, ..)`: FH.4b drops them as HTTP-verb names, so they are kept as heritage wrappers whose sites are the `this.<verb>(` / `super.<verb>(` calls of APIService and of the classes extending it (a same-file base, or one imported by a specifier whose last segment is the base file's stem, through in-repo intermediates). `ViewService extends APIService` (imported from `./api.service`): `this.get(`/api/views/${id}/`)` and `this.post('/api/views/', data)` mint the ENDPOINTs their literals name (EVIDENCE emitter `pass:inferred_wrapper`, rule `heritage_wrapper_call`, ORIGIN rule `inferred:APIService.<verb>`), which pair the Go routes; the Express scan's reading of the same `this.post('/api/views/', data)` as a server ROUTE is released. `CachedViewService` overrides `get` with a store lookup, so its `this.get('/api/cached/')` reaches no wrapper (and `this.store.get(url)` stays an FH.17 phantom); `OrphanService` extends an `APIService` imported from a package, no in-repo class; a commented call and a non-literal mint nothing. Baseline (HEAD 681d9b4a's release binary): `[http-wrappers] wrappers=0 sites=0 minted=0 ambiguous=2 test_sites=0 phantom_dropped=1 ..`, `[http] routes=8 endpoints=0 paired=0`. The Express scan's phantom ROUTEs at the override's call (`GET /api/cached/`) and the commented call (`GET /api/legacy/`) are not this packet's and are left unpinned. Deliberately not bound to a matrix cell: typescript/http_client is already scored.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/views/${…}/", "exact": true, "note": "this.get(`/api/views/${id}/`) through APIService.get"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/api/views/", "exact": true, "note": "this.post('/api/views/', data) through APIService.post"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/views/${…}/", "to": "GET /api/views/{id}", "category": "HTTP_CALLS", "exact": true},
+    {"from": "endpoint:POST:/api/views/", "to": "POST /api/views", "category": "HTTP_CALLS", "exact": true},
+    {"from": "fetchView", "to": "endpoint:GET:/api/views/${…}/", "category": "CALLS"},
+    {"from": "createView", "to": "endpoint:POST:/api/views/", "category": "CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/views/${…}/", "cell": "ORIGIN", "contains": "inferred:APIService.get"},
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/api/views/", "cell": "ORIGIN", "contains": "inferred:APIService.post"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/cached/", "note": "PRECISION: an override shadows the wrapper"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/orphans/", "note": "PRECISION: a base imported from a package is no in-repo wrapper"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/api/legacy/", "note": "a commented call"},
+    {"kind": "ROUTE", "name": "POST /api/views/", "note": "PRECISION: the Express scan's reading of a heritage client call is released"}
+  ]
+}

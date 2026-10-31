@@ -113,6 +113,24 @@
 //!    is a client call whose method is the member's parameter
 //!    ([`computed_verb_calls`], `computed_verb`).
 //!
+//! 7. HERITAGE, GD.26 (TS family): a direct or forwarding candidate whose
+//!    owner is a METHOD of a CLASS C and that step 4's gate drops for its
+//!    name (an HTTP verb, or one several callables share; never for its
+//!    length) is a [`HeritageWrapper`] keyed (C, C's file, name), with the
+//!    same shape; it forwards nothing. Its sites are not `<name>(` calls but
+//!    `this.<name>(` / `super.<name>(` inside a class D's own lines
+//!    ([`HeritageScope`], [`heritage_scopes`]): D is C, or D declares no
+//!    member of that name and its `extends` base (a class of that name in
+//!    D's file, else the classes so named in the files whose path's
+//!    [`module_key`] is that of the specifier D imports the name from)
+//!    reaches C, through in-repo intermediates up to [`MAX_HERITAGE_DEPTH`]
+//!    hops. A member of that name on the way that is no heritage wrapper (an
+//!    override) shadows it. Same-named copies of C (plane's three
+//!    `APIService`s) all count: every chain must reach a wrapper, all of one
+//!    shape, else the site is `ambiguous_base` and mints nothing. Because the
+//!    wrapper must already hold a client call FH.17 keeps, a cache base class
+//!    whose `get(key)` reads `this.store.get(key)` is no wrapper.
+//!
 //! The sites are read in `wrappers.rs` ([`read_http_site`]), minted with
 //! EVIDENCE emitter `pass:inferred_wrapper` rule `wrapper_call`, Weak:
 //! the path must be ONE literal starting with `/` or `http(s)://`, with no
@@ -123,15 +141,19 @@
 //! ORIGIN provenance `test_fixture` and a `"test_site":true` hit, which the
 //! `http` pass pairs with nothing (a test helper drives the app's own
 //! router, as photoprism's `PerformRequest(app, "GET", "/api/v1/..")` does).
-//! Counts: `[http-wrappers] wrappers=<w> sites=<s> minted=<m> ambiguous=<a>
-//! test_sites=<t> phantom_dropped=<p> client_by_import=<i> options_object=<o>
-//! computed_verb=<c> repo=<label>`.
+//! A heritage site mints with rule `heritage_wrapper_call` and ORIGIN rule
+//! `inferred:<class>.<verb>`. Counts: `[http-wrappers] wrappers=<w>
+//! sites=<s> minted=<m> ambiguous=<a> test_sites=<t> phantom_dropped=<p>
+//! client_by_import=<i> options_object=<o> computed_verb=<c> repo=<label>`,
+//! with ` heritage=<classes> heritage_sites=<s> heritage_minted=<m>
+//! ambiguous_base=<a> routes_released=<r>` before ` repo=` when a heritage
+//! wrapper exists (`wrappers.rs`).
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use glia_code_domain::glia_config::{HTTP_METHODS, Origin, WrapperDecl};
-use glia_code_domain::{FileParse, cell_type, node_kind};
+use glia_code_domain::{FileParse, cell_type, edge_category, node_kind};
 use glia_code_extractors::{anchor, data_entities, queue_topic};
 use glia_core::{CellPayload, NodeId, RepoId};
 
@@ -199,6 +221,58 @@ pub(crate) struct InferredWrappers {
     /// FH.17: kept HTTP wrappers whose client call is a computed verb on a
     /// client (`client[method](path)`, [`computed_verb_calls`]).
     pub(crate) http_computed: usize,
+    /// GD.26: the TS class members kept as heritage wrappers, sorted by
+    /// (class, definition file, verb).
+    pub(crate) heritage: Vec<HeritageWrapper>,
+    /// GD.26: the TS classes whose `this.<verb>(` / `super.<verb>(` calls
+    /// reach a [`HeritageWrapper`], in walked file order, then source order.
+    pub(crate) heritage_scopes: Vec<HeritageScope>,
+}
+
+/// GD.26: an HTTP wrapper that is a member of a TS class C (`APIService.get(url)
+/// { return this.axiosInstance.get(url, ..) }`), whose sites are the
+/// `this.<verb>(` / `super.<verb>(` calls of C and of the classes extending
+/// it ([`HeritageScope`]), never a bare `<verb>(` call. Kept where the plain
+/// gate drops the member (an HTTP-verb name, or one several callables share).
+#[derive(Debug, Clone)]
+pub(crate) struct HeritageWrapper {
+    /// C's name.
+    pub(crate) class: String,
+    /// The member's name, the `<verb>` a site calls on `this` / `super`.
+    pub(crate) verb: String,
+    /// The walked path of the file defining C.
+    pub(crate) def_file: String,
+    /// 0-based line of the member's declaration.
+    pub(crate) def_line0: u32,
+    /// The member's FH.4b reading: `path_arg`, prefix / suffix and method.
+    pub(crate) shape: HttpShape,
+    /// The `kind = "http"` stanza the wrapper stage reads its sites through.
+    pub(crate) decl: WrapperDecl,
+}
+
+/// GD.26: what a `this.<verb>(` call in a [`HeritageScope`] reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeritageTarget {
+    /// The [`InferredWrappers::heritage`] entry at this index: every base
+    /// chain reaches a wrapper of one shape.
+    Wrapper(usize),
+    /// Some chain reaches a wrapper, another a non-wrapper member, no
+    /// in-repo base or a wrapper of another shape: the site mints nothing.
+    Ambiguous,
+}
+
+/// GD.26: one TS class D whose own lines hold heritage sites.
+#[derive(Debug, Clone)]
+pub(crate) struct HeritageScope {
+    /// The walked path of D's file.
+    pub(crate) file: String,
+    /// D's POSITION span, 0-based lines, inclusive.
+    pub(crate) start_line0: u32,
+    pub(crate) end_line0: u32,
+    /// The spans of classes nested in D: their lines are not D's.
+    pub(crate) inner: Vec<(u32, u32)>,
+    /// What `this.<verb>(` reaches, per verb, sorted by verb.
+    pub(crate) targets: Vec<(String, HeritageTarget)>,
 }
 
 impl InferredWrappers {
@@ -622,6 +696,8 @@ struct HttpCandidate {
     def_line0: u32,
     /// FH.17: how the direct reading reached the client call.
     via: Via,
+    /// GD.26: the TS CLASS the owner is a METHOD of ([`method_class`]).
+    class: Option<String>,
 }
 
 /// FH.17: how a direct HTTP candidate's path reaches its client call.
@@ -808,7 +884,8 @@ fn infer_http(
                 Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
             }
         }
-        let mut frontier = admit_http(found, 1, out, &mut seen, &defined, &languages);
+        let heritage = family.contains(&"typescript");
+        let mut frontier = admit_http(found, 1, out, &mut seen, &defined, &languages, heritage);
         for depth in 2..=MAX_DEPTH {
             if frontier.is_empty() {
                 break;
@@ -827,7 +904,20 @@ fn infer_http(
                     }
                 }
             }
-            frontier = admit_http(found, depth, out, &mut seen, &defined, &languages);
+            frontier = admit_http(found, depth, out, &mut seen, &defined, &languages, heritage);
+        }
+        if heritage && !out.heritage.is_empty() {
+            out.heritage.sort_by(|a, b| {
+                (a.class.as_str(), a.def_file.as_str(), a.verb.as_str()).cmp(&(
+                    b.class.as_str(),
+                    b.def_file.as_str(),
+                    b.verb.as_str(),
+                ))
+            });
+            match catch_unwind(AssertUnwindSafe(|| heritage_scopes(&code, &out.heritage))) {
+                Ok(scopes) => out.heritage_scopes = scopes,
+                Err(_) => parse_errors.push("<heritage classes>: PANIC (inferred wrappers)".into()),
+            }
         }
     }
     out.http.sort_by(|a, b| {
@@ -838,6 +928,11 @@ fn infer_http(
 
 /// The HTTP precision gate: [`admit`]'s rules, plus a name that is an HTTP
 /// verb is dropped (`get(path)` would mint from every `map.get("/x")`).
+///
+/// GD.26: in the TS family (`heritage`), a candidate that is a METHOD of a
+/// CLASS and that the gate would drop for its verb name or its ambiguity
+/// (not its length) is kept as a [`HeritageWrapper`] instead, one per
+/// (class, file, name); it forwards nothing.
 fn admit_http(
     found: Vec<HttpCandidate>,
     depth: usize,
@@ -845,16 +940,36 @@ fn admit_http(
     seen: &mut HashSet<String>,
     defined: &HashMap<&str, usize>,
     languages: &[String],
+    heritage: bool,
 ) -> Vec<(String, HttpShape)> {
     let mut frontier = Vec::new();
     for c in found {
+        let dropped = HTTP_METHODS.iter().any(|m| m.eq_ignore_ascii_case(&c.call))
+            || defined.get(c.call.as_str()).copied().unwrap_or(0) >= 2;
+        if let Some(class) = c.class.as_ref().filter(|_| heritage)
+            && dropped
+            && c.call.len() >= MIN_CALL_LEN
+        {
+            if !out
+                .heritage
+                .iter()
+                .any(|h| h.class == *class && h.def_file == c.def_file && h.verb == c.call)
+            {
+                out.heritage.push(HeritageWrapper {
+                    class: class.clone(),
+                    verb: c.call.clone(),
+                    decl: http_decl(c.call.clone(), &c.shape, languages),
+                    def_file: c.def_file,
+                    def_line0: c.def_line0,
+                    shape: c.shape,
+                });
+            }
+            continue;
+        }
         if !seen.insert(c.call.clone()) {
             continue;
         }
-        if c.call.len() < MIN_CALL_LEN
-            || HTTP_METHODS.iter().any(|m| m.eq_ignore_ascii_case(&c.call))
-            || defined.get(c.call.as_str()).copied().unwrap_or(0) >= 2
-        {
+        if c.call.len() < MIN_CALL_LEN || dropped {
             out.http_ambiguous += 1;
             continue;
         }
@@ -976,6 +1091,7 @@ fn direct_http(f: &CodeFile<'_>) -> DirectHttp {
             def_file: f.path.to_string(),
             def_line0: decl.line0,
             via,
+            class: method_class(f, fp, owner),
         });
     }
     out
@@ -1116,6 +1232,7 @@ fn forwarding_http(f: &CodeFile<'_>, call: &str, shape: &HttpShape) -> (Vec<Http
             def_file: f.path.to_string(),
             def_line0: decl.line0,
             via: Via::Path,
+            class: method_class(f, fp, owner),
         });
     }
     (out, unparsed)
@@ -1323,6 +1440,22 @@ const CODE_EXTS: &[&str] = &[
 /// trailing `s` (`@/utils/request`, `./http-client.ts`, `./user.service`).
 /// `@/store`, `./cache/index.ts` and `lodash` name none.
 fn is_client_specifier(spec: &str) -> bool {
+    let Some(last) = module_key(spec) else {
+        return false;
+    };
+    words(last).iter().any(|w| {
+        let w = w.as_str();
+        CLIENT_MODULE_WORDS.contains(&w)
+            || w.strip_suffix('s')
+                .is_some_and(|s| CLIENT_MODULE_WORDS.contains(&s))
+    })
+}
+
+/// The module an import specifier or a file path names: its last path
+/// segment with a code extension dropped, the segment before it when that is
+/// `index` (`@/services/api.service` and `services/api.service.ts` ->
+/// `api.service`, `./lib/index.ts` -> `lib`); `None` for an empty one.
+fn module_key(spec: &str) -> Option<&str> {
     let spec = spec.split(['?', '#']).next().unwrap_or(spec);
     let mut segs = spec
         .trim_end_matches('/')
@@ -1334,21 +1467,11 @@ fn is_client_specifier(spec: &str) -> bool {
                 .unwrap_or(s)
         })
         .filter(|s| !s.is_empty() && *s != "." && *s != "..");
-    let Some(mut last) = segs.next() else {
-        return false;
-    };
+    let last = segs.next()?;
     if last == "index" {
-        match segs.next() {
-            Some(prev) => last = prev,
-            None => return false,
-        }
+        return segs.next();
     }
-    words(last).iter().any(|w| {
-        let w = w.as_str();
-        CLIENT_MODULE_WORDS.contains(&w)
-            || w.strip_suffix('s')
-                .is_some_and(|s| CLIENT_MODULE_WORDS.contains(&s))
-    })
+    Some(last)
 }
 
 /// FH.17b, TS family: the local names the file binds by a default or named
@@ -1659,6 +1782,298 @@ fn http_owner(f: &CodeFile<'_>, fp: &FileParse, owner: NodeId) -> Option<HttpOwn
         }
     }
     None
+}
+
+/// GD.26: the name of the TS CLASS that `owner` is a METHOD of (its nav
+/// parent); `None` outside the TS family or for any other owner.
+fn method_class(f: &CodeFile<'_>, fp: &FileParse, owner: NodeId) -> Option<String> {
+    if !TS_FAMILY.contains(&f.lang) || fp.nav.kind_by_id.get(&owner) != Some(&node_kind::METHOD) {
+        return None;
+    }
+    let class = fp.nav.parent_of.get(&owner)?;
+    (fp.nav.kind_by_id.get(class) == Some(&node_kind::CLASS))
+        .then(|| fp.nav.name_by_id.get(class).cloned())
+        .flatten()
+        .filter(|n| !n.is_empty())
+}
+
+/// GD.26: the deepest `extends` chain followed from a class to the class
+/// defining a heritage wrapper.
+pub(crate) const MAX_HERITAGE_DEPTH: usize = 4;
+
+/// GD.26: one TS-family CLASS as [`heritage_scopes`] reads it.
+struct ClassInfo<'a> {
+    /// Index into the walked code files.
+    file: usize,
+    name: &'a str,
+    span: (u32, u32),
+    /// The `extends` clause's bare base name (its INHERITS_FROM ref).
+    extends: Option<&'a str>,
+    /// The names of its nav children (methods, fields, accessors).
+    members: HashSet<&'a str>,
+}
+
+/// GD.26: one TS-family file's heritage reading.
+struct ClassFile<'a> {
+    /// The module its path names ([`module_key`]).
+    key: Option<&'a str>,
+    /// `(local name, imported name, specifier)` per named or default value
+    /// import; a default import's imported name is its local name.
+    imports: Vec<(&'a str, &'a str, &'a str)>,
+}
+
+/// What one base chain from a class reaches for a verb.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// A heritage wrapper (index into the wrappers).
+    Wrapper(usize),
+    /// A member of that name that is no heritage wrapper (an override).
+    Shadow,
+    /// No member of that name before the chain ends (no in-repo base, or
+    /// [`MAX_HERITAGE_DEPTH`]).
+    End,
+}
+
+/// GD.26: the classes [`heritage_scopes`] reads, with its lookups (never
+/// iterated).
+struct ClassIndex<'i, 'a> {
+    classes: &'i [ClassInfo<'a>],
+    files: &'i [ClassFile<'a>],
+    code: &'i [CodeFile<'a>],
+    by_name: &'i HashMap<&'a str, Vec<usize>>,
+    /// (class, file, verb) -> index into the heritage wrappers.
+    wrapper_at: &'i HashMap<(&'a str, &'a str, &'a str), usize>,
+}
+
+impl ClassIndex<'_, '_> {
+    /// The `extends` base(s) of class `ci`: the classes of that name in its
+    /// file, else the classes of the imported name in the files whose
+    /// [`module_key`] is the import specifier's.
+    fn bases(&self, ci: usize) -> Vec<usize> {
+        let Some(c) = self.classes.get(ci) else {
+            return Vec::new();
+        };
+        let Some(base) = c.extends else {
+            return Vec::new();
+        };
+        let named = |n: &str| self.by_name.get(n).map_or(&[][..], Vec::as_slice);
+        let local: Vec<usize> = named(base)
+            .iter()
+            .copied()
+            .filter(|&b| b != ci && self.classes.get(b).is_some_and(|x| x.file == c.file))
+            .collect();
+        if !local.is_empty() {
+            return local;
+        }
+        let Some((imported, spec)) = self.files.get(c.file).and_then(|f| {
+            f.imports
+                .iter()
+                .find(|(l, _, _)| *l == base)
+                .map(|(_, i, s)| (*i, *s))
+        }) else {
+            return Vec::new();
+        };
+        let Some(key) = module_key(spec) else {
+            return Vec::new();
+        };
+        named(imported)
+            .iter()
+            .copied()
+            .filter(|&b| {
+                b != ci
+                    && self
+                        .classes
+                        .get(b)
+                        .and_then(|x| self.files.get(x.file))
+                        .is_some_and(|f| f.key == Some(key))
+            })
+            .collect()
+    }
+
+    /// What `this.<verb>(` in class `ci` reaches along each base chain,
+    /// `depth` hops from the calling class.
+    fn reach(&self, ci: usize, verb: &str, depth: usize, out: &mut Vec<Reach>) {
+        let Some(c) = self.classes.get(ci) else {
+            out.push(Reach::End);
+            return;
+        };
+        if c.members.contains(verb) {
+            let path = self.code.get(c.file).map_or("", |f| f.path);
+            out.push(
+                self.wrapper_at
+                    .get(&(c.name, path, verb))
+                    .map_or(Reach::Shadow, |w| Reach::Wrapper(*w)),
+            );
+            return;
+        }
+        let bs = if depth < MAX_HERITAGE_DEPTH {
+            self.bases(ci)
+        } else {
+            Vec::new()
+        };
+        if bs.is_empty() {
+            out.push(Reach::End);
+            return;
+        }
+        for b in bs {
+            self.reach(b, verb, depth + 1, out);
+        }
+    }
+}
+
+/// GD.26: every TS-family CLASS D of `code` whose `this.<verb>(` reaches a
+/// heritage wrapper: D itself defines the verb as a wrapper, or D declares no
+/// member of that name and its `extends` base does, through in-repo
+/// intermediates up to [`MAX_HERITAGE_DEPTH`] hops. A base named N is a
+/// class named N declared in D's file, else the classes named N (or, for a
+/// default import, the local name) in the files whose [`module_key`] is the
+/// key of the specifier D's file imports N from; several such copies all
+/// count. Every chain must reach a wrapper, all of one [`HttpShape`]
+/// ([`HeritageTarget::Wrapper`], the least index); a chain reaching a
+/// non-wrapper member, no base or another shape beside one that reaches a
+/// wrapper is [`HeritageTarget::Ambiguous`]; a class none of whose chains
+/// reaches a wrapper is no scope.
+fn heritage_scopes(code: &[CodeFile<'_>], wrappers: &[HeritageWrapper]) -> Vec<HeritageScope> {
+    let mut classes: Vec<ClassInfo<'_>> = Vec::new();
+    let mut files: Vec<ClassFile<'_>> = Vec::with_capacity(code.len());
+    for (fi, f) in code.iter().enumerate() {
+        let mut cf = ClassFile {
+            key: module_key(f.path),
+            imports: Vec::new(),
+        };
+        let Some(fp) = f.parse else {
+            files.push(cf);
+            continue;
+        };
+        for imp in &fp.imports {
+            if let glia_code_domain::ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                ..
+            } = &imp.target
+            {
+                let local = alias.as_deref().unwrap_or(name.as_str());
+                let imported = if name == "default" {
+                    local
+                } else {
+                    name.as_str()
+                };
+                cf.imports.push((local, imported, module.as_str()));
+            }
+        }
+        files.push(cf);
+        for n in &fp.nodes {
+            if fp.nav.kind_by_id.get(&n.id) != Some(&node_kind::CLASS) {
+                continue;
+            }
+            let (Some(name), Some(span)) = (fp.nav.name_by_id.get(&n.id), anchor::position_span(n))
+            else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let extends = fp.refs.iter().find_map(|r| match &r.qualifier {
+                glia_code_domain::CallQualifier::Bare(b)
+                    if r.from == n.id && r.category == edge_category::INHERITS_FROM =>
+                {
+                    Some(b.as_str())
+                }
+                _ => None,
+            });
+            let members = fp
+                .nav
+                .children_of
+                .get(&n.id)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| fp.nav.name_by_id.get(c).map(String::as_str))
+                .collect();
+            classes.push(ClassInfo {
+                file: fi,
+                name,
+                span,
+                extends,
+                members,
+            });
+        }
+    }
+    let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, c) in classes.iter().enumerate() {
+        by_name.entry(c.name).or_default().push(i);
+    }
+    let wrapper_at: HashMap<(&str, &str, &str), usize> = wrappers
+        .iter()
+        .enumerate()
+        .map(|(i, w)| ((w.class.as_str(), w.def_file.as_str(), w.verb.as_str()), i))
+        .collect();
+    let mut verbs: Vec<&str> = wrappers.iter().map(|w| w.verb.as_str()).collect();
+    verbs.sort_unstable();
+    verbs.dedup();
+
+    let idx = ClassIndex {
+        classes: &classes,
+        files: &files,
+        code,
+        by_name: &by_name,
+        wrapper_at: &wrapper_at,
+    };
+    let mut out = Vec::new();
+    for (ci, c) in classes.iter().enumerate() {
+        let mut targets: Vec<(String, HeritageTarget)> = Vec::new();
+        for verb in &verbs {
+            let mut reached = Vec::new();
+            idx.reach(ci, verb, 0, &mut reached);
+            let found: Vec<usize> = reached
+                .iter()
+                .filter_map(|r| match r {
+                    Reach::Wrapper(w) => Some(*w),
+                    Reach::Shadow | Reach::End => None,
+                })
+                .collect();
+            let Some(&first) = found.iter().min() else {
+                continue;
+            };
+            let shape = wrappers.get(first).map(|w| &w.shape);
+            let one = found.len() == reached.len()
+                && found
+                    .iter()
+                    .all(|w| wrappers.get(*w).map(|x| &x.shape) == shape);
+            targets.push((
+                (*verb).to_string(),
+                if one {
+                    HeritageTarget::Wrapper(first)
+                } else {
+                    HeritageTarget::Ambiguous
+                },
+            ));
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        let (start, end) = c.span;
+        let inner = classes
+            .iter()
+            .enumerate()
+            .filter(|(j, x)| {
+                *j != ci
+                    && x.file == c.file
+                    && start <= x.span.0
+                    && x.span.1 <= end
+                    && x.span != c.span
+            })
+            .map(|(_, x)| x.span)
+            .collect();
+        out.push(HeritageScope {
+            file: code.get(c.file).map_or("", |f| f.path).to_string(),
+            start_line0: start,
+            end_line0: end,
+            inner,
+            targets,
+        });
+    }
+    out
 }
 
 /// The leading identifier of `s` (not starting with a digit).
@@ -2990,6 +3405,197 @@ def users(c):
         assert!(
             hits.len() == 1 && hits[0].ends_with(r#","test_site":true}"#),
             "{hits:?}"
+        );
+    }
+
+    /// GD.26: the heritage wrappers as `<class>.<verb> @<file>:<1-based
+    /// line> path=<index> <method>`.
+    fn heritage_found(w: &InferredWrappers) -> Vec<String> {
+        w.heritage
+            .iter()
+            .map(|h| {
+                format!(
+                    "{}.{} @{}:{} path={} {:?}",
+                    h.class,
+                    h.verb,
+                    h.def_file,
+                    h.def_line0 + 1,
+                    h.shape.path.index,
+                    h.shape.method
+                )
+            })
+            .collect()
+    }
+
+    /// GD.26: the heritage scopes as `<file>:<1-based start>-<end>
+    /// <verb>=<wrapper index | ?>..`.
+    fn scopes_found(w: &InferredWrappers) -> Vec<String> {
+        w.heritage_scopes
+            .iter()
+            .map(|sc| {
+                let targets: Vec<String> = sc
+                    .targets
+                    .iter()
+                    .map(|(v, t)| match t {
+                        HeritageTarget::Wrapper(i) => format!("{v}=W{i}"),
+                        HeritageTarget::Ambiguous => format!("{v}=?"),
+                    })
+                    .collect();
+                format!(
+                    "{}:{}-{} {}",
+                    sc.file,
+                    sc.start_line0 + 1,
+                    sc.end_line0 + 1,
+                    targets.join(",")
+                )
+            })
+            .collect()
+    }
+
+    const HERITAGE_BASE: &str = r#"import axios from "axios";
+export abstract class APIService {
+  private axiosInstance: any;
+  get(url: string, params = {}) {
+    return this.axiosInstance.get(url, { ...params });
+  }
+  post(url: string, data = {}) {
+    return this.axiosInstance.post(url, data);
+  }
+}
+export class LocalChild extends APIService {
+  a() { return this.get("/api/local/"); }
+}
+"#;
+
+    /// GD.26: an HTTP-verb member of a class that hands its parameter to a
+    /// client call is a heritage wrapper, not an ambiguous name; its scopes
+    /// are the class itself, a same-file subclass, subclasses importing it by
+    /// a specifier whose last segment is its file's stem (relative or
+    /// aliased), and their in-repo subclasses (a same-file intermediate, then
+    /// an imported one). An override shadows the verb (`get` there reaches
+    /// nothing; `post` still does); a base imported from a package, and a
+    /// Map-like member whose call is a phantom (no client receiver), reach
+    /// nothing.
+    #[test]
+    fn ts_heritage_wrappers_and_their_scopes() {
+        let view = r#"import { APIService } from "./api.service";
+export class ViewService extends APIService {
+  load(id: string) { return this.get(`/api/views/${id}/`); }
+}
+"#;
+        let live = r#"import { APIService } from "@/services/api.service";
+export class LiveService extends APIService {}
+export class DeepService extends LiveService {
+  x() { return this.post("/api/deep/", {}); }
+}
+"#;
+        let deeper = r#"import { DeepService } from "./live.service";
+export class Deeper extends DeepService {
+  y() { return super.get("/api/deeper/"); }
+}
+"#;
+        let cached = r#"import { APIService } from "./api.service";
+export class CachedService extends APIService {
+  private store: any;
+  get(url: string) { return this.store.get(url); }
+  z() { return this.post("/api/cached/", {}); }
+}
+"#;
+        let orphan = r#"import { APIService } from "@vendor/sdk";
+export class OrphanService extends APIService {
+  w() { return this.get("/api/orphans/"); }
+}
+"#;
+        let kv = r#"export class KV {
+  private entries: any;
+  get(key: string) { return this.entries.get(key); }
+}
+export class Sub extends KV {
+  v() { return this.get("/not/http"); }
+}
+"#;
+        let w = infer(&[
+            ("src/services/api.service.ts", HERITAGE_BASE),
+            ("src/services/view.service.ts", view),
+            ("src/services/live.service.ts", live),
+            ("src/services/deeper.ts", deeper),
+            ("src/services/cached.service.ts", cached),
+            ("src/legacy/orphan.ts", orphan),
+            ("src/lib/kv.ts", kv),
+        ]);
+        assert_eq!(
+            heritage_found(&w),
+            [
+                r#"APIService.get @src/services/api.service.ts:4 path=0 Fixed("GET")"#,
+                r#"APIService.post @src/services/api.service.ts:7 path=0 Fixed("POST")"#,
+            ]
+        );
+        assert!(w.http.is_empty(), "no plain wrapper: {:?}", w.http);
+        assert_eq!(
+            w.http_ambiguous, 0,
+            "the verb members are heritage wrappers"
+        );
+        // KV.get's `this.entries.get(key)` and CachedService.get's
+        // `this.store.get(url)`: verb calls on no HTTP client.
+        assert_eq!(w.http_phantom, 2);
+        assert_eq!(
+            scopes_found(&w),
+            [
+                "src/services/api.service.ts:2-10 get=W0,post=W1",
+                "src/services/api.service.ts:11-13 get=W0,post=W1",
+                "src/services/view.service.ts:2-4 get=W0,post=W1",
+                "src/services/live.service.ts:2-2 get=W0,post=W1",
+                "src/services/live.service.ts:3-5 get=W0,post=W1",
+                "src/services/deeper.ts:2-4 get=W0,post=W1",
+                "src/services/cached.service.ts:2-6 post=W1",
+            ]
+        );
+    }
+
+    /// GD.26: several same-named base classes whose files share the
+    /// specifier's stem all count: one wrapper shape across them reaches the
+    /// least wrapper; two shapes, or a copy that does not define the verb, is
+    /// `ambiguous_base`.
+    #[test]
+    fn ts_heritage_copies_agree_or_are_ambiguous() {
+        let copy = |prefix: &str| {
+            format!(
+                "export class APIService {{\n  private http: any;\n  get(url: string) {{ return this.http.get({prefix}url); }}\n  put(url: string) {{ return this.http.put(url); }}\n}}\n"
+            )
+        };
+        let (a, b) = (copy(""), copy("\"/v2\" + "));
+        let bare = "export class APIService {\n  private http: any;\n}\n";
+        let user = r#"import { APIService } from "@/api.service";
+export class UserService extends APIService {
+  u() { return this.get("/api/users/"); }
+}
+"#;
+        let w = infer(&[
+            ("app/a/api.service.ts", &a),
+            ("app/b/api.service.ts", &b),
+            ("app/user.service.ts", user),
+        ]);
+        assert_eq!(
+            scopes_found(&w),
+            [
+                "app/a/api.service.ts:1-5 get=W0,put=W1",
+                "app/b/api.service.ts:1-5 get=W2,put=W3",
+                // `get`: "/v2" + url differs from url; `put` agrees, and
+                // reaches the least of the two.
+                "app/user.service.ts:2-4 get=?,put=W1",
+            ]
+        );
+        let w = infer(&[
+            ("app/a/api.service.ts", &a),
+            ("app/c/api.service.ts", bare),
+            ("app/user.service.ts", user),
+        ]);
+        assert_eq!(
+            scopes_found(&w),
+            [
+                "app/a/api.service.ts:1-5 get=W0,put=W1",
+                "app/user.service.ts:2-4 get=?,put=?",
+            ]
         );
     }
 }
