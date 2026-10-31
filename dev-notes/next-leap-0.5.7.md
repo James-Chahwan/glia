@@ -36,6 +36,13 @@ rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
 The agent before / after compares against `bench/agent-ab/results/0.5.4/baseline.json`; the edge precision against
 FD.3c's baseline and 0.5.6's re-run.
 
+**Section-level doc ties (parked from 0.5.6, James 2026-10-31 "okay fine").** 0.5.6 GP.9 measured file-level doc ties
+(a doc file and the code files it co-changes with) as a one-hop bridge in ANS:impact and they FAILED
+(`bench/rank-gate/doc-ties/report.md`: `[doc-ties] verdict=FAIL glia r10=0.2551`, floor 0.2594), so GP.10 / GP.11 were
+not built and the rank gate's four FD.79 `accepted` glia rows stay. The retry: tie a doc SECTION (not the whole file) to
+the code it changes with, which needs a history snapshot that records each commit's hunks, measured the same way against
+a pass rule committed first; on PASS, build the bridge and empty `accepted`.
+
 ## 4. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
 
 James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
