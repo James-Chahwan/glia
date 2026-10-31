@@ -1,0 +1,23 @@
+{
+  "framework": "go-process-entry",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "process_entry",
+  "cells": ["go/process_entry"],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:gosrv", "exact": true},
+    {"kind": "FUNCTION", "name": "gosrv::cmd::server::main::main", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:gosrv", "to": "gosrv::cmd::server::main::main", "category": "HANDLED_BY", "exact": true,
+     "note": "multi-stage: RUN go build -o /bin/server ./cmd/server, COPY --from=build /bin/server, ENTRYPOINT [\"/bin/server\"]: the binary is the ./cmd/server main package"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "infra:image:gosrv", "to": "gosrv::cmd::migrate::main::main", "category": "HANDLED_BY",
+     "note": "cmd/migrate is another main package the image never builds"},
+    {"from": "infra:image:gosrv", "to": "gosrv::cmd::migrate::main", "category": "HANDLED_BY",
+     "note": "nor its MODULE"}
+  ],
+  "note": "0.5.6 use pattern (GH.12): a container starts a compiled Go binary. The binding is the build line's package path followed through the output path to the ENTRYPOINT; a second main package (cmd/migrate) sits beside it so a name-only `main` match is caught. No ENTRYPOINT cell is expected: a Go `main` FUNCTION is already a named entry (CODE_TABLES), so the gain is the HANDLED_BY link. At HEAD 12375a67: partial (the image node, no edge to code)."
+}

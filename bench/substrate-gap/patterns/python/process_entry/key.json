@@ -1,0 +1,25 @@
+{
+  "framework": "python-process-entry",
+  "language": "python",
+  "dirs": ["."],
+  "mechanism": "process_entry",
+  "cells": ["python/process_entry"],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:svc-py", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:api", "exact": true},
+    {"kind": "MODULE", "name": "svc-py::worker", "exact": true},
+    {"kind": "MODULE", "name": "svc-py::app", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:svc-py", "to": "svc-py::worker", "category": "HANDLED_BY", "exact": true,
+     "note": "ENTRYPOINT [\"python\", \"worker.py\"] under WORKDIR /app, COPY . . from the Dockerfile's directory"},
+    {"from": "infra:service:api", "to": "svc-py::app", "category": "HANDLED_BY", "exact": true,
+     "note": "compose `build: .` + `command: gunicorn app:app`: the WSGI module the server imports"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "svc-py::worker", "cell": "ENTRYPOINT"},
+    {"kind": "MODULE", "node": "svc-py::app", "cell": "ENTRYPOINT"}
+  ],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.12): a container starts a Python process. The Dockerfile's ENTRYPOINT runs worker.py (a module-scope loop() call, no main guard, so script_entry's main_guard reading never fires); the compose service `api` builds the same directory and runs `gunicorn app:app`. INTENDED: each starting INFRA_RESOURCE HANDLED_BY the MODULE it starts, and that MODULE an entry (ENTRYPOINT). At HEAD 12375a67 the INFRA_RESOURCE nodes exist with no edge to code and no ENTRYPOINT cell: partial."
+}

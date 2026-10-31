@@ -326,6 +326,18 @@ PATTERNS = [
      "categories": [], "proof_cells": ["ENTRYPOINT"], "cross_repo": False,
      "note": "a standalone script run from a shell (`#!/usr/bin/env lua`, `arg`): its "
              "MODULE is an entry"},
+    # 0.5.6 (GH.12): a process another file starts. Not script_entry: the
+    # evidence is the deployment unit (cross-file, cross-language, like
+    # embedded_script) and the target may be a compiled entry (a Go main
+    # package, a Rust bin, a Java main class, a .NET Program) where a `main`
+    # FUNCTION is already a named entry and the gain is the HANDLED_BY link.
+    {"id": "process_entry", "label": "proc", "family": "host",
+     "kinds": [["INFRA_RESOURCE"]], "via_labels": ["process_entry"],
+     "literal": "the started file's MODULE / main FUNCTION / main METHOD as the HANDLED_BY "
+                "target of the starting INFRA_RESOURCE",
+     "categories": ["HANDLED_BY"], "proof_cells": ["ENTRYPOINT"], "cross_repo": False,
+     "note": "Dockerfile ENTRYPOINT / CMD, compose command, k8s command / args, Procfile, "
+             "systemd ExecStart: the host that starts the process -> the code it starts"},
 ]
 _PATTERN_BY_ID = {p["id"]: p for p in PATTERNS}
 PATTERN_IDS = [p["id"] for p in PATTERNS]

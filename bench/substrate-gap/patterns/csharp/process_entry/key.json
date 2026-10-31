@@ -1,0 +1,18 @@
+{
+  "framework": "csharp-process-entry",
+  "language": "csharp",
+  "dirs": ["."],
+  "mechanism": "process_entry",
+  "cells": ["csharp/process_entry"],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:cartsvc", "exact": true},
+    {"kind": "METHOD", "name": "Cart::Program::Main", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:cartsvc", "to": "Cart::Program::Main", "category": "HANDLED_BY", "exact": true,
+     "note": "RUN dotnet publish Cart.csproj -o /app + ENTRYPOINT [\"dotnet\", \"Cart.dll\"]: Cart.dll is Cart.csproj's assembly (OutputType Exe), whose entry is Program.Main"}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.12): a container starts a .NET assembly. The ENTRYPOINT names a published dll, so the binding goes through the publish line's project file (its assembly name defaults to the .csproj stem) to that project's Main. At HEAD 12375a67: partial (the image node, no edge to code)."
+}

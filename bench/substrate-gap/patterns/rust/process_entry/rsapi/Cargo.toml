@@ -1,0 +1,12 @@
+[package]
+name = "rsapi"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "api"
+path = "src/bin/api.rs"
+
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"

@@ -1,0 +1,21 @@
+{
+  "framework": "java-process-entry",
+  "language": "java",
+  "dirs": ["."],
+  "mechanism": "process_entry",
+  "cells": ["java/process_entry"],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:adservice", "exact": true},
+    {"kind": "METHOD", "name": "adservice::src::main::java::shop::Ad::main", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:adservice", "to": "adservice::src::main::java::shop::Ad::main", "category": "HANDLED_BY", "exact": true,
+     "note": "RUN ./gradlew installDist + ENTRYPOINT [\"/app/build/install/shop/bin/Ad\"]: installDist writes build/install/<rootProject.name>/bin/<applicationName>, the start script of application { mainClass = 'shop.Ad' }"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "infra:image:adservice", "to": "adservice::src::main::java::shop::Ad::Ad", "category": "HANDLED_BY",
+     "note": "the start script runs main, not the constructor"}
+  ],
+  "note": "0.5.6 use pattern (GH.12): a container starts a Gradle application (microservices-demo adservice's shape). The ENTRYPOINT names the installDist start script, not a class: the binding goes through settings.gradle's rootProject.name and build.gradle's application { mainClass, applicationName } to the main METHOD. At HEAD 12375a67: partial (the image node, no edge to code)."
+}

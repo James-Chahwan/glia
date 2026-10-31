@@ -1,0 +1,25 @@
+{
+  "framework": "typescript-process-entry",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "process_entry",
+  "cells": ["typescript/process_entry"],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:server", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:worker", "exact": true},
+    {"kind": "MODULE", "name": "server::src::main", "exact": true},
+    {"kind": "MODULE", "name": "server::src::worker", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:server", "to": "server::src::main", "category": "HANDLED_BY", "exact": true,
+     "note": "CMD [\"node\", \"dist/main\"] under WORKDIR /app/server: dist/main is tsconfig outDir ./dist over rootDir ./src, so src/main.ts"},
+    {"from": "infra:service:worker", "to": "server::src::worker", "category": "HANDLED_BY", "exact": true,
+     "note": "compose `command: [\"yarn\", \"worker:prod\"]` -> package.json script `node dist/worker` -> src/worker.ts"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "server::src::main", "cell": "ENTRYPOINT"},
+    {"kind": "MODULE", "node": "server::src::worker", "cell": "ENTRYPOINT"}
+  ],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.12): a container starts a compiled TypeScript process (the shape of a NestJS server image: WORKDIR /app/server, CMD node dist/main). The started file is the build OUTPUT, so the binding goes through tsconfig's outDir / rootDir back to the source MODULE; the compose worker goes one hop further, through a package.json script. INTENDED: each starting INFRA_RESOURCE HANDLED_BY its source MODULE, which is an entry. At HEAD 12375a67: partial (the INFRA_RESOURCE nodes, no edge to code, no ENTRYPOINT cell)."
+}

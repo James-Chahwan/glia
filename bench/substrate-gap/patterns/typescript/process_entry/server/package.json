@@ -1,0 +1,8 @@
+{
+  "name": "server",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "worker:prod": "node dist/worker"
+  }
+}

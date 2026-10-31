@@ -1,0 +1,6 @@
+services:
+  api:
+    build: .
+    command: gunicorn app:app
+    ports:
+      - "8000:8000"
