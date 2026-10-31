@@ -2,4 +2,4 @@
 //! no resolved key or no traced code reported beside the rule rows, never
 //! blocking on its own.
 //!
-//! Reserved for 0.5.6 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.

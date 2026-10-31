@@ -2,4 +2,4 @@
 //! states and the keys each cites (ids, paths, symbols, routes), read from
 //! untrusted text redacted before it is stored. Feeds the joiner, never a walk.
 //!
-//! Reserved for 0.5.6 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.

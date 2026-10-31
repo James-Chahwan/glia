@@ -111,9 +111,9 @@ embed/              glia-embed (0.5.4, FB.1, FB.14): the Embedder trait, HashEmb
                     opt-in); a GPU failure finishes on an in-process CPU session. The engine reaches the
                     model only through feature `sem-eval` (gate harnesses), py through `embed` (on in
                     the published wheels), the CLI through its default `embed`. docs/embeddings.md
-build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.6's build-target graphs
+build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.7's build-target graphs
                     (track T9); doc-only in 0.5.4, a stamp HASHED_ROOTS entry
-parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.6 (track T9); doc-only in 0.5.4
+parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.7 (track T9); doc-only in 0.5.4
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
                     (the rules layer's own toy proof is inline in rules/tests/toy.rs, so this list is unchanged)
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
@@ -184,11 +184,11 @@ The facade rules:
    (`activation/src/algo/fuse.rs`, `engine/src/{rank,calibrate}/mod.rs`,
    `engine/src/intent/{text,ids,defs,paths,idr}.rs`) and every other tracked `.rs` (EZ.1's scan).
    At 0.5.4 every tracked `.rs` has code except exactly the 16 wave-0 slots of the tracks moved
-   to 0.5.6 (James 2026-10-30, F0.8 dropped: kept, not removed): `build-domain/src/lib.rs`,
+   to 0.5.6, then 0.5.7 (James 2026-10-30 and 2026-10-31, F0.8 dropped: kept, not removed): `build-domain/src/lib.rs`,
    `code-domain/src/goal.rs`, `engine/src/clarify/{answer,questions}.rs`,
    `engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs`, `engine/src/targets.rs`,
    `parsers/build/bazel/src/lib.rs` and `py/src/{clarify,goal,targets}.rs`, each ending
-   `//! Reserved for 0.5.6 (track T6|T9); empty in 0.5.4.` (FZ.1's scan exempts exactly these).
+   `//! Reserved for 0.5.7 (track T6|T9); empty in 0.5.4 to 0.5.6.` (FZ.1's scan exempts exactly these).
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -385,9 +385,9 @@ engine/src/   lib.rs        facade (rules above)
                        the dead share; health / health_with / boundary_health; blind_caveats /
                        blind_line, the `blind` row an answer gains for a mechanism it read that
                        health rates BLIND or DEGRADED (FH.9, `BlastRadius.blind`)
-              goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.6 (T6: goal/, clarify/;
+              goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.7 (T6: goal/, clarify/;
                        T9: targets.rs): goal/mod.rs and clarify/mod.rs declare their children,
-                       every child file is doc-only (`Reserved for 0.5.6`)
+                       every child file is doc-only (`Reserved for 0.5.7`)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -492,7 +492,7 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     glia_config gains Rejection / LoadedConfig.rejections (DT.7c)
                     0.5.4: lib.rs's IMPORT_BINDINGS writers and readers (import_bindings_cell /
                     import_bindings_json, IMPORT_BINDINGS_CAP 256, FA.21; read_import_bindings,
-                    ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.6
+                    ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.7
                     (T6); same_as keys four more ecosystems (FD.31: maven `groupId:artifactId`
                     lowercase, pub, hex, nuget; PROJECT ecosystems dart -> pub, elixir -> hex,
                     dotnet -> nuget, maven / gradle -> maven); glia_config gains ConventionDecl
@@ -523,7 +523,7 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               graph.rs: a PyGraph drop calls memory::release_freed_memory (DE.10)
   0.5.4 private slots (F0.4, F0.7): embed FB.5c (glia_py.embed; the process-wide bge-small
               session; the wheel's `glia-embed-worker` found beside the interpreter, FB.14)
-              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.6 (T6, T9)
+              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.7 (T6, T9)
               vocab_sync (FB.13b) lives in snapshots.rs beside history_sync
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
@@ -613,7 +613,7 @@ snapshot steps (CLI / pyo3, never a build, never a .gmap):
 ```
 
 0.5.4 adds no graph beside the region / project / docs graphs: the goal graph (GOAL_UNIT /
-TRACES) and the build-target graph (targets.gmap) moved to 0.5.6 with tracks T6 and T9.
+TRACES) and the build-target graph (targets.gmap) moved to 0.5.7 with tracks T6 and T9.
 
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
 mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
@@ -1210,7 +1210,7 @@ fields SCHEMA_FIELDS.
 0.5.4 allocates four (F0.1): node GOAL_UNIT 50, edge TRACES 38, cells UNIT 26 and
 IMPORT_BINDINGS 27. IMPORT_BINDINGS is written (FA.21: each MODULE's external imports, specifier,
 name, alias and row, capped at 256). GOAL_UNIT, TRACES and UNIT were allocated for the goal layer
-(track T6), which moved to 0.5.6: they stay registered with no emitter, locked like
+(track T6), which moved to 0.5.7: they stay registered with no emitter, locked like
 SHARES_DEPENDENCY, in no carry, community, entry or embed list.
 The next free ids are node 51 / edge 39 / cell 28.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
@@ -1252,7 +1252,7 @@ the code-domain readings (FileIndex, co-change, IDR, the calibration replay) liv
 0.5.4 keeps the dials too. The one tier type is `glia_activation::profile::Tier` (FD.7a; was
 IdentityTier, the rules crate's Tier, and per-module strings), printed lowercase on every
 surface through `Tier::as_str` (FD.7d). TRACES (38) weighs 0 and GOAL_UNIT (50) is no entry,
-carry or embed kind: both are registered for 0.5.6's goal layer with no emitter. The profile's
+carry or embed kind: both are registered for 0.5.7's goal layer with no emitter. The profile's
 `EMBED_KINDS` (30 declaration kinds) is what `glia embed` embeds. A similarity never reaches a
 walk: the semantic tier only re-orders `find --files`' candidates and picks `pack`'s fallback
 seeds, each marked heuristic beside the lexical absence.
@@ -2042,17 +2042,20 @@ questions over one graph computes `entrypoint_reachable` once.
   a mechanism and kept out of the 30-column totals; Lua's six read three none and three partial, the targets of
   0.5.6's host-to-plugin graph (PR #3's plugin families, generalised). No registry id, no FORMAT_VERSION /
   MANIFEST_VERSION change; Cargo.lock gains tree-sitter-lua.
-- **After 0.5.5:** **0.5.6** (seed `dev-notes/next-leap-0.5.6.md`) — the tracks moved out of 0.5.4,
-  already specced and to be re-verified against the shipped tree: T4 (the per-language precision
-  and recall residuals), T6 (the goal-layer connector and the clarification queue; it fills the
-  reserved slots and GOAL_UNIT / TRACES / UNIT), T7 (concept search over flows, PR / issue intent,
-  placement), T8 (Stack Graphs-style incremental resolution, watch's body-only fast path,
-  multi-repo `glia watch --with`, the watch / rules memory budget) and T9 (build-target graphs,
-  the first non-code domain: build-domain/, parsers/build/bazel/, engine targets.rs); then proof
-  (precision on real repos from FD.3c's baseline, the FH.13 agent probes run, big-repo per-phase
-  timings, calibrated confidence, `decide/`, `glia judge`); plus docs as a second graph (retiring
-  the rank gate's `accepted` rows), wave agents that never run the full gates, and the edge-audit
-  re-run after FD.73-FD.81. An optional `scope` on `[[note]]` (FD.65's follow-up) is listed only if
+- **After 0.5.5, split in two (James 2026-10-31: *"Yeah that's probably better to make this 2 releases"*).**
+  **0.5.6** (`dev-notes/next-leap-0.5.6.md`) finishes what is started: T4 (the per-language precision
+  and recall residuals), T7's concept search over flows and placement (FC.15, FC.16, FB.9, FC.21,
+  FC.22), T8 (Stack Graphs-style incremental resolution, watch's body-only fast path, multi-repo
+  `glia watch --with`, the watch / rules memory budget), each re-verified against `v0.5.5`; the
+  host-to-plugin graph (PR #3's plugin families generalised; it fills the use-pattern axis); 0.5.4's
+  W20 / W21 follow-ups, docs as a second graph (retiring the rank gate's `accepted` rows), wave agents
+  that never run the full gates and the edge-audit re-run after FD.73-FD.81. **0.5.7**
+  (`dev-notes/next-leap-0.5.7.md`) takes the new capabilities: T6 (the goal-layer connector and the
+  clarification queue; it fills the reserved slots and GOAL_UNIT / TRACES / UNIT) with T7's PR intent
+  (FC.19, FC.20), T9 (build-target graphs, the first non-code domain: build-domain/,
+  parsers/build/bazel/, engine targets.rs), proof (precision on real repos from FD.3c's baseline, the
+  FH.13 agent probes run, big-repo per-phase timings, calibrated confidence, `decide/`, `glia judge`)
+  and the domain id allocator. An optional `scope` on `[[note]]` (FD.65's follow-up) is listed only if
   James asks. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
   security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated" items stay
   out (`SECURITY.md`).

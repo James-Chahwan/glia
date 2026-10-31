@@ -1,4 +1,4 @@
-# glia 0.5.6 — proof, plus the tracks moved out of 0.5.4 (scope seed)
+# glia 0.5.6 — finishing what is started: T4, T7's search and placement, T8, the host-to-plugin graph
 
 **Renumbered 2026-10-31** (was the 0.5.5 seed). James: *"we could a small lua pr 0.5.5 then bump our 0.5.5 to 0.5.6"*:
 0.5.5 is the Lua release (`dev-notes/next-leap-0.5.5.md`), the first community patch, from Brian Ealdwine's glia PR
@@ -7,72 +7,48 @@ plan, now 0.5.6. `--release 055` / id prefixes below become `056`.
 
 **Born 2026-10-30.** James cut 0.5.4 to what was built plus two small tracks (*"Nah we can change to option 3 to round of
 0.5.4 now right ?"*, superseding the 2026-10-24 ruling that 0.5.4 ships only after every track). 0.5.4 ships T0 T1 T2 T3
-T5 T10 (+FD.31) T11 TS TH and FH.11c. Everything below moves here.
+T5 T10 (+FD.31) T11 TS TH and FH.11c; the rest moved here.
+
+**Split 2026-10-31** into two releases. James: *"Yeah that's probably better to make this 2 releases and then let's
+update and complete 0.5.6"*. 0.5.6 finishes what is already started (the moved T4 / T7 / T8 work, the host-to-plugin
+graph 0.5.5 promised, 0.5.4's follow-ups); 0.5.7 (`dev-notes/next-leap-0.5.7.md`) takes the new capabilities: the goal
+layer and clarification queue (T6, with T7's PR-intent packets FC.19 / FC.20, which need it), build-target graphs (T9),
+the proof row, calibrated confidence and the domain id allocator. The T6 / T9 slot files now read `Reserved for 0.5.7`.
 
 ## 1. Tracks moved from 0.5.4 (already specced)
 
 The packets are in `dev-notes/leap-054-packets.json` with their corrections in `leap-054-corrections.json`; the track
 lists are in `dev-notes/wave-runner/tracks_054.py`. They were specced against 2026-10-23's tree, so every one needs the
-re-verify pass (`dev-notes/reverify_054.md`'s method) against the shipped 0.5.4 before a wave, and a new id prefix and
-`--release 056` schedule.
+re-verify pass below before a wave.
 
 | track | what | packets | LOC at spec |
 |---|---|---|---|
 | T4 | per-language precision and recall residuals (0.5.4 plan §D, §E, F.1) | 53 | ~15,870 |
-| T6 | goal-layer connector (§G) and the clarification queue (§C) | 21 | ~8,000 |
-| T7 | concept search over flows (F.6), PR / issue text as intent (F.15), where new code goes (F.14) | 7 | ~2,670 |
+| T7 (part) | concept search over flows (F.6, FC.15, FC.16, FB.9) and where new code goes (F.14, FC.21, FC.22) | 5 | ~1,830 |
 | T8 | Stack Graphs-style incremental resolution, watch's body-only fast path, multi-repo watch, the watch memory budget (F.3) | 19 | ~7,080 |
-| T9 | build-target graphs (bazel), the first non-code domain | 6 | ~2,180 |
 
-The moved tracks' empty wave-0 slots ship in 0.5.4 untouched, reserved here (James 2026-10-30: kept rather than removed,
-since 0.5.5 starts straight away): build-domain/src/lib.rs, code-domain/src/goal.rs, engine/src/clarify/{answer,questions}.rs,
-engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs, engine/src/targets.rs, parsers/build/bazel/src/lib.rs,
-py/src/{clarify,goal,targets}.rs. The registry ids 0.5.4's F0.1 allocated for T6 (GOAL_UNIT 50, TRACES 38, UNIT 26) stay
-reserved too. 0.5.5's packets fill these slots; no new wave-0 is needed for them.
+Every prerequisite track these lean on shipped in 0.5.4 (T4 needs T2; T8 needs T2 and T5; FB.9 needs TS). T7's PR / issue
+intent (FC.19, FC.20) depends on T6's goal graph (FC.17b, FC.10, FC.18) and moves to 0.5.7 with it. T6's and T9's wave-0
+slots and registry ids (GOAL_UNIT 50, TRACES 38, UNIT 26) stay reserved, for 0.5.7.
 
-## 2. From the Sibyl cohort follow-up (2026-10-26, option 1: "C + D go to 0.5.5")
+Before a wave: the re-verify pass (`dev-notes/reverify_054.md`'s method) against the shipped `v0.5.5` tree, every packet
+`unchanged` / `rewritten` / `not-needed (<commit>)` / `blocked`, then a new id prefix and a `--release 056` schedule.
 
-- **C: per-repo calibrated inference as a repair loop**: detect -> hypothesise a mechanism from evidence (the overlay
-  loop, an LLM fallback) -> verify by numbers (pairing rises, the drift replay) -> absorb (a per-repo record; promoted to
-  an engine rule once it holds on several cohort repos). Record: `dev-notes/agent-ab-probe-0.5.4.md` §5.
-- **D: calibrated confidence per row**, measured on the cohort ("crime coefficient").
+## 2. The host-to-plugin graph (promised by 0.5.5)
 
-## 3. Proof (the original 0.5.5 row)
+0.5.5's §3 left these here, and the PR #3 reply promised the plugin families (Brian Ealdwine: *"Particularly glad about
+the plugin families being generally useful, that required some thought"*); link the work on glia PR #3 when it starts.
 
-Precision rate on real repos (T3's audit in 0.5.4 gives the baseline), agent before / after (0.5.4's harness and FH.13's
-probes), big-repo per-phase timings, calibrated confidence, `decide/` a-e, `glia judge`. Candidate after it: a RunPod
-rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
+- **One host-to-plugin mechanism**: PR #3's plugin families, manifests and LOADS, generalised (Neovim, Maki, VS Code
+  commands, Obsidian plugins, Flask blueprints, webpack plugins, editor and game hosts), its family table as the first
+  case. Any new id comes from `code-domain/src/lib.rs`'s next free (node 51 / edge 39 / cell 28), never PR #3's.
+- **It fills the use-pattern axis**: Lua's host_command, host_event and config_table (`none`) and host_callback,
+  embedded_script and script_entry (`partial`) are its targets; pattern rows for the other languages that are embedded or
+  plugin-shaped.
+- **Lua's remaining reach**: globals across files, `pcall` / `load` / `dofile` indirection, metatable `__call`
+  constructors, OpenResty's nginx-side routing (the embedded_script pattern).
 
-## 4. Raised in conversation, not yet specced
-
-- A Claude Code plugin packaging skills/, shaped by FH.13's agent-usage data (James 2026-10-24; ruled after 0.5.4).
-- The Rust-native install (`cargo install` / crates.io, GitHub-release binaries) beyond the PyPI `glia-cli` wheels.
-  James 2026-10-31, on why glia-cli is a PyPI package: *"okay sure go for it we will do the rust part later then"*:
-  glia-cli ships on PyPI with 0.5.4; the Rust channel comes later.
-- An image-embedding space for visual domains (2026-10-24; arrives with the first visual domain; VectorRow already fits).
-- The DPG explainer's future directions (LLM uplift of new graph features, biology-inspired ideas; 2026-10-24): only in
-  a chat paste so far; commit it as docs/dpg.md.
-- Close-out speed: per-step timestamps, then a faster rank gate (about 14 of a close-out's ~20 minutes).
-
-## 4b. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
-
-James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
-code but in 0.5.6 we are doing more graph work and stacking and domains soooo ... Maybe we will think if some way like
-port protocol number system to domain or something else like a domain then allocator number idk ... But yeah we should
-handle this at some point"*. `CONTRIBUTING.md` (0.5.5) states the current model: issues, fixtures, PRs read as designs
-and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph stacking and domains:
-
-- **Id allocation by domain, like port / protocol numbers.** The u32 id spaces (node kinds, edge categories, cell
-  types) split into blocks: a core block, one registered block per domain (code, build targets, goals, later visual
-  domains), and an experimental / private range that never ships, so a branch or a local domain can mint ids without
-  colliding and a release promotes them into the domain's block. An allocator (`glia ids alloc --domain <d>` or a
-  build-time check) hands out the next number in a block and fails CI on an overlap; the header registries a `.gmap`
-  already carries (LC.4) record which block each id came from. Old layouts keep decoding: allocated ids never move.
-- **Contribution seams that stay stable across a leap**: a parser crate behind the `detect_language` / `parse_one_with`
-  / build-group wiring, a fixture, a pattern cell; documented so a PR touching only a seam can merge.
-- **Gates a contributor can run**: a fast tier (minutes) for PRs, the full rank / cohort gates at release only.
-
-## 5. From 0.5.4's W20 follow-ups (James 2026-10-30: the precision extensions move here)
+## 3. From 0.5.4's W20 follow-ups (James 2026-10-30: the precision extensions move here)
 
 - Clients reached through class heritage: `this.get(url)` in a class extending an imported `APIService` / `HttpService` (the bulk of the remaining phantom_dropped: plane 43, chatwoot 128; FH.17b's handoff).
 - TS type references imported from another file (`import { Dto } from './types'; http.get<Dto>()`) as USES through import bindings, and abstract method signatures' type names (FH.20's handoff).
@@ -80,7 +56,8 @@ and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph 
 - gin-vue-admin: 131 of 196 endpoints pair; the 65 unpaired look like Go router-group prefixes not folded into the route path (checked 2026-10-30).
 - Dropped: a `nest_handler` rule name on Nest HANDLED_BY edges (cosmetic; the binding works through graph:refs).
 
-## 6. From 0.5.4's W21 follow-ups and the 2026-10-30 build profile
+
+## 4. From 0.5.4's W21 follow-ups and the 2026-10-30 build profile
 
 - TS EVM reader (DT.10c / DT.10j's shape): a method-name wrapper read the way Go's DT.10f does (a string parameter handed to `getFunction(..)` or viem's `functionName`), and an imported TypeChain / ethers contract instance followed across files. These are the 3 TS wrapper cases and the ts x generated-sdk case in the Sibyl evm matrix (FH.11c's handoff; FH.23 fixed the stale-ABI pairing only).
 - Build profile, the parts FH.21 leaves: on twenty, merge_parses + build_symbol_table + resolve_imports_ts stay serial (1.4 s); persist is serial (2 s). Profile one large Go and one large JVM repo the same way (per-second core samples + timestamped markers) before assuming they share twenty's shape.
@@ -95,3 +72,9 @@ and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph 
 - Wave agents never run the full rank or cohort gate (James 2026-10-30, at 0.5.4's finish: "everything will become part of 0.5.5"): measured agent time W21 109 / W22 285 / W23 60 / W24 15 / W25 367 min, W25's 86 min of it rank-gate runs in the shared tree, where a sibling's uncommitted edits were judged as FD.78's and FD.81 waited ~60 min on the gate lock; W26's FD.76 ran it again (14 min). The brief says: own tests, own fixtures and the debug CLI; the close-out owns the gates.
 - Re-run the edge-precision audit (scripts/edge-audit.sh, FD.3c's method) after FD.73-FD.81 and FD.76: the eight strata under floor at FD.3c are unmeasured since their fixes (FD.76 expects DEFINES_CONFIG|fact to lose the 10 C1 rows; FD.78 shrinks samples' strata).
 - Public-repo hygiene: engine/examples/rank_eval.rs names a function `kina_model` (a private repo's name, FZ.1's release check); rename it and re-take bench/edge-audit/samples/audit.jsonl, which pins it.
+
+## 5. Small
+
+- Close-out speed: per-step timestamps, then a faster rank gate (about 14 of a close-out's ~20 minutes).
+- The DPG explainer's future directions (LLM uplift of new graph features, biology-inspired ideas; 2026-10-24): only in
+  a chat paste so far; commit it as docs/dpg.md.

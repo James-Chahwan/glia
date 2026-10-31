@@ -1,0 +1,63 @@
+# glia 0.5.7 — the goal layer, build targets, proof and the id allocator (scope seed)
+
+**Born 2026-10-31**, split out of the 0.5.6 seed. James: *"Yeah that's probably better to make this 2 releases and then
+let's update and complete 0.5.6"*. 0.5.6 finishes the started work; this release takes the new capabilities. It starts
+after 0.5.6 ships.
+
+## 1. Tracks moved from 0.5.4 (already specced)
+
+The packets are in `dev-notes/leap-054-packets.json` with their corrections in `leap-054-corrections.json`; the track
+lists are in `dev-notes/wave-runner/tracks_054.py`. Each needs the re-verify pass against the shipped 0.5.6 tree.
+
+| track | what | packets | LOC at spec |
+|---|---|---|---|
+| T6 | goal-layer connector (§G) and the clarification queue (§C) | 21 | ~8,000 |
+| T7 (part) | PR / issue text as intent (F.15): FC.19's measured experiment, then FC.20 `glia review --pr` only on PASS | 2 | ~840 |
+| T9 | build-target graphs (bazel), the first non-code domain | 6 | ~2,180 |
+
+They fill the 16 wave-0 slots reserved since 0.5.4 (`Reserved for 0.5.7 (track T6|T9)`): build-domain/src/lib.rs,
+code-domain/src/goal.rs, engine/src/clarify/{answer,questions}.rs, engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs,
+engine/src/targets.rs, parsers/build/bazel/src/lib.rs, py/src/{clarify,goal,targets}.rs, and the registry ids 0.5.4's F0.1
+allocated for T6 (GOAL_UNIT 50, TRACES 38, UNIT 26).
+
+## 2. From the Sibyl cohort follow-up (2026-10-26, option 1: "C + D go to 0.5.5", now 0.5.7)
+
+- **C: per-repo calibrated inference as a repair loop**: detect -> hypothesise a mechanism from evidence (the overlay
+  loop, an LLM fallback) -> verify by numbers (pairing rises, the drift replay) -> absorb (a per-repo record; promoted to
+  an engine rule once it holds on several cohort repos). Record: `dev-notes/agent-ab-probe-0.5.4.md` §5.
+- **D: calibrated confidence per row**, measured on the cohort ("crime coefficient").
+
+## 3. Proof (the original 0.5.5 row)
+
+Precision rate on real repos (T3's audit in 0.5.4 gives the baseline), agent before / after (0.5.4's harness and FH.13's
+probes), big-repo per-phase timings, calibrated confidence, `decide/` a-e, `glia judge`. Candidate after it: a RunPod
+rerun of the SWE-bench Lite / latent-injection arms (James 2026-10-23).
+
+The agent before / after compares against `bench/agent-ab/results/0.5.4/baseline.json`; the edge precision against
+FD.3c's baseline and 0.5.6's re-run.
+
+## 4. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
+
+James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
+code but in 0.5.6 we are doing more graph work and stacking and domains soooo ... Maybe we will think if some way like
+port protocol number system to domain or something else like a domain then allocator number idk ... But yeah we should
+handle this at some point"*. `CONTRIBUTING.md` (0.5.5) states the current model: issues, fixtures, PRs read as designs
+and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph stacking and domains:
+
+- **Id allocation by domain, like port / protocol numbers.** The u32 id spaces (node kinds, edge categories, cell
+  types) split into blocks: a core block, one registered block per domain (code, build targets, goals, later visual
+  domains), and an experimental / private range that never ships, so a branch or a local domain can mint ids without
+  colliding and a release promotes them into the domain's block. An allocator (`glia ids alloc --domain <d>` or a
+  build-time check) hands out the next number in a block and fails CI on an overlap; the header registries a `.gmap`
+  already carries (LC.4) record which block each id came from. Old layouts keep decoding: allocated ids never move.
+- **Contribution seams that stay stable across a leap**: a parser crate behind the `detect_language` / `parse_one_with`
+  / build-group wiring, a fixture, a pattern cell; documented so a PR touching only a seam can merge.
+- **Gates a contributor can run**: a fast tier (minutes) for PRs, the full rank / cohort gates at release only.
+
+## 5. Distribution and later
+
+- A Claude Code plugin packaging skills/, shaped by FH.13's agent-usage data (James 2026-10-24; ruled after 0.5.4).
+- The Rust-native install (`cargo install` / crates.io, GitHub-release binaries) beyond the PyPI `glia-cli` wheels.
+  James 2026-10-31, on why glia-cli is a PyPI package: *"okay sure go for it we will do the rust part later then"*:
+  glia-cli ships on PyPI with 0.5.4; the Rust channel comes later.
+- An image-embedding space for visual domains (2026-10-24; arrives with the first visual domain; VectorRow already fits).

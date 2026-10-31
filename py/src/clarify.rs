@@ -5,4 +5,4 @@
 //! `inventory::submit!`), and creates `py/api_surface/clarify.txt` and
 //! `py/tests/surface/test_clarify.py`; FC.14 never edits `py/src/lib.rs`.
 //!
-//! Reserved for 0.5.6 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.

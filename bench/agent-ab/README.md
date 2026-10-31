@@ -295,7 +295,7 @@ meta's mtime).
 `fingerprints.prompt_sha256` match, then prints, per arm in both and per judged metric measured
 on a shared task, new - old over the shared tasks with the same bootstrap:
 `[agent-ab] compare arm=<a> metric=<m> diff=<d> ci=[lo,hi] verdict=<v>`. This is the call
-0.5.6's proof makes against `results/0.5.4/baseline.json`.
+0.5.7's proof makes against `results/0.5.4/baseline.json`.
 
 ## Cost
 
@@ -317,14 +317,14 @@ and FE.3 reports task-cluster bootstrap intervals rather than single numbers. Up
 can be rewritten: a bare clone keeps `end_rev` once fetched, and `check` fails loudly when it
 cannot resolve it.
 
-## The 0.5.6 baseline
+## The 0.5.7 baseline
 
 FE.4 runs the 0.5.4 matrix (run id `0.5.4`: the pilot's sessions are rep 1, then `run.py run
 --run-id 0.5.4`) and commits it scored, metrics only (no transcripts or patches, which quote
 third-party source; those stay under DIR):
 
 - `results/0.5.4/sessions.jsonl`: FE.3's `--out-sessions` rows, the input that reproduces the rest;
-- `results/0.5.4/baseline.json`: the 0.5.6 contract;
+- `results/0.5.4/baseline.json`: the 0.5.7 contract;
 - `dev-notes/agent-ab-0.5.4.md`: the report, with a short Reading section under it.
 
 They are written by
@@ -341,11 +341,11 @@ python3 score.py score --from-metrics results/0.5.4/sessions.jsonl --out-json /t
 cmp /tmp/b.json results/0.5.4/baseline.json
 ```
 
-0.5.6's proof runs the same tasks and prompt (`compare` refuses on a changed task file or
-prompt), scores its own run to `results/0.5.6/baseline.json`, and compares:
+0.5.7's proof runs the same tasks and prompt (`compare` refuses on a changed task file or
+prompt), scores its own run to `results/0.5.7/baseline.json`, and compares:
 
 ```
-python3 score.py compare results/0.5.4/baseline.json results/0.5.6/baseline.json
+python3 score.py compare results/0.5.4/baseline.json results/0.5.7/baseline.json
 ```
 
 one `[agent-ab] compare arm=<a> metric=<m> diff=<d> ci=[lo,hi] verdict=<v>` line per arm and

@@ -7,4 +7,4 @@
 //! `py/tests/surface/test_goal.py`; neither FC.7 nor FC.8 edits
 //! `py/src/lib.rs`.
 //!
-//! Reserved for 0.5.6 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.

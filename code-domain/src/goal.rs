@@ -5,4 +5,4 @@
 //! implements, requires), the key types the extractors read, the `UNIT` cell
 //! payload and its validation, and the namespaced unit qnames.
 //!
-//! Reserved for 0.5.6 (track T6); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.

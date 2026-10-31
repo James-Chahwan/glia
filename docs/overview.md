@@ -83,7 +83,7 @@ source files
 
 Workspace crates:
 - `core/`: `Node`, `Edge`, `QName`, `RepoId`, shared primitives.
-- `code-domain/`: code-specific registries (50 NodeKind, 38 EdgeCategory, 27 CellType IDs; 0.5.2 added SAME_AS, 0.5.4 IMPORT_BINDINGS and three ids reserved for 0.5.6's goal layer) and the code domain's profile tables, identity rules included.
+- `code-domain/`: code-specific registries (50 NodeKind, 38 EdgeCategory, 27 CellType IDs; 0.5.2 added SAME_AS, 0.5.4 IMPORT_BINDINGS and three ids reserved for 0.5.7's goal layer) and the code domain's profile tables, identity rules included.
 - `parsers/code/<lang>/`: one crate per language. `parsers/code/extractors/` for cross-cutting (gRPC, queues, WebSocket, EventBus, GraphQL, CLI, data-sources, data-entities, cron, config, IaC, packages, ts-routes, React, Angular and Angular templates, Vue, and the EVM contract clients for TypeScript and Go).
 - `graph/`: per-repo builder, MergedGraph, the 16 cross-graph resolvers (org-internal package routing included), the models pass (client / server contract models: wire shapes, pairs, drift) and the identity resolver, blast radius.
 - `engine/`: orchestration (walk, parse, build, passes, persist), every answer primitive, the rules layer over the code graph, identity collapse, the watch session, the rankings, boundary health and the query-time embedding tier. Used by `py/` and `cli/`.
@@ -94,7 +94,7 @@ Workspace crates:
 - `projection-text/`: dense sigil projection for LLM context.
 - `activation/`: Personalised PageRank (power iteration and push), the pass registry, the domain profile and the generic algorithms (reachability, levelled BFS, graph delta, SCC, communities, cuts, hubs, MinHash, identity classes and their quotient), all domain-agnostic.
 - `doc-sources/`: Confluence ingestion behind `glia docs`. `snapshots/`: the git-history, test-report and identifier-vocabulary snapshot writers. `stamp/`: the build identity that keys the parse cache.
-- `toy-domain/`: a test-only second domain proving the domain seam; never a dependency of a shipped crate. `build-domain/` and `parsers/build/bazel/` are empty slots reserved for 0.5.6's build-target graphs.
+- `toy-domain/`: a test-only second domain proving the domain seam; never a dependency of a shipped crate. `build-domain/` and `parsers/build/bazel/` are empty slots reserved for 0.5.7's build-target graphs.
 
 ## Compared to
 

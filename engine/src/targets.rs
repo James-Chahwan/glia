@@ -3,4 +3,4 @@
 //! `.glia/`), mapped onto the code graph's files. Reads a snapshot only: it
 //! never runs bazel and never refreshes the snapshot inside a build.
 //!
-//! Reserved for 0.5.6 (track T9); empty in 0.5.4.
+//! Reserved for 0.5.7 (track T9); empty in 0.5.4 to 0.5.6.
