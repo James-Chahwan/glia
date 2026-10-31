@@ -1,0 +1,27 @@
+{
+  "framework": "python-script-entry",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "script_entry",
+  "cells": [
+    "python/script_entry"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "tools::count_lines"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {
+      "kind": "MODULE",
+      "node": "tools::count_lines",
+      "cell": "ENTRYPOINT"
+    }
+  ],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.1): a standalone script run from a shell (#!/usr/bin/env python3, an `if __name__ == \"__main__\":` guard). Read since DT.5l (main guard): its MODULE carries an ENTRYPOINT cell {\"decl\":\"tools/count_lines.py:11\",\"source\":\"main_guard\"}. Passed at authoring (AUTHORING.md: a fixture that passes at once is a finding, reported by GH.1)."
+}

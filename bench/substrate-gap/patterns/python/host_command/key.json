@@ -1,0 +1,35 @@
+{
+  "framework": "python-host-command",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "host_command",
+  "cells": [
+    "python/host_command"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "seed-db"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "seed-db",
+      "to": "seed_db",
+      "category": "HANDLED_BY",
+      "note": "the command -> its decorated handler"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "count",
+      "max_nodes": 0,
+      "note": "a click.argument is no command"
+    }
+  ],
+  "note": "0.5.6 use pattern (GH.1): a Flask app registers a CLI command with its host (@app.cli.command on a click-decorated fn). Read since LA.20b (click); host_command here is the flask CLI host: one CLI_COMMAND HANDLED_BY the decorated function. Passed at authoring (AUTHORING.md: a fixture that passes at once is a finding, reported by GH.1)."
+}
