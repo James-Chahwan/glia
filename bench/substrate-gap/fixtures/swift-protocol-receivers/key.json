@@ -1,0 +1,17 @@
+{
+  "framework": "swift-protocol-receivers",
+  "language": "swift",
+  "dirs": ["."],
+  "note": "GD.15 (FD.47; seed D 'Swift protocol receivers', E W7 DF.21, W2 DH.20). Base 6b4dca1a: a protocol's requirements are no nodes (the parser skips `protocol_function_declaration`), Swift writes no heritage, a parameter typed `any Store` records no type, a call result types nothing, and a Vapor `use: self.index` is a SelfMethod ref from the ROUTE, which has no enclosing type. After: `Store::load` is a METHOD of the protocol; `run`'s `s.load()` binds it through the existential parameter, `chain`'s `makeStore().load()` and `held`'s `made.load()` through makeStore's `-> some Store` return; `Mem: Store` is IMPLEMENTS and its `load` implements the requirement; the route binds Ctl's own `index`.",
+  "expect_edges": [
+    {"from": "Sources::App::Use::run", "to": "Sources::App::Store::load", "category": "CALLS"},
+    {"from": "Sources::App::Use::chain", "to": "Sources::App::Store::load", "category": "CALLS"},
+    {"from": "Sources::App::Use::held", "to": "Sources::App::Store::load", "category": "CALLS"},
+    {"from": "Sources::App::Mem", "to": "Sources::App::Store", "category": "IMPLEMENTS"},
+    {"from": "Sources::App::Mem::load", "to": "Sources::App::Store::load", "category": "IMPLEMENTS"},
+    {"from": "GET /items", "to": "Sources::App::Ctl::index", "category": "HANDLED_BY"}
+  ],
+  "forbid": [
+    {"from": "Sources::App::Use::run", "to": "Sources::App::Mem::load", "category": "CALLS"}
+  ]
+}

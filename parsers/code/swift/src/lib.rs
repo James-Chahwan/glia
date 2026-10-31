@@ -27,7 +27,15 @@ pub fn parse_file(
     let src = source.as_bytes();
     let root = tree.root_node();
 
-    let mut acc = Acc::default();
+    let mut acc = Acc {
+        module: Some(NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::MODULE,
+            module_qname,
+        )),
+        ..Acc::default()
+    };
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -157,6 +165,18 @@ struct Acc {
     /// DT.5l: the `@main` / `@UIApplicationMain` / `@NSApplicationMain` types
     /// tagged ROLE COMPONENT in this file, for the `[swift-app]` marker.
     app_entries: usize,
+    /// GD.15: the file MODULE, the `from_module` of a heritage ref.
+    module: Option<NodeId>,
+    /// GD.15: the top-level protocols this file declares, so a class whose
+    /// first inherited type names one IMPLEMENTS it ([`heritage_category`]).
+    file_protocols: Vec<String>,
+    /// GD.15: protocol requirement METHODs already emitted by this file, so
+    /// an overload or a same-file protocol extension's default
+    /// implementation folds onto the requirement's node. Lookup only.
+    requirement_seen: HashSet<NodeId>,
+    /// GD.15: callables whose overloads declare different return types: no
+    /// return type is recorded for them. Lookup only.
+    return_conflict: HashSet<NodeId>,
 }
 
 /// LB.7c: a Swift type belongs to its MODULE (the target directory), not its
@@ -246,9 +266,13 @@ fn visit_top(
                 && !is_extension(child)
                 && let Some(name_node) = child.child_by_field_name("name")
             {
+                let kind = swift_type_kind(child);
+                if kind == node_kind::INTERFACE {
+                    acc.file_protocols.push(text_of(name_node, src).to_string());
+                }
                 declared.push(Declared {
                     name: text_of(name_node, src),
-                    kind: swift_type_kind(child),
+                    kind,
                     file_private: is_file_private(child, src),
                 });
             }
@@ -436,6 +460,8 @@ fn visit_type(
         acc.app_entries += 1;
     }
 
+    record_heritage(node, id, src, acc);
+
     // tree-sitter-swift 0.7 uses class_body / enum_class_body — find by suffix.
     let body = {
         let mut c = node.walk();
@@ -444,8 +470,9 @@ fn visit_type(
     };
     if let Some(body) = body {
         // CB.10: a protocol body's `init` / `subscript` are bodiless
-        // requirements (its funcs are `protocol_function_declaration`s, never
-        // minted), so members are read from class / enum / extension bodies.
+        // requirements, so members are read from class / enum / extension
+        // bodies; its funcs (`protocol_function_declaration`) are METHODs
+        // since GD.15 ([`visit_requirement`]).
         let members = body.kind() != "protocol_body";
         let owner = Owner {
             qname: &qname,
@@ -459,6 +486,7 @@ fn visit_type(
                 "function_declaration" => {
                     visit_method(child, src, file_rel, &qname, id, repo, acc);
                 }
+                "protocol_function_declaration" => visit_requirement(child, &owner, src, acc),
                 "class_declaration" => {
                     let nested_kind = swift_type_kind(child);
                     visit_type(child, src, file_rel, &qname, id, repo, nested_kind, acc);
@@ -486,6 +514,134 @@ fn visit_type(
         }
     }
     true
+}
+
+/// GD.15: a protocol's function requirement (`func load() -> String`) is
+/// the METHOD `<Protocol>::<name>`, DEFINES-child of the protocol, so a
+/// protocol-typed receiver's call has a node to bind (`interface_methods`)
+/// and a conforming type's same-named method pairs with it through
+/// method-level IMPLEMENTS. Its declared return type is recorded
+/// ([`record_return`]). Overloads, and a same-file protocol extension's
+/// default implementation ([`visit_method`]), fold onto one node.
+fn visit_requirement(node: TsNode, owner: &Owner, src: &[u8], acc: &mut Acc) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .map(|n| text_of(n, src))
+        .filter(|n| !n.is_empty())
+    else {
+        return;
+    };
+    let qname = format!("{}::{name}", owner.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, owner.repo, node_kind::METHOD, &qname);
+    let cells = entity_cells(&node, src, owner.file_rel);
+    acc.requirement_seen.insert(id);
+    if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == id) {
+        existing.cells.extend(cells);
+    } else {
+        acc.nodes.push(Node {
+            id,
+            repo: owner.repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: owner.id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::METHOD, Some(owner.id));
+    }
+    record_return(node, id, src, acc);
+}
+
+/// GD.15: one heritage ref per `inheritance_specifier` of the type
+/// declaration `node` (`class Mem: Base, Store`), from the type `id`, bound
+/// by the graph's heritage resolution. The category follows Swift's rules
+/// ([`heritage_category`]).
+fn record_heritage(node: TsNode, id: NodeId, src: &[u8], acc: &mut Acc) {
+    let Some(module) = acc.module else {
+        return;
+    };
+    let decl = node
+        .child_by_field_name("declaration_kind")
+        .map_or("", |k| k.kind());
+    let mut cursor = node.walk();
+    let specs: Vec<TsNode> = node
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "inheritance_specifier")
+        .collect();
+    for (i, spec) in specs.into_iter().enumerate() {
+        let Some(name) = spec
+            .child_by_field_name("inherits_from")
+            .and_then(|t| simple_type_name(t, src))
+        else {
+            continue;
+        };
+        let r = UnresolvedRef {
+            from: id,
+            from_module: module,
+            qualifier: CallQualifier::Bare(name.to_string()),
+            category: heritage_category(decl, i == 0, name, &acc.file_protocols),
+            line: line_at(spec),
+        };
+        if !acc.refs.contains(&r) {
+            acc.refs.push(r);
+        }
+    }
+}
+
+/// GD.15: the category of a Swift heritage clause entry. A protocol's
+/// entries are the protocols it refines: INHERITS_FROM (interface ->
+/// interface, LD.7a). A struct, enum, actor or extension can only conform to
+/// protocols: IMPLEMENTS. A class's entries after the first are protocols
+/// too (the superclass must come first); its first is its superclass unless
+/// this file declares that name a protocol (`protocols`), since Swift writes
+/// both alike.
+fn heritage_category(
+    decl: &str,
+    first: bool,
+    name: &str,
+    protocols: &[String],
+) -> glia_core::EdgeCategoryId {
+    match decl {
+        "protocol" => edge_category::INHERITS_FROM,
+        "class" if first && !protocols.iter().any(|p| p == name) => edge_category::INHERITS_FROM,
+        _ => edge_category::IMPLEMENTS,
+    }
+}
+
+/// GD.15: record the declared return type of the callable `decl` mints as
+/// `id` ([`type_text`] of the type after `->`, `any` / `some` kept), the
+/// Swift hook's chain typing (`makeStore().load()`). Overloads that declare
+/// different types record none.
+fn record_return(decl: TsNode, id: NodeId, src: &[u8], acc: &mut Acc) {
+    if acc.return_conflict.contains(&id) {
+        return;
+    }
+    let mut cursor = decl.walk();
+    let mut arrow = false;
+    let mut ty = None;
+    for child in decl.children(&mut cursor) {
+        if arrow && child.is_named() {
+            ty = type_text(child, src);
+            break;
+        }
+        arrow = child.kind() == "->";
+    }
+    let Some(ty) = ty else {
+        return;
+    };
+    match acc.nav.return_types.get(&id) {
+        Some(prev) if *prev != ty => {
+            acc.nav.return_types.remove(&id);
+            acc.return_conflict.insert(id);
+        }
+        Some(_) => {}
+        None => acc.nav.record_return_type(id, &ty),
+    }
 }
 
 /// CB.10: the type a member hangs off (its qname and node id), with the
@@ -600,13 +756,13 @@ fn record_stored_field_types(node: TsNode, owner: NodeId, src: &[u8], acc: &mut 
                 typed = true;
                 child
                     .child_by_field_name("name")
-                    .and_then(|t| simple_type_name(t, src))
+                    .and_then(|t| type_text(t, src))
             }
-            (Some("value"), _) if !typed => constructor_name(child, src),
+            (Some("value"), _) if !typed => constructor_name(child, src).map(str::to_string),
             _ => None,
         };
         if let (Some(name), Some(ty)) = (binding, ty) {
-            acc.nav.record_field_type(owner, name, ty);
+            acc.nav.record_field_type(owner, name, &ty);
             acc.members.fields += 1;
         }
         if !cursor.goto_next_sibling() {
@@ -632,6 +788,58 @@ fn simple_type_name<'a>(ty: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
                 .filter(|t| !t.is_empty())
         }
         "optional_type" => simple_type_name(ty.child_by_field_name("wrapped")?, src),
+        _ => None,
+    }
+}
+
+/// GD.15: the receiver type a declared type names: [`simple_type_name`],
+/// except that an existential `any P` or an opaque `some P` keeps its
+/// keyword (`"any Store"`), through `?` and one pair of parentheses
+/// (`(any EventMonitor)?`). The keyword keeps the generic receiver pass,
+/// which reads bare type names repo-wide, off it: the Swift hook binds it in
+/// the caller's own module (`graph::swift_scope`, its `existentials` count).
+fn type_text(ty: TsNode, src: &[u8]) -> Option<String> {
+    match ty.kind() {
+        "existential_type" | "opaque_type" => {
+            let keyword = if ty.kind() == "opaque_type" {
+                "some"
+            } else {
+                "any"
+            };
+            let mut cursor = ty.walk();
+            let inner = ty.named_children(&mut cursor).find(|c| c.is_named())?;
+            simple_type_name(inner, src).map(|t| format!("{keyword} {t}"))
+        }
+        "optional_type" => type_text(ty.child_by_field_name("wrapped")?, src),
+        "tuple_type" => {
+            let mut cursor = ty.walk();
+            let items: Vec<TsNode> = ty.named_children(&mut cursor).collect();
+            match items.as_slice() {
+                [only] if only.kind() == "tuple_type_item" => {
+                    type_text(only.child_by_field_name("element")?, src)
+                }
+                _ => None,
+            }
+        }
+        _ => simple_type_name(ty, src).map(str::to_string),
+    }
+}
+
+/// GD.15: a call chain as the Swift hook reads it: identifiers, `self`,
+/// member reads and calls with their arguments elided (`self.repo.make(x:
+/// 1).next()` -> `self.repo.make().next()`). `None` for any other expression
+/// (a subscript, a force unwrap, a literal, a closure callee).
+fn chain_text(node: TsNode, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "simple_identifier" => Some(text_of(node, src).to_string()).filter(|t| !t.is_empty()),
+        "self_expression" => Some("self".to_string()),
+        "navigation_expression" => {
+            let member = nav_member_name(node, src);
+            let target = node.child_by_field_name("target")?;
+            let ok = !member.is_empty() && member.chars().all(|c| c.is_alphanumeric() || c == '_');
+            ok.then(|| chain_text(target, src).map(|t| format!("{t}.{member}")))?
+        }
+        "call_expression" => chain_text(node.named_child(0)?, src).map(|c| format!("{c}()")),
         _ => None,
     }
 }
@@ -730,9 +938,9 @@ fn record_param(p: TsNode, scope: NodeId, src: &[u8], acc: &mut Acc) {
     };
     let ty = names
         .next()
-        .and_then(|t| simple_type_name(t, src))
-        .unwrap_or("");
-    record_local(scope, text_of(local, src), ty, acc);
+        .and_then(|t| type_text(t, src))
+        .unwrap_or_default();
+    record_local(scope, text_of(local, src), &ty, acc);
 }
 
 /// DF.3: the bindings of a local `let` / `var` (`let a: Store, b = Repo()`
@@ -842,9 +1050,8 @@ fn finish_condition_binding(
 fn annotated_type(annotation: TsNode, src: &[u8]) -> String {
     annotation
         .child_by_field_name("name")
-        .and_then(|t| simple_type_name(t, src))
-        .unwrap_or("")
-        .to_string()
+        .and_then(|t| type_text(t, src))
+        .unwrap_or_default()
 }
 
 /// DF.3: record a `let` / `var` binding [`record_property_locals`] closed;
@@ -887,7 +1094,10 @@ fn record_unknown_pattern(pattern: TsNode, bound: bool, scope: NodeId, src: &[u8
 /// - `Store(..)` ([`constructor_name`]) or `Store.init(..)`: `Store`;
 /// - `x as? Store` / `as!` / `as`: `Store`; `try` / `await` are peeled;
 /// - `self.repo` or a bare `repo`: [`alias_type`];
-/// - anything else (a call chain, a factory, a literal): `""`.
+/// - GD.15: any other call, a factory or a call chain: its [`chain_text`]
+///   (`makeStore()`, `Store.shared.make()`), typed by the Swift hook through
+///   the callees' return types;
+/// - anything else (a literal): `""`.
 fn local_value_type(value: TsNode, scope: NodeId, src: &[u8], nav: &CodeNav) -> String {
     match value.kind() {
         "try_expression" | "await_expression" => value
@@ -896,13 +1106,14 @@ fn local_value_type(value: TsNode, scope: NodeId, src: &[u8], nav: &CodeNav) -> 
             .unwrap_or_default(),
         "as_expression" => value
             .child_by_field_name("name")
-            .and_then(|t| simple_type_name(t, src))
-            .unwrap_or("")
-            .to_string(),
-        "call_expression" => constructor_name(value, src)
-            .or_else(|| init_call_type(value, src))
-            .unwrap_or("")
-            .to_string(),
+            .and_then(|t| type_text(t, src))
+            .unwrap_or_default(),
+        "call_expression" => {
+            match constructor_name(value, src).or_else(|| init_call_type(value, src)) {
+                Some(ty) => ty.to_string(),
+                None => chain_text(value, src).unwrap_or_default(),
+            }
+        }
         "simple_identifier" => alias_type(text_of(value, src), scope, nav),
         "navigation_expression" => {
             let target = value.child_by_field_name("target");
@@ -980,6 +1191,7 @@ fn visit_function(
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
+    record_return(node, id, src, acc);
 
     let body = node.child_by_field_name("body");
     record_local_types(node, body, id, src, acc);
@@ -1005,21 +1217,31 @@ fn visit_method(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
 
-    acc.nodes.push(Node {
-        id,
-        repo,
-        confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
-    });
-    acc.edges.push(Edge {
-        from: parent_id,
-        to: id,
-        category: edge_category::DEFINES,
-        confidence: Confidence::Strong,
-        cells: Vec::new(),
-    });
-    acc.nav
-        .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+    let cells = entity_cells(&node, src, file_rel);
+    // GD.15: a same-file protocol extension's default implementation of a
+    // requirement folds onto the requirement's METHOD.
+    if acc.requirement_seen.contains(&id)
+        && let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == id)
+    {
+        existing.cells.extend(cells);
+    } else {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+    }
+    record_return(node, id, src, acc);
 
     let body = node.child_by_field_name("body");
     record_local_types(node, body, id, src, acc);
@@ -1205,8 +1427,13 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> (CallQualifier, bool) {
                             base: target_text.to_string(),
                             name,
                         },
+                        // GD.15: a receiver chain holding a call is
+                        // written with its arguments elided
+                        // ([`chain_text`]), the form the Swift hook types.
                         _ => CallQualifier::ComplexReceiver {
-                            receiver: target_text.to_string(),
+                            receiver: chain_text(target, src)
+                                .filter(|c| c.contains("()"))
+                                .unwrap_or_else(|| target_text.to_string()),
                             name,
                         },
                     }
@@ -1402,6 +1629,9 @@ struct VaporCounts {
     routes: usize,
     handlers: usize,
     skipped: usize,
+    /// GD.15: the `use: self.m` / `Self.m` responders written as their
+    /// enclosing type's method (`Attribute { <Type>, m }`).
+    self_handlers: usize,
 }
 
 /// One `<x>.<verb>(..)` call of the tree, read as a Vapor registration
@@ -1433,10 +1663,14 @@ struct VaporCall {
 /// stay. A grouped builder (`users.get(":id", use: show)`) reads only its own
 /// components, so the group prefix is not joined. A `use:` naming a function
 /// (`getUser`), `self.m` or `<ident>.m` is a HANDLED_BY ref from the ROUTE,
-/// resolved by `build_swift` through the file MODULE's symbols first.
+/// resolved by `build_swift` through the file MODULE's symbols first. A ROUTE
+/// has no enclosing type, so (GD.15) a `self.m` / `Self.m` registered inside
+/// a type `T` (a controller's `boot(routes:)`, the common RouteCollection
+/// shape) is written `Attribute { T, m }`: the graph binds the registering
+/// module's own type's method (CA.5a's `type_method`).
 ///
 /// fired_on, on stderr, once per file with a registration or a skipped call:
-///   `[vapor-routes] routes=<n> handlers=<n> skipped=<n> path=<file>`
+///   `[vapor-routes] routes=<n> handlers=<n> skipped=<n> self_handlers=<s> path=<file>`
 fn scan_vapor_routes(
     root: TsNode,
     src: &[u8],
@@ -1447,12 +1681,20 @@ fn scan_vapor_routes(
 ) {
     let mut counts = VaporCounts::default();
     let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
+    // Each node with the name of the innermost type declaration around it.
+    let mut stack: Vec<(TsNode, Option<&str>)> = vec![(root, None)];
+    while let Some((n, owner)) = stack.pop() {
         if n.kind() == "call_expression"
-            && let Some(call) = vapor_call(n, src)
+            && let Some(mut call) = vapor_call(n, src)
             && !call.path.is_empty()
         {
+            if let (Some(CallQualifier::SelfMethod(m)), Some(ty)) = (&call.handler, owner) {
+                call.handler = Some(CallQualifier::Attribute {
+                    base: ty.to_string(),
+                    name: m.clone(),
+                });
+                counts.self_handlers += 1;
+            }
             if call.registers {
                 let route_name = format!("{} /{}", call.method, call.path);
                 let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
@@ -1477,15 +1719,25 @@ fn scan_vapor_routes(
                 counts.skipped += 1;
             }
         }
+        let owner = match n.kind() {
+            "class_declaration" => n
+                .child_by_field_name("name")
+                .and_then(|t| match t.kind() {
+                    "type_identifier" => Some(text_of(t, src)),
+                    _ => simple_type_name(t, src),
+                })
+                .filter(|t| !t.is_empty()),
+            _ => owner,
+        };
         // Reverse, so the stack pops the children in source order.
         let mut cursor = n.walk();
         let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev());
+        stack.extend(children.into_iter().rev().map(|c| (c, owner)));
     }
     if counts.routes + counts.skipped > 0 {
         eprintln!(
-            "[vapor-routes] routes={} handlers={} skipped={} path={file_rel}",
-            counts.routes, counts.handlers, counts.skipped
+            "[vapor-routes] routes={} handlers={} skipped={} self_handlers={} path={file_rel}",
+            counts.routes, counts.handlers, counts.skipped, counts.self_handlers
         );
     }
 }
@@ -2191,12 +2443,18 @@ struct TodoController: RouteCollection {
                 ),
                 (
                     "POST /todos".to_string(),
-                    CallQualifier::SelfMethod("create".into()),
+                    CallQualifier::Attribute {
+                        base: "TodoController".into(),
+                        name: "create".into()
+                    },
                     6
                 ),
                 (
                     "DELETE /todos/:todoID".to_string(),
-                    CallQualifier::SelfMethod("delete".into()),
+                    CallQualifier::Attribute {
+                        base: "TodoController".into(),
+                        name: "delete".into()
+                    },
                     7,
                 ),
             ]
@@ -2772,9 +3030,12 @@ func listOrders(base: String) {
             }\n";
         let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
         let unknown = [
-            "a1", "a2", "err", "i", "item", "lc", "pa", "pb", "sx", "twice", "v", "w",
+            "a1", "a2", "err", "i", "item", "pa", "pb", "sx", "twice", "v", "w",
         ];
-        let want: Vec<(&str, &str)> = unknown.iter().map(|n| (*n, "")).collect();
+        let mut want: Vec<(&str, &str)> = unknown.iter().map(|n| (*n, "")).collect();
+        // GD.15: a call's result is its chain text, typed by the Swift hook.
+        want.push(("lc", "make()"));
+        want.sort_unstable();
         assert_eq!(locals_of(&fp, node_kind::FUNCTION, "W::m"), pairs(&want));
     }
 
@@ -2804,7 +3065,7 @@ func listOrders(base: String) {
                 ("a", "Store"),
                 ("c", "Repo"),
                 ("e", "self.maybe"),
-                ("n", ""),
+                ("n", "it.next()"),
                 ("p", "Store"),
                 ("q", "Store"),
                 ("r", "self.repo"),
@@ -2883,5 +3144,175 @@ func listOrders(base: String) {
         .unwrap();
         assert_eq!(node_count(&other, init), 1);
         assert_eq!(other.nav.parent_of.get(&init), Some(&class));
+    }
+
+    // ---- GD.15: protocol requirements, heritage, existential / chain types ----
+
+    #[test]
+    fn protocol_requirements_are_methods() {
+        let source = "protocol Store: Base {\n\
+            func load() -> String\n\
+            func load(id: Int) -> String\n\
+            func save(_ x: Int) async throws -> any Store\n\
+            init(x: Int)\n\
+            }\n\
+            extension Store {\n\
+            func load() -> String { helper() }\n\
+            }\n";
+        let fp = parse_file(source, "Store.swift", "Store", repo()).unwrap();
+        let store = id(node_kind::INTERFACE, "Store");
+        let load = id(node_kind::METHOD, "Store::load");
+        let save = id(node_kind::METHOD, "Store::save");
+        assert_eq!(node_count(&fp, load), 1, "overloads and the default fold");
+        assert_eq!(
+            start_lines(&fp, load),
+            vec!["1", "2", "7"],
+            "each requirement's POSITION, then the default implementation's"
+        );
+        assert_eq!(node_count(&fp, save), 1);
+        let defines = |m: NodeId| {
+            fp.edges
+                .iter()
+                .filter(|e| e.from == store && e.to == m && e.category == edge_category::DEFINES)
+                .count()
+        };
+        assert_eq!((defines(load), defines(save)), (1, 1));
+        assert_eq!(fp.nav.parent_of.get(&save), Some(&store));
+        assert_eq!(
+            fp.nav.return_types.get(&load).map(String::as_str),
+            Some("String")
+        );
+        assert_eq!(
+            fp.nav.return_types.get(&save).map(String::as_str),
+            Some("any Store"),
+            "an existential return keeps its keyword"
+        );
+        let from_load: Vec<&CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == load)
+            .map(|c| &c.qualifier)
+            .collect();
+        assert_eq!(from_load, vec![&bare("helper")]);
+        assert_eq!(
+            node_count(&fp, id(node_kind::METHOD, "Store::init")),
+            0,
+            "an init requirement still mints nothing"
+        );
+    }
+
+    /// `(category, from type, supertype)` of every heritage ref.
+    fn heritage(fp: &FileParse) -> Vec<(&'static str, String, String)> {
+        fp.refs
+            .iter()
+            .filter(|r| {
+                r.category == edge_category::IMPLEMENTS
+                    || r.category == edge_category::INHERITS_FROM
+            })
+            .map(|r| {
+                let cat = if r.category == edge_category::IMPLEMENTS {
+                    "IMPLEMENTS"
+                } else {
+                    "INHERITS_FROM"
+                };
+                let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
+                let CallQualifier::Bare(to) = &r.qualifier else {
+                    panic!("{:?}", r.qualifier)
+                };
+                (cat, from, to.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heritage_follows_swift_rules() {
+        let source = "protocol Store: Base {}\n\
+            final class Mem: Store, Codable {}\n\
+            class Sub: Super, Store {}\n\
+            struct Box: Store {}\n\
+            enum Kind: String, Store {}\n\
+            extension Sub: Hashable {}\n";
+        let fp = parse_file(source, "Store.swift", "Store", repo()).unwrap();
+        let s = |c: &'static str, f: &str, t: &str| (c, f.to_string(), t.to_string());
+        assert_eq!(
+            heritage(&fp),
+            vec![
+                s("INHERITS_FROM", "Store", "Base"),
+                s("IMPLEMENTS", "Mem", "Store"),
+                s("IMPLEMENTS", "Mem", "Codable"),
+                s("INHERITS_FROM", "Sub", "Super"),
+                s("IMPLEMENTS", "Sub", "Store"),
+                s("IMPLEMENTS", "Box", "Store"),
+                s("IMPLEMENTS", "Kind", "String"),
+                s("IMPLEMENTS", "Kind", "Store"),
+                s("IMPLEMENTS", "Sub", "Hashable"),
+            ]
+        );
+    }
+
+    #[test]
+    fn existential_and_chain_types_are_recorded() {
+        let source = "final class Holder {\n\
+            var monitor: (any EventMonitor)?\n\
+            var plain: Repo?\n\
+            func run(s: any Store, t: some Store, u: (any Store)?) -> Repo? {\n\
+            let made = makeStore()\n\
+            let next = self.repo.make(x: 1).next()\n\
+            let typed: any Store = pick()\n\
+            _ = make(x: 1).load()\n\
+            return nil\n\
+            }\n\
+            }\n";
+        let fp = parse_file(source, "Holder.swift", "Holder", repo()).unwrap();
+        assert_eq!(
+            locals_of(&fp, node_kind::METHOD, "Holder::run"),
+            pairs(&[
+                ("made", "makeStore()"),
+                ("next", "self.repo.make().next()"),
+                ("s", "any Store"),
+                ("t", "some Store"),
+                ("typed", "any Store"),
+                ("u", "any Store"),
+            ])
+        );
+        let holder = id(node_kind::CLASS, "Holder");
+        let fields = &fp.nav.field_types[&holder];
+        assert_eq!(
+            fields.get("monitor").map(String::as_str),
+            Some("any EventMonitor")
+        );
+        assert_eq!(fields.get("plain").map(String::as_str), Some("Repo"));
+        assert_eq!(
+            fp.nav
+                .return_types
+                .get(&id(node_kind::METHOD, "Holder::run"))
+                .map(String::as_str),
+            Some("Repo")
+        );
+        let run = id(node_kind::METHOD, "Holder::run");
+        assert!(
+            fp.calls.iter().any(|c| c.from == run
+                && c.qualifier
+                    == CallQualifier::ComplexReceiver {
+                        receiver: "make()".into(),
+                        name: "load".into()
+                    }),
+            "a receiver chain holding a call elides its arguments"
+        );
+    }
+
+    #[test]
+    fn overloads_with_different_returns_record_none() {
+        let source = "func make() -> Store { Store() }\nfunc make(x: Int) -> Repo { Repo() }\n\
+            func same() -> Store { Store() }\nfunc same(x: Int) -> Store { Store() }\n";
+        let fp = parse_file(source, "f.swift", "f", repo()).unwrap();
+        let ret = |q: &str| {
+            fp.nav
+                .return_types
+                .get(&id(node_kind::FUNCTION, q))
+                .cloned()
+        };
+        assert_eq!(ret("f::make"), None);
+        assert_eq!(ret("f::same").as_deref(), Some("Store"));
     }
 }
