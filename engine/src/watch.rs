@@ -59,18 +59,41 @@
 //! hangs from moves only when a scan finds nothing, so a recorded value is
 //! never trusted past the last time all of them were checked.
 //!
+//! Several repos (GA.9). [`WatchSession::open_many`] holds one joint build
+//! of several roots, composed exactly as `generate_many` composes it: each
+//! root walked, the identities disambiguated against each other, one proto
+//! service set over every repo's files, each repo's DC.2 stages appended in
+//! argument order, one pass tail. [`WatchSession::apply`] routes each
+//! changed path to the one repo whose root holds it (roots never nest:
+//! `open_many` refuses nested or repeated roots); each repo with a named
+//! path re-reads or re-plans as above (durability is per repo), every other
+//! repo re-reads nothing and its stages run on its table's reads (its parse
+//! cache entries, memos and cached groups make it a cache hit throughout), so
+//! every update is a clean `generate_many` of the trees as the session read
+//! them. A moved joint service set is the `proto_services` full rebuild of
+//! every repo's groups; a re-read identity is disambiguated against every
+//! root again. In a multi-repo session `groups_rebuilt` entries read
+//! `<label>:<key>` and `WatchFiles` paths `<label>:<rel>`. Every repo's walk
+//! table, cache and group cache is held, and the memory budget covers the
+//! whole session.
+//!
 //! fired_on markers, on stderr:
 //! - `[watch] open repo=<label> files=<n> groups=<g> nodes=<N> edges=<E> took=<ms>`
 //!   once per [`WatchSession::open`]; `files` counts the walked sources and docs
-//!   the build read, `groups` the language groups.
+//!   the build read, `groups` the language groups. A multi-repo
+//!   [`WatchSession::open_many`] prints
+//!   `[watch] open repos=<n> repo=<l1,l2,..> files=<n> groups=<g> nodes=<N> edges=<E> took=<ms>`
+//!   (GA.9; `files` and `groups` summed over the repos).
 //! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> took=<ms> repo=<label>`
 //!   once per update that rebuilt (`k` the language groups rebuilt of the
-//!   plan's `g`, `>` counts moved nodes, `~` on edges the reconfidenced ones).
+//!   plan's `g`, `>` counts moved nodes, `~` on edges the reconfidenced ones);
+//!   GA.9: `repo=` lists the repos with named paths, comma-joined.
 //! - `[watch] noop repo=<label> paths=<n>` for an update that changed nothing
-//!   (`n` = the paths it was given), and `[watch] outside repo=<label> paths=<n>`
-//!   when some given paths do not lie under the root.
+//!   (`n` = the paths it was given; `repo=` the repos with named paths, or
+//!   every root when none had one), and `[watch] outside repo=<label> paths=<n>`
+//!   when some given paths lie under no root (`repo=` every root).
 //! - `[watch] poll files=<n> dirs=<d> watched=<w> changed=<c> racy=<k> took=<ms> repo=<label>`
-//!   once per [`WatchSession::changed_paths`] scan that found something: `n`
+//!   once per repo whose [`WatchSession::changed_paths`] scan found something: `n`
 //!   table entries, `d` directories and region roots and `w` watched inputs
 //!   checked, `c` paths reported, `k` checks the racy rule made (an entry
 //!   re-read, a listing or input fingerprinted, or one reported for want of
@@ -127,6 +150,7 @@ use glia_code_domain::snapshots::scip_dir;
 use glia_code_domain::walk_gating::{self, CONTROL_DIR, RepoIdentity, repo_identity};
 use glia_code_extractors::{grpc, migrations, packages};
 use glia_core::RepoId;
+use glia_graph::RepoGraph;
 use serde::Serialize;
 use twox_hash::XxHash64;
 
@@ -139,8 +163,8 @@ use crate::build::lang_build::{
 use crate::build::rpc_needles::RpcContext;
 use crate::build::timing::{self, BuildTimes, PhaseTimes};
 use crate::build::{
-    BuildOptions, Finished, GenerateResult, aux_graphs, finish_build, go_module_dirs,
-    go_modules_for,
+    BuildOptions, Finished, GenerateResult, aux_graphs, canonical_display, disambiguate,
+    finish_build, go_module_dirs, go_modules_for,
 };
 use crate::cache::{ParseCache, parse_fingerprint};
 use crate::calibrate::record::CALIBRATION_DIR;
@@ -356,9 +380,10 @@ pub struct WatchUpdate {
     pub phase_ms: WatchPhases,
 }
 
-/// One repo's build held open: see the module doc. Made by
-/// [`WatchSession::open`]; every field is private, so a new one is not a
-/// break.
+/// One repo's build, or several repos' joint build (GA.9), held open: see
+/// the module doc. Made by [`WatchSession::open`] or
+/// [`WatchSession::open_many`]; every field is private, so a new one is not
+/// a break.
 ///
 /// The session holds no lock on the repo. [`WatchSession::persist`] writes
 /// against the files on disk: CD.7c stores a CODE cell as a span only when its
@@ -366,16 +391,21 @@ pub struct WatchUpdate {
 ///
 /// The per-repo state (walk table, repo-level inputs, parse cache, group
 /// cache, watched inputs) lives in one `RepoWatch` per repo; the session
-/// holds the joint build, its `seq`, the racy watermark and the ranking
-/// cache. [`WatchSession::open`] makes exactly one repo, and nothing removes
-/// it.
+/// holds the joint build, its `seq`, the racy watermark, the build's proto
+/// service set and the ranking cache. [`WatchSession::open`] makes exactly
+/// one repo, [`WatchSession::open_many`] one per root, and nothing removes
+/// one.
 pub struct WatchSession {
-    /// The repos watched, in build order: exactly one, from
-    /// [`WatchSession::open`].
+    /// The repos watched, in build order (the roots' argument order): one
+    /// from [`WatchSession::open`], one per root from
+    /// [`WatchSession::open_many`].
     repos: Vec<RepoWatch>,
     opts: BuildOptions,
     result: GenerateResult,
     seq: u64,
+    /// The build's proto service set ([`proto_services_fp`]): the union over
+    /// every repo's walked files, as `generate_many` folds its `RpcContext`.
+    services_fp: u64,
     /// DC.7c: the racy rule's watermark: every record, directory listing and
     /// watched input of every repo was read, or stat'ed and found unchanged,
     /// at or after it. Set at open (before any read) and moved only by a scan
@@ -440,8 +470,11 @@ struct RepoWatch {
     regions: Vec<RegionAnchor>,
     roots: Vec<ProjectRoot>,
     setup: Setup,
-    /// The build's proto service set ([`proto_services_fp`]).
-    services_fp: u64,
+    /// GA.9: the root's own identity, before [`disambiguate`] suffixed a key
+    /// another root of the session shares (`setup.ident` is the
+    /// disambiguated one the build keys on); an update that re-reads no
+    /// identity path re-disambiguates from it.
+    ident_raw: RepoIdentity,
     cache: ParseCache,
     /// DC.7b: every language group's last pre-pass build whose fingerprint
     /// could be taken, in plan order; GA.12 evicts from it past the budget.
@@ -453,6 +486,10 @@ struct RepoWatch {
     /// index for index (`LanguageGraphs::keys`); the region / project / docs
     /// graphs follow them.
     graph_keys: Vec<&'static str>,
+    /// GA.9: how many graphs of `result.merged` this repo holds (language,
+    /// then region / project / docs); a repo's first graph index is the sum
+    /// of the counts of the repos before it.
+    graph_count: usize,
     /// DC.7c: every input a build reads besides the table ([`Input`]), by
     /// repo-relative path: its class and its stat as of the update that last
     /// read it (`None`: absent, or not a file). A class an update did not
@@ -605,11 +642,37 @@ struct Setup {
     glia_fp: u64,
 }
 
-/// The session's root, label and options, as the stages read them.
+/// One repo's root, label and options, as the stages read them, and the
+/// overlay text it parses in place of `.glia/overlay.toml`: `opts.overlay_text`
+/// for the session's first repo only, as `generate_many` hands it to its
+/// first path alone (GA.9).
 struct At<'a> {
     root: &'a Path,
     label: &'a str,
     opts: &'a BuildOptions,
+    overlay_text: Option<&'a str>,
+}
+
+impl<'a> At<'a> {
+    /// The stages' view of `repo`, the session's `slot`-th repo.
+    fn of(repo: &'a RepoWatch, slot: usize, opts: &'a BuildOptions) -> Self {
+        Self {
+            root: &repo.root,
+            label: &repo.label,
+            opts,
+            overlay_text: overlay_text_for(slot, opts),
+        }
+    }
+}
+
+/// The overlay text the `slot`-th repo of a build parses (`generate_many`'s
+/// rule): `opts.overlay_text` for slot 0, none for the rest.
+fn overlay_text_for(slot: usize, opts: &BuildOptions) -> Option<&str> {
+    if slot == 0 {
+        opts.overlay_text.as_deref()
+    } else {
+        None
+    }
 }
 
 /// The file table an update would commit, and its walk's output.
@@ -626,9 +689,27 @@ struct Tree {
     read: Duration,
 }
 
-/// One build through the DC.2 stages.
+/// One repo's input to a joint [`build`]: its tree and, when this update
+/// moved them, its repo-level inputs (`None`: the repo's committed
+/// [`Setup`]). `updated`: the tree came from this update's reads (a re-read
+/// or a re-plan), so it is committed after the build; otherwise it is the
+/// table as it stands ([`RepoWatch::current_tree`]) and nothing of it is.
+struct Work {
+    tree: Tree,
+    setup: Option<Setup>,
+    updated: bool,
+}
+
+/// One joint build through the DC.2 stages ([`build`]).
 struct Built {
     result: GenerateResult,
+    /// Per repo, in build order.
+    repos: Vec<RepoBuilt>,
+    times: BuildTimes,
+}
+
+/// One repo's part of a [`Built`].
+struct RepoBuilt {
     /// The plan's group keys, in plan order.
     groups: Vec<&'static str>,
     /// The keys of the groups built (not reused), in plan order.
@@ -637,8 +718,10 @@ struct Built {
     slots: Vec<Slot>,
     /// `LanguageGraphs::keys` of the build.
     graph_keys: Vec<&'static str>,
+    /// The graphs this repo added to the joint result (language, then
+    /// region / project / docs).
+    graphs: usize,
     phases: PhaseTimes,
-    times: BuildTimes,
     fingerprint: Duration,
     clone: Duration,
 }
@@ -664,24 +747,26 @@ impl Setup {
             c_includes,
             files_fp: paths_fp(files),
             config,
-            overlay_fp: overlay_fp(at.root, at.opts),
+            overlay_fp: overlay_fp(at),
             glia_fp: glia_inputs_fp(at.root),
         }
     }
 
-    /// The inputs for `tree`: the identity re-read when an identity path is
-    /// in `high`, the go modules and tsconfig aliases on a re-plan (they read
-    /// the project roots), the include roots on a re-plan or a changed file
-    /// list (they read the dirs that hold a C/C++ file), the overlay and the
-    /// `.glia` fingerprint when a `.glia` path is in `high`. The rest is kept.
-    fn refresh(&self, at: &At<'_>, tree: &Tree, high: &BTreeSet<&str>, replan: bool) -> Self {
-        let ident = if high.contains("identity") {
-            let ident = repo_identity(at.root);
-            repo_id_marker(&ident, at.label);
-            ident
-        } else {
-            self.ident.clone()
-        };
+    /// The inputs for `tree` under `ident` (the identity the session settled
+    /// for this repo: re-read when an identity path is in `high`, then
+    /// disambiguated against the session's other roots, GA.9): the go modules
+    /// and tsconfig aliases on a re-plan (they read the project roots), the
+    /// include roots on a re-plan or a changed file list (they read the dirs
+    /// that hold a C/C++ file), the overlay and the `.glia` fingerprint when a
+    /// `.glia` path is in `high`. The rest is kept.
+    fn refresh(
+        &self,
+        at: &At<'_>,
+        tree: &Tree,
+        high: &BTreeSet<&str>,
+        replan: bool,
+        ident: RepoIdentity,
+    ) -> Self {
         let repo = RepoId::from_canonical(&ident.key);
         let (go, ts_aliases) = if replan {
             (
@@ -700,7 +785,7 @@ impl Setup {
         let (config, overlay, glia) = if high.contains("glia_inputs") {
             (
                 load_config(at, repo),
-                overlay_fp(at.root, at.opts),
+                overlay_fp(at),
                 glia_inputs_fp(at.root),
             )
         } else {
@@ -719,6 +804,18 @@ impl Setup {
         }
     }
 
+    /// GA.9: these inputs under another identity `ident` (an untouched repo
+    /// whose disambiguated key moved with another root's identity). Nothing
+    /// else a build reads depends on the identity: the overlay config is the
+    /// root's file, the rest its tree.
+    fn reidentified(&self, ident: RepoIdentity) -> Self {
+        Self {
+            repo: RepoId::from_canonical(&ident.key),
+            ident,
+            ..self.clone()
+        }
+    }
+
     /// Whether every input a build reads is the same as `other`'s.
     /// `TsAliasSet` holds only strings and vecs, so its `Debug` is a pure
     /// function of its content.
@@ -733,57 +830,135 @@ impl Setup {
 }
 
 impl WatchSession {
-    /// Open a session on the repo at `root`: load its parse cache sidecar
-    /// once, plan and read the walk (with stat stamps), read the repo-level
-    /// inputs and run one build. Errs when `root` is not a directory.
+    /// Open a session on the repo at `root`: [`WatchSession::open_many`] of
+    /// that one root (GA.9): load its parse cache sidecar once, plan and read
+    /// the walk (with stat stamps), read the repo-level inputs and run one
+    /// build. Errs when `root` is not a directory.
     pub fn open(root: &str, opts: &BuildOptions) -> Result<Self, String> {
+        Self::open_many(&[root.to_string()], opts)
+    }
+
+    /// GA.9: open one session over the repos at `roots`, built exactly as
+    /// `generate_many` builds them. Per root, in argument order: its parse
+    /// cache sidecar loaded once, its walk planned and read (with stat
+    /// stamps) and its identity read; then the identities disambiguated
+    /// against each other (`build::disambiguate`, by each root's canonical
+    /// path), each root's repo-level inputs read (the first root parses
+    /// `opts.overlay_text` when it is set, every other root its own
+    /// `.glia/overlay.toml`, as `generate_many` hands the text to its first
+    /// path alone), and one build: each repo's DC.2 stages against the proto
+    /// service set of every repo's files, appended in argument order, then
+    /// one pass tail over all of them. The result's labels and roots are the
+    /// roots as given.
+    ///
+    /// A multi-repo session ([`WatchSession::roots`] holds more than one)
+    /// names each `WatchUpdate::groups_rebuilt` entry `<label>:<key>` and
+    /// each `WatchFiles` path `<label>:<rel>` (`label` the root as given);
+    /// a one-root session keeps the bare key and path.
+    ///
+    /// Errs when `roots` is empty, when a root is not a directory (unlike
+    /// `generate_many`, which builds the rest: a watch needs every repo), when
+    /// two roots are one directory, or when one root lies inside another after
+    /// canonicalisation (`nested watch roots: <inner> is inside <outer>`): a
+    /// clean `generate_many` reads the inner repo's files in both walks, which
+    /// routing each changed path to one repo cannot reproduce.
+    pub fn open_many(roots: &[String], opts: &BuildOptions) -> Result<Self, String> {
         let started = Instant::now();
         // DC.7c: before any read, so every record is newer than it.
         let scanned_at = SystemTime::now();
-        let root_path = PathBuf::from(root);
-        if !root_path.is_dir() {
+        if roots.is_empty() {
+            return Err("no watch roots".to_string());
+        }
+        if let Some(root) = roots.iter().find(|r| !Path::new(r).is_dir()) {
             return Err(format!("not a directory: {root}"));
         }
-        let mut cache = ParseCache::load(root);
-        let ident = repo_identity(&root_path);
-        repo_id_marker(&ident, root);
-        let walk_started = Instant::now();
-        let plan = plan_walk(&root_path);
-        let walk = walk_started.elapsed();
-        let read_started = Instant::now();
-        let ((files, regions, md, roots), records) = read_walk(&root_path, &plan, None, true);
-        let read = read_started.elapsed();
-        let at = At {
-            root: &root_path,
-            label: root,
-            opts,
+        check_roots(roots)?;
+        // Phase 1 (generate_many's): every root's cache, identity and walk.
+        let mut walked = Vec::with_capacity(roots.len());
+        for root in roots {
+            let root_path = PathBuf::from(root);
+            let cache = ParseCache::load(root);
+            let ident = repo_identity(&root_path);
+            let walk_started = Instant::now();
+            let plan = plan_walk(&root_path);
+            let walk = walk_started.elapsed();
+            let read_started = Instant::now();
+            let ((files, regions, md, project_roots), records) =
+                read_walk(&root_path, &plan, None, true);
+            let tree = Tree {
+                plan: None,
+                records: Vec::new(),
+                files,
+                md,
+                regions,
+                roots: project_roots,
+                changes: WatchFiles::default(),
+                walk,
+                read: read_started.elapsed(),
+            };
+            walked.push((root_path, cache, ident, plan, records, tree));
+        }
+        let raws: Vec<RepoIdentity> = walked.iter().map(|w| w.2.clone()).collect();
+        let paths: Vec<&Path> = walked.iter().map(|w| w.0.as_path()).collect();
+        let idents = settle_identities(&paths, raws);
+        let files: usize = walked.iter().map(|w| w.5.files.len() + w.5.md.len()).sum();
+        let mut repos = Vec::with_capacity(walked.len());
+        let mut works = Vec::with_capacity(walked.len());
+        for (slot, ((root_path, cache, ident_raw, plan, records, tree), ident)) in
+            walked.into_iter().zip(idents).enumerate()
+        {
+            let label = roots.get(slot).cloned().unwrap_or_default();
+            repo_id_marker(&ident, &label);
+            let at = At {
+                root: &root_path,
+                label: &label,
+                opts,
+                overlay_text: overlay_text_for(slot, opts),
+            };
+            let setup = Setup::read(&at, ident, &tree.files, &tree.roots);
+            repos.push(RepoWatch {
+                abs_roots: abs_roots(&root_path),
+                index: index_of(&records),
+                root: root_path,
+                label,
+                plan,
+                records,
+                regions: tree.regions.clone(),
+                roots: tree.roots.clone(),
+                setup,
+                ident_raw,
+                cache,
+                groups: Vec::new(),
+                group_count: 0,
+                graph_keys: Vec::new(),
+                graph_count: 0,
+                watched: BTreeMap::new(),
+                baselines: BTreeMap::new(),
+            });
+            works.push(Work {
+                tree,
+                setup: None,
+                updated: true,
+            });
+        }
+        let services_fp = proto_services_fp(works.iter().map(|w| w.tree.files.as_slice()));
+        let built = build(&mut repos, &mut works, opts, services_fp, started);
+        for (repo, part) in repos.iter_mut().zip(built.repos) {
+            repo.groups = refresh_groups(Vec::new(), part.slots, 0);
+            repo.group_count = part.groups.len();
+            repo.graph_keys = part.graph_keys;
+            repo.graph_count = part.graphs;
+            repo.refresh_watch(Consumed::ALL, BTreeMap::new());
+        }
+        let groups: usize = repos.iter().map(|r| r.group_count).sum();
+        let labels: Vec<&str> = repos.iter().map(|r| r.label.as_str()).collect();
+        let shape = if labels.len() > 1 {
+            format!("repos={} repo={}", labels.len(), labels.join(","))
+        } else {
+            format!("repo={}", labels.join(","))
         };
-        let setup = Setup::read(&at, ident, &files, &roots);
-        let services_fp = proto_services_fp(&files);
-        let walked = files.len() + md.len();
-        let mut tree = Tree {
-            plan: None,
-            records: Vec::new(),
-            files,
-            md,
-            regions,
-            roots,
-            changes: WatchFiles::default(),
-            walk,
-            read,
-        };
-        let built = build(
-            &at,
-            &setup,
-            &mut tree,
-            &mut cache,
-            &[],
-            services_fp,
-            started,
-        );
         eprintln!(
-            "[watch] open repo={root} files={walked} groups={} nodes={} edges={} took={}",
-            built.groups.len(),
+            "[watch] open {shape} files={files} groups={groups} nodes={} edges={} took={}",
             built.result.total_nodes,
             built.result.total_edges,
             timing::ms(started.elapsed())
@@ -793,30 +968,12 @@ impl WatchSession {
             &built.result.repo_roots,
             &built.result.repo_labels,
         ));
-        let mut repo = RepoWatch {
-            abs_roots: abs_roots(&root_path),
-            index: index_of(&records),
-            root: root_path,
-            label: root.to_string(),
-            plan,
-            records,
-            regions: tree.regions,
-            roots: tree.roots,
-            setup,
-            services_fp,
-            cache,
-            groups: refresh_groups(Vec::new(), built.slots, 0),
-            group_count: built.groups.len(),
-            graph_keys: built.graph_keys,
-            watched: BTreeMap::new(),
-            baselines: BTreeMap::new(),
-        };
-        repo.refresh_watch(Consumed::ALL, BTreeMap::new());
         let mut session = Self {
-            repos: vec![repo],
+            repos,
             opts: opts.clone(),
             result: built.result,
             seq: 0,
+            services_fp,
             scanned_at: Mutex::new(scanned_at),
             rank,
             budget: MemoryBudget::from_env(),
@@ -825,6 +982,11 @@ impl WatchSession {
         };
         session.enforce_budget();
         Ok(session)
+    }
+
+    /// GA.9: the session's roots as given, in build order.
+    pub fn roots(&self) -> Vec<&str> {
+        self.repos.iter().map(|r| r.label.as_str()).collect()
     }
 
     /// GA.12: bound the session's caches by `budget` from now on (module
@@ -917,8 +1079,11 @@ impl WatchSession {
     }
 
     /// Bring the session up to date with `changed`, the paths the caller saw
-    /// change (absolute under the root, or repo-relative). A path the caller
-    /// does not name is not re-read. Paths under `.glia/graph/` or
+    /// change (absolute under a root, or repo-relative). A path the caller
+    /// does not name is not re-read. GA.9: each absolute path goes to the one
+    /// repo whose root holds it (roots never nest, [`WatchSession::open_many`]);
+    /// a relative path is taken under the first root, as a one-root session
+    /// takes it. Paths under `.glia/graph/` or
     /// `.glia/calibration-snapshot/`, under a
     /// hard-skipped directory (`.git/`, but `.git/HEAD` and `.git/config`,
     /// `.idea/`, a nested `.glia/`, ...) and two or more levels below a
@@ -926,63 +1091,69 @@ impl WatchSession {
     /// graph. A direct entry of a region root re-plans (`gate_dir` decides
     /// the region from exactly those entries).
     ///
-    /// Re-plans when a path is High ([`durability`]), a known file is gone or
-    /// no longer a file, an unknown path exists, or a gone path is a directory
-    /// the walk knew (or held table entries); otherwise re-reads only the named
-    /// entries. When the table, the regions, the project roots and every
-    /// repo-level input are unchanged the update is a noop: no rows, `seq`
-    /// unchanged. Otherwise the tree is rebuilt, the located delta taken
-    /// against the previous graph, `seq` advanced and the freed heap trimmed
-    /// (`memory::release_freed_memory`). Errs when the root is no longer a
-    /// directory; state is committed only once an update succeeded, so an
-    /// error (or a panic an embedding app catches) leaves the previous state.
+    /// Per repo: re-plans when a path is High ([`durability`]), a known file
+    /// is gone or no longer a file, an unknown path exists, or a gone path is
+    /// a directory the walk knew (or held table entries); otherwise re-reads
+    /// only the named entries. When every repo's table, regions, project
+    /// roots and repo-level inputs are unchanged the update is a noop: no
+    /// rows, `seq` unchanged. Otherwise the joint tree is rebuilt (a repo with
+    /// no named path re-reads nothing: its stages run on its table's reads, a
+    /// cache hit throughout), the located delta taken against the previous
+    /// graph, `seq` advanced and the freed heap trimmed
+    /// (`memory::release_freed_memory`). A re-read identity is disambiguated
+    /// against every root again; any key that moved is the `identity` full
+    /// rebuild. Errs when a root is no longer a directory; state is committed
+    /// only once an update succeeded, so an error (or a panic an embedding
+    /// app catches) leaves the previous state.
     pub fn apply(&mut self, changed: &[PathBuf]) -> Result<WatchUpdate, String> {
         let started = Instant::now();
         let scanned = watermark(&self.scanned_at);
-        let Some(repo) = self.repos.first_mut() else {
+        if self.repos.is_empty() {
             return Err("watch session holds no repo".to_string());
-        };
-        if !repo.root.is_dir() {
+        }
+        if let Some(repo) = self.repos.iter().find(|r| !r.root.is_dir()) {
             return Err(format!("not a directory: {}", repo.label));
         }
-        let mut outside = 0usize;
-        let mut named = BTreeSet::new();
-        for p in changed {
-            match repo.rel_of(p) {
-                Some(rel) if !repo.dropped(&rel) => {
-                    named.insert(rel);
-                }
-                Some(_) => {}
-                None => outside += 1,
-            }
-        }
+        let (named, outside) = self.route(changed);
         if outside > 0 {
-            eprintln!("[watch] outside repo={} paths={outside}", repo.label);
+            eprintln!("[watch] outside repo={} paths={outside}", self.labels(None));
         }
-        let high: BTreeSet<&'static str> = named
+        let label = self.labels(Some(&named));
+        let highs: Vec<BTreeSet<&'static str>> = named
             .iter()
-            .filter_map(|rel| match durability(rel) {
-                Durability::High(why) => Some(why),
-                Durability::Low => None,
+            .map(|named| {
+                named
+                    .iter()
+                    .filter_map(|rel| match durability(rel) {
+                        Durability::High(why) => Some(why),
+                        Durability::Low => None,
+                    })
+                    .collect()
             })
             .collect();
-        let replan = !high.is_empty() || named.iter().any(|rel| repo.reshapes(rel));
-        // DC.7c: the baselines, before this update reads anything.
-        let captured = if named.is_empty() {
-            BTreeMap::new()
-        } else {
-            repo.capture(replan, scanned)
-        };
-        let tree = if named.is_empty() {
-            None
-        } else if replan {
-            Some(repo.replanned(&named))
-        } else {
-            repo.reread(&named)
-        };
-        let Some(mut tree) = tree else {
+        let mut replans = Vec::with_capacity(self.repos.len());
+        let mut captured = Vec::with_capacity(self.repos.len());
+        let mut trees: Vec<Option<Tree>> = Vec::with_capacity(self.repos.len());
+        for ((repo, named), high) in self.repos.iter_mut().zip(&named).zip(&highs) {
+            let replan = !high.is_empty() || named.iter().any(|rel| repo.reshapes(rel));
+            // DC.7c: the baselines, before this update reads anything.
+            captured.push(if named.is_empty() {
+                BTreeMap::new()
+            } else {
+                repo.capture(replan, scanned)
+            });
+            trees.push(if named.is_empty() {
+                None
+            } else if replan {
+                Some(repo.replanned(named))
+            } else {
+                repo.reread(named)
+            });
+            replans.push(replan);
+        }
+        if trees.iter().all(Option::is_none) {
             return Ok(noop_update(
-                &repo.label,
+                &label,
                 self.seq,
                 &self.result,
                 changed.len(),
@@ -990,31 +1161,94 @@ impl WatchSession {
                 Duration::ZERO,
                 Duration::ZERO,
             ));
+        }
+        // GA.9: the identities, re-read where an identity path changed and
+        // disambiguated against every root again.
+        let reread: Vec<bool> = trees
+            .iter()
+            .zip(&highs)
+            .map(|(tree, high)| tree.is_some() && high.contains("identity"))
+            .collect();
+        let raws: Vec<RepoIdentity> = self
+            .repos
+            .iter()
+            .zip(&reread)
+            .map(|(repo, &again)| {
+                if again {
+                    repo_identity(&repo.root)
+                } else {
+                    repo.ident_raw.clone()
+                }
+            })
+            .collect();
+        let idents: Vec<RepoIdentity> = if reread.contains(&true) {
+            let paths: Vec<&Path> = self.repos.iter().map(|r| r.root.as_path()).collect();
+            let idents = settle_identities(&paths, raws.clone());
+            for ((repo, ident), &again) in self.repos.iter().zip(&idents).zip(&reread) {
+                if again {
+                    repo_id_marker(ident, &repo.label);
+                }
+            }
+            idents
+        } else {
+            self.repos.iter().map(|r| r.setup.ident.clone()).collect()
         };
-        let at = At {
-            root: &repo.root,
-            label: &repo.label,
-            opts: &self.opts,
-        };
-        let setup = repo.setup.refresh(&at, &tree, &high, replan);
-        let consumed = Consumed {
-            walk: replan,
-            includes: replan || setup.files_fp != repo.setup.files_fp,
-            glia: high.contains("glia_inputs"),
-            identity: high.contains("identity"),
-        };
-        let unchanged = tree.changes.added.is_empty()
-            && tree.changes.modified.is_empty()
-            && tree.changes.removed.is_empty()
-            && tree.regions == repo.regions
-            && tree.roots == repo.roots
-            && setup.same_inputs(&repo.setup);
-        if unchanged {
-            let (walk, read) = (tree.walk, tree.read);
-            repo.commit_tree(tree, setup);
-            repo.refresh_watch(consumed, captured);
+        let mut setups: Vec<Option<Setup>> = Vec::with_capacity(self.repos.len());
+        let mut changed_repo = false;
+        for (slot, ((repo, tree), ident)) in self.repos.iter().zip(&trees).zip(idents).enumerate() {
+            let at = At::of(repo, slot, &self.opts);
+            let setup = match tree {
+                Some(tree) => {
+                    let setup = repo
+                        .setup
+                        .refresh(&at, tree, &highs[slot], replans[slot], ident);
+                    changed_repo |= !(tree.changes.added.is_empty()
+                        && tree.changes.modified.is_empty()
+                        && tree.changes.removed.is_empty()
+                        && tree.regions == repo.regions
+                        && tree.roots == repo.roots
+                        && setup.same_inputs(&repo.setup));
+                    Some(setup)
+                }
+                None if ident.key != repo.setup.ident.key => {
+                    changed_repo = true;
+                    Some(repo.setup.reidentified(ident))
+                }
+                None => None,
+            };
+            setups.push(setup);
+        }
+        let consumed: Vec<Consumed> = self
+            .repos
+            .iter()
+            .zip(&setups)
+            .enumerate()
+            .map(|(slot, (repo, setup))| Consumed {
+                walk: replans[slot],
+                includes: replans[slot]
+                    || setup
+                        .as_ref()
+                        .is_some_and(|s| s.files_fp != repo.setup.files_fp),
+                glia: highs[slot].contains("glia_inputs"),
+                identity: highs[slot].contains("identity"),
+            })
+            .collect();
+        if !changed_repo {
+            let (mut walk, mut read) = (Duration::ZERO, Duration::ZERO);
+            for (slot, (tree, setup)) in trees.into_iter().zip(setups).enumerate() {
+                let (Some(tree), Some(setup)) = (tree, setup) else {
+                    continue;
+                };
+                walk += tree.walk;
+                read += tree.read;
+                let Some(repo) = self.repos.get_mut(slot) else {
+                    continue;
+                };
+                repo.commit_tree(tree, setup);
+                repo.refresh_watch(consumed[slot], std::mem::take(&mut captured[slot]));
+            }
             return Ok(noop_update(
-                &repo.label,
+                &label,
                 self.seq,
                 &self.result,
                 changed.len(),
@@ -1023,14 +1257,42 @@ impl WatchSession {
                 read,
             ));
         }
-        let services_fp = proto_services_fp(&tree.files);
-        let full_rebuild = full_rebuild_reason(&repo.setup, &setup, repo.services_fp, services_fp);
+        let mut works: Vec<Work> = self
+            .repos
+            .iter()
+            .zip(trees)
+            .zip(setups)
+            .map(|((repo, tree), setup)| {
+                let updated = tree.is_some();
+                Work {
+                    tree: tree.unwrap_or_else(|| repo.current_tree()),
+                    setup,
+                    updated,
+                }
+            })
+            .collect();
+        let services_fp = proto_services_fp(works.iter().map(|w| w.tree.files.as_slice()));
+        // The first reason by kind (identity, go modules, overlay) over the
+        // repos, then the joint service set.
+        let reasons: Vec<&'static str> = self
+            .repos
+            .iter()
+            .zip(&works)
+            .filter_map(|(repo, w)| {
+                w.setup
+                    .as_ref()
+                    .and_then(|s| full_rebuild_reason(&repo.setup, s))
+            })
+            .collect();
+        let full_rebuild = REBUILD_REASONS
+            .into_iter()
+            .find(|r| reasons.contains(r))
+            .or_else(|| (services_fp != self.services_fp).then_some("proto_services"));
+        let multi = self.repos.len() > 1;
         let built = build(
-            &at,
-            &setup,
-            &mut tree,
-            &mut repo.cache,
-            &repo.groups,
+            &mut self.repos,
+            &mut works,
+            &self.opts,
             services_fp,
             started,
         );
@@ -1040,23 +1302,38 @@ impl WatchSession {
         // holds on a Low update; a High input (the overlay, `.glia`, a
         // manifest, ...) or a SCIP snapshot can move a clean graph after the
         // passes, so those take the full delta.
-        let scoped = high.is_empty() && full_rebuild.is_none() && !scip_dir(&repo.root).exists();
+        let scoped = highs.iter().all(BTreeSet::is_empty)
+            && full_rebuild.is_none()
+            && !self.repos.iter().any(|r| scip_dir(&r.root).exists());
         let rows = if scoped {
-            let scope = DeltaScope {
-                before: scope_side(
-                    &repo.graph_keys,
-                    self.result.merged.graphs.len(),
-                    &built.rebuilt,
-                    &built.graph_keys,
-                ),
-                after: scope_side(
-                    &built.graph_keys,
-                    built.result.merged.graphs.len(),
-                    &built.rebuilt,
-                    &repo.graph_keys,
-                ),
-                moves: !tree.changes.added.is_empty() || !tree.changes.removed.is_empty(),
+            let mut scope = DeltaScope {
+                before: BTreeSet::new(),
+                after: BTreeSet::new(),
+                moves: works.iter().any(|w| {
+                    !w.tree.changes.added.is_empty() || !w.tree.changes.removed.is_empty()
+                }),
             };
+            let (mut before_at, mut after_at) = (0usize, 0usize);
+            for (repo, part) in self.repos.iter().zip(&built.repos) {
+                let before = scope_side(
+                    &repo.graph_keys,
+                    repo.graph_count,
+                    &part.rebuilt,
+                    &part.graph_keys,
+                );
+                let after = scope_side(
+                    &part.graph_keys,
+                    part.graphs,
+                    &part.rebuilt,
+                    &repo.graph_keys,
+                );
+                scope
+                    .before
+                    .extend(before.into_iter().map(|i| i + before_at));
+                scope.after.extend(after.into_iter().map(|i| i + after_at));
+                before_at += repo.graph_count;
+                after_at += part.graphs;
+            }
             located_delta_scoped(&self.result.merged, &built.result.merged, &scope)
         } else {
             located_delta_counted(&self.result.merged, &built.result.merged, &[])
@@ -1064,23 +1341,70 @@ impl WatchSession {
         let delta = delta_started.elapsed();
         let Built {
             result,
-            groups,
-            rebuilt,
-            slots,
-            graph_keys,
-            phases,
+            repos: parts,
             times,
-            fingerprint,
-            clone,
         } = built;
-        let (walk, read) = (tree.walk, tree.read);
-        let changes = std::mem::take(&mut tree.changes);
-        repo.commit_tree(tree, setup);
-        repo.refresh_watch(consumed, captured);
-        repo.services_fp = services_fp;
-        repo.groups = refresh_groups(std::mem::take(&mut repo.groups), slots, self.seq + 1);
-        repo.group_count = groups.len();
-        repo.graph_keys = graph_keys;
+        let mut phases = PhaseTimes::default();
+        let (mut walk, mut read, mut fingerprint, mut clone) = (
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+        let mut files = WatchFiles::default();
+        let mut groups_rebuilt = Vec::new();
+        let mut groups = 0usize;
+        for (slot, ((repo, work), part)) in self.repos.iter_mut().zip(works).zip(parts).enumerate()
+        {
+            let Work {
+                mut tree,
+                setup,
+                updated,
+            } = work;
+            let tag = |s: &str| {
+                if multi {
+                    format!("{}:{s}", repo.label)
+                } else {
+                    s.to_string()
+                }
+            };
+            let changes = std::mem::take(&mut tree.changes);
+            files.added.extend(changes.added.iter().map(|s| tag(s)));
+            files
+                .modified
+                .extend(changes.modified.iter().map(|s| tag(s)));
+            files.removed.extend(changes.removed.iter().map(|s| tag(s)));
+            groups_rebuilt.extend(part.rebuilt.iter().map(|g| tag(g)));
+            walk += tree.walk;
+            read += tree.read;
+            phases.parse += part.phases.parse;
+            phases.const_scan += part.phases.const_scan;
+            phases.grafts += part.phases.grafts;
+            phases.language_build += part.phases.language_build;
+            fingerprint += part.fingerprint;
+            clone += part.clone;
+            groups += part.groups.len();
+            let stats = repo.cache.stats;
+            files.reparsed += stats.reparsed;
+            files.reused += stats.reused;
+            if updated {
+                if let Some(setup) = setup {
+                    repo.commit_tree(tree, setup);
+                }
+                repo.refresh_watch(consumed[slot], std::mem::take(&mut captured[slot]));
+            } else if let Some(setup) = setup {
+                repo.setup = setup;
+            }
+            if let Some(raw) = raws.get(slot) {
+                repo.ident_raw = raw.clone();
+            }
+            repo.groups =
+                refresh_groups(std::mem::take(&mut repo.groups), part.slots, self.seq + 1);
+            repo.group_count = part.groups.len();
+            repo.graph_keys = part.graph_keys;
+            repo.graph_count = part.graphs;
+        }
+        self.services_fp = services_fp;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
         self.rank = Arc::new(RankCache::new(
@@ -1089,15 +1413,10 @@ impl WatchSession {
             &self.result.repo_labels,
         ));
         crate::memory::release_freed_memory("watch_update");
-        let stats = repo.cache.stats;
         let update = WatchUpdate {
             seq: self.seq,
-            files: WatchFiles {
-                reparsed: stats.reparsed,
-                reused: stats.reused,
-                ..changes
-            },
-            groups_rebuilt: rebuilt.iter().map(|g| (*g).to_string()).collect(),
+            files,
+            groups_rebuilt,
             full_rebuild: full_rebuild.map(str::to_string),
             total_nodes: self.result.total_nodes,
             total_edges: self.result.total_edges,
@@ -1123,10 +1442,63 @@ impl WatchSession {
         };
         eprintln!(
             "{}",
-            update_marker(&update, groups.len(), started.elapsed(), &repo.label)
+            update_marker(&update, groups, started.elapsed(), &label)
         );
         self.enforce_budget();
         Ok(update)
+    }
+
+    /// GA.9: `changed` routed to the repos ([`WatchSession::apply`]): each
+    /// repo's named repo-relative paths (dropped ones left out), and the
+    /// count of paths under no root.
+    fn route(&self, changed: &[PathBuf]) -> (Vec<BTreeSet<String>>, usize) {
+        let mut named = vec![BTreeSet::new(); self.repos.len()];
+        let mut outside = 0usize;
+        for p in changed {
+            let hit = if p.is_absolute() {
+                self.repos
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, r)| r.rel_of(p).map(|rel| (i, rel)))
+            } else {
+                self.repos
+                    .first()
+                    .and_then(|r| r.rel_of(p))
+                    .map(|rel| (0, rel))
+            };
+            match hit {
+                Some((i, rel)) => {
+                    if let (Some(repo), Some(set)) = (self.repos.get(i), named.get_mut(i))
+                        && !repo.dropped(&rel)
+                    {
+                        set.insert(rel);
+                    }
+                }
+                None => outside += 1,
+            }
+        }
+        (named, outside)
+    }
+
+    /// GA.9: the `repo=` of a marker: the labels of the repos `named` holds
+    /// a path for, or every label when it holds none (or is `None`), in
+    /// build order, comma-joined. A one-root session's label either way.
+    fn labels(&self, named: Option<&[BTreeSet<String>]>) -> String {
+        let hit: Vec<&str> = match named {
+            Some(named) => self
+                .repos
+                .iter()
+                .zip(named)
+                .filter(|(_, n)| !n.is_empty())
+                .map(|(r, _)| r.label.as_str())
+                .collect(),
+            None => Vec::new(),
+        };
+        if hit.is_empty() {
+            self.roots().join(",")
+        } else {
+            hit.join(",")
+        }
     }
 
     /// The session's current build.
@@ -1150,12 +1522,19 @@ impl WatchSession {
         crate::persist::persist_result(&self.result, dir, "watch")
     }
 
-    /// Save the held parse cache beside the repo's layout
-    /// (`ParseCache::save`: written only when it changed, LC.11).
+    /// Save each repo's held parse cache beside that repo's layout
+    /// (`ParseCache::save`: written only when it changed, LC.11), in build
+    /// order. GA.9: every repo's is attempted; the first error is returned.
     pub fn save_cache(&self) -> std::io::Result<()> {
-        self.repos
-            .first()
-            .map_or(Ok(()), |repo| repo.cache.save(&repo.label))
+        let mut first = Ok(());
+        for repo in &self.repos {
+            if let Err(e) = repo.cache.save(&repo.label)
+                && first.is_ok()
+            {
+                first = Err(e);
+            }
+        }
+        first
     }
 
     /// Updates that rebuilt since [`WatchSession::open`] (0 right after it).
@@ -1169,34 +1548,43 @@ impl WatchSession {
     /// poll"), absolute (the root made absolute, joined with each
     /// repo-relative path; the root itself for its own directory), sorted
     /// and deduplicated. A path keeps being reported until an update reads
-    /// it, so a quiet scan is an empty one. A scan that finds nothing moves
-    /// the racy watermark to its start; one that finds something prints the
-    /// `[watch] poll` line.
+    /// it, so a quiet scan is an empty one. GA.9: every repo is scanned, in
+    /// build order. A scan that finds nothing in any repo moves the racy
+    /// watermark to the first repo scan's start; each repo whose scan finds
+    /// something prints its `[watch] poll` line.
     pub fn changed_paths(&self) -> Vec<PathBuf> {
-        let Some(repo) = self.repos.first() else {
-            return Vec::new();
-        };
-        let scan = repo.scan(self.scanned());
-        if scan.found.is_empty() {
-            let mut at = self
-                .scanned_at
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            *at = (*at).max(scan.started);
-            return Vec::new();
-        }
-        eprintln!("{}", poll_marker(&scan, &repo.label));
-        let base = repo.abs_roots.first().unwrap_or(&repo.root);
-        scan.found
-            .iter()
-            .map(|rel| {
+        let scanned = self.scanned();
+        let mut out = Vec::new();
+        let mut first_start: Option<SystemTime> = None;
+        for repo in &self.repos {
+            let scan = repo.scan(scanned);
+            first_start.get_or_insert(scan.started);
+            if scan.found.is_empty() {
+                continue;
+            }
+            eprintln!("{}", poll_marker(&scan, &repo.label));
+            let base = repo.abs_roots.first().unwrap_or(&repo.root);
+            out.extend(scan.found.iter().map(|rel| {
                 if rel.is_empty() {
                     base.clone()
                 } else {
                     base.join(rel)
                 }
-            })
-            .collect()
+            }));
+        }
+        if out.is_empty() {
+            if let Some(started) = first_start {
+                let mut at = self
+                    .scanned_at
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                *at = (*at).max(started);
+            }
+            return out;
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// DC.7c: [`WatchSession::changed_paths`], then [`WatchSession::apply`]
@@ -1415,6 +1803,35 @@ impl RepoWatch {
             changes,
             walk,
             read: read_started.elapsed(),
+        }
+    }
+
+    /// GA.9: the tree as the table holds it, for a repo with no named path
+    /// in an update that rebuilds: the walk's fold over the plan with every
+    /// entry's recorded read reused (no file is read; the fold's lines
+    /// print). Never committed, so every record keeps its stamp.
+    fn current_tree(&self) -> Tree {
+        let started = Instant::now();
+        let (records, index) = (&self.records, &self.index);
+        let reuse = |p: &Pending| -> Option<Read> {
+            index
+                .get(&p.rel)
+                .and_then(|&i| records.get(i))
+                .map(|r| r.read.clone())
+        };
+        let reuse: &Reuse<'_> = &reuse;
+        let ((files, regions, md, roots), _) =
+            read_walk(&self.root, &self.plan, Some(reuse), false);
+        Tree {
+            plan: None,
+            records: Vec::new(),
+            files,
+            md,
+            regions,
+            roots,
+            changes: WatchFiles::default(),
+            walk: Duration::ZERO,
+            read: started.elapsed(),
         }
     }
 
@@ -1704,42 +2121,132 @@ fn noop_update(
     }
 }
 
-/// One build of `tree` through the DC.2 stages, composed exactly as
-/// `generate_one_inner` composes them (`build_graphs_for_repo`, then the
-/// region / project / docs graphs and `finish_build`, whose pass context is
-/// `CodeBuildCtx::new(inputs, opts)`), with `cache` held, and (DC.7b) each
-/// language group whose fingerprint matches its entry of `cached` taken from
-/// a clone of that entry's build instead of built. `services_fp` is the
-/// build's proto service set ([`proto_services_fp`]). Prints the `[timing]
-/// repo=` and `[timing] build` lines. Takes `tree.md`.
+/// One build of every repo's `Work` through the DC.2 stages, composed exactly
+/// as `generate_many` composes them (`assemble_many_with`'s phase 2, then
+/// `finish_build`): one proto service set from every repo's files, in build
+/// order; per repo ([`build_repo`]) its stages with its cache held, its
+/// language graphs, then its region / project / docs graphs, appended in
+/// build order with their fills aligned; then one pass tail over all of
+/// them, whose inputs are one `RepoInputs` per repo. `services_fp` is that
+/// service set's fingerprint ([`proto_services_fp`]). The result's labels
+/// are `arch::repo_label_map` over each repo's (RepoId, label), its roots
+/// first-wins, its parse errors concatenated in build order. A single repo
+/// is exactly `generate_one_inner`'s composition. Prints each repo's
+/// `[timing] repo=` line and the `[timing] build` line. Takes every
+/// `tree.md`.
 fn build(
+    repos: &mut [RepoWatch],
+    works: &mut [Work],
+    opts: &BuildOptions,
+    services_fp: u64,
+    started: Instant,
+) -> Built {
+    let mut rpc = RpcContext::default();
+    for w in works.iter() {
+        rpc.add_files(&w.tree.files);
+    }
+    let count = repos.len();
+    let mut graphs = Vec::new();
+    let mut fills: Vec<Option<GroupFill>> = Vec::new();
+    let mut parse_errors = Vec::new();
+    let mut inputs = Vec::with_capacity(count);
+    let mut label_inputs: Vec<(u64, String)> = Vec::with_capacity(count);
+    let mut repo_roots: BTreeMap<u64, String> = BTreeMap::new();
+    let mut parts = Vec::with_capacity(count);
+    for (slot, (repo, work)) in repos.iter_mut().zip(works.iter_mut()).enumerate() {
+        let RepoWatch {
+            root,
+            label,
+            setup,
+            cache,
+            groups,
+            ..
+        } = repo;
+        let at = At {
+            root: root.as_path(),
+            label: label.as_str(),
+            opts,
+            overlay_text: overlay_text_for(slot, opts),
+        };
+        let setup = work.setup.as_ref().unwrap_or(setup);
+        let stage = build_repo(&at, setup, &mut work.tree, cache, groups, services_fp, &rpc);
+        label_inputs.push((setup.repo.0, at.label.to_string()));
+        // First root wins, like `repo_label_map` (disambiguated keys never
+        // repeat; a repeat is one repo given twice, which open refuses).
+        repo_roots
+            .entry(setup.repo.0)
+            .or_insert_with(|| at.label.to_string());
+        parts.push(stage.part);
+        graphs.extend(stage.graphs);
+        fills.extend(stage.fills);
+        parse_errors.extend(stage.parse_errors);
+        inputs.push(stage.input);
+    }
+    let Finished {
+        merged,
+        total_nodes,
+        total_edges,
+        times,
+    } = finish_build(graphs, fills, inputs, opts, count, started);
+    eprintln!("{}", times.marker());
+    parse_errors.shrink_to_fit();
+    Built {
+        result: GenerateResult {
+            merged,
+            total_nodes,
+            total_edges,
+            parse_errors,
+            repo_labels: crate::arch::repo_label_map(&label_inputs),
+            repo_roots,
+        },
+        repos: parts,
+        times,
+    }
+}
+
+/// One repo's stages ([`build`]): what it adds to the joint build, in order.
+struct RepoStage {
+    part: RepoBuilt,
+    /// Its language graphs, then its region / project / docs graphs.
+    graphs: Vec<RepoGraph>,
+    /// Aligned with `graphs`: `Some` for a language graph, `None` after.
+    fills: Vec<Option<GroupFill>>,
+    parse_errors: Vec<String>,
+    input: RepoInputs,
+}
+
+/// One repo's DC.2 stages for [`build`]: `parse_and_graft` against the
+/// build's `rpc` with `cache` held, then plan / fingerprint / reuse / build /
+/// fold the groups (DC.7b: each language group whose fingerprint matches its
+/// entry of `cached` taken from a clone of that entry's build instead of
+/// built), the per-repo markers and the region / project / docs graphs.
+/// Prints its `[timing] repo=` line. Takes `tree.md`.
+fn build_repo(
     at: &At<'_>,
     setup: &Setup,
     tree: &mut Tree,
     cache: &mut ParseCache,
     cached: &[CachedGroup],
     services_fp: u64,
-    started: Instant,
-) -> Built {
+    rpc: &RpcContext,
+) -> RepoStage {
     let (root, label, opts) = (at.root, at.label, at.opts);
     cache.validate_context(&setup.ident.key, &setup.go.context_key());
-    let mut rpc = RpcContext::default();
-    rpc.add_files(&tree.files);
-    let inputs = vec![RepoInputs {
+    let input = RepoInputs {
         repo: setup.repo,
         root: root.to_path_buf(),
         label: label.to_string(),
         config: setup.config.clone(),
-    }];
+    };
     let ctx = RepoBuildCtx {
         repo: setup.repo,
         repo_label: label,
         go: &setup.go,
         ts_aliases: &setup.ts_aliases,
         c_includes: &setup.c_includes,
-        rpc: &rpc,
+        rpc,
         roots: &tree.roots,
-        config: inputs.first().and_then(|i| i.config.as_ref()),
+        config: input.config.as_ref(),
         opts,
     };
     let mut g = parse_and_graft(&tree.files, Some(cache), &ctx);
@@ -1803,32 +2310,21 @@ fn build(
     ));
     fills.resize_with(graphs.len(), || None);
     eprintln!("{}", g.times.repo_marker(label));
-    let Finished {
-        merged,
-        total_nodes,
-        total_edges,
-        times,
-    } = finish_build(graphs, fills, inputs, opts, 1, started);
-    eprintln!("{}", times.marker());
-    let mut parse_errors = g.parse_errors;
-    parse_errors.shrink_to_fit();
-    Built {
-        result: GenerateResult {
-            merged,
-            total_nodes,
-            total_edges,
-            parse_errors,
-            repo_labels: crate::arch::repo_label_map(&[(setup.repo.0, label.to_string())]),
-            repo_roots: BTreeMap::from([(setup.repo.0, label.to_string())]),
+    RepoStage {
+        part: RepoBuilt {
+            groups: keys,
+            rebuilt,
+            slots,
+            graph_keys,
+            graphs: graphs.len(),
+            phases: g.times,
+            fingerprint,
+            clone,
         },
-        groups: keys,
-        rebuilt,
-        slots,
-        graph_keys,
-        phases: g.times,
-        times,
-        fingerprint,
-        clone,
+        graphs,
+        fills,
+        parse_errors: g.parse_errors,
+        input,
     }
 }
 
@@ -2007,32 +2503,68 @@ fn load_config(at: &At<'_>, repo: RepoId) -> Option<LoadedConfig> {
         repo,
         at.root.to_path_buf(),
         at.label.to_string(),
-        at.opts.overlay_text.as_deref(),
+        at.overlay_text,
     )
     .config
 }
 
-/// The reason an update counts as a full rebuild: the identity key moved
-/// (every NodeId re-keys), the go module context moved (the parse cache
-/// discards every parse), the overlay moved, or the proto service set moved
-/// (every gRPC needle re-runs).
-fn full_rebuild_reason(
-    before: &Setup,
-    after: &Setup,
-    services_before: u64,
-    services_after: u64,
-) -> Option<&'static str> {
+/// The per-repo full-rebuild reasons, in the order an update reports the
+/// first one found over its repos ([`full_rebuild_reason`]); a moved joint
+/// proto service set (`proto_services`) comes after all of them.
+const REBUILD_REASONS: [&str; 3] = ["identity", "go_modules", "overlay"];
+
+/// The reason a repo's update counts as a full rebuild: the identity key
+/// moved (every NodeId re-keys), the go module context moved (the parse
+/// cache discards every parse) or the overlay moved. The build-wide reason,
+/// the proto service set moving (every gRPC needle re-runs), is the
+/// caller's ([`WatchSession::apply`]).
+fn full_rebuild_reason(before: &Setup, after: &Setup) -> Option<&'static str> {
     if before.ident.key != after.ident.key {
         Some("identity")
     } else if before.go.context_key() != after.go.context_key() {
         Some("go_modules")
     } else if before.overlay_fp != after.overlay_fp {
         Some("overlay")
-    } else if services_before != services_after {
-        Some("proto_services")
     } else {
         None
     }
+}
+
+/// GA.9: refuse roots one session cannot route between: two that are one
+/// directory, or one inside another, compared by canonical path (a root
+/// that cannot be canonicalised is compared as given).
+fn check_roots(roots: &[String]) -> Result<(), String> {
+    let canon: Vec<PathBuf> = roots
+        .iter()
+        .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| PathBuf::from(r)))
+        .collect();
+    for (i, (outer, a)) in roots.iter().zip(&canon).enumerate() {
+        for (inner, b) in roots.iter().zip(&canon).skip(i + 1) {
+            if a == b {
+                return Err(format!(
+                    "duplicate watch roots: {outer} and {inner} are one directory"
+                ));
+            }
+            if b.starts_with(a) {
+                return Err(format!("nested watch roots: {inner} is inside {outer}"));
+            }
+            if a.starts_with(b) {
+                return Err(format!("nested watch roots: {outer} is inside {inner}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// GA.9: the build identities of `raws` (each root's own, in build order),
+/// disambiguated as `generate_many` disambiguates them (`build::disambiguate`
+/// over each root's canonical path); prints its collision lines.
+fn settle_identities(roots: &[&Path], mut raws: Vec<RepoIdentity>) -> Vec<RepoIdentity> {
+    let abs: Vec<String> = roots.iter().map(|r| canonical_display(r)).collect();
+    for line in disambiguate(&mut raws, &abs) {
+        eprintln!("{line}");
+    }
+    raws
 }
 
 /// The table entries added, modified (class or read) and removed between
@@ -2101,11 +2633,13 @@ fn paths_fp(files: &[(String, String)]) -> u64 {
     h.finish()
 }
 
-/// The build's proto service set, as `RpcContext::add_files` folds it
-/// (sorted, deduplicated), fingerprinted as the DC.4 needle memo keys it.
-fn proto_services_fp(files: &[(String, String)]) -> u64 {
-    let mut services: Vec<grpc::ProtoServiceRef> = files
-        .iter()
+/// The build's proto service set over every repo's walked files, as
+/// `RpcContext::add_files` folds it (sorted, deduplicated), fingerprinted as
+/// the DC.4 needle memo keys it.
+fn proto_services_fp<'a>(repos: impl IntoIterator<Item = &'a [(String, String)]>) -> u64 {
+    let mut services: Vec<grpc::ProtoServiceRef> = repos
+        .into_iter()
+        .flatten()
         .filter(|(path, _)| detect_language(path) == Some("proto"))
         .flat_map(|(_, source)| grpc::proto_service_refs(source))
         .collect();
@@ -2114,12 +2648,14 @@ fn proto_services_fp(files: &[(String, String)]) -> u64 {
     crate::build::memo::services_fp(&services)
 }
 
-/// xxh64 of `opts.overlay` and the overlay the build reads: the given text,
-/// or `.glia/overlay.toml`'s bytes (a missing file apart from an empty one).
-fn overlay_fp(root: &Path, opts: &BuildOptions) -> u64 {
+/// xxh64 of `opts.overlay` and the overlay the repo's build reads: its given
+/// text ([`At::overlay_text`]), or `.glia/overlay.toml`'s bytes (a missing
+/// file apart from an empty one).
+fn overlay_fp(at: &At<'_>) -> u64 {
+    let root = at.root;
     let mut h = XxHash64::with_seed(0);
-    h.write_u8(u8::from(opts.overlay));
-    match &opts.overlay_text {
+    h.write_u8(u8::from(at.opts.overlay));
+    match at.overlay_text {
         Some(text) => {
             h.write_u8(2);
             h.write(text.as_bytes());
@@ -2334,7 +2870,6 @@ fn poll_marker(scan: &Scan, label: &str) -> String {
     )
 }
 
-/// The `[watch] update` line (module doc).
 /// GA.12: `repo`'s `[watch] rss` line (module doc): `evicted` groups and
 /// `memo_cleared` by the enforcement that just ran.
 fn rss_marker(
@@ -2357,6 +2892,9 @@ fn rss_marker(
     )
 }
 
+/// The `[watch] update` line (module doc): `groups` the plans' language
+/// groups summed over the repos, `label` the repos with named paths
+/// (GA.9, comma-joined).
 fn update_marker(u: &WatchUpdate, groups: usize, took: Duration, label: &str) -> String {
     let c = &u.counts;
     format!(
@@ -3528,6 +4066,242 @@ mod tests {
             );
         }
         std::fs::write(&path, &original).unwrap();
+    }
+
+    /// GA.9: two repos under one directory name (`one/app`, `two/app`), so
+    /// their dir identities share a key and are disambiguated by path: a
+    /// proto-owning server (python, go, `api/greet.proto`) and a Go gRPC
+    /// client of its service with no proto of its own, plus python.
+    fn two_repos(tmp: &Path) -> (PathBuf, PathBuf) {
+        let server = tmp.join("one").join("app");
+        write(
+            &server,
+            "a.py",
+            "def foo():\n    return bar()\n\ndef bar():\n    return 1\n",
+        );
+        write(&server, "go.mod", "module example.com/server\n");
+        write(
+            &server,
+            "m.go",
+            "package m\n\nfunc F() int { return G() }\n\nfunc G() int { return 1 }\n",
+        );
+        write(&server, "api/greet.proto", &proto(""));
+        let client = tmp.join("two").join("app");
+        write(&client, "go.mod", "module example.com/client\n");
+        write(
+            &client,
+            "client.go",
+            "package main\n\nimport (\n\t\"context\"\n\n\tpb \"example.com/gen/greet\"\n\t\"google.golang.org/grpc\"\n)\n\nfunc Call(conn *grpc.ClientConn) {\n\tc := pb.NewGreeterClient(conn)\n\tc.Hello(context.Background(), &pb.Req{})\n}\n",
+        );
+        write(&client, "b.py", "def baz():\n    return 2\n");
+        (server, client)
+    }
+
+    fn roots_of(dirs: &[&Path]) -> Vec<String> {
+        dirs.iter()
+            .map(|d| d.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// GA.9: the session's layout equals a clean `generate_many` of the
+    /// trees as they are (persisted at the same depth, as [`assert_clean`]),
+    /// and so do its totals, parse errors, labels and roots.
+    fn assert_clean_many(s: &WatchSession, roots: &[String], tmp: &Path, tag: &str) {
+        let out = tmp.join("out").join(tag);
+        s.persist(&out.join("watch")).unwrap();
+        let clean =
+            crate::build::generate_many_opts(roots, false, &BuildOptions::default()).unwrap();
+        crate::persist::persist_result(&clean, &out.join("clean"), "test").unwrap();
+        let (w, c) = (
+            layout_bytes(&out.join("watch")),
+            layout_bytes(&out.join("clean")),
+        );
+        assert!(!w.is_empty());
+        assert_eq!(w.len(), c.len(), "{tag}: same files");
+        for ((wn, wb), (cn, cb)) in w.iter().zip(&c) {
+            assert_eq!(wn, cn, "{tag}");
+            assert!(wb == cb, "{tag}: {wn} differs from a clean generate_many");
+        }
+        let r = s.result();
+        assert_eq!(
+            (r.total_nodes, r.total_edges, &r.parse_errors),
+            (clean.total_nodes, clean.total_edges, &clean.parse_errors),
+            "{tag}"
+        );
+        assert_eq!(r.repo_labels, clean.repo_labels, "{tag}");
+        assert_eq!(r.repo_roots, clean.repo_roots, "{tag}");
+    }
+
+    #[test]
+    fn open_many_equals_generate_many() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, client) = two_repos(tmp.path());
+        let roots = roots_of(&[&server, &client]);
+        let s = WatchSession::open_many(&roots, &BuildOptions::default()).unwrap();
+        assert_eq!(
+            s.roots(),
+            roots.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(s.repos.len(), 2);
+        assert_ne!(
+            s.repos[0].setup.repo, s.repos[1].setup.repo,
+            "a shared dir key is disambiguated"
+        );
+        assert_eq!(s.repos[0].ident_raw.key, s.repos[1].ident_raw.key);
+        assert_eq!(s.result().repo_labels.len(), 2);
+        assert_eq!(
+            s.repos.iter().map(|r| r.graph_count).sum::<usize>(),
+            s.result().merged.graphs.len()
+        );
+        assert_clean_many(&s, &roots, tmp.path(), "open_many");
+        // One root is `open`: the same build as a one-root session.
+        let one = WatchSession::open_many(&roots[..1], &BuildOptions::default()).unwrap();
+        assert_clean(&one, &server, tmp.path(), "open_many_one");
+        // A root that is not a directory refuses the whole session.
+        let missing = tmp.path().join("nope").to_str().unwrap().to_string();
+        let err = WatchSession::open_many(
+            &[roots[0].clone(), missing.clone()],
+            &BuildOptions::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(err, format!("not a directory: {missing}"));
+        assert!(WatchSession::open_many(&[], &BuildOptions::default()).is_err());
+    }
+
+    /// A path in the second repo rebuilds only that repo's group, named
+    /// `<label>:<key>`; the scoped delta (offset into the joint graph list)
+    /// equals the full one; a relative path goes to the first root, a path
+    /// under no root is outside; the stat poll sees an edit in either repo;
+    /// a proto service change in the first repo rebuilds every group of
+    /// both. Every update equals a clean `generate_many`.
+    #[test]
+    fn multi_repo_edit_rebuilds_only_its_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, client) = two_repos(tmp.path());
+        settle(&server);
+        settle(&client);
+        let roots = roots_of(&[&server, &client]);
+        let mut s = WatchSession::open_many(&roots, &BuildOptions::default()).unwrap();
+        assert!(s.changed_paths().is_empty(), "settled trees are quiet");
+        let server_keys: Vec<String> = s.repos[0]
+            .groups
+            .iter()
+            .map(|c| format!("{}:{}", roots[0], c.key))
+            .collect();
+        let client_keys: Vec<String> = s.repos[1]
+            .groups
+            .iter()
+            .map(|c| format!("{}:{}", roots[1], c.key))
+            .collect();
+        assert!(
+            client_keys.contains(&format!("{}:python", roots[1])),
+            "{client_keys:?}"
+        );
+
+        let prev = s.result().merged.clone();
+        write(
+            &client,
+            "b.py",
+            "def baz():\n    return qux()\n\ndef qux():\n    return 3\n",
+        );
+        let u = s.apply(&[client.join("b.py")]).unwrap();
+        assert_eq!(u.seq, 1);
+        assert_eq!(u.groups_rebuilt, [format!("{}:python", roots[1])]);
+        assert_eq!(u.files.modified, [format!("{}:b.py", roots[1])]);
+        assert_eq!(u.full_rebuild, None);
+        let full = located_delta_counted(&prev, &s.result().merged, &[]);
+        assert!(
+            u.nodes.iter().any(|n| n.qname.ends_with("qux")),
+            "{:?}",
+            u.nodes
+        );
+        assert_eq!(json(&u.nodes), json(&full.nodes));
+        assert_eq!(json(&u.edges), json(&full.edges));
+        assert_eq!(json(&u.counts), json(&full.counts));
+        assert_clean_many(&s, &roots, tmp.path(), "client_body");
+
+        // A relative path is the first root's; one under no root is outside.
+        write(
+            &server,
+            "a.py",
+            "def foo():\n    return bar() + 1\n\ndef bar():\n    return 1\n",
+        );
+        let elsewhere = tmp.path().join("elsewhere.py");
+        let u = s
+            .apply(&[PathBuf::from("a.py"), elsewhere.clone()])
+            .unwrap();
+        assert_eq!(u.groups_rebuilt, [format!("{}:python", roots[0])]);
+        assert_eq!(u.files.modified, [format!("{}:a.py", roots[0])]);
+        assert_clean_many(&s, &roots, tmp.path(), "server_body");
+        let u = s.apply(&[elsewhere]).unwrap();
+        assert_eq!(u.seq, 2, "a path under no root is a noop");
+
+        // The stat poll scans both repos.
+        assert!(s.poll().unwrap().is_none(), "quiet after the updates");
+        write(&client, "b.py", "def baz():\n    return 22\n");
+        let u = s.poll().unwrap().expect("the client edit is seen");
+        assert_eq!(u.groups_rebuilt, [format!("{}:python", roots[1])]);
+        assert_clean_many(&s, &roots, tmp.path(), "client_poll");
+
+        // The proto service set is the union: a service change in the
+        // server rebuilds the client's groups too.
+        write(
+            &server,
+            "api/greet.proto",
+            &proto("  rpc Bye (Req) returns (Rep);\n"),
+        );
+        let u = s.apply(&[server.join("api/greet.proto")]).unwrap();
+        assert_eq!(u.full_rebuild.as_deref(), Some("proto_services"));
+        let mut all = server_keys.clone();
+        all.extend(client_keys);
+        assert_eq!(u.groups_rebuilt, all);
+        assert_clean_many(&s, &roots, tmp.path(), "proto_service");
+    }
+
+    /// Nested roots (either order) and one directory given twice are
+    /// refused, naming both roots.
+    #[test]
+    fn open_many_refuses_nested_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = repo(tmp.path());
+        let inner = outer.join("sub");
+        write(&inner, "c.py", "def c():\n    return 1\n");
+        let roots = roots_of(&[&outer, &inner]);
+        let opts = BuildOptions::default();
+        let want = format!("nested watch roots: {} is inside {}", roots[1], roots[0]);
+        assert_eq!(WatchSession::open_many(&roots, &opts).err().unwrap(), want);
+        let reversed = [roots[1].clone(), roots[0].clone()];
+        assert_eq!(
+            WatchSession::open_many(&reversed, &opts).err().unwrap(),
+            want
+        );
+        let twice = [roots[0].clone(), format!("{}/.", roots[0])];
+        let err = WatchSession::open_many(&twice, &opts).err().unwrap();
+        assert!(err.starts_with("duplicate watch roots: "), "{err}");
+    }
+
+    /// `save_cache` writes every repo's parse cache to its own root.
+    #[test]
+    fn save_cache_writes_every_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, client) = two_repos(tmp.path());
+        let roots = roots_of(&[&server, &client]);
+        let s = WatchSession::open_many(&roots, &BuildOptions::default()).unwrap();
+        s.save_cache().unwrap();
+        for root in [&server, &client] {
+            assert!(
+                root.join(".glia/graph/parse_cache.bin").is_file(),
+                "{}",
+                root.display()
+            );
+        }
+        // A reopened session reads them back: every parse is a cache hit.
+        let mut s = WatchSession::open_many(&roots, &BuildOptions::default()).unwrap();
+        assert!(s.repos.iter().all(|r| r.cache.stats.reparsed == 0));
+        write(&server, "a.py", "def foo():\n    return 7\n");
+        s.apply(&[server.join("a.py")]).unwrap();
+        assert_clean_many(&s, &roots, tmp.path(), "reopened");
     }
 
     /// Release timing harness for DC.7c's acceptance (a quiet poll of the

@@ -735,7 +735,7 @@ fn repo_id_marker(ident: &RepoIdentity, repo_path: &str) {
 
 /// The canonical absolute spelling of `root`, or `root` as given when it
 /// cannot be resolved. Only [`disambiguate`] suffixes it onto a key.
-fn canonical_display(root: &Path) -> String {
+pub(crate) fn canonical_display(root: &Path) -> String {
     std::fs::canonicalize(root)
         .unwrap_or_else(|_| root.to_path_buf())
         .to_string_lossy()
@@ -749,7 +749,7 @@ fn canonical_display(root: &Path) -> String {
 /// result does not depend on argument order. Groups are found in argument
 /// order by linear scan (no HashMap iteration reaches the output). Returns one
 /// `[repo-id]` collision line per group, for the caller to print.
-fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String> {
+pub(crate) fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String> {
     let original: Vec<String> = idents.iter().map(|i| i.key.clone()).collect();
     let mut grouped = vec![false; original.len()];
     let mut lines = Vec::new();
