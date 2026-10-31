@@ -174,7 +174,7 @@ glia contracts <REPO> [--breaking-only] [--fields] [--json] [--mismatch-only] [-
     nothing is unknown, saying why (ambiguous_server, client_type_unresolved, ...).
 glia pages <REPO> [--dead-only] [--json] [--with <WITH>]...
     Frontend router pages, the links between them, dead deep links, unlinked pages.
-glia flows <REPO> [--concept <CONCEPT>] [--depth <DEPTH>] [--feature <FEATURE>] [--features] [--group-by feature|entry] [--json] [--no-collapse] [--out <OUT>] [--scope <SCOPE>] [--with <WITH>]...
+glia flows <REPO> [--concept <CONCEPT>] [--depth <DEPTH>] [--feature <FEATURE>] [--features] [--group-by feature|entry] [--json] [--no-collapse] [--no-semantic] [--out <OUT>] [--scope <SCOPE>] [--with <WITH>]...
     Every entry point's forward flow: reach, mechanisms, whether it crosses a service,
     keyed by the feature word `glia trace` takes. --features / --out group them into
     per-feature records (<feature>.yaml + index.json). A hop through an identity class
@@ -183,6 +183,10 @@ glia flows <REPO> [--concept <CONCEPT>] [--depth <DEPTH>] [--feature <FEATURE>] 
     name or qname, a node kind such as cache, a mechanism, a data entity, an external
     host or a doc heading), best tier then shallowest matching hop first, the hop shown;
     exits 1 when none does. `glia trace` falls back to it when a word names no flow.
+    When no flow touches the word that way and the repo holds vectors of the surface
+    model (glia embed; one repo), the flows through the files the fused find --files
+    order ranks answer at tier `semantic` (heuristic), by that file rank then the hop's
+    depth, each with the matched node's `similarity`; --no-semantic never reads them.
 glia spec-status <REPO> [--feature <FEATURE>] [--json] [--status implemented|declared_missing|undeclared] [--with <WITH>]...
     Per feature, the declared API ops (OpenAPI, feature.yaml) a route implements, the
     ones still missing, and routes no op declares. Each implemented row says how it
@@ -275,10 +279,12 @@ glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backw
     tail, a 4-digit `score`. --full keeps every row and field whole. The JSON leaves out
     null, empty and default fields, and a capped answer shows a seed's identity also_in
     past three members as the first three and `also_in_count`.
-glia trace <REPO> <FEATURE> [--depth <DEPTH>] [--json] [--max-paths <MAX_PATHS>] [--no-collapse] [--to <TO>] [--with <WITH>]...
+glia trace <REPO> <FEATURE> [--depth <DEPTH>] [--json] [--max-paths <MAX_PATHS>] [--no-collapse] [--no-semantic] [--to <TO>] [--with <WITH>]...
     Ranked distinct paths from a feature across service boundaries, each hop with its
     mechanism; --to gives the paths between two nodes. A hop through an identity class
-    shows its best member and an `(also in: ..)` cell.
+    shows its best member and an `(also in: ..)` cell. A feature that names nothing may
+    seed from the top `semantic` flow of glia flows --concept (resolved_by
+    concept_semantic, heuristic); --no-semantic never reads the vectors.
 glia why <REPO> <FROM> <TO> [--category <CATEGORY>] [--json] [--with <WITH>]...
     Every edge between two nodes with its emitter, rule, call site, confidence and
     FACT / DERIVED / HEURISTIC tier; with none, a witness path. Exits 1 when not found.
