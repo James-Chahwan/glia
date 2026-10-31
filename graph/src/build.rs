@@ -694,8 +694,14 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// Cart`, bind the module's FUNCTION once every generic lookup (an `alias`
 /// import binding among them) missed, so no edge the shared passes draw
 /// moves. Prints `[elixir-calls] full-name remote calls bound=<n>
-/// ambiguous=<m>` once when either count is non-zero, then the LC.3d
-/// `[evidence-graph]` line.
+/// ambiguous=<m> interface_members=<i> as_aliases=<a>` once when any count
+/// is non-zero, then the LC.3d `[evidence-graph]` line.
+///
+/// GD.17: an INTERFACE (`defprotocol`, a behaviour) holds FUNCTION children
+/// (a protocol's heads, a behaviour's helpers); they join its
+/// `module_symbols` like a PACKAGE's (`index_elixir_interface_functions`,
+/// `interface_members=`), so a call through the module's name, an alias or
+/// `__MODULE__` binds them, and the hook binds a bare call inside one.
 pub fn build_elixir(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (g, modules, tally) = elixir_passes(repo, parses);
     if let Some(line) = modules.marker() {
@@ -713,10 +719,12 @@ fn elixir_passes(
 ) -> (RepoGraph, ElixirModules, EvidenceTally) {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
+    let interface_members = index_elixir_interface_functions(&mut g);
     let mut same = same_stem_table(&g);
     resolve_imports_python(&mut g, &all_imports, &mut same);
     same.report();
-    let modules = ElixirModules::new(&g, &all_imports);
+    let mut modules = ElixirModules::new(&g, &all_imports);
+    modules.interface_members = interface_members;
     let mut tally = EvidenceTally::with_hook("elixir_modules");
     resolve_calls(
         &mut g,
@@ -5968,6 +5976,39 @@ impl CppCallScope {
 /// The EVIDENCE emitter of every call [`ElixirModules`] binds.
 const ELIXIR_EMITTER: &str = "graph:elixir_modules";
 
+/// GD.17: put every FUNCTION child of an Elixir INTERFACE (a `defprotocol`'s
+/// heads, a behaviour's helpers) in that INTERFACE's `module_symbols`, as
+/// `build_symbol_table` does for a PACKAGE's, so the generic Attribute pass
+/// (an `alias` binding) and [`ElixirModules::function`] find them. Only the
+/// Elixir builder calls it: elsewhere an INTERFACE owns METHOD members, in
+/// their own table. Returns how many it indexed (the `interface_members=`
+/// field). Two children never share a name (one qname per def name), so the
+/// HashMap walk's order reaches no output.
+fn index_elixir_interface_functions(g: &mut RepoGraph) -> usize {
+    let mut added: Vec<(NodeId, String, NodeId)> = Vec::new();
+    for (parent, children) in &g.nav.children_of {
+        if g.nav.kind_by_id.get(parent) != Some(&node_kind::INTERFACE) {
+            continue;
+        }
+        for child in children {
+            if g.nav.kind_by_id.get(child) == Some(&node_kind::FUNCTION)
+                && let Some(name) = g.nav.name_by_id.get(child)
+            {
+                added.push((*parent, name.clone(), *child));
+            }
+        }
+    }
+    let n = added.len();
+    for (parent, name, child) in added {
+        g.symbols
+            .module_symbols
+            .entry(parent)
+            .or_default()
+            .insert(name, child);
+    }
+    n
+}
+
 /// An Elixir graph's modules by full name, for the remote calls
 /// (`CallQualifier::Attribute { base: "Shop.Cart", name: "total" }`) the
 /// generic pass leaves unbound: it binds an Attribute base only through the
@@ -5985,9 +6026,10 @@ const ELIXIR_EMITTER: &str = "graph:elixir_modules";
 /// - `__MODULE__` is the caller's own module (rule `module_self`;
 ///   `__MODULE__.Item` is `<own>.Item`);
 /// - a head an `alias` / `import` / `use` line of the caller's file names
-///   (`alias Shop.Cart` names `Cart`, `alias Shop.{Cart, Order}` both)
-///   expands to that line's path (rule `alias_path`); a head two lines of one
-///   file expand differently binds nothing. The parser emits the three forms
+///   (`alias Shop.Cart` names `Cart`, `alias Shop.{Cart, Order}` both,
+///   `alias Shop.Cart, as: C` only `C`, GD.17) expands to that line's path
+///   (rule `alias_path`); a head two lines of one file expand differently
+///   binds nothing. The parser emits the three forms
 ///   alike and the generic pass binds each by its last segment, so the hook
 ///   reads them alike too. An aliased head never falls through to the
 ///   global name: `alias Ext.Cart` + `Cart.total(..)` is `Ext.Cart` even
@@ -5999,7 +6041,13 @@ const ELIXIR_EMITTER: &str = "graph:elixir_modules";
 ///
 /// A full name two nodes declare (an umbrella's twin modules, a test
 /// support copy) binds nothing and counts as `ambiguous`; only a FUNCTION
-/// of the module is a target. The name index is a BTreeMap and every other
+/// of the module is a target.
+///
+/// GD.17: a Bare call the generic pass left unbound inside an INTERFACE
+/// (a behaviour's helper calling its sibling) binds the FUNCTION of that
+/// name declared directly in the innermost enclosing module when that module
+/// is an INTERFACE (rule `interface_member`): the generic `enclosing_package`
+/// branch reads PACKAGEs only. The name index is a BTreeMap and every other
 /// map is read by key, never iterated for a pick, so a build is independent
 /// of HashMap order.
 struct ElixirModules {
@@ -6013,6 +6061,11 @@ struct ElixirModules {
     /// File MODULE -> alias head -> the path it expands to; `None` when two
     /// lines of the file expand the head differently.
     aliases: HashMap<NodeId, BTreeMap<String, Option<String>>>,
+    /// GD.17: the INTERFACE FUNCTION children indexed in `module_symbols`
+    /// ([`index_elixir_interface_functions`]).
+    interface_members: usize,
+    /// GD.17: `alias X, as: Y` lines read: each binds only `Y`.
+    as_aliases: usize,
     bound: std::cell::Cell<usize>,
     ambiguous: std::cell::Cell<usize>,
 }
@@ -6050,15 +6103,26 @@ impl ElixirModules {
             }
         }
         let mut aliases: HashMap<NodeId, BTreeMap<String, Option<String>>> = HashMap::new();
+        let mut as_aliases = 0usize;
         for stmt in imports {
-            let ImportTarget::Module { path, .. } = &stmt.target else {
+            let ImportTarget::Module { path, alias } = &stmt.target else {
                 continue;
             };
             let Some(&file) = g.symbols.module_by_qname.get(&stmt.from_module) else {
                 continue;
             };
             let heads = aliases.entry(file).or_default();
-            for (head, full) in alias_heads(path) {
+            // `alias X, as: Y` (the parser's `alias`, DH.17b) binds `Y` to
+            // the whole path, never X's last segment (GD.17).
+            let pairs = match alias {
+                Some(head) if is_alias_segment(head) => {
+                    as_aliases += 1;
+                    vec![(head.clone(), path.trim().to_string())]
+                }
+                Some(_) => Vec::new(),
+                None => alias_heads(path),
+            };
+            for (head, full) in pairs {
                 heads
                     .entry(head)
                     .and_modify(|p| {
@@ -6074,6 +6138,8 @@ impl ElixirModules {
             full_of,
             nested_heads,
             aliases,
+            interface_members: 0,
+            as_aliases,
             bound: std::cell::Cell::new(0),
             ambiguous: std::cell::Cell::new(0),
         }
@@ -6083,8 +6149,16 @@ impl ElixirModules {
     /// its base's module (the rules on [`ElixirModules`]); `None` for every
     /// other site. Runs only after the generic lookups missed.
     fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
-        let CallQualifier::Attribute { base, name } = &site.qualifier else {
-            return None;
+        let (base, name) = match &site.qualifier {
+            CallQualifier::Attribute { base, name } => (base, name),
+            CallQualifier::Bare(name) => {
+                let own = self.enclosing(g, site.from)?;
+                if g.nav.kind_by_id.get(&own) != Some(&node_kind::INTERFACE) {
+                    return None;
+                }
+                return self.function(g, own, name, "interface_member");
+            }
+            _ => return None,
         };
         let (head, rest) = match base.split_once('.') {
             Some((head, rest)) => (head, Some(rest)),
@@ -6186,12 +6260,17 @@ impl ElixirModules {
         (self.bound.get(), self.ambiguous.get())
     }
 
-    /// DH.17a fired_on, once per Elixir graph that bound or refused a call:
-    /// `[elixir-calls] full-name remote calls bound=<n> ambiguous=<m>`.
+    /// DH.17a / GD.17 fired_on, once per Elixir graph that bound or refused
+    /// a call, indexed an INTERFACE's FUNCTION or read an `as:` alias:
+    /// `[elixir-calls] full-name remote calls bound=<n> ambiguous=<m>
+    /// interface_members=<i> as_aliases=<a>`.
     fn marker(&self) -> Option<String> {
         let (bound, ambiguous) = self.counts();
-        (bound + ambiguous > 0).then(|| {
-            format!("[elixir-calls] full-name remote calls bound={bound} ambiguous={ambiguous}")
+        let (members, as_aliases) = (self.interface_members, self.as_aliases);
+        (bound + ambiguous + members + as_aliases > 0).then(|| {
+            format!(
+                "[elixir-calls] full-name remote calls bound={bound} ambiguous={ambiguous} interface_members={members} as_aliases={as_aliases}"
+            )
         })
     }
 }
@@ -11490,7 +11569,143 @@ mod tests {
         assert!(g.unresolved_calls.is_empty());
         assert_eq!(
             modules.marker().as_deref(),
-            Some("[elixir-calls] full-name remote calls bound=1 ambiguous=0")
+            Some(
+                "[elixir-calls] full-name remote calls bound=1 ambiguous=0 interface_members=0 as_aliases=0"
+            )
+        );
+    }
+
+    /// `defprotocol <module> do def <heads..>(x) end` in file `file`: an
+    /// INTERFACE with FUNCTION children, as the Elixir parser mints it (GD.17).
+    fn ex_protocol(file: &str, module: &str, heads: &[&str]) -> FileParse {
+        let mut f = go_file(file, &[]);
+        let iface = format!("{file}::{module}");
+        ex_push(
+            &mut f,
+            node_kind::INTERFACE,
+            &iface,
+            gid(node_kind::MODULE, file),
+        );
+        for name in heads {
+            ex_push(
+                &mut f,
+                node_kind::FUNCTION,
+                &format!("{iface}::{name}"),
+                gid(node_kind::INTERFACE, &iface),
+            );
+        }
+        f
+    }
+
+    #[test]
+    fn elixir_protocol_head_call_binds() {
+        // plug's `Plug.Exception.status(error)` (lib/plug/debugger.ex) into
+        // `defprotocol Plug.Exception do def status(exception) end`.
+        let protocol = ex_protocol(
+            "lib::plug::exceptions",
+            "Plug.Exception",
+            &["status", "actions"],
+        );
+        let caller = ex_module(
+            "lib::plug::debugger",
+            "Plug.Debugger",
+            &["render", "aliased"],
+            &["Plug.Exception"],
+            &[
+                ("render", "Plug.Exception", "status"),
+                ("aliased", "Exception", "actions"),
+            ],
+        );
+        let (g, modules, _) = elixir_passes(repo(), vec![protocol, caller]);
+        assert_eq!(
+            calls_from(&g, "lib::plug::debugger::Plug.Debugger::render"),
+            hooked(&[("lib::plug::exceptions::Plug.Exception::status", "full_name")])
+        );
+        // `alias Plug.Exception` + `Exception.actions(e)`: the generic
+        // Attribute pass reads an INTERFACE base's METHOD table only, so the
+        // hook's alias rule binds the head.
+        assert_eq!(
+            calls_from(&g, "lib::plug::debugger::Plug.Debugger::aliased"),
+            hooked(&[(
+                "lib::plug::exceptions::Plug.Exception::actions",
+                "alias_path"
+            )])
+        );
+        assert!(g.unresolved_calls.is_empty(), "{:?}", g.unresolved_calls);
+        assert_eq!(
+            modules.marker().as_deref(),
+            Some(
+                "[elixir-calls] full-name remote calls bound=2 ambiguous=0 interface_members=2 as_aliases=0"
+            )
+        );
+    }
+
+    #[test]
+    fn elixir_behaviour_helper_bare_call_binds() {
+        // `defmodule Shop.Worker do @callback ..; def enqueue(a), do:
+        // later(a); defp later(a) .. end`: the helper's bare sibling call binds
+        // inside the INTERFACE (the generic `enclosing_package` reads PACKAGEs).
+        let mut worker = ex_protocol("lib::worker", "Shop.Worker", &["enqueue", "later"]);
+        worker.calls = vec![CallSite {
+            from: gid(node_kind::FUNCTION, "lib::worker::Shop.Worker::enqueue"),
+            qualifier: CallQualifier::Bare("later".to_string()),
+            line: 3,
+        }];
+        // A bare call in a PACKAGE stays the generic pass's (no hook edge).
+        let mut plain = ex_module("lib::plain", "Shop.Plain", &["a"], &[], &[]);
+        plain.calls = vec![CallSite {
+            from: gid(node_kind::FUNCTION, "lib::plain::Shop.Plain::a"),
+            qualifier: CallQualifier::Bare("later".to_string()),
+            line: 3,
+        }];
+        let (g, modules, _) = elixir_passes(repo(), vec![worker, plain]);
+        assert_eq!(
+            calls_from(&g, "lib::worker::Shop.Worker::enqueue"),
+            hooked(&[("lib::worker::Shop.Worker::later", "interface_member")])
+        );
+        assert!(calls_from(&g, "lib::plain::Shop.Plain::a").is_empty());
+        assert_eq!(modules.counts(), (1, 0));
+    }
+
+    #[test]
+    fn elixir_as_alias_binds_only_its_name() {
+        // `alias Shop.Cart, as: C`: `C.total(..)` binds Shop.Cart even where a
+        // second `Cart` makes the generic short-name fallback refuse, and
+        // `Cart.total(..)` is no alias of the line: it is the top-level Cart.
+        let mut caller = ex_module(
+            "lib::caller",
+            "Shop.Caller",
+            &["via_as", "via_last"],
+            &[],
+            &[("via_as", "C", "total"), ("via_last", "Cart", "total")],
+        );
+        caller.imports = vec![ImportStmt {
+            from_module: "lib::caller".to_string(),
+            target: ImportTarget::Module {
+                path: "Shop.Cart".to_string(),
+                alias: Some("C".to_string()),
+            },
+            line: 1,
+        }];
+        let parses = vec![
+            ex_cart("lib::cart", "Shop.Cart"),
+            ex_cart("lib::top_cart", "Cart"),
+            caller,
+        ];
+        let (g, modules, _) = elixir_passes(repo(), parses);
+        assert_eq!(
+            calls_from(&g, "lib::caller::Shop.Caller::via_as"),
+            hooked(&[("lib::cart::Shop.Cart::total", "alias_path")])
+        );
+        assert_eq!(
+            calls_from(&g, "lib::caller::Shop.Caller::via_last"),
+            hooked(&[("lib::top_cart::Cart::total", "full_name")])
+        );
+        assert_eq!(
+            modules.marker().as_deref(),
+            Some(
+                "[elixir-calls] full-name remote calls bound=2 ambiguous=0 interface_members=0 as_aliases=1"
+            )
         );
     }
 
@@ -11542,7 +11757,9 @@ mod tests {
         assert_eq!(g.unresolved_calls.len(), 1);
         assert_eq!(
             modules.marker().as_deref(),
-            Some("[elixir-calls] full-name remote calls bound=0 ambiguous=1")
+            Some(
+                "[elixir-calls] full-name remote calls bound=0 ambiguous=1 interface_members=0 as_aliases=0"
+            )
         );
     }
 

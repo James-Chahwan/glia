@@ -247,6 +247,7 @@ fn visit_defmodule(
             qname: &qname,
             id,
             exunit: shape.exunit,
+            properties: shape.exunit && shape.properties,
             ecto_schema: shape.ecto_schema,
         };
         visit_module_body(body, src, file_rel, &module, repo, acc);
@@ -255,13 +256,15 @@ fn visit_defmodule(
 
 /// The module a body walk is in: its qname and node id (the parent of every
 /// def, the `from` of every IMPLEMENTS / INJECTS ref), whether it `use`s
-/// an ExUnit case template, so its `test` blocks are test functions, and
-/// whether it `use`s Ecto.Schema, so its `schema "x" do` declares the
-/// model's DATA_ENTITY (DH.18).
+/// an ExUnit case template, so its `test` blocks are test functions, whether
+/// it also `use`s / `import`s ExUnitProperties, so its StreamData `property`
+/// blocks are too (GD.17), and whether it `use`s Ecto.Schema, so its
+/// `schema "x" do` declares the model's DATA_ENTITY (DH.18).
 struct ModuleScope<'a> {
     qname: &'a str,
     id: NodeId,
     exunit: bool,
+    properties: bool,
     ecto_schema: bool,
 }
 
@@ -278,24 +281,22 @@ struct BodyShape {
     /// A `use ExUnit.Case` / `use <..>Case` line (Phoenix's `ConnCase` /
     /// `DataCase` / `ChannelCase` `use ExUnit.Case` in turn).
     exunit: bool,
+    /// A `use ExUnitProperties` / `import ExUnitProperties` line: StreamData's
+    /// `property "name" do .. end` macro is in scope (GD.17).
+    properties: bool,
     /// A `use Ecto.Schema` / `use <App>.Schema` line ([`is_ecto_schema_use`]).
     ecto_schema: bool,
 }
 
 impl BodyShape {
-    /// A behaviour (hexdocs.pm/elixir/typespecs.html#behaviours) that mints
-    /// no child is a pure contract: an INTERFACE, as `defprotocol` is.
-    ///
-    /// A behaviour that also defines functions (default helpers) stays a
-    /// PACKAGE: the graph indexes a module's FUNCTION children for call
-    /// resolution only under a MODULE / PACKAGE (`build_symbol_table`'s
-    /// `module_symbols`, which the Bare `package_symbol` branch and the
-    /// DH.17a full-name hook read), so an INTERFACE would cut every call
-    /// into its helpers. It still takes its `@behaviour` IMPLEMENTS edges;
-    /// only its kind stays. Removal path: once the graph indexes an Elixir
-    /// INTERFACE's FUNCTION children there, drop `!self.children`.
+    /// A behaviour (hexdocs.pm/elixir/typespecs.html#behaviours) is a
+    /// contract: an INTERFACE, as `defprotocol` is, whether or not it also
+    /// defines functions (default helpers). GD.17: the Elixir graph indexes
+    /// an INTERFACE's FUNCTION children in `module_symbols` and its call hook
+    /// binds a bare call inside one (`glia_graph::build_elixir`), so a
+    /// helper stays reachable under either kind.
     fn is_contract(self) -> bool {
-        self.callbacks && !self.children
+        self.callbacks
     }
 }
 
@@ -327,15 +328,22 @@ fn body_shape(body: TsNode, src: &[u8]) -> BodyShape {
                     let used = first_arg_text(args, src);
                     shape.exunit |= is_exunit_case(&used);
                     shape.ecto_schema |= is_ecto_schema_use(&used);
+                    shape.properties |= used == EXUNIT_PROPERTIES;
+                }
+            }
+            Some("import") => {
+                if let Some(args) = find_args(*child) {
+                    shape.properties |= first_arg_text(args, src) == EXUNIT_PROPERTIES;
                 }
             }
             _ => {}
         }
     }
+    let properties = shape.properties;
     let tests = |c: &TsNode| {
         matches!(
-            exunit_block(*c, src),
-            Some(ExUnitBlock::Test | ExUnitBlock::Describe)
+            exunit_block(*c, src, properties),
+            Some(ExUnitBlock::Test | ExUnitBlock::Property | ExUnitBlock::Describe)
         )
     };
     if shape.exunit && children.iter().any(tests) {
@@ -368,23 +376,34 @@ fn is_module_alias(text: &str) -> bool {
         })
 }
 
+/// The module StreamData's `property` macro comes from (GD.17).
+const EXUNIT_PROPERTIES: &str = "ExUnitProperties";
+
 /// The ExUnit block forms of a case module body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExUnitBlock {
     /// `test "name" [, ctx] [do .. end | , do: ..]`
     Test,
+    /// StreamData's `property "name" [, ctx] do .. end` (GD.17), in a module
+    /// that has ExUnitProperties in scope: a test ExUnit names
+    /// `property <name>` (ExUnitProperties.property/3 registers it with
+    /// `ExUnit.Case.register_test(.., :property, name, ..)`).
+    Property,
     /// `describe "name" do .. end`
     Describe,
     /// `setup` / `setup_all`: fixtures, not tests.
     Setup,
 }
 
-fn exunit_block(node: TsNode, src: &[u8]) -> Option<ExUnitBlock> {
+/// `properties`: the module has ExUnitProperties in scope, so a `property`
+/// block is a test too.
+fn exunit_block(node: TsNode, src: &[u8], properties: bool) -> Option<ExUnitBlock> {
     if node.kind() != "call" {
         return None;
     }
     let block = match text_of(node.child_by_field_name("target")?, src) {
         "test" => ExUnitBlock::Test,
+        "property" if properties => ExUnitBlock::Property,
         "describe" => ExUnitBlock::Describe,
         "setup" | "setup_all" => ExUnitBlock::Setup,
         _ => return None,
@@ -440,15 +459,29 @@ struct TypeCounts {
     injects: usize,
     /// ExUnit `test` blocks minted as FUNCTION.
     exunit_tests: usize,
+    /// StreamData `property` blocks minted as FUNCTION (GD.17).
+    property_tests: usize,
 }
 
 impl TypeCounts {
     /// `[elixir-types] behaviours=<n> implements=<n> injects=<n>
-    /// exunit_tests=<n> path=<file>`, when any count is non-zero.
+    /// exunit_tests=<n>[ property_tests=<n>] path=<file>`, when any count is
+    /// non-zero; `property_tests=` only when StreamData blocks were read
+    /// (GD.17), so a file without one prints the DH.17b line unchanged.
     fn marker(&self, path: &str) -> Option<String> {
-        (self.behaviours + self.implements + self.injects + self.exunit_tests > 0).then(|| {
+        let any = self.behaviours
+            + self.implements
+            + self.injects
+            + self.exunit_tests
+            + self.property_tests;
+        let properties = if self.property_tests > 0 {
+            format!(" property_tests={}", self.property_tests)
+        } else {
+            String::new()
+        };
+        (any > 0).then(|| {
             format!(
-                "[elixir-types] behaviours={} implements={} injects={} exunit_tests={} path={path}",
+                "[elixir-types] behaviours={} implements={} injects={} exunit_tests={}{properties} path={path}",
                 self.behaviours, self.implements, self.injects, self.exunit_tests
             )
         })
@@ -562,11 +595,11 @@ fn visit_module_body(
             continue;
         }
         if module.exunit
-            && let Some(block) = exunit_block(child, src)
+            && let Some(block) = exunit_block(child, src, module.properties)
         {
             pending = None;
             match block {
-                ExUnitBlock::Test => {
+                ExUnitBlock::Test | ExUnitBlock::Property => {
                     visit_exunit_test(child, src, file_rel, module, None, repo, acc);
                 }
                 ExUnitBlock::Describe => {
@@ -699,13 +732,20 @@ fn visit_exunit_test(
     let Some(name) = block_name(node, src) else {
         return;
     };
+    // `property` blocks register under the `:property` tag (GD.17).
+    let property = exunit_block(node, src, module.properties) == Some(ExUnitBlock::Property);
+    let tag = if property { "property" } else { "test" };
     let name = match describe {
-        Some(d) => format!("test {d} {name}"),
-        None => format!("test {name}"),
+        Some(d) => format!("{tag} {d} {name}"),
+        None => format!("{tag} {name}"),
     };
     let qname = format!("{}::{name}", module.qname);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
-    acc.types.exunit_tests += 1;
+    if property {
+        acc.types.property_tests += 1;
+    } else {
+        acc.types.exunit_tests += 1;
+    }
     acc.nodes.push(Node {
         id,
         repo,
@@ -727,6 +767,10 @@ fn visit_exunit_test(
     if let Some(body) = do_keyword_body(node, src) {
         collect_calls_in(body, src, id, acc);
     }
+    // GD.17: an HTTP client call in a test body is an ENDPOINT as in a
+    // `def` (the whole call: the name string holds no client call).
+    let hits = collect_client_endpoints_in(node, src, id, repo, file_rel, acc);
+    acc.endpoint_hits += hits;
 }
 
 /// `describe "<d>" do .. end`: each `test` inside is a test FUNCTION named
@@ -746,8 +790,8 @@ fn visit_exunit_describe(
     };
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
-        match exunit_block(child, src) {
-            Some(ExUnitBlock::Test) => {
+        match exunit_block(child, src, module.properties) {
+            Some(ExUnitBlock::Test | ExUnitBlock::Property) => {
                 visit_exunit_test(child, src, file_rel, module, Some(&describe), repo, acc);
             }
             Some(ExUnitBlock::Describe | ExUnitBlock::Setup) => {}
@@ -808,9 +852,9 @@ fn visit_defprotocol(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &qname);
 
-    // Same `@moduledoc` pre-scan as `visit_defmodule`; the protocol body's
-    // other children (function heads) are not walked.
-    let doc = do_block_of(node).map_or(DocChoice::Leading, |b| moduledoc_choice(b, src));
+    // Same `@moduledoc` pre-scan as `visit_defmodule`.
+    let body = do_block_of(node);
+    let doc = body.map_or(DocChoice::Leading, |b| moduledoc_choice(b, src));
     acc.count_doc(&doc, true);
     acc.nodes.push(Node {
         id,
@@ -827,6 +871,20 @@ fn visit_defprotocol(
     });
     acc.nav
         .record(id, &name, &qname, node_kind::INTERFACE, Some(parent_id));
+    // GD.17: the protocol's function heads (`def status(exception)`, no
+    // body) are its FUNCTION children, each with its `@doc`, so a dispatch
+    // call `Plug.Exception.status(e)` binds to the head it names. A head
+    // has no body: it emits no CallSite.
+    if let Some(body) = body {
+        let module = ModuleScope {
+            qname: &qname,
+            id,
+            exunit: false,
+            properties: false,
+            ecto_schema: false,
+        };
+        visit_module_body(body, src, file_rel, &module, repo, acc);
+    }
 }
 
 fn visit_defstruct(
@@ -2856,10 +2914,10 @@ end
     }
 
     #[test]
-    fn behaviour_with_helpers_stays_package() {
-        // Callbacks plus a default helper: the graph indexes FUNCTION children
-        // for call resolution only under a PACKAGE, so this stays one; the
-        // `@behaviour` IMPLEMENTS of its implementations still land on it.
+    fn behaviour_with_helpers_is_interface() {
+        // GD.17: callbacks plus a default helper are still a contract (the
+        // Elixir graph indexes an INTERFACE's FUNCTION children); the helpers
+        // are its FUNCTION children.
         let src = r#"
 defmodule Shop.Worker do
   @callback perform(map) :: :ok
@@ -2870,9 +2928,29 @@ end
         let fp = parse_file(src, "lib/worker.ex", "lib::worker", repo()).unwrap();
         assert_eq!(
             kind_of(&fp, "lib::worker::Shop.Worker"),
-            Some(node_kind::PACKAGE)
+            Some(node_kind::INTERFACE)
         );
-        assert_eq!(counts_of(src, "lib/worker.ex", "lib::worker").behaviours, 0);
+        assert_eq!(
+            functions(&fp),
+            vec![
+                "lib::worker::Shop.Worker::enqueue".to_string(),
+                "lib::worker::Shop.Worker::perform_later".to_string(),
+            ]
+        );
+        let iface = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::INTERFACE,
+            "lib::worker::Shop.Worker",
+        );
+        let enqueue = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "lib::worker::Shop.Worker::enqueue",
+        );
+        assert_eq!(fp.nav.parent_of.get(&enqueue), Some(&iface));
+        assert_eq!(counts_of(src, "lib/worker.ex", "lib::worker").behaviours, 1);
         // A `defmacro __using__` that injects `@behaviour` + default defs is
         // still a pure contract: the `quote` body is not the module's.
         let src = r#"
@@ -3145,6 +3223,170 @@ end
         assert_eq!(
             calls_from(&fp, "lib::m::M::f"),
             vec![CallQualifier::Bare("g".to_string())]
+        );
+    }
+
+    /// GD.17: plug's `defprotocol Plug.Exception` shape (lib/plug/exceptions.ex):
+    /// bodiless function heads, each under its `@doc`.
+    const PROTOCOL: &str = "defprotocol Plug.Exception do\n  @fallback_to_any true\n\n  @doc \"Receives an exception and returns its HTTP status code.\"\n  @spec status(t) :: Plug.Conn.status()\n  def status(exception)\n\n  @doc \"Receives an exception and returns the possible actions.\"\n  def actions(exception)\nend\n";
+
+    #[test]
+    fn protocol_heads_are_interface_functions() {
+        let fp = parse_file(
+            PROTOCOL,
+            "lib/plug/exceptions.ex",
+            "lib::plug::exceptions",
+            repo(),
+        )
+        .unwrap();
+        let q = "lib::plug::exceptions::Plug.Exception";
+        assert_eq!(kind_of(&fp, q), Some(node_kind::INTERFACE));
+        assert_eq!(
+            functions(&fp),
+            vec![format!("{q}::actions"), format!("{q}::status")]
+        );
+        let iface = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, q);
+        let status = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            &format!("{q}::status"),
+        );
+        assert_eq!(fp.nav.parent_of.get(&status), Some(&iface));
+        assert_eq!(
+            fp.nav.name_by_id.get(&status).map(String::as_str),
+            Some("status")
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == iface && e.to == status && e.category == edge_category::DEFINES)
+        );
+        // Each head carries its own `@doc`.
+        let doc = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == status)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::DOC))
+            .map(|c| match &c.payload {
+                CellPayload::Text(t) => t.clone(),
+                other => format!("{other:?}"),
+            });
+        assert_eq!(
+            doc.as_deref(),
+            Some("Receives an exception and returns its HTTP status code.")
+        );
+        // A head has no body: no CallSite.
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+    }
+
+    #[test]
+    fn stream_data_property_blocks_are_tests() {
+        let src = r#"
+defmodule CartPropertyTest do
+  use ExUnit.Case
+  use ExUnitProperties
+
+  property "total is non-negative" do
+    check all xs <- list_of(positive_integer()) do
+      assert Cart.total(xs) >= 0
+    end
+  end
+
+  describe "sum" do
+    property "is commutative" do
+      check all a <- integer(), b <- integer() do
+        assert Cart.add(a, b) == Cart.add(b, a)
+      end
+    end
+  end
+
+  test "empty", do: Cart.total([])
+end
+"#;
+        let fp = parse_file(
+            src,
+            "test/cart_property_test.exs",
+            "test::cart_property_test",
+            repo(),
+        )
+        .unwrap();
+        let m = "test::cart_property_test::CartPropertyTest";
+        assert_eq!(
+            functions(&fp),
+            vec![
+                format!("{m}::property sum is commutative"),
+                format!("{m}::property total is non-negative"),
+                format!("{m}::test empty"),
+            ]
+        );
+        assert!(
+            calls_from(&fp, &format!("{m}::property total is non-negative"))
+                .contains(&attr("Cart", "total"))
+        );
+        let counts = counts_of(
+            src,
+            "test/cart_property_test.exs",
+            "test::cart_property_test",
+        );
+        assert_eq!((counts.exunit_tests, counts.property_tests), (1, 2));
+        assert_eq!(
+            counts.marker("test/cart_property_test.exs").as_deref(),
+            Some(
+                "[elixir-types] behaviours=0 implements=0 injects=0 exunit_tests=1 property_tests=2 path=test/cart_property_test.exs"
+            )
+        );
+        // Without ExUnitProperties in scope a `property` call is no test.
+        let src = "defmodule T do\n  use ExUnit.Case\n  property \"x\" do\n    :ok\n  end\nend\n";
+        let fp = parse_file(src, "test/t_test.exs", "test::t_test", repo()).unwrap();
+        assert!(functions(&fp).is_empty(), "{:?}", functions(&fp));
+        // `import ExUnitProperties` brings it in too.
+        let src = "defmodule T do\n  use ExUnit.Case\n  import ExUnitProperties\n  property \"x\" do\n    :ok\n  end\nend\n";
+        let fp = parse_file(src, "test/t_test.exs", "test::t_test", repo()).unwrap();
+        assert_eq!(
+            functions(&fp),
+            vec!["test::t_test::T::property x".to_string()]
+        );
+    }
+
+    #[test]
+    fn http_call_in_a_test_body_is_an_endpoint() {
+        let src = r#"
+defmodule ApiTest do
+  use ExUnit.Case
+
+  test "lists users" do
+    {:ok, _} = HTTPoison.get("http://localhost:4000/api/users")
+  end
+end
+"#;
+        let fp = parse_file(src, "test/api_test.exs", "test::api_test", repo()).unwrap();
+        let test_fn = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "test::api_test::ApiTest::test lists users",
+        );
+        let endpoints: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        assert_eq!(endpoints, vec!["endpoint:GET:/api/users".to_string()]);
+        let ep = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/api/users",
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == test_fn && e.to == ep && e.category == edge_category::CALLS),
+            "{:?}",
+            fp.edges
         );
     }
 

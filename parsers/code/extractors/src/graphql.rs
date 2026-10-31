@@ -904,7 +904,11 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
                 .iter()
                 .filter(|&&at| mask.get(at) == Some(&b' '))
                 .count();
-            absinthe_roots_and_fields(source, &mask, &root_sites)
+            let (roots, fields, imported) = absinthe_roots_and_fields(source, &mask, &root_sites);
+            if let Some(line) = imported.marker() {
+                eprintln!("{line}");
+            }
+            (roots, fields)
         }
     };
     census.roots = roots.iter().map(|&(root, _)| root).collect();
@@ -3790,6 +3794,10 @@ fn elixir_sigil_end(b: &[u8], at: usize) -> Option<usize> {
 /// included), sigils ([`elixir_sigil_end`]) and `?c` char literals (`?#`,
 /// `?"`; a `?` after an identifier byte ends a name such as `valid?`).
 /// String interpolation is read as part of its string.
+///
+/// Kept private (GD.17 checked): `CodeMap::script(.., Script::Elixir)` reads
+/// a sigil's content as code (FD.5a, crate::code_guard), and a root block or
+/// `field` inside `~s(..)` must not count here.
 fn elixir_code_mask(source: &str) -> Vec<u8> {
     let b = source.as_bytes();
     let mut code = vec![true; b.len()];
@@ -3905,10 +3913,12 @@ fn absinthe_root_sites(source: &str) -> Vec<usize> {
 /// Absinthe's default `LanguageConventions` external name
 /// ([`absinthe_external_name`]); a field's own `do .. end` (its `resolve`,
 /// its `arg`s) is a deeper level, so nothing inside it is a root field.
-/// `import_fields :order_queries` is not expanded: the imported object's
-/// fields are declared in an `object` block, which no root scan reads.
-fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> Vec<(String, u32)> {
+/// An `import_fields :order_queries` statement at the first level names an
+/// object whose fields the block takes too (GD.17): its names come back in
+/// the second list, for [`absinthe_roots_and_fields`] to expand.
+fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> (Vec<(String, u32)>, Vec<String>) {
     let mut fields = Vec::new();
+    let mut imports = Vec::new();
     let mut depth = 1usize;
     let mut i = from;
     while i < m.len() {
@@ -3951,11 +3961,104 @@ fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> Vec<(String, u32)>
                     }
                 }
             }
+            b"import_fields" if plain && depth == 1 && absinthe_statement_start(m, i) => {
+                if let Some(name) = absinthe_atom_arg(src, m, end) {
+                    imports.push(name.to_string());
+                }
+            }
             _ => {}
         }
         i = end;
     }
-    fields
+    (fields, imports)
+}
+
+/// GD.17: the token at `i` opens its line's statement (only blanks, or a
+/// `;`, before it).
+fn absinthe_statement_start(m: &[u8], i: usize) -> bool {
+    let line_start = m
+        .get(..i)
+        .and_then(|r| r.iter().rposition(|&c| c == b'\n'))
+        .map_or(0, |p| p + 1);
+    m.get(line_start..i)
+        .unwrap_or_default()
+        .iter()
+        .rposition(|c| !c.is_ascii_whitespace())
+        .is_none_or(|p| m.get(line_start + p) == Some(&b';'))
+}
+
+/// GD.17: the atom a macro call whose name ends at `end` takes first
+/// (`import_fields :order_queries`, `object(:order) do`), read from `src` at
+/// a code position of the mask.
+fn absinthe_atom_arg<'s>(src: &'s str, m: &[u8], end: usize) -> Option<&'s str> {
+    let mut p = first_non_blank(m, end, m.len());
+    if m.get(p) == Some(&b'(') {
+        p = first_non_blank(m, p + 1, m.len());
+    }
+    if m.get(p) != Some(&b':') || m.get(p + 1) == Some(&b':') {
+        return None;
+    }
+    let name_end = cs_ident_end(m, p + 1, m.len());
+    src.get(p + 1..name_end).filter(|n| is_ident(n))
+}
+
+/// GD.17: the offset past the `do` of the file's `object :<name> do` block
+/// at code position, the statement that opens its line; `None` when the file
+/// declares no such object (it lives in another module: not read here).
+fn absinthe_object_block(src: &str, m: &[u8], name: &str) -> Option<usize> {
+    word_sites(m, b"object").into_iter().find_map(|at| {
+        if !absinthe_statement_start(m, at)
+            || matches!(at.checked_sub(1).and_then(|p| m.get(p)), Some(b':' | b'.'))
+        {
+            return None;
+        }
+        let end = at + "object".len();
+        if absinthe_atom_arg(src, m, end)? != name {
+            return None;
+        }
+        let line_end = m
+            .get(at..)
+            .and_then(|r| r.iter().position(|&c| c == b'\n'))
+            .map_or(m.len(), |p| at + p);
+        let p = first_non_blank(m, end, line_end);
+        let after_name = if m.get(p) == Some(&b'(') {
+            // `object(:name) do`: past the closing paren.
+            m.get(p..line_end)?.iter().position(|&c| c == b')')? + p + 1
+        } else {
+            cs_ident_end(m, p + 1, line_end)
+        };
+        absinthe_block_do(m, after_name, line_end)
+    })
+}
+
+/// GD.17: the fields `import_fields` brings into a root block from objects
+/// the same file declares, expanded transitively (an imported object may
+/// import another; each object at most once). Returns the fields and how
+/// many import statements named an object this file does not declare.
+fn absinthe_imported_fields(
+    src: &str,
+    m: &[u8],
+    imports: Vec<String>,
+) -> (Vec<(String, u32)>, usize) {
+    let mut fields = Vec::new();
+    let mut unresolved = 0usize;
+    let mut seen: Vec<String> = Vec::new();
+    let mut queue = imports;
+    while let Some(name) = queue.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        seen.push(name.clone());
+        match absinthe_object_block(src, m, &name) {
+            Some(open) => {
+                let (found, more) = absinthe_block_fields(src, m, open);
+                fields.extend(found);
+                queue.extend(more.into_iter().rev());
+            }
+            None => unresolved += 1,
+        }
+    }
+    (fields, unresolved)
 }
 
 /// DH.8: an Elixir file's Absinthe root nouns and their fields, given its
@@ -3967,9 +4070,10 @@ fn absinthe_roots_and_fields(
     src: &str,
     m: &[u8],
     sites: &[usize],
-) -> (RootNouns, Vec<(String, u32)>) {
+) -> (RootNouns, Vec<(String, u32)>, AbsintheImports) {
     let mut roots = RootNouns::new();
     let mut fields = Vec::new();
+    let mut imported = AbsintheImports::default();
     for &at in sites.iter().filter(|&&at| m.get(at) != Some(&b' ')) {
         let line_start = m
             .get(..at)
@@ -3997,10 +4101,37 @@ fn absinthe_roots_and_fields(
         if !roots.iter().any(|&(r, _)| r == root) {
             roots.push((root, line_of(src, at)));
         }
-        fields.extend(absinthe_block_fields(src, m, open));
+        let (own, imports) = absinthe_block_fields(src, m, open);
+        fields.extend(own);
+        let (from_objects, unresolved) = absinthe_imported_fields(src, m, imports);
+        imported.fields += from_objects.len();
+        imported.unresolved += unresolved;
+        fields.extend(from_objects);
     }
     fields.sort_by_key(|&(_, line)| line);
-    (roots, fields)
+    (roots, fields, imported)
+}
+
+/// GD.17: what a schema file's root blocks took through `import_fields`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AbsintheImports {
+    /// Fields read from an `object` block of the same file.
+    fields: usize,
+    /// `import_fields` statements naming an object the file does not declare.
+    unresolved: usize,
+}
+
+impl AbsintheImports {
+    /// GD.17 fired_on, once per schema file with an `import_fields`:
+    /// `[graphql] absinthe import_fields=<n> unresolved=<u>`.
+    fn marker(&self) -> Option<String> {
+        (self.fields + self.unresolved > 0).then(|| {
+            format!(
+                "[graphql] absinthe import_fields={} unresolved={}",
+                self.fields, self.unresolved
+            )
+        })
+    }
 }
 
 /// DH.8: Absinthe's default adapter, `LanguageConventions.to_external_name`
@@ -9404,6 +9535,41 @@ mod tests {
         let notation = "defmodule ShopWeb.Schema.OrderQueries do\n  use Absinthe.Schema.Notation\n\n  object :order_queries do\n    field :orders, list_of(:order)\n  end\nend\n";
         assert_resolvers(notation, "elixir", &[]);
         assert_resolvers(ABSINTHE_SCHEMA, "ruby", &[]);
+    }
+
+    #[test]
+    fn absinthe_import_fields_expand_same_file_objects() {
+        // GD.17: `import_fields :order_queries` in `query do` takes the
+        // fields of the file's `object :order_queries do` block, transitively
+        // (`:admin_queries` imports `:audit_queries`), each object once, at
+        // its own field line; an object another module declares is counted
+        // unresolved.
+        let src = "defmodule ShopWeb.Schema do\n  use Absinthe.Schema\n\n  object :order_queries do\n    field :orders, list_of(:order) do\n      resolve &Resolvers.list_orders/3\n    end\n    field :order_count, :integer\n  end\n\n  object(:admin_queries) do\n    field :users, list_of(:user)\n    import_fields :audit_queries\n  end\n\n  object :audit_queries do\n    field :audit_log, list_of(:entry)\n    import_fields :admin_queries\n  end\n\n  query do\n    field :ping, :string\n    import_fields :order_queries\n    import_fields :admin_queries\n    import_fields :elsewhere_queries\n  end\nend\n";
+        assert_resolvers(
+            src,
+            "elixir",
+            &["Query", "auditLog", "orderCount", "orders", "ping", "users"],
+        );
+        let out = extract_graphql_resolver_nodes(src, "elixir", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(4));
+        assert_eq!(anchor_line(&out, "graphql_resolver:auditLog"), Some(16));
+        let m = elixir_code_mask(src);
+        let (_, _, imported) = absinthe_roots_and_fields(src, &m, &absinthe_root_sites(src));
+        assert_eq!(
+            imported,
+            AbsintheImports {
+                fields: 4,
+                unresolved: 1
+            }
+        );
+        assert_eq!(
+            imported.marker().as_deref(),
+            Some("[graphql] absinthe import_fields=4 unresolved=1")
+        );
+        // An `import_fields` inside a field's own block, or in a comment, is
+        // no root import; without one the object's fields stay out.
+        let quiet = "defmodule S do\n  use Absinthe.Schema\n  object :q do\n    field :hidden, :string\n  end\n  query do\n    field :a, :string do\n      import_fields :q\n    end\n    # import_fields :q\n  end\nend\n";
+        assert_resolvers(quiet, "elixir", &["Query", "a"]);
     }
 
     #[test]

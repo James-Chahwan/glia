@@ -469,8 +469,8 @@ fn ident_start(bytes: &[u8], pos: usize) -> usize {
 /// The canonical service names the suffix-convention patterns recover from
 /// `source`, deduplicated, in emission order. Only needles `guard` admits
 /// count (CJ.1b).
-fn suffix_pattern_names(source: &str, guard: &mut LazyGuard<'_>) -> Vec<String> {
-    suffix_pattern_hits(source, guard)
+fn suffix_pattern_names(source: &str, path: &str, guard: &mut LazyGuard<'_>) -> Vec<String> {
+    suffix_pattern_hits(source, path, guard)
         .into_iter()
         .map(|(name, _)| name)
         .collect()
@@ -479,8 +479,13 @@ fn suffix_pattern_names(source: &str, guard: &mut LazyGuard<'_>) -> Vec<String> 
 /// [`suffix_pattern_names`] with every construction site: each name once, in
 /// emission order, with the byte offsets of all the needles that recovered it.
 /// CJ.1b: a needle `guard` refuses (it starts in a Rust / Python literal or
-/// comment) is no site.
-fn suffix_pattern_hits(source: &str, guard: &mut LazyGuard<'_>) -> Vec<(String, Vec<usize>)> {
+/// comment) is no site. GD.17: an elixir-grpc file's stub calls whatever the
+/// service is named ([`elixir_channel_clients`]) follow the suffix needles'.
+fn suffix_pattern_hits(
+    source: &str,
+    path: &str,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<(String, Vec<usize>)> {
     let mut names: Vec<(String, Vec<usize>)> = Vec::new();
     let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let bytes = source.as_bytes();
@@ -514,7 +519,189 @@ fn suffix_pattern_hits(source: &str, guard: &mut LazyGuard<'_>) -> Vec<(String, 
             }
         }
     }
+    for (name, pos) in elixir_channel_clients(source, path) {
+        match slot.get(&name) {
+            Some(&i) => {
+                // A suffix needle inside this segment (`Order|Service.Stub.`)
+                // already holds the site.
+                let end = pos + name.len();
+                if !names[i].1.iter().any(|&p| (pos..end).contains(&p)) {
+                    names[i].1.push(pos);
+                    names[i].1.sort_unstable();
+                }
+            }
+            None => {
+                slot.insert(name.clone(), names.len());
+                names.push((name, vec![pos]));
+            }
+        }
+    }
     names
+}
+
+// ---- GD.17: elixir-grpc without a .proto --------------------------------
+
+/// True for an Elixir source path (`.ex` / `.exs`).
+fn is_elixir_path(path: &str) -> bool {
+    path.ends_with(".ex") || path.ends_with(".exs")
+}
+
+/// elixir-grpc names a file that speaks gRPC: its channel type or stub
+/// module (`GRPC.Channel.t()`, `GRPC.Stub.connect(..)`).
+fn elixir_grpc_client_context(source: &str) -> bool {
+    source.contains("GRPC.Channel") || source.contains("GRPC.Stub")
+}
+
+/// The line holding byte `at`, from its start, with its leading blanks
+/// dropped: `#` starts an Elixir comment line.
+fn elixir_comment_line(source: &str, at: usize) -> bool {
+    source[line_start(source, at)..at]
+        .trim_start()
+        .starts_with('#')
+}
+
+/// GD.17 (DH.12's residual): in an elixir-grpc file ([`is_elixir_path`],
+/// [`elixir_grpc_client_context`]), every call on a generated stub module,
+/// `<Pkg>.<Service>.Stub.<rpc>(..)` (or piped, `channel |> ..`), names the
+/// service by the module segment before `.Stub`, whatever its suffix: a
+/// file only handed a channel, with no `.proto` in the build and a service
+/// not named `..Service` / `..Svc`, still reads `Greeter`. As (name, byte
+/// offset of the segment) in offset order. The library's own
+/// `GRPC.Stub.connect(..)` and a stub module's definition or `alias` (no
+/// call after `.Stub.`) are no site.
+fn elixir_channel_clients(source: &str, path: &str) -> Vec<(String, usize)> {
+    if !is_elixir_path(path) || !elixir_grpc_client_context(source) {
+        return Vec::new();
+    }
+    let bytes = source.as_bytes();
+    let needle = ".Stub.";
+    let mut out = Vec::new();
+    for (pos, _) in source.match_indices(needle) {
+        let start = ident_start(bytes, pos);
+        let segment = &source[start..pos];
+        if !segment.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        // The whole dotted module before `.Stub`: `GRPC` is the library.
+        let mut module_start = start;
+        while module_start > 0 && bytes[module_start - 1] == b'.' {
+            let s = ident_start(bytes, module_start - 1);
+            if s == module_start - 1 {
+                break;
+            }
+            module_start = s;
+        }
+        if &source[module_start..pos] == "GRPC" || elixir_comment_line(source, pos) {
+            continue;
+        }
+        let call = pos + needle.len();
+        let call_end = call
+            + bytes[call..]
+                .iter()
+                .take_while(|&&b| is_ident_byte(b) || b == b'!' || b == b'?')
+                .count();
+        let rpc = &source[call..call_end];
+        if rpc.starts_with(|c: char| c.is_ascii_lowercase()) && bytes.get(call_end) == Some(&b'(') {
+            out.push((segment.to_string(), start));
+        }
+    }
+    out
+}
+
+/// GD.17: an elixir-grpc server declaration, `use GRPC.Server, service:
+/// <Pkg>.<Service>.Service` (the module that defines the rpc functions), as
+/// (service name, byte offset of `use`) in offset order. The name is the
+/// segment before the generated `.Service` module, so the declaration needs
+/// no `.proto` in the build. A comment line is no declaration.
+fn elixir_server_decls(source: &str, path: &str) -> Vec<(String, usize)> {
+    if !is_elixir_path(path) || !source.contains("GRPC.Server") {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices("use GRPC.Server") {
+        if source[line_start(source, at)..at].trim() != "" {
+            continue;
+        }
+        let rest = &source[at + "use GRPC.Server".len()..];
+        // The `use` statement's options: up to the end of its line, or of the
+        // next lines while it continues after a trailing comma.
+        let stmt_end = rest
+            .split_inclusive('\n')
+            .scan(true, |more, line| {
+                let take = *more;
+                *more = line.trim_end().ends_with(',');
+                take.then_some(line.len())
+            })
+            .sum::<usize>();
+        let stmt = &rest[..stmt_end];
+        if !stmt.starts_with(',') {
+            continue;
+        }
+        let Some(k) = stmt.find("service:") else {
+            continue;
+        };
+        let value = stmt[k + "service:".len()..].trim_start();
+        let module: String = value
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+            .collect();
+        let Some(service_path) = module.strip_suffix(".Service") else {
+            continue;
+        };
+        let name = service_path.rsplit('.').next().unwrap_or(service_path);
+        if name.starts_with(|c: char| c.is_ascii_uppercase()) && name.bytes().all(is_ident_byte) {
+            out.push((name.to_string(), at));
+        }
+    }
+    out
+}
+
+/// GD.17: one GRPC_SERVER per service an elixir-grpc file declares
+/// ([`elixir_server_decls`]), `grpc_server:<Service>`, anchored at its first
+/// `use` line (outside every function, so the file's MODULE CONTAINS it).
+/// Minted by the per-file client pass because the declaration names its
+/// service itself: the post-cache server pass runs only when the build holds
+/// a `.proto`, and never reads Elixir. No handler is bound: without the
+/// proto's rpc names nothing says which `def`s serve it.
+fn push_elixir_servers(
+    out: &mut GrpcNodes,
+    source: &str,
+    servers: &[(String, usize)],
+    module_id: NodeId,
+    repo: RepoId,
+    evidence: Option<&Cell>,
+) {
+    let mut grouped: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (name, at) in servers {
+        grouped.entry(name.as_str()).or_default().push(*at);
+    }
+    for (name, sites) in grouped {
+        let qname = format!("grpc_server:{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_SERVER, &qname);
+        out.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Medium,
+            cells: evidence.cloned().into_iter().collect(),
+        });
+        out.nav
+            .record(id, name, &qname, node_kind::GRPC_SERVER, Some(module_id));
+        out.anchors.extend(sites.iter().map(|&at| Anchor {
+            node: id,
+            line: line_of(source, at),
+        }));
+    }
+}
+
+/// GD.17 fired_on, once per Elixir file with an elixir-grpc server
+/// declaration or channel-read client: `[grpc] elixir servers=<s>
+/// channel_clients=<c> path=<p>` (sites, not distinct names).
+fn report_elixir_grpc(source: &str, path: &str) {
+    let servers = elixir_server_decls(source, path).len();
+    let clients = elixir_channel_clients(source, path).len();
+    if servers + clients > 0 {
+        eprintln!("[grpc] elixir servers={servers} channel_clients={clients} path={path}");
+    }
 }
 
 /// Push one GRPC_CLIENT and an anchor for each of its construction `sites`
@@ -1129,13 +1316,23 @@ pub fn extract_grpc_client_nodes(
     if skips_generated("suffix", path, source) {
         return out;
     }
+    report_elixir_grpc(source, path);
     let mut guard = LazyGuard::new(path, source);
-    let hits = suffix_pattern_hits(source, &mut guard);
+    let hits = suffix_pattern_hits(source, path, &mut guard);
     guard.report("grpc_client");
-    if hits.is_empty() {
+    let servers = elixir_server_decls(source, path);
+    if hits.is_empty() && servers.is_empty() {
         return out;
     }
     let evidence = client_evidence_cell(source);
+    push_elixir_servers(
+        &mut out,
+        source,
+        &servers,
+        module_id,
+        repo,
+        evidence.as_ref(),
+    );
     let (mut sites_seen, mut hosted) = (0usize, 0usize);
     for (canonical, sites) in hits {
         sites_seen += sites.len();
@@ -1258,8 +1455,12 @@ const GRPC_CONTEXT_NEEDLES: &[&str] = &[
     "grpcpp",
     // Dart
     "package:grpc/",
-    // Elixir (elixir-grpc): `GRPC.Stub.connect(..)`, `use GRPC.Stub, service: ..`
+    // Elixir (elixir-grpc): `GRPC.Stub.connect(..)`, `use GRPC.Stub, service: ..`;
+    // a function only handed a channel names `GRPC.Channel` (its type), and
+    // a server module `use GRPC.Server, service: ..` (GD.17)
     "GRPC.Stub",
+    "GRPC.Channel",
+    "GRPC.Server",
 ];
 
 /// True when `source` carries any `GRPC_CONTEXT_NEEDLES` entry.
@@ -1337,7 +1538,7 @@ pub fn extract_known_grpc_client_nodes(
     // Its own guard: the suffix pass reports those refusals for this file, so
     // this pass's marker counts only its own needles.
     let mut seen: std::collections::HashSet<String> =
-        suffix_pattern_names(source, &mut LazyGuard::new(path, source))
+        suffix_pattern_names(source, path, &mut LazyGuard::new(path, source))
             .into_iter()
             .collect();
     let mut guard = LazyGuard::new(path, source);
@@ -5379,6 +5580,121 @@ let db = makeDbClient(uri);
         assert!(known.nodes.is_empty(), "a definition is no call site");
     }
 
+    // ---- GD.17: elixir-grpc servers and channel-only clients ---------------
+
+    const EX_SERVER: &str = "defmodule MyApp.Greeter.Server do\n  use GRPC.Server, service: Helloworld.Greeter.Service\n\n  def say_hello(_r, _s), do: nil\nend\n";
+    const EX_CHANNEL_CLIENT: &str = "defmodule MyApp.GreeterClient do\n  @spec hello(GRPC.Channel.t(), map()) :: term()\n  def hello(channel, req), do: Helloworld.Greeter.Stub.say_hello(channel, req)\nend\n";
+
+    #[test]
+    fn elixir_channel_only_client_reads_the_stub_module() {
+        // A file only handed a channel (no GRPC.Stub, no proto, no Service /
+        // Svc suffix): the segment before `.Stub` names the service.
+        assert!(file_has_grpc_context(EX_CHANNEL_CLIENT));
+        let out = extract_grpc_client_nodes(
+            EX_CHANNEL_CLIENT,
+            "lib/greeter_client.ex",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
+        assert_eq!(
+            out.anchors,
+            vec![Anchor {
+                node: out.nodes[0].id,
+                line: 2
+            }]
+        );
+        assert_eq!(
+            elixir_channel_clients(EX_CHANNEL_CLIENT, "lib/greeter_client.ex").len(),
+            1
+        );
+        // The data-driven pass counts the read as already emitted.
+        let known = extract_known_grpc_client_nodes(
+            EX_CHANNEL_CLIENT,
+            "lib/greeter_client.ex",
+            module_id(),
+            repo(),
+            &[svc("Greeter")],
+        );
+        assert!(known.nodes.is_empty(), "one node per client");
+        // The suffix name and this read agree on a `..Service` stub: one node.
+        let both = "def f(ch), do: Shop.OrderService.Stub.get_order(ch, GRPC.Channel)\n";
+        let out = extract_grpc_client_nodes(both, "lib/o.ex", module_id(), repo());
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:OrderService".to_string()]
+        );
+        assert_eq!(out.anchors.len(), 1);
+        // Not Elixir, no elixir-grpc name in the file, the library's own
+        // `GRPC.Stub.connect`, a comment, an alias or a definition: nothing.
+        for (src, path) in [
+            (EX_CHANNEL_CLIENT, "lib/greeter_client.rb"),
+            (
+                "def hello(ch, req), do: Helloworld.Greeter.Stub.say_hello(ch, req)\n",
+                "lib/g.ex",
+            ),
+            (
+                "def c, do: GRPC.Stub.connect(\"x:1\")\n# Helloworld.Greeter.Stub.say_hello(ch, req)\n",
+                "lib/g.ex",
+            ),
+            (
+                "defmodule Helloworld.Greeter.Stub do\n  use GRPC.Stub, service: Helloworld.Greeter.Service\nend\nalias Helloworld.Greeter.Stub\n",
+                "lib/g.ex",
+            ),
+        ] {
+            assert!(
+                elixir_channel_clients(src, path).is_empty(),
+                "{path}: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn elixir_server_declaration_mints_grpc_server() {
+        assert_eq!(
+            elixir_server_decls(EX_SERVER, "lib/grpc.ex"),
+            vec![("Greeter".to_string(), EX_SERVER.find("use").unwrap())]
+        );
+        // No proto in the build: the declaration names the service itself,
+        // and the per-file client pass mints it (the post-cache server pass
+        // runs only with a proto and never reads Elixir).
+        let out = extract_grpc_client_nodes(EX_SERVER, "lib/grpc.ex", module_id(), repo());
+        assert_eq!(out.nodes.len(), 1);
+        let id = out.nodes[0].id;
+        assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_SERVER);
+        assert_eq!(out.nav.qname_by_id[&id], "grpc_server:Greeter");
+        assert_eq!(out.nav.name_by_id[&id], "Greeter");
+        assert_eq!(out.anchors, vec![Anchor { node: id, line: 1 }]);
+        // The server pass with a proto still mints nothing for it: one node.
+        let nav = CodeNav::default();
+        let with_proto = extract_grpc_server_nodes(
+            EX_SERVER,
+            "lib/grpc.ex",
+            module_id(),
+            repo(),
+            &[greeter()],
+            &[],
+            &nav,
+        );
+        assert!(with_proto.nodes.is_empty());
+        // A `use GRPC.Server` without `service:`, another library, a comment
+        // or a non-Elixir path declares nothing.
+        for (src, path) in [
+            ("  use GRPC.Server\n", "lib/s.ex"),
+            ("  use GRPC.ServerX, service: A.B.Service\n", "lib/s.ex"),
+            ("  # use GRPC.Server, service: A.B.Service\n", "lib/s.ex"),
+            (EX_SERVER, "lib/s.rb"),
+        ] {
+            assert!(elixir_server_decls(src, path).is_empty(), "{src}");
+        }
+        // A multi-line `use`: the options continue after a trailing comma.
+        let multi = "  use GRPC.Server,\n    service: Shop.Orders.Service,\n    compressors: [GRPC.Compressor.Gzip]\n";
+        assert_eq!(
+            elixir_server_decls(multi, "lib/o.ex"),
+            vec![("Orders".to_string(), 2)]
+        );
+    }
+
     /// CB.21 over elixir-grpc: `GRPC.Stub.connect("host:port")` and the
     /// three-argument `connect(host, port, opts)` name the host the stub
     /// below them dials; a `defp` bounds the search, so a function handed its
@@ -5421,21 +5737,17 @@ let db = makeDbClient(uri);
         assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
     }
 
-    /// The known pass reads `<Service>.Stub.` for a service with no `Service`
-    /// / `Svc` suffix (hexdocs' `Helloworld.Greeter.Stub.say_hello`), only in
-    /// a file with gRPC context, which `GRPC.Stub` gives Elixir. DE.8: a
-    /// generated `.pb.ex` yields nothing through either pass.
+    /// A service with no `Service` / `Svc` suffix (hexdocs'
+    /// `Helloworld.Greeter.Stub.say_hello`) is read in a file with
+    /// elixir-grpc context, which `GRPC.Stub` (or `GRPC.Channel`) gives
+    /// Elixir: since GD.17 by the suffix pass's stub-module read, with no
+    /// proto, so the known pass counts it as emitted. DE.8: a generated
+    /// `.pb.ex` yields nothing through either pass.
     #[test]
     fn elixir_stub_needs_grpc_context_for_known_pass() {
         let with = "defmodule Hello do\n  def run do\n    {:ok, channel} = GRPC.Stub.connect(\"localhost:50051\")\n    {:ok, reply} = channel |> Helloworld.Greeter.Stub.say_hello(Helloworld.HelloRequest.new(name: \"x\"))\n    reply\n  end\nend\n";
         assert!(file_has_grpc_context(with));
-        let out = extract_known_grpc_client_nodes(
-            with,
-            "lib/hello.ex",
-            module_id(),
-            repo(),
-            &[svc("Greeter")],
-        );
+        let out = extract_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo());
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
         assert_eq!(
             out.anchors,
@@ -5446,10 +5758,16 @@ let db = makeDbClient(uri);
         );
         assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
         assert!(
-            extract_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo())
-                .nodes
-                .is_empty(),
-            "Greeter has no Service suffix: the suffix pass is blind to it"
+            extract_known_grpc_client_nodes(
+                with,
+                "lib/hello.ex",
+                module_id(),
+                repo(),
+                &[svc("Greeter")],
+            )
+            .nodes
+            .is_empty(),
+            "one node per client: the suffix pass holds Greeter"
         );
 
         // A channel handed in and nothing naming GRPC.Stub: no context, no client.

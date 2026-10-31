@@ -1,0 +1,20 @@
+{
+  "framework": "elixir-graph-residuals",
+  "language": "elixir",
+  "dirs": ["."],
+  "note": "GD.17 (FD.53: DH.17b / DH.8 / DH.12 residuals). Single dir: the gRPC server, its channel-only client and the proto pair inside one repo. Absinthe import_fields is graded by the extractor's unit tests (same-file objects only).",
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "Exception", "note": "defprotocol MyApp.Exception"},
+    {"kind": "FUNCTION", "name": "status", "note": "the protocol's bodiless head `def status(exception)`: a FUNCTION child of the INTERFACE"},
+    {"kind": "GRPC_SERVER", "name": "Greeter", "note": "use GRPC.Server, service: Helloworld.Greeter.Service: the declaration names its service (minted with or without the proto)"},
+    {"kind": "GRPC_CLIENT", "name": "Greeter", "note": "Helloworld.Greeter.Stub.say_hello(channel, req) in a file only handed a GRPC.Channel (no GRPC.Stub); no Service / Svc suffix"},
+    {"kind": "FUNCTION", "name": "property get returns its id", "note": "StreamData `property` block under use ExUnitProperties"}
+  ],
+  "expect_edges": [
+    {"from": "show", "to": "get", "category": "CALLS", "note": "alias MyApp.Accounts, as: Acc; Acc.get(id). Regression row: binds since 8f72df22 (DH.17b)"},
+    {"from": "render", "to": "status", "category": "CALLS", "note": "MyApp.Exception.status(error): a dispatch call to the protocol head"},
+    {"from": "property get returns its id", "to": "get", "category": "CALLS", "note": "the property block's body calls are the test's"},
+    {"from": "Greeter", "to": "Greeter", "category": "GRPC_CALLS", "note": "the channel-only client pairs with the proto's GRPC_SERVICE"},
+    {"from": "Greeter", "to": "Greeter", "category": "HANDLED_BY", "note": "the proto's GRPC_SERVICE is served by the elixir-grpc server the use line declares"}
+  ]
+}
