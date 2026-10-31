@@ -19,6 +19,21 @@
 //! | `maki` | `maki.api.register_tool{ name = "t", execute = .., restore = .. }` (and `register_command`) | CLI_COMMAND `host_cmd:maki:t` HANDLED_BY execute / restore |
 //! | `neovim` | `vim.api.nvim_create_user_command("Name", handler, opts)`, `vim.api.nvim_buf_create_user_command(buf, "Name", handler, opts)` | CLI_COMMAND `host_cmd:neovim:Name` HANDLED_BY the handler |
 //!
+//! **Entries (GH.4).** A host that calls a function by name, or loads a file
+//! by its path, makes it an entry: the parser writes an ENTRYPOINT
+//! [`entry_cell`](crate::hosts::entry_cell) `{"decl":"<file>:<row>","source":"host:<h>"}`, never
+//! an edge, so liveness and flows start there.
+//!
+//! | Host | Callbacks ([`callback_for`](crate::hosts::callback_for)) | Plugin units ([`load_for`](crate::hosts::load_for)) |
+//! |---|---|---|
+//! | `love` | `function love.<cb>()` / `love.<cb> = function() end`, `<cb>` one of LÖVE 11's callbacks (load, update, draw, conf, keypressed, ..), the root `love` unshadowed | `main.lua`, `conf.lua` at the repo root, in a file that shows the host |
+//! | `neovim` | — | `plugin/**/*.lua`, `ftplugin/**/*.lua`, `after/**/*.lua` by path; a root `init.lua` that reads `vim` |
+//! | `wezterm` | — | a root `wezterm.lua` / `.wezterm.lua` requiring `wezterm` |
+//!
+//! A script run from a shell names its interpreter on its first line:
+//! [`shebang_entry`](crate::hosts::shebang_entry) reads `#!` lines for any parser
+//! (`source` `shebang`).
+//!
 //! | `wezterm` (config, GH.5) | in a file requiring `wezterm`: `local c = wezterm.config_builder()` then `c.<key> = v`; or the table the chunk returns (`return { <key> = v }`, or a chunk-level `local c = {}` it returns) | CONFIG_KEY `config:wezterm:<key>`, DEFINES_CONFIG from the MODULE |
 //! | `neovim` (config, GH.5) | `vim.opt` / `vim.opt_local` / `vim.opt_global` / `vim.o` / `vim.go` / `vim.bo` / `vim.wo` `.<key> = v` (or `:append` / `:prepend` / `:remove`), `vim.g.<key> = v` | CONFIG_KEY `config:neovim:<key>` (`config:neovim:g.<key>`), DEFINES_CONFIG from the MODULE; an rvalue read is READS_CONFIG from the enclosing scope |
 //!
@@ -70,13 +85,14 @@ pub struct HostRow {
     pub exts: &'static [&'static str],
     /// What makes the host present in a file.
     pub gate: Gate,
-    /// Where the host loads plugin units from: repo-relative path globs. Read
-    /// by the plugin-unit load rows (none of the rows here declares one).
-    pub loads: &'static [&'static str],
+    /// Where the host loads plugin units from (GH.4): repo-relative path
+    /// globs, read by [`load_for`]. A file one names is a plugin unit: its
+    /// MODULE is an entry.
+    pub loads: &'static [Load],
     /// The registration calls a plugin makes.
     pub registrations: &'static [Registration],
-    /// The functions the host calls by name (`love.update`). None of the rows
-    /// here declares one.
+    /// The functions the host calls by name (`love.update`, GH.4), read by
+    /// [`callback_for`].
     pub callbacks: &'static [Callback],
     /// The settings a plugin or user config writes for the host. None of the
     /// rows here declares one.
@@ -207,12 +223,70 @@ pub enum Shape {
 }
 
 /// Functions a host calls by name: `<prefix><name>` for each of `names`.
+/// The prefix is rooted at the gate's root (`love.`): a function declared
+/// under that path, read through [`Gate::root`] unshadowed, is the callback.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Callback {
     pub prefix: &'static str,
     pub names: &'static [&'static str],
 }
+
+/// One place a host loads plugin units from (GH.4).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct Load {
+    /// A repo-relative path glob: `*` matches within one path segment, `**`
+    /// any number of whole segments (none included).
+    pub glob: &'static str,
+    /// True when the path alone is too common to stand behind (a root
+    /// `main.lua`, `init.lua`): the file must also show the host, its gate's
+    /// global read unshadowed, its module required, or one of its
+    /// registrations, callbacks or settings read. False when the layout is
+    /// the host's own (`plugin/**/*.lua` under a Neovim plugin root).
+    pub gated: bool,
+}
+
+/// LOVE's callbacks (LÖVE 11): the functions `love.run` calls by name.
+const LOVE_CALLBACKS: &[&str] = &[
+    "conf",
+    "load",
+    "update",
+    "draw",
+    "run",
+    "quit",
+    "errorhandler",
+    "errhand",
+    "threaderror",
+    "keypressed",
+    "keyreleased",
+    "textinput",
+    "textedited",
+    "mousepressed",
+    "mousereleased",
+    "mousemoved",
+    "wheelmoved",
+    "mousefocus",
+    "focus",
+    "visible",
+    "resize",
+    "displayrotated",
+    "lowmemory",
+    "filedropped",
+    "directorydropped",
+    "touchpressed",
+    "touchreleased",
+    "touchmoved",
+    "joystickadded",
+    "joystickremoved",
+    "joystickpressed",
+    "joystickreleased",
+    "joystickaxis",
+    "joystickhat",
+    "gamepadpressed",
+    "gamepadreleased",
+    "gamepadaxis",
+];
 
 /// How a host's settings are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,7 +359,24 @@ pub static HOSTS: &[HostRow] = &[
         lang: "lua",
         exts: &["lua"],
         gate: Gate::Global("vim"),
-        loads: &[],
+        loads: &[
+            Load {
+                glob: "plugin/**/*.lua",
+                gated: false,
+            },
+            Load {
+                glob: "ftplugin/**/*.lua",
+                gated: false,
+            },
+            Load {
+                glob: "after/**/*.lua",
+                gated: false,
+            },
+            Load {
+                glob: "init.lua",
+                gated: true,
+            },
+        ],
         registrations: &[
             Registration {
                 callee: Callee::Exact("vim.api.nvim_create_user_command"),
@@ -327,7 +418,16 @@ pub static HOSTS: &[HostRow] = &[
         lang: "lua",
         exts: &["lua"],
         gate: Gate::Require("wezterm"),
-        loads: &[],
+        loads: &[
+            Load {
+                glob: "wezterm.lua",
+                gated: true,
+            },
+            Load {
+                glob: ".wezterm.lua",
+                gated: true,
+            },
+        ],
         registrations: &[],
         callbacks: &[],
         config: &[ConfigRule {
@@ -335,6 +435,30 @@ pub static HOSTS: &[HostRow] = &[
             prefixes: &["wezterm.config_builder"],
             namespaced: &[],
         }],
+    },
+    // GH.4: LOVE registers nothing; it calls `love.<callback>` by name and
+    // runs `main.lua` / `conf.lua` from the game's root.
+    HostRow {
+        name: "love",
+        lang: "lua",
+        exts: &["lua"],
+        gate: Gate::Global("love"),
+        loads: &[
+            Load {
+                glob: "main.lua",
+                gated: true,
+            },
+            Load {
+                glob: "conf.lua",
+                gated: true,
+            },
+        ],
+        registrations: &[],
+        callbacks: &[Callback {
+            prefix: "love.",
+            names: LOVE_CALLBACKS,
+        }],
+        config: &[],
     },
 ];
 
@@ -400,6 +524,110 @@ pub fn host_for_require(lang: &str, spec: &str) -> Option<&'static HostRow> {
     HOSTS
         .iter()
         .find(|h| h.lang == lang && matches!(h.gate, Gate::Require(r) if r == spec))
+}
+
+/// The host that calls the function declared at `path` by name (GH.4): a
+/// [`Callback`] whose prefix starts the path and one of whose names is the
+/// whole rest (`love.update`). `path` is the declaration's name expanded to
+/// its host root, so a local shadowing the root never reaches here. The
+/// longest prefix wins, table order breaks a tie; `None` for any other path.
+pub fn callback_for(lang: &str, path: &str) -> Option<&'static HostRow> {
+    let mut best: Option<(usize, &'static HostRow)> = None;
+    for host in HOSTS.iter().filter(|h| h.lang == lang) {
+        for cb in host.callbacks {
+            let named = path
+                .strip_prefix(cb.prefix)
+                .is_some_and(|rest| cb.names.contains(&rest));
+            if named && best.is_none_or(|(l, _)| cb.prefix.len() > l) {
+                best = Some((cb.prefix.len(), host));
+            }
+        }
+    }
+    best.map(|(_, h)| h)
+}
+
+/// The host that loads the file at the repo-relative `path` as a plugin unit
+/// (GH.4): the first row of `lang`, in table order, with a [`Load`] glob
+/// matching the path, where an ungated load holds by its path and a
+/// [`Load::gated`] one only when `present(host)` says the file shows the host.
+pub fn load_for(
+    lang: &str,
+    path: &str,
+    present: impl Fn(&'static HostRow) -> bool,
+) -> Option<&'static HostRow> {
+    let path = path.replace('\\', "/");
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.loads
+            .iter()
+            .any(|l| glob_matches(l.glob, &path) && (!l.gated || present(h)))
+    })
+}
+
+/// `glob` against a `/`-separated path: `**` is any number of whole segments
+/// (none included), `*` any run of characters inside one segment.
+fn glob_matches(glob: &str, path: &str) -> bool {
+    fn segments(g: &[&str], p: &[&str]) -> bool {
+        match g.split_first() {
+            None => p.is_empty(),
+            Some((&"**", rest)) => (0..=p.len()).any(|i| segments(rest, &p[i..])),
+            Some((seg, rest)) => p.split_first().is_some_and(|(head, tail)| {
+                segment(seg.as_bytes(), head.as_bytes()) && segments(rest, tail)
+            }),
+        }
+    }
+    fn segment(g: &[u8], s: &[u8]) -> bool {
+        match g.split_first() {
+            None => s.is_empty(),
+            Some((b'*', rest)) => (0..=s.len()).any(|i| segment(rest, &s[i..])),
+            Some((c, rest)) => s
+                .split_first()
+                .is_some_and(|(h, t)| h == c && segment(rest, t)),
+        }
+    }
+    let g: Vec<&str> = glob.split('/').collect();
+    let p: Vec<&str> = path.split('/').collect();
+    segments(&g, &p)
+}
+
+/// The ENTRYPOINT cell a parser writes on a node something outside the code
+/// runs (GH.4): `{"decl":"<file>:<1-based row>","source":"<source>"}`, the
+/// shape Python's `__main__` guard writes (`source` `main_guard`). Sources:
+/// `host:<host>` (a host callback or a plugin unit the host loads),
+/// `shebang`, `script_arg`.
+pub fn entry_cell(file: &str, row: u32, source: &str) -> Cell {
+    let payload = serde_json::json!({
+        "decl": format!("{file}:{row}"),
+        "source": source,
+    })
+    .to_string();
+    Cell {
+        kind: crate::cell_type::ENTRYPOINT,
+        payload: glia_core::CellPayload::Json(payload),
+    }
+}
+
+/// The interpreter a script's first line names (GH.4; shared by every
+/// parser that reads script entries): `#!<path>/<interp>` or
+/// `#!<path>/env [-S] [-flags] [K=V].. <interp>`, where `<interp>` is one of
+/// `interpreters` or one of them with a version tail (`lua5.4`, `lua-5.1`,
+/// `python3.11`). Returns the matched entry of `interpreters`; `None` for a
+/// line that is no `#!` or names another program.
+pub fn shebang_entry<'i>(first_line: &str, interpreters: &[&'i str]) -> Option<&'i str> {
+    let line = first_line.trim_start_matches('\u{feff}');
+    let mut words = line.strip_prefix("#!")?.split_whitespace();
+    let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_string();
+    let mut program = base(words.next()?);
+    if program == "env" {
+        program = base(words.find(|w| !w.starts_with('-') && !w.contains('='))?);
+    }
+    interpreters.iter().copied().find(|i| {
+        program.strip_prefix(i).is_some_and(|tail| {
+            let digits = tail.strip_prefix('-').unwrap_or(tail);
+            tail.is_empty()
+                || (digits.starts_with(|c: char| c.is_ascii_digit())
+                    && digits.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
+        })
+    })
 }
 
 /// A setting a host path names.
@@ -707,8 +935,11 @@ pub struct HostTally {
     pub commands: usize,
     /// Event registrations read, node minted.
     pub events: usize,
-    /// Host callbacks recognised.
+    /// Host callbacks recognised (GH.4): FUNCTIONs given an ENTRYPOINT cell.
     pub callbacks: usize,
+    /// Plugin units a host loads by path (GH.4): the file's MODULE given an
+    /// ENTRYPOINT cell. Not counted in `hosts`.
+    pub loads: usize,
     /// Host setting sites read (written or read), one per key per site.
     pub config: usize,
     /// Anonymous handlers minted as FUNCTIONs.
@@ -717,8 +948,8 @@ pub struct HostTally {
     pub aux: usize,
     /// Registrations whose name is not a string literal: nothing minted.
     pub unread: usize,
-    /// Matched registrations (read, aux and unread) and setting sites per
-    /// host.
+    /// Matched registrations (read, aux and unread), callbacks and setting
+    /// sites per host.
     pub hosts: BTreeMap<&'static str, usize>,
 }
 
@@ -738,15 +969,16 @@ impl HostTally {
 
     /// `[host] lang=.. file=<p>`, or `None` when the file matched no row.
     pub fn marker(&self, lang: &str, file: &str) -> Option<String> {
-        if self.hosts.is_empty() && self.callbacks == 0 && self.config == 0 {
+        if self.hosts.is_empty() && self.callbacks == 0 && self.config == 0 && self.loads == 0 {
             return None;
         }
         let hosts: Vec<String> = self.hosts.iter().map(|(h, n)| format!("{h}:{n}")).collect();
         Some(format!(
-            "[host] lang={lang} commands={} events={} callbacks={} config={} minted={} aux={} unread={} hosts={} file={file}",
+            "[host] lang={lang} commands={} events={} callbacks={} loads={} config={} minted={} aux={} unread={} hosts={} file={file}",
             self.commands,
             self.events,
             self.callbacks,
+            self.loads,
             self.config,
             self.minted,
             self.aux,
@@ -763,7 +995,9 @@ const RESERVED_NAMES: &[&str] = &["env", "secret", "flag", "setting"];
 /// Every problem in `rows`: duplicate or reserved host names, empty
 /// language / extensions / callees, a callee not rooted at its row's gate
 /// root, a prefix callee with nothing to mint, a shape with an empty key or
-/// a 0 / shared argument position, empty load globs or callback names, and a
+/// a 0 / shared argument position, an empty or absolute load glob, a
+/// callback rule with no prefix or names, a prefix not rooted at the gate's
+/// root or a name that is no identifier, and a
 /// config rule with no prefix, a prefix not rooted at the gate's root or a
 /// namespaced prefix it does not declare. Empty = valid.
 pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
@@ -837,13 +1071,35 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                 }
             }
         }
-        if row.loads.iter().any(|l| l.is_empty()) {
-            problems.push(format!("{at}: empty load glob"));
+        if row
+            .loads
+            .iter()
+            .any(|l| l.glob.is_empty() || l.glob.starts_with('/') || l.glob.contains('\\'))
+        {
+            problems.push(format!("{at}: empty or absolute load glob"));
         }
         if row.callbacks.iter().any(|c| {
             c.prefix.is_empty() || c.names.is_empty() || c.names.iter().any(|n| n.is_empty())
         }) {
             problems.push(format!("{at}: a callback rule needs a prefix and names"));
+        }
+        if let Some(c) = row
+            .callbacks
+            .iter()
+            .find(|c| !c.prefix.is_empty() && !c.prefix.starts_with(&format!("{global}.")))
+        {
+            problems.push(format!(
+                "{at}: callback prefix {:?} is not rooted at `{global}.`",
+                c.prefix
+            ));
+        }
+        if row
+            .callbacks
+            .iter()
+            .flat_map(|c| c.names)
+            .any(|n| !n.is_empty() && !is_identifier_tail(n))
+        {
+            problems.push(format!("{at}: callback names must be identifiers"));
         }
         for (j, c) in row.config.iter().enumerate() {
             if c.prefixes.is_empty() || c.prefixes.iter().any(|p| p.is_empty()) {
@@ -2431,7 +2687,7 @@ mod tests {
         assert_eq!(validate(), Vec::<String>::new());
         // Maki first: PR #3's seed.
         let names: Vec<&str> = HOSTS.iter().map(|h| h.name).collect();
-        assert_eq!(names, ["maki", "neovim", "wezterm"]);
+        assert_eq!(names, ["maki", "neovim", "wezterm", "love"]);
     }
 
     #[test]
@@ -2442,7 +2698,10 @@ mod tests {
                 lang: "lua",
                 exts: &[".lua"],
                 gate: Gate::Global("x"),
-                loads: &[""],
+                loads: &[Load {
+                    glob: "",
+                    gated: false,
+                }],
                 registrations: &[
                     Registration {
                         callee: Callee::Exact("y.f"),
@@ -2493,7 +2752,7 @@ mod tests {
         assert!(has("distinct 1-based arguments"));
         assert!(has("needs identifier mint suffixes"));
         assert!(has("distinct handler keys"));
-        assert!(has("empty load glob"));
+        assert!(has("empty or absolute load glob"));
         assert!(has("callback rule needs a prefix"));
         assert!(has("Assign config rule needs prefixes"));
         assert!(has("Assign config flavour declared twice"));
@@ -2713,9 +2972,185 @@ mod tests {
         assert_eq!(
             t.marker("lua", "plugin/greet.lua").as_deref(),
             Some(
-                "[host] lang=lua commands=2 events=0 callbacks=0 config=0 minted=1 aux=0 unread=0 hosts=neovim:2 file=plugin/greet.lua"
+                "[host] lang=lua commands=2 events=0 callbacks=0 loads=0 config=0 minted=1 aux=0 unread=0 hosts=neovim:2 file=plugin/greet.lua"
             )
         );
+        // GH.4: a file whose only host fact is a load still prints.
+        let t = HostTally {
+            loads: 1,
+            ..HostTally::default()
+        };
+        assert_eq!(
+            t.marker("lua", "plugin/x.lua").as_deref(),
+            Some(
+                "[host] lang=lua commands=0 events=0 callbacks=0 loads=1 config=0 minted=0 aux=0 unread=0 hosts= file=plugin/x.lua"
+            )
+        );
+    }
+
+    #[test]
+    fn love_callbacks_are_named_paths_under_the_love_root() {
+        for cb in ["love.load", "love.update", "love.draw", "love.keypressed"] {
+            assert_eq!(
+                callback_for("lua", cb).map(|h| h.name),
+                Some("love"),
+                "{cb}"
+            );
+        }
+        // Not a callback: another field, a deeper path, the bare root, a
+        // path under another root, another language.
+        for path in [
+            "love.graphics",
+            "love.update.x",
+            "love",
+            "love.",
+            "game.update",
+            "vim.load",
+        ] {
+            assert!(callback_for("lua", path).is_none(), "{path}");
+        }
+        assert!(callback_for("python", "love.update").is_none());
+    }
+
+    #[test]
+    fn plugin_units_load_by_path_and_root_files_only_with_their_host() {
+        let none = |_: &'static HostRow| false;
+        let all = |_: &'static HostRow| true;
+        for path in [
+            "plugin/greet.lua",
+            "plugin/sub/deep.lua",
+            "ftplugin/rust.lua",
+            "ftplugin/rust/keys.lua",
+            "after/plugin/x.lua",
+            "after/ftplugin/go.lua",
+        ] {
+            assert_eq!(
+                load_for("lua", path, none).map(|h| h.name),
+                Some("neovim"),
+                "{path}"
+            );
+        }
+        // A root file the path alone cannot stand behind: only when present.
+        for (path, host) in [
+            ("init.lua", "neovim"),
+            ("main.lua", "love"),
+            ("conf.lua", "love"),
+            ("wezterm.lua", "wezterm"),
+            (".wezterm.lua", "wezterm"),
+        ] {
+            assert!(load_for("lua", path, none).is_none(), "{path}");
+            assert_eq!(
+                load_for("lua", path, all).map(|h| h.name),
+                Some(host),
+                "{path}"
+            );
+        }
+        // `present` is asked about the row that owns the glob.
+        assert_eq!(
+            load_for("lua", "main.lua", |h| h.name == "love").map(|h| h.name),
+            Some("love")
+        );
+        assert!(load_for("lua", "main.lua", |h| h.name == "neovim").is_none());
+        // Not loads: a nested root file, another directory, another ext.
+        for path in [
+            "src/main.lua",
+            "lua/x/init.lua",
+            "plugins/x.lua",
+            "plugin/x.vim",
+            "myplugin/x.lua",
+        ] {
+            assert!(load_for("lua", path, all).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn globs_match_whole_segments() {
+        assert!(glob_matches("plugin/**/*.lua", "plugin/a.lua"));
+        assert!(glob_matches("plugin/**/*.lua", "plugin/a/b/c.lua"));
+        assert!(!glob_matches("plugin/**/*.lua", "plugin.lua"));
+        assert!(!glob_matches("plugin/*.lua", "plugin/a/b.lua"));
+        assert!(glob_matches("*.lua", "x.lua"));
+        assert!(!glob_matches("*.lua", "a/x.lua"));
+        assert!(glob_matches("main.lua", "main.lua"));
+        assert!(!glob_matches("main.lua", "main.luac"));
+    }
+
+    #[test]
+    fn the_entry_cell() {
+        let c = entry_cell("tools/run.lua", 1, "shebang");
+        assert_eq!(c.kind, crate::cell_type::ENTRYPOINT);
+        assert_eq!(
+            c.payload,
+            glia_core::CellPayload::Json(
+                r#"{"decl":"tools/run.lua:1","source":"shebang"}"#.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn shebangs_name_their_interpreter() {
+        let lua = ["lua", "luajit"];
+        for (line, want) in [
+            ("#!/usr/bin/env lua", Some("lua")),
+            ("#!/usr/bin/lua", Some("lua")),
+            ("#!/usr/local/bin/lua5.4", Some("lua")),
+            ("#!/usr/bin/env lua5.1", Some("lua")),
+            ("#!/usr/bin/lua-5.3", Some("lua")),
+            ("#! /usr/bin/env luajit", Some("luajit")),
+            ("#!/usr/bin/env -S lua -e 'x()'", Some("lua")),
+            ("#!/usr/bin/env LUA_PATH=./?.lua lua", Some("lua")),
+            ("\u{feff}#!/usr/bin/env lua", Some("lua")),
+            ("#!/bin/sh", None),
+            ("#!/usr/bin/env luarocks", None),
+            ("#!/usr/bin/env texlua", None),
+            ("#!/usr/bin/env lua5.x", None),
+            ("-- #!/usr/bin/env lua", None),
+            ("#!", None),
+            ("#!/usr/bin/env", None),
+        ] {
+            assert_eq!(shebang_entry(line, &lua), want, "{line}");
+        }
+        assert_eq!(
+            shebang_entry("#!/usr/bin/env python3.11", &["python"]),
+            Some("python")
+        );
+    }
+
+    #[test]
+    fn a_callback_prefix_is_rooted_at_its_gate() {
+        let bad = [HostRow {
+            name: "g",
+            lang: "lua",
+            exts: &["lua"],
+            gate: Gate::Global("g"),
+            loads: &[Load {
+                glob: "/abs.lua",
+                gated: false,
+            }],
+            registrations: &[],
+            callbacks: &[Callback {
+                prefix: "other.",
+                names: &["a b"],
+            }],
+            config: &[],
+        }];
+        let problems = validate_rows(&bad);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("callback prefix \"other.\" is not rooted"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("callback names must be identifiers"))
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("empty or absolute load glob"))
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
     }
 }
 

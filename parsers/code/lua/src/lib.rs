@@ -22,6 +22,9 @@
 //! | `socket.http`'s `http.request("http://h/p")` (POST with a body) / `http.request{ url = .., method = .. }`, `resty.http`'s `httpc:request_uri("http://h/p", { method = .. })` | an `ENDPOINT` from the caller (code-domain's client helpers, `host` on the hit) |
 //! | busted `it("adds", function() .. end)` in a test file ([`is_test_file`]) | `FUNCTION`, key `<describe ..> adds` (space-joined, as Elixir's ExUnit tests), its calls its own |
 //! | a host registration (0.5.6, GH.2, code-domain [`hosts`]): Neovim `vim.api.nvim_create_user_command("Name", h, ..)` / `nvim_buf_create_user_command(buf, "Name", h, ..)`, Maki `maki.api.register_tool{ name = "t", execute = .., restore = .. }` / `register_command`, the callee rooted at the unshadowed global `vim` / `maki` or a local alias of it (`local api = vim.api`), the name a string literal | `CLI_COMMAND` `host_cmd:<host>:<name>` (no parent: the host's) + a `HANDLED_BY` ref to each handler (an anonymous one minted as `FUNCTION` `command <name>`, a second table handler `command <name> <key>`, each owning its calls) |
+//! | a host callback (GH.4, [`hosts::callback_for`]): LOVE's `function love.update(dt)` / `love.draw = function() end`, the root `love` the unshadowed global or a local alias of it | the `FUNCTION` gets an `ENTRYPOINT` cell `{"decl":"<file>:<row>","source":"host:love"}` |
+//! | a plugin unit (GH.4, [`hosts::load_for`]): Neovim `plugin/**/*.lua`, `ftplugin/**/*.lua`, `after/**/*.lua`, a root `init.lua` reading `vim`; LOVE's root `main.lua` / `conf.lua` showing `love`; WezTerm's root `wezterm.lua` / `.wezterm.lua` requiring `wezterm` | the `MODULE` gets an `ENTRYPOINT` cell, source `host:<host>` |
+//! | a script (GH.4): a first line `#!.. lua` / `luajit` / `lua5.N` ([`hosts::shebang_entry`]), else a read of the global `arg` outside every function with no local, parameter or loop variable `arg` in scope | the `MODULE` gets an `ENTRYPOINT` cell, source `shebang` / `script_arg` (one entry cell per node, a host load first) |
 //!
 //! The qname of a symbol is `<module>::<key>`; a key two declarations of one
 //! file would share gets `@<line>` (1-based) on the later one, so every node
@@ -32,8 +35,9 @@
 //!
 //! fired_on, per parsed file:
 //! `[lua] functions=<f> methods=<m> classes=<k> heritage=<h> routes=<r> endpoints=<e> tests=<t> requires=<q> dynamic_requires=<d> calls=<c> file=<p>`,
-//! then, per file holding a host registration (GH.2):
-//! `[host] lang=lua commands=<c> events=<e> callbacks=<k> config=<g> minted=<m> aux=<a> unread=<u> hosts=<h:n,..> file=<p>`.
+//! then, per file holding a host registration, callback, setting or load (GH.2, GH.4):
+//! `[host] lang=lua commands=<c> events=<e> callbacks=<k> loads=<o> config=<g> minted=<m> aux=<a> unread=<u> hosts=<h:n,..> file=<p>`,
+//! and per script entry (GH.4): `[script-entry] lang=lua source=<shebang|script_arg> module=<q> file=<p>`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -100,6 +104,8 @@ pub fn parse_file(
         host_bindings: vec![HashMap::new()],
         host: HostTally::default(),
         table_keys: HashMap::new(),
+        host_roots: BTreeSet::new(),
+        script_arg: None,
     };
     w.nodes.push(Node {
         id: module_id,
@@ -119,6 +125,7 @@ pub fn parse_file(
     w.visit_children(root, &top);
     w.settle_pending();
     w.mint_classes();
+    w.module_entry(source);
 
     eprintln!(
         "[lua] functions={} methods={} classes={} heritage={} routes={} endpoints={} tests={} requires={} dynamic_requires={} calls={} file={file_rel_path}",
@@ -228,6 +235,12 @@ struct Walk<'a> {
     /// requiring a host that reads the returned table makes them its
     /// settings (GH.5); otherwise they are dropped. Looked up, never iterated.
     table_keys: HashMap<String, Vec<(String, TsNode<'a>)>>,
+    /// Host roots the file shows (GH.4): a host global read unshadowed, a
+    /// host module required. A gated plugin-unit load holds only for them.
+    host_roots: BTreeSet<String>,
+    /// The 0-based row of the first chunk-level read of the global `arg`
+    /// (GH.4): the file is run as a script.
+    script_arg: Option<u32>,
 }
 
 /// The host-binding path of a chunk-level local bound to a table literal:
@@ -299,6 +312,7 @@ impl<'a> Walk<'a> {
             }
             "function_call" => self.call(node, ctx),
             "dot_index_expression" if self.setting_read(node, ctx) => {}
+            "identifier" => self.name_read(node),
             _ => self.visit_children(node, ctx),
         }
     }
@@ -333,6 +347,9 @@ impl<'a> Walk<'a> {
             _ => return,
         };
         let plain = name.kind() == "identifier";
+        let callback = (kind == node_kind::FUNCTION)
+            .then(|| self.host_callback(name, ctx))
+            .flatten();
         let key = if plain && (local || ctx.key.is_some()) {
             nested_key(ctx, &dotted)
         } else {
@@ -349,6 +366,9 @@ impl<'a> Walk<'a> {
             }
         }
         let id = self.mint(&key, kind, node);
+        if let Some(host) = callback {
+            self.callback_entry(id, host, node);
+        }
         let inner = Ctx {
             owner: id,
             key: Some(key),
@@ -420,6 +440,7 @@ impl<'a> Walk<'a> {
             });
             match (value.kind(), target) {
                 ("function_definition", Some((dotted, plain))) => {
+                    let callback = names.get(i).and_then(|n| self.host_callback(*n, ctx));
                     let key = if plain && (local || ctx.key.is_some()) {
                         nested_key(ctx, &dotted)
                     } else {
@@ -427,6 +448,9 @@ impl<'a> Walk<'a> {
                     };
                     let key = self.unique(key, *value);
                     let id = self.mint(&key, node_kind::FUNCTION, *value);
+                    if let Some(host) = callback {
+                        self.callback_entry(id, host, *value);
+                    }
                     let inner = Ctx {
                         owner: id,
                         key: Some(key.clone()),
@@ -1427,6 +1451,9 @@ impl<'a> Walk<'a> {
             "resty.http" => self.resty_http = true,
             _ => {}
         }
+        if let Some(host) = host_for_require("lua", &spec) {
+            self.host_roots.insert(host.gate.root().to_string());
+        }
         self.imports.push(ImportStmt {
             from_module: self.module_qname.to_string(),
             target: ImportTarget::Module { path: spec, alias },
@@ -1455,6 +1482,105 @@ impl<'a> Walk<'a> {
                 ))
             }
             _ => None,
+        }
+    }
+
+    /// The host that calls the function declared under `name` by its name
+    /// (GH.4, [`hosts::callback_for`]): `love.update`, the root read as
+    /// [`Walk::host_path`] reads it, so a local `love` is the file's own.
+    fn host_callback(&self, name: TsNode<'a>, ctx: &Ctx) -> Option<&'static hosts::HostRow> {
+        if name.kind() != "dot_index_expression" {
+            return None;
+        }
+        let path = self.host_path(name, ctx)?;
+        hosts::callback_for("lua", &path)
+    }
+
+    /// The callback `id` declared at `at` is an entry of `host`.
+    fn callback_entry(&mut self, id: NodeId, host: &'static hosts::HostRow, at: TsNode<'a>) {
+        if self.entry(id, &format!("host:{}", host.name), row(at)) {
+            self.host.callbacks += 1;
+            self.host.hit(host.name);
+        }
+    }
+
+    /// One ENTRYPOINT cell ([`hosts::entry_cell`]) on the node `id`, unless it
+    /// holds one already. True when written.
+    fn entry(&mut self, id: NodeId, source: &str, row0: u32) -> bool {
+        let Some(node) = self.nodes.iter_mut().rev().find(|n| n.id == id) else {
+            return false;
+        };
+        if node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT) {
+            return false;
+        }
+        let row1 = row0.saturating_add(1);
+        node.cells
+            .push(hosts::entry_cell(self.file_rel_path, row1, source));
+        true
+    }
+
+    /// An identifier in a value position: a host global read unshadowed
+    /// marks its host present; the first chunk-level read of the global
+    /// `arg` (no local, parameter or loop variable of that name in scope,
+    /// no enclosing function) marks the file a script.
+    fn name_read(&mut self, node: TsNode<'a>) {
+        let Some(parent) = node.parent() else {
+            return;
+        };
+        let is_field = |f: &str| {
+            parent
+                .child_by_field_name(f)
+                .is_some_and(|c| c.id() == node.id())
+        };
+        let member = match parent.kind() {
+            "dot_index_expression" => is_field("field"),
+            "method_index_expression" => is_field("method"),
+            "field" => is_field("name"),
+            _ => false,
+        };
+        if member {
+            return;
+        }
+        let name = text(node, self.src);
+        if self.host_bindings.iter().any(|s| s.contains_key(name)) {
+            return;
+        }
+        if hosts::is_host_global("lua", name) {
+            self.host_roots.insert(name.to_string());
+        }
+        if name == "arg" && self.script_arg.is_none() && global_at_chunk_level(node, self.src) {
+            self.script_arg = Some(row(node));
+        }
+    }
+
+    /// The MODULE's entry, once the file is read (GH.4): a plugin unit its
+    /// host loads by path ([`hosts::load_for`], a gated load only where the
+    /// file shows the host), else a script whose `#!` names a Lua
+    /// interpreter ([`hosts::shebang_entry`]), else one reading the global
+    /// `arg` at chunk level.
+    fn module_entry(&mut self, source: &str) {
+        let loaded = hosts::load_for("lua", self.file_rel_path, |h| {
+            self.host.hosts.contains_key(h.name) || self.host_roots.contains(h.gate.root())
+        });
+        if let Some(host) = loaded {
+            if self.entry(self.module_id, &format!("host:{}", host.name), 0) {
+                self.host.loads += 1;
+            }
+            return;
+        }
+        let first = source.lines().next().unwrap_or("");
+        let script = if hosts::shebang_entry(first, LUA_INTERPRETERS).is_some() {
+            Some(("shebang", 0))
+        } else {
+            self.script_arg.map(|r| ("script_arg", r))
+        };
+        if let Some((how, at)) = script
+            && self.entry(self.module_id, how, at)
+        {
+            eprintln!(
+                "[script-entry] lang=lua source={how} module={} file={}",
+                self.module_qname, self.file_rel_path
+            );
         }
     }
 
@@ -1679,6 +1805,50 @@ fn nested_key(ctx: &Ctx, name: &str) -> String {
 /// True for a statement directly in the file's chunk.
 fn is_chunk_level(node: TsNode) -> bool {
     node.parent().is_some_and(|p| p.kind() == "chunk")
+}
+
+/// The interpreters a Lua script's `#!` line may name (GH.4).
+const LUA_INTERPRETERS: &[&str] = &["lua", "luajit"];
+
+/// True when the identifier `node` sits in no function (a chunk-level
+/// statement, at any block depth) and no enclosing `for` declares its name.
+fn global_at_chunk_level(node: TsNode, src: &[u8]) -> bool {
+    let name = text(node, src);
+    let mut at = node.parent();
+    while let Some(n) = at {
+        match n.kind() {
+            "function_declaration" | "function_definition" => return false,
+            "for_statement" if for_declares(n, name, src) => return false,
+            _ => {}
+        }
+        at = n.parent();
+    }
+    true
+}
+
+/// True when the `for` statement's clause declares `name` as a loop variable.
+fn for_declares(stmt: TsNode, name: &str, src: &[u8]) -> bool {
+    let Some(clause) = stmt.child_by_field_name("clause") else {
+        return false;
+    };
+    if clause
+        .child_by_field_name("name")
+        .is_some_and(|n| text(n, src) == name)
+    {
+        return true;
+    }
+    let mut cursor = clause.walk();
+    let lists: Vec<TsNode> = clause
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "variable_list")
+        .collect();
+    lists.into_iter().any(|l| {
+        let mut c = l.walk();
+        let names: Vec<TsNode> = l.named_children(&mut c).collect();
+        names
+            .into_iter()
+            .any(|n| n.kind() == "identifier" && text(n, src) == name)
+    })
 }
 
 fn first_token_is(node: TsNode, token: &str) -> bool {
@@ -2427,5 +2597,163 @@ mod tests {
         // A local named `vim` shadows the host.
         let shadow = parse("local vim = {}\nvim.opt = {}\nvim.opt.number = true\n");
         assert!(config_edges(&shadow).is_empty());
+    }
+
+    /// `(key, source, decl)` of every node carrying an ENTRYPOINT cell, the
+    /// MODULE as `<module>`, in node order.
+    fn entries(fp: &FileParse) -> Vec<(String, String, String)> {
+        let module = fp.nodes[0].id;
+        fp.nodes
+            .iter()
+            .flat_map(|n| {
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::ENTRYPOINT)
+                    .map(move |c| (n.id, c))
+            })
+            .map(|(id, c)| {
+                let CellPayload::Json(p) = &c.payload else {
+                    panic!("ENTRYPOINT is JSON");
+                };
+                // hosts::entry_cell's fixed shape.
+                let (decl, source) = p
+                    .strip_prefix("{\"decl\":\"")
+                    .and_then(|r| r.strip_suffix("\"}"))
+                    .and_then(|r| r.split_once("\",\"source\":\""))
+                    .unwrap_or_else(|| panic!("entry cell shape: {p}"));
+                let key = if id == module {
+                    "<module>".to_string()
+                } else {
+                    fp.nav.name_by_id[&id].clone()
+                };
+                (key, source.to_string(), decl.to_string())
+            })
+            .collect()
+    }
+
+    fn parse_at(source: &str, path: &str) -> FileParse {
+        let module = path.trim_end_matches(".lua").replace('/', "::");
+        parse_file(source, path, &module, RepoId(7)).unwrap()
+    }
+
+    fn e(key: &str, source: &str, decl: &str) -> (String, String, String) {
+        (key.to_string(), source.to_string(), decl.to_string())
+    }
+
+    #[test]
+    fn love_callbacks_are_entries_and_main_lua_is_the_game() {
+        let src = "local function step(dt) end\n\
+                   function love.load()\nend\n\
+                   love.update = function(dt)\n  step(dt)\nend\n\
+                   function love.draw()\n  love.graphics.print(\"x\", 1, 1)\nend\n\
+                   function love.helper()\nend\n";
+        let fp = parse_at(src, "main.lua");
+        assert_eq!(
+            entries(&fp),
+            [
+                e("<module>", "host:love", "main.lua:1"),
+                e("love.load", "host:love", "main.lua:2"),
+                e("love.update", "host:love", "main.lua:4"),
+                e("love.draw", "host:love", "main.lua:7"),
+            ]
+        );
+        // The callback's body still calls.
+        let update = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(_, n)| n.as_str() == "love.update")
+            .map(|(id, _)| *id);
+        assert!(
+            fp.calls.iter().any(
+                |c| Some(c.from) == update && c.qualifier == CallQualifier::Bare("step".into())
+            ),
+            "{:?}",
+            calls(&fp)
+        );
+        // Anywhere else in the tree the callbacks are still LOVE's; the file
+        // is no plugin unit.
+        let nested = parse_at(src, "src/game.lua");
+        assert_eq!(entries(&nested).len(), 3);
+        assert!(entries(&nested).iter().all(|(k, _, _)| k != "<module>"));
+        // A local `love` is the file's own table: no callback, and a root
+        // main.lua that never shows the host is no LOVE game.
+        let shadow = parse_at(
+            "local love = {}\nfunction love.update() end\nlove.draw = function() end\n",
+            "main.lua",
+        );
+        assert!(entries(&shadow).is_empty(), "{:?}", entries(&shadow));
+        // An alias of the global reads through to it.
+        let alias = parse_at("local l = love\nfunction l.draw() end\n", "src/a.lua");
+        assert_eq!(entries(&alias), [e("l.draw", "host:love", "src/a.lua:2")]);
+    }
+
+    #[test]
+    fn plugin_units_are_module_entries() {
+        let plain = "local M = {}\nreturn M\n";
+        for path in [
+            "plugin/greet.lua",
+            "ftplugin/rust.lua",
+            "after/plugin/x.lua",
+        ] {
+            assert_eq!(
+                entries(&parse_at(plain, path)),
+                [e("<module>", "host:neovim", &format!("{path}:1"))],
+                "{path}"
+            );
+        }
+        // A root init.lua is Neovim's only when it reads `vim`.
+        assert!(entries(&parse_at(plain, "init.lua")).is_empty());
+        assert_eq!(
+            entries(&parse_at("vim.keymap.set('n', 'x', 'y')\n", "init.lua")),
+            [e("<module>", "host:neovim", "init.lua:1")]
+        );
+        assert!(entries(&parse_at("local vim = {}\nvim.x()\n", "init.lua")).is_empty());
+        // WezTerm's config file, when it requires wezterm.
+        assert_eq!(
+            entries(&parse_at(
+                "local wezterm = require 'wezterm'\nreturn {}\n",
+                ".wezterm.lua"
+            )),
+            [e("<module>", "host:wezterm", ".wezterm.lua:1")]
+        );
+        assert!(entries(&parse_at(plain, "wezterm.lua")).is_empty());
+        // Not a load path.
+        assert!(entries(&parse_at(plain, "lua/greet/init.lua")).is_empty());
+    }
+
+    #[test]
+    fn scripts_are_entries_by_shebang_or_a_chunk_level_arg_read() {
+        let fp = parse_at(
+            "#!/usr/bin/env lua\nlocal path = arg[1]\nprint(path)\n",
+            "tools/count_lines.lua",
+        );
+        assert_eq!(
+            entries(&fp),
+            [e("<module>", "shebang", "tools/count_lines.lua:1")]
+        );
+        let luajit = parse_at("#!/usr/bin/luajit\nprint(1)\n", "bin/x.lua");
+        assert_eq!(entries(&luajit), [e("<module>", "shebang", "bin/x.lua:1")]);
+        // No shebang: a chunk-level read of the global `arg`, at its row.
+        let arg = parse_at(
+            "local M = {}\nif #arg > 0 then\n  print(arg[1])\nend\n",
+            "tools/run.lua",
+        );
+        assert_eq!(
+            entries(&arg),
+            [e("<module>", "script_arg", "tools/run.lua:2")]
+        );
+        // Not script entries: `arg` inside a function, a local `arg`, a
+        // loop variable `arg`, a field named arg, another interpreter.
+        for src in [
+            "local function f(...)\n  return arg\nend\n",
+            "local arg = {...}\nprint(arg[1])\n",
+            "for _, arg in ipairs(t) do print(arg) end\n",
+            "local t = {}\nprint(t.arg)\nlocal u = { arg = 1 }\n",
+            "#!/bin/sh\nprint(1)\n",
+            "local f = function() return arg end\n",
+        ] {
+            assert!(entries(&parse_at(src, "tools/x.lua")).is_empty(), "{src}");
+        }
     }
 }
