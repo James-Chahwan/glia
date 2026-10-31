@@ -121,12 +121,18 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
-use glia_code_domain::endpoint::{endpoint_qname, url_split};
+use glia_code_domain::endpoint::{
+    canonical_http_path, endpoint_qname, normalise_client_path, url_split,
+};
+use glia_code_domain::evidence::Evidence;
 use glia_code_domain::glia_config::Origin;
 use glia_code_domain::project_roots::ProjectRoot;
-use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, NavFact, cell_type, node_kind};
+use glia_code_domain::{
+    CodeNav, FileParse, GRAPH_TYPE, NavFact, cell_type, edge_category, node_kind,
+};
 use glia_code_extractors::constants::{ConstTable, fold_interpolations};
 use glia_core::{CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_parser_typescript::class_url::{self, ClassUrlParts, ClassUrlSite, UrlExpr, UrlMember};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -165,6 +171,15 @@ pub(crate) struct FoldStats {
     /// CH.5c: Dart projects whose Dio bases block the project-base step, by
     /// owner (`.` = the repo root), with the reason, for `[endpoint-base]`.
     pub blocked_bases: BTreeMap<String, String>,
+    /// GD.29: the repo's resource classes ([`ClassResources`]): classes whose
+    /// fields or members build a URL, set once per repo.
+    pub class_classes: usize,
+    /// GD.29: classes handing `super()` a literal, set once per repo.
+    pub class_subclasses: usize,
+    /// GD.29: ENDPOINT entries whose URL argument is `this`-led in a class.
+    pub class_hits: usize,
+    /// GD.29: of those, the entries the class-resource fold moved.
+    pub class_folded: usize,
 }
 
 impl FoldStats {
@@ -178,6 +193,10 @@ impl FoldStats {
         self.prefixed_base += other.prefixed_base;
         self.prefixes.extend(other.prefixes);
         self.blocked_bases.extend(other.blocked_bases);
+        self.class_classes += other.class_classes;
+        self.class_subclasses += other.class_subclasses;
+        self.class_hits += other.class_hits;
+        self.class_folded += other.class_folded;
     }
 
     /// The fired_on markers, once per repo, each only when non-zero:
@@ -226,6 +245,19 @@ impl FoldStats {
         for (project, reason) in &self.blocked_bases {
             eprintln!("[endpoint-base] project {project} not prefixed: {reason} repo={repo_label}");
         }
+        // GD.29 fired_on marker, once per repo with a `this`-led call site:
+        //   `[endpoint-fold] class_resource classes=<c> subclasses=<s> hits=<h> folded=<f> unread=<u> repo=<label>`
+        if self.class_hits > 0 {
+            eprintln!(
+                "[endpoint-fold] class_resource classes={} subclasses={} hits={} folded={} \
+                 unread={} repo={repo_label}",
+                self.class_classes,
+                self.class_subclasses,
+                self.class_hits,
+                self.class_folded,
+                self.class_hits - self.class_folded
+            );
+        }
     }
 }
 
@@ -242,6 +274,8 @@ pub(crate) fn fold_repo<'a>(
     let ctx = PrefixContext::build(&parses, consts, roots);
     let mut stats = FoldStats {
         blocked_bases: ctx.blocked_bases.clone(),
+        class_classes: ctx.classes.resource_classes(),
+        class_subclasses: ctx.classes.literal_subclasses(),
         ..FoldStats::default()
     };
     for fp in parses.iter_mut() {
@@ -288,6 +322,8 @@ struct PrefixContext {
     dart: BTreeMap<Option<String>, BuilderPrefix>,
     /// CH.5c: owner label -> why its Dart bases block the project-base step.
     blocked_bases: BTreeMap<String, String>,
+    /// GD.29: the repo's JS / TS resource clients.
+    classes: ClassResources,
 }
 
 impl PrefixContext {
@@ -297,6 +333,7 @@ impl PrefixContext {
             ..PrefixContext::default()
         };
         (ctx.dart, ctx.blocked_bases) = dart_bases(parses, consts, &ctx.owners);
+        ctx.classes = ClassResources::build(parses);
         let owner_of = |fp: &FileParse| {
             http_owner::module_file(fp).and_then(|f| ctx.owners.owner_of(&f).map(String::from))
         };
@@ -736,6 +773,50 @@ struct Plan {
     prefix: Option<String>,
     /// CH.5c: that prefix is the project's Dio base path, not a builder's.
     base: bool,
+    /// GD.29: the class-resource fold moved it: the calling scope and the
+    /// call's 0-based row, for the CALLS edge's EVIDENCE.
+    class_site: Option<(NodeId, u32)>,
+}
+
+/// GD.29: one ENDPOINT entry's `this`-led call site.
+struct ClassRead {
+    /// The scope the site fact sits on: the CALLS edge's `from`.
+    scope: NodeId,
+    /// The class the call sits in.
+    class: String,
+    /// The folded path, None when the site is unread.
+    path: Option<String>,
+    /// The call's 0-based row.
+    line0: u32,
+}
+
+/// GD.29: the class-resource reading of `node`, when its one ENDPOINT_HIT is
+/// at a call site the parser recorded a `this`-led URL for.
+fn class_read(
+    node: &Node,
+    sites: &BTreeMap<(u64, u64), Option<(NodeId, ClassUrlSite)>>,
+    file: Option<&str>,
+    classes: &ClassResources,
+) -> Option<ClassRead> {
+    if sites.is_empty() {
+        return None;
+    }
+    let (_, fields) = single_hit(node)?;
+    let num = |key: &str| {
+        fields
+            .0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.as_u64())
+    };
+    let (line, col) = (num("line")?, num("col")?);
+    let (scope, site) = sites.get(&(line, col))?.as_ref()?;
+    Some(ClassRead {
+        scope: *scope,
+        class: site.class.clone(),
+        path: file.and_then(|f| classes.fold(f, site)),
+        line0: u32::try_from(line.saturating_sub(1)).unwrap_or(u32::MAX),
+    })
 }
 
 /// LF.2d: the confidence of an entry an overlay constant folded. `[constants]`
@@ -758,12 +839,24 @@ fn fold_endpoint_paths_with(
     let mut order: Vec<NodeId> = Vec::new();
     let mut groups: HashMap<NodeId, Vec<(usize, Option<Plan>)>> = HashMap::new();
     let mut stats = FoldStats::default();
+    // GD.29: the parse's `this`-led call sites, only when the repo has a
+    // resource class at all.
+    let sites = if ctx.classes.classes.is_empty() {
+        BTreeMap::new()
+    } else {
+        ClassResources::sites(fp)
+    };
+    let file = (!sites.is_empty())
+        .then(|| http_owner::module_file(fp))
+        .flatten();
     for (idx, node) in fp.nodes.iter().enumerate() {
         if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::ENDPOINT) {
             continue;
         }
         stats.preset += usize::from(arrived_with_host(node));
-        let plan = plan_entry(node, &fp.nav, consts, repo, ctx);
+        let class = class_read(node, &sites, file.as_deref(), &ctx.classes);
+        stats.class_hits += usize::from(class.is_some());
+        let plan = plan_entry(node, &fp.nav, consts, repo, ctx, class.as_ref());
         groups
             .entry(node.id)
             .or_insert_with(|| {
@@ -790,6 +883,12 @@ fn fold_endpoint_paths_with(
         update_nav(&mut fp.nav, old, &targets, &entries);
         for (idx, plan) in entries {
             let Some(plan) = plan else { continue };
+            if let Some((scope, line0)) = plan.class_site
+                && plan.moved
+            {
+                stats.class_folded += 1;
+                stamp_class_evidence(fp, scope, plan.id, line0, file.as_deref());
+            }
             let Some(node) = fp.nodes.get_mut(idx) else {
                 continue;
             };
@@ -838,10 +937,39 @@ fn plan_entry(
     consts: &ConstTable,
     repo: RepoId,
     ctx: &PrefixContext,
+    class: Option<&ClassRead>,
 ) -> Option<Plan> {
     let qname = nav.qname_by_id.get(&node.id)?;
     let (method, qpath) = qname.strip_prefix("endpoint:")?.split_once(':')?;
     let (_, mut fields) = single_hit(node)?;
+    // GD.29: a `this`-led call site the class chain folds owns its path: no
+    // const fold, builder prefix or host applies to it.
+    if let Some(read) = class
+        && let Some(folded) = &read.path
+    {
+        let (norm, _) = normalise_client_path(folded);
+        let path = canonical_http_path(&norm).into_owned();
+        if path == qpath || !path.starts_with('/') {
+            return None;
+        }
+        fields.set("path", Value::from(path.as_str()));
+        fields.set("folded_from", Value::from(qpath));
+        fields.set("class_resource", Value::from(read.class.as_str()));
+        let payload = serde_json::to_string(&fields).ok()?;
+        let new_qname = endpoint_qname(method, &path);
+        return Some(Plan {
+            id: NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &new_qname),
+            name: format!("{method} {path}"),
+            qname: new_qname,
+            payload,
+            moved: true,
+            host: false,
+            confidence: Some(Confidence::Weak),
+            prefix: None,
+            base: false,
+            class_site: Some((read.scope, read.line0)),
+        });
+    }
 
     let folded = fields
         .str("template")
@@ -939,7 +1067,42 @@ fn plan_entry(
         },
         prefix: builder.map(|b| b.path.clone()),
         base: base && builder.is_some(),
+        class_site: None,
     })
+}
+
+/// GD.29: the EVIDENCE rule of a CALLS edge whose ENDPOINT the
+/// class-resource fold moved.
+const CLASS_RESOURCE_RULE: &str = "class_resource_fold";
+
+/// GD.29: the CALLS edge `scope` -> `to` a class-resource fold moved carries
+/// EVIDENCE `extractor:endpoint_fold` rule `class_resource_fold` at the
+/// call's row, in place of the parser's rule-less cell: the first such edge
+/// not stamped yet, so two sites of one scope that fold to one path each
+/// stamp their own edge. An edge whose parser cell names a rule (FH.4a's
+/// `call_shape`) keeps it.
+fn stamp_class_evidence(
+    fp: &mut FileParse,
+    scope: NodeId,
+    to: NodeId,
+    line0: u32,
+    file: Option<&str>,
+) {
+    let Some(edge) = fp.edges.iter_mut().find(|e| {
+        e.from == scope
+            && e.to == to
+            && e.category == edge_category::CALLS
+            && Evidence::read(&e.cells).is_none_or(|ev| ev.rule.is_none())
+    }) else {
+        return;
+    };
+    let ev = Evidence::emitter("extractor:endpoint_fold").rule(CLASS_RESOURCE_RULE);
+    let ev = match file {
+        Some(f) => ev.at(f, line0),
+        None => ev.line(line0),
+    };
+    edge.cells.retain(|c| c.kind != cell_type::EVIDENCE);
+    edge.cells.push(ev.to_cell());
 }
 
 /// A11.5: the entry's ENDPOINT_HIT already names a `host`, written at
@@ -1416,6 +1579,474 @@ pub(crate) fn mark_external_clients<'a>(
         }
     }
     stats
+}
+
+// ============================================================================
+// GD.29: class-resource URLs
+// ============================================================================
+
+/// GD.29: the repo's JS / TS resource clients, from the TypeScript parser's
+/// class URL facts (`glia_parser_typescript::class_url`).
+///
+/// A call site in a method of class D whose URL argument starts with
+/// `this.<member>` (`axios.get(`${this.url}/${id}`)`) is folded by evaluating
+/// that argument against D's class chain: D, then the class its `extends`
+/// names (bound through the import specifier the file binds it from, else a
+/// class of that name in the same file), and so on. The constructor
+/// parameters of each class are bound from the literal arguments its subclass
+/// hands `super()` (`super('notifications', { accountScoped: true })`), else
+/// from the parameter's literal default when `super()` omits the argument;
+/// D's own constructor arguments are runtime values. `this.<f>` reads the
+/// field the constructors assign (the most derived assignment wins) or, for
+/// none, the getter / zero-argument method of the nearest class that declares
+/// one. A member's `if (..) v = ..;` step is taken when no condition term is
+/// false and at least one is true (`this.options.accountScoped &&
+/// this.accountIdFromRoute`: the literal option decides, the runtime half is
+/// assumed), skipped when one is false (an option the literal object does not
+/// set). Anything the source does not state (a runtime getter, a method's own
+/// parameter) is a `${…}` hole in the path.
+///
+/// What is never folded (the site stays as it was, counted `unread`): a
+/// constructor parameter bound to a runtime value (a site in the base class
+/// itself, a subclass forwarding its own argument), a condition no term of
+/// which is known, a call that needs a getter or method the chain does not
+/// declare in the readable shape, more than [`MAX_MEMBER_DEPTH`] nested member
+/// reads, and a result that is not a `/`-led path or that read no `super()`
+/// argument. James 2026-10-31: a URL is folded only from a string literal
+/// handed to a constructor / `super()`, never from a runtime value; this is a
+/// bounded literal fold over one class chain (SECURITY.md: no value-flow
+/// relation).
+#[derive(Debug, Default)]
+struct ClassResources {
+    /// Every recorded class, sorted by `(file, name)`.
+    classes: Vec<ClassEntry>,
+    /// `file` -> its classes' indices.
+    by_file: BTreeMap<String, Vec<usize>>,
+    /// Each class's resolved base (`extends`), by index.
+    base: Vec<Option<usize>>,
+}
+
+#[derive(Debug)]
+struct ClassEntry {
+    file: String,
+    parts: ClassUrlParts,
+}
+
+/// Nested member reads one site may take (`this.url` -> `this.baseUrl()` ->
+/// `this.apiVersion` is three).
+const MAX_MEMBER_DEPTH: usize = 8;
+
+/// The JS / TS extensions a relative import specifier may omit, in the order
+/// a bundler tries them, then the directory index files.
+const JS_RESOLVE_EXTS: &[&str] = &["", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"];
+
+impl ClassResources {
+    fn build(parses: &[&mut FileParse]) -> Self {
+        let mut classes: Vec<ClassEntry> = Vec::new();
+        for fp in parses {
+            let mut found = fp
+                .nav
+                .nav_facts
+                .values()
+                .flatten()
+                .filter_map(|f| match f {
+                    NavFact::ValueLiteral { name, value } if name == class_url::CLASS_FACT => {
+                        serde_json::from_str::<ClassUrlParts>(value).ok()
+                    }
+                    _ => None,
+                })
+                .peekable();
+            if found.peek().is_none() {
+                continue;
+            }
+            let Some(file) = http_owner::module_file(fp) else {
+                continue;
+            };
+            classes.extend(found.map(|parts| ClassEntry {
+                file: file.clone(),
+                parts,
+            }));
+        }
+        classes.sort_by(|a, b| (&a.file, &a.parts.name).cmp(&(&b.file, &b.parts.name)));
+        let mut by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, c) in classes.iter().enumerate() {
+            by_file.entry(c.file.clone()).or_default().push(i);
+        }
+        let mut out = ClassResources {
+            classes,
+            by_file,
+            base: Vec::new(),
+        };
+        out.base = (0..out.classes.len())
+            .map(|i| out.resolve_base(i))
+            .collect();
+        out
+    }
+
+    /// The class `i` extends: the import specifier's file (a relative one;
+    /// a package or alias specifier names no class here), else the same file;
+    /// there, the class of that name, else (an import) the file's only class.
+    fn resolve_base(&self, i: usize) -> Option<usize> {
+        let entry = self.classes.get(i)?;
+        let base = entry.parts.base.as_deref()?;
+        let (file, imported) = match entry.parts.base_from.as_deref() {
+            None => (entry.file.clone(), false),
+            Some(spec) if spec.starts_with('.') => (self.resolve_file(&entry.file, spec)?, true),
+            Some(_) => return None,
+        };
+        let in_file = self.by_file.get(&file)?;
+        let named = in_file
+            .iter()
+            .copied()
+            .find(|&j| j != i && self.classes[j].parts.name == base);
+        match (named, imported, in_file.as_slice()) {
+            (Some(j), _, _) => Some(j),
+            (None, true, [only]) if *only != i => Some(*only),
+            _ => None,
+        }
+    }
+
+    /// The recorded file a relative specifier names from `from`.
+    fn resolve_file(&self, from: &str, spec: &str) -> Option<String> {
+        let mut segs: Vec<&str> = from.split('/').collect();
+        segs.pop();
+        for part in spec.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segs.pop()?;
+                }
+                p => segs.push(p),
+            }
+        }
+        let path = segs.join("/");
+        let index = format!("{path}/index");
+        [&path, &index]
+            .into_iter()
+            .flat_map(|p| JS_RESOLVE_EXTS.iter().map(move |e| format!("{p}{e}")))
+            .find(|p| self.by_file.contains_key(p))
+    }
+
+    /// The class named `name` declared in `file`.
+    fn class_in(&self, file: &str, name: &str) -> Option<usize> {
+        self.by_file
+            .get(file)?
+            .iter()
+            .copied()
+            .find(|&j| self.classes[j].parts.name == name)
+    }
+
+    /// `[endpoint-fold] class_resource classes=`: classes whose fields or
+    /// members build a URL.
+    fn resource_classes(&self) -> usize {
+        self.classes.iter().filter(|c| c.parts.builds_url()).count()
+    }
+
+    /// `[endpoint-fold] class_resource subclasses=`: classes whose `super()`
+    /// call hands a literal or an object literal.
+    fn literal_subclasses(&self) -> usize {
+        self.classes
+            .iter()
+            .filter(|c| {
+                c.parts
+                    .ctor
+                    .as_ref()
+                    .and_then(|k| k.super_args.as_ref())
+                    .is_some_and(|args| {
+                        args.iter()
+                            .any(|a| matches!(a, UrlExpr::Lit(_) | UrlExpr::Obj(_)))
+                    })
+            })
+            .count()
+    }
+
+    /// One parse's call-site facts, by the hit's 1-based `(line, col)`, with
+    /// the scope that records them. A key two scopes record is dropped.
+    fn sites(fp: &FileParse) -> BTreeMap<(u64, u64), Option<(NodeId, ClassUrlSite)>> {
+        let mut out: BTreeMap<(u64, u64), Option<(NodeId, ClassUrlSite)>> = BTreeMap::new();
+        for (scope, facts) in &fp.nav.nav_facts {
+            for fact in facts {
+                let NavFact::ValueLiteral { name, value } = fact else {
+                    continue;
+                };
+                let Some((line, col)) = name
+                    .strip_prefix(class_url::SITE_FACT_PREFIX)
+                    .and_then(|k| k.split_once(':'))
+                    .and_then(|(l, c)| Some((l.parse().ok()?, c.parse().ok()?)))
+                else {
+                    continue;
+                };
+                let Ok(site) = serde_json::from_str::<ClassUrlSite>(value) else {
+                    continue;
+                };
+                out.entry((line, col))
+                    .and_modify(|seen| *seen = None)
+                    .or_insert(Some((*scope, site)));
+            }
+        }
+        out
+    }
+
+    /// The path `site` (in `file`) folds to, or None (unread).
+    fn fold(&self, file: &str, site: &ClassUrlSite) -> Option<String> {
+        let leaf = self.class_in(file, &site.class)?;
+        let mut chain = vec![leaf];
+        while let Some(next) = self.base.get(*chain.last()?).copied().flatten() {
+            if chain.contains(&next) {
+                break;
+            }
+            chain.push(next);
+        }
+        let mut eval = ChainEval::new(self, chain)?;
+        let value = eval.eval(&site.url, Frame::Site)?;
+        match value {
+            Val::Str(path) if path.starts_with('/') && eval.super_read => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// A value a class-resource expression evaluates to.
+#[derive(Debug, Clone, PartialEq)]
+enum Val {
+    /// A string; `${…}` for each runtime part.
+    Str(String),
+    Obj(Vec<(String, Val)>),
+    Bool(bool),
+    Undef,
+    /// A runtime value.
+    Unknown,
+}
+
+impl Val {
+    /// JS truthiness, None when the value is a runtime one.
+    fn truthy(&self) -> Option<bool> {
+        match self {
+            Val::Str(s) if s.is_empty() => Some(false),
+            Val::Str(s) if s.replace("${…}", "").is_empty() => None,
+            Val::Str(_) | Val::Obj(_) => Some(true),
+            Val::Bool(b) => Some(*b),
+            Val::Undef => Some(false),
+            Val::Unknown => None,
+        }
+    }
+
+    /// Property reads: an object's key (absent: `undefined`); on a runtime
+    /// value, a runtime value; on `undefined`, a TypeError: None.
+    fn read(self, path: &[String]) -> Option<Val> {
+        let mut v = self;
+        for key in path {
+            v = match v {
+                Val::Obj(fields) => fields
+                    .into_iter()
+                    .find(|(k, _)| k == key)
+                    .map_or(Val::Undef, |(_, v)| v),
+                Val::Undef => return None,
+                _ => Val::Unknown,
+            };
+        }
+        Some(v)
+    }
+}
+
+/// Where an expression is evaluated: a constructor of the chain's class at
+/// `pos` (its parameters readable), a member of it (its variable), or the
+/// call site.
+#[derive(Clone)]
+enum Frame {
+    Ctor(usize),
+    Member(Option<Val>),
+    Site,
+}
+
+/// One site's evaluation over one class chain.
+struct ChainEval<'a> {
+    res: &'a ClassResources,
+    /// Class indices, the site's class first.
+    chain: Vec<usize>,
+    /// Per chain position: the constructor's parameter bindings (None: no
+    /// declared constructor).
+    params: Vec<Option<BTreeMap<String, Val>>>,
+    /// The instance fields: name -> (expression, the chain position whose
+    /// constructor assigns it).
+    fields: BTreeMap<String, (UrlExpr, usize)>,
+    /// Member reads in progress, for the depth and cycle guards.
+    stack: Vec<String>,
+    /// A constructor parameter a `super()` argument (or its default) bound
+    /// was read.
+    super_read: bool,
+}
+
+impl<'a> ChainEval<'a> {
+    fn new(res: &'a ClassResources, chain: Vec<usize>) -> Option<Self> {
+        let mut eval = ChainEval {
+            res,
+            chain,
+            params: Vec::new(),
+            fields: BTreeMap::new(),
+            stack: Vec::new(),
+            super_read: false,
+        };
+        // The arguments the class at each position is constructed with: the
+        // site's class by runtime code (None), each base by its subclass's
+        // `super(..)`, or by the implicit constructor, which forwards them.
+        let mut args: Option<Vec<Val>> = None;
+        for pos in 0..eval.chain.len() {
+            let parts = &eval.res.classes[eval.chain[pos]].parts;
+            let Some(ctor) = &parts.ctor else {
+                eval.params.push(None);
+                continue;
+            };
+            let mut bound: BTreeMap<String, Val> = BTreeMap::new();
+            eval.params.push(Some(BTreeMap::new()));
+            for (k, p) in ctor.params.iter().enumerate() {
+                let value = match &args {
+                    None => Val::Unknown,
+                    Some(given) => match given.get(k) {
+                        Some(v) => v.clone(),
+                        None => match &p.default {
+                            Some(d) => {
+                                eval.params[pos] = Some(bound.clone());
+                                eval.eval(d, Frame::Ctor(pos))?
+                            }
+                            None => Val::Undef,
+                        },
+                    },
+                };
+                if !p.name.is_empty() {
+                    bound.insert(p.name.clone(), value);
+                }
+            }
+            eval.params[pos] = Some(bound);
+            args = ctor.super_args.as_ref().map(|list| {
+                list.iter()
+                    .map(|a| eval.eval(a, Frame::Ctor(pos)).unwrap_or(Val::Unknown))
+                    .collect()
+            });
+        }
+        // Field assignments run base first; the most derived one wins.
+        for pos in (0..eval.chain.len()).rev() {
+            for (name, e) in &eval.res.classes[eval.chain[pos]].parts.fields {
+                eval.fields.insert(name.clone(), (e.clone(), pos));
+            }
+        }
+        // Only the site's own reads count.
+        eval.super_read = false;
+        Some(eval)
+    }
+
+    fn eval(&mut self, e: &UrlExpr, frame: Frame) -> Option<Val> {
+        Some(match e {
+            UrlExpr::Lit(s) => Val::Str(s.clone()),
+            UrlExpr::Cat(parts) => {
+                let mut out = String::new();
+                for p in parts {
+                    match self.eval(p, frame.clone())? {
+                        Val::Str(s) => out.push_str(&s),
+                        Val::Unknown => out.push_str("${…}"),
+                        Val::Obj(_) | Val::Bool(_) | Val::Undef => return None,
+                    }
+                }
+                Val::Str(out)
+            }
+            UrlExpr::Param { name, path } => {
+                let Frame::Ctor(pos) = frame else {
+                    return None;
+                };
+                let value = self.params.get(pos)?.as_ref()?.get(name)?.clone();
+                // A parameter bound to a runtime value never reaches a path.
+                if value == Val::Unknown {
+                    return None;
+                }
+                self.super_read = true;
+                value.read(path)?
+            }
+            UrlExpr::This { name, call, path } => self.this_member(name, *call)?.read(path)?,
+            UrlExpr::Var(_) => match frame {
+                Frame::Member(Some(v)) => v,
+                _ => return None,
+            },
+            UrlExpr::Or(a, b) => {
+                let left = self.eval(a, frame.clone())?;
+                match left.truthy() {
+                    Some(true) => left,
+                    Some(false) => self.eval(b, frame)?,
+                    None => Val::Unknown,
+                }
+            }
+            UrlExpr::Not(a) => match self.eval(a, frame)?.truthy() {
+                Some(t) => Val::Bool(!t),
+                None => Val::Unknown,
+            },
+            UrlExpr::Bool(b) => Val::Bool(*b),
+            UrlExpr::Obj(fields) => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (k, v) in fields {
+                    out.push((k.clone(), self.eval(v, frame.clone())?));
+                }
+                Val::Obj(out)
+            }
+            UrlExpr::Undefined => Val::Undef,
+            UrlExpr::Hole => Val::Unknown,
+        })
+    }
+
+    /// `this.<name>` (`call`: `this.<name>()`): an assigned field, else the
+    /// nearest declared getter / method in the readable shape, else a runtime
+    /// value.
+    fn this_member(&mut self, name: &str, call: bool) -> Option<Val> {
+        if self.stack.len() >= MAX_MEMBER_DEPTH || self.stack.iter().any(|s| s == name) {
+            return None;
+        }
+        if !call && let Some((e, pos)) = self.fields.get(name).cloned() {
+            self.stack.push(name.to_string());
+            let v = self.eval(&e, Frame::Ctor(pos));
+            self.stack.pop();
+            return v;
+        }
+        let res = self.res;
+        let member = self
+            .chain
+            .iter()
+            .find_map(|&c| res.classes[c].parts.members.iter().find(|m| m.name == name));
+        let Some(member) = member else {
+            return Some(Val::Unknown);
+        };
+        // A getter is read, a method called; anything else is no URL.
+        if member.getter == call {
+            return None;
+        }
+        self.stack.push(name.to_string());
+        let v = self.member_value(member);
+        self.stack.pop();
+        v
+    }
+
+    fn member_value(&mut self, m: &UrlMember) -> Option<Val> {
+        let mut cur = self.eval(&m.init, Frame::Member(None))?;
+        if m.var.is_none() {
+            return Some(cur);
+        }
+        for step in &m.steps {
+            let mut any_true = false;
+            let mut any_false = false;
+            for term in &step.when {
+                match self.eval(term, Frame::Member(Some(cur.clone())))?.truthy() {
+                    Some(true) => any_true = true,
+                    Some(false) => any_false = true,
+                    None => {}
+                }
+            }
+            if any_false {
+                continue;
+            }
+            if !any_true {
+                return None;
+            }
+            cur = self.eval(&step.set, Frame::Member(Some(cur.clone())))?;
+        }
+        Some(cur)
+    }
 }
 
 /// A JSON object that keeps its key order through a rewrite. The workspace
@@ -3553,5 +4184,180 @@ mod tests {
             }
         );
         assert!(same(&a, &once_a) && same(&b, &once_b));
+    }
+}
+
+#[cfg(test)]
+mod class_resource_tests {
+    use super::*;
+    use glia_parser_typescript::class_url::{Ctor, CtorParam, UrlStep};
+
+    fn this(name: &str, call: bool, path: &[&str]) -> UrlExpr {
+        UrlExpr::This {
+            name: name.into(),
+            call,
+            path: path.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    fn param(name: &str) -> UrlExpr {
+        UrlExpr::Param {
+            name: name.into(),
+            path: Vec::new(),
+        }
+    }
+
+    /// `Base(resource, options = {})` with `url` = `/api` + an option step
+    /// whose second term is `cond`, and `Leaf extends Base` handing super()
+    /// `super_args`.
+    fn resources(cond: UrlExpr, super_args: Vec<UrlExpr>) -> ClassResources {
+        let base = ClassUrlParts {
+            name: "Base".into(),
+            ctor: Some(Ctor {
+                params: vec![
+                    CtorParam {
+                        name: "resource".into(),
+                        default: None,
+                    },
+                    CtorParam {
+                        name: "options".into(),
+                        default: Some(UrlExpr::Obj(Vec::new())),
+                    },
+                ],
+                super_args: None,
+            }),
+            fields: vec![
+                ("resource".into(), param("resource")),
+                ("options".into(), param("options")),
+            ],
+            members: vec![UrlMember {
+                name: "url".into(),
+                getter: true,
+                var: Some("u".into()),
+                init: UrlExpr::Lit("/api".into()),
+                steps: vec![UrlStep {
+                    when: vec![cond],
+                    set: UrlExpr::Cat(vec![
+                        UrlExpr::Var("u".into()),
+                        UrlExpr::Lit("/scoped".into()),
+                    ]),
+                }],
+            }],
+            ..ClassUrlParts::default()
+        };
+        let leaf = ClassUrlParts {
+            name: "Leaf".into(),
+            base: Some("Base".into()),
+            ctor: Some(Ctor {
+                params: Vec::new(),
+                super_args: Some(super_args),
+            }),
+            ..ClassUrlParts::default()
+        };
+        let classes = vec![
+            ClassEntry {
+                file: "a.js".into(),
+                parts: base,
+            },
+            ClassEntry {
+                file: "a.js".into(),
+                parts: leaf,
+            },
+        ];
+        let mut by_file = BTreeMap::new();
+        by_file.insert("a.js".to_string(), vec![0, 1]);
+        let mut res = ClassResources {
+            classes,
+            by_file,
+            base: Vec::new(),
+        };
+        res.base = (0..2).map(|i| res.resolve_base(i)).collect();
+        res
+    }
+
+    fn site(class: &str) -> ClassUrlSite {
+        ClassUrlSite {
+            class: class.into(),
+            url: UrlExpr::Cat(vec![
+                this("url", false, &[]),
+                UrlExpr::Lit("/".into()),
+                this("resource", false, &[]),
+            ]),
+        }
+    }
+
+    fn scoped() -> UrlExpr {
+        this("options", false, &["scoped"])
+    }
+
+    fn opts(scoped: bool) -> UrlExpr {
+        UrlExpr::Obj(vec![("scoped".into(), UrlExpr::Bool(scoped))])
+    }
+
+    #[test]
+    fn literal_super_arguments_fold_and_decide_the_step() {
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into()), opts(true)]);
+        assert_eq!(res.base, vec![None, Some(0)]);
+        assert_eq!(
+            res.fold("a.js", &site("Leaf")).as_deref(),
+            Some("/api/scoped/items")
+        );
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into()), opts(false)]);
+        assert_eq!(
+            res.fold("a.js", &site("Leaf")).as_deref(),
+            Some("/api/items")
+        );
+        // An omitted options argument takes the literal default `{}`.
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into())]);
+        assert_eq!(
+            res.fold("a.js", &site("Leaf")).as_deref(),
+            Some("/api/items")
+        );
+    }
+
+    #[test]
+    fn runtime_values_never_fold() {
+        // The base's own site: its constructor arguments are runtime values.
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into()), opts(true)]);
+        assert_eq!(res.fold("a.js", &site("Base")), None);
+        // A runtime value handed to super().
+        let res = resources(scoped(), vec![UrlExpr::Hole, opts(true)]);
+        assert_eq!(res.fold("a.js", &site("Leaf")), None);
+        // A step whose only term is a runtime value is undecidable.
+        let res = resources(
+            this("runtime", false, &[]),
+            vec![UrlExpr::Lit("items".into()), opts(true)],
+        );
+        assert_eq!(res.fold("a.js", &site("Leaf")), None);
+        // A getter called as a method is no URL.
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into()), opts(true)]);
+        let called = ClassUrlSite {
+            class: "Leaf".into(),
+            url: this("url", true, &[]),
+        };
+        assert_eq!(res.fold("a.js", &called), None);
+    }
+
+    #[test]
+    fn a_runtime_member_is_a_hole_and_a_cycle_is_unread() {
+        let res = resources(scoped(), vec![UrlExpr::Lit("items".into()), opts(true)]);
+        let holed = ClassUrlSite {
+            class: "Leaf".into(),
+            url: UrlExpr::Cat(vec![this("url", false, &[]), this("routeId", false, &[])]),
+        };
+        assert_eq!(res.fold("a.js", &holed).as_deref(), Some("/api/scoped${…}"));
+        let mut res = res;
+        res.classes[0].parts.members.push(UrlMember {
+            name: "loop".into(),
+            getter: true,
+            var: None,
+            init: this("loop", false, &[]),
+            steps: Vec::new(),
+        });
+        let looped = ClassUrlSite {
+            class: "Leaf".into(),
+            url: this("loop", false, &[]),
+        };
+        assert_eq!(res.fold("a.js", &looped), None);
     }
 }

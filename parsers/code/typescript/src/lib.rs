@@ -181,6 +181,7 @@ fn parse_file_stats(
     // A13.15: ES imports are hoisted, so a `typeorm` import below the first
     // `@Entity` class still gates it; read them all before any visit.
     (acc.typeorm.import, acc.typeorm.access) = typeorm_imports(root, src);
+    acc.declared_globals = declared_globals(root, src);
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -332,7 +333,7 @@ fn parse_file_stats(
 /// argument. Only candidates `resolve_intra_file` turns into ENDPOINTs count:
 /// a shape-2 call (`x.get(url)`) whose `x` is not an import alias does not.
 fn endpoint_arg_stats(acc: &Acc) -> EndpointArgStats {
-    let aliases = build_alias_set(&acc.imports);
+    let aliases = http_alias_set(&acc.imports, &acc.declared_globals);
     let mut stats = EndpointArgStats::default();
     let emitted = acc.endpoints.iter().filter(|c| {
         c.requires_import_alias
@@ -527,6 +528,15 @@ struct Acc {
     /// `f()`, a static call `T.m()`). A name declared twice keeps `""`. Read
     /// by [`record_module_const_aliases`].
     module_consts: BTreeMap<String, String>,
+    /// GD.29: the names an ESLint `/* global a, b */` comment at the top level
+    /// of the file declares ([`declared_globals`]): bindings a shape-2 call
+    /// (`axios.get(..)`) may name like an import alias.
+    declared_globals: Vec<String>,
+    /// GD.29: each class's URL parts ([`class_url::class_parts`]) and whether
+    /// they say something about a URL on their own (a super() literal, a
+    /// `/`-holding field or member); recorded in `resolve_intra_file`, where a
+    /// class that holds a `this`-led call site is kept too.
+    class_urls: Vec<(NodeId, class_url::ClassUrlParts, bool)>,
 }
 
 /// FH.20: a type name read in a type position by `from` (an annotation, a
@@ -878,6 +888,9 @@ struct EndpointCandidate {
     /// reading, emitted instead of it when `<alias>` is no import alias
     /// ([`settle_call_shapes`]).
     fallback: Option<Box<EndpointCandidate>>,
+    /// GD.29: the URL argument read as a `this`-led class-resource URL
+    /// ([`class_url::site_url`], JSON), recorded as a site fact on `from`.
+    class_site: Option<String>,
 }
 
 /// The path text of an HTTP call whose URL argument could not be read.
@@ -1372,6 +1385,10 @@ fn visit_class(
     // A6.2b: every constructor parameter's declared type, decorated class or
     // not, so `this.api.fetchUser()` binds on `api`'s type.
     collect_ctor_param_field_types(body, src, class_id, acc);
+    // GD.29: the class's URL parts, recorded in `resolve_intra_file`.
+    let parts = class_url::class_parts(n, name, body, src);
+    let urlish = parts.urlish();
+    acc.class_urls.push((class_id, parts, urlish));
 }
 
 /// The class body's `constructor` method, if it declares one.
@@ -4820,7 +4837,8 @@ fn try_named_endpoint(
             fetch_request: init.and_then(|i| fetch_request(i, src)),
             ..WireRead::default()
         };
-        push_endpoint(
+        let site_url = class_url::site_url(first, src);
+        if push_endpoint(
             call,
             from,
             enclosing_class,
@@ -4829,7 +4847,10 @@ fn try_named_endpoint(
             CallBase::Fetch,
             wire,
             acc,
-        );
+        ) && let Some(last) = acc.endpoints.last_mut()
+        {
+            last.class_site = site_url;
+        }
         return true;
     }
 
@@ -4901,6 +4922,7 @@ fn try_named_endpoint(
         _ => None,
     };
     let site = if awaited_generic { func } else { call };
+    let site_url = class_url::site_url(first, src);
     if push_endpoint(
         site,
         from,
@@ -4912,7 +4934,11 @@ fn try_named_endpoint(
         acc,
     ) && let Some(last) = acc.endpoints.last_mut()
     {
-        last.fallback = fallback;
+        last.fallback = fallback.map(|mut f| {
+            f.class_site = site_url.clone();
+            f
+        });
+        last.class_site = site_url;
     }
     true
 }
@@ -5006,6 +5032,7 @@ fn endpoint_candidate(
         wire,
         call_shape: None,
         fallback: None,
+        class_site: None,
     })
 }
 
@@ -5443,7 +5470,7 @@ fn try_call_shape(call: TsNode, src: &[u8], from: NodeId, class: Option<NodeId>,
 /// [`endpoint_arg_stats`], so `[ts-endpoint-args]` counts what becomes an
 /// ENDPOINT.
 fn settle_call_shapes(acc: &mut Acc) {
-    let aliases: HashSet<String> = build_alias_set(&acc.imports)
+    let aliases: HashSet<String> = http_alias_set(&acc.imports, &acc.declared_globals)
         .into_iter()
         .map(str::to_string)
         .collect();
@@ -8435,11 +8462,29 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     let mut endpoint_nav_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let repo = acc.repo.expect("Acc.repo set in parse_file");
     let mut wire_stats = WireStats::default();
+    // GD.29: an ESLint `/* global axios */` binds `axios` like an import.
+    let http_aliases = http_alias_set(&out.imports, &acc.declared_globals);
+    let mut site_classes: BTreeSet<String> = BTreeSet::new();
     for cand in acc.endpoints {
         if let Some(req) = cand.requires_import_alias.as_ref()
-            && !alias_set.contains(req.as_str())
+            && !http_aliases.contains(req.as_str())
         {
             continue;
+        }
+        // GD.29: a `this`-led URL argument is a site fact on the caller,
+        // keyed by the hit's 1-based line and column; the endpoint fold reads
+        // it with the class URL parts of the caller's class chain.
+        if let Some(site) = &cand.class_site {
+            if let Ok(parsed) = serde_json::from_str::<class_url::ClassUrlSite>(site) {
+                site_classes.insert(parsed.class);
+            }
+            out.nav.record_fact(
+                cand.from,
+                NavFact::ValueLiteral {
+                    name: class_url::site_fact_name(cand.line, cand.col),
+                    value: site.clone(),
+                },
+            );
         }
         // DT.1d: which argument is the body depends on the client: the
         // receiver field's declared type (A7.1's `inject(T)` fields are on
@@ -8500,6 +8545,28 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         });
     }
     wire_stats.report(&acc.file_rel);
+    // GD.29: each class's URL parts, when they say something about a URL or
+    // the class holds a `this`-led call site; the base's import specifier is
+    // known now.
+    for (class_id, mut parts, urlish) in std::mem::take(&mut acc.class_urls) {
+        if !urlish && !site_classes.contains(&parts.name) {
+            continue;
+        }
+        parts.base_from = parts
+            .base
+            .as_deref()
+            .and_then(|b| import_module(&out.imports, b))
+            .map(str::to_string);
+        if let Ok(value) = serde_json::to_string(&parts) {
+            out.nav.record_fact(
+                class_id,
+                NavFact::ValueLiteral {
+                    name: class_url::CLASS_FACT.to_string(),
+                    value,
+                },
+            );
+        }
+    }
 
     let rs = acc.receiver_stats;
     if rs.any() {
@@ -8684,6 +8751,55 @@ fn build_alias_set(imports: &[ImportStmt]) -> std::collections::HashSet<&str> {
     set
 }
 
+/// GD.29: the bindings a shape-2 call's `<alias>` may name: the import
+/// aliases ([`build_alias_set`]) and the file's ESLint-declared globals.
+fn http_alias_set<'a>(imports: &'a [ImportStmt], globals: &'a [String]) -> HashSet<&'a str> {
+    let mut set = build_alias_set(imports);
+    set.extend(globals.iter().map(String::as_str));
+    set
+}
+
+/// GD.29: the names an ESLint `global` / `globals` block comment at the top
+/// level of the file declares (`/* global axios, $: readonly */`); a name
+/// declared `off` is not one. A declaration, read as written: the file says
+/// the binding exists, as an import would.
+fn declared_globals(root: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = root.walk();
+    for c in root.named_children(&mut cursor) {
+        if c.kind() != "comment" {
+            continue;
+        }
+        let Some(body) = text(c, src)
+            .strip_prefix("/*")
+            .and_then(|t| t.strip_suffix("*/"))
+        else {
+            continue;
+        };
+        let body = body.trim_start();
+        let Some(list) = body
+            .strip_prefix("globals")
+            .or_else(|| body.strip_prefix("global"))
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+        else {
+            continue;
+        };
+        for item in list.split(',') {
+            let mut parts = item.splitn(2, ':');
+            let name = parts.next().unwrap_or("").trim();
+            let setting = parts.next().map(str::trim).unwrap_or("");
+            let ident = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
+            if ident && setting != "off" && !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 // ============================================================================
 // Cell building
 // ============================================================================
@@ -8746,6 +8862,722 @@ fn strip_string_quotes(s: &str) -> String {
         t[1..t.len() - 1].to_string()
     } else {
         t.to_string()
+    }
+}
+
+// ============================================================================
+// GD.29: class-resource URLs
+// ============================================================================
+
+/// GD.29: what a class says about the URL its `this`-led HTTP calls build.
+///
+/// A resource client (`class ApiClient { constructor(resource, options = {})
+/// { this.resource = resource; .. } get url() { return
+/// `${this.baseUrl()}/${this.resource}` } }`) is extended by one class per
+/// API resource, each handing `super()` a literal (`super('notifications', {
+/// accountScoped: true })`) and calling `axios.get(`${this.url}/${id}`)`. The
+/// parser reads, per class, the constructor's parameters (with literal
+/// defaults), its top-level `this.<f> = <expr>` assignments and field
+/// initialisers, its `super(..)` arguments, and every getter / zero-argument
+/// method whose body is one `return`, or a `let v = ..; if (..) { v = ..; } ..
+/// return v;` sequence; and, per HTTP call site, the URL argument when it
+/// starts with `this.<member>`. Each is a small expression tree
+/// ([`class_url::UrlExpr`]) of what the source writes: a literal, a constructor
+/// parameter, a `this` member, a same-file `const` string, a `||`, a `+` /
+/// template concatenation. Anything else is a [`class_url::UrlExpr::Hole`]. No value is
+/// followed: the engine's endpoint fold (engine/src/endpoint_fold.rs)
+/// evaluates the trees per subclass, binding a constructor parameter only from
+/// a literal `super()` argument or the parameter's literal default (James
+/// 2026-10-31: a URL is folded only from a string literal handed to a
+/// constructor / super(), never from a runtime value).
+///
+/// STOPGAP CARRIER. The facts ride as [`NavFact::ValueLiteral`] (`name` =
+/// [`class_url::CLASS_FACT`] on the CLASS, [`class_url::site_fact_name`] on the calling scope,
+/// `value` = this module's JSON), because a dedicated NavFact variant needs
+/// `code-domain/src/lib.rs` and the parse cache's fact table
+/// (`engine/src/cache.rs`), which GD.29 does not own. ValueLiteral is a
+/// cross-file surface fact there, which these are, and the Dart base reader
+/// that also reads it skips every non-`.dart` file. Removal: give the facts
+/// their own variants (`ClassUrlParts`, `ClassUrlSite`) and drop the name
+/// prefixes; the JSON shapes below carry over.
+pub mod class_url {
+    use super::{TsNode, has_token, local_const_value, sole_named, strip_string_quotes, text};
+    use serde::{Deserialize, Serialize};
+
+    /// The ValueLiteral `name` of a class's [`ClassUrlParts`].
+    pub const CLASS_FACT: &str = "gd29:class_url_parts";
+    /// The ValueLiteral `name` prefix of a call site's [`ClassUrlSite`].
+    pub const SITE_FACT_PREFIX: &str = "gd29:class_url_site:";
+
+    /// The site fact name for the hit at 1-based `line` and `col` (the
+    /// ENDPOINT_HIT's own `line` / `col`).
+    pub fn site_fact_name(line: usize, col: usize) -> String {
+        format!("{SITE_FACT_PREFIX}{line}:{col}")
+    }
+
+    /// One expression as the source writes it.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum UrlExpr {
+        /// A string literal (or a same-file `const` bound to one), a number.
+        Lit(String),
+        /// A template literal or a `+` chain: its parts, concatenated.
+        Cat(Vec<UrlExpr>),
+        /// A constructor parameter, then property reads (`options.apiVersion`).
+        Param {
+            name: String,
+            path: Vec<String>,
+        },
+        /// `this.<name>` (`call`: `this.<name>()` with no arguments), then
+        /// property reads (`this.options.accountScoped`).
+        This {
+            name: String,
+            call: bool,
+            path: Vec<String>,
+        },
+        /// The method's own `let` variable.
+        Var(String),
+        /// `a || b` / `a ?? b`.
+        Or(Box<UrlExpr>, Box<UrlExpr>),
+        /// `!a`, in a condition.
+        Not(Box<UrlExpr>),
+        Bool(bool),
+        /// An object literal of such values.
+        Obj(Vec<(String, UrlExpr)>),
+        /// `undefined` / `null`.
+        Undefined,
+        /// Anything else: a runtime value.
+        Hole,
+    }
+
+    /// A constructor parameter: its name (`""` for a destructuring or rest
+    /// pattern) and its default.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct CtorParam {
+        pub name: String,
+        pub default: Option<UrlExpr>,
+    }
+
+    /// A class's constructor: parameters, the fields it and the field
+    /// initialisers assign (initialisers first, in order), its `super(..)`
+    /// arguments.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct Ctor {
+        pub params: Vec<CtorParam>,
+        pub super_args: Option<Vec<UrlExpr>>,
+    }
+
+    /// One conditional step of a member: when every `when` term holds, the
+    /// variable becomes `set`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct UrlStep {
+        pub when: Vec<UrlExpr>,
+        pub set: UrlExpr,
+    }
+
+    /// A getter (`getter`) or zero-argument method: its variable starts as
+    /// `init`, the steps run in order, the variable is returned (`var` None:
+    /// a single `return init`).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct UrlMember {
+        pub name: String,
+        pub getter: bool,
+        pub var: Option<String>,
+        pub init: UrlExpr,
+        pub steps: Vec<UrlStep>,
+    }
+
+    /// Everything one class says about its URL.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct ClassUrlParts {
+        pub name: String,
+        /// The `extends` name, as written (`ApiClient`).
+        pub base: Option<String>,
+        /// The import specifier the file binds `base` from (`./ApiClient`).
+        pub base_from: Option<String>,
+        /// The declared constructor; None = the implicit one, which hands its
+        /// arguments to `super` unchanged.
+        pub ctor: Option<Ctor>,
+        /// `this.<f> = <expr>` in the constructor body (top level) and field
+        /// initialisers, in the order they run.
+        pub fields: Vec<(String, UrlExpr)>,
+        pub members: Vec<UrlMember>,
+    }
+
+    impl ClassUrlParts {
+        /// True when the parts say something about a URL on their own: a
+        /// `super()` argument that is a literal or an object literal, or a
+        /// field or member whose text holds a `/` literal.
+        pub fn urlish(&self) -> bool {
+            let literal_super = self
+                .ctor
+                .as_ref()
+                .and_then(|c| c.super_args.as_ref())
+                .is_some_and(|args| {
+                    args.iter()
+                        .any(|a| matches!(a, UrlExpr::Lit(_) | UrlExpr::Obj(_)))
+                });
+            literal_super || self.builds_url()
+        }
+
+        /// True when a field or member's text holds a `/` literal: the class
+        /// builds a URL (`ApiClient`), whatever its subclasses hand it.
+        pub fn builds_url(&self) -> bool {
+            self.fields.iter().any(|(_, e)| has_slash(e))
+                || self
+                    .members
+                    .iter()
+                    .any(|m| has_slash(&m.init) || m.steps.iter().any(|s| has_slash(&s.set)))
+        }
+    }
+
+    /// A call site's URL argument, `this`-led, inside a method of `class`.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ClassUrlSite {
+        pub class: String,
+        pub url: UrlExpr,
+    }
+
+    fn has_slash(e: &UrlExpr) -> bool {
+        match e {
+            UrlExpr::Lit(s) => s.contains('/'),
+            UrlExpr::Cat(parts) => parts.iter().any(has_slash),
+            UrlExpr::Or(a, b) => has_slash(a) || has_slash(b),
+            _ => false,
+        }
+    }
+
+    /// What an identifier may name where an expression is read.
+    #[derive(Clone, Copy)]
+    enum Scope<'a> {
+        /// A constructor: its parameter names.
+        Ctor(&'a [String]),
+        /// A member: its `let` variable.
+        Member(Option<&'a str>),
+        /// A call site: no parameter or variable is readable.
+        Site,
+    }
+
+    /// [`UrlExpr`] of `n`.
+    fn expr(n: TsNode, src: &[u8], scope: Scope) -> UrlExpr {
+        match n.kind() {
+            "string" => {
+                let raw = text(n, src);
+                if raw.contains('\\') {
+                    UrlExpr::Hole
+                } else {
+                    UrlExpr::Lit(strip_string_quotes(raw))
+                }
+            }
+            "number" => UrlExpr::Lit(text(n, src).to_string()),
+            "true" => UrlExpr::Bool(true),
+            "false" => UrlExpr::Bool(false),
+            "null" | "undefined" => UrlExpr::Undefined,
+            "template_string" => {
+                let mut parts = Vec::new();
+                let mut cursor = n.walk();
+                for c in n.named_children(&mut cursor) {
+                    match c.kind() {
+                        "string_fragment" => parts.push(UrlExpr::Lit(text(c, src).to_string())),
+                        "template_substitution" => parts.push(
+                            sole_named(c).map_or(UrlExpr::Hole, |inner| expr(inner, src, scope)),
+                        ),
+                        _ => parts.push(UrlExpr::Hole),
+                    }
+                }
+                UrlExpr::Cat(parts)
+            }
+            "parenthesized_expression" => {
+                sole_named(n).map_or(UrlExpr::Hole, |inner| expr(inner, src, scope))
+            }
+            "binary_expression" => {
+                let (Some(l), Some(op), Some(r)) = (
+                    n.child_by_field_name("left"),
+                    n.child_by_field_name("operator"),
+                    n.child_by_field_name("right"),
+                ) else {
+                    return UrlExpr::Hole;
+                };
+                match text(op, src) {
+                    "+" => {
+                        let mut parts = Vec::new();
+                        for side in [expr(l, src, scope), expr(r, src, scope)] {
+                            match side {
+                                UrlExpr::Cat(inner) => parts.extend(inner),
+                                other => parts.push(other),
+                            }
+                        }
+                        UrlExpr::Cat(parts)
+                    }
+                    "||" | "??" => {
+                        UrlExpr::Or(Box::new(expr(l, src, scope)), Box::new(expr(r, src, scope)))
+                    }
+                    _ => UrlExpr::Hole,
+                }
+            }
+            "unary_expression" => {
+                let negated = n
+                    .child_by_field_name("operator")
+                    .is_some_and(|o| text(o, src) == "!");
+                match (negated, n.child_by_field_name("argument")) {
+                    (true, Some(a)) => UrlExpr::Not(Box::new(expr(a, src, scope))),
+                    _ => UrlExpr::Hole,
+                }
+            }
+            "object" => {
+                let mut fields = Vec::new();
+                let mut cursor = n.walk();
+                for p in n.named_children(&mut cursor) {
+                    match p.kind() {
+                        "pair" => {
+                            let (Some(k), Some(v)) =
+                                (p.child_by_field_name("key"), p.child_by_field_name("value"))
+                            else {
+                                return UrlExpr::Hole;
+                            };
+                            let key = match k.kind() {
+                                "property_identifier" => text(k, src).to_string(),
+                                "string" => strip_string_quotes(text(k, src)),
+                                _ => return UrlExpr::Hole,
+                            };
+                            fields.push((key, expr(v, src, scope)));
+                        }
+                        "shorthand_property_identifier" => {
+                            fields.push((text(p, src).to_string(), ident(p, src, scope)));
+                        }
+                        "comment" => {}
+                        _ => return UrlExpr::Hole,
+                    }
+                }
+                UrlExpr::Obj(fields)
+            }
+            "identifier" => ident(n, src, scope),
+            "member_expression" => member(n, src, scope),
+            "call_expression" => {
+                let no_args = n
+                    .child_by_field_name("arguments")
+                    .is_some_and(|a| a.kind() == "arguments" && !super::has_named_non_comment(a));
+                match n.child_by_field_name("function") {
+                    Some(f) if no_args && f.kind() == "member_expression" => {
+                        match member(f, src, scope) {
+                            UrlExpr::This { name, path, .. } if path.is_empty() => UrlExpr::This {
+                                name,
+                                call: true,
+                                path,
+                            },
+                            _ => UrlExpr::Hole,
+                        }
+                    }
+                    _ => UrlExpr::Hole,
+                }
+            }
+            _ => UrlExpr::Hole,
+        }
+    }
+
+    /// An identifier: a constructor parameter, the member's variable,
+    /// `undefined`, or a same-file `const` bound to a string literal.
+    fn ident(n: TsNode, src: &[u8], scope: Scope) -> UrlExpr {
+        let name = text(n, src);
+        match scope {
+            Scope::Ctor(params) if params.iter().any(|p| p == name) => {
+                return UrlExpr::Param {
+                    name: name.to_string(),
+                    path: Vec::new(),
+                };
+            }
+            Scope::Member(Some(v)) if v == name => return UrlExpr::Var(name.to_string()),
+            _ => {}
+        }
+        if name == "undefined" {
+            return UrlExpr::Undefined;
+        }
+        match local_const_value(n, src) {
+            Some(v) if v.kind() == "string" => expr(v, src, scope),
+            Some(v) if v.kind() == "template_string" && v.named_child_count() <= 1 => {
+                match expr(v, src, scope) {
+                    UrlExpr::Cat(parts) if parts.iter().all(|p| matches!(p, UrlExpr::Lit(_))) => {
+                        UrlExpr::Cat(parts)
+                    }
+                    _ => UrlExpr::Hole,
+                }
+            }
+            _ => UrlExpr::Hole,
+        }
+    }
+
+    /// `this.a.b` / `param.a`: the root and its property chain.
+    fn member(n: TsNode, src: &[u8], scope: Scope) -> UrlExpr {
+        let mut path: Vec<String> = Vec::new();
+        let mut cur = n;
+        loop {
+            match cur.kind() {
+                "member_expression" => {
+                    let Some(p) = cur.child_by_field_name("property") else {
+                        return UrlExpr::Hole;
+                    };
+                    if !matches!(
+                        p.kind(),
+                        "property_identifier" | "private_property_identifier"
+                    ) {
+                        return UrlExpr::Hole;
+                    }
+                    path.push(text(p, src).to_string());
+                    let Some(o) = cur.child_by_field_name("object") else {
+                        return UrlExpr::Hole;
+                    };
+                    cur = o;
+                }
+                "this" => {
+                    path.reverse();
+                    let mut it = path.into_iter();
+                    let Some(name) = it.next() else {
+                        return UrlExpr::Hole;
+                    };
+                    return UrlExpr::This {
+                        name,
+                        call: false,
+                        path: it.collect(),
+                    };
+                }
+                "identifier" => {
+                    path.reverse();
+                    return match ident(cur, src, scope) {
+                        UrlExpr::Param { name, .. } => UrlExpr::Param { name, path },
+                        _ => UrlExpr::Hole,
+                    };
+                }
+                _ => return UrlExpr::Hole,
+            }
+        }
+    }
+
+    /// The conjunction a condition states: its top-level `&&` terms.
+    fn terms(n: TsNode, src: &[u8], scope: Scope, out: &mut Vec<UrlExpr>) {
+        let node = match n.kind() {
+            "parenthesized_expression" => sole_named(n).unwrap_or(n),
+            _ => n,
+        };
+        if node.kind() == "binary_expression"
+            && node
+                .child_by_field_name("operator")
+                .is_some_and(|o| text(o, src) == "&&")
+            && let (Some(l), Some(r)) = (
+                node.child_by_field_name("left"),
+                node.child_by_field_name("right"),
+            )
+        {
+            terms(l, src, scope, out);
+            terms(r, src, scope, out);
+            return;
+        }
+        out.push(expr(node, src, scope));
+    }
+
+    /// The non-comment named children of `n`.
+    fn statements(n: TsNode) -> Vec<TsNode> {
+        let mut cursor = n.walk();
+        n.named_children(&mut cursor)
+            .filter(|c| c.kind() != "comment")
+            .collect()
+    }
+
+    /// `v = <e>` / `v += <e>` as the new value of `v`.
+    fn assigned(stmt: TsNode, var: &str, src: &[u8]) -> Option<UrlExpr> {
+        let e = match stmt.kind() {
+            "expression_statement" => sole_named(stmt)?,
+            "statement_block" => {
+                let [only] = statements(stmt)[..] else {
+                    return None;
+                };
+                return assigned(only, var, src);
+            }
+            _ => return None,
+        };
+        let left = e.child_by_field_name("left")?;
+        if left.kind() != "identifier" || text(left, src) != var {
+            return None;
+        }
+        let right = expr(
+            e.child_by_field_name("right")?,
+            src,
+            Scope::Member(Some(var)),
+        );
+        match e.kind() {
+            "assignment_expression" => Some(right),
+            "augmented_assignment_expression"
+                if e.child_by_field_name("operator")
+                    .is_some_and(|o| text(o, src) == "+=") =>
+            {
+                Some(UrlExpr::Cat(vec![UrlExpr::Var(var.to_string()), right]))
+            }
+            _ => None,
+        }
+    }
+
+    /// A getter or zero-argument, non-static, non-async method whose body is
+    /// one `return`, or `let|const v = ..;` + `if (..) v = ..;` steps (no
+    /// `else`) + `return v;`.
+    fn url_member(def: TsNode, src: &[u8]) -> Option<UrlMember> {
+        let name = text(def.child_by_field_name("name")?, src).to_string();
+        if name == "constructor"
+            || has_token(def, "set")
+            || has_token(def, "static")
+            || has_token(def, "async")
+            || has_token(def, "*")
+            || def
+                .child_by_field_name("parameters")
+                .is_some_and(super::has_named_non_comment)
+        {
+            return None;
+        }
+        let getter = has_token(def, "get");
+        let body = statements(def.child_by_field_name("body")?);
+        if let [only] = body[..]
+            && only.kind() == "return_statement"
+        {
+            let e = sole_named(only)?;
+            return Some(UrlMember {
+                name,
+                getter,
+                var: None,
+                init: expr(e, src, Scope::Member(None)),
+                steps: Vec::new(),
+            });
+        }
+        let (first, rest) = body.split_first()?;
+        let (last, middle) = rest.split_last()?;
+        if !matches!(first.kind(), "lexical_declaration" | "variable_declaration") {
+            return None;
+        }
+        let [decl] = statements(*first)[..] else {
+            return None;
+        };
+        if decl.kind() != "variable_declarator" {
+            return None;
+        }
+        let var_node = decl.child_by_field_name("name")?;
+        if var_node.kind() != "identifier" {
+            return None;
+        }
+        let var = text(var_node, src).to_string();
+        let init = expr(decl.child_by_field_name("value")?, src, Scope::Member(None));
+        let mut steps = Vec::new();
+        for stmt in middle {
+            if stmt.kind() != "if_statement" || stmt.child_by_field_name("alternative").is_some() {
+                return None;
+            }
+            let mut when = Vec::new();
+            terms(
+                stmt.child_by_field_name("condition")?,
+                src,
+                Scope::Member(Some(&var)),
+                &mut when,
+            );
+            let set = assigned(stmt.child_by_field_name("consequence")?, &var, src)?;
+            steps.push(UrlStep { when, set });
+        }
+        let returned = (last.kind() == "return_statement")
+            .then(|| sole_named(*last))
+            .flatten()?;
+        if returned.kind() != "identifier" || text(returned, src) != var {
+            return None;
+        }
+        Some(UrlMember {
+            name,
+            getter,
+            var: Some(var),
+            init,
+            steps,
+        })
+    }
+
+    /// A constructor parameter's name and default, and whether it is a
+    /// TypeScript parameter property (`private readonly x`), which is also a
+    /// field.
+    fn ctor_param(p: TsNode, src: &[u8], known: &[String]) -> (CtorParam, bool) {
+        let (pattern, value) = match p.kind() {
+            "required_parameter" | "optional_parameter" => (
+                p.child_by_field_name("pattern"),
+                p.child_by_field_name("value"),
+            ),
+            "assignment_pattern" => (
+                p.child_by_field_name("left"),
+                p.child_by_field_name("right"),
+            ),
+            "identifier" => (Some(p), None),
+            _ => (None, None),
+        };
+        let name = pattern
+            .filter(|n| n.kind() == "identifier")
+            .map(|n| text(n, src).to_string())
+            .unwrap_or_default();
+        let mut cursor = p.walk();
+        let property = p
+            .named_children(&mut cursor)
+            .any(|c| c.kind() == "accessibility_modifier")
+            || has_token(p, "readonly");
+        let default = value.map(|v| expr(v, src, Scope::Ctor(known)));
+        (CtorParam { name, default }, property)
+    }
+
+    /// The class's [`ClassUrlParts`]: `class` the declaration, `body` its
+    /// `class_body`.
+    pub(crate) fn class_parts(
+        class: TsNode,
+        name: &str,
+        body: TsNode,
+        src: &[u8],
+    ) -> ClassUrlParts {
+        let mut parts = ClassUrlParts {
+            name: name.to_string(),
+            base: extends_name(class, src),
+            ..ClassUrlParts::default()
+        };
+        // Field initialisers run before the constructor body's assignments.
+        for m in statements(body) {
+            match m.kind() {
+                "public_field_definition" if !has_token(m, "static") => {
+                    if let (Some(n), Some(v)) = (
+                        m.child_by_field_name("name"),
+                        m.child_by_field_name("value"),
+                    ) && matches!(
+                        n.kind(),
+                        "property_identifier" | "private_property_identifier"
+                    ) {
+                        parts
+                            .fields
+                            .push((text(n, src).to_string(), expr(v, src, Scope::Ctor(&[]))));
+                    }
+                }
+                "method_definition" => {
+                    // A member that returns a runtime value says nothing.
+                    if let Some(member) = url_member(m, src)
+                        && !(member.init == UrlExpr::Hole && member.steps.is_empty())
+                    {
+                        parts.members.push(member);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(ctor) = statements(body).into_iter().find(|m| {
+            m.kind() == "method_definition"
+                && m.child_by_field_name("name")
+                    .is_some_and(|n| text(n, src) == "constructor")
+        }) else {
+            return parts;
+        };
+        let mut names: Vec<String> = Vec::new();
+        let mut params: Vec<CtorParam> = Vec::new();
+        if let Some(list) = ctor.child_by_field_name("parameters") {
+            for p in statements(list) {
+                let (param, property) = ctor_param(p, src, &names);
+                if property && !param.name.is_empty() {
+                    parts.fields.push((
+                        param.name.clone(),
+                        UrlExpr::Param {
+                            name: param.name.clone(),
+                            path: Vec::new(),
+                        },
+                    ));
+                }
+                names.push(param.name.clone());
+                params.push(param);
+            }
+        }
+        let mut super_args = None;
+        if let Some(block) = ctor.child_by_field_name("body") {
+            for stmt in statements(block) {
+                let Some(e) = (stmt.kind() == "expression_statement")
+                    .then(|| sole_named(stmt))
+                    .flatten()
+                else {
+                    continue;
+                };
+                match e.kind() {
+                    "call_expression"
+                        if e.child_by_field_name("function")
+                            .is_some_and(|f| f.kind() == "super") =>
+                    {
+                        let args = e
+                            .child_by_field_name("arguments")
+                            .map(|a| {
+                                statements(a)
+                                    .into_iter()
+                                    .map(|arg| expr(arg, src, Scope::Ctor(&names)))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        super_args = Some(args);
+                    }
+                    "assignment_expression" => {
+                        let (Some(l), Some(r)) = (
+                            e.child_by_field_name("left"),
+                            e.child_by_field_name("right"),
+                        ) else {
+                            continue;
+                        };
+                        if let UrlExpr::This { name, path, .. } = member(l, src, Scope::Site)
+                            && path.is_empty()
+                            && l.kind() == "member_expression"
+                        {
+                            parts.fields.push((name, expr(r, src, Scope::Ctor(&names))));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        parts.ctor = Some(Ctor { params, super_args });
+        parts
+    }
+
+    /// The simple name a class `extends` (`ApiClient`, `ns.Base` -> `Base`);
+    /// None for no `extends` or a computed one (`mixin(A)`).
+    fn extends_name(class: TsNode, src: &[u8]) -> Option<String> {
+        let mut cursor = class.walk();
+        let heritage = class
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "class_heritage")?;
+        let mut hc = heritage.walk();
+        let clause = heritage
+            .named_children(&mut hc)
+            .find(|c| c.kind() == "extends_clause")?;
+        let value = clause.child_by_field_name("value")?;
+        matches!(value.kind(), "identifier" | "member_expression")
+            .then(|| super::heritage_type_name(value, src))
+            .flatten()
+            .map(str::to_string)
+    }
+
+    /// The URL argument `arg` of an HTTP call, JSON, when it is `this`-led
+    /// (`this.url`, `this.base()`, `` `${this.url}/x` ``, `this.url + '/x'`)
+    /// inside an instance member of a named class declaration.
+    pub(crate) fn site_url(arg: TsNode, src: &[u8]) -> Option<String> {
+        let (body, is_static) = super::this_class(arg)?;
+        if is_static {
+            return None;
+        }
+        let class = body.parent()?;
+        if !matches!(
+            class.kind(),
+            "class_declaration" | "abstract_class_declaration"
+        ) {
+            return None;
+        }
+        let class = text(class.child_by_field_name("name")?, src).to_string();
+        let url = expr(arg, src, Scope::Site);
+        let head = match &url {
+            UrlExpr::Cat(parts) => parts
+                .iter()
+                .find(|p| !matches!(p, UrlExpr::Lit(s) if s.is_empty())),
+            other => Some(other),
+        };
+        if !matches!(head, Some(UrlExpr::This { .. })) {
+            return None;
+        }
+        serde_json::to_string(&ClassUrlSite { class, url }).ok()
     }
 }
 
@@ -16315,5 +17147,219 @@ export class Store {
             Some("Store")
         );
         assert_eq!(p.nav.return_types.get(&clone), None);
+    }
+}
+
+#[cfg(test)]
+mod class_url_tests {
+    use super::class_url::{CLASS_FACT, ClassUrlParts, ClassUrlSite, SITE_FACT_PREFIX, UrlExpr};
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts_class_url")
+    }
+
+    fn parse(src: &str, path: &str, module: &str) -> FileParse {
+        parse_file(src, path, module, repo()).unwrap()
+    }
+
+    fn endpoints(p: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = p
+            .nodes
+            .iter()
+            .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .filter_map(|n| p.nav.qname_by_id.get(&n.id))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The `(fact name, value)` ValueLiterals recorded on `qname`'s node.
+    fn facts(p: &FileParse, qname: &str) -> Vec<(String, String)> {
+        let id = p
+            .nav
+            .qname_by_id
+            .iter()
+            .find_map(|(id, q)| (q == qname).then_some(*id))
+            .unwrap_or_else(|| panic!("no node {qname}"));
+        p.nav
+            .nav_facts
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter_map(|f| match f {
+                NavFact::ValueLiteral { name, value } => Some((name.clone(), value.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn parts(p: &FileParse, qname: &str) -> ClassUrlParts {
+        let (_, value) = facts(p, qname)
+            .into_iter()
+            .find(|(n, _)| n == CLASS_FACT)
+            .unwrap_or_else(|| panic!("no class fact on {qname}"));
+        serde_json::from_str(&value).expect("parts json")
+    }
+
+    const BASE: &str = r#"/* global axios */
+const DEFAULT_API_VERSION = 'v1';
+
+class ApiClient {
+  constructor(resource, options = {}) {
+    this.apiVersion = `/api/${options.apiVersion || DEFAULT_API_VERSION}`;
+    this.options = options;
+    this.resource = resource;
+  }
+
+  get url() {
+    return `${this.baseUrl()}/${this.resource}`;
+  }
+
+  baseUrl() {
+    let url = this.apiVersion;
+    if (this.options.accountScoped && this.accountIdFromRoute) {
+      url = `${url}/accounts/${this.accountIdFromRoute}`;
+    }
+    return url;
+  }
+}
+
+export default ApiClient;
+"#;
+
+    #[test]
+    fn eslint_global_declares_a_shape_two_alias() {
+        let src = "/* global axios, $: readonly, gone: off */\nexport function f() { return axios.get('/api/x'); }\nexport function g() { return gone.get('/api/y'); }\n";
+        let p = parse(src, "src/a.js", "src::a");
+        assert_eq!(endpoints(&p), ["endpoint:GET:/api/x"]);
+        // No directive: the shape-2 call stays dropped, as on HEAD.
+        let p = parse(
+            "export function f() { return axios.get('/api/x'); }\n",
+            "src/b.js",
+            "src::b",
+        );
+        assert!(endpoints(&p).is_empty(), "{:?}", endpoints(&p));
+    }
+
+    #[test]
+    fn base_class_parts_read_the_constructor_and_members() {
+        let p = parse(BASE, "src/api/ApiClient.js", "src::api::ApiClient");
+        let parts = parts(&p, "src::api::ApiClient::ApiClient");
+        assert_eq!(parts.name, "ApiClient");
+        assert_eq!(parts.base, None);
+        let ctor = parts.ctor.as_ref().expect("ctor");
+        assert_eq!(ctor.params.len(), 2);
+        assert_eq!(ctor.params[1].default, Some(UrlExpr::Obj(Vec::new())));
+        let field = |n: &str| {
+            parts
+                .fields
+                .iter()
+                .find(|(f, _)| f == n)
+                .map(|(_, e)| e.clone())
+        };
+        assert_eq!(
+            field("apiVersion"),
+            Some(UrlExpr::Cat(vec![
+                UrlExpr::Lit("/api/".into()),
+                UrlExpr::Or(
+                    Box::new(UrlExpr::Param {
+                        name: "options".into(),
+                        path: vec!["apiVersion".into()],
+                    }),
+                    Box::new(UrlExpr::Lit("v1".into())),
+                ),
+            ]))
+        );
+        let url = parts.members.iter().find(|m| m.name == "url").expect("url");
+        assert!(url.getter);
+        let base = parts
+            .members
+            .iter()
+            .find(|m| m.name == "baseUrl")
+            .expect("baseUrl");
+        assert!(!base.getter);
+        assert_eq!(base.var.as_deref(), Some("url"));
+        assert_eq!(base.steps.len(), 1);
+        assert_eq!(base.steps[0].when.len(), 2, "{:?}", base.steps[0].when);
+        assert!(parts.builds_url());
+    }
+
+    #[test]
+    fn subclass_records_its_super_literals_and_this_led_sites() {
+        let src = r#"/* global axios */
+import ApiClient from './ApiClient';
+
+class NotificationsAPI extends ApiClient {
+  constructor() {
+    super('notifications', { accountScoped: true });
+  }
+
+  list() {
+    return axios.get(this.url);
+  }
+
+  unread(id) {
+    return axios.post(`${this.url}/${id}/unread`);
+  }
+
+  other() {
+    return axios.get('/api/v1/other');
+  }
+}
+
+export default new NotificationsAPI();
+"#;
+        let p = parse(src, "src/api/notifications.js", "src::api::notifications");
+        let parts = parts(&p, "src::api::notifications::NotificationsAPI");
+        assert_eq!(parts.base.as_deref(), Some("ApiClient"));
+        assert_eq!(parts.base_from.as_deref(), Some("./ApiClient"));
+        assert_eq!(
+            parts.ctor.and_then(|c| c.super_args),
+            Some(vec![
+                UrlExpr::Lit("notifications".into()),
+                UrlExpr::Obj(vec![("accountScoped".into(), UrlExpr::Bool(true))]),
+            ])
+        );
+        // The sites, keyed by the hit's line:col; the literal URL is no site.
+        let site = |m: &str| -> Vec<ClassUrlSite> {
+            facts(
+                &p,
+                &format!("src::api::notifications::NotificationsAPI::{m}"),
+            )
+            .into_iter()
+            .filter(|(n, _)| n.starts_with(SITE_FACT_PREFIX))
+            .map(|(_, v)| serde_json::from_str(&v).expect("site json"))
+            .collect()
+        };
+        let list = site("list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].class, "NotificationsAPI");
+        assert_eq!(
+            list[0].url,
+            UrlExpr::This {
+                name: "url".into(),
+                call: false,
+                path: Vec::new()
+            }
+        );
+        let unread = site("unread");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(
+            unread[0].url,
+            UrlExpr::Cat(vec![
+                UrlExpr::This {
+                    name: "url".into(),
+                    call: false,
+                    path: Vec::new()
+                },
+                UrlExpr::Lit("/".into()),
+                UrlExpr::Hole,
+                UrlExpr::Lit("/unread".into()),
+            ])
+        );
+        assert!(site("other").is_empty());
     }
 }

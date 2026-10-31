@@ -1,0 +1,27 @@
+{
+  "framework": "js-class-resource-client",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "mechanism": "http",
+  "note": "GD.29: a JS resource client (the chatwoot ApiClient shape) builds its URL in a getter over a base-URL method and the constructor's `resource`; each subclass hands super() a literal resource and options object, and its methods call `axios.<verb>(this.url)` / `` axios.<verb>(`${this.url}/..`) `` with `axios` an ESLint `/* global axios */`. The endpoint fold binds the resource and the accountScoped branch from the literal super() arguments. Baseline before GD.29 (release CLI 0.5.5+p186044a81f3cb527 at 780e5cfa, client --with server): `[http] routes=3 endpoints=0 paired=0`: the shape-2 calls on the global `axios` minted nothing. After (debug CLI): `[endpoint-fold] class_resource classes=1 subclasses=3 hits=6 folded=4 unread=2` and `[http] routes=3 endpoints=6 paired=4`. The DynamicAPI control hands super() a runtime value and must not fold.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /api/v1/accounts/${…}/notifications", "exact": true, "note": "accountScoped subclass, bare this.url"},
+    {"kind": "ENDPOINT", "name": "POST /api/v1/accounts/${…}/notifications/${…}/unread", "exact": true, "note": "accountScoped subclass, template over this.url"},
+    {"kind": "ENDPOINT", "name": "GET /api/v1/profile", "exact": true, "note": "plain subclass: no options, the enterprise and accountScoped branches are not taken"},
+    {"kind": "ENDPOINT", "name": "PUT /api/v1/profile", "exact": true, "note": "plain subclass, second verb"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v1/accounts/${…}/notifications", "to": "ANY /api/v1/accounts/:account_id/notifications", "category": "HTTP_CALLS", "exact": true, "note": "the folded endpoint pairs the scoped resources route"},
+    {"from": "POST /api/v1/accounts/${…}/notifications/${…}/unread", "to": "POST /api/v1/accounts/:account_id/notifications/:id/unread", "category": "HTTP_CALLS", "exact": true, "note": "the member route"},
+    {"from": "GET /api/v1/profile", "to": "ANY /api/v1/profile", "category": "HTTP_CALLS", "exact": true, "note": "singular resource"},
+    {"from": "PUT /api/v1/profile", "to": "ANY /api/v1/profile", "category": "HTTP_CALLS", "exact": true, "note": "singular resource"},
+    {"from": "src::api::notifications::NotificationsAPI::list", "to": "GET /api/v1/accounts/${…}/notifications", "category": "CALLS", "exact": true, "note": "the call site keeps its caller"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "GET /api/v1/profile", "cell": "ENDPOINT_HIT", "contains": "\"class_resource\":\"ProfileAPI\"", "note": "the hit names the subclass whose super() literal it read"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "GET /api/v1/accounts/${…}/${…}/search", "note": "PRECISION: a runtime value handed to super() is never folded into a path"},
+    {"kind": "ENDPOINT", "name": "GET /enterprise/api/v1/profile", "note": "PRECISION: an option the literal object does not set takes no branch"}
+  ]
+}
