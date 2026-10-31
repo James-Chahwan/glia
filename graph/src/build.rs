@@ -146,6 +146,7 @@ pub fn build_go_with(
         aliases,
         wire,
         values,
+        clause_dot,
     } = build_go_passes_with(repo, parses, &GoModuleRoots::new(go_module_dirs));
     if let Some(line) = split.marker() {
         eprintln!("{line}");
@@ -165,6 +166,9 @@ pub fn build_go_with(
         eprintln!("{line}");
     }
     if let Some(line) = packages.root_marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = clause_dot.marker() {
         eprintln!("{line}");
     }
     eprintln!("{}", receivers.marker());
@@ -260,6 +264,34 @@ struct GoPasses {
     wire: go_wire::WireStats,
     /// DT.5j: the func / method value USES and package-function handlers.
     values: ValueStats,
+    /// GD.14: clause-named field-mount owners mapped and names bound through
+    /// a dot-import.
+    clause_dot: ClauseDotStats,
+}
+
+/// GD.14: what the clause-name owner map and the dot-import lookups did to
+/// one Go graph.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ClauseDotStats {
+    /// Clause-named Field mount owner placeholders mapped to their package
+    /// directory (`go_mounts::bind`).
+    clause_owner_binds: usize,
+    /// Calls, func values and composite literals bound to an exported name
+    /// of a dot-imported in-repo package.
+    dot_imports: usize,
+}
+
+impl ClauseDotStats {
+    /// GD.14 fired_on, once per Go graph where either bound something:
+    /// `[go-packages] clause_owner_binds=<c> dot_imports=<d>`.
+    fn marker(&self) -> Option<String> {
+        (self.clause_owner_binds + self.dot_imports > 0).then(|| {
+            format!(
+                "[go-packages] clause_owner_binds={} dot_imports={}",
+                self.clause_owner_binds, self.dot_imports
+            )
+        })
+    }
 }
 
 /// [`build_go_passes_with`] with no Go module roots known, for the tests.
@@ -296,13 +328,20 @@ fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModule
     let mut tally = EvidenceTally::default();
     let hooked = resolve_go_calls(&mut g, &all_calls, &split, &packages, &mut tally);
     packages.sibling_calls = hooked.sibling_calls;
+    let hooked_dot = hooked.dot_imports;
     packages.promoted.calls = hooked.promoted_calls;
     packages.promoted.field_hops = hooked.promoted_field_hops;
     let package_stats = packages.stats(import_stats);
     let receivers = hooked.receivers;
     // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
     // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
-    let mounts = crate::go_mounts::bind(&mut g, &mut refs);
+    // GD.14: a clause-named owner placeholder maps through the imports of
+    // the file holding the provisional or fact.
+    let owner_dir = |g: &RepoGraph, at: NodeId, pkg: &str| {
+        let module = packages.file_of(g, at)?;
+        packages.imported_dir(g, module, pkg).map(str::to_string)
+    };
+    let mounts = crate::go_mounts::bind(&mut g, &mut refs, &owner_dir);
     // CI.4: a receiver method value whose type sits in another file of the
     // package, or whose method is promoted, binds through the package before
     // the generic resolver's repo-unique method name can.
@@ -311,6 +350,11 @@ fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModule
     // (or are dropped); the generic resolver never sees a USES ref.
     let mut values = packages.bind_value_refs(&mut g, &mut refs);
     values.pkg_handlers = handlers.package_functions;
+    // GD.14: `[go-packages] clause_owner_binds= dot_imports=`.
+    let clause_dot = ClauseDotStats {
+        clause_owner_binds: mounts.clause_owner_binds,
+        dot_imports: hooked_dot + values.dot_imports,
+    };
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
     // DT.1f: the handlers' wire values typed through the facts the calls were
@@ -348,6 +392,7 @@ fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModule
         aliases,
         wire,
         values,
+        clause_dot,
     }
 }
 
@@ -1419,7 +1464,20 @@ pub(crate) struct GoPackages {
     /// CI.2a: the methods and fields each embedding STRUCT promotes, set by
     /// `build_go_passes` once the embeds are bound (empty until then).
     promoted: GoPromoted,
+    /// GD.14: importing file MODULE -> the in-repo package dirs it
+    /// dot-imports (`import . ".../models"`), sorted, deduplicated: an
+    /// exported name the file does not declare may be one of theirs.
+    dot_dirs: HashMap<NodeId, Vec<String>>,
+    /// GD.14: file MODULE -> its FUNCTION / METHOD spans `(start row, end row,
+    /// id)` from their POSITION cells, built on the first lookup
+    /// ([`GoPackages::registering_fn`]). Only looked up, never iterated into
+    /// output.
+    fn_spans: OnceLock<FnSpans>,
 }
+
+/// GD.14: file MODULE -> its FUNCTION / METHOD spans `(start row, end row,
+/// id)` ([`GoPackages::registering_fn`]).
+type FnSpans = HashMap<NodeId, Vec<(u32, u32, NodeId)>>;
 
 /// Where an import of a package directory binds ([`GoPackages::import_target`]).
 #[derive(Debug, PartialEq, Eq)]
@@ -1508,10 +1566,25 @@ impl GoPackages {
             }
         }
         let mut import_path: HashMap<NodeId, HashMap<String, String>> = HashMap::new();
+        let mut dot_dirs: HashMap<NodeId, Vec<String>> = HashMap::new();
         for stmt in imports {
             let ImportTarget::Module { path, alias } = &stmt.target else {
                 continue;
             };
+            // GD.14: a dot import of an in-repo package dir.
+            if alias.as_deref() == Some(".") {
+                if let (Some(&from), true) = (
+                    g.symbols.module_by_qname.get(&stmt.from_module),
+                    by_dir.contains_key(path),
+                ) {
+                    let dirs = dot_dirs.entry(from).or_default();
+                    if !dirs.contains(path) {
+                        dirs.push(path.clone());
+                        dirs.sort();
+                    }
+                }
+                continue;
+            }
             // DF.15: an un-aliased import is named by its package clause
             // (an empty path, the repository-root package of CI.3, by the
             // clause only; without one it names nothing).
@@ -1551,7 +1624,73 @@ impl GoPackages {
             method_file,
             global_types: OnceLock::new(),
             promoted: GoPromoted::default(),
+            dot_dirs,
+            fn_spans: OnceLock::new(),
         }
+    }
+
+    /// GD.14: the one exported top-level def `name` (a FUNCTION, STRUCT,
+    /// INTERFACE ..; never a METHOD) across the in-repo packages file
+    /// `module` dot-imports, through [`GoPackages::unique_in`]; two packages
+    /// answering, or none, -> `None`. Only an exported name a dot import can
+    /// bring into the file's scope.
+    fn dot_imported(&self, g: &RepoGraph, module: NodeId, name: &str) -> Option<NodeId> {
+        if !is_exported(name) {
+            return None;
+        }
+        let mut hit: Option<NodeId> = None;
+        for dir in self.dot_dirs.get(&module)? {
+            let Some(id) = self.unique_in(g, dir, name, module, false) else {
+                continue;
+            };
+            match hit {
+                Some(existing) if existing != id => return None,
+                _ => hit = Some(id),
+            }
+        }
+        hit
+    }
+
+    /// GD.14: the FUNCTION / METHOD of file `module` whose POSITION span holds
+    /// 0-based row `row`, the innermost when spans nest; two of one size ->
+    /// `None`. A ROUTE's HANDLED_BY ref sits on its registration's row, so
+    /// this is the callable that registered it.
+    fn registering_fn(&self, g: &RepoGraph, module: NodeId, row: u32) -> Option<NodeId> {
+        let spans = self.fn_spans.get_or_init(|| {
+            let mut out: FnSpans = HashMap::new();
+            for n in &g.nodes {
+                let kind = g.nav.kind_by_id.get(&n.id);
+                if kind != Some(&node_kind::FUNCTION) && kind != Some(&node_kind::METHOD) {
+                    continue;
+                }
+                let (Some(file), Some((start, end))) = (self.file_of(g, n.id), position_rows(n))
+                else {
+                    continue;
+                };
+                out.entry(file).or_default().push((start, end, n.id));
+            }
+            out
+        });
+        let mut best: Option<(u32, NodeId)> = None;
+        let mut tied = false;
+        for &(start, end, id) in spans.get(&module)? {
+            if row < start || row > end {
+                continue;
+            }
+            let size = end - start;
+            match best {
+                Some((b, other)) if b == size && other != id => tied = true,
+                Some((b, _)) if b <= size => {}
+                _ => {
+                    best = Some((size, id));
+                    tied = false;
+                }
+            }
+        }
+        if tied {
+            return None;
+        }
+        best.map(|(_, id)| id)
     }
 
     /// DF.15: the name an un-aliased import of `path` (a package dir qname,
@@ -1641,6 +1780,10 @@ impl GoPackages {
     /// `init` (several per package, never callable) or `_`. Two answers (a
     /// build-tag pair, a package and its `_test` twin) bind nothing.
     ///
+    /// GD.14: a `Bare(name)` no file of the package declares is the exported
+    /// def `name` of the one in-repo package the file dot-imports that
+    /// declares it ([`GoPackages::dot_imported`]), rule `dot_import`.
+    ///
     /// The hit's evidence (LC.3d) is `graph:go_packages` with rule
     /// `package_sibling` (Bare) or `package_import` (Attribute).
     fn package_call(
@@ -1652,10 +1795,17 @@ impl GoPackages {
         let module = enclosing_module(&g.nav, site.from)?;
         let from_test = self.tests.contains(&module);
         let (hit, rule) = match &site.qualifier {
-            CallQualifier::Bare(name) => (
-                self.unique_in(g, self.dir_of.get(&module)?, name, module, from_test)?,
-                "package_sibling",
-            ),
+            CallQualifier::Bare(name) => {
+                match self.unique_in(g, self.dir_of.get(&module)?, name, module, from_test) {
+                    Some(hit) => (hit, "package_sibling"),
+                    // GD.14: an exported def of a dot-imported package.
+                    None => {
+                        let hit = self.dot_imported(g, module, name)?;
+                        counts.dot_imports += 1;
+                        return Some((hit, go_ev("dot_import")));
+                    }
+                }
+            }
             CallQualifier::Attribute { base, name }
                 if name.chars().next().is_some_and(char::is_uppercase) =>
             {
@@ -2028,6 +2178,27 @@ enum Hop<'p> {
     Package(&'p str),
 }
 
+/// GD.14: a node's POSITION rows `(start_line, end_line)` (0-based), read
+/// from the first POSITION cell's JSON (`glia_doc::position_json`'s keys).
+fn position_rows(node: &glia_core::Node) -> Option<(u32, u32)> {
+    let json = node.cells.iter().find_map(|c| match &c.payload {
+        glia_core::CellPayload::Json(j) if c.kind == glia_code_domain::cell_type::POSITION => {
+            Some(j.as_str())
+        }
+        _ => None,
+    })?;
+    let num = |key: &str| -> Option<u32> {
+        let marker = format!("\"{key}\":");
+        let at = json.find(&marker)? + marker.len();
+        let digits: String = json[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    };
+    Some((num("start_line")?, num("end_line")?))
+}
+
 /// The scope a chain's names are read in.
 #[derive(Clone, Copy)]
 struct RecvScope<'p> {
@@ -2156,11 +2327,15 @@ struct GoHookCounts {
     promoted_calls: usize,
     /// CALLS bound through a promoted field (`[go-embeds] field_hops=`).
     promoted_field_hops: usize,
+    /// GD.14: CALLS bound to an exported def of a dot-imported package
+    /// (`[go-packages] dot_imports=`).
+    dot_imports: usize,
 }
 
 impl HookCounts for GoHookCounts {
     fn merge(&mut self, other: Self) {
         self.sibling_calls += other.sibling_calls;
+        self.dot_imports += other.dot_imports;
         self.receivers.merge(&other.receivers);
         self.promoted_calls += other.promoted_calls;
         self.promoted_field_hops += other.promoted_field_hops;
@@ -2551,6 +2726,15 @@ impl GoPackages {
             [Seg::Ident(name)] => {
                 let dir = self.dir_of.get(&scope.module)?;
                 self.unique_type_in(g, dir, name, scope.with_tests(dir))
+                    .or_else(|| {
+                        // GD.14: a type of a dot-imported package.
+                        self.dot_imported(g, scope.module, name).filter(|id| {
+                            matches!(
+                                g.nav.kind_by_id.get(id),
+                                Some(&node_kind::STRUCT | &node_kind::INTERFACE)
+                            )
+                        })
+                    })
                     .or_else(|| self.global_type(g, name, scope.from_test))
             }
             _ => None,
@@ -2803,6 +2987,10 @@ struct ValueStats {
     /// to a FUNCTION of another file of the imported package (rule
     /// `package_function`), from [`TypeHandlerStats::package_functions`].
     pkg_handlers: usize,
+    /// GD.14: of the funcs and composites, those bound through a dot-import
+    /// (rules `dot_import_value` / `dot_import_composite`); printed by
+    /// `[go-packages] dot_imports=`, not this marker.
+    dot_imports: usize,
 }
 
 impl ValueStats {
@@ -2883,6 +3071,14 @@ impl GoPackages {
             match rule {
                 "method_value" => stats.methods += 1,
                 "composite_literal" => stats.composites += 1,
+                "dot_import_composite" => {
+                    stats.composites += 1;
+                    stats.dot_imports += 1;
+                }
+                "dot_import_value" => {
+                    stats.funcs += 1;
+                    stats.dot_imports += 1;
+                }
                 _ => stats.funcs += 1,
             }
         }
@@ -2919,8 +3115,22 @@ impl GoPackages {
                     .copied();
                 let hit = own.or_else(|| {
                     self.unique_in(g, caller_dir, name, module, scope.with_tests(caller_dir))
-                })?;
-                rule_of(hit)
+                });
+                match hit {
+                    Some(hit) => rule_of(hit),
+                    // GD.14: an exported func or struct of a dot-imported
+                    // package, counted by `bind_value_refs`.
+                    None => {
+                        let hit = self.dot_imported(g, module, name)?;
+                        rule_of(hit).map(|(id, _)| {
+                            let rule = match g.nav.kind_by_id.get(&id) {
+                                Some(&node_kind::STRUCT) => "dot_import_composite",
+                                _ => "dot_import_value",
+                            };
+                            (id, rule)
+                        })
+                    }
+                }
             }
             CallQualifier::Attribute { base, name } => {
                 let segs = receiver_segments(base)?;
@@ -3126,7 +3336,12 @@ impl GoPackages {
                     .filter(is_struct)
                 {
                     Some(ty) => (ty, true),
-                    None => return TypeHandler::Generic,
+                    // GD.14: a local of the registering callable.
+                    None => {
+                        return self
+                            .registering_handler(g, r, base, name)
+                            .unwrap_or(TypeHandler::Generic);
+                    }
                 }
             }
         };
@@ -3188,6 +3403,57 @@ impl GoPackages {
             Some(function) => TypeHandler::Function(function),
             None => TypeHandler::Generic,
         }
+    }
+
+    /// GD.14: a handler base the Go parser left a variable because no package
+    /// scope text names it (a chain rooted in another local, `h :=
+    /// s.Handlers()`; a `self.<field>` alias, `h := s.handlers`): the
+    /// registering callable ([`GoPackages::registering_fn`], found by the
+    /// registration's row in the ref's file) records the variable's text, and
+    /// [`GoPackages::type_of_text`] reads it in that callable's scope, so
+    /// `s` is the parameter's type and `self` the method's STRUCT. A STRUCT
+    /// with the method (own or promoted) binds, rule `field_alias` for a
+    /// `self.` text, else `registering_local`; a STRUCT without it is
+    /// unbound; no callable, no local, an unknown text or a non-STRUCT type
+    /// -> `None` (generic, the variable's name for `resolve_refs` as before).
+    fn registering_handler(
+        &self,
+        g: &RepoGraph,
+        r: &UnresolvedRef,
+        base: &str,
+        name: &str,
+    ) -> Option<TypeHandler> {
+        let module = r.from_module;
+        let func = self.registering_fn(g, module, r.line)?;
+        let text = g.nav.local_types.get(&func)?.get(base)?;
+        if text.is_empty() {
+            return None;
+        }
+        let scope = RecvScope {
+            func: Some(func),
+            module,
+            caller_dir: self.dir_of.get(&module)?,
+            from_test: self.tests.contains(&module),
+        };
+        let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
+        let ty = self
+            .type_of_text(g, scope, text, 0, &mut Typed::default())
+            .filter(is_struct)?;
+        let rule = if text.starts_with("self.") {
+            "field_alias"
+        } else {
+            "registering_local"
+        };
+        let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
+        Some(match self.method_on(g, ty, name) {
+            Some((method, promoted)) if on_struct(&method) => TypeHandler::Bound {
+                method,
+                promoted,
+                other_file: self.file_of(g, ty) != Some(module),
+                rule,
+            },
+            _ => TypeHandler::Unbound,
+        })
     }
 
     /// DF.16: the METHOD `name` of the type a handler base's TYPE TEXT names,
@@ -8732,7 +8998,8 @@ mod tests {
                 funcs: 4,
                 composites: 2,
                 dropped: 6,
-                pkg_handlers: 0
+                pkg_handlers: 0,
+                dot_imports: 0
             }
         );
     }
@@ -8881,6 +9148,7 @@ mod tests {
             composites: 3,
             dropped: 3,
             pkg_handlers: 1,
+            dot_imports: 0,
         };
         assert_eq!(
             stats.marker().as_deref(),
@@ -11361,5 +11629,166 @@ mod tests {
         assert_eq!(calls_from(&g2, "lib::caller::Shop.Caller::full"), want);
         assert_eq!(m1.counts(), (1, 1));
         assert_eq!(m2.counts(), (1, 1));
+    }
+
+    // ---- GD.14: handler bases through the registering callable, clause-named
+    // field-mount owners, dot imports -------------------------------------
+
+    const GD14_SVC: &str = "package svc\n\nimport \"net/http\"\n\n\
+                            type Svc struct{}\ntype Handlers struct{}\ntype Other struct{}\n\n\
+                            func (s *Svc) Handlers() *Handlers { return &Handlers{} }\n\n\
+                            func (h *Handlers) List(w http.ResponseWriter, r *http.Request) {}\n\
+                            func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {}\n\
+                            func (o *Other) List(w http.ResponseWriter, r *http.Request) {}\n\
+                            func (o *Other) Create(w http.ResponseWriter, r *http.Request) {}\n";
+
+    /// A handler base bound from a chain rooted in a parameter (`h :=
+    /// s.Handlers()`) or a `self.<field>` alias (`h := srv.handlers`) is typed
+    /// in the registering callable, found by the registration's row: every
+    /// method name is shared, so the name fallback binds nothing.
+    #[test]
+    fn registering_callable_types_chain_and_field_alias_bases() {
+        let main = "package main\n\nimport (\n\t\"github.com/go-chi/chi/v5\"\n\n\
+                    \t\"example.com/scope/svc\"\n)\n\n\
+                    type server struct{ handlers *svc.Handlers }\n\n\
+                    func routes(r chi.Router, s *svc.Svc) {\n\
+                    \th := s.Handlers()\n\
+                    \tr.Get(\"/list\", h.List)\n}\n\n\
+                    func (srv *server) mount(r chi.Router) {\n\
+                    \th := srv.handlers\n\
+                    \tr.Post(\"/items\", h.Create)\n}\n";
+        let parses = go_sources(&[("svc/svc.go", GD14_SVC), ("cmd/main.go", main)]);
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        for (route, method, rule, row) in [
+            (
+                "GET /list",
+                "svc::svc::Handlers::List",
+                "registering_local",
+                12,
+            ),
+            (
+                "POST /items",
+                "svc::svc::Handlers::Create",
+                "field_alias",
+                17,
+            ),
+        ] {
+            let r = route_id(&g, route);
+            assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
+            assert_eq!(
+                handler_ev(&g, r, m(method)),
+                (
+                    "graph:go_packages".to_string(),
+                    Some(rule.to_string()),
+                    Some("cmd/main.go".to_string()),
+                    Some(row)
+                ),
+                "{route}"
+            );
+        }
+        assert_eq!(handlers.bound, 2);
+    }
+
+    /// The span lookup picks the callable holding the row and nothing past
+    /// its span.
+    #[test]
+    fn registering_fn_is_the_callable_holding_the_row() {
+        let main = "package main\n\nfunc a() {\n\tx()\n}\n\nfunc b() {\n\ty()\n}\n";
+        let (mut g, imports, _, _) = merge_parses(repo(), go_sources(&[("cmd/main.go", main)]));
+        build_symbol_table(&mut g);
+        let pk = GoPackages::build(&g, &imports, go_package_names(&g));
+        let module = gid(node_kind::MODULE, "cmd::main");
+        let f = |q: &str| gid(node_kind::FUNCTION, q);
+        assert_eq!(pk.registering_fn(&g, module, 3), Some(f("cmd::main::a")));
+        assert_eq!(pk.registering_fn(&g, module, 7), Some(f("cmd::main::b")));
+        assert_eq!(pk.registering_fn(&g, module, 0), None);
+    }
+
+    /// `s := &api.Server{}; s.v1 = r.Group("/v1")` in cmd/ names `api` by the
+    /// `package api` clause of `internal/v2api`, which no path spelling
+    /// gives: the parser writes a placeholder owner, and the mount pass maps
+    /// it through cmd/main.go's import, so the field's routes take `/v1`.
+    #[test]
+    fn clause_named_owner_mounts_the_field_routes() {
+        let server = "package api\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                      type Server struct{ v1 *gin.RouterGroup }\n\n\
+                      func (s *Server) Routes() {\n\ts.v1.GET(\"/x\", s.X)\n}\n\n\
+                      func (s *Server) X(c *gin.Context) {}\n";
+        let main = "package main\n\nimport (\n\t\"github.com/gin-gonic/gin\"\n\n\
+                    \t\"example.com/scope/internal/v2api\"\n)\n\n\
+                    func main() {\n\tr := gin.Default()\n\ts := &api.Server{}\n\
+                    \ts.v1 = r.Group(\"/v1\")\n\ts.Routes()\n}\n";
+        let parses = go_sources(&[("internal/v2api/server.go", server), ("cmd/main.go", main)]);
+        let GoPasses {
+            g,
+            mounts,
+            clause_dot,
+            ..
+        } = build_go_passes(repo(), parses);
+        let r = route_id(&g, "GET /v1/x");
+        assert_eq!(
+            handled_by(&g, r),
+            vec![gid(node_kind::METHOD, "internal::v2api::server::Server::X")]
+        );
+        assert_eq!(mounts.clause_owner_binds, 1);
+        assert_eq!(
+            clause_dot.marker().as_deref(),
+            Some("[go-packages] clause_owner_binds=1 dot_imports=0")
+        );
+    }
+
+    /// A dot import brings the imported package's exported names into the
+    /// file's scope: a call, a func value and a composite literal bind there
+    /// even though another package declares the same names; an unexported
+    /// name never does.
+    #[test]
+    fn dot_import_names_bind_in_the_imported_package() {
+        let models = "package models\n\ntype User struct{}\n\n\
+                      func NewUser() *User { return &User{} }\n\nfunc hidden() {}\n";
+        let other = "package other\n\ntype User struct{}\n\n\
+                     func NewUser() *User { return &User{} }\n\nfunc hidden() {}\n";
+        let app = "package app\n\nimport . \"example.com/scope/models\"\n\n\
+                   func f() {\n\tu := NewUser()\n\t_ = User{}\n\tg := NewUser\n\thidden()\n\
+                   \t_, _ = u, g\n}\n";
+        let parses = go_sources(&[
+            ("models/models.go", models),
+            ("other/other.go", other),
+            ("app/app.go", app),
+        ]);
+        let GoPasses {
+            g,
+            values,
+            clause_dot,
+            ..
+        } = build_go_passes(repo(), parses);
+        let f = gid(node_kind::FUNCTION, "app::app::f");
+        let new_user = gid(node_kind::FUNCTION, "models::models::NewUser");
+        let user = gid(node_kind::STRUCT, "models::models::User");
+        assert_eq!(
+            edge_rule_line(&g, f, new_user, edge_category::CALLS),
+            rule("dot_import", 5)
+        );
+        assert_eq!(
+            edge_rule_line(&g, f, user, edge_category::USES),
+            rule("dot_import_composite", 6)
+        );
+        assert_eq!(
+            edge_rule_line(&g, f, new_user, edge_category::USES),
+            rule("dot_import_value", 7)
+        );
+        let hidden = |q: &str| gid(node_kind::FUNCTION, q);
+        for q in ["models::models::hidden", "other::other::hidden"] {
+            assert!(
+                edge_rule_line(&g, f, hidden(q), edge_category::CALLS).is_none(),
+                "{q}"
+            );
+        }
+        assert_eq!(values.dot_imports, 2);
+        assert_eq!(
+            clause_dot.marker().as_deref(),
+            Some("[go-packages] clause_owner_binds=0 dot_imports=3")
+        );
+        assert_eq!(ClauseDotStats::default().marker(), None);
     }
 }

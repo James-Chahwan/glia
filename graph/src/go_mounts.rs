@@ -38,6 +38,16 @@
 //! directory); a placeholder with no constant substitutes `""`, the root the
 //! walk gave such a group before DF.7.
 
+//!
+//! GD.14: a Field mount owner whose package the file names by an un-aliased
+//! import's `package` clause, which the parser cannot read, reaches here as
+//! `${pkg:<name>}::<Type>` ([`PKG_OWNER_OPEN`]); [`bind`] maps it to
+//! `<dir>::<Type>` through the imports of the file that wrote it (the
+//! caller's [`OwnerDir`]) before any slot is keyed, so the field's assigning
+//! and registering files meet. One no import answers keys no slot a real
+//! owner does: its routes re-key to their local path, the root the parser
+//! gave them before.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::{
@@ -50,6 +60,15 @@ use glia_core::{Cell, Confidence, Edge, NodeId};
 
 use crate::build::rename_nodes;
 use crate::types::RepoGraph;
+
+/// GD.14: the opening of a clause-named owner placeholder, the literal the Go
+/// parser's `RouteScope::owner` writes (`${pkg:api}::Server`).
+const PKG_OWNER_OPEN: &str = "${pkg:";
+
+/// GD.14: the package directory an import bound under `pkg` stands for in
+/// the file that holds node `at` (a file MODULE, or a fn of one), `""` for the
+/// repository-root package; `None` when no import of that file answers.
+pub(crate) type OwnerDir<'a> = dyn Fn(&RepoGraph, NodeId, &str) -> Option<String> + 'a;
 
 /// Fixpoint rounds before the pass stops a still-growing mount (a mount loop:
 /// `A` hands its group, suffixed, to `B`, which hands it back to `A`).
@@ -86,6 +105,10 @@ pub(crate) struct MountStats {
     /// DF.7: the `const_prefixes` no package constant answered: substituted
     /// `""`.
     pub(crate) const_unresolved: usize,
+    /// GD.14: clause-named owner placeholders (a provisional's, a
+    /// `FieldMount` / `MountArg` fact's) mapped to their package directory;
+    /// printed by `[go-packages] clause_owner_binds=`.
+    pub(crate) clause_owner_binds: usize,
 }
 
 impl MountStats {
@@ -164,16 +187,29 @@ struct Final {
 /// Deterministic: provisionals in `g.nodes` order, facts by scope in
 /// `g.nodes` order (never `nav_facts` map order), BTree slots, finals sorted;
 /// clones append to `g.nodes` / `g.edges` / `refs` in that order.
-pub(crate) fn bind(g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> MountStats {
+///
+/// GD.14: `owner_dir` maps a clause-named owner placeholder, read in the file
+/// of the provisional (its HANDLED_BY refs' `from_module`) or of the fn that
+/// holds the fact.
+pub(crate) fn bind(
+    g: &mut RepoGraph,
+    refs: &mut Vec<UnresolvedRef>,
+    owner_dir: &OwnerDir<'_>,
+) -> MountStats {
     let mut stats = MountStats::default();
-    let provisionals = collect_provisionals(g, refs);
+    let mut provisionals = collect_provisionals(g, refs);
     if provisionals.is_empty() {
         return stats;
     }
     stats.provisional = provisionals.len();
+    for p in &mut provisionals {
+        if let Some(module) = p.refs.first().map(|r| r.from_module) {
+            p.base = map_owner(g, &p.base, module, owner_dir, &mut stats);
+        }
+    }
 
     let fn_ids = param_fn_ids(g, &provisionals);
-    let flows = collect_flows(g, &mut stats);
+    let flows = collect_flows(g, owner_dir, &mut stats);
     let slots = fixpoint(&flows, &fn_ids, &mut stats);
     let consts = package_consts(g);
 
@@ -436,7 +472,7 @@ fn slot_of(mount: &Mount, fn_ids: &BTreeMap<String, NodeId>) -> Option<Slot> {
 /// `arg` of the one fn its call site's CALLS edge reaches, matched on
 /// `(caller, EVIDENCE site line, callee nav name)`; no such edge, or two
 /// distinct targets for that key, leaves it unbound.
-fn collect_flows(g: &RepoGraph, stats: &mut MountStats) -> Vec<Flow> {
+fn collect_flows(g: &RepoGraph, owner_dir: &OwnerDir<'_>, stats: &mut MountStats) -> Vec<Flow> {
     let callers: HashSet<NodeId> = g
         .nav
         .nav_facts
@@ -483,7 +519,7 @@ fn collect_flows(g: &RepoGraph, stats: &mut MountStats) -> Vec<Flow> {
                     {
                         Some([to]) => flows.push(Flow {
                             target: Slot::Param(to.0, *arg),
-                            mount: mount.clone(),
+                            mount: map_owner(g, mount, n.id, owner_dir, stats),
                         }),
                         _ => stats.unbound_args += 1,
                     }
@@ -494,9 +530,11 @@ fn collect_flows(g: &RepoGraph, stats: &mut MountStats) -> Vec<Flow> {
                     mount,
                 } => {
                     stats.field_mounts += 1;
+                    let owner = map_owner_name(g, owner, n.id, owner_dir, stats)
+                        .unwrap_or_else(|| owner.clone());
                     flows.push(Flow {
-                        target: Slot::Field(owner.clone(), field.clone()),
-                        mount: mount.clone(),
+                        target: Slot::Field(owner, field.clone()),
+                        mount: map_owner(g, mount, n.id, owner_dir, stats),
                     });
                 }
                 _ => {}
@@ -504,6 +542,53 @@ fn collect_flows(g: &RepoGraph, stats: &mut MountStats) -> Vec<Flow> {
         }
     }
     flows
+}
+
+/// GD.14: `owner` with a clause-named placeholder (`${pkg:api}::Server`)
+/// mapped to `<dir>::Server` (`Server` in the repository-root package)
+/// through the imports of the file holding `at`; `None` for an owner with
+/// no placeholder or one no import answers.
+fn map_owner_name(
+    g: &RepoGraph,
+    owner: &str,
+    at: NodeId,
+    owner_dir: &OwnerDir<'_>,
+    stats: &mut MountStats,
+) -> Option<String> {
+    let (pkg, ty) = owner.strip_prefix(PKG_OWNER_OPEN)?.split_once("}::")?;
+    let dir = owner_dir(g, at, pkg)?;
+    stats.clause_owner_binds += 1;
+    Some(if dir.is_empty() {
+        ty.to_string()
+    } else {
+        format!("{dir}::{ty}")
+    })
+}
+
+/// GD.14: `mount` with a Field owner placeholder mapped
+/// ([`map_owner_name`]); any other mount unchanged.
+fn map_owner(
+    g: &RepoGraph,
+    mount: &Mount,
+    at: NodeId,
+    owner_dir: &OwnerDir<'_>,
+    stats: &mut MountStats,
+) -> Mount {
+    match mount {
+        Mount::Field {
+            owner,
+            field,
+            suffix,
+        } => match map_owner_name(g, owner, at, owner_dir, stats) {
+            Some(owner) => Mount::Field {
+                owner,
+                field: field.clone(),
+                suffix: suffix.clone(),
+            },
+            None => mount.clone(),
+        },
+        _ => mount.clone(),
+    }
 }
 
 /// The prefixes `mount` stands for, given the slots so far: a Const is its

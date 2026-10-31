@@ -231,11 +231,15 @@ pub fn parse_file_with_modules(
     }
     // CA.5a / DF.16 fired_on: method-value handlers whose base names a type,
     // through the registering method's receiver (`handlers=`) or a typed
-    // parameter / local of the registering callable (`local-method=`).
-    if acc.receiver_handlers + acc.local_handlers > 0 {
+    // parameter / local of the registering callable (`local-method=`); GD.14:
+    // a local the graph types through the registering callable's locals, a
+    // chain rooted in another local (`registering_local=`) or a `self.<field>`
+    // alias (`field_alias=`).
+    if acc.receiver_handlers + acc.local_handlers + acc.registering_locals + acc.field_aliases > 0 {
         eprintln!(
-            "[go-routes] receiver-method handlers={} local-method={} in {file_rel_path}",
-            acc.receiver_handlers, acc.local_handlers
+            "[go-routes] receiver-method handlers={} local-method={} registering_local={} \
+             field_alias={} in {file_rel_path}",
+            acc.receiver_handlers, acc.local_handlers, acc.registering_locals, acc.field_aliases
         );
     }
     let forms = &acc.route_forms;
@@ -423,6 +427,15 @@ struct Acc {
     /// parameter or local of the registering callable to its type text
     /// ([`local_handler_base`]) — the marker's `local-method=`.
     local_handlers: usize,
+    /// GD.14: HANDLED_BY refs whose base stays a local of the registering
+    /// callable bound from a chain the package scope cannot read (`h :=
+    /// s.Handlers()`, `s` a parameter): the graph types it through that
+    /// callable's locals (`GoPackages::registering_handler`) — the marker's
+    /// `registering_local=`.
+    registering_locals: usize,
+    /// GD.14: the same for a `self.<field>` alias (`h := s.handlers` in a
+    /// method of `s`) — the marker's `field_alias=`.
+    field_aliases: usize,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
@@ -464,6 +477,13 @@ struct Acc {
     /// package-level func as a local does, but record no `local_types` entry
     /// (the receiver pass reads them as before). Read by [`flush_value_refs`].
     value_shadows: HashMap<NodeId, std::collections::HashSet<String>>,
+    /// GD.14: per fn / METHOD scope, each fn-local type (`type row struct{..}`,
+    /// an alias too) with the byte range it is in scope for: from its spec to
+    /// the end of the block declaring it. A value ref or composite literal
+    /// naming it inside that range is the local type ([`flush_value_refs`]
+    /// drops it); one in another block of the same fn names the package's.
+    /// Only looked up, never iterated into output.
+    block_types: HashMap<NodeId, Vec<(String, usize, usize)>>,
     /// GD.1: the names this file's package-level `var` / `const` specs
     /// declare, read before any function: an indexed call through one
     /// (`table[k](..)`) is a call through a value, never a generic
@@ -2519,7 +2539,16 @@ fn flush_value_refs(acc: &mut Acc) {
         let locals = acc.nav.local_types.get(&r.from);
         let is_local = |n: &str| locals.is_some_and(|l| l.contains_key(n));
         let shadows = acc.value_shadows.get(&r.from);
-        let is_shadow = |n: &str| shadows.is_some_and(|s| s.contains(n));
+        let block_types = acc.block_types.get(&r.from);
+        // GD.14: a fn-local type shadows only inside its own block.
+        let is_shadow = |n: &str| {
+            shadows.is_some_and(|s| s.contains(n))
+                || block_types.is_some_and(|types| {
+                    types
+                        .iter()
+                        .any(|(t, from, to)| t == n && *from <= start && start < *to)
+                })
+        };
         let keep = match &r.qualifier {
             CallQualifier::Bare(name) => !is_local(name) && !is_shadow(name),
             CallQualifier::Attribute { base, .. } => {
@@ -2598,10 +2627,12 @@ fn classify_instantiation(
 ) -> Option<CallQualifier> {
     let locals = acc.nav.local_types.get(&from);
     let shadows = acc.value_shadows.get(&from);
+    let block_types = acc.block_types.get(&from);
     let is_value = |name: &str| {
         Some(name) == receiver_var
             || locals.is_some_and(|l| l.contains_key(name))
             || shadows.is_some_and(|s| s.contains(name))
+            || block_types.is_some_and(|types| types.iter().any(|(t, _, _)| t == name))
     };
     let is_import =
         |name: &str| acc.import_dirs.contains_key(name) || acc.external_pkgs.contains(name);
@@ -3017,6 +3048,22 @@ fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Ac
             }
         }
     }
+}
+
+/// GD.14: the end byte of the innermost `block` holding `n` (a fn body, an
+/// `if` / `for` / `switch` case body or a bare `{ .. }`); `None` outside one.
+fn enclosing_block_end(n: TsNode) -> Option<usize> {
+    let mut cur = n.parent();
+    while let Some(p) = cur {
+        if matches!(
+            p.kind(),
+            "block" | "expression_case" | "type_case" | "default_case" | "communication_case"
+        ) {
+            return Some(p.end_byte());
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 /// DT.5j: the names a result `parameter_list` declares (`(handler func(),
@@ -3645,10 +3692,26 @@ fn record_body_locals(
             }
         }
         // DT.5j: a body `const` names no typed local, but shadows a
-        // package-level func for the value refs ([`Acc::value_shadows`]); a
-        // fn-local type (`type row struct{..}`) shadows a package-level type
-        // for a composite literal's ref ([`queue_composite_ref`]) the same way.
-        "const_spec" | "type_spec" | "type_alias" => {
+        // package-level func for the value refs ([`Acc::value_shadows`]).
+        // GD.14: a fn-local type (`type row struct{..}`) shadows a
+        // package-level type for a composite literal's ref
+        // ([`queue_composite_ref`]) only from its spec to the end of its block
+        // ([`Acc::block_types`]).
+        "type_spec" | "type_alias" => {
+            let to = enclosing_block_end(node).unwrap_or(usize::MAX);
+            let mut nc = node.walk();
+            for name in node.children_by_field_name("name", &mut nc) {
+                let name = text_of(name, src);
+                if !name.is_empty() && name != "_" {
+                    acc.block_types.entry(scope).or_default().push((
+                        name.to_string(),
+                        node.start_byte(),
+                        to,
+                    ));
+                }
+            }
+        }
+        "const_spec" => {
             let mut nc = node.walk();
             for name in node.children_by_field_name("name", &mut nc) {
                 let name = text_of(name, src);
@@ -5850,11 +5913,38 @@ fn method_pattern(node: TsNode, src: &[u8]) -> Option<(&'static str, String)> {
     path.starts_with('/').then(|| (verb, path.to_string()))
 }
 
-/// True when positional argument `i` of a call's `args` list is a string
-/// literal starting with `/`.
-fn arg_is_url_path(args: TsNode, i: u32, src: &[u8]) -> bool {
+/// GD.14: `Some(verb)` when `node` is a `net/http` method constant
+/// (`http.MethodGet` .. `http.MethodTrace`) through a local name `http_names`
+/// holds (the file's `net/http` imports, an alias honoured), else what
+/// [`method_literal`] reads.
+fn method_arg(
+    node: TsNode,
+    src: &[u8],
+    http_names: &std::collections::HashSet<String>,
+) -> Option<&'static str> {
+    if node.kind() != "selector_expression" {
+        return method_literal(node, src);
+    }
+    let pkg = node
+        .child_by_field_name("operand")
+        .filter(|o| o.kind() == "identifier")?;
+    if !http_names.contains(text_of(pkg, src)) {
+        return None;
+    }
+    let field = text_of(node.child_by_field_name("field")?, src);
+    let verb = field.strip_prefix("Method")?;
+    HTTP_METHOD_LITERALS
+        .iter()
+        .copied()
+        .find(|m| m.eq_ignore_ascii_case(verb) && verb[1..].bytes().all(|b| b.is_ascii_lowercase()))
+}
+
+/// True when positional argument `i` of a call's `args` list is a path
+/// starting with `/`: a string literal or (GD.14) a path the callable's
+/// constants fold ([`PrefixScope::path_text`]).
+fn arg_is_url_path(args: TsNode, i: u32, src: &[u8], scope: &RouteScope) -> bool {
     args.named_child(i)
-        .and_then(|a| string_literal_text(a, src))
+        .and_then(|a| scope.prefix.path_text(a, src))
         .is_some_and(|p| p.starts_with('/'))
 }
 
@@ -6618,6 +6708,16 @@ struct FileConsts {
     /// Package-level var names: a `.Group(..)` argument naming one is never a
     /// constant of another file.
     vars: BTreeSet<String>,
+    /// GD.14: the package-level string vars of this file whose only literal
+    /// value is `""`: declared `= ""` (or `var x string`, its zero value), and
+    /// no assignment of the file gives them a non-empty constant value (a
+    /// `+=` disqualifies too). A runtime value (`os.Getenv(..)`, a call, a
+    /// field) is no literal, so microservices-demo's `baseUrl` is one. A
+    /// prefix or path naming such a var reads `""`, the value the code holds
+    /// unless deployed with a setting. Another file of the package assigning
+    /// it a literal is not seen: such a fold keeps the path the route would
+    /// have at its literal default. Only looked up, never iterated.
+    empty_vars: BTreeSet<String>,
 }
 
 impl FileConsts {
@@ -6635,7 +6735,43 @@ impl FileConsts {
                 _ => {}
             }
         }
+        if !out.empty_vars.is_empty() {
+            out.drop_assigned_vars(root, src);
+        }
         out
+    }
+
+    /// GD.14: drop from [`FileConsts::empty_vars`] every var an assignment
+    /// under `n` gives a non-empty constant value (`x = "/v1"`, `x = Prefix`)
+    /// or updates (`x += ".."`). Called once, after the declarations.
+    fn drop_assigned_vars(&mut self, n: TsNode, src: &[u8]) {
+        if n.kind() == "assignment_statement" {
+            let plain = n
+                .child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "=");
+            let targets = named_kids(n.child_by_field_name("left"));
+            let values = named_kids(n.child_by_field_name("right"));
+            for (i, target) in targets.iter().enumerate() {
+                if target.kind() != "identifier" {
+                    continue;
+                }
+                let name = text_of(*target, src);
+                if !self.empty_vars.contains(name) {
+                    continue;
+                }
+                let literal = values
+                    .get(i)
+                    .filter(|_| targets.len() == values.len())
+                    .and_then(|v| self.fold(*v, src));
+                if !plain || literal.is_some_and(|v| !v.is_empty()) {
+                    self.empty_vars.remove(name);
+                }
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            self.drop_assigned_vars(child, src);
+        }
     }
 
     /// One `const` declaration, grouped or not. A spec with no value repeats
@@ -6688,10 +6824,34 @@ impl FileConsts {
             };
             for spec in specs.into_iter().filter(|s| s.kind() == "var_spec") {
                 let mut c = spec.walk();
-                for name in spec.children_by_field_name("name", &mut c) {
-                    if name.kind() == "identifier" {
-                        self.vars.insert(text_of(name, src).to_string());
+                let names: Vec<TsNode> = spec
+                    .children_by_field_name("name", &mut c)
+                    .filter(|n| n.kind() == "identifier")
+                    .collect();
+                // GD.14: `= ""` (names and values paired by position) or a
+                // `string` var with no value, its zero value `""`.
+                let values = spec
+                    .child_by_field_name("value")
+                    .map(|v| named_kids(Some(v)));
+                let string_zero = values.is_none()
+                    && spec
+                        .child_by_field_name("type")
+                        .is_some_and(|t| text_of(t, src) == "string");
+                for (i, name) in names.iter().enumerate() {
+                    let name = text_of(*name, src).to_string();
+                    let empty = match &values {
+                        Some(vs) if vs.len() == names.len() => {
+                            self.fold(vs[i], src).is_some_and(|v| v.is_empty())
+                        }
+                        Some(_) => false,
+                        None => string_zero,
+                    };
+                    if empty && !self.vars.contains(&name) {
+                        self.empty_vars.insert(name.clone());
+                    } else {
+                        self.empty_vars.remove(&name);
                     }
+                    self.vars.insert(name);
                 }
             }
         }
@@ -6777,8 +6937,12 @@ impl<'a> PrefixScope<'a> {
             "parenthesized_expression" => self.prefix_text(arg.named_child(0)?, src),
             "identifier" => {
                 let name = text_of(arg, src);
-                if self.binds(name, src) || self.consts.vars.contains(name) {
+                if self.binds(name, src) {
                     return None;
+                }
+                // GD.14: a package var whose only literal value is `""`.
+                if self.consts.vars.contains(name) {
+                    return self.consts.empty_vars.contains(name).then(String::new);
                 }
                 Some(match self.consts.values.get(name) {
                     Some(value) => value.clone(),
@@ -6800,6 +6964,36 @@ impl<'a> PrefixScope<'a> {
             "binary_expression" if is_concat(arg) => {
                 let left = self.prefix_text(arg.child_by_field_name("left")?, src)?;
                 let right = self.prefix_text(arg.child_by_field_name("right")?, src)?;
+                Some(left + &right)
+            }
+            _ => None,
+        }
+    }
+
+    /// GD.14: a registration's path argument: a string literal, or (DF.7's
+    /// fold, read here as a group prefix is) a constant of this file, a
+    /// package var whose only literal value is `""`
+    /// ([`FileConsts::empty_vars`]), parenthesised or `+`-joined, each name
+    /// unless the callable binds it otherwise. A constant of another file
+    /// or package (a placeholder only the mount pass substitutes, and only
+    /// in a prefix) and anything else read nothing: `None`.
+    fn path_text(&self, arg: TsNode, src: &[u8]) -> Option<String> {
+        match arg.kind() {
+            "interpreted_string_literal" | "raw_string_literal" => string_literal_text(arg, src),
+            "parenthesized_expression" => self.path_text(arg.named_child(0)?, src),
+            "identifier" => {
+                let name = text_of(arg, src);
+                if self.binds(name, src) {
+                    return None;
+                }
+                if self.consts.vars.contains(name) {
+                    return self.consts.empty_vars.contains(name).then(String::new);
+                }
+                self.consts.values.get(name).cloned()
+            }
+            "binary_expression" if is_concat(arg) => {
+                let left = self.path_text(arg.child_by_field_name("left")?, src)?;
+                let right = self.path_text(arg.child_by_field_name("right")?, src)?;
                 Some(left + &right)
             }
             _ => None,
@@ -6887,6 +7081,23 @@ struct RouteScope<'a> {
     callable: &'a RouteFn<'a>,
     /// DF.7: how a `.Group(..)` argument is read in this callable.
     prefix: PrefixScope<'a>,
+    /// GD.14: the file's imports outside the repo ([`Acc::external_pkgs`]),
+    /// lent for the walk: a `pkg.T` naming one has no in-repo owner.
+    externals: &'a std::collections::HashSet<String>,
+}
+
+/// GD.14: the opening of a Field mount owner whose package is named by an
+/// import's `package` clause the parser cannot read (`${pkg:api}::Server`,
+/// [`RouteScope::owner`]); `graph/src/go_mounts.rs` reads the same literal.
+const PKG_OWNER_OPEN: &str = "${pkg:";
+
+/// GD.14: whether `s` is a Go identifier (a package name a placeholder may
+/// carry).
+fn is_go_identifier(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 impl RouteScope<'_> {
@@ -6907,9 +7118,21 @@ impl RouteScope<'_> {
     /// of `pkg` maps to (the repo-root package: `T`), so `cmd/main.go`'s
     /// `&api.Server{}` and `api/server.go`'s `Server` meet; a package outside
     /// the repo, or one no import binds, places no owner: `None`.
+    ///
+    /// GD.14: a `pkg` no import binds by its path spelling and that names no
+    /// package outside the repo is an un-aliased in-repo import named by its
+    /// `package` clause (`import ".../v2api"` declaring `package api`), which
+    /// only the graph reads: the owner is `${pkg:<pkg>}::<T>`
+    /// ([`PKG_OWNER_OPEN`]), which `go_mounts::bind` maps to the clause's
+    /// directory through the registering file's imports (an owner it cannot
+    /// map is no slot, so its routes re-key to the local path, the root
+    /// `None` gave before).
     fn owner(&self, ty: &str) -> Option<String> {
         if let Some((pkg, name)) = ty.split_once('.') {
-            let dir = self.imports.get(pkg)?;
+            let Some(dir) = self.imports.get(pkg) else {
+                return (!self.externals.contains(pkg) && is_go_identifier(pkg))
+                    .then(|| format!("{PKG_OWNER_OPEN}{pkg}}}::{name}"));
+            };
             return Some(if dir.is_empty() {
                 name.to_string()
             } else {
@@ -7103,6 +7326,7 @@ fn collect_routes_in(
     let fields = std::mem::take(&mut acc.field_prefixes);
     let imports = std::mem::take(&mut acc.import_dirs);
     let consts = std::mem::take(&mut acc.file_consts);
+    let externals = std::mem::take(&mut acc.external_pkgs);
     let mut scope = RouteScope {
         groups: seed_param_mounts(callable.decl, callable.qname, src),
         scanned: fields.scopes.get(&callable.body.start_byte()),
@@ -7117,6 +7341,7 @@ fn collect_routes_in(
             callable.decl,
             callable.body,
         ),
+        externals: &externals,
     };
     walk_routes(
         callable.body,
@@ -7130,6 +7355,7 @@ fn collect_routes_in(
     acc.field_prefixes = fields;
     acc.import_dirs = imports;
     acc.file_consts = consts;
+    acc.external_pkgs = externals;
 }
 
 fn walk_routes(
@@ -7306,7 +7532,7 @@ fn record_mount_args(call: TsNode, src: &[u8], scope: &RouteScope, acc: &mut Acc
             }
             if operand.kind() == "identifier" {
                 let base = text_of(operand, src);
-                if acc.external_pkgs.contains(base) || scope.groups.contains_key(base) {
+                if scope.externals.contains(base) || scope.groups.contains_key(base) {
                     return;
                 }
             }
@@ -7381,8 +7607,10 @@ fn try_emit_route(
     // `wg.Add(1)`, `h.Add("k", "/x")` and `q.Add("GET", "/x")` never mint one.
     if matches!(method_name, "Handle" | "Add" | "Method" | "MethodFunc")
         && args.named_child_count() >= 3
-        && let Some(verb) = args.named_child(0).and_then(|a| method_literal(a, src))
-        && arg_is_url_path(args, 1, src)
+        && let Some(verb) = args
+            .named_child(0)
+            .and_then(|a| method_arg(a, src, &acc.wire.http))
+        && arg_is_url_path(args, 1, src, scope)
     {
         let emitted = emit_route_from_call(
             call, verb, 1, 2, None, src, file_rel, module_id, repo, scope, acc,
@@ -7401,7 +7629,7 @@ fn try_emit_route(
             && let Some(verbs) = args
                 .named_child(0)
                 .and_then(|a| method_list_literal(a, src))
-            && arg_is_url_path(args, 1, src)
+            && arg_is_url_path(args, 1, src, scope)
         {
             let mut emitted = false;
             for verb in verbs {
@@ -7441,7 +7669,7 @@ fn try_emit_route(
             }
             return emitted;
         }
-        if !first_arg_is_url_path(call, src) {
+        if !first_arg_is_url_path(call, src, scope) {
             return false;
         }
         return emit_route_from_call(
@@ -7476,7 +7704,7 @@ fn try_emit_route(
         .map(|c| c.is_ascii_uppercase())
         .unwrap_or(false)
         && method_name.chars().skip(1).any(|c| c.is_ascii_lowercase());
-    if is_title_case && !first_arg_is_url_path(call, src) {
+    if is_title_case && !first_arg_is_url_path(call, src, scope) {
         return false;
     }
     let emitted = emit_route_from_call(
@@ -7491,17 +7719,9 @@ fn try_emit_route(
 /// True if the call's first positional argument is a string literal beginning
 /// with `/` — the conventional URL-path shape. Used to discriminate route
 /// registrations from same-shape getters (`Header.Get("X-Foo")`).
-fn first_arg_is_url_path(call: TsNode, src: &[u8]) -> bool {
-    let Some(args) = call.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(first) = args.named_child(0) else {
-        return false;
-    };
-    let Some(path) = string_literal_text(first, src) else {
-        return false;
-    };
-    path.starts_with('/')
+fn first_arg_is_url_path(call: TsNode, src: &[u8], scope: &RouteScope) -> bool {
+    call.child_by_field_name("arguments")
+        .is_some_and(|args| arg_is_url_path(args, 0, src, scope))
 }
 
 /// True when `call` is the operand of a `<call>.Methods(...)` selector — i.e.
@@ -7561,10 +7781,14 @@ fn try_emit_gorilla_methods_chain(
     let mut emitted = false;
     let mut cursor = method_args.walk();
     for arg in method_args.named_children(&mut cursor) {
-        let Some(method_str) = string_literal_text(arg, src) else {
-            continue;
+        // GD.14: a `net/http` method constant (`http.MethodGet`) is its verb.
+        let method_upper = match string_literal_text(arg, src) {
+            Some(method_str) => method_str.to_ascii_uppercase(),
+            None => match method_arg(arg, src, &acc.wire.http) {
+                Some(verb) => verb.to_string(),
+                None => continue,
+            },
         };
-        let method_upper = method_str.to_ascii_uppercase();
         emitted |= emit_route_from_call(
             inner_call,
             &method_upper,
@@ -7626,7 +7850,8 @@ fn emit_route_from_call(
             let Some(path_node) = args.named_child(path_arg) else {
                 return false;
             };
-            let Some(p) = string_literal_text(path_node, src) else {
+            // GD.14: a literal, or a path the callable's constants fold.
+            let Some(p) = scope.prefix.path_text(path_node, src) else {
                 return false;
             };
             p
@@ -7689,7 +7914,16 @@ fn emit_route_from_call(
                                     acc.local_handlers += 1;
                                     ty
                                 }
-                                None => base,
+                                // GD.14: the base stays the local; the graph
+                                // reads it in the registering callable.
+                                None => {
+                                    match registering_local(&acc.nav, scope.callable.id, &base) {
+                                        Some(BaseLocal::FieldAlias) => acc.field_aliases += 1,
+                                        Some(BaseLocal::Chain) => acc.registering_locals += 1,
+                                        None => {}
+                                    }
+                                    base
+                                }
                             },
                         };
                         (Some(display), Some(CallQualifier::Attribute { base, name }))
@@ -7766,7 +8000,7 @@ fn emit_route_from_call(
     if let Some(h) = literal
         && acc.func_literal_expanded.insert((h.start_byte(), route_id))
     {
-        for (qualifier, line) in func_literal_callees(h, src, &acc.external_pkgs) {
+        for (qualifier, line) in func_literal_callees(h, src, scope.externals) {
             acc.refs.push(UnresolvedRef {
                 from: route_id,
                 from_module: module_id,
@@ -7983,6 +8217,36 @@ fn local_handler_base(nav: &CodeNav, scope: NodeId, var: &str) -> Option<String>
         return None;
     }
     Some(text.clone())
+}
+
+/// GD.14: how a handler base [`local_handler_base`] left a variable reads
+/// in the registering callable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseLocal {
+    /// `h := s.handlers`, `s` the method's receiver: text `self.<field>..`.
+    FieldAlias,
+    /// `h := s.Handlers()`, `h := svc.repo`: a chain rooted in another local.
+    Chain,
+}
+
+/// GD.14: whether `var`, a handler base no package-scope text names, is a
+/// local of the registering callable `scope` whose recorded text the graph
+/// can walk there (`GoPackages::registering_handler`, which finds the callable
+/// by the registration's row): a `self.<field>` alias, or a call / field
+/// chain rooted in another local or parameter. An unknown local (`""`),
+/// several alternatives and a func value (`func() R`) -> `None`: the base
+/// stays the variable's name for the generic resolver, as before.
+fn registering_local(nav: &CodeNav, scope: NodeId, var: &str) -> Option<BaseLocal> {
+    let locals = nav.local_types.get(&scope)?;
+    let text = locals.get(var)?;
+    if text.is_empty() || text.contains('|') || text.starts_with("func") || text.ends_with("[]") {
+        return None;
+    }
+    if text.starts_with("self.") {
+        return Some(BaseLocal::FieldAlias);
+    }
+    let root = text.split(['.', '(']).next().unwrap_or("");
+    (text.contains('.') && locals.contains_key(root) && root != var).then_some(BaseLocal::Chain)
 }
 
 fn route_method_cell(
@@ -13579,6 +13843,237 @@ func f() {
         assert_eq!(
             string_consts(&other, "api::consts"),
             vec![pair("OtherFilePrefix", "/other")]
+        );
+    }
+
+    // ---- GD.14: Go route residuals ----
+
+    /// The fixture's microservices-demo-shaped gorilla frontend, so the unit
+    /// tests and the graded fixture describe one program.
+    const GD14_FRONTEND: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/go-handler-bases/frontend/main.go");
+    const GD14_MAIN: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/go-handler-bases/main.go");
+
+    #[test]
+    fn gorilla_methods_read_net_http_method_constants_and_empty_var_prefix() {
+        let parse = parse_file(
+            GD14_FRONTEND,
+            "frontend/main.go",
+            "frontend::main",
+            "example.com/h",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /".to_string(),
+                "HEAD /".to_string(),
+                "POST /cart".to_string()
+            ]
+        );
+        // `svc := new(frontendServer)` names its type (DF.16), and the
+        // handler is the route's HANDLED_BY, no value ref.
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/")),
+            vec![attr("frontendServer", "homeHandler")]
+        );
+        assert!(uses_refs(&parse, func_id("frontend::main::main")).is_empty());
+    }
+
+    #[test]
+    fn method_constants_need_the_net_http_import() {
+        let source = r#"package web
+
+import (
+    nethttp "net/http"
+    "example.com/w/verbs"
+    "github.com/go-chi/chi/v5"
+    "github.com/gorilla/mux"
+)
+
+func routes(r *mux.Router, c chi.Router) {
+    r.HandleFunc("/a", a).Methods(nethttp.MethodPut, nethttp.MethodOptions)
+    r.HandleFunc("/b", b).Methods(verbs.MethodGet)
+    r.HandleFunc("/c", c2).Methods(nethttp.MethodGET)
+    c.Method(nethttp.MethodPatch, "/d", d)
+}
+"#;
+        let parse = parse_file(
+            source,
+            "web/routes.go",
+            "web::routes",
+            "example.com/w",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "OPTIONS /a".to_string(),
+                "PATCH /d".to_string(),
+                "PUT /a".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn path_folds_constants_and_empty_only_vars() {
+        let source = r#"package web
+
+import (
+    "os"
+
+    "github.com/gin-gonic/gin"
+)
+
+const api = "/api"
+
+var (
+    base   = ""
+    root   string
+    pinned = ""
+    grown  = ""
+    env    = os.Getenv("X")
+)
+
+func init() {
+    base = os.Getenv("BASE")
+    pinned = "/v1"
+    grown += "/x"
+}
+
+func routes(r *gin.Engine, local string) {
+    r.GET(base+"/a", a)
+    r.GET(root+api+"/b", b)
+    r.GET(pinned+"/c", c)
+    r.GET(grown+"/d", d)
+    r.GET(env+"/e", e)
+    r.GET(local+"/f", f)
+    r.Get((api)+"/g", g)
+    g2 := r.Group(base + "/grp")
+    g2.GET("/h", h)
+}
+"#;
+        let parse = parse_file(
+            source,
+            "web/routes.go",
+            "web::routes",
+            "example.com/w",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /a".to_string(),
+                "GET /api/b".to_string(),
+                "GET /api/g".to_string(),
+                "GET /grp/h".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn chain_and_field_alias_bases_stay_the_local() {
+        let parse = parse_file(GD14_MAIN, "main.go", "main", "example.com/h", repo()).unwrap();
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/list")),
+            vec![attr("h", "List")]
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "POST", "/items")),
+            vec![attr("h", "Create")]
+        );
+        let routes = func_id("main::routes");
+        let mount =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "main::server::mount");
+        assert_eq!(
+            registering_local(&parse.nav, routes, "h"),
+            Some(BaseLocal::Chain)
+        );
+        assert_eq!(
+            registering_local(&parse.nav, mount, "h"),
+            Some(BaseLocal::FieldAlias)
+        );
+        // The parameter itself names its type: no registering local.
+        assert_eq!(registering_local(&parse.nav, routes, "s"), None);
+    }
+
+    #[test]
+    fn clause_named_import_owner_is_a_placeholder() {
+        // `api` is no spelling of `.../internal/v2api` (its clause is `api`)
+        // and no package outside the repo: the graph maps the owner.
+        let source = r#"package main
+
+import (
+    "net/http"
+
+    "example.com/o/internal/v2api"
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default()
+    s := &api.Server{}
+    s.v1 = r.Group("/v1")
+    srv := &http.Server{}
+    srv.Handler = r
+    run(s, srv)
+}
+"#;
+        let parse =
+            parse_file(source, "cmd/main.go", "cmd::main", "example.com/o", repo()).unwrap();
+        assert_eq!(
+            field_mounts(&parse, func_id("cmd::main::main")),
+            vec![(
+                "${pkg:api}::Server".to_string(),
+                "v1".to_string(),
+                Mount::Const("/v1".into())
+            )]
+        );
+        let server = r#"package main
+
+import "example.com/o/internal/v2api"
+
+func serve(s *api.Server) {
+    s.v1.GET("/x", h)
+}
+"#;
+        let parse = parse_file(
+            server,
+            "cmd/serve.go",
+            "cmd::serve",
+            "example.com/o",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET <mount:field:${pkg:api}::Server.v1>/x".to_string()]
+        );
+    }
+
+    #[test]
+    fn fn_local_type_shadows_only_its_block() {
+        let source = r#"package app
+
+type row struct{}
+
+func f(ok bool) {
+    if ok {
+        type row struct{ n int }
+        _ = row{}
+    }
+    _ = row{}
+}
+"#;
+        let parse = parse_file(source, "app/f.go", "app::f", "example.com/app", repo()).unwrap();
+        // Only the literal outside the `if` block names the package's `row`.
+        assert_eq!(
+            uses_refs(&parse, func_id("app::f::f")),
+            vec![(bare("row"), 9)]
         );
     }
 }

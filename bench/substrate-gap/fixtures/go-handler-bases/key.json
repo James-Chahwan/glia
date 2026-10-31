@@ -1,0 +1,63 @@
+{
+  "framework": "go-handler-bases",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "FD.44 / GD.14 (Go handler bases and the FH.14 gorilla handoff). A route handler `h.List` whose base is a local bound from a chain rooted in another local (`h := s.Handlers()`, `s *svc.Svc` a parameter) or a `self.<field>` alias (`h := s.handlers` in a method of `s`) kept base `h`; with two types sharing every method name the repo-unique name fallback binds nothing. microservices-demo's frontend shape: `r.HandleFunc(baseUrl+\"/\", svc.homeHandler).Methods(http.MethodGet, http.MethodHead)`, `baseUrl` a package var initialised \"\" and reassigned from os.Getenv; try_emit_gorilla_methods_chain read only string literals, so no ROUTE was minted. HEAD (c10a61f8, debug CLI): ROUTEs `GET /list`, `POST /items` only, HANDLED_BY 0/4.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /",
+      "exact": true
+    },
+    {
+      "kind": "ROUTE",
+      "name": "HEAD /",
+      "exact": true
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /cart",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /list",
+      "to": "svc::svc::Handlers::List",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "POST /items",
+      "to": "svc::svc::Handlers::Create",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "GET /",
+      "to": "frontend::handlers::frontendServer::homeHandler",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "POST /cart",
+      "to": "frontend::handlers::frontendServer::addToCartHandler",
+      "category": "HANDLED_BY",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "GET /list",
+      "to": "svc::svc::Other::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /items",
+      "to": "svc::svc::Other::Create",
+      "category": "HANDLED_BY"
+    }
+  ]
+}
