@@ -72,3 +72,14 @@ The 0.5.6 waves (`dev-notes/leap-056-packets.json`, `schedule_056.py`) run up to
 6. **It ships with 0.5.6** if it has merged before GZ.1 (the release docs packet), which documents it. Otherwise it waits
    for the next release.
 7. The repo is public: no private project's names or material in scenes.
+
+## Open (James has not ruled; the site session asked him 2026-10-31)
+
+1. **Terminal fidelity.** Captions and ASCII only (the default above: no raster output), or also real frames in
+   image-capable terminals? Real frames would mean kitty / sixel through resvg, which is a new dependency and so a
+   Cargo.lock move.
+2. **Scene source.** A data model the renderer draws (the default above), or keep the hand-drawn SVGs, or data with an
+   optional per-scene SVG override for art-directed scenes?
+3. **On a TTY.** Interactive keys by default (next / back / quit), or print the whole walkthrough?
+
+Ask James before building past the defaults on any of these. Whichever session hears his answer first records it here.
