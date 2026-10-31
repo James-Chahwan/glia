@@ -6668,25 +6668,26 @@
     },
     "rust/imports": {
       "extract": [
-        1,
-        1
+        3,
+        3
       ],
       "fixtures": [
-        "fixtures/rust-axum-imports"
+        "fixtures/rust-axum-imports",
+        "fixtures/rust-inline-mod-imports"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
-        1,
-        1
+        3,
+        3
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "import"
     },
@@ -9664,6 +9665,7 @@
     "fixtures/go-ethereum-contract-calls",
     "fixtures/go-ethereum-events-abigen",
     "fixtures/go-ethereum-method-wrappers",
+    "fixtures/go-generic-instantiation-calls",
     "fixtures/go-gorm",
     "fixtures/go-implicit-implements-per-module",
     "fixtures/go-local-method-handlers",
@@ -9770,6 +9772,7 @@
     "fixtures/python-decorator-handlers",
     "fixtures/python-requirements-roots",
     "fixtures/react-hook",
+    "fixtures/react-tsx-components",
     "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
@@ -10003,6 +10006,84 @@
   },
   "patterns": {
     "cells": {
+      "csharp/process_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/csharp/process_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          1
+        ],
+        "via": "process_entry"
+      },
+      "go/process_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/go/process_entry"
+        ],
+        "forbid": [
+          2,
+          2
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          1
+        ],
+        "via": "process_entry"
+      },
+      "java/process_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/java/process_entry"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          1
+        ],
+        "via": "process_entry"
+      },
       "lua/config_table": {
         "extract": [
           0,
@@ -10081,8 +10162,8 @@
       },
       "lua/host_command": {
         "extract": [
-          0,
-          2
+          3,
+          3
         ],
         "fixtures": [
           "patterns/lua/host_command"
@@ -10091,17 +10172,17 @@
           1,
           1
         ],
-        "level": "none",
+        "level": "full",
         "literal": [
-          0,
-          2
+          3,
+          3
         ],
         "reasons": [],
         "route": [
-          0,
-          1
+          3,
+          3
         ],
-        "via": null
+        "via": "host_command"
       },
       "lua/host_event": {
         "extract": [
@@ -10177,6 +10258,32 @@
         ],
         "via": "host_command"
       },
+      "python/process_entry": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/python/process_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          4
+        ],
+        "via": "process_entry"
+      },
       "python/script_entry": {
         "extract": [
           1,
@@ -10200,6 +10307,58 @@
           1
         ],
         "via": "script_entry"
+      },
+      "rust/process_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/rust/process_entry"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "partial",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          1
+        ],
+        "via": "process_entry"
+      },
+      "typescript/process_entry": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/typescript/process_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "partial",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [
+          "routing edge missing"
+        ],
+        "route": [
+          0,
+          4
+        ],
+        "via": "process_entry"
       }
     },
     "patterns": [
@@ -10208,14 +10367,15 @@
       "host_callback",
       "config_table",
       "embedded_script",
-      "script_entry"
+      "script_entry",
+      "process_entry"
     ],
     "totals": {
       "error": 0,
-      "full": 2,
-      "none": 3,
-      "partial": 3,
-      "unknown": 100
+      "full": 3,
+      "none": 2,
+      "partial": 9,
+      "unknown": 112
     }
   },
   "schema": 3,

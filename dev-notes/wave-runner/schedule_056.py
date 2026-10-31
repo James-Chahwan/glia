@@ -58,6 +58,7 @@ EXCLUSIVE = set()
 # --verify then guards that re-running the scheduler reproduces history.
 LANDED = {
     0: "GA.1 GA.8 GA.13 GA.20 GB.1 GD.2 GD.5 GD.9 GD.10 GD.13 GD.15 GD.16 GD.21 GD.23 GD.26 GD.33 GD.36 GD.37 GH.1 GH.13 GP.1 GP.5 GP.7 GP.8 GP.9 GP.13",
+    1: "GA.2 GA.12 GA.16 GA.19 GB.2 GB.3 GB.4 GD.1 GD.25 GD.35 GD.38 GH.2 GH.12 GP.4 GP.12",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = False

@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 471,
+  "fixtures": 474,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -879,6 +879,13 @@
     },
     "go-field-dispatch": {
       "framework": "go-field-dispatch",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "go-generic-instantiation-calls": {
+      "framework": "go-generic-instantiation-calls",
       "language": "go",
       "per_category": {
         "CALLS": 1.0
@@ -2048,6 +2055,11 @@
         "IMPORTS": 1.0
       }
     },
+    "react-tsx-components": {
+      "framework": "react-tsx-components",
+      "language": "typescript",
+      "per_category": {}
+    },
     "rpc-event-monorepo-owner": {
       "framework": "rpc-event-monorepo-owner",
       "language": "typescript",
@@ -2188,6 +2200,13 @@
         "CONTAINS": 1.0,
         "HAS_ATTRIBUTE": 1.0,
         "USES": 1.0
+      }
+    },
+    "rust-inline-mod-imports": {
+      "framework": "rust-inline-mod-imports",
+      "language": "rust",
+      "per_category": {
+        "IMPORTS": 1.0
       }
     },
     "rust-macro-arg-calls": {

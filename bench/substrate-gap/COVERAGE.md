@@ -150,7 +150,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 354/512 applicable cells have a fixture (69.1%) — 354 full, 0 partial, 0 none, 158 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 306
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 308
 
 ## Cells routed via an alternative mechanism
 
@@ -259,30 +259,31 @@ The second axis (0.5.5): how code is USED rather than how services talk. Graded 
 - `cfg_tbl` — **config_table**: configuration as code the host reads: WezTerm's returned table, vim.opt
 - `embed` — **embedded_script**: another language's code or config runs the script: nginx content_by_lua_file (a location ROUTE HANDLED_BY the module), a Redis EVAL / register_script
 - `script` — **script_entry**: a standalone script run from a shell (`#!/usr/bin/env lua`, `arg`): its MODULE is an entry
+- `proc` — **process_entry**: Dockerfile ENTRYPOINT / CMD, compose command, k8s command / args, Procfile, systemd ExecStart: the host that starts the process -> the code it starts
 
 ```
-              h_cmd    h_evt     h_cb  cfg_tbl    embed   script
-python            ●        ?        ?        ?        ?        ●
-go                ?        ?        ?        ?        ?        ?
-typescript        ?        ?        ?        ?        ?        ?
-java              ?        ?        ?        ?        ?        ?
-csharp            ?        ?        ?        ?        ?        ?
-ruby              ?        ?        ?        ?        ?        ?
-php               ?        ?        ?        ?        ?        ?
-swift             ?        ?        ?        ?        ?        ?
-c_cpp             ?        ?        ?        ?        ?        ?
-scala             ?        ?        ?        ?        ?        ?
-clojure           ?        ?        ?        ?        ?        ?
-dart              ?        ?        ?        ?        ?        ?
-elixir            ?        ?        ?        ?        ?        ?
-rust              ?        ?        ?        ?        ?        ?
-solidity          ?        ?        ?        ?        ?        ?
-terraform         ?        ?        ?        ?        ?        ?
-kotlin            ?        ?        ?        ?        ?        ?
-lua               ·        ·        ◐        ·        ◐        ◐
+              h_cmd    h_evt     h_cb  cfg_tbl    embed   script     proc
+python            ●        ?        ?        ?        ?        ●        ◐
+go                ?        ?        ?        ?        ?        ?        ◐
+typescript        ?        ?        ?        ?        ?        ?        ◐
+java              ?        ?        ?        ?        ?        ?        ◐
+csharp            ?        ?        ?        ?        ?        ?        ◐
+ruby              ?        ?        ?        ?        ?        ?        ?
+php               ?        ?        ?        ?        ?        ?        ?
+swift             ?        ?        ?        ?        ?        ?        ?
+c_cpp             ?        ?        ?        ?        ?        ?        ?
+scala             ?        ?        ?        ?        ?        ?        ?
+clojure           ?        ?        ?        ?        ?        ?        ?
+dart              ?        ?        ?        ?        ?        ?        ?
+elixir            ?        ?        ?        ?        ?        ?        ?
+rust              ?        ?        ?        ?        ?        ?        ◐
+solidity          ?        ?        ?        ?        ?        ?        ?
+terraform         ?        ?        ?        ?        ?        ?        ?
+kotlin            ?        ?        ?        ?        ?        ?        ?
+lua               ●        ·        ◐        ·        ◐        ◐        ?
 ```
 
-USE PATTERNS: 8/108 cells have a fixture — 2 full, 3 partial, 3 none, 100 unknown, 0 error.
+USE PATTERNS: 14/126 cells have a fixture — 3 full, 9 partial, 2 none, 112 unknown, 0 error.
 
 ## Cohort grades
 
