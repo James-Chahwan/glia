@@ -102,7 +102,7 @@ def leap_inputs(wave):
     return P, claims, waves, ids, corr, brief, serial_run
 
 
-RELEASES = ("051", "052", "053", "054")
+RELEASES = ("051", "052", "053", "054", "056")
 
 
 def release_inputs(release, wave):
@@ -113,7 +113,8 @@ def release_inputs(release, wave):
     brief = ((HERE / f"shared_brief_{release}.md").read_text()
              .replace("{{WAVE}}", str(wave))
              .replace("{{LAST}}", str(len(waves) - 1)))
-    return P, claims, waves, ids, {i: corr.get(i) for i in ids}, brief, wave == 0 or len(ids) == 1
+    serial0 = getattr(importlib.import_module(f"schedule_{release}"), "WAVE0_SERIAL", True)
+    return P, claims, waves, ids, {i: corr.get(i) for i in ids}, brief, (wave == 0 and serial0) or len(ids) == 1
 
 
 def main():

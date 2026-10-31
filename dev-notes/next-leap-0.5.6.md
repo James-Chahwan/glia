@@ -84,3 +84,45 @@ the plugin families being generally useful, that required some thought"*); link 
 - Close-out speed: per-step timestamps, then a faster rank gate (about 14 of a close-out's ~20 minutes).
 - The DPG explainer's future directions (LLM uplift of new graph features, biology-inspired ideas; 2026-10-24): only in
   a chat paste so far; commit it as docs/dpg.md.
+
+## 6. Packets (2026-10-31)
+
+The re-verify and spec pass ran at 06012cc6: eight agents read the code and probed it with the release binary. They
+re-checked the 77 moved packets (T4, T7's part, T8) and specced the new items: §2's plugin and environment hosts, and
+§3-§5. The result:
+
+- `dev-notes/leap-056-packets.json`: 100 packets, ~32,900 LOC. Each keeps `from` (its 0.5.4 id or spec-pass id) and
+  `class`. They fall into six groups:
+  - GA, watch: 20 packets. The body-only fast path is gated on GA.1, FA.1's measurement on twenty, photoprism, prefect
+    and glia. Also multi-repo watch, the memory budget and the pooled Go call hook.
+  - GB, concept search and placement: 5 packets.
+  - GD, precision and recall fixes that move a graded result: 37 packets.
+  - GH, the host graph: 20 packets, plugin hosts plus environment hosts and the `process_entry` column.
+  - GP, build speed, rank-gate speed, docs as a second graph, the edge-audit re-run and hygiene: 16 packets.
+  - GZ, the release docs and handoffs: 2 packets.
+- `dev-notes/leap-056-corrections.json`: each packet's re-verify note, its carried 0.5.4 correction and its rulings.
+- `dev-notes/precision-backlog.json`: 35 real defects with no example yet, ~9,600 LOC. A release pulls one in once an
+  example turns up.
+- FA.24 was dropped: an update's clone is 4-5% of its time, against FA.24's own 20% bar.
+
+Schedule `dev-notes/wave-runner/schedule_056.py` (`--release 056`, ids G*, no wave 0, no tracks): 13 waves. Brief
+`shared_brief_056.md`.
+
+Rulings (James 2026-10-31):
+- Docs graph: measure first with the pass rule committed before the run (*"Is fine sounds good"*).
+- A URL may be folded from a string literal handed to a constructor (*"Sounds fine"*).
+- Multi-repo watch stays (*"yeah it needs to be here it's a real world limitations sometimes"*: the test repos are
+  monorepos only because they were built here).
+- A separate `process_entry` pattern column (*"yeap"*).
+- No new registry ids, with the host table as data (*"Why a table ? But sounds fine"*, then *"Okay as long as it's not a
+  crutch"*: a row never mints an edge by name; the parser must read the registration in the AST, gated on the host
+  being present).
+- Shell entry scripts are read for their start / `exec` line only (*"sounds fine"*).
+- The listed defaults hold (*"Everything else sounds fine"*):
+  - wave agents never run the full gates;
+  - FA.1 runs on the cohort repos;
+  - FA.24 is dropped;
+  - a fix keeps its whole bundle;
+  - JVM projects keep their label and gain a coordinate field;
+  - Neovim keymaps are not commands;
+  - the semantic flow tier is fused only.

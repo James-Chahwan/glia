@@ -28,8 +28,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-RELEASES = ("051", "052", "053", "054")
-RELEASE_PREFIX = {"051": "C", "052": "D", "053": "E", "054": "F"}   # packet-id family per release
+RELEASES = ("051", "052", "053", "054", "056")
+RELEASE_PREFIX = {"051": "C", "052": "D", "053": "E", "054": "F", "056": "G"}   # packet-id family per release
 WF = Path("/tmp/claude-1000/-home-ivy-Code-glia/wf")  # wave logs / next-wave scripts; /tmp is cleared on reboot
 SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
