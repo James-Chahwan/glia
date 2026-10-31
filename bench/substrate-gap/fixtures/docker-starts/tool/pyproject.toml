@@ -1,0 +1,6 @@
+[project]
+name = "mytool"
+version = "0.1.0"
+
+[project.scripts]
+mytool = "mytool.cli:main"

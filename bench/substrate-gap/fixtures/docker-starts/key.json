@@ -1,0 +1,34 @@
+{
+  "framework": "docker-starts",
+  "language": "dockerfile",
+  "dirs": ["."],
+  "note": "GH.15 container starts (legacy-only, no matrix cell: the host-start rules that bind a start to code are GH.18's, and the process_entry pattern fixtures grade that). Each Dockerfile's stages are read for ENTRYPOINT / CMD (exec and shell form, a backslash continuation joined, a shell form run as [\"/bin/sh\", \"-c\", <str>]), WORKDIR, the COPY map and the build-output RUN lines (go build -o, cargo build --bin, dotnet publish -o, ./gradlew installDist), chained through COPY --from=<stage>; one CODE start cell per stage with a start, on the image node, and a separate trigger=healthcheck cell for HEALTHCHECK CMD. A binary start that no build line writes and no COPY brings in (tool/: tini -- mytool serve) mints a CLI_INVOCATION from the Dockerfile MODULE, which resolver:cli pairs with the pyproject's console script; a built binary (server, api, Ad), a launcher start (dotnet, gunicorn) and a health probe (curl) mint none. Before GH.15: no start cell, no CLI_INVOCATION from any Dockerfile.",
+  "expect_nodes": [
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:mytool", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "cli:mytool", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "tool::Dockerfile", "to": "cli_invoke:mytool", "category": "DEFINES", "exact": true, "note": "the start's binary, from the Dockerfile MODULE"},
+    {"from": "cli_invoke:mytool", "to": "cli:mytool", "category": "CLI_INVOKES", "exact": true, "note": "tini -- mytool serve: the wrapper read through, the console script the pyproject declares"}
+  ],
+  "expect_cells": [
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:go-svc", "cell": "CODE", "contains": "\"argv\":[\"/bin/server\"]"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:go-svc", "cell": "CODE", "contains": "\"builds\":[{\"tool\":\"go\",\"out\":\"/bin/server\",\"pkg\":\"./cmd/server\",\"workdir\":\"/src\",\"src\":\".\",\"stage\":\"build\"}]"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:py-svc", "cell": "CODE", "contains": "\"argv\":[\"/bin/sh\",\"-c\",\"gunicorn  --bind 0.0.0.0:8000 app:app\"]"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:py-svc", "cell": "CODE", "contains": "\"trigger\":\"healthcheck\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:py-svc", "cell": "CODE", "contains": "\"copies\":[[\"/app\",\".\"]]"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:rust-api", "cell": "CODE", "contains": "{\"tool\":\"cargo\",\"out\":\"/usr/local/bin/api\",\"bin\":\"api\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:cart-dotnet", "cell": "CODE", "contains": "{\"tool\":\"dotnet\",\"out\":\"/app\",\"proj\":\"Cart.csproj\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:ad-gradle", "cell": "CODE", "contains": "{\"tool\":\"gradle\",\"out\":\"/app/build/install\",\"task\":\"installDist\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:tool", "cell": "CODE", "contains": "\"argv\":[\"/sbin/tini\",\"--\",\"mytool\",\"serve\",\"--port\",\"8080\"]"}
+  ],
+  "forbid": [
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:curl", "note": "HEALTHCHECK CMD curl is a health probe, not the container's process"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:server", "note": "built by the go build line"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:api", "note": "built by cargo build --bin api, copied onto PATH"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:Ad", "note": "under gradle installDist's output"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:tini", "note": "a wrapper, read through"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:dotnet", "note": "a launcher of Cart.dll"},
+    {"kind": "CLI_INVOCATION", "name": "cli_invoke:gunicorn", "note": "a launcher of app:app"}
+  ]
+}
