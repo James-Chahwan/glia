@@ -378,6 +378,13 @@ struct Args {
     /// GP.9: `--doc-ties-judge <run.json>,..` judges each `--ans on --r3-perq on` run's
     /// `ANS:impact+doctie` against its `ANS:impact` (bench/rank-gate/doc-ties/RULE.md).
     doc_ties_judge: String,
+    /// GB.4: `on` scores placement (the directory an added file lands in, the file it was
+    /// patterned on) on the test commits that add a candidate file (needs `--tune on --pick ..`).
+    place: String,
+    /// GB.4: the per-repo placement tables (`--place on`), or the report (`--place-judge`).
+    place_md: String,
+    /// GB.4: `--place-judge <run.json>,..` applies the cross-repo pass rule to `--place on` runs.
+    place_judge: String,
 }
 
 fn parse_args() -> Args {
@@ -436,6 +443,9 @@ fn parse_args() -> Args {
         test_after: String::new(),
         window_only: "off".into(),
         doc_ties_judge: String::new(),
+        place: "off".into(),
+        place_md: "rank_eval_place.md".into(),
+        place_judge: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -496,6 +506,9 @@ fn parse_args() -> Args {
             "--test-after" => a.test_after = v,
             "--window-only" => a.window_only = v,
             "--doc-ties-judge" => a.doc_ties_judge = v,
+            "--place" => a.place = v,
+            "--place-md" => a.place_md = v,
+            "--place-judge" => a.place_judge = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -521,11 +534,20 @@ fn parse_args() -> Args {
         a.sem == "off" || a.round3 == "on",
         "--sem on needs --round3 on (the find shape)"
     );
+    assert!(
+        a.place == "on" || a.place == "off",
+        "--place: expected on or off"
+    );
+    assert!(
+        a.place == "off" || (a.tune == "on" && !a.pick.is_empty()),
+        "--place on needs --tune on --pick <cfg> (Dstr:PT* reads the picked PPR)"
+    );
     let offline = !a.r3_compare.is_empty()
         || !a.gate_check.is_empty()
         || !a.gate_trim.is_empty()
         || !a.gate_pair.is_empty()
-        || !a.doc_ties_judge.is_empty();
+        || !a.doc_ties_judge.is_empty()
+        || !a.place_judge.is_empty();
     assert!(
         offline || (!a.repo.is_empty() && !a.git.is_empty()),
         "--repo and --git are required"
@@ -4804,6 +4826,9 @@ fn main() {
     if !args.doc_ties_judge.is_empty() {
         std::process::exit(doc_ties_judge_main(&args));
     }
+    if !args.place_judge.is_empty() {
+        std::process::exit(place_judge_main(&args));
+    }
     if !args.r3_compare.is_empty() {
         r3_compare_main(&args);
         return;
@@ -5145,6 +5170,15 @@ fn main() {
     };
     let mut doc_counts = DocCounts::new(docs.len());
     let mut doc_ties: Vec<DocTies> = Vec::new();
+    // GB.4: the name-status log and the candidate extensions, read only under `--place on`.
+    let place_log = (args.place == "on").then(|| place_git_log(&args.git, &args.rev));
+    let place_ext: HashSet<String> = if place_log.is_some() {
+        ext_hist.keys().filter(|e| !e.is_empty()).cloned().collect()
+    } else {
+        HashSet::new()
+    };
+    let mut place_raws: Vec<PlaceRaw> = Vec::new();
+    let mut place_root = 0usize;
     let mut t_task = 0.0f64;
     let mut n_train = 0usize;
     for (k, c) in commits.iter().enumerate() {
@@ -5193,6 +5227,20 @@ fn main() {
             }
             if ans_on {
                 doc_ties.push(doc_counts.ties(&cnt));
+            }
+            if let Some(pl) = &place_log {
+                let at = PlaceAt {
+                    paths: &g.paths,
+                    pidx: &pidx,
+                    exts: &place_ext,
+                    bm: &bm,
+                    co: &co,
+                    cnt: &cnt,
+                };
+                match place_raw(pl, o, c, &at) {
+                    Ok(r) => place_raws.push(r),
+                    Err(root) => place_root += usize::from(root),
+                }
             }
             if let Some(h) = &hist {
                 let mut rc = r1.test(h, k, &c.sha);
@@ -5445,6 +5493,18 @@ fn main() {
         );
     }
     let ctx = ctx;
+    // GB.4: the placement experiment, on its own outputs (`--place-md`, the JSON's `place`).
+    let place_doc = place_log.as_ref().map(|pl| {
+        place_eval(
+            &ctx,
+            &args,
+            pl,
+            &place_raws,
+            test_idx.len(),
+            place_root,
+            &pidx,
+        )
+    });
     if parity_on {
         let named = ctx.pick.map(|i| ctx.tune[i].0.as_str());
         assert!(
@@ -6068,6 +6128,9 @@ fn main() {
     }
     if let Some(p) = &parity {
         doc["engine_parity"] = p.json.clone();
+    }
+    if let Some(p) = place_doc {
+        doc["place"] = p;
     }
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write json");
     let mut md = render_md(&args.label, &doc, &names, &metrics, &paired_all);
@@ -23839,4 +23902,1093 @@ fn gate_check_main(args: &Args) -> i32 {
     } else {
         0
     }
+}
+
+// ============================================================================
+// Placement (0.5.6, GB.4): where a new file lands, and the file it was patterned on
+// ============================================================================
+//
+// `--place on` (needs `--tune on --pick <cfg>`): on the test commits (eligibility unchanged) that
+// ADD at least one candidate-extension file (`git log --name-status --no-renames` A rows), score
+// the directory each added file lands in and the existing file it was patterned on, at the
+// commit's parent revision. Seeds are the commit's MODIFIED candidate files (k1 / k2 / half over
+// them, ordered by the replay's seed hash); a commit modifying none is the find shape (the subject's
+// text alone). Every ranker reads the snapshot's graph and the replay's leak-free co-change and
+// BM25 state at the commit, as the other rankers of this file do. Fired_on, per repo:
+// `[place-eval] repo=<label> queries=<q> with_sibling=<s> best=<ranker> dir_hit3=<x>
+// control=<c> verdict=<PASS|FAIL|thin> ..`; `--place-judge <run.json>,..` applies the cross-repo
+// rule and prints `Placement: PASS (..)` / `Placement: FAIL (..)`.
+
+/// The place shapes: one, two or half (at least four modified) of the modified candidate files as
+/// seeds, or none (the subject's text alone).
+const PLACE_SHAPES: [&str; 4] = ["k1", "k2", "half", "find"];
+/// The directory rankers, in row order; `Dsel` (r3_select's online pick among them on dir hit@3)
+/// is appended after the controls.
+const PLACE_RANKERS: [&str; 5] = ["Dstr:P1", "Dstr:PT*", "Dco", "Dtxt", "Dmm"];
+/// The controls: the seeds' directories, the most populous directories, a seeded random order;
+/// `Csib` is the sibling control only (the seeds' directories' files, most recently modified first).
+const PLACE_CONTROLS: [&str; 4] = ["Cseed", "Cpop", "Crand", "Csib"];
+const PLACE_SEL: &str = "Dsel";
+/// A sibling below this line-set Jaccard is no sibling (counted).
+const PLACE_SIB_MIN: f64 = 0.2;
+/// A repo with fewer added-file commits is `thin`: neither a pass nor a loss.
+const PLACE_THIN: usize = 30;
+/// The repos (of the six public gate snapshots) a ranker must beat the best control on.
+const PLACE_PASS_REPOS: usize = 4;
+/// Sibling recall cut-off and the directories whose files a sibling ranker lists.
+const PLACE_SIB_K: usize = 5;
+const PLACE_SIB_DIRS: usize = 3;
+/// A blob above this size reads as no lines (no sibling through it).
+const PLACE_MAX_BLOB: usize = 1 << 20;
+
+/// The pass rule, printed above every table (committed before the run).
+const PLACE_RULE: &str = "Pass rule (GB.4, committed before the run). Query set: rank_eval's leak-free test commits (eligibility unchanged) that add at least one candidate-extension file; one query per commit and seed shape (k1 / k2 / half over the commit's modified candidate files, the find shape when it modifies none). Directory truth: the immediate directory of each added file, or its nearest ancestor holding a parent-revision candidate file when the directory is new (`new_dir`). The directory answer PASSES when one non-control ranker R (the same R on every repo) beats the best control (Cseed unless Cpop has the higher all-shape mean on that repo) on dir hit@3, all shapes pooled, with the commit-cluster bootstrap 95% CI of R minus the control above 0 on at least 4 of the 6 public gate repos, and its CI is not wholly below 0 on any. The sibling answer PASSES under the same rule on sibling recall@5 against Csib, over the queries with a sibling. A repo with fewer than 30 added-file commits is `thin` and counts as neither. Verdict line: `Placement: PASS (<ranker>[, sibling])` / `Placement: FAIL (<reason>)`.";
+
+/// One commit of the placement log: its first parent and its added / modified paths.
+struct PlaceCommit {
+    parent: Option<String>,
+    added: Vec<String>,
+    modified: Vec<String>,
+}
+
+/// `git log --name-status` of `--rev` (the replay's order, oldest = position 0) and, per path, the
+/// positions of the commits that added or modified it (ascending), for the recency controls.
+struct PlaceLog {
+    by_sha: HashMap<String, (usize, PlaceCommit)>,
+    touches: HashMap<String, Vec<usize>>,
+}
+
+impl PlaceLog {
+    /// The position of the last commit before `pos` that touched `path`, or -1.
+    fn last_touch(&self, path: &str, pos: usize) -> f64 {
+        self.touches.get(path).map_or(-1.0, |v| {
+            let i = v.partition_point(|&x| x < pos);
+            if i == 0 { -1.0 } else { v[i - 1] as f64 }
+        })
+    }
+}
+
+fn place_git_log(git: &str, rev: &str) -> PlaceLog {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            git,
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--topo-order",
+            "--no-merges",
+            "--no-renames",
+            "--name-status",
+            "--format=%x1e%H%x1f%P%x1f",
+            rev,
+        ])
+        .output()
+        .expect("git log --name-status");
+    assert!(
+        out.status.success(),
+        "git log --name-status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let recs: Vec<&str> = text.split('\x1e').skip(1).collect();
+    let n = recs.len();
+    let mut by_sha = HashMap::new();
+    let mut touches: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, rec) in recs.iter().enumerate() {
+        let pos = n - 1 - i;
+        let mut parts = rec.splitn(3, '\x1f');
+        let sha = parts.next().unwrap_or("").trim().to_string();
+        let parent = parts
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .map(str::to_string);
+        let mut pc = PlaceCommit {
+            parent,
+            added: Vec::new(),
+            modified: Vec::new(),
+        };
+        for line in parts.next().unwrap_or("").lines() {
+            let mut f = line.split('\t');
+            let (Some(st), Some(path)) = (f.next(), f.next()) else {
+                continue;
+            };
+            let path = path.to_string();
+            match st.chars().next() {
+                Some('A') => pc.added.push(path.clone()),
+                Some('M') | Some('T') => pc.modified.push(path.clone()),
+                _ => continue,
+            }
+            touches.entry(path).or_default().push(pos);
+        }
+        by_sha.insert(sha, (pos, pc));
+    }
+    for v in touches.values_mut() {
+        v.sort_unstable();
+    }
+    PlaceLog { by_sha, touches }
+}
+
+/// The replay's state at a test commit, as `place_raw` reads it (strictly older commits only).
+struct PlaceAt<'a> {
+    paths: &'a [String],
+    pidx: &'a HashMap<&'a str, u32>,
+    exts: &'a HashSet<String>,
+    bm: &'a Bm25,
+    co: &'a [HashMap<u32, u32>],
+    cnt: &'a [u32],
+}
+
+/// One added-file test commit: its parent, the added candidate files, each shape's seeds with
+/// their co-change, and the subject's BM25 file scores (T1s).
+struct PlaceRaw {
+    o: usize,
+    sha: String,
+    parent: String,
+    pos: usize,
+    added: Vec<String>,
+    shapes: Vec<PlaceShape>,
+    t1s: Vec<(u32, f64)>,
+}
+
+/// One seed shape of a placement commit: (shape index, seeds, their co-change scores).
+type PlaceShape = (usize, Vec<u32>, Vec<(u32, f64)>);
+
+/// A tree listing: (path, blob id) per file, path order.
+type PlaceTree = Vec<(String, String)>;
+
+/// The test commit `c` as a placement query, or Err(true) for a root commit with additions,
+/// Err(false) when it adds no candidate file.
+fn place_raw(log: &PlaceLog, o: usize, c: &Commit, at: &PlaceAt) -> Result<PlaceRaw, bool> {
+    let Some((pos, pc)) = log.by_sha.get(&c.sha) else {
+        return Err(false);
+    };
+    let mut added: Vec<String> = pc
+        .added
+        .iter()
+        .filter(|p| at.exts.contains(&ext_of(p)))
+        .cloned()
+        .collect();
+    added.sort_unstable();
+    added.dedup();
+    if added.is_empty() {
+        return Err(false);
+    }
+    let Some(parent) = pc.parent.clone() else {
+        return Err(true);
+    };
+    let mut mods: Vec<u32> = pc
+        .modified
+        .iter()
+        .filter_map(|p| at.pidx.get(p.as_str()).copied())
+        .collect();
+    mods.sort_unstable();
+    mods.dedup();
+    mods.sort_by_key(|&f| h64(&format!("{}:{}", c.sha, at.paths[f as usize])));
+    let c0_of = |seeds: &[u32]| -> Vec<(u32, f64)> {
+        let mut acc: BTreeMap<u32, f64> = BTreeMap::new();
+        for &s in seeds {
+            let d = f64::from(at.cnt[s as usize]) + 1.0;
+            for (&f, &x) in &at.co[s as usize] {
+                *acc.entry(f).or_default() += f64::from(x) / d;
+            }
+        }
+        acc.into_iter().collect()
+    };
+    let m = mods.len();
+    let mut shapes = Vec::new();
+    if m == 0 {
+        shapes.push((3, Vec::new(), Vec::new()));
+    } else {
+        for (shape, k, need) in [(0usize, 1usize, 1usize), (1, 2, 2), (2, m / 2, 4)] {
+            if m >= need {
+                let seeds = mods[..k].to_vec();
+                let c0 = c0_of(&seeds);
+                shapes.push((shape, seeds, c0));
+            }
+        }
+    }
+    let t1s = at
+        .bm
+        .file_scores(&at.bm.scores(&tokens(subject(&c.msg))), |_| true);
+    Ok(PlaceRaw {
+        o,
+        sha: c.sha.clone(),
+        parent,
+        pos: *pos,
+        added,
+        shapes,
+        t1s,
+    })
+}
+
+/// Every blob of `rev`'s tree (or of `paths` in it), as (path, blob id), path order.
+fn place_ls_tree(git: &str, rev: &str, paths: &[String]) -> PlaceTree {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", git, "ls-tree", "-r", "-z", "--full-tree", rev]);
+    if !paths.is_empty() {
+        cmd.arg("--").args(paths);
+    }
+    let out = cmd.output().expect("git ls-tree");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut v: Vec<(String, String)> = text
+        .split('\0')
+        .filter_map(|rec| {
+            let (meta, path) = rec.split_once('\t')?;
+            let mut m = meta.split_whitespace();
+            let (_, kind, blob) = (m.next()?, m.next()?, m.next()?);
+            (kind == "blob").then(|| (path.to_string(), blob.to_string()))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The trimmed non-empty lines of a text, hashed, sorted and deduplicated.
+fn place_lines(text: &str) -> Vec<u64> {
+    let mut v: Vec<u64> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(h64)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Each blob's line set (`place_lines`), read through `git cat-file --batch` in chunks.
+fn place_blob_lines(git: &str, blobs: &[String]) -> HashMap<String, Vec<u64>> {
+    use std::io::Write;
+    let mut out_map = HashMap::new();
+    for chunk in blobs.chunks(4000) {
+        let mut child = Command::new("git")
+            .args(["-C", git, "cat-file", "--batch"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("git cat-file --batch");
+        let mut stdin = child.stdin.take().expect("cat-file stdin");
+        let input: String = chunk.iter().map(|b| format!("{b}\n")).collect();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+        let out = child.wait_with_output().expect("git cat-file output");
+        let _ = writer.join();
+        let b = &out.stdout;
+        let mut i = 0;
+        while i < b.len() {
+            let Some(nl) = b[i..].iter().position(|&x| x == b'\n') else {
+                break;
+            };
+            let header = String::from_utf8_lossy(&b[i..i + nl]).to_string();
+            i += nl + 1;
+            let mut h = header.split_whitespace();
+            let (Some(id), Some(kind)) = (h.next(), h.next()) else {
+                continue;
+            };
+            if kind == "missing" {
+                continue;
+            }
+            let size: usize = h.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let end = (i + size).min(b.len());
+            let lines = if size > PLACE_MAX_BLOB {
+                Vec::new()
+            } else {
+                place_lines(&String::from_utf8_lossy(&b[i..end]))
+            };
+            out_map.insert(id.to_string(), lines);
+            i = end + 1;
+        }
+    }
+    out_map
+}
+
+fn place_jaccard(a: &[u64], b: &[u64]) -> f64 {
+    let (mut i, mut j, mut both) = (0, 0, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                both += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    let union = a.len() + b.len() - both;
+    if union == 0 {
+        0.0
+    } else {
+        both as f64 / union as f64
+    }
+}
+
+fn place_depth(d: &str) -> usize {
+    if d.is_empty() {
+        0
+    } else {
+        d.split('/').count()
+    }
+}
+
+/// What one added-file commit holds, beside its queries.
+#[derive(Default)]
+struct PlaceInfo {
+    dirs: usize,
+    new_dir: bool,
+    unanchored: bool,
+    added: usize,
+    with_sib: usize,
+    below_min: usize,
+}
+
+/// One placement query's rows: `Out::m` = [dir hit@1, dir hit@3, sibling recall@5, 0, 0] per row
+/// (PLACE_RANKERS, then PLACE_CONTROLS); `has_sib` when an added file has a sibling.
+struct PlaceQ {
+    o: usize,
+    shape: usize,
+    out: Out,
+    has_sib: bool,
+}
+
+/// The queries of one added-file commit (`tree`: the parent's candidate files with their blobs,
+/// `new_blobs`: the added files' blobs at the commit).
+fn place_one(
+    ctx: &Ctx,
+    log: &PlaceLog,
+    raw: &PlaceRaw,
+    tree: &[(String, String)],
+    new_blobs: &[(String, String)],
+    lines: &HashMap<String, Vec<u64>>,
+    pidx: &HashMap<&str, u32>,
+) -> (Vec<PlaceQ>, PlaceInfo) {
+    let g = ctx.g;
+    let nf = g.paths.len();
+    let mut info = PlaceInfo::default();
+    // the parent's directories (each holding a candidate file), lexicographic
+    let mut dir_ix: BTreeMap<&str, usize> = BTreeMap::new();
+    for (p, _) in tree {
+        dir_ix.insert(dir_of(p), 0);
+    }
+    for (i, v) in dir_ix.values_mut().enumerate() {
+        *v = i;
+    }
+    let dirs: Vec<&str> = dir_ix.keys().copied().collect();
+    let nd = dirs.len();
+    info.dirs = nd;
+    let pf_dir: Vec<usize> = tree.iter().map(|(p, _)| dir_ix[dir_of(p)]).collect();
+    let mut dir_count = vec![0.0f64; nd];
+    for &d in &pf_dir {
+        dir_count[d] += 1.0;
+    }
+    let pf_snap: Vec<Option<usize>> = tree
+        .iter()
+        .map(|(p, _)| pidx.get(p.as_str()).map(|&f| f as usize))
+        .collect();
+    // directory truth: the immediate directory, else its nearest existing ancestor (`new_dir`)
+    let mut truth: BTreeSet<usize> = BTreeSet::new();
+    for a in &raw.added {
+        let mut d = dir_of(a);
+        let exact = dir_ix.contains_key(d);
+        loop {
+            if let Some(&i) = dir_ix.get(d) {
+                truth.insert(i);
+                break;
+            }
+            if d.is_empty() {
+                break;
+            }
+            d = dir_of(d);
+        }
+        if !exact {
+            info.new_dir = true;
+        }
+    }
+    info.unanchored = truth.is_empty();
+    // sibling truth: per added file, the parent file of the highest line-set Jaccard
+    let empty: Vec<u64> = Vec::new();
+    let mut sibs: Vec<usize> = Vec::new();
+    for (path, blob) in new_blobs {
+        if !raw.added.contains(path) {
+            continue;
+        }
+        info.added += 1;
+        let mine = lines.get(blob).unwrap_or(&empty);
+        let mut best: Option<(f64, bool, usize)> = None;
+        for (pf, (p, b)) in tree.iter().enumerate() {
+            let j = place_jaccard(mine, lines.get(b).unwrap_or(&empty));
+            let same = dir_of(p) == dir_of(path);
+            let better = match best {
+                None => true,
+                Some((bj, bs, _)) => j > bj || (j == bj && same && !bs),
+            };
+            if better {
+                best = Some((j, same, pf));
+            }
+        }
+        match best {
+            Some((j, _, pf)) if j >= PLACE_SIB_MIN => {
+                sibs.push(pf);
+                info.with_sib += 1;
+            }
+            _ => info.below_min += 1,
+        }
+    }
+    sibs.sort_unstable();
+    sibs.dedup();
+    let n_sib_files = info.with_sib;
+
+    let to_pf =
+        |v: &[f64]| -> Vec<f64> { pf_snap.iter().map(|s| s.map_or(0.0, |f| v[f])).collect() };
+    let to_dir = |pfv: &[f64]| -> Vec<f64> {
+        let mut d = vec![0.0; nd];
+        for (pf, &x) in pfv.iter().enumerate() {
+            d[pf_dir[pf]] += x;
+        }
+        d
+    };
+    let dense_of = |v: &[(u32, f64)]| -> Vec<f64> {
+        let mut x = vec![0.0; nf];
+        for &(f, s) in v {
+            x[f as usize] = s;
+        }
+        x
+    };
+    let recency: Vec<f64> = tree
+        .iter()
+        .map(|(p, _)| log.last_touch(p, raw.pos))
+        .collect();
+    let hit = |ord: &[usize], k: usize| -> f64 {
+        f64::from(u8::from(ord.iter().take(k).any(|d| truth.contains(d))))
+    };
+    let sib_recall = |list: &[usize]| -> f64 {
+        if sibs.is_empty() {
+            return 0.0;
+        }
+        sibs.iter().filter(|s| list.contains(s)).count() as f64 / sibs.len() as f64
+    };
+    // a sibling list: the files of `dirs_in` ordered by `score`, path order on a tie, the first 5
+    let sib_list = |dirs_in: &[bool], score: &[f64]| -> Vec<usize> {
+        let key: Vec<Key> = (0..tree.len())
+            .map(|pf| {
+                if dirs_in[pf_dir[pf]] {
+                    [1.0, score[pf], 0.0]
+                } else {
+                    [0.0, 0.0, 0.0]
+                }
+            })
+            .collect();
+        order(&key, usize::MAX)
+            .into_iter()
+            .filter(|&pf| dirs_in[pf_dir[pf]])
+            .take(PLACE_SIB_K)
+            .collect()
+    };
+    let top_dirs = |ord: &[usize]| -> Vec<bool> {
+        let mut v = vec![false; nd];
+        for &d in ord.iter().take(PLACE_SIB_DIRS) {
+            v[d] = true;
+        }
+        v
+    };
+    let row = |ord: &[usize], sib: &[usize]| -> [f64; 5] {
+        [hit(ord, 1), hit(ord, 3), sib_recall(sib), 0.0, 0.0]
+    };
+
+    let t1s = dense_of(&raw.t1s);
+    let t1s_pf = to_pf(&t1s);
+    let mut qs = Vec::new();
+    for (shape, seeds, c0) in &raw.shapes {
+        let (p1, pt) = if seeds.is_empty() {
+            (vec![0.0; nf], vec![0.0; nf])
+        } else {
+            let nodes: Vec<usize> = seeds
+                .iter()
+                .flat_map(|&f| {
+                    g.file_nodes[f as usize]
+                        .iter()
+                        .map(|&u| g.node_ppr[u as usize])
+                })
+                .collect();
+            let pers = Ppr::uniform(&nodes);
+            let v1 = ctx.ppr[0].1.run(&pers);
+            let p1 = file_pool(g, |u| v1[g.node_ppr[u]], false);
+            let pt = match ctx.pick {
+                Some(i) => {
+                    let vt = ctx.tune[i].1.run(&pers);
+                    file_pool(g, |u| vt[g.node_ppr[u]], true)
+                }
+                None => vec![0.0; nf],
+            };
+            (p1, pt)
+        };
+        let pf_scores: [Vec<f64>; 4] =
+            [to_pf(&p1), to_pf(&pt), to_pf(&dense_of(c0)), t1s_pf.clone()];
+        let mut d_scores: Vec<Vec<f64>> = pf_scores.iter().map(|v| to_dir(v)).collect();
+        let mm = |v: &[f64]| minmax(v, usize::MAX);
+        let (mp1, mco, mtx) = (mm(&d_scores[0]), mm(&d_scores[2]), mm(&d_scores[3]));
+        d_scores.push(r3_eq(&[&mp1, &mco, &mtx]));
+        let mm_pf = r3_eq(&[&mm(&pf_scores[0]), &mm(&pf_scores[2]), &mm(&pf_scores[3])]);
+        let file_level: [&[f64]; 5] = [
+            &pf_scores[0],
+            &pf_scores[1],
+            &pf_scores[2],
+            &pf_scores[3],
+            &mm_pf,
+        ];
+        let mut out = Out::default();
+        for (ri, name) in PLACE_RANKERS.iter().enumerate() {
+            let ord = order(&scalar(&d_scores[ri]), usize::MAX);
+            let sl = sib_list(&top_dirs(&ord), file_level[ri]);
+            out.names.push((*name).to_string());
+            out.m.push(row(&ord, &sl));
+        }
+        // controls
+        let mut seed_cnt = vec![0.0f64; nd];
+        let mut seed_dirs = vec![false; nd];
+        for &s in seeds {
+            if let Some(&d) = dir_ix.get(dir_of(&g.paths[s as usize])) {
+                seed_cnt[d] += 1.0;
+                seed_dirs[d] = true;
+            }
+        }
+        let cpop: Vec<usize> = order(&scalar(&dir_count), usize::MAX);
+        let cseed_key: Vec<Key> = (0..nd)
+            .map(|d| {
+                if seed_cnt[d] > 0.0 {
+                    [seed_cnt[d], place_depth(dirs[d]) as f64, dir_count[d]]
+                } else {
+                    [0.0, 0.0, dir_count[d]]
+                }
+            })
+            .collect();
+        let cseed = order(&cseed_key, usize::MAX);
+        let crand_key: Vec<f64> = dirs
+            .iter()
+            .map(|d| (h64(&format!("{}:{d}:place-rand", raw.sha)) >> 11) as f64)
+            .collect();
+        let crand = order(&scalar(&crand_key), usize::MAX);
+        for (name, ord) in PLACE_CONTROLS.iter().zip([&cseed, &cpop, &crand]) {
+            let sl = sib_list(&top_dirs(ord), &recency);
+            out.names.push((*name).to_string());
+            out.m.push(row(ord, &sl));
+        }
+        // Csib: the seeds' directories (every directory for the find shape), most recent first;
+        // its directory columns are Cseed's (its directory is the seeds')
+        let csib_dirs = if seeds.is_empty() {
+            vec![true; nd]
+        } else {
+            seed_dirs
+        };
+        let csib = sib_list(&csib_dirs, &recency);
+        out.names.push(PLACE_CONTROLS[3].to_string());
+        out.m.push(row(&cseed, &csib));
+        qs.push(PlaceQ {
+            o: raw.o,
+            shape: *shape,
+            out,
+            has_sib: n_sib_files > 0,
+        });
+    }
+    (qs, info)
+}
+
+fn place_ci(
+    a: &[f64],
+    b: &[f64],
+    commit_of: &[usize],
+    nc: usize,
+    boot: usize,
+) -> serde_json::Value {
+    if a.is_empty() || nc == 0 || boot == 0 {
+        return serde_json::Value::Null;
+    }
+    let lf = ln_fact_table(a.len());
+    let p = paired(a, b, commit_of, nc, boot, &lf);
+    json!({"mean": p.mean, "lo": p.lo, "hi": p.hi, "p_sign": p.p, "wins": p.wins, "losses": p.losses})
+}
+
+fn place_fmt_ci(v: &serde_json::Value) -> String {
+    match (v["mean"].as_f64(), v["lo"].as_f64(), v["hi"].as_f64()) {
+        (Some(m), Some(lo), Some(hi)) => format!("{m:+.4} [{lo:+.4}, {hi:+.4}]"),
+        _ => "-".into(),
+    }
+}
+
+/// Scores every placement query, writes `--place-md`, prints the `[place-eval]` line and returns
+/// the run JSON's `place`.
+fn place_eval(
+    ctx: &Ctx,
+    args: &Args,
+    log: &PlaceLog,
+    raws: &[PlaceRaw],
+    test_commits: usize,
+    root: usize,
+    pidx: &HashMap<&str, u32>,
+) -> serde_json::Value {
+    let t0 = Instant::now();
+    let exts: HashSet<String> = ctx
+        .g
+        .paths
+        .iter()
+        .map(|p| ext_of(p))
+        .filter(|e| !e.is_empty())
+        .collect();
+    let trees: Vec<(PlaceTree, PlaceTree)> = raws
+        .par_iter()
+        .map(|r| {
+            let tree: PlaceTree = place_ls_tree(&args.git, &r.parent, &[])
+                .into_iter()
+                .filter(|(p, _)| exts.contains(&ext_of(p)))
+                .collect();
+            (tree, place_ls_tree(&args.git, &r.sha, &r.added))
+        })
+        .collect();
+    let blobs: Vec<String> = trees
+        .iter()
+        .flat_map(|(t, n)| t.iter().chain(n.iter()).map(|(_, b)| b.clone()))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    let lines = place_blob_lines(&args.git, &blobs);
+    let per: Vec<(Vec<PlaceQ>, PlaceInfo)> = raws
+        .par_iter()
+        .zip(trees.par_iter())
+        .map(|(r, (tree, new_blobs))| place_one(ctx, log, r, tree, new_blobs, &lines, pidx))
+        .collect();
+    let mut infos = Vec::new();
+    let mut qs: Vec<PlaceQ> = Vec::new();
+    for (q, i) in per {
+        qs.extend(q);
+        infos.push(i);
+    }
+    // Dsel per shape: r3_select's online pick among PLACE_RANKERS on dir hit@3 (m[1])
+    let sel_set = vec![(
+        PLACE_SEL.to_string(),
+        PLACE_RANKERS.iter().map(|s| s.to_string()).collect(),
+    )];
+    let mut select = serde_json::Map::new();
+    for (si, sname) in PLACE_SHAPES.iter().enumerate() {
+        let ix: Vec<usize> = (0..qs.len()).filter(|&i| qs[i].shape == si).collect();
+        if ix.is_empty() {
+            continue;
+        }
+        let mut outs: Vec<Out> = ix.iter().map(|&i| std::mem::take(&mut qs[i].out)).collect();
+        let tc_of: Vec<usize> = ix.iter().map(|&i| qs[i].o).collect();
+        select.insert(
+            (*sname).to_string(),
+            r3_select(&mut outs, &tc_of, test_commits, &sel_set),
+        );
+        for (&i, o) in ix.iter().zip(outs) {
+            qs[i].out = o;
+        }
+    }
+    let names: Vec<String> = qs.first().map(|q| q.out.names.clone()).unwrap_or_default();
+    let col = |sel: &[usize], name: &str, mi: usize| -> Vec<f64> {
+        let ri = names.iter().position(|n| n == name);
+        sel.iter()
+            .map(|&q| ri.map_or(0.0, |r| qs[q].out.m[r][mi]))
+            .collect()
+    };
+    let mean = |v: &[f64]| {
+        if v.is_empty() {
+            f64::NAN
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        }
+    };
+    let all: Vec<usize> = (0..qs.len()).collect();
+    let control = if mean(&col(&all, "Cpop", 1)) > mean(&col(&all, "Cseed", 1)) {
+        "Cpop"
+    } else {
+        "Cseed"
+    };
+    let candidates: Vec<String> = PLACE_RANKERS
+        .iter()
+        .chain([PLACE_SEL].iter())
+        .map(|s| s.to_string())
+        .collect();
+    let mut scopes = serde_json::Map::new();
+    let mut md = format!(
+        "## Placement: {} @ {}\n\n{PLACE_RULE}\n\n",
+        args.label,
+        &args.rev[..args.rev.len().min(12)]
+    );
+    let n_commits = raws.len();
+    let with_sib = infos.iter().filter(|i| i.with_sib > 0).count();
+    let new_dir = infos.iter().filter(|i| i.new_dir).count();
+    let unanchored = infos.iter().filter(|i| i.unanchored).count();
+    let added: usize = infos.iter().map(|i| i.added).sum();
+    let added_sib: usize = infos.iter().map(|i| i.with_sib).sum();
+    let below: usize = infos.iter().map(|i| i.below_min).sum();
+    let dirs_mean = mean(&infos.iter().map(|i| i.dirs as f64).collect::<Vec<_>>());
+    let mut shape_n = serde_json::Map::new();
+    for (si, s) in PLACE_SHAPES.iter().enumerate() {
+        shape_n.insert(
+            (*s).to_string(),
+            json!(qs.iter().filter(|q| q.shape == si).count()),
+        );
+    }
+    md.push_str(&format!(
+        "Coverage: {n_commits} of {test_commits} test commits add a candidate file ({root} root commits skipped); queries {} ({}); new_dir commits {new_dir}, unanchored {unanchored}; added files {added}, with a sibling {added_sib} (below Jaccard {PLACE_SIB_MIN}: {below}); commits with a sibling {with_sib}; parent directories per commit {dirs_mean:.1}. Directory control: {control}; sibling control: Csib.\n\n",
+        qs.len(),
+        PLACE_SHAPES
+            .iter()
+            .map(|s| format!("{s} {}", shape_n[*s]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    for scope in ["all", "k1", "k2", "half", "find"] {
+        let sel: Vec<usize> = match PLACE_SHAPES.iter().position(|s| *s == scope) {
+            Some(si) => (0..qs.len()).filter(|&q| qs[q].shape == si).collect(),
+            None => all.clone(),
+        };
+        if sel.is_empty() {
+            continue;
+        }
+        let sel_sib: Vec<usize> = sel.iter().copied().filter(|&q| qs[q].has_sib).collect();
+        let cluster = |s: &[usize]| -> (Vec<usize>, usize) {
+            let mut m: BTreeMap<usize, usize> = BTreeMap::new();
+            for &q in s {
+                let n = m.len();
+                m.entry(qs[q].o).or_insert(n);
+            }
+            (s.iter().map(|&q| m[&qs[q].o]).collect(), m.len())
+        };
+        let (cof, nc) = cluster(&sel);
+        let (cof_s, nc_s) = cluster(&sel_sib);
+        let mut rows = serde_json::Map::new();
+        let mut vs = serde_json::Map::new();
+        md.push_str(&format!(
+            "### {scope} ({} queries, {nc} commits, {} with a sibling)\n\n| ranker | dir hit@1 | dir hit@3 | sib recall@5 | hit@3 - {control} [95% CI] | sib@5 - Csib [95% CI] |\n|---|---|---|---|---|---|\n",
+            sel.len(),
+            sel_sib.len()
+        ));
+        let ctl3 = col(&sel, control, 1);
+        let ctl1 = col(&sel, control, 0);
+        let csib = col(&sel_sib, "Csib", 2);
+        for n in &names {
+            let h1 = col(&sel, n, 0);
+            let h3 = col(&sel, n, 1);
+            let s5 = col(&sel_sib, n, 2);
+            rows.insert(
+                n.clone(),
+                json!({"hit1": mean(&h1), "hit3": mean(&h3), "sib5": mean(&s5)}),
+            );
+            let is_cand = candidates.contains(n);
+            let (v3, v1, vs5) = if is_cand {
+                (
+                    place_ci(&h3, &ctl3, &cof, nc, args.boot),
+                    place_ci(&h1, &ctl1, &cof, nc, args.boot),
+                    place_ci(&s5, &csib, &cof_s, nc_s, args.boot),
+                )
+            } else {
+                (
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                    serde_json::Value::Null,
+                )
+            };
+            let dir_cols = if n == "Csib" {
+                ("-".to_string(), "-".to_string())
+            } else {
+                (format!("{:.4}", mean(&h1)), format!("{:.4}", mean(&h3)))
+            };
+            md.push_str(&format!(
+                "| {n} | {} | {} | {:.4} | {} | {} |\n",
+                dir_cols.0,
+                dir_cols.1,
+                mean(&s5),
+                place_fmt_ci(&v3),
+                place_fmt_ci(&vs5)
+            ));
+            if is_cand {
+                vs.insert(n.clone(), json!({"hit3": v3, "hit1": v1, "sib5": vs5}));
+            }
+        }
+        md.push('\n');
+        scopes.insert(
+            scope.to_string(),
+            json!({"queries": sel.len(), "commits": nc, "with_sibling": sel_sib.len(), "rows": rows, "vs": vs}),
+        );
+    }
+    // the repo's own reading: the best candidate on all-shape dir hit@3 against the control
+    let all_rows = &scopes
+        .get("all")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let best = candidates
+        .iter()
+        .max_by(|a, b| {
+            let x = all_rows["rows"][a.as_str()]["hit3"]
+                .as_f64()
+                .unwrap_or(f64::NAN);
+            let y = all_rows["rows"][b.as_str()]["hit3"]
+                .as_f64()
+                .unwrap_or(f64::NAN);
+            x.total_cmp(&y).then_with(|| {
+                let ia = candidates.iter().position(|c| c == *a);
+                let ib = candidates.iter().position(|c| c == *b);
+                ib.cmp(&ia)
+            })
+        })
+        .cloned()
+        .unwrap_or_default();
+    let thin = n_commits < PLACE_THIN;
+    let bv = &all_rows["vs"][best.as_str()]["hit3"];
+    let verdict = if thin {
+        "thin"
+    } else if bv["lo"].as_f64().is_some_and(|lo| lo > 0.0) {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let best_h3 = all_rows["rows"][best.as_str()]["hit3"]
+        .as_f64()
+        .unwrap_or(f64::NAN);
+    let ctl_h3 = all_rows["rows"][control]["hit3"]
+        .as_f64()
+        .unwrap_or(f64::NAN);
+    eprintln!(
+        "[place-eval] repo={} queries={n_commits} with_sibling={with_sib} best={best} dir_hit3={best_h3:.4} control={control} verdict={verdict} control_hit3={ctl_h3:.4} ci=[{:.4},{:.4}] shape_queries={} ms={}",
+        args.label,
+        bv["lo"].as_f64().unwrap_or(f64::NAN),
+        bv["hi"].as_f64().unwrap_or(f64::NAN),
+        qs.len(),
+        t0.elapsed().as_millis()
+    );
+    md.push_str(&format!(
+        "Repo reading: best {best} dir hit@3 {best_h3:.4} vs {control} {ctl_h3:.4}: {verdict}.\n"
+    ));
+    std::fs::write(&args.place_md, &md).unwrap_or_else(|e| panic!("write {}: {e}", args.place_md));
+    json!({
+        "label": args.label,
+        "rev": args.rev,
+        "test_commits": test_commits,
+        "queries": n_commits,
+        "root_skipped": root,
+        "shape_queries": shape_n,
+        "with_sibling": with_sib,
+        "added_files": added,
+        "added_with_sibling": added_sib,
+        "sibling_below_min": below,
+        "new_dir": new_dir,
+        "unanchored": unanchored,
+        "parent_dirs_mean": dirs_mean,
+        "control": control,
+        "rankers": names,
+        "candidates": candidates,
+        "scopes": scopes,
+        "select": select,
+        "best": best,
+        "thin": thin,
+        "verdict": verdict,
+    })
+}
+
+/// `--place-judge <run.json>,..`: the cross-repo rule over each run's `place`, the report tables
+/// written to `--place-md`, the verdict line printed.
+fn place_judge_main(args: &Args) -> i32 {
+    let mut runs: Vec<serde_json::Value> = Vec::new();
+    for path in args.place_judge.split(',').filter(|s| !s.is_empty()) {
+        let v = match gate_load(path) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[place-eval] judge: {e}");
+                return 2;
+            }
+        };
+        let p = if v.get("place").is_some() {
+            v["place"].clone()
+        } else {
+            v
+        };
+        if p.get("scopes").is_none() {
+            eprintln!("[place-eval] judge: {path} holds no `place` (run with --place on)");
+            return 2;
+        }
+        runs.push(p);
+    }
+    let labels: Vec<String> = runs
+        .iter()
+        .map(|r| r["label"].as_str().unwrap_or("?").to_string())
+        .collect();
+    let candidates: Vec<String> = PLACE_RANKERS
+        .iter()
+        .chain([PLACE_SEL].iter())
+        .map(|s| s.to_string())
+        .collect();
+    let fmt = |x: Option<f64>| x.map_or("-".to_string(), |v| format!("{v:.4}"));
+    let mut md = format!(
+        "# Placement, measured (GB.4)\n\n{PLACE_RULE}\n\n## Coverage\n\n| repo | test commits | add a candidate file | k1 | k2 | half | find | new_dir | unanchored | added files | with a sibling | below {PLACE_SIB_MIN} | dir control | thin |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    );
+    for r in &runs {
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            r["label"].as_str().unwrap_or("?"),
+            r["test_commits"],
+            r["queries"],
+            r["shape_queries"]["k1"],
+            r["shape_queries"]["k2"],
+            r["shape_queries"]["half"],
+            r["shape_queries"]["find"],
+            r["new_dir"],
+            r["unanchored"],
+            r["added_files"],
+            r["added_with_sibling"],
+            r["sibling_below_min"],
+            r["control"].as_str().unwrap_or("?"),
+            if r["thin"].as_bool().unwrap_or(true) {
+                "thin"
+            } else {
+                "no"
+            }
+        ));
+    }
+    // means per repo, all shapes pooled
+    let all_names: Vec<String> = runs
+        .first()
+        .and_then(|r| r["rankers"].as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (metric, title) in [
+        ("hit3", "Directory hit@3"),
+        ("hit1", "Directory hit@1"),
+        ("sib5", "Sibling recall@5"),
+    ] {
+        md.push_str(&format!(
+            "\n## {title}, all shapes pooled (mean per query)\n\n| ranker | {} |\n|---|{}\n",
+            labels.join(" | "),
+            "---|".repeat(labels.len())
+        ));
+        for n in &all_names {
+            let cells: Vec<String> = runs
+                .iter()
+                .map(|r| {
+                    if n == "Csib" && metric != "sib5" {
+                        "-".into()
+                    } else {
+                        fmt(r["scopes"]["all"]["rows"][n.as_str()][metric].as_f64())
+                    }
+                })
+                .collect();
+            md.push_str(&format!("| {n} | {} |\n", cells.join(" | ")));
+        }
+    }
+    // the rule, per candidate: wins (CI above 0) and losses (CI below 0) over the non-thin repos
+    let non_thin = runs
+        .iter()
+        .filter(|r| !r["thin"].as_bool().unwrap_or(true))
+        .count();
+    let mut judged: Vec<(String, &str, usize, usize, f64)> = Vec::new();
+    for (metric, title, ctl) in [
+        (
+            "hit3",
+            "Directory: dir hit@3 minus the best control",
+            "control",
+        ),
+        ("sib5", "Sibling: recall@5 minus Csib", "Csib"),
+    ] {
+        md.push_str(&format!(
+            "\n## {title} (all shapes pooled; mean [95% commit-cluster bootstrap CI])\n\n| ranker | {} | wins | below |\n|---|{}---|---|\n",
+            labels.join(" | "),
+            "---|".repeat(labels.len())
+        ));
+        for c in &candidates {
+            let (mut wins, mut below, mut sum) = (0usize, 0usize, 0.0f64);
+            let mut cells = Vec::new();
+            for r in &runs {
+                let v = &r["scopes"]["all"]["vs"][c.as_str()][metric];
+                let thin = r["thin"].as_bool().unwrap_or(true);
+                let lo = v["lo"].as_f64();
+                let hi = v["hi"].as_f64();
+                let mark = if thin {
+                    " (thin)"
+                } else if lo.is_some_and(|x| x > 0.0) {
+                    wins += 1;
+                    " win"
+                } else if hi.is_some_and(|x| x < 0.0) {
+                    below += 1;
+                    " below"
+                } else {
+                    ""
+                };
+                if !thin {
+                    sum += v["mean"].as_f64().unwrap_or(0.0);
+                }
+                cells.push(format!("{}{mark}", place_fmt_ci(v)));
+            }
+            md.push_str(&format!(
+                "| {c} | {} | {wins} | {below} |\n",
+                cells.join(" | ")
+            ));
+            judged.push((c.clone(), metric, wins, below, sum));
+        }
+        if ctl == "control" {
+            md.push_str(&format!(
+                "\nThe control per repo: {}.\n",
+                runs.iter()
+                    .map(|r| format!(
+                        "{} {}",
+                        r["label"].as_str().unwrap_or("?"),
+                        r["control"].as_str().unwrap_or("?")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    let pick = |metric: &str| -> (Option<String>, String) {
+        let mut rows: Vec<&(String, &str, usize, usize, f64)> =
+            judged.iter().filter(|j| j.1 == metric).collect();
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then(a.3.cmp(&b.3)).then(b.4.total_cmp(&a.4)));
+        let passed = rows
+            .iter()
+            .find(|j| j.2 >= PLACE_PASS_REPOS && j.3 == 0)
+            .map(|j| j.0.clone());
+        let lead = rows
+            .first()
+            .map(|j| {
+                format!(
+                    "best {} wins {} of {non_thin} non-thin repos, below on {}",
+                    j.0, j.2, j.3
+                )
+            })
+            .unwrap_or_else(|| "no candidate".into());
+        (passed, lead)
+    };
+    let (dir_pass, dir_lead) = pick("hit3");
+    let (sib_pass, sib_lead) = pick("sib5");
+    let line = match (&dir_pass, &sib_pass) {
+        (Some(d), Some(s)) if d == s => format!("Placement: PASS ({d}, sibling)"),
+        (Some(d), Some(s)) => format!("Placement: PASS ({d}, sibling: {s})"),
+        (Some(d), None) => format!("Placement: PASS ({d})"),
+        (None, Some(s)) => format!(
+            "Placement: FAIL (directory: no ranker beats the best control on dir hit@3 on >= {PLACE_PASS_REPOS} repos without a loss; {dir_lead}; sibling: PASS {s})"
+        ),
+        (None, None) => format!(
+            "Placement: FAIL (directory: no ranker beats the best control on dir hit@3 on >= {PLACE_PASS_REPOS} repos without a loss, {dir_lead}; sibling: none beats Csib on recall@5, {sib_lead})"
+        ),
+    };
+    md.push_str(&format!("\n## Verdict\n\n{line}\n"));
+    if let Err(e) = std::fs::write(&args.place_md, &md) {
+        eprintln!("[place-eval] write {}: {e}", args.place_md);
+        return 2;
+    }
+    eprintln!(
+        "[place-eval] judge repos={} non_thin={non_thin} dir={} sibling={}",
+        runs.len(),
+        dir_pass.as_deref().unwrap_or("none"),
+        sib_pass.as_deref().unwrap_or("none")
+    );
+    println!("{line}");
+    0
 }
