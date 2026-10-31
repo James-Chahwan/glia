@@ -192,6 +192,14 @@ fn parse_file_stats(
             ab.classes, ab.methods
         );
     }
+    // GD.2: interface members minted as METHODs, per file.
+    let it = acc.iface_stats;
+    if it.members > 0 {
+        eprintln!(
+            "[ts-interface] interfaces={} members={} file={file_rel_path}",
+            it.interfaces, it.members
+        );
+    }
     // CH.3c: `this.<field>.<verb>(<unreadable>)` on a known non-HTTP field
     // type mints nothing; before the `[ts-endpoint-args]` count, which counts
     // only what becomes an ENDPOINT.
@@ -317,6 +325,11 @@ struct Acc {
     fn_fields: FnFieldStats,
     /// CH.1: the `[ts-abstract]` counters.
     abstract_stats: AbstractStats,
+    /// GD.2: `(interface, member name)` of each interface METHOD minted in
+    /// this file, so an overload or a merged declaration mints it once.
+    iface_members: HashSet<(NodeId, String)>,
+    /// GD.2: the `[ts-interface]` counters.
+    iface_stats: InterfaceStats,
     /// CH.2: the `[ts-state]` counters.
     state_fields: StateFieldStats,
     /// DT.1c: the `[model-schemas] lang=typescript` counters.
@@ -614,6 +627,17 @@ struct AbstractStats {
     classes: usize,
     /// `abstract m(…): T;` members minted as METHODs.
     methods: usize,
+}
+
+/// GD.2: what one file's interface members gave the graph (the
+/// `[ts-interface]` marker).
+#[derive(Default, Clone, Copy)]
+struct InterfaceStats {
+    /// Interface declarations that minted at least one member METHOD.
+    interfaces: usize,
+    /// Member METHODs minted (`method_signature`s and function-typed
+    /// `property_signature`s).
+    members: usize,
 }
 
 /// CG.1: what one file's function-valued class fields gave the graph (the
@@ -2063,7 +2087,107 @@ fn visit_interface(
         node_kind::INTERFACE,
         Some(module_id),
     );
+    visit_interface_members(n, src, file_rel, &iface_qname, iface_id, repo, acc);
     collect_interface_heritage(n, src, iface_id, module_id, acc);
+}
+
+/// GD.2 (FD.9): an interface's callable members are METHOD nodes
+/// `<interface>::<name>`, children of the INTERFACE: a `method_signature`
+/// (`load(id: string): string;`) and a `property_signature` whose type is a
+/// function type (`save: (v: string) => void;`, parenthesised or not). The
+/// graph build files them in `interface_methods` (A6.6), never
+/// `class_methods`, so an interface-typed receiver (`s.load()` on `s: Store`,
+/// a typed field, `this.#store.load()`) binds the interface's own METHOD, and
+/// `emit_method_level_implements` pairs each `implements` class's same-named
+/// METHOD with it: PHP / Java / Go's shape.
+///
+/// It gets [`visit_abstract_method`]'s treatment: DEFINES from the interface,
+/// the nav record, CODE / POSITION / DOC of the member, a `get` / `set`
+/// member's accessor fact; no body, so no call walk. A data member (a
+/// property of any other type), an index or call signature and a computed /
+/// string / number name mint nothing. An overload set, or a name a merged
+/// declaration of the interface repeats in this file, keeps one METHOD, the
+/// first.
+#[allow(clippy::too_many_arguments)]
+fn visit_interface_members(
+    iface: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    iface_qname: &str,
+    iface_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(body) = iface.child_by_field_name("body") else {
+        return;
+    };
+    let mut minted = 0usize;
+    let mut bc = body.walk();
+    for member in body.named_children(&mut bc) {
+        let callable = match member.kind() {
+            "method_signature" => true,
+            "property_signature" => member
+                .child_by_field_name("type")
+                .and_then(first_named)
+                .is_some_and(is_function_type),
+            _ => false,
+        };
+        if !callable {
+            continue;
+        }
+        let Some(name_node) = member.child_by_field_name("name") else {
+            continue;
+        };
+        if name_node.kind() != "property_identifier" {
+            continue;
+        }
+        let name = text(name_node, src);
+        let method_qname = format!("{iface_qname}::{name}");
+        let method_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &method_qname);
+        if acc.iface_members.insert((iface_id, name.to_string())) {
+            acc.nodes.push(Node {
+                id: method_id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: build_cells(&member, src, file_rel),
+            });
+            acc.edges.push(Edge {
+                from: iface_id,
+                to: method_id,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            });
+            acc.nav.record(
+                method_id,
+                name,
+                &method_qname,
+                node_kind::METHOD,
+                Some(iface_id),
+            );
+            minted += 1;
+        }
+        // A getter and its setter share one METHOD, which carries both facts.
+        if member.kind() == "method_signature" && is_accessor(member) {
+            acc.accessors.insert(method_id);
+            mark_accessor(member, method_id, acc);
+        }
+    }
+    if minted > 0 {
+        acc.iface_stats.interfaces += 1;
+        acc.iface_stats.members += minted;
+    }
+}
+
+/// GD.2: a `function_type` annotation, through any `( .. )` around it.
+fn is_function_type(mut ty: TsNode) -> bool {
+    while ty.kind() == "parenthesized_type" {
+        match first_named(ty) {
+            Some(inner) => ty = inner,
+            None => return false,
+        }
+    }
+    ty.kind() == "function_type"
 }
 
 /// LD.7a: `interface A extends B, ns.C<T>` → one INHERITS_FROM ref per
@@ -12496,6 +12620,82 @@ class W {
             "CG.1 keeps the arrow"
         );
         assert_eq!(state_field_counts(src, "src/w.ts", "src::w"), (4, 1, 4));
+    }
+
+    // ---- GD.2: interface members ---------------------------------------------
+
+    /// GD.2 (FD.9): a `method_signature` and a function-typed
+    /// `property_signature` of an interface are METHOD children of the
+    /// INTERFACE (DEFINES, nav parent), CODE the member text; a data member,
+    /// an index / call signature and a string name mint nothing; an overload
+    /// and a merged declaration's repeat keep one METHOD, the first.
+    #[test]
+    fn interface_members_are_methods() {
+        let src = "\
+export interface Store {
+  load(id: string): string;
+  load(id: number): string;
+  save: (v: string) => void;
+  flush?: ((force: boolean) => Promise<void>);
+  size: number;
+  [key: string]: unknown;
+  (raw: string): void;
+  'quoted'(): void;
+  get label(): string;
+  set label(v: string);
+}
+export interface Store {
+  save: (v: string) => void;
+  close(): void;
+}
+interface Shape { x: number; y: number }
+";
+        let parse = parse_file(src, "src/store.ts", "src::store", repo()).unwrap();
+        let iface = id(node_kind::INTERFACE, "src::store::Store");
+        let m = |name: &str| id(node_kind::METHOD, &format!("src::store::Store::{name}"));
+        for name in ["load", "save", "flush", "label", "close"] {
+            assert_eq!(
+                parse.nodes.iter().filter(|n| n.id == m(name)).count(),
+                1,
+                "{name} is one METHOD"
+            );
+            assert!(
+                has_edge(&parse, iface, m(name), edge_category::DEFINES),
+                "DEFINES {name}"
+            );
+            assert_eq!(
+                parse.nav.parent_of.get(&m(name)),
+                Some(&iface),
+                "{name}'s nav parent is the interface"
+            );
+            assert_eq!(parse.nav.kind_by_id.get(&m(name)), Some(&node_kind::METHOD));
+        }
+        for name in ["size", "quoted", "x"] {
+            assert!(!has_node(&parse, m(name)), "{name} mints nothing");
+        }
+        assert!(
+            !parse.nodes.iter().any(|n| parse.nav.parent_of.get(&n.id)
+                == Some(&id(node_kind::INTERFACE, "src::store::Shape"))),
+            "a data-only interface has no member node"
+        );
+        let (code, pos, _) = method_cells(&parse, "src::store::Store::load");
+        assert_eq!(code, "load(id: string): string", "the first overload");
+        assert!(
+            pos.contains("\"start_line\":1,"),
+            "load sits on row 1: {pos}"
+        );
+        let (code, _, _) = method_cells(&parse, "src::store::Store::save");
+        assert_eq!(code, "save: (v: string) => void");
+        let facts = parse
+            .nav
+            .nav_facts
+            .get(&m("label"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            facts.contains(&NavFact::Getter) && facts.contains(&NavFact::Setter),
+            "the accessor pair carries both facts: {facts:?}"
+        );
     }
 
     // ---- CH.1: abstract classes ---------------------------------------------

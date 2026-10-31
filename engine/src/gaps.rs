@@ -19,7 +19,7 @@
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo) or, FH.17, like an inferred HTTP wrapper of its repo (the `<call>` of an ENDPOINT's ORIGIN rule `inferred:<call>`, written where the wrapper's literal sites minted, FH.4b; a declared stanza naming the same last segment wins): the sink is real, its identity now lives at the wrapper's call sites (LF.2e / FH.4b mint them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS and no WebSocket client connecting through it (DT.3c: the route lent its path to a generic upgrade handler and a client paired with it at its best tier, `glia_graph::WebSocketStackResolver::served_routes`), and not ORIGIN `test_fixture` (a route only test code registers, DT.6a: every registration site a test path or a `[walk] tests` match, `passes::test_route_ids`; DT.6b withholds it, counted on its own marker) | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
-//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor; DT.5l: a Go runtime-interface method by signature, an app-delegate callback of an `@main` type, a member an external base's library calls - Transloco, Angular ErrorHandler / Resolve / TitleStrategy / RouteReuseStrategy, dio: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
+//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not a member of an INTERFACE (GD.2: reported with its interface, which is no dead_symbol kind), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor; DT.5l: a Go runtime-interface method by signature, an app-delegate callback of an `@main` type, a member an external base's library calls - Transloco, Angular ErrorHandler / Resolve / TitleStrategy / RouteReuseStrategy, dio: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
@@ -129,6 +129,10 @@
 //!   when the DT.5d rules keep any row out: `g` generated-code candidates
 //!   (checked first), `i` invoked members of an owner with an incoming carry
 //!   edge (checked after dispatch);
+//! - `[dead-interface] dead_symbol rows withheld: <n> (interface members)`
+//!   once per report that computes `dead_symbol` (and per [`graph_counts`])
+//!   when `n > 0` METHODs whose nav parent is an INTERFACE are kept out
+//!   (GD.2, checked after dispatch, before the invoked-member rule);
 //! - `[gaps] named_not_modelled repo=<l> cited=<c> rows=<r>` once per repo
 //!   with a vocabulary snapshot, per report that computes
 //!   `named_not_modelled`: `c` distinct identifier-shaped tokens its docs
@@ -744,6 +748,12 @@ struct View<'a> {
     /// DT.5d: each framework- or runtime-invoked METHOD's owner
     /// ([`crate::answers::invoked_members`]). Only looked up, never iterated.
     invoked_owner: HashMap<NodeId, NodeId>,
+    /// GD.2: the METHODs whose nav parent is an INTERFACE (a Java / C# / PHP
+    /// / Kotlin interface member, a Go `method_elem`, a Rust trait fn, a TS
+    /// `method_signature` or function-typed property). Never a `dead_symbol`
+    /// row: the member is reported with its interface, and INTERFACE is no
+    /// dead_symbol kind. Only looked up, never iterated.
+    iface_members: HashSet<NodeId>,
     /// CALLS / USES predecessors, in edge order.
     callers: HashMap<NodeId, Vec<NodeId>>,
     /// HANDLED_BY targets, in edge order.
@@ -789,6 +799,7 @@ impl<'a> View<'a> {
                 .into_iter()
                 .map(|(member, owner, _)| (member, owner))
                 .collect(),
+            iface_members: HashSet::new(),
             callers: HashMap::new(),
             handlers: HashMap::new(),
             project_roots: BTreeMap::new(),
@@ -818,6 +829,14 @@ impl<'a> View<'a> {
                 v.qname_of.insert(n.id, qname.as_str());
                 if *kind == node_kind::METHOD {
                     methods.insert(n.id);
+                    if g.nav
+                        .parent_of
+                        .get(&n.id)
+                        .and_then(|p| g.nav.kind_by_id.get(p))
+                        == Some(&node_kind::INTERFACE)
+                    {
+                        v.iface_members.insert(n.id);
+                    }
                 }
                 if *kind == node_kind::GRAPHQL_OPERATION {
                     gql_ops.insert(n.id);
@@ -1206,6 +1225,8 @@ fn collect_rows(
     // DT.5d: candidates that are generated code, and framework- or
     // runtime-invoked members of an owner with an incoming carry edge.
     let (mut generated, mut invoked) = (0usize, 0usize);
+    // GD.2: candidates that are an interface's members.
+    let mut iface_members = 0usize;
     // DT.3c: routes a WebSocket client connects through.
     let mut ws_served = 0usize;
     // DT.6b: routes only test code registers.
@@ -1484,6 +1505,13 @@ fn collect_rows(
                         withheld += 1;
                         continue;
                     }
+                    // GD.2: an interface member is a declaration of its
+                    // interface's contract, reported with the interface,
+                    // which is no dead_symbol kind.
+                    if view.iface_members.contains(&n.id) {
+                        iface_members += 1;
+                        continue;
+                    }
                     // An invoked member is a row exactly when its owner is:
                     // a live owner made it live already, and an owner with
                     // an incoming carry edge (a dead caller's included, as
@@ -1515,6 +1543,11 @@ fn collect_rows(
     if want(DEAD_SYMBOL) && (invoked > 0 || generated > 0) {
         eprintln!(
             "[dead-framework] dead_symbol rows withheld: invoked={invoked} generated={generated}"
+        );
+    }
+    if want(DEAD_SYMBOL) && iface_members > 0 {
+        eprintln!(
+            "[dead-interface] dead_symbol rows withheld: {iface_members} (interface members)"
         );
     }
     if want(UNPAIRED_ROUTE) && test_withheld > 0 {

@@ -563,6 +563,11 @@ pub(crate) fn resolve_calls<H>(
             iface_recv + iface_static
         );
     }
+    // GD.2: the receiver-typed binds among them (a typed parameter, local or
+    // field of an INTERFACE type: TS interface members since GD.2).
+    if iface_recv > 0 {
+        eprintln!("[recv] interface receivers bound={iface_recv}");
+    }
     let mut gate = gate.sharing();
     gate.skipped = skipped;
     if let Some(line) = gate.marker() {

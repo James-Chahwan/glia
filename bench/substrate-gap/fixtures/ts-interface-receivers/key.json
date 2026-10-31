@@ -1,0 +1,49 @@
+{
+  "framework": "ts-interface-receivers",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.2 (FD.9): an interface's method_signature and function-typed property_signature are METHOD children of the INTERFACE, so a call through an interface-typed parameter or a private #field of that type binds the interface method (A6.6), and the implementing class's methods pair by method-level IMPLEMENTS. Baseline (HEAD cb9334e5, debug CLI): INTERFACE store::Store with no METHOD under it; run and Holder::go have no CALLS; only PgStore IMPLEMENTS Store.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "store::Store::load",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "store::Store::save",
+      "exact": true,
+      "note": "a function-typed property_signature"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "run",
+      "to": "store::Store::load",
+      "category": "CALLS"
+    },
+    {
+      "from": "run",
+      "to": "store::Store::save",
+      "category": "CALLS"
+    },
+    {
+      "from": "Holder::go",
+      "to": "store::Store::load",
+      "category": "CALLS",
+      "note": "receiver typed through the private #store field"
+    },
+    {
+      "from": "pg::PgStore::load",
+      "to": "store::Store::load",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "pg::PgStore::save",
+      "to": "store::Store::save",
+      "category": "IMPLEMENTS"
+    }
+  ]
+}
