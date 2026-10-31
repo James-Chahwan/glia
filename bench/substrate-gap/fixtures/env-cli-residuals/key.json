@@ -1,0 +1,96 @@
+{
+  "framework": "env-cli-residuals",
+  "language": "dart+elixir+php+javascript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "API_KEY",
+      "exact": true,
+      "note": "Dart compile-time `String.fromEnvironment('API_KEY')` (a --dart-define) is an env read: config:env:API_KEY"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "APP_DEBUG",
+      "exact": true,
+      "note": "dart:io `Platform.environment.containsKey('APP_DEBUG')` reads the key's presence"
+    },
+    {
+      "kind": "CONFIG_KEY",
+      "name": "shop:api_key",
+      "exact": true,
+      "note": "Elixir `Application.get_env(:shop, :api_key)` reads application config: config:setting:shop:api_key"
+    },
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "convert",
+      "exact": true,
+      "note": "PHP's global `exec('convert a.png b.jpg')`, a shell string whose binary is convert (.php files only)"
+    },
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "git",
+      "exact": true,
+      "note": "a fully qualified `new \\Symfony\\Component\\Process\\Process(['git', 'status'])` launches git"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "pull-env",
+      "exact": true,
+      "note": "package:args `List<String> get aliases => const ['pull-env']`: an alias is a command the user types"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "envcheck",
+      "exact": true,
+      "note": "pubspec.yaml `executables:` key (envtool is also the CommandRunner's name, so envcheck is the pubspec-only row)"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "thumbs-gc",
+      "exact": true,
+      "note": "gemspec `spec.executables.concat(%w[thumbs-gc])`"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "thumbs-ls",
+      "exact": true,
+      "note": "gemspec `spec.executables += [\"thumbs-ls\"]`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "dart/lib/env/debugOn",
+      "to": "config:env:APP_DEBUG",
+      "category": "READS_CONFIG",
+      "note": "the containsKey read, re-homed to the reading function"
+    },
+    {
+      "from": "ex/lib/cfg/Shop.Cfg/api_key",
+      "to": "config:setting:shop:api_key",
+      "category": "READS_CONFIG",
+      "note": "Application.get_env, re-homed to the reading function"
+    },
+    {
+      "from": "cli:pull-env",
+      "to": "dart/bin/envtool/SyncCommand",
+      "category": "HANDLED_BY",
+      "note": "an alias runs the same Command class"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "s",
+      "note": "PRECISION: JavaScript `/a/.exec(s)` is a RegExp match, never a launch (no bare exec needle outside PHP)"
+    },
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "CREATE",
+      "note": "PRECISION: PDO's `$db->exec('CREATE TABLE ..')` is a member call running SQL, not PHP's global exec"
+    }
+  ],
+  "note": "GD.21 (FD.62; seed §E W3 DH.5, DH.10): the env and CLI residuals. Dart `String.fromEnvironment` / `Platform.environment.containsKey` and Elixir `Application.get_env` were unread; PHP's global `exec(` was no needle (cli.rs said so: a bare exec would read JS `regex.exec(..)`), so it is read in .php files only, outside a `->exec(` / `::exec(` member call; a fully qualified Symfony Process was unread (the `new Process(` needle needs the bare class). Also package:args `aliases`, pubspec `executables:` and gemspec `executables.concat(..)` / `+=`. Baseline at cb9334e5 (debug CLI merge, the pre-change binary): every expect node and edge missing (no CONFIG_KEY or CLI_INVOCATION at all; CLI_COMMAND only sync, envtool, thumbs); both forbid rows already pass (no bare exec needle at HEAD), kept as regression guards."
+}

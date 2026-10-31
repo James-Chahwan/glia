@@ -45,9 +45,16 @@
 //!       properties, not the environment)
 //!     - PHP:    `getenv('X')`, `$_ENV['X']`; Laravel's `env('X')` helper
 //!       in a `.php` file, at a word edge (DH.5, `scan_laravel_env`)
-//!     - Dart:   `Platform.environment['X']` (DH.5)
+//!     - Dart:   `Platform.environment['X']` (DH.5); GD.21:
+//!       `Platform.environment.containsKey('X')` and the compile-time
+//!       `String.fromEnvironment('X')` / `bool.` / `int.fromEnvironment`,
+//!       `bool.hasEnvironment('X')` (a `--dart-define`)
 //!     - Elixir: `System.get_env("X")`, `System.fetch_env!("X")`,
-//!       `System.fetch_env("X")` (DH.5)
+//!       `System.fetch_env("X")` (DH.5); GD.21, in a `.ex` / `.exs` file:
+//!       `Application.get_env(:app, :key)` and its `fetch_env!` / `fetch_env`
+//!       / `compile_env` / `compile_env!` twins, application config on the
+//!       setting track, `config:setting:<app>:<key>` (a `[:k, :sub]` key path
+//!       joins with `:`; a module key keeps its alias, `app:Shop.Repo`)
 //!     - C#:     `Environment.GetEnvironmentVariable("X")` (CL.7a; the
 //!       `(..., EnvironmentVariableTarget.X)` form reads its first literal)
 //!     - .NET settings (CL.7b, `config:setting:`, `.cs` files only):
@@ -271,6 +278,15 @@ pub fn extract_config_reads(
     reads.extend(idiom(IDIOM_DART, scan_dart_env(source)));
     reads.extend(idiom(IDIOM_ELIXIR, scan_elixir_env(source)));
     reads.extend(idiom(IDIOM_LARAVEL, scan_laravel_env(source, path)));
+    // GD.21: Dart's `containsKey` / compile-time `fromEnvironment` env reads,
+    // and Elixir's `Application.get_env` application config (`.ex` / `.exs`
+    // files only), on the setting track.
+    reads.extend(idiom(IDIOM_DART_DEFINE, scan_dart_env_residuals(source)));
+    reads.extend(
+        scan_elixir_app_env(source, path)
+            .into_iter()
+            .map(|(n, o)| (n, o, Flavor::Setting, Some(IDIOM_ELIXIR_APP))),
+    );
     reads.extend(env(scan_dotnet_env(source)));
     // CL.7b: .NET IConfiguration reads, on the `config:setting:` track — C#
     // files only, so a TypeScript `interface IConfiguration` beside a
@@ -375,10 +391,20 @@ pub fn extract_yaml_env_defs(
             .into_iter()
             .map(|d| (d, Side::Define)),
     );
-    let out = build_sided(items, module_id, repo);
+    let mut out = build_sided(items, module_id, repo);
     if let Some(marker) = crate::secrets_flags::marker(&[&out], "yaml") {
         eprintln!("{marker}");
     }
+    // GD.21 stopgap (removal path on the callee): a pubspec.yaml's
+    // `executables:` keys, as `cli:<name>` CLI_COMMANDs on its MODULE.
+    crate::cli::extract_pubspec_executables(
+        source,
+        path,
+        module_id,
+        repo,
+        &mut out.nodes,
+        &mut out.nav,
+    );
     out
 }
 
@@ -1525,16 +1551,174 @@ fn scan_php_env(source: &str, writes: &mut EnvWrites) -> Vec<(String, usize)> {
 
 /// DH.5: the env-read idioms the `[config] env-read` marker counts, by the
 /// index [`extract_config_reads`] tags their reads with. The HEAD idioms
-/// above print nothing, so their output is unchanged.
-const ENV_READ_IDIOMS: [&str; 3] = ["dart_platform", "elixir_system", "laravel_env"];
+/// above print nothing, so their output is unchanged. GD.21 appends its two,
+/// which print the `[config] dart env=.. elixir app_env=..` line instead.
+const ENV_READ_IDIOMS: [&str; 5] = [
+    "dart_platform",
+    "elixir_system",
+    "laravel_env",
+    "dart_define",
+    "elixir_app_env",
+];
 const IDIOM_DART: usize = 0;
 const IDIOM_ELIXIR: usize = 1;
 const IDIOM_LARAVEL: usize = 2;
+const IDIOM_DART_DEFINE: usize = 3;
+const IDIOM_ELIXIR_APP: usize = 4;
 
 /// DH.5: `dart:io`'s `Platform.environment['X']`, the server-side Dart env
 /// map. The key is the index literal; a non-literal index reads nothing.
 fn scan_dart_env(source: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "Platform.environment[")
+}
+
+/// GD.21: the Dart env reads DH.5 left unread: dart:io's
+/// `Platform.environment.containsKey('X')` (the key's presence is read) and
+/// the compile-time declarations a `--dart-define` sets,
+/// `String.fromEnvironment('X')` (`const` or not, a `defaultValue:` after the
+/// key), `bool.fromEnvironment` / `int.fromEnvironment` and
+/// `bool.hasEnvironment`. The key is the first literal; a non-literal key
+/// reads nothing, and a dotted platform key (`dart.vm.product`) is no env
+/// name and is dropped by the validator.
+fn scan_dart_env_residuals(source: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for needle in [
+        "Platform.environment.containsKey(",
+        "String.fromEnvironment(",
+        "bool.fromEnvironment(",
+        "int.fromEnvironment(",
+        "bool.hasEnvironment(",
+    ] {
+        out.extend(capture_first_string_arg(source, needle));
+    }
+    out.sort_by_key(|(_, at)| *at);
+    out
+}
+
+/// GD.21: Elixir's application config reads, `Application.get_env(:app,
+/// :key)` (a default after the key is passed over) and its
+/// `fetch_env!` / `fetch_env` / `compile_env` / `compile_env!` twins, as the
+/// setting `<app>:<key>`: the first argument an atom, the second an atom, a
+/// module alias (`Shop.Repo`, kept with its dots) or a `[:key, :sub]` atom
+/// path (compile_env's, joined with `:`). Scanned in a `.ex` / `.exs` path
+/// only, in code (an Elixir-lexed [`crate::cli::CodeMap`]: a comment, string
+/// or heredoc reads nothing), and `Application` must start its alias (no
+/// `My.Application.get_env`). `Application.get_all_env(:app)` names no key
+/// and anything not spelled literally (a variable app or key) reads nothing.
+/// The offset is the `Application` needle's start.
+fn scan_elixir_app_env(source: &str, path: &str) -> Vec<(String, usize)> {
+    let is_elixir = path
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("ex") || ext.eq_ignore_ascii_case("exs"));
+    if !is_elixir || !source.contains("Application.") {
+        return Vec::new();
+    }
+    let code = crate::cli::CodeMap::script(source, crate::cli::Script::Elixir);
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for needle in [
+        "Application.get_env(",
+        "Application.fetch_env!(",
+        "Application.fetch_env(",
+        "Application.compile_env(",
+        "Application.compile_env!(",
+    ] {
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(needle) {
+            let at = from + rel;
+            from = at + needle.len();
+            let edge = at
+                .checked_sub(1)
+                .and_then(|i| b.get(i))
+                .is_none_or(|&c| !(c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.')));
+            if !edge || !code.is_code(at) {
+                continue;
+            }
+            if let Some(key) = elixir_app_key(source, at + needle.len()) {
+                out.push((key, at));
+            }
+        }
+    }
+    out.sort_by_key(|(_, at)| *at);
+    out
+}
+
+/// The `<app>:<key>` an `Application.*_env(` call's arguments at `i` name
+/// (see [`scan_elixir_app_env`]), or `None`.
+fn elixir_app_key(source: &str, i: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let ws = |mut j: usize| {
+        while b.get(j).is_some_and(|c| c.is_ascii_whitespace()) {
+            j += 1;
+        }
+        j
+    };
+    let (app, j) = elixir_atom(source, ws(i))?;
+    let j = ws(j);
+    if b.get(j) != Some(&b',') {
+        return None;
+    }
+    let j = ws(j + 1);
+    let (key, end) = match b.get(j) {
+        Some(b':') => elixir_atom(source, j)?,
+        Some(b'[') => {
+            let mut segs = Vec::new();
+            let mut k = ws(j + 1);
+            loop {
+                let (seg, after) = elixir_atom(source, k)?;
+                segs.push(seg);
+                k = ws(after);
+                match b.get(k) {
+                    Some(b',') => k = ws(k + 1),
+                    Some(b']') => break,
+                    _ => return None,
+                }
+            }
+            (segs.join(":"), k + 1)
+        }
+        Some(c) if c.is_ascii_uppercase() => {
+            let mut k = j;
+            while b
+                .get(k)
+                .is_some_and(|&c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.'))
+            {
+                k += 1;
+            }
+            let alias = source[j..k].trim_end_matches('.');
+            (alias.to_string(), k)
+        }
+        _ => return None,
+    };
+    let close = ws(end);
+    if !matches!(b.get(close), Some(b',' | b')')) {
+        return None;
+    }
+    let name = format!("{app}:{key}");
+    is_valid_setting_key(&name).then_some(name)
+}
+
+/// A plain Elixir atom at `i` (`:api_key`): its name and the index after it.
+/// A quoted (`:"x"`), operator, or `?` / `!`-suffixed atom is `None`.
+fn elixir_atom(source: &str, i: usize) -> Option<(String, usize)> {
+    let b = source.as_bytes();
+    if b.get(i) != Some(&b':')
+        || !b
+            .get(i + 1)
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
+        return None;
+    }
+    let mut j = i + 1;
+    while b
+        .get(j)
+        .is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        j += 1;
+    }
+    if matches!(b.get(j), Some(b'?' | b'!' | b'@')) {
+        return None;
+    }
+    Some((source[i + 1..j].to_string(), j))
 }
 
 /// DH.5: Elixir's `System.get_env("X")` (and its `("X", default)` form),
@@ -1582,13 +1766,23 @@ fn scan_laravel_env(source: &str, path: &str) -> Vec<(String, usize)> {
 
 /// DH.5: the `[config] env-read` marker lines for one file, one per idiom of
 /// [`ENV_READ_IDIOMS`] that read at least one key (`counts` by idiom index).
+/// GD.21: its two idioms print one `[config] dart env=<d> elixir
+/// app_env=<a> path=<p>` line instead, when either read a key.
 fn env_read_markers(counts: &[usize; ENV_READ_IDIOMS.len()], path: &str) -> Vec<String> {
-    ENV_READ_IDIOMS
+    let mut out: Vec<String> = ENV_READ_IDIOMS
         .iter()
         .zip(counts)
+        .take(IDIOM_DART_DEFINE)
         .filter(|(_, n)| **n > 0)
         .map(|(idiom, n)| format!("[config] env-read idiom={idiom} n={n} path={path}"))
-        .collect()
+        .collect();
+    let (dart, app) = (counts[IDIOM_DART_DEFINE], counts[IDIOM_ELIXIR_APP]);
+    if dart + app > 0 {
+        out.push(format!(
+            "[config] dart env={dart} elixir app_env={app} path={path}"
+        ));
+    }
+    out
 }
 
 // ----------------------------------------------------------------------------
@@ -2307,6 +2501,143 @@ $key = $_ENV['API_KEY'];
         }
         // `System.get_env()` names no key: four reads, four sites.
         assert_eq!(out.sites.len(), 4, "{:?}", out.sites);
+    }
+
+    #[test]
+    fn dart_env_residual_reads() {
+        let repo = RepoId(1);
+        let src = "import 'dart:io';\n\n\
+                   const apiKey = String.fromEnvironment('API_KEY', defaultValue: '');\n\
+                   final base = String.fromEnvironment(\"BASE_URL\");\n\
+                   bool debugOn() => Platform.environment.containsKey('APP_DEBUG');\n\
+                   const port = int.fromEnvironment('PORT', defaultValue: 8080);\n\
+                   const flag = bool.fromEnvironment('FEATURE_X');\n\
+                   const has = bool.hasEnvironment('SENTRY_DSN');\n\
+                   const product = bool.fromEnvironment('dart.vm.product');\n\
+                   final any = Platform.environment.containsKey(name);\n\
+                   final dyn = String.fromEnvironment(key);\n";
+        let out = extract_config_reads(src, "app/lib/env.dart", module_id(repo), repo);
+        assert_eq!(
+            sorted_config_keys(&out),
+            [
+                "config:env:API_KEY",
+                "config:env:APP_DEBUG",
+                "config:env:BASE_URL",
+                "config:env:FEATURE_X",
+                "config:env:PORT",
+                "config:env:SENTRY_DSN"
+            ]
+        );
+        for (key, needle) in [
+            ("API_KEY", "String.fromEnvironment('API"),
+            ("BASE_URL", "String.fromEnvironment(\"BASE"),
+            ("APP_DEBUG", "Platform.environment.containsKey('APP"),
+            ("PORT", "int.fromEnvironment("),
+            ("FEATURE_X", "bool.fromEnvironment('FEATURE"),
+            ("SENTRY_DSN", "bool.hasEnvironment("),
+        ] {
+            assert_eq!(
+                site_offsets(&out, repo, key),
+                vec![src.find(needle).unwrap()],
+                "{key}"
+            );
+        }
+        // The dotted platform key is no env name; a variable key reads nothing.
+        assert_eq!(out.sites.len(), 6, "{:?}", out.sites);
+        // `Platform.environment[` (DH.5) does not read a `.containsKey(` call.
+        assert!(scan_dart_env(src).is_empty());
+        let mut counts = [0usize; ENV_READ_IDIOMS.len()];
+        counts[IDIOM_DART_DEFINE] = 6;
+        assert_eq!(
+            env_read_markers(&counts, "app/lib/env.dart"),
+            ["[config] dart env=6 elixir app_env=0 path=app/lib/env.dart"]
+        );
+    }
+
+    #[test]
+    fn elixir_application_env_reads() {
+        let repo = RepoId(1);
+        let src = "defmodule Shop.Cfg do\n\
+                   \x20 def api_key, do: Application.get_env(:shop, :api_key)\n\
+                   \x20 def repo, do: Application.fetch_env!(:shop, Shop.Repo)\n\
+                   \x20 @adapter Application.compile_env(:shop, [:mailer, :adapter])\n\
+                   \x20 def port, do: Application.get_env(:shop, :port, 4000)\n\
+                   \x20 def ok, do: Application.fetch_env(\n    :shop,\n    :pool_size\n  )\n\
+                   \x20 @strict Application.compile_env!(:shop, :strict)\n\
+                   \x20 # Application.get_env(:shop, :commented)\n\
+                   \x20 def doc, do: \"Application.get_env(:shop, :quoted)\"\n\
+                   \x20 def other, do: My.Application.get_env(:shop, :nested)\n\
+                   \x20 def var, do: Application.get_env(app, :key)\n\
+                   \x20 def all, do: Application.get_all_env(:shop)\n\
+                   \x20 def q, do: Application.get_env(:shop, :valid?)\n\
+                   \x20 def env, do: System.get_env(\"PORT\")\n\
+                   end\n";
+        let out = extract_config_reads(src, "lib/shop/cfg.ex", module_id(repo), repo);
+        assert_eq!(
+            sorted_config_keys(&out),
+            [
+                "config:env:PORT",
+                "config:setting:shop:Shop.Repo",
+                "config:setting:shop:api_key",
+                "config:setting:shop:mailer:adapter",
+                "config:setting:shop:pool_size",
+                "config:setting:shop:port",
+                "config:setting:shop:strict"
+            ]
+        );
+        let at = src.find("Application.get_env(:shop, :api_key").unwrap();
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            "config:setting:shop:api_key",
+        );
+        assert!(out.sites.contains(&(id, at)), "{:?}", out.sites);
+        assert_eq!(out.sites.len(), 7, "{:?}", out.sites);
+        let reads = out
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::READS_CONFIG && e.from == module_id(repo))
+            .count();
+        assert_eq!(reads, 7);
+        // A config/*.exs reads too; any other language reads nothing.
+        assert_eq!(scan_elixir_app_env(src, "config/runtime.exs").len(), 6);
+        for path in ["lib/cfg.erl", "src/cfg.ts", "cfg"] {
+            assert!(scan_elixir_app_env(src, path).is_empty(), "{path}");
+        }
+        let mut counts = [0usize; ENV_READ_IDIOMS.len()];
+        counts[IDIOM_ELIXIR] = 1;
+        counts[IDIOM_ELIXIR_APP] = 6;
+        assert_eq!(
+            env_read_markers(&counts, "lib/shop/cfg.ex"),
+            [
+                "[config] env-read idiom=elixir_system n=1 path=lib/shop/cfg.ex",
+                "[config] dart env=0 elixir app_env=6 path=lib/shop/cfg.ex"
+            ]
+        );
+        // Every truncation of a multi-byte source reads without a panic.
+        let multibyte = "Application.get_env(:shöp, :ä) Application.get_env(:a, [:é";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = scan_elixir_app_env(&multibyte[..cut], "x.ex");
+        }
+    }
+
+    #[test]
+    fn pubspec_executables_ride_the_yaml_defs() {
+        let repo = RepoId(1);
+        let src = "name: envtool\nexecutables:\n  envtool:\n  envcheck: check\n";
+        let out = extract_yaml_env_defs(src, "tool/pubspec.yaml", module_id(repo), repo);
+        let mut cli: Vec<&String> = out
+            .nodes
+            .iter()
+            .filter(|n| out.nav.kind_by_id.get(&n.id) == Some(&node_kind::CLI_COMMAND))
+            .filter_map(|n| out.nav.qname_by_id.get(&n.id))
+            .collect();
+        cli.sort();
+        assert_eq!(cli, ["cli:envcheck", "cli:envtool"]);
+        // Only a pubspec: the same yaml elsewhere mints no command.
+        let other = extract_yaml_env_defs(src, "tool/config.yaml", module_id(repo), repo);
+        assert!(other.nodes.is_empty());
     }
 
     #[test]

@@ -73,6 +73,41 @@ pub struct CliNodes {
     /// LA.20a: distinct commands each framework declared in this file, sorted
     /// by framework. Feeds the `[cli-decl]` marker.
     pub per_framework: Vec<(CliFramework, usize)>,
+    /// GD.21: what this file's residual forms read, for the `[cli] php ..`
+    /// marker ([`Residuals::marker`]).
+    residuals: Residuals,
+}
+
+/// GD.21: the residual CLI forms one file read, each counted by the scan
+/// that read it: PHP's global `exec(` sites, fully qualified `new
+/// \Symfony\Component\Process\Process(` sites, package:args `aliases`,
+/// pubspec `executables:` keys and gemspec `executables.concat(..)` / `+=`
+/// names. fired_on, once per file that read one:
+/// `[cli] php exec=<e> symfony_fq=<s> args_aliases=<a> pubspec_exec=<p>
+/// gemspec_concat=<g> path=<p>`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Residuals {
+    php_exec: usize,
+    symfony_fq: usize,
+    args_aliases: usize,
+    pubspec_exec: usize,
+    gemspec_concat: usize,
+}
+
+impl Residuals {
+    /// The marker line, or `None` when nothing was read.
+    fn marker(self, path: &str) -> Option<String> {
+        (self != Residuals::default()).then(|| {
+            format!(
+                "[cli] php exec={} symfony_fq={} args_aliases={} pubspec_exec={} gemspec_concat={} path={path}",
+                self.php_exec,
+                self.symfony_fq,
+                self.args_aliases,
+                self.pubspec_exec,
+                self.gemspec_concat
+            )
+        })
+    }
 }
 
 /// One command a scanner read: the name a user types, and the symbol that
@@ -130,6 +165,7 @@ pub fn extract_cli_command_nodes(
     repo: RepoId,
 ) -> CliNodes {
     let mut decls: Vec<CliDecl> = Vec::new();
+    let mut residuals = Residuals::default();
 
     let line_extractors: Vec<(LineExtractor, CliFramework)> = match lang {
         "go" => vec![(
@@ -199,10 +235,9 @@ pub fn extract_cli_command_nodes(
             decls.extend(scan_scopt(source, &CodeMap::new(source)));
         }
         "dart" if source.contains("package:args/") => {
-            decls.extend(scan_dart_args(
-                source,
-                &CodeMap::script(source, Script::Dart),
-            ));
+            let (dart, aliases) = scan_dart_args(source, &CodeMap::script(source, Script::Dart));
+            decls.extend(dart);
+            residuals.args_aliases = aliases;
         }
         "elixir" if source.contains("Mix.Task") => {
             decls.extend(scan_mix_tasks(
@@ -267,6 +302,7 @@ pub fn extract_cli_command_nodes(
         }
     }
     out.per_framework.sort();
+    out.residuals = residuals;
     out
 }
 
@@ -276,7 +312,10 @@ pub fn extract_cli_command_nodes(
 /// declares only setuptools `console_scripts` binaries (a setup.py) prints the
 /// manifest line instead, `[cli-decl] manifest bins=1 (pyproject=0 setup=1
 /// npm=0 cargo=0 composer=0 gemspec=0) path=setup.py`, the one every
-/// manifest-declared binary shares.
+/// manifest-declared binary shares. GD.21: a Dart file whose commands
+/// declared package:args `aliases` gets a second line, `[cli] php exec=0
+/// symfony_fq=0 args_aliases=<a> pubspec_exec=0 gemspec_concat=0 path=<p>`,
+/// joined by `\n` (the caller prints the whole value to stderr).
 pub fn decl_marker(lang: &str, out: &CliNodes, path: &str) -> Option<String> {
     if out.per_framework.is_empty() {
         return None;
@@ -291,11 +330,15 @@ pub fn decl_marker(lang: &str, out: &CliNodes, path: &str) -> Option<String> {
         .iter()
         .map(|(f, n)| format!("{}:{n}", f.label()))
         .collect();
-    Some(format!(
+    let decl = format!(
         "[cli-decl] {lang}={} handler_refs={} path={path}",
         counts.join(","),
         out.refs.len()
-    ))
+    );
+    Some(match out.residuals.marker(path) {
+        Some(residual) => format!("{decl}\n{residual}"),
+        None => decl,
+    })
 }
 
 fn add_cli_command(
@@ -3028,10 +3071,13 @@ fn dart_name_value(source: &str, at: usize, end: usize) -> Option<String> {
 /// body declares its `name` ([`dart_command_name`]) -> `cli:<name>` handled
 /// by `Bare(<Class>)`, the Symfony precedent (a command is its class; its
 /// `run` shares a name with every other command's). In source order. An
-/// abstract base with no literal `name` declares nothing, and `aliases` are
-/// not read.
-fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
+/// abstract base with no literal `name` declares nothing. GD.21: a named
+/// command's top-level `aliases` ([`dart_command_aliases`]) are commands
+/// too, each handled by the same class (package:args runs a command by any
+/// alias); the second value counts them.
+fn scan_dart_args(source: &str, code: &CodeMap) -> (Vec<CliDecl>, usize) {
     let b = source.as_bytes();
+    let mut aliases = 0usize;
     let first_str = |at: usize| {
         call_args(source, code, at)
             .and_then(|span| first_positional_str(source, span))
@@ -3063,6 +3109,17 @@ fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             && let Some((at, name)) = dart_command_name(source, code, class.body)
         {
             let handler = CallQualifier::Bare(class.name.to_string());
+            for (alias_at, alias) in dart_command_aliases(source, code, class.body) {
+                aliases += 1;
+                found.push((
+                    alias_at,
+                    CliDecl::new(
+                        CliFramework::CommandRunner,
+                        alias,
+                        at_row(Some(handler.clone()), source, alias_at),
+                    ),
+                ));
+            }
             found.push((
                 at,
                 CliDecl::new(
@@ -3073,8 +3130,96 @@ fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             ));
         }
     }
+    // Stable: a command's aliases share one offset and keep their order.
     found.sort_by_key(|(at, _)| *at);
-    found.into_iter().map(|(_, decl)| decl).collect()
+    (found.into_iter().map(|(_, decl)| decl).collect(), aliases)
+}
+
+/// GD.21: the aliases a `Command` subclass body declares at its top level
+/// (as [`dart_command_name`] reads `name`), each with the `aliases` offset:
+/// `List<String> get aliases => ['a', 'b'];`, `get aliases { return [..];
+/// }`, or a field `final aliases = const <String>['a'];` (any declared
+/// type). Each plain string literal of the list is an alias; an
+/// interpolation or a variable element is passed over, and a list built
+/// any other way (a call, a spread, a variable) names nothing.
+fn dart_command_aliases(
+    source: &str,
+    code: &CodeMap,
+    (start, end): (usize, usize),
+) -> Vec<(usize, String)> {
+    let b = source.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < end {
+        let next = code.next_code(i);
+        if next != i {
+            i = next;
+            continue;
+        }
+        match b[i] {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+            b'a' if depth == 0
+                && b[i..].starts_with(b"aliases")
+                && !(i > 0 && (is_ident_byte(b[i - 1]) || matches!(b[i - 1], b'$' | b'.')))
+                && !b.get(i + 7).copied().is_some_and(is_ident_byte) =>
+            {
+                if let Some(names) = dart_aliases_value(source, code, i, end) {
+                    return names.into_iter().map(|n| (i, n)).collect();
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Vec::new()
+}
+
+/// The aliases an `aliases` member at `at` is declared with (see
+/// [`dart_command_aliases`]), read up to `end`.
+fn dart_aliases_value(source: &str, code: &CodeMap, at: usize, end: usize) -> Option<Vec<String>> {
+    let b = source.as_bytes();
+    let after = skip_ws(b, at + "aliases".len());
+    let getter = php_prev_word(source, at) == "get";
+    let mut v = if getter && b[after..].starts_with(b"=>") {
+        skip_ws(b, after + 2)
+    } else if getter && b.get(after) == Some(&b'{') {
+        let (word, ret) = read_ident(source, skip_ws(b, after + 1));
+        if word != "return" {
+            return None;
+        }
+        skip_ws(b, ret)
+    } else if !getter
+        && b.get(after) == Some(&b'=')
+        && !matches!(b.get(after + 1), Some(b'=' | b'>'))
+    {
+        skip_ws(b, after + 1)
+    } else {
+        return None;
+    };
+    let (word, word_end) = read_ident(source, v);
+    if word == "const" {
+        v = skip_ws(b, word_end);
+    }
+    if b.get(v) == Some(&b'<') {
+        v = skip_ws(b, dart_type_args_end(b, v)?);
+    }
+    if b.get(v) != Some(&b'[') {
+        return None;
+    }
+    let (list_start, list_end) = balanced_code(source, code, v, MAX_ATTR_SPAN)?;
+    if list_end > end || b.get(skip_ws(b, list_end + 1)) != Some(&b';') {
+        return None;
+    }
+    let names = source[list_start..list_end]
+        .split(',')
+        .map(str::trim)
+        .filter_map(|item| {
+            let lit = quoted_literal(item)?;
+            (lit.len() + 2 == item.len() && valid_cli_name(lit)).then(|| lit.to_string())
+        })
+        .collect();
+    Some(names)
 }
 
 /// The Elixir alias at `i` (`Mix.Tasks.Shop.Sync`: identifier bytes and
@@ -3260,14 +3405,23 @@ pub fn extract_manifest_binaries(
     module_id: NodeId,
     repo: RepoId,
 ) -> CliNodes {
+    let mut residuals = Residuals::default();
     let names = match ManifestForm::of_path(path) {
         Some(ManifestForm::Pyproject) => scan_pyproject_scripts(source),
         Some(ManifestForm::Npm) => scan_package_json_bin(source),
         Some(ManifestForm::Cargo) => scan_cargo_bins(source),
         Some(ManifestForm::Composer) => scan_composer_bin(source),
-        Some(ManifestForm::Gemspec) => scan_gemspec_executables(source),
+        Some(ManifestForm::Gemspec) => {
+            let (names, concat) = scan_gemspec_executables(source);
+            residuals.gemspec_concat = concat;
+            names
+        }
         Some(ManifestForm::SetupPy) | None => Vec::new(),
     };
+    // GD.21 fired_on: the gemspec's `concat` / `+=` names.
+    if let Some(line) = residuals.marker(path) {
+        eprintln!("{line}");
+    }
     let mut out = CliNodes::default();
     let mut seen = std::collections::HashSet::new();
     for name in names {
@@ -3486,35 +3640,135 @@ fn scan_composer_bin(source: &str) -> Vec<String> {
 /// declare nothing): `<spec>.executables = ["a", 'b']` (a list may span
 /// lines; non-literal elements are passed over), `= %w[a b]` (any `%w` /
 /// `%W` delimiter), `= "a"`, `<< "a"`, and the singular `<spec>.executable =
-/// "a"`. A computed list (`spec.files.grep(%r{^exe/}) { .. }`, `Dir[..]`)
-/// names no literal binary and reads nothing. In source order.
-fn scan_gemspec_executables(source: &str) -> Vec<String> {
+/// "a"`; GD.21: `+= [..]` / `+= %w[..]` and `.concat([..])` / `.concat(%w[..])`
+/// (or paren-less `.concat %w[..]`), whose names the second value counts. A
+/// computed list (`spec.files.grep(%r{^exe/}) { .. }`, `Dir[..]`) names no
+/// literal binary and reads nothing. In source order.
+fn scan_gemspec_executables(source: &str) -> (Vec<String>, usize) {
     let b = source.as_bytes();
     let code = CodeMap::script(source, Script::Ruby);
     let mut found: Vec<(usize, String)> = Vec::new();
+    let mut concat = 0usize;
     for word in ["executables", "executable"] {
         for at in code_words(source, &code, 0, source.len(), word) {
             if at < 2 || b[at - 1] != b'.' || ident_before(source, at - 1).is_empty() {
                 continue;
             }
             let op = skip_ws(b, at + word.len());
-            let rhs =
+            let plural = word == "executables";
+            let (rhs, appends) =
                 if b.get(op) == Some(&b'=') && !matches!(b.get(op + 1), Some(b'=' | b'~' | b'>')) {
-                    skip_ws(b, op + 1)
-                } else if word == "executables" && b[op..].starts_with(b"<<") {
-                    skip_ws(b, op + 2)
+                    (skip_ws(b, op + 1), false)
+                } else if plural && b[op..].starts_with(b"<<") {
+                    (skip_ws(b, op + 2), false)
+                } else if plural && b[op..].starts_with(b"+=") {
+                    (skip_ws(b, op + 2), true)
+                } else if plural && b.get(op) == Some(&b'.') {
+                    let (method, after) = read_ident(source, op + 1);
+                    match b.get(after) {
+                        Some(b'(') if method == "concat" => (skip_ws(b, after + 1), true),
+                        Some(b' ' | b'\t') if method == "concat" => (skip_ws(b, after), true),
+                        _ => continue,
+                    }
                 } else {
                     continue;
                 };
-            found.extend(
-                ruby_string_list(source, &code, rhs)
-                    .into_iter()
-                    .map(|name| (at, name)),
-            );
+            let names = ruby_string_list(source, &code, rhs);
+            if appends {
+                concat += names.len();
+            }
+            found.extend(names.into_iter().map(|name| (at, name)));
         }
     }
     found.sort_by_key(|(at, _)| *at);
-    found.into_iter().map(|(_, name)| name).collect()
+    (found.into_iter().map(|(_, name)| name).collect(), concat)
+}
+
+/// GD.21: every executable a `pubspec.yaml` declares, as a flat `cli:<name>`
+/// CLI_COMMAND parented to the pubspec's MODULE (as
+/// [`extract_manifest_binaries`] mints a manifest's binaries): the keys of
+/// the top-level `executables:` map (`dart pub global activate` puts each on
+/// the PATH; the value names the `bin/` script, the key is what a caller
+/// types). Appended to `nodes` / `nav`; prints the `[cli] php ..` marker
+/// when one is read. Any other path reads nothing.
+///
+/// Stopgap: a pubspec.yaml keeps the engine's yaml route, which calls only
+/// `config::extract_yaml_env_defs`, so that function calls this one.
+/// Removal: once engine/src/route.rs's yaml branch calls it directly beside
+/// `deps_beside`, drop the call from `extract_yaml_env_defs`.
+pub(crate) fn extract_pubspec_executables(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    nodes: &mut Vec<Node>,
+    nav: &mut CodeNav,
+) {
+    if path.rsplit('/').next() != Some("pubspec.yaml") {
+        return;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut residuals = Residuals::default();
+    for name in scan_pubspec_executables(source) {
+        if is_bin_name(&name) && seen.insert(name.clone()) {
+            add_cli_command(nodes, nav, &name, module_id, repo);
+            residuals.pubspec_exec += 1;
+        }
+    }
+    if let Some(line) = residuals.marker(path) {
+        eprintln!("{line}");
+    }
+}
+
+/// The keys of a pubspec's top-level `executables:` map, in order: the
+/// indented `name:` / `name: script` lines of the block form (comments and
+/// blank lines skipped, the block ending at the next unindented line), or a
+/// flow map `executables: {a: , b: c}`. Quoted keys are unquoted; a key
+/// holding anything but a plain name is dropped later by [`is_bin_name`].
+fn scan_pubspec_executables(source: &str) -> Vec<String> {
+    let unquote = |k: &str| k.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+    let strip_comment = |line: &str| -> String {
+        match line.find(" #") {
+            Some(i) => line[..i].to_string(),
+            None if line.trim_start().starts_with('#') => String::new(),
+            None => line.to_string(),
+        }
+    };
+    let mut out = Vec::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("executables:") else {
+            continue;
+        };
+        let rest = strip_comment(rest);
+        let rest = rest.trim();
+        if let Some(flow) = rest.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
+            out.extend(flow.split(',').filter_map(|pair| {
+                pair.split_once(':').map(|(k, _)| unquote(k)).or_else(|| {
+                    let k = unquote(pair);
+                    (!k.is_empty()).then_some(k)
+                })
+            }));
+            break;
+        }
+        if !rest.is_empty() {
+            break;
+        }
+        for item in lines.by_ref() {
+            let text = strip_comment(item);
+            if text.trim().is_empty() {
+                continue;
+            }
+            if !text.starts_with([' ', '\t']) {
+                break;
+            }
+            if let Some((key, _)) = text.split_once(':') {
+                out.push(unquote(key));
+            }
+        }
+        break;
+    }
+    out
 }
 
 /// The strings a Ruby expression at `at` spells literally: a `[..]` list's
@@ -3739,7 +3993,8 @@ const INVOCATION_PATTERNS: &[&str] = &[
     // `start` and Elixir's `System.cmd` take the binary then an argv list,
     // `System.shell` a shell string. C# `new Process()` has no quoted argv
     // and is no site; a bare `exec` needle is not added (`regex.exec(..)`
-    // would read a binary).
+    // would read a binary): GD.21 reads PHP's global `exec(` in a `.php`
+    // file only, outside a member call (`php_residual_sites`).
     "new Process(",
     "Process::fromShellCommandline(",
     "shell_exec(",
@@ -3755,6 +4010,77 @@ const INVOCATION_PATTERNS: &[&str] = &[
     "os.execute(",
     "io.popen(",
 ];
+
+/// `(offset the call's arguments start at, argv)` per launch site.
+type ArgvSites = Vec<(usize, Vec<String>)>;
+
+/// GD.21: true for a `.php` path (ASCII case ignored).
+fn is_php_path(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("php"))
+}
+
+/// The fully qualified Symfony Process class a `new` constructs, the leading
+/// `\` optional (a file in the global namespace may omit it).
+const SYMFONY_PROCESS_FQ: &str = "Symfony\\Component\\Process\\Process(";
+
+/// GD.21: the PHP launches no [`INVOCATION_PATTERNS`] needle reads, each as
+/// `(offset its arguments start at, argv)` in source order, in code only
+/// (a PHP-lexed [`CodeMap`]: a comment, string or heredoc launches nothing):
+///
+/// - PHP's global `exec('convert a.png b.jpg')` (a shell string, split by
+///   [`scan_argv`]): `exec` at a word edge, so `shell_exec(` / `curl_exec(`
+///   / `pcntl_exec(` are not it, and never a member or static call
+///   (`$db->exec(`, `$db?->exec(`, `X::exec(`), a variable or closure
+///   (`$exec(`), a concatenation or embedded script (`.exec(`), nor a
+///   declaration (`function exec(`). A namespaced `\exec(` is the global
+///   function and reads;
+/// - `new \Symfony\Component\Process\Process([..])`, the argv array, as the
+///   bare `new Process(` needle reads it.
+fn php_residual_sites(source: &str) -> (ArgvSites, ArgvSites) {
+    let b = source.as_bytes();
+    let code = CodeMap::script(source, Script::Php);
+    let mut exec = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find("exec(") {
+        let at = from + rel;
+        let args = at + "exec(".len();
+        from = args;
+        let prev = at.checked_sub(1).map(|i| b[i]);
+        let member = match prev {
+            Some(c) if is_ident_byte(c) || c >= 0x80 => true,
+            Some(b'>' | b':' | b'$' | b'.') => true,
+            _ => false,
+        };
+        if member || !code.is_code(at) || php_prev_word(source, at) == "function" {
+            continue;
+        }
+        let tokens = scan_argv(&source[args..]);
+        if !tokens.is_empty() {
+            exec.push((args, tokens));
+        }
+    }
+    let mut fq = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(SYMFONY_PROCESS_FQ) {
+        let at = from + rel;
+        let args = at + SYMFONY_PROCESS_FQ.len();
+        from = args;
+        let start = if at > 0 && b[at - 1] == b'\\' {
+            at - 1
+        } else {
+            at
+        };
+        if !code.is_code(at) || php_prev_word(source, start) != "new" {
+            continue;
+        }
+        let tokens = scan_argv(&source[args..]);
+        if !tokens.is_empty() {
+            fq.push((args, tokens));
+        }
+    }
+    (exec, fq)
+}
 
 /// Most argv tokens [`scan_argv`] reads from one call site (the binary included).
 const MAX_ARGV_TOKENS: usize = 8;
@@ -3814,6 +4140,28 @@ pub fn extract_cli_invocation_nodes(
             }
             search_from = args_at;
         }
+    }
+    // GD.21: PHP's global `exec(` and a fully qualified Symfony Process,
+    // read in a `.php` file only (a bare `exec` needle would read JS
+    // `regex.exec(..)` and PDO's `$db->exec(..)`).
+    let mut residuals = Residuals::default();
+    if is_php_path(path) {
+        let (exec, fq) = php_residual_sites(source);
+        for (at, tokens) in exec {
+            if let std::collections::btree_map::Entry::Vacant(e) = sites.entry(at) {
+                e.insert(tokens);
+                residuals.php_exec += 1;
+            }
+        }
+        for (at, tokens) in fq {
+            if let std::collections::btree_map::Entry::Vacant(e) = sites.entry(at) {
+                e.insert(tokens);
+                residuals.symfony_fq += 1;
+            }
+        }
+    }
+    if let Some(line) = residuals.marker(path) {
+        eprintln!("{line}");
     }
     // DG.8: a `scala.sys.process` launch is recognised by what FOLLOWS its
     // argv (`Seq("tool", "x").!`), so no needle above reads it.
@@ -5512,6 +5860,84 @@ def build():
         assert!(invocation("$p = new Process($argv);").0.is_empty());
     }
 
+    /// GD.21: the sorted `cli_invoke:` qnames a file at `path` mints, with
+    /// its residual counts.
+    fn residual_invocations(source: &str, path: &str) -> (Vec<String>, (usize, usize)) {
+        let (exec, fq) = if is_php_path(path) {
+            let (e, f) = php_residual_sites(source);
+            (e.len(), f.len())
+        } else {
+            (0, 0)
+        };
+        (invocation_qnames(source, path), (exec, fq))
+    }
+
+    #[test]
+    fn php_global_exec_in_php_files_only() {
+        let source = r#"<?php
+function thumbnail(PDO $db, $ch): void
+{
+    exec('convert a.png b.jpg');
+    \exec("ffmpeg -i in.mp4 out.webm", $out, $code);
+    $db->exec('CREATE TABLE thumbs (id INTEGER)');
+    $db?->exec('DROP TABLE thumbs');
+    $r = PDO::exec('VACUUM');
+    $exec('rogue arg');
+    curl_exec($ch);
+    $a = pcntl_exec('/bin/true');
+    // exec('commented out');
+    $s = 'exec("quoted")';
+    echo "<script>re.exec('abc')</script>";
+}
+class Runner { public function exec($cmd) { return 1; } }
+"#;
+        let (qnames, counts) = residual_invocations(source, "src/run.php");
+        assert_eq!(qnames, ["cli_invoke:convert", "cli_invoke:ffmpeg"]);
+        assert_eq!(counts, (2, 0));
+        let (_, argv) = invocation(source);
+        assert!(argv.is_empty(), "no needle reads exec outside a .php path");
+        // JavaScript: RegExp.exec and a bare exec are never launches.
+        for path in ["js/x.js", "src/a.ts", "run.py", "run.phpx"] {
+            let js = "export const hasA = (s) => /a/.exec(s) !== null;\nconst m = re.exec(\"abc\");\nexec('convert a.png b.jpg');\n";
+            assert!(residual_invocations(js, path).0.is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn php_fully_qualified_symfony_process() {
+        let source = r#"<?php
+$a = new \Symfony\Component\Process\Process(['git', 'status']);
+$b = new Symfony\Component\Process\Process(["make", "build"]);
+$c = \Symfony\Component\Process\Process::fromShellCommandline('npm ci');
+// $d = new \Symfony\Component\Process\Process(['commented']);
+$e = \Symfony\Component\Process\Process(['no-new']);
+$f = new \Symfony\Component\Process\Process($argv);
+"#;
+        let (qnames, counts) = residual_invocations(source, "app/Jobs/Build.php");
+        assert_eq!(
+            qnames,
+            ["cli_invoke:git", "cli_invoke:make", "cli_invoke:npm"]
+        );
+        assert_eq!(counts, (0, 2));
+        assert_eq!(
+            Residuals {
+                php_exec: 1,
+                symfony_fq: 2,
+                ..Residuals::default()
+            }
+            .marker("app/Jobs/Build.php")
+            .as_deref(),
+            Some(
+                "[cli] php exec=1 symfony_fq=2 args_aliases=0 pubspec_exec=0 gemspec_concat=0 path=app/Jobs/Build.php"
+            )
+        );
+        // Every truncation of a multi-byte PHP source reads without a panic.
+        let multibyte = "<?php exec('é ö'); new \\Symfony\\Component\\Process\\Process(['ü']);";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = php_residual_sites(&multibyte[..cut]);
+        }
+    }
+
     #[test]
     fn php_shell_exec_split() {
         assert_invocations(&[
@@ -5714,6 +6140,133 @@ final runner = CommandRunner(executable, 'built');
             let _ = decls(&multibyte[..cut], "dart");
         }
         assert_eq!(commands(&decls(multibyte, "dart")), vec!["cli:é", "cli:ö"]);
+    }
+
+    #[test]
+    fn dart_command_aliases_are_commands() {
+        let source = r#"import 'package:args/command_runner.dart';
+
+class SyncCommand extends Command<void> {
+  @override
+  final name = 'sync';
+  @override
+  List<String> get aliases => const ['pull-env', "s"];
+}
+
+class GcCommand extends Command {
+  String get name => 'gc';
+  @override
+  final List<String> aliases = const <String>['clean'];
+}
+
+class LsCommand extends Command {
+  String get name => 'ls';
+  List<String> get aliases {
+    return ['list', '$prefix-ls', dir];
+  }
+}
+
+class NoNameCommand extends Command {
+  List<String> get aliases => ['orphan'];
+}
+
+class LocalCommand extends Command {
+  String get name => 'local';
+  void run() {
+    final aliases = ['inner'];
+  }
+  List<String> get aliases => computeAliases();
+}
+"#;
+        let out = decls(source, "dart");
+        assert_eq!(
+            commands(&out),
+            vec![
+                "cli:sync",
+                "cli:pull-env",
+                "cli:s",
+                "cli:gc",
+                "cli:clean",
+                "cli:ls",
+                "cli:list",
+                "cli:local"
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                ("cli:sync".to_string(), bare("SyncCommand")),
+                ("cli:pull-env".to_string(), bare("SyncCommand")),
+                ("cli:s".to_string(), bare("SyncCommand")),
+                ("cli:gc".to_string(), bare("GcCommand")),
+                ("cli:clean".to_string(), bare("GcCommand")),
+                ("cli:ls".to_string(), bare("LsCommand")),
+                ("cli:list".to_string(), bare("LsCommand")),
+                ("cli:local".to_string(), bare("LocalCommand")),
+            ]
+        );
+        assert_eq!(out.residuals.args_aliases, 4);
+        assert_eq!(
+            decl_marker("dart", &out, "bin/tool.dart").as_deref(),
+            Some(
+                "[cli-decl] dart=commandrunner:8 handler_refs=8 path=bin/tool.dart\n\
+                 [cli] php exec=0 symfony_fq=0 args_aliases=4 pubspec_exec=0 gemspec_concat=0 path=bin/tool.dart"
+            )
+        );
+        // A file with no alias keeps its one-line marker.
+        let plain = decls(DART_CLI_DEF_MYTOOL, "dart");
+        assert_eq!(plain.residuals, Residuals::default());
+    }
+
+    #[test]
+    fn pubspec_executables_keys() {
+        let pubspec = "name: envtool # the package\nenvironment:\n  sdk: ^3.0.0\nexecutables:\n  # the default script\n  envtool:\n\n  envcheck: check\n  \"quoted\": q\nflutter:\n  uses-material-design: true\n";
+        assert_eq!(
+            scan_pubspec_executables(pubspec),
+            ["envtool", "envcheck", "quoted"]
+        );
+        assert_eq!(
+            scan_pubspec_executables("name: x\nexecutables: {a: , b: c}\n"),
+            ["a", "b"]
+        );
+        for none in [
+            "name: x\n",
+            "name: x\nexecutables:\nflutter:\n",
+            "name: x\nexecutables: ~\n",
+            "name: x\ndev:\n  executables:\n    nested:\n",
+        ] {
+            assert!(scan_pubspec_executables(none).is_empty(), "{none}");
+        }
+        let mut nodes = Vec::new();
+        let mut nav = CodeNav::default();
+        extract_pubspec_executables(
+            pubspec,
+            "tools/pubspec.yaml",
+            module_id(),
+            repo(),
+            &mut nodes,
+            &mut nav,
+        );
+        let out = CliNodes {
+            nodes,
+            nav,
+            ..CliNodes::default()
+        };
+        assert_eq!(
+            manifest_commands(&out),
+            ["cli:envtool", "cli:envcheck", "cli:quoted"]
+        );
+        let mut nodes = Vec::new();
+        let mut nav = CodeNav::default();
+        extract_pubspec_executables(
+            pubspec,
+            "tools/x.yaml",
+            module_id(),
+            repo(),
+            &mut nodes,
+            &mut nav,
+        );
+        assert!(nodes.is_empty());
     }
 
     #[test]
@@ -6080,15 +6633,42 @@ Gem::Specification.new do |spec|
   spec.name = "toolkit"
   spec.executables = %w[alpha beta]
   spec.executables << 'gamma'
-  spec.executables += ["not-read"] if false
+  spec.executables += ["zeta"] if true
   spec.executable = "delta"
   spec.executables.concat(%w(epsilon))
+  spec.executables.concat ["eta", 'theta']
+  spec.executables.concat(extra)
+  spec.executables.push("not-read")
 end
 "#;
+        // GD.21: `+=` and `.concat(..)` / `.concat [..]` append names too
+        // (before, `+=` and `concat` read nothing); a variable reads nothing.
         assert_eq!(
             manifest_commands(&manifest_bins(gemspec, "toolkit.gemspec")),
-            ["cli:alpha", "cli:beta", "cli:gamma", "cli:delta"]
+            [
+                "cli:alpha",
+                "cli:beta",
+                "cli:gamma",
+                "cli:zeta",
+                "cli:delta",
+                "cli:epsilon",
+                "cli:eta",
+                "cli:theta"
+            ]
         );
+        assert_eq!(scan_gemspec_executables(gemspec).1, 4);
+        assert_eq!(
+            Residuals {
+                gemspec_concat: 4,
+                ..Residuals::default()
+            }
+            .marker("toolkit.gemspec")
+            .as_deref(),
+            Some(
+                "[cli] php exec=0 symfony_fq=0 args_aliases=0 pubspec_exec=0 gemspec_concat=4 path=toolkit.gemspec"
+            )
+        );
+        assert_eq!(Residuals::default().marker("x.gemspec"), None);
         let multi = "Gem::Specification.new do |s|\n  s.executables = [\n    \"one\", # the first\n    'two',\n    name,\n  ]\n  s.executables = %w(three)\n  s.executables = \"four\"\nend\n";
         assert_eq!(
             manifest_commands(&manifest_bins(multi, "pkg/multi.gemspec")),
