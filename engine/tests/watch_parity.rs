@@ -430,6 +430,57 @@ fn sbt_member_add(r: &Path) {
     );
 }
 
+// GA.21: the wrapper memos. `api` is an inferred HTTP wrapper from the
+// seed on; `send` becomes one at `wrapper_create`, in its own file only.
+const WRAP_HTTP: &str = "export async function api(path: string) {\n  return fetch(`/api${path}`);\n}\n\nexport async function send(path: string) {\n  return path;\n}\n";
+const WRAP_VERBS: &str = "import { api, send } from \"./http\";\n\nexport function getJson(path: string) {\n  return api(path);\n}\n\nexport function postJson(path: string) {\n  return send(path);\n}\n";
+const WRAP_USERS: &str = "import { getJson, postJson } from \"../lib/verbs\";\n\nexport function listUsers() {\n  return getJson(\"/users\");\n}\n\nexport function createUser() {\n  return postJson(\"/users\");\n}\n";
+const WRAP_API_SERVICE: &str = "import axios from \"axios\";\n\nexport class APIService {\n  private axiosInstance = axios.create({});\n\n  get(url: string) {\n    return this.axiosInstance.get(url);\n  }\n}\n";
+const WRAP_BASE_SERVICE: &str = "import { APIService } from \"./api.service\";\n\nexport class BaseService extends APIService {}\n";
+const WRAP_VIEW_SERVICE: &str = "import { BaseService } from \"./base.service\";\n\nexport class ViewService extends BaseService {\n  async fetchView() {\n    return this.get(\"/api/views/\");\n  }\n}\n";
+fn wrappers_seed(r: &Path) {
+    write(r, "web/src/lib/http.ts", WRAP_HTTP);
+    write(r, "web/src/lib/verbs.ts", WRAP_VERBS);
+    write(r, "web/src/features/users.ts", WRAP_USERS);
+    write(r, "web/src/services/api.service.ts", WRAP_API_SERVICE);
+    write(r, "web/src/services/base.service.ts", WRAP_BASE_SERVICE);
+    write(r, "web/src/services/view.service.ts", WRAP_VIEW_SERVICE);
+}
+/// `send` becomes a direct wrapper: the unchanged `verbs.ts` forwards it
+/// (`postJson`, a new depth-2 frontier) and the unchanged `users.ts` holds
+/// its site (a new stanza set).
+fn wrapper_create(r: &Path) {
+    replace(
+        r,
+        "web/src/lib/http.ts",
+        "  return path;\n",
+        "  return fetch(`/api${path}`, { method: \"POST\" });\n",
+    );
+}
+fn wrapper_site_add(r: &Path) {
+    let users = std::fs::read_to_string(r.join("web/src/features/users.ts")).expect("read");
+    write(
+        r,
+        "web/src/features/users.ts",
+        &format!("{users}\nexport function listTeams() {{\n  return getJson(\"/teams\");\n}}\n"),
+    );
+}
+/// The middle class drops its base: the unchanged `view.service.ts` keeps
+/// its text and the stanza set, only its heritage scope goes.
+fn heritage_base_remove(r: &Path) {
+    replace(
+        r,
+        "web/src/services/base.service.ts",
+        "export class BaseService extends APIService {}\n",
+        "export class BaseService {}\n",
+    );
+}
+/// A same-stem `.js` beside `http.ts` renames its MODULE (LB.9b / LB.13):
+/// the unchanged file's wrapper key must miss.
+fn wrapper_module_move(r: &Path) {
+    write(r, "web/src/lib/http.js", "export const unused = 1;\n");
+}
+
 // ---- the harness -----------------------------------------------------------
 
 /// How a step reaches the session: `apply` of the named repo-relative paths,
@@ -1186,6 +1237,89 @@ fn scripted_poll_sbt() {
 /// process, so each update evicts every cached group and the build memos:
 /// the eviction is a cache drop, so every step still equals a clean build
 /// byte for byte, with the same rows and files ([`run_with`]).
+/// GA.21: the wrapper stages' per-file memos (`build::memo` WrapperMemo /
+/// ScanMemo). Each step leaves an unchanged file whose stale replay would
+/// differ from a clean build; falsified by dropping one key part (the
+/// frontier fingerprint fails `wrapper_create` at `postJson`, the stanza
+/// fingerprint at `users.ts`' POST site, the content hash at
+/// `wrapper_site_add`, the heritage-scope fingerprint at
+/// `heritage_base_remove`).
+const SEQ_WRAPPERS: &[Step] = &[
+    Step {
+        name: "wrappers_seed",
+        edit: wrappers_seed,
+        via: Via::Apply(&[
+            "web/src/features/users.ts",
+            "web/src/lib/http.ts",
+            "web/src/lib/verbs.ts",
+            "web/src/services/api.service.ts",
+            "web/src/services/base.service.ts",
+            "web/src/services/view.service.ts",
+        ]),
+        expect: Expect {
+            rebuilt_contains: &["typescript"],
+            files_added: &[
+                "web/src/features/users.ts",
+                "web/src/lib/http.ts",
+                "web/src/lib/verbs.ts",
+                "web/src/services/api.service.ts",
+                "web/src/services/base.service.ts",
+                "web/src/services/view.service.ts",
+            ],
+            row_kinds: &["ENDPOINT"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "wrapper_create",
+        edit: wrapper_create,
+        via: Via::Apply(&["web/src/lib/http.ts"]),
+        expect: Expect {
+            rebuilt_contains: &["typescript"],
+            files_modified: &["web/src/lib/http.ts"],
+            row_kinds: &["ENDPOINT"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "wrapper_site_add",
+        edit: wrapper_site_add,
+        via: Via::Apply(&["web/src/features/users.ts"]),
+        expect: Expect {
+            rebuilt_contains: &["typescript"],
+            files_modified: &["web/src/features/users.ts"],
+            row_kinds: &["ENDPOINT"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "heritage_base_remove",
+        edit: heritage_base_remove,
+        via: Via::Apply(&["web/src/services/base.service.ts"]),
+        expect: Expect {
+            rebuilt_contains: &["typescript"],
+            files_modified: &["web/src/services/base.service.ts"],
+            row_kinds: &["ENDPOINT"],
+            ..EXPECT
+        },
+    },
+    Step {
+        name: "wrapper_module_move",
+        edit: wrapper_module_move,
+        via: Via::Apply(&["web/src/lib/http.js"]),
+        expect: Expect {
+            rebuilt_contains: &["typescript"],
+            files_added: &["web/src/lib/http.js"],
+            ..EXPECT
+        },
+    },
+];
+
+#[test]
+fn scripted_wrappers_memo() {
+    run("wrappers_memo", SEQ_WRAPPERS);
+}
+
 #[test]
 fn scripted_budgeted() {
     let sequences: &[(&str, &[Step])] = &[
@@ -1206,6 +1340,7 @@ fn scripted_budgeted() {
         ("noop", SEQ_NOOP),
         ("conf", &[CONF]),
         ("sbt", &[SBT]),
+        ("wrappers_memo", SEQ_WRAPPERS),
     ];
     for (name, steps) in sequences {
         run_with(

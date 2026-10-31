@@ -157,9 +157,11 @@ use glia_code_domain::{FileParse, cell_type, edge_category, node_kind};
 use glia_code_extractors::{anchor, data_entities, queue_topic};
 use glia_core::{CellPayload, NodeId, RepoId};
 
+use super::wrappers::NeedleSet;
 use super::wrappers::{
     arg_region, commented_at, is_ident_byte, literal, live_call_args, skip_type_args, split_args,
 };
+use crate::build::memo::{BuildMemo, MemoRow, WrapperKey, parts_fp};
 use crate::extract::{TS_FAMILY, detect_language};
 use crate::route::ModuleQnames;
 
@@ -294,7 +296,18 @@ struct GoFile<'a> {
     parse: Option<&'a FileParse>,
 }
 
+impl<'a> GoFile<'a> {
+    fn of(f: &CodeFile<'a>) -> Self {
+        GoFile {
+            path: f.path,
+            source: f.source,
+            parse: f.parse,
+        }
+    }
+}
+
 /// A wrapper before the precision gate.
+#[derive(Clone)]
 struct Candidate {
     call: String,
     name_arg: usize,
@@ -314,44 +327,396 @@ struct OwnerDecl {
 /// Infer the repo's Go collection wrappers and (FH.4b) its HTTP wrappers
 /// (see the module doc). Reads the parses and the walked sources; changes
 /// nothing.
+///
+/// GA.21: with `memo` (the walked files' DC.4 content hashes, index-aligned
+/// with `files`, and the held cache's build memos) every per-file reading
+/// (the direct candidates, the heritage class record, each forwarding
+/// depth's hits) is replayed from the memo's record of an unchanged file
+/// (`build::memo::WrapperMemo`, keyed by [`WrapperKey`]) and only the
+/// misses are computed, on the engine pool; the repo-wide steps (the
+/// precision gate, the heritage join) run over the replayed and the fresh
+/// readings alike, in walk order, so the result is the memo-free one. Sets
+/// the memo's `wrappers_hit` / `wrappers_miss` (walked files of an
+/// inference language). A hash list of another length disables the memo.
 pub(crate) fn infer_entity_wrappers(
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     modules: &ModuleQnames,
     repo: RepoId,
+    memo: Option<(&[u64], &mut BuildMemo)>,
     parse_errors: &mut Vec<String>,
 ) -> InferredWrappers {
-    let mut out = infer_collections(parses_by_lang, files, modules, repo, parse_errors);
-    infer_http(parses_by_lang, files, modules, repo, parse_errors, &mut out);
+    let mut memo = memo.filter(|(hashes, _)| hashes.len() == files.len());
+    let mut table = FileTable::open(
+        parses_by_lang,
+        files,
+        modules,
+        repo,
+        memo.as_mut().map(|(h, m)| (*h, &mut **m)),
+    );
+    let mut out = infer_collections(&mut table, parses_by_lang, parse_errors);
+    infer_http(&mut table, parses_by_lang, parse_errors, &mut out);
+    if let Some((_, m)) = memo {
+        table.close(m);
+    }
     out
+}
+
+/// GA.21: one walked file's readings, the memo's per-file record
+/// (`build::memo::WrapperMemo`). A field is `None` / short until a stage
+/// computes it; a replayed record holds what the last build computed for
+/// the same [`WrapperKey`].
+#[derive(Default)]
+struct WrapperFile {
+    /// CA.4 step 1 (Go files).
+    go_direct: Option<Reading<(Vec<Candidate>, usize)>>,
+    /// FH.4b step 1 (every HTTP family).
+    http_direct: Option<Reading<DirectHttp>>,
+    /// CA.4 step 2, per depth from 2.
+    go_forward: Vec<Forward<Candidate>>,
+    /// FH.4b step 2, per depth from 2.
+    http_forward: Vec<Forward<HttpCandidate>>,
+    /// GD.26: the file's classes and value imports (TS family, read only
+    /// when a heritage wrapper exists).
+    classes: Option<ClassRecord>,
+}
+
+/// GA.21: one per-file reading.
+#[derive(Clone)]
+enum Reading<T> {
+    /// The step's text gate kept it off the file.
+    Gated,
+    /// The reading panicked (replayed as the same `parse_errors` line).
+    Panicked,
+    Read(T),
+}
+
+/// GA.21: one `forwarding_*` reading: the candidates and the calls counted
+/// unparsed.
+type ForwardRead<C> = Reading<(Vec<C>, usize)>;
+
+/// GA.21: one forwarding depth's hits in one file: the frontier calls (by
+/// index) its text holds, each with its `forwarding_*` reading, valid for
+/// the frontier whose fingerprint is `frontier` (`None`: a filler for a
+/// depth this file was never read at, which matches no frontier).
+struct Forward<C> {
+    frontier: Option<u64>,
+    hits: Vec<(usize, ForwardRead<C>)>,
+}
+
+/// GA.21: the walked files of every inference language, in walk order, with
+/// their memo records.
+struct FileTable<'a> {
+    parses_by_lang: &'a HashMap<&'static str, Vec<FileParse>>,
+    /// Each file's `parse` is `None` until [`FileTable::resolve`] finds it.
+    files: Vec<CodeFile<'a>>,
+    /// Per file: the index into [`HTTP_FAMILIES`] its language belongs to.
+    family: Vec<usize>,
+    /// Per file: its LB.9b MODULE id, which finds its parse.
+    module_ids: Vec<NodeId>,
+    resolved: Vec<bool>,
+    /// Per family: MODULE id -> parse, built once a run resolves many files.
+    by_family: Vec<Option<HashMap<NodeId, &'a FileParse>>>,
+    recs: Vec<WrapperFile>,
+    /// Per file: its memo key (`None` without a memo).
+    keys: Vec<Option<WrapperKey>>,
+    /// Per file: the path `String` of its last-run memo row, reused.
+    row_paths: Vec<Option<String>>,
+}
+
+/// More misses than this in one batch build the family's MODULE id map;
+/// fewer find each parse by a scan of the family's parses.
+const SCAN_RESOLVE_MAX: usize = 64;
+
+impl<'a> FileTable<'a> {
+    /// Every walked file of an [`HTTP_FAMILIES`] language, and its record
+    /// replayed from `memo` when its key matches.
+    fn open(
+        parses_by_lang: &'a HashMap<&'static str, Vec<FileParse>>,
+        files: &'a [(String, String)],
+        modules: &ModuleQnames,
+        repo: RepoId,
+        memo: Option<(&[u64], &mut BuildMemo)>,
+    ) -> Self {
+        let slots: Vec<usize> = (0..files.len()).collect();
+        let (planned, _) = crate::parallel::par_map_ordered(&slots, |&i| {
+            let (path, _) = &files[i];
+            let lang = detect_language(path)?;
+            let family = HTTP_FAMILIES.iter().position(|f| f.contains(&lang))?;
+            Some((lang, family, modules.module_id(path, repo)))
+        });
+        let mut memo = memo;
+        let mut rows = memo
+            .as_mut()
+            .and_then(|(_, m)| m.wrappers.take::<WrapperKey, WrapperFile>());
+        let planned: Vec<(usize, (&'static str, usize, NodeId))> = planned
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, p)| Some((i, p?)))
+            .collect();
+        // An unchanged walk hands out the rows by position.
+        let aligned = rows.as_ref().is_some_and(|r| {
+            let paths: Vec<&str> = planned.iter().map(|(i, _)| files[*i].0.as_str()).collect();
+            r.aligned(&paths)
+        });
+        let n = planned.len();
+        let mut table = FileTable {
+            parses_by_lang,
+            files: Vec::with_capacity(n),
+            family: Vec::with_capacity(n),
+            module_ids: Vec::with_capacity(n),
+            resolved: Vec::with_capacity(n),
+            by_family: HTTP_FAMILIES.iter().map(|_| None).collect(),
+            recs: Vec::with_capacity(n),
+            keys: Vec::with_capacity(n),
+            row_paths: Vec::with_capacity(n),
+        };
+        let (mut hit, mut miss) = (0usize, 0usize);
+        for (k, (i, (lang, family, module_id))) in planned.into_iter().enumerate() {
+            let (path, source) = &files[i];
+            let key = memo.as_ref().map(|(hashes, _)| WrapperKey {
+                lang,
+                content_hash: hashes.get(i).copied().unwrap_or(0),
+                module_id,
+            });
+            let row = rows
+                .as_mut()
+                .and_then(|r| if aligned { r.row_at(k) } else { r.row(path) });
+            let (rec, row_path) = match (row, key) {
+                (Some(row), Some(k)) if row.key == k => {
+                    hit += 1;
+                    (row.value, Some(row.path))
+                }
+                (row, Some(_)) => {
+                    miss += 1;
+                    (WrapperFile::default(), row.map(|r| r.path))
+                }
+                (_, None) => (WrapperFile::default(), None),
+            };
+            table.files.push(CodeFile {
+                path,
+                source,
+                lang,
+                parse: None,
+            });
+            table.family.push(family);
+            table.module_ids.push(module_id);
+            table.resolved.push(false);
+            table.recs.push(rec);
+            table.keys.push(key);
+            table.row_paths.push(row_path);
+        }
+        if let Some((_, m)) = memo {
+            m.wrapper_stats.wrappers_hit = hit;
+            m.wrapper_stats.wrappers_miss = miss;
+        }
+        table
+    }
+
+    /// The indices of the files of family `fi`, in walk order.
+    fn members(&self, fi: usize) -> Vec<usize> {
+        (0..self.files.len())
+            .filter(|&i| self.family.get(i) == Some(&fi))
+            .collect()
+    }
+
+    /// Find the parse of every file in `need` (the parse of its family whose
+    /// first node is its MODULE id; the last such, as a map collected from
+    /// the parses in order keeps). Only a file some reading recomputes needs
+    /// one, so an unchanged tree finds none.
+    fn resolve(&mut self, need: &[usize]) {
+        let todo: Vec<usize> = need
+            .iter()
+            .copied()
+            .filter(|&i| self.resolved.get(i) == Some(&false))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        let parses_by_lang = self.parses_by_lang;
+        let family_parses = |fi: usize| {
+            HTTP_FAMILIES
+                .get(fi)
+                .into_iter()
+                .flat_map(|family| family.iter())
+                .filter_map(|l| parses_by_lang.get(l))
+                .flatten()
+        };
+        for i in todo {
+            let (Some(&fi), Some(&id)) = (self.family.get(i), self.module_ids.get(i)) else {
+                continue;
+            };
+            let parse = if need.len() > SCAN_RESOLVE_MAX {
+                let map = self.by_family.get_mut(fi).map(|m| {
+                    m.get_or_insert_with(|| {
+                        family_parses(fi)
+                            .filter_map(|fp| fp.nodes.first().map(|n| (n.id, fp)))
+                            .collect()
+                    })
+                });
+                map.and_then(|m| m.get(&id).copied())
+            } else {
+                family_parses(fi)
+                    .rev()
+                    .find(|fp| fp.nodes.first().is_some_and(|n| n.id == id))
+            };
+            if let Some(f) = self.files.get_mut(i) {
+                f.parse = parse;
+            }
+            if let Some(r) = self.resolved.get_mut(i) {
+                *r = true;
+            }
+        }
+    }
+
+    /// Record every file's reading in `memo`, under its key, in walk order.
+    fn close(self, memo: &mut BuildMemo) {
+        let mut rows = Vec::with_capacity(self.files.len());
+        for (((f, key), rec), path) in self
+            .files
+            .iter()
+            .zip(self.keys)
+            .zip(self.recs)
+            .zip(self.row_paths)
+        {
+            if let Some(key) = key {
+                rows.push(MemoRow {
+                    path: path.unwrap_or_else(|| f.path.to_string()),
+                    key,
+                    value: rec,
+                });
+            }
+        }
+        memo.wrappers.put(rows);
+    }
+}
+
+/// GA.21: compute the readings `need` lacks on the engine pool (input
+/// order), each panic caught as [`Reading::Panicked`].
+fn read_misses<T: Send>(
+    files: &[CodeFile<'_>],
+    need: &[usize],
+    read: impl Fn(&CodeFile<'_>) -> Reading<T> + Sync + Send,
+) -> Vec<Reading<T>> {
+    crate::parallel::par_map_ordered(need, |&i| {
+        files.get(i).map_or(Reading::Gated, |f| {
+            crate::parallel::quiet(|| read(f)).unwrap_or(Reading::Panicked)
+        })
+    })
+    .0
+}
+
+/// GA.21: one forwarding depth over the family `members`: for every file
+/// whose record holds no reading for this frontier (`fp`), ONE pass over
+/// its text finds the frontier calls it holds ([`NeedleSet`]: exactly the
+/// `str::contains` set), each read with `read(file, call index)`, on the
+/// pool; then every file's hits (replayed or fresh) in call-major order,
+/// files in walk order: the order the per-call loop visited them, so the
+/// gate admits the same candidates first.
+fn forward_depth<C: Clone + Send>(
+    table: &mut FileTable<'_>,
+    members: &[usize],
+    slot_of: fn(&mut WrapperFile) -> &mut Vec<Forward<C>>,
+    depth: usize,
+    calls: &[&str],
+    fp: u64,
+    read: impl Fn(&CodeFile<'_>, usize) -> (Vec<C>, usize) + Sync + Send,
+) -> Vec<(usize, usize, ForwardRead<C>)> {
+    let d = depth.saturating_sub(2);
+    let need: Vec<usize> = members
+        .iter()
+        .copied()
+        .filter(|&i| {
+            table
+                .recs
+                .get_mut(i)
+                .map(slot_of)
+                .is_none_or(|v| v.get(d).is_none_or(|f| f.frontier != Some(fp)))
+        })
+        .collect();
+    table.resolve(&need);
+    let needles = NeedleSet::new(calls);
+    let files = &table.files;
+    let (fresh, _) = crate::parallel::par_map_ordered(&need, |&i| {
+        let Some(f) = files.get(i) else {
+            return Vec::new();
+        };
+        needles
+            .present(f.source)
+            .into_iter()
+            .map(|c| {
+                let r =
+                    crate::parallel::quiet(|| read(f, c)).map_or(Reading::Panicked, Reading::Read);
+                (c, r)
+            })
+            .collect()
+    });
+    for (i, hits) in need.iter().zip(fresh) {
+        if let Some(v) = table.recs.get_mut(*i).map(slot_of) {
+            v.truncate(d);
+            v.resize_with(d, || Forward {
+                frontier: None,
+                hits: Vec::new(),
+            });
+            v.push(Forward {
+                frontier: Some(fp),
+                hits,
+            });
+        }
+    }
+    // `members` ascend in walk order, so (call, file index) is call-major,
+    // files in walk order.
+    let mut out = Vec::new();
+    for &i in members {
+        let Some(v) = table.recs.get_mut(i).map(slot_of) else {
+            continue;
+        };
+        if let Some(f) = v.get(d) {
+            for (c, r) in &f.hits {
+                out.push((*c, i, r.clone()));
+            }
+        }
+    }
+    out.sort_by_key(|(c, i, _)| (*c, *i));
+    out
+}
+
+/// GA.21: drop the forwarding readings past the depths this build ran, so a
+/// record holds only what it was last read for.
+fn trim_forward<C>(
+    table: &mut FileTable<'_>,
+    members: &[usize],
+    slot_of: fn(&mut WrapperFile) -> &mut Vec<Forward<C>>,
+    ran: usize,
+) {
+    for &i in members {
+        if let Some(v) = table.recs.get_mut(i).map(slot_of) {
+            v.truncate(ran);
+        }
+    }
+}
+
+/// The fingerprint of one depth's frontier: every call and what its sites
+/// are read with, in order.
+fn frontier_fp<T: std::fmt::Debug>(frontier: &[(String, T)]) -> u64 {
+    let parts: Vec<String> = frontier
+        .iter()
+        .map(|(call, how)| format!("{call}\u{1}{how:?}"))
+        .collect();
+    parts_fp(parts.iter().map(String::as_str))
 }
 
 /// The Go collection wrappers (CA.4).
 fn infer_collections(
+    table: &mut FileTable<'_>,
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
-    files: &[(String, String)],
-    modules: &ModuleQnames,
-    repo: RepoId,
     parse_errors: &mut Vec<String>,
 ) -> InferredWrappers {
     let mut out = InferredWrappers::default();
-    let parses: HashMap<NodeId, &FileParse> = parses_by_lang
-        .get(LANG)
-        .map(|ps| {
-            ps.iter()
-                .filter_map(|fp| fp.nodes.first().map(|n| (n.id, fp)))
-                .collect()
-        })
-        .unwrap_or_default();
-    let go: Vec<GoFile<'_>> = files
-        .iter()
-        .filter(|(path, _)| detect_language(path) == Some(LANG))
-        .map(|(path, source)| GoFile {
-            path,
-            source,
-            parse: parses.get(&modules.module_id(path, repo)).copied(),
-        })
-        .collect();
+    let Some(go_family) = HTTP_FAMILIES.iter().position(|f| *f == [LANG]) else {
+        return out;
+    };
+    let go = table.members(go_family);
     if go.is_empty() {
         return out;
     }
@@ -359,39 +724,77 @@ fn infer_collections(
     let mut seen: HashSet<String> = HashSet::new();
 
     // 1. DIRECT: every needle holds "ollection".
+    let need: Vec<usize> = go
+        .iter()
+        .copied()
+        .filter(|&i| table.recs.get(i).is_some_and(|r| r.go_direct.is_none()))
+        .collect();
+    table.resolve(&need);
+    let fresh = read_misses(&table.files, &need, |f| {
+        if f.source.contains("ollection") {
+            Reading::Read(direct_candidates(&GoFile::of(f)))
+        } else {
+            Reading::Gated
+        }
+    });
+    for (i, r) in need.iter().zip(fresh) {
+        if let Some(rec) = table.recs.get_mut(*i) {
+            rec.go_direct = Some(r);
+        }
+    }
     let mut found: Vec<Candidate> = Vec::new();
-    for f in go.iter().filter(|f| f.source.contains("ollection")) {
-        match catch_unwind(AssertUnwindSafe(|| direct_candidates(f))) {
-            Ok((cands, unparsed)) => {
-                found.extend(cands);
+    for &i in &go {
+        match table.recs.get(i).and_then(|r| r.go_direct.as_ref()) {
+            Some(Reading::Read((cands, unparsed))) => {
+                found.extend(cands.iter().cloned());
                 out.skipped_unparsed += unparsed;
             }
-            Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
+            Some(Reading::Panicked) => {
+                let path = table.files.get(i).map_or("", |f| f.path);
+                parse_errors.push(format!("{path}: PANIC (inferred wrappers)"));
+            }
+            Some(Reading::Gated) | None => {}
         }
     }
     let mut frontier = admit(found, 1, &mut out, &mut seen, &defined);
 
     // 2. FORWARDING.
+    let mut ran = 0usize;
     for depth in 2..=MAX_DEPTH {
         if frontier.is_empty() {
             break;
         }
+        ran = depth - 1;
+        let calls: Vec<&str> = frontier.iter().map(|(c, _)| c.as_str()).collect();
+        let hits = forward_depth(
+            table,
+            &go,
+            |r| &mut r.go_forward,
+            depth,
+            &calls,
+            frontier_fp(&frontier),
+            |f, c| {
+                let (call, name_arg) = &frontier[c];
+                forwarding_candidates(&GoFile::of(f), call, *name_arg)
+            },
+        );
         let mut found: Vec<Candidate> = Vec::new();
-        for (call, name_arg) in &frontier {
-            for f in go.iter().filter(|f| f.source.contains(call.as_str())) {
-                match catch_unwind(AssertUnwindSafe(|| {
-                    forwarding_candidates(f, call, *name_arg)
-                })) {
-                    Ok((cands, unparsed)) => {
-                        found.extend(cands);
-                        out.skipped_unparsed += unparsed;
-                    }
-                    Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
+        for (_, i, r) in hits {
+            match r {
+                Reading::Read((cands, unparsed)) => {
+                    found.extend(cands);
+                    out.skipped_unparsed += unparsed;
                 }
+                Reading::Panicked => {
+                    let path = table.files.get(i).map_or("", |f| f.path);
+                    parse_errors.push(format!("{path}: PANIC (inferred wrappers)"));
+                }
+                Reading::Gated => {}
             }
         }
         frontier = admit(found, depth, &mut out, &mut seen, &defined);
     }
+    trim_forward(table, &go, |r| &mut r.go_forward, ran);
 
     out.wrappers.sort_by(|a, b| {
         (a.decl.call.as_str(), a.def_file.as_str())
@@ -407,27 +810,33 @@ fn defined_names<'a>(
     defined_names_in(parses_by_lang, &[LANG])
 }
 
-/// [`defined_names`] over the parses of every language in `langs`.
+/// [`defined_names`] over the parses of every language in `langs`. GA.21:
+/// each parse's callable names are read on the engine pool, then counted
+/// here (a count does not depend on the order).
 fn defined_names_in<'a>(
     parses_by_lang: &'a HashMap<&'static str, Vec<FileParse>>,
     langs: &[&str],
 ) -> HashMap<&'a str, usize> {
-    let mut out: HashMap<&str, usize> = HashMap::new();
-    for fp in parses_by_lang
+    let parses: Vec<&FileParse> = parses_by_lang
         .iter()
         .filter(|(lang, _)| langs.contains(lang))
         .flat_map(|(_, ps)| ps)
-    {
-        for n in &fp.nodes {
-            let callable = fp
-                .nav
-                .kind_by_id
-                .get(&n.id)
-                .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD);
-            if let Some(name) = fp.nav.name_by_id.get(&n.id).filter(|_| callable) {
-                *out.entry(name.as_str()).or_default() += 1;
-            }
-        }
+        .collect();
+    let (names, _) = crate::parallel::par_map_ordered(&parses, |fp| {
+        fp.nodes
+            .iter()
+            .filter(|n| {
+                fp.nav
+                    .kind_by_id
+                    .get(&n.id)
+                    .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD)
+            })
+            .filter_map(|n| fp.nav.name_by_id.get(&n.id).map(String::as_str))
+            .collect::<Vec<&str>>()
+    });
+    let mut out: HashMap<&str, usize> = HashMap::new();
+    for name in names.into_iter().flatten() {
+        *out.entry(name).or_default() += 1;
     }
     out
 }
@@ -689,6 +1098,7 @@ struct CodeFile<'a> {
 }
 
 /// An HTTP wrapper before the precision gate.
+#[derive(Clone)]
 struct HttpCandidate {
     call: String,
     shape: HttpShape,
@@ -840,72 +1250,85 @@ impl Recv {
 
 /// The HTTP half of [`infer_entity_wrappers`] (module doc, HTTP WRAPPERS).
 fn infer_http(
+    table: &mut FileTable<'_>,
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
-    files: &[(String, String)],
-    modules: &ModuleQnames,
-    repo: RepoId,
     parse_errors: &mut Vec<String>,
     out: &mut InferredWrappers,
 ) {
-    for family in HTTP_FAMILIES {
-        let parses: HashMap<NodeId, &FileParse> = family
-            .iter()
-            .filter_map(|l| parses_by_lang.get(l))
-            .flatten()
-            .filter_map(|fp| fp.nodes.first().map(|n| (n.id, fp)))
-            .collect();
-        let code: Vec<CodeFile<'_>> = files
-            .iter()
-            .filter_map(|(path, source)| {
-                let lang = detect_language(path)?;
-                family.contains(&lang).then(|| CodeFile {
-                    path,
-                    source,
-                    lang,
-                    parse: parses.get(&modules.module_id(path, repo)).copied(),
-                })
-            })
-            .collect();
+    for (fi, family) in HTTP_FAMILIES.iter().enumerate() {
+        let code = table.members(fi);
         if code.is_empty() {
             continue;
         }
         let defined = defined_names_in(parses_by_lang, family);
         let languages: Vec<String> = family.iter().map(|l| (*l).to_string()).collect();
         let mut seen: HashSet<String> = HashSet::new();
+        let need: Vec<usize> = code
+            .iter()
+            .copied()
+            .filter(|&i| table.recs.get(i).is_some_and(|r| r.http_direct.is_none()))
+            .collect();
+        table.resolve(&need);
+        let fresh = read_misses(&table.files, &need, |f| Reading::Read(direct_http(f)));
+        for (i, r) in need.iter().zip(fresh) {
+            if let Some(rec) = table.recs.get_mut(*i) {
+                rec.http_direct = Some(r);
+            }
+        }
         let mut found: Vec<HttpCandidate> = Vec::new();
-        for f in &code {
-            match catch_unwind(AssertUnwindSafe(|| direct_http(f))) {
-                Ok(d) => {
-                    found.extend(d.cands);
+        for &i in &code {
+            match table.recs.get(i).and_then(|r| r.http_direct.as_ref()) {
+                Some(Reading::Read(d)) => {
+                    found.extend(d.cands.iter().cloned());
                     out.http_unparsed += d.unparsed;
                     out.http_phantom += d.gate.phantom;
                     out.http_client_by_import += d.gate.by_import;
                 }
-                Err(_) => parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path)),
+                Some(Reading::Panicked) => {
+                    let path = table.files.get(i).map_or("", |f| f.path);
+                    parse_errors.push(format!("{path}: PANIC (inferred wrappers)"));
+                }
+                Some(Reading::Gated) | None => {}
             }
         }
         let heritage = family.contains(&"typescript");
         let mut frontier = admit_http(found, 1, out, &mut seen, &defined, &languages, heritage);
+        let mut ran = 0usize;
         for depth in 2..=MAX_DEPTH {
             if frontier.is_empty() {
                 break;
             }
+            ran = depth - 1;
+            let calls: Vec<&str> = frontier.iter().map(|(c, _)| c.as_str()).collect();
+            let hits = forward_depth(
+                table,
+                &code,
+                |r| &mut r.http_forward,
+                depth,
+                &calls,
+                frontier_fp(&frontier),
+                |f, c| {
+                    let (call, shape) = &frontier[c];
+                    forwarding_http(f, call, shape)
+                },
+            );
             let mut found: Vec<HttpCandidate> = Vec::new();
-            for (call, shape) in &frontier {
-                for f in code.iter().filter(|f| f.source.contains(call.as_str())) {
-                    match catch_unwind(AssertUnwindSafe(|| forwarding_http(f, call, shape))) {
-                        Ok((cands, unparsed)) => {
-                            found.extend(cands);
-                            out.http_unparsed += unparsed;
-                        }
-                        Err(_) => {
-                            parse_errors.push(format!("{}: PANIC (inferred wrappers)", f.path));
-                        }
+            for (_, i, r) in hits {
+                match r {
+                    Reading::Read((cands, unparsed)) => {
+                        found.extend(cands);
+                        out.http_unparsed += unparsed;
                     }
+                    Reading::Panicked => {
+                        let path = table.files.get(i).map_or("", |f| f.path);
+                        parse_errors.push(format!("{path}: PANIC (inferred wrappers)"));
+                    }
+                    Reading::Gated => {}
                 }
             }
             frontier = admit_http(found, depth, out, &mut seen, &defined, &languages, heritage);
         }
+        trim_forward(table, &code, |r| &mut r.http_forward, ran);
         if heritage && !out.heritage.is_empty() {
             out.heritage.sort_by(|a, b| {
                 (a.class.as_str(), a.def_file.as_str(), a.verb.as_str()).cmp(&(
@@ -914,9 +1337,40 @@ fn infer_http(
                     b.verb.as_str(),
                 ))
             });
-            match catch_unwind(AssertUnwindSafe(|| heritage_scopes(&code, &out.heritage))) {
-                Ok(scopes) => out.heritage_scopes = scopes,
-                Err(_) => parse_errors.push("<heritage classes>: PANIC (inferred wrappers)".into()),
+            let need: Vec<usize> = code
+                .iter()
+                .copied()
+                .filter(|&i| table.recs.get(i).is_some_and(|r| r.classes.is_none()))
+                .collect();
+            table.resolve(&need);
+            let fresh = read_misses(&table.files, &need, |f| Reading::Read(class_record(f)));
+            let mut panicked = false;
+            for (i, r) in need.iter().zip(fresh) {
+                match r {
+                    Reading::Read(c) => {
+                        if let Some(rec) = table.recs.get_mut(*i) {
+                            rec.classes = Some(c);
+                        }
+                    }
+                    Reading::Panicked | Reading::Gated => panicked = true,
+                }
+            }
+            let joined = (!panicked)
+                .then(|| {
+                    let files: Vec<(&CodeFile<'_>, &ClassRecord)> = code
+                        .iter()
+                        .filter_map(|&i| {
+                            Some((table.files.get(i)?, table.recs.get(i)?.classes.as_ref()?))
+                        })
+                        // A file with no class holds no scope and no base.
+                        .filter(|(_, r)| !r.classes.is_empty())
+                        .collect();
+                    catch_unwind(AssertUnwindSafe(|| heritage_scopes(&files, &out.heritage))).ok()
+                })
+                .flatten();
+            match joined {
+                Some(scopes) => out.heritage_scopes = scopes,
+                None => parse_errors.push("<heritage classes>: PANIC (inferred wrappers)".into()),
             }
         }
     }
@@ -1014,6 +1468,7 @@ fn http_decl(call: String, shape: &HttpShape, languages: &[String]) -> WrapperDe
 }
 
 /// What step 1 found in one file.
+#[derive(Clone)]
 struct DirectHttp {
     cands: Vec<HttpCandidate>,
     /// Client calls whose owner's declaration did not read.
@@ -1810,7 +2265,7 @@ struct ClassInfo<'a> {
     /// The `extends` clause's bare base name (its INHERITS_FROM ref).
     extends: Option<&'a str>,
     /// The names of its nav children (methods, fields, accessors).
-    members: HashSet<&'a str>,
+    members: &'a HashSet<String>,
 }
 
 /// GD.26: one TS-family file's heritage reading.
@@ -1819,7 +2274,88 @@ struct ClassFile<'a> {
     key: Option<&'a str>,
     /// `(local name, imported name, specifier)` per named or default value
     /// import; a default import's imported name is its local name.
-    imports: Vec<(&'a str, &'a str, &'a str)>,
+    imports: &'a [(String, String, String)],
+}
+
+/// GA.21: one file's GD.26 class record, read off its own parse alone
+/// ([`class_record`]), so the memo replays it for an unchanged file.
+#[derive(Default)]
+struct ClassRecord {
+    /// [`ClassFile::imports`], owned.
+    imports: Vec<(String, String, String)>,
+    /// The file's named CLASS nodes with a POSITION span, in node order.
+    classes: Vec<ClassRow>,
+}
+
+/// GA.21: one CLASS of a [`ClassRecord`] ([`ClassInfo`], owned).
+struct ClassRow {
+    name: String,
+    span: (u32, u32),
+    extends: Option<String>,
+    /// Looked up, never iterated.
+    members: HashSet<String>,
+}
+
+/// GA.21: the GD.26 reading of one file: its value imports and its classes
+/// (empty without a parse).
+fn class_record(f: &CodeFile<'_>) -> ClassRecord {
+    let mut rec = ClassRecord::default();
+    let Some(fp) = f.parse else {
+        return rec;
+    };
+    for imp in &fp.imports {
+        if let glia_code_domain::ImportTarget::Symbol {
+            module,
+            name,
+            alias,
+            ..
+        } = &imp.target
+        {
+            let local = alias.as_deref().unwrap_or(name.as_str());
+            let imported = if name == "default" {
+                local
+            } else {
+                name.as_str()
+            };
+            rec.imports
+                .push((local.to_string(), imported.to_string(), module.clone()));
+        }
+    }
+    for n in &fp.nodes {
+        if fp.nav.kind_by_id.get(&n.id) != Some(&node_kind::CLASS) {
+            continue;
+        }
+        let (Some(name), Some(span)) = (fp.nav.name_by_id.get(&n.id), anchor::position_span(n))
+        else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        let extends = fp.refs.iter().find_map(|r| match &r.qualifier {
+            glia_code_domain::CallQualifier::Bare(b)
+                if r.from == n.id && r.category == edge_category::INHERITS_FROM =>
+            {
+                Some(b.clone())
+            }
+            _ => None,
+        });
+        let members = fp
+            .nav
+            .children_of
+            .get(&n.id)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| fp.nav.name_by_id.get(c).cloned())
+            .collect();
+        rec.classes.push(ClassRow {
+            name: name.clone(),
+            span,
+            extends,
+            members,
+        });
+    }
+    rec
 }
 
 /// What one base chain from a class reaches for a verb.
@@ -1839,7 +2375,7 @@ enum Reach {
 struct ClassIndex<'i, 'a> {
     classes: &'i [ClassInfo<'a>],
     files: &'i [ClassFile<'a>],
-    code: &'i [CodeFile<'a>],
+    code: &'i [(&'a CodeFile<'a>, &'a ClassRecord)],
     by_name: &'i HashMap<&'a str, Vec<usize>>,
     /// (class, file, verb) -> index into the heritage wrappers.
     wrapper_at: &'i HashMap<(&'a str, &'a str, &'a str), usize>,
@@ -1868,8 +2404,8 @@ impl ClassIndex<'_, '_> {
         let Some((imported, spec)) = self.files.get(c.file).and_then(|f| {
             f.imports
                 .iter()
-                .find(|(l, _, _)| *l == base)
-                .map(|(_, i, s)| (*i, *s))
+                .find(|(l, _, _)| l == base)
+                .map(|(_, i, s)| (i.as_str(), s.as_str()))
         }) else {
             return Vec::new();
         };
@@ -1898,7 +2434,7 @@ impl ClassIndex<'_, '_> {
             return;
         };
         if c.members.contains(verb) {
-            let path = self.code.get(c.file).map_or("", |f| f.path);
+            let path = self.code.get(c.file).map_or("", |(f, _)| f.path);
             out.push(
                 self.wrapper_at
                     .get(&(c.name, path, verb))
@@ -1933,69 +2469,24 @@ impl ClassIndex<'_, '_> {
 /// non-wrapper member, no base or another shape beside one that reaches a
 /// wrapper is [`HeritageTarget::Ambiguous`]; a class none of whose chains
 /// reaches a wrapper is no scope.
-fn heritage_scopes(code: &[CodeFile<'_>], wrappers: &[HeritageWrapper]) -> Vec<HeritageScope> {
+fn heritage_scopes<'a>(
+    code: &'a [(&'a CodeFile<'a>, &'a ClassRecord)],
+    wrappers: &[HeritageWrapper],
+) -> Vec<HeritageScope> {
     let mut classes: Vec<ClassInfo<'_>> = Vec::new();
     let mut files: Vec<ClassFile<'_>> = Vec::with_capacity(code.len());
-    for (fi, f) in code.iter().enumerate() {
-        let mut cf = ClassFile {
+    for (fi, (f, rec)) in code.iter().enumerate() {
+        files.push(ClassFile {
             key: module_key(f.path),
-            imports: Vec::new(),
-        };
-        let Some(fp) = f.parse else {
-            files.push(cf);
-            continue;
-        };
-        for imp in &fp.imports {
-            if let glia_code_domain::ImportTarget::Symbol {
-                module,
-                name,
-                alias,
-                ..
-            } = &imp.target
-            {
-                let local = alias.as_deref().unwrap_or(name.as_str());
-                let imported = if name == "default" {
-                    local
-                } else {
-                    name.as_str()
-                };
-                cf.imports.push((local, imported, module.as_str()));
-            }
-        }
-        files.push(cf);
-        for n in &fp.nodes {
-            if fp.nav.kind_by_id.get(&n.id) != Some(&node_kind::CLASS) {
-                continue;
-            }
-            let (Some(name), Some(span)) = (fp.nav.name_by_id.get(&n.id), anchor::position_span(n))
-            else {
-                continue;
-            };
-            if name.is_empty() {
-                continue;
-            }
-            let extends = fp.refs.iter().find_map(|r| match &r.qualifier {
-                glia_code_domain::CallQualifier::Bare(b)
-                    if r.from == n.id && r.category == edge_category::INHERITS_FROM =>
-                {
-                    Some(b.as_str())
-                }
-                _ => None,
-            });
-            let members = fp
-                .nav
-                .children_of
-                .get(&n.id)
-                .into_iter()
-                .flatten()
-                .filter_map(|c| fp.nav.name_by_id.get(c).map(String::as_str))
-                .collect();
+            imports: &rec.imports,
+        });
+        for c in &rec.classes {
             classes.push(ClassInfo {
                 file: fi,
-                name,
-                span,
-                extends,
-                members,
+                name: &c.name,
+                span: c.span,
+                extends: c.extends.as_deref(),
+                members: &c.members,
             });
         }
     }
@@ -2019,8 +2510,19 @@ fn heritage_scopes(code: &[CodeFile<'_>], wrappers: &[HeritageWrapper]) -> Vec<H
         by_name: &by_name,
         wrapper_at: &wrapper_at,
     };
+    // GA.21: a class with no `extends` reaches a wrapper only through its
+    // own member, so one that defines none ends every chain: skipped, as
+    // its `reach` would find nothing.
+    let defines: HashSet<(&str, &str)> = wrappers
+        .iter()
+        .map(|w| (w.class.as_str(), w.def_file.as_str()))
+        .collect();
     let mut out = Vec::new();
     for (ci, c) in classes.iter().enumerate() {
+        let path = code.get(c.file).map_or("", |(f, _)| f.path);
+        if c.extends.is_none() && !defines.contains(&(c.name, path)) {
+            continue;
+        }
         let mut targets: Vec<(String, HeritageTarget)> = Vec::new();
         for verb in &verbs {
             let mut reached = Vec::new();
@@ -2066,7 +2568,7 @@ fn heritage_scopes(code: &[CodeFile<'_>], wrappers: &[HeritageWrapper]) -> Vec<H
             .map(|(_, x)| x.span)
             .collect();
         out.push(HeritageScope {
-            file: code.get(c.file).map_or("", |f| f.path).to_string(),
+            file: code.get(c.file).map_or("", |(f, _)| f.path).to_string(),
             start_line0: start,
             end_line0: end,
             inner,
@@ -2685,7 +3187,7 @@ mod tests {
             parses.entry(lang).or_default().push(fp);
         }
         let mut errors = Vec::new();
-        let out = infer_entity_wrappers(&parses, &files, &modules, repo, &mut errors);
+        let out = infer_entity_wrappers(&parses, &files, &modules, repo, None, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
         out
     }
@@ -3596,6 +4098,166 @@ export class UserService extends APIService {
                 "app/a/api.service.ts:1-5 get=W0,put=W1",
                 "app/user.service.ts:2-4 get=?,put=?",
             ]
+        );
+    }
+
+    /// The walked files, their module plan and their parses by language.
+    type Parsed = (
+        Vec<(String, String)>,
+        ModuleQnames,
+        HashMap<&'static str, Vec<FileParse>>,
+    );
+
+    /// GA.21: the parses of `files` the way [`infer`] makes them.
+    fn parsed(files: &[(&str, &str)]) -> Parsed {
+        let repo = RepoId::from_canonical("test://infer-wrappers");
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect();
+        let modules = ModuleQnames::plan(&files);
+        let mut parses: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
+        for (path, source) in &files {
+            let lang = detect_language(path).expect("a code file");
+            let fp = parse_one_as(
+                source,
+                path,
+                lang,
+                repo,
+                &GoModules::root_only(""),
+                &modules.module_qname(path),
+            )
+            .expect("parses");
+            parses.entry(lang).or_default().push(fp);
+        }
+        (files, modules, parses)
+    }
+
+    /// GA.21: [`infer_entity_wrappers`] over `files` with `memo` (or none),
+    /// its result and errors rendered for comparison.
+    fn infer_memo(files: &[(&str, &str)], memo: Option<&mut BuildMemo>) -> String {
+        let repo = RepoId::from_canonical("test://infer-wrappers");
+        let (files, modules, parses) = parsed(files);
+        let hashes: Vec<u64> = files
+            .iter()
+            .map(|(_, s)| crate::cache::content_hash(s))
+            .collect();
+        let mut errors = Vec::new();
+        let out = infer_entity_wrappers(
+            &parses,
+            &files,
+            &modules,
+            repo,
+            memo.map(|m| (hashes.as_slice(), m)),
+            &mut errors,
+        );
+        format!("{out:?}\n{errors:?}")
+    }
+
+    const MEMO_HTTP: &str =
+        "export async function api(path: string) {\n  return fetch(`/api${path}`);\n}\n";
+    const MEMO_VERBS: &str = "import { api } from \"./http\";\n\nexport function getJson(path: string) {\n  return api(path);\n}\n\nexport function readResource(path: string) {\n  return getJson(`/v1${path}`);\n}\n";
+    const MEMO_USERS: &str = "import { getJson } from \"../lib/verbs\";\n\nexport function listUsers() {\n  return getJson(\"/users\");\n}\n";
+    const MEMO_BASE: &str = "import axios from \"axios\";\n\nexport class APIService {\n  private axiosInstance = axios.create({});\n\n  get(url: string) {\n    return this.axiosInstance.get(url);\n  }\n}\n";
+    const MEMO_VIEW: &str = "import { APIService } from \"./api.service\";\n\nexport class ViewService extends APIService {\n  async fetchView() {\n    return this.get(\"/api/views/\");\n  }\n}\n";
+
+    fn memo_files() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("repositories/collection.go", GROUPED),
+            ("web/lib/http.ts", MEMO_HTTP),
+            ("web/lib/verbs.ts", MEMO_VERBS),
+            ("web/features/users.ts", MEMO_USERS),
+            ("web/services/api.service.ts", MEMO_BASE),
+            ("web/services/view.service.ts", MEMO_VIEW),
+        ]
+    }
+
+    #[test]
+    fn the_memo_replays_what_a_fresh_inference_reads() {
+        let files = memo_files();
+        let fresh = infer_memo(&files, None);
+        assert!(
+            fresh.contains("call: \"getJson\"")
+                && fresh.contains("call: \"readResource\"")
+                && fresh.contains("class: \"APIService\"")
+                && fresh.contains("call: \"NewCollection\""),
+            "the fixture holds direct, forwarding, heritage and Go wrappers: {fresh}"
+        );
+        let mut memo = BuildMemo::default();
+        assert_eq!(infer_memo(&files, Some(&mut memo)), fresh, "a cold memo");
+        let w = memo.wrapper_stats;
+        assert_eq!((w.wrappers_hit, w.wrappers_miss), (0, 6));
+        assert_eq!(memo.wrappers.len(), 6, "one record per inference file");
+        assert_eq!(infer_memo(&files, Some(&mut memo)), fresh, "a warm memo");
+        let w = memo.wrapper_stats;
+        assert_eq!((w.wrappers_hit, w.wrappers_miss), (6, 0));
+
+        // An edited file is the one miss, and the replay equals a fresh run
+        // over the edited tree: `send` joins the frontier, so every
+        // unchanged file's depth-2 reading is retaken for the new frontier.
+        let http = format!(
+            "{MEMO_HTTP}\nexport async function send(path: string) {{\n  return fetch(`/api${{path}}`, {{ method: \"POST\" }});\n}}\n"
+        );
+        let verbs = format!(
+            "{MEMO_VERBS}\nexport function postJson(path: string) {{\n  return send(path);\n}}\n"
+        );
+        let mut edited: Vec<(&str, &str)> = files.clone();
+        edited[2].1 = &verbs;
+        assert_eq!(
+            infer_memo(&edited, Some(&mut memo)),
+            infer_memo(&edited, None)
+        );
+        assert_eq!(memo.wrapper_stats.wrappers_miss, 1);
+        edited[1].1 = &http;
+        let want = infer_memo(&edited, None);
+        assert!(want.contains("call: \"postJson\""), "{want}");
+        assert_eq!(infer_memo(&edited, Some(&mut memo)), want, "edited");
+        assert_eq!(
+            (
+                memo.wrapper_stats.wrappers_hit,
+                memo.wrapper_stats.wrappers_miss
+            ),
+            (5, 1)
+        );
+
+        // A removed file: the rest replays, equal to a fresh run.
+        let mut removed = edited.clone();
+        removed.remove(4);
+        let want = infer_memo(&removed, None);
+        assert!(!want.contains("class: \"APIService\""), "{want}");
+        assert_eq!(infer_memo(&removed, Some(&mut memo)), want, "removed");
+        assert_eq!(memo.wrapper_stats.wrappers_hit, 5);
+    }
+
+    #[test]
+    fn a_moved_module_id_misses() {
+        let files = memo_files();
+        let (files, modules, parses) = parsed(&files);
+        let hashes: Vec<u64> = files
+            .iter()
+            .map(|(_, s)| crate::cache::content_hash(s))
+            .collect();
+        let mut memo = BuildMemo::default();
+        let run = |repo: &str, memo: &mut BuildMemo| {
+            infer_entity_wrappers(
+                &parses,
+                &files,
+                &modules,
+                RepoId::from_canonical(repo),
+                Some((hashes.as_slice(), memo)),
+                &mut Vec::new(),
+            );
+            (
+                memo.wrapper_stats.wrappers_hit,
+                memo.wrapper_stats.wrappers_miss,
+            )
+        };
+        assert_eq!(run("test://infer-wrappers", &mut memo), (0, 6));
+        assert_eq!(run("test://infer-wrappers", &mut memo), (6, 0));
+        assert_eq!(
+            run("test://elsewhere", &mut memo),
+            (0, 6),
+            "every MODULE id moved: every key misses"
         );
     }
 }

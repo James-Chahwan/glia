@@ -25,7 +25,7 @@ use super::angular_templates;
 use super::assemble::FileConstTables;
 use super::evm_abi;
 use super::lang_build::TsAliasSet;
-use super::memo::{BuildMemo, ImportsKey, ImportsOut, IndexFp};
+use super::memo::{BuildMemo, ImportsKey, ImportsOut, IndexFp, WrapperStats};
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
 use super::timing::GraftTimes;
 use crate::arch::node_file;
@@ -60,7 +60,8 @@ use crate::route::ModuleQnames;
 /// (`external::WrapperPass`), after the CA.4 inferred Go collection wrappers
 /// (`external::infer_entity_wrappers`), which run either way. `memo` is the
 /// held parse cache's build memos (`None` without a cache): GA.20 replays the
-/// A16.4 IMPORTS filter's index and per-file output from it. Returns the
+/// A16.4 IMPORTS filter's index and per-file output from it, GA.21 the
+/// wrapper inference's and the wrapper scan's per-file readings. Returns the
 /// RPC needle pass's counts (`apply_rpc_needles`), whose `files` the
 /// caller's `[parallel]` line reads (LG.1c).
 ///
@@ -102,11 +103,39 @@ pub(super) fn apply_post_cache(
     // the overlay (an overlay stanza naming the same call shadows one). The
     // http half mints its ENDPOINTs BEFORE the endpoint fold, so a `${X}`
     // wrapper path folds through the const table like any other client call.
-    let inferred = t.time("infer_wrappers", || {
-        infer_entity_wrappers(parses_by_lang, files, &modules, repo, parse_errors)
+    // GA.21: with a held cache, both wrapper stages replay an unchanged
+    // file's readings from the build memos (`build::memo` WrapperMemo /
+    // ScanMemo), keyed by its DC.4 content hash (hashed here on the pool,
+    // inside the inference's time).
+    let mut memo = memo;
+    if let Some(m) = memo.as_deref_mut() {
+        m.wrapper_stats = WrapperStats::default();
+    }
+    let (inferred, hashes) = t.time("infer_wrappers", || {
+        let hashes: Option<Vec<u64>> = memo.is_some().then(|| {
+            crate::parallel::par_map_ordered(files, |(_, source)| {
+                crate::cache::content_hash(source)
+            })
+            .0
+        });
+        let inferred = infer_entity_wrappers(
+            parses_by_lang,
+            files,
+            &modules,
+            repo,
+            hashes.as_deref().zip(memo.as_deref_mut()),
+            parse_errors,
+        );
+        (inferred, hashes)
     });
     let mut wrappers = t.time("wrapper_scan", || {
-        WrapperPass::scan(wrappers, inferred, files, parse_errors)
+        WrapperPass::scan(
+            wrappers,
+            inferred,
+            files,
+            hashes.as_deref().zip(memo.as_deref_mut()),
+            parse_errors,
+        )
     });
     if let Some(w) = wrappers.as_mut() {
         t.time("wrappers_http", || {

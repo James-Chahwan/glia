@@ -179,6 +179,7 @@ use glia_core::{
 use super::infer_wrappers::{
     HeritageScope, HeritageTarget, HttpShape, HttpSite, InferredWrappers, read_http_site,
 };
+use crate::build::memo::{BuildMemo, MemoRow, ScanKey, parts_fp};
 use crate::extract::detect_language;
 use crate::route::ModuleQnames;
 
@@ -534,6 +535,62 @@ impl InferenceCounts {
     }
 }
 
+/// GA.21: what the LF.2e scan read off one file, the scan memo's value
+/// (`build::memo::ScanMemo`).
+#[derive(Default)]
+enum ScanOut {
+    /// The stanza gate kept the scan off the file.
+    #[default]
+    Skipped,
+    /// Its sites (source order) and its ambiguous heritage calls.
+    Read(Vec<Site>, usize),
+    /// The scan panicked (replayed as the same `parse_errors` line).
+    Panicked,
+}
+
+/// GA.21: a scanned file's language, heritage scopes and memo key.
+type PlannedScan<'s> = (&'static str, &'s [&'s HeritageScope], Option<ScanKey>);
+
+/// GA.21: one file the scan reads, in walk order.
+struct ScanPlan<'s> {
+    /// Index into the walked `files`.
+    file: usize,
+    lang: &'static str,
+    scopes: &'s [&'s HeritageScope],
+    key: Option<ScanKey>,
+    out: Option<ScanOut>,
+    /// The path `String` of its last-run memo row, reused.
+    row_path: Option<String>,
+}
+
+/// GA.21: the fingerprint of what the scan reads off the stanza set (module
+/// doc of `build::memo`: CONTRACT): per stanza, in order, its declaration,
+/// kind, FH.4b shape and whether it is a heritage stanza.
+fn stanzas_fp(stanzas: &[Stanza<'_>]) -> u64 {
+    let parts: Vec<String> = stanzas
+        .iter()
+        .map(|s| {
+            format!(
+                "{:?}\u{1}{:?}\u{1}{:?}\u{1}{}",
+                s.decl,
+                s.kind,
+                s.shape,
+                s.heritage.is_some()
+            )
+        })
+        .collect();
+    parts_fp(parts.iter().map(String::as_str))
+}
+
+/// GA.21: the fingerprint of one file's GD.26 heritage scopes.
+fn scopes_fp(scopes: &[&HeritageScope]) -> u64 {
+    if scopes.is_empty() {
+        return 0;
+    }
+    let parts: Vec<String> = scopes.iter().map(|sc| format!("{sc:?}")).collect();
+    parts_fp(parts.iter().map(String::as_str))
+}
+
 /// One repo's wrapper stage: the scanned sites, minted in two phases.
 pub(crate) struct WrapperPass<'c> {
     stanzas: Vec<Stanza<'c>>,
@@ -555,10 +612,22 @@ impl<'c> WrapperPass<'c> {
     /// graph. `None` when neither source holds a stanza (the caller passes
     /// `None` for `config` on a build without the overlay) and the inference
     /// found no candidate.
+    ///
+    /// GA.21: with `memo` (the walked files' DC.4 content hashes,
+    /// index-aligned with `files`, and the held cache's build memos) a file
+    /// whose [`ScanKey`] (language, content hash, the ordered stanza set's
+    /// fingerprint, its own heritage scopes' fingerprint) matches the memo's
+    /// replays the last scan's outcome (skipped by the gate, its sites, or a
+    /// caught panic); the misses are scanned on the engine pool, one
+    /// [`NeedleSet`] pass per file for the stanza gate, and every outcome
+    /// folds in walk order, so the pass is the memo-free one. Sets the
+    /// memo's `scan_hit` / `scan_miss` (files with a code language). A hash
+    /// list of another length disables the memo.
     pub(crate) fn scan(
         config: Option<&'c LoadedConfig>,
         mut inferred: InferredWrappers,
         files: &[(String, String)],
+        memo: Option<(&[u64], &mut BuildMemo)>,
         parse_errors: &mut Vec<String>,
     ) -> Option<Self> {
         let tests = config.and_then(|c| c.config.walk.tests_matcher());
@@ -653,6 +722,10 @@ impl<'c> WrapperPass<'c> {
             });
         }
         if cfg.is_none() && !inference.any() && !inference.http_any() {
+            // GA.21: no scan ran, so the memo keeps no row of an older one.
+            if let Some((_, m)) = memo {
+                m.scan.put::<ScanKey, ScanOut>(Vec::new());
+            }
             return None;
         }
         let mut pass = WrapperPass {
@@ -679,48 +752,153 @@ impl<'c> WrapperPass<'c> {
         for sc in &scopes {
             scopes_of.entry(sc.file.as_str()).or_default().push(sc);
         }
-        for (i, (path, source)) in files.iter().enumerate() {
-            let Some(lang) = detect_language(path) else {
-                continue;
+        let mut memo = memo.filter(|(hashes, _)| hashes.len() == files.len());
+        let stanzas_fp = memo.as_ref().map(|_| stanzas_fp(&pass.stanzas));
+        // GA.21: one plan per scanned file, in walk order: its language, its
+        // scopes and key (on the pool), then the outcome the memo replays
+        // (`None`: scan it now).
+        let slots: Vec<usize> = (0..files.len()).collect();
+        let hashes = memo.as_ref().map(|(h, _)| *h);
+        let (planned, _) = crate::parallel::par_map_ordered(&slots, |&i| {
+            let (path, _) = &files[i];
+            let lang = detect_language(path).filter(|l| !NOT_CODE.contains(l))?;
+            let file_scopes = if scopes_of.is_empty() {
+                &[][..]
+            } else {
+                scopes_of.get(path.as_str()).map_or(&[][..], Vec::as_slice)
             };
-            let file_scopes = scopes_of.get(path.as_str()).map_or(&[][..], Vec::as_slice);
-            if NOT_CODE.contains(&lang)
-                || (file_scopes.is_empty()
-                    && !pass.stanzas.iter().any(|s| {
-                        s.heritage.is_none()
-                            && s.applies_to(lang)
-                            && source.contains(s.decl.call.as_str())
-                    }))
-            {
-                continue;
-            }
-            let read = catch_unwind(AssertUnwindSafe(|| {
-                let mut sites = scan_file(source, lang, &pass.stanzas);
-                let (heritage_sites, ambiguous) =
-                    scan_heritage(source, file_scopes, heritage_base, &pass.stanzas);
-                sites.extend(heritage_sites);
-                sites.sort_by_key(|s| (s.offset, s.stanza));
-                (sites, ambiguous)
-            }));
-            match read {
-                Ok((sites, ambiguous)) => {
-                    pass.inference.heritage_ambiguous += ambiguous;
-                    if sites.is_empty() {
-                        continue;
-                    }
-                    for s in &sites {
-                        if let Some(st) = pass.stanzas.get(s.stanza) {
-                            pass.tally.of(st).count_read(&s.read);
-                        }
-                    }
-                    pass.files.push(FileSites {
-                        file: i,
-                        lang,
-                        sites,
-                    });
+            let key = hashes.zip(stanzas_fp).map(|(hashes, stanzas)| ScanKey {
+                lang,
+                content_hash: hashes.get(i).copied().unwrap_or(0),
+                stanzas,
+                scopes: scopes_fp(file_scopes),
+            });
+            Some((lang, file_scopes, key))
+        });
+        let mut rows = memo
+            .as_mut()
+            .and_then(|(_, m)| m.scan.take::<ScanKey, ScanOut>());
+        let planned: Vec<(usize, PlannedScan<'_>)> = planned
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, p)| Some((i, p?)))
+            .collect();
+        // An unchanged walk hands out the rows by position.
+        let aligned = rows.as_ref().is_some_and(|r| {
+            let paths: Vec<&str> = planned.iter().map(|(i, _)| files[*i].0.as_str()).collect();
+            r.aligned(&paths)
+        });
+        let mut plan: Vec<ScanPlan<'_>> = Vec::with_capacity(planned.len());
+        let (mut hit, mut miss) = (0usize, 0usize);
+        for (k, (i, (lang, file_scopes, key))) in planned.into_iter().enumerate() {
+            let row = rows.as_mut().and_then(|r| {
+                if aligned {
+                    r.row_at(k)
+                } else {
+                    r.row(&files[i].0)
                 }
-                Err(_) => parse_errors.push(format!("{path}: PANIC (overlay wrappers)")),
+            });
+            let (out, row_path) = match (row, key) {
+                (Some(row), Some(k)) if row.key == k => {
+                    hit += 1;
+                    (Some(row.value), Some(row.path))
+                }
+                (row, Some(_)) => {
+                    miss += 1;
+                    (None, row.map(|r| r.path))
+                }
+                (_, None) => (None, None),
+            };
+            plan.push(ScanPlan {
+                file: i,
+                lang,
+                scopes: file_scopes,
+                key,
+                out,
+                row_path,
+            });
+        }
+        // The misses, on the pool: the stanza gate (one needle pass), then
+        // the plain and heritage sites.
+        let gate = NeedleSet::new(
+            &pass
+                .stanzas
+                .iter()
+                .map(|s| s.decl.call.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let need: Vec<usize> = (0..plan.len())
+            .filter(|&k| plan.get(k).is_some_and(|p| p.out.is_none()))
+            .collect();
+        let stanzas = &pass.stanzas;
+        let fresh = {
+            let plan = &plan;
+            crate::parallel::par_map_ordered(&need, |&k| {
+                let Some(p) = plan.get(k) else {
+                    return ScanOut::Skipped;
+                };
+                let source = files.get(p.file).map_or("", |(_, s)| s.as_str());
+                let gated = p.scopes.is_empty()
+                    && !gate.any(source, |si| {
+                        stanzas
+                            .get(si)
+                            .is_some_and(|s| s.heritage.is_none() && s.applies_to(p.lang))
+                    });
+                if gated {
+                    return ScanOut::Skipped;
+                }
+                crate::parallel::quiet(|| {
+                    let mut sites = scan_file(source, p.lang, stanzas);
+                    let (heritage_sites, ambiguous) =
+                        scan_heritage(source, p.scopes, heritage_base, stanzas);
+                    sites.extend(heritage_sites);
+                    sites.sort_by_key(|s| (s.offset, s.stanza));
+                    ScanOut::Read(sites, ambiguous)
+                })
+                .unwrap_or(ScanOut::Panicked)
+            })
+            .0
+        };
+        for (k, out) in need.into_iter().zip(fresh) {
+            if let Some(p) = plan.get_mut(k) {
+                p.out = Some(out);
             }
+        }
+        let mut kept = Vec::with_capacity(if memo.is_some() { plan.len() } else { 0 });
+        for p in plan {
+            let (path, _) = &files[p.file];
+            let out = p.out.unwrap_or_default();
+            match &out {
+                ScanOut::Skipped => {}
+                ScanOut::Read(sites, ambiguous) => {
+                    pass.inference.heritage_ambiguous += ambiguous;
+                    if !sites.is_empty() {
+                        for s in sites {
+                            if let Some(st) = pass.stanzas.get(s.stanza) {
+                                pass.tally.of(st).count_read(&s.read);
+                            }
+                        }
+                        pass.files.push(FileSites {
+                            file: p.file,
+                            lang: p.lang,
+                            sites: sites.clone(),
+                        });
+                    }
+                }
+                ScanOut::Panicked => parse_errors.push(format!("{path}: PANIC (overlay wrappers)")),
+            }
+            if let Some(key) = p.key {
+                kept.push(MemoRow {
+                    path: p.row_path.unwrap_or_else(|| path.clone()),
+                    key,
+                    value: out,
+                });
+            }
+        }
+        if let Some((_, m)) = memo {
+            m.scan.put(kept);
+            m.wrapper_stats.scan_hit = hit;
+            m.wrapper_stats.scan_miss = miss;
         }
         Some(pass)
     }
@@ -957,6 +1135,129 @@ fn scan_heritage(
         }
     }
     (out, ambiguous)
+}
+
+/// GA.21: a set of needle texts tested against a text in ONE pass: which
+/// needles occur in it, exactly the `str::contains` answer per needle (a
+/// byte-substring test; a needle is a whole `&str`, so a byte match is a
+/// `str` match). The needles are bucketed by their first two bytes; the
+/// pass reads each two-byte window once and compares only the needles of
+/// its bucket. A needle under two bytes is tested with `str::contains`.
+pub(super) struct NeedleSet<'n> {
+    needles: Vec<&'n [u8]>,
+    /// Per two-byte window `b0 << 8 | b1`: its bucket in `buckets`, 0 when
+    /// no needle starts with it.
+    table: Vec<u32>,
+    /// Needle indices per bucket; bucket 0 is empty.
+    buckets: Vec<Vec<usize>>,
+    /// Needles shorter than two bytes.
+    short: Vec<usize>,
+}
+
+impl<'n> NeedleSet<'n> {
+    pub(super) fn new(needles: &[&'n str]) -> Self {
+        let mut set = NeedleSet {
+            needles: needles.iter().map(|n| n.as_bytes()).collect(),
+            table: Vec::new(),
+            buckets: vec![Vec::new()],
+            short: Vec::new(),
+        };
+        for (i, n) in set.needles.iter().enumerate() {
+            let (Some(&b0), Some(&b1)) = (n.first(), n.get(1)) else {
+                set.short.push(i);
+                continue;
+            };
+            if set.table.is_empty() {
+                set.table = vec![0; 1 << 16];
+            }
+            let w = (usize::from(b0) << 8) | usize::from(b1);
+            let Some(slot) = set.table.get_mut(w) else {
+                continue;
+            };
+            if *slot == 0 {
+                *slot = u32::try_from(set.buckets.len()).unwrap_or(u32::MAX);
+                set.buckets.push(Vec::new());
+            }
+            if let Some(b) = usize::try_from(*slot)
+                .ok()
+                .and_then(|b| set.buckets.get_mut(b))
+            {
+                b.push(i);
+            }
+        }
+        set
+    }
+
+    /// The indices of the needles `hay` contains, ascending.
+    pub(super) fn present(&self, hay: &str) -> Vec<usize> {
+        let mut found = vec![false; self.needles.len()];
+        self.scan(hay, &mut |i| {
+            if let Some(f) = found.get_mut(i) {
+                *f = true;
+            }
+            false
+        });
+        (0..found.len())
+            .filter(|&i| found.get(i).copied().unwrap_or(false))
+            .collect()
+    }
+
+    /// Whether `hay` contains a needle `accept` takes (stops at the first).
+    pub(super) fn any(&self, hay: &str, accept: impl Fn(usize) -> bool) -> bool {
+        self.scan(hay, &mut |i| accept(i))
+    }
+
+    /// Call `hit` once per needle `hay` contains (in no promised order) until
+    /// it returns true; returns whether it did.
+    fn scan(&self, hay: &str, hit: &mut dyn FnMut(usize) -> bool) -> bool {
+        for &i in &self.short {
+            let n = self.needles.get(i).copied().unwrap_or_default();
+            if std::str::from_utf8(n).is_ok_and(|n| hay.contains(n)) && hit(i) {
+                return true;
+            }
+        }
+        if self.table.is_empty() {
+            return false;
+        }
+        let b = hay.as_bytes();
+        let mut seen = vec![false; self.needles.len()];
+        let mut left = self.needles.len() - self.short.len();
+        for (at, w) in b.windows(2).enumerate() {
+            let (Some(&w0), Some(&w1)) = (w.first(), w.get(1)) else {
+                continue;
+            };
+            let k = (usize::from(w0) << 8) | usize::from(w1);
+            let bucket = self.table.get(k).copied().unwrap_or(0);
+            if bucket == 0 {
+                continue;
+            }
+            let Some(ids) = usize::try_from(bucket)
+                .ok()
+                .and_then(|x| self.buckets.get(x))
+            else {
+                continue;
+            };
+            let rest = b.get(at..).unwrap_or_default();
+            for &i in ids {
+                if seen.get(i).copied().unwrap_or(true) {
+                    continue;
+                }
+                if self.needles.get(i).is_some_and(|n| rest.starts_with(n)) {
+                    if let Some(s) = seen.get_mut(i) {
+                        *s = true;
+                    }
+                    left -= 1;
+                    if hit(i) {
+                        return true;
+                    }
+                }
+            }
+            if left == 0 {
+                break;
+            }
+        }
+        false
+    }
 }
 
 pub(super) fn is_ident_byte(b: u8) -> bool {
@@ -2037,8 +2338,14 @@ mod tests {
         };
         let files = vec![(format!("src/a.{ext}"), source.to_string())];
         let mut errors = Vec::new();
-        let pass = WrapperPass::scan(Some(&cfg), InferredWrappers::default(), &files, &mut errors)
-            .expect("a wrapper stanza");
+        let pass = WrapperPass::scan(
+            Some(&cfg),
+            InferredWrappers::default(),
+            &files,
+            None,
+            &mut errors,
+        )
+        .expect("a wrapper stanza");
         assert!(errors.is_empty(), "{errors:?}");
         pass.files.into_iter().flat_map(|f| f.sites).collect()
     }
@@ -2170,6 +2477,7 @@ mod tests {
             Some(&cfg),
             InferredWrappers::default(),
             &files,
+            None,
             &mut Vec::new(),
         )
         .expect("stanza");
@@ -2270,6 +2578,7 @@ mod tests {
             Some(&cfg),
             InferredWrappers::default(),
             &files,
+            None,
             &mut Vec::new(),
         )
         .expect("stanza");
@@ -2278,5 +2587,108 @@ mod tests {
             Some("wrapper#2")
         );
         assert_eq!(pass.files[0].sites[0].read, http("GET", "/x"));
+    }
+
+    #[test]
+    fn a_needle_set_finds_exactly_what_contains_finds() {
+        let needles = [
+            "getJson",
+            "api",
+            "a",
+            "",
+            "ap",
+            "readResource",
+            "xyz",
+            "é",
+            "€uro",
+        ];
+        let set = NeedleSet::new(&needles);
+        for hay in [
+            "",
+            "a",
+            "return api(path)",
+            "getJsonX getJso readResource",
+            "€uro and é",
+            "apap",
+            "xy",
+        ] {
+            let want: Vec<usize> = (0..needles.len())
+                .filter(|&i| hay.contains(needles[i]))
+                .collect();
+            assert_eq!(set.present(hay), want, "{hay:?}");
+            for i in 0..needles.len() {
+                assert_eq!(set.any(hay, |j| j == i), want.contains(&i), "{hay:?} {i}");
+            }
+        }
+        assert!(NeedleSet::new(&[]).present("anything").is_empty());
+    }
+
+    /// GA.21: the scan's per-file outcomes, rendered.
+    fn scanned(
+        overlay: &str,
+        files: &[(String, String)],
+        memo: Option<&mut BuildMemo>,
+    ) -> Vec<(usize, &'static str, Vec<Site>)> {
+        let cfg = parse_str(overlay);
+        let hashes: Vec<u64> = files
+            .iter()
+            .map(|(_, s)| crate::cache::content_hash(s))
+            .collect();
+        let mut errors = Vec::new();
+        let pass = WrapperPass::scan(
+            Some(&cfg),
+            InferredWrappers::default(),
+            files,
+            memo.map(|m| (hashes.as_slice(), m)),
+            &mut errors,
+        )
+        .expect("a stanza");
+        assert!(errors.is_empty(), "{errors:?}");
+        pass.files
+            .into_iter()
+            .map(|f| (f.file, f.lang, f.sites))
+            .collect()
+    }
+
+    #[test]
+    fn the_scan_memo_replays_what_a_fresh_scan_reads() {
+        let mut files: Vec<(String, String)> = vec![
+            ("src/a.ts".into(), "request('get', '/a');\n".into()),
+            ("src/b.ts".into(), "const x = 1;\n".into()),
+            ("src/c.py".into(), "request('post', '/c')\n".into()),
+            ("schema.proto".into(), "request('get', '/p')\n".into()),
+        ];
+        let fresh = scanned(REQUEST, &files, None);
+        assert_eq!(fresh.len(), 2, "a.ts and c.py hold sites");
+        let mut memo = BuildMemo::default();
+        assert_eq!(scanned(REQUEST, &files, Some(&mut memo)), fresh, "cold");
+        let w = memo.wrapper_stats;
+        assert_eq!((w.scan_hit, w.scan_miss), (0, 3), "the .proto is no code");
+        assert_eq!(scanned(REQUEST, &files, Some(&mut memo)), fresh, "warm");
+        let w = memo.wrapper_stats;
+        assert_eq!((w.scan_hit, w.scan_miss), (3, 0));
+        // An edited file is the one miss.
+        files[1].1 = "request('delete', '/b');\n".into();
+        let want = scanned(REQUEST, &files, None);
+        assert_eq!(want.len(), 3);
+        assert_eq!(scanned(REQUEST, &files, Some(&mut memo)), want, "edited");
+        let w = memo.wrapper_stats;
+        assert_eq!((w.scan_hit, w.scan_miss), (2, 1));
+        // Another stanza set: every key misses.
+        let more = format!(
+            "{REQUEST}[[wrapper]]\ncall = \"const\"\nkind = \"http\"\nmethod = \"get\"\npath_arg = 0\n"
+        );
+        assert_eq!(
+            scanned(&more, &files, Some(&mut memo)),
+            scanned(&more, &files, None)
+        );
+        let w = memo.wrapper_stats;
+        assert_eq!((w.scan_hit, w.scan_miss), (0, 3));
+        // A removed file.
+        files.remove(0);
+        assert_eq!(
+            scanned(&more, &files, Some(&mut memo)),
+            scanned(&more, &files, None)
+        );
     }
 }

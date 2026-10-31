@@ -50,6 +50,36 @@
 //!   its `FileParse::imports`, its language and that index, all three in
 //!   [`ImportsKey`]. A packet that makes the index or the filter read
 //!   anything else adds it to the fingerprint or the key in the same commit.
+//! - [`WrapperMemo`] (GA.21, `external::infer_entity_wrappers`): per walked
+//!   file of an inference language (the HTTP families and Go), the file's
+//!   CA.4 direct collection candidates (`direct_candidates`), its FH.4b
+//!   direct HTTP candidates (`direct_http`: candidates, unparsed calls and
+//!   the FH.17 phantom gate), its GD.26 heritage class record (classes,
+//!   spans, `extends` bases, members and value imports) and, per forwarding
+//!   depth, the frontier calls its text holds with their `forwarding_*`
+//!   outputs. Each of those reads exactly the file's path (its row's
+//!   path), its text, its language and its own parse, found by its LB.9b
+//!   MODULE id; the parse is a function of the same text, language and
+//!   MODULE qname under the build context (which clears the memo), so
+//!   [`WrapperKey`] carries the language, the text's content hash and the
+//!   MODULE id. A forwarding depth's outputs are kept with a fingerprint of
+//!   that depth's whole frontier (every call and its shape / name argument,
+//!   in order) and replayed only under an equal one. A packet that gives
+//!   `direct_candidates`, `direct_http`, the class reader or a
+//!   `forwarding_*` reader another input adds it to [`WrapperKey`] (or, for
+//!   a repo-wide input of the forwarding pass, to the frontier
+//!   fingerprint) in the same commit.
+//! - [`ScanMemo`] (GA.21, `external::WrapperPass::scan`): per walked file the
+//!   LF.2e stage scans, what the scan read off it: skipped by the stanza
+//!   gate, or its sites and GD.26 ambiguous heritage calls (or a caught
+//!   panic). The scan reads the file's text and language, the ordered stanza
+//!   set (each stanza's declaration, kind, FH.4b shape and whether it is a
+//!   heritage stanza: everything `scan_file` / `read_site` /
+//!   `scan_heritage` read) and the file's own GD.26 heritage scopes, so
+//!   [`ScanKey`] carries the language, the content hash, a fingerprint of
+//!   the stanza set and one of the file's scopes. A packet that makes the
+//!   gate, `scan_file`, `read_site` or `scan_heritage` read anything else
+//!   adds it to [`ScanKey`] in the same commit.
 //!
 //! What a hit does not replay: the stderr lines an extractor prints itself
 //! from inside the call (`[code-guard]`, `[grpc-client] dial hosts`,
@@ -61,14 +91,25 @@
 //!
 //! fired_on marker, once per repo build that holds a cache
 //! ([`BuildMemo::marker`]):
-//!   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> imports hit=<h>/<n> index=<hit|built|none> repo=<label>`
+//!   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> imports hit=<h>/<n> index=<hit|built|none> wrappers hit=<h>/<n> scan hit=<h>/<n> repo=<label>`
 //! `n` = hits + misses: files with a source language (const), files a needle
 //! text gate passed with a source language other than `.proto` (needles; 0
 //! when the build knows no proto service), files a `PURE_NONCODE` branch
 //! routed (noncode), parses carrying an IMPORTS cell that the filter rewrote
 //! (imports, GA.20); `index` says whether the repo's `LocalModuleIndex` was
-//! reused or built (`none` only when the filter did not run).
+//! reused or built (`none` only when the filter did not run); walked files
+//! of an inference language (wrappers, GA.21) and files the LF.2e stage
+//! scanned, every file with a code language (scan, GA.21; 0 when the stage
+//! did not run).
+//!
+//! The two GA.21 memos hold the wrapper stages' own per-file records
+//! (private types of `external::infer_wrappers` / `external::wrappers`) as
+//! one row table per stage ([`StageMemo`]), type-erased (`Box<dyn Any + Send
+//! + Sync>`) and downcast by their one reader: a table of another type reads
+//! as a cold memo, never as a value. Each run rewrites its table from this
+//! build's walked files, so [`BuildMemo::retain`] leaves them alone.
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::{FileParse, ImportStmt, LocalModuleIndex};
@@ -205,6 +246,175 @@ pub(crate) struct ImportsMemo {
     pub(crate) files: HashMap<NodeId, (ImportsKey, ImportsOut)>,
 }
 
+/// GA.21: what one file's wrapper-inference outputs were computed from
+/// (module doc: CONTRACT). The content hash is the DC.4 one
+/// (`cache::content_hash`, xxh64), the hash the parse cache keys the same
+/// file's parse by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WrapperKey {
+    pub(crate) lang: &'static str,
+    pub(crate) content_hash: u64,
+    pub(crate) module_id: NodeId,
+}
+
+/// GA.21: the inference stage's per-file records
+/// (`external::infer_wrappers`): its [`MemoRow`]s, type-erased (module doc).
+pub(crate) type WrapperMemo = StageMemo;
+
+/// GA.21: what one file's LF.2e scan was computed from (module doc:
+/// CONTRACT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScanKey {
+    pub(crate) lang: &'static str,
+    pub(crate) content_hash: u64,
+    /// The ordered stanza set's fingerprint.
+    pub(crate) stanzas: u64,
+    /// The file's own GD.26 heritage scopes' fingerprint.
+    pub(crate) scopes: u64,
+}
+
+/// GA.21: the scan's per-file outcomes (`external::wrappers`): its
+/// [`MemoRow`]s, type-erased (module doc).
+pub(crate) type ScanMemo = StageMemo;
+
+/// GA.21: one row of a stage's memo: a walked path, the key its value was
+/// computed under and the value (the stage's own record type).
+pub(crate) struct MemoRow<K, V> {
+    pub(crate) path: String,
+    pub(crate) key: K,
+    pub(crate) value: V,
+}
+
+/// GA.21: a per-path memo its stage rewrites whole on every run: the last
+/// run's rows (`Vec<MemoRow<K, V>>`, in walk order), kept as one type-erased
+/// value. A run takes them out ([`StageMemo::take`]) and puts back exactly
+/// its own ([`StageMemo::put`]), so a path no longer walked drops out at the
+/// stage's next run and memory is bounded by the file count. The rows are
+/// read positionally ([`RowTake`]): the walk order rarely moves between two
+/// builds of one repo, so an unchanged tree hashes no path.
+#[derive(Default)]
+pub(crate) struct StageMemo {
+    rows: Option<Box<dyn Any + Send + Sync>>,
+    len: usize,
+}
+
+impl StageMemo {
+    /// The last run's rows, out of the memo; `None` when it holds none (or
+    /// rows of another type, which read as a cold memo).
+    pub(crate) fn take<K: 'static, V: Default + 'static>(&mut self) -> Option<RowTake<K, V>> {
+        self.len = 0;
+        let rows = *self.rows.take()?.downcast::<Vec<MemoRow<K, V>>>().ok()?;
+        Some(RowTake {
+            taken: vec![false; rows.len()],
+            rows,
+            next: 0,
+            index: None,
+        })
+    }
+
+    /// This run's rows, replacing whatever the memo held.
+    pub(crate) fn put<K: Send + Sync + 'static, V: Send + Sync + 'static>(
+        &mut self,
+        rows: Vec<MemoRow<K, V>>,
+    ) {
+        self.len = rows.len();
+        self.rows = Some(Box::new(rows));
+    }
+
+    /// Paths held.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    fn clear(&mut self) {
+        self.rows = None;
+        self.len = 0;
+    }
+}
+
+/// GA.21: the rows of a [`StageMemo`] taken out for one run.
+pub(crate) struct RowTake<K, V> {
+    rows: Vec<MemoRow<K, V>>,
+    taken: Vec<bool>,
+    /// The row after the last one taken: the next path's, when the walk
+    /// order did not move.
+    next: usize,
+    /// Path -> row, built on the first positional miss. Looked up, never
+    /// iterated.
+    index: Option<HashMap<String, usize>>,
+}
+
+impl<K: Copy + Sync, V: Default + Sync> RowTake<K, V> {
+    /// Whether this run's walked paths, in order, are exactly the last run's
+    /// rows (the paths compared on the engine pool). Then [`RowTake::row_at`]
+    /// hands out row `k` for the `k`-th path with no per-row lookup.
+    pub(crate) fn aligned(&self, paths: &[&str]) -> bool {
+        if paths.len() != self.rows.len() {
+            return false;
+        }
+        let at: Vec<usize> = (0..paths.len()).collect();
+        let rows = &self.rows;
+        crate::parallel::par_map_ordered(&at, |&k| {
+            rows.get(k).map(|r| r.path.as_str()) == paths.get(k).copied()
+        })
+        .0
+        .into_iter()
+        .all(|same| same)
+    }
+
+    /// Row `k`, out of the take, when [`RowTake::aligned`] held.
+    pub(crate) fn row_at(&mut self, k: usize) -> Option<MemoRow<K, V>> {
+        let taken = self.taken.get_mut(k)?;
+        if *taken {
+            return None;
+        }
+        *taken = true;
+        let r = self.rows.get_mut(k)?;
+        Some(MemoRow {
+            path: std::mem::take(&mut r.path),
+            key: r.key,
+            value: std::mem::take(&mut r.value),
+        })
+    }
+
+    /// The row of `path`, out of the take (`None` when the last run held
+    /// none, or it was taken already).
+    pub(crate) fn row(&mut self, path: &str) -> Option<MemoRow<K, V>> {
+        let at = match self.rows.get(self.next) {
+            Some(r) if r.path == path => self.next,
+            _ => {
+                let rows = &self.rows;
+                *self
+                    .index
+                    .get_or_insert_with(|| {
+                        rows.iter()
+                            .enumerate()
+                            .map(|(i, r)| (r.path.clone(), i))
+                            .collect()
+                    })
+                    .get(path)?
+            }
+        };
+        self.next = at + 1;
+        self.row_at(at)
+    }
+}
+
+/// GA.21: an xxh64 fingerprint over `parts`, each followed by a 0 byte so two
+/// lists never concatenate to the same bytes (the [`services_fp`] rule). The
+/// wrapper memos fingerprint `Debug` strings of types that hold no hash
+/// container, so equal values give equal fingerprints.
+pub(crate) fn parts_fp<'a>(parts: impl IntoIterator<Item = &'a str>) -> u64 {
+    use core::hash::Hasher;
+    use twox_hash::XxHash64;
+    let mut h = XxHash64::with_seed(0);
+    for p in parts {
+        h.write(p.as_bytes());
+        h.write(&[0]);
+    }
+    h.finish()
+}
+
 /// The last build's lookups, per memo. Reset at the start of each repo build
 /// that holds a cache.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +432,19 @@ pub(crate) struct MemoStats {
     pub(crate) index_hit: Option<bool>,
 }
 
+/// GA.21: the last build's lookups in the two wrapper memos, beside
+/// [`MemoStats`] (reset by `grafts::apply_post_cache` before the inference).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WrapperStats {
+    /// Walked files of an inference language whose record was replayed /
+    /// recomputed.
+    pub(crate) wrappers_hit: usize,
+    pub(crate) wrappers_miss: usize,
+    /// Files the LF.2e scan replayed / rescanned.
+    pub(crate) scan_hit: usize,
+    pub(crate) scan_miss: usize,
+}
+
 /// Every DC.4 memo of one repo's builds, held by its `ParseCache`.
 #[derive(Default)]
 pub(crate) struct BuildMemo {
@@ -229,7 +452,10 @@ pub(crate) struct BuildMemo {
     pub(crate) needles: NeedleMemo,
     pub(crate) noncode: NonCodeMemo,
     pub(crate) imports: ImportsMemo,
+    pub(crate) wrappers: WrapperMemo,
+    pub(crate) scan: ScanMemo,
     pub(crate) stats: MemoStats,
+    pub(crate) wrapper_stats: WrapperStats,
 }
 
 impl BuildMemo {
@@ -240,6 +466,8 @@ impl BuildMemo {
         self.needles.clear();
         self.noncode.clear();
         self.imports = ImportsMemo::default();
+        self.wrappers.clear();
+        self.scan.clear();
     }
 
     /// Drop the entries of paths not in `live` (this build's walked set).
@@ -247,19 +475,28 @@ impl BuildMemo {
         self.consts.retain(live);
         self.needles.retain(live);
         self.noncode.retain(live);
+        // GA.21's stage memos are rewritten from the walked files by their
+        // stage's next run (`StageMemo`): nothing to drop here.
     }
 
-    /// Paths held across the three path memos (a path may be in several) plus
-    /// the files of the imports memo: `WatchMemory.memo_paths` (GA.12).
+    /// Paths held across the five path memos (a path may be in several) plus
+    /// the files of the imports memo: `WatchMemory.memo_paths` (GA.12). The
+    /// two GA.21 stage memos count the rows their stage's last run kept.
     pub(crate) fn len(&self) -> usize {
-        self.consts.len() + self.needles.len() + self.noncode.len() + self.imports.files.len()
+        self.consts.len()
+            + self.needles.len()
+            + self.noncode.len()
+            + self.imports.files.len()
+            + self.wrappers.len()
+            + self.scan.len()
     }
 
     /// The `[graft-memo]` line of the last build (module doc).
     pub(crate) fn marker(&self, repo_label: &str) -> String {
         let s = &self.stats;
+        let w = &self.wrapper_stats;
         format!(
-            "[graft-memo] const hit={}/{} needles hit={}/{} noncode hit={}/{} imports hit={}/{} index={} repo={repo_label}",
+            "[graft-memo] const hit={}/{} needles hit={}/{} noncode hit={}/{} imports hit={}/{} index={} wrappers hit={}/{} scan hit={}/{} repo={repo_label}",
             s.const_hit,
             s.const_hit + s.const_miss,
             s.needle_hit,
@@ -273,6 +510,10 @@ impl BuildMemo {
                 Some(false) => "built",
                 None => "none",
             },
+            w.wrappers_hit,
+            w.wrappers_hit + w.wrappers_miss,
+            w.scan_hit,
+            w.scan_hit + w.scan_miss,
         )
     }
 }
@@ -328,17 +569,105 @@ mod tests {
     fn the_marker_names_the_imports_memo() {
         let mut m = BuildMemo::default();
         assert!(
-            m.marker("r")
-                .ends_with(" noncode hit=0/0 imports hit=0/0 index=none repo=r"),
+            m.marker("r").ends_with(
+                " noncode hit=0/0 imports hit=0/0 index=none wrappers hit=0/0 scan hit=0/0 repo=r"
+            ),
             "{}",
             m.marker("r")
         );
         m.stats.imports_hit = 3;
         m.stats.imports_miss = 1;
         m.stats.index_hit = Some(true);
-        assert!(m.marker("r").ends_with(" imports hit=3/4 index=hit repo=r"));
+        assert!(
+            m.marker("r")
+                .contains(" imports hit=3/4 index=hit wrappers")
+        );
         m.stats.index_hit = Some(false);
-        assert!(m.marker("r").ends_with(" index=built repo=r"));
+        assert!(m.marker("r").contains(" index=built wrappers"));
+    }
+
+    #[test]
+    fn the_marker_names_the_wrapper_memos_before_the_repo() {
+        let mut m = BuildMemo::default();
+        m.wrapper_stats.wrappers_hit = 9;
+        m.wrapper_stats.wrappers_miss = 1;
+        m.wrapper_stats.scan_hit = 4;
+        m.wrapper_stats.scan_miss = 2;
+        assert!(
+            m.marker("r")
+                .ends_with(" wrappers hit=9/10 scan hit=4/6 repo=r"),
+            "{}",
+            m.marker("r")
+        );
+    }
+
+    fn row(path: &str, key: u32) -> MemoRow<u32, u32> {
+        MemoRow {
+            path: path.to_string(),
+            key,
+            value: key * 10,
+        }
+    }
+
+    #[test]
+    fn the_wrapper_memos_count_and_clear() {
+        let mut m = BuildMemo::default();
+        m.wrappers.put(vec![row("a.ts", 1), row("b.ts", 2)]);
+        m.scan.put(vec![row("a.ts", 3)]);
+        assert_eq!(m.len(), 3, "memo_paths counts both");
+        m.retain(&HashSet::from(["a.ts"]));
+        assert_eq!(
+            (m.wrappers.len(), m.scan.len()),
+            (2, 1),
+            "rewritten by their stage, not by retain"
+        );
+        m.clear();
+        assert_eq!(m.len(), 0, "cleared with the other memos");
+        assert!(m.wrappers.take::<u32, u32>().is_none());
+    }
+
+    #[test]
+    fn a_stage_memo_of_another_type_reads_cold() {
+        let mut m = StageMemo::default();
+        m.put(vec![row("a", 1)]);
+        assert!(m.take::<u32, u8>().is_none());
+        assert_eq!(m.len(), 0, "and is gone");
+    }
+
+    #[test]
+    fn row_take_matches_by_position_then_by_path() {
+        let mut m = StageMemo::default();
+        m.put(vec![row("a", 1), row("b", 2), row("c", 3), row("d", 4)]);
+        let mut t = m.take::<u32, u32>().expect("rows");
+        assert_eq!(m.len(), 0, "taken out whole");
+        let got = |r: Option<MemoRow<u32, u32>>| r.map(|r| (r.path, r.key, r.value));
+        assert_eq!(got(t.row("a")), Some(("a".into(), 1, 10)), "positional");
+        // "b" was removed from the walk, "x" added: the path index.
+        assert_eq!(got(t.row("c")), Some(("c".into(), 3, 30)));
+        assert_eq!(got(t.row("x")), None);
+        assert_eq!(got(t.row("d")), Some(("d".into(), 4, 40)));
+        assert_eq!(got(t.row("a")), None, "a row is taken once");
+        // Out of order, too.
+        m.put(vec![row("a", 1), row("b", 2)]);
+        let mut t = m.take::<u32, u32>().expect("rows");
+        assert_eq!(got(t.row("b")), Some(("b".into(), 2, 20)));
+        assert_eq!(got(t.row("a")), Some(("a".into(), 1, 10)));
+        // Aligned: by index.
+        m.put(vec![row("a", 1), row("b", 2)]);
+        let mut t = m.take::<u32, u32>().expect("rows");
+        assert!(!t.aligned(&["a"]), "another length");
+        assert!(!t.aligned(&["b", "a"]), "another order");
+        assert!(t.aligned(&["a", "b"]));
+        assert_eq!(got(t.row_at(1)), Some(("b".into(), 2, 20)));
+        assert_eq!(got(t.row_at(1)), None, "taken once");
+    }
+
+    #[test]
+    fn parts_fp_separates_the_parts() {
+        assert_eq!(parts_fp(["ab", "c"]), parts_fp(["ab", "c"]));
+        assert_ne!(parts_fp(["ab", "c"]), parts_fp(["a", "bc"]));
+        assert_ne!(parts_fp(["a"]), parts_fp(["a", ""]));
+        assert_ne!(parts_fp([]), parts_fp([""]));
     }
 
     #[test]
