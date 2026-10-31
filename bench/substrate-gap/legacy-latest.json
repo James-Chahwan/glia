@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 481,
+  "fixtures": 485,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -472,6 +472,14 @@
         "CALLS": 1.0
       }
     },
+    "dart-export-barrels": {
+      "framework": "dart-export-barrels",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "dart-extensions-imports": {
       "framework": "dart-extensions-imports",
       "language": "dart",
@@ -650,6 +658,15 @@
       "framework": "elixir-docs",
       "language": "elixir",
       "per_category": {}
+    },
+    "elixir-graph-residuals": {
+      "framework": "elixir-graph-residuals",
+      "language": "elixir",
+      "per_category": {
+        "CALLS": 1.0,
+        "GRPC_CALLS": 1.0,
+        "HANDLED_BY": 1.0
+      }
     },
     "elixir-http": {
       "framework": "elixir-http",
@@ -1775,6 +1792,13 @@
         "DOCUMENTS": 1.0
       }
     },
+    "orchestrator-starts": {
+      "framework": "orchestrator-starts",
+      "language": "yaml",
+      "per_category": {
+        "INFRA_REFERENCES": 1.0
+      }
+    },
     "org-packages-cargo": {
       "framework": "org-packages",
       "language": "rust",
@@ -2614,6 +2638,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-close-out-receivers": {
+      "framework": "ts-close-out-receivers",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-concrete-override-dispatch": {
