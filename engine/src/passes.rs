@@ -2329,17 +2329,25 @@ struct TestsEdgeStats {
     /// DF.11: a module under a declared `[walk] tests` path, rule
     /// `declared_name` (counted here only, whatever affix it carries).
     declared: usize,
+    /// GD.36: test modules whose candidates the own-directory rule narrowed
+    /// ([`select_test_targets`]): at least one candidate in another
+    /// directory was dropped (a Go test keeps only its own directory's
+    /// candidates, even none).
+    own_dir: usize,
+    /// GD.36: Dart flutter drive hosts ([`is_drive_host`]) that paired
+    /// nothing by name.
+    drive_hosts: usize,
 }
 
 impl TestsEdgeStats {
-    /// `[tests] module TESTS edges: <n> (snake=<s> camel=<c> declared=<d>)`,
-    /// when `n > 0`.
+    /// `[tests] module TESTS edges: <n> (snake=<s> camel=<c> declared=<d>)
+    /// own_dir=<o> drive_hosts=<h>`, when `n + o + h > 0`.
     fn marker(&self) -> Option<String> {
         let n = self.snake + self.camel + self.declared;
-        (n > 0).then(|| {
+        (n + self.own_dir + self.drive_hosts > 0).then(|| {
             format!(
-                "[tests] module TESTS edges: {n} (snake={} camel={} declared={})",
-                self.snake, self.camel, self.declared
+                "[tests] module TESTS edges: {n} (snake={} camel={} declared={}) own_dir={} drive_hosts={}",
+                self.snake, self.camel, self.declared, self.own_dir, self.drive_hosts
             )
         })
     }
@@ -2637,6 +2645,48 @@ struct TestsModule {
     /// DF.11: its POSITION file matches its repo's declared `[walk] tests`
     /// paths (CJ.4): a test module whatever its name, and never a target.
     declared: bool,
+    /// GD.36: its repo; the own-directory rule compares `(repo, dir)`.
+    repo: RepoId,
+    /// GD.36: its POSITION file's directory (`""` at the repo root), `None`
+    /// when it has no POSITION.
+    dir: Option<String>,
+    /// GD.36: its POSITION file sits under a `test_driver/` directory (the
+    /// flutter drive layout): never a TESTS target.
+    driver_dir: bool,
+    /// GD.36: a Dart flutter drive host ([`is_drive_host`]).
+    drive_host: bool,
+}
+
+/// GD.36: the libraries a flutter drive host imports: the host side of a
+/// `flutter drive` run (`integrationDriver()` / `FlutterDriver.connect()`),
+/// which starts the app under test and tests no module of its own stem.
+const DRIVE_HOST_IMPORTS: [&str; 2] = [
+    "package:integration_test/integration_test_driver.dart",
+    "package:flutter_driver/flutter_driver.dart",
+];
+
+/// GD.36: is a Dart MODULE (`ext` `dart`) a flutter drive host: its file sits
+/// under a `test_driver/` directory, or its IMPORT_BINDINGS cell (FA.21: each
+/// external import's full specifier) lists one of [`DRIVE_HOST_IMPORTS`]?
+/// The IMPORTS cell names only the package (`integration_test`), which an
+/// on-device `integration_test.dart` suite imports too, so the specifier is
+/// read from IMPORT_BINDINGS.
+fn is_drive_host(ext: Option<&str>, driver_dir: bool, cells: &[Cell]) -> bool {
+    if ext != Some("dart") {
+        return false;
+    }
+    driver_dir
+        || cells
+            .iter()
+            .filter(|c| c.kind == cell_type::IMPORT_BINDINGS)
+            .any(|c| {
+                let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                    return false;
+                };
+                glia_code_domain::read_import_bindings(s)
+                    .iter()
+                    .any(|b| DRIVE_HOST_IMPORTS.contains(&b.spec.as_str()))
+            })
 }
 
 /// Pair each test MODULE with the module(s) it tests by stripping the test
@@ -2691,6 +2741,13 @@ fn tests_module_edges(
                     .find(|(repo, _)| *repo == n.repo)
                     .is_some_and(|(_, matcher)| matcher.matches(f))
             });
+            let dir = file
+                .as_deref()
+                .map(|f| f.rsplit_once('/').map_or("", |(d, _)| d).to_string());
+            let driver_dir = dir
+                .as_deref()
+                .is_some_and(|d| d.split('/').any(|seg| seg == "test_driver"));
+            let drive_host = is_drive_host(ext.as_deref(), driver_dir, &n.cells);
             module_info.push(TestsModule {
                 id: n.id,
                 key,
@@ -2698,6 +2755,10 @@ fn tests_module_edges(
                 graph,
                 ext,
                 declared,
+                repo: n.repo,
+                dir,
+                driver_dir,
+                drive_host,
             });
         }
     }
@@ -2713,6 +2774,12 @@ fn tests_module_edges(
         if stripped.is_empty() || (stripped == tail && !test.declared) {
             continue;
         }
+        // GD.36: a flutter drive host starts the app; it tests no module of
+        // its stem (DF.11's declared pairing keeps its own reading).
+        if test.drive_host && !test.declared {
+            stats.drive_hosts += 1;
+            continue;
+        }
         let Some(candidates) = modules_by_tail.get(stripped) else {
             continue;
         };
@@ -2720,7 +2787,7 @@ fn tests_module_edges(
         let candidates: Vec<&TestsModule> = candidates
             .iter()
             .filter_map(|&i| module_info.get(i))
-            .filter(|c| !c.declared)
+            .filter(|c| !c.declared && !c.driver_dir)
             .filter(|c| !test.declared || !is_test_module_qname(&c.key))
             .collect();
         let rule = if test.declared {
@@ -2728,7 +2795,11 @@ fn tests_module_edges(
         } else {
             "name_match"
         };
-        for to_id in select_test_targets(test, &candidates) {
+        let (targets, narrowed) = select_test_targets(test, &candidates);
+        if narrowed {
+            stats.own_dir += 1;
+        }
+        for to_id in targets {
             if test.declared {
                 stats.declared += 1;
             } else if snake {
@@ -2746,7 +2817,17 @@ fn tests_module_edges(
 }
 
 /// The modules a test module tests, among the same-tail `candidates`: the
-/// ones sharing the longest directory prefix with it, at most three.
+/// ones sharing the longest directory prefix with it, at most three. The
+/// second value is true when GD.36's own-directory rule dropped a candidate.
+///
+/// GD.36: when a candidate sits in the test's own directory (same repo, same
+/// POSITION directory), only those are kept, before the score and the cap:
+/// a root `server_test.go` pairs the root `server.go`, never three
+/// `examples/*/server.go` the cap happened to keep. A Go test (`.go`) only
+/// ever pairs its own directory's candidates (a `_test.go` file belongs to
+/// its directory's package), so with none it pairs nothing. A test with no
+/// own-directory candidate (`tests/test_foo.py` -> `src/pkg/foo.py`,
+/// `__tests__/foo.test.ts` -> `../foo.ts`) keeps the prefix score.
 ///
 /// LB.9b: a candidate named by its file name (`api::user.py` beside
 /// `api/user.ts`) is kept only when it sits in the test module's own graph:
@@ -2759,20 +2840,34 @@ fn tests_module_edges(
 /// breaks ties). A test language with no file-import order keeps them all
 /// (`FooTest.java` pairs `Foo.java` and `Foo.kt`). Every other pairing is
 /// unchanged.
-fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<NodeId> {
+fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> (Vec<NodeId>, bool) {
     const MAX_TEST_TARGETS: usize = 3;
     let test_parent: Vec<&str> = qname_parent_segments(&test.key);
-    let mut scored: Vec<(usize, &TestsModule)> = candidates
+    let mut pool: Vec<&TestsModule> = candidates
         .iter()
         .filter(|c| c.id != test.id)
         .filter(|c| !c.qualified || c.graph == test.graph)
+        .copied()
+        .collect();
+    let mut narrowed = false;
+    if let Some(dir) = test.dir.as_deref() {
+        let own = |c: &TestsModule| c.repo == test.repo && c.dir.as_deref() == Some(dir);
+        let go = test.ext.as_deref() == Some("go");
+        if go || pool.iter().any(|c| own(c)) {
+            let before = pool.len();
+            pool.retain(|c| own(c));
+            narrowed = pool.len() < before;
+        }
+    }
+    let mut scored: Vec<(usize, &TestsModule)> = pool
+        .into_iter()
         .map(|c| {
             let cand_parent = qname_parent_segments(&c.key);
-            (common_prefix_len(&test_parent, &cand_parent), *c)
+            (common_prefix_len(&test_parent, &cand_parent), c)
         })
         .collect();
     if scored.is_empty() {
-        return Vec::new();
+        return (Vec::new(), narrowed);
     }
     let max_score = scored.iter().map(|(s, _)| *s).max().unwrap_or(0);
     scored.retain(|(s, _)| *s == max_score);
@@ -2807,7 +2902,7 @@ fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<N
         kept.push(c.id);
     }
     kept.truncate(MAX_TEST_TARGETS);
-    kept
+    (kept, narrowed)
 }
 
 fn qname_parent_segments(qname: &str) -> Vec<&str> {
@@ -5496,7 +5591,9 @@ mod passes_tests {
             TestsEdgeStats {
                 snake: 2,
                 camel: 3,
-                declared: 0
+                declared: 0,
+                own_dir: 0,
+                drive_hosts: 0
             }
         );
     }
@@ -5581,12 +5678,16 @@ mod passes_tests {
             TestsEdgeStats {
                 snake: 2,
                 camel: 0,
-                declared: 3
+                declared: 3,
+                own_dir: 0,
+                drive_hosts: 0
             }
         );
         assert_eq!(
             stats.marker().as_deref(),
-            Some("[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3)")
+            Some(
+                "[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3) own_dir=0 drive_hosts=0"
+            )
         );
 
         // No matcher, or another repo's: the name rule alone.
@@ -5607,7 +5708,9 @@ mod passes_tests {
                 TestsEdgeStats {
                     snake: 4,
                     camel: 0,
-                    declared: 0
+                    declared: 0,
+                    own_dir: 0,
+                    drive_hosts: 0
                 }
             );
         }
@@ -5638,6 +5741,200 @@ mod passes_tests {
         );
     }
 
+    /// GD.36: one hand-built repo for the own-directory and drive-host
+    /// rules: MODULEs at their POSITION files, Dart ones optionally with an
+    /// IMPORT_BINDINGS cell naming their external import specifiers.
+    fn gd36_module(h: &mut Hand, q: &str, file: &str, imports: &[&str]) -> NodeId {
+        let mut cells = vec![Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":4}}"#
+            )),
+        }];
+        if !imports.is_empty() {
+            let rows: Vec<String> = imports
+                .iter()
+                .map(|spec| format!(r#"{{"spec":"{spec}","name":null,"alias":null,"line":0}}"#))
+                .collect();
+            cells.push(Cell {
+                kind: cell_type::IMPORT_BINDINGS,
+                payload: CellPayload::Json(format!("[{}]", rows.join(","))),
+            });
+        }
+        let tail = q.rsplit("::").next().unwrap_or(q).to_string();
+        h.add(node_kind::MODULE, &tail, q, cells)
+    }
+
+    fn gd36_pairs(edges: &[Edge]) -> Vec<(NodeId, NodeId)> {
+        let mut got: Vec<(NodeId, NodeId)> = edges
+            .iter()
+            .inspect(|e| assert_eq!(e.category, edge_category::TESTS))
+            .map(|e| (e.from, e.to))
+            .collect();
+        got.sort_by_key(|(f, t)| (f.0, t.0));
+        got
+    }
+
+    /// GD.36: a root `server_test.go` beside a root `server.go` pairs it
+    /// alone, never the three `examples/*/server.go` (before, every
+    /// candidate of a root test scored 0 and the 3-target cap kept the
+    /// examples in candidate order, cutting the root module).
+    #[test]
+    fn tests_own_directory_candidate_wins() {
+        let mut h = Hand::new("test://gd36/go-root");
+        // Candidate order puts the examples first, as the websocket walk does.
+        let echo = gd36_module(
+            &mut h,
+            "examples::echo::server",
+            "examples/echo/server.go",
+            &[],
+        );
+        let autobahn = gd36_module(
+            &mut h,
+            "examples::autobahn::server",
+            "examples/autobahn/server.go",
+            &[],
+        );
+        let pool = gd36_module(
+            &mut h,
+            "examples::bufferpool::server",
+            "examples/bufferpool/server.go",
+            &[],
+        );
+        let root = gd36_module(&mut h, "server", "server.go", &[]);
+        let test = gd36_module(&mut h, "server_test", "server_test.go", &[]);
+        let merged = MergedGraph::new(vec![h.graph()]);
+        let (edges, stats) = tests_module_edges(&merged, &[]);
+        assert_eq!(gd36_pairs(&edges), vec![(test, root)]);
+        for wrong in [echo, autobahn, pool] {
+            assert!(!gd36_pairs(&edges).contains(&(test, wrong)));
+        }
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 1,
+                camel: 0,
+                declared: 0,
+                own_dir: 1,
+                drive_hosts: 0
+            }
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[tests] module TESTS edges: 1 (snake=1 camel=0 declared=0) own_dir=1 drive_hosts=0"
+            )
+        );
+    }
+
+    /// GD.36: a Go `_test.go` belongs to its directory's package, so it
+    /// pairs only a same-stem module of its own directory: `pkg/a`'s
+    /// `store_test.go` pairs nothing when only `pkg/b/store.go` exists.
+    /// A Python `tests/test_foo.py` has no own-directory candidate and keeps
+    /// the prefix score (`src/pkg/foo.py`).
+    #[test]
+    fn tests_go_own_package_only_python_unchanged() {
+        let mut h = Hand::new("test://gd36/go-pkg");
+        let other = gd36_module(&mut h, "pkg::b::store", "pkg/b/store.go", &[]);
+        let go_test = gd36_module(&mut h, "pkg::a::store_test", "pkg/a/store_test.go", &[]);
+        let foo = gd36_module(&mut h, "src::pkg::foo", "src/pkg/foo.py", &[]);
+        let py_test = gd36_module(&mut h, "tests::test_foo", "tests/test_foo.py", &[]);
+        let merged = MergedGraph::new(vec![h.graph()]);
+        let (edges, stats) = tests_module_edges(&merged, &[]);
+        assert_eq!(gd36_pairs(&edges), vec![(py_test, foo)]);
+        assert!(!gd36_pairs(&edges).contains(&(go_test, other)));
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 1,
+                camel: 0,
+                declared: 0,
+                own_dir: 1,
+                drive_hosts: 0
+            }
+        );
+    }
+
+    /// GD.36: a flutter drive host pairs nothing (one under `test_driver/`,
+    /// one elsewhere importing `integration_test_driver.dart` or
+    /// `flutter_driver.dart`), and a `test_driver/` module is never a target
+    /// (`test/plugin_integration_test.dart` pairs no `test_driver/`
+    /// module). An on-device `integration_test/` suite importing
+    /// `integration_test.dart` and a `test/foo_test.dart` -> `lib/foo.dart`
+    /// pair as before.
+    #[test]
+    fn tests_flutter_drive_hosts_pair_nothing() {
+        const SUITE: &str = "package:integration_test/integration_test.dart";
+        const DRIVER: &str = "package:integration_test/integration_test_driver.dart";
+        const FLUTTER_DRIVER: &str = "package:flutter_driver/flutter_driver.dart";
+        let mut h = Hand::new("test://gd36/dart");
+        let lib = gd36_module(&mut h, "lib::plugin", "lib/plugin.dart", &[]);
+        let unit = gd36_module(&mut h, "test::plugin_test", "test/plugin_test.dart", &[]);
+        let suite = gd36_module(
+            &mut h,
+            "test_driver::plugin_integration",
+            "test_driver/plugin_integration.dart",
+            &[SUITE],
+        );
+        let host = gd36_module(
+            &mut h,
+            "test_driver::plugin_integration_test",
+            "test_driver/plugin_integration_test.dart",
+            &[DRIVER],
+        );
+        let elsewhere = gd36_module(
+            &mut h,
+            "test::plugin_integration_test",
+            "test/plugin_integration_test.dart",
+            &[],
+        );
+        let app = gd36_module(&mut h, "lib::app", "lib/app.dart", &[]);
+        let on_device = gd36_module(
+            &mut h,
+            "integration_test::app_test",
+            "integration_test/app_test.dart",
+            &[SUITE],
+        );
+        let perf = gd36_module(&mut h, "lib::perf", "lib/perf.dart", &[]);
+        let perf_host = gd36_module(
+            &mut h,
+            "integration_test::perf_test",
+            "integration_test/perf_test.dart",
+            &[DRIVER],
+        );
+        let shot = gd36_module(&mut h, "lib::shot", "lib/shot.dart", &[]);
+        let shot_host = gd36_module(
+            &mut h,
+            "integration_test::shot_test",
+            "integration_test/shot_test.dart",
+            &[FLUTTER_DRIVER],
+        );
+        let merged = MergedGraph::new(vec![h.graph()]);
+        let (edges, stats) = tests_module_edges(&merged, &[]);
+        let got = gd36_pairs(&edges);
+        let mut want = vec![(unit, lib), (on_device, app)];
+        want.sort_by_key(|(f, t)| (f.0, t.0));
+        assert_eq!(got, want);
+        for (from, to) in [
+            (host, suite),
+            (elsewhere, suite),
+            (perf_host, perf),
+            (shot_host, shot),
+        ] {
+            assert!(!got.contains(&(from, to)));
+        }
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 2,
+                camel: 0,
+                declared: 0,
+                own_dir: 0,
+                drive_hosts: 3
+            }
+        );
+    }
+
     /// LB.13: a test pairs the one same-stem sibling its language loads; a
     /// test language with no file-import order pairs every sibling.
     #[test]
@@ -5652,12 +5949,17 @@ mod passes_tests {
             graph: 0,
             ext: Some(ext.to_string()),
             declared: false,
+            repo,
+            // No POSITION: GD.36's own-directory rule reads nothing here.
+            dir: None,
+            driver_dir: false,
+            drive_host: false,
         };
         let ts = module("src::util.ts", "src::util", true, "ts");
         let js = module("src::util.js", "src::util", true, "js");
         let other = module("lib::util", "lib::util", false, "ts");
         let candidates = [&js, &ts, &other];
-        let pick = |test: &TestsModule| select_test_targets(test, &candidates);
+        let pick = |test: &TestsModule| select_test_targets(test, &candidates).0;
         assert_eq!(
             pick(&module("src::util.test", "src::util.test", false, "ts")),
             [ts.id]

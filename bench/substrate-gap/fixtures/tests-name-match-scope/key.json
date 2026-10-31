@@ -1,0 +1,27 @@
+{
+  "framework": "tests-name-match-scope",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "go/server", "exact": true, "note": "the root server.go module the root test exercises"},
+    {"kind": "MODULE", "name": "go/server_test", "exact": true, "note": "the root Go test file"}
+  ],
+  "expect_edges": [
+    {"from": "go/server_test", "to": "go/server", "category": "TESTS", "exact": true,
+     "note": "GD.36: a test module's own-directory candidate wins, and a Go _test.go pairs only its own package directory. Before GD.36 every candidate of a root test scored 0 on the common-prefix rule and the 3-target cap kept the three examples/*/server modules in candidate order, cutting this one (websocket@dcea2f088ce1 server_test.go:1, edge-audit sample 0ec92a9cdac28545)."},
+    {"from": "dart/test/plugin_test", "to": "dart/lib/plugin", "category": "TESTS", "exact": true,
+     "note": "a Dart unit test in test/ still pairs lib/ by the prefix score: no own-directory candidate, unchanged by GD.36"}
+  ],
+  "forbid": [
+    {"from": "go/server_test", "to": "go/examples/echo/server", "category": "TESTS",
+     "note": "GD.36: a root server_test.go never pairs an examples/ program of its stem"},
+    {"from": "go/server_test", "to": "go/examples/autobahn/server", "category": "TESTS",
+     "note": "GD.36: as above"},
+    {"from": "go/server_test", "to": "go/examples/bufferpool/server", "category": "TESTS",
+     "note": "GD.36: as above"},
+    {"from": "dart/test_driver/plugin_integration_test", "to": "dart/test_driver/plugin_integration", "category": "TESTS",
+     "note": "GD.36: a flutter drive host (under test_driver/, `integrationDriver()` from package:integration_test/integration_test_driver.dart) starts the app and tests no module; a test_driver/ module is never a target (samples@291ba126bfc1 federated_plugin_web test_driver, edge-audit sample 254a1809d90e56cd)"}
+  ],
+  "note": "GD.36, TESTS name_match scope (edge-precision-0.5.4 T1). Two trees: go/ (a root package with a root test, three examples/ programs of the same stem) and dart/ (a flutter plugin with a unit test and a test_driver/ drive host beside its integration suite)."
+}
