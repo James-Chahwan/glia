@@ -24,12 +24,20 @@
 //! string literal (the gate sees a real mechanism; the guard hides the
 //! literal).
 //!
+//! [`self_graph_has_build_pipeline`] (GD.25) reads the same build: every
+//! function of the engine's build pipeline ([`PIPELINE`]) is a FUNCTION node
+//! located under `engine/src/build/`. A source directory named `build` is
+//! walked, not collapsed to a build-output REGION, unless it sits directly
+//! under the repo root or a project root (`walk_gating::gate_dir_in`).
+//!
 //! fired_on, on stderr: `[self-scan] mechanism_nodes=<n> allowlisted=<a>
-//! phantoms=<p> skipped_roots=<k> ms=<t>`.
+//! phantoms=<p> skipped_roots=<k> ms=<t>` and `[self-scan] pipeline
+//! functions=<found>/<expected>`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use glia_code_domain::evidence::{Evidence, locate};
@@ -367,38 +375,110 @@ fn failure(v: &Verdict) -> Option<String> {
     Some(msg)
 }
 
+/// One build of glia's own tracked tree, shared by the tests that read it.
+struct SelfBuild {
+    result: GenerateResult,
+    /// Distinct shallowest directories the [`SKIP`] patterns matched.
+    skipped: usize,
+    /// When the copy started, for the marker's `ms=`.
+    start: Instant,
+}
+
+/// Copies the tracked tree (`git ls-files`) into a temp dir with the
+/// [`SKIP`] overlay and builds it, once per test binary run.
+fn self_build() -> &'static SelfBuild {
+    static BUILD: OnceLock<SelfBuild> = OnceLock::new();
+    BUILD.get_or_init(|| {
+        let start = Instant::now();
+        let tree = TempTree::new("tree");
+        let root = repo_root();
+        let copied = copy_tracked(&root, &tree.0);
+        // The scratch overlay: glia's own (copied) plus the fixture skips.
+        let overlay = tree.0.join(".glia/overlay.toml");
+        let own = std::fs::read_to_string(&overlay).unwrap_or_else(|_| "version = 1\n".to_string());
+        assert!(
+            !own.lines().any(|l| l.trim() == "[walk]"),
+            "glia's .glia/overlay.toml declares [walk]; merge SKIP into it here"
+        );
+        let skip: Vec<String> = SKIP.iter().map(|s| s.to_string()).collect();
+        let skip_line = skip
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::create_dir_all(overlay.parent().expect("overlay dir")).expect("create .glia");
+        std::fs::write(&overlay, format!("{own}\n[walk]\nskip = [{skip_line}]\n"))
+            .expect("write the scratch overlay");
+        let globs = PathGlobs::new(&skip).expect("the skip patterns compile");
+        let skipped = skipped_roots(&copied, &globs);
+        let result = generate_one(tree.path()).expect("glia's own tree builds");
+        SelfBuild {
+            result,
+            skipped,
+            start,
+        }
+    })
+}
+
 #[test]
 fn self_scan_has_no_phantoms() {
-    let start = Instant::now();
-    let tree = TempTree::new("tree");
-    let root = repo_root();
-    let copied = copy_tracked(&root, &tree.0);
-    // The scratch overlay: glia's own (copied) plus the fixture skips.
-    let overlay = tree.0.join(".glia/overlay.toml");
-    let own = std::fs::read_to_string(&overlay).unwrap_or_else(|_| "version = 1\n".to_string());
-    assert!(
-        !own.lines().any(|l| l.trim() == "[walk]"),
-        "glia's .glia/overlay.toml declares [walk]; merge SKIP into it here"
-    );
-    let skip: Vec<String> = SKIP.iter().map(|s| s.to_string()).collect();
-    let skip_line = skip
-        .iter()
-        .map(|s| format!("{s:?}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    std::fs::create_dir_all(overlay.parent().expect("overlay dir")).expect("create .glia");
-    std::fs::write(&overlay, format!("{own}\n[walk]\nskip = [{skip_line}]\n"))
-        .expect("write the scratch overlay");
-    let globs = PathGlobs::new(&skip).expect("the skip patterns compile");
-    let skipped = skipped_roots(&copied, &globs);
-
-    let r = generate_one(tree.path()).expect("glia's own tree builds");
-    let (minted, nodes) = mechanisms(&r);
+    let b = self_build();
+    let (minted, nodes) = mechanisms(&b.result);
     let v = check(&minted, &allowlist());
-    report(&minted, nodes, &v, skipped, start);
+    report(&minted, nodes, &v, b.skipped, b.start);
     if let Some(msg) = failure(&v) {
         panic!("{msg}");
     }
+}
+
+/// The engine's build pipeline (engine/src/build/mod.rs and assemble.rs):
+/// the functions GD.25's probe found missing from glia's self-graph while
+/// `engine/src/build/` was collapsed as build output.
+const PIPELINE: [&str; 5] = [
+    "aux_graphs",
+    "assemble_many",
+    "build_graphs_for_repo",
+    "finish_build",
+    "parse_and_graft",
+];
+
+#[test]
+fn self_graph_has_build_pipeline() {
+    let r = &self_build().result;
+    let mut found: BTreeSet<&str> = BTreeSet::new();
+    for graph in &r.merged.graphs {
+        for n in &graph.nodes {
+            if graph.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::FUNCTION) {
+                continue;
+            }
+            let Some(qname) = graph.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let name = qname.rsplit("::").next().unwrap_or(qname.as_str());
+            let Some(want) = PIPELINE.iter().find(|p| **p == name) else {
+                continue;
+            };
+            let in_build =
+                locate(&n.cells).is_some_and(|(file, _)| file.starts_with("engine/src/build/"));
+            if in_build {
+                found.insert(want);
+            }
+        }
+    }
+    eprintln!(
+        "[self-scan] pipeline functions={}/{}",
+        found.len(),
+        PIPELINE.len()
+    );
+    let missing: Vec<&str> = PIPELINE
+        .iter()
+        .copied()
+        .filter(|p| !found.contains(p))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "glia's self-graph has no FUNCTION node under engine/src/build/ for: {missing:?}"
+    );
 }
 
 #[test]

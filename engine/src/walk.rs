@@ -582,7 +582,7 @@ pub(crate) fn read_walk(
     }
     // Attributable collapse tally. Gated on non-zero so a region-free repo stays
     // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
-    if plan.counts.total() > 0 {
+    if plan.counts.total() > 0 || plan.counts.build_source > 0 {
         eprintln!("[walk] {}", plan.counts.marker());
     }
     // FD.78 fired_on: `grep '^\[walk\] symlinks root='`, gated on non-zero.
@@ -908,14 +908,17 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
             // one anchor and do NOT descend — categorise the region instead of
             // dropping it or emitting a node per file inside. The rules live in
             // `code_domain::walk_gating` so `store::is_gmap_stale` scans exactly
-            // this tree. (glia-v2 G1/G2/G10, A8.1)
-            let gate = walk_gating::gate_dir(
+            // this tree. (glia-v2 G1/G2/G10, A8.1) A `build` / `out` collapses
+            // only directly under the root or a project root; nested in a
+            // source tree it is walked, counted `build_source=` (GD.25).
+            let gate = walk_gating::gate_dir_in(
+                Some(root),
                 &path,
                 &name,
                 ignores.is_ignored(&path, true),
                 ignores.is_excluded(&path, true),
             );
-            plan.counts.record(gate);
+            plan.counts.record_named(gate, &name);
             if let Some(provenance) = gate.collapse() {
                 let rel = path
                     .strip_prefix(root)

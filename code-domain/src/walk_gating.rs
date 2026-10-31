@@ -132,15 +132,65 @@ pub fn is_hard_skip(name: &str) -> bool {
 
 /// Directories always collapsed regardless of `.gitignore` — dependency trees
 /// and conventional build output. `None` for an ordinary source directory.
+///
+/// `build` and `out` are absent: they are as often a source package
+/// (`engine/src/build/`, `src/commands/app/build/`) as build output, so
+/// [`gate_dir_in`] collapses them only where build output lives
+/// ([`is_build_output_home`]). See [`is_build_or_out`].
 pub fn always_region(name: &str) -> Option<Collapse> {
     match name {
         "node_modules" | "vendor" | "bower_components" | ".venv" | "site-packages" => {
             Some(Collapse::Vendored)
         }
-        "target" | "dist" | "build" | "out" | "__pycache__" | ".cache" | ".next" | ".nuxt"
-        | ".angular" | "coverage" | "TestResults" => Some(Collapse::BuildOutput),
+        "target" | "dist" | "__pycache__" | ".cache" | ".next" | ".nuxt" | ".angular"
+        | "coverage" | "TestResults" => Some(Collapse::BuildOutput),
         _ => None,
     }
+}
+
+/// The two directory names that are build output only by where they sit
+/// (GD.25): `build` and `out`.
+pub fn is_build_or_out(name: &str) -> bool {
+    matches!(name, "build" | "out")
+}
+
+/// True when a `build` / `out` directory `dir` sits where a toolchain writes
+/// its output: directly under the walk's `root` (when the caller knows it), or
+/// directly under a project root, a directory holding a manifest
+/// ([`crate::project_roots::MANIFESTS`] by name, [`crate::project_roots::MANIFEST_EXTS`]
+/// by extension: `package.json`, `Cargo.toml`, `go.mod`, `pom.xml`,
+/// `build.gradle(.kts)`, `CMakeLists.txt`, `pyproject.toml`, `*.csproj`, ..)
+/// or a `.git` entry (a checkout's top). Name-level only, never a manifest's
+/// text, so the walk, the store's freshness scan and `glia health` agree.
+///
+/// One `read_dir` of the parent, paid only for a directory named `build` /
+/// `out`. On an IO error: no evidence, so the directory is walked (a
+/// gitignored one is still gated by the matcher).
+pub fn is_build_output_home(root: Option<&Path>, dir: &Path) -> bool {
+    let Some(parent) = dir.parent() else {
+        return true;
+    };
+    if root.is_some_and(|r| r == parent) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            return true;
+        }
+        if entry.file_type().is_ok_and(|t| t.is_file()) {
+            names.push(name);
+        }
+    }
+    names.sort_unstable();
+    crate::project_roots::MANIFESTS
+        .iter()
+        .any(|(base, _)| names.iter().any(|n| n == base))
+        || crate::project_roots::detect(&names).is_some()
 }
 
 /// Git's `.gitignore` semantics for the repo walk: one matcher per directory
@@ -177,6 +227,10 @@ pub struct IgnoreStack {
     /// The root-anchored `[walk] skip` matcher, `None` without one. One `Arc`,
     /// so the per-directory clones in the store's scan stay pointer copies.
     config: Option<Arc<ConfigSkip>>,
+    /// The walk root given to [`with_config`](Self::with_config), spelled as
+    /// the walker spells the paths below it; `None` for a default stack.
+    /// [`dir_is_gated`] hands it to [`gate_dir_in`] (GD.25).
+    root: Option<PathBuf>,
     /// `.gitignore` files successfully loaded.
     pub files: usize,
     /// Ignore + whitelist globs across every loaded file.
@@ -212,7 +266,10 @@ impl IgnoreStack {
     /// with the same `add_line`, so none fails here. A matcher that fails to
     /// build is reported and leaves the stack without config skips.
     pub fn with_config(root: &Path, walk: &crate::glia_config::WalkConfig) -> Self {
-        let mut stack = Self::default();
+        let mut stack = Self {
+            root: Some(root.to_path_buf()),
+            ..Self::default()
+        };
         if walk.skip.is_empty() {
             return stack;
         }
@@ -247,8 +304,14 @@ impl IgnoreStack {
     pub fn for_repo(root: &Path) -> Self {
         match crate::glia_config::load(root) {
             Some(loaded) => Self::with_config(root, &loaded.config.walk),
-            None => Self::default(),
+            None => Self::with_config(root, &crate::glia_config::WalkConfig::default()),
         }
+    }
+
+    /// The walk root this stack was built for ([`with_config`](Self::with_config)),
+    /// `None` for a default stack.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// True when a user `[walk] skip` pattern matches `path` (the child path
@@ -798,7 +861,27 @@ fn scp_split(url: &str) -> Option<(&str, &str)> {
 /// `ignored` is the caller's `.gitignore` verdict for this directory
 /// ([`IgnoreStack::is_ignored`] with `is_dir = true`); `excluded` its user
 /// `[walk] skip` verdict ([`IgnoreStack::is_excluded`], LF.3a).
+///
+/// [`gate_dir_in`] with no walk root: a `build` / `out` directory collapses
+/// only beside a manifest or a `.git` ([`is_build_output_home`]).
 pub fn gate_dir(dir: &Path, name: &str, ignored: bool, excluded: bool) -> Gate {
+    gate_dir_in(None, dir, name, ignored, excluded)
+}
+
+/// [`gate_dir`] knowing the walk's `root` (spelled as the walker spells the
+/// paths below it), so a `build` / `out` directly under the root collapses
+/// even when the root holds no manifest. A `build` / `out` anywhere else is
+/// always-region only directly under a project root; nested in a source tree
+/// it falls through to the `.gitignore`, dotnet and bundle rules and is
+/// otherwise walked (GD.25). [`dir_is_gated`] reads the root from its
+/// [`IgnoreStack`].
+pub fn gate_dir_in(
+    root: Option<&Path>,
+    dir: &Path,
+    name: &str,
+    ignored: bool,
+    excluded: bool,
+) -> Gate {
     if is_hard_skip(name) {
         return Gate::HardSkip;
     }
@@ -815,6 +898,9 @@ pub fn gate_dir(dir: &Path, name: &str, ignored: bool, excluded: bool) -> Gate {
     }
     if let Some(c) = always_region(name) {
         return Gate::Always(c);
+    }
+    if is_build_or_out(name) && is_build_output_home(root, dir) {
+        return Gate::Always(Collapse::BuildOutput);
     }
     if ignored {
         return Gate::Ignored(Collapse::BuildOutput);
@@ -833,7 +919,8 @@ pub fn gate_dir(dir: &Path, name: &str, ignored: bool, excluded: bool) -> Gate {
 /// (a hard-skipped directory produces no node at all, so not even its own mtime
 /// is observable), which is why that case is NOT folded in here.
 pub fn dir_is_gated(dir: &Path, name: &str, ignores: &IgnoreStack) -> bool {
-    gate_dir(
+    gate_dir_in(
+        ignores.root(),
         dir,
         name,
         ignores.is_ignored(dir, true),
@@ -853,9 +940,21 @@ pub struct GateCounts {
     pub nested: usize,
     /// User `[walk] skip` collapses (LF.3a).
     pub config: usize,
+    /// Directories named `build` / `out` walked as source, not collapsed
+    /// (GD.25). Not a collapse, so not in [`total`](Self::total).
+    pub build_source: usize,
 }
 
 impl GateCounts {
+    /// [`record`](Self::record), also counting a `build` / `out` directory
+    /// the gate walked into as [`build_source`](Self::build_source).
+    pub fn record_named(&mut self, g: Gate, name: &str) {
+        if g == Gate::Descend && is_build_or_out(name) {
+            self.build_source += 1;
+        }
+        self.record(g);
+    }
+
     pub fn record(&mut self, g: Gate) {
         match g {
             Gate::Descend | Gate::HardSkip => {}
@@ -872,17 +971,19 @@ impl GateCounts {
         self.always + self.gitignore + self.bundle + self.dotnet + self.nested + self.config
     }
 
-    /// `collapsed 5 regions (always=2 gitignore=1 bundle=0 dotnet=1 nested=1 config=0)`
+    /// `collapsed 5 regions (always=2 gitignore=1 bundle=0 dotnet=1 nested=1 config=0
+    /// build_source=3)`
     pub fn marker(&self) -> String {
         format!(
-            "collapsed {} regions (always={} gitignore={} bundle={} dotnet={} nested={} config={})",
+            "collapsed {} regions (always={} gitignore={} bundle={} dotnet={} nested={} config={} build_source={})",
             self.total(),
             self.always,
             self.gitignore,
             self.bundle,
             self.dotnet,
             self.nested,
-            self.config
+            self.config,
+            self.build_source
         )
     }
 }
@@ -1115,8 +1216,92 @@ mod tests {
         st.push_dir(&root);
         assert!(dir_is_gated(&root.join("generated"), "generated", &st));
         assert!(!dir_is_gated(&root.join("src/generated"), "generated", &st));
-        // always_region still outranks the matcher: `build` collapses anywhere.
-        assert!(dir_is_gated(&root.join("src/build"), "build", &st));
+        // GD.25: a `build` nested in a source tree is walked (it was
+        // always-region by name, `src/build` gated, before).
+        std::fs::create_dir_all(root.join("src/build")).unwrap();
+        assert!(!dir_is_gated(&root.join("src/build"), "build", &st));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GD.25: `build` / `out` collapse only where build output lives.
+    #[test]
+    fn build_and_out_collapse_only_at_a_project_or_repo_root() {
+        let root = tmp("build_home");
+        for d in [
+            "build",
+            "out",
+            "src/build",
+            "src/out",
+            "web/build",
+            "web/out",
+            "lib/gen/build",
+            "svc/build",
+            "dotnet/out",
+        ] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("src/build/x.rs"), "pub fn x() {}\n").unwrap();
+        std::fs::write(root.join("web/package.json"), "{}\n").unwrap();
+        std::fs::write(root.join("dotnet/App.csproj"), "<Project/>\n").unwrap();
+        std::fs::write(root.join("lib/.gitignore"), "build/\n").unwrap();
+        let walk = crate::glia_config::WalkConfig::default();
+        let mut st = IgnoreStack::with_config(&root, &walk);
+        st.push_dir(&root);
+        assert_eq!(st.root(), Some(root.as_path()));
+        let gate = |st: &IgnoreStack, rel: &str| {
+            let dir = root.join(rel);
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            gate_dir_in(
+                st.root(),
+                &dir,
+                &name,
+                st.is_ignored(&dir, true),
+                st.is_excluded(&dir, true),
+            )
+        };
+        // The repo root's own `build/` / `out/` collapse, manifest or not.
+        assert_eq!(gate(&st, "build"), Gate::Always(Collapse::BuildOutput));
+        assert_eq!(gate(&st, "out"), Gate::Always(Collapse::BuildOutput));
+        assert!(dir_is_gated(&root.join("build"), "build", &st));
+        // Nested in a source tree: walked.
+        assert_eq!(gate(&st, "src/build"), Gate::Descend);
+        assert_eq!(gate(&st, "src/out"), Gate::Descend);
+        assert!(!dir_is_gated(&root.join("src/build"), "build", &st));
+        // Beside a manifest (a project root): collapsed.
+        assert_eq!(gate(&st, "web/build"), Gate::Always(Collapse::BuildOutput));
+        assert_eq!(gate(&st, "web/out"), Gate::Always(Collapse::BuildOutput));
+        assert_eq!(gate(&st, "dotnet/out"), Gate::Always(Collapse::BuildOutput));
+        // No manifest beside it, but gitignored: the matcher still gates it.
+        st.push_dir(&root.join("lib"));
+        assert_eq!(
+            gate(&st, "lib/gen/build"),
+            Gate::Ignored(Collapse::BuildOutput)
+        );
+        st.pop();
+        assert_eq!(gate(&st, "svc/build"), Gate::Descend);
+        // Without a root, the repo-root clause is gone but a `.git` beside
+        // the directory still marks a checkout's top.
+        assert_eq!(
+            gate_dir(&root.join("build"), "build", false, false),
+            Gate::Descend
+        );
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert_eq!(
+            gate_dir(&root.join("build"), "build", false, false),
+            Gate::Always(Collapse::BuildOutput)
+        );
+        // Other always-region names are unchanged, wherever they sit.
+        assert_eq!(always_region("dist"), Some(Collapse::BuildOutput));
+        assert_eq!(always_region("target"), Some(Collapse::BuildOutput));
+        assert_eq!(always_region("build"), None);
+        assert_eq!(always_region("out"), None);
+        // The marker counts the walked ones.
+        let mut c = GateCounts::default();
+        c.record_named(Gate::Descend, "build");
+        c.record_named(Gate::Descend, "src");
+        c.record_named(Gate::Always(Collapse::BuildOutput), "out");
+        assert_eq!(c.build_source, 1);
+        assert_eq!(c.total(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1130,12 +1315,12 @@ mod tests {
         assert_eq!(c.total(), 2);
         assert_eq!(
             c.marker(),
-            "collapsed 2 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=0)"
+            "collapsed 2 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=0 build_source=0)"
         );
         c.record(Gate::Config(Collapse::Excluded));
         assert_eq!(
             c.marker(),
-            "collapsed 3 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=1)"
+            "collapsed 3 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=1 build_source=0)"
         );
         assert_eq!(Collapse::Excluded.provenance(), "excluded");
     }
