@@ -12,6 +12,7 @@ import { AuthService } from '../core/auth.service';
     @for (auth of sessions; track $index) {
       <button (click)="auth.stop()">Stop</button>
     }
+    <span [class.dark]="theme.isDark">{{ 'theme.isLight' }}</span>
   `,
 })
 export class ProfileCardComponent {

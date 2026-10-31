@@ -43,16 +43,29 @@
 //! node, so the LB.8 ordering rule holds wherever it runs; it runs after the
 //! RPC needles, so no DC.4 `NeedleKey` input moves.
 //!
+//! GD.24: a template's one-hop member read with no call (`{{ store.isReady
+//! }}`) is a `NavFact::MemberRead` on the CLASS (receiver `this.store`),
+//! recorded on the component file's parse's nav, at the `templateUrl` row as
+//! the receiver CallSites are, for the graph's DT.5k member-read pass. An
+//! inline template's and host binding's reads are recorded here too, at the
+//! component file's own rows: a private stopgap, since the per-file caller of
+//! `bind_inline` (`engine/src/extract.rs`) records its edges and CallSites but
+//! not its member reads (removal path: once it records
+//! `TemplateBinding::member_reads` on `fp.nav`, the inline pass below and
+//! `angular_template::inline_member_reads` go). Both are re-read every build,
+//! so a cached parse and a clean one carry the same facts.
+//!
 //! fired_on, on stderr, once per repo where a component names a templateUrl:
 //! `[angular-template] external repo=<label> components=<c> templates=<t>
 //! missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x>
-//! receivers=<v>`. Decorator-bound members are the component file's own
-//! text, bound per file by `bind_inline` (its `decorated=` field).
+//! receivers=<v> member_reads=<r>`. Decorator-bound members are the component
+//! file's own text, bound per file by `bind_inline` (its `decorated=` field),
+//! and so are an inline template's member reads (its `member_reads=`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::evidence;
-use glia_code_domain::{FileParse, GRAPH_TYPE, edge_category, node_kind};
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, NavFact, edge_category, node_kind};
 use glia_code_extractors::angular;
 use glia_code_extractors::angular_template::{self, BindSite};
 use glia_core::{NodeId, RepoId};
@@ -80,11 +93,13 @@ pub(super) struct TemplateUrlStats {
     pub(super) no_class: usize,
     /// DT.5c: receiver CallSites the templates added to the parses.
     pub(super) receivers: usize,
+    /// GD.24: `NavFact::MemberRead`s the `templateUrl` templates added.
+    pub(super) member_reads: usize,
 }
 
 impl TemplateUrlStats {
     /// fired_on marker, once per repo with a `templateUrl` component:
-    ///   `[angular-template] external repo=<label> components=<c> templates=<t> missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x> receivers=<v>`
+    ///   `[angular-template] external repo=<label> components=<c> templates=<t> missing=<m> calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x> receivers=<v> member_reads=<r>`
     pub(super) fn report(&self, repo_label: &str) {
         if let Some(line) = self.marker(repo_label) {
             eprintln!("{line}");
@@ -94,7 +109,7 @@ impl TemplateUrlStats {
     fn marker(&self, repo_label: &str) -> Option<String> {
         (self.components > 0).then(|| {
             format!(
-                "[angular-template] external repo={repo_label} components={} templates={} missing={} calls={} uses={} unbound={} shadowed={} no_class={} receivers={}",
+                "[angular-template] external repo={repo_label} components={} templates={} missing={} calls={} uses={} unbound={} shadowed={} no_class={} receivers={} member_reads={}",
                 self.components,
                 self.templates,
                 self.missing,
@@ -103,7 +118,8 @@ impl TemplateUrlStats {
                 self.unbound,
                 self.shadowed,
                 self.no_class,
-                self.receivers
+                self.receivers,
+                self.member_reads
             )
         })
     }
@@ -121,9 +137,13 @@ pub(super) fn graft_template_urls(
     parse_errors: &mut Vec<String>,
 ) -> TemplateUrlStats {
     let mut stats = TemplateUrlStats::default();
+    // GD.24: an inline-template component file is read too, for its member
+    // reads (the module doc's stopgap).
     let is_component_file = |path: &str, source: &str| {
         detect_language(path).is_some_and(|lang| TS_FAMILY.contains(&lang))
-            && source.contains("templateUrl")
+            && (source.contains("templateUrl")
+                || source.contains("@Component(")
+                || source.contains("@Directive("))
     };
     if !files.iter().any(|(p, s)| is_component_file(p, s)) {
         return stats;
@@ -157,6 +177,17 @@ pub(super) fn graft_template_urls(
         };
         let module_qname = modules.module_qname(path);
         let candidates = by_module.get(&modules.module_id(path, repo).0);
+        if source.contains("@Component(") || source.contains("@Directive(") {
+            record_inline_reads(
+                parses_by_lang,
+                candidates,
+                source,
+                path,
+                &module_qname,
+                repo,
+                parse_errors,
+            );
+        }
         for dc in decorated {
             let Some((url, url_row)) = &dc.template_url else {
                 continue;
@@ -239,10 +270,66 @@ pub(super) fn graft_template_urls(
                     fp.calls.push(c);
                 }
             }
+            for (scope, fact) in binding.member_reads {
+                if record_read(&mut fp.nav, scope, fact) {
+                    stats.member_reads += 1;
+                }
+            }
         }
     }
     stats.templates = read.len();
     stats
+}
+
+/// Record `fact` on `scope` unless the nav already holds it; true when added.
+fn record_read(nav: &mut CodeNav, scope: NodeId, fact: NavFact) -> bool {
+    if nav.nav_facts.get(&scope).is_some_and(|f| f.contains(&fact)) {
+        return false;
+    }
+    nav.record_fact(scope, fact);
+    true
+}
+
+/// GD.24's stopgap (the module doc): record the member reads of `source`'s
+/// inline templates and host bindings on the parse among `candidates` that
+/// holds each reading CLASS. A panic while reading is caught, quietly, and
+/// recorded in `parse_errors`.
+fn record_inline_reads(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    candidates: Option<&Vec<(&'static str, usize)>>,
+    source: &str,
+    path: &str,
+    module_qname: &str,
+    repo: RepoId,
+    parse_errors: &mut Vec<String>,
+) {
+    for (lang, slot) in candidates.into_iter().flatten().copied() {
+        let Some(fp) = parses_by_lang.get_mut(lang).and_then(|p| p.get_mut(slot)) else {
+            continue;
+        };
+        let reads = crate::parallel::quiet(|| {
+            angular_template::inline_member_reads(
+                source,
+                path,
+                &fp.nodes,
+                &fp.nav,
+                module_qname,
+                repo,
+            )
+        });
+        let Ok(reads) = reads else {
+            parse_errors.push(format!("{path}: PANIC (angular inline member reads)"));
+            return;
+        };
+        if reads.is_empty() {
+            continue;
+        }
+        for (scope, fact) in reads {
+            record_read(&mut fp.nav, scope, fact);
+        }
+        // One parse holds the file's classes: the first that reads any.
+        return;
+    }
 }
 
 /// The repo-relative path a component at `component` names with `url`: its
@@ -313,7 +400,7 @@ mod tests {
         assert_eq!(
             s.marker("web").as_deref(),
             Some(
-                "[angular-template] external repo=web components=2 templates=2 missing=0 calls=5 uses=1 unbound=0 shadowed=0 no_class=0 receivers=0"
+                "[angular-template] external repo=web components=2 templates=2 missing=0 calls=5 uses=1 unbound=0 shadowed=0 no_class=0 receivers=0 member_reads=0"
             )
         );
     }

@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "DT.5c (T5, Kina's and quokka-stack's shapes): a template calls an injected service through a component member - an `inject(ThemeService)` field, a `public auth: AuthService` constructor property - and Angular invokes decorator-bound members (`@HostListener`, a `@HostBinding` getter, an `@Input()` setter on its own line and on the decorator's line, a `@ViewChild` setter behind `private`). Each `<member>.<method>(..)` is a CallSite from the component CLASS with receiver `this.<member>`, which the graph's receiver-type branch binds once a type caller with a `this.` receiver is its own field scope (graph::calls::receiver_type); each decorator-bound METHOD is a USES from its class at the decorator's row. A two-hop chain (`auth.session.end()`) and a call on the `@for` loop variable that shares a member's name (`auth.stop()`) bind nothing. HEAD 5dfe4c72 (debug CLI + the glia-leap wheel): CALLS 0/2, USES 0/5, FORBID VIOLATIONS 0; 14 dead_symbol rows, ThemeService::toggle, AuthService::logout and the five decorator-bound SheetComponent / QrComponent members among them.",
+  "note": "DT.5c (T5, Kina's and quokka-stack's shapes): a template calls an injected service through a component member - an `inject(ThemeService)` field, a `public auth: AuthService` constructor property - and Angular invokes decorator-bound members (`@HostListener`, a `@HostBinding` getter, an `@Input()` setter on its own line and on the decorator's line, a `@ViewChild` setter behind `private`). Each `<member>.<method>(..)` is a CallSite from the component CLASS with receiver `this.<member>`, which the graph's receiver-type branch binds once a type caller with a `this.` receiver is its own field scope (graph::calls::receiver_type); each decorator-bound METHOD is a USES from its class at the decorator's row. A two-hop chain (`auth.session.end()`) and a call on the `@for` loop variable that shares a member's name (`auth.stop()`) bind nothing. HEAD 5dfe4c72 (debug CLI + the glia-leap wheel): CALLS 0/2, USES 0/5, FORBID VIOLATIONS 0; 14 dead_symbol rows, ThemeService::toggle, AuthService::logout and the five decorator-bound SheetComponent / QrComponent members among them. GD.24: a template read of a member's getter with no call (`[class.dark]=\"theme.isDark\"`) is a NavFact::MemberRead { receiver: \"this.theme\" } on the CLASS, bound by the graph's DT.5k member-read pass as CALLS rule receiver_accessor_read; a member name inside a template string literal (`{{ 'theme.isLight' }}`) reads nothing.",
   "expect_edges": [
     {
       "from": "ProfileCardComponent",
@@ -17,6 +17,12 @@
       "to": "AuthService::logout",
       "category": "CALLS",
       "note": "(click)=\"auth.logout()\" on a constructor property"
+    },
+    {
+      "from": "ProfileCardComponent",
+      "to": "ThemeService::isDark",
+      "category": "CALLS",
+      "note": "[class.dark]=\"theme.isDark\": a getter read, no call (GD.24)"
     },
     {
       "from": "SheetComponent",
@@ -67,6 +73,12 @@
       "to": "src::app::core::theme.service::ThemeService::set",
       "category": "CALLS",
       "note": "never called"
+    },
+    {
+      "from": "src::app::profile::profile-card.component::ProfileCardComponent",
+      "to": "src::app::core::theme.service::ThemeService::isLight",
+      "category": "CALLS",
+      "note": "named only inside a template string literal (GD.24)"
     },
     {
       "from": "src::app::shared::sheet.component::SheetComponent",

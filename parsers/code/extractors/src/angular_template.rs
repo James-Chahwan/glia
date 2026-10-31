@@ -35,16 +35,28 @@
 //! class at the decorator's row (rules `host_listener` / `host_binding` /
 //! `input_setter` / `query_setter`).
 //!
+//! GD.24 adds a third. A binding expression's `<member>.<name>` read that no
+//! call follows (`{{ store.isReady }}`, `[disabled]="auth?.busy"`, `!.`
+//! too, a pipe's operand alike), `<member>` a top-level member ref and the
+//! read one hop (`a.b.c` reads `b` of `a` only; an assignment target reads
+//! nothing), is a [`MemberReadRef`]; the component's binding turns it into a
+//! `NavFact::MemberRead { receiver: "this.<member>", name, line }` on the
+//! CLASS, which the graph binds through the member's declared type exactly as
+//! a TS member read (`graph::calls::resolve_member_reads`: a getter is a CALLS
+//! rule `receiver_accessor_read`; an inherited STATE_VAR a USES rule
+//! `inherited_state`), so a getter only a template reads stays live. A name in
+//! a string literal is skipped by the lexer, as every ref is.
+//!
 //! fired_on, on stderr, one line per TS file with an inline template, a host
 //! binding or a decorator-bound member: `[angular-template] inline
 //! file=<path> components=<c> calls=<k> uses=<u> unbound=<n> shadowed=<s>
-//! unread=<r> no_class=<m> receivers=<v> decorated=<d>`.
+//! unread=<r> no_class=<m> receivers=<v> decorated=<d> member_reads=<m>`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, GRAPH_TYPE, edge_category, line_of, node_kind,
+    CallQualifier, CallSite, CodeNav, GRAPH_TYPE, NavFact, edge_category, line_of, node_kind,
 };
 use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
 
@@ -72,6 +84,17 @@ pub struct ReceiverRef {
     pub row: u32,
 }
 
+/// GD.24: a read of a component member's member, `<member>.<name>` (also
+/// `member?.name`, `member!.name` and `this.member.name`) that no call
+/// follows, one hop, the member a ref no template local shadows; `row`
+/// 0-based from the scanned text's start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberReadRef {
+    pub member: String,
+    pub name: String,
+    pub row: u32,
+}
+
 /// A pipe a binding applies (`| date`), 0-based row from the text's start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipeRef {
@@ -85,6 +108,8 @@ pub struct TemplateRefs {
     pub members: Vec<MemberRef>,
     /// DT.5c: the one-hop calls through a member, in scan order.
     pub receivers: Vec<ReceiverRef>,
+    /// GD.24: the one-hop reads through a member, in scan order.
+    pub reads: Vec<MemberReadRef>,
     pub pipes: Vec<PipeRef>,
     /// Member refs dropped because a template local of that name was in scope.
     pub shadowed: usize,
@@ -131,6 +156,11 @@ pub struct TemplateBinding {
     pub receivers: usize,
     /// DT.5c: decorator-bound members naming a METHOD of their class.
     pub decorated: usize,
+    /// GD.24: one `NavFact::MemberRead` per (member, name) a template or host
+    /// binding reads, keyed by the CLASS scope it is recorded on, at its
+    /// lowest binding row (or the [`BindSite::call_row`]); the caller records
+    /// them on the parse's nav for the graph to bind.
+    pub member_reads: Vec<(NodeId, NavFact)>,
 }
 
 impl TemplateBinding {
@@ -158,6 +188,18 @@ impl TemplateBinding {
                 Some(held) if c.line < held.line => *held = c,
                 Some(_) => {}
                 None => self.call_sites.push(c),
+            }
+        }
+        for (scope, fact) in other.member_reads {
+            let Some(key) = read_key(&fact) else { continue };
+            match self.member_reads.iter_mut().find(|(s, f)| {
+                *s == scope && read_key(f).is_some_and(|k| (k.0, k.1) == (key.0, key.1))
+            }) {
+                Some(held) if read_key(&held.1).is_some_and(|k| key.2 < k.2) => {
+                    *held = (scope, fact)
+                }
+                Some(_) => {}
+                None => self.member_reads.push((scope, fact)),
             }
         }
         self.components += other.components;
@@ -188,7 +230,7 @@ impl TemplateBinding {
     pub fn marker(&self, path: &str) -> Option<String> {
         (self.components > 0).then(|| {
             format!(
-                "[angular-template] inline file={path} components={} calls={} uses={} unbound={} shadowed={} unread={} no_class={} receivers={} decorated={}",
+                "[angular-template] inline file={path} components={} calls={} uses={} unbound={} shadowed={} unread={} no_class={} receivers={} decorated={} member_reads={}",
                 self.components,
                 self.calls,
                 self.uses,
@@ -197,9 +239,22 @@ impl TemplateBinding {
                 self.unread,
                 self.no_class,
                 self.receivers,
-                self.decorated
+                self.decorated,
+                self.member_reads.len()
             )
         })
+    }
+}
+
+/// A `NavFact::MemberRead`'s (receiver, name, line); `None` for any other fact.
+fn read_key(f: &NavFact) -> Option<(&str, &str, u32)> {
+    match f {
+        NavFact::MemberRead {
+            receiver,
+            name,
+            line,
+        } => Some((receiver.as_str(), name.as_str(), *line)),
+        _ => None,
     }
 }
 
@@ -216,6 +271,42 @@ fn edge_row(e: &Edge) -> u32 {
 /// toward `components` when it has any of the three. Costs a `contains` and
 /// nothing else on a file with no such decorator.
 pub fn bind_inline(
+    source: &str,
+    path: &str,
+    nodes: &[Node],
+    nav: &CodeNav,
+    module_qname: &str,
+    repo: RepoId,
+) -> TemplateBinding {
+    let out = bind_inline_quiet(source, path, nodes, nav, module_qname, repo);
+    if let Some(m) = out.marker(path) {
+        eprintln!("{m}");
+    }
+    out
+}
+
+/// GD.24: the `NavFact::MemberRead`s the inline templates and host bindings
+/// of `source` read ([`bind_inline`]'s `member_reads`, no marker printed).
+///
+/// A private stopgap for the engine's post-cache `templateUrl` graft
+/// (`engine/src/build/angular_templates.rs`), which records them on the
+/// component file's parse: the per-file caller of [`bind_inline`]
+/// (`engine/src/extract.rs`) records its edges and CallSites but not these.
+/// Removal path: once that caller records `TemplateBinding::member_reads` on
+/// `fp.nav` itself, the graft's inline pass and this fn go.
+pub fn inline_member_reads(
+    source: &str,
+    path: &str,
+    nodes: &[Node],
+    nav: &CodeNav,
+    module_qname: &str,
+    repo: RepoId,
+) -> Vec<(NodeId, NavFact)> {
+    bind_inline_quiet(source, path, nodes, nav, module_qname, repo).member_reads
+}
+
+/// [`bind_inline`] without its marker.
+fn bind_inline_quiet(
     source: &str,
     path: &str,
     nodes: &[Node],
@@ -272,9 +363,6 @@ pub fn bind_inline(
         if !dc.members.is_empty() {
             out.absorb(bind_members(nodes, nav, class_id, &dc.members, path));
         }
-    }
-    if let Some(m) = out.marker(path) {
-        eprintln!("{m}");
     }
     out
 }
@@ -336,7 +424,9 @@ pub fn bind_members(
 /// a USES, deduped by (method, category) at the lowest row. DT.5c: each
 /// receiver ref is a CallSite from `class_id` with receiver `this.<member>`
 /// (one per (member, method), lowest row), whatever the class declares: the
-/// graph types the member.
+/// graph types the member. GD.24: each member read is a `NavFact::MemberRead`
+/// on `class_id` with receiver `this.<member>` (one per (member, name), lowest
+/// row, rows as the receiver CallSites'), likewise typed by the graph.
 pub fn bind_component(
     nodes: &[Node],
     nav: &CodeNav,
@@ -408,6 +498,30 @@ pub fn bind_component(
             line,
         })
         .collect();
+    // (member, name) -> lowest row
+    let mut reads: BTreeMap<(&str, &str), u32> = BTreeMap::new();
+    for r in &refs.reads {
+        let row = site
+            .call_row
+            .unwrap_or_else(|| site.base_row.saturating_add(r.row));
+        reads
+            .entry((r.member.as_str(), r.name.as_str()))
+            .and_modify(|held| *held = (*held).min(row))
+            .or_insert(row);
+    }
+    out.member_reads = reads
+        .into_iter()
+        .map(|((member, name), line)| {
+            (
+                class_id,
+                NavFact::MemberRead {
+                    receiver: format!("this.{member}"),
+                    name: name.to_string(),
+                    line,
+                },
+            )
+        })
+        .collect();
     out.recount();
     out
 }
@@ -438,6 +552,13 @@ pub fn scan_host(entries: &[HostEntry]) -> TemplateRefs {
                     out.receivers.push(ReceiverRef {
                         member: t.name.clone(),
                         method,
+                        row: e.row,
+                    });
+                }
+                if let Some(name) = t.read {
+                    out.reads.push(MemberReadRef {
+                        member: t.name.clone(),
+                        name,
                         row: e.row,
                     });
                 }
@@ -486,6 +607,8 @@ struct Cand {
     pos: usize,
     /// DT.5c: the method a one-hop `name.<m>(` calls.
     recv: Option<String>,
+    /// GD.24: the member a one-hop `name.<m>` reads.
+    read: Option<String>,
 }
 
 /// Locals scoped to one element: from its open tag to the end of its
@@ -551,6 +674,13 @@ impl Scanner<'_> {
                         row,
                     });
                 }
+                if let Some(name) = c.read {
+                    self.out.reads.push(MemberReadRef {
+                        member: c.name.clone(),
+                        name,
+                        row,
+                    });
+                }
                 self.out.members.push(MemberRef {
                     name: c.name,
                     called: c.called,
@@ -587,6 +717,7 @@ impl Scanner<'_> {
                     called: t.called,
                     pos: t.pos,
                     recv: t.recv,
+                    read: t.read,
                 });
             }
         }
@@ -1066,6 +1197,8 @@ struct Tok {
     pipe: bool,
     /// DT.5c: the method of a one-hop `name.<m>(` ([`receiver_call`]).
     recv: Option<String>,
+    /// GD.24: the member of a one-hop `name.<m>` read ([`receiver_read`]).
+    read: Option<String>,
 }
 
 /// The top-level identifiers and pipe names of the expression `b[start..end]`.
@@ -1116,6 +1249,7 @@ fn lex(b: &[u8], start: usize, end: usize, header: bool, out: &mut Vec<Tok>) {
                             called: false,
                             pipe: true,
                             recv: None,
+                            read: None,
                         });
                     }
                     continue;
@@ -1143,6 +1277,7 @@ fn lex(b: &[u8], start: usize, end: usize, header: bool, out: &mut Vec<Tok>) {
                     called,
                     pipe: false,
                     recv: receiver_call(b, j, end),
+                    read: receiver_read(b, j, end),
                 });
             }
             b'|' => {
@@ -1185,6 +1320,34 @@ fn receiver_call(b: &[u8], j: usize, end: usize) -> Option<String> {
             && at(p + 1) == Some(b'.')
             && at(skip_ws(b, p + 2, end)) == Some(b'('));
     called.then(|| ascii(&b[ms..me]))
+}
+
+/// GD.24: with `b[j]` the first non-space byte after a member ref, the
+/// member a one-hop read through it names: `.m`, `?.m` or `!.m` that no call
+/// follows (`(` or `?.(`, [`receiver_call`]'s case) and that is no assignment
+/// target (`=`, or a compound `+=` / `??=` ..; `==` / `=>` are no
+/// assignment). A further hop (`.m.n`) still reads `m`; an index (`[0]`) or
+/// no `.` reads nothing.
+fn receiver_read(b: &[u8], j: usize, end: usize) -> Option<String> {
+    let at = |k: usize| b.get(k).copied().filter(|_| k < end);
+    let dot = match (at(j)?, at(j + 1)) {
+        (b'.', Some(c)) if c != b'.' => j + 1,
+        (b'?' | b'!', Some(b'.')) => j + 2,
+        _ => return None,
+    };
+    let (ms, me) = ident_at(b, skip_ws(b, dot, end), end)?;
+    let p = skip_ws(b, me, end);
+    let called = at(p) == Some(b'(')
+        || (at(p) == Some(b'?')
+            && at(p + 1) == Some(b'.')
+            && at(skip_ws(b, p + 2, end)) == Some(b'('));
+    let mut k = p;
+    while k < p + 3 && at(k).is_some_and(|c| b"+-*/%&|^?".contains(&c)) {
+        k += 1;
+    }
+    let assigned =
+        at(k) == Some(b'=') && at(k + 1) != Some(b'=') && (k > p || at(k + 1) != Some(b'>'));
+    (!called && !assigned).then(|| ascii(&b[ms..me]))
 }
 
 // ----------------------------------------------------------------------------
@@ -1781,7 +1944,7 @@ mod tests {
         assert_eq!(
             out.marker("m.ts").as_deref(),
             Some(
-                "[angular-template] inline file=m.ts components=1 calls=2 uses=0 unbound=1 shadowed=0 unread=0 no_class=0 receivers=0 decorated=0"
+                "[angular-template] inline file=m.ts components=1 calls=2 uses=0 unbound=1 shadowed=0 unread=0 no_class=0 receivers=0 decorated=0 member_reads=0"
             )
         );
         // No decorator: nothing read, no marker.
@@ -1956,8 +2119,110 @@ mod tests {
         assert_eq!(
             out.marker("m.ts").as_deref(),
             Some(
-                "[angular-template] inline file=m.ts components=1 calls=0 uses=4 unbound=0 shadowed=0 unread=0 no_class=0 receivers=0 decorated=4"
+                "[angular-template] inline file=m.ts components=1 calls=0 uses=4 unbound=0 shadowed=0 unread=0 no_class=0 receivers=0 decorated=4 member_reads=0"
             )
         );
+    }
+
+    /// `(member, name, row)` of every member read, in scan order.
+    fn reads(text: &str) -> Vec<(String, String, u32)> {
+        scan_template(text)
+            .reads
+            .into_iter()
+            .map(|r| (r.member, r.name, r.row))
+            .collect()
+    }
+
+    /// GD.24: a one-hop read through a member that no call follows is a
+    /// member read: `?.`, `!.`, `this.`, a pipe's operand, a chain's first hop
+    /// and a structural directive's expression alike; a call, an assignment
+    /// target, an index on the member itself (`list[0].x`), a string
+    /// literal's text, a template local and a
+    /// comparison's right side are not (the last is no member's member).
+    #[test]
+    fn member_reads_are_one_hop_reads_through_an_unshadowed_member() {
+        let t = "{{ store.isReady }} {{ store?.label | uppercase }}\n\
+                 <b [disabled]=\"auth!.busy\" (click)=\"store.save(); store.count = 1; store.n += 2\"></b>\n\
+                 <i *ngIf=\"this.store.open && store.items[0] && list[0].x\">{{ 'store.hidden' }} {{ store.inner.deep }}</i>\n\
+                 @for (store of list; track store.id) { {{ store.gone }} }\n\
+                 {{ a.b == c.d }} {{ svc.check?.() }} {{ svc.flag ?? x }}";
+        assert_eq!(
+            reads(t),
+            vec![
+                ("store".to_string(), "isReady".to_string(), 0),
+                ("store".to_string(), "label".to_string(), 0),
+                ("auth".to_string(), "busy".to_string(), 1),
+                ("store".to_string(), "open".to_string(), 2),
+                ("store".to_string(), "items".to_string(), 2),
+                ("store".to_string(), "inner".to_string(), 2),
+                ("a".to_string(), "b".to_string(), 4),
+                ("c".to_string(), "d".to_string(), 4),
+                ("svc".to_string(), "flag".to_string(), 4),
+            ]
+        );
+        let host = scan_host(&[HostEntry {
+            key: "[class.on]".into(),
+            value: "state.active".into(),
+            row: 3,
+        }]);
+        assert_eq!(
+            host.reads,
+            vec![MemberReadRef {
+                member: "state".into(),
+                name: "active".into(),
+                row: 3
+            }]
+        );
+    }
+
+    /// GD.24: each member read is one `NavFact::MemberRead` on the CLASS with
+    /// receiver `this.<member>`, deduped by (member, name) at the lowest row,
+    /// rows as the receiver CallSites' (an external template's `call_row`);
+    /// the marker counts them.
+    #[test]
+    fn member_reads_are_facts_on_the_class() {
+        let (nodes, nav, class_id) = class_with(&[("save", node_kind::METHOD)]);
+        let refs = scan_template("{{ store.ready }}\n{{ store.ready }} {{ auth.user }}");
+        let site = |call_row| BindSite {
+            path: "m.html",
+            base_row: 7,
+            host: false,
+            call_row,
+        };
+        let read = |member: &str, name: &str, line: u32| {
+            (
+                class_id,
+                NavFact::MemberRead {
+                    receiver: format!("this.{member}"),
+                    name: name.to_string(),
+                    line,
+                },
+            )
+        };
+        let inline = bind_component(&nodes, &nav, class_id, &refs, &site(None));
+        assert_eq!(
+            inline.member_reads,
+            vec![read("auth", "user", 8), read("store", "ready", 7)]
+        );
+        let external = bind_component(&nodes, &nav, class_id, &refs, &site(Some(3)));
+        assert_eq!(
+            external.member_reads,
+            vec![read("auth", "user", 3), read("store", "ready", 3)]
+        );
+        let mut both = inline;
+        both.components = 1;
+        both.absorb(external);
+        assert_eq!(
+            both.member_reads,
+            vec![read("auth", "user", 3), read("store", "ready", 3)]
+        );
+        assert!(
+            both.marker("m.ts")
+                .is_some_and(|m| m.ends_with(" decorated=0 member_reads=2"))
+        );
+        let src = "@Component({ template: '<i>{{ store.ready }}</i>' })\nexport class C {}\n";
+        let (nodes, nav, _) = class_with(&[]);
+        let quiet = inline_member_reads(src, "m.ts", &nodes, &nav, "m", RepoId(1));
+        assert_eq!(quiet, vec![read("store", "ready", 0)]);
     }
 }

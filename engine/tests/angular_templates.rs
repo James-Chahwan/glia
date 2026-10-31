@@ -499,7 +499,9 @@ fn template_receivers_call_the_members_declared_type() {
         .unwrap_or_else(|e| panic!("generate_one: {e}"))
         .merged;
     let card = "src/app/profile/profile-card.component.ts";
-    // 0-based rows: the file's 1-based lines 10 and 9 minus one.
+    // 0-based rows: the file's 1-based lines 10, 15 and 9 minus one. GD.24:
+    // `[class.dark]="theme.isDark"` reads a getter, a CALLS through the
+    // member read; `{{ 'theme.isLight' }}` is a string and reads nothing.
     assert_eq!(
         qualified_edges_from(&m, CARD, edge_category::CALLS),
         vec![
@@ -511,6 +513,13 @@ fn template_receivers_call_the_members_declared_type() {
                 9
             ),
             located(
+                &format!("{THEME}::ThemeService::isDark"),
+                "graph:calls",
+                "receiver_accessor_read",
+                card,
+                14
+            ),
+            located(
                 &format!("{THEME}::ThemeService::toggle"),
                 "graph:calls",
                 "receiver_type",
@@ -518,7 +527,7 @@ fn template_receivers_call_the_members_declared_type() {
                 8
             ),
         ],
-        "a two-hop chain, a loop variable's call and an uncalled method bind nothing"
+        "a two-hop chain, a loop variable's call, an uncalled method and a string's text bind nothing"
     );
     assert!(qualified_edges_from(&m, CARD, edge_category::USES).is_empty());
     let sheet = "src/app/shared/sheet.component.ts";
@@ -551,6 +560,7 @@ fn template_receivers_call_the_members_declared_type() {
     let dead = dead_rows(&m);
     for live in [
         format!("{THEME}::ThemeService::toggle"),
+        format!("{THEME}::ThemeService::isDark"),
         format!("{AUTH}::AuthService::logout"),
         format!("{SHEET}::onResize"),
         format!("{SHEET}::isOpen"),
@@ -565,6 +575,7 @@ fn template_receivers_call_the_members_declared_type() {
         format!("{AUTH}::Session::end"),
         format!("{AUTH}::AuthService::stop"),
         format!("{THEME}::ThemeService::set"),
+        format!("{THEME}::ThemeService::isLight"),
         format!("{SHEET}::close"),
         format!("{QR}::redraw"),
     ] {
@@ -638,6 +649,221 @@ fn template_url_receivers_sit_at_the_template_url_row() {
             "graph:calls",
             "receiver_type",
             ts,
+            5
+        )]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GD.24 — template member reads
+// ---------------------------------------------------------------------------
+//
+// A template expression reading a member of a typed component field with no
+// call (`{{ store.isReady }}`, `[disabled]="store?.busy"`) is a
+// `NavFact::MemberRead { receiver: "this.<field>", .. }` on the component
+// CLASS, bound by the graph's DT.5k member-read pass: a getter read is a
+// CALLS rule `receiver_accessor_read`, an inherited STATE_VAR read a USES
+// rule `inherited_state` (GD.3; a signal / call-initialised field is a
+// STATE_VAR); a read of the type's own STATE_VAR binds nothing (DT.5k binds an
+// own member read only to an accessor), exactly as the same read in TS code
+// does. Safe
+// navigation and pipes are read through, a chain reads its first hop only, a
+// call stays DT.5c's receiver CallSite, and a member name inside a template
+// string literal reads nothing. A `templateUrl` template's reads sit at the
+// component's `templateUrl` row in its TS file, as its receiver calls do.
+
+const STORE_TS: &str = "import { Injectable, signal } from '@angular/core';\n\
+\n\
+export class Inner { get deep(): number { return 1; } }\n\
+\n\
+export class BaseStore { total = signal(0); }\n\
+\n\
+@Injectable({ providedIn: 'root' })\n\
+export class Store extends BaseStore {\n\
+\x20 count = signal(0);\n\
+\x20 readonly inner = new Inner();\n\
+\x20 get isReady(): boolean { return this.count() > 0; }\n\
+\x20 get busy(): boolean { return false; }\n\
+\x20 get label(): string { return ''; }\n\
+\x20 get hidden(): boolean { return true; }\n\
+\x20 get chain(): Inner { return this.inner; }\n\
+\x20 save(): void {}\n\
+}\n";
+
+const PANEL_TS: &str = "import { Component, inject } from '@angular/core';\n\
+import { Store } from './store';\n\
+\n\
+@Component({\n\
+\x20 selector: 'x-panel',\n\
+\x20 standalone: true,\n\
+\x20 template: `\n\
+\x20   <p>{{ store.isReady }} {{ store.count }}</p>\n\
+\x20   <button [disabled]=\"store?.busy\" (click)=\"store.save()\">{{ 'store.hidden' }}</button>\n\
+\x20   <i>{{ store.label | uppercase }} {{ store.chain.deep }} {{ store.total }}</i>\n\
+\x20 `,\n\
+})\n\
+export class PanelComponent {\n\
+\x20 readonly store = inject(Store);\n\
+}\n";
+
+const BADGE_TS: &str = "import { Component, inject } from '@angular/core';\n\
+import { Store } from './store';\n\
+\n\
+@Component({\n\
+\x20 selector: 'x-badge',\n\
+\x20 templateUrl: './badge.component.html',\n\
+})\n\
+export class BadgeComponent {\n\
+\x20 private readonly store = inject(Store);\n\
+}\n";
+
+const BADGE_HTML: &str = "<b>badge</b>\n@if (store.busy) { <i>{{ store?.label }}</i> }\n";
+
+fn write_reads_fixture(dir: &Path) {
+    for (f, body) in [
+        (
+            "package.json",
+            "{ \"name\": \"web\", \"dependencies\": { \"@angular/core\": \"^17.3.0\" } }\n",
+        ),
+        ("src/app/store.ts", STORE_TS),
+        ("src/app/panel.component.ts", PANEL_TS),
+        ("src/app/badge.component.ts", BADGE_TS),
+        ("src/app/badge.component.html", BADGE_HTML),
+    ] {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, body).expect("write");
+    }
+}
+
+const STORE: &str = "src::app::store";
+const PANEL: &str = "src::app::panel.component::PanelComponent";
+const BADGE: &str = "src::app::badge.component::BadgeComponent";
+
+#[test]
+fn template_member_reads_call_getters_through_the_members_type() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_reads_fixture(dir.path());
+    let m = generate_one(dir.path().to_str().expect("utf-8 temp path"))
+        .unwrap_or_else(|e| panic!("generate_one: {e}"))
+        .merged;
+    let panel = "src/app/panel.component.ts";
+    let calls = "graph:calls";
+    // 0-based rows: the file's 1-based lines 8, 9 and 10 minus one.
+    assert_eq!(
+        qualified_edges_from(&m, PANEL, edge_category::CALLS),
+        vec![
+            located(
+                &format!("{STORE}::Store::busy"),
+                calls,
+                "receiver_accessor_read",
+                panel,
+                8
+            ),
+            located(
+                &format!("{STORE}::Store::chain"),
+                calls,
+                "receiver_accessor_read",
+                panel,
+                9
+            ),
+            located(
+                &format!("{STORE}::Store::isReady"),
+                calls,
+                "receiver_accessor_read",
+                panel,
+                7
+            ),
+            located(
+                &format!("{STORE}::Store::label"),
+                calls,
+                "receiver_accessor_read",
+                panel,
+                9
+            ),
+            located(
+                &format!("{STORE}::Store::save"),
+                calls,
+                "receiver_type",
+                panel,
+                8
+            ),
+        ],
+        "a string literal's text and a chain's second hop read nothing"
+    );
+    assert_eq!(
+        qualified_edges_from(&m, PANEL, edge_category::USES),
+        vec![located(
+            &format!("{STORE}::BaseStore::total"),
+            "graph:calls",
+            "inherited_state",
+            panel,
+            9
+        )],
+        "an own STATE_VAR (`count`) binds nothing; an inherited one is a USES"
+    );
+    let badge = "src/app/badge.component.ts";
+    // The `templateUrl` row (1-based line 6) for both reads.
+    assert_eq!(
+        qualified_edges_from(&m, BADGE, edge_category::CALLS),
+        vec![
+            located(
+                &format!("{STORE}::Store::busy"),
+                calls,
+                "receiver_accessor_read",
+                badge,
+                5
+            ),
+            located(
+                &format!("{STORE}::Store::label"),
+                calls,
+                "receiver_accessor_read",
+                badge,
+                5
+            ),
+        ]
+    );
+    let dead = dead_rows(&m);
+    for live in ["isReady", "busy", "label", "chain"] {
+        let q = format!("{STORE}::Store::{live}");
+        assert!(!dead.contains(&q), "{q} is bound: {dead:?}");
+    }
+    for gone in ["Store::hidden", "Inner::deep"] {
+        let q = format!("{STORE}::{gone}");
+        assert!(dead.contains(&q), "{q} stays a dead_symbol row: {dead:?}");
+    }
+}
+
+/// An edit to a `templateUrl` template alone moves its member reads exactly
+/// as a clean build does, with no stale or duplicated read.
+#[test]
+fn an_edit_to_the_template_alone_moves_its_member_reads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_reads_fixture(dir.path());
+    let repo = dir.path().to_str().expect("utf-8 temp path");
+    let mut cache = ParseCache::new();
+    generate_one_with_cache(repo, &mut cache).expect("cold build");
+    std::fs::write(
+        dir.path().join("src/app/badge.component.html"),
+        "<i>{{ store.isReady }}</i>\n",
+    )
+    .expect("edit template");
+    let warm = generate_one_with_cache(repo, &mut cache)
+        .expect("warm build")
+        .merged;
+    let clean = generate_one(repo).expect("clean build").merged;
+    let calls = qualified_edges_from(&warm, BADGE, edge_category::CALLS);
+    assert_eq!(
+        calls,
+        qualified_edges_from(&clean, BADGE, edge_category::CALLS)
+    );
+    assert_eq!(
+        calls,
+        vec![located(
+            &format!("{STORE}::Store::isReady"),
+            "graph:calls",
+            "receiver_accessor_read",
+            "src/app/badge.component.ts",
             5
         )]
     );
