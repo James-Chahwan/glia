@@ -16,6 +16,16 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
+    parse_with_stats(source, file_rel_path, module_qname, repo).map(|(fp, _)| fp)
+}
+
+/// [`parse_file`] plus the file's `[sol-abi]` tallies (printed here too).
+fn parse_with_stats(
+    source: &str,
+    file_rel_path: &str,
+    module_qname: &str,
+    repo: RepoId,
+) -> Result<(FileParse, AbiStats), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_solidity::LANGUAGE.into();
     parser
@@ -66,23 +76,41 @@ pub fn parse_file(
             ns.tags, ns.param, ns.ret, ns.notice, ns.dev, ns.other, ns.nodes, file_rel_path
         );
     }
-    // DT.10a fired_on marker, once per file with at least one EVM procedure.
-    let abi = &acc.abi;
-    if abi.procedures > 0 {
-        eprintln!(
-            "[sol-abi] procedures={} (functions={} getters={} abstract={}) contracts={} path={}",
-            abi.procedures, abi.functions, abi.getters, abi.abstract_, abi.contracts, file_rel_path
-        );
+    // DT.10a fired_on marker (GD.23 appends `literal_constants=`), once per
+    // file with an EVM procedure or a var the noise gate dropped.
+    if let Some(line) = abi_marker(&acc.abi, file_rel_path) {
+        eprintln!("{line}");
     }
 
-    Ok(FileParse {
-        nodes: acc.nodes,
-        edges: acc.edges,
-        imports: acc.imports,
-        calls: acc.calls,
-        refs: acc.refs,
-        nav: acc.nav,
-        properties: Default::default(),
+    Ok((
+        FileParse {
+            nodes: acc.nodes,
+            edges: acc.edges,
+            imports: acc.imports,
+            calls: acc.calls,
+            refs: acc.refs,
+            nav: acc.nav,
+            properties: Default::default(),
+        },
+        acc.abi,
+    ))
+}
+
+/// The `[sol-abi]` line for one file's tallies, `None` when the file holds
+/// no EVM procedure and the noise gate dropped nothing.
+fn abi_marker(abi: &AbiStats, file_rel_path: &str) -> Option<String> {
+    (abi.procedures > 0 || abi.literal_constants > 0).then(|| {
+        format!(
+            "[sol-abi] procedures={} (functions={} getters={} abstract={}) contracts={} \
+             literal_constants={} path={}",
+            abi.procedures,
+            abi.functions,
+            abi.getters,
+            abi.abstract_,
+            abi.contracts,
+            abi.literal_constants,
+            file_rel_path
+        )
     })
 }
 
@@ -100,7 +128,9 @@ struct Acc {
 
 /// Per-file tallies behind the `[sol-abi]` marker (DT.10a): procedures
 /// emitted, split into functions and getters, the abstract ones among them,
-/// and the contracts / interfaces holding at least one.
+/// and the contracts / interfaces holding at least one; and (GD.23) the state
+/// variables the noise gate dropped, undocumented and initialised by a
+/// literal primitive, public or not.
 #[derive(Default)]
 struct AbiStats {
     procedures: usize,
@@ -108,6 +138,7 @@ struct AbiStats {
     getters: usize,
     abstract_: usize,
     contracts: usize,
+    literal_constants: usize,
 }
 
 /// One contract member an ABI client can reach, gathered while the contract
@@ -707,6 +738,7 @@ fn visit_state_variable(
         });
     }
     if gated {
+        acc.abi.literal_constants += 1;
         return;
     }
 
@@ -735,8 +767,26 @@ fn is_public_state(node: TsNode, src: &[u8]) -> bool {
         .any(|v| text_of(v, src).trim() == "public")
 }
 
-/// True if `value` is a literal primitive (number / string / bool).
+/// True if `value` is a literal primitive (number, with or without a unit /
+/// string / hex / unicode string / bool). tree-sitter-solidity boxes a state
+/// variable's `value` in an `expression` node, and `(true)` adds a
+/// `parenthesized_expression` around another; both unwrap first (GD.23:
+/// before, the kind test saw only the wrapper and the gate never fired).
 fn is_literal_primitive(value: TsNode) -> bool {
+    let mut value = value;
+    loop {
+        let inner = unwrap_expression(value);
+        if inner != value {
+            value = inner;
+        } else if value.kind() == "parenthesized_expression" && value.named_child_count() == 1 {
+            match value.named_child(0) {
+                Some(child) => value = child,
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
     matches!(
         value.kind(),
         "number_literal"
@@ -1279,11 +1329,10 @@ contract Y is Base {
             .filter(|(_, k)| **k == node_kind::STATE_VAR)
             .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(String::as_str))
             .collect();
-        // Solidity keeps state variables (the contract's storage interface);
-        // the noise gate only drops an undocumented var with a *detected*
-        // literal initializer, which is conservative here, so both survive.
+        // The noise gate drops an undocumented var initialised by a literal
+        // primitive (`count = 0`, through the `expression` wrapper, GD.23);
         // `treasury` (documented, uninitialized) is the must-keep case.
-        assert!(state_vars.contains(&"treasury"));
+        assert_eq!(state_vars, ["treasury"]);
 
         // `Base` is not interface-like → an INHERITS_FROM ref, no IMPLEMENTS.
         assert_eq!(
@@ -2002,9 +2051,11 @@ contract Bank {
 
     #[test]
     fn gated_public_constant_getter_is_contained_by_the_module() {
-        // At tree-sitter-solidity 1.2.13 a state variable's `value` is an
-        // `expression` wrapper, so the noise gate's literal test never sees
-        // the `100` and keeps the STATE_VAR: the getter is HANDLED_BY it.
+        // GD.23: the noise gate unwraps the `expression` wrapper tree-sitter
+        // puts around a state variable's `value`, so an undocumented
+        // `uint256 public constant FEE = 100;` mints no STATE_VAR. Its getter
+        // stays an RPC_PROCEDURE, CONTAINed by the module and never HANDLED_BY
+        // a guessed handler, with the var's own POSITION.
         let source = r#"
 pragma solidity ^0.8.0;
 contract Fee {
@@ -2013,61 +2064,32 @@ contract Fee {
 "#;
         let fp = parse_file(source, "contracts/Fee.sol", "contracts::Fee", repo()).unwrap();
         assert_eq!(procedures(&fp), ["evm:Fee.FEE"]);
-        assert_eq!(
-            edge_qnames(&fp, edge_category::HANDLED_BY),
-            [(
-                "evm:Fee.FEE".to_string(),
-                "contracts::Fee::Fee::FEE".to_string()
-            )]
-        );
+        assert!(edge_qnames(&fp, edge_category::HANDLED_BY).is_empty());
+        assert!(state_var_names(&fp).is_empty());
         let f = facts(&fp, "evm:Fee.FEE");
         assert_eq!((f.arities.as_slice(), f.getter), (&[0][..], true));
 
-        // The gated branch: a getter recorded with no handler (what the gate's
-        // early return leaves) is CONTAINed by the module and never HANDLED_BY
-        // a guessed handler; it keeps the var's own POSITION.
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "contracts::Fee");
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::Fee::Fee");
-        let position = Cell {
-            kind: cell_type::POSITION,
-            payload: CellPayload::Json(
-                r#"{"file":"contracts/Fee.sol","start_line":3,"end_line":3}"#.into(),
-            ),
-        };
-        let mut abi = ContractAbi::new();
-        record_member(&mut abi, "FEE", 0, || FirstDecl {
-            mutability: "view".to_string(),
-            getter: true,
-            abstract_: false,
-            handler: None,
-            position: position.clone(),
-        });
-        let mut acc = Acc::default();
-        emit_procedures(
-            &abi,
-            Owner {
-                name: "Fee",
-                kind: node_kind::CLASS,
-            },
-            class,
-            module,
-            repo(),
-            &mut acc,
-        );
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Fee.FEE");
-        assert_eq!(acc.edges.len(), 1);
-        let e = &acc.edges[0];
+        let touching: Vec<_> = fp
+            .edges
+            .iter()
+            .filter(|e| e.from == id || e.to == id)
+            .map(|e| (e.from, e.to, e.category))
+            .collect();
+        assert_eq!(touching, [(module, id, edge_category::CONTAINS)]);
+        let node = fp.nodes.iter().find(|n| n.id == id).expect("procedure");
         assert_eq!(
-            (e.from, e.to, e.category),
-            (module, id, edge_category::CONTAINS)
+            node.cells[0],
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(
+                    r#"{"file":"contracts/Fee.sol","start_line":3,"end_line":3}"#.into(),
+                ),
+            }
         );
-        assert_eq!(acc.nodes.len(), 1);
-        assert_eq!(acc.nodes[0].cells[0], position);
-        assert_eq!(acc.nav.parent_of.get(&id), Some(&class));
-        assert_eq!(
-            (acc.abi.procedures, acc.abi.getters, acc.abi.contracts),
-            (1, 1, 1)
-        );
+        assert_eq!(fp.nav.parent_of.get(&id), Some(&class));
     }
 
     #[test]
@@ -2132,5 +2154,102 @@ contract M {
         ] {
             assert_eq!(facts(&fp, q).mutability, m, "{q}");
         }
+    }
+
+    /// The STATE_VARs a parse minted, by simple name, sorted.
+    fn state_var_names(fp: &FileParse) -> Vec<String> {
+        let mut names: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::STATE_VAR)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn noise_gate_unwraps_the_expression_wrapper() {
+        // GD.23: tree-sitter-solidity boxes a state variable's `value` in an
+        // `expression` node; the gate unwraps it (and any parentheses), so an
+        // undocumented literal-initialised var mints no STATE_VAR. A public one
+        // keeps its getter procedure, CONTAINed by the module. An uninitialised
+        // var, a computed initialiser and a documented literal survive.
+        let source = r#"
+pragma solidity ^0.8.0;
+contract Fee {
+    uint256 public constant FEE = 100;
+    string public constant NAME = "x";
+    bool public constant ON = (true);
+    uint256 public constant WAIT = 1 days;
+    uint256 private constant HIDDEN = 7;
+    address public owner;
+    uint256 public constant LIMIT = a + b;
+    /// @notice the documented one
+    uint256 public constant KEPT = 5;
+}
+"#;
+        let fp = parse_file(source, "contracts/Fee.sol", "contracts::Fee", repo()).unwrap();
+        assert_eq!(state_var_names(&fp), ["KEPT", "LIMIT", "owner"]);
+        assert_eq!(
+            procedures(&fp),
+            [
+                "evm:Fee.FEE",
+                "evm:Fee.KEPT",
+                "evm:Fee.LIMIT",
+                "evm:Fee.NAME",
+                "evm:Fee.ON",
+                "evm:Fee.WAIT",
+                "evm:Fee.owner",
+            ]
+        );
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "contracts::Fee");
+        for gated in ["evm:Fee.FEE", "evm:Fee.NAME", "evm:Fee.ON", "evm:Fee.WAIT"] {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, gated);
+            assert!(
+                fp.edges
+                    .iter()
+                    .any(|e| e.category == edge_category::CONTAINS
+                        && e.from == module
+                        && e.to == id),
+                "{gated} is CONTAINed by the module"
+            );
+            assert!(
+                !fp.edges
+                    .iter()
+                    .any(|e| e.category == edge_category::HANDLED_BY && e.from == id),
+                "{gated} has no handler"
+            );
+        }
+        assert_eq!(
+            edge_qnames(&fp, edge_category::HANDLED_BY),
+            [
+                (
+                    "evm:Fee.KEPT".to_string(),
+                    "contracts::Fee::Fee::KEPT".to_string()
+                ),
+                (
+                    "evm:Fee.LIMIT".to_string(),
+                    "contracts::Fee::Fee::LIMIT".to_string()
+                ),
+                (
+                    "evm:Fee.owner".to_string(),
+                    "contracts::Fee::Fee::owner".to_string()
+                ),
+            ]
+        );
+        // The tally behind the marker: every var the gate dropped (the
+        // private HIDDEN included), and the marker line that reports it.
+        let (_, stats) =
+            parse_with_stats(source, "contracts/Fee.sol", "contracts::Fee", repo()).unwrap();
+        assert_eq!(stats.literal_constants, 5);
+        assert_eq!(
+            abi_marker(&stats, "contracts/Fee.sol").as_deref(),
+            Some(
+                "[sol-abi] procedures=7 (functions=0 getters=7 abstract=0) contracts=1 \
+                 literal_constants=5 path=contracts/Fee.sol"
+            )
+        );
     }
 }

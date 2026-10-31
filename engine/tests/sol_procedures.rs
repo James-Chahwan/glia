@@ -112,12 +112,31 @@ fn procedures_are_handled_by_their_members() {
     assert_eq!(
         procedures.into_iter().collect::<Vec<_>>(),
         [
+            "evm:Escrow.FEE_BPS",
             "evm:Escrow.deposit",
             "evm:Escrow.deposits",
             "evm:Escrow.release",
             "evm:Escrow.seller",
             "evm:IEscrow.deposit",
         ]
+    );
+    // GD.23: the undocumented literal constant mints no STATE_VAR; its getter
+    // procedure is CONTAINed by the module instead of HANDLED_BY a handler.
+    let fee = id_of(&m, node_kind::RPC_PROCEDURE, "evm:Escrow.FEE_BPS");
+    assert!(
+        !m.graphs.iter().any(|g| g
+            .nav
+            .kind_by_id
+            .iter()
+            .any(|(id, k)| *k == node_kind::STATE_VAR
+                && g.nav.qname_by_id.get(id).map(String::as_str)
+                    == Some("contracts::Escrow::Escrow::FEE_BPS"))),
+        "a literal constant is no STATE_VAR"
+    );
+    let module = id_of(&m, node_kind::MODULE, "contracts::Escrow");
+    assert!(
+        m.all_edges()
+            .any(|e| e.category == edge_category::CONTAINS && e.from == module && e.to == fee)
     );
     let handled: BTreeSet<(String, String)> = m
         .all_edges()

@@ -15,6 +15,7 @@ contract Escrow is IEscrow {
     address public immutable seller;
     mapping(bytes32 => uint256) public deposits;
     uint256 private total;
+    uint256 public constant FEE_BPS = 100;
 
     event Deposited(bytes32 indexed orderId, uint256 amount);
 

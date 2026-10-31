@@ -34,6 +34,12 @@
       "name": "evm:IEscrow.deposit",
       "exact": true,
       "note": "an interface member is external"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.FEE_BPS",
+      "exact": true,
+      "note": "GD.23: a literal public constant keeps its getter procedure"
     }
   ],
   "expect_edges": [
@@ -60,6 +66,13 @@
       "to": "contracts::Escrow::IEscrow::deposit",
       "category": "HANDLED_BY",
       "exact": true
+    },
+    {
+      "from": "contracts::Escrow",
+      "to": "evm:Escrow.FEE_BPS",
+      "category": "CONTAINS",
+      "exact": true,
+      "note": "GD.23: the gated getter has no STATE_VAR handler; the module CONTAINS it"
     }
   ],
   "expect_cells": [
@@ -112,6 +125,11 @@
       "kind": "RPC_PROCEDURE",
       "name": "evm:Escrow.release",
       "max_nodes": 1
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "contracts::Escrow::Escrow::FEE_BPS",
+      "note": "GD.23: the noise gate drops an undocumented literal-initialised var"
     }
   ]
 }
