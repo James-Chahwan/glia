@@ -60,20 +60,36 @@
 //!
 //! So a body-only edit leaves every other file's stitching valid: re-stitching
 //! the edited files alone gives a clean build's graph.
+//!
+//! GA.7, GO ([`rebuild_go`]). The same seam, three differences. Ownership:
+//! a split-file method (LA.23d) sits under its receiver STRUCT in another
+//! file, so [`Owners`] names its declaring file and the merged parse is
+//! re-parented the way the build re-parented it before it is compared. The
+//! surface index is rebuilt from the graph and the group's parses (the
+//! package model needs every file's import statements and embed refs, which
+//! no graph keeps), and the edited files' import bindings are re-derived and
+//! compared. And three Go passes read resolved calls or another file's body
+//! facts, so a file holding their input is refused ([`go_refusal`]): a mount
+//! fact, a ROUTE or HANDLED_BY ref, a JSON wire cell. The implicit and
+//! method-level IMPLEMENTS and the split DEFINES are surface outputs with no
+//! row: kept, never re-derived.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 
+use glia_code_domain::wire::{ServerWire, WireForm};
 use glia_code_domain::{
-    CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, cell_type, edge_category, evidence,
-    node_kind,
+    CallSite, CodeNav, FileParse, ImportStmt, NavFact, UnresolvedRef, cell_type, edge_category,
+    evidence, node_kind,
 };
-use glia_core::{Cell, Edge, Node, NodeId};
+use glia_core::{Cell, Edge, EdgeCategoryId, Node, NodeId};
 
-use super::{PyBody, merge_parses_with, python_stitch};
+use super::{
+    GoBody, PyBody, go_index, go_split_of, go_stitch, is_go_embed, merge_parses_with, python_stitch,
+};
 use crate::calls::EvidenceTally;
-use crate::imports::{ImportEdge, RebindRefusal, python_rebind};
+use crate::imports::{ImportEdge, RebindRefusal, python_rebind, resolve_imports_go};
 use crate::types::RepoGraph;
 
 /// GA.3: one file whose body changed, as its fresh parse.
@@ -156,11 +172,20 @@ pub(crate) struct FileOutputs {
     pub(crate) unresolved_refs: usize,
 }
 
-/// The MODULE `id` sits under (itself for a MODULE), walking `parent_of`;
-/// `None` when the chain reaches no MODULE. Bounded by the nav's size, so a
-/// malformed cycle ends.
-fn module_of(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
+/// GA.7: node -> the file MODULE that declared it, for a node whose nav
+/// ancestor is another file's (a Go split-file method, LA.23d, sits under its
+/// receiver STRUCT); empty for a language whose nav tree names one file per
+/// node (Python).
+type Owners = HashMap<NodeId, NodeId>;
+
+/// The MODULE `id` sits under (itself for a MODULE), walking `parent_of`
+/// and stopping at a node `owners` names a file for; `None` when the chain
+/// reaches no MODULE. Bounded by the nav's size, so a malformed cycle ends.
+fn module_of(nav: &CodeNav, owners: &Owners, mut id: NodeId) -> Option<NodeId> {
     for _ in 0..=nav.parent_of.len() {
+        if let Some(&module) = owners.get(&id) {
+            return Some(module);
+        }
         if nav.kind_by_id.get(&id) == Some(&node_kind::MODULE) {
             return Some(id);
         }
@@ -170,29 +195,32 @@ fn module_of(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
 }
 
 /// GA.3: the nodes of `g` the file of MODULE `module` owns: the MODULE and
-/// every node whose nav ancestor it is.
-pub(crate) fn file_nodes(g: &RepoGraph, module: NodeId) -> HashSet<NodeId> {
+/// every node whose nav ancestor it is (GA.7: or that `owners` places in it).
+pub(crate) fn file_nodes(g: &RepoGraph, owners: &Owners, module: NodeId) -> HashSet<NodeId> {
     g.nodes
         .iter()
         .map(|n| n.id)
-        .filter(|id| module_of(&g.nav, *id) == Some(module))
+        .filter(|id| module_of(&g.nav, owners, *id) == Some(module))
         .collect()
 }
 
 /// GA.3: remove the stitch outputs of the files owning `owned`: every edge
-/// whose `from` they own, every unresolved call they raised and every
-/// unresolved ref from them or with one of their `modules` as its module.
+/// whose `from` they own (GA.7: but the ones `keep` holds, a surface pass's
+/// output the stitch does not re-derive), every unresolved call they raised
+/// and every unresolved ref from them or with one of their `modules` as its
+/// module.
 pub(crate) fn drop_file_outputs(
     g: &mut RepoGraph,
     owned: &HashSet<NodeId>,
     modules: &HashSet<NodeId>,
+    keep: impl Fn(&Edge) -> bool,
 ) -> FileOutputs {
     let (edges, calls, refs) = (
         g.edges.len(),
         g.unresolved_calls.len(),
         g.unresolved_refs.len(),
     );
-    g.edges.retain(|e| !owned.contains(&e.from));
+    g.edges.retain(|e| !owned.contains(&e.from) || keep(e));
     g.unresolved_calls.retain(|c| !owned.contains(&c.from));
     g.unresolved_refs
         .retain(|r| !owned.contains(&r.from) && !modules.contains(&r.from_module));
@@ -244,6 +272,9 @@ struct Prepared {
 
 /// What every edit is checked against, read once per call.
 struct Ctx {
+    /// The nodes declared in another file than their nav ancestor's
+    /// ([`Owners`]).
+    owners: Owners,
     /// Node id -> its index in `g.nodes`.
     index: HashMap<NodeId, usize>,
     /// The indexes of `g.nodes`' MODULEs, ascending: a clean merge writes
@@ -255,7 +286,7 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn read(g: &RepoGraph) -> Ctx {
+    fn read(g: &RepoGraph, owners: Owners) -> Ctx {
         let mut index: HashMap<NodeId, usize> = HashMap::with_capacity(g.nodes.len());
         let mut modules = Vec::new();
         let mut shared_by_file: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -278,6 +309,7 @@ impl Ctx {
             }
         }
         Ctx {
+            owners,
             index,
             modules,
             shared_by_file,
@@ -307,7 +339,7 @@ fn cell_run(cells: &[Cell], path: &str) -> Option<Range<usize>> {
 /// Check one edit against `g` (read-only) and merge its parse.
 fn prepare(g: &RepoGraph, ctx: &Ctx, edit: BodyEdit) -> Result<Prepared, Refused> {
     let index = &ctx.index;
-    let (mini, imports, calls, refs) = merge_parses_with(g.repo, vec![edit.parse], false);
+    let (mut mini, imports, calls, refs) = merge_parses_with(g.repo, vec![edit.parse], false);
     let mut modules = mini
         .nodes
         .iter()
@@ -333,13 +365,33 @@ fn prepare(g: &RepoGraph, ctx: &Ctx, edit: BodyEdit) -> Result<Prepared, Refused
         return Err(Refused::UnknownFile(path));
     }
     let moved = || Refused::SurfaceMoved(path.clone());
+    // GA.7: a method this file declares under another file's type sits there
+    // in the merged parse too, as the build re-parented it.
+    place_owned(g, &ctx.owners, &mut mini, module_id);
 
     // The declarations: one node set, each node named and placed alike.
-    let owned = file_nodes(g, module_id);
-    let new_owned = file_nodes(&mini, module_id);
+    let owned = file_nodes(g, &ctx.owners, module_id);
+    let new_owned = file_nodes(&mini, &ctx.owners, module_id);
     if owned != new_owned {
-        return Err(moved());
+        // A node both parses hold, placed in another file by the merge (two
+        // files minting one id under their own MODULE: the last one wins).
+        let shared = owned
+            .symmetric_difference(&new_owned)
+            .any(|id| index.contains_key(id) && mini.nav.kind_by_id.contains_key(id));
+        return Err(if shared {
+            Refused::Unsupported("shared node")
+        } else {
+            moved()
+        });
     }
+    // A node's children this file declares, in order (a STRUCT's methods
+    // other files declare are theirs).
+    let own_children = |nav: &CodeNav, id: &NodeId| -> Vec<NodeId> {
+        nav.children_of
+            .get(id)
+            .map(|kids| kids.iter().filter(|k| owned.contains(k)).copied().collect())
+            .unwrap_or_default()
+    };
     let (a, b) = (&g.nav, &mini.nav);
     for n in &mini.nodes {
         let id = n.id;
@@ -353,12 +405,24 @@ fn prepare(g: &RepoGraph, ctx: &Ctx, edit: BodyEdit) -> Result<Prepared, Refused
             continue;
         }
         let placed = a.parent_of.get(&id) == b.parent_of.get(&id)
-            && a.children_of.get(&id) == b.children_of.get(&id)
+            && own_children(a, &id) == own_children(b, &id)
             && a.field_types.get(&id) == b.field_types.get(&id)
-            && a.return_types.get(&id) == b.return_types.get(&id)
-            && a.method_sigs.get(&id) == b.method_sigs.get(&id);
+            && a.return_types.get(&id) == b.return_types.get(&id);
         if !placed {
             return Err(moved());
+        }
+        if a.method_sigs.get(&id) != b.method_sigs.get(&id) {
+            // CI.6 rewrote the built signature's in-repo type aliases.
+            let aliased = a
+                .nav_facts
+                .values()
+                .flatten()
+                .any(|f| matches!(f, NavFact::TypeAlias { .. }));
+            return Err(if aliased {
+                Refused::Unsupported("type alias")
+            } else {
+                moved()
+            });
         }
     }
     if a.local_types.get(&module_id) != b.local_types.get(&module_id) {
@@ -487,7 +551,7 @@ pub(crate) fn rebuild_bodies(
     if !g.symbols.home_module.is_empty() {
         return Err(Refused::Unsupported("shared package"));
     }
-    let ctx = Ctx::read(g);
+    let ctx = Ctx::read(g, Owners::new());
     let index = &ctx.index;
     let mut prepared = edits
         .into_iter()
@@ -520,7 +584,7 @@ pub(crate) fn rebuild_bodies(
         .flat_map(|p| p.owned.iter().copied())
         .collect();
     let modules: HashSet<NodeId> = prepared.iter().map(|p| p.module).collect();
-    let dropped = drop_file_outputs(g, &owned, &modules);
+    let dropped = drop_file_outputs(g, &owned, &modules, |_| false);
     let kept = g.edges.len();
     let mut body = PyBody::default();
     let mut types: HashSet<NodeId> = HashSet::new();
@@ -571,6 +635,260 @@ pub(crate) fn rebuild_bodies(
     })
 }
 
+/// GA.7: re-parent, in the edited file's merged parse `mini`, every method
+/// `owners` places in file `module` whose nav parent the build moved to a
+/// STRUCT of another file (LA.23d's split receivers), as the build did:
+/// under that parent, out of the MODULE's children.
+fn place_owned(g: &RepoGraph, owners: &Owners, mini: &mut RepoGraph, module: NodeId) {
+    if owners.is_empty() {
+        return;
+    }
+    let moved: Vec<(NodeId, NodeId)> = mini
+        .nodes
+        .iter()
+        .filter(|n| owners.get(&n.id) == Some(&module))
+        .filter(|n| mini.nav.parent_of.get(&n.id) == Some(&module))
+        .filter_map(|n| {
+            let parent = *g.nav.parent_of.get(&n.id)?;
+            (parent != module).then_some((n.id, parent))
+        })
+        .collect();
+    for (id, parent) in moved {
+        mini.nav.parent_of.insert(id, parent);
+        if let Some(kids) = mini.nav.children_of.get_mut(&module) {
+            kids.retain(|k| *k != id);
+        }
+    }
+}
+
+/// GA.7: why a Go edit is not re-stitched, beyond GA.3's checks: its old
+/// (the file's nodes in `g`) or new (`parse`) parse holds what another file's resolution reads
+/// through resolved calls. `mount`: a CB.20 mount fact (a `MountArg` flows
+/// through this file's CALLS into another file's ROUTEs, a `FieldMount` keys
+/// the ROUTEs of the field's readers); `route`: a ROUTE or a HANDLED_BY ref
+/// or edge (CI.4 binds handlers through the package, CB.20 re-keys the
+/// ROUTEs); `wire`: a json_response / json_bind wire cell (DT.1f types it
+/// through other files' facts and draws its USES).
+fn go_refusal(g: &RepoGraph, ctx: &Ctx, parse: &FileParse) -> Option<&'static str> {
+    let nav = &parse.nav;
+    let mut modules = parse
+        .nodes
+        .iter()
+        .filter(|n| nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE));
+    let module = modules.next()?;
+    let path = evidence::locate(&module.cells).map(|(file, _)| file);
+    let owned = if ctx.index.contains_key(&module.id) {
+        file_nodes(g, &ctx.owners, module.id)
+    } else {
+        HashSet::new()
+    };
+    let mount = |f: &NavFact| matches!(f, NavFact::MountArg { .. } | NavFact::FieldMount { .. });
+    let old_facts = owned
+        .iter()
+        .filter_map(|id| g.nav.nav_facts.get(id))
+        .flatten();
+    if old_facts.chain(nav.nav_facts.values().flatten()).any(mount) {
+        return Some("mount");
+    }
+    let shared = path
+        .as_ref()
+        .and_then(|p| ctx.shared_by_file.get(p))
+        .into_iter()
+        .flatten();
+    let is_route = |nav: &CodeNav, id: &NodeId| nav.kind_by_id.get(id) == Some(&node_kind::ROUTE);
+    let handled = |category: EdgeCategoryId| category == edge_category::HANDLED_BY;
+    let route = owned.iter().chain(shared).any(|id| is_route(&g.nav, id))
+        || parse.nodes.iter().any(|n| is_route(nav, &n.id))
+        || parse.refs.iter().any(|r| handled(r.category))
+        || g.unresolved_refs.iter().any(|r| {
+            handled(r.category) && (owned.contains(&r.from) || r.from_module == module.id)
+        })
+        || g.edges
+            .iter()
+            .any(|e| handled(e.category) && owned.contains(&e.from));
+    if route {
+        return Some("route");
+    }
+    let wire = |c: &Cell| {
+        ServerWire::from_cell(c)
+            .is_some_and(|w| matches!(w.form, WireForm::JsonResponse | WireForm::JsonBind))
+    };
+    let old_wire = g
+        .nodes
+        .iter()
+        .filter(|n| owned.contains(&n.id))
+        .any(|n| n.cells.iter().any(wire));
+    if old_wire || parse.nodes.iter().any(|n| n.cells.iter().any(wire)) {
+        return Some("wire");
+    }
+    None
+}
+
+/// GA.7: [`super::rebuild_go_bodies`] without its marker: GA.3's checks
+/// ([`prepare`], file ownership following the split receivers), the Go
+/// refusals ([`go_refusal`]), the package model rebuilt from `group`'s
+/// statements and embed refs ([`super::go_index`]) and each edited file's
+/// import bindings re-derived and compared, all before the first write; then
+/// the files' outputs dropped (the implicit / method-level IMPLEMENTS and the
+/// split DEFINES kept: surface passes' outputs, carrying no row), their
+/// cells, parse edges and body nav replaced, their IMPORTS edges drawn again
+/// and [`super::go_stitch`] over their calls and refs; then
+/// [`RepoGraph::canonicalize`].
+///
+/// WHY NO OTHER FILE'S OUTPUT MOVES (verified against the Go builder,
+/// beside the Python reading in the module doc): the Go call hook types a
+/// receiver from the CALLER's own locals and its file's imports, and from
+/// the surface (package vars are MODULE-scope locals, field / return types,
+/// signatures, the package model, the promoted members), never an edge or
+/// another file's body; the value refs bind through the same tables; the
+/// passes that DO read resolved calls or another file's body facts are the
+/// three the refusals keep out: CB.20's mounts (a `MountArg`'s caller CALLS),
+/// CI.4's type handlers and DT.1f's wire typing.
+pub(crate) fn rebuild_go(
+    g: &mut RepoGraph,
+    edits: Vec<BodyEdit>,
+    group: &[FileParse],
+) -> Result<RebodyStats, Refused> {
+    if !g.symbols.home_module.is_empty() {
+        return Err(Refused::Unsupported("shared package"));
+    }
+    let split = go_split_of(g);
+    let owners: Owners = split
+        .bound
+        .iter()
+        .map(|&(method, module, _)| (method, module))
+        .collect();
+    let ctx = Ctx::read(g, owners);
+    let index = &ctx.index;
+    // The Go refusals first, so a refused file reads as why, whatever else
+    // moved; the first reason in this order over every edit.
+    let reasons: Vec<&'static str> = edits
+        .iter()
+        .filter_map(|e| go_refusal(g, &ctx, &e.parse))
+        .collect();
+    if let Some(why) = ["mount", "route", "wire"]
+        .into_iter()
+        .find(|r| reasons.contains(r))
+    {
+        return Err(Refused::Unsupported(why));
+    }
+    let mut prepared = edits
+        .into_iter()
+        .map(|e| prepare(g, &ctx, e))
+        .collect::<Result<Vec<Prepared>, Refused>>()?;
+    prepared.sort_by(|a, b| a.qname.cmp(&b.qname).then(a.path.cmp(&b.path)));
+    if prepared.windows(2).any(|w| w[0].module == w[1].module) {
+        return Err(Refused::Unsupported("a file edited twice"));
+    }
+    let shared: HashSet<NodeId> = prepared
+        .iter()
+        .flat_map(|p| p.runs.iter().map(|(at, _)| g.nodes[*at].id))
+        .collect();
+    if !shared.is_empty() && g.edges.iter().any(|e| shared.contains(&e.from)) {
+        return Err(Refused::Unsupported("an edge from a shared node"));
+    }
+
+    // The surface index, from every statement and embed ref of the group.
+    let imports: Vec<ImportStmt> = group.iter().flat_map(|p| p.imports.clone()).collect();
+    let embed_refs: Vec<UnresolvedRef> = group
+        .iter()
+        .flat_map(|p| p.refs.iter())
+        .filter(|r| is_go_embed(&g.nav, r))
+        .cloned()
+        .collect();
+    let mut surface = go_index(g, split, &imports, &embed_refs);
+    // Each file's IMPORTS edges, drawn and taken back: its bindings must be
+    // the graph's, else the surface moved (`g` restored either way).
+    let mut import_edges: Vec<Edge> = Vec::new();
+    for p in &prepared {
+        let old = g.symbols.module_import_bindings.remove(&p.module);
+        let mark = g.edges.len();
+        resolve_imports_go(g, &p.imports, &surface.packages);
+        let drawn = g.edges.split_off(mark);
+        let fresh = g.symbols.module_import_bindings.remove(&p.module);
+        if let Some(old) = &old {
+            g.symbols
+                .module_import_bindings
+                .insert(p.module, old.clone());
+        }
+        if fresh != old {
+            return Err(Refused::SurfaceMoved(p.path.clone()));
+        }
+        import_edges.extend(drawn);
+    }
+
+    // Writes from here on.
+    let owned: HashSet<NodeId> = prepared
+        .iter()
+        .flat_map(|p| p.owned.iter().copied())
+        .collect();
+    let modules: HashSet<NodeId> = prepared.iter().map(|p| p.module).collect();
+    let dropped = drop_file_outputs(g, &owned, &modules, is_go_surface_edge);
+    let kept = g.edges.len();
+    let mut body = GoBody {
+        calls: Vec::new(),
+        refs: Vec::new(),
+    };
+    for p in prepared {
+        let Prepared {
+            owned,
+            nodes,
+            edges,
+            nav,
+            calls,
+            refs,
+            runs,
+            block,
+            order,
+            ..
+        } = p;
+        let mut run_of: HashMap<usize, Range<usize>> = runs.into_iter().collect();
+        for n in nodes {
+            let Some(&at) = index.get(&n.id) else {
+                continue;
+            };
+            match run_of.remove(&at) {
+                Some(run) => {
+                    g.nodes[at].cells.splice(run, n.cells);
+                }
+                None => g.nodes[at].cells = n.cells,
+            }
+        }
+        reorder_block(g, block, &order);
+        g.edges.extend(edges);
+        replace_file_nav(g, &owned, &nav);
+        body.calls.extend(calls);
+        body.refs
+            .extend(refs.into_iter().filter(|r| !is_go_embed(&g.nav, r)));
+    }
+    g.edges.extend(import_edges);
+    let mut tally = EvidenceTally::default();
+    go_stitch(g, &mut surface, body, Some(&owned), &mut tally);
+    let added = g.edges.len() - kept;
+    g.canonicalize();
+    Ok(RebodyStats {
+        files: modules.len(),
+        edges_removed: dropped.edges,
+        edges_added: added,
+        calls_bound: tally.calls_bound(),
+        refs_bound: tally.refs_bound(),
+        names_ms: tally.names_ms(),
+    })
+}
+
+/// GA.7: an edge a Go re-stitch keeps although its `from` is an edited
+/// file's: an IMPLEMENTS the implicit or method-level pass derived from
+/// method sets and signatures (`graph:iface`), or a split receiver's
+/// struct -> method DEFINES (`split_receiver`). Both are surface passes'
+/// outputs and carry no row, so a body-only edit leaves them as they are.
+fn is_go_surface_edge(e: &Edge) -> bool {
+    evidence::Evidence::of(e).is_some_and(|ev| match ev.emitter.as_str() {
+        "graph:iface" => true,
+        "graph:go_packages" => ev.rule.as_deref() == Some("split_receiver"),
+        _ => false,
+    })
+}
+
 /// Put `g.nodes[block]` in `order` (the block's own indexes, each once): a
 /// body edit that mints a shared node at another statement moves it within
 /// its file's block, as a clean merge would.
@@ -612,7 +930,7 @@ mod tests {
     use glia_core::RepoId;
 
     use super::*;
-    use crate::build::{build_python, rebuild_python_bodies};
+    use crate::build::{build_go, build_python, rebuild_go_bodies, rebuild_python_bodies};
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://rebody")
@@ -995,5 +1313,382 @@ def unused():
             "[rebody] lang=python files=2 edges -7 +9 calls_bound=3 refs_bound=1 names_ms=0.3 \
              refused=none"
         );
+    }
+
+    // ---- GA.7: Go ------------------------------------------------------------
+
+    fn go_parse(path: &str, src: &str) -> FileParse {
+        let qname = path.trim_end_matches(".go").replace('/', "::");
+        glia_parser_go::parse_file(src, path, &qname, "example.com/app", repo()).expect("parse")
+    }
+
+    const GO_MODELS: &str = "\
+package models
+
+type Item struct {
+	ID   string
+	Name string
+}
+
+func (i *Item) Label() string {
+	return i.Name
+}
+
+func NewItem(id string) *Item {
+	return &Item{ID: id}
+}
+
+type Namer interface {
+	Label() string
+}
+
+type Tagged struct {
+	Item
+	Tag string
+}
+";
+
+    const GO_STORE: &str = "\
+package store
+
+import \"example.com/app/models\"
+
+type Store struct {
+	items []*models.Item
+}
+
+func New() *Store {
+	return &Store{}
+}
+
+func (s *Store) Items() []*models.Item {
+	return s.items
+}
+";
+
+    /// Split receivers (LA.23d): `Store`'s methods declared beside it, and a
+    /// struct embedding it below them.
+    const GO_EXTRA: &str = "\
+package store
+
+import \"example.com/app/models\"
+
+func (s *Store) Count() int {
+	return len(s.Items())
+}
+
+func (s *Store) Add(id string) {
+	s.items = append(s.items, models.NewItem(id))
+}
+
+type Cached struct {
+	Store
+	hits int
+}
+";
+
+    const GO_SERVICE: &str = "\
+package service
+
+import (
+	\"example.com/app/models\"
+	\"example.com/app/store\"
+)
+
+var shared = store.New()
+
+func helper() int {
+	return 1
+}
+
+func Run() int {
+	shared.Add(\"a\")
+	for _, it := range shared.Items() {
+		it.Label()
+	}
+	run := func() int { return helper() }
+	c := &store.Cached{}
+	c.Count()
+	item := &models.Item{ID: \"x\"}
+	mk := models.NewItem
+	_ = mk
+	_ = item
+	return run()
+}
+";
+
+    const GO_ROUTES: &str = "\
+package routes
+
+import \"github.com/gin-gonic/gin\"
+
+func Register(r *gin.Engine) {
+	r.GET(\"/items\", list)
+}
+
+func list(c *gin.Context) {
+	c.String(200, \"ok\")
+}
+";
+
+    const GO_MOUNT: &str = "\
+package routes
+
+import \"github.com/gin-gonic/gin\"
+
+func Mount(r *gin.Engine) {
+	v1 := r.Group(\"/v1\")
+	sub(v1)
+}
+
+func sub(g *gin.RouterGroup) {
+	g.GET(\"/x\", list)
+}
+";
+
+    const GO_HANDLER: &str = "\
+package api
+
+import (
+	\"net/http\"
+
+	\"example.com/app/models\"
+	\"github.com/gin-gonic/gin\"
+)
+
+func Show(c *gin.Context) {
+	c.JSON(http.StatusOK, models.Item{})
+}
+";
+
+    fn go_base() -> Vec<(&'static str, String)> {
+        vec![
+            ("api/handler.go", GO_HANDLER.to_string()),
+            ("models/models.go", GO_MODELS.to_string()),
+            ("routes/mount.go", GO_MOUNT.to_string()),
+            ("routes/routes.go", GO_ROUTES.to_string()),
+            ("service/service.go", GO_SERVICE.to_string()),
+            ("store/extra.go", GO_EXTRA.to_string()),
+            ("store/store.go", GO_STORE.to_string()),
+        ]
+    }
+
+    fn go_parses(tree: &[(&'static str, String)]) -> Vec<FileParse> {
+        tree.iter().map(|(p, s)| go_parse(p, s)).collect()
+    }
+
+    fn go_clean(tree: &[(&'static str, String)]) -> RepoGraph {
+        let mut g = build_go(repo(), go_parses(tree)).expect("build");
+        g.canonicalize();
+        g
+    }
+
+    /// Re-stitch `files` (path, new source) on the base graph, compare with
+    /// a clean build of the edited tree, and return the stats.
+    fn go_rebody(files: &[(&str, String)], label: &str) -> RebodyStats {
+        let tree = go_base();
+        let mut g = go_clean(&tree);
+        let mut after = tree.clone();
+        for (path, src) in files {
+            after = edited(&after, path, src);
+        }
+        let edits = files
+            .iter()
+            .map(|(p, s)| BodyEdit::new(go_parse(p, s)))
+            .collect();
+        let stats = rebuild_go_bodies(&mut g, edits, &go_parses(&after))
+            .unwrap_or_else(|e| panic!("{label}: refused: {e}"));
+        assert_same(&g, &go_clean(&after), label);
+        stats
+    }
+
+    fn go_refused(path: &str, src: &str) -> Result<RebodyStats, Refused> {
+        let tree = go_base();
+        let mut g = go_clean(&tree);
+        let before = g.clone();
+        let after = edited(&tree, path, src);
+        let got = rebuild_go_bodies(
+            &mut g,
+            vec![BodyEdit::new(go_parse(path, src))],
+            &go_parses(&after),
+        );
+        assert!(got.is_err(), "{path}: {got:?}");
+        assert_same(&g, &before, "refused leaves the graph");
+        got
+    }
+
+    fn rule_count(g: &RepoGraph, emitter: &str, rule: &str) -> usize {
+        g.edges
+            .iter()
+            .filter_map(evidence::Evidence::of)
+            .filter(|ev| ev.emitter == emitter && ev.rule.as_deref() == Some(rule))
+            .count()
+    }
+
+    /// The fixture reaches what a Go re-stitch must keep or re-derive: split
+    /// receivers, embeds, implicit IMPLEMENTS, package-var and range-element
+    /// receivers, value refs, a ROUTE, a mount and a wire cell.
+    #[test]
+    fn go_base_fixture_reaches_every_path() {
+        let g = go_clean(&go_base());
+        assert_eq!(rule_count(&g, "graph:go_packages", "split_receiver"), 2);
+        let embeds = rule_count(&g, "graph:go_packages", "embed_package")
+            + rule_count(&g, "graph:go_packages", "embed_import");
+        assert_eq!(embeds, 2, "Tagged and Cached embed");
+        assert!(
+            g.edges
+                .iter()
+                .filter_map(evidence::Evidence::of)
+                .any(|ev| ev.emitter == "graph:iface"),
+            "an implicit IMPLEMENTS"
+        );
+        assert!(rule_count(&g, "graph:go_packages", "composite_literal") > 0);
+        assert!(rule_count(&g, "graph:go_packages", "func_value") > 0);
+        let kinds: Vec<_> = g.nav.kind_by_id.values().copied().collect();
+        assert!(kinds.contains(&node_kind::ROUTE));
+        let service = g.symbols.module_by_qname["service::service"];
+        assert!(
+            g.nav.local_types[&service].contains_key("shared"),
+            "the package var is a MODULE-scope local"
+        );
+        let label = g
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "models::models::Item::Label")
+            .map(|(id, _)| *id)
+            .expect("Label");
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.category == edge_category::CALLS && e.to == label),
+            "the range element's receiver binds Item.Label"
+        );
+    }
+
+    #[test]
+    fn go_a_typed_receiver_call_added() {
+        let src = GO_SERVICE.replace(
+            "\tshared.Add(\"a\")\n",
+            "\tn := shared.Count()\n\t_ = n\n\tshared.Add(\"a\")\n",
+        );
+        let s = go_rebody(&[("service/service.go", src)], "typed receiver");
+        assert_eq!(s.files, 1);
+        assert!(s.calls_bound > 0 && s.edges_removed > 0, "{s:?}");
+    }
+
+    #[test]
+    fn go_a_closure_call_changed() {
+        let src = GO_SERVICE.replace(
+            "\trun := func() int { return helper() }\n",
+            "\trun := func() int {\n\t\tc.Count()\n\t\treturn helper() + 1\n\t}\n",
+        );
+        let src = src.replace("\tc := &store.Cached{}\n", "").replace(
+            "\tshared.Add(\"a\")\n",
+            "\tshared.Add(\"a\")\n\tc := &store.Cached{}\n",
+        );
+        go_rebody(&[("service/service.go", src)], "closure");
+    }
+
+    #[test]
+    fn go_a_range_element_receiver_removed() {
+        let src = GO_SERVICE.replace(
+            "\tfor _, it := range shared.Items() {\n\t\tit.Label()\n\t}\n",
+            "",
+        );
+        go_rebody(&[("service/service.go", src)], "range element");
+    }
+
+    #[test]
+    fn go_a_composite_literal_and_func_value_moved() {
+        let src = GO_SERVICE.replace(
+            "\titem := &models.Item{ID: \"x\"}\n\tmk := models.NewItem\n",
+            "\tvar pad1, pad2 int\n\t_, _ = pad1, pad2\n\tmk := models.NewItem\n\titem := []models.Item{{ID: \"y\"}}\n",
+        );
+        go_rebody(&[("service/service.go", src)], "composite literal");
+    }
+
+    /// A split method's body edit shifts the embedding struct below it: the
+    /// embed's row is re-derived, the split DEFINES and IMPLEMENTS kept.
+    #[test]
+    fn go_a_split_method_body_shifts_an_embed() {
+        let src = GO_EXTRA.replace(
+            "\treturn len(s.Items())\n",
+            "\titems := s.Items()\n\ttotal := len(items)\n\treturn total\n",
+        );
+        go_rebody(&[("store/extra.go", src)], "split method");
+    }
+
+    /// The struct's own file edited: its methods other files declare keep
+    /// their DEFINES; the implicit IMPLEMENTS of a type in the file is kept.
+    #[test]
+    fn go_a_struct_file_and_an_implementer_edited() {
+        let store = GO_STORE.replace(
+            "\treturn &Store{}\n",
+            "\ts := &Store{}\n\ts.items = nil\n\treturn s\n",
+        );
+        let models = GO_MODELS.replace(
+            "\treturn i.Name\n",
+            "\tif i == nil {\n\t\treturn \"\"\n\t}\n\treturn i.Name\n",
+        );
+        let s = go_rebody(
+            &[("models/models.go", models), ("store/store.go", store)],
+            "two files",
+        );
+        assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn go_a_route_file_is_refused() {
+        let src = GO_ROUTES.replace("\tc.String(200, \"ok\")\n", "\tc.String(201, \"ok\")\n");
+        let got = go_refused("routes/routes.go", &src);
+        assert_eq!(got, Err(Refused::Unsupported("route")));
+        assert!(
+            marker("go", &got).ends_with("refused=unsupported:route"),
+            "{}",
+            marker("go", &got)
+        );
+    }
+
+    #[test]
+    fn go_a_mount_file_is_refused() {
+        let src = GO_MOUNT.replace("\tsub(v1)\n", "\tsub(v1)\n\t_ = v1\n");
+        assert_eq!(
+            go_refused("routes/mount.go", &src),
+            Err(Refused::Unsupported("mount"))
+        );
+    }
+
+    #[test]
+    fn go_a_wire_handler_is_refused() {
+        let src = GO_HANDLER.replace(
+            "\tc.JSON(http.StatusOK, models.Item{})\n",
+            "\tc.Header(\"x\", \"y\")\n\tc.JSON(http.StatusOK, models.Item{})\n",
+        );
+        assert_eq!(
+            go_refused("api/handler.go", &src),
+            Err(Refused::Unsupported("wire"))
+        );
+    }
+
+    #[test]
+    fn go_a_func_added_is_refused() {
+        let src = format!("{GO_EXTRA}\nfunc Extra() int {{\n\treturn 2\n}}\n");
+        assert_eq!(
+            go_refused("store/extra.go", &src),
+            Err(Refused::SurfaceMoved("store/extra.go".to_string()))
+        );
+    }
+
+    #[test]
+    fn go_an_import_added_is_refused() {
+        let src = GO_SERVICE.replace(
+            "\t\"example.com/app/store\"\n",
+            "\t\"example.com/app/store\"\n\t\"example.com/app/api\"\n",
+        );
+        assert!(matches!(
+            go_refused("service/service.go", &src),
+            Err(Refused::SurfaceMoved(_))
+        ));
     }
 }

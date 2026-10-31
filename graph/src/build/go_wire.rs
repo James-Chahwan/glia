@@ -58,7 +58,7 @@
 //! `[go-wire] resolved sites=<s>/<n> models=<m> (type=<t> call=<c> chain=<h>)
 //! scalar=<s> unresolved=<u> uses=<e> nested=<k>`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::wire::{
@@ -181,8 +181,13 @@ struct Use {
 /// STRUCT's SCHEMA_FIELDS (module doc), rewriting the cells in place and
 /// pushing the USES edges. Runs after the calls and refs resolve (the
 /// promoted-member index is set) and changes no node, so no earlier binding
-/// moves.
-pub(super) fn resolve(g: &mut RepoGraph, packages: &GoPackages) -> WireStats {
+/// moves. GA.7: `only` (a re-stitch's file nodes, `None` for every node)
+/// limits the cells read to those nodes'.
+pub(super) fn resolve(
+    g: &mut RepoGraph,
+    packages: &GoPackages,
+    only: Option<&HashSet<NodeId>>,
+) -> WireStats {
     let mut stats = WireStats::default();
     let (rewrites, uses) = {
         let wire = Wire::new(g, packages);
@@ -190,6 +195,9 @@ pub(super) fn resolve(g: &mut RepoGraph, packages: &GoPackages) -> WireStats {
         let mut uses: Vec<Use> = Vec::new();
         let mut at: HashMap<(NodeId, NodeId, WireForm), usize> = HashMap::new();
         for (ni, node) in g.nodes.iter().enumerate() {
+            if only.is_some_and(|o| !o.contains(&node.id)) {
+                continue;
+            }
             for (ci, cell) in node.cells.iter().enumerate() {
                 if let Some(new) = wire.site(node.id, cell, &mut stats, &mut uses, &mut at) {
                     rewrites.push((ni, ci, new));

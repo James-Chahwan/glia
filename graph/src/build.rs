@@ -385,63 +385,26 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
 /// `modules` (the repo's go.mod roots) is read only by the
 /// implicit-IMPLEMENTS pass's cross-module gate (FD.81).
 ///
-/// CI.2a: the embed refs (interface and struct) bind right after the symbol
-/// table, before any import or call pass, so the call hook reads the
-/// promoted-member index ([`GoPromoted`]) they give; they read only nav and
-/// the ImportStmts, so no binding moves. Their edges and unbound refs are
-/// pushed where LD.7b pushed them, after `resolve_refs`, so a graph without a
-/// struct embed keeps its edge and `unresolved_refs` order.
+/// GA.7: [`go_surface`] then [`go_stitch`] over every file, then the
+/// surface passes that read the whole graph's method sets: CI.6's aliases,
+/// the implicit IMPLEMENTS and the method-level pairs. A body-only edit
+/// re-runs only the stitch, for the edited files ([`rebuild_go_bodies`]).
 fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModuleRoots) -> GoPasses {
-    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
-    let split = bind_split_go_receivers(&mut g);
-    build_symbol_table(&mut g);
-    let (embed_refs, mut refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
-        all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
-    // DF.15: the name each package dir's `package` clause declares, read
-    // once, before the two passes that name an un-aliased import by it.
-    let package_names = go_package_names(&g);
-    let embed_binds = bind_go_embeds(&g, &embed_refs, &all_imports, &package_names);
-    let mut packages = GoPackages::build(&g, &all_imports, package_names);
-    packages.promoted = GoPromoted::build(&g, &embed_binds.bound);
-    let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
-    // GA.19: the package hook is pure (its counters come back per chunk), so
-    // it decides on the resolve pool: no serial hook is left.
+    let (mut g, mut surface, body, import_stats) = go_surface(repo, parses);
     let mut tally = EvidenceTally::default();
-    let hooked = resolve_go_calls(&mut g, &all_calls, &split, &packages, &mut tally);
-    packages.sibling_calls = hooked.sibling_calls;
-    let hooked_dot = hooked.dot_imports;
-    packages.promoted.calls = hooked.promoted_calls;
-    packages.promoted.field_hops = hooked.promoted_field_hops;
+    let GoStitch {
+        receivers,
+        mounts,
+        handlers,
+        values,
+        clause_dot,
+        embeds,
+        wire,
+    } = go_stitch(&mut g, &mut surface, body, None, &mut tally);
+    let GoSurface {
+        split, packages, ..
+    } = surface;
     let package_stats = packages.stats(import_stats);
-    let receivers = hooked.receivers;
-    // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
-    // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
-    // GD.14: a clause-named owner placeholder maps through the imports of
-    // the file holding the provisional or fact.
-    let owner_dir = |g: &RepoGraph, at: NodeId, pkg: &str| {
-        let module = packages.file_of(g, at)?;
-        packages.imported_dir(g, module, pkg).map(str::to_string)
-    };
-    let mounts = crate::go_mounts::bind(&mut g, &mut refs, &owner_dir);
-    // CI.4: a receiver method value whose type sits in another file of the
-    // package, or whose method is promoted, binds through the package before
-    // the generic resolver's repo-unique method name can.
-    let handlers = packages.bind_type_handlers(&mut g, &mut refs);
-    // DT.5j: the parser's func / method value refs bind through the package
-    // (or are dropped); the generic resolver never sees a USES ref.
-    let mut values = packages.bind_value_refs(&mut g, &mut refs);
-    values.pkg_handlers = handlers.package_functions;
-    // GD.14: `[go-packages] clause_owner_binds= dot_imports=`.
-    let clause_dot = ClauseDotStats {
-        clause_owner_binds: mounts.clause_owner_binds,
-        dot_imports: hooked_dot + values.dot_imports,
-    };
-    resolve_refs(&mut g, &refs, &mut tally);
-    let embeds = embed_binds.push(&mut g, &packages.promoted);
-    // DT.1f: the handlers' wire values typed through the facts the calls were
-    // bound with (the promoted-member index included); edges appended last,
-    // so a graph with no wire cell keeps its edge order.
-    let wire = go_wire::resolve(&mut g, &packages);
     // CI.6: the signatures name an in-repo type alias by its target before
     // CA.3b compares them (and CI.2b's promoted method sets read them).
     let aliases = resolve_go_alias_sigs(&mut g, &packages);
@@ -475,6 +438,220 @@ fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModule
         values,
         clause_dot,
     }
+}
+
+/// GA.7: the Go group's SURFACE index, what [`go_stitch`] reads and never
+/// writes: the split-file receiver binds (LA.23d), the package model
+/// ([`GoPackages`], with the promoted-member index CI.2a's embeds give it)
+/// and the embed binds, pushed per embedder by the stitch.
+struct GoSurface {
+    split: SplitStats,
+    packages: GoPackages,
+    embeds: GoEmbedBinds,
+}
+
+/// GA.7: the body stubs [`go_stitch`] resolves: call sites and the refs that
+/// are not embeds, in parse order.
+struct GoBody {
+    calls: Vec<CallSite>,
+    refs: Vec<UnresolvedRef>,
+}
+
+/// GA.7: the SURFACE phase of [`build_go_with`]: [`merge_parses`], the split
+/// receivers, the symbol table, the embed binds, the package model
+/// ([`go_index`]) and the IMPORTS edges and bindings, which every file's
+/// stitching reads.
+///
+/// CI.2a: the embed refs (interface and struct) bind right after the symbol
+/// table, before any import or call pass, so the call hook reads the
+/// promoted-member index ([`GoPromoted`]) they give; they read only nav and
+/// the ImportStmts, so no binding moves. Their edges and unbound refs are
+/// pushed where LD.7b pushed them, after `resolve_refs` ([`go_stitch`]), so
+/// a graph without a struct embed keeps its edge and `unresolved_refs`
+/// order.
+fn go_surface(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+) -> (RepoGraph, GoSurface, GoBody, GoImportStats) {
+    let (mut g, all_imports, calls, all_refs) = merge_parses(repo, parses);
+    let split = bind_split_go_receivers(&mut g);
+    build_symbol_table(&mut g);
+    let (embed_refs, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+        all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
+    let surface = go_index(&g, split, &all_imports, &embed_refs);
+    let import_stats = resolve_imports_go(&mut g, &all_imports, &surface.packages);
+    (g, surface, GoBody { calls, refs }, import_stats)
+}
+
+/// GA.7: the package model and embed binds of a Go graph whose symbol table
+/// is built, from every import statement and embed ref of its files: what
+/// [`go_surface`] builds for a clean build and [`rebuild_go_bodies`] rebuilds
+/// from a built graph (`split` read back from its edges).
+fn go_index(
+    g: &RepoGraph,
+    split: SplitStats,
+    imports: &[ImportStmt],
+    embed_refs: &[UnresolvedRef],
+) -> GoSurface {
+    // DF.15: the name each package dir's `package` clause declares, read
+    // once, before the two passes that name an un-aliased import by it.
+    let package_names = go_package_names(g);
+    let embeds = bind_go_embeds(g, embed_refs, imports, &package_names);
+    let mut packages = GoPackages::build(g, imports, package_names);
+    packages.promoted = GoPromoted::build(g, &embeds.bound);
+    GoSurface {
+        split,
+        packages,
+        embeds,
+    }
+}
+
+/// What [`go_stitch`] did, the stats its markers print.
+struct GoStitch {
+    receivers: ReceiverTally,
+    mounts: MountStats,
+    handlers: TypeHandlerStats,
+    values: ValueStats,
+    clause_dot: ClauseDotStats,
+    embeds: GoEmbedStats,
+    wire: go_wire::WireStats,
+}
+
+/// GA.7: the STITCH phase of [`build_go_with`]: resolve `body`'s calls
+/// through the package hook, re-key the CB.20 mount ROUTEs through the CALLS
+/// just bound, bind the CI.4 type handlers and the DT.5j value refs through
+/// the package, resolve the remaining refs, push the embeds and type the
+/// DT.1f wire cells. `only` (the nodes of the files re-stitched, `None` for a
+/// clean build) limits the embed edges pushed and the wire cells typed to
+/// those files' nodes, and skips the mount pass, which reads only mount
+/// facts and provisional ROUTEs, both refused in a re-stitched file
+/// ([`rebuild_go_bodies`]). `tally` sums every stitch of one graph.
+fn go_stitch(
+    g: &mut RepoGraph,
+    s: &mut GoSurface,
+    body: GoBody,
+    only: Option<&HashSet<NodeId>>,
+    tally: &mut EvidenceTally,
+) -> GoStitch {
+    // GA.19: the package hook is pure (its counters come back per chunk), so
+    // it decides on the resolve pool: no serial hook is left.
+    let hooked = resolve_go_calls(g, &body.calls, &s.split, &s.packages, tally);
+    s.packages.sibling_calls = hooked.sibling_calls;
+    s.packages.promoted.calls = hooked.promoted_calls;
+    s.packages.promoted.field_hops = hooked.promoted_field_hops;
+    let mut refs = body.refs;
+    // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
+    // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
+    // GD.14: a clause-named owner placeholder maps through the imports of
+    // the file holding the provisional or fact.
+    let mounts = match only {
+        Some(_) => MountStats::default(),
+        None => {
+            let packages = &s.packages;
+            let owner_dir = |g: &RepoGraph, at: NodeId, pkg: &str| {
+                let module = packages.file_of(g, at)?;
+                packages.imported_dir(g, module, pkg).map(str::to_string)
+            };
+            crate::go_mounts::bind(g, &mut refs, &owner_dir)
+        }
+    };
+    // CI.4: a receiver method value whose type sits in another file of the
+    // package, or whose method is promoted, binds through the package before
+    // the generic resolver's repo-unique method name can.
+    let handlers = s.packages.bind_type_handlers(g, &mut refs);
+    // DT.5j: the parser's func / method value refs bind through the package
+    // (or are dropped); the generic resolver never sees a USES ref.
+    let mut values = s.packages.bind_value_refs(g, &mut refs);
+    values.pkg_handlers = handlers.package_functions;
+    // GD.14: `[go-packages] clause_owner_binds= dot_imports=`.
+    let clause_dot = ClauseDotStats {
+        clause_owner_binds: mounts.clause_owner_binds,
+        dot_imports: hooked.dot_imports + values.dot_imports,
+    };
+    resolve_refs(g, &refs, tally);
+    let embeds = s.embeds.push(g, &s.packages.promoted, only);
+    // DT.1f: the handlers' wire values typed through the facts the calls were
+    // bound with (the promoted-member index included); edges appended last,
+    // so a graph with no wire cell keeps its edge order.
+    let wire = go_wire::resolve(g, &s.packages, only);
+    GoStitch {
+        receivers: hooked.receivers,
+        mounts,
+        handlers,
+        values,
+        clause_dot,
+        embeds,
+        wire,
+    }
+}
+
+/// GA.7: the split-file receiver binds of a built Go graph, read back from
+/// its edges: each `split_receiver` DEFINES (struct -> method) with the
+/// MODULE whose own DEFINES names the method, in `g.nodes` order of the
+/// method, as [`bind_split_go_receivers`] listed them. Its counters are not
+/// kept (markers only).
+fn go_split_of(g: &RepoGraph) -> SplitStats {
+    let mut file_of: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut strukt_of: HashMap<NodeId, NodeId> = HashMap::new();
+    for e in &g.edges {
+        if e.category != edge_category::DEFINES {
+            continue;
+        }
+        let from_kind = g.nav.kind_by_id.get(&e.from);
+        if from_kind == Some(&node_kind::MODULE) {
+            file_of.entry(e.to).or_insert(e.from);
+        } else if from_kind == Some(&node_kind::STRUCT)
+            && g.nav.parent_of.get(&e.to) == Some(&e.from)
+            && Evidence::of(e).is_some_and(|ev| {
+                ev.emitter == "graph:go_packages" && ev.rule.as_deref() == Some("split_receiver")
+            })
+        {
+            strukt_of.insert(e.to, e.from);
+        }
+    }
+    let mut split = SplitStats::default();
+    for n in &g.nodes {
+        if let (Some(&strukt), Some(&module)) = (strukt_of.get(&n.id), file_of.get(&n.id))
+            && !split.bound.iter().any(|&(m, ..)| m == n.id)
+        {
+            split.bound.push((n.id, module, strukt));
+        }
+    }
+    split
+}
+
+/// GA.7: re-stitch the Go files `edits` changed in their bodies only,
+/// against the unchanged surface index of `g` (a Go group graph
+/// [`build_go_with`] built), then put `g` in its canonical order: the result
+/// equals a clean [`build_go_with`] of the edited tree after
+/// [`RepoGraph::canonicalize`].
+///
+/// `group` is every parse of the group as it now is (the edited files'
+/// fresh parses among them), in the build's order: read only for its import
+/// statements and embed refs, the surface the package model is rebuilt from
+/// (`go_index`; neither is kept in a graph). The go.mod roots are not an
+/// input: the implicit-IMPLEMENTS pass (FD.81's only reader of them) reads
+/// method signatures, a surface, and its edges are kept, never re-derived.
+///
+/// Refuses, leaving `g` untouched, as GA.3's seam does (the surface moved,
+/// an unknown file, a node another file shares cells with), and, as
+/// [`Refused::Unsupported`], when an edited file, old or new parse, holds
+/// what another file's resolution reads through resolved calls: a mount
+/// fact (`mount`: CB.20 re-keys ROUTEs through the caller's CALLS), a ROUTE
+/// or a HANDLED_BY ref (`route`: CI.4 binds handlers through the package),
+/// or a JSON wire cell (`wire`: DT.1f types it through other files' facts
+/// and draws its USES). The model is in `build/partial.rs`.
+///
+/// fired_on, once per call on stderr:
+///   `[rebody] lang=go files=<f> edges -<r> +<a> calls_bound=<c> refs_bound=<n> names_ms=<ms> refused=<reason|none>`
+pub fn rebuild_go_bodies(
+    g: &mut RepoGraph,
+    edits: Vec<BodyEdit>,
+    group: &[FileParse],
+) -> Result<RebodyStats, Refused> {
+    let result = partial::rebuild_go(g, edits, group);
+    eprintln!("{}", partial::marker("go", &result));
+    result
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -3656,8 +3833,21 @@ impl GoEmbedBinds {
     /// `graph:go_packages`, rule `embed_package` / `embed_import`, the ref's
     /// line) and the rest onto `unresolved_refs`, then complete the
     /// `[go-embeds]` counters from `promoted` (read after the calls bound).
-    fn push(self, g: &mut RepoGraph, promoted: &GoPromoted) -> GoEmbedStats {
-        for (from, to, rule, line) in self.bound {
+    ///
+    /// GA.7: `only` (a re-stitch's file nodes, `None` for a clean build)
+    /// pushes only the embeds whose embedder it holds. The binds are taken,
+    /// so a second push adds nothing.
+    fn push(
+        &mut self,
+        g: &mut RepoGraph,
+        promoted: &GoPromoted,
+        only: Option<&HashSet<NodeId>>,
+    ) -> GoEmbedStats {
+        let kept = |from: &NodeId| only.is_none_or(|o| o.contains(from));
+        for (from, to, rule, line) in std::mem::take(&mut self.bound) {
+            if !kept(&from) {
+                continue;
+            }
             push_edge(
                 g,
                 from,
@@ -3666,14 +3856,16 @@ impl GoEmbedBinds {
                 go_ev(rule).line(line),
             );
         }
-        g.unresolved_refs.extend(self.unbound);
+        let unbound = std::mem::take(&mut self.unbound);
+        g.unresolved_refs
+            .extend(unbound.into_iter().filter(|r| kept(&r.from)));
         GoEmbedStats {
             methods: promoted.methods.values().map(BTreeMap::len).sum(),
             fields: promoted.fields.values().map(BTreeMap::len).sum(),
             ambiguous: promoted.ambiguous,
             calls: promoted.calls,
             field_hops: promoted.field_hops,
-            ..self.stats
+            ..std::mem::take(&mut self.stats)
         }
     }
 }

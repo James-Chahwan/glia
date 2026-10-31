@@ -299,7 +299,7 @@ pub(crate) fn build_groups_seeded(
             let refused = if files != edited.len() {
                 RebodyRefusal::NoEdits
             } else {
-                match crate::parallel::quiet(|| rebody_group(cached, edits)) {
+                match crate::parallel::quiet(|| rebody_group(cached, edits, &input.parses)) {
                     Ok(Ok(build)) => {
                         let ms = started.elapsed().as_secs_f64() * 1000.0;
                         return Ok((build, Made::Rebodied { files, ms }));
@@ -363,10 +363,11 @@ fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
 
 /// GA.4: whether group `key` has a body-only fast path ([`rebody_group`]):
 /// a `glia_graph::rebuild_*_bodies` entry that re-stitches edited files
-/// against the group's unchanged surface. Python only (GA.3's seam); FA.5 -
-/// FA.7 add their arms.
+/// against the group's unchanged surface. Python (GA.3's seam) and Go
+/// (GA.7, `glia_graph::rebuild_go_bodies`, which refuses a file holding a
+/// mount fact, a route or a JSON wire cell).
 pub(crate) fn fast_path_for(key: &str) -> bool {
-    matches!(key, "python")
+    matches!(key, "python" | "go")
 }
 
 /// GA.4: why [`rebody_group`] would not re-stitch a group; the caller builds
@@ -421,7 +422,9 @@ impl RebodyRefusal {
 /// edges the re-stitch drew ([`stamp_graph_edges`]), the canonical order
 /// (GA.2), the `[heritage]` tally, the `[evidence-lines]` line and the
 /// evidence fill (DC.5), so the build is the one a clean build of the edited
-/// group makes. Runs under [`EngineResolvePool`] like a build.
+/// group makes. Runs under [`EngineResolvePool`] like a build. `group` is
+/// every parse of the group as it now is (the edits among them): Go rebuilds
+/// its package model from their import statements and embed refs (GA.7).
 ///
 /// The build's `recv_bound` (the `[recv]` marker's receiver-typed binds) is
 /// the cached build's: the re-stitch binds only the edited files' sites and
@@ -432,6 +435,7 @@ impl RebodyRefusal {
 pub(crate) fn rebody_group(
     cached: LangBuild,
     edits: Vec<FileParse>,
+    group: &[FileParse],
 ) -> Result<LangBuild, RebodyRefusal> {
     let LangBuild {
         lang,
@@ -456,6 +460,7 @@ pub(crate) fn rebody_group(
         edits.into_iter().map(glia_graph::BodyEdit::new).collect();
     let restitch = |g: &mut RepoGraph| match lang {
         "python" => glia_graph::rebuild_python_bodies(g, body_edits).map(|_| ()),
+        "go" => glia_graph::rebuild_go_bodies(g, body_edits, group).map(|_| ()),
         _ => Err(glia_graph::Refused::Unsupported("no fast path")),
     };
     // The graph crate counts receiver binds on this thread: bracket them so

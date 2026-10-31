@@ -73,6 +73,14 @@
 //! random half gains `py_body` (a call statement in a python file's last
 //! `def`), checks `body_only` is a python subset of `groups_rebuilt` on every
 //! flush, and the default seeds must take the fast path at least once.
+//!
+//! GA.7, the Go fast path ([`scripted_go_fast_path`]): a Go module fixture
+//! ([`write_go_fixture`]: a package-var, range-element and closure receiver,
+//! split-file methods above an embedding struct, a gin route file, a JSON
+//! handler) through body edits (`body_only` `["go"]`), a route file and a
+//! JSON handler edit (refused: `[]`, rebuilt) and a surface edit (`[]`),
+//! checks 1-3 after each. The random half gains `go_body` (a call statement
+//! in a go file's last `func`), and `body_only` may name `go` too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -775,6 +783,12 @@ const MAIN: Fixture = Fixture {
 /// GA.4's four-file Python fixture ([`write_py_fixture`]).
 const PY: Fixture = Fixture {
     write: write_py_fixture,
+    undo: false,
+};
+
+/// GA.7's Go fixture ([`write_go_fixture`]).
+const GO: Fixture = Fixture {
+    write: write_go_fixture,
     undo: false,
 };
 
@@ -1512,6 +1526,182 @@ fn scripted_py_fast_path() {
     run_on(PY, "py_fast_path", SEQ_PY_FAST, None);
 }
 
+/// GA.7's Go fixture at `<tmp>/repo`: a module whose service types its
+/// receivers through a package var, a range element and a closure, a store
+/// whose methods sit in a second file (split receivers) above an embedding
+/// struct, a gin route file and a JSON handler (both refused by the fast
+/// path: rebuilt, still byte-identical).
+fn write_go_fixture(tmp: &Path) -> PathBuf {
+    let repo = tmp.join("repo");
+    for (rel, body) in GO_INLINE {
+        write(&repo, rel, body);
+    }
+    repo
+}
+
+const GO_INLINE: &[(&str, &str)] = &[
+    ("go.mod", "module example.com/goparity\n\ngo 1.21\n"),
+    (
+        "models/models.go",
+        "package models\n\ntype Item struct {\n\tID   string\n\tName string\n}\n\nfunc (i *Item) Label() string {\n\treturn i.Name\n}\n\nfunc NewItem(id string) *Item {\n\treturn &Item{ID: id}\n}\n\ntype Namer interface {\n\tLabel() string\n}\n",
+    ),
+    (
+        "store/store.go",
+        "package store\n\nimport \"example.com/goparity/models\"\n\ntype Store struct {\n\titems []*models.Item\n}\n\nfunc New() *Store {\n\treturn &Store{}\n}\n\nfunc (s *Store) Items() []*models.Item {\n\treturn s.items\n}\n",
+    ),
+    (
+        "store/extra.go",
+        "package store\n\nimport \"example.com/goparity/models\"\n\nfunc (s *Store) Count() int {\n\treturn len(s.Items())\n}\n\nfunc (s *Store) Add(id string) {\n\ts.items = append(s.items, models.NewItem(id))\n}\n\ntype Cached struct {\n\tStore\n\thits int\n}\n",
+    ),
+    (
+        "service/service.go",
+        "package service\n\nimport (\n\t\"example.com/goparity/models\"\n\t\"example.com/goparity/store\"\n)\n\nvar shared = store.New()\n\nfunc helper() int {\n\treturn 1\n}\n\nfunc Run() int {\n\tshared.Add(\"a\")\n\tfor _, it := range shared.Items() {\n\t\tit.Label()\n\t}\n\trun := func() int { return helper() }\n\titem := &models.Item{ID: \"x\"}\n\t_ = item\n\treturn run()\n}\n",
+    ),
+    (
+        "routes/routes.go",
+        "package routes\n\nimport \"github.com/gin-gonic/gin\"\n\nfunc Register(r *gin.Engine) {\n\tr.GET(\"/items\", list)\n}\n\nfunc list(c *gin.Context) {\n\tc.String(200, \"ok\")\n}\n",
+    ),
+    (
+        "api/handler.go",
+        "package api\n\nimport (\n\t\"net/http\"\n\n\t\"example.com/goparity/models\"\n\t\"github.com/gin-gonic/gin\"\n)\n\nfunc Show(c *gin.Context) {\n\tc.JSON(http.StatusOK, models.Item{})\n}\n",
+    ),
+];
+
+/// A typed-receiver call through the package var, two rows ahead of the
+/// range loop.
+fn go_body(r: &Path) {
+    replace(
+        r,
+        "service/service.go",
+        "\tshared.Add(\"a\")\n",
+        "\tn := shared.Count()\n\t_ = n\n\tshared.Add(\"a\")\n",
+    );
+}
+/// A split-file method's body grows: the embedding struct below it moves.
+fn go_split_body(r: &Path) {
+    replace(
+        r,
+        "store/extra.go",
+        "\treturn len(s.Items())\n",
+        "\titems := s.Items()\n\ttotal := len(items)\n\treturn total\n",
+    );
+}
+fn go_two_bodies(r: &Path) {
+    replace(
+        r,
+        "models/models.go",
+        "\treturn i.Name\n",
+        "\tif i == nil {\n\t\treturn \"\"\n\t}\n\treturn i.Name\n",
+    );
+    replace(
+        r,
+        "service/service.go",
+        "\trun := func() int { return helper() }\n",
+        "\trun := func() int {\n\t\tshared.Count()\n\t\treturn helper()\n\t}\n",
+    );
+}
+/// A route file's handler body: refused (`route`), the group rebuilt.
+fn go_routes_body(r: &Path) {
+    replace(
+        r,
+        "routes/routes.go",
+        "\tc.String(200, \"ok\")\n",
+        "\tc.String(201, \"ok\")\n",
+    );
+}
+/// A JSON handler's body: refused (`wire`), the group rebuilt.
+fn go_wire_body(r: &Path) {
+    replace(
+        r,
+        "api/handler.go",
+        "\tc.JSON(http.StatusOK, models.Item{})\n",
+        "\tc.Header(\"x\", \"y\")\n\tc.JSON(http.StatusOK, models.Item{})\n",
+    );
+}
+/// A new function: store.go's surface moves.
+fn go_surface(r: &Path) {
+    let store = std::fs::read_to_string(r.join("store/store.go")).expect("read");
+    write(
+        r,
+        "store/store.go",
+        &format!("{store}\nfunc Drop(s *Store) int {{\n\treturn s.Count()\n}}\n"),
+    );
+}
+fn go_body_again(r: &Path) {
+    replace(
+        r,
+        "service/service.go",
+        "\t_ = item\n",
+        "\t_ = item.Label()\n",
+    );
+}
+
+/// GA.7: a Go step rebuilding the `go` group, through the fast path
+/// (`body_only` `["go"]`) or not (`[]`: refused, or the surface moved).
+const fn go_step(
+    name: &'static str,
+    edit: fn(&Path),
+    files: &'static [&'static str],
+    fast: bool,
+) -> Step {
+    Step {
+        name,
+        edit,
+        via: Via::Apply(files),
+        expect: Expect {
+            rebuilt_exact: Some(&["go"]),
+            body_only: Some(if fast { &["go"] } else { &[] }),
+            files_modified: files,
+            ..EXPECT
+        },
+    }
+}
+
+const SEQ_GO_FAST: &[Step] = &[
+    go_step("go_body", go_body, &["service/service.go"], true),
+    go_step("go_split_body", go_split_body, &["store/extra.go"], true),
+    go_step(
+        "go_two_bodies",
+        go_two_bodies,
+        &["models/models.go", "service/service.go"],
+        true,
+    ),
+    go_step(
+        "go_routes_body",
+        go_routes_body,
+        &["routes/routes.go"],
+        false,
+    ),
+    go_step("go_wire_body", go_wire_body, &["api/handler.go"], false),
+    Step {
+        name: "go_surface",
+        edit: go_surface,
+        via: Via::Apply(&["store/store.go"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["go"]),
+            body_only: Some(&[]),
+            files_modified: &["store/store.go"],
+            row_changes: &["added"],
+            ..EXPECT
+        },
+    },
+    go_step(
+        "go_body_again",
+        go_body_again,
+        &["service/service.go"],
+        true,
+    ),
+];
+
+/// GA.7: the Go body-only fast path: after every step the layout is a clean
+/// build's (checks 1-3); `body_only` is `["go"]` on the body-only steps and
+/// `[]` on a route file, a JSON handler (both refused, then rebuilt) and the
+/// surface step.
+#[test]
+fn scripted_go_fast_path() {
+    run_on(GO, "go_fast_path", SEQ_GO_FAST, None);
+}
+
 #[test]
 fn scripted_budgeted() {
     let sequences: &[(&str, &[Step])] = &[
@@ -1545,6 +1735,12 @@ fn scripted_budgeted() {
         PY,
         "budgeted_py_fast_path",
         SEQ_PY_FAST,
+        Some(MemoryBudget::mb(1)),
+    );
+    run_on(
+        GO,
+        "budgeted_go_fast_path",
+        SEQ_GO_FAST,
         Some(MemoryBudget::mb(1)),
     );
 }
@@ -1593,6 +1789,8 @@ enum Op {
     /// GA.4: a call statement as the first line of the last function of a
     /// python file: a body-only edit the fast path may re-stitch.
     PyBody,
+    /// GA.7: the same in a go file (the Go fast path, or its refusal).
+    GoBody,
     /// A new function, and a call to it from a sibling file.
     Declaration,
     /// A new python or go file with one function (a python one sometimes in a
@@ -1618,9 +1816,10 @@ enum Op {
 }
 
 impl Op {
-    const ALL: [Op; 15] = [
+    const ALL: [Op; 16] = [
         Op::Body,
         Op::PyBody,
+        Op::GoBody,
         Op::Declaration,
         Op::AddFile,
         Op::DeleteFile,
@@ -1640,6 +1839,7 @@ impl Op {
         match self {
             Op::Body => "body",
             Op::PyBody => "py_body",
+            Op::GoBody => "go_body",
             Op::Declaration => "declaration",
             Op::AddFile => "add",
             Op::DeleteFile => "delete",
@@ -1656,8 +1856,9 @@ impl Op {
         }
     }
 
-    /// Its cards in one [`World::pick`] bag: 15 in all, one default
-    /// sequence (GA.4's `py_body` took one of `body`'s two).
+    /// Its cards in one [`World::pick`] bag: 16 in all, one default
+    /// sequence (GA.4's `py_body` took one of `body`'s two; GA.7 added
+    /// `go_body`).
     fn weight(self) -> usize {
         1
     }
@@ -1924,6 +2125,23 @@ impl World {
                     .collect();
                 let rel = self.choose(&files);
                 let edited = in_last_py_fn(&self.read(&rel), &format!("_p{i} = len([{i}])"));
+                self.put(&rel, &edited);
+                vec![rel]
+            }
+            Op::GoBody => {
+                let files: Vec<String> = self
+                    .mirror
+                    .iter()
+                    .filter(|r| ext(r) == "go")
+                    .cloned()
+                    .collect();
+                let rel = self.choose(&files);
+                let text = self.read(&rel);
+                let edited = in_last_fn(&rel, &text, i).replacen(
+                    &format!("\t_ = {i}\n"),
+                    &format!("\t_ = len(\"g{i}\")\n"),
+                    1,
+                );
                 self.put(&rel, &edited);
                 vec![rel]
             }
@@ -2289,10 +2507,11 @@ impl Want {
         if let Some(exact) = &self.rebuilt_exact {
             assert_eq!(&u.groups_rebuilt, exact, "{at}: groups rebuilt");
         }
-        // GA.4: only python has a fast path, and its groups are rebuilt ones.
+        // GA.4 / GA.7: only python and go have a fast path, and its groups
+        // are rebuilt ones.
         for key in &u.body_only {
             assert!(
-                key == "python" && u.groups_rebuilt.contains(key),
+                (key == "python" || key == "go") && u.groups_rebuilt.contains(key),
                 "{at}: body_only {key}: {:?} of {:?}",
                 u.body_only,
                 u.groups_rebuilt
