@@ -7,7 +7,18 @@ edition = "2021"
 cli = []
 
 [dependencies]
-serde = "1"
+anyhow = "1"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies.winapi]
+version = "0.3"
+features = ["winuser"]
 
 [dev-dependencies]
 tempfile = "3"

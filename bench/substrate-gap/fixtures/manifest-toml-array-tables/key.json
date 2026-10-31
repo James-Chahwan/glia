@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "FD.77. Baseline HEAD c4152966: forbid violations expected for every target-table / poetry-source key (name, path, harness, required-features, url, priority).",
+  "note": "FD.77. Baseline HEAD c4152966: forbid violations expected for every target-table / poetry-source key (name, path, harness, required-features, url, priority). GD.37 (baseline HEAD 39c7f9e0, before the fix: package:cargo:serde / libc / winapi and package:pypi:sphinx / pytest-cov / httpx / ruff / mypy missing): dotted `[dependencies.serde]`, target `[target.'cfg(unix)'.dependencies]` / `[target.'cfg(windows)'.dependencies.winapi]`, PEP 621 `[project.optional-dependencies]`, PEP 735 `[dependency-groups]` (an `include-group` item names no package), a Poetry `test` group and a dotted Poetry table.",
   "expect_nodes": [
     {
       "kind": "PACKAGE_DEP",
@@ -25,6 +25,46 @@
       "kind": "PACKAGE_DEP",
       "name": "package:pypi:requests",
       "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:anyhow",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:libc",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:winapi",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:sphinx",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:pytest-cov",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:httpx",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:ruff",
+      "exact": true
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:mypy",
+      "exact": true
     }
   ],
   "expect_edges": [
@@ -41,6 +81,36 @@
     {
       "from": "pyapp/pyproject.toml",
       "to": "package:pypi:requests",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "crate/Cargo.toml",
+      "to": "package:cargo:libc",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "crate/Cargo.toml",
+      "to": "package:cargo:winapi",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "pyapp/pyproject.toml",
+      "to": "package:pypi:sphinx",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "pyapp/pyproject.toml",
+      "to": "package:pypi:pytest-cov",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "pyapp/pyproject.toml",
+      "to": "package:pypi:httpx",
+      "category": "DEPENDS_ON"
+    },
+    {
+      "from": "pyapp/pyproject.toml",
+      "to": "package:pypi:ruff",
       "category": "DEPENDS_ON"
     }
   ],
@@ -85,6 +155,38 @@
       "from": "crate/Cargo.toml",
       "to": "package:cargo:name",
       "category": "DEPENDS_ON"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:version"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:features"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:cargo:cfg(unix)"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:version"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:docs"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:lint"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:typing"
+    },
+    {
+      "kind": "PACKAGE_DEP",
+      "name": "package:pypi:include-group"
     }
   ]
 }

@@ -9,10 +9,14 @@
 //! Single qname shape: `package:<ecosystem>:<name>`. Ecosystems:
 //!   - `npm`        — package.json `dependencies` / `devDependencies` /
 //!     `peerDependencies`
-//!   - `pypi`       — pyproject.toml `[project.dependencies]`,
-//!     `[tool.poetry.dependencies]`, requirements.txt
+//!   - `pypi`       — pyproject.toml `[project] dependencies`,
+//!     `[project.optional-dependencies]`, `[dependency-groups]` (PEP 735),
+//!     `[tool.poetry.dependencies]` and every Poetry group, plain or dotted
+//!     (`[tool.poetry.dependencies.<name>]`, GD.37), requirements.txt
 //!   - `cargo`      — Cargo.toml `[dependencies]` / `[dev-dependencies]` /
-//!     `[build-dependencies]`
+//!     `[build-dependencies]`, their dotted forms (`[dependencies.<name>]`) and
+//!     target tables (`[target.<cfg or triple>.dependencies]`, GD.37; recorded
+//!     like any dependency, no condition cell)
 //!   - `gomod`      — go.mod `require <name> <version>`
 //!   - `rubygems`   — Gemfile `gem '<name>', ...`
 //!   - `composer`   — composer.json `require` / `require-dev`
@@ -347,41 +351,49 @@ fn extract_top_level_string_keys(body: &str) -> Vec<String> {
 }
 
 // ----------------------------------------------------------------------------
-// pyproject.toml — `[project]` PEP-621 deps OR `[tool.poetry.dependencies]`.
-// Both layouts captured via a section walker.
+// pyproject.toml — PEP 621 `[project]` deps and `[project.optional-dependencies]`,
+// PEP 735 `[dependency-groups]`, and Poetry's dependency tables (every group,
+// plain or dotted). Both layouts captured via a section walker.
 // ----------------------------------------------------------------------------
 
 fn scan_pyproject(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let sections = parse_toml_sections(source);
     for section in sections.iter().filter(|s| !s.array) {
-        match section.name.as_str() {
-            "project" => {
+        let segs = toml_key_segments(&section.name);
+        let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+        match segs.as_slice() {
+            ["project"] => {
                 // PEP-621: `dependencies = ["foo>=1.0", "bar~=2.0"]`.
                 if let Some(list) = read_toml_array_field(&section.body, "dependencies") {
-                    for item in list {
-                        if let Some(name) = pep508_package_name(&item) {
-                            out.push(name);
-                        }
-                    }
-                }
-                if let Some(list) = read_toml_array_field(&section.body, "optional-dependencies") {
-                    for item in list {
-                        if let Some(name) = pep508_package_name(&item) {
-                            out.push(name);
-                        }
-                    }
+                    out.extend(list.iter().filter_map(|item| pep508_package_name(item)));
                 }
             }
-            // Poetry's `[tool.poetry.dependencies]` is a key/value table.
-            "tool.poetry.dependencies"
-            | "tool.poetry.dev-dependencies"
-            | "tool.poetry.group.dev.dependencies" => {
+            // GD.37: PEP 621 makes `optional-dependencies` a table of arrays
+            // (extra -> PEP 508 specs), and PEP 735's `[dependency-groups]` is
+            // the same shape, its `{include-group = ..}` items naming no package.
+            ["project", "optional-dependencies"] | ["dependency-groups"] => {
+                for (_, items) in toml_array_values(&section.body) {
+                    out.extend(items.iter().filter_map(|item| pep508_package_name(item)));
+                }
+            }
+            // Poetry's dependency tables are key/value tables: the main one,
+            // the legacy dev one and every `group.<g>` (GD.37: any group, not
+            // only `dev`).
+            ["tool", "poetry", "dependencies" | "dev-dependencies"]
+            | ["tool", "poetry", "group", _, "dependencies"] => {
                 for key in toml_table_keys(&section.body) {
                     if key != "python" {
                         out.push(key);
                     }
                 }
+            }
+            // GD.37: a dotted Poetry table names one dependency.
+            ["tool", "poetry", "dependencies" | "dev-dependencies", name]
+            | ["tool", "poetry", "group", _, "dependencies", name]
+                if *name != "python" && is_pep503_or_ident(name) =>
+            {
+                out.push((*name).to_string());
             }
             _ => {}
         }
@@ -413,16 +425,16 @@ fn parse_toml_sections(source: &str) -> Vec<TomlSection> {
         let t = line.trim_start();
         if let Some(inner) = t.strip_prefix("[[") {
             out.extend(current.take());
-            let name = inner.find("]]").map_or("", |end| inner[..end].trim());
+            let name = toml_header_close(inner, "]]").map_or("", |end| inner[..end].trim());
             current = Some(TomlSection {
                 name: name.to_string(),
                 body: String::new(),
                 array: true,
             });
-        } else if t.starts_with('[') {
+        } else if let Some(inner) = t.strip_prefix('[') {
             out.extend(current.take());
-            current = t.find(']').map(|end| TomlSection {
-                name: t[1..end].trim().to_string(),
+            current = toml_header_close(inner, "]").map(|end| TomlSection {
+                name: inner[..end].trim().to_string(),
                 body: String::new(),
                 array: false,
             });
@@ -433,6 +445,130 @@ fn parse_toml_sections(source: &str) -> Vec<TomlSection> {
     }
     out.extend(current);
     out.retain(|s| s.array || !s.name.is_empty());
+    out
+}
+
+/// GD.37: the offset of a header's closing `close` (`]` or `]]`) in the text
+/// after its opener, found outside quotes: a quoted key segment such as
+/// `'cfg(x = "]")'` may hold a `]`. A basic (`"`) string honours `\` escapes,
+/// a literal (`'`) one does not. `None` when the header never closes.
+fn toml_header_close(inner: &str, close: &str) -> Option<usize> {
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            q @ (b'"' | b'\'') => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += if q == b'"' && bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            _ if bytes[i..].starts_with(close.as_bytes()) => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// GD.37: a dotted TOML key (a header's name) split into its segments,
+/// whitespace around the dots dropped and quoted segments unquoted:
+/// `target.'cfg(unix)'.dependencies` -> `["target", "cfg(unix)",
+/// "dependencies"]`. Escapes inside a basic string are kept verbatim; no
+/// segment this module matches holds one.
+fn toml_key_segments(key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seg = String::new();
+    let mut chars = key.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                while let Some(d) = chars.next() {
+                    if d == c {
+                        break;
+                    }
+                    if c == '"' && d == '\\' {
+                        if let Some(e) = chars.next() {
+                            seg.push(d);
+                            seg.push(e);
+                        }
+                        continue;
+                    }
+                    seg.push(d);
+                }
+            }
+            '.' => out.push(std::mem::take(&mut seg).trim().to_string()),
+            _ => seg.push(c),
+        }
+    }
+    out.push(seg.trim().to_string());
+    out
+}
+
+/// GD.37: every `key = [..]` of a TOML table body (multi-line arrays
+/// included), with the array's top-level strings. A string inside an
+/// inline-table item (`{ include-group = "test" }`) or a nested array is
+/// skipped, and so is a `#` comment inside the array.
+fn toml_array_values(body: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let line_end = rest.find('\n').map_or(rest.len(), |e| e + 1);
+        let line = &rest[..line_end];
+        let t = line.trim_start();
+        let value = (!t.starts_with('#'))
+            .then(|| t.split_once('='))
+            .flatten()
+            .map(|(key, value)| (key.trim().trim_matches(|c| c == '"' || c == '\''), value))
+            .filter(|(key, value)| !key.is_empty() && value.trim_start().starts_with('['));
+        let Some((key, value)) = value else {
+            rest = &rest[line_end..];
+            continue;
+        };
+        // `value` is a sub-slice of `rest`: its offset there is the `[`.
+        let open = value.trim_start().as_ptr() as usize - rest.as_ptr() as usize;
+        let array = &rest[open + 1..];
+        let Some(close) = balanced_close(array, b'[', b']') else {
+            break;
+        };
+        out.push((key.to_string(), toml_top_level_strings(&array[..close])));
+        let after = &array[close + 1..];
+        rest = after.find('\n').map_or("", |e| &after[e + 1..]);
+    }
+    out
+}
+
+/// GD.37: the strings at depth 0 of a TOML array's inner text: items inside
+/// `{..}` / `[..]` and `#` comments are skipped.
+fn toml_top_level_strings(inner: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            q @ (b'"' | b'\'') => {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j] != q {
+                    j += if q == b'"' && bytes[j] == b'\\' { 2 } else { 1 };
+                }
+                if depth == 0 && j <= bytes.len() {
+                    out.push(inner[start..j.min(bytes.len())].to_string());
+                }
+                i = j;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
     out
 }
 
@@ -552,17 +688,44 @@ fn scan_requirements(source: &str) -> Vec<String> {
 
 // ----------------------------------------------------------------------------
 // Cargo.toml — `[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`,
-// plus `[target.'cfg(...)'.dependencies]` (skipped — niche).
+// their dotted forms (`[dependencies.serde]`), and the same under a target
+// table (`[target.'cfg(unix)'.dependencies]`, `[target.<triple>.dependencies]`,
+// `[target.<spec>.dependencies.<name>]`). A target table's dependencies are
+// platform-conditional; they are recorded like any other dependency, with no
+// condition cell. `[workspace.dependencies]` stays unread: a member
+// re-declares `x = { workspace = true }`, which is read as its own dependency.
 // ----------------------------------------------------------------------------
+
+/// GD.37: the Cargo dependency table kinds (with Cargo's legacy underscore
+/// spellings, which it still accepts).
+fn is_cargo_dep_kind(seg: &str) -> bool {
+    matches!(
+        seg,
+        "dependencies"
+            | "dev-dependencies"
+            | "build-dependencies"
+            | "dev_dependencies"
+            | "build_dependencies"
+    )
+}
 
 fn scan_cargo_toml(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     for section in parse_toml_sections(source).into_iter().filter(|s| !s.array) {
-        match section.name.as_str() {
-            "dependencies" | "dev-dependencies" | "build-dependencies" => {
-                for key in toml_table_keys(&section.body) {
-                    out.push(key);
-                }
+        let segs = toml_key_segments(&section.name);
+        let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+        // GD.37: a `target.<spec>.` prefix (a quoted cfg or a bare triple)
+        // reads like the table it prefixes.
+        let segs = match segs.as_slice() {
+            ["target", _, rest @ ..] => rest,
+            all => all,
+        };
+        match segs {
+            [kind] if is_cargo_dep_kind(kind) => out.extend(toml_table_keys(&section.body)),
+            // GD.37: `[dependencies.serde]` is the dependency `serde`; its
+            // keys (`version`, `features`) are its settings.
+            [kind, name] if is_cargo_dep_kind(kind) && is_pep503_or_ident(name) => {
+                out.push((*name).to_string());
             }
             _ => {}
         }
@@ -1831,5 +1994,117 @@ end
                 ("c".to_string(), false),
             ]
         );
+    }
+
+    /// GD.37: probe-f4p/toml1, the dotted, target and dotted-target tables.
+    const DOTTED_CARGO: &str = "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[dependencies]\nanyhow = \"1\"\n\n[dependencies.serde]\nversion = \"1\"\nfeatures = [\"derive\"]\n\n[target.'cfg(unix)'.dependencies]\nlibc = \"0.2\"\n\n[target.'cfg(windows)'.dependencies.winapi]\nversion = \"0.3\"\n\n[dev-dependencies.tempfile]\nversion = \"3\"\n";
+
+    /// GD.37: a dotted `[<kind>.<name>]` table is the dependency <name>, and
+    /// a `[target.<spec>.<kind>]` table reads like `[<kind>]`; the keys of a
+    /// dotted table (`version`, `features`) are no dependencies.
+    #[test]
+    fn cargo_dotted_and_target_dependency_tables() {
+        let out = manifest_deps(DOTTED_CARGO, "Cargo.toml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:cargo:anyhow",
+                "package:cargo:libc",
+                "package:cargo:serde",
+                "package:cargo:tempfile",
+                "package:cargo:winapi",
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=cargo deps=5 array_tables=0 path=Cargo.toml")
+        );
+    }
+
+    /// GD.37: a target triple, a double-quoted cfg holding a `]` and a dot,
+    /// build-dependencies in both forms, and a quoted dotted name.
+    #[test]
+    fn cargo_target_triples_and_quoted_cfgs() {
+        let src = "[target.x86_64-pc-windows-msvc.dependencies]\nwindows-sys = \"0.52\"\n\n[target.\"cfg(any(target_os = \\\"a]b\\\", unix))\".build-dependencies]\npkg-config = \"0.3\"\n\n[target.'cfg(target_arch = \"wasm32\")'.dev-dependencies.wasm-bindgen-test]\nversion = \"0.3\"\n\n[build-dependencies.\"cc\"]\nversion = \"1\"\n\n[target.'cfg(unix)'.features]\nnot-a-dep = []\n\n[workspace.dependencies]\nshared = \"1\"\n";
+        let out = manifest_deps(src, "Cargo.toml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:cargo:cc",
+                "package:cargo:pkg-config",
+                "package:cargo:wasm-bindgen-test",
+                "package:cargo:windows-sys",
+            ]
+        );
+    }
+
+    /// GD.37: a header's `]` is the first one outside quotes.
+    #[test]
+    fn toml_header_close_skips_quoted_brackets() {
+        let src =
+            "[target.'cfg(x = \"]\")'.dependencies]\na = \"1\"\n[[bin.'x]]y']]\nname = \"b\"\n";
+        let got: Vec<(String, bool)> = parse_toml_sections(src)
+            .into_iter()
+            .map(|s| (s.name, s.array))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("target.'cfg(x = \"]\")'.dependencies".to_string(), false),
+                ("bin.'x]]y'".to_string(), true),
+            ]
+        );
+    }
+
+    /// GD.37: probe-f4p/toml2, PEP 621 optional dependencies (a table of
+    /// arrays), a Poetry group other than `dev` and a dotted Poetry
+    /// dependency table.
+    #[test]
+    fn pyproject_optional_groups_and_dotted_poetry_tables() {
+        let src = "[tool.poetry]\nname = \"probe\"\nversion = \"0.1.0\"\n\n[project]\nname = \"probe\"\ndependencies = [\"requests>=2\"]\n\n[project.optional-dependencies]\ndocs = [\"sphinx>=7\"]\n\n[tool.poetry.group.test.dependencies]\npytest-cov = \"^5\"\n\n[tool.poetry.dependencies.httpx]\nversion = \"^0.27\"\n";
+        let out = manifest_deps(src, "pyproject.toml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:pypi:httpx",
+                "package:pypi:pytest-cov",
+                "package:pypi:requests",
+                "package:pypi:sphinx",
+            ]
+        );
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[packages] eco=pypi deps=4 array_tables=0 path=pyproject.toml")
+        );
+    }
+
+    /// GD.37: prefect's layout, `[project.optional-dependencies]` with
+    /// multi-line arrays and extras, then PEP 735 `[dependency-groups]`
+    /// whose `{include-group = ..}` items name no package.
+    #[test]
+    fn pyproject_dependency_groups_skip_include_group() {
+        let src = "[project]\nname = \"app\"\ndependencies = [\n  \"anyio>=4\",\n]\n\n[project.optional-dependencies]\notel = [\n  \"opentelemetry-api>=1.27\", # traces\n  \"opentelemetry-sdk[grpc]>=1.27\",\n]\naws = [\"boto3\"]\n\n[dependency-groups]\ndev = [\n  \"ruff==0.6\",\n  { include-group = \"test\" },\n]\ntest = [\"pytest>=8\", 'pytest-xdist']\n\n[tool.poetry.group.lint.dependencies.mypy]\nversion = \"^1\"\n\n[tool.poetry.dev-dependencies.black]\nversion = \"^24\"\n";
+        let out = manifest_deps(src, "pyproject.toml");
+        assert_eq!(
+            names(&out),
+            [
+                "package:pypi:anyio",
+                "package:pypi:black",
+                "package:pypi:boto3",
+                "package:pypi:mypy",
+                "package:pypi:opentelemetry-api",
+                "package:pypi:opentelemetry-sdk",
+                "package:pypi:pytest",
+                "package:pypi:pytest-xdist",
+                "package:pypi:ruff",
+            ]
+        );
+    }
+
+    /// GD.37: a dotted Poetry `python` table is the interpreter, no package.
+    #[test]
+    fn poetry_dotted_python_is_no_dependency() {
+        let src = "[tool.poetry.dependencies.python]\nversion = \"^3.11\"\n";
+        assert!(names(&manifest_deps(src, "pyproject.toml")).is_empty());
     }
 }
