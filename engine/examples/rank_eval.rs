@@ -142,6 +142,21 @@
 //! read (no ranker runs): `[rank_eval] window label=<l> rev=<r12> test=<t> first=<sha> last=<sha>`,
 //! its shas written to `--out`. Every run's JSON `stats` gains `test_shas` (oldest first).
 //! scripts/embedding-gate.sh `fusion-preview` / `fusion-verdict` run and judge it.
+//!
+//! Docs as a second graph, measured (0.5.6, GP.9; the rule is bench/rank-gate/doc-ties/RULE.md):
+//! `--ans on` also appends `ANS:impact+doctie` and `ANS:impact.files+doctie` after every other
+//! row of every seeded shape (after the ENG-* rows and EG.6 / EG.7's late rows), so no existing
+//! row moves. A doc (an md / mdx / markdown / rst path holding a DOC_SECTION of the build) is tied
+//! to a candidate file when, over the training commits strictly older than the test commit (the
+//! co-change prefix's), they change together in >= 3 commits and in >= 300 per mille of the rarer
+//! side's (LF.5b's floors); a doc tied to more than 30 files is a hub and bridges nothing. A seeded
+//! query's files tied to a doc its seeds are tied to, and that diff impact's walk did not reach,
+//! are appended after the walk's rows in the answer's ranking order (`.files`: lifted to just after
+//! the last file holding a row). Fired_on, once per run: `[doc-ties] label=<l> docs=<d> ties=<t>
+//! hubs=<h> bridged_queries=<q> appended_queries=<a>`. `--doc-ties-judge <run.json>,..` judges
+//! `ANS:impact+doctie` against `ANS:impact` per snapshot with `--gate-check`'s one-sided Holm rule
+//! and prints `[doc-ties] verdict=<PASS|FAIL> glia r10=<x> mrr=<y> drops=<n> snapshots=<s>`
+//! (`doc_ties_judge_main`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
@@ -360,6 +375,9 @@ struct Args {
     test_after: String,
     /// FB.6b: `on` prints the test window and stops before any ranker runs (default off).
     window_only: String,
+    /// GP.9: `--doc-ties-judge <run.json>,..` judges each `--ans on --r3-perq on` run's
+    /// `ANS:impact+doctie` against its `ANS:impact` (bench/rank-gate/doc-ties/RULE.md).
+    doc_ties_judge: String,
 }
 
 fn parse_args() -> Args {
@@ -417,6 +435,7 @@ fn parse_args() -> Args {
         gate_shape: "find".into(),
         test_after: String::new(),
         window_only: "off".into(),
+        doc_ties_judge: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -476,6 +495,7 @@ fn parse_args() -> Args {
             "--gate-shape" => a.gate_shape = v,
             "--test-after" => a.test_after = v,
             "--window-only" => a.window_only = v,
+            "--doc-ties-judge" => a.doc_ties_judge = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -504,7 +524,8 @@ fn parse_args() -> Args {
     let offline = !a.r3_compare.is_empty()
         || !a.gate_check.is_empty()
         || !a.gate_trim.is_empty()
-        || !a.gate_pair.is_empty();
+        || !a.gate_pair.is_empty()
+        || !a.doc_ties_judge.is_empty();
     assert!(
         offline || (!a.repo.is_empty() && !a.git.is_empty()),
         "--repo and --git are required"
@@ -1339,6 +1360,13 @@ struct Ctx<'a> {
     /// Per test commit (its ordinal), the calibrated pick of SELh0 per seeded shape (k1, k2, k3,
     /// half: `ans_picks`) the ANS:*@sel rankers answer with; empty without `--ans on`.
     sel: Vec<[Ranking; 4]>,
+    /// GP.9: per test commit (its ordinal), the doc ties of the same leak-free prefix
+    /// (`DocCounts::ties`); empty without `--ans on`.
+    doc_ties: Vec<DocTies>,
+    /// GP.9: seeded queries whose doc bridge reached a file (`[doc-ties] bridged_queries=`).
+    doctie_bridged: AtomicU64,
+    /// GP.9: seeded queries where the bridge appended a file the walk did not reach.
+    doctie_appended: AtomicU64,
 }
 
 /// The replay's co-change counts at one test commit, strictly older training commits only (the
@@ -1413,6 +1441,9 @@ struct Out {
     /// `--ans on` (EG.6): the ANS:*@sel and ANS:impact.files rows, held apart until
     /// `eng_append` puts them after the ENG-* rows, so no earlier row's position moves.
     late: Vec<(String, [f64; 5])>,
+    /// `--ans on` (GP.9): the doc-tie rows, held apart until `eng_append` puts them after the
+    /// late rows (EG.7's review rows included), so no existing row's position moves.
+    doctie: Vec<(String, [f64; 5])>,
 }
 
 impl Out {
@@ -1428,12 +1459,13 @@ impl Out {
 }
 
 /// Moves every held ENG-* row (`Out::eng`) after the last row of each query, then every held
-/// EG.6 row (`Out::late`) after those.
+/// EG.6 row (`Out::late`) after those, then GP.9's doc-tie rows (`Out::doctie`).
 fn eng_append(outs: &mut [Out]) {
     for o in outs {
         for (n, m) in std::mem::take(&mut o.eng)
             .into_iter()
             .chain(std::mem::take(&mut o.late))
+            .chain(std::mem::take(&mut o.doctie))
         {
             o.names.push(n);
             o.m.push(m);
@@ -1575,9 +1607,18 @@ fn rows_to_keys(
 /// half), and `ANS:impact.files`, the default diff impact's file roll-up (`BlastRadius::files`
 /// with `top_files = usize::MAX`, rank 1 first) instead of its rows. `top_files` cuts only the
 /// roll-up, never the rows, so ANS:impact reads the same rows as before.
+///
+/// The third list is GP.9's, held apart by the callers (`Out::doctie`): `ANS:impact+doctie` and
+/// `ANS:impact.files+doctie`, the two orders above with the doc bridge of test commit `tc`
+/// (`DocTies::bridge`, `doctie_rows_key`, `doctie_files_key`).
 type NamedKeys = Vec<(String, Vec<Key>)>;
 
-fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKeys, NamedKeys) {
+fn ans_keys_seed(
+    ctx: &Ctx,
+    tc: usize,
+    seeds: &[u32],
+    shape: usize,
+) -> (NamedKeys, NamedKeys, NamedKeys) {
     let g = ctx.g;
     let t0 = Instant::now();
     let cache = ans_cache(ctx, tc);
@@ -1598,8 +1639,32 @@ fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKey
     let impact = rows_to_keys(
         g,
         &ctx.path_ix,
-        d.impact.results.into_iter().map(|r| r.file),
+        d.impact.results.iter().map(|r| r.file.clone()),
     );
+    // GP.9: the roll-up's candidate files in the ranking's order, each with its row count.
+    let order: Vec<(u32, usize)> = d
+        .impact
+        .files
+        .iter()
+        .filter_map(|f| ctx.path_ix.get(&f.file).map(|&ix| (ix, f.rows)))
+        .collect();
+    let bridged = ctx
+        .doc_ties
+        .get(tc)
+        .map(|t| t.bridge(seeds))
+        .unwrap_or_default();
+    let (impact_dt, appended) = doctie_rows_key(&impact, &order, &bridged);
+    let files_dt = doctie_files_key(g.paths.len(), &order, &bridged);
+    if !bridged.is_empty() {
+        ctx.doctie_bridged.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    if appended > 0 {
+        ctx.doctie_appended.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+    let doctie = vec![
+        ("ANS:impact+doctie".to_string(), impact_dt),
+        ("ANS:impact.files+doctie".to_string(), files_dt),
+    ];
     let seed_ids: Vec<NodeId> = seeds
         .iter()
         .flat_map(|&f| g.file_nodes[f as usize].iter().map(|&u| g.ids[u as usize]))
@@ -1636,7 +1701,562 @@ fn ans_keys_seed(ctx: &Ctx, tc: usize, seeds: &[u32], shape: usize) -> (NamedKey
     (
         vec![("ANS:impact".into(), impact), ("ANS:pack".into(), pack)],
         late,
+        doctie,
     )
+}
+
+// ============================================================================
+// GP.9: docs as a second graph, measured (bench/rank-gate/doc-ties/RULE.md)
+// ============================================================================
+
+/// The paths a doc may have: their extension (`ext_of`) is one of these.
+const DOC_EXTS: [&str; 4] = ["md", "mdx", "markdown", "rst"];
+/// LF.5b's support floor (`external::history::MIN_SUPPORT`, crate-private there): a tie needs at
+/// least this many training commits that change the doc and the file together.
+const DOCTIE_MIN_SUPPORT: u32 = 3;
+/// LF.5b's ratio floor (`external::history::MIN_RATIO_PERMILLE`): ... and at least this share
+/// (per mille, integer division) of the commits of the side that changes less often.
+const DOCTIE_MIN_RATIO_PERMILLE: u64 = 300;
+/// A doc tied to more than this many files is a hub: it bridges nothing.
+const DOCTIE_HUB_FILES: usize = 30;
+/// The pass rule's glia floors: ANS:impact's 0.5.4 pre-FD.79 single-shape means.
+const DOCTIE_PASS_R10: f64 = 0.2594;
+const DOCTIE_PASS_MRR: f64 = 0.4614;
+/// The snapshots the pass rule judges (bench/rank-gate/snapshots.json).
+const DOCTIE_SNAPSHOTS: usize = 6;
+/// The seeded shapes the bridge runs on, in the run JSON's naming.
+const DOCTIE_SHAPES: [&str; 4] = ["single", "k2", "k3", "half"];
+
+/// The docs of the build: every path with a [`DOC_EXTS`] extension that holds a DOC_SECTION
+/// node (located through its POSITION file), sorted.
+fn doc_paths(merged: &MergedGraph) -> Vec<String> {
+    let loc = Locator::new(merged);
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
+                continue;
+            }
+            if let Some(f) = loc.locate(n.id).file
+                && DOC_EXTS.contains(&ext_of(&f).as_str())
+            {
+                out.insert(f);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Each non-merge commit's docs (indices into `docs`, sorted), keyed by sha and looked up only:
+/// the same `--topo-order --no-merges --no-renames --name-only` log `git_log` reads. A commit
+/// that changes no doc is absent.
+fn doc_log(git: &str, rev: &str, docs: &[String]) -> HashMap<String, Vec<u32>> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            git,
+            "log",
+            "--topo-order",
+            "--no-merges",
+            "--no-renames",
+            "--name-only",
+            "--format=%x1e%H",
+            rev,
+        ])
+        .output()
+        .expect("git log (doc ties)");
+    assert!(
+        out.status.success(),
+        "git log (doc ties) failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut map = HashMap::new();
+    for rec in text.split('\x1e').skip(1) {
+        let mut lines = rec.lines();
+        let sha = lines.next().unwrap_or("").trim().to_string();
+        let mut ds: Vec<u32> = lines
+            .filter_map(|l| {
+                let l = l.trim();
+                docs.binary_search_by(|d| d.as_str().cmp(l)).ok()
+            })
+            .map(|i| i as u32)
+            .collect();
+        ds.sort_unstable();
+        ds.dedup();
+        if !ds.is_empty() {
+            map.insert(sha, ds);
+        }
+    }
+    map
+}
+
+/// The running doc counts of the replay's training commits (GP.9): per doc, the commits that
+/// change it (`n`) and, per candidate file, the commits that change both (`pair`).
+struct DocCounts {
+    n: Vec<u32>,
+    pair: Vec<BTreeMap<u32, u32>>,
+}
+
+impl DocCounts {
+    fn new(n_docs: usize) -> DocCounts {
+        DocCounts {
+            n: vec![0; n_docs],
+            pair: vec![BTreeMap::new(); n_docs],
+        }
+    }
+
+    /// One training commit that changes `docs` and the candidate files `files`.
+    fn train(&mut self, docs: &[u32], files: &[u32]) {
+        for &d in docs {
+            self.n[d as usize] += 1;
+            for &f in files {
+                *self.pair[d as usize].entry(f).or_default() += 1;
+            }
+        }
+    }
+
+    /// The ties of the commits trained so far: (D, f) with `pair >= DOCTIE_MIN_SUPPORT` and
+    /// `1000 * pair / min(n(D), cnt(f)) >= DOCTIE_MIN_RATIO_PERMILLE`; `cnt` is the replay's own
+    /// per-file training count.
+    fn ties(&self, cnt: &[u32]) -> DocTies {
+        let mut docs = Vec::new();
+        for (d, row) in self.pair.iter().enumerate() {
+            let nd = self.n[d];
+            let fs: Vec<u32> = row
+                .iter()
+                .filter(|&(&f, &c)| {
+                    let least = u64::from(nd.min(cnt.get(f as usize).copied().unwrap_or(0)));
+                    c >= DOCTIE_MIN_SUPPORT
+                        && least > 0
+                        && 1000 * u64::from(c) / least >= DOCTIE_MIN_RATIO_PERMILLE
+                })
+                .map(|(&f, _)| f)
+                .collect();
+            if !fs.is_empty() {
+                docs.push((d as u32, fs));
+            }
+        }
+        DocTies::new(docs)
+    }
+}
+
+/// One test commit's doc ties (GP.9): per tied doc its tied files, and the reverse, both sorted.
+#[derive(Default)]
+struct DocTies {
+    docs: Vec<(u32, Vec<u32>)>,
+    by_file: Vec<(u32, Vec<u32>)>,
+}
+
+impl DocTies {
+    fn new(docs: Vec<(u32, Vec<u32>)>) -> DocTies {
+        let mut rev: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (d, fs) in &docs {
+            for &f in fs {
+                rev.entry(f).or_default().push(*d);
+            }
+        }
+        DocTies {
+            docs,
+            by_file: rev.into_iter().collect(),
+        }
+    }
+
+    /// The bridge of seed files `seeds`: every file tied to a non-hub doc some seed is tied to,
+    /// seeds excluded, sorted.
+    fn bridge(&self, seeds: &[u32]) -> Vec<u32> {
+        let mut ds: BTreeSet<u32> = BTreeSet::new();
+        for s in seeds {
+            if let Ok(i) = self.by_file.binary_search_by_key(s, |x| x.0) {
+                ds.extend(self.by_file[i].1.iter().copied());
+            }
+        }
+        let mut out: BTreeSet<u32> = BTreeSet::new();
+        for d in ds {
+            if let Ok(i) = self.docs.binary_search_by_key(&d, |x| x.0) {
+                let fs = &self.docs[i].1;
+                if fs.len() <= DOCTIE_HUB_FILES {
+                    out.extend(fs.iter().copied());
+                }
+            }
+        }
+        for s in seeds {
+            out.remove(s);
+        }
+        out.into_iter().collect()
+    }
+}
+
+/// `[doc-ties]`'s totals over every test commit: distinct (D, f) ties, distinct hub docs.
+fn doc_tie_totals(all: &[DocTies]) -> (usize, usize) {
+    let mut ties: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut hubs: BTreeSet<u32> = BTreeSet::new();
+    for t in all {
+        for (d, fs) in &t.docs {
+            ties.extend(fs.iter().map(|&f| (*d, f)));
+            if fs.len() > DOCTIE_HUB_FILES {
+                hubs.insert(*d);
+            }
+        }
+    }
+    (ties.len(), hubs.len())
+}
+
+/// `ANS:impact+doctie`: ANS:impact's keys (`rows_to_keys`, `[-k, 0, 0]` by first appearance),
+/// then every `bridged` file no row reached, appended in `order` (the answer's ranking order,
+/// `BlastRadius::files`). Returns the keys and how many files were appended.
+fn doctie_rows_key(impact: &[Key], order: &[(u32, usize)], bridged: &[u32]) -> (Vec<Key>, usize) {
+    let mut key = impact.to_vec();
+    let mut k = key.iter().filter(|x| x[0] != f64::NEG_INFINITY).count();
+    let mut appended = 0;
+    for &(f, _) in order {
+        let slot = &mut key[f as usize];
+        if slot[0] == f64::NEG_INFINITY && bridged.binary_search(&f).is_ok() {
+            *slot = [-(k as f64), 0.0, 0.0];
+            k += 1;
+            appended += 1;
+        }
+    }
+    (key, appended)
+}
+
+/// `ANS:impact.files+doctie`: the file roll-up `order` (file, rows) up to and including its last
+/// file holding a row, then the `bridged` files below that point, then the rest, each part in
+/// roll-up order; keyed `[-position, 0, 0]`, every other file `-inf` (as `rows_to_keys`).
+fn doctie_files_key(nf: usize, order: &[(u32, usize)], bridged: &[u32]) -> Vec<Key> {
+    let cut = order.iter().rposition(|&(_, r)| r > 0).map_or(0, |i| i + 1);
+    let (head, tail) = order.split_at(cut);
+    let is_b = |f: u32| bridged.binary_search(&f).is_ok();
+    let seq = head
+        .iter()
+        .map(|x| x.0)
+        .chain(tail.iter().map(|x| x.0).filter(|&f| is_b(f)))
+        .chain(tail.iter().map(|x| x.0).filter(|&f| !is_b(f)));
+    let mut key: Vec<Key> = vec![[f64::NEG_INFINITY; 3]; nf];
+    for (i, f) in seq.enumerate() {
+        key[f as usize] = [-(i as f64), 0.0, 0.0];
+    }
+    key
+}
+
+/// One judged row of `--doc-ties-judge`.
+struct DocTieRow {
+    shape: &'static str,
+    ranker: &'static str,
+    metric: &'static str,
+    base: f64,
+    new: f64,
+    p: Paired,
+    changed: bool,
+    p_drop: f64,
+    p_gain: f64,
+    verdict: &'static str,
+}
+
+/// GP.9: `--doc-ties-judge <run.json>,.. [--boot B] [--md <report rows>]`, each a `--ans on
+/// --r3-perq on` run. Per run and doc-tie ranker against its base (`ANS:impact+doctie` -
+/// `ANS:impact`, gated; `ANS:impact.files+doctie` - `ANS:impact.files`, reported only), per
+/// seeded shape and metric (r10, mrr): `--gate-check`'s rule (ruling EG-2) with base = the base
+/// ranker's column and new = the doc-tie ranker's, of the same run: the paired commit-cluster
+/// bootstrap of new - base, the changed rows one family per direction, one-sided, Holm at
+/// [`GATE_ALPHA`], a rejected row below [`GATE_MIN_EFFECT`] `same`. The verdict follows
+/// RULE.md: PASS iff [`DOCTIE_SNAPSHOTS`] runs were judged, glia's single-shape
+/// `ANS:impact+doctie` means reach [`DOCTIE_PASS_R10`] / [`DOCTIE_PASS_MRR`], and no gated row
+/// is a drop. Fired_on: one `[doc-ties] judge ..` line per row and `[doc-ties] verdict=<PASS|FAIL>
+/// glia r10=<x> mrr=<y> drops=<n> snapshots=<s>`. Exit 0 on PASS, 1 on FAIL, 2 on a missing run,
+/// shape or ranker.
+fn doc_ties_judge_main(args: &Args) -> i32 {
+    let mut code = 0;
+    let mut md = format!(
+        "new - base, commit-cluster bootstrap 95% CI (B = {}); Holm per snapshot over the changed rows, one-sided, family alpha {GATE_ALPHA}.\n",
+        args.boot
+    );
+    let mut judged = 0usize;
+    let mut drops = 0usize;
+    let mut glia: Option<(f64, f64)> = None;
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    for path in args
+        .doc_ties_judge
+        .split(',')
+        .filter(|p| !p.trim().is_empty())
+    {
+        let run = match gate_load(path.trim()) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                code = 2;
+                continue;
+            }
+        };
+        let label = run["stats"]["label"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        judged += 1;
+        md.push_str(&format!(
+            "\n### {label}\n\n| shape | ranker - base | metric | base | new | diff [CI] | verdict |\n|---|---|---|---|---|---|---|\n"
+        ));
+        for (ranker, base_ranker, gated) in [
+            ("ANS:impact+doctie", "ANS:impact", true),
+            ("ANS:impact.files+doctie", "ANS:impact.files", false),
+        ] {
+            let mut rows: Vec<DocTieRow> = Vec::new();
+            for shape in DOCTIE_SHAPES {
+                let Some(n) = gate_run_shape(&run, shape) else {
+                    eprintln!("[doc-ties] missing shape={shape} label={label}");
+                    code = 2;
+                    continue;
+                };
+                let commit_of: Vec<usize> = n["commit_of"]
+                    .as_array()
+                    .map(|v| v.iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect())
+                    .unwrap_or_default();
+                let nq = commit_of.len();
+                let nc = commit_of.iter().max().map_or(0, |m| m + 1);
+                let lf = ln_fact_table(nq + 1);
+                for metric in GATE_METRICS {
+                    let (Some(vb), Some(vn)) = (n[metric].get(base_ranker), n[metric].get(ranker))
+                    else {
+                        eprintln!(
+                            "[doc-ties] missing ranker={ranker} or {base_ranker} shape={shape} label={label}"
+                        );
+                        code = 2;
+                        continue;
+                    };
+                    let (xb, xn) = (json_col(vb), json_col(vn));
+                    if nq == 0 || xb.len() != nq || xn.len() != nq {
+                        eprintln!(
+                            "[doc-ties] column length differs label={label} shape={shape} queries={nq}"
+                        );
+                        code = 2;
+                        continue;
+                    }
+                    let (p, means) = paired_boot(&xn, &xb, &commit_of, nc, args.boot, &lf);
+                    let share = |f: &dyn Fn(f64) -> bool| {
+                        means.iter().filter(|&&x| f(x)).count() as f64 / means.len() as f64
+                    };
+                    rows.push(DocTieRow {
+                        shape,
+                        ranker,
+                        metric,
+                        base: mean(&xb),
+                        new: mean(&xn),
+                        changed: xb
+                            .iter()
+                            .zip(&xn)
+                            .any(|(x, y)| !(x == y || (x.is_nan() && y.is_nan()))),
+                        p_drop: share(&|x| x >= 0.0),
+                        p_gain: share(&|x| x <= 0.0),
+                        p,
+                        verdict: "same",
+                    });
+                }
+            }
+            let changed: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].changed).collect();
+            let down = holm(
+                changed.iter().map(|&i| (i, rows[i].p_drop)).collect(),
+                GATE_ALPHA,
+            );
+            let up = holm(
+                changed.iter().map(|&i| (i, rows[i].p_gain)).collect(),
+                GATE_ALPHA,
+            );
+            for (i, row) in rows.iter_mut().enumerate() {
+                let effect = row.new - row.base;
+                row.verdict = if effect.abs() < GATE_MIN_EFFECT {
+                    "same"
+                } else if down.contains(&i) {
+                    "drop"
+                } else if up.contains(&i) {
+                    "gain"
+                } else {
+                    "same"
+                };
+                if gated && row.verdict == "drop" {
+                    drops += 1;
+                }
+                if gated && label == "glia" && row.shape == "single" {
+                    let g = glia.get_or_insert((f64::NAN, f64::NAN));
+                    if row.metric == "r10" {
+                        g.0 = row.new;
+                    } else {
+                        g.1 = row.new;
+                    }
+                }
+                eprintln!(
+                    "[doc-ties] judge label={label} shape={} ranker={} base_ranker={base_ranker} metric={} base={:.4} new={:.4} diff={:+.4} ci=[{:+.4}, {:+.4}] verdict={} p_drop={:.4} p_gain={:.4} changed={} gated={}",
+                    row.shape,
+                    row.ranker,
+                    row.metric,
+                    row.base,
+                    row.new,
+                    row.p.mean,
+                    row.p.lo,
+                    row.p.hi,
+                    row.verdict,
+                    row.p_drop,
+                    row.p_gain,
+                    u8::from(row.changed),
+                    u8::from(gated)
+                );
+                md.push_str(&format!(
+                    "| {} | {} - {base_ranker} | {} | {:.4} | {:.4} | {:+.4} [{:+.4}, {:+.4}] | {}{} |\n",
+                    row.shape,
+                    row.ranker,
+                    row.metric,
+                    row.base,
+                    row.new,
+                    row.p.mean,
+                    row.p.lo,
+                    row.p.hi,
+                    row.verdict,
+                    if gated { "" } else { " (info)" }
+                ));
+            }
+        }
+    }
+    let (r10, mrr) = glia.unwrap_or((f64::NAN, f64::NAN));
+    let pass = code == 0
+        && judged == DOCTIE_SNAPSHOTS
+        && r10 >= DOCTIE_PASS_R10
+        && mrr >= DOCTIE_PASS_MRR
+        && drops == 0;
+    let line = format!(
+        "[doc-ties] verdict={} glia r10={r10:.4} mrr={mrr:.4} drops={drops} snapshots={judged}",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    eprintln!("{line}");
+    md.push_str(&format!("\n{line}\n"));
+    if let Err(e) = std::fs::write(&args.md, &md) {
+        eprintln!("[doc-ties] write {}: {e}", args.md);
+        return 2;
+    }
+    match (code, pass) {
+        (0, true) => 0,
+        (0, false) => 1,
+        _ => 2,
+    }
+}
+
+#[cfg(test)]
+mod doc_tie_tests {
+    use super::*;
+
+    /// A scripted history: doc 0 (D) changes with file a in 3 commits, with b in 3, with c in 1;
+    /// doc 1 (E) changes with 31 files (10..=40) in 3 commits.
+    fn scripted() -> (DocCounts, Vec<u32>) {
+        let (a, b, c) = (0u32, 1u32, 2u32);
+        let mut dc = DocCounts::new(2);
+        let mut cnt = vec![0u32; 41];
+        let mut commit = |dc: &mut DocCounts, docs: &[u32], files: &[u32]| {
+            dc.train(docs, files);
+            for &f in files {
+                cnt[f as usize] += 1;
+            }
+        };
+        for _ in 0..3 {
+            commit(&mut dc, &[0], &[a]);
+            commit(&mut dc, &[0], &[b]);
+        }
+        commit(&mut dc, &[0], &[c]);
+        let many: Vec<u32> = (10..=40).collect();
+        for _ in 0..3 {
+            commit(&mut dc, &[1], &many);
+        }
+        (dc, cnt)
+    }
+
+    #[test]
+    fn ties_take_the_floors() {
+        let (dc, cnt) = scripted();
+        let t = dc.ties(&cnt);
+        assert_eq!(
+            t.docs[0],
+            (0, vec![0, 1]),
+            "(D, a) and (D, b) only: (D, c) has support 1"
+        );
+        assert_eq!(t.docs[1].1.len(), 31);
+        assert_eq!(doc_tie_totals(&[t]), (2 + 31, 1));
+    }
+
+    #[test]
+    fn a_seed_reaches_its_doc_partners() {
+        let (dc, cnt) = scripted();
+        let t = dc.ties(&cnt);
+        assert_eq!(t.bridge(&[0]), vec![1], "a reaches b through D");
+        assert_eq!(t.bridge(&[1]), vec![0]);
+        assert_eq!(
+            t.bridge(&[0, 1]),
+            Vec::<u32>::new(),
+            "seeds never bridge to themselves"
+        );
+        assert!(t.bridge(&[2]).is_empty(), "c is tied to no doc");
+    }
+
+    #[test]
+    fn a_hub_bridges_nothing() {
+        let (dc, cnt) = scripted();
+        let t = dc.ties(&cnt);
+        assert!(t.bridge(&[10]).is_empty(), "E is tied to 31 files");
+    }
+
+    #[test]
+    fn the_ratio_floor_reads_the_rarer_side() {
+        // D changes in 20 commits, f in 3, together in 3: 1000 * 3 / 3 >= 300, a tie.
+        // g changes in 20 commits, together with D in 5: 1000 * 5 / 20 = 250 < 300, none.
+        let mut dc = DocCounts::new(1);
+        let mut cnt = vec![0u32; 2];
+        for i in 0..20 {
+            let files: Vec<u32> = match i {
+                0..3 => vec![0, 1],
+                3..5 => vec![1],
+                _ => vec![],
+            };
+            dc.train(&[0], &files);
+            for &f in &files {
+                cnt[f as usize] += 1;
+            }
+        }
+        cnt[1] += 15;
+        assert_eq!(dc.ties(&cnt).docs, vec![(0, vec![0])]);
+    }
+
+    #[test]
+    fn rows_key_appends_unreached_bridged_files_in_ranking_order() {
+        let ninf = [f64::NEG_INFINITY; 3];
+        // Rows reached files 0 (first) and 1; the ranking order is 1, 0, 3, 2, 4.
+        let impact: Vec<Key> = vec![[0.0, 0.0, 0.0], [-1.0, 0.0, 0.0], ninf, ninf, ninf];
+        let order = [(1, 2), (0, 1), (3, 0), (2, 0), (4, 0)];
+        let (k, n) = doctie_rows_key(&impact, &order, &[1, 2, 4]);
+        assert_eq!(n, 2, "1 was reached: only 2 and 4 are appended");
+        assert_eq!(k[2], [-2.0, 0.0, 0.0]);
+        assert_eq!(k[4], [-3.0, 0.0, 0.0]);
+        assert_eq!(k[3], ninf);
+        assert_eq!(&k[..2], &impact[..2]);
+        let (same, none) = doctie_rows_key(&impact, &order, &[]);
+        assert_eq!((same, none), (impact, 0));
+    }
+
+    #[test]
+    fn files_key_lifts_bridged_files_after_the_last_row() {
+        // Roll-up 5, 3, 1 (last row), 2, 4; file 0 is the seed (no entry).
+        let order = [(5, 1), (3, 0), (1, 2), (2, 0), (4, 0)];
+        let k = doctie_files_key(6, &order, &[4]);
+        let pos = |f: usize| -k[f][0];
+        assert_eq!(
+            [pos(5), pos(3), pos(1), pos(4), pos(2)],
+            [0.0, 1.0, 2.0, 3.0, 4.0]
+        );
+        assert_eq!(k[0], [f64::NEG_INFINITY; 3]);
+        // No bridge: the roll-up's own order.
+        let k0 = doctie_files_key(6, &order, &[]);
+        assert_eq!(
+            [5, 3, 1, 2, 4].map(|f| -k0[f][0]),
+            [0.0, 1.0, 2.0, 3.0, 4.0]
+        );
+        // A bridged file above the last row stays where it is.
+        assert_eq!(doctie_files_key(6, &order, &[3]), k0);
+    }
 }
 
 /// The history window the shipped answers read (ruling EA-1, James 2026-10-23): `glia history
@@ -4013,11 +4633,15 @@ fn run_query(
 
     // ---- the shipped answers (`--ans on`, appended last, so every ranker above is unchanged) ----
     if ctx.ans {
-        let (keys, late) = ans_keys_seed(ctx, q.tc, &[q.seed], 0);
+        let (keys, late, doctie) = ans_keys_seed(ctx, q.tc, &[q.seed], 0);
         for (name, key) in keys {
             out.push(name, &key, seed, t);
         }
         out.late = late
+            .into_iter()
+            .map(|(name, key)| (name, evaluate(&key, seed, t)))
+            .collect();
+        out.doctie = doctie
             .into_iter()
             .map(|(name, key)| (name, evaluate(&key, seed, t)))
             .collect();
@@ -4176,6 +4800,9 @@ fn main() {
     }
     if !args.gate_pair.is_empty() {
         std::process::exit(gate_pair_main(&args));
+    }
+    if !args.doc_ties_judge.is_empty() {
+        std::process::exit(doc_ties_judge_main(&args));
     }
     if !args.r3_compare.is_empty() {
         r3_compare_main(&args);
@@ -4503,6 +5130,21 @@ fn main() {
     let parity_on = args.engine_parity == "on";
     let want_prefix = parity_on || args.ans == "on";
     let mut prefix: Vec<Prefix> = Vec::new();
+    // GP.9: the docs of the build, each commit's doc paths and the running doc-tie counts, read in
+    // this same walk (the prefix's training commits only), one `DocTies` per test commit.
+    let ans_on = args.ans == "on";
+    let docs: Vec<String> = if ans_on {
+        doc_paths(merged)
+    } else {
+        Vec::new()
+    };
+    let doc_by_sha = if ans_on {
+        doc_log(&args.git, &args.rev, &docs)
+    } else {
+        HashMap::new()
+    };
+    let mut doc_counts = DocCounts::new(docs.len());
+    let mut doc_ties: Vec<DocTies> = Vec::new();
     let mut t_task = 0.0f64;
     let mut n_train = 0usize;
     for (k, c) in commits.iter().enumerate() {
@@ -4549,6 +5191,9 @@ fn main() {
             if want_prefix {
                 prefix.push(Prefix::at(&cnt, &co, &c.files));
             }
+            if ans_on {
+                doc_ties.push(doc_counts.ties(&cnt));
+            }
             if let Some(h) = &hist {
                 let mut rc = r1.test(h, k, &c.sha);
                 for q in queries.iter().filter(|q| q.tc == o) {
@@ -4588,6 +5233,9 @@ fn main() {
         }
         if train_ok(c) {
             n_train += 1;
+            if let Some(ds) = doc_by_sha.get(c.sha.as_str()) {
+                doc_counts.train(ds, &c.files);
+            }
             for &a in &c.files {
                 cnt[a as usize] += 1;
                 for &b in &c.files {
@@ -4783,6 +5431,9 @@ fn main() {
         ans_ns: AtomicU64::new(0),
         prefix,
         sel,
+        doc_ties,
+        doctie_bridged: AtomicU64::new(0),
+        doctie_appended: AtomicU64::new(0),
     };
     let mut ctx = ctx;
     if !args.pick.is_empty() {
@@ -4944,6 +5595,14 @@ fn main() {
             "[rank_eval] ans rankers=6 single={} transfer={n_transfer} find={n_find} ms={}",
             results.len(),
             ctx.ans_ns.load(AtomicOrdering::Relaxed) / 1_000_000
+        );
+        let (n_ties, n_hubs) = doc_tie_totals(&ctx.doc_ties);
+        eprintln!(
+            "[doc-ties] label={} docs={} ties={n_ties} hubs={n_hubs} bridged_queries={} appended_queries={}",
+            args.label,
+            docs.len(),
+            ctx.doctie_bridged.load(AtomicOrdering::Relaxed),
+            ctx.doctie_appended.load(AtomicOrdering::Relaxed)
         );
     }
     let r1_sel = if r1_on {
@@ -21555,13 +22214,15 @@ fn r3_transfer(
                 )
             };
             let mut late = Vec::new();
+            let mut doctie = Vec::new();
             if ctx.ans {
                 if find {
                     bank.extend(ans_keys_find(ctx, &subjects[q.tc]));
                 } else {
-                    let (keys, l) = ans_keys_seed(ctx, q.tc, &q.seeds, q.shape + 1);
+                    let (keys, l, dt) = ans_keys_seed(ctx, q.tc, &q.seeds, q.shape + 1);
                     bank.extend(keys);
                     late = l;
+                    doctie = dt;
                 }
             }
             // FB.6: the semantic rankers after every other find-bank row (`--sem on` only).
@@ -21591,6 +22252,10 @@ fn r3_transfer(
                 .map(|(name, key)| (name, eval_ex(&key, &excl, &q.targets)))
                 .collect();
             out.late = late
+                .into_iter()
+                .map(|(name, key)| (name, eval_ex(&key, &excl, &q.targets)))
+                .collect();
+            out.doctie = doctie
                 .into_iter()
                 .map(|(name, key)| (name, eval_ex(&key, &excl, &q.targets)))
                 .collect();
