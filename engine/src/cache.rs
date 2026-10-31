@@ -40,7 +40,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use glia_code_domain::{CodeNav, FileParse};
+use glia_code_domain::{CodeNav, FileParse, NavFact};
 use glia_core::NodeId;
 
 use crate::build::memo::BuildMemo;
@@ -343,6 +343,19 @@ fn canonical_parse<S: serde::Serializer>(p: &FileParse, s: S) -> Result<S::Ok, S
 /// parse the cache can hold does: the caller then treats the parse as
 /// changed.
 pub(crate) fn parse_fingerprint(fp: &FileParse) -> Option<u64> {
+    /// The parse as [`CacheEntry`]'s `parse` field serializes it.
+    struct Canonical<'a>(&'a FileParse);
+    impl serde::Serialize for Canonical<'_> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            canonical_parse(self.0, s)
+        }
+    }
+    stream_hash(&Canonical(fp))
+}
+
+/// xxh64 (seed 0) of `v`'s bincode, streamed into the hasher with no buffer.
+/// `None` when the serializer fails.
+fn stream_hash<T: serde::Serialize>(v: &T) -> Option<u64> {
     use core::hash::Hasher;
     use twox_hash::XxHash64;
 
@@ -358,17 +371,285 @@ pub(crate) fn parse_fingerprint(fp: &FileParse) -> Option<u64> {
         }
     }
 
-    /// The parse as [`CacheEntry`]'s `parse` field serializes it.
-    struct Canonical<'a>(&'a FileParse);
-    impl serde::Serialize for Canonical<'_> {
-        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            canonical_parse(self.0, s)
-        }
-    }
-
     let mut w = HashWriter(XxHash64::with_seed(0));
-    bincode::serialize_into(&mut w, &Canonical(fp)).ok()?;
+    bincode::serialize_into(&mut w, v).ok()?;
     Some(w.0.finish())
+}
+
+// ----------------------------------------------------------------------------
+// GA.1: the declaration surface of a parse (the body-only fast path's sizing)
+// ----------------------------------------------------------------------------
+
+/// GA.1: which half of a file's partial a [`NavFact`] belongs to, in the
+/// incremental-resolution model `dev-notes/surface-replay-0.5.6.md` measures:
+/// a file's SURFACE is what another file's resolution may read (its
+/// declarations, imports, heritage and the facts a builder or language hook
+/// looks up across files), its BODY what only its own scope's resolution reads
+/// (call sites, non-heritage refs, local types, body facts, node cells). A
+/// body-only edit leaves every other file's stitching valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Part {
+    /// Read by another file's resolution: a change invalidates its readers.
+    Surface,
+    /// Read only by the resolution of the scope that holds it.
+    Body,
+}
+
+/// GA.1: the [`Part`] a [`NavFact`] belongs to. Surface when a builder or
+/// language hook reads it while resolving ANOTHER file (a lookup by name or
+/// path across files), Body when only its own scope's resolution reads it.
+/// Exhaustive, so a new variant fails to compile until it is classified.
+pub fn surface_class(f: &NavFact) -> Part {
+    match f {
+        // cpp_scope: a prototype in one file names the definition in another.
+        NavFact::DeclaresFn { .. } => Part::Surface,
+        // cpp_scope: a header's `using` reaches every file that includes it.
+        NavFact::UsingNamespace { .. } => Part::Surface,
+        // cpp_scope: as UsingNamespace, one name.
+        NavFact::UsingName { .. } => Part::Surface,
+        // go_mounts: flows into the callee's parameter through this scope's own
+        // resolved CALLS edge; the callee's ROUTEs (maybe in another file) move
+        // with it, a cross-file BODY dependency the replay flags apart.
+        NavFact::MountArg { .. } => Part::Body,
+        // go_mounts: a struct field's mount, read by the struct's methods in
+        // other files of the package.
+        NavFact::FieldMount { .. } => Part::Surface,
+        // cpp_scope: decides which file's definition a prototype elsewhere binds.
+        NavFact::InternalLinkage { .. } => Part::Surface,
+        // grafts: the post-cache graft (re-run every update, outside the group
+        // build) reads it; no group resolution does.
+        NavFact::ClientHost { .. } => Part::Body,
+        // endpoint_fold: read by the post-group endpoint fold, never by a
+        // group's resolution.
+        NavFact::ClientBase { .. } => Part::Body,
+        // endpoint_fold: a getter / constant another file's base expression names.
+        NavFact::ValueLiteral { .. } => Part::Surface,
+        // calls::emit_override_implements: a subclass in another file pairs with it.
+        NavFact::AbstractMethod => Part::Surface,
+        // endpoint_fold: a URL built through this callable from another file.
+        NavFact::UrlPrefixKey { .. } => Part::Surface,
+        // build (Go): aliases resolved in every package file's method signatures.
+        NavFact::TypeAlias { .. } => Part::Surface,
+        // go_mounts / evm_abi: a constant another file of the package names.
+        NavFact::GoStringConst { .. } => Part::Surface,
+        // GoPackages: the name an import of this directory binds.
+        NavFact::GoPackageName { .. } => Part::Surface,
+        // go_wire: types another file's handler value that is this call's result.
+        NavFact::SliceResult { .. } => Part::Surface,
+        // imports/reexports: an importer resolves through this barrel.
+        NavFact::ReExportStar { .. } => Part::Surface,
+        // imports/reexports: as ReExportStar.
+        NavFact::ReExportNamespace { .. } => Part::Surface,
+        // imports/reexports: as ReExportStar.
+        NavFact::ReExportName { .. } => Part::Surface,
+        // imports/reexports: what this file exports under another name.
+        NavFact::ExportLocal { .. } => Part::Surface,
+        // imports/reexports: the names a star from another file passes on.
+        NavFact::Exports { .. } => Part::Surface,
+        // evm_abi: the ABI binding a client in another file imports.
+        NavFact::EvmAbi { .. } => Part::Surface,
+        // calls / dart: bound in the reader's own scope.
+        NavFact::MemberRead { .. } => Part::Body,
+        // dart::provider_type: `ref.read(p)` in another file reads the provider type.
+        NavFact::RiverpodProvider { .. } => Part::Surface,
+        // calls::receiver_type: this scope's own receiver.
+        NavFact::ReceiverType { .. } => Part::Body,
+        // calls::resolve_member_reads: this scope's own write.
+        NavFact::MemberWrite { .. } => Part::Body,
+        // calls::resolve_member_reads: a read in another file binds the getter.
+        NavFact::Getter => Part::Surface,
+        // calls::resolve_member_reads: a write in another file binds the setter.
+        NavFact::Setter => Part::Surface,
+    }
+}
+
+/// GA.1: the language tag the build's language detection routes `path`
+/// to (`"python"`, `"go"`, `"typescript"`, `"vue"`, `"rust"`, ..), `None` for
+/// a path no parser reads. For the surface replay, which picks the files to
+/// fingerprint the way a build would.
+pub fn surface_language(path: &str) -> Option<&'static str> {
+    crate::extract::detect_language(path)
+}
+
+/// GA.1: xxh64 of `fp`'s declaration SURFACE, the part of a parse another
+/// file's resolution may read, so equal fingerprints across an edit mean the
+/// edit left every other file's stitching valid (a body-only edit). In order,
+/// through the streaming bincode the watch's parse fingerprint uses:
+/// (a) the nodes as (id, kind, qname) in id order, never their cells;
+/// (b) the nav's names, qnames, kinds, parents, children, field types, return
+/// types and method signatures in key order (as the parse cache writes
+/// them), and the `local_types` of MODULE scopes only (package / module-level
+/// variables an importer's receiver typing reads);
+/// (c) the properties in id order;
+/// (d) the imports, parser order, without their rows;
+/// (e) the heritage refs and in-file heritage edges (INHERITS_FROM /
+/// IMPLEMENTS), without their rows;
+/// (f) the [`Part::Surface`] nav facts, scopes in id order, each scope's in
+/// parser order, any `line` field zeroed.
+///
+/// Rows are left out on purpose: an IMPORTS / INHERITS_FROM edge's EVIDENCE
+/// row is the edited file's OWN output, re-derived when the edited file is
+/// re-stitched, and no other file's resolution reads it; a body edit shifts
+/// every row below it. [`surface_fingerprint_strict`] keeps them. `None` when
+/// serialization fails: the caller treats the surface as changed.
+pub fn surface_fingerprint(fp: &FileParse) -> Option<u64> {
+    stream_hash(&SurfaceView { fp, strict: false })
+}
+
+/// GA.1: [`surface_fingerprint`] plus every row: the import, heritage and
+/// surface-fact rows and every node's POSITION cell payload (its declaration
+/// rows). Equal across an edit only when no declaration moved, which a fast
+/// path that cannot re-derive line-carrying outputs would need.
+pub fn surface_fingerprint_strict(fp: &FileParse) -> Option<u64> {
+    stream_hash(&SurfaceView { fp, strict: true })
+}
+
+/// The surface of a parse, serialized for [`surface_fingerprint`] (`strict`
+/// false) and [`surface_fingerprint_strict`].
+struct SurfaceView<'a> {
+    fp: &'a FileParse,
+    strict: bool,
+}
+
+impl serde::Serialize for SurfaceView<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use glia_code_domain::{cell_type, edge_category, node_kind};
+        use serde::ser::SerializeStruct;
+        let FileParse {
+            nodes,
+            edges,
+            imports,
+            calls: _,
+            refs,
+            nav,
+            properties,
+        } = self.fp;
+        let strict = self.strict;
+        let row = |line: u32| strict.then_some(line);
+        let heritage = |c: &glia_core::EdgeCategoryId| {
+            *c == edge_category::INHERITS_FROM || *c == edge_category::IMPLEMENTS
+        };
+
+        let mut ids: Vec<NodeId> = nodes.iter().map(|n| n.id).collect();
+        ids.sort_unstable_by_key(|id| id.0);
+        let node_rows: Vec<(u64, Option<u32>, Option<&String>)> = ids
+            .iter()
+            .map(|id| {
+                (
+                    id.0,
+                    nav.kind_by_id.get(id).map(|k| k.0),
+                    nav.qname_by_id.get(id),
+                )
+            })
+            .collect();
+        let module_locals: Vec<(u64, OrderedMap<&String, &String>)> = {
+            let mut e: Vec<(u64, OrderedMap<&String, &String>)> = nav
+                .local_types
+                .iter()
+                .filter(|(scope, _)| nav.kind_by_id.get(scope) == Some(&node_kind::MODULE))
+                .map(|(scope, m)| (scope.0, by_name(m)))
+                .collect();
+            e.sort_unstable_by_key(|(k, _)| *k);
+            e
+        };
+        let mut props: Vec<u64> = properties.iter().map(|id| id.0).collect();
+        props.sort_unstable();
+        let import_rows: Vec<(&String, &glia_code_domain::ImportTarget, Option<u32>)> = imports
+            .iter()
+            .map(|i| (&i.from_module, &i.target, row(i.line)))
+            .collect();
+        let heritage_refs: Vec<(u64, u64, &glia_code_domain::CallQualifier, u32, Option<u32>)> =
+            refs.iter()
+                .filter(|r| heritage(&r.category))
+                .map(|r| {
+                    (
+                        r.from.0,
+                        r.from_module.0,
+                        &r.qualifier,
+                        r.category.0,
+                        row(r.line),
+                    )
+                })
+                .collect();
+        let heritage_edges: Vec<(u64, u64, u32)> = edges
+            .iter()
+            .filter(|e| heritage(&e.category))
+            .map(|e| (e.from.0, e.to.0, e.category.0))
+            .collect();
+        let facts: Vec<(u64, Vec<NavFact>)> = {
+            let mut e: Vec<(u64, Vec<NavFact>)> = nav
+                .nav_facts
+                .iter()
+                .filter_map(|(scope, list)| {
+                    let kept: Vec<NavFact> = list
+                        .iter()
+                        .filter(|f| surface_class(f) == Part::Surface)
+                        .map(|f| if strict { f.clone() } else { without_row(f) })
+                        .collect();
+                    (!kept.is_empty()).then_some((scope.0, kept))
+                })
+                .collect();
+            e.sort_unstable_by_key(|(k, _)| *k);
+            e
+        };
+        let positions: Vec<(u64, Vec<&glia_core::CellPayload>)> = if strict {
+            let mut e: Vec<(u64, Vec<&glia_core::CellPayload>)> = nodes
+                .iter()
+                .map(|n| {
+                    let cells = n
+                        .cells
+                        .iter()
+                        .filter(|c| c.kind == cell_type::POSITION)
+                        .map(|c| &c.payload)
+                        .collect();
+                    (n.id.0, cells)
+                })
+                .collect();
+            e.sort_by_key(|(k, _)| *k);
+            e
+        } else {
+            Vec::new()
+        };
+
+        let mut st = s.serialize_struct("Surface", 17)?;
+        st.serialize_field("nodes", &node_rows)?;
+        st.serialize_field("name_by_id", &by_id(&nav.name_by_id, |v| v))?;
+        st.serialize_field("qname_by_id", &by_id(&nav.qname_by_id, |v| v))?;
+        st.serialize_field("kind_by_id", &by_id(&nav.kind_by_id, |v| v))?;
+        st.serialize_field("parent_of", &by_id(&nav.parent_of, |v| v))?;
+        st.serialize_field("children_of", &by_id(&nav.children_of, |v| v))?;
+        st.serialize_field("field_types", &by_id(&nav.field_types, by_name))?;
+        st.serialize_field("return_types", &by_id(&nav.return_types, |v| v))?;
+        st.serialize_field("method_sigs", &by_id(&nav.method_sigs, |v| v))?;
+        st.serialize_field("module_locals", &module_locals)?;
+        st.serialize_field("properties", &props)?;
+        st.serialize_field("imports", &import_rows)?;
+        st.serialize_field("heritage_refs", &heritage_refs)?;
+        st.serialize_field("heritage_edges", &heritage_edges)?;
+        st.serialize_field("facts", &facts)?;
+        st.serialize_field("strict", &strict)?;
+        st.serialize_field("positions", &positions)?;
+        st.end()
+    }
+}
+
+/// `f` with every `line` field zeroed: the loose surface reads no row.
+fn without_row(f: &NavFact) -> NavFact {
+    let mut f = f.clone();
+    match &mut f {
+        NavFact::MountArg { line, .. }
+        | NavFact::ClientHost { line, .. }
+        | NavFact::ClientBase { line, .. }
+        | NavFact::ReExportStar { line, .. }
+        | NavFact::ReExportNamespace { line, .. }
+        | NavFact::ReExportName { line, .. }
+        | NavFact::ExportLocal { line, .. }
+        | NavFact::MemberRead { line, .. }
+        | NavFact::MemberWrite { line, .. } => *line = 0,
+        _ => {}
+    }
+    f
 }
 
 /// `CodeNav` in the derived wire shape, each map in key order.
@@ -1698,5 +1979,186 @@ mod tests {
             "truncation accepted"
         );
         assert!(CacheEntry::from_payload(&[]).is_err());
+    }
+
+    // ------------------------------------------------------------------------
+    // GA.1: the declaration surface
+    // ------------------------------------------------------------------------
+
+    /// A fresh parse of `src` at `path`, as the replay parses a blob.
+    fn surface_parse(src: &str, path: &str) -> FileParse {
+        let lang = surface_language(path).expect("a parsed language");
+        crate::parse_one(src, path, lang, glia_core::RepoId(7)).expect("parses")
+    }
+
+    /// (loose, strict, whole-parse) fingerprints of `src`.
+    fn prints(src: &str, path: &str) -> (u64, u64, u64) {
+        let p = surface_parse(src, path);
+        (
+            surface_fingerprint(&p).expect("loose"),
+            surface_fingerprint_strict(&p).expect("strict"),
+            parse_fingerprint(&p).expect("parse"),
+        )
+    }
+
+    const PY: &str = "import os\nfrom pkg.base import Base\n\ncounter = 0\n\n\nclass Repo(Base):\n    def load(self, k):\n        x = 1\n        return os.path.join(k, x)\n\n\ndef helper():\n    return Repo().load(\"a\")\n";
+
+    const RS: &str = "use crate::store::Store;\n\npub trait Load {\n    fn load(&self) -> u32;\n}\n\npub struct Repo {\n    store: Store,\n}\n\nimpl Repo {\n    pub fn get(&self) -> u32 {\n        let n = 1;\n        n + self.store.size()\n    }\n}\n\nimpl Load for Repo {\n    fn load(&self) -> u32 {\n        self.get()\n    }\n}\n";
+
+    /// GA.1 (a): a statement changed inside a fn body, the rows below it
+    /// shifted, keeps the loose surface and moves the strict one and the
+    /// whole-parse fingerprint, for a Python and a Rust file.
+    #[test]
+    fn surface_fingerprint_survives_a_body_edit() {
+        let cases = [
+            (
+                PY,
+                "pkg/repo.py",
+                PY.replace(
+                    "        x = 1\n",
+                    "        y = 2\n        x = y - 1\n        print(x)\n",
+                ),
+            ),
+            (
+                RS,
+                "src/repo.rs",
+                RS.replace(
+                    "        let n = 1;\n",
+                    "        let m = 2;\n        let n = m - 1;\n        log(n);\n",
+                ),
+            ),
+        ];
+        for (before, path, after) in cases {
+            assert_ne!(before, after.as_str());
+            let (l0, s0, p0) = prints(before, path);
+            let (l1, s1, p1) = prints(&after, path);
+            assert_eq!(l0, l1, "{path}: a body edit moved the surface");
+            assert_ne!(s0, s1, "{path}: the shifted rows left the strict surface");
+            assert_ne!(p0, p1, "{path}: the parse fingerprint missed the edit");
+        }
+    }
+
+    /// GA.1 (b): a new fn, a renamed class, a changed import and a changed
+    /// base class each move the loose surface.
+    #[test]
+    fn surface_fingerprint_moves_with_a_declaration() {
+        let (base, _, _) = prints(PY, "pkg/repo.py");
+        let edits = [
+            (
+                "a new fn",
+                PY.replace(
+                    "def helper():",
+                    "def extra():\n    return 1\n\n\ndef helper():",
+                ),
+            ),
+            ("a renamed class", PY.replace("Repo", "Store")),
+            (
+                "a changed import",
+                PY.replace("from pkg.base import Base", "from pkg.other import Base"),
+            ),
+            (
+                "a changed base",
+                PY.replace("class Repo(Base):", "class Repo(object):"),
+            ),
+        ];
+        for (what, src) in edits {
+            assert_ne!(prints(&src, "pkg/repo.py").0, base, "python: {what}");
+        }
+        let (rbase, _, _) = prints(RS, "src/repo.rs");
+        let redits = [
+            (
+                "a new fn",
+                format!("{RS}\npub fn extra() -> u32 {{\n    1\n}}\n"),
+            ),
+            ("a renamed struct", RS.replace("Repo", "Cache")),
+            (
+                "a changed import",
+                RS.replace("use crate::store::Store;", "use crate::other::Store;"),
+            ),
+            (
+                "a changed trait impl",
+                RS.replace("impl Load for Repo", "impl Clone for Repo"),
+            ),
+        ];
+        for (what, src) in redits {
+            assert_ne!(prints(&src, "src/repo.rs").0, rbase, "rust: {what}");
+        }
+    }
+
+    /// GA.1 (c): the surface does not depend on the order the parse's hash
+    /// containers were filled in (the same synthetic parse filled forwards and
+    /// backwards, as `parse_fingerprint_hashes_the_canonical_bytes` does).
+    #[test]
+    fn surface_fingerprint_ignores_fill_order() {
+        let fwd: Vec<u64> = (0..24).collect();
+        let rev: Vec<u64> = (0..24).rev().collect();
+        let (mut a, mut b) = (rich_parse(24, &fwd), rich_parse(24, &rev));
+        // A MODULE scope with module-level locals, filled in both orders.
+        for (p, order) in [(&mut a, &fwd), (&mut b, &rev)] {
+            p.nav
+                .kind_by_id
+                .insert(NodeId(9), glia_code_domain::node_kind::MODULE);
+            for &j in order.iter() {
+                p.nav
+                    .record_local_type(NodeId(9), &format!("v{j}"), &format!("T{j}"));
+            }
+        }
+        assert_eq!(surface_fingerprint(&a), surface_fingerprint(&b));
+        assert_eq!(
+            surface_fingerprint_strict(&a),
+            surface_fingerprint_strict(&b)
+        );
+        assert!(surface_fingerprint(&a).is_some());
+        // And two real parses of one source agree.
+        assert_eq!(prints(PY, "pkg/repo.py"), prints(PY, "pkg/repo.py"));
+    }
+
+    /// GA.1 (d): a module-level (package-level) variable's type moves the
+    /// surface; a local's inside a fn does not. Go records both (CA.2a);
+    /// Python records no local types at all, so no Python resolution reads a
+    /// module variable's type and its change is a body change there.
+    #[test]
+    fn surface_fingerprint_reads_module_locals_only() {
+        let go = "package store\n\nvar shared = NewStore()\n\nfunc Run() int {\n\tlocal := NewStore()\n\treturn local.Size()\n}\n";
+        let path = "store/store.go";
+        let (base, _, _) = prints(go, path);
+        let module = go.replace("var shared = NewStore()", "var shared = NewCache()");
+        assert_ne!(prints(&module, path).0, base, "a package var's type");
+        let local = go.replace("local := NewStore()", "local := NewCache()");
+        assert_eq!(prints(&local, path).0, base, "a fn local's type");
+    }
+
+    /// GA.1: every NavFact variant has a class, and the classes are the
+    /// ones the variant readers were read for.
+    #[test]
+    fn surface_class_splits_the_facts() {
+        let body: Vec<&str> = every_nav_fact()
+            .iter()
+            .filter(|f| surface_class(f) == Part::Body)
+            .map(|f| match f {
+                NavFact::MountArg { .. } => "MountArg",
+                NavFact::ClientHost { .. } => "ClientHost",
+                NavFact::ClientBase { .. } => "ClientBase",
+                NavFact::MemberRead { .. } => "MemberRead",
+                NavFact::ReceiverType { .. } => "ReceiverType",
+                NavFact::MemberWrite { .. } => "MemberWrite",
+                _ => "other",
+            })
+            .collect();
+        let mut body = body;
+        body.dedup();
+        assert_eq!(
+            body,
+            [
+                "MountArg",
+                "ClientHost",
+                "ClientBase",
+                "MemberRead",
+                "ReceiverType",
+                "MemberWrite"
+            ]
+        );
+        assert_eq!(surface_language("a/b.py"), Some("python"));
+        assert_eq!(surface_language("README.md"), None);
     }
 }
