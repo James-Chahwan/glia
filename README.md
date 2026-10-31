@@ -236,7 +236,7 @@ glia health <REPO> [--json] [--with <WITH>]...
     an unfamiliar repo. A report: exits 0, 2 on an error.
 
 # One symbol, channel or signal
-glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [--no-semantic] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
+glia find <REPO> <QUERY> [--depth <DEPTH>] [--files] [--flows] [--json] [--kind <KIND>]... [--no-collapse] [--no-semantic] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     The ranked, located nodes a symbol, qname or fragment names, with the match tier.
     One row per identity class, folded before the --top-k cut. --files ranks one repo's
     files for the query text instead: ids in the text first (through its task / requirement
@@ -247,7 +247,10 @@ glia find <REPO> <QUERY> [--files] [--json] [--kind <KIND>]... [--no-collapse] [
     naming the missing input, exit 0. When the repo holds vectors of the surface model
     (glia embed; GLIA_EMBED_MODEL, default bge-small) the text key blends in their
     similarity, LX[IDR,FUSE[T1s,SEMp:t2]], and the table gains a `sem` column (--json:
-    `sem`); --no-semantic (with --files) ranks without them.
+    `sem`); --no-semantic (with --files) ranks without them. --flows lists, under each
+    row, the entry flows (glia flows) that pass through it within --depth hops, each with
+    the row's depth in the flow (0 = the row is the entry), at most 20 per row (--json:
+    `flows`, one `{id, qname, kind, total, flows, more}` per row).
 glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]

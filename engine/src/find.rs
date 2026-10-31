@@ -112,9 +112,9 @@ use glia_code_domain::snapshots::{
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
-use crate::absence::{self, Answer};
+use crate::absence::{self, Answer, BlindCaveat};
 use crate::answers::{
-    Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
+    Located, Locator, entrypoint_reachable, in_scope, live_marker, project_roots, resolve_scope,
 };
 use crate::arch::{repo_label_for, repo_label_map};
 use crate::calibrate::fusions::{FindHead, find_keys, find_order, find_signals_at_head};
@@ -128,6 +128,7 @@ use crate::intent::text::{Candidates, TextAbsent, TextIndex, subject};
 use crate::rank::RankCache;
 use crate::review::IntentHistory;
 use crate::semantic::SemanticSource;
+use crate::trace::{EntryFlow, entry_flows_with_live};
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -678,6 +679,215 @@ fn log_marker(query: &str, cands: &[Candidate], top_k: usize) {
     );
 }
 
+// ---- GB.2: the entry flows through find's hits ---------------------------
+
+/// `FlowsThrough::flows` keeps at most this many flows per hit; `more`
+/// counts the rest.
+pub const DEFAULT_FLOWS_PER_HIT: usize = 20;
+
+/// One entry flow that passes through a hit, and how deep: the same flow
+/// [`crate::trace::entry_flows`] lists, seen from the node side.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FlowRef {
+    /// 1-based position in the hit's flow order.
+    pub rank: usize,
+    /// The flow's key ([`EntryFlow::key`]).
+    pub key: String,
+    /// The flow's entry, located.
+    pub entry: Located,
+    /// The hit's depth in the flow: 0 when the hit is the entry itself, else
+    /// the BFS depth of the shallowest hop that shows it.
+    pub depth: usize,
+    /// Nodes the flow reaches ([`EntryFlow::reach`]).
+    pub reach: usize,
+    /// The flow names more than one service ([`EntryFlow::cross_service`]).
+    pub cross_service: bool,
+    /// The flow's distinct mechanisms ([`EntryFlow::mechanisms`]).
+    pub mechanisms: Vec<&'static str>,
+    /// The flow's FH.9 caveats, copied from [`EntryFlow::blind`]; empty, and
+    /// not serialized, otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blind: Vec<BlindCaveat>,
+}
+
+/// The entry flows through one find hit, parallel to the answer's rows.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FlowsThrough {
+    /// The hit's node id ([`FoundNode::id`]).
+    pub id: u64,
+    /// The hit's qname.
+    pub qname: String,
+    /// The hit's kind name.
+    pub kind: &'static str,
+    /// Every flow through the hit.
+    pub total: usize,
+    /// The first flows by (depth asc, reach desc, key, entry qname, entry id).
+    pub flows: Vec<FlowRef>,
+    /// `total - flows.len()`: the flows the per-hit cap left out.
+    pub more: usize,
+}
+
+/// [`find_flows`]' answer: find's `{results, absence}` envelope, unchanged,
+/// plus `flows`, one [`FlowsThrough`] per row in row order (empty when the
+/// answer is).
+#[derive(serde::Serialize, Debug, Clone)]
+#[non_exhaustive]
+pub struct FindFlows {
+    #[serde(flatten)]
+    pub answer: Answer<FoundNode>,
+    pub flows: Vec<FlowsThrough>,
+}
+
+/// Where a flow row shows a node: `(qname, file, line)`, the fields a
+/// [`TraceHop`](crate::trace::TraceHop) and a [`RowIdentity`]'s `also_in`
+/// both carry, read off one [`Locator`].
+type Place<'a> = (&'a str, Option<&'a str>, Option<i64>);
+
+/// **flows_through** (GB.2): for each hit, in hit order, the `flows` that
+/// pass through it (the entry is the hit, or a hop shows it), each with the
+/// hit's depth, ordered by (depth asc, reach desc, key, entry qname, entry
+/// id) and cut to `per_hit` (`0` keeps every flow; `more` counts the cut).
+///
+/// A hit is matched where a flow row shows it: its own node, and, for a row
+/// that stands for an identity class ([`FoundNode::identity`], DD.9), every
+/// other member (`also_in`), so a collapsed hit finds the flows whose walk
+/// shows the class's display member (or, outside a walk class, any member).
+/// Hops carry no node id, so a hop matches by its `(qname, file, line)`: two
+/// nodes at one place with one qname (a CLASS and the COMPONENT it is) are
+/// one hit here, and so are two repos holding one file at one path with one
+/// qname, which no flow row tells apart either. `flows` should be
+/// `trace::entry_flows_with_live` over the same identity option as `hits`.
+pub fn flows_through(hits: &[FoundNode], flows: &[EntryFlow], per_hit: usize) -> Vec<FlowsThrough> {
+    hits.iter()
+        .map(|h| {
+            let mut places: Vec<Place<'_>> = vec![(&h.qname, h.file.as_deref(), h.line)];
+            if let Some(id) = &h.identity {
+                places.extend(
+                    id.also_in
+                        .iter()
+                        .map(|a| (a.qname.as_str(), a.file.as_deref(), a.line)),
+                );
+            }
+            let mut refs: Vec<FlowRef> = flows
+                .iter()
+                .filter_map(|f| {
+                    let e = &f.entry;
+                    let entry_is_hit = e.id == h.id
+                        || places.contains(&(e.qname.as_str(), e.file.as_deref(), e.line));
+                    let depth = if entry_is_hit {
+                        Some(0)
+                    } else {
+                        f.hops
+                            .iter()
+                            .filter(|x| {
+                                places.contains(&(
+                                    x.to_qname.as_str(),
+                                    x.to_file.as_deref(),
+                                    x.to_line,
+                                ))
+                            })
+                            .map(|x| x.depth)
+                            .min()
+                    }?;
+                    Some(FlowRef {
+                        rank: 0,
+                        key: f.key.clone(),
+                        entry: f.entry.clone(),
+                        depth,
+                        reach: f.reach,
+                        cross_service: f.cross_service,
+                        mechanisms: f.mechanisms.clone(),
+                        blind: f.blind.clone(),
+                    })
+                })
+                .collect();
+            refs.sort_by(|a, b| {
+                a.depth
+                    .cmp(&b.depth)
+                    .then_with(|| b.reach.cmp(&a.reach))
+                    .then_with(|| a.key.cmp(&b.key))
+                    .then_with(|| a.entry.qname.cmp(&b.entry.qname))
+                    .then_with(|| a.entry.id.cmp(&b.entry.id))
+            });
+            let total = refs.len();
+            if per_hit > 0 {
+                refs.truncate(per_hit);
+            }
+            for (i, r) in refs.iter_mut().enumerate() {
+                r.rank = i + 1;
+            }
+            FlowsThrough {
+                id: h.id,
+                qname: h.qname.clone(),
+                kind: h.kind,
+                total,
+                more: total - refs.len(),
+                flows: refs,
+            }
+        })
+        .collect()
+}
+
+/// **find_flows** (GB.2, `glia find --flows`, `PyGraph.find_flows`): the
+/// [`find_nodes`] answer for `query`, and per row the entry flows within
+/// `depth` that pass through it ([`flows_through`], at most
+/// [`DEFAULT_FLOWS_PER_HIT`] each). The flows are walked once, over
+/// `opts.collapse` (its repo labels name the services), only when the answer
+/// has a row. Prints find's own lines, `trace::entry_flows`' lines when it
+/// walks, and one `[find-flows] query=<q> hits=<h> flows=<f>
+/// with_flows=<w> surface=lib` line.
+pub fn find_flows(
+    merged: &MergedGraph,
+    query: &str,
+    opts: &FindOptions,
+    depth: usize,
+) -> FindFlows {
+    find_flows_with_live(
+        merged,
+        &entrypoint_reachable(merged),
+        query,
+        opts,
+        depth,
+        "lib",
+    )
+}
+
+/// [`find_flows`] over a live set the caller already holds (`live` must be
+/// `entrypoint_reachable` of `merged`), its marker naming `surface` (`cli`,
+/// `py`).
+pub fn find_flows_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    query: &str,
+    opts: &FindOptions,
+    depth: usize,
+    surface: &str,
+) -> FindFlows {
+    let answer = find_nodes_with_live(merged, live, query, opts);
+    let walked = if answer.results.is_empty() {
+        Vec::new()
+    } else {
+        entry_flows_with_live(
+            merged,
+            live,
+            &opts.collapse.repo_labels,
+            depth,
+            &opts.collapse,
+        )
+    };
+    let flows = flows_through(&answer.results, &walked, DEFAULT_FLOWS_PER_HIT);
+    eprintln!(
+        "[find-flows] query={} hits={} flows={} with_flows={} surface={surface}",
+        query.trim(),
+        answer.results.len(),
+        walked.len(),
+        flows.iter().filter(|f| f.total > 0).count()
+    );
+    FindFlows { answer, flows }
+}
+
 // ---- EB.8: the files a free-text query is about -------------------------
 
 /// The fusion [`find_files`] ranks by (round 3's find table): typed id links
@@ -1105,6 +1315,107 @@ fn find_files_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GB.2: a row standing for an identity class matches a flow through
+    /// any member (`also_in`), at the shallowest such hop; a raw row only
+    /// through its own place.
+    #[test]
+    fn flows_through_matches_a_class_row_through_its_members() {
+        use crate::identity::AlsoIn;
+        use crate::trace::TraceHop;
+        let at = |id: u64, q: &str, file: &str, line: i64| Located {
+            id,
+            name: q.to_string(),
+            qname: q.to_string(),
+            kind: "FUNCTION",
+            file: Some(file.to_string()),
+            line: Some(line),
+        };
+        let hop = |depth: usize, q: &str, file: &str, line: i64| TraceHop {
+            depth,
+            mechanism: "CALLS",
+            cross_service: false,
+            cross_repo: false,
+            from_qname: "x".to_string(),
+            to_qname: q.to_string(),
+            to_kind: "FUNCTION",
+            to_live: true,
+            to_file: Some(file.to_string()),
+            to_line: Some(line),
+            to_identity: None,
+        };
+        let flow = |key: &str, entry: Located, hops: Vec<TraceHop>| EntryFlow {
+            key: key.to_string(),
+            entry,
+            reach: hops.len(),
+            cross_service: false,
+            mechanisms: vec!["CALLS"],
+            services: Vec::new(),
+            hops,
+            blind: Vec::new(),
+        };
+        let flows = vec![
+            // Reaches member b (2 deep) and the hit a (3 deep): depth 2.
+            flow(
+                "b_first",
+                at(10, "main", "m.py", 1),
+                vec![
+                    hop(1, "mid", "m.py", 3),
+                    hop(2, "pkg::b", "b.py", 7),
+                    hop(3, "pkg::a", "a.py", 4),
+                ],
+            ),
+            // Starts at member b: depth 0.
+            flow(
+                "entry_b",
+                at(11, "pkg::b", "b.py", 7),
+                vec![hop(1, "y", "y.py", 1)],
+            ),
+            // A same-qname node elsewhere is no member: no match.
+            flow(
+                "other",
+                at(12, "run", "r.py", 1),
+                vec![hop(1, "pkg::b", "c.py", 7)],
+            ),
+        ];
+        let mut hit = FoundNode {
+            id: 1,
+            qname: "pkg::a".to_string(),
+            name: "a".to_string(),
+            kind: "FUNCTION",
+            live: true,
+            file: Some("a.py".to_string()),
+            line: Some(4),
+            r#match: "exact_name",
+            identity: None,
+        };
+        let raw = flows_through(std::slice::from_ref(&hit), &flows, 0);
+        let got: Vec<(&str, usize)> = raw[0]
+            .flows
+            .iter()
+            .map(|f| (f.key.as_str(), f.depth))
+            .collect();
+        assert_eq!(got, vec![("b_first", 3)]);
+        hit.identity = Some(RowIdentity {
+            tier: "derived",
+            rules: vec!["http_model"],
+            diverged: false,
+            also_in: vec![AlsoIn {
+                repo: "web".to_string(),
+                qname: "pkg::b".to_string(),
+                file: Some("b.py".to_string()),
+                line: Some(7),
+            }],
+        });
+        let class = flows_through(std::slice::from_ref(&hit), &flows, 0);
+        let got: Vec<(&str, usize)> = class[0]
+            .flows
+            .iter()
+            .map(|f| (f.key.as_str(), f.depth))
+            .collect();
+        assert_eq!(got, vec![("entry_b", 0), ("b_first", 2)]);
+        assert_eq!((class[0].total, class[0].more), (2, 0));
+    }
 
     fn tier(q: &str, name: &str, qname: &str) -> Option<&'static str> {
         Query::new(q).tier_of(name, qname).map(Tier::label)

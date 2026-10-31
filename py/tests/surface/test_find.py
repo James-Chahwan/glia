@@ -11,6 +11,9 @@ EB.8: `find_files(query, top_k=20)` is the files a free-text query is about
 rows. FB.7b: `find_files(.., semantic=None)` blends the repo's embeddings
 (`embed`) in when it has vectors of the surface model (GLIA_EMBED_MODEL):
 rows gain `sem` and the fallback pick reads LX[IDR,FUSE[T1s,SEMp:t2]].
+GB.2: `find_flows(query, top_k=20, depth=6, collapse=True)` is `find` plus
+`flows`, one `{id, qname, kind, total, flows, more}` per row: the entry flows
+through it, each with the row's depth in the flow.
 Shared helpers: test_build.py."""
 from __future__ import annotations
 
@@ -32,6 +35,8 @@ def manifest(repo: str, extra: str) -> str:
             % (repo, extra))
 RESOLVE_KEYS = ["id", "qname", "name", "kind", "score", "live", "file", "line"]
 FILE_KEYS = ["rank", "file", "idr", "text", "degree", "ids"]
+FLOWS_KEYS = ["id", "qname", "kind", "total", "flows", "more"]
+FLOW_REF_KEYS = ["rank", "key", "entry", "depth", "reach", "cross_service", "mechanisms"]
 
 
 def git(root: pathlib.Path, *args: str) -> None:
@@ -102,6 +107,29 @@ def main() -> int:
                 == (True, True, False, False), live)
         c.check("a row outside any identity class has no identity key",
                 all("identity" not in r for r in rows), rows[:1])
+
+        # GB.2: the entry flows through each row.
+        c.check("find_flows signature",
+                params(rg.PyGraph.find_flows) == [("query", None), ("top_k", 20), ("depth", 6),
+                                                  ("collapse", True)],
+                params(rg.PyGraph.find_flows))
+        ff, err = stderr_of(lambda: g.find_flows("helper"))
+        c.check("find_flows marker", "[find-flows] query=helper hits=" in err and " surface=py" in err,
+                err[-400:])
+        c.check("find_flows -> dict {results, absence, flows}",
+                type(ff) is dict and list(ff) == ["results", "absence", "flows"], type(ff) is dict and list(ff))
+        c.check("find_flows rows are find's rows", ff["results"] == g.find("helper")["results"], None)
+        fl = ff["flows"]
+        c.check("one flows entry per row", len(fl) == len(ff["results"])
+                and [t["qname"] for t in fl] == [r["qname"] for r in ff["results"]], fl[:2])
+        c.check("flows entry keys", fl and list(fl[0]) == FLOWS_KEYS, fl[:1])
+        helper = next((t for t in fl if t["qname"] == "app::helper"), {})
+        c.check("main's flow passes through helper one hop in",
+                any(f["key"] == "main" and f["depth"] == 1 for f in helper.get("flows", [])), helper)
+        c.check("flow ref keys", helper.get("flows") and list(helper["flows"][0]) == FLOW_REF_KEYS, helper)
+        nf = g.find_flows("zzqqxx")
+        c.check("find_flows no match: absence, no flows",
+                nf["results"] == [] and nf["flows"] == [] and nf["absence"]["reason"] == "no_match", nf)
 
     # DD.9: a package both repos declare is one identity class (package_name).
     with tempfile.TemporaryDirectory(prefix="glia-surface-find-identity-") as tmp:

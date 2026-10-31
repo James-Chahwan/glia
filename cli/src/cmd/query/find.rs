@@ -36,16 +36,30 @@
 //! `FindOptions::vocab_roots`, so with a vocabulary snapshot (`glia vocab
 //! sync`) a no-match absence names where each identifier of the query occurs
 //! (`named_in` in `--json`, an `occurs in` clause in the note).
+//!
+//! GB.2: `--flows` adds, under the node table, the entry flows (`glia flows`)
+//! that pass through each row within `--depth` hops (default
+//! `trace::DEFAULT_DEPTH`), each with the row's depth in the flow (0 = the
+//! row is the entry), ordered by depth, then reach, then key, at most 20 per
+//! row (`more` counts the rest). `--json` is find's envelope plus `flows`,
+//! one `{id, qname, kind, total, flows, more}` per row in row order. With
+//! identity collapse on, a row standing for a class matches the flows that
+//! show any of its members. Stderr: `[find-flows] query=<q> hits=<h>
+//! flows=<f> with_flows=<w> surface=cli`. Without `--flows` the output is
+//! unchanged.
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
 use glia_engine::GenerateResult;
 use glia_engine::calibrate::Selection;
+use glia_engine::entrypoint_reachable;
 use glia_engine::find::{
-    DEFAULT_TOP_K, FindFilesOptions, FindOptions, FoundNode, find_files_with_ids, find_nodes,
+    DEFAULT_TOP_K, FindFilesOptions, FindFlows, FindOptions, FoundNode, find_files_with_ids,
+    find_flows_with_live, find_nodes,
 };
 use glia_engine::identity::Collapse;
 use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
+use glia_engine::trace::DEFAULT_DEPTH;
 use std::sync::Arc;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -89,6 +103,14 @@ pub(crate) struct Args {
     /// into the text ranking and prints a `sem` column.
     #[arg(long, requires = "files")]
     no_semantic: bool,
+    /// List, under each row, the entry flows (glia flows) that pass through
+    /// it, with the row's depth in each flow (0 = the row is the entry); at
+    /// most 20 per row.
+    #[arg(long, conflicts_with_all = ["files", "no_semantic"])]
+    flows: bool,
+    /// With --flows: maximum hops each flow follows from its entry point.
+    #[arg(long, default_value_t = DEFAULT_DEPTH, requires = "flows")]
+    depth: usize,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -133,7 +155,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let mut opts = FindOptions::default();
     opts.top_k = args.top_k;
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
-    opts.scope = args.scope;
+    opts.scope = args.scope.clone();
     opts.collapse = if args.no_collapse {
         Collapse::off()
     } else {
@@ -146,6 +168,9 @@ pub(crate) fn run(args: Args) -> i32 {
             .map(|(id, p)| (*id, std::path::PathBuf::from(p)))
             .collect(),
     );
+    if args.flows {
+        return run_flows(&args, &result, &opts);
+    }
     let mut answer = find_nodes(&result.merged, &args.query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
@@ -161,9 +186,15 @@ pub(crate) fn run(args: Args) -> i32 {
         print_absence(a);
         return 0;
     }
+    print_rows(&answer.results);
+    0
+}
+
+/// The node table.
+fn print_rows(rows: &[FoundNode]) {
     println!("| match | live | kind | qname | location |");
     println!("|---|:-:|---|---|---|");
-    for r in &answer.results {
+    for r in rows {
         println!(
             "| {} | {} | {} | `{}` | {} |",
             r.r#match,
@@ -173,7 +204,81 @@ pub(crate) fn run(args: Args) -> i32 {
             location_cell(r)
         );
     }
+}
+
+/// `glia find --flows` (GB.2): the node table, then per row the entry flows
+/// through it. Exit 0 with rows and on the absence (as the node answer).
+fn run_flows(args: &Args, result: &GenerateResult, opts: &FindOptions) -> i32 {
+    let live = entrypoint_reachable(&result.merged);
+    let mut found =
+        find_flows_with_live(&result.merged, &live, &args.query, opts, args.depth, "cli");
+    if let Some(a) = found.answer.absence.as_mut() {
+        a.unparsed_files = result.parse_errors.len();
+    }
+    if args.json {
+        println!("{}", serde_json::to_string(&found).unwrap_or_default());
+        return 0;
+    }
+    println!(
+        "# glia find `{}` --flows (depth ≤ {})",
+        args.query, args.depth
+    );
+    println!();
+    if let Some(a) = &found.answer.absence {
+        println!("_(no match)_");
+        print_absence(a);
+        return 0;
+    }
+    print_rows(&found.answer.results);
+    print_flows(&found);
     0
+}
+
+/// One section per row some flow passes through, then one line naming the
+/// rows no flow reaches.
+fn print_flows(found: &FindFlows) {
+    let mut none: Vec<String> = Vec::new();
+    for t in &found.flows {
+        if t.total == 0 {
+            none.push(format!("`{}`", t.qname));
+            continue;
+        }
+        println!();
+        let shown = if t.more > 0 {
+            format!(", first {}", t.flows.len())
+        } else {
+            String::new()
+        };
+        let plural = if t.total == 1 { "" } else { "s" };
+        println!(
+            "## flows through `{}` ({} flow{plural}{shown})",
+            t.qname, t.total
+        );
+        println!();
+        println!("| # | key | entry | depth | reach | mechanisms | location |");
+        println!("|--:|---|---|--:|--:|---|---|");
+        for f in &t.flows {
+            let at = place(f.entry.file.as_deref(), f.entry.line).unwrap_or_else(|| "—".into());
+            println!(
+                "| {} | `{}` | `{}` ({}) | {} | {} | {} | {at} |",
+                f.rank,
+                f.key,
+                f.entry.qname,
+                f.entry.kind,
+                f.depth,
+                f.reach,
+                f.mechanisms.join(", ")
+            );
+        }
+        if t.more > 0 {
+            println!();
+            println!("_{} more_", t.more);
+        }
+    }
+    if !none.is_empty() {
+        println!();
+        println!("No entry flow passes through: {}.", none.join(", "));
+    }
 }
 
 /// `glia find --files`: the routed ids, then the ranked files. Exit 0 with

@@ -2,7 +2,8 @@
 //! lookup) and `resolve` (P3: a failure / change signal → located records);
 //! text → files: `find_files` (EB.8, the files a free-text query is about,
 //! LX[IDR,T1s]). Each returns the LD.8a envelope `{results, absence}` as a
-//! native `dict`.
+//! native `dict`. GB.2: `find_flows` is `find` plus `flows`, the entry flows
+//! through each row.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -14,7 +15,8 @@ use glia_code_domain::node_kind;
 use glia_core::{NodeId, NodeKindId};
 use glia_engine::absence::Answer;
 use glia_engine::find::{
-    FindFilesOptions, FindOptions, FoundFile, FoundNode, find_files, find_nodes_with_live,
+    FindFilesOptions, FindFlows, FindOptions, FoundFile, FoundNode, find_files,
+    find_flows_with_live, find_nodes_with_live,
 };
 use glia_engine::identity::Collapse;
 use glia_engine::rank::RankCache;
@@ -28,6 +30,8 @@ use crate::graph::PyGraph;
 // `find`'s `top_k=20` below is a literal so `__text_signature__` shows it;
 // this keeps it the engine's default.
 const _: () = assert!(glia_engine::find::DEFAULT_TOP_K == 20);
+// `find_flows`' `depth=6`, likewise the trace default.
+const _: () = assert!(glia_engine::trace::DEFAULT_DEPTH == 6);
 
 /// Node-kind names → ids, case-insensitively, as `glia find --kind` reads
 /// them. An unknown name is an error naming every valid one.
@@ -84,6 +88,28 @@ fn find_answer(
         a.unparsed_files = unparsed_files;
     }
     Ok(answer)
+}
+
+/// The whole body of [`PyGraph::find_flows`], minus pyo3 (GB.2): the
+/// engine's `find_flows` on surface `py` over the graph's cached live set,
+/// the absence counting the build's parse errors.
+fn find_flows_answer(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    query: &str,
+    top_k: usize,
+    depth: usize,
+    collapse: Collapse,
+    unparsed_files: usize,
+) -> FindFlows {
+    let mut opts = FindOptions::default();
+    opts.top_k = top_k;
+    opts.collapse = collapse;
+    let mut found = find_flows_with_live(merged, live, query, &opts, depth, "py");
+    if let Some(a) = found.answer.absence.as_mut() {
+        a.unparsed_files = unparsed_files;
+    }
+    found
 }
 
 /// The `selection.reason` of a `find_files(.., semantic=True)` answer whose
@@ -263,6 +289,47 @@ impl PyGraph {
         )
         .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
+    }
+
+    /// **find_flows** (GB.2): `find(query, top_k, collapse=collapse)` plus,
+    /// per row, the entry flows (`entry_flows(depth)`) that pass through it.
+    /// Returns a dict `{results, absence, flows}`: `results` / `absence` are
+    /// `find`'s; `flows` holds one `{id, qname, kind, total, flows, more}`
+    /// per row in row order (`[]` when there is no row), whose `flows` are
+    /// `{rank, key, entry, depth, reach, cross_service, mechanisms}` (`depth`
+    /// the row's depth in the flow, 0 when the row is the entry; `blind`
+    /// when health rates a mechanism the flow read BLIND or DEGRADED),
+    /// ordered by depth, then reach desc, then key, at most 20 per row
+    /// (`more` counts the rest). `collapse=True` matches a row standing for
+    /// an identity class through every member; `collapse=False` is the raw
+    /// walk.
+    #[pyo3(signature = (query, top_k=20, depth=6, collapse=true))]
+    fn find_flows(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        top_k: usize,
+        depth: usize,
+        collapse: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let collapse = if collapse {
+            Collapse::with_labels(&self.repo_labels)
+        } else {
+            Collapse::off()
+        };
+        let live = self.live();
+        let found = py.detach(|| {
+            find_flows_answer(
+                &self.merged,
+                live,
+                query,
+                top_k,
+                depth,
+                collapse,
+                self.parse_errors.len(),
+            )
+        });
+        to_py(py, serde_json::to_string(&found))
     }
 
     /// **resolve** (P3, handoff v6): a failure/change signal (stacktrace, diff,
@@ -530,6 +597,38 @@ mod tests {
         )
         .expect_err("two repos");
         assert_eq!(err, "find --files ranks one repo's files; got 2 repos");
+    }
+
+    /// GB.2: `find_flows` is the engine's `find_flows` (marker surface aside)
+    /// and lists `main`'s flow under `helper`, one hop in.
+    #[test]
+    fn find_flows_is_the_engine_answer_with_the_flows_through_each_row() {
+        let merged = built("flows");
+        let live = glia_engine::entrypoint_reachable(&merged);
+        let a = find_flows_answer(&merged, &live, "helper", 20, 6, Collapse::off(), 0);
+        let mut opts = FindOptions::default();
+        opts.collapse = Collapse::off();
+        let e = glia_engine::find::find_flows(&merged, "helper", &opts, 6);
+        assert_eq!(
+            serde_json::to_string(&a).expect("json"),
+            serde_json::to_string(&e).expect("json")
+        );
+        assert_eq!(a.flows.len(), a.answer.results.len());
+        let helper = a
+            .flows
+            .iter()
+            .find(|t| t.qname == "app::helper")
+            .expect("a flows entry for app::helper");
+        assert!(
+            helper.flows.iter().any(|f| f.key == "main" && f.depth == 1),
+            "{helper:?}"
+        );
+        let none = find_flows_answer(&merged, &live, "zzqqxx", 20, 6, Collapse::off(), 3);
+        assert!(none.flows.is_empty());
+        assert_eq!(
+            none.answer.absence.as_ref().map(|a| a.unparsed_files),
+            Some(3)
+        );
     }
 
     fn engine_with_errors(built: &glia_engine::GenerateResult, n: usize) -> Answer<FoundFile> {

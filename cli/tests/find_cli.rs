@@ -6,7 +6,7 @@
 //! here makes it a tested contract, and relaying it lets
 //! `cargo test -p glia-cli --test find_cli -- --nocapture 2>&1 | grep '^\[find\] query='`
 //! show it. DD.9's `[identity] collapse surface=find` line is relayed and
-//! asserted the same way.
+//! asserted the same way, and so is GB.2's `[find-flows] query=` line.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -53,6 +53,7 @@ fn glia(args: &[&str]) -> Output {
             || line.starts_with("[identity] collapse ")
             || line.starts_with("[find-files] ")
             || line.starts_with("[select] surface=find_files ")
+            || line.starts_with("[find-flows] ")
         {
             eprintln!("{line}");
         }
@@ -670,4 +671,118 @@ fn no_semantic_needs_files() {
             && stderr.contains("--files"),
         "{stderr}"
     );
+}
+
+// ---- GB.2: `find --flows`, the entry flows through each row ----
+
+/// GB.1's `shop` service (engine/tests/concept_flows.rs): `POST /orders` ->
+/// `create_order` -> `place_order` / `notify`, `GET /orders/<oid>/comments`
+/// -> `order_comments` -> `list_comments` -> the `issue_comments` table,
+/// `GET /health` -> `health`.
+const SHOP_PY: &str = "import sqlite3\n\nimport requests\nfrom flask import Flask\n\napp = Flask(__name__)\n\n\ndef place_order(order):\n    db = sqlite3.connect('shop.db')\n    db.execute(\"INSERT INTO order_lines (body) VALUES (?)\", (order,))\n    return order\n\n\ndef list_comments(order):\n    db = sqlite3.connect('shop.db')\n    return db.execute(\"SELECT body FROM issue_comments WHERE id = ?\", (order,))\n\n\ndef notify(order):\n    return requests.post('https://hooks.example-chat.com/services/orders', json=order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    place_order(order)\n    notify(order)\n    return order\n\n\n@app.route('/orders/<oid>/comments')\ndef order_comments(oid):\n    return list_comments(oid)\n\n\n@app.route('/health')\ndef health():\n    return 'ok'\n";
+
+fn shop_fixture(tag: &str) -> (Fixture, String) {
+    let fx = Fixture::new(tag);
+    std::fs::create_dir_all(fx.0.join("shop")).unwrap();
+    std::fs::write(fx.0.join("shop/app.py"), SHOP_PY).unwrap();
+    let repo = fx.repo("shop");
+    (fx, repo)
+}
+
+#[test]
+fn flows_json_is_the_engine_answer_with_the_marker() {
+    let (_fx, shop) = shop_fixture("flows-json");
+    let out = ok(&["find", &shop, "place_order", "--flows", "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[find-flows] query=place_order hits=1 flows=3 with_flows=1 surface=cli"),
+        "{stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let t = &v["flows"][0];
+    assert_eq!(t["qname"], "app::place_order", "{v:#}");
+    assert_eq!(
+        (t["total"].as_u64(), t["more"].as_u64()),
+        (Some(1), Some(0))
+    );
+    assert_eq!(t["flows"][0]["key"], "post_/orders");
+    assert_eq!(t["flows"][0]["depth"], 2);
+
+    let built = glia_engine::generate_one(&shop).expect("generate_one");
+    let mut opts = FindOptions::default();
+    opts.collapse = glia_engine::identity::Collapse::with_labels(&built.repo_labels);
+    let engine = glia_engine::find::find_flows(
+        &built.merged,
+        "place_order",
+        &opts,
+        glia_engine::trace::DEFAULT_DEPTH,
+    );
+    assert_eq!(serde_json::to_value(&engine).expect("serialises"), v);
+}
+
+#[test]
+fn flows_table_names_each_flow_and_depth_cuts_it() {
+    let (_fx, shop) = shop_fixture("flows-table");
+    let text = text_of(&ok(&["find", &shop, "place_order", "--flows"]));
+    assert!(
+        text.contains("# glia find `place_order` --flows (depth ≤ 6)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("## flows through `app::place_order` (1 flow)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| # | key | entry | depth | reach | mechanisms | location |"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| 1 | `post_/orders` | `POST /orders` (ROUTE) | 2 | 5 |"),
+        "{text}"
+    );
+    let short = text_of(&ok(&[
+        "find",
+        &shop,
+        "place_order",
+        "--flows",
+        "--depth",
+        "1",
+    ]));
+    assert!(
+        short.contains("No entry flow passes through: `app::place_order`."),
+        "{short}"
+    );
+    let none = text_of(&ok(&["find", &shop, "zzqqxx", "--flows"]));
+    assert!(none.contains("_(no match)_"), "{none}");
+}
+
+#[test]
+fn flows_conflicts_with_files_and_depth_needs_flows() {
+    let (_fx, shop) = shop_fixture("flows-conflict");
+    for args in [
+        ["find", shop.as_str(), "x", "--flows", "--files"].as_slice(),
+        &[
+            "find",
+            shop.as_str(),
+            "x",
+            "--flows",
+            "--files",
+            "--no-semantic",
+        ],
+        &["find", shop.as_str(), "x", "--depth", "3"],
+    ] {
+        let out = glia(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn without_flows_find_prints_no_flows() {
+    let (_fx, shop) = shop_fixture("flows-default");
+    let out = ok(&["find", &shop, "place_order", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["absence", "results"]);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("[find-flows]"));
 }
