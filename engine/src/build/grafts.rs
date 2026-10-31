@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Instant;
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::glia_config::LoadedConfig;
@@ -24,7 +25,9 @@ use super::angular_templates;
 use super::assemble::FileConstTables;
 use super::evm_abi;
 use super::lang_build::TsAliasSet;
+use super::memo::{BuildMemo, ImportsKey, ImportsOut, IndexFp};
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
+use super::timing::GraftTimes;
 use crate::arch::node_file;
 use crate::endpoint_fold;
 use crate::external::{WrapperPass, WrapperPhase, infer_entity_wrappers};
@@ -55,9 +58,15 @@ use crate::route::ModuleQnames;
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
 /// (`external::WrapperPass`), after the CA.4 inferred Go collection wrappers
-/// (`external::infer_entity_wrappers`), which run either way. Returns the
+/// (`external::infer_entity_wrappers`), which run either way. `memo` is the
+/// held parse cache's build memos (`None` without a cache): GA.20 replays the
+/// A16.4 IMPORTS filter's index and per-file output from it. Returns the
 /// RPC needle pass's counts (`apply_rpc_needles`), whose `files` the
 /// caller's `[parallel]` line reads (LG.1c).
+///
+/// GA.20 fired_on marker, once per repo build, as it returns
+/// (`timing::GraftTimes`): one `<step>=<ms>` per graft, in run order:
+///   `[timing] grafts repo=<label> modules=<ms> infer_wrappers=<ms> .. imports_filter=<ms>`
 ///
 /// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
 /// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
@@ -78,51 +87,66 @@ pub(super) fn apply_post_cache(
     rust_crates: &[RustCrate],
     ts_aliases: &TsAliasSet,
     wrappers: Option<&LoadedConfig>,
+    memo: Option<&mut BuildMemo>,
     parse_errors: &mut Vec<String>,
     repo_label: &str,
 ) -> RpcNeedleCounts {
     // LB.9b: the router's MODULE plan, recomputed from the same walked list
     // (a pure function of it), so every graft below finds a file's parse by
     // the MODULE id the router gave it.
-    let modules = ModuleQnames::plan(files);
+    // GA.20: every step's wall time, the `[timing] grafts` line at the end.
+    let mut t = GraftTimes::default();
+    let modules = t.time("modules", || ModuleQnames::plan(files));
     // LF.2e: the overlay `[[wrapper]]` call sites, plus (CA.4) the Go
     // collection wrappers the code itself declares, inferred with or without
     // the overlay (an overlay stanza naming the same call shadows one). The
     // http half mints its ENDPOINTs BEFORE the endpoint fold, so a `${X}`
     // wrapper path folds through the const table like any other client call.
-    let inferred = infer_entity_wrappers(parses_by_lang, files, &modules, repo, parse_errors);
-    let mut wrappers = WrapperPass::scan(wrappers, inferred, files, parse_errors);
+    let inferred = t.time("infer_wrappers", || {
+        infer_entity_wrappers(parses_by_lang, files, &modules, repo, parse_errors)
+    });
+    let mut wrappers = t.time("wrapper_scan", || {
+        WrapperPass::scan(wrappers, inferred, files, parse_errors)
+    });
     if let Some(w) = wrappers.as_mut() {
-        w.mint(
-            WrapperPhase::Http,
-            parses_by_lang,
-            files,
-            repo,
-            &modules,
-            parse_errors,
-        );
+        t.time("wrappers_http", || {
+            w.mint(
+                WrapperPhase::Http,
+                parses_by_lang,
+                files,
+                repo,
+                &modules,
+                parse_errors,
+            )
+        });
     }
     // DT.10g: an EVM client whose ABI another file declares (a TS import, a Go
     // constant of another file of the package) takes that file's entries, so
     // `resolver:evm` identifies it by ABI. Here, while the nav facts it reads
     // are present, and above every stamp that adds a key to a client hit.
-    evm_abi::join_evm_abis(parses_by_lang).report(repo_label);
+    t.time("evm_abi", || evm_abi::join_evm_abis(parses_by_lang))
+        .report(repo_label);
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse. CH.5b: a call site read through a URL
     // builder that reads a configured API prefix moves under it; `roots` key
     // the builders by owner. Before nav is dropped (the builder facts live
     // only there) and above the owner pass (it re-keys ENDPOINTs).
-    endpoint_fold::fold_repo(
-        parses_by_lang.values_mut().flatten(),
-        const_table,
-        repo,
-        roots,
-    )
+    t.time("endpoint_fold", || {
+        endpoint_fold::fold_repo(
+            parses_by_lang.values_mut().flatten(),
+            const_table,
+            repo,
+            roots,
+        )
+    })
     .report(repo_label);
     // LA.6d: Next.js file-system pages. Before the owner pass, so a grafted
     // page is owner-qualified like every other nav ROUTE.
-    graft_next_pages(parses_by_lang, files, repo, &modules, parse_errors).report(repo_label);
+    t.time("next_pages", || {
+        graft_next_pages(parses_by_lang, files, repo, &modules, parse_errors)
+    })
+    .report(repo_label);
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
@@ -138,14 +162,21 @@ pub(super) fn apply_post_cache(
     // through the same tables and the same cache rule. Above the owner pass
     // (it re-keys ROUTEs, an owned kind) and so before the HTTP resolver
     // indexes a route.
-    apply_path_symbol_fold(parses_by_lang, &folds).report(repo_label);
-    let (queue_stats, queue_pool) = apply_queue_const_topics(parses_by_lang, &folds, parse_errors);
+    t.time("path_symbol_fold", || {
+        apply_path_symbol_fold(parses_by_lang, &folds)
+    })
+    .report(repo_label);
+    let (queue_stats, queue_pool) = t.time("queue_const_fold", || {
+        apply_queue_const_topics(parses_by_lang, &folds, parse_errors)
+    });
     queue_stats.report(repo_label);
     // CB.3b: event sites keyed by a constant fold to its literal through the
     // same tables and the same cache rule. Above the owner pass, which
     // qualifies EVENT_EMITTER / EVENT_HANDLER like every owned kind, and
     // before the A16.4 filter, which rewrites the folded nodes' IMPORTS cell.
-    let (event_stats, event_pool) = apply_event_const_names(parses_by_lang, &folds, parse_errors);
+    let (event_stats, event_pool) = t.time("event_const_fold", || {
+        apply_event_const_names(parses_by_lang, &folds, parse_errors)
+    });
     event_stats.report(repo_label);
     report_const_fold_pool(queue_pool, event_pool, repo_label);
     // DT.3b: WebSocket clients whose URL base sits in the configuration fold
@@ -153,35 +184,49 @@ pub(super) fn apply_post_cache(
     // fold does for HTTP clients. Above the owner pass (WS_CLIENT is an owned
     // kind), and above the CB.24 stamp and the DF.8 external mark, which read
     // the hosts it records.
-    apply_ws_client_bases(parses_by_lang, &folds, parse_errors).report(repo_label);
+    t.time("ws_client_bases", || {
+        apply_ws_client_bases(parses_by_lang, &folds, parse_errors)
+    })
+    .report(repo_label);
     // DF.13: blinker / Django signal sites, named through the repo's signal
     // table. After the CB.3b fold, whose re-emit it extends (one helper,
     // `event_fold_one`, so the two cannot drift), and in the same seam: above
     // the owner pass and the A16.4 filter, so the swapped nodes are
     // owner-qualified and IMPORTS-filtered like every event node.
-    apply_python_signals(parses_by_lang, &folds, roots, parse_errors).report(repo_label);
+    t.time("python_signals", || {
+        apply_python_signals(parses_by_lang, &folds, roots, parse_errors)
+    })
+    .report(repo_label);
     // DG.7b: akka-quartz jobs started by a schedule name that a HOCON conf
     // declares, re-keyed to the conf's expression. Post-cache over `files`, so
     // a conf edit re-keys a cache-served job. CRON_JOB is no owned kind and no
     // needle input (CLASS / STRUCT / METHOD / FUNCTION), so neither the LB.8
     // rule nor the DC.4 NeedleKey is touched by where it runs.
-    graft_quartz_conf_schedules(parses_by_lang, files, repo).report(repo_label);
+    t.time("quartz_conf", || {
+        graft_quartz_conf_schedules(parses_by_lang, files, repo)
+    })
+    .report(repo_label);
     // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
     // folded file's queue nodes from the queue scan and would drop a wrapper
     // node) and above the owner pass, like every graft that mints an owned kind.
     if let Some(w) = wrappers.as_mut() {
-        w.mint(
-            WrapperPhase::Queue,
-            parses_by_lang,
-            files,
-            repo,
-            &modules,
-            parse_errors,
-        );
+        t.time("wrappers_queue", || {
+            w.mint(
+                WrapperPhase::Queue,
+                parses_by_lang,
+                files,
+                repo,
+                &modules,
+                parse_errors,
+            )
+        });
         w.report(repo_label);
     }
 
-    let rpc_added = apply_rpc_needles(parses_by_lang, files, repo, &modules, rpc, parse_errors);
+    let rpc_added = t.time("rpc_needles", || {
+        apply_rpc_needles(parses_by_lang, files, repo, &modules, rpc, parse_errors)
+    });
+    let census_started = Instant::now();
     // A5.2 fired_on marker, once per repo. Printed whenever the build knows a
     // proto service or this repo holds a client stub.
     let grpc_clients = parses_by_lang
@@ -256,6 +301,7 @@ pub(super) fn apply_post_cache(
     // a feature-flag check edge:
     //   `[flag-read] rehomed fn={F} module_kept={M} repo=<label>`
     anchor::report_flag_read(access, repo_label);
+    t.record("census", census_started.elapsed());
 
     // LB.4a / LB.8: qualify every owned node under a nested project root with
     // ` @<project path>` (see the ordering rule above). After the endpoint
@@ -264,14 +310,19 @@ pub(super) fn apply_post_cache(
     // GRPC_SERVER markers by owner-free name; per parse, so HashMap order
     // cannot reach the ids.
     let owners = http_owner::OwnerIndex::from_roots(roots);
-    http_owner::qualify_repo(parses_by_lang.values_mut().flatten(), &owners, repo)
-        .report(repo_label);
+    t.time("owner", || {
+        http_owner::qualify_repo(parses_by_lang.values_mut().flatten(), &owners, repo)
+    })
+    .report(repo_label);
 
     // CB.24: spread each project's GraphQL / tRPC client base URL to its
     // GRAPHQL_OPERATION / RPC_CALL sides as an ENDPOINT_HIT `hosts`. After the
     // owner pass, whose owners group the facts and the sides; it mints and
     // re-keys nothing, so the ordering rule above holds.
-    stamp_client_hosts(parses_by_lang, &owners).report(repo_label);
+    t.time("client_hosts", || {
+        stamp_client_hosts(parses_by_lang, &owners)
+    })
+    .report(repo_label);
 
     // DF.19: a base-less OpenAPI op of a project whose Go code declares one
     // swaggo general-info `@BasePath` records that base, which the
@@ -279,14 +330,19 @@ pub(super) fn apply_post_cache(
     // Beside the CB.24 stamp and for the same reason: the owners group the
     // bases and the ops, and it rewrites ORIGIN payloads only, so the
     // ordering rule above holds.
-    stamp_annotated_bases(parses_by_lang, files, &owners).report(repo_label);
+    t.time("annotated_bases", || {
+        stamp_annotated_bases(parses_by_lang, files, &owners)
+    })
+    .report(repo_label);
 
     // DF.8: mark each WS_CLIENT / GRPC_CLIENT / GRAPHQL_OPERATION site hit
     // that dials a public host outside the repo's configuration, CG.4a's rule
     // for the channel clients. After the CB.24 stamp, which writes the GraphQL
     // `hosts` it reads; it rewrites payloads only, so the ordering rule holds.
-    endpoint_fold::mark_external_clients(parses_by_lang.values_mut().flatten(), const_table)
-        .report(repo_label);
+    t.time("external_clients", || {
+        endpoint_fold::mark_external_clients(parses_by_lang.values_mut().flatten(), const_table)
+    })
+    .report(repo_label);
 
     // DT.5b: a component's `templateUrl` template binds its METHODs (CALLS /
     // USES from the CLASS, EVIDENCE at the template's file and row). The
@@ -294,14 +350,19 @@ pub(super) fn apply_post_cache(
     // to the template alone moves the edges of a cache-served component. It
     // mints no node, so the ordering rule holds, and it runs after the RPC
     // needles, so no DC.4 NeedleKey input moves.
-    angular_templates::graft_template_urls(parses_by_lang, files, repo, &modules, parse_errors)
-        .report(repo_label);
+    t.time("angular_templates", || {
+        angular_templates::graft_template_urls(parses_by_lang, files, repo, &modules, parse_errors)
+    })
+    .report(repo_label);
 
     // A16.4: drop intra-repo names from every IMPORTS cell. It needs the whole
     // repo's declarations, so like `apply_rpc_needles` it runs after the parse
     // cache (cached parses are filtered too) and after the RPC grafts (whose
     // markers carry the same cell).
-    filter_imports_cells(parses_by_lang, rust_crates, ts_aliases, repo_label);
+    t.time("imports_filter", || {
+        filter_imports_cells(parses_by_lang, rust_crates, ts_aliases, memo, repo_label)
+    });
+    eprintln!("{}", t.marker(repo_label));
 
     rpc_added
 }
@@ -2362,6 +2423,14 @@ fn swap_signal_nodes(
 /// `ts_aliases` is declared (`LocalModuleIndex::add_alias_prefix`), and the
 /// build's TS resolver turns the same specifier into an IMPORTS edge.
 ///
+/// GA.20: with `memo` (a build that holds a parse cache), the index is
+/// reused when its [`index_fingerprint`] is the last build's, and each file's
+/// output ([`filter_file`]) is replayed when its imports, language and index
+/// fingerprint are the last build's (`memo::ImportsKey`); the replay writes
+/// the same cells a fresh run writes ([`write_imports_cell`],
+/// [`place_import_bindings_cell`]), so the graph is byte-identical with or
+/// without the memo.
+///
 /// fired_on marker, once per repo that holds a language-parser parse:
 ///   `[imports] local-filter: kept {k}, dropped {d} intra-repo name(s) across {n} language group(s) repo=<label>`
 /// `kept` / `dropped` sum the per-file library names; `n` counts lang tags.
@@ -2369,39 +2438,81 @@ fn filter_imports_cells(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     rust_crates: &[RustCrate],
     ts_aliases: &TsAliasSet,
+    mut memo: Option<&mut BuildMemo>,
     repo_label: &str,
 ) {
-    let carries_imports = |fp: &FileParse| {
-        fp.nodes
-            .iter()
-            .any(|n| n.cells.iter().any(|c| c.kind == cell_type::IMPORTS))
+    let (index_fp, local) = match memo.as_deref_mut() {
+        Some(m) => {
+            let fp = index_fingerprint(parses_by_lang, rust_crates, ts_aliases);
+            match m.imports.index.take() {
+                Some((was, local)) if was == fp => {
+                    m.stats.index_hit = Some(true);
+                    (Some(fp), local)
+                }
+                _ => {
+                    m.stats.index_hit = Some(false);
+                    (
+                        Some(fp),
+                        local_index(parses_by_lang, rust_crates, ts_aliases),
+                    )
+                }
+            }
+        }
+        None => (None, local_index(parses_by_lang, rust_crates, ts_aliases)),
     };
-    let mut local = LocalModuleIndex::default();
-    for fp in parses_by_lang
-        .values()
-        .flatten()
-        .filter(|fp| carries_imports(fp))
-    {
-        local.add_parse(fp);
-    }
-    for c in rust_crates {
-        local.add_local_crate(&c.name);
-    }
-    for key in ts_aliases.keys() {
-        local.add_alias_prefix(key);
-    }
+    let mut held = memo
+        .as_deref_mut()
+        .map(|m| std::mem::take(&mut m.imports.files))
+        .unwrap_or_default();
+    let mut next: HashMap<NodeId, (ImportsKey, ImportsOut)> = HashMap::new();
+    let (mut hits, mut misses) = (0usize, 0usize);
     let (mut kept, mut dropped, mut groups) = (0usize, 0usize, 0usize);
     let mut bindings = BindingsTally::default();
     for (lang, parses) in parses_by_lang.iter_mut() {
         let mut filtered_any = false;
         for fp in parses.iter_mut().filter(|fp| carries_imports(fp)) {
-            let (k, d) = attach_imports_cell_filtered(fp, lang, &local);
-            kept += k;
-            dropped += d;
             filtered_any = true;
-            bindings.add(attach_import_bindings_cell(fp, lang, &local));
+            let keyed = index_fp.zip(fp.nodes.first().map(|n| n.id));
+            let Some((index, id)) = keyed else {
+                let out = filter_file(fp, lang, &local);
+                kept += out.kept;
+                dropped += out.dropped;
+                bindings.add(place_import_bindings_cell(fp, out.bindings));
+                continue;
+            };
+            let replay = held.remove(&id).filter(|(key, _)| {
+                key.lang == *lang && key.index == index && key.imports == fp.imports
+            });
+            let (key, out) = match replay {
+                Some((key, out)) => {
+                    hits += 1;
+                    if let Some(json) = &out.imports_json {
+                        write_imports_cell(fp, json);
+                    }
+                    (key, out)
+                }
+                None => {
+                    misses += 1;
+                    let key = ImportsKey {
+                        lang,
+                        index,
+                        imports: fp.imports.clone(),
+                    };
+                    (key, filter_file(fp, lang, &local))
+                }
+            };
+            kept += out.kept;
+            dropped += out.dropped;
+            bindings.add(place_import_bindings_cell(fp, out.bindings.clone()));
+            next.insert(id, (key, out));
         }
         groups += usize::from(filtered_any);
+    }
+    if let Some(m) = memo {
+        m.stats.imports_hit = hits;
+        m.stats.imports_miss = misses;
+        m.imports.files = next;
+        m.imports.index = index_fp.map(|fp| (fp, local));
     }
     if groups > 0 {
         eprintln!(
@@ -2435,7 +2546,153 @@ impl BindingsTally {
     }
 }
 
-/// FA.21: put one IMPORT_BINDINGS cell (`import_bindings_json`: each
+/// A16.4: the parses that take part in the IMPORTS filter, on both sides
+/// (declaring into the index, and having their cell rewritten).
+fn carries_imports(fp: &FileParse) -> bool {
+    fp.nodes
+        .iter()
+        .any(|n| n.cells.iter().any(|c| c.kind == cell_type::IMPORTS))
+}
+
+/// The repo's A16.4 index: every taking-part parse's declarations, the Cargo
+/// package names (LA.1b) and the tsconfig alias keys (A6.8).
+fn local_index(
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+    rust_crates: &[RustCrate],
+    ts_aliases: &TsAliasSet,
+) -> LocalModuleIndex {
+    let mut local = LocalModuleIndex::default();
+    for fp in parses_by_lang
+        .values()
+        .flatten()
+        .filter(|fp| carries_imports(fp))
+    {
+        local.add_parse(fp);
+    }
+    for c in rust_crates {
+        local.add_local_crate(&c.name);
+    }
+    for key in ts_aliases.keys() {
+        local.add_alias_prefix(key);
+    }
+    local
+}
+
+/// GA.20: the fingerprint of what [`local_index`] reads (`memo::IndexFp`):
+/// per taking-part parse, every MODULE / PACKAGE / CLASS / STRUCT / INTERFACE
+/// / ENUM / FUNCTION entry's kind and name, and a MODULE / PACKAGE's qname
+/// (what `LocalModuleIndex::add_parse` reads); every Cargo package name; every
+/// alias key. Each entry hashes under two seeds and the hashes are summed, a
+/// multiset sum, so neither HashMap order nor the order parses arrive in
+/// moves it, while a count does (the index counts declarations per name).
+fn index_fingerprint(
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+    rust_crates: &[RustCrate],
+    ts_aliases: &TsAliasSet,
+) -> IndexFp {
+    use core::hash::Hasher;
+    use twox_hash::XxHash64;
+    let mut sum: IndexFp = (0, 0);
+    let mut add = |parts: &[&[u8]]| {
+        for (seed, slot) in [(0x9e37_79b9_u64, &mut sum.0), (0x85eb_ca6b_u64, &mut sum.1)] {
+            let mut h = XxHash64::with_seed(seed);
+            for p in parts {
+                h.write(&(p.len() as u64).to_le_bytes());
+                h.write(p);
+            }
+            *slot = slot.wrapping_add(h.finish());
+        }
+    };
+    fn opt(s: Option<&String>) -> &[u8] {
+        s.map_or(&[0xff_u8][..], |s| s.as_bytes())
+    }
+    for fp in parses_by_lang
+        .values()
+        .flatten()
+        .filter(|fp| carries_imports(fp))
+    {
+        for (id, kind) in &fp.nav.kind_by_id {
+            let module = matches!(*kind, node_kind::MODULE | node_kind::PACKAGE);
+            let item = matches!(
+                *kind,
+                node_kind::CLASS
+                    | node_kind::STRUCT
+                    | node_kind::INTERFACE
+                    | node_kind::ENUM
+                    | node_kind::FUNCTION
+            );
+            if !(module || item) {
+                continue;
+            }
+            let qname = if module {
+                fp.nav.qname_by_id.get(id)
+            } else {
+                None
+            };
+            add(&[
+                b"decl",
+                &kind.0.to_le_bytes(),
+                opt(fp.nav.name_by_id.get(id)),
+                opt(qname),
+            ]);
+        }
+    }
+    for c in rust_crates {
+        add(&[b"crate", c.name.as_bytes()]);
+    }
+    for key in ts_aliases.keys() {
+        add(&[b"alias", key.as_bytes()]);
+    }
+    sum
+}
+
+/// One file's A16.4 output, computed and written: the filtered IMPORTS cell
+/// on every node (`attach_imports_cell_filtered`) and the IMPORT_BINDINGS
+/// payload its MODULE takes ([`place_import_bindings_cell`] places it).
+fn filter_file(fp: &mut FileParse, lang: &str, local: &LocalModuleIndex) -> ImportsOut {
+    let (kept, dropped) = attach_imports_cell_filtered(fp, lang, local);
+    let imports_json = fp.nodes.first().and_then(|n| {
+        n.cells.iter().find_map(|c| match (&c.kind, &c.payload) {
+            (&cell_type::IMPORTS, CellPayload::Json(j)) => Some(j.clone()),
+            _ => None,
+        })
+    });
+    ImportsOut {
+        imports_json,
+        kept,
+        dropped,
+        bindings: import_bindings_cell(&fp.imports, lang, local),
+    }
+}
+
+/// GA.20: `attach_imports_cell_filtered`'s write, replayed with its payload:
+/// every node ends with exactly one IMPORTS cell holding `json`, an existing
+/// one rewritten in its slot (a duplicate removed), a missing one appended.
+/// `replayed_imports_cell_equals_a_fresh_filter` pins it to the original.
+fn write_imports_cell(fp: &mut FileParse, json: &str) {
+    for n in &mut fp.nodes {
+        let mut seen = false;
+        n.cells.retain_mut(|c| {
+            if c.kind != cell_type::IMPORTS {
+                return true;
+            }
+            if seen {
+                return false;
+            }
+            seen = true;
+            c.payload = CellPayload::Json(json.to_string());
+            true
+        });
+        if !seen {
+            n.cells.push(Cell {
+                kind: cell_type::IMPORTS,
+                payload: CellPayload::Json(json.to_string()),
+            });
+        }
+    }
+}
+
+/// FA.21: one IMPORT_BINDINGS cell (`import_bindings_json`: each
 /// external import's specifier, imported name, local alias and row) on the
 /// file's MODULE, right after its IMPORTS cell, so a pass after the language
 /// build, a joint build and a layout merge alike read which names an import
@@ -2443,17 +2700,18 @@ impl BindingsTally {
 /// IMPORTS cell's every-node fan-out). The file's MODULE is its MODULE with
 /// the least (qname length, qname): a Rust inline `mod tests` is a longer
 /// qname under it. Idempotent: an existing cell (a replayed parse) is
-/// removed first from every node. Returns the cell's `(rows, capped)`, or
-/// `None` when the file imports no library or has no MODULE.
-fn attach_import_bindings_cell(
+/// removed first from every node. `cell` is `import_bindings_cell`'s answer
+/// for the file (GA.20: computed by [`filter_file`] or replayed). Returns the
+/// cell's `(rows, capped)`, or `None` when the file imports no library or has
+/// no MODULE.
+fn place_import_bindings_cell(
     fp: &mut FileParse,
-    lang: &str,
-    local: &LocalModuleIndex,
+    cell: Option<(String, usize, usize)>,
 ) -> Option<(usize, usize)> {
     for n in &mut fp.nodes {
         n.cells.retain(|c| c.kind != cell_type::IMPORT_BINDINGS);
     }
-    let (json, rows, capped) = import_bindings_cell(&fp.imports, lang, local)?;
+    let (json, rows, capped) = cell?;
     let module = fp
         .nodes
         .iter()
@@ -3949,5 +4207,169 @@ mod path_fold_tests {
     fn tidy_collapses_slashes() {
         assert_eq!(tidy_route_path("//users//me/"), "/users/me");
         assert_eq!(tidy_route_path("/"), "/");
+    }
+}
+
+#[cfg(test)]
+mod imports_memo_tests {
+    use glia_code_domain::{GRAPH_TYPE, ImportStmt};
+    use glia_core::{Confidence, Node};
+
+    use super::*;
+
+    const REPO: RepoId = RepoId(20);
+
+    fn imports_cell(payload: &str) -> Cell {
+        Cell {
+            kind: cell_type::IMPORTS,
+            payload: CellPayload::Json(payload.to_string()),
+        }
+    }
+
+    fn push(fp: &mut FileParse, kind: NodeKindId, q: &str, cells: Vec<Cell>) -> NodeId {
+        let id = NodeId::from_parts(GRAPH_TYPE, REPO, kind, q);
+        fp.nodes.push(Node {
+            id,
+            repo: REPO,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        let name = q.rsplit("::").next().unwrap_or(q);
+        fp.nav.record(id, name, q, kind, None);
+        id
+    }
+
+    fn import(from: &str, path: &str, line: u32) -> ImportStmt {
+        ImportStmt {
+            from_module: from.to_string(),
+            target: ImportTarget::Module {
+                path: path.to_string(),
+                alias: None,
+            },
+            line,
+        }
+    }
+
+    /// A python file `q` importing `libs`: its MODULE carries the router's
+    /// raw IMPORTS cell (twice, as a replayed parse may), a FUNCTION none.
+    fn file(q: &str, libs: &[&str]) -> FileParse {
+        let mut fp = FileParse::default();
+        push(
+            &mut fp,
+            node_kind::MODULE,
+            q,
+            vec![imports_cell("[\"raw\"]"), imports_cell("[\"dup\"]")],
+        );
+        push(&mut fp, node_kind::FUNCTION, &format!("{q}::run"), vec![]);
+        fp.imports = libs
+            .iter()
+            .enumerate()
+            .map(|(i, l)| import(q, l, i as u32))
+            .collect();
+        fp
+    }
+
+    fn parses(files: Vec<FileParse>) -> HashMap<&'static str, Vec<FileParse>> {
+        HashMap::from([("python", files)])
+    }
+
+    fn run(
+        by_lang: &HashMap<&'static str, Vec<FileParse>>,
+        memo: Option<&mut BuildMemo>,
+    ) -> Vec<Vec<Node>> {
+        let mut by_lang = by_lang.clone();
+        filter_imports_cells(&mut by_lang, &[], &TsAliasSet::default(), memo, "r");
+        by_lang["python"]
+            .iter()
+            .map(|fp| fp.nodes.clone())
+            .collect()
+    }
+
+    #[test]
+    fn replayed_imports_cell_equals_a_fresh_filter() {
+        let local = LocalModuleIndex::default();
+        let mut fresh = file("app::svc", &["requests", "flask"]);
+        let mut replayed = fresh.clone();
+        let out = filter_file(&mut fresh, "python", &local);
+        place_import_bindings_cell(&mut fresh, out.bindings.clone());
+        write_imports_cell(&mut replayed, out.imports_json.as_deref().unwrap());
+        place_import_bindings_cell(&mut replayed, out.bindings.clone());
+        assert_eq!(replayed.nodes, fresh.nodes);
+        assert_eq!((out.kept, out.dropped), (2, 0));
+        assert!(out.bindings.is_some());
+        // Every node carries exactly one IMPORTS cell, the MODULE its bindings.
+        for n in &fresh.nodes {
+            let k = n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS);
+            assert_eq!(k.count(), 1);
+        }
+    }
+
+    #[test]
+    fn the_memo_replays_a_rerun_and_misses_on_a_new_declaration() {
+        let base = parses(vec![
+            file("app::svc", &["requests", "helpers"]),
+            file("app::api", &["flask"]),
+        ]);
+        let want = run(&base, None);
+        let mut memo = BuildMemo::default();
+        assert_eq!(run(&base, Some(&mut memo)), want, "a cold memo");
+        assert_eq!((memo.stats.imports_hit, memo.stats.imports_miss), (0, 2));
+        assert_eq!(memo.stats.index_hit, Some(false));
+        assert_eq!(run(&base, Some(&mut memo)), want, "a warm memo");
+        assert_eq!((memo.stats.imports_hit, memo.stats.imports_miss), (2, 0));
+        assert_eq!(memo.stats.index_hit, Some(true));
+
+        // A new file declaring `helpers`: no other file's imports moved, but
+        // `helpers` is now local, so app::svc's cell must drop it.
+        let mut grown = base.clone();
+        grown.get_mut("python").unwrap().push(file("helpers", &[]));
+        let want_grown = run(&grown, None);
+        assert_ne!(want_grown[0], want[0], "the declaration moves svc's cell");
+        assert_eq!(run(&grown, Some(&mut memo)), want_grown);
+        assert_eq!(memo.stats.index_hit, Some(false));
+        assert_eq!(memo.stats.imports_hit, 0, "every key holds the index");
+        assert_eq!(memo.imports.files.len(), 3);
+
+        // One file's imports move: only it misses.
+        let mut edited = grown.clone();
+        edited.get_mut("python").unwrap()[1]
+            .imports
+            .push(import("app::api", "jinja2", 3));
+        assert_eq!(run(&edited, Some(&mut memo)), run(&edited, None));
+        assert_eq!((memo.stats.imports_hit, memo.stats.imports_miss), (2, 1));
+
+        // A file gone drops out of the memo.
+        let mut shrunk = edited.clone();
+        shrunk.get_mut("python").unwrap().pop();
+        assert_eq!(run(&shrunk, Some(&mut memo)), run(&shrunk, None));
+        assert_eq!(memo.imports.files.len(), 2);
+    }
+
+    #[test]
+    fn the_index_fingerprint_ignores_order_and_counts_declarations() {
+        let a = file("app::svc", &[]);
+        let b = file("app::api", &[]);
+        let fp =
+            |files: Vec<FileParse>| index_fingerprint(&parses(files), &[], &TsAliasSet::default());
+        assert_eq!(
+            fp(vec![a.clone(), b.clone()]),
+            fp(vec![b.clone(), a.clone()])
+        );
+        assert_ne!(fp(vec![a.clone()]), fp(vec![a.clone(), b.clone()]));
+        assert_ne!(
+            fp(vec![a.clone(), b.clone()]),
+            fp(vec![a.clone(), b.clone(), b.clone()]),
+            "a second declaration of a name counts"
+        );
+        let mut krate = RustCrate::default();
+        krate.name = "glia_core".to_string();
+        assert_ne!(
+            index_fingerprint(&parses(vec![a.clone()]), &[krate], &TsAliasSet::default()),
+            fp(vec![a.clone()])
+        );
+        // A parse carrying no IMPORTS cell takes no part.
+        let mut synthetic = FileParse::default();
+        push(&mut synthetic, node_kind::MODULE, "config::logging", vec![]);
+        assert_eq!(fp(vec![a.clone(), synthetic]), fp(vec![a]));
     }
 }

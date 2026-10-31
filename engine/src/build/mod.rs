@@ -1122,10 +1122,14 @@ mod cache_tests {
         // Cold: every eligible file computed. Const: the .proto, the Go and
         // the Python file (a source language each); needles: the Go client;
         // non-code: go.mod, the .proto, the yaml, the json, the Dockerfile.
+        // GA.20: imports, the Go and the Python file (the parses carrying
+        // an IMPORTS cell), and the repo's import index built.
         let cold = MemoStats {
             const_miss: 3,
             needle_miss: 1,
             noncode_miss: 5,
+            imports_miss: 2,
+            index_hit: Some(false),
             ..MemoStats::default()
         };
         assert_eq!(cache.memo().stats, cold);
@@ -1136,6 +1140,8 @@ mod cache_tests {
                 const_hit: 3,
                 needle_hit: 1,
                 noncode_hit: 5,
+                imports_hit: 2,
+                index_hit: Some(true),
                 ..MemoStats::default()
             },
             "an unchanged tree recomputes nothing"
@@ -1164,6 +1170,9 @@ mod cache_tests {
                 needle_miss: 1,
                 noncode_hit: 4,
                 noncode_miss: 1,
+                imports_hit: 2,
+                imports_miss: 0,
+                index_hit: Some(true),
             }
         );
         assert_bytes_clean(

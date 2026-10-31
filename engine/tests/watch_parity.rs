@@ -396,6 +396,20 @@ fn conf_edit(r: &Path) {
         "\"0 0 4 * * ?\"",
     );
 }
+fn import_lib_add(r: &Path) {
+    replace(
+        r,
+        "api/svc.py",
+        "from api.user import get_user\n",
+        "import yaml\nfrom api.user import get_user\n",
+    );
+}
+fn local_module_add(r: &Path) {
+    write(r, "yaml.py", "def load():\n    return {}\n");
+}
+fn local_module_remove(r: &Path) {
+    std::fs::remove_file(r.join("yaml.py")).expect("rm");
+}
 fn sbt_member_add(r: &Path) {
     write(
         r,
@@ -981,6 +995,61 @@ fn scripted_gitignore() {
                 ..EXPECT
             },
         }],
+    );
+}
+
+/// GA.20: the A16.4 IMPORTS filter's memo. `api/svc.py` imports `yaml`, then
+/// a new `yaml.py` makes `yaml` an in-repo module and the file is no longer
+/// edited: its cell must drop the name all the same (the memo's key holds the
+/// repo's index fingerprint, not only the file's imports), and take it back
+/// when the module goes. Falsifiable: a key without the index replays the
+/// stale cell at `local_module_add` (layout bytes).
+#[test]
+fn scripted_imports_memo() {
+    run(
+        "imports_memo",
+        &[
+            Step {
+                name: "import_lib_add",
+                edit: import_lib_add,
+                via: Via::Apply(&["api/svc.py"]),
+                expect: Expect {
+                    rebuilt_exact: Some(&["python"]),
+                    files_modified: &["api/svc.py"],
+                    ..EXPECT
+                },
+            },
+            Step {
+                name: "local_module_add",
+                edit: local_module_add,
+                via: Via::Apply(&["yaml.py"]),
+                expect: Expect {
+                    rebuilt_contains: &["python"],
+                    files_added: &["yaml.py"],
+                    ..EXPECT
+                },
+            },
+            Step {
+                name: "body_after",
+                edit: body_edit,
+                via: Via::Apply(&["api/svc.py"]),
+                expect: Expect {
+                    rebuilt_exact: Some(&["python"]),
+                    files_modified: &["api/svc.py"],
+                    ..EXPECT
+                },
+            },
+            Step {
+                name: "local_module_remove",
+                edit: local_module_remove,
+                via: Via::Apply(&["yaml.py"]),
+                expect: Expect {
+                    rebuilt_contains: &["python"],
+                    files_removed: &["yaml.py"],
+                    ..EXPECT
+                },
+            },
+        ],
     );
 }
 

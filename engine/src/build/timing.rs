@@ -15,6 +15,10 @@
 //!   `const_scan` the A11.1 const table and its LF.2d overlay pins; `grafts`
 //!   the Cargo-package read and `grafts::apply_post_cache`; `language_build`
 //!   the per-language graph builds.
+//! - `[timing] grafts repo=<label> <step>=<ms> ...` once per built repo,
+//!   printed by `grafts::apply_post_cache` as it returns ([`GraftTimes`]):
+//!   one `<step>=<ms>` per post-cache graft, in run order, so the repo
+//!   line's `grafts=` splits into what each graft cost (GA.20).
 //! - `[timing] build repos=<n> resolve=<ms> post=<ms> finalize=<ms> external_cells=<ms> total=<ms> slowest_pass=<name>:<ms>`
 //!   once per build, from [`crate::build`]'s `generate_*` (`total` = the
 //!   whole call) and from a layout merge (`crate::merge::merge_layouts`,
@@ -29,7 +33,7 @@
 //! than the printed total.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glia_activation::passes::{PassReport, Stage};
 
@@ -56,6 +60,37 @@ impl PhaseTimes {
             ms(self.grafts),
             ms(self.language_build),
         )
+    }
+}
+
+/// GA.20: the post-cache grafts of one repo build, each step's wall time in
+/// run order (the `[timing] grafts` line).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GraftTimes {
+    steps: Vec<(&'static str, Duration)>,
+}
+
+impl GraftTimes {
+    /// Run `f`, recording its wall time under `step`.
+    pub(crate) fn time<R>(&mut self, step: &'static str, f: impl FnOnce() -> R) -> R {
+        let started = Instant::now();
+        let out = f();
+        self.record(step, started.elapsed());
+        out
+    }
+
+    /// Record `took` under `step`.
+    pub(crate) fn record(&mut self, step: &'static str, took: Duration) {
+        self.steps.push((step, took));
+    }
+
+    /// `[timing] grafts repo=<label> <step>=<ms> ...`
+    pub(crate) fn marker(&self, label: &str) -> String {
+        let mut line = format!("[timing] grafts repo={label}");
+        for (step, took) in &self.steps {
+            line.push_str(&format!(" {step}={}", ms(*took)));
+        }
+        line
     }
 }
 
@@ -188,6 +223,24 @@ mod tests {
             persist_marker("cli", us(4_321), Path::new("/r/.glia/graph")),
             "[timing] persist writer=cli 4.3ms dir=/r/.glia/graph"
         );
+    }
+
+    #[test]
+    fn graft_times_print_steps_in_run_order() {
+        let mut g = GraftTimes::default();
+        assert_eq!(g.time("modules", || 7), 7);
+        g.record("endpoint_fold", us(2_340));
+        g.record("imports_filter", us(50));
+        let line = g.marker("r");
+        assert!(
+            line.starts_with("[timing] grafts repo=r modules="),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(" endpoint_fold=2.3ms imports_filter=0.0ms"),
+            "{line}"
+        );
+        assert_eq!(GraftTimes::default().marker("r"), "[timing] grafts repo=r");
     }
 
     #[test]

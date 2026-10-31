@@ -38,6 +38,16 @@
 //!   `(path, source, repo)`. A packet that makes one read anything else (the
 //!   module plan, the go context, another file) removes it from `PURE_NONCODE`
 //!   in the same commit.
+//! - [`ImportsMemo`] (GA.20, the A16.4 IMPORTS filter of
+//!   `grafts::filter_imports_cells`): the repo's `LocalModuleIndex` is a
+//!   function of what `LocalModuleIndex::add_parse` reads off every parse
+//!   that carries an IMPORTS cell (each MODULE / PACKAGE / CLASS / STRUCT /
+//!   INTERFACE / ENUM / FUNCTION's kind, name and MODULE / PACKAGE qname),
+//!   the Cargo package names and the tsconfig alias keys, fingerprinted as
+//!   [`IndexFp`]; one file's filter output ([`ImportsOut`]) is a function of
+//!   its `FileParse::imports`, its language and that index, all three in
+//!   [`ImportsKey`]. A packet that makes the index or the filter read
+//!   anything else adds it to the fingerprint or the key in the same commit.
 //!
 //! What a hit does not replay: the stderr lines an extractor prints itself
 //! from inside the call (`[code-guard]`, `[grpc-client] dial hosts`,
@@ -49,15 +59,17 @@
 //!
 //! fired_on marker, once per repo build that holds a cache
 //! ([`BuildMemo::marker`]):
-//!   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> repo=<label>`
+//!   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> imports hit=<h>/<n> index=<hit|built|none> repo=<label>`
 //! `n` = hits + misses: files with a source language (const), files a needle
 //! text gate passed with a source language other than `.proto` (needles; 0
 //! when the build knows no proto service), files a `PURE_NONCODE` branch
-//! routed (noncode).
+//! routed (noncode), parses carrying an IMPORTS cell that the filter rewrote
+//! (imports, GA.20); `index` says whether the repo's `LocalModuleIndex` was
+//! reused or built (`none` only when the filter did not run).
 
 use std::collections::{HashMap, HashSet};
 
-use glia_code_domain::FileParse;
+use glia_code_domain::{FileParse, ImportStmt, LocalModuleIndex};
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::grpc::{self, ProtoServiceRef};
 use glia_core::NodeId;
@@ -155,6 +167,43 @@ pub(crate) struct NonCodeOut {
 /// routed it to.
 pub(crate) type NonCodeMemo = PathMemo<u64, NonCodeOut>;
 
+/// GA.20: a 128-bit fingerprint of what one repo's `LocalModuleIndex` was
+/// built from (module doc: CONTRACT).
+pub(crate) type IndexFp = (u64, u64);
+
+/// GA.20: what one file's A16.4 filter output was computed from (module doc:
+/// CONTRACT). The imports are held whole, so a hit is an exact match, never a
+/// hash collision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportsKey {
+    pub(crate) lang: &'static str,
+    pub(crate) index: IndexFp,
+    pub(crate) imports: Vec<ImportStmt>,
+}
+
+/// GA.20: one file's A16.4 filter output, replayed onto its parse on a hit:
+/// the IMPORTS cell payload every node carries (`None` when the parse holds
+/// no node), the `(kept, dropped)` counts and the IMPORT_BINDINGS cell
+/// (`code_domain::import_bindings_cell`: payload, rows, capped rows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImportsOut {
+    pub(crate) imports_json: Option<String>,
+    pub(crate) kept: usize,
+    pub(crate) dropped: usize,
+    pub(crate) bindings: Option<(String, usize, usize)>,
+}
+
+/// GA.20: the A16.4 IMPORTS filter's memo. The index is the last build's;
+/// the files are keyed by their parse's MODULE id (its first node, the id the
+/// LB.9b plan gives the file) and hold exactly the last build's parses: the
+/// filter rebuilds the map on every build, so memory is bounded by the file
+/// count and a file no longer walked drops out.
+#[derive(Default)]
+pub(crate) struct ImportsMemo {
+    pub(crate) index: Option<(IndexFp, LocalModuleIndex)>,
+    pub(crate) files: HashMap<NodeId, (ImportsKey, ImportsOut)>,
+}
+
 /// The last build's lookups, per memo. Reset at the start of each repo build
 /// that holds a cache.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +214,11 @@ pub(crate) struct MemoStats {
     pub(crate) needle_miss: usize,
     pub(crate) noncode_hit: usize,
     pub(crate) noncode_miss: usize,
+    pub(crate) imports_hit: usize,
+    pub(crate) imports_miss: usize,
+    /// The repo's `LocalModuleIndex`: reused (`Some(true)`), built
+    /// (`Some(false)`), or `None` when the filter did not run.
+    pub(crate) index_hit: Option<bool>,
 }
 
 /// Every DC.4 memo of one repo's builds, held by its `ParseCache`.
@@ -173,6 +227,7 @@ pub(crate) struct BuildMemo {
     pub(crate) consts: ConstMemo,
     pub(crate) needles: NeedleMemo,
     pub(crate) noncode: NonCodeMemo,
+    pub(crate) imports: ImportsMemo,
     pub(crate) stats: MemoStats,
 }
 
@@ -183,6 +238,7 @@ impl BuildMemo {
         self.consts.clear();
         self.needles.clear();
         self.noncode.clear();
+        self.imports = ImportsMemo::default();
     }
 
     /// Drop the entries of paths not in `live` (this build's walked set).
@@ -192,23 +248,31 @@ impl BuildMemo {
         self.noncode.retain(live);
     }
 
-    /// Paths held across the three memos (a path may be in several).
+    /// Paths held across the three path memos (a path may be in several) plus
+    /// the files of the imports memo.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.consts.len() + self.needles.len() + self.noncode.len()
+        self.consts.len() + self.needles.len() + self.noncode.len() + self.imports.files.len()
     }
 
     /// The `[graft-memo]` line of the last build (module doc).
     pub(crate) fn marker(&self, repo_label: &str) -> String {
         let s = &self.stats;
         format!(
-            "[graft-memo] const hit={}/{} needles hit={}/{} noncode hit={}/{} repo={repo_label}",
+            "[graft-memo] const hit={}/{} needles hit={}/{} noncode hit={}/{} imports hit={}/{} index={} repo={repo_label}",
             s.const_hit,
             s.const_hit + s.const_miss,
             s.needle_hit,
             s.needle_hit + s.needle_miss,
             s.noncode_hit,
             s.noncode_hit + s.noncode_miss,
+            s.imports_hit,
+            s.imports_hit + s.imports_miss,
+            match s.index_hit {
+                Some(true) => "hit",
+                Some(false) => "built",
+                None => "none",
+            },
         )
     }
 }
@@ -258,6 +322,23 @@ mod tests {
         assert_ne!(services_fp(&base), services_fp(&[]));
         let two = [svc("A", &[]), svc("B", &[])];
         assert_ne!(services_fp(&two), services_fp(&[svc("A", &[])]));
+    }
+
+    #[test]
+    fn the_marker_names_the_imports_memo() {
+        let mut m = BuildMemo::default();
+        assert!(
+            m.marker("r")
+                .ends_with(" noncode hit=0/0 imports hit=0/0 index=none repo=r"),
+            "{}",
+            m.marker("r")
+        );
+        m.stats.imports_hit = 3;
+        m.stats.imports_miss = 1;
+        m.stats.index_hit = Some(true);
+        assert!(m.marker("r").ends_with(" imports hit=3/4 index=hit repo=r"));
+        m.stats.index_hit = Some(false);
+        assert!(m.marker("r").ends_with(" index=built repo=r"));
     }
 
     #[test]
