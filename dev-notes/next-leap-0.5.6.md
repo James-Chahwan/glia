@@ -45,6 +45,12 @@ the plugin families being generally useful, that required some thought"*); link 
 - **It fills the use-pattern axis**: Lua's host_command, host_event and config_table (`none`) and host_callback,
   embedded_script and script_entry (`partial`) are its targets; pattern rows for the other languages that are embedded or
   plugin-shaped.
+- **The environment hosts, in the same table** (James 2026-10-31: *"0.5.6 they kinda go together as idea as current
+  host for environment"*): hosts stack, each starting the next (orchestrator -> container -> process -> app framework ->
+  plugin / route handler), so container and process starts are host rows too: Dockerfile `ENTRYPOINT` / `CMD`,
+  docker-compose `command:` / `entrypoint:`, Kubernetes container `command` / `args`, systemd `ExecStart`, Procfile.
+  glia already reads parts of this (Dockerfiles, k8s CronJobs, IaC, CLI entries); this joins them into one "who starts
+  this" relation. Static only: glia reads what the files declare, never a running host. (The old RuntimeZone idea.)
 - **Lua's remaining reach**: globals across files, `pcall` / `load` / `dofile` indirection, metatable `__call`
   constructors, OpenResty's nginx-side routing (the embedded_script pattern).
 
