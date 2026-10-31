@@ -2,6 +2,7 @@
 //! passes they all run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{
@@ -11,10 +12,10 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, InheritStats, SiteFiles, emit_method_level_implements,
+    EvidenceTally, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
     emit_method_level_implements_with, emit_override_implements, enclosing_class_or_struct,
-    enclosing_module, graph_evidence, push_edge, resolve_calls, resolve_inherited_calls,
-    resolve_refs, unique_global_type,
+    enclosing_module, graph_evidence, push_edge, resolve_calls, resolve_calls_pooled,
+    resolve_inherited_calls, resolve_refs, unique_global_types,
 };
 pub use crate::calls::{ResolvePool, with_resolve_pool};
 use crate::cpp_scope::{CppScope, implicit_this};
@@ -290,11 +291,15 @@ fn build_go_passes_with(repo: RepoId, parses: Vec<FileParse>, modules: &GoModule
     let mut packages = GoPackages::build(&g, &all_imports, package_names);
     packages.promoted = GoPromoted::build(&g, &embed_binds.bound);
     let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
-    let mut tally = EvidenceTally::with_hook("go_packages");
-    let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
-    resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
+    // GA.19: the package hook is pure (its counters come back per chunk), so
+    // it decides on the resolve pool: no serial hook is left.
+    let mut tally = EvidenceTally::default();
+    let hooked = resolve_go_calls(&mut g, &all_calls, &split, &packages, &mut tally);
+    packages.sibling_calls = hooked.sibling_calls;
+    packages.promoted.calls = hooked.promoted_calls;
+    packages.promoted.field_hops = hooked.promoted_field_hops;
     let package_stats = packages.stats(import_stats);
-    let receivers = packages.tally.clone();
+    let receivers = hooked.receivers;
     // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
     // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
     let mounts = crate::go_mounts::bind(&mut g, &mut refs);
@@ -1178,22 +1183,22 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
 /// struct parents are restored after it. With no bound method this is one
 /// `resolve_calls` over every site, as before LA.23d.
 ///
-/// `hook` is the `extra_hook` of both passes ([`GoPackages::resolve`],
+/// `packages` is the call hook of both passes ([`GoPackages::resolve`],
 /// LA.13b). It scopes a site by its nearest MODULE too, so in the second pass
 /// a bound method's Bare call reaches the other files of its OWN file's
-/// package.
-fn resolve_go_calls<H>(
+/// package. GA.19: the hook is a pure function of the graph and the site, so
+/// both passes run it on the resolve pool ([`resolve_calls_pooled`]); its
+/// counters, both passes' summed, are returned.
+fn resolve_go_calls(
     g: &mut RepoGraph,
     calls: &[CallSite],
     split: &SplitStats,
-    hook: H,
+    packages: &GoPackages,
     tally: &mut EvidenceTally,
-) where
-    H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)> + Copy,
-{
+) -> GoHookCounts {
+    let hook = |g: &RepoGraph, site: &CallSite, c: &mut GoHookCounts| packages.resolve(g, site, c);
     if split.bound.is_empty() {
-        resolve_calls(g, calls, hook, tally);
-        return;
+        return resolve_calls_pooled(g, calls, hook, tally);
     }
     let bound: HashSet<NodeId> = split.bound.iter().map(|&(m, _, _)| m).collect();
     let (file_scoped, rest): (Vec<CallSite>, Vec<CallSite>) =
@@ -1203,14 +1208,15 @@ fn resolve_go_calls<H>(
                 CallQualifier::Bare(_) | CallQualifier::Attribute { .. }
             ) && under_bound_method(&g.nav, &bound, s.from)
         });
-    resolve_calls(g, &rest, hook, tally);
+    let mut counts: GoHookCounts = resolve_calls_pooled(g, &rest, hook, tally);
     for &(method, module, _) in &split.bound {
         g.nav.parent_of.insert(method, module);
     }
-    resolve_calls(g, &file_scoped, hook, tally);
+    counts.merge(resolve_calls_pooled(g, &file_scoped, hook, tally));
     for &(method, _, strukt) in &split.bound {
         g.nav.parent_of.insert(method, strukt);
     }
+    counts
 }
 
 /// True when `id` is in `bound` or sits under a node that is. The walk is
@@ -1396,18 +1402,20 @@ pub(crate) struct GoPackages {
     /// DF.15: package dir -> the name its non-test files' `package` clause
     /// declares ([`go_package_names`]).
     package_names: BTreeMap<String, String>,
-    /// Calls [`GoPackages::package_call`] bound.
-    sibling_calls: std::cell::Cell<usize>,
+    /// Calls [`GoPackages::package_call`] bound, set from the call passes'
+    /// [`GoHookCounts`] once they ran (GA.19).
+    sibling_calls: usize,
     /// METHOD -> the file MODULE that DEFINES it, for a method whose nav
     /// parent is not its file: a split-file method (LA.23d) sits under a
     /// struct of ANOTHER file, whose imports are not the ones its receiver
     /// facts and result type name packages by (CA.2b).
     method_file: HashMap<NodeId, NodeId>,
-    /// Bare type name -> [`unique_global_type`]'s answer, memoised: the
-    /// symbol table does not change while calls resolve.
-    global_types: std::cell::RefCell<HashMap<String, Option<NodeId>>>,
-    /// What [`GoPackages::typed_receiver`] bound and missed (CA.2b).
-    tally: ReceiverTally,
+    /// Bare type name -> its repo-unique type (`unique_global_type`'s
+    /// answer), every name's at once ([`unique_global_types`]), built on the
+    /// first lookup: the symbol table does not change while calls resolve.
+    /// GA.19: a `OnceLock`, not a per-name `RefCell` memo, so the call hook
+    /// is `Sync` and runs on the resolve pool.
+    global_types: OnceLock<HashMap<String, Option<NodeId>>>,
     /// CI.2a: the methods and fields each embedding STRUCT promotes, set by
     /// `build_go_passes` once the embeds are bound (empty until then).
     promoted: GoPromoted,
@@ -1539,10 +1547,9 @@ impl GoPackages {
             tests,
             import_path,
             package_names,
-            sibling_calls: std::cell::Cell::new(0),
+            sibling_calls: 0,
             method_file,
-            global_types: std::cell::RefCell::new(HashMap::new()),
-            tally: ReceiverTally::default(),
+            global_types: OnceLock::new(),
             promoted: GoPromoted::default(),
         }
     }
@@ -1578,17 +1585,31 @@ impl GoPackages {
     /// method on a typed receiver ([`GoPackages::typed_receiver`], CA.2b),
     /// else a self call of a promoted method ([`GoPackages::promoted_self`],
     /// CI.2a). A base that is not an import no longer ends the hook.
-    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
-        self.package_call(g, site)
-            .or_else(|| self.typed_receiver(g, site))
-            .or_else(|| self.promoted_self(g, site))
+    ///
+    /// GA.19: a pure function of `g` and `site` (it reads no edge and keeps
+    /// no state; what it bound counts into `counts`), so
+    /// [`resolve_calls_pooled`] runs it on the resolve pool.
+    fn resolve(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        counts: &mut GoHookCounts,
+    ) -> Option<(NodeId, Evidence)> {
+        self.package_call(g, site, counts)
+            .or_else(|| self.typed_receiver(g, site, counts))
+            .or_else(|| self.promoted_self(g, site, counts))
     }
 
     /// CI.2a: a self call `u.exec(..)` the receiver's STRUCT does not declare
     /// (the generic SelfMethod arm missed it) binds to the method one of its
     /// embeds promotes ([`GoPromoted::method`]), evidence
     /// `graph:go_packages` rule `promoted_self`.
-    fn promoted_self(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+    fn promoted_self(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        counts: &mut GoHookCounts,
+    ) -> Option<(NodeId, Evidence)> {
         let CallQualifier::SelfMethod(name) = &site.qualifier else {
             return None;
         };
@@ -1597,7 +1618,7 @@ impl GoPackages {
             return None;
         }
         let hit = self.promoted.method(owner, name)?;
-        self.promoted.bump_call();
+        counts.promoted_calls += 1;
         Some((hit, go_ev("promoted_self")))
     }
 
@@ -1622,7 +1643,12 @@ impl GoPackages {
     ///
     /// The hit's evidence (LC.3d) is `graph:go_packages` with rule
     /// `package_sibling` (Bare) or `package_import` (Attribute).
-    fn package_call(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+    fn package_call(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        counts: &mut GoHookCounts,
+    ) -> Option<(NodeId, Evidence)> {
         let module = enclosing_module(&g.nav, site.from)?;
         let from_test = self.tests.contains(&module);
         let (hit, rule) = match &site.qualifier {
@@ -1642,7 +1668,7 @@ impl GoPackages {
             }
             _ => return None,
         };
-        self.sibling_calls.set(self.sibling_calls.get() + 1);
+        counts.sibling_calls += 1;
         Some((hit, go_ev(rule)))
     }
 
@@ -1700,7 +1726,7 @@ impl GoPackages {
             dirs: self.by_dir.len(),
             multi_file: self.by_dir.values().filter(|m| m.len() > 1).count(),
             dir_bound_imports: imports.dir_bound,
-            sibling_calls: self.sibling_calls.get(),
+            sibling_calls: self.sibling_calls,
             root_imports: imports.root_imports,
             root_bound: imports.root_bound,
             clause_named: imports.clause_named,
@@ -2025,65 +2051,73 @@ impl RecvScope<'_> {
     }
 }
 
-/// What [`GoPackages::typed_receiver`] did to one Go graph, as Cell counters
-/// (the hook takes `&self`), for the `[go-receivers]` marker.
+/// What [`GoPackages::typed_receiver`] did to one Go graph, for the
+/// `[go-receivers]` marker. GA.19: plain counts in each chunk's
+/// [`GoHookCounts`], summed in input order ([`ReceiverTally::merge`]).
 #[derive(Debug, Default, Clone)]
 struct ReceiverTally {
-    ret: std::cell::Cell<usize>,
-    local: std::cell::Cell<usize>,
-    package_var: std::cell::Cell<usize>,
-    field_chain: std::cell::Cell<usize>,
+    ret: usize,
+    local: usize,
+    package_var: usize,
+    field_chain: usize,
     /// Sites whose receiver had a recorded type text (a local, package var,
     /// result or field type) but whose type or method did not resolve: a
     /// type of another module (`gin.Context`), an ambiguous name, a method
     /// promoted from an embed of another module (`sync.Mutex`'s `Lock`) or
     /// supplied by two embeds at one depth (CI.2a binds the rest).
-    typed_unbound: std::cell::Cell<usize>,
+    typed_unbound: usize,
     /// DT.5j: bound sites whose walk read an element, a qualified field
     /// text, a func-value local or agreeing alternatives ([`Typed`]).
-    elem: std::cell::Cell<usize>,
-    qualified_field: std::cell::Cell<usize>,
-    func_value: std::cell::Cell<usize>,
-    alternatives: std::cell::Cell<usize>,
-    conversion: std::cell::Cell<usize>,
+    elem: usize,
+    qualified_field: usize,
+    func_value: usize,
+    alternatives: usize,
+    conversion: usize,
 }
 
 impl ReceiverTally {
-    fn bound(&self, source: RecvSource) {
-        let c = match source {
-            RecvSource::Return => &self.ret,
-            RecvSource::Local => &self.local,
-            RecvSource::PackageVar => &self.package_var,
-            RecvSource::FieldChain => &self.field_chain,
-        };
-        c.set(c.get() + 1);
+    fn bound(&mut self, source: RecvSource) {
+        *match source {
+            RecvSource::Return => &mut self.ret,
+            RecvSource::Local => &mut self.local,
+            RecvSource::PackageVar => &mut self.package_var,
+            RecvSource::FieldChain => &mut self.field_chain,
+        } += 1;
+    }
+
+    /// GA.19: add a later chunk's counts.
+    fn merge(&mut self, other: &ReceiverTally) {
+        self.ret += other.ret;
+        self.local += other.local;
+        self.package_var += other.package_var;
+        self.field_chain += other.field_chain;
+        self.typed_unbound += other.typed_unbound;
+        self.elem += other.elem;
+        self.qualified_field += other.qualified_field;
+        self.func_value += other.func_value;
+        self.alternatives += other.alternatives;
+        self.conversion += other.conversion;
     }
 
     /// `[go-receivers] bound=<n> (return=<a> local=<b> package_var=<c>
     /// field_chain=<d>) typed_unbound=<u>`, once per Go graph.
     fn marker(&self) -> String {
-        let (r, l, p, f) = (
-            self.ret.get(),
-            self.local.get(),
-            self.package_var.get(),
-            self.field_chain.get(),
-        );
+        let (r, l, p, f) = (self.ret, self.local, self.package_var, self.field_chain);
         format!(
             "[go-receivers] bound={} (return={r} local={l} package_var={p} field_chain={f}) \
              typed_unbound={}",
             r + l + p + f,
-            self.typed_unbound.get()
+            self.typed_unbound
         )
     }
 
     /// DT.5j: count a bound site's [`Typed`] flags.
-    fn bound_through(&self, typed: &Typed) {
-        let bump = |c: &std::cell::Cell<usize>, on: bool| c.set(c.get() + usize::from(on));
-        bump(&self.elem, typed.elem);
-        bump(&self.qualified_field, typed.qualified_field);
-        bump(&self.func_value, typed.func_value);
-        bump(&self.alternatives, typed.alternatives);
-        bump(&self.conversion, typed.conversion);
+    fn bound_through(&mut self, typed: &Typed) {
+        self.elem += usize::from(typed.elem);
+        self.qualified_field += usize::from(typed.qualified_field);
+        self.func_value += usize::from(typed.func_value);
+        self.alternatives += usize::from(typed.alternatives);
+        self.conversion += usize::from(typed.conversion);
     }
 
     /// DT.5j fired_on, after [`ReceiverTally::marker`]: `[go-receivers] typed
@@ -2092,11 +2126,11 @@ impl ReceiverTally {
     /// count under several); `None` when all are 0.
     fn typed_marker(&self) -> Option<String> {
         let (e, q, f, a, c) = (
-            self.elem.get(),
-            self.qualified_field.get(),
-            self.func_value.get(),
-            self.alternatives.get(),
-            self.conversion.get(),
+            self.elem,
+            self.qualified_field,
+            self.func_value,
+            self.alternatives,
+            self.conversion,
         );
         (e + q + f + a + c > 0).then(|| {
             format!(
@@ -2104,6 +2138,32 @@ impl ReceiverTally {
                  alternatives={a} conversion={c}"
             )
         })
+    }
+}
+
+/// GA.19: what the Go call hook ([`GoPackages::resolve`]) bound, counted
+/// per chunk of the pooled call pass and summed in input order: the counts
+/// its `&self` used to keep in Cells. [`build_go_passes_with`] writes them
+/// back into [`GoPackages`] and [`GoPromoted`] once the call passes ran.
+#[derive(Debug, Default)]
+struct GoHookCounts {
+    /// Calls [`GoPackages::package_call`] bound (`[go-package]
+    /// sibling_calls=`).
+    sibling_calls: usize,
+    /// What [`GoPackages::typed_receiver`] bound and missed (CA.2b).
+    receivers: ReceiverTally,
+    /// CALLS bound to a promoted method (`[go-embeds] calls=`, CI.2a).
+    promoted_calls: usize,
+    /// CALLS bound through a promoted field (`[go-embeds] field_hops=`).
+    promoted_field_hops: usize,
+}
+
+impl HookCounts for GoHookCounts {
+    fn merge(&mut self, other: Self) {
+        self.sibling_calls += other.sibling_calls;
+        self.receivers.merge(&other.receivers);
+        self.promoted_calls += other.promoted_calls;
+        self.promoted_field_hops += other.promoted_field_hops;
     }
 }
 
@@ -2118,7 +2178,12 @@ impl GoPackages {
     /// Evidence `graph:go_packages` with rule `receiver_return` /
     /// `receiver_local` / `receiver_package_var` / `receiver_field_chain`: the
     /// fact that typed the chain's last hop.
-    fn typed_receiver(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+    fn typed_receiver(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        counts: &mut GoHookCounts,
+    ) -> Option<(NodeId, Evidence)> {
         let (segs, name) = match &site.qualifier {
             CallQualifier::Attribute { base, name } => (receiver_segments(base)?, name),
             CallQualifier::ComplexReceiver { receiver, name } => {
@@ -2143,22 +2208,14 @@ impl GoPackages {
             .and_then(|(ty, source)| Some((self.method_on(g, ty, name)?, source)));
         match hit {
             Some(((method, promoted), source)) => {
-                self.tally.bound(source);
-                self.tally.bound_through(&typed);
-                if promoted {
-                    self.promoted.bump_call();
-                }
-                if typed.promoted_field {
-                    self.promoted.bump_field_hop();
-                }
+                counts.receivers.bound(source);
+                counts.receivers.bound_through(&typed);
+                counts.promoted_calls += usize::from(promoted);
+                counts.promoted_field_hops += usize::from(typed.promoted_field);
                 Some((method, go_ev(source.rule())))
             }
             None => {
-                if typed.any {
-                    self.tally
-                        .typed_unbound
-                        .set(self.tally.typed_unbound.get() + 1);
-                }
+                counts.receivers.typed_unbound += usize::from(typed.any);
                 None
             }
         }
@@ -2706,15 +2763,16 @@ impl GoPackages {
         hit
     }
 
-    /// The repo-unique type `name` ([`unique_global_type`], memoised), unless
-    /// it is declared in a test file and the caller is not one.
+    /// The repo-unique type `name` (`unique_global_type`'s answer, read from
+    /// the one `global_types` index), unless it is declared in a test file
+    /// and the caller is not one.
     fn global_type(&self, g: &RepoGraph, name: &str, from_test: bool) -> Option<NodeId> {
-        let hit = *self
+        let hit = self
             .global_types
-            .borrow_mut()
-            .entry(name.to_string())
-            .or_insert_with(|| unique_global_type(g, name));
-        let hit = hit?;
+            .get_or_init(|| unique_global_types(g))
+            .get(name)
+            .copied()
+            .flatten()?;
         let in_test = enclosing_module(&g.nav, hit).is_some_and(|m| self.tests.contains(&m));
         (from_test || !in_test).then_some(hit)
     }
@@ -3243,8 +3301,8 @@ impl GoEmbedBinds {
             methods: promoted.methods.values().map(BTreeMap::len).sum(),
             fields: promoted.fields.values().map(BTreeMap::len).sum(),
             ambiguous: promoted.ambiguous,
-            calls: promoted.calls.get(),
-            field_hops: promoted.field_hops.get(),
+            calls: promoted.calls,
+            field_hops: promoted.field_hops,
             ..self.stats
         }
     }
@@ -3455,8 +3513,8 @@ enum PromotedSrc {
 /// bounded walk ([`GO_EMBED_MAX_DEPTH`]) per embedding STRUCT with a visited
 /// set, so an embedding cycle (which Go rejects) cannot loop. Every map is
 /// name-keyed and BTree-ordered and every embed list is sorted by id, so no
-/// answer depends on a HashMap's seed. The counters are Cells: the call hook
-/// takes `&self`.
+/// answer depends on a HashMap's seed. The counters are set from the call
+/// passes' [`GoHookCounts`] (GA.19: the hook keeps no state).
 #[derive(Default)]
 pub(crate) struct GoPromoted {
     /// STRUCT -> promoted method name -> METHOD.
@@ -3466,9 +3524,9 @@ pub(crate) struct GoPromoted {
     /// Names promoted by neither of two embeds at one depth.
     ambiguous: usize,
     /// CALLS bound to a promoted method.
-    calls: std::cell::Cell<usize>,
+    calls: usize,
     /// CALLS bound through a promoted field.
-    field_hops: std::cell::Cell<usize>,
+    field_hops: usize,
 }
 
 impl GoPromoted {
@@ -3583,14 +3641,6 @@ impl GoPromoted {
     /// promotes.
     fn field_owner(&self, ty: NodeId, field: &str) -> Option<NodeId> {
         self.fields.get(&ty)?.get(field).copied()
-    }
-
-    fn bump_call(&self) {
-        self.calls.set(self.calls.get() + 1);
-    }
-
-    fn bump_field_hop(&self) {
-        self.field_hops.set(self.field_hops.get() + 1);
     }
 }
 
@@ -7846,7 +7896,7 @@ mod tests {
     /// The `[go-receivers]` marker: bound is the sum of the four sources.
     #[test]
     fn receiver_tally_marker_shape() {
-        let tally = ReceiverTally::default();
+        let mut tally = ReceiverTally::default();
         for (source, n) in [
             (RecvSource::Return, 3),
             (RecvSource::Local, 2),
@@ -7857,7 +7907,7 @@ mod tests {
                 tally.bound(source);
             }
         }
-        tally.typed_unbound.set(2);
+        tally.typed_unbound = 2;
         assert_eq!(
             tally.marker(),
             "[go-receivers] bound=7 (return=3 local=2 package_var=1 field_chain=1) typed_unbound=2"
@@ -8391,7 +8441,7 @@ mod tests {
         );
         assert!(!has_edge(&g, create, scr, calls));
         assert!(!has_edge(&g, pairs, scr, calls));
-        assert_eq!(receivers.qualified_field.get(), 3);
+        assert_eq!(receivers.qualified_field, 3);
     }
 
     /// LA.23a's guard case: `type Logger struct { *store.Logger }` records
@@ -8467,7 +8517,7 @@ mod tests {
             "{:?}",
             g.edges
         );
-        assert_eq!(receivers.elem.get(), 6);
+        assert_eq!(receivers.elem, 6);
     }
 
     const OXR_GO: &str = "package fx\n\ntype OXR struct{}\n\nfunc NewOXR() *OXR { return &OXR{} }\n\n\
@@ -8501,10 +8551,7 @@ mod tests {
         for to in [oxr, other] {
             assert!(!has_edge(&g, mixed, to, edge_category::CALLS));
         }
-        assert_eq!(
-            (receivers.alternatives.get(), receivers.func_value.get()),
-            (1, 1)
-        );
+        assert_eq!((receivers.alternatives, receivers.func_value), (1, 1));
     }
 
     /// A func-typed parameter's or func literal's `func() R` types a call
@@ -8526,7 +8573,7 @@ mod tests {
             ev_of(&g, gid(node_kind::FUNCTION, "app::app::Lit"), find, calls),
             hook_ev("receiver_local", 13)
         );
-        assert_eq!(receivers.func_value.get(), 2);
+        assert_eq!(receivers.func_value, 2);
     }
 
     const SVC_REFUSAL_GO: &str = "package svc\n\ntype Refusal struct{ Reason string }\n\n\
@@ -8569,7 +8616,7 @@ mod tests {
             ]
         );
         assert!(!has_edge(&g, from, own_err, edge_category::CALLS));
-        assert_eq!(receivers.conversion.get(), 2);
+        assert_eq!(receivers.conversion, 2);
         // The literals build svc's Refusal (the 2026-10-17 correction).
         let uses = edge_category::USES;
         let svc_ty = gid(node_kind::STRUCT, "svc::refusal::Refusal");
@@ -8806,7 +8853,7 @@ mod tests {
     /// The two DT.5j markers' shapes, and silence when nothing counted.
     #[test]
     fn typed_and_values_marker_shapes() {
-        let tally = ReceiverTally::default();
+        let mut tally = ReceiverTally::default();
         assert_eq!(tally.typed_marker(), None);
         tally.bound_through(&Typed {
             elem: true,

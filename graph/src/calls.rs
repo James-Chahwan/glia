@@ -173,7 +173,7 @@ fn module_exts(g: &RepoGraph) -> BTreeSet<String> {
 // ============================================================================
 
 /// FH.21: the repo-unique top-level names, indexed once per pass instead of
-/// scanned per site. [`unique_global_function`] and [`unique_global_type`]
+/// scanned per site. [`unique_global_function`] and `unique_global_type`
 /// walk every module's symbol table for one name; on a large TypeScript
 /// group (34k files) the receiver-type fallback asked that ~11k times in
 /// `resolve_calls` and again in `resolve_inherited_calls`, 7-23 s each. A
@@ -206,7 +206,7 @@ impl<'g> GlobalNames<'g> {
             .flatten()
     }
 
-    /// [`unique_global_type`] of `name`.
+    /// `unique_global_type` of `name`.
     fn type_named(&self, name: &str) -> Option<NodeId> {
         self.types
             .get_or_init(|| unique_names(self.g, |id| is_type_kind(self.g, id)))
@@ -240,8 +240,18 @@ fn unique_names<'g>(
     map
 }
 
+/// GA.19: every name's `unique_global_type` answer at once, owned, for an
+/// index that outlives a borrow of `g` (the Go package hook's,
+/// `build::GoPackages`); a name absent from it answers `None`.
+pub(crate) fn unique_global_types(g: &RepoGraph) -> HashMap<String, Option<NodeId>> {
+    unique_names(g, |id| is_type_kind(g, id))
+        .into_iter()
+        .map(|(name, hit)| (name.to_string(), hit))
+        .collect()
+}
+
 /// True for a STRUCT / CLASS / INTERFACE / ENUM: the kinds
-/// [`unique_global_type`] answers with.
+/// `unique_global_type` answers with.
 fn is_type_kind(g: &RepoGraph, id: &NodeId) -> bool {
     matches!(
         g.nav.kind_by_id.get(id).copied(),
@@ -376,13 +386,14 @@ pub(crate) struct EvidenceTally {
     pool: PoolTally,
     /// FH.21: the name of the builder's `extra_hook`, which runs in the
     /// apply step on the build's own thread (it may keep state of its own),
-    /// never on the pool; `None` for a builder that passes none.
+    /// never on the pool; `None` for a builder that passes none or whose hook
+    /// runs on the pool ([`resolve_calls_pooled`], GA.19: Go's).
     hook: Option<&'static str>,
 }
 
 impl EvidenceTally {
     /// A tally for a builder whose `resolve_calls` passes the `extra_hook`
-    /// named `hook` (`go_packages`, `rust_paths`, ..).
+    /// named `hook` (`rust_paths`, `cpp_scope`, ..).
     pub(crate) fn with_hook(hook: &'static str) -> Self {
         Self {
             hook: Some(hook),
@@ -471,17 +482,74 @@ impl EvidenceTally {
 /// FH.21: the generic lookups run per site in chunks ([`decide_call`], on
 /// the installed [`ResolvePool`] when there is one), then the decisions
 /// apply in input order on this thread: the edges, `unresolved_calls`, the
-/// hook's calls and every marker count match one sequential loop. The hook
+/// hook's calls and every marker count match one sequential loop. This hook
 /// runs in the apply step, never on the pool, so it may keep state of its own
 /// and sees every earlier site's edge, as before. A site's receiver-typed
 /// bind is counted toward `recv_stats` here too, on this thread. The repo-
-/// unique fallbacks read one per-pass [`GlobalNames`] index.
+/// unique fallbacks read one per-pass [`GlobalNames`] index. A hook that
+/// keeps no state and reads no edge goes through [`resolve_calls_pooled`]
+/// instead (GA.19).
 pub(crate) fn resolve_calls<H>(
     g: &mut RepoGraph,
     calls: &[CallSite],
     extra_hook: H,
     tally: &mut EvidenceTally,
 ) where
+    H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)>,
+{
+    resolve_calls_with(g, calls, |_, _, _: &mut ()| None, extra_hook, tally);
+}
+
+/// GA.19: the counters a pool-safe call hook ([`resolve_calls_pooled`])
+/// keeps for its own markers, one value per chunk, merged in chunk order.
+/// Every field is a count, so the merge gives one sequential loop's totals
+/// in any grouping.
+pub(crate) trait HookCounts: Default + Send + Sync {
+    /// Add a later chunk's counters.
+    fn merge(&mut self, other: Self);
+}
+
+impl HookCounts for () {
+    fn merge(&mut self, _other: ()) {}
+}
+
+/// GA.19: [`resolve_calls`] with a hook that is a pure function of the
+/// read-only graph and the site (no interior state, no edge or unresolved
+/// list read), so it runs in the DECIDE step, on the installed
+/// [`ResolvePool`], right after the site's generic lookups miss. Each chunk
+/// counts into its own `C`, and the chunks' counters are merged in input
+/// order and returned. A hook hit still counts `extra_hook`, and the edges,
+/// `unresolved_calls` and every marker are the ones [`resolve_calls`] with
+/// the same hook writes: the hook is asked for exactly the sites whose
+/// generic lookups missed, and no answer of it depends on an earlier site.
+/// The Go package hook (`build::GoPackages::resolve`) is the one user, so
+/// its builder prints `serial_hooks=-`.
+pub(crate) fn resolve_calls_pooled<C, H>(
+    g: &mut RepoGraph,
+    calls: &[CallSite],
+    hook: H,
+    tally: &mut EvidenceTally,
+) -> C
+where
+    C: HookCounts,
+    H: Fn(&RepoGraph, &CallSite, &mut C) -> Option<(NodeId, Evidence)> + Sync,
+{
+    resolve_calls_with(g, calls, hook, |_, _| None, tally)
+}
+
+/// [`resolve_calls`] and [`resolve_calls_pooled`]: `pool_hook` is asked in
+/// the decide step (on the pool), `extra_hook` in the apply step (on this
+/// thread); each builder passes one of them as a no-op.
+fn resolve_calls_with<C, P, H>(
+    g: &mut RepoGraph,
+    calls: &[CallSite],
+    pool_hook: P,
+    extra_hook: H,
+    tally: &mut EvidenceTally,
+) -> C
+where
+    C: HookCounts,
+    P: Fn(&RepoGraph, &CallSite, &mut C) -> Option<(NodeId, Evidence)> + Sync,
     H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)>,
 {
     let started = Instant::now();
@@ -498,23 +566,36 @@ pub(crate) fn resolve_calls<H>(
         run_chunks(pool, ranges.len(), |i| {
             let mut gate = gate.sharing();
             let mut counts = CallCounts::default();
+            let mut hook_counts = C::default();
             let range = ranges.get(i).cloned().unwrap_or_default();
             let outcomes: Vec<CallOutcome> = calls
                 .get(range)
                 .unwrap_or_default()
                 .iter()
-                .map(|site| decide_call(g, site, &mut gate, &names, &mut counts))
+                .map(
+                    |site| match decide_call(g, site, &mut gate, &names, &mut counts) {
+                        // GA.19: a pool-safe hook decides here, on the pool.
+                        CallOutcome::Miss => match pool_hook(g, site, &mut hook_counts) {
+                            Some((to, ev)) => CallOutcome::Hooked { to, ev },
+                            None => CallOutcome::Miss,
+                        },
+                        decided => decided,
+                    },
+                )
                 .collect();
             counts.skipped = gate.skipped;
-            (outcomes, counts)
+            (outcomes, counts, hook_counts)
         })
     };
-    // FH.21 apply: in input order, on this thread. The hook runs here, so it
-    // sees the edges of every earlier site, as in one sequential loop.
+    // FH.21 apply: in input order, on this thread. The apply-step hook runs
+    // here, so it sees the edges of every earlier site, as in one sequential
+    // loop.
     let mut counts = CallCounts::default();
+    let mut hook_counts = C::default();
     let mut decided: Vec<CallOutcome> = Vec::with_capacity(calls.len());
-    for (outcomes, chunk_counts) in chunks {
+    for (outcomes, chunk_counts, chunk_hook_counts) in chunks {
         counts.merge(chunk_counts);
+        hook_counts.merge(chunk_hook_counts);
         decided.extend(outcomes);
     }
     for (site, outcome) in calls.iter().zip(decided) {
@@ -526,6 +607,10 @@ pub(crate) fn resolve_calls<H>(
                 }
                 tally.calls[branch as usize] += 1;
                 Some((to, graph_evidence("graph:calls", branch.rule())))
+            }
+            CallOutcome::Hooked { to, ev } => {
+                tally.extra_hook += 1;
+                Some((to, ev))
             }
             CallOutcome::Miss => extra_hook(g, site).inspect(|_| tally.extra_hook += 1),
         };
@@ -592,10 +677,10 @@ pub(crate) fn resolve_calls<H>(
         tally.pool.calls += calls.len();
         tally.pool.calls_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
+    hook_counts
 }
 
 /// What [`decide_call`] found for one call site.
-#[derive(Clone, Copy)]
 enum CallOutcome {
     /// The caller has no enclosing module: unresolved, the hook not asked.
     NoModule,
@@ -606,8 +691,11 @@ enum CallOutcome {
         branch: Branch,
         recv: bool,
     },
-    /// Every generic lookup missed: the `extra_hook`'s turn, in the apply
-    /// step.
+    /// GA.19: every generic lookup missed and the pool-safe hook
+    /// ([`resolve_calls_pooled`]) bound it to `to` with its own evidence.
+    Hooked { to: NodeId, ev: Evidence },
+    /// Every generic lookup missed (and the pool-safe hook, if any): the
+    /// `extra_hook`'s turn, in the apply step.
     Miss,
 }
 
@@ -1521,10 +1609,13 @@ pub(crate) fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId
 /// [`unique_global_function`] restricted to STRUCT / CLASS / INTERFACE /
 /// ENUM, so a same-named FUNCTION never answers a type lookup (quokka's
 /// FUNCTION `repository_provider::UserRepository` beside the STRUCT
-/// `user_repository::UserRepository`). Two distinct types -> `None`. The Go
-/// call hook's last-resort type lookup (CA.2b); `resolve_type_name_with` (the
-/// generic A6.2a chain) keeps `unique_global_function`, so no other
-/// language's CALLS move.
+/// `user_repository::UserRepository`). Two distinct types -> `None`. The
+/// per-name scan, kept as the tests' oracle: the Go call hook's last-resort
+/// type lookup (CA.2b) reads every name's answer from one index since GA.19
+/// ([`unique_global_types`]), and [`GlobalNames`] answers the generic passes;
+/// `resolve_type_name_with` (the generic A6.2a chain) keeps
+/// `unique_global_function`, so no other language's CALLS move.
+#[cfg(test)]
 pub(crate) fn unique_global_type(g: &RepoGraph, name: &str) -> Option<NodeId> {
     let is_type = |id: &NodeId| {
         matches!(
@@ -1986,7 +2077,7 @@ fn balanced_end(b: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
 /// first scope that has the name decides — the caller module's import
 /// bindings (looking through a bound MODULE to its same-named def, as a TS
 /// default import binds the file), then the module's own top-level symbols
-/// ([`scope_binding`]), then the repo-unique type ([`unique_global_type`];
+/// ([`scope_binding`]), then the repo-unique type (`unique_global_type`;
 /// two distinct same-named types -> `None`). Only a STRUCT / CLASS /
 /// INTERFACE / ENUM answers, so a same-named FUNCTION never does.
 fn constructed_type_id(
@@ -6209,12 +6300,12 @@ mod pool_tests {
                  refs_ms=0.5 serial_hooks=-"
             )
         );
-        let mut go = EvidenceTally::with_hook("go_packages");
-        go.pool.chunks = 2;
+        let mut rust = EvidenceTally::with_hook("rust_paths");
+        rust.pool.chunks = 2;
         assert!(
-            go.pool_marker()
+            rust.pool_marker()
                 .is_some_and(|l| l.starts_with("[resolve-pool] lang=? ")
-                    && l.ends_with(" serial_hooks=go_packages")),
+                    && l.ends_with(" serial_hooks=rust_paths")),
         );
     }
 }
