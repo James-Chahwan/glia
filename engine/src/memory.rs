@@ -45,10 +45,17 @@
 //! --memory-budget-mb`, pyo3 `WatchSession(memory_budget_mb=)`). The same
 //! value bounds a watch session's caches (its cached language group builds
 //! and DC.4 build memos, evicted past it: `watch::WatchSession`) and a rules
-//! evaluation's working set (FA.14). It is compared with the PROCESS's
+//! evaluation's working set (GA.14: [`MemoryBudget::rules_bytes`], the
+//! default of `rules::QueryOptions::byte_budget` and of check's rule
+//! invariants, so `glia query`, `glia check`, `review` and the overlay loop's
+//! trial all stop an evaluation that grows past it). Each holder compares the one
+//! number with its own measurement. Watch compares it with the PROCESS's
 //! resident set ([`rss_kb`]), not a session's own size: a host process (an
 //! MCP server, a `PyGraph` held beside the session, an embedder) counts too,
-//! so the budget is a process target. A budget below what the process needs
+//! so the budget is a process target. A rules evaluation compares it with its
+//! own heap (glia-rules' `Evaluation::heap_bytes`: relations, value table and
+//! builtin memo by capacity) after each round, so one evaluation never grows
+//! past the number the whole process is held to. A budget below what the process needs
 //! with every cache dropped (one graph, its parse cache, the host) evicts
 //! every cache at every update and costs time, never bytes: an evicted cache
 //! is rebuilt by the next update exactly as a miss computes it. fired_on, on
@@ -127,6 +134,16 @@ impl MemoryBudget {
     /// The budget in kB (the unit [`rss_kb`] reads), `None` for no budget.
     pub fn limit_kb(&self) -> Option<u64> {
         self.mb.map(|mb| mb.saturating_mul(1024))
+    }
+
+    /// GA.14: the budget in bytes, the cap a rules evaluation's heap is held
+    /// to (glia-rules' `Options::max_bytes`): the same number as
+    /// [`Self::limit_kb`] x 1024, measured against the evaluation's own heap
+    /// rather than the process's resident set (module doc). `None` for no
+    /// budget.
+    pub fn rules_bytes(&self) -> Option<usize> {
+        self.limit_kb()
+            .map(|kb| usize::try_from(kb.saturating_mul(1024)).unwrap_or(usize::MAX))
     }
 
     /// Whether a resident set of `rss_kb` kB is over the budget (never
@@ -265,6 +282,8 @@ mod tests {
         assert_eq!(b.limit_kb(), Some(2048));
         assert!(!b.exceeded(2048), "at the budget is within it");
         assert!(b.exceeded(2049));
+        assert_eq!(b.rules_bytes(), Some(2 * 1024 * 1024));
+        assert_eq!(MemoryBudget::none().rules_bytes(), None);
         let none = MemoryBudget::none();
         assert_eq!(none.limit_kb(), None);
         assert!(!none.exceeded(u64::MAX), "no budget is never exceeded");

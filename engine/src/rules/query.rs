@@ -65,10 +65,20 @@
 //! positive or negated>, None)`.
 //!
 //! **Errors** ([`RuleError`]): `parse`, `analysis`, `budget` (the row budget, or
-//! an explain's candidate cap) and `evaluation` (a builtin or run-time type
+//! an explain's candidate cap), `memory_budget` (GA.14: the evaluation's heap grew
+//! past [`QueryOptions::byte_budget`]) and `evaluation` (a builtin or run-time type
 //! error). `rendered` is glia-rules' text (`<source>:<line>:<col>: error: ...`); a
 //! budget stop adds the surface's way to raise the budget. Nothing is ever
 //! truncated silently.
+//!
+//! **Memory budget (GA.14).** [`QueryOptions::byte_budget`] defaults to the one
+//! memory budget, `crate::memory::MemoryBudget::from_env().rules_bytes()`
+//! (`GLIA_MEMORY_BUDGET_MB`, unset: none), and [`evaluate_rule`] (check's rule
+//! invariants, so review and the overlay loop's trial too) evaluates under the same
+//! default. glia-rules measures the evaluation's heap after each round and stops
+//! with `RulesError::MemoryBudget` past it (`[rules] budget pred=<p> bytes=<b>
+//! cap=<c> kind=memory`). The reflexion model (`reflexion::derive`) keeps its own
+//! row budget and no memory budget.
 //!
 //! **Markers**, on stderr: glia-rules' `[rules] eval` / `[rules] closure` / `[rules]
 //! budget` lines, the prelude's `[rules] prelude relations=<n> (...)` once per
@@ -132,6 +142,7 @@ use super::prelude::{self, PreludeFacts};
 use crate::absence::{self, Absence};
 use crate::check::{MAX_EVIDENCE, ViolationEdge};
 use crate::coverage::{CoverageNote, caveats_for};
+use crate::memory::MemoryBudget;
 use crate::profile::CODE_PROFILE;
 use crate::why;
 
@@ -154,6 +165,11 @@ pub struct QueryOptions {
     pub explain: bool,
     /// The row budget; `None` is glia-rules' `DEFAULT_MAX_ROWS`.
     pub row_budget: Option<usize>,
+    /// The memory budget in heap bytes (GA.14, module doc); `None` bounds nothing.
+    /// Default: `GLIA_MEMORY_BUDGET_MB`'s
+    /// [`MemoryBudget::rules_bytes`](crate::memory::MemoryBudget::rules_bytes), read
+    /// when the options are built.
+    pub byte_budget: Option<usize>,
     /// The name diagnostics and spans carry (`<query>` when empty; [`query_gql`]'s is
     /// `<gql>` when this is empty or `<query>`).
     pub source_name: String,
@@ -169,6 +185,7 @@ impl Default for QueryOptions {
             limit: None,
             explain: false,
             row_budget: None,
+            byte_budget: MemoryBudget::from_env().rules_bytes(),
             source_name: DEFAULT_SOURCE.to_string(),
             surface: "engine",
         }
@@ -264,7 +281,7 @@ pub struct RuleDiagnostic {
 #[non_exhaustive]
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct RuleError {
-    /// `parse` | `analysis` | `budget` | `evaluation`.
+    /// `parse` | `analysis` | `budget` | `memory_budget` | `evaluation`.
     pub kind: &'static str,
     pub diagnostics: Vec<RuleDiagnostic>,
     /// The text a surface prints: glia-rules' rendering, one diagnostic per line.
@@ -327,7 +344,8 @@ pub fn query(
         limit: opts.limit,
     };
     let src = PreludeFacts::new(merged, &facts);
-    let evaluated = run_program(&src, &program.program, &run).map_err(failed)?;
+    let evaluated =
+        run_program_with(&src, &program.program, &run, false, opts.byte_budget).map_err(failed)?;
     Ok(answer(
         merged,
         &facts,
@@ -387,8 +405,14 @@ pub fn query_gql(
     };
     let facts = CodeFacts::new(merged);
     let src = PreludeFacts::new(merged, &facts);
-    let mut evaluated =
-        run_program_with(&src, &program, &run, path_column.is_some()).map_err(failed)?;
+    let mut evaluated = run_program_with(
+        &src,
+        &program,
+        &run,
+        path_column.is_some(),
+        opts.byte_budget,
+    )
+    .map_err(failed)?;
     let shape = GqlShape {
         columns,
         order_by,
@@ -569,7 +593,8 @@ pub(crate) struct EvalRow {
 
 /// Evaluate `program` (the prelude already merged in, `prelude::merge`) over `src`,
 /// the code facts plus the engine relations (module doc): outputs resolved and
-/// ordered, rows sorted by rendered values and cut, witnesses built when asked.
+/// ordered, rows sorted by rendered values and cut, witnesses built when asked,
+/// under the one memory budget (`GLIA_MEMORY_BUDGET_MB`, GA.14).
 /// Analysis warnings print on stderr, then the `[rules] prelude relations=` marker,
 /// error or not; `src.built()` says afterwards which relations the run built.
 pub(crate) fn run_program(
@@ -577,18 +602,21 @@ pub(crate) fn run_program(
     program: &Program,
     run: &Run<'_>,
 ) -> Result<Evaluated, RulesError> {
-    run_program_with(src, program, run, false)
+    let max_bytes = MemoryBudget::from_env().rules_bytes();
+    run_program_with(src, program, run, false, max_bytes)
 }
 
-/// [`run_program`], each explained row also keeping its witness's edge leaves as hop
-/// segments when `segments` is set (a GQL path column, [`query_gql`]).
+/// [`run_program`] under the memory budget `max_bytes` (`None`: none), each
+/// explained row also keeping its witness's edge leaves as hop segments when
+/// `segments` is set (a GQL path column, [`query_gql`]).
 fn run_program_with(
     src: &PreludeFacts<'_, '_>,
     program: &Program,
     run: &Run<'_>,
     segments: bool,
+    max_bytes: Option<usize>,
 ) -> Result<Evaluated, RulesError> {
-    let outputs = evaluate_outputs(src, program, run, segments);
+    let outputs = evaluate_outputs(src, program, run, segments, max_bytes);
     eprintln!("{}", src.marker());
     Ok(Evaluated { outputs: outputs? })
 }
@@ -599,6 +627,7 @@ fn evaluate_outputs(
     program: &Program,
     run: &Run<'_>,
     keep_segments: bool,
+    max_bytes: Option<usize>,
 ) -> Result<Vec<EvalOutput>, RulesError> {
     let facts = src.facts();
     let mut options = Options::default();
@@ -606,6 +635,7 @@ fn evaluate_outputs(
     if let Some(cap) = run.budget {
         options.max_rows = cap;
     }
+    options.max_bytes = max_bytes;
     let mut ev = evaluate(program, src, &options)?;
     for w in ev.warnings() {
         eprintln!("{w}");
@@ -1408,6 +1438,16 @@ fn budget_hint(surface: &str) -> Option<&'static str> {
     }
 }
 
+/// How `surface` sets the memory budget, for a memory stop's text (GA.14).
+fn memory_hint(surface: &str) -> &'static str {
+    match surface {
+        "cli" => "`--max-mb <n>` (default: GLIA_MEMORY_BUDGET_MB)",
+        "py" => "`max_mb=<n>` (default: GLIA_MEMORY_BUDGET_MB)",
+        "engine" => "`QueryOptions::byte_budget` (default: GLIA_MEMORY_BUDGET_MB)",
+        _ => "GLIA_MEMORY_BUDGET_MB",
+    }
+}
+
 /// `e` as a [`RuleError`] of `source`, rendered for `surface` (module doc).
 fn rule_error(e: &RulesError, source: &str, surface: &str) -> RuleError {
     let unplaced = |message: String, predicate: Option<String>| RuleDiagnostic {
@@ -1450,6 +1490,21 @@ fn rule_error(e: &RulesError, source: &str, surface: &str) -> RuleError {
                 rendered,
             }
         }
+        RulesError::MemoryBudget {
+            predicate,
+            line,
+            col,
+            ..
+        } => RuleError {
+            kind: "memory_budget",
+            diagnostics: vec![RuleDiagnostic {
+                line: *line,
+                column: *col,
+                message: e.to_string(),
+                predicate: Some(predicate.clone()),
+            }],
+            rendered: format!("{e} The budget is set with {}.", memory_hint(surface)),
+        },
         _ => RuleError {
             kind: "evaluation",
             diagnostics: vec![unplaced(e.to_string(), None)],
@@ -1479,6 +1534,52 @@ mod tests {
             .expect("parses");
         let read = categories_read(&carry, &["d"]);
         assert_eq!(read.len(), CODE_PROFILE.tables.carry_edges.len());
+    }
+
+    #[test]
+    fn memory_budget_stops_a_query() {
+        // GA.14: byte_budget reaches glia-rules as Options::max_bytes; a 1-byte
+        // budget stops even an empty graph's evaluation (its value table holds the
+        // program's constants), as a `memory_budget` error placed at the rule and
+        // naming the surface's setting; None bounds nothing.
+        let empty = MergedGraph::new(Vec::new());
+        let text = "x(a) :- node(a, \"MODULE\").";
+        let mut opts = QueryOptions {
+            byte_budget: Some(1),
+            ..QueryOptions::default()
+        };
+        let err = query(&empty, text, &opts).expect_err("over a 1-byte budget");
+        assert_eq!(err.kind, "memory_budget");
+        assert_eq!((err.diagnostics[0].line, err.diagnostics[0].column), (1, 1));
+        assert_eq!(err.diagnostics[0].predicate.as_deref(), Some("x/1"));
+        assert!(
+            err.rendered
+                .starts_with("<query>:1:1: error: memory budget: x/1 grew the evaluation to "),
+            "{}",
+            err.rendered
+        );
+        assert!(
+            err.rendered.ends_with(
+                "The budget is set with `QueryOptions::byte_budget` (default: \
+                 GLIA_MEMORY_BUDGET_MB)."
+            ),
+            "{}",
+            err.rendered
+        );
+        let gql = query_gql(&empty, "MATCH (a:MODULE) RETURN a", &opts)
+            .expect_err("the GQL path takes the same budget");
+        assert_eq!(gql.kind, "memory_budget");
+        opts.byte_budget = None;
+        assert!(query(&empty, text, &opts).is_ok());
+        assert_eq!(
+            memory_hint("cli"),
+            "`--max-mb <n>` (default: GLIA_MEMORY_BUDGET_MB)"
+        );
+        assert_eq!(
+            memory_hint("py"),
+            "`max_mb=<n>` (default: GLIA_MEMORY_BUDGET_MB)"
+        );
+        assert_eq!(memory_hint(""), "GLIA_MEMORY_BUDGET_MB");
     }
 
     #[test]

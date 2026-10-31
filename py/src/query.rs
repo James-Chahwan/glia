@@ -2,12 +2,13 @@
 //! `PyGraph.query_gql` a GQL read query over the graph, each as the engine's
 //! `glia_engine::rules::QueryAnswer` in one native dict (LD.2), from this
 //! module's own `#[pymethods] impl PyGraph` block (no `ModuleFns`). A parse,
-//! analysis, budget or evaluation error raises `ValueError` whose text is the
+//! analysis, budget (rows or memory) or evaluation error raises `ValueError` whose text is the
 //! engine's rendered diagnostics. docs/rules.md is the language reference.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::memory::MemoryBudget;
 use glia_engine::rules::{QueryAnswer, QueryOptions, RuleError, query, query_gql};
 use glia_graph::MergedGraph;
 
@@ -23,18 +24,23 @@ const SURFACE: &str = "py";
 const SOURCE: &str = "<query>";
 
 /// The options both methods pass: `max_rows` is the engine's row budget (`None`
-/// keeps glia-rules' default).
+/// keeps glia-rules' default); `max_mb` its memory budget in MB (GA.14; `None`
+/// keeps the one memory budget, `GLIA_MEMORY_BUDGET_MB`; `0` lifts it).
 fn options(
     outputs: Option<Vec<String>>,
     limit: Option<usize>,
     explain: bool,
     max_rows: Option<usize>,
+    max_mb: Option<u64>,
 ) -> QueryOptions {
     let mut o = QueryOptions::default();
     o.outputs = outputs.unwrap_or_default();
     o.limit = limit;
     o.explain = explain;
     o.row_budget = max_rows;
+    if let Some(mb) = max_mb {
+        o.byte_budget = MemoryBudget::mb(mb).rules_bytes();
+    }
     o.source_name = SOURCE.to_string();
     o.surface = SURFACE;
     o
@@ -90,7 +96,10 @@ impl PyGraph {
     /// sort. `explain=True` gives every shown row its `witness`. `max_rows`
     /// is the row budget (`None`: the evaluator's default); a program that
     /// derives more rows stops with a ValueError saying so, never a silently
-    /// truncated answer.
+    /// truncated answer. `max_mb` is the memory budget in MB, checked against
+    /// the evaluation's heap after each round (`None`: the one memory budget,
+    /// `GLIA_MEMORY_BUDGET_MB`, none when unset; `0` lifts it); a program that
+    /// grows past it stops with a ValueError reading `memory budget: ...`.
     ///
     /// Returns a dict `{language, outputs, results, absence}`: `language`
     /// `"datalog"`; `outputs` one `{predicate, arity, columns, total, shown}`
@@ -118,10 +127,11 @@ impl PyGraph {
     /// analysis error (an unknown node kind / edge category / cell type /
     /// predicate, an arity mismatch, an unsafe variable, an unstratifiable
     /// negation, a rule defining a prelude predicate, an output no rule
-    /// defines), the row budget (naming `max_rows=<n>`) or an evaluation
-    /// error. Prints `[query] lang=datalog outputs=<o> rows=<r> fact=<f>
+    /// defines), the row budget (naming `max_rows=<n>`), the memory budget
+    /// (naming `max_mb=<n>`) or an evaluation error. Prints `[query] lang=datalog outputs=<o> rows=<r> fact=<f>
     /// derived=<d> heuristic=<h> caveated=<c> surface=py` on stderr.
-    #[pyo3(signature = (program, outputs=None, limit=None, explain=false, max_rows=None))]
+    #[pyo3(signature = (program, outputs=None, limit=None, explain=false, max_rows=None, max_mb=None))]
+    #[allow(clippy::too_many_arguments)]
     fn query(
         &self,
         py: Python<'_>,
@@ -130,8 +140,9 @@ impl PyGraph {
         limit: Option<usize>,
         explain: bool,
         max_rows: Option<usize>,
+        max_mb: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
-        let opts = options(outputs, limit, explain, max_rows);
+        let opts = options(outputs, limit, explain, max_rows, max_mb);
         let json = query_json(&self.merged, program, &opts, self.parse_errors.len())
             .map_err(PyValueError::new_err)?;
         to_py(py, Ok(json))
@@ -159,15 +170,16 @@ impl PyGraph {
     /// (`a -CALLS-> b`), its witness kept. ORDER BY sorts by rendered values
     /// (DESC flips a key; ties keep the rendered order), the query's LIMIT
     /// cuts them, then `limit` cuts again; `total` keeps the uncut count.
-    /// `explain` and `max_rows` are `query`'s; tiers, caveats and the absence
+    /// `explain`, `max_rows` and `max_mb` are `query`'s; tiers, caveats and the absence
     /// are as there.
     ///
     /// Raises ValueError with the rendered diagnostics,
     /// `<gql>:<line>:<col>: error: ...`: a GQL construct outside the subset, an
     /// unknown label / type / property, the row budget (naming
-    /// `max_rows=<n>`) or an evaluation error. Prints `[query] lang=gql ...
+    /// `max_rows=<n>`), the memory budget (naming `max_mb=<n>`) or an
+    /// evaluation error. Prints `[query] lang=gql ...
     /// surface=py` on stderr.
-    #[pyo3(signature = (query, limit=None, explain=false, max_rows=None))]
+    #[pyo3(signature = (query, limit=None, explain=false, max_rows=None, max_mb=None))]
     fn query_gql(
         &self,
         py: Python<'_>,
@@ -175,8 +187,9 @@ impl PyGraph {
         limit: Option<usize>,
         explain: bool,
         max_rows: Option<usize>,
+        max_mb: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
-        let opts = options(None, limit, explain, max_rows);
+        let opts = options(None, limit, explain, max_rows, max_mb);
         let json = query_gql_json(&self.merged, query, &opts, self.parse_errors.len())
             .map_err(PyValueError::new_err)?;
         to_py(py, Ok(json))
@@ -197,7 +210,7 @@ mod tests {
         let json = query_json(
             &empty,
             "x(a) :- node(a, \"MODULE\").",
-            &options(None, None, false, None),
+            &options(None, None, false, None, None),
             2,
         )
         .expect("answers");
@@ -213,7 +226,7 @@ mod tests {
         let err = query_json(
             &empty,
             "x(a) :- node(a, \"ROUTEE\").",
-            &options(None, None, false, None),
+            &options(None, None, false, None, None),
             0,
         )
         .expect_err("an unknown kind is refused");
@@ -223,7 +236,7 @@ mod tests {
         let gql = query_gql_json(
             &empty,
             "MATCH (a:ROUTEE) RETURN a",
-            &options(None, None, false, None),
+            &options(None, None, false, None, None),
             0,
         )
         .expect_err("an unknown label is refused");
@@ -294,7 +307,7 @@ mod tests {
         };
         let web_calls = "x(a, b) :- calls(a, b), in_scope(a, \"web\").";
 
-        let a = run(web_calls, options(None, None, false, None));
+        let a = run(web_calls, options(None, None, false, None, None));
         assert_eq!(
             a["outputs"],
             serde_json::json!([{"predicate": "x", "arity": 2, "columns": ["a", "b"], "total": 2, "shown": 2}])
@@ -323,18 +336,21 @@ mod tests {
 
         // outputs= and limit= reach the engine.
         let two = "x(a) :- calls(a, _), in_scope(a, \"web\").\ny(a) :- calls(_, a), in_scope(a, \"shared\").";
-        let only = run(two, options(Some(vec!["y".to_string()]), None, false, None));
+        let only = run(
+            two,
+            options(Some(vec!["y".to_string()]), None, false, None, None),
+        );
         assert_eq!(only["outputs"][0]["predicate"], "y");
         assert_eq!(only["outputs"].as_array().map(Vec::len), Some(1));
         assert_eq!(rendered(&only), [["shared::util::helper"]]);
-        let cut = run(web_calls, options(None, Some(1), false, None));
+        let cut = run(web_calls, options(None, Some(1), false, None, None));
         assert_eq!(
             (&cut["outputs"][0]["total"], &cut["outputs"][0]["shown"]),
             (&2.into(), &1.into())
         );
 
         // explain= gives each row its one witness edge.
-        let ex = run(web_calls, options(None, None, true, None));
+        let ex = run(web_calls, options(None, None, true, None, None));
         for r in ex["results"].as_array().into_iter().flatten() {
             assert_eq!(r["witness"].as_array().map(Vec::len), Some(1), "{r}");
         }
@@ -361,23 +377,45 @@ mod tests {
         let stop = query_json(
             &merged,
             "x(a) :- node(a, _).",
-            &options(None, None, false, Some(1)),
+            &options(None, None, false, Some(1), None),
             0,
         )
         .expect_err("one row is over budget");
         assert!(stop.contains("max_rows=<n>"), "{stop}");
         let roomy = run(
             "x(a) :- node(a, _).",
-            options(None, None, false, Some(1000)),
+            options(None, None, false, Some(1000), None),
         );
         assert!(
             roomy["outputs"][0]["total"].as_u64().unwrap_or(0) > 1,
             "{roomy}"
         );
+        // max_mb= is the memory budget (GA.14): a five-way product of the 13 nodes
+        // (371,293 rows) grows past 1 MB and stops naming the py parameter; max_mb=0
+        // lifts the budget.
+        let wide = "w(a, b, c, d, e) :- node(a, _), node(b, _), node(c, _), node(d, _), \
+                    node(e, _).";
+        let mem = query_json(
+            &merged,
+            wide,
+            &options(None, Some(0), false, None, Some(1)),
+            0,
+        )
+        .expect_err("the product is over a 1 MB budget");
+        assert!(
+            mem.starts_with("<query>:1:1: error: memory budget: w/5 "),
+            "{mem}"
+        );
+        assert!(mem.contains("max_mb=<n>"), "{mem}");
+        let lifted = run(wide, options(None, Some(0), false, None, Some(0)));
+        assert!(
+            lifted["outputs"][0]["total"].as_u64().unwrap_or(0) > 100_000,
+            "{lifted}"
+        );
         let unknown = query_json(
             &merged,
             web_calls,
-            &options(Some(vec!["nope".to_string()]), None, false, None),
+            &options(Some(vec!["nope".to_string()]), None, false, None, None),
             0,
         )
         .expect_err("an output no rule defines");
@@ -389,7 +427,7 @@ mod tests {
             let json = query_gql_json(&merged, text, &o, 0).unwrap_or_else(|e| panic!("{e}"));
             serde_json::from_str(&json).expect("valid JSON")
         };
-        let q = g(gql, options(None, None, false, None));
+        let q = g(gql, options(None, None, false, None, None));
         assert_eq!(q["language"], "gql");
         assert_eq!(q["outputs"][0]["predicate"], "result");
         assert_eq!(
@@ -416,7 +454,7 @@ mod tests {
         let props = g(
             "MATCH (a:FUNCTION)-[:CALLS]->(b) WHERE a.qname STARTS WITH 'web::' \
              RETURN a.qname, b.qname",
-            options(None, None, false, None),
+            options(None, None, false, None, None),
         );
         assert_eq!(
             rendered(&props),
@@ -440,7 +478,7 @@ mod tests {
         );
         let lim = g(
             &format!("{gql} LIMIT 3"),
-            options(None, Some(2), false, None),
+            options(None, Some(2), false, None, None),
         );
         assert_eq!(
             (&lim["outputs"][0]["total"], &lim["outputs"][0]["shown"]),
@@ -449,7 +487,7 @@ mod tests {
         let bad = query_gql_json(
             &merged,
             "MATCH (a:FUNCTION) RETURN",
-            &options(None, None, false, None),
+            &options(None, None, false, None, None),
             0,
         )
         .expect_err("a RETURN with no item");

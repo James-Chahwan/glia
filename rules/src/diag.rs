@@ -126,7 +126,7 @@ impl fmt::Display for Diagnostic {
 }
 
 /// Every failure of the rules crate: a program that does not lex / parse, one that
-/// fails analysis, an evaluation that hit its row budget, a builtin that failed, a
+/// fails analysis, an evaluation that hit its row or memory budget, a builtin that failed, a
 /// value of the wrong type at run time, or a request for an output the program
 /// does not define.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +145,19 @@ pub enum RulesError {
         source: String,
         line: u32,
         rows: usize,
+        cap: usize,
+    },
+    /// Evaluation stopped on the memory budget (GA.14): after a round, the
+    /// evaluation's heap (`Evaluation::heap_bytes`'s measure: relations, value table,
+    /// builtin memo, by capacity) held `bytes`, over `cap`. `predicate` (`name/arity`,
+    /// its first rule at `source:line:col`) is the one whose relation grew most in
+    /// that round.
+    MemoryBudget {
+        predicate: String,
+        source: String,
+        line: u32,
+        col: u32,
+        bytes: usize,
         cap: usize,
     },
     /// A builtin (`name/arity`) returned an error.
@@ -167,6 +180,30 @@ impl RulesError {
             RulesError::Parse(d) | RulesError::Invalid(d) => d,
             _ => &[],
         }
+    }
+}
+
+/// Bytes in a MiB, the unit the memory budget renders in.
+const MIB: usize = 1 << 20;
+
+/// `bytes` and `cap` in MB for the memory budget's text: a whole MiB as an
+/// integer, else one decimal, more (up to six) while the two would read alike, so
+/// the text always shows `bytes` over `cap`.
+fn mb_pair(bytes: usize, cap: usize) -> (String, String) {
+    let show = |b: usize, places: usize| -> String {
+        if b.is_multiple_of(MIB) {
+            (b / MIB).to_string()
+        } else {
+            format!("{:.*}", places, b as f64 / MIB as f64)
+        }
+    };
+    let mut places = 1;
+    loop {
+        let (b, c) = (show(bytes, places), show(cap, places));
+        if b != c || places >= 6 {
+            return (b, c);
+        }
+        places += 1;
     }
 }
 
@@ -231,6 +268,24 @@ impl fmt::Display for RulesError {
                     f,
                     " Its recursion is probably unseeded: bind an argument from a small \
                      relation (`{} :- seed(x), ...`), use reaches(x, y, \"CATS\") for \
+                     reachability, or raise the budget.",
+                    hint_head(predicate)
+                )
+            }
+            RulesError::MemoryBudget {
+                predicate,
+                source,
+                line,
+                col,
+                bytes,
+                cap,
+            } => {
+                let (b, c) = mb_pair(*bytes, *cap);
+                write!(
+                    f,
+                    "{source}:{line}:{col}: error: memory budget: {predicate} grew the \
+                     evaluation to {b} MB, over the {c} MB budget. Seed its recursion \
+                     (`{} :- seed(x), ...`), use reaches(x, y, \"CATS\") for \
                      reachability, or raise the budget.",
                     hint_head(predicate)
                 )
@@ -328,6 +383,25 @@ mod tests {
              reachability, or raise the budget."
         );
         assert_eq!(hint_head("wide/6"), "wide(x, y, z, w, x5, x6)");
+        // GA.14: the memory budget's text, placed at the predicate's first rule.
+        let mem = RulesError::MemoryBudget {
+            predicate: "r/2".into(),
+            source: "<-e>".into(),
+            line: 1,
+            col: 1,
+            bytes: 3 * MIB / 2,
+            cap: MIB,
+        };
+        assert_eq!(
+            mem.to_string(),
+            "<-e>:1:1: error: memory budget: r/2 grew the evaluation to 1.5 MB, over the 1 MB \
+             budget. Seed its recursion (`r(x, y) :- seed(x), ...`), use reaches(x, y, \"CATS\") \
+             for reachability, or raise the budget."
+        );
+        // Two sizes that round alike read with more places until they differ.
+        assert_eq!(mb_pair(65_537, 65_536), ("0.063".into(), "0.062".into()));
+        assert_eq!(mb_pair(70_000, 65_536), ("0.07".into(), "0.06".into()));
+        assert_eq!(mb_pair(2 * MIB, MIB), ("2".into(), "1".into()));
         assert_eq!(hint_head("flag/0"), "flag");
         assert_eq!(hint_head("bare"), "bare(x, y)");
         assert!(over.diagnostics().is_empty());

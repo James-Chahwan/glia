@@ -2,7 +2,8 @@
 """pyo3 surface, py/src/query.rs (DB.6): `query(program, ...)` answers a
 Datalog program and `query_gql(query, ...)` a GQL read query over the graph,
 each as the engine's QueryAnswer in one native dict; a parse, analysis or
-budget error raises ValueError with the rendered diagnostics. Shared helpers:
+budget error (rows, or the memory budget's `max_mb=`, GA.14) raises ValueError
+with the rendered diagnostics. Shared helpers:
 test_build.py."""
 from __future__ import annotations
 
@@ -51,11 +52,12 @@ def main() -> int:
     c = Checks("query")
     c.check("query signature",
             params(rg.PyGraph.query)
-            == [("program", None), ("outputs", None), ("limit", None), ("explain", False), ("max_rows", None)],
+            == [("program", None), ("outputs", None), ("limit", None), ("explain", False), ("max_rows", None),
+                ("max_mb", None)],
             params(rg.PyGraph.query))
     c.check("query_gql signature",
             params(rg.PyGraph.query_gql)
-            == [("query", None), ("limit", None), ("explain", False), ("max_rows", None)],
+            == [("query", None), ("limit", None), ("explain", False), ("max_rows", None), ("max_mb", None)],
             params(rg.PyGraph.query_gql))
     with tempfile.TemporaryDirectory(prefix="glia-surface-query-") as tmp:
         root = pathlib.Path(tmp) / "fx1"
@@ -136,6 +138,18 @@ def main() -> int:
                  lambda: g.query(WEB_CALLS, outputs=["nope"]), "nope")
         c.raises("row budget raises ValueError naming max_rows", ValueError,
                  lambda: g.query("x(a) :- node(a, _).", max_rows=1), "max_rows=<n>")
+        # GA.14: max_mb is the memory budget; a recursive five-way product over every
+        # node (13^5 rows) grows past 1 MB and stops naming the kwarg, max_mb=0 lifts it.
+        grow = ("w(a, b, c, d, e) :- node(a, _), node(b, _), node(c, _), node(d, _), node(e, _).\n"
+                "v(a, b, c, d, e) :- w(a, b, c, d, e).\n"
+                "v(a, b, c, d, e) :- v(b, a, c, d, e).\n")
+        c.raises("memory budget raises ValueError", ValueError,
+                 lambda: g.query(grow, limit=0, max_mb=1), "memory budget")
+        c.raises("memory budget names max_mb", ValueError,
+                 lambda: g.query(grow, limit=0, max_mb=1), "max_mb=<n>")
+        lifted = g.query(grow, limit=0, max_mb=0)
+        c.check("max_mb=0 lifts the memory budget",
+                lifted.get("outputs", [{}])[0].get("total", 0) > 100_000, lifted.get("outputs"))
         roomy = g.query("x(a) :- node(a, _).", max_rows=1000)
         c.check("max_rows raises the budget", roomy.get("outputs", [{}])[0].get("total", 0) > 1,
                 roomy.get("outputs"))

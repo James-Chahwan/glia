@@ -62,6 +62,17 @@
 //! `RulesError::Budget` naming the head being derived (a magic copy names its user
 //! predicate) and prints `[rules] budget pred=<name>/<arity> rows=<n> cap=<cap>`.
 //!
+//! **Memory budget (GA.14).** With `Options::max_bytes`, after each round's insertion
+//! (a rule stratum's round, an aggregate's load) the evaluation's heap is measured as
+//! [`Evaluation::heap_bytes`](crate::eval::Evaluation::heap_bytes) measures it (the
+//! relations, the scc relations, the value table and the builtin memo, by capacity:
+//! deterministic, so one program over one fact set trips at one round). Over the cap,
+//! evaluation stops with `RulesError::MemoryBudget` naming the stratum's predicate
+//! whose relation grew most in that round (ties by `name/arity`; a magic copy names
+//! its user predicate) and prints `[rules] budget pred=<name>/<arity> bytes=<b>
+//! cap=<c> kind=memory`. Measured once per round, never per row: the measure walks
+//! every relation. `None` (the default) measures nothing.
+//!
 //! **Markers**, once per evaluation, on stderr: `[rules] eval strata=<n> rules=<r>
 //! variants=<v> edb=<rows> derived=<rows> rounds=<k> aggregates=<a> magic=<m>
 //! values=<h> warnings=<w> ms=<t>` (then ` shortest_fixed=<n>` when a row was lowered),
@@ -131,6 +142,9 @@ pub struct Options {
     pub outputs: Vec<String>,
     /// Apply the magic-sets rewrite to unseeded recursion read from bound sites.
     pub magic: bool,
+    /// The memory budget in heap bytes (GA.14, module doc): `None` (the default)
+    /// bounds nothing.
+    pub max_bytes: Option<usize>,
 }
 
 impl Default for Options {
@@ -139,6 +153,7 @@ impl Default for Options {
             max_rows: DEFAULT_MAX_ROWS,
             outputs: Vec::new(),
             magic: true,
+            max_bytes: None,
         }
     }
 }
@@ -312,6 +327,7 @@ pub fn evaluate<'s, S: FactSource + ?Sized>(
         closure: Closure::new(src, &tiers),
         memo: Memo::new(),
         budget: Budget::new(opts.max_rows),
+        max_bytes: opts.max_bytes,
         stats: EvalStats {
             magic_rewrites,
             ..EvalStats::default()
@@ -856,6 +872,8 @@ struct State<'t, S: FactSource + ?Sized> {
     closure: Closure<'t, S>,
     memo: Memo,
     budget: Budget,
+    /// `Options::max_bytes`.
+    max_bytes: Option<usize>,
     stats: EvalStats,
 }
 
@@ -1128,6 +1146,7 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                     }
                     break;
                 };
+                let before = self.own_bytes(own);
                 let mut fresh = 0;
                 for (slot, &p) in own.iter().enumerate() {
                     let (rows, metas) = &mut batch[slot];
@@ -1142,6 +1161,7 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                         return Err(self.budget_error(an, p, user));
                     }
                 }
+                self.memory_check(an, own, &before, user)?;
                 self.stats.rounds += 1;
                 first = false;
                 if !stratum.recursive || (fresh == 0 && waiting.is_empty()) {
@@ -1210,28 +1230,114 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
             levels: out.levels,
             ordinals: Vec::new(),
         };
+        let before = self.own_bytes(&[p]);
         let n = self.rels[p as usize].load(rows, Some(&out.heights));
         self.stats.derived_rows += n;
         if self.budget.charge(n) {
             return Err(self.budget_error(an, p, user));
         }
-        Ok(())
+        self.memory_check(an, &[p], &before, user)
     }
 
-    /// The budget error for predicate `p` (a magic copy names its user predicate, and
-    /// the line is that predicate's first rule in the user's program), printing the
-    /// `[rules] budget` marker.
-    fn budget_error(&self, an: &Analysis, p: PredId, user: &Program) -> RulesError {
+    /// The heap the evaluation holds so far, measured as [`Evaluation::heap_bytes`]
+    /// measures it (every relation, every scc relation, the value table and the
+    /// builtin memo, by capacity).
+    fn heap_bytes(&self) -> usize {
+        self.rels.iter().map(Relation::heap_bytes).sum::<usize>()
+            + self.scc.iter().map(|(_, r)| r.heap_bytes()).sum::<usize>()
+            + self.values.heap_bytes()
+            + self.memo.heap_bytes()
+    }
+
+    /// Each of `own`'s relations' heap bytes before a round's insertion, for
+    /// [`Self::memory_check`]; empty (nothing measured) without a memory budget.
+    fn own_bytes(&self, own: &[PredId]) -> Vec<usize> {
+        if self.max_bytes.is_none() {
+            return Vec::new();
+        }
+        own.iter()
+            .map(|&p| self.rels.get(p as usize).map_or(0, Relation::heap_bytes))
+            .collect()
+    }
+
+    /// The memory budget's check after a round's insertion (module doc): over
+    /// `max_bytes`, the error naming the predicate of `own` whose relation grew most
+    /// since `before` ([`Self::own_bytes`]), ties by `name/arity`.
+    fn memory_check(
+        &self,
+        an: &Analysis,
+        own: &[PredId],
+        before: &[usize],
+        user: &Program,
+    ) -> Result<(), RulesError> {
+        let Some(cap) = self.max_bytes else {
+            return Ok(());
+        };
+        let bytes = self.heap_bytes();
+        if bytes <= cap {
+            return Ok(());
+        }
+        let named = |p: PredId| user_predicate(an, p).unwrap_or_default();
+        let grown = own
+            .iter()
+            .zip(before)
+            .map(|(&p, &was)| {
+                let now = self.rels.get(p as usize).map_or(0, Relation::heap_bytes);
+                (p, now.saturating_sub(was), named(p))
+            })
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.2.cmp(&a.2)));
+        let p = grown.map_or_else(|| own.first().copied().unwrap_or_default(), |g| g.0);
+        Err(self.memory_error(an, p, user, bytes, cap))
+    }
+
+    /// The first rule of `p`'s user predicate in the user's program: `(name/arity,
+    /// source, line, col)` (a magic copy names its user predicate; no rule reads as the
+    /// program's first source at 0:0).
+    fn first_rule(an: &Analysis, p: PredId, user: &Program) -> (String, String, u32, u32) {
         let (name, arity) = user_predicate(an, p).unwrap_or_default();
         let predicate = format!("{name}/{arity}");
         let first = user
             .rules
             .iter()
             .find(|r| r.head.pred == name && r.head.arity() == arity);
-        let (source, line) = match first {
-            Some(r) => (user.source_name(r.span.source).to_string(), r.span.line),
-            None => (user.source_name(0).to_string(), 0),
-        };
+        match first {
+            Some(r) => (
+                predicate,
+                user.source_name(r.span.source).to_string(),
+                r.span.line,
+                r.span.col,
+            ),
+            None => (predicate, user.source_name(0).to_string(), 0, 0),
+        }
+    }
+
+    /// The memory budget error for predicate `p` at `bytes` over `cap`, printing the
+    /// `[rules] budget .. kind=memory` marker.
+    fn memory_error(
+        &self,
+        an: &Analysis,
+        p: PredId,
+        user: &Program,
+        bytes: usize,
+        cap: usize,
+    ) -> RulesError {
+        let (predicate, source, line, col) = Self::first_rule(an, p, user);
+        eprintln!("[rules] budget pred={predicate} bytes={bytes} cap={cap} kind=memory");
+        RulesError::MemoryBudget {
+            predicate,
+            source,
+            line,
+            col,
+            bytes,
+            cap,
+        }
+    }
+
+    /// The budget error for predicate `p` (a magic copy names its user predicate, and
+    /// the line is that predicate's first rule in the user's program), printing the
+    /// `[rules] budget` marker.
+    fn budget_error(&self, an: &Analysis, p: PredId, user: &Program) -> RulesError {
+        let (predicate, source, line, _) = Self::first_rule(an, p, user);
         let (rows, cap) = (
             self.budget.tripped.unwrap_or(self.budget.used),
             self.budget.cap,
@@ -1576,6 +1682,110 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
         let tc = ev.rows("tc").unwrap_or_default();
         assert_eq!(tc[1].at.meta.height, 2);
         assert_eq!(ev.stats().derived_rows, 3);
+    }
+
+    /// GA.14: the memory budget's error, or a panic when the evaluation passed it.
+    /// The row budget is lifted, so only the memory budget can stop it.
+    fn memory_stop(text: &str, g: &MemSource, max_bytes: usize) -> RulesError {
+        let opts = Options {
+            max_bytes: Some(max_bytes),
+            ..unbounded()
+        };
+        match run("rules", text, g, &opts) {
+            Ok(ev) => panic!(
+                "passed a {max_bytes}-byte budget at {} bytes",
+                ev.heap_bytes()
+            ),
+            Err(e) => e,
+        }
+    }
+
+    /// No row budget and no memory budget.
+    fn unbounded() -> Options {
+        Options {
+            max_rows: usize::MAX,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn memory_budget_stops_the_closure() {
+        // GA.14: a closure over a 2,000-node chain (1,999,000 rows) stops on a 64 KiB
+        // budget, naming the closure's predicate; with no memory budget it completes
+        // (both with the row budget lifted: the closure charges about 6,000,000).
+        let g = chain(2_000, "CALLS", &[Tier::Fact]);
+        let reach = "r(a, b) :- reaches(a, b, \"CALLS\").";
+        let err = memory_stop(reach, &g, 64 * 1024);
+        let RulesError::MemoryBudget {
+            predicate,
+            source,
+            line,
+            col,
+            bytes,
+            cap,
+        } = &err
+        else {
+            panic!("expected a memory budget error, got {err:?}")
+        };
+        assert_eq!(
+            (predicate.as_str(), source.as_str(), *line, *col, *cap),
+            ("r/2", "rules", 1, 1, 64 * 1024)
+        );
+        assert!(*bytes > 64 * 1024, "{bytes}");
+        assert!(
+            err.to_string()
+                .starts_with("rules:1:1: error: memory budget: r/2 grew the evaluation to "),
+            "{err}"
+        );
+        // Deterministic: the same program over the same facts trips at the same bytes.
+        assert_eq!(memory_stop(reach, &g, 64 * 1024), err);
+        // No memory budget: the same closure completes.
+        assert_eq!(Options::default().max_bytes, None);
+        let ev = eval(reach, &g, &unbounded());
+        assert_eq!(ev.rows("r").map(|r| r.len()).ok(), Some(1_999_000));
+    }
+
+    #[test]
+    fn memory_budget_stops_a_recursive_round() {
+        // The recursive closure stops at a round of its own fixpoint, at one round
+        // for one input, and completes without the budget.
+        let g = chain(600, "CALLS", &[Tier::Fact]);
+        let err = memory_stop(TC, &g, 64 * 1024);
+        assert!(
+            matches!(&err, RulesError::MemoryBudget { predicate, line, .. }
+                if predicate == "tc/2" && *line == 1),
+            "{err:?}"
+        );
+        assert_eq!(memory_stop(TC, &g, 64 * 1024), err);
+        let ev = eval(TC, &g, &Options::default());
+        assert_eq!(ev.rows("tc").map(|r| r.len()).ok(), Some(179_700));
+        // A generous budget never trips. (A round can hold more than the finished
+        // evaluation, whose stratum is sealed, so the cap leaves room over its heap.)
+        let roomy = Options {
+            max_bytes: Some(4 * ev.heap_bytes()),
+            ..Options::default()
+        };
+        assert_eq!(
+            eval(TC, &g, &roomy).rows("tc").map(|r| r.len()).ok(),
+            Some(179_700)
+        );
+    }
+
+    #[test]
+    fn memory_budget_names_the_relation_that_grew() {
+        // One recursive stratum of two predicates: `big/2` takes the closure's rows
+        // in the round that trips, `s/1` at most one per node, so the error names
+        // `big/2` at its first rule (line 2), not the stratum's first rule.
+        let g = chain(400, "CALLS", &[Tier::Fact]);
+        let both = "s(x) :- big(x, _).\n\
+                    big(x, y) :- reaches(x, y, \"CALLS\").\n\
+                    big(x, x) :- s(x).\n";
+        let err = memory_stop(both, &g, 128 * 1024);
+        assert!(
+            matches!(&err, RulesError::MemoryBudget { predicate, line, .. }
+                if predicate == "big/2" && *line == 2),
+            "{err:?}"
+        );
     }
 
     #[test]

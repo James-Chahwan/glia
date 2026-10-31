@@ -11,8 +11,10 @@
 //! query; `--output` names Datalog outputs (`name` or `name/arity`, repeatable;
 //! default the program's sinks) and is a usage error with `--gql`, whose one
 //! output is `result`. `--max-rows` is the evaluation's row budget (the engine's
-//! budget stop names it); `--limit` cuts each output's rows after the sort, the
-//! totals kept.
+//! budget stop names it); `--max-mb` its memory budget in MB (GA.14; default the
+//! one memory budget, `GLIA_MEMORY_BUDGET_MB`; `0` lifts it), checked against the
+//! evaluation's heap after each round; `--limit` cuts each output's rows after the
+//! sort, the totals kept.
 //!
 //! **Text.** ``# glia query `<repo>` (datalog|gql)``, then per output
 //! `## <pred>/<arity> - <total> row(s)` (GQL: `## result - ...`) and a table
@@ -28,8 +30,8 @@
 //! `results`, `absence`), same exit codes.
 //!
 //! **Exit**: 0 with rows, 1 with none (the absence says why; a `--limit 0` of a
-//! non-empty answer is 0), 2 on a usage, read, build, parse, analysis, budget or
-//! evaluation error (the engine's rendered text on stderr, one diagnostic per
+//! non-empty answer is 0), 2 on a usage, read, build, parse, analysis, budget
+//! (rows or memory) or evaluation error (the engine's rendered text on stderr, one diagnostic per
 //! line, `<source>:<line>:<col>: error: <message>`).
 //!
 //! **fired_on**, on stderr: the engine's `[query] lang=<datalog|gql> outputs=<o>
@@ -40,6 +42,7 @@ use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read};
 
 use glia_engine::check::{MAX_EVIDENCE, ViolationEdge};
+use glia_engine::memory::MemoryBudget;
 use glia_engine::rules::{
     QueryAnswer, QueryOptions, QueryOutput, QueryRow, QueryValue, query, query_gql,
 };
@@ -83,6 +86,10 @@ pub(crate) struct Args {
     /// The evaluation's row budget (default: the rules engine's).
     #[arg(long, value_name = "N")]
     max_rows: Option<usize>,
+    /// The evaluation's memory budget in MB, checked against its heap after
+    /// each round (default: GLIA_MEMORY_BUDGET_MB; 0 lifts it).
+    #[arg(long, value_name = "MB")]
+    max_mb: Option<u64>,
     /// Follow each row with its witness: the derivation's edges, located.
     #[arg(long)]
     explain: bool,
@@ -122,6 +129,9 @@ fn answer(args: &Args) -> i32 {
     opts.limit = Some(args.limit);
     opts.explain = args.explain;
     opts.row_budget = args.max_rows;
+    if let Some(mb) = args.max_mb {
+        opts.byte_budget = MemoryBudget::mb(mb).rules_bytes();
+    }
     opts.source_name = source;
     opts.surface = SURFACE;
     let asked = if args.gql {
