@@ -497,9 +497,10 @@ struct Acc {
     /// (`inject(CountriesService).list()`), as `(scope, receiver text,
     /// callee, T)`, awaiting the `inject` import gate.
     inject_receivers: Vec<(NodeId, String, String, String)>,
-    /// DT.5k: `const x = f(..)` locals, as `(scope, x, f)`, recorded as the
-    /// call-result type `f()` once every local of the scope is known.
-    call_locals: Vec<(NodeId, String, String)>,
+    /// DT.5k: `const x = f(..)` locals, recorded as the call-result type
+    /// `f()` once every local of the scope is known; GD.4 adds the awaited /
+    /// subscribed forms (`await f()`, `subscribe f()`).
+    call_locals: Vec<CallLocal>,
     /// DT.5k: member accesses `<recv>.<name>` that are no callee, one per
     /// `(from, recv, name, write)` at its first source row.
     member_reads: Vec<MemberReadCand>,
@@ -603,6 +604,17 @@ struct ReceiverStats {
     member_reads: usize,
     /// Accessor METHODs marked ([`NavFact::Getter`] / [`NavFact::Setter`]).
     accessors: usize,
+    /// GD.4: `const x = TestBed.inject(T)` / `TestBed.get(T)` locals typed
+    /// `T` (the `@angular/core/testing` import gate passed).
+    testbed: usize,
+    /// GD.4: locals and callback parameters typed as an awaited / subscribed
+    /// call result (`await f()`, `f().then(v => ..)`, `f().subscribe(v =>
+    /// ..)`), read through the callee's `Promise<T>` / `Observable<T>`
+    /// return annotation.
+    awaited: usize,
+    /// GD.4: nested `function f() {}` / `class K {}` declarations walked as
+    /// their enclosing scope's code.
+    nested_decls: usize,
 }
 
 impl ReceiverStats {
@@ -614,6 +626,9 @@ impl ReceiverStats {
             + self.static_reads
             + self.call_locals
             + self.member_reads
+            + self.testbed
+            + self.awaited
+            + self.nested_decls
             > 0
     }
 }
@@ -664,6 +679,19 @@ enum LocalSrc {
     Call,
 }
 
+/// DT.5k: one `const x = f(..)` local ([`Acc::call_locals`]), typed late.
+struct CallLocal {
+    /// The callable the local belongs to (the call walk's `from`).
+    scope: NodeId,
+    name: String,
+    /// The bare callee `f`.
+    callee: String,
+    /// GD.4: `""` for the plain call result `f()`, else [`AWAIT_PREFIX`] /
+    /// [`SUBSCRIBE_PREFIX`] for the unwrapped result `await f()` /
+    /// `subscribe f()`.
+    prefix: &'static str,
+}
+
 /// DF.22a: one `const x = <callee>(T)` local awaiting the `inject` import
 /// gate ([`Acc::local_inject`]).
 struct LocalInject {
@@ -676,6 +704,10 @@ struct LocalInject {
     /// The type the call returns when it is `inject`: its `<T>` argument,
     /// else its class argument's simple name.
     ty: String,
+    /// GD.4: a `TestBed.inject(T)` / `TestBed.get(T)` call: `callee` is the
+    /// `TestBed` binding the call goes through, gated on its
+    /// `@angular/core/testing` import instead of `inject`'s.
+    testbed: bool,
 }
 
 /// DF.22a: one file's `x.m()` call sites whose receiver `x` is a recorded
@@ -1376,6 +1408,16 @@ fn visit_class(
         }
     }
 
+    // GD.4: the names the class declares `static` (fields, methods,
+    // accessors), one [`NavFact::Exports`] on the CLASS: what `T.<name>`
+    // reads from another file. The graph binds a lowercase `T.name` read only
+    // to a class that declares that static exactly (rule `static_member`).
+    let statics = static_member_names(body, src);
+    if !statics.is_empty() {
+        acc.nav
+            .record_fact(class_id, NavFact::Exports { names: statics });
+    }
+
     // Constructor dependency injection (Angular Pattern E, NestJS). A DI-
     // decorated class declares its dependencies as typed constructor
     // parameters. Each class/interface-typed param becomes an INJECTS ref
@@ -1389,6 +1431,30 @@ fn visit_class(
     let parts = class_url::class_parts(n, name, body, src);
     let urlish = parts.urlish();
     acc.class_urls.push((class_id, parts, urlish));
+}
+
+/// GD.4: the plain names of `body`'s `static` members (a field, a method,
+/// an accessor; a `#private` or computed name is no `T.name` read), sorted
+/// and deduplicated.
+fn static_member_names(body: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        if !matches!(
+            member.kind(),
+            "public_field_definition" | "method_definition" | "abstract_method_signature"
+        ) || !has_token(member, "static")
+        {
+            continue;
+        }
+        if let Some(name) = member
+            .child_by_field_name("name")
+            .filter(|n| n.kind() == "property_identifier")
+        {
+            out.insert(text(name, src).to_string());
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The class body's `constructor` method, if it declares one.
@@ -3111,10 +3177,10 @@ fn visit_method(
     // type, so A6.2b's constructor binds keep their target).
     record_param_types(n, src, method_id, acc);
     // GD.3: a static method's declared class return type types a module
-    // const built by it (`const repo = Repo.create()`).
-    if has_token(n, "static") {
-        record_return_class(n, src, method_id, acc);
-    }
+    // const built by it (`const repo = Repo.create()`); GD.4: any method's
+    // types an awaited / subscribed call of it (`await s.load()`), which the
+    // graph reads only through those forms.
+    record_return_class(n, src, method_id, acc);
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
     }
@@ -3605,13 +3671,52 @@ fn emit_function_value(
 /// `CodeNav::return_types`, so a caller's `const x = f()` local is of that
 /// class. A primitive, array, union, function or type-predicate annotation,
 /// and no annotation, record nothing.
+///
+/// GD.4: a `Promise<T>` / `PromiseLike<T>` / `Observable<T>` annotation whose
+/// one type argument is class-shaped records the text `Wrapper<T>`
+/// ([`wrapped_class_type`]); the graph reads the wrapper name for a plain
+/// call result (as before: `const p = f()` holds the Promise) and `T` only
+/// for an awaited / subscribed one.
 fn record_return_class(func: TsNode, src: &[u8], func_id: NodeId, acc: &mut Acc) {
-    if let Some(ty) = func
-        .child_by_field_name("return_type")
-        .and_then(|t| annotated_class_type(t, src))
-    {
+    let Some(ann) = func.child_by_field_name("return_type") else {
+        return;
+    };
+    if let Some(wrapped) = wrapped_class_type(ann, src) {
+        acc.nav.record_return_type(func_id, &wrapped);
+    } else if let Some(ty) = annotated_class_type(ann, src) {
         acc.nav.record_return_type(func_id, ty);
     }
+}
+
+/// GD.4: the wrappers whose type argument an `await` / `.then` /
+/// `.subscribe` unwraps.
+const RESULT_WRAPPERS: &[&str] = &["Promise", "PromiseLike", "Observable"];
+
+/// GD.4: `Wrapper<T>` for a return annotation `Promise<T>` / `PromiseLike<T>`
+/// / `Observable<T>` (the wrapper a bare name, never `ns.Promise`) whose one
+/// type argument names a class ([`class_type_name`]: `Item`, `ns.Item`,
+/// `Item | null` -> `Item`); `None` for any other annotation.
+fn wrapped_class_type(ann: TsNode, src: &[u8]) -> Option<String> {
+    let mut tc = ann.walk();
+    let ty = ann.named_children(&mut tc).next()?;
+    if ty.kind() != "generic_type" {
+        return None;
+    }
+    let wrapper = ty.child_by_field_name("name")?;
+    if wrapper.kind() != "type_identifier" || !RESULT_WRAPPERS.contains(&text(wrapper, src)) {
+        return None;
+    }
+    let args = ty.child_by_field_name("type_arguments")?;
+    let mut ac = args.walk();
+    let mut it = args
+        .named_children(&mut ac)
+        .filter(|a| a.kind() != "comment");
+    let only = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+    let inner = class_type_name(only, src)?;
+    Some(format!("{}<{inner}>", text(wrapper, src)))
 }
 
 // ============================================================================
@@ -3716,8 +3821,13 @@ fn collect_calls_in(
     enclosing_class: Option<NodeId>,
     acc: &mut Acc,
 ) {
-    let mut stack = vec![n];
-    while let Some(node) = stack.pop() {
+    // GD.4: each entry carries the class `this` names there and whether it
+    // sits inside a nested `function` / `class` declaration (`nested`), which
+    // rebinds `this`: inside one the class is None, a `this.` / `super.` call
+    // is dropped (its target is no node of the enclosing class), and a nested
+    // class's own methods are walked (they mint no node either).
+    let mut stack = vec![(n, enclosing_class, false)];
+    while let Some((node, enclosing_class, nested)) = stack.pop() {
         let kind = node.kind();
         // Named-declaration/class bodies own their own from-node (emitted as
         // separate Function/Method/Class nodes) — walked separately, so skip.
@@ -3731,24 +3841,45 @@ fn collect_calls_in(
         // declaration seam via `emit_function_value`, which walks the callback
         // body directly and never routes the callback node through here — so
         // descending here does not double-emit.)
+        //
+        // GD.4: a nested `function f() {}` / `class K {}` declared inside a
+        // walked body mints no node either (only top-level declarations and
+        // class members do, and those never reach this walk), so it is walked
+        // like a nested callback: its calls, endpoints and value references
+        // are `from`'s. Its own `this` is not the enclosing class's.
         if matches!(
             kind,
-            "function_declaration"
-                | "method_definition"
-                | "class_declaration"
-                | "abstract_class_declaration"
-                | "class_expression"
+            "function_declaration" | "class_declaration" | "abstract_class_declaration"
         ) {
             // DT.5g: a nested `function f() {}` / `class K {}` binds `f` / `K`
             // in the walked body, shadowing a top-level symbol of that name.
-            if matches!(
-                kind,
-                "function_declaration" | "class_declaration" | "abstract_class_declaration"
-            ) && let Some(name) = child_text(node, "name", src)
-            {
+            if let Some(name) = child_text(node, "name", src) {
                 acc.nested_decls.insert((from, name.to_string()));
             }
+            acc.receiver_stats.nested_decls += 1;
+            if kind == "function_declaration" {
+                record_param_types(node, src, from, acc);
+            }
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                // The name is a binding, not a value read.
+                if node.child_by_field_name("name") == Some(child) {
+                    continue;
+                }
+                stack.push((child, None, true));
+            }
             continue;
+        }
+        let nested_method = kind == "method_definition"
+            && nested
+            && node.parent().is_some_and(|p| p.kind() == "class_body");
+        if kind == "class_expression" || (kind == "method_definition" && !nested_method) {
+            continue;
+        }
+        if kind == "method_definition" {
+            // GD.4: a method of a nested class: its parameters are locals of
+            // `from`, as a nested callback's are.
+            record_param_types(node, src, from, acc);
         }
         // DT.5g: a bare identifier passed by value.
         if matches!(kind, "identifier" | "shorthand_property_identifier") {
@@ -3760,7 +3891,9 @@ fn collect_calls_in(
             record_type_ident(node, src, from, acc);
         }
         if kind == "call_expression" {
-            if let Some(q) = extract_call_qualifier(node, src) {
+            if let Some(q) = extract_call_qualifier(node, src)
+                && !(nested && this_rooted(&q))
+            {
                 acc.unresolved.push(UnresolvedCall {
                     from,
                     enclosing_class,
@@ -3792,7 +3925,16 @@ fn collect_calls_in(
         match kind {
             "variable_declarator" => record_declarator_type(node, src, from, acc),
             "arrow_function" | "function_expression" | "generator_function" => {
-                record_param_types(node, src, from, acc);
+                // GD.4: the first parameter of a `.then(v => ..)` /
+                // `.subscribe(v => ..)` callback holds the unwrapped result
+                // of the call it hangs off.
+                match unwrapped_callback(node, src) {
+                    Some((param, prefix, callee)) => {
+                        record_params(node, src, from, acc, Some(param));
+                        record_awaited_local(acc, from, param, prefix, callee);
+                    }
+                    None => record_param_types(node, src, from, acc),
+                }
             }
             "for_in_statement" => record_pattern_unknown(node, "left", src, from, acc),
             "catch_clause" => record_pattern_unknown(node, "parameter", src, from, acc),
@@ -3800,9 +3942,65 @@ fn collect_calls_in(
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            stack.push(child);
+            stack.push((child, enclosing_class, nested));
         }
     }
+}
+
+/// GD.4: true for a call through `this` / `super` (`this.m()`, `super.m()`,
+/// `this.svc.m()`), which inside a nested `function` / `class` declaration
+/// names no member of the enclosing class.
+fn this_rooted(q: &CallQualifier) -> bool {
+    match q {
+        CallQualifier::SelfMethod(_) | CallQualifier::SuperMethod(_) => true,
+        CallQualifier::ComplexReceiver { receiver, .. } => {
+            receiver == "this"
+                || receiver == "super"
+                || receiver.starts_with("this.")
+                || receiver.starts_with("super.")
+        }
+        _ => false,
+    }
+}
+
+/// GD.4: `(parameter, prefix, callee)` when `func` (an arrow or function
+/// expression) is the first argument of `<call>.then(..)` (prefix
+/// [`AWAIT_PREFIX`]) or `<call>.subscribe(..)` ([`SUBSCRIBE_PREFIX`]), where
+/// `<call>` is a call the graph can type ([`call_form`]: `f()`, `s.load()`)
+/// and the callback's first parameter is an unannotated identifier (an
+/// annotation types it itself). Any other callback is `None`.
+fn unwrapped_callback<'a>(func: TsNode, src: &'a [u8]) -> Option<(&'a str, &'static str, &'a str)> {
+    let args = func.parent().filter(|a| a.kind() == "arguments")?;
+    let mut ac = args.walk();
+    if args.named_children(&mut ac).find(|a| a.kind() != "comment") != Some(func) {
+        return None;
+    }
+    let call = args.parent().filter(|c| c.kind() == "call_expression")?;
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "member_expression" {
+        return None;
+    }
+    let prefix = match text(callee.child_by_field_name("property")?, src) {
+        "then" => AWAIT_PREFIX,
+        "subscribe" => SUBSCRIBE_PREFIX,
+        _ => return None,
+    };
+    let form = call_form(peel(callee.child_by_field_name("object")?, src)?, src)?;
+    let param = match func.child_by_field_name("parameter") {
+        Some(p) => p,
+        None => {
+            let params = func.child_by_field_name("parameters")?;
+            let mut pc = params.walk();
+            let first = params
+                .named_children(&mut pc)
+                .find(|p| p.kind() != "comment")?;
+            if first.kind() != "required_parameter" || first.child_by_field_name("type").is_some() {
+                return None;
+            }
+            first.child_by_field_name("pattern")?
+        }
+    };
+    (param.kind() == "identifier").then(|| (text(param, src), prefix, form))
 }
 
 /// LA.30c: record `X.Y` — object an `identifier`, property a
@@ -4299,9 +4497,19 @@ fn record_pattern_unknown(node: TsNode, field: &str, src: &[u8], scope: NodeId, 
 /// rest or defaulted pattern binds each of its names as `""`; a `this`
 /// parameter binds nothing. An arrow's bare `x => …` parameter is `""`.
 fn record_param_types(func: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    record_params(func, src, scope, acc, None);
+}
+
+/// [`record_param_types`], leaving the parameter named `skip` to its caller
+/// (GD.4: a `.then` / `.subscribe` callback's first parameter, typed as the
+/// unwrapped call result instead of `""`).
+fn record_params(func: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc, skip: Option<&str>) {
+    let skipped = |name: &str| skip == Some(name);
     if let Some(p) = func.child_by_field_name("parameter") {
         for name in pattern_names(p, src) {
-            acc.nav.record_local_type(scope, name, "");
+            if !skipped(name) {
+                acc.nav.record_local_type(scope, name, "");
+            }
         }
         return;
     }
@@ -4318,6 +4526,7 @@ fn record_param_types(func: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc) {
         };
         match pattern.kind() {
             "this" => {}
+            "identifier" if skipped(text(pattern, src)) => {}
             "identifier" => {
                 let ty = param
                     .child_by_field_name("type")
@@ -4393,25 +4602,183 @@ fn record_declarator_type(decl: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc
             let ty = alias.as_deref().unwrap_or("");
             record_local(acc, scope, name, ty, LocalSrc::Alias);
         }
-        "call_expression" => match inject_shape(value, src) {
-            Some((callee, ty)) => acc.local_inject.push(LocalInject {
+        "call_expression" => match inject_shape(value, src)
+            .map(|(callee, ty)| (callee, ty, false))
+            .or_else(|| testbed_shape(value, src).map(|(callee, ty)| (callee, ty, true)))
+        {
+            Some((callee, ty, testbed)) => acc.local_inject.push(LocalInject {
                 scope,
                 name: name.to_string(),
                 callee: callee.to_string(),
                 ty: ty.to_string(),
+                testbed,
             }),
             // DT.5k: a bare call `f(..)` holds `f`'s result, typed late
             // ([`record_call_locals`]); a member call's result stays unknown.
             None => match value.child_by_field_name("function") {
-                Some(f) if f.kind() == "identifier" => {
-                    acc.call_locals
-                        .push((scope, name.to_string(), text(f, src).to_string()))
-                }
+                Some(f) if f.kind() == "identifier" => acc.call_locals.push(CallLocal {
+                    scope,
+                    name: name.to_string(),
+                    callee: text(f, src).to_string(),
+                    prefix: "",
+                }),
                 _ => acc.nav.record_local_type(scope, name, ""),
             },
         },
+        // GD.4: `const x = await f()` / `await s.load()` holds the value the
+        // callee's `Promise<T>` resolves to: the type text `await f()`, which
+        // the graph reads off the callee's declared return type.
+        "await_expression" => match awaited_call(value, src) {
+            Some(callee) => record_awaited_local(acc, scope, name, AWAIT_PREFIX, callee),
+            None => acc.nav.record_local_type(scope, name, ""),
+        },
         _ => acc.nav.record_local_type(scope, name, ""),
     }
+}
+
+/// GD.4: the type-text prefix of a local holding an `await`ed call's result
+/// (`await f()`, `await s.load()`): the graph unwraps the callee's declared
+/// `Promise<T>` / `PromiseLike<T>` return type to `T`.
+const AWAIT_PREFIX: &str = "await ";
+
+/// GD.4: the type-text prefix of a `.subscribe(v => ..)` callback's first
+/// parameter (`subscribe f()`): the graph unwraps the callee's declared
+/// `Observable<T>` return type to `T`.
+const SUBSCRIBE_PREFIX: &str = "subscribe ";
+
+/// GD.4: the callee form of the call an `await` expression awaits: a bare
+/// `f(..)` -> `f`, a one-hop member call `s.load(..)` (`s` an identifier,
+/// a local or a class name) -> `s.load`. Parentheses and `!` are peeled; any
+/// other awaited expression names none.
+fn awaited_call<'a>(value: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = value.walk();
+    let inner = value
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "comment")?;
+    call_form(peel(inner, src)?, src)
+}
+
+/// GD.4: `node` with any parentheses and non-null `!` around it peeled.
+fn peel<'t>(mut node: TsNode<'t>, _src: &[u8]) -> Option<TsNode<'t>> {
+    while matches!(
+        node.kind(),
+        "parenthesized_expression" | "non_null_expression"
+    ) {
+        let mut c = node.walk();
+        node = node
+            .named_children(&mut c)
+            .find(|n| n.kind() != "comment")?;
+    }
+    Some(node)
+}
+
+/// GD.4: the callee form of a call expression the graph can type the result
+/// of: `f` for a bare identifier callee, `s.load` for a member callee whose
+/// object is an identifier and whose property is a plain name. Anything
+/// else (a chain, `this.x.f()`, a computed callee) is `None`.
+fn call_form<'a>(call: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let f = call.child_by_field_name("function")?;
+    match f.kind() {
+        "identifier" => Some(text(f, src)),
+        "member_expression" => {
+            let object = f.child_by_field_name("object")?;
+            let property = f.child_by_field_name("property")?;
+            (object.kind() == "identifier" && property.kind() == "property_identifier")
+                .then(|| text(f, src))
+                .filter(|t| !t.contains(|c: char| c.is_whitespace()))
+        }
+        _ => None,
+    }
+}
+
+/// GD.4: record `name` as a local of `scope` holding the unwrapped result
+/// of the call `callee` (`prefix` [`AWAIT_PREFIX`] / [`SUBSCRIBE_PREFIX`]).
+/// A member callee (`s.load`) is recorded now (the graph types `s` itself);
+/// a bare one (`f`) queues on [`Acc::call_locals`], so a local or nested
+/// declaration named `f` shadows it as it does a plain call result.
+fn record_awaited_local(
+    acc: &mut Acc,
+    scope: NodeId,
+    name: &str,
+    prefix: &'static str,
+    callee: &str,
+) {
+    if callee.contains('.') {
+        record_local(
+            acc,
+            scope,
+            name,
+            &format!("{prefix}{callee}()"),
+            LocalSrc::Call,
+        );
+        acc.receiver_stats.awaited += 1;
+    } else {
+        acc.call_locals.push(CallLocal {
+            scope,
+            name: name.to_string(),
+            callee: callee.to_string(),
+            prefix,
+        });
+    }
+}
+
+/// GD.4: `(TestBed binding, T)` of a `TestBed.inject(T)` / `TestBed.get(T)`
+/// call: the callee a member of an identifier, its property `inject` or
+/// `get`, and its first argument an identifier or member chain naming a
+/// class (`<T>` first when written, else the argument's simple name starting
+/// with an ASCII uppercase letter), as [`inject_shape`] reads `inject(T)`.
+/// Whether the object IS `TestBed` from `@angular/core/testing` is
+/// [`record_inject_locals`]' late gate.
+fn testbed_shape<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "member_expression" {
+        return None;
+    }
+    let object = callee.child_by_field_name("object")?;
+    let property = callee.child_by_field_name("property")?;
+    if object.kind() != "identifier" || !matches!(text(property, src), "inject" | "get") {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut ac = args.walk();
+    let arg = args
+        .named_children(&mut ac)
+        .find(|a| a.kind() != "comment")?;
+    if !matches!(arg.kind(), "identifier" | "member_expression") {
+        return None;
+    }
+    let ty = match call.child_by_field_name("type_arguments") {
+        Some(ta) => {
+            let mut tc = ta.walk();
+            let first = ta.named_children(&mut tc).next()?;
+            class_type_name(first, src)?
+        }
+        None => heritage_type_name(arg, src)
+            .filter(|t| t.starts_with(|c: char| c.is_ascii_uppercase()))?,
+    };
+    Some((text(object, src), ty))
+}
+
+/// GD.4: the local names `TestBed` is imported under from
+/// `@angular/core/testing` (`import { TestBed }`, `{ TestBed as TB }`).
+fn testbed_import_bindings(imports: &[ImportStmt]) -> HashSet<String> {
+    imports
+        .iter()
+        .filter_map(|imp| match &imp.target {
+            ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                ..
+            } if module == "@angular/core/testing" && name == "TestBed" => {
+                Some(alias.clone().unwrap_or_else(|| name.clone()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// DF.22a: the class a `new T(…)` builds: its constructor's identifier, or a
@@ -4471,13 +4838,18 @@ fn record_inject_locals(acc: &mut Acc) {
         .into_iter()
         .map(str::to_string)
         .collect();
+    let testbed = testbed_import_bindings(&acc.imports);
     for local in std::mem::take(&mut acc.local_inject) {
-        let ty = if gate.contains(&local.callee) {
-            local.ty.as_str()
+        let passes = if local.testbed {
+            testbed.contains(&local.callee)
         } else {
-            ""
+            gate.contains(&local.callee)
         };
+        let ty = if passes { local.ty.as_str() } else { "" };
         record_local(acc, local.scope, &local.name, ty, LocalSrc::Inject);
+        if passes && local.testbed {
+            acc.receiver_stats.testbed += 1;
+        }
     }
 }
 
@@ -4488,7 +4860,13 @@ fn record_inject_locals(acc: &mut Acc) {
 /// `function f` there, shadows the top-level `f`, and the local is of
 /// unknown type.
 fn record_call_locals(acc: &mut Acc) {
-    for (scope, name, callee) in std::mem::take(&mut acc.call_locals) {
+    for local in std::mem::take(&mut acc.call_locals) {
+        let CallLocal {
+            scope,
+            name,
+            callee,
+            prefix,
+        } = local;
         let shadowed = acc
             .nav
             .local_types
@@ -4499,8 +4877,18 @@ fn record_call_locals(acc: &mut Acc) {
             acc.nav.record_local_type(scope, &name, "");
             continue;
         }
-        record_local(acc, scope, &name, &format!("{callee}()"), LocalSrc::Call);
-        acc.receiver_stats.call_locals += 1;
+        record_local(
+            acc,
+            scope,
+            &name,
+            &format!("{prefix}{callee}()"),
+            LocalSrc::Call,
+        );
+        if prefix.is_empty() {
+            acc.receiver_stats.call_locals += 1;
+        } else {
+            acc.receiver_stats.awaited += 1;
+        }
     }
 }
 
@@ -8301,7 +8689,8 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
 
     // LA.30c: `X.Y` member reads, in walk order. A member of a same-file enum
     // is a USES edge now. An import-bound base with an Upper-initial base AND
-    // member becomes a USES `Attribute` ref for the graph crate's
+    // member (GD.4: or a lowercase member, which the graph binds only as a
+    // declared static of a CLASS) becomes a USES `Attribute` ref for the graph crate's
     // `resolve_refs`: an ENUM base binds its ATTRIBUTE member (LA.30a); a
     // namespace-import MODULE base or a CLASS base binds through the generic
     // attribute lookup like any other ref (`Models.User` -> the class,
@@ -8349,14 +8738,30 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             continue;
         };
         let upper = |s: &str| s.starts_with(|c: char| c.is_ascii_uppercase());
-        if alias_set.contains(base.as_str()) && upper(&base) && upper(&name) {
-            out.refs.push(UnresolvedRef {
-                from,
-                from_module: module_id,
-                qualifier: CallQualifier::Attribute { base, name },
-                category: edge_category::USES,
-                line,
-            });
+        if !alias_set.contains(base.as_str()) || !upper(&base) {
+            continue;
+        }
+        // GD.4: a lowercase member (`Api.baseUrl`) is a ref too, unless a
+        // local of the reader shadows the import; the graph binds it only to
+        // an imported CLASS declaring that static exactly (`static_member`).
+        let lowercase = !upper(&name);
+        if lowercase
+            && out
+                .nav
+                .local_types
+                .get(&from)
+                .is_some_and(|l| l.contains_key(&base))
+        {
+            continue;
+        }
+        out.refs.push(UnresolvedRef {
+            from,
+            from_module: module_id,
+            qualifier: CallQualifier::Attribute { base, name },
+            category: edge_category::USES,
+            line,
+        });
+        if !lowercase {
             member_ref_count += 1;
         }
     }
@@ -8572,7 +8977,8 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     if rs.any() {
         eprintln!(
             "[ts-receivers] query_fields={} query_receivers={} inject_receivers={} \
-             inject_refs={} static_reads={} call_locals={} member_reads={} accessors={} file={}",
+             inject_refs={} static_reads={} call_locals={} member_reads={} accessors={} \
+             testbed={} awaited={} nested_decls={} file={}",
             rs.query_fields,
             rs.query_receivers,
             rs.inject_receivers,
@@ -8581,6 +8987,9 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             rs.call_locals,
             rs.member_reads,
             rs.accessors,
+            rs.testbed,
+            rs.awaited,
+            rs.nested_decls,
             acc.file_rel
         );
     }
@@ -12458,7 +12867,7 @@ export function pick(): Color {
     }
 
     #[test]
-    fn lowercase_base_emits_nothing() {
+    fn lowercase_base_emits_nothing_lowercase_member_is_a_ref() {
         let src = "\
 import { environment } from './env';
 import { Color } from './color';
@@ -12470,10 +12879,21 @@ export function url(): string {
 }
 ";
         let parse = parse_file(src, "src/url.ts", "src::url", repo()).unwrap();
-        assert!(
-            parse.refs.iter().all(|r| r.category != edge_category::USES),
-            "lower-case base or member, or an un-imported base, emits no USES ref: {:?}",
-            parse.refs
+        // GD.4: an import-bound Upper base with a lowercase member
+        // (`Color.green`) is a ref the graph binds only to a declared static.
+        let uses: Vec<&CallQualifier> = parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .map(|r| &r.qualifier)
+            .collect();
+        assert_eq!(
+            uses,
+            vec![&CallQualifier::Attribute {
+                base: "Color".to_string(),
+                name: "green".to_string()
+            }],
+            "a lower-case base or an un-imported base emits no USES ref"
         );
         assert!(uses_edges(&parse).is_empty());
     }
@@ -13952,15 +14372,19 @@ export abstract class BaseRepo<T> {
     }
 
     #[test]
-    fn nested_abstract_class_calls_stay_its_own() {
-        // A class declared inside a function body is skipped by the body's call
-        // walk whichever keyword it has (it is not a top-level declaration, so
-        // it mints no node either): its field initialiser's call never becomes
-        // the function's.
+    fn nested_abstract_class_calls_are_the_functions() {
+        // A class declared inside a function body is not a top-level
+        // declaration, so it mints no node, whichever keyword it has. GD.4:
+        // the body's call walk reads it as the function's own code (as a
+        // nested callback is), so its field initialiser's call is the
+        // function's.
         let src = "export function f() {\n  abstract class Inner { x = g(); }\n  h();\n}\n";
         let parse = parse_file(src, "src/f.ts", "src::f", repo()).unwrap();
         let f = id(node_kind::FUNCTION, "src::f::f");
-        assert_eq!(call_site_names(&parse, f), vec!["h".to_string()]);
+        let mut names = call_site_names(&parse, f);
+        names.sort();
+        assert_eq!(names, vec!["g".to_string(), "h".to_string()]);
+        assert!(!parse.nav.qname_by_id.values().any(|q| q.contains("Inner")));
     }
 
     // ---- CH.1b: abstract-member facts and `super.m()` -------------------------
@@ -16465,7 +16889,7 @@ export function j(): A | B { return x; }
                 ("c", some("Store")),
                 ("d", some("Foo")),
                 ("e", some("Box")),
-                ("f", some("Promise")),
+                ("f", some("Promise<Store>")),
                 ("g", None),
                 ("h", None),
                 ("i", None),
@@ -17130,7 +17554,8 @@ register(svc);
     }
 
     /// A `static` method's declared class return type is recorded (what a
-    /// `const x = T.create()` reads); an instance method's is not.
+    /// `const x = T.create()` reads); since GD.4 an instance method's too
+    /// (what `await s.load()` reads).
     #[test]
     fn static_method_return_class_recorded() {
         let src = "\
@@ -17146,7 +17571,10 @@ export class Store {
             p.nav.return_types.get(&create).map(String::as_str),
             Some("Store")
         );
-        assert_eq!(p.nav.return_types.get(&clone), None);
+        assert_eq!(
+            p.nav.return_types.get(&clone).map(String::as_str),
+            Some("Store")
+        );
     }
 }
 
@@ -17361,5 +17789,263 @@ export default new NotificationsAPI();
             ])
         );
         assert!(site("other").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod close_out_receiver_tests {
+    //! GD.4: the TypeScript residuals of the 0.5.2 close-out: a
+    //! `TestBed.inject(T)` local, an awaited / subscribed call result through
+    //! its callee's `Promise<T>` / `Observable<T>` annotation, a nested
+    //! `function` / `class` declaration walked as its enclosing scope's code,
+    //! and a lowercase static read of an imported class.
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-close-out-receivers")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/use.ts", "src::use", repo()).expect("parse")
+    }
+
+    fn locals(p: &FileParse, scope: NodeId) -> BTreeMap<String, String> {
+        p.nav
+            .local_types
+            .get(&scope)
+            .map(|l| l.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    fn local(p: &FileParse, scope: NodeId, name: &str) -> Option<String> {
+        locals(p, scope).get(name).cloned()
+    }
+
+    /// The call sites and intra-file CALLS edges `from` makes, as text.
+    fn calls_of(p: &FileParse, from: NodeId) -> Vec<String> {
+        let mut out: Vec<String> = p
+            .calls
+            .iter()
+            .filter(|c| c.from == from)
+            .map(|c| format!("{:?}", c.qualifier))
+            .collect();
+        out.extend(
+            p.edges
+                .iter()
+                .filter(|e| e.from == from && e.category == edge_category::CALLS)
+                .map(|e| format!("edge:{}", p.nav.qname_by_id[&e.to])),
+        );
+        out.sort();
+        out
+    }
+
+    /// `const s = TestBed.inject(T)` / `TestBed.get(T)` is a `T` under the
+    /// `@angular/core/testing` import (an alias included); a `TestBed` from
+    /// anywhere else, or none, types nothing.
+    #[test]
+    fn testbed_inject_types_the_local() {
+        let src = "\
+import { TestBed } from '@angular/core/testing';
+import { Svc, Other } from './svc';
+it('x', () => {
+  const s = TestBed.inject(Svc);
+  const o = TestBed.get(Other);
+  const t = TestBed.inject<Svc>(TOKEN);
+  s.load();
+});
+";
+        let p = parse(src);
+        let m = id(node_kind::MODULE, "src::use");
+        assert_eq!(local(&p, m, "s").as_deref(), Some("Svc"));
+        assert_eq!(local(&p, m, "o").as_deref(), Some("Other"));
+        assert_eq!(local(&p, m, "t").as_deref(), Some("Svc"));
+
+        let aliased = src
+            .replace("{ TestBed }", "{ TestBed as TB }")
+            .replace("TestBed.", "TB.");
+        assert_eq!(local(&parse(&aliased), m, "s").as_deref(), Some("Svc"));
+
+        for gate in [
+            src.replace("'@angular/core/testing'", "'./testbed'"),
+            src.replace("import { TestBed } from '@angular/core/testing';\n", ""),
+        ] {
+            let p = parse(&gate);
+            assert_eq!(local(&p, m, "s").as_deref(), Some(""), "{gate}");
+        }
+    }
+
+    /// A `Promise<T>` / `PromiseLike<T>` / `Observable<T>` return annotation
+    /// records `Wrapper<T>`; another generic records its name as before.
+    #[test]
+    fn wrapped_return_annotations_keep_their_argument() {
+        let src = "\
+export function a(): Promise<Item> { return x; }
+export function b(): Observable<ns.Item | null> { return x; }
+export function c(): PromiseLike<Item> { return x; }
+export function d(): Promise<Item[]> { return x; }
+export function e(): Map<string, Item> { return x; }
+export class K { load(): Promise<Item> { return x; } }
+";
+        let p = parse(src);
+        let ret = |q: &str, kind| {
+            p.nav
+                .return_types
+                .get(&id(kind, q))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let f = node_kind::FUNCTION;
+        assert_eq!(ret("src::use::a", f), "Promise<Item>");
+        assert_eq!(ret("src::use::b", f), "Observable<Item>");
+        assert_eq!(ret("src::use::c", f), "PromiseLike<Item>");
+        assert_eq!(ret("src::use::d", f), "Promise");
+        assert_eq!(ret("src::use::e", f), "Map");
+        assert_eq!(ret("src::use::K::load", node_kind::METHOD), "Promise<Item>");
+    }
+
+    /// `await f()` / `await s.load()` locals and the first parameter of a
+    /// `.then(v => ..)` / `.subscribe(v => ..)` callback hang off the call;
+    /// a plain call result keeps DT.5k's form, an annotated parameter keeps
+    /// its annotation, and a local named like the callee shadows it.
+    #[test]
+    fn awaited_and_subscribed_results_are_typed_by_their_call() {
+        let src = "\
+import { Svc, make, watch } from './svc';
+export async function run(s: Svc) {
+  const a = await make();
+  const b = await s.load();
+  const c = make();
+  const d = await (s.load());
+  make().then(x => x.touch());
+  watch().subscribe((y) => y.touch());
+  s.load().then((z: Item) => z.touch());
+  const e = await this.svc.load();
+}
+";
+        let p = parse(src);
+        let run = id(node_kind::FUNCTION, "src::use::run");
+        let got = locals(&p, run);
+        let want: BTreeMap<String, String> = [
+            ("s", "Svc"),
+            ("a", "await make()"),
+            ("b", "await s.load()"),
+            ("c", "make()"),
+            ("d", "await s.load()"),
+            ("x", "await make()"),
+            ("y", "subscribe watch()"),
+            ("z", "Item"),
+            ("e", ""),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(got, want);
+
+        let shadow = "\
+import { make } from './svc';
+export async function run() {
+  const make = 1;
+  const a = await make();
+}
+";
+        let p = parse(shadow);
+        let run = id(node_kind::FUNCTION, "src::use::run");
+        assert_eq!(local(&p, run, "a").as_deref(), Some(""));
+    }
+
+    /// A nested `function` / `class` declaration's calls are the enclosing
+    /// scope's (a nested class's methods included); its `this.` / `super.`
+    /// calls are dropped (its `this` is not the enclosing class's), and its
+    /// name still shadows a top-level symbol.
+    #[test]
+    fn nested_declarations_are_walked_as_the_enclosing_scope() {
+        let src = "\
+import { Api, helper, other } from './api';
+export class C {
+  run(): void {
+    function inner(p: Api) { helper(); this.x(); p.get(); }
+    class K extends Base { m() { other(); super.m(); } }
+    inner(null);
+    this.y();
+  }
+}
+";
+        let p = parse(src);
+        let run = id(node_kind::METHOD, "src::use::C::run");
+        let calls = calls_of(&p, run);
+        let has = |needle: &str| calls.iter().any(|c| c.contains(needle));
+        assert!(has("Bare(\"helper\")"), "{calls:?}");
+        assert!(has("Bare(\"other\")"), "{calls:?}");
+        assert!(has("name: \"get\""), "{calls:?}");
+        assert!(has("SelfMethod(\"y\")"), "{calls:?}");
+        assert!(!has("SelfMethod(\"x\")"), "{calls:?}");
+        assert!(!has("SuperMethod"), "{calls:?}");
+        assert_eq!(local(&p, run, "p").as_deref(), Some("Api"));
+        // No node for the nested declarations.
+        assert!(
+            !p.nav
+                .qname_by_id
+                .values()
+                .any(|q| q.contains("inner") || q.ends_with("::K"))
+        );
+    }
+
+    /// A class's `static` names are one `Exports` fact on the CLASS; a
+    /// lowercase `Api.baseUrl` read of an import-bound Upper base is a USES
+    /// `Attribute` ref (the graph checks the static), unless a local of the
+    /// reader shadows the base.
+    #[test]
+    fn statics_and_lowercase_static_reads() {
+        let api = "\
+export class Api {
+  static baseUrl = '/v1';
+  static ping(): string { return ''; }
+  static get mode(): string { return ''; }
+  load(): void {}
+  #secret = 1;
+  static #hidden = 2;
+}
+";
+        let p = parse(api);
+        let class = id(node_kind::CLASS, "src::use::Api");
+        let exports: Vec<Vec<String>> = p.nav.nav_facts[&class]
+            .iter()
+            .filter_map(|f| match f {
+                NavFact::Exports { names } => Some(names.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exports, vec![vec!["baseUrl", "mode", "ping"]]);
+
+        let reader = "\
+import { Api } from './api';
+export function url() { return Api.baseUrl; }
+export function shadowed(Api: any) { return Api.baseUrl; }
+export function upper() { return Api.MODE; }
+";
+        let p = parse(reader);
+        let refs: Vec<(String, String)> = p
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, name } => {
+                    Some((p.nav.qname_by_id[&r.from].clone(), format!("{base}.{name}")))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            refs,
+            vec![
+                ("src::use::url".to_string(), "Api.baseUrl".to_string()),
+                ("src::use::upper".to_string(), "Api.MODE".to_string()),
+            ]
+        );
     }
 }

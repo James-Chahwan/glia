@@ -1256,6 +1256,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         enum_hits,
         iface_extends,
         static_member,
+        static_lowercase,
     } = counts;
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
@@ -1267,10 +1268,13 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
             enum_hits.ext(g)
         );
     }
-    // DT.5k fired_on, once per graph build that bound one:
-    //   `[resolve] static member uses bound: N`
+    // DT.5k fired_on, once per graph build that bound one (GD.4 adds the
+    // lowercase statics, `Api.baseUrl`, among the N):
+    //   `[resolve] static member uses bound: N (lowercase=L)`
     if static_member > 0 {
-        eprintln!("[resolve] static member uses bound: {static_member}");
+        eprintln!(
+            "[resolve] static member uses bound: {static_member} (lowercase={static_lowercase})"
+        );
     }
     // LD.7a fired_on marker, once per language graph build:
     //   `[heritage] interface-extends bound=N unresolved=M ext=<ext>`
@@ -1298,6 +1302,8 @@ struct RefCounts {
     enum_hits: EnumHits,
     iface_extends: IfaceExtends,
     static_member: usize,
+    /// GD.4: the `static_member` binds of a lowercase member.
+    static_lowercase: usize,
 }
 
 impl RefCounts {
@@ -1309,6 +1315,7 @@ impl RefCounts {
         self.iface_extends.unresolved += other.iface_extends.unresolved;
         self.iface_extends.ifaces.extend(other.iface_extends.ifaces);
         self.static_member += other.static_member;
+        self.static_lowercase += other.static_lowercase;
     }
 }
 
@@ -1381,6 +1388,35 @@ fn decide_ref(
                     }
                 }),
         },
+        // GD.4: a TS-family `T.lower` read (the TS parser keeps one only for
+        // an import-bound, Upper-initial base) of a CLASS binds only when the
+        // class declares `static lower` exactly: a static method read by value
+        // is that METHOD, any other static USES the class (`static_member`).
+        CallQualifier::Attribute { base, name }
+            if r.category == edge_category::USES
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+                && files.is_ts_family(r)
+                && attribute_base(g, bindings, base).map(|(_, k)| k) == Some(node_kind::CLASS) =>
+        {
+            attribute_base(g, bindings, base)
+                .map(|(class, _)| class)
+                .filter(|&class| declares_static(g, class, name))
+                .map(|class| {
+                    match g
+                        .symbols
+                        .class_methods
+                        .get(&class)
+                        .and_then(|m| m.get(name.as_str()).copied())
+                    {
+                        Some(method) => (method, Branch::Attribute),
+                        None => {
+                            counts.static_member += 1;
+                            counts.static_lowercase += 1;
+                            (class, Branch::StaticMember)
+                        }
+                    }
+                })
+        }
         CallQualifier::Attribute { base, name } => {
             let bound_base = attribute_base(g, bindings, base);
             let hit =
@@ -1516,6 +1552,17 @@ fn resolve_attribute_target(
             .and_then(|m| m.get(name).copied()),
         _ => None,
     }
+}
+
+/// GD.4: true when the CLASS `class` declares a `static` member `name`: the
+/// TS parser records a class's static names as one [`NavFact::Exports`] on
+/// the CLASS (what a `T.<name>` read reaches from another file).
+fn declares_static(g: &RepoGraph, class: NodeId, name: &str) -> bool {
+    g.nav.nav_facts.get(&class).is_some_and(|facts| {
+        facts
+            .iter()
+            .any(|f| matches!(f, NavFact::Exports { names } if names.iter().any(|n| n == name)))
+    })
 }
 
 /// The node `base` is bound to in this module's import table, with its kind —
@@ -2237,6 +2284,15 @@ fn receiver_type_node(
     names: &GlobalNames<'_>,
     scoped: bool,
 ) -> Option<(NodeId, bool)> {
+    // GD.4: an awaited / subscribed call result (`await s.load()`,
+    // `subscribe f()`): the callee's `Promise<T>` / `Observable<T>` unwrapped.
+    if let Some((wrappers, call)) = unwrap_form(type_name) {
+        if !gate.ext(g, site.from).as_deref().is_some_and(is_ts_family) {
+            return None;
+        }
+        return unwrapped_returned_type(g, site, from_module, call, wrappers, names)
+            .map(|t| (t, true));
+    }
     match type_name.strip_suffix("()") {
         Some(callee) => {
             if !gate.ext(g, site.from).as_deref().is_some_and(is_ts_family) {
@@ -2282,7 +2338,90 @@ fn returned_type(g: &RepoGraph, from_module: NodeId, from: NodeId, callee: &str)
         return None;
     }
     let ret = g.nav.return_types.get(&f)?;
-    scope_type(g, enclosing_home_module(g, f)?, ret)
+    scope_type(g, enclosing_home_module(g, f)?, plain_return(ret))
+}
+
+/// GD.4: the TS parser's type-text prefix of an awaited call result
+/// (`await f()`), and the wrappers `await` / `.then` unwrap.
+const AWAIT_FORM: (&str, &[&str]) = ("await ", &["Promise", "PromiseLike"]);
+
+/// GD.4: the prefix of a `.subscribe(v => ..)` callback parameter
+/// (`subscribe f()`), and the wrapper it unwraps.
+const SUBSCRIBE_FORM: (&str, &[&str]) = ("subscribe ", &["Observable"]);
+
+/// GD.4: `(wrappers, callee)` of a local's type text written as an
+/// unwrapped call result: `await s.load()` -> (`Promise` / `PromiseLike`,
+/// `s.load`), `subscribe f()` -> (`Observable`, `f`). Any other text is
+/// `None`.
+fn unwrap_form(type_name: &str) -> Option<(&'static [&'static str], &str)> {
+    [AWAIT_FORM, SUBSCRIBE_FORM]
+        .into_iter()
+        .find_map(|(prefix, wrappers)| {
+            let call = type_name.strip_prefix(prefix)?.strip_suffix("()")?;
+            (!call.is_empty()).then_some((wrappers, call))
+        })
+}
+
+/// GD.4: a return-type text as a plain call result reads it: the TS parser
+/// records `Promise<T>` / `PromiseLike<T>` / `Observable<T>` with its
+/// argument, and `const p = f()` holds the wrapper (`Promise`), as before.
+fn plain_return(ret: &str) -> &str {
+    ret.split_once('<').map_or(ret, |(wrapper, _)| wrapper)
+}
+
+/// GD.4: `T` of a return-type text `Wrapper<T>` whose wrapper is one of
+/// `wrappers`; any other text (a plain class, another wrapper) is `None`.
+fn unwrapped_return<'r>(ret: &'r str, wrappers: &[&str]) -> Option<&'r str> {
+    let (wrapper, rest) = ret.split_once('<')?;
+    let inner = rest.strip_suffix('>')?;
+    (wrappers.contains(&wrapper) && !inner.is_empty()).then_some(inner)
+}
+
+/// GD.4: the class an awaited / subscribed call `callee` (`f`, `s.load`,
+/// `Repo.find`) resolves to from `site`'s scope: the callable it names (a
+/// bare FUNCTION as [`returned_type`] binds it; a METHOD of the type of the
+/// caller's local `s`, resolved as a receiver's type is; or a static METHOD
+/// of a CLASS the caller's module names), then that callable's declared
+/// `Wrapper<T>` return ([`unwrapped_return`] over `wrappers`), `T` resolved
+/// from the callable's own file. A local of unknown type, a call-form or
+/// aliased local, or a callable declaring no such wrapper names nothing.
+fn unwrapped_returned_type(
+    g: &RepoGraph,
+    site: &CallSite,
+    from_module: NodeId,
+    callee: &str,
+    wrappers: &[&str],
+    names: &GlobalNames<'_>,
+) -> Option<NodeId> {
+    let plain = |t: &str| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    };
+    let callable = match callee.split_once('.') {
+        None => {
+            if !plain(callee) {
+                return None;
+            }
+            let bindings = g.symbols.module_import_bindings.get(&from_module);
+            let (f, _) = bare_call_target(g, bindings, from_module, site.from, callee)?;
+            (g.nav.kind_by_id.get(&f) == Some(&node_kind::FUNCTION)).then_some(f)?
+        }
+        Some((base, method)) => {
+            if !plain(base) || !plain(method) {
+                return None;
+            }
+            let ty = match local_type(g, site.from, base) {
+                Some(t) if plain(t) => resolve_type_name_with(g, names, from_module, t)?,
+                Some(_) => return None,
+                None => scope_type(g, from_module, base)
+                    .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::CLASS))?,
+            };
+            type_method(g, ty, method)?
+        }
+    };
+    let inner = unwrapped_return(g.nav.return_types.get(&callable)?, wrappers)?;
+    scope_type(g, enclosing_home_module(g, callable)?, inner)
 }
 
 /// GD.3: the class a static call `class.method()` returns: the CLASS
@@ -2301,7 +2440,7 @@ fn static_returned_type(
         .filter(|c| g.nav.kind_by_id.get(c) == Some(&node_kind::CLASS))?;
     let m = g.symbols.class_methods.get(&class)?.get(method).copied()?;
     let ret = g.nav.return_types.get(&m)?;
-    scope_type(g, enclosing_home_module(g, m)?, ret)
+    scope_type(g, enclosing_home_module(g, m)?, plain_return(ret))
 }
 
 /// True when `id` is a CLASS / STRUCT / ENUM: a type that owns fields and
@@ -6383,6 +6522,64 @@ mod tests {
         }
     }
 
+    /// GD.4: `const s = await makeStore()` / `await r.load()` and a
+    /// `.subscribe(s => ..)` parameter bind through the callee's declared
+    /// `Promise<Store>` / `Observable<Store>`, rule `receiver_return`; the
+    /// plain call result holds the wrapper and binds nothing, as does a
+    /// wrapper the form does not unwrap, an unknown-typed base local and a
+    /// non-TS caller.
+    #[test]
+    fn awaited_call_result_binds_through_the_unwrapped_return() {
+        let call = |f| vec![attr_call(f, "s", "reset", 7)];
+        let build = |path: &str, ret: &str, local: &str| {
+            let (api, [_, reset, ..]) = dt5k_api();
+            let (caller, f) = dt5k_caller("spec", path, &["Store"], call, |s, m, f| {
+                let make = s.add(node_kind::FUNCTION, "src::spec::makeStore", Some(m));
+                s.nav.record_return_type(make, ret);
+                let repo_class = s.add(node_kind::CLASS, "src::spec::Repo", Some(m));
+                let load = s.add(node_kind::METHOD, "src::spec::Repo::load", Some(repo_class));
+                s.nav.record_return_type(load, ret);
+                s.nav.record_local_type(f, "r", "Repo");
+                s.nav.record_local_type(f, "u", "");
+                s.nav.record_local_type(f, "s", local);
+            });
+            (
+                build_typescript(repo(), vec![api, caller], rel).unwrap(),
+                f,
+                reset,
+            )
+        };
+        for (ret, local) in [
+            ("Promise<Store>", "await makeStore()"),
+            ("PromiseLike<Store>", "await makeStore()"),
+            ("Promise<Store>", "await r.load()"),
+            ("Observable<Store>", "subscribe makeStore()"),
+            ("Observable<Store>", "subscribe r.load()"),
+        ] {
+            let (g, f, reset) = build("src/spec.ts", ret, local);
+            assert_eq!(
+                calls_with_rule(&g, "receiver_return"),
+                vec![(f, reset, Some(7))],
+                "{ret} {local}"
+            );
+        }
+        for (path, ret, local) in [
+            ("src/spec.ts", "Promise<Store>", "makeStore()"),
+            ("src/spec.ts", "Observable<Store>", "await makeStore()"),
+            ("src/spec.ts", "Promise<Store>", "subscribe makeStore()"),
+            ("src/spec.ts", "Store", "await makeStore()"),
+            ("src/spec.ts", "Promise<Store>", "await u.load()"),
+            ("src/spec.ts", "Promise<Store>", "await r.missing()"),
+            ("svc/spec.py", "Promise<Store>", "await makeStore()"),
+        ] {
+            let (g, _, _) = build(path, ret, local);
+            assert!(
+                edges_of(&g, edge_category::CALLS).is_empty(),
+                "{path} {ret} {local}"
+            );
+        }
+    }
+
     fn member_read(receiver: &str, name: &str, line: u32) -> NavFact {
         NavFact::MemberRead {
             receiver: receiver.to_string(),
@@ -6616,6 +6813,13 @@ mod tests {
             let cm = c.add(node_kind::MODULE, "src::svc", None);
             let class = c.add(node_kind::CLASS, "src::svc::Countries", Some(cm));
             let make = c.add(node_kind::METHOD, "src::svc::Countries::make", Some(class));
+            // GD.4: the TS parser records the class's static names.
+            c.nav.record_fact(
+                class,
+                NavFact::Exports {
+                    names: vec!["fallback".into(), "make".into()],
+                },
+            );
             let e = c.add(node_kind::ENUM, "src::svc::Kind", Some(cm));
             let red = c.add(node_kind::ATTRIBUTE, "src::svc::Kind::RED", Some(e));
             let mut s = Shape::new();
@@ -6660,6 +6864,75 @@ mod tests {
         let (g, _, _) = build("Countries.FALLBACK", "src/Page.java");
         assert!(edges_of(&g, edge_category::USES).is_empty());
         assert_eq!(g.unresolved_refs.len(), 1);
+    }
+
+    /// GD.4: a lowercase `T.x` read of an imported CLASS binds only to a
+    /// static the class declares exactly (its [`NavFact::Exports`]): a static
+    /// field USES the CLASS (`static_member`), a static method read by value
+    /// that METHOD (`attribute`); an undeclared name, a class with no static
+    /// record and a non-TS reader bind nothing.
+    #[test]
+    fn ts_lowercase_static_read_needs_a_declared_static() {
+        let build = |name: &str, path: &str, statics: &[&str]| {
+            let mut c = Shape::new();
+            let cm = c.add(node_kind::MODULE, "src::api", None);
+            let class = c.add(node_kind::CLASS, "src::api::Api", Some(cm));
+            let ping = c.add(node_kind::METHOD, "src::api::Api::ping", Some(class));
+            let load = c.add(node_kind::METHOD, "src::api::Api::load", Some(class));
+            if !statics.is_empty() {
+                c.nav.record_fact(
+                    class,
+                    NavFact::Exports {
+                        names: statics.iter().map(|s| s.to_string()).collect(),
+                    },
+                );
+            }
+            let mut s = Shape::new();
+            let m = s.add(node_kind::MODULE, "src::page", None);
+            let f = s.add(node_kind::FUNCTION, "src::page::f", Some(m));
+            let (base, member) = name.split_once('.').expect("a dotted read");
+            let uses = UnresolvedRef {
+                from: f,
+                from_module: m,
+                qualifier: attr(base, member),
+                category: edge_category::USES,
+                line: 2,
+            };
+            let mut file = s.file(
+                vec![import_symbol("src::page", "./api", "Api")],
+                vec![],
+                vec![uses],
+            );
+            place(&mut file, f, path);
+            let g =
+                build_typescript(repo(), vec![c.file(vec![], vec![], vec![]), file], rel).unwrap();
+            (g, f, [class, ping, load])
+        };
+        let statics = ["baseUrl", "ping"];
+        let (g, f, [class, ..]) = build("Api.baseUrl", "src/page.ts", &statics);
+        assert_eq!(
+            evidence_rule(&g, f, class, edge_category::USES),
+            refs_rule("static_member")
+        );
+        let (g, f, [_, ping, _]) = build("Api.ping", "src/page.ts", &statics);
+        assert_eq!(
+            evidence_rule(&g, f, ping, edge_category::USES),
+            refs_rule("attribute")
+        );
+        // `load` is an instance method, `other` no member: neither is static.
+        for (read, path, statics) in [
+            ("Api.load", "src/page.ts", &statics[..]),
+            ("Api.other", "src/page.ts", &statics[..]),
+            ("Api.baseUrl", "src/page.ts", &[][..]),
+            ("Api.baseUrl", "src/Page.java", &statics[..]),
+        ] {
+            let (g, _, _) = build(read, path, statics);
+            assert!(
+                edges_of(&g, edge_category::USES).is_empty(),
+                "{read} {path}"
+            );
+            assert_eq!(g.unresolved_refs.len(), 1, "{read} {path}");
+        }
     }
 }
 

@@ -1,0 +1,34 @@
+{
+  "framework": "ts-close-out-receivers",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.4 (FD.10b, the TypeScript residuals of the 0.5.2 close-out): a `TestBed.inject(T)` local is a T, an `await` of a call whose return annotation is `Promise<T>` is a T, a nested `function f() {}` inside a walked body is walked with its calls credited to the enclosing scope, and a lowercase static read `Api.baseUrl` of an imported CLASS declaring that static is a USES of the CLASS. Baseline (HEAD a8323fe7, debug CLI and the wave-3 leap wheel): none of the four edges.",
+  "expect_edges": [
+    {
+      "from": "svc::useIt",
+      "to": "svc::Item::touch",
+      "category": "CALLS",
+      "note": "`const it = await s.load()` with `load(): Promise<Item>`: await unwraps the Promise"
+    },
+    {
+      "from": "svc::useIt",
+      "to": "api::Api::ping",
+      "category": "CALLS",
+      "note": "a call inside the nested `function inner()` is credited to useIt"
+    },
+    {
+      "from": "svc::url",
+      "to": "api::Api",
+      "category": "USES",
+      "note": "lowercase static `Api.baseUrl` read cross-file, Api declares `static baseUrl`"
+    },
+    {
+      "from": "svc.spec",
+      "to": "svc::Svc::load",
+      "category": "CALLS",
+      "note": "`const s = TestBed.inject(Svc)` under an @angular/core/testing import types s"
+    }
+  ]
+}
