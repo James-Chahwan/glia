@@ -53,7 +53,7 @@
 //! file under `.glia/` but the layout, the git identity files). A directory
 //! or watched input inside the racy window is checked against a fingerprint
 //! of its listing or bytes taken right before the update that last read it
-//! (`WatchSession::capture`); one with none is reported, and the update it
+//! (`RepoWatch::capture`); one with none is reported, and the update it
 //! triggers takes one. [`WatchSession::poll`] is the scan, then
 //! [`WatchSession::apply`] of what it found. The watermark the racy window
 //! hangs from moves only when a scan finds nothing, so a recorded value is
@@ -330,7 +330,40 @@ pub struct WatchUpdate {
 /// The session holds no lock on the repo. [`WatchSession::persist`] writes
 /// against the files on disk: CD.7c stores a CODE cell as a span only when its
 /// text still matches the file, so persist right after an update.
+///
+/// The per-repo state (walk table, repo-level inputs, parse cache, group
+/// cache, watched inputs) lives in one `RepoWatch` per repo; the session
+/// holds the joint build, its `seq`, the racy watermark and the ranking
+/// cache. [`WatchSession::open`] makes exactly one repo, and nothing removes
+/// it.
 pub struct WatchSession {
+    /// The repos watched, in build order: exactly one, from
+    /// [`WatchSession::open`].
+    repos: Vec<RepoWatch>,
+    opts: BuildOptions,
+    result: GenerateResult,
+    seq: u64,
+    /// DC.7c: the racy rule's watermark: every record, directory listing and
+    /// watched input of every repo was read, or stat'ed and found unchanged,
+    /// at or after it. Set at open (before any read) and moved only by a scan
+    /// that finds nothing, never by an update: an update re-reads only what
+    /// it was named (a re-plan reuses every other entry's read under its
+    /// recorded stamp), so moving it there would age an entry out of the
+    /// window unchecked. Behind a lock because
+    /// [`WatchSession::changed_paths`] takes `&self`.
+    scanned_at: Mutex<SystemTime>,
+    /// 0.5.3 (EA.7): the ranking indexes of `result`'s graph (holder
+    /// `watch`), shared with every snapshot of it ([`WatchSession::rank_cache`]).
+    /// Built empty at open and replaced by a fresh one right after an update
+    /// swaps `result`, so it never serves an index of an older graph; a noop
+    /// update keeps it, since the graph did not change.
+    rank: Arc<RankCache>,
+}
+
+/// One repo of a [`WatchSession`]: its walk plan and file table, the
+/// repo-level inputs, the parse cache, the language group cache and the
+/// watched inputs with their racy baselines.
+struct RepoWatch {
     /// The root as the caller gave it.
     root: PathBuf,
     /// The root's absolute and canonical spellings, which an absolute changed
@@ -339,7 +372,6 @@ pub struct WatchSession {
     /// The root as given, as a string: every marker's `repo=`, the result's
     /// label and root, the parse cache's location.
     label: String,
-    opts: BuildOptions,
     plan: WalkPlan,
     /// One record per `plan.pending`, index for index (walk order).
     records: Vec<ReadRecord>,
@@ -351,40 +383,23 @@ pub struct WatchSession {
     /// The build's proto service set ([`proto_services_fp`]).
     services_fp: u64,
     cache: ParseCache,
-    result: GenerateResult,
     /// DC.7b: every language group's last pre-pass build whose fingerprint
     /// could be taken, in plan order.
     groups: Vec<CachedGroup>,
-    /// The plan key of each language graph of `result.merged`, index for
-    /// index (`LanguageGraphs::keys`); the region / project / docs graphs
-    /// follow them.
+    /// The plan key of each language graph of the session's `result.merged`,
+    /// index for index (`LanguageGraphs::keys`); the region / project / docs
+    /// graphs follow them.
     graph_keys: Vec<&'static str>,
-    seq: u64,
     /// DC.7c: every input a build reads besides the table ([`Input`]), by
     /// repo-relative path: its class and its stat as of the update that last
     /// read it (`None`: absent, or not a file). A class an update did not
     /// re-read keeps its entries, so a change nobody named stays visible.
     watched: BTreeMap<String, Watched>,
-    /// DC.7c: the fingerprints [`WatchSession::capture`] took right before
+    /// DC.7c: the fingerprints [`RepoWatch::capture`] took right before
     /// the update that last read each class: of the walked directories
     /// ([`dir_fp`], class [`Input::Walk`]) and watched inputs ([`bytes_fp`])
     /// that were inside the racy window then.
     baselines: BTreeMap<String, (Input, u64)>,
-    /// DC.7c: the racy rule's watermark: every record, directory listing and
-    /// watched input was read, or stat'ed and found unchanged, at or after
-    /// it. Set at open (before any read) and moved only by a scan that finds
-    /// nothing, never by an update: an update re-reads only what it was
-    /// named (a re-plan reuses every other entry's read under its recorded
-    /// stamp), so moving it there would age an entry out of the window
-    /// unchecked. Behind a lock because [`WatchSession::changed_paths`]
-    /// takes `&self`.
-    scanned_at: Mutex<SystemTime>,
-    /// 0.5.3 (EA.7): the ranking indexes of `result`'s graph (holder
-    /// `watch`), shared with every snapshot of it ([`WatchSession::rank_cache`]).
-    /// Built empty at open and replaced by a fresh one right after an update
-    /// swaps `result`, so it never serves an index of an older graph; a noop
-    /// update keeps it, since the graph did not change.
-    rank: Arc<RankCache>,
 }
 
 /// DC.7c: which update re-reads a watched input.
@@ -411,7 +426,7 @@ enum Input {
     Identity,
 }
 
-/// DC.7c: one watched input ([`WatchSession::watched`]).
+/// DC.7c: one watched input ([`RepoWatch::watched`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Watched {
     class: Input,
@@ -475,7 +490,7 @@ impl Window {
     }
 }
 
-/// DC.7c: one stat scan ([`WatchSession::scan`]): the repo-relative paths it
+/// DC.7c: one stat scan ([`RepoWatch::scan`]): the repo-relative paths it
 /// found changed (sorted, deduplicated), what it checked, the racy checks it
 /// made, when it started and what it took.
 struct Scan {
@@ -712,12 +727,11 @@ impl WatchSession {
             &built.result.repo_roots,
             &built.result.repo_labels,
         ));
-        let mut session = Self {
+        let mut repo = RepoWatch {
             abs_roots: abs_roots(&root_path),
             index: index_of(&records),
             root: root_path,
             label: root.to_string(),
-            opts: opts.clone(),
             plan,
             records,
             regions: tree.regions,
@@ -725,17 +739,20 @@ impl WatchSession {
             setup,
             services_fp,
             cache,
-            result: built.result,
             groups: refresh_groups(Vec::new(), built.slots),
             graph_keys: built.graph_keys,
-            seq: 0,
             watched: BTreeMap::new(),
             baselines: BTreeMap::new(),
+        };
+        repo.refresh_watch(Consumed::ALL, BTreeMap::new());
+        Ok(Self {
+            repos: vec![repo],
+            opts: opts.clone(),
+            result: built.result,
+            seq: 0,
             scanned_at: Mutex::new(scanned_at),
             rank,
-        };
-        session.refresh_watch(Consumed::ALL, BTreeMap::new());
-        Ok(session)
+        })
     }
 
     /// Bring the session up to date with `changed`, the paths the caller saw
@@ -760,14 +777,18 @@ impl WatchSession {
     /// error (or a panic an embedding app catches) leaves the previous state.
     pub fn apply(&mut self, changed: &[PathBuf]) -> Result<WatchUpdate, String> {
         let started = Instant::now();
-        if !self.root.is_dir() {
-            return Err(format!("not a directory: {}", self.label));
+        let scanned = watermark(&self.scanned_at);
+        let Some(repo) = self.repos.first_mut() else {
+            return Err("watch session holds no repo".to_string());
+        };
+        if !repo.root.is_dir() {
+            return Err(format!("not a directory: {}", repo.label));
         }
         let mut outside = 0usize;
         let mut named = BTreeSet::new();
         for p in changed {
-            match self.rel_of(p) {
-                Some(rel) if !self.dropped(&rel) => {
+            match repo.rel_of(p) {
+                Some(rel) if !repo.dropped(&rel) => {
                     named.insert(rel);
                 }
                 Some(_) => {}
@@ -775,7 +796,7 @@ impl WatchSession {
             }
         }
         if outside > 0 {
-            eprintln!("[watch] outside repo={} paths={outside}", self.label);
+            eprintln!("[watch] outside repo={} paths={outside}", repo.label);
         }
         let high: BTreeSet<&'static str> = named
             .iter()
@@ -784,55 +805,71 @@ impl WatchSession {
                 Durability::Low => None,
             })
             .collect();
-        let replan = !high.is_empty() || named.iter().any(|rel| self.reshapes(rel));
+        let replan = !high.is_empty() || named.iter().any(|rel| repo.reshapes(rel));
         // DC.7c: the baselines, before this update reads anything.
         let captured = if named.is_empty() {
             BTreeMap::new()
         } else {
-            self.capture(replan)
+            repo.capture(replan, scanned)
         };
         let tree = if named.is_empty() {
             None
         } else if replan {
-            Some(self.replanned(&named))
+            Some(repo.replanned(&named))
         } else {
-            self.reread(&named)
+            repo.reread(&named)
         };
         let Some(mut tree) = tree else {
-            return Ok(self.noop(changed.len(), started, Duration::ZERO, Duration::ZERO));
+            return Ok(noop_update(
+                &repo.label,
+                self.seq,
+                &self.result,
+                changed.len(),
+                started,
+                Duration::ZERO,
+                Duration::ZERO,
+            ));
         };
         let at = At {
-            root: &self.root,
-            label: &self.label,
+            root: &repo.root,
+            label: &repo.label,
             opts: &self.opts,
         };
-        let setup = self.setup.refresh(&at, &tree, &high, replan);
+        let setup = repo.setup.refresh(&at, &tree, &high, replan);
         let consumed = Consumed {
             walk: replan,
-            includes: replan || setup.files_fp != self.setup.files_fp,
+            includes: replan || setup.files_fp != repo.setup.files_fp,
             glia: high.contains("glia_inputs"),
             identity: high.contains("identity"),
         };
         let unchanged = tree.changes.added.is_empty()
             && tree.changes.modified.is_empty()
             && tree.changes.removed.is_empty()
-            && tree.regions == self.regions
-            && tree.roots == self.roots
-            && setup.same_inputs(&self.setup);
+            && tree.regions == repo.regions
+            && tree.roots == repo.roots
+            && setup.same_inputs(&repo.setup);
         if unchanged {
             let (walk, read) = (tree.walk, tree.read);
-            self.commit_tree(tree, setup);
-            self.refresh_watch(consumed, captured);
-            return Ok(self.noop(changed.len(), started, walk, read));
+            repo.commit_tree(tree, setup);
+            repo.refresh_watch(consumed, captured);
+            return Ok(noop_update(
+                &repo.label,
+                self.seq,
+                &self.result,
+                changed.len(),
+                started,
+                walk,
+                read,
+            ));
         }
         let services_fp = proto_services_fp(&tree.files);
-        let full_rebuild = full_rebuild_reason(&self.setup, &setup, self.services_fp, services_fp);
+        let full_rebuild = full_rebuild_reason(&repo.setup, &setup, repo.services_fp, services_fp);
         let built = build(
             &at,
             &setup,
             &mut tree,
-            &mut self.cache,
-            &self.groups,
+            &mut repo.cache,
+            &repo.groups,
             services_fp,
             started,
         );
@@ -842,11 +879,11 @@ impl WatchSession {
         // holds on a Low update; a High input (the overlay, `.glia`, a
         // manifest, ...) or a SCIP snapshot can move a clean graph after the
         // passes, so those take the full delta.
-        let scoped = high.is_empty() && full_rebuild.is_none() && !scip_dir(&self.root).exists();
+        let scoped = high.is_empty() && full_rebuild.is_none() && !scip_dir(&repo.root).exists();
         let rows = if scoped {
             let scope = DeltaScope {
                 before: scope_side(
-                    &self.graph_keys,
+                    &repo.graph_keys,
                     self.result.merged.graphs.len(),
                     &built.rebuilt,
                     &built.graph_keys,
@@ -855,7 +892,7 @@ impl WatchSession {
                     &built.graph_keys,
                     built.result.merged.graphs.len(),
                     &built.rebuilt,
-                    &self.graph_keys,
+                    &repo.graph_keys,
                 ),
                 moves: !tree.changes.added.is_empty() || !tree.changes.removed.is_empty(),
             };
@@ -877,11 +914,11 @@ impl WatchSession {
         } = built;
         let (walk, read) = (tree.walk, tree.read);
         let changes = std::mem::take(&mut tree.changes);
-        self.commit_tree(tree, setup);
-        self.refresh_watch(consumed, captured);
-        self.services_fp = services_fp;
-        self.groups = refresh_groups(std::mem::take(&mut self.groups), slots);
-        self.graph_keys = graph_keys;
+        repo.commit_tree(tree, setup);
+        repo.refresh_watch(consumed, captured);
+        repo.services_fp = services_fp;
+        repo.groups = refresh_groups(std::mem::take(&mut repo.groups), slots);
+        repo.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
         self.rank = Arc::new(RankCache::new(
@@ -890,7 +927,7 @@ impl WatchSession {
             &self.result.repo_labels,
         ));
         crate::memory::release_freed_memory("watch_update");
-        let stats = self.cache.stats;
+        let stats = repo.cache.stats;
         let update = WatchUpdate {
             seq: self.seq,
             files: WatchFiles {
@@ -924,7 +961,7 @@ impl WatchSession {
         };
         eprintln!(
             "{}",
-            update_marker(&update, groups.len(), started.elapsed(), &self.label)
+            update_marker(&update, groups.len(), started.elapsed(), &repo.label)
         );
         Ok(update)
     }
@@ -953,7 +990,9 @@ impl WatchSession {
     /// Save the held parse cache beside the repo's layout
     /// (`ParseCache::save`: written only when it changed, LC.11).
     pub fn save_cache(&self) -> std::io::Result<()> {
-        self.cache.save(&self.label)
+        self.repos
+            .first()
+            .map_or(Ok(()), |repo| repo.cache.save(&repo.label))
     }
 
     /// Updates that rebuilt since [`WatchSession::open`] (0 right after it).
@@ -971,7 +1010,10 @@ impl WatchSession {
     /// the racy watermark to its start; one that finds something prints the
     /// `[watch] poll` line.
     pub fn changed_paths(&self) -> Vec<PathBuf> {
-        let scan = self.scan();
+        let Some(repo) = self.repos.first() else {
+            return Vec::new();
+        };
+        let scan = repo.scan(self.scanned());
         if scan.found.is_empty() {
             let mut at = self
                 .scanned_at
@@ -980,8 +1022,8 @@ impl WatchSession {
             *at = (*at).max(scan.started);
             return Vec::new();
         }
-        eprintln!("{}", poll_marker(&scan, &self.label));
-        let base = self.abs_roots.first().unwrap_or(&self.root);
+        eprintln!("{}", poll_marker(&scan, &repo.label));
+        let base = repo.abs_roots.first().unwrap_or(&repo.root);
         scan.found
             .iter()
             .map(|rel| {
@@ -1008,6 +1050,13 @@ impl WatchSession {
         Ok((update.seq != seq).then_some(update))
     }
 
+    /// DC.7c: the racy watermark ([`WatchSession::scanned_at`]).
+    fn scanned(&self) -> SystemTime {
+        watermark(&self.scanned_at)
+    }
+}
+
+impl RepoWatch {
     /// `p` as a repo-relative `/` path: an absolute `p` must lie under the
     /// root (as given made absolute, or canonical), a relative one is taken as
     /// repo-relative; `None` for a path outside the root or one that climbs
@@ -1225,36 +1274,6 @@ impl WatchSession {
         self.setup = setup;
     }
 
-    /// The answer of an update that changed nothing, with its marker.
-    fn noop(&self, paths: usize, started: Instant, walk: Duration, read: Duration) -> WatchUpdate {
-        eprintln!("[watch] noop repo={} paths={paths}", self.label);
-        WatchUpdate {
-            seq: self.seq,
-            files: WatchFiles::default(),
-            groups_rebuilt: Vec::new(),
-            full_rebuild: None,
-            total_nodes: self.result.total_nodes,
-            total_edges: self.result.total_edges,
-            counts: DeltaCounts::default(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            phase_ms: WatchPhases {
-                read: ms(read),
-                walk: ms(walk),
-                total: ms(started.elapsed()),
-                ..WatchPhases::default()
-            },
-        }
-    }
-
-    /// DC.7c: the racy watermark ([`WatchSession::scanned_at`]).
-    fn scanned(&self) -> SystemTime {
-        *self
-            .scanned_at
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// DC.7c: one stat scan (module doc, "Stat poll"). A table entry is
     /// found when its stat differs from its record or, inside the racy
     /// window, when a fresh read (by its class's rule) differs from the
@@ -1263,10 +1282,10 @@ impl WatchSession {
     /// watched input when it appeared, vanished or its stat moved or, inside
     /// the window, its bytes differ from its baseline (or it has none). The
     /// table and the directories are stat'ed on the pool.
-    fn scan(&self) -> Scan {
+    fn scan(&self, scanned: SystemTime) -> Scan {
         let started = SystemTime::now();
         let timer = Instant::now();
-        let window = Window::at(self.scanned(), started);
+        let window = Window::at(scanned, started);
         let mut found = BTreeSet::new();
         let mut racy = 0usize;
         let table: Vec<(&Pending, &ReadRecord)> =
@@ -1365,8 +1384,8 @@ impl WatchSession {
     /// mismatch on a later scan, one between it and the read a spurious one
     /// that the next update settles. A directory or input new to the update
     /// has none until the update after.
-    fn capture(&self, replan: bool) -> BTreeMap<String, (Input, u64)> {
-        let window = Window::at(self.scanned(), SystemTime::now());
+    fn capture(&self, replan: bool, scanned: SystemTime) -> BTreeMap<String, (Input, u64)> {
+        let window = Window::at(scanned, SystemTime::now());
         let mut out = BTreeMap::new();
         if replan {
             let dirs = self.walked_dirs();
@@ -1483,6 +1502,42 @@ impl WatchSession {
             }
         }
         out
+    }
+}
+
+/// DC.7c: the racy watermark held in `at` ([`WatchSession::scanned_at`]).
+fn watermark(at: &Mutex<SystemTime>) -> SystemTime {
+    *at.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The answer of an update that changed nothing (the session's `seq` and
+/// `result` totals as they stand), with its marker for the repo `label`.
+fn noop_update(
+    label: &str,
+    seq: u64,
+    result: &GenerateResult,
+    paths: usize,
+    started: Instant,
+    walk: Duration,
+    read: Duration,
+) -> WatchUpdate {
+    eprintln!("[watch] noop repo={label} paths={paths}");
+    WatchUpdate {
+        seq,
+        files: WatchFiles::default(),
+        groups_rebuilt: Vec::new(),
+        full_rebuild: None,
+        total_nodes: result.total_nodes,
+        total_edges: result.total_edges,
+        counts: DeltaCounts::default(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        phase_ms: WatchPhases {
+            read: ms(read),
+            walk: ms(walk),
+            total: ms(started.elapsed()),
+            ..WatchPhases::default()
+        },
     }
 }
 
@@ -2740,7 +2795,11 @@ mod tests {
 
     /// The plan keys the session caches a build for, in plan order.
     fn cached_keys(s: &WatchSession) -> Vec<String> {
-        s.groups.iter().map(|c| c.key.to_string()).collect()
+        s.repos[0]
+            .groups
+            .iter()
+            .map(|c| c.key.to_string())
+            .collect()
     }
 
     /// A proto service change is a full rebuild: the service set is in
@@ -2770,7 +2829,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = mixed_repo(tmp.path());
         let mut s = open(&dir);
-        for c in &mut s.groups {
+        for c in &mut s.repos[0].groups {
             if c.key == "go" || c.key == "typescript" {
                 c.build = LangBuild::failed(c.key, &format!("{} graph: e", c.key));
             }
@@ -2783,11 +2842,12 @@ mod tests {
         want.extend(["go graph: e".to_string(), "typescript graph: e".to_string()]);
         assert_eq!(s.result().parse_errors, want);
         assert!(
-            !s.graph_keys
+            !s.repos[0]
+                .graph_keys
                 .iter()
                 .any(|k| *k == "go" || *k == "typescript"),
             "{:?}",
-            s.graph_keys
+            s.repos[0].graph_keys
         );
         assert_eq!(
             s.result().merged.graphs.len() + 2,
@@ -2879,7 +2939,10 @@ mod tests {
 
     /// `paths` (from `changed_paths`) as repo-relative paths, `""` the root.
     fn rels(s: &WatchSession, paths: &[PathBuf]) -> Vec<String> {
-        paths.iter().map(|p| s.rel_of(p).unwrap()).collect()
+        paths
+            .iter()
+            .map(|p| s.repos[0].rel_of(p).unwrap())
+            .collect()
     }
 
     #[test]
@@ -2899,13 +2962,13 @@ mod tests {
         let found = s.changed_paths();
         assert!(found.iter().all(|p| p.is_absolute()), "{found:?}");
         assert_eq!(rels(&s, &found), ["a.py"]);
-        let scan = s.scan();
+        let scan = s.repos[0].scan(s.scanned());
         let line = poll_marker(&scan, "r");
         assert!(
             line.starts_with(&format!(
                 "[watch] poll files={} dirs={} watched={} changed=1 racy=",
-                s.records.len(),
-                s.plan.dirs.len() + s.plan.region_dirs.len(),
+                s.repos[0].records.len(),
+                s.repos[0].plan.dirs.len() + s.repos[0].plan.region_dirs.len(),
                 scan.watched
             )) && line.ends_with(" repo=r"),
             "{line}"
@@ -2954,8 +3017,14 @@ mod tests {
         write(&dir, "third/lib/.git/HEAD", "ref: refs/heads/main\n");
         settle(&dir);
         let mut s = open(&dir);
-        let region = |s: &WatchSession| s.plan.region_dirs.iter().any(|d| d.rel == "third/lib");
-        assert!(region(&s), "{:?}", s.plan.region_dirs);
+        let region = |s: &WatchSession| {
+            s.repos[0]
+                .plan
+                .region_dirs
+                .iter()
+                .any(|d| d.rel == "third/lib")
+        };
+        assert!(region(&s), "{:?}", s.repos[0].plan.region_dirs);
         assert!(s.changed_paths().is_empty());
 
         write(&dir, "pkg/d.py", "def d():\n    return c()\n");
@@ -2969,7 +3038,7 @@ mod tests {
         assert_eq!(rels(&s, &s.changed_paths()), ["third/lib"]);
         let u = s.poll().unwrap().expect("the region un-collapses");
         assert_eq!(u.files.added, ["third/lib/x.py"]);
-        assert!(!region(&s), "{:?}", s.plan.region_dirs);
+        assert!(!region(&s), "{:?}", s.repos[0].plan.region_dirs);
         assert_clean(&s, &dir, tmp.path(), "unregioned");
         assert!(s.changed_paths().is_empty());
     }
@@ -2983,8 +3052,8 @@ mod tests {
         // Written "just now": inside the racy window when the session opens.
         set_mtime(&path, SystemTime::now());
         let mut s = open(&dir);
-        let recorded = s.records[s.index["a.py"]].stamp.unwrap();
-        let scan = s.scan();
+        let recorded = s.repos[0].records[s.repos[0].index["a.py"]].stamp.unwrap();
+        let scan = s.repos[0].scan(s.scanned());
         assert!(scan.found.is_empty(), "{:?}", scan.found);
         assert_eq!(scan.racy, 1, "a.py alone sits in the window");
         assert!(s.changed_paths().is_empty());
@@ -3030,7 +3099,11 @@ mod tests {
             ".git/HEAD",
             ".git/config",
         ] {
-            assert!(s.watched.contains_key(rel), "{rel}: {:?}", s.watched.keys());
+            assert!(
+                s.repos[0].watched.contains_key(rel),
+                "{rel}: {:?}",
+                s.repos[0].watched.keys()
+            );
         }
         assert!(s.changed_paths().is_empty());
 
@@ -3172,7 +3245,7 @@ mod tests {
             let started = Instant::now();
             let found = s.changed_paths();
             let took = started.elapsed();
-            let scan = s.scan();
+            let scan = s.repos[0].scan(s.scanned());
             eprintln!(
                 "[watch-bench] quiet poll {i} files={} dirs={} watched={} racy={} changed={} took={}",
                 scan.files,
