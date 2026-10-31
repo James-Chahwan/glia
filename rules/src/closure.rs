@@ -692,7 +692,7 @@ fn category_name(registries: &Registries, c: EdgeCategoryId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     use glia_activation::profile::{DomainTables, EntryRule};
     use glia_core::{Confidence, NodeKindId};
@@ -808,7 +808,7 @@ mod tests {
         for level in Tier::ALL {
             let mut frontier: Vec<u64> =
                 seeds.iter().filter(|s| s.1 <= level).map(|s| s.0).collect();
-            let mut seen: HashSet<u64> = HashSet::new();
+            let mut seen: BTreeSet<u64> = BTreeSet::new();
             let mut d = 0u32;
             while !frontier.is_empty() && depth.is_none_or(|m| d < m) {
                 let mut next = Vec::new();
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn reach_from_matches_bfs_levels_semantics() {
-        let mut tiers_seen = HashSet::new();
+        let mut tiers_seen = BTreeSet::new();
         for (seed, m) in (1..=6u64).zip([260, 260, 260, 150, 150, 150]) {
             let edges = random_edges(seed, 120, m, true);
             let g = graph(120, &edges);
@@ -902,7 +902,7 @@ mod tests {
                         "seed {seed} backward {backward}"
                     );
                     assert_eq!(
-                        rows.iter().map(|r| r.0).collect::<HashSet<_>>().len(),
+                        rows.iter().map(|r| r.0.0).collect::<BTreeSet<_>>().len(),
                         rows.len(),
                         "a node is one row"
                     );
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn scc_rows_match_tarjan() {
-        let (mut tiers_seen, mut widest) = (HashSet::new(), 0usize);
+        let (mut tiers_seen, mut widest) = (BTreeSet::new(), 0usize);
         for seed in 1..=8u64 {
             let n = 40;
             let edges = random_edges(seed, n, 70, true);

@@ -6,10 +6,14 @@
 //!
 //! **The search.** A row of rule R with height H at level L is explained by
 //! enumerating the instantiations of R whose body rows sit at levels <= L with heights
-//! below H. That is exec's Explain mode over `View { levels: 0..=L, max_height: Some(H)
-//! }`. The levelled evaluation inserts a row once, at the first derivation of its
-//! level, and never updates it, so the recorded derivation is always among them. The
-//! body runs from one of three plans:
+//! at L below H. That is exec's Explain mode over `View { levels: 0..=L, max_height:
+//! Some(H), at: Some(L) }`. Rows keep a height per level (GA.16, eval.rs "Heights per
+//! level"), each the lowest derivation with inputs of that level or below, so the
+//! recorded derivation is always among them. A body row is a child tuple searched in
+//! turn AT L, under its (rule, height) at L, so a FACT prefix of a DERIVED row shows the
+//! DERIVED-level derivation it was counted at (its `tier` stays its own) and the whole
+//! witness is BFS-shortest at the root's tier. The body runs from one of three
+//! plans:
 //! - `plan_bound` with the head's variables bound (no hoist: every literal is
 //!   instantiated). Its index permutations are built with `Relation::ensure_index` the
 //!   first time they are needed and kept for later explains.
@@ -138,9 +142,12 @@ pub struct Witness {
     /// `name/arity`: the user predicate (a synthetic copy is never named).
     pub predicate: String,
     pub values: Vec<Value>,
+    /// The row's own tier (a tuple inside a weaker row's proof keeps its own).
     pub tier: Tier,
-    /// The derivation height (0 for a leaf or a negation).
+    /// The derivation height (0 for a leaf or a negation): for a tuple, at the level the
+    /// proof is searched at, the root's (GA.16).
     pub height: u32,
+    /// The rule of that derivation.
     pub rule: Option<RuleRef>,
     pub negated: bool,
     pub support: Vec<Witness>,
@@ -450,6 +457,9 @@ struct Cand {
     vars: Vec<Handle>,
     level: Tier,
     height: u32,
+    /// The level its rows' heights were read at: the search's (GA.16), where each
+    /// child tuple is searched in turn.
+    at: Tier,
     lits: Vec<LitRow>,
     /// An aggregate binding's projection; empty otherwise.
     proj: Vec<Handle>,
@@ -459,11 +469,13 @@ struct Cand {
 #[derive(Clone)]
 enum Child {
     /// An IDB tuple, expanded when placed; `splice`: an adorned copy, whose support
-    /// takes its place.
+    /// takes its place. `tier` is the row's own level, `meta` its provenance at level
+    /// `at`, the level its parent was searched at and it is searched at.
     Tuple {
         pred: PredId,
         row: Vec<Handle>,
         tier: Tier,
+        at: Tier,
         meta: RowMeta,
         splice: bool,
     },
@@ -501,8 +513,8 @@ struct Explainer<'x, S: FactSource + ?Sized> {
     candidates: usize,
     /// By rule index.
     bodies: Lookup<usize, Rc<Body>>,
-    /// Each searched tuple's position in `searched`.
-    chosen: Lookup<(PredId, Vec<Handle>), usize>,
+    /// Each searched (tuple, level)'s position in `searched`.
+    chosen: Lookup<(PredId, Tier, Vec<Handle>), usize>,
     searched: Vec<Vec<Child>>,
 }
 
@@ -536,10 +548,11 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                     pred,
                     row,
                     tier,
+                    at,
                     meta,
                     splice,
                 } => {
-                    let kids = self.expand(pred, &row, tier, meta)?;
+                    let kids = self.expand(pred, &row, at, meta)?;
                     let to = if splice {
                         attach
                     } else {
@@ -678,7 +691,8 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         })
     }
 
-    /// A tuple's chosen children, searched once per tuple.
+    /// A tuple's chosen children at `level` (its provenance there is `meta`), searched
+    /// once per tuple and level.
     fn expand(
         &mut self,
         pred: PredId,
@@ -686,7 +700,7 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         level: Tier,
         meta: RowMeta,
     ) -> Result<Vec<Child>, RulesError> {
-        let key = (pred, row.to_vec());
+        let key = (pred, level, row.to_vec());
         if let Some(&i) = self.chosen.get(&key) {
             return Ok(self.searched.get(i).cloned().unwrap_or_default());
         }
@@ -904,6 +918,11 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         let (mut count, mut over) = (0usize, false);
         let mut best: Option<(Tier, u32)> = None;
         let mut cands: Vec<Cand> = Vec::new();
+        let at = match mode {
+            Mode::Explain { level, .. } => level,
+            Mode::Eval { level, .. } => level,
+            Mode::Fold => Tier::Heuristic,
+        };
         let ran = self.run(steps, kept, fresh, mode, &mut |b| {
             let Some(proj) = accept(b) else { return Ok(()) };
             count += 1;
@@ -932,6 +951,7 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                 vars: b.vars.to_vec(),
                 level: b.level,
                 height: b.height,
+                at,
                 lits,
                 proj,
             });
@@ -1074,7 +1094,7 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                     else {
                         return Err(self.internal(rule.head, unmatched()));
                     };
-                    if let Some(c) = self.positive(*p, terms, step, row, &cand.vars)? {
+                    if let Some(c) = self.positive(*p, terms, step, row, cand)? {
                         out.push((li, c));
                     }
                 }
@@ -1083,16 +1103,18 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
         Ok(out)
     }
 
-    /// The child of a positive literal's row: an IDB tuple (none for a magic atom),
-    /// an EDB leaf or a builtin leaf.
+    /// The child of a positive literal's row in instantiation `cand`: an IDB tuple
+    /// (none for a magic atom), searched at `cand`'s level, an EDB leaf or a builtin
+    /// leaf.
     fn positive(
         &mut self,
         p: PredId,
         terms: &[CTerm],
         step: &Step,
         lit: &LitRow,
-        vars: &[Handle],
+        cand: &Cand,
     ) -> Result<Option<Child>, RulesError> {
+        let vars = &cand.vars;
         let Some(info) = self.an.preds.get(p as usize) else {
             return Err(self.internal(p, "a row of an unknown predicate".into()));
         };
@@ -1106,6 +1128,7 @@ impl<'x, S: FactSource + ?Sized> Explainer<'x, S> {
                     pred: p,
                     row,
                     tier,
+                    at: cand.at,
                     meta,
                     splice: info.synthetic,
                 }))

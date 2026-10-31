@@ -3,8 +3,8 @@
 //!
 //! A relation holds rows of `arity` value handles. A row is stored once, in the
 //! partition of the level (0 FACT, 1 DERIVED, 2 HEURISTIC) whose round first derived
-//! it, and never updated, so "visible at level <= L" picks partitions instead of
-//! filtering rows. Every index keeps its own copy of the rows with the columns
+//! it, and never moved (only its height at a higher level may drop, below), so
+//! "visible at level <= L" picks partitions instead of filtering rows. Every index keeps its own copy of the rows with the columns
 //! permuted (position `i` holds relation column `perm[i]`; index 0 is the identity),
 //! so a lookup key is a prefix of the permuted columns. A partition holds stable runs
 //! (oldest first) and `recent`, the last round's new rows. Each batch is row-major,
@@ -26,6 +26,18 @@
 //! searches otherwise. Handle order carries no meaning: nothing here orders output.
 //! No hash map. Columns are `u8`, so a relation of more than 256 columns has the
 //! identity index only.
+//!
+//! **Heights per level (GA.16).** A row's (height, rule) is its lowest derivation at
+//! its own level; a level above it may reach the row in fewer steps (DERIVED edges
+//! shortening a FACT prefix). [`Relation::insert_round`] at level L does not drop such
+//! a row: it LOWERS it at L, recording a [`Low`] `(from: L, meta)` beside the row in
+//! every index, so a view resolving heights at L (or above) reads the lower meta, and
+//! keeps a copy of the row in `lowered[L][home]`. Those copies are what changed at L
+//! besides L's own rows: a delta view at L (`View::lowered`) reads the last round's
+//! copies, and the first round of a later stratum's level L reads all of them. A
+//! copy is never in a level partition, so `contains`, `len`, negation and every
+//! non-delta view see each row once. Within a level lowerings come in height order
+//! (eval.rs's held candidates), so a row is lowered at most once a level.
 
 use std::ops::RangeInclusive;
 
@@ -55,12 +67,47 @@ pub(crate) enum Which {
 
 /// What a scan or cursor sees: the partitions of `levels` (`1..=0` sees none), the
 /// batches `which` picks in each, and, for explain, only heights strictly below
-/// `max_height`.
+/// `max_height`. Each row's meta is resolved at level `at` (its lowest derivation with
+/// inputs of level <= `at`; `None`: at the row's own level), and the height bound
+/// reads that meta. With `lowered`, the rows lowered at each level of `levels` (their
+/// copies, `which` picking the last round's or all) are read too: a delta's view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct View {
     pub(crate) levels: RangeInclusive<u8>,
     pub(crate) which: Which,
     pub(crate) max_height: Option<u32>,
+    pub(crate) at: Option<u8>,
+    pub(crate) lowered: bool,
+}
+
+impl View {
+    /// `levels` and `which`, every row at its own level's meta, no height bound.
+    pub(crate) fn rows(levels: RangeInclusive<u8>, which: Which) -> View {
+        View {
+            levels,
+            which,
+            max_height: None,
+            at: None,
+            lowered: false,
+        }
+    }
+}
+
+/// A row lowered at level `from` (module doc): from `from` up its meta is `meta`. A
+/// batch keeps its lows sorted by (`pos`, `from`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Low {
+    pos: u32,
+    from: u8,
+    meta: RowMeta,
+}
+
+/// What [`Relation::insert_round`] did: rows added at the level, and rows of a level at
+/// or below it lowered there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Inserted {
+    pub(crate) added: usize,
+    pub(crate) lowered: usize,
 }
 
 /// What a scan or seek calls per row: the permuted row, its level, its provenance
@@ -73,6 +120,7 @@ struct Batch {
     rows: Vec<Handle>,
     metas: Metas,
     ordinals: Option<Vec<u32>>,
+    lows: Vec<Low>,
 }
 
 /// A batch's provenance column (GA.13): one [`RowMeta`] for every row while they all
@@ -178,6 +226,8 @@ impl Part {
 struct Index {
     perm: Vec<u8>,
     parts: [Part; 3],
+    /// `[L][home]`: copies of the rows of level `home` lowered at level `L`.
+    lowered: [[Part; 3]; 3],
 }
 
 /// A relation: its indexes (index 0 the identity permutation) and its row count.
@@ -195,11 +245,19 @@ struct Run<'r> {
     pos: usize,
 }
 
+impl Run<'_> {
+    /// Row `i`'s meta at level `at`.
+    fn meta(&self, i: usize, at: Option<u8>) -> RowMeta {
+        self.batch.meta_at(i, at.unwrap_or(self.tier.level()))
+    }
+}
+
 /// Lookups by key prefix over one index under one view.
 pub(crate) struct Cursor<'r> {
     arity: usize,
     runs: Vec<Run<'r>>,
     max_height: Option<u32>,
+    at: Option<u8>,
     last: Vec<Handle>,
     started: bool,
 }
@@ -213,13 +271,48 @@ impl Batch {
         &self.rows[i * arity..(i + 1) * arity]
     }
 
+    /// Row `i`'s meta at its own level (lows ignored).
     fn meta(&self, i: usize) -> RowMeta {
         self.metas.get(i)
     }
 
-    /// Heap bytes held: rows, metas and ordinals, by capacity.
+    /// Row `i`'s lows, ascending by level.
+    fn lows_of(&self, i: usize) -> &[Low] {
+        if self.lows.is_empty() {
+            return &[];
+        }
+        let pos = u32::try_from(i).unwrap_or(u32::MAX);
+        let from = self.lows.partition_point(|l| l.pos < pos);
+        let to = from + self.lows[from..].partition_point(|l| l.pos == pos);
+        &self.lows[from..to]
+    }
+
+    /// Row `i`'s meta resolved at level `at`: its last low from a level <= `at`, else
+    /// its own.
+    fn meta_at(&self, i: usize, at: u8) -> RowMeta {
+        self.lows_of(i)
+            .iter()
+            .rev()
+            .find(|l| l.from <= at)
+            .map_or_else(|| self.meta(i), |l| l.meta)
+    }
+
+    /// Record row `i` lowered to `meta` from level `from` on (kept sorted; a low of
+    /// the same level is replaced).
+    fn lower(&mut self, i: usize, from: u8, meta: RowMeta) {
+        let pos = u32::try_from(i).unwrap_or(u32::MAX);
+        let at = self.lows.partition_point(|l| (l.pos, l.from) < (pos, from));
+        let low = Low { pos, from, meta };
+        match self.lows.get_mut(at) {
+            Some(l) if (l.pos, l.from) == (pos, from) => *l = low,
+            _ => self.lows.insert(at, low),
+        }
+    }
+
+    /// Heap bytes held: rows, metas, lows and ordinals, by capacity.
     fn heap_bytes(&self) -> usize {
         self.rows.capacity() * std::mem::size_of::<Handle>()
+            + self.lows.capacity() * std::mem::size_of::<Low>()
             + self.metas.heap_bytes()
             + self
                 .ordinals
@@ -283,6 +376,9 @@ impl Batch {
 
     /// Append row `i` of `src`; `hint` is the row count this batch is built to.
     fn push_from(&mut self, src: &Batch, arity: usize, i: usize, hint: usize) {
+        let pos = u32::try_from(self.len()).unwrap_or(u32::MAX);
+        self.lows
+            .extend(src.lows_of(i).iter().map(|l| Low { pos, ..*l }));
         self.rows.extend_from_slice(src.row(arity, i));
         self.metas.push(src.meta(i), hint);
         if let Some(o) = &mut self.ordinals {
@@ -334,13 +430,17 @@ impl Batch {
                 },
             },
             ordinals: None,
+            lows: Vec::new(),
         };
         let per = out.metas.uniform().is_none();
-        for i in order {
+        for (to, i) in order.into_iter().enumerate() {
             out.rows.extend_from_slice(at(i));
             if per {
                 out.metas.push(self.meta(i), n);
             }
+            let pos = u32::try_from(to).unwrap_or(u32::MAX);
+            out.lows
+                .extend(self.lows_of(i).iter().map(|l| Low { pos, ..*l }));
         }
         out
     }
@@ -365,6 +465,7 @@ impl Batch {
             rows: Vec::with_capacity(a.rows.len() + b.rows.len()),
             metas,
             ordinals: (a.ordinals.is_some() || b.ordinals.is_some()).then(|| Vec::with_capacity(n)),
+            lows: Vec::with_capacity(a.lows.len() + b.lows.len()),
         };
         let (mut i, mut j) = (0, 0);
         while i < a.len() || j < b.len() {
@@ -405,6 +506,17 @@ fn row_count(arity: usize, handles: usize, rows: usize) -> usize {
         .map_or(rows, |whole| rows.min(whole))
 }
 
+/// The batches of `part` that `which` picks, tagged `tier`: stable runs oldest first,
+/// then a non-empty recent.
+fn pick<'r>(part: &'r Part, tier: Tier, which: Which, out: &mut Vec<(&'r Batch, Tier)>) {
+    if matches!(which, Which::Stable | Which::Both) {
+        out.extend(part.stable.iter().map(|b| (b, tier)));
+    }
+    if matches!(which, Which::Recent | Which::Both) && part.recent.len() > 0 {
+        out.push((&part.recent, tier));
+    }
+}
+
 /// `perm` lists each of the `arity` columns exactly once.
 fn is_perm(perm: &[u8], arity: usize) -> bool {
     let mut seen = vec![false; arity];
@@ -434,6 +546,7 @@ impl Relation {
         let index = |perm| Index {
             perm,
             parts: Default::default(),
+            lowered: Default::default(),
         };
         let mut rel = Relation {
             arity,
@@ -464,18 +577,18 @@ impl Relation {
             return None;
         }
         let arity = self.arity;
-        let id = &self.indexes[0].parts;
-        let parts = std::array::from_fn(|l| Part {
-            stable: id[l]
-                .stable
-                .iter()
-                .map(|b| b.permuted(arity, perm))
-                .collect(),
-            recent: id[l].recent.permuted(arity, perm),
-        });
+        let permuted = |p: &Part| Part {
+            stable: p.stable.iter().map(|b| b.permuted(arity, perm)).collect(),
+            recent: p.recent.permuted(arity, perm),
+        };
+        let ix = &self.indexes[0];
+        let parts = std::array::from_fn(|l| permuted(&ix.parts[l]));
+        let lowered =
+            std::array::from_fn(|at| std::array::from_fn(|h| permuted(&ix.lowered[at][h])));
         self.indexes.push(Index {
             perm: perm.to_vec(),
             parts,
+            lowered,
         });
         Some(self.indexes.len() - 1)
     }
@@ -567,16 +680,17 @@ impl Relation {
 
     /// One round at `level`: advance, sort `to_add` (flat, `arity` handles a row,
     /// one meta each) by (row, height, rule), keep each row's first (lowest height,
-    /// then lowest rule index: properties of the program and data, never of ids), drop
-    /// every row present at any level, and store the survivors as the level's
-    /// `recent` in every index. Empties both vectors (capacity kept); returns the
-    /// survivors.
+    /// then lowest rule index: properties of the program and data, never of ids), and
+    /// store the rows present at no level as the level's `recent` in every index. A row
+    /// present at `level` or below whose meta at `level` is higher is lowered there
+    /// (module doc, "Heights per level"); any other present row is dropped. Empties
+    /// both vectors (capacity kept).
     pub(crate) fn insert_round(
         &mut self,
         level: Tier,
         to_add: &mut Vec<Handle>,
         metas: &mut Vec<RowMeta>,
-    ) -> usize {
+    ) -> Inserted {
         self.advance();
         let arity = self.arity;
         let n = row_count(arity, to_add.len(), metas.len());
@@ -589,7 +703,9 @@ impl Relation {
                 .then_with(|| metas[a].rule.cmp(&metas[b].rule))
         });
         order.dedup_by(|later, earlier| row(*later) == row(*earlier));
-        self.drop_present(to_add, &mut order);
+        let lower = self.drop_present_lowering(to_add, metas, level, &mut order);
+        let lowered = lower.len();
+        self.lower_rows(level, to_add, metas, lower);
         let batch = Batch::collect(
             arity,
             order.len(),
@@ -599,13 +715,100 @@ impl Relation {
         self.store(level, batch, true);
         to_add.clear();
         metas.clear();
-        added
+        Inserted { added, lowered }
     }
 
-    /// Every part's `recent` becomes its newest stable run (geometric merge).
+    /// [`Relation::drop_present`] for a round at `level`: also returns, sorted by row,
+    /// `(position, home level)` of each dropped row of a level <= `level` whose meta at
+    /// `level` is higher than its candidate's.
+    fn drop_present_lowering(
+        &self,
+        rows: &[Handle],
+        metas: &[RowMeta],
+        level: Tier,
+        order: &mut Vec<usize>,
+    ) -> Vec<(usize, Tier)> {
+        let (arity, at) = (self.arity, level.level());
+        let mut lower = Vec::new();
+        for (l, part) in self.indexes[0].parts.iter().enumerate() {
+            let home = Tier::ALL[l];
+            for b in part.batches() {
+                let mut pos = 0;
+                order.retain(|&i| {
+                    let row = &rows[i * arity..(i + 1) * arity];
+                    pos = b.gallop(arity, pos, row);
+                    let found = pos < b.len() && b.row(arity, pos) == row;
+                    if found && home.level() <= at && metas[i].height < b.meta_at(pos, at).height {
+                        lower.push((i, home));
+                    }
+                    !found
+                });
+            }
+        }
+        lower.sort_unstable_by(|a, b| {
+            rows[a.0 * arity..(a.0 + 1) * arity].cmp(&rows[b.0 * arity..(b.0 + 1) * arity])
+        });
+        lower
+    }
+
+    /// Lower each `(position, home)` row of `rows` to its meta in `metas` at `level`:
+    /// a low on the row in every index, and its copy as `lowered[level][home]`'s
+    /// recent run (module doc). `lower` is sorted by row.
+    fn lower_rows(
+        &mut self,
+        level: Tier,
+        rows: &[Handle],
+        metas: &[RowMeta],
+        lower: Vec<(usize, Tier)>,
+    ) {
+        if lower.is_empty() {
+            return;
+        }
+        let (arity, at) = (self.arity, level.level());
+        let row = |i: usize| &rows[i * arity..(i + 1) * arity];
+        let mut permuted = Vec::with_capacity(arity);
+        for ix in &mut self.indexes {
+            for &(i, home) in &lower {
+                permuted.clear();
+                permuted.extend(ix.perm.iter().map(|&c| row(i)[usize::from(c)]));
+                let part = &mut ix.parts[part_of(home)];
+                let held = part
+                    .stable
+                    .iter_mut()
+                    .chain(std::iter::once(&mut part.recent));
+                for b in held {
+                    let p = b.lower_bound(arity, &permuted);
+                    if p < b.len() && b.row(arity, p) == permuted.as_slice() {
+                        b.lower(p, at, metas[i]);
+                        break;
+                    }
+                }
+            }
+        }
+        for home in Tier::ALL {
+            let picked = lower.iter().filter(|(_, h)| *h == home);
+            let n = picked.clone().count();
+            if n == 0 {
+                continue;
+            }
+            let batch = Batch::collect(
+                arity,
+                n,
+                picked.map(|&(i, _)| (row(i), metas[i], NO_ORDINAL)),
+            );
+            let (l, h) = (part_of(level), part_of(home));
+            for ix in self.indexes.iter_mut().skip(1) {
+                ix.lowered[l][h].recent = batch.permuted(arity, &ix.perm);
+            }
+            self.indexes[0].lowered[l][h].recent = batch;
+        }
+    }
+
+    /// Every part's `recent`, the lowered copies' included, becomes its newest stable
+    /// run (geometric merge).
     pub(crate) fn advance(&mut self) {
         let arity = self.arity;
-        for part in self.indexes.iter_mut().flat_map(|ix| ix.parts.iter_mut()) {
+        for part in self.indexes.iter_mut().flat_map(Index::all_parts) {
             let recent = std::mem::take(&mut part.recent);
             push_run(&mut part.stable, recent, arity);
         }
@@ -616,7 +819,7 @@ impl Relation {
     pub(crate) fn seal(&mut self) {
         self.advance();
         let arity = self.arity;
-        for part in self.indexes.iter_mut().flat_map(|ix| ix.parts.iter_mut()) {
+        for part in self.indexes.iter_mut().flat_map(Index::all_parts) {
             if part.stable.len() > 1 {
                 // Newest (smallest) first: runs shrink geometrically, so this is linear.
                 let runs = std::mem::take(&mut part.stable).into_iter().rev();
@@ -626,8 +829,8 @@ impl Relation {
         }
     }
 
-    /// `row` (relation column order) at any level: its level, provenance and witness
-    /// ordinal ([`NO_ORDINAL`] when none).
+    /// `row` (relation column order) at any level: its level, provenance at that level
+    /// and witness ordinal ([`NO_ORDINAL`] when none).
     pub(crate) fn contains(&self, row: &[Handle]) -> Option<(Tier, RowMeta, u32)> {
         if row.len() != self.arity {
             return None;
@@ -637,7 +840,8 @@ impl Relation {
             for b in part.batches() {
                 let i = b.lower_bound(arity, row);
                 if i < b.len() && b.row(arity, i) == row {
-                    return Some((Tier::ALL[l], b.meta(i), b.ordinal(i)));
+                    let tier = Tier::ALL[l];
+                    return Some((tier, b.meta_at(i, tier.level()), b.ordinal(i)));
                 }
             }
         }
@@ -658,7 +862,8 @@ impl Relation {
     }
 
     /// The batches of `index` that `view` selects, with their levels: level order,
-    /// stable runs oldest first, then recent.
+    /// stable runs oldest first, then recent; with `view.lowered`, then the copies
+    /// lowered at each level of the view, by home level, tagged with their home.
     fn selected(&self, index: usize, view: &View) -> Vec<(&Batch, Tier)> {
         let mut out = Vec::new();
         let Some(ix) = self.indexes.get(index) else {
@@ -666,14 +871,18 @@ impl Relation {
         };
         for (l, part) in ix.parts.iter().enumerate() {
             let tier = Tier::ALL[l];
-            if !view.levels.contains(&tier.level()) {
-                continue;
+            if view.levels.contains(&tier.level()) {
+                pick(part, tier, view.which, &mut out);
             }
-            if matches!(view.which, Which::Stable | Which::Both) {
-                out.extend(part.stable.iter().map(|b| (b, tier)));
-            }
-            if matches!(view.which, Which::Recent | Which::Both) && part.recent.len() > 0 {
-                out.push((&part.recent, tier));
+        }
+        if view.lowered {
+            for (l, homes) in ix.lowered.iter().enumerate() {
+                if !view.levels.contains(&Tier::ALL[l].level()) {
+                    continue;
+                }
+                for (h, part) in homes.iter().enumerate() {
+                    pick(part, Tier::ALL[h], view.which, &mut out);
+                }
             }
         }
         out
@@ -693,19 +902,22 @@ impl Relation {
             arity: self.arity,
             runs: runs.collect(),
             max_height: view.max_height,
+            at: view.at,
             last: Vec::new(),
             started: false,
         }
     }
 
     /// Every row of `index` under `view`, permuted, run by run (each run sorted):
-    /// `f(row, level, meta, ordinal)`.
+    /// `f(row, level, meta at view.at, ordinal)`.
     pub(crate) fn scan(&self, index: usize, view: View, f: &mut Visit<'_>) {
         let arity = self.arity;
         for (b, tier) in self.selected(index, &view) {
+            let at = view.at.unwrap_or(tier.level());
             for i in 0..b.len() {
-                if view.max_height.is_none_or(|h| b.meta(i).height < h) {
-                    f(b.row(arity, i), tier, b.meta(i), b.ordinal(i));
+                let meta = b.meta_at(i, at);
+                if view.max_height.is_none_or(|h| meta.height < h) {
+                    f(b.row(arity, i), tier, meta, b.ordinal(i));
                 }
             }
         }
@@ -723,6 +935,7 @@ impl Relation {
             ix.perm.capacity()
                 + ix.parts
                     .iter()
+                    .chain(ix.lowered.iter().flatten())
                     .map(|p| {
                         p.stable.capacity() * std::mem::size_of::<Batch>()
                             + p.batches().map(Batch::heap_bytes).sum::<usize>()
@@ -733,9 +946,23 @@ impl Relation {
             + self.indexes.iter().map(index).sum::<usize>()
     }
 
-    /// Rows in the last round.
+    /// Rows in the last round, added or lowered.
     pub(crate) fn recent_len(&self) -> usize {
-        self.indexes[0].parts.iter().map(|p| p.recent.len()).sum()
+        let ix = &self.indexes[0];
+        ix.parts
+            .iter()
+            .chain(ix.lowered.iter().flatten())
+            .map(|p| p.recent.len())
+            .sum()
+    }
+}
+
+impl Index {
+    /// The level partitions, then the lowered copies' parts.
+    fn all_parts(&mut self) -> impl Iterator<Item = &mut Part> {
+        self.parts
+            .iter_mut()
+            .chain(self.lowered.iter_mut().flatten())
     }
 }
 
@@ -744,7 +971,7 @@ impl Cursor<'_> {
     /// (none when `key` is longer than a row). A key not below the previous one
     /// gallops on from each run's previous position; any other binary searches.
     pub(crate) fn seek(&mut self, key: &[Handle], f: &mut Visit<'_>) {
-        let (arity, max_height) = (self.arity, self.max_height);
+        let (arity, max_height, at) = (self.arity, self.max_height, self.at);
         if key.len() > arity {
             return;
         }
@@ -758,8 +985,9 @@ impl Cursor<'_> {
             };
             let mut i = run.pos;
             while i < b.len() && b.has_prefix(arity, i, key) {
-                if max_height.is_none_or(|h| b.meta(i).height < h) {
-                    f(b.row(arity, i), run.tier, b.meta(i), b.ordinal(i));
+                let meta = run.meta(i, at);
+                if max_height.is_none_or(|h| meta.height < h) {
+                    f(b.row(arity, i), run.tier, meta, b.ordinal(i));
                 }
                 i += 1;
             }
@@ -781,11 +1009,7 @@ mod tests {
     }
 
     fn view(levels: RangeInclusive<u8>, which: Which) -> View {
-        View {
-            levels,
-            which,
-            max_height: None,
-        }
+        View::rows(levels, which)
     }
 
     fn all() -> View {
@@ -810,7 +1034,7 @@ mod tests {
         let mut metas: Vec<RowMeta> = rows.iter().map(|r| m(r.1, r.2)).collect();
         let n = rel.insert_round(level, &mut to_add, &mut metas);
         assert!(to_add.is_empty() && metas.is_empty());
-        n
+        n.added
     }
 
     fn scanned(rel: &Relation, index: usize, v: View) -> Vec<Seen> {
@@ -890,9 +1114,9 @@ mod tests {
     fn rows_at_a_lower_level_block_reinsertion() {
         let mut r = Relation::new(2, &[vec![1, 0]]);
         assert_eq!(insert(&mut r, Tier::Fact, &[(&[1, 2], 1, 0)]), 1);
-        // Still recent at FACT: the next round advances it, then drops it.
+        // Still recent at FACT: the next round advances it, then drops it (no higher).
         assert_eq!(
-            insert(&mut r, Tier::Derived, &[(&[1, 2], 0, 0), (&[3, 4], 2, 1)]),
+            insert(&mut r, Tier::Derived, &[(&[1, 2], 1, 0), (&[3, 4], 2, 1)]),
             1
         );
         assert_eq!(r.contains(&[1, 2]), Some((Tier::Fact, m(1, 0), NO_ORDINAL)));
@@ -902,7 +1126,7 @@ mod tests {
         );
         // Any level blocks: a DERIVED row is not re-derived at HEURISTIC, or at FACT.
         assert_eq!(
-            insert(&mut r, Tier::Heuristic, &[(&[3, 4], 0, 0), (&[1, 2], 0, 0)]),
+            insert(&mut r, Tier::Heuristic, &[(&[3, 4], 2, 0), (&[1, 2], 1, 0)]),
             0
         );
         assert_eq!(insert(&mut r, Tier::Fact, &[(&[3, 4], 0, 0)]), 0);
@@ -914,6 +1138,129 @@ mod tests {
         assert_eq!(r.contains(&[1]), None);
         assert_eq!((r.len(), r.recent_len()), (2, 0));
         check(&r);
+    }
+
+    #[test]
+    fn a_higher_level_lowers_a_row() {
+        let mut r = Relation::new(2, &[vec![1, 0]]);
+        insert(&mut r, Tier::Fact, &[(&[1, 2], 7, 1), (&[5, 6], 3, 1)]);
+        // DERIVED reaches (1, 2) at height 3 by rule 0: lowered there, not added.
+        let (mut to_add, mut metas) = (vec![1, 2, 5, 6, 8, 9], vec![m(3, 0), m(3, 0), m(4, 1)]);
+        let got = r.insert_round(Tier::Derived, &mut to_add, &mut metas);
+        assert_eq!(
+            got,
+            Inserted {
+                added: 1,
+                lowered: 1
+            }
+        );
+        assert_eq!((r.len(), r.recent_len()), (3, 2));
+        // Its own level still reads 7; DERIVED and HEURISTIC read 3.
+        assert_eq!(r.contains(&[1, 2]), Some((Tier::Fact, m(7, 1), NO_ORDINAL)));
+        let at = |l: u8| View {
+            at: Some(l),
+            ..all()
+        };
+        let meta_of = |v: View, ix: usize, row: &[Handle]| -> Vec<(Tier, RowMeta)> {
+            scanned(&r, ix, v)
+                .into_iter()
+                .filter(|s| s.0 == row)
+                .map(|s| (s.1, s.2))
+                .collect()
+        };
+        assert_eq!(meta_of(at(0), 0, &[1, 2]), [(Tier::Fact, m(7, 1))]);
+        assert_eq!(meta_of(at(1), 0, &[1, 2]), [(Tier::Fact, m(3, 0))]);
+        assert_eq!(meta_of(at(2), 1, &[2, 1]), [(Tier::Fact, m(3, 0))]);
+        assert_eq!(meta_of(all(), 1, &[2, 1]), [(Tier::Fact, m(7, 1))]);
+        // A bound at DERIVED's heights admits it; at FACT's it does not.
+        let below = |l: u8| View {
+            max_height: Some(4),
+            ..at(l)
+        };
+        assert_eq!(meta_of(below(1), 0, &[1, 2]).len(), 1);
+        assert!(meta_of(below(0), 0, &[1, 2]).is_empty());
+        // The delta at DERIVED reads the new row and the lowered copy, once each; a
+        // view without `lowered` reads no copy.
+        let delta = View {
+            lowered: true,
+            ..at(1)
+        };
+        let recent = View {
+            levels: 1..=1,
+            which: Which::Recent,
+            ..delta.clone()
+        };
+        assert_eq!(
+            sorted(scanned(&r, 0, recent.clone())),
+            [
+                (vec![1, 2], Tier::Fact, m(3, 0), NO_ORDINAL),
+                (vec![8, 9], Tier::Derived, m(4, 1), NO_ORDINAL)
+            ]
+        );
+        let mut seeked = Vec::new();
+        r.cursor(1, recent.clone())
+            .seek(&[2], &mut |row, t, meta, _| {
+                seeked.push((row.to_vec(), t, meta))
+            });
+        assert_eq!(seeked, [(vec![2, 1], Tier::Fact, m(3, 0))]);
+        assert_eq!(
+            sorted(scanned(
+                &r,
+                0,
+                View {
+                    lowered: false,
+                    ..recent.clone()
+                }
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(sorted(scanned(&r, 0, all())).len(), 3);
+        // The next round makes the copy stable: no recent delta, but a first round's
+        // delta (both runs of the level) still reads it.
+        r.advance();
+        assert_eq!(sorted(scanned(&r, 0, recent)), []);
+        let first = View {
+            levels: 1..=1,
+            which: Which::Both,
+            ..delta
+        };
+        assert_eq!(sorted(scanned(&r, 0, first.clone())).len(), 2);
+        // Not lowered again by an equal height, nor at a level it is not visible to.
+        let (mut to_add, mut metas) = (vec![1, 2], vec![m(3, 2)]);
+        assert_eq!(
+            r.insert_round(Tier::Heuristic, &mut to_add, &mut metas),
+            Inserted::default()
+        );
+        r.seal();
+        assert_eq!(
+            sorted(scanned(&r, 0, first)).len(),
+            2,
+            "sealed, the copy stays for later strata"
+        );
+        assert_eq!(
+            sorted(scanned(
+                &r,
+                1,
+                View {
+                    levels: 1..=1,
+                    ..all()
+                }
+            ))
+            .len(),
+            1
+        );
+        check(&r);
+        // An index built after the lowering carries it.
+        let mut r2 = r.clone();
+        r2.indexes.truncate(1);
+        let ix = r2.ensure_index(&[1, 0]).expect("a permutation");
+        let got: Vec<RowMeta> = scanned(&r2, ix, at(2))
+            .into_iter()
+            .filter(|s| s.0 == [2, 1])
+            .map(|s| s.2)
+            .collect();
+        assert_eq!(got, [m(3, 0)]);
     }
 
     #[test]
@@ -1008,9 +1355,8 @@ mod tests {
         let shuffled = keys.clone();
         keys.sort();
         let v = View {
-            levels: 0..=2,
-            which: Which::Both,
             max_height: Some(6),
+            ..all()
         };
         for perm in &perms {
             let ix = r.index_of(perm).expect("planned index");
@@ -1073,9 +1419,8 @@ mod tests {
             Vec::<Handle>::new()
         );
         let low = View {
-            levels: 0..=2,
-            which: Which::Both,
             max_height: Some(4),
+            ..all()
         };
         assert_eq!(seen(&r, low), [1, 3, 6]);
         let levels: Vec<Tier> = scanned(&r, 0, all()).into_iter().map(|s| s.1).collect();
@@ -1325,11 +1670,18 @@ mod tests {
         assert_eq!(r.indexes.len(), 1);
         assert_eq!(r.contains(&[]), None);
         let (mut to_add, mut metas) = (Vec::new(), vec![m(4, 2), m(1, 3), m(1, 5)]);
-        assert_eq!(r.insert_round(Tier::Derived, &mut to_add, &mut metas), 1);
+        assert_eq!(
+            r.insert_round(Tier::Derived, &mut to_add, &mut metas).added,
+            1
+        );
         assert_eq!(r.contains(&[]), Some((Tier::Derived, m(1, 3), NO_ORDINAL)));
         assert!(r.exists_prefix(0, &[]));
+        // At FACT, below the row's own level: neither added nor lowered.
         let mut metas = vec![m(0, 0)];
-        assert_eq!(r.insert_round(Tier::Fact, &mut to_add, &mut metas), 0);
+        assert_eq!(
+            r.insert_round(Tier::Fact, &mut to_add, &mut metas),
+            Inserted::default()
+        );
         assert_eq!(r.len(), 1);
         check(&r);
     }

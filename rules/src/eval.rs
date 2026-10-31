@@ -30,8 +30,8 @@
 //! (Q5); a row carries the static negation cones of its recorded rule instead.
 //!
 //! **Minimal heights.** A row's recorded (rule, height) is its lowest-height
-//! derivation at its level, each lower-level row read at its own recorded height;
-//! explain (DA.15) searches below that height. A level's first round can derive a row
+//! derivation at its level, each lower-level row read at its height at that level
+//! (below); explain (DA.15) searches below that height. A level's first round can derive a row
 //! from a long lower-level prefix before a later round finds a shorter derivation at
 //! that level (DA.15's counterexample), so a recursive stratum holds candidates back by
 //! height: each round inserts the candidates, new and held, at most one above the
@@ -39,14 +39,22 @@
 //! row inserted in this round or later, of height at least that lowest, so it is at
 //! least one above it and no inserted row can lose to it. The level ends when nothing
 //! is held and a round inserts nothing. A held candidate is one exec emitted, so the
-//! budget is unchanged; the extra rounds count in `rounds`. One height per row is kept,
-//! not one per level: a lower-level row is read at its own level's height even when
-//! this level reaches it in fewer steps (a FACT `tc(x, p)` of 7 hops that DERIVED edges
-//! reach in 3), so a row derived through it records the longer height, and its witness
-//! is a valid path of its tier but not always a shortest one.
+//! budget is unchanged; the extra rounds count in `rounds`.
 //!
-//! **Aggregates** run their one body over every level at once and hand the projected
-//! bindings to `aggregate::aggregate`, ordered by `ValueTable::cmp_rendered`.
+//! **Heights per level (GA.16).** A row keeps a height per level: a lower-level row is
+//! read at the height of the level being evaluated, and a candidate for a row already
+//! held at or below this level, lower than its height here, LOWERS it here
+//! (`Relation::insert_round`; a FACT `tc(x, p)` of 7 hops that DERIVED edges reach in
+//! 3 reads 3 from DERIVED on). A lowered row is new at this level: the next round's
+//! delta reads it, and so does a later stratum's first round of the level (it counts
+//! in `at_level`). Lowerings go through the held candidates like insertions, so they
+//! come in height order and every row's height at a level is its BFS-shortest
+//! derivation there; explain searches under it, so every witness is shortest at its
+//! tier. The marker counts the rows lowered as `shortest_fixed`.
+//!
+//! **Aggregates** run their one body over every level at once (exec's `Mode::Fold`,
+//! each row at its own level's height) and hand the projected bindings to
+//! `aggregate::aggregate`, ordered by `ValueTable::cmp_rendered`.
 //!
 //! **Budget.** exec counts every binding each body step emits (GA.13: intermediate
 //! bindings included, not only complete ones) and builtin / closure rows; this module
@@ -56,7 +64,8 @@
 //!
 //! **Markers**, once per evaluation, on stderr: `[rules] eval strata=<n> rules=<r>
 //! variants=<v> edb=<rows> derived=<rows> rounds=<k> aggregates=<a> magic=<m>
-//! values=<h> warnings=<w> ms=<t>`, then `[rules] mem relations=<n> bytes=<b>
+//! values=<h> warnings=<w> ms=<t>` (then ` shortest_fixed=<n>` when a row was lowered),
+//! then `[rules] mem relations=<n> bytes=<b>
 //! top=<pred>:<kb>,.. values=<b> memo=<b>` (GA.13: the heap the relations, the value
 //! table and the builtin memo hold, by capacity; the three largest relations by bytes,
 //! ties by name; [`Evaluation::heap_bytes`](crate::eval::Evaluation::heap_bytes) is
@@ -185,6 +194,9 @@ pub struct EvalStats {
     /// Distinct values interned.
     pub values: usize,
     pub elapsed_ms: f64,
+    /// Rows a level reached in fewer steps than their own level's height, lowered
+    /// there (GA.16: per-level heights, so every witness is shortest at its tier).
+    pub shortest_fixed: usize,
 }
 
 /// A finished evaluation: the rows of every stratum and what explain (DA.15) reads.
@@ -387,11 +399,7 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
         };
         let mut raw: Vec<(Vec<Handle>, Tier, RowMeta)> = Vec::new();
         if let Some(rel) = self.relations.get(p as usize) {
-            let view = View {
-                levels: EVERY_ROW,
-                which: Which::Both,
-                max_height: None,
-            };
+            let view = View::rows(EVERY_ROW, Which::Both);
             rel.scan(0, view, &mut |r, t, m, _| raw.push((r.to_vec(), t, m)));
         }
         let keys = Keys::new(
@@ -486,11 +494,17 @@ impl<'s, S: FactSource + ?Sized> Evaluation<'s, S> {
     }
 }
 
-/// The `[rules] eval` marker line (ms truncated to one decimal).
+/// The `[rules] eval` marker line (ms truncated to one decimal), ending
+/// ` shortest_fixed=<n>` when a level lowered any row (GA.16).
 pub(crate) fn eval_line(s: &EvalStats, warnings: usize) -> String {
+    let fixed = if s.shortest_fixed > 0 {
+        format!(" shortest_fixed={}", s.shortest_fixed)
+    } else {
+        String::new()
+    };
     format!(
         "[rules] eval strata={} rules={} variants={} edb={} derived={} rounds={} aggregates={} \
-         magic={} values={} warnings={} ms={:.1}",
+         magic={} values={} warnings={} ms={:.1}{fixed}",
         s.strata,
         s.rules,
         s.variants,
@@ -1117,10 +1131,13 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                 let mut fresh = 0;
                 for (slot, &p) in own.iter().enumerate() {
                     let (rows, metas) = &mut batch[slot];
-                    let n = self.rels[p as usize].insert_round(level, rows, metas);
-                    self.at_level[p as usize][usize::from(level.level())] += n;
+                    let got = self.rels[p as usize].insert_round(level, rows, metas);
+                    let n = got.added;
+                    // A lowered row is new at this level for whatever reads it next.
+                    self.at_level[p as usize][usize::from(level.level())] += n + got.lowered;
                     self.stats.derived_rows += n;
-                    fresh += n;
+                    self.stats.shortest_fixed += got.lowered;
+                    fresh += n + got.lowered;
                     if self.budget.charge(n) {
                         return Err(self.budget_error(an, p, user));
                     }
@@ -1153,17 +1170,18 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         let p = rule.head;
         let head = self.head(&v.head);
         let (mut bindings, mut levels, mut heights) = (Vec::new(), Vec::new(), Vec::new());
-        let mode = Mode::Eval {
-            level: Tier::Heuristic,
-            first_round: true,
-        };
-        run_body(&mut self.ctx(declared, multi), &v.steps, mode, &mut |b| {
-            if push_head(&head, b, &mut bindings) {
-                levels.push(b.level);
-                heights.push(b.height);
-            }
-            Ok(())
-        })?;
+        run_body(
+            &mut self.ctx(declared, multi),
+            &v.steps,
+            Mode::Fold,
+            &mut |b| {
+                if push_head(&head, b, &mut bindings) {
+                    levels.push(b.level);
+                    heights.push(b.height);
+                }
+                Ok(())
+            },
+        )?;
         if self.budget.tripped.is_some() {
             return Err(self.budget_error(an, p, user));
         }
@@ -1763,6 +1781,12 @@ tc(x, z) :- tc(x, y), edge(y, z, "CALLS").
         s.elapsed_ms = 12.36;
         assert!(
             eval_line(&s, 0).ends_with(" warnings=0 ms=12.3"),
+            "{}",
+            eval_line(&s, 0)
+        );
+        s.shortest_fixed = 2;
+        assert!(
+            eval_line(&s, 0).ends_with(" ms=12.3 shortest_fixed=2"),
             "{}",
             eval_line(&s, 0)
         );

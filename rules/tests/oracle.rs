@@ -21,15 +21,14 @@
 //!
 //! **Witnesses.** A `tc` witness's leaf edges must chain from x to y over graph edges
 //! of tier <= the row's, as many as its height. (9) holds that count to the BFS depth
-//! at the row's tier over graph 1's first 500 rows; (10) holds it, over every row of
-//! every graph, to [`Oracle::lattice_heights`]: the lowest height of a derivation at
-//! the row's level with each lower-level prefix at its own height, which is what
-//! eval.rs records (its "Minimal heights"). The two differ where a lower-level prefix
-//! row is longer than this level's path through it, since a row keeps one height, not
-//! one per level: at DA.18, 99 of graph 4's 3,812 rows (`tc(n00031, n00050)`, DERIVED,
-//! 8 hops through a 7-hop FACT `tc(n00031, n00006)` that DERIVED edges reach in 3; BFS
-//! depth 4).
-//!
+//! at the row's tier over every row of every graph: rows keep a height per level
+//! (GA.16), so a lower-level prefix is read at the height of the row's level. (10)
+//! measures what that fixed: [`Oracle::lattice_heights`], the lowest height with each
+//! lower-level prefix read at its own level's height (what one height per row
+//! recorded), is longer than the BFS depth for 99 of graph 4's 3,812 rows
+//! (`tc(n00031, n00050)`, DERIVED, 8 hops through a 7-hop FACT `tc(n00031, n00006)`
+//! that DERIVED edges reach in 3; BFS depth 4), and the evaluation now lowers them.
+
 //! Rows compare rendered (`Evaluation::render`), in `rows()` order, with their tiers.
 //! `Options` and `ExplainLimits` are `#[non_exhaustive]`, so they are built with
 //! `Default` and field assignment. Every evaluation prints its `[rules] eval` line,
@@ -636,7 +635,7 @@ tot(k, sum(i)) :- node(x, k), index(x, i).
 }
 
 // ============================================================================
-// (9)-(11): witnesses: valid paths of the row's tier, of the recorded (lowest) height
+// (9)-(11): witnesses: valid paths of the row's tier, BFS-shortest there
 // ============================================================================
 
 /// Check tc row `row`'s witness: its leaf edges chain from x to y, each an edge of
@@ -704,54 +703,79 @@ fn check_witness(
 
 #[test]
 fn witnesses_are_valid_shortest_paths() {
-    let g = graph(1);
-    let oracle = Oracle::new(&g, &["CALLS"]);
-    let mut ev = eval(TC, &g, &Options::default());
-    let all = rows(&ev, "tc");
-    assert!(all.len() >= 500, "graph 1 has {} tc rows", all.len());
-    for t in Tier::ALL {
-        assert!(
-            all[..500].iter().any(|r| r.tier == t),
-            "no {t:?} row among the first 500"
-        );
-    }
-    for row in &all[..500] {
-        let bfs_depth = |x: NodeId, y: NodeId| oracle.depths(row.tier, x).get(&y).copied();
-        check_witness(&g, &mut ev, row, &bfs_depth);
-    }
-}
-
-#[test]
-fn witness_heights_match_the_lattice_oracle() {
-    // Every tc row of every graph: its witness height is the lowest height of a
-    // derivation at its level, a lower-level prefix read at its own height.
+    // Every tc row of every graph: its witness is a valid path of its tier, as long as
+    // the BFS depth at that tier (GA.16: per-level heights).
+    let mut longer: Vec<(u64, usize)> = Vec::new();
     for seed in SEEDS {
         let g = graph(seed);
         let oracle = Oracle::new(&g, &["CALLS"]);
         let mut ev = eval(TC, &g, &Options::default());
-        let mut heights: HashMap<NodeId, HashMap<NodeId, (Tier, usize)>> = HashMap::new();
-        for row in rows(&ev, "tc") {
-            let Value::Node(x) = row.values[0] else {
+        let all = rows(&ev, "tc");
+        for t in Tier::ALL {
+            assert!(all.iter().any(|r| r.tier == t), "seed {seed}: no {t:?} row");
+        }
+        let mut depths: HashMap<(Tier, NodeId), HashMap<NodeId, usize>> = HashMap::new();
+        let mut n = 0;
+        for row in &all {
+            let [Value::Node(x), Value::Node(y)] = row.values.as_slice() else {
                 panic!("{:?}", row.values)
             };
-            let from_x = heights.entry(x).or_insert_with(|| {
-                let (h, tiers) = (oracle.lattice_heights(x), oracle.tiers_from(x));
-                assert_eq!(h.len(), tiers.len(), "seed {seed}");
-                assert!(
-                    h.iter().all(|(y, (t, _))| tiers.get(y) == Some(t)),
-                    "seed {seed}"
-                );
-                h
-            });
-            let lattice = |_: NodeId, y: NodeId| {
-                from_x
-                    .get(&y)
-                    .filter(|(t, _)| *t == row.tier)
-                    .map(|(_, h)| *h)
-            };
-            check_witness(&g, &mut ev, &row, &lattice);
+            let from_x = depths
+                .entry((row.tier, *x))
+                .or_insert_with(|| oracle.depths(row.tier, *x));
+            let want = from_x.get(y).copied();
+            let w = ev
+                .explain(row, &ExplainLimits::default())
+                .unwrap_or_else(|e| panic!("{e}"));
+            if Some(w.leaf_edges().len()) != want {
+                n += 1;
+                continue;
+            }
+            check_witness(&g, &mut ev, row, &|_, y| from_x.get(&y).copied());
+        }
+        if n > 0 {
+            longer.push((seed, n));
         }
     }
+    assert!(
+        longer.is_empty(),
+        "(seed, tc rows whose witness is longer than the BFS depth at its tier): {longer:?}"
+    );
+}
+
+#[test]
+fn per_level_heights_shorten_the_lattice_rows() {
+    // Graph 4 holds rows a lower-level prefix made longer than the BFS depth when a
+    // row kept one height (DA.18: 99 of 3,812, tc(n00031, n00050) 8 hops through the
+    // 7-hop FACT tc(n00031, n00006) that DERIVED edges reach in 3). Per-level heights
+    // lower such prefixes, and the `[rules] eval` marker counts them.
+    let g = graph(4);
+    let oracle = Oracle::new(&g, &["CALLS"]);
+    let ev = eval(TC, &g, &Options::default());
+    let mut lattice: HashMap<NodeId, HashMap<NodeId, (Tier, usize)>> = HashMap::new();
+    let mut fixed = 0;
+    for row in rows(&ev, "tc") {
+        let [Value::Node(x), Value::Node(y)] = row.values.as_slice() else {
+            panic!("{:?}", row.values)
+        };
+        let l = lattice
+            .entry(*x)
+            .or_insert_with(|| oracle.lattice_heights(*x));
+        let bfs = oracle.depths(row.tier, *x).get(y).copied();
+        let one_height = l.get(y).filter(|(t, _)| *t == row.tier).map(|(_, h)| *h);
+        assert!(one_height >= bfs, "{row:?}");
+        fixed += usize::from(one_height > bfs);
+    }
+    assert_eq!(fixed, 99, "rows one height per row left longer than the BFS depth");
+    let marked = ev.stats().shortest_fixed;
+    assert!(marked > 0, "no row lowered");
+    let row = row_of(&ev, "tc", &["n00031", "n00050"]);
+    assert_eq!(row.tier, Tier::Derived);
+    let mut ev = ev;
+    let w = ev
+        .explain(&row, &ExplainLimits::default())
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(w.leaf_edges().len(), 4, "{:?}", hops(&g, &w.leaf_edges()));
 }
 
 #[test]

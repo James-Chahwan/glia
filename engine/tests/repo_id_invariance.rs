@@ -481,3 +481,61 @@ fn tie_breaks_are_independent_of_the_repo_identity() {
         names.len()
     );
 }
+
+/// GA.16: a `glia query --explain` witness among equal-height derivations is
+/// picked by rendered values, never by NodeId. `go` reaches `t` in two hops
+/// through `a` and through `b`; every copy of the tree under another
+/// directory name explains `hit` through `a`, the lesser rendered body, while
+/// the copies order `a` and `b`'s ids both ways.
+#[test]
+fn query_explain_witness_tie_is_independent_of_the_repo_identity() {
+    const FLOW: &str = "def go():\n    a()\n    b()\n\n\ndef a():\n    t()\n\n\n\
+                        def b():\n    t()\n\n\ndef t():\n    return 1\n";
+    const PROGRAM: &str = "reach(x, y) :- edge(x, y, \"CALLS\").\n\
+                           reach(x, z) :- reach(x, y), edge(y, z, \"CALLS\").\n\
+                           hit(y) :- qname(x, \"app::flow::go\"), reach(x, y), \
+                           qname(y, \"app::flow::t\").\n";
+    let scratch = Scratch::new("witness");
+    let mut witnesses = Vec::new();
+    let mut orders = Vec::new();
+    for i in 0..8 {
+        let root = scratch.path(&format!("witness-{i}"));
+        write(&root, "app/flow.py", FLOW);
+        let m = build(&root);
+        let id = |q: &str| m.node_id_by_qname(q).unwrap_or_else(|| panic!("no {q}"));
+        orders.push(id("app::flow::a").0 < id("app::flow::b").0);
+        let mut o = glia_engine::rules::QueryOptions::default();
+        o.explain = true;
+        let answer =
+            glia_engine::rules::query(&m, PROGRAM, &o).unwrap_or_else(|e| panic!("query: {e:?}"));
+        assert_eq!(answer.results.len(), 1, "one hit row");
+        let row = &answer.results[0];
+        let hops: Vec<(String, String, &str, Option<i64>)> = row
+            .witness
+            .iter()
+            .map(|w| (w.from_qname.clone(), w.to_qname.clone(), w.tier, w.line))
+            .collect();
+        witnesses.push(hops);
+    }
+    assert!(
+        orders.iter().any(|b| *b) && orders.iter().any(|b| !*b),
+        "precondition: a and b's ids must order both ways across the copies: {orders:?}"
+    );
+    let first = &witnesses[0];
+    let path: Vec<(&str, &str)> = first
+        .iter()
+        .map(|(f, t, _, _)| (f.as_str(), t.as_str()))
+        .collect();
+    assert_eq!(
+        path,
+        [
+            ("app::flow::go", "app::flow::a"),
+            ("app::flow::a", "app::flow::t")
+        ],
+        "the lesser rendered body of two equal-height derivations"
+    );
+    assert!(
+        witnesses.iter().all(|w| w == first),
+        "the witness differs across copies: {witnesses:#?}"
+    );
+}

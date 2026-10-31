@@ -357,33 +357,6 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Per line: is it inside the file's test module (`#[cfg(test)]` at column 0 directly
-/// above `mod <name> {`, through the `}` at column 0 that closes it)?
-fn test_lines(lines: &[&str]) -> Vec<bool> {
-    let mut out = vec![false; lines.len()];
-    let mut i = 0;
-    while i < lines.len() {
-        let opens = lines[i] == "#[cfg(test)]"
-            && lines
-                .get(i + 1)
-                .is_some_and(|l| l.starts_with("mod ") && l.ends_with('{'));
-        if !opens {
-            i += 1;
-            continue;
-        }
-        let mut j = i;
-        while j < lines.len() {
-            out[j] = true;
-            if j > i + 1 && lines[j] == "}" {
-                break;
-            }
-            j += 1;
-        }
-        i = j + 1;
-    }
-    out
-}
-
 /// Lookup-map calls that would expose its order.
 const ITERATION: [&str; 6] = [
     ".iter()",
@@ -404,7 +377,6 @@ struct Scan {
 /// [`source_guard`]'s rules over one file, `name` relative to `rules/src`.
 fn scan(name: &str, text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
-    let in_test = test_lines(&lines);
     let is_value = name == "value.rs";
     let mut out = Scan {
         offences: Vec::new(),
@@ -418,13 +390,11 @@ fn scan(name: &str, text: &str) -> Scan {
                 flag(&format!("`{word}`"));
             }
         }
-        if !in_test[n] {
-            if line.contains("HashSet") {
-                flag("`HashSet`");
-            }
-            if line.contains("HashMap") && !is_value {
-                flag("`HashMap` outside value.rs");
-            }
+        if line.contains("HashSet") {
+            flag("`HashSet`");
+        }
+        if line.contains("HashMap") && !is_value {
+            flag("`HashMap` outside value.rs");
         }
         if !is_value {
             continue;
@@ -458,10 +428,9 @@ fn scan(name: &str, text: &str) -> Scan {
 /// iteration, no threads). Over every `.rs` file under `rules/src`, recursively:
 ///
 /// - no line names `thread::spawn`, `rayon` or `par_iter`;
-/// - shipped code (every line outside the file's `#[cfg(test)]` module) names no
-///   `HashSet`, and `HashMap` only in `value.rs`, the one sanctioned map (`Lookup`):
-///   say `Lookup` in prose. A test module may hold a hash-set oracle (closure.rs's
-///   reach oracle does): it is compiled only under test and reaches no output;
+/// - no line names `HashSet`, and `HashMap` only in `value.rs`, the one sanctioned map
+///   (`Lookup`): say `Lookup` in prose. Test modules too (GA.16): an oracle keeps an
+///   ordered set (closure.rs's reach oracle holds a `BTreeSet`);
 /// - in `value.rs`, Lookup's inner map is a private field, no line applies `.iter()`,
 ///   `.iter_mut()`, `.keys()`, `.values()`, `.drain()`, `.into_iter()` or a `for` loop
 ///   to it (`self.0`), and no `impl` gives Lookup an iterator.
@@ -509,7 +478,7 @@ fn source_guard() {
     );
 }
 
-/// The guard flags what it says it flags, at file:line, and spares a test module.
+/// The guard flags what it says it flags, at file:line, test modules included.
 #[test]
 fn source_guard_catches() {
     let shipped = "use std::collections::HashSet;\nfn f() {\n    let m: HashMap<u32, u32> = HashMap::new();\n    rayon::scope(|_| xs.par_iter());\n}\n";
@@ -529,16 +498,20 @@ fn source_guard_catches() {
         "{found:?}"
     );
 
-    // A test module's oracle set is spared; a thread in it is not.
+    // A test module is no exemption: its hash set and its thread are both flagged.
     let tests = "fn g() {}\n\n#[cfg(test)]\nmod tests {\n    use std::collections::HashSet;\n    fn t() { std::thread::spawn(|| ()); }\n}\nstruct After(HashSet<u8>);\n";
     let found = scan("closure.rs", tests).offences;
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
     assert!(
-        found[0].starts_with("rules/src/closure.rs:6: `thread::spawn`"),
+        found[0].starts_with("rules/src/closure.rs:5: `HashSet`"),
         "{found:?}"
     );
     assert!(
-        found[1].starts_with("rules/src/closure.rs:8: `HashSet`"),
+        found[1].starts_with("rules/src/closure.rs:6: `thread::spawn`"),
+        "{found:?}"
+    );
+    assert!(
+        found[2].starts_with("rules/src/closure.rs:8: `HashSet`"),
         "{found:?}"
     );
 

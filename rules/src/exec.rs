@@ -19,7 +19,10 @@
 //!
 //! **Levels and heights.** A binding's level is the weakest of its positive rows'
 //! tiers (node and attribute rows are FACT, builtin rows carry theirs); its height is
-//! the highest of its relation rows' heights (EDB rows are 0).
+//! the highest of its relation rows' heights (EDB rows are 0), each read at the run's
+//! level L (GA.16: `View::at`, a row's height at L, lower than at its own level where
+//! L reaches it in fewer steps), except `Mode::Fold`'s, at each row's own level. In
+//! evaluation a `Delta` also reads the rows lowered at L (`View::lowered`).
 //!
 //! **Builtins.** A domain or string builtin is called through [`Builtin::call`] once
 //! per (builtin, bound arguments) and its interned rows kept in the evaluation's
@@ -238,14 +241,16 @@ impl Budget {
 }
 
 /// How a body runs. `Eval` at level L, in that level's first round or a later one;
-/// `Explain` at level L over rows below `max_height`, with `bound` (variable, value)
-/// set before the body (the head's, for a row).
+/// `Fold`, an aggregate's one body, over every level with each row at its own level's
+/// height; `Explain` at level L over rows below `max_height`, with `bound` (variable,
+/// value) set before the body (the head's, for a row).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Mode<'m> {
     Eval {
         level: Tier,
         first_round: bool,
     },
+    Fold,
     Explain {
         level: Tier,
         max_height: u32,
@@ -302,6 +307,7 @@ pub(crate) fn run_body<S: FactSource + ?Sized>(
 ) -> Result<(), RulesError> {
     let (level, first, max_height, bound) = match mode {
         Mode::Eval { level, first_round } => (level, first_round, None, &[][..]),
+        Mode::Fold => (Tier::Heuristic, true, None, &[][..]),
         Mode::Explain {
             level,
             max_height,
@@ -315,6 +321,8 @@ pub(crate) fn run_body<S: FactSource + ?Sized>(
         max_height,
         explain,
         count: !explain,
+        at: (!matches!(mode, Mode::Fold)).then_some(level.level()),
+        lowered: matches!(mode, Mode::Eval { .. }),
     };
     walk(ctx, steps, vis, bound, emit)
 }
@@ -328,6 +336,10 @@ struct Vis {
     explain: bool,
     /// Charge the budget (evaluation).
     count: bool,
+    /// The level row heights resolve at (`View::at`).
+    at: Option<u8>,
+    /// A `Delta` read also reads the rows lowered at its level (evaluation only).
+    lowered: bool,
 }
 
 impl Vis {
@@ -356,6 +368,8 @@ impl Vis {
             levels,
             which,
             max_height: self.max_height,
+            at: self.at,
+            lowered: self.lowered && matches!(src, Src::Delta),
         }
     }
 
@@ -374,6 +388,8 @@ impl Vis {
             max_height: None,
             explain: false,
             count,
+            at: None,
+            lowered: false,
         }
     }
 }
