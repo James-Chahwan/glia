@@ -447,6 +447,8 @@ pub fn surface_class(f: &NavFact) -> Part {
         NavFact::ExportLocal { .. } => Part::Surface,
         // imports/reexports: the names a star from another file passes on.
         NavFact::Exports { .. } => Part::Surface,
+        // imports/reexports (GD.8): the names a Dart star does not pass on.
+        NavFact::ReExportHide { .. } => Part::Surface,
         // evm_abi: the ABI binding a client in another file imports.
         NavFact::EvmAbi { .. } => Part::Surface,
         // calls / dart: bound in the reader's own scope.
@@ -647,6 +649,7 @@ fn without_row(f: &NavFact) -> NavFact {
         | NavFact::ReExportStar { line, .. }
         | NavFact::ReExportNamespace { line, .. }
         | NavFact::ReExportName { line, .. }
+        | NavFact::ReExportHide { line, .. }
         | NavFact::ExportLocal { line, .. }
         | NavFact::MemberRead { line, .. }
         | NavFact::MemberWrite { line, .. } => *line = 0,
@@ -1464,6 +1467,11 @@ mod tests {
                 category: glia_code_domain::edge_category::HANDLED_BY,
                 rule: "content_by_lua_file".into(),
                 line: 4,
+            },
+            NavFact::ReExportHide {
+                source: "src/svc.dart".into(),
+                hidden: vec!["Hidden".into()],
+                line: 0,
             },
         ]
     }

@@ -296,11 +296,12 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // of each receiver shape below. DF.21: DF.4a's own-package URIs and
     // DF.4b's plain imports, measured on fixtures/dart-plain-import-calls plus
     // a probe of an `export` barrel, a `hide` clash, closures and receivers.
+    // GD.8: `export` barrels bind, measured on fixtures/dart-export-barrels.
     CoverageCaveat {
         language: "dart",
         edge_category: "CALLS",
-        note: "Dart constructors, factories, operators, abstract members and extension members are METHOD nodes. Calls bind: a bare call inside a class to its own member (implicit this) before a top-level function of the library; a call through a typed field (`final Repo repo;`, `final _r = Repo()`); a same-file type's constructions and statics; through an import with a `show` list or an `as` prefix, the imported library's functions, constructors and statics; and through a plain `import 'x.dart';` every public top-level name of x (bare calls, constructions, statics). An import resolves by relative path or by an own-package `package:<pubspec name>/..` URI (to that package's lib/ file); another package's URI and `dart:` stay external. A name two plain imports both declare binds neither, and a `hide` list is not read, so a name hidden from one plain import and taken from another binds neither; a `show` / `as` binding or the importer's own declaration wins. Not bound: a name reached only through an `export` re-export (a barrel library), a receiver typed by a parameter or a local (`void f(Repo r)`, `final r = Repo()`), a function's return value or a chain (`make().value()`), a `dynamic` receiver, an extension-method call and an operator expression (`a + b`) at the call site, a closure-held function, and any call inside a closure (`xs.forEach((x) { f(x); })`, `(x) => f(x)`)",
-        verify: "grep the callee name across *.dart, and for a name behind a barrel, the `export` lines that re-export it",
+        note: "Dart constructors, factories, operators, abstract members and extension members are METHOD nodes. Calls bind: a bare call inside a class to its own member (implicit this) before a top-level function of the library; a call through a typed field (`final Repo repo;`, `final _r = Repo()`); a same-file type's constructions and statics; through an import with a `show` list or an `as` prefix, the imported library's functions, constructors and statics; and through a plain `import 'x.dart';` every public top-level name of x (bare calls, constructions, statics), the names x re-exports included: a library barrel's `export 'src/y.dart';` passes y's public names, `show` only the names it lists, `hide` all but the names it lists, through chained barrels, and a name two exports bind to distinct declarations binds neither. An import or export resolves by relative path or by an own-package `package:<pubspec name>/..` URI (to that package's lib/ file); another package's URI and `dart:` stay external. A name two plain imports both declare binds neither, and a `hide` list is not read, so a name hidden from one plain import and taken from another binds neither; a `show` / `as` binding or the importer's own declaration wins. Not bound: a receiver typed by a parameter or a local (`void f(Repo r)`, `final r = Repo()`), a function's return value or a chain (`make().value()`), a `dynamic` receiver, an extension-method call and an operator expression (`a + b`) at the call site, a closure-held function, and any call inside a closure (`xs.forEach((x) { f(x); })`, `(x) => f(x)`)",
+        verify: "grep the callee name across *.dart, and the `export` lines of the barrels between the call and its declaration",
     },
     // CB.19 / CB.22 / CB.25: the C/C++ residual, measured on fixtures/
     // cpp-declarations, cpp-include-paths and cpp-call-scope plus a probe of
@@ -1140,8 +1141,9 @@ mod tests {
             assert!(unbound.contains(part), "not bound {part}: {swift}");
         }
         // CB.9 / CB.17: constructors, operators and extension members are
-        // nodes; DF.4a / DF.4b: own-package URIs and plain imports bind. The
-        // row names the barrel, closure and receiver residual.
+        // nodes; DF.4a / DF.4b: own-package URIs and plain imports bind;
+        // GD.8: so do `export` barrels. The row names the closure and
+        // receiver residual.
         assert!(lang_rows("lib/app.dart", "dart").contains(&("dart", "CALLS")));
         let dart = row_note("lib/app.dart", "dart", "CALLS");
         let (bound, unbound) = bound_split(dart);
@@ -1154,15 +1156,12 @@ mod tests {
             "plain `import",
             "package:",
             "`hide`",
+            "`export 'src/y.dart';`",
+            "chained barrels",
         ] {
             assert!(bound.contains(part), "bound {part}: {dart}");
         }
-        for part in [
-            "`export`",
-            "`dynamic`",
-            "a parameter or a local",
-            "inside a closure",
-        ] {
+        for part in ["`dynamic`", "a parameter or a local", "inside a closure"] {
             assert!(unbound.contains(part), "not bound {part}: {dart}");
         }
         // Control: neither row reaches a repo without the language.
@@ -1264,10 +1263,13 @@ mod tests {
         assert!(unbound.contains("`any P`, `some P`"), "{swift}");
 
         let dart = row_note("lib/app.dart", "dart", "CALLS");
-        let (_, unbound) = bound_split(dart);
+        let (bound, unbound) = bound_split(dart);
         assert!(!unbound.contains("plain `import"), "DF.4b: {dart}");
         assert!(!unbound.contains("a library pulled in"), "DF.4b: {dart}");
-        assert!(unbound.contains("barrel"), "{dart}");
+        // GD.8: export barrels bind.
+        assert!(!unbound.contains("barrel"), "GD.8: {dart}");
+        assert!(!unbound.contains("`export`"), "GD.8: {dart}");
+        assert!(bound.contains("barrel"), "GD.8: {dart}");
 
         let calls = row_note("src/a.cpp", "c_cpp", "CALLS");
         let (bound, unbound) = bound_split(calls);

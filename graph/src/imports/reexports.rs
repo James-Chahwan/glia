@@ -4,6 +4,18 @@
 //! [`NavFact::ReExportNamespace`], [`NavFact::ReExportName`],
 //! [`NavFact::ExportLocal`]).
 //!
+//! GD.8: Dart `export` directives ride on the same facts, recorded by the
+//! Dart parser: `export 'x.dart';` is a star, `show A, B` one named entry per
+//! name and `hide C` a star plus [`NavFact::ReExportHide`], so the star
+//! passes every name of its source but `C`; each Dart library records its
+//! public top-level names as [`NavFact::Exports`]. Dart has no `default` and
+//! no `export .. as`, and two exports of one name binding distinct
+//! declarations is a compile error there, read here as the ambiguity it is
+//! for a TS star: nothing binds. A plain import of a Dart barrel then binds
+//! the re-exported names through the barrel's `module_symbols`
+//! (`bind_dart_library_names`), and the `[imports] dart export` marker
+//! counts the Dart barrels ([`DartExportStats`]).
+//!
 //! A barrel is a MODULE with any re-export or from-less `export { .. }`
 //! fact. [`Barrels::read`] gives every barrel one IMPORTS edge (rule
 //! [`REEXPORT`]) per statement to each in-repo module it re-exports from,
@@ -62,6 +74,14 @@ enum Src {
     External(String),
 }
 
+/// One star re-export of a module: its source, and the names a Dart `hide`
+/// keeps it from passing (empty for TS and an unqualified Dart star).
+#[derive(Debug, Clone)]
+struct Star {
+    src: Src,
+    hidden: BTreeSet<String>,
+}
+
 /// One indirect export entry of a module.
 #[derive(Debug, Clone)]
 enum Indirect {
@@ -115,8 +135,9 @@ struct ModuleExports {
     /// [`NavFact::ReExportName`] / [`NavFact::ReExportNamespace`]: exported
     /// name -> entry, first wins.
     indirect: BTreeMap<String, Indirect>,
-    /// [`NavFact::ReExportStar`] sources, in statement order.
-    stars: Vec<Src>,
+    /// [`NavFact::ReExportStar`] sources, in statement order, each with the
+    /// names its [`NavFact::ReExportHide`] (same source and row) hides.
+    stars: Vec<Star>,
     /// The module's imports of the local names its [`NavFact::ExportLocal`]
     /// facts export: local name -> binding, the first statement wins.
     imports: BTreeMap<String, Imported>,
@@ -130,9 +151,18 @@ impl ModuleExports {
 
     /// The in-repo modules it stars, in statement order.
     fn star_modules(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.stars.iter().filter_map(|s| match s {
-            Src::Module(id) => Some(*id),
+        self.stars.iter().filter_map(|s| match s.src {
+            Src::Module(id) => Some(id),
             Src::External(_) => None,
+        })
+    }
+
+    /// The in-repo modules it stars that pass `n` (no `hide` names it), in
+    /// statement order.
+    fn star_modules_passing<'a>(&'a self, n: &'a str) -> impl Iterator<Item = NodeId> + 'a {
+        self.stars.iter().filter_map(move |s| match s.src {
+            Src::Module(id) if !s.hidden.contains(n) => Some(id),
+            _ => None,
         })
     }
 }
@@ -170,6 +200,40 @@ pub(crate) struct ReexportStats {
     pub(crate) capped: usize,
 }
 
+/// GD.8: what the Dart barrels of one graph build hold (the `[imports] dart
+/// export` marker): a subset of [`ReexportStats`]' statements, counted per
+/// Dart library.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DartExportStats {
+    /// Dart libraries with an `export` directive.
+    pub(crate) barrels: usize,
+    /// Names those barrels bind ([`Barrels::materialize`]'s entries).
+    pub(crate) names: usize,
+    /// Names their `hide` combinators list.
+    pub(crate) hidden: usize,
+    /// Names their `show` combinators list (one named entry each).
+    pub(crate) shown: usize,
+}
+
+impl DartExportStats {
+    /// GD.8 fired_on, once per graph build with a Dart barrel:
+    ///   `[imports] dart export barrels=<b> names=<n> hidden=<h> shown=<s>`
+    pub(crate) fn marker(&self) -> Option<String> {
+        let DartExportStats {
+            barrels,
+            names,
+            hidden,
+            shown,
+        } = *self;
+        (barrels > 0).then(|| {
+            format!(
+                "[imports] dart export barrels={barrels} names={names} hidden={hidden} \
+                 shown={shown}"
+            )
+        })
+    }
+}
+
 /// DT.1q: one graph's re-export barrels, read off the TS parser's export
 /// facts ([`Barrels::read`]) and resolved into its symbol tables
 /// ([`Barrels::materialize`]).
@@ -187,7 +251,10 @@ pub(crate) struct Barrels {
     side: HashMap<NodeId, BTreeMap<String, NodeId>>,
     /// Barrel -> what its `default` entry binds (lookup only).
     default_entry: HashMap<NodeId, NodeId>,
+    /// GD.8: the barrels that are Dart libraries (lookup only).
+    dart: HashSet<NodeId>,
     stats: ReexportStats,
+    dart_stats: DartExportStats,
 }
 
 impl Barrels {
@@ -198,9 +265,10 @@ impl Barrels {
     /// its same-stem sibling, then a directory's index (DT.1b). A source
     /// naming its own file is dropped (a cycle); one naming no in-repo module
     /// is kept as external, with no edge: a named or namespace re-export of
-    /// it still shadows the stars, and an external star is skipped. A graph
-    /// with no such fact (Dart, Solidity, Terraform, Swift, C/C++) costs one
-    /// scan of its nodes.
+    /// it still shadows the stars, and an external star is skipped. A
+    /// [`NavFact::ReExportHide`] joins the star of its source and row (GD.8:
+    /// a Dart `hide`). A graph with no such fact (Solidity, Terraform, Swift,
+    /// C/C++) costs one scan of its nodes.
     pub(crate) fn read<R: Fn(&str, &str) -> Option<String>>(
         g: &mut RepoGraph,
         imports: &[ImportStmt],
@@ -257,8 +325,24 @@ impl Barrels {
             let mut e = ModuleExports::default();
             let mut statement_edges: BTreeSet<(u32, u64)> = BTreeSet::new();
             let mut external: BTreeSet<u32> = BTreeSet::new();
-            for fact in facts {
-                let (source, line) = match &fact {
+            // GD.8: (source, row) -> the names a `hide` of that star lists.
+            let mut hides: BTreeMap<(&str, u32), BTreeSet<String>> = BTreeMap::new();
+            for f in &facts {
+                if let NavFact::ReExportHide {
+                    source,
+                    hidden,
+                    line,
+                } = f
+                {
+                    hides
+                        .entry((source.as_str(), *line))
+                        .or_default()
+                        .extend(hidden.iter().cloned());
+                }
+            }
+            let (mut hidden_names, mut shown_names) = (0usize, 0usize);
+            for fact in &facts {
+                let (source, line) = match fact {
                     NavFact::Exports { names } => {
                         e.own.extend(names.iter().cloned());
                         continue;
@@ -279,7 +363,7 @@ impl Barrels {
                     _ => continue,
                 };
                 e.barrel = true;
-                match &fact {
+                match fact {
                     NavFact::ReExportStar { .. } => b.stats.stars += 1,
                     NavFact::ReExportNamespace { .. } => b.stats.namespace += 1,
                     _ => b.stats.named += 1,
@@ -299,16 +383,24 @@ impl Barrels {
                     }
                 };
                 match fact {
-                    NavFact::ReExportStar { .. } => e.stars.push(src),
+                    NavFact::ReExportStar { .. } => {
+                        let hidden = hides
+                            .get(&(source.as_str(), line))
+                            .cloned()
+                            .unwrap_or_default();
+                        hidden_names += hidden.len();
+                        e.stars.push(Star { src, hidden });
+                    }
                     NavFact::ReExportNamespace { exported, .. } => {
                         e.indirect
-                            .entry(exported)
+                            .entry(exported.clone())
                             .or_insert(Indirect::Namespace(src));
                     }
                     NavFact::ReExportName { name, exported, .. } => {
+                        shown_names += 1;
                         e.indirect
-                            .entry(exported)
-                            .or_insert(Indirect::Name(src, name));
+                            .entry(exported.clone())
+                            .or_insert_with(|| Indirect::Name(src, name.clone()));
                     }
                     _ => {}
                 }
@@ -354,6 +446,12 @@ impl Barrels {
             }
             if e.barrel {
                 b.order.push(m);
+                if same.importer_ext(g, m).as_deref() == Some("dart") {
+                    b.dart.insert(m);
+                    b.dart_stats.barrels += 1;
+                    b.dart_stats.hidden += hidden_names;
+                    b.dart_stats.shown += shown_names;
+                }
             }
             b.modules.insert(m, e);
         }
@@ -421,6 +519,11 @@ impl Barrels {
         self.stats.cycles += r.cycles;
         self.stats.capped += r.capped;
         self.stats.entries = added.len() + side.len() + defaults.len();
+        self.dart_stats.names = added
+            .iter()
+            .chain(&side)
+            .filter(|(m, ..)| self.dart.contains(m))
+            .count();
         for (m, n, id) in added {
             g.symbols
                 .module_symbols
@@ -477,6 +580,11 @@ impl Barrels {
         self.stats
     }
 
+    /// GD.8: the counters the `[imports] dart export` marker prints.
+    pub(crate) fn dart_stats(&self) -> DartExportStats {
+        self.dart_stats
+    }
+
     /// DT.1q fired_on, once per graph build that read a re-export fact
     /// ([`ReexportStats::marker`]).
     pub(crate) fn marker(&self) -> Option<String> {
@@ -516,12 +624,13 @@ impl ReexportStats {
     }
 }
 
-/// The five DT.1q fact variants.
+/// The five DT.1q fact variants and GD.8's [`NavFact::ReExportHide`].
 fn is_export_fact(f: &NavFact) -> bool {
     matches!(
         f,
         NavFact::Exports { .. }
             | NavFact::ReExportStar { .. }
+            | NavFact::ReExportHide { .. }
             | NavFact::ReExportNamespace { .. }
             | NavFact::ReExportName { .. }
             | NavFact::ExportLocal { .. }
@@ -702,11 +811,12 @@ impl Resolver<'_> {
         if n == DEFAULT {
             return (Res::Null, Some(0));
         }
-        // Stars, in statement order; an external star is skipped.
+        // Stars, in statement order; an external star, and one whose `hide`
+        // names `n` (GD.8), is skipped.
         let mut found: Option<Res> = None;
         let mut height = 0;
         let mut clean = true;
-        for s in e.star_modules() {
+        for s in e.star_modules_passing(n) {
             let (res, c) = self.resolve(s, n, path, depth + 1);
             match c {
                 Some(h) => height = height.max(h + 1),

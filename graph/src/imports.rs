@@ -1244,6 +1244,12 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
 /// ([`reexports::Barrels::marker`]) and returns its counters, which the tests
 /// read back (the builders drop them).
 ///
+/// GD.8: a Dart library's `export` directives are the same facts (the Dart
+/// parser records them), so its re-exported names bind through it as a TS
+/// barrel's do; `[imports] dart export barrels=<b> names=<n> hidden=<h>
+/// shown=<s>` ([`reexports::DartExportStats::marker`]) fires once per graph
+/// build holding a Dart barrel.
+///
 /// FH.5: a qname `resolve_source` tags [`WORKSPACE_ENTRY`] /
 /// [`WORKSPACE_SUBPATH`] (a bare specifier naming a package the repo's own
 /// manifests declare, `from '@acme/sdk'`) binds through [`ts_target`]'s
@@ -1369,6 +1375,9 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
         eprintln!("{line}");
     }
     if let Some(line) = barrels.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = barrels.dart_stats().marker() {
         eprintln!("{line}");
     }
     if let Some(report) = workspace.report() {
@@ -1533,8 +1542,13 @@ fn dart_public_name(name: &str) -> bool {
 /// BTreeMap, so the result is independent of HashMap order. `hide` is not
 /// represented on an `ImportTarget::Module`, so a hidden name counts as
 /// visible: it can only add an ambiguity drop, never a wrong binding.
-/// `export` directives are not read, so a barrel library re-exporting its
-/// `src/` files binds only its own declarations.
+///
+/// GD.8: a barrel library's `module_symbols` holds the names its `export`
+/// directives re-export (same-name entries [`reexports::Barrels::materialize`]
+/// added before the statement loop, a `hide`n name left out), so a plain
+/// import of `package:app/app.dart` binds the declarations its `src/` files
+/// make, as a direct import of each would; the same declaration reached
+/// through two imports is one id, never an ambiguity.
 pub(crate) fn bind_dart_library_names(
     g: &mut RepoGraph,
     plain: &[(NodeId, NodeId)],
@@ -1782,7 +1796,7 @@ mod tests {
     use crate::build::{build_dotted, build_python, build_typescript, build_typescript_family};
     use crate::test_support::repo;
     use glia_code_domain::evidence::Evidence;
-    use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, cell_type};
+    use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, NavFact, cell_type};
     use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeKindId};
 
     #[test]
@@ -4394,6 +4408,284 @@ mod tests {
                 .iter()
                 .all(|e| e.category != edge_category::IMPORTS)
         );
+    }
+
+    // ---- GD.8: Dart `export` barrels --------------------------------------
+
+    /// GD.8: `fact` recorded on MODULE `qname` of `fp`, as the Dart parser
+    /// records an `export` directive's.
+    fn dart_fact(fp: &mut FileParse, qname: &str, fact: NavFact) {
+        fp.nav.record_fact(module(qname), fact);
+    }
+
+    /// GD.8: a Dart library's [`NavFact::Exports`]: its public names.
+    fn dart_exports(fp: &mut FileParse, qname: &str, names: &[&str]) {
+        let mut names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        names.sort();
+        dart_fact(fp, qname, NavFact::Exports { names });
+    }
+
+    fn dart_star(fp: &mut FileParse, qname: &str, source: &str, line: u32) {
+        let source = source.to_string();
+        dart_fact(fp, qname, NavFact::ReExportStar { source, line });
+    }
+
+    fn dart_hide(fp: &mut FileParse, qname: &str, source: &str, hidden: &[&str], line: u32) {
+        dart_star(fp, qname, source, line);
+        dart_fact(
+            fp,
+            qname,
+            NavFact::ReExportHide {
+                source: source.to_string(),
+                hidden: hidden.iter().map(|h| h.to_string()).collect(),
+                line,
+            },
+        );
+    }
+
+    fn dart_show(fp: &mut FileParse, qname: &str, source: &str, name: &str, line: u32) {
+        dart_fact(
+            fp,
+            qname,
+            NavFact::ReExportName {
+                source: source.to_string(),
+                name: name.to_string(),
+                exported: name.to_string(),
+                line,
+            },
+        );
+    }
+
+    /// GD.8: lib/src/svc.dart, `class Svc { go }` and `class Hidden { no }`.
+    fn svc_dart() -> FileParse {
+        let mut fp = library(
+            "lib/src/svc.dart",
+            "lib::src::svc",
+            &[],
+            &[("Svc", &["go"]), ("Hidden", &["no"])],
+        );
+        dart_exports(&mut fp, "lib::src::svc", &["Svc", "Hidden"]);
+        fp
+    }
+
+    /// GD.8: lib/main.dart, `import '<spec>';` and `main()` constructing
+    /// `Svc` and `Hidden`.
+    fn main_dart(spec: &str) -> FileParse {
+        let mut main = library("lib/main.dart", "lib::main", &["main"], &[]);
+        import_module(&mut main, "lib::main", spec, None);
+        call(&mut main, "lib::main::main", bare("Svc"));
+        call(&mut main, "lib::main::main", bare("Hidden"));
+        dart_exports(&mut main, "lib::main", &["main"]);
+        main
+    }
+
+    /// GD.8: a barrel's `export 'src/svc.dart' hide Hidden;` IMPORTS its
+    /// source (rule reexport) and passes Svc, never Hidden, to a plain import
+    /// of the barrel.
+    #[test]
+    fn dart_hide_export_binds_all_but_the_hidden() {
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_hide(&mut app, "lib::app", "src/svc.dart", &["Hidden"], 0);
+        let parses = vec![svc_dart(), app, main_dart("app.dart")];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(
+            imports_from(&g, "lib::app"),
+            [rule(module("lib::src::svc"), reexports::REEXPORT)]
+        );
+        assert_eq!(
+            binding(&g, "lib::main", "Svc"),
+            Some(class("lib::src::svc::Svc"))
+        );
+        assert_eq!(binding(&g, "lib::main", "Hidden"), None);
+        assert_eq!(
+            g.symbols.module_symbols[&module("lib::app")].get("Hidden"),
+            None
+        );
+        assert!(
+            calls_from(&g, "lib::main::main")
+                .contains(&rule(class("lib::src::svc::Svc"), "import_binding"))
+        );
+    }
+
+    /// GD.8: `export 'src/svc.dart' show Svc;` passes Svc alone; a plain
+    /// `export` passes both.
+    #[test]
+    fn dart_show_and_plain_exports() {
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_show(&mut app, "lib::app", "src/svc.dart", "Svc", 0);
+        let parses = vec![svc_dart(), app, main_dart("app.dart")];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(
+            binding(&g, "lib::main", "Svc"),
+            Some(class("lib::src::svc::Svc"))
+        );
+        assert_eq!(binding(&g, "lib::main", "Hidden"), None);
+
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_star(&mut app, "lib::app", "src/svc.dart", 0);
+        let parses = vec![svc_dart(), app, main_dart("app.dart")];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(
+            binding(&g, "lib::main", "Svc"),
+            Some(class("lib::src::svc::Svc"))
+        );
+        assert_eq!(
+            binding(&g, "lib::main", "Hidden"),
+            Some(class("lib::src::svc::Hidden"))
+        );
+    }
+
+    /// GD.8: app.dart -> src/all.dart -> src/svc.dart binds through both
+    /// barrels; a `hide` on the inner one holds for the outer.
+    #[test]
+    fn dart_chained_barrels_bind() {
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_star(&mut app, "lib::app", "src/all.dart", 0);
+        let mut all = library("lib/src/all.dart", "lib::src::all", &[], &[]);
+        dart_hide(&mut all, "lib::src::all", "svc.dart", &["Hidden"], 0);
+        let parses = vec![svc_dart(), all, app, main_dart("app.dart")];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(
+            imports_from(&g, "lib::src::all"),
+            [rule(module("lib::src::svc"), reexports::REEXPORT)]
+        );
+        assert_eq!(
+            binding(&g, "lib::main", "Svc"),
+            Some(class("lib::src::svc::Svc"))
+        );
+        assert_eq!(binding(&g, "lib::main", "Hidden"), None);
+    }
+
+    /// GD.8: two barrels exporting each other end the cycle and still pass
+    /// what each declares; two stars passing distinct `Svc`s bind neither
+    /// (a Dart compile error, never a guess).
+    #[test]
+    fn dart_cycles_end_and_clashes_bind_nothing() {
+        let mut a = library("lib/a.dart", "lib::a", &["fromA"], &[]);
+        dart_exports(&mut a, "lib::a", &["fromA"]);
+        dart_star(&mut a, "lib::a", "b.dart", 0);
+        let mut b = library("lib/b.dart", "lib::b", &["fromB"], &[]);
+        dart_exports(&mut b, "lib::b", &["fromB"]);
+        dart_star(&mut b, "lib::b", "a.dart", 0);
+        let mut main = library("lib/main.dart", "lib::main", &["main"], &[]);
+        import_module(&mut main, "lib::main", "b.dart", None);
+        let g = build_typescript(repo(), vec![a, b, main], dart_source).expect("build");
+        assert_eq!(
+            binding(&g, "lib::main", "fromA"),
+            Some(func("lib::a::fromA"))
+        );
+        assert_eq!(
+            binding(&g, "lib::main", "fromB"),
+            Some(func("lib::b::fromB"))
+        );
+
+        let mut other = library(
+            "lib/src/other.dart",
+            "lib::src::other",
+            &[],
+            &[("Svc", &[])],
+        );
+        dart_exports(&mut other, "lib::src::other", &["Svc"]);
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_star(&mut app, "lib::app", "src/svc.dart", 0);
+        dart_star(&mut app, "lib::app", "src/other.dart", 1);
+        let parses = vec![svc_dart(), other, app, main_dart("app.dart")];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(binding(&g, "lib::main", "Svc"), None);
+        assert_eq!(
+            binding(&g, "lib::main", "Hidden"),
+            Some(class("lib::src::svc::Hidden"))
+        );
+    }
+
+    /// GD.8: the hidden name of one plain import leaves the other's to bind
+    /// (with `hide` unread both would declare `Hidden` and neither bind), and
+    /// the same declaration through the barrel and a direct import is one.
+    #[test]
+    fn dart_hidden_name_does_not_clash() {
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_hide(&mut app, "lib::app", "src/svc.dart", &["Hidden"], 0);
+        let mut legacy = library(
+            "lib/src/legacy.dart",
+            "lib::src::legacy",
+            &[],
+            &[("Hidden", &[])],
+        );
+        dart_exports(&mut legacy, "lib::src::legacy", &["Hidden"]);
+        let mut main = main_dart("app.dart");
+        import_module(&mut main, "lib::main", "src/legacy.dart", None);
+        import_module(&mut main, "lib::main", "src/svc.dart", None);
+        let parses = vec![svc_dart(), legacy, app, main];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        // svc.dart's own Hidden (direct import) and legacy's clash.
+        assert_eq!(binding(&g, "lib::main", "Hidden"), None);
+        assert_eq!(
+            binding(&g, "lib::main", "Svc"),
+            Some(class("lib::src::svc::Svc"))
+        );
+
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_hide(&mut app, "lib::app", "src/svc.dart", &["Hidden"], 0);
+        let mut legacy = library(
+            "lib/src/legacy.dart",
+            "lib::src::legacy",
+            &[],
+            &[("Hidden", &[])],
+        );
+        dart_exports(&mut legacy, "lib::src::legacy", &["Hidden"]);
+        let mut main = main_dart("app.dart");
+        import_module(&mut main, "lib::main", "src/legacy.dart", None);
+        let parses = vec![svc_dart(), legacy, app, main];
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(
+            binding(&g, "lib::main", "Hidden"),
+            Some(class("lib::src::legacy::Hidden"))
+        );
+    }
+
+    /// GD.8: the `[imports] dart export` counters, and no line for a graph
+    /// with no Dart barrel (a TS barrel included).
+    #[test]
+    fn dart_export_marker_counts() {
+        use reexports::DartExportStats;
+        let mut app = library("lib/app.dart", "lib::app", &[], &[]);
+        dart_hide(&mut app, "lib::app", "src/svc.dart", &["Hidden"], 0);
+        dart_show(&mut app, "lib::app", "src/other.dart", "Other", 1);
+        let mut other = library(
+            "lib/src/other.dart",
+            "lib::src::other",
+            &[],
+            &[("Other", &[])],
+        );
+        dart_exports(&mut other, "lib::src::other", &["Other"]);
+        let parses = vec![svc_dart(), other, app, main_dart("app.dart")];
+        let imports = all_imports(&parses);
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        let mut pre = pre_imports(&g);
+        let mut same = same_stem_table(&pre);
+        let mut barrels = Barrels::read(&mut pre, &imports, &dart_source, &mut same);
+        barrels.materialize(&mut pre);
+        assert_eq!(
+            barrels.dart_stats(),
+            DartExportStats {
+                barrels: 1,
+                names: 2,
+                hidden: 1,
+                shown: 1,
+            }
+        );
+        assert_eq!(
+            barrels.dart_stats().marker().as_deref(),
+            Some("[imports] dart export barrels=1 names=2 hidden=1 shown=1")
+        );
+        assert_eq!(DartExportStats::default().marker(), None);
+        // A TS barrel is no Dart barrel.
+        let (g, imports) = ts_graph(&fixture());
+        let mut pre = pre_imports(&g);
+        let mut same = same_stem_table(&pre);
+        let mut barrels = Barrels::read(&mut pre, &imports, &ts_source, &mut same);
+        barrels.materialize(&mut pre);
+        assert_eq!(barrels.dart_stats(), DartExportStats::default());
     }
 
     // ---- GD.9: Python star re-exports through a package `__init__` ----------

@@ -2021,6 +2021,17 @@ pub enum NavFact {
         rule: String,
         line: u32,
     },
+    /// Dart (GD.8), recorded by the Dart parser on the file MODULE beside the
+    /// [`NavFact::ReExportStar`] of the same `source` and `line`, read by
+    /// `graph/src/imports/reexports.rs`; build-time only: `export '<source>'
+    /// hide <hidden>;` on 0-based row `line`. The star re-exports every name
+    /// of its source but these (a `show` export is one
+    /// [`NavFact::ReExportName`] per name instead, and records none).
+    ReExportHide {
+        source: String,
+        hidden: Vec<String>,
+        line: u32,
+    },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

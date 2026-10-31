@@ -1,0 +1,52 @@
+{
+  "framework": "dart-export-barrels",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.8 (FD.20; DF.4b / DF.21 residual 'a name reached only through an `export` re-export'). lib/app.dart is a library barrel, `export 'src/svc.dart' hide Hidden;`. Baseline HEAD a8323fe7: the Dart parser read no `export` directive, so `import 'package:app/app.dart';` bound none of the names app.dart re-exports: only `lib::main IMPORTS lib::app` (plus Runner::run -> Svc::go, bound by the repo-unique field-type fallback). After GD.8 the export is DT.1q's ReExportStar plus a ReExportHide, app.dart IMPORTS svc.dart (rule reexport) and Svc joins app.dart's module_symbols, so the plain import binds the construction, the static call and the field's construction. `hide Hidden` keeps svc.dart's Hidden out of app.dart, so old.dart's plain imports of app.dart and src/legacy.dart do not clash on Hidden: `Hidden()` binds legacy's (with hide ignored both imports would declare it and neither would bind), never svc's. `Svc().go()` -> Svc::go is a call on a construction's result, which Dart binds through no import (a direct `import 'src/svc.dart'` binds it neither), so it is not a row here.",
+  "expect_edges": [
+    {
+      "from": "lib::app",
+      "to": "lib::src::svc",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "lib::main::main",
+      "to": "lib::src::svc::Svc",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::main::main",
+      "to": "lib::src::svc::Svc::open",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::main::Runner",
+      "to": "lib::src::svc::Svc",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::main::Runner::run",
+      "to": "lib::src::svc::Svc::go",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::old::old",
+      "to": "lib::src::legacy::Hidden",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::old::old",
+      "to": "lib::src::svc::Svc",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "lib::old::old",
+      "to": "lib::src::svc::Hidden",
+      "category": "CALLS"
+    }
+  ]
+}

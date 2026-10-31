@@ -499,10 +499,18 @@ fn visit_top(
         library: library_names(node, src),
     };
     acc.type_names = file_types.types.keys().cloned().collect();
+    // GD.8: what a library re-exporting this file can pass on.
+    let names = exported_names(node, src);
+    if !names.is_empty() {
+        acc.nav.record_fact(parent_id, NavFact::Exports { names });
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "import_or_export" => collect_import(child, src, parent_qname, acc),
+            "import_or_export" => {
+                collect_import(child, src, parent_qname, acc);
+                collect_export(child, src, parent_id, acc);
+            }
             "class_declaration" => {
                 visit_class(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
@@ -1951,7 +1959,7 @@ fn find_method_name<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<String> {
 ///
 /// The uri is the string's text without its quotes; a conditional import's
 /// (`'a.dart' if (dart.library.io) 'b.dart'`) is its default, the first
-/// `uri`. `export` directives are not read.
+/// `uri`. `export` directives are [`collect_export`]'s.
 fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     let Some(spec) = named_child_of_kind(node, "library_import")
         .and_then(|lib| named_child_of_kind(lib, "import_specification"))
@@ -1989,6 +1997,128 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         }
         (alias, _) => push(ImportTarget::Module { path, alias }),
     }
+}
+
+/// GD.8: one `export` directive (`library_export` under `import_or_export`),
+/// read from the AST, recorded on the file MODULE `module_id` as DT.1q's
+/// re-export facts, which `graph/src/imports/reexports.rs` resolves:
+///
+///   `export 'a.dart';`                [`NavFact::ReExportStar`]
+///   `export 'a.dart' hide X, Y;`      ReExportStar + one
+///                                     [`NavFact::ReExportHide`] { [X, Y] }
+///   `export 'a.dart' show X, Y;`      one [`NavFact::ReExportName`] per name
+///                                     the combinators leave visible
+///                                     ([`shown_names`]), `exported` = `name`
+///
+/// The uri is read as an import's ([`import_uri`]: a conditional export's
+/// default). A `show` list the `hide`s empty records nothing. Dart has no
+/// `export .. as` and no `default` export, so no ReExportNamespace or
+/// ExportLocal is recorded.
+fn collect_export(node: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let Some(export) = named_child_of_kind(node, "library_export") else {
+        return;
+    };
+    let Some(source) = export
+        .child_by_field_name("uri")
+        .and_then(|u| import_uri(u, src))
+    else {
+        return;
+    };
+    let line = line_at(node);
+    if let Some(names) = shown_names(export, src) {
+        let mut seen: HashSet<String> = HashSet::new();
+        for name in names {
+            if seen.insert(name.clone()) {
+                acc.nav.record_fact(
+                    module_id,
+                    NavFact::ReExportName {
+                        source: source.clone(),
+                        name: name.clone(),
+                        exported: name,
+                        line,
+                    },
+                );
+            }
+        }
+        return;
+    }
+    let mut hidden: Vec<String> = Vec::new();
+    let mut cursor = export.walk();
+    for comb in export.named_children(&mut cursor) {
+        if comb.kind() != "combinator" || comb.child(0).map(|t| t.kind()) != Some("hide") {
+            continue;
+        }
+        let mut ids = comb.walk();
+        hidden.extend(
+            comb.named_children(&mut ids)
+                .filter(|i| i.kind() == "identifier")
+                .map(|i| text_of(i, src).to_string()),
+        );
+    }
+    hidden.sort();
+    hidden.dedup();
+    acc.nav.record_fact(
+        module_id,
+        NavFact::ReExportStar {
+            source: source.clone(),
+            line,
+        },
+    );
+    if !hidden.is_empty() {
+        acc.nav.record_fact(
+            module_id,
+            NavFact::ReExportHide {
+                source,
+                hidden,
+                line,
+            },
+        );
+    }
+}
+
+/// GD.8: every public name this library declares at top level, sorted and
+/// deduplicated (recorded as one [`NavFact::Exports`]): classes, mixins,
+/// enums, extension types, named extensions, typedefs, functions, getters,
+/// setters and variables, whether or not one mints a node. A Dart library
+/// exports exactly these (a `_` name is library-private), so a star
+/// re-export of this file passes them and nothing else.
+fn exported_names(root: TsNode, src: &[u8]) -> Vec<String> {
+    let mut names: Vec<String> = library_names(root, src).into_iter().collect();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        let name = match child.kind() {
+            "class_declaration" => find_identifier(child, src),
+            "mixin_declaration" | "extension_type_declaration" | "enum_declaration" => {
+                decl_name(child, src)
+            }
+            "extension_declaration" => child
+                .child_by_field_name("name")
+                .map(|n| text_of(n, src).to_string()),
+            "type_alias" => typedef_name(child, src),
+            _ => None,
+        };
+        names.extend(name);
+    }
+    names.retain(|n| !n.is_empty() && !n.starts_with('_'));
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// GD.8: a `typedef`'s name: the last `type_identifier` child before its
+/// `=` (`typedef Json = Map<String, Object?>;`), its type parameters or its
+/// parameter list (the legacy `typedef int Cmp(a, b);`).
+fn typedef_name(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut last: Option<TsNode> = None;
+    let mut cursor = node.walk();
+    for c in node.children(&mut cursor) {
+        match c.kind() {
+            "type_identifier" => last = Some(c),
+            "=" | "type_parameters" | "formal_parameter_list" => break,
+            _ => {}
+        }
+    }
+    last.map(|n| text_of(n, src).to_string())
 }
 
 /// The first named child of `node` of `kind`.
@@ -9513,10 +9643,108 @@ class Wallet {
         )
     }
 
-    /// CH.5a: the facts recorded on MODULE `module_qname`, in record order.
+    /// CH.5a: the facts recorded on MODULE `module_qname`, in record order,
+    /// but the one [`NavFact::Exports`] every library with a public name
+    /// records (GD.8; [`all_module_facts`] keeps it).
     fn module_facts(fp: &FileParse, module_qname: &str) -> Vec<NavFact> {
+        all_module_facts(fp, module_qname)
+            .into_iter()
+            .filter(|f| !matches!(f, NavFact::Exports { .. }))
+            .collect()
+    }
+
+    /// GD.8: every fact recorded on MODULE `module_qname`, in record order.
+    fn all_module_facts(fp: &FileParse, module_qname: &str) -> Vec<NavFact> {
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_qname);
         fp.nav.nav_facts.get(&module).cloned().unwrap_or_default()
+    }
+
+    // ---- GD.8: `export` directives are DT.1q's re-export facts ---------------
+
+    /// GD.8: `export 'x.dart';` is a star, `hide` a star plus its hidden
+    /// names, `show` one named entry per visible name; the uri is read as an
+    /// import's, and no `import` statement comes of an export.
+    #[test]
+    fn export_directives_are_reexport_facts() {
+        let source = "library app;\n\
+export 'src/a.dart';\n\
+export 'package:app/src/b.dart' hide Hidden, Gone, Hidden;\n\
+export 'src/c.dart' show C, d;\n\
+export 'src/e.dart' show E, F hide F;\n\
+export 'src/f.dart' show F hide F;\n\
+export 'src/g.dart' if (dart.library.io) 'src/g_io.dart';\n\
+import 'src/h.dart' hide H;\n";
+        let fp = parse_file(source, "lib/app.dart", "lib::app", repo()).unwrap();
+        let star = |source: &str, line: u32| NavFact::ReExportStar {
+            source: source.into(),
+            line,
+        };
+        let name = |source: &str, name: &str, line: u32| NavFact::ReExportName {
+            source: source.into(),
+            name: name.into(),
+            exported: name.into(),
+            line,
+        };
+        assert_eq!(
+            all_module_facts(&fp, "lib::app"),
+            [
+                star("src/a.dart", 1),
+                star("package:app/src/b.dart", 2),
+                NavFact::ReExportHide {
+                    source: "package:app/src/b.dart".into(),
+                    hidden: vec!["Gone".into(), "Hidden".into()],
+                    line: 2,
+                },
+                name("src/c.dart", "C", 3),
+                name("src/c.dart", "d", 3),
+                name("src/e.dart", "E", 4),
+                star("src/g.dart", 6),
+            ]
+        );
+        // Only the import is an ImportStmt; its `hide` stays unread there.
+        assert_eq!(fp.imports.len(), 1);
+        assert_eq!(fp.imports[0].target, module("src/h.dart", None));
+    }
+
+    /// GD.8: a library records its public top-level names, every declaration
+    /// form, as one sorted Exports fact; private names are left out, and a
+    /// library with none records no fact.
+    #[test]
+    fn a_library_records_its_public_names() {
+        let source = "class Svc { void go() {} }\n\
+class _Private {}\n\
+mixin Logs {}\n\
+enum Mode { a, b }\n\
+extension Strings on String { int get n => 1; }\n\
+extension on int { int get m => 1; }\n\
+extension type Id(int v) {}\n\
+typedef Json = Map<String, Object?>;\n\
+typedef int Cmp(int a, int b);\n\
+typedef _Hidden = int;\n\
+void run() {}\n\
+void _helper() {}\n\
+int get count => 1;\n\
+set count(int v) {}\n\
+const limit = 3, _cap = 4;\n\
+var counter = 0;\n\
+final Svc shared = Svc();\n";
+        let fp = parse_file(source, "lib/src/svc.dart", "lib::src::svc", repo()).unwrap();
+        let exports: Vec<NavFact> = all_module_facts(&fp, "lib::src::svc")
+            .into_iter()
+            .filter(|f| matches!(f, NavFact::Exports { .. }))
+            .collect();
+        let names = [
+            "Cmp", "Id", "Json", "Logs", "Mode", "Strings", "Svc", "count", "counter", "limit",
+            "run", "shared",
+        ];
+        assert_eq!(
+            exports,
+            [NavFact::Exports {
+                names: names.iter().map(|n| n.to_string()).collect(),
+            }]
+        );
+        let fp = parse_file("void _only() {}\n", "lib/src/p.dart", "lib::src::p", repo()).unwrap();
+        assert_eq!(all_module_facts(&fp, "lib::src::p"), []);
     }
 
     /// CH.5a: a generic client call `dio.get<T>('/x')` is an ENDPOINT with its
