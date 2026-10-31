@@ -461,6 +461,9 @@ pub fn surface_class(f: &NavFact) -> Part {
         NavFact::Getter => Part::Surface,
         // calls::resolve_member_reads: a write in another file binds the setter.
         NavFact::Setter => Part::Surface,
+        // resolver:host (GH.6): this conf's own outgoing script ref, bound
+        // after every group build; no group resolution reads it.
+        NavFact::HostScriptRef { .. } => Part::Body,
     }
 }
 
@@ -1454,6 +1457,14 @@ mod tests {
             },
             NavFact::Getter,
             NavFact::Setter,
+            NavFact::HostScriptRef {
+                host: "nginx".into(),
+                conf: "deploy/nginx.conf".into(),
+                path: "lua/hello.lua".into(),
+                category: glia_code_domain::edge_category::HANDLED_BY,
+                rule: "content_by_lua_file".into(),
+                line: 4,
+            },
         ]
     }
 
@@ -2152,6 +2163,7 @@ mod tests {
                 NavFact::MemberRead { .. } => "MemberRead",
                 NavFact::ReceiverType { .. } => "ReceiverType",
                 NavFact::MemberWrite { .. } => "MemberWrite",
+                NavFact::HostScriptRef { .. } => "HostScriptRef",
                 _ => "other",
             })
             .collect();
@@ -2165,7 +2177,8 @@ mod tests {
                 "ClientBase",
                 "MemberRead",
                 "ReceiverType",
-                "MemberWrite"
+                "MemberWrite",
+                "HostScriptRef"
             ]
         );
         assert_eq!(surface_language("a/b.py"), Some("python"));

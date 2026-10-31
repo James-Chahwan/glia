@@ -79,6 +79,15 @@ const MIGRATION_SQL_CAP: u64 = 4 * 1024 * 1024;
 /// other file ([`PendingClass::Markdown`]).
 const MARKDOWN_CAP: u64 = 500_000;
 
+/// GH.6 `[nginx] confs` marker counters: every `.conf` the walk sniffed, and
+/// the ones it admitted (an nginx conf naming a Lua phase); the rest are
+/// `skipped=`.
+#[derive(Default)]
+struct ConfAdmission {
+    sniffed: usize,
+    admitted: usize,
+}
+
 /// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
 /// `.json` the walk reached, `admitted` is the ones queued as contracts,
 /// (LA.16) as JSON Schemas or (CL.7b) as .NET `appsettings*.json` settings
@@ -120,6 +129,9 @@ pub(crate) enum PendingClass {
     /// A non-manifest `.json`, read only to be sniffed (A10.8, LA.16), or
     /// admitted by its path as a .NET settings file (CL.7b).
     JsonSniff,
+    /// GH.6: a `.conf` that is no HOCON conf, read only to be sniffed for an
+    /// nginx Lua phase directive (`glia_code_extractors::nginx::sniff`).
+    NginxSniff,
     /// A language file or a bypass path (manifest, yaml, Dockerfile, ...).
     Source,
 }
@@ -137,6 +149,11 @@ pub(crate) enum Read {
         admitted: Option<String>,
     },
     Src(String),
+    /// GH.6: a sniffed `.conf`: its text when it names an nginx Lua phase
+    /// (at most [`glia_code_extractors::nginx::CONF_CAP`] bytes), else `None`.
+    Conf {
+        admitted: Option<String>,
+    },
     /// Nothing to keep: a read failed, or a doc fell through to no rule.
     Unreadable,
 }
@@ -176,6 +193,13 @@ pub(crate) fn read_one(p: &Pending) -> Read {
                 over_cap: false,
                 admitted: None,
             },
+        },
+        PendingClass::NginxSniff => Read::Conf {
+            admitted: file_len()
+                .ok()
+                .filter(|n| *n <= glia_code_extractors::nginx::CONF_CAP)
+                .and_then(|_| std::fs::read_to_string(&p.abs).ok())
+                .filter(|t| glia_code_extractors::nginx::sniff(t)),
         },
         PendingClass::Source => match std::fs::read_to_string(&p.abs) {
             Ok(text) => Read::Src(text),
@@ -377,6 +401,7 @@ struct ReadFold {
     files: Vec<(String, String)>,
     md: Vec<(String, String)>,
     json: JsonAdmission,
+    confs: ConfAdmission,
     counts: ReadCounts,
 }
 
@@ -385,7 +410,8 @@ impl ReadFold {
         match class {
             PendingClass::Markdown { .. } => self.counts.md += 1,
             PendingClass::JsonSniff => self.counts.json += 1,
-            PendingClass::Source => self.counts.source += 1,
+            // GH.6: a sniffed `.conf` counts as source in `[parallel] walk`.
+            PendingClass::NginxSniff | PendingClass::Source => self.counts.source += 1,
         }
         match read {
             Read::Md(text) => self.md.push((rel.to_string(), text)),
@@ -398,6 +424,13 @@ impl ReadFold {
                 }
             }
             Read::Src(text) => self.files.push((rel.to_string(), text)),
+            Read::Conf { admitted } => {
+                self.confs.sniffed += 1;
+                if let Some(text) = admitted {
+                    self.confs.admitted += 1;
+                    self.files.push((rel.to_string(), text));
+                }
+            }
             Read::Unreadable => {}
         }
     }
@@ -490,7 +523,8 @@ pub(crate) type Reuse<'a> = dyn Fn(&Pending) -> Option<Read> + Sync + 'a;
 /// the source rule counts as md), then with `reuse` only
 ///   `[walk] reuse root=<root> reused=<r> read=<k> of <n>` (`r + k = n`),
 /// then the `[roots] sbt` lines ([`SbtMembers`]), the `[roots] declared`
-/// lines, `[contract] json sniffed=`, `[contract] json over_cap=`, `[roots]
+/// lines, `[contract] json sniffed=`, `[contract] json over_cap=`, `[nginx]
+/// confs sniffed=` (GH.6), `[roots]
 /// <n> project roots`, the `[walk]` gate tally and the `[walk] gitignore` /
 /// `[walk] config skip` lines, each gated on non-zero as before.
 pub(crate) fn read_walk(
@@ -534,6 +568,7 @@ pub(crate) fn read_walk(
         files,
         md,
         json,
+        confs,
         counts,
     } = fold;
     eprintln!(
@@ -571,6 +606,15 @@ pub(crate) fn read_walk(
         eprintln!(
             "[contract] json over_cap={} cap_bytes={JSON_CONTRACT_CAP}",
             json.over_cap
+        );
+    }
+    // GH.6 fired_on: `grep '^\[nginx\] confs sniffed='`, gated on non-zero.
+    if confs.sniffed > 0 {
+        eprintln!(
+            "[nginx] confs sniffed={} admitted={} skipped={}",
+            confs.sniffed,
+            confs.admitted,
+            confs.sniffed - confs.admitted
         );
     }
     // Explicit, although the name-sorted walk already discovers roots in a
@@ -984,6 +1028,17 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
                     rel: rel_str,
                     abs: path,
                     class: PendingClass::JsonSniff,
+                });
+                continue;
+            }
+            // GH.6: a `.conf` no other rule reads (HOCON confs are bypass
+            // paths) is read only to be sniffed for an nginx Lua phase, and
+            // queued only when it names one; every other conf is dropped.
+            if glia_code_extractors::nginx::is_conf_path(&rel_str) && !source_rule() {
+                plan.pending.push(Pending {
+                    rel: rel_str,
+                    abs: path,
+                    class: PendingClass::NginxSniff,
                 });
                 continue;
             }
@@ -2059,6 +2114,36 @@ mod walk_tests {
             .filter(|q| q.contains("conf"))
             .collect();
         assert!(modules.is_empty(), "a conf is no MODULE: {modules:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH.6: a `.conf` that is no HOCON conf is sniffed, and queued only
+    /// when it names an nginx Lua phase directive: a plain nginx conf, an INI
+    /// conf and a word in a comment are dropped.
+    #[test]
+    fn walk_admits_only_lua_nginx_confs() {
+        let root = walk_tmp("nginx");
+        for d in ["deploy/nginx", "etc"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, text) in [
+            (
+                "deploy/nginx/app.conf",
+                "server { location /x { content_by_lua_file lua/x.lua; } }\n",
+            ),
+            (
+                "deploy/nginx/plain.conf",
+                "server { location / { proxy_pass http://a; } }\n",
+            ),
+            ("etc/supervisord.conf", "[program:web]\ncommand=run\n"),
+            ("notes.conf", "# content_by_lua_file x.lua;\n"),
+        ] {
+            std::fs::write(root.join(rel), text).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(read, ["deploy/nginx/app.conf"]);
+        assert!(crate::route::parser_route("deploy/nginx/app.conf").is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

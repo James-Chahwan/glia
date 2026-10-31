@@ -2003,6 +2003,24 @@ pub enum NavFact {
     /// TypeScript / JavaScript (DT.5k), recorded by the TS parser on a METHOD:
     /// it is declared as a `set` accessor.
     Setter,
+    /// GH.6: a host's configuration names a script file it runs (`host`
+    /// `nginx`: `content_by_lua_file lua/hello.lua;` inside a `location`),
+    /// recorded on the scope that runs it (the location's ROUTE, or the conf's
+    /// MODULE for a phase outside one). `conf` is the repo-relative path of the
+    /// file that holds the directive, `path` the script path as written,
+    /// `category` the edge the binding asserts (HANDLED_BY for a content
+    /// handler, USES for every other phase), `rule` the directive name and
+    /// `line` its 0-based row. Read by the graph crate's `HostResolver`
+    /// (resolver:host), which binds `path` to a MODULE of the same repo by file
+    /// path; a host row never mints the edge by itself.
+    HostScriptRef {
+        host: String,
+        conf: String,
+        path: String,
+        category: EdgeCategoryId,
+        rule: String,
+        line: u32,
+    },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

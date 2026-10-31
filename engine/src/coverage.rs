@@ -368,12 +368,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( / url( across *.kt",
     },
     // GH.2: the host table's Lua rows (code_domain::hosts), measured on
-    // patterns/lua/host_command and the Lua parser's host tests.
+    // patterns/lua/host_command and the Lua parser's host tests. GH.6: the
+    // nginx / OpenResty side (extractors::nginx, resolver:host), measured on
+    // patterns/lua/embedded_script.
     CoverageCaveat {
         language: "lua",
         edge_category: "HANDLED_BY",
-        note: "Lua host commands are read for two hosts only: Neovim `vim.api.nvim_create_user_command(\"Name\", h, ..)` / `nvim_buf_create_user_command(buf, \"Name\", h, ..)` and Maki `maki.api.register_tool` / `register_command` with a `name` and `execute` / `restore` fields, each a CLI_COMMAND `host_cmd:<host>:<name>` HANDLED_BY its handler (an anonymous one is the FUNCTION `command <name>`). The callee must be rooted at the global `vim` / `maki`, directly or through a local alias of it or of one of its fields (`local api = vim.api`); a host table passed as a parameter, stored in a table field or reached through `require`, a local that shadows the global, a name that is not a string literal, a keymap (`vim.keymap.set`, `nvim_set_keymap`: no command), other `maki.api.register_*` calls and every other host (WezTerm, LOVE, AwesomeWM, WoW, OpenResty) register nothing",
-        verify: "grep nvim_create_user_command / register_tool / register_command in *.lua",
+        note: "Lua host commands are read for two hosts only: Neovim `vim.api.nvim_create_user_command(\"Name\", h, ..)` / `nvim_buf_create_user_command(buf, \"Name\", h, ..)` and Maki `maki.api.register_tool` / `register_command` with a `name` and `execute` / `restore` fields, each a CLI_COMMAND `host_cmd:<host>:<name>` HANDLED_BY its handler (an anonymous one is the FUNCTION `command <name>`). The callee must be rooted at the global `vim` / `maki`, directly or through a local alias of it or of one of its fields (`local api = vim.api`); a host table passed as a parameter, stored in a table field or reached through `require`, a local that shadows the global, a name that is not a string literal, a keymap (`vim.keymap.set`, `nvim_set_keymap`: no command), other `maki.api.register_*` calls and every other host (WezTerm, LOVE, AwesomeWM, WoW) register nothing. OpenResty is read from the nginx side: a `*.conf` (not a HOCON application.conf / reference.conf / resources conf) naming a Lua phase directive, where `content_by_lua_file <f>` in a `location <path>` / `location = <path>` / `location ^~ <path>` is the ROUTE `ANY <path>` HANDLED_BY the MODULE of <f>, and every other `<phase>_by_lua_file` a USES from that ROUTE (or from the conf's MODULE outside a served location; init / init_worker / exit_worker make the conf an ENTRYPOINT), bound by file path: the conf's directory, then the repo root, then the one longest path suffix of a file of the same extension (two at that length bind nothing). Not read: a regex (`~`, `~*`) or named (`@x`) location (no ROUTE), a path holding an nginx variable, inline `*_by_lua_block` / `*_by_lua` Lua, `include`d confs, a `.conf` over 1 MiB, and Lua run any other way (Redis EVAL / register_script, an embedded interpreter)",
+        verify: "grep nvim_create_user_command / register_tool / register_command in *.lua; grep _by_lua in *.conf",
     },
 ];
 
@@ -995,6 +997,8 @@ mod tests {
         let note = row_note("plugin/greet.lua", "lua", "HANDLED_BY");
         assert!(note.contains("nvim_create_user_command") && note.contains("register_tool"));
         assert!(note.contains("keymap"));
+        // GH.6: the OpenResty side, read from the nginx conf.
+        assert!(note.contains("content_by_lua_file") && note.contains("regex"));
         assert!(lang_rows("src/app.py", "lua").is_empty());
         assert_eq!(ext_to_language("plugin/greet.lua"), None);
     }

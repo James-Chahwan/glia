@@ -37,6 +37,8 @@ mod models;
 // FA.22: org-internal package routing over the manifest_name SAME_AS class
 // (runs after identity: it reads its edges).
 mod org_packages;
+// GH.6: host-run scripts (nginx `*_by_lua_file`) -> the MODULE of the file.
+mod host_scripts;
 // CB.12: host narrowing (the service alias index and `narrow_by_host`),
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;
@@ -50,6 +52,7 @@ pub use evm::EvmContractResolver;
 pub use gqlgen::GqlgenResolver;
 pub use graphql::GraphQLStackResolver;
 pub use grpc::GrpcStackResolver;
+pub use host_scripts::HostResolver;
 pub use http::HttpStackResolver;
 pub use iac::IacResolver;
 pub use identity::IdentityResolver;

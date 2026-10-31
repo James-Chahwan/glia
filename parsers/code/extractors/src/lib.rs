@@ -19,6 +19,7 @@ mod marker_swap;
 pub mod migrations;
 pub mod nav_links;
 pub mod nav_routes;
+pub mod nginx;
 pub mod next_pages;
 pub mod openapi_annot;
 pub mod packages;

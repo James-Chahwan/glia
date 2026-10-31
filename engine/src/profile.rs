@@ -51,7 +51,7 @@ use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver, GrpcStackResolver,
-    HttpStackResolver, IacResolver, IdentityResolver, MergedGraph, ModelResolver,
+    HostResolver, HttpStackResolver, IacResolver, IdentityResolver, MergedGraph, ModelResolver,
     OrgPackageResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
     WebSocketStackResolver,
 };
@@ -197,6 +197,10 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("db", DbResolver),
     resolver!("cron", CronResolver),
     resolver!("config", ConfigResolver),
+    // GH.6: a host's conf names a script it runs (nginx `content_by_lua_file`)
+    // -> the MODULE of that file, by path (HANDLED_BY from the location's
+    // ROUTE, USES for every other phase). Reads nodes and nav facts only.
+    resolver!("host", HostResolver),
     resolver!("iac", IacResolver),
     // DT.1h: http_model SAME_AS stars, client model -> server model. It reads
     // the HTTP_CALLS edges the `http` pass drew (EVIDENCE `resolver:http`)
@@ -405,7 +409,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 29] = [
+    const HEAD_ORDER: [&str; 30] = [
         "http",
         "grpc",
         "rpc",
@@ -420,6 +424,7 @@ mod tests {
         "db",
         "cron",
         "config",
+        "host",
         "iac",
         "models",
         "identity",
@@ -448,7 +453,7 @@ mod tests {
     /// resolver follows the RPC one, making sixteen; DT.1h's models resolver
     /// runs just before identity, making seventeen; FA.22's org_packages
     /// reads identity's SAME_AS edges and runs right after it, making
-    /// eighteen.
+    /// eighteen; GH.6's host resolver follows the config one, making nineteen.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -462,7 +467,7 @@ mod tests {
                 count(Stage::Post),
                 count(Stage::Finalize)
             ),
-            (18, 9, 2)
+            (19, 9, 2)
         );
     }
 

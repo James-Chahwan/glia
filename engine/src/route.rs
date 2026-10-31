@@ -540,8 +540,8 @@ struct RouteCtx<'a> {
 /// The non-code branches whose outcome is a function of `(path, source,
 /// repo)` alone, so the DC.4 non-code memo may replay it for an unchanged
 /// file: yaml, Dockerfile, package manifest, dotenv, migration `.sql`, `.json`
-/// (settings, JSON Schema, contract), `.proto`, `.graphql`, `.avsc`. Not
-/// `prisma` (it reads the build-wide A13.16 `prisma_provider`, another file's
+/// (settings, JSON Schema, contract), `.proto`, `.graphql`, `.avsc`, an nginx
+/// `.conf` (GH.6). Not `prisma` (it reads the build-wide A13.16 `prisma_provider`, another file's
 /// datasource) nor `angular` (the template's links hang off the LB.9b plan's
 /// MODULE id of its `.component.ts`).
 ///
@@ -559,6 +559,8 @@ const PURE_NONCODE: &[&str] = &[
     "proto",
     "graphql",
     "avro",
+    // GH.6: an nginx conf reads its own text only.
+    "nginx",
 ];
 
 /// Where a [`Routed::NonCode`] outcome came from (DC.4).
@@ -957,6 +959,48 @@ fn route_branches(
         });
         return Routed::NonCode {
             key: "dotenv",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
+    }
+
+    // GH.6: an nginx conf the walk admitted (it names a Lua phase
+    // directive). Its `content_by_lua_file` locations are ROUTEs, and every
+    // Lua file it runs is a `HostScriptRef` the `host` Resolve pass binds to
+    // the file's MODULE. A conf that holds nothing to stash routes nowhere.
+    if glia_code_extractors::nginx::is_conf_path(path) {
+        *branch = "nginx";
+        let module_id = synthetic_module_id(repo, path);
+        let out = glia_code_extractors::nginx::extract_nginx(source, path, module_id, repo);
+        if let Some(marker) = out.marker(path) {
+            t.lines.push(marker);
+        }
+        let glia_code_extractors::nginx::NginxOut {
+            nodes,
+            nav,
+            facts,
+            module_cells,
+            ..
+        } = out;
+        let fp = (!nodes.is_empty() || !facts.is_empty()).then(|| {
+            let mut fp = synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![nodes],
+                vec![],
+                vec![nav],
+                module_cells,
+            );
+            // In source order: `merge_nav` carries no facts.
+            for (scope, fact) in facts {
+                fp.nav.record_fact(scope, fact);
+            }
+            fp
+        });
+        return Routed::NonCode {
+            key: "nginx",
             fp,
             tally: t,
             memo: fresh(),
@@ -1698,7 +1742,7 @@ fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
 /// under (the `[modules]` marker counts these). A new non-code branch adds its
 /// key here; `synthetic_modules_are_named_by_file_name` fails on a routed key
 /// it lacks.
-const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
+const SYNTHETIC_MODULE_KEYS: [&str; 11] = [
     "avro",
     "dockerfile",
     "dotenv",
@@ -1706,6 +1750,7 @@ const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
     "json",
     "manifest",
     "migration",
+    "nginx",
     "prisma",
     "proto",
     "yaml",
@@ -2942,7 +2987,7 @@ mod tests {
             "the code form keeps the stem"
         );
 
-        let cases: [(&str, &str, &str, &str); 14] = [
+        let cases: [(&str, &str, &str, &str); 15] = [
             (
                 "api/user.proto",
                 "syntax = \"proto3\";\npackage user;\nservice UserService {\n  rpc GetUser (GetUserRequest) returns (User);\n}\nmessage GetUserRequest { string id = 1; }\nmessage User { string id = 1; }\n",
@@ -3011,6 +3056,12 @@ mod tests {
                 "type Query {\n  getUser(id: ID!): String\n}\n",
                 "graphql",
                 "api::schema.graphql",
+            ),
+            (
+                "deploy/nginx.conf",
+                "server { location /x { content_by_lua_file lua/x.lua; } }\n",
+                "nginx",
+                "deploy::nginx.conf",
             ),
             (
                 "schemas/user.avsc",
