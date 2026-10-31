@@ -5,7 +5,8 @@
 //! - `[timing] build repos=<n> resolve=<ms> post=<ms> finalize=<ms> [external_cells=<ms>] total=<ms> slowest_pass=<name>:<ms>`
 //!   once per build (a layout merge, which runs no external-cell stage, has
 //!   no `external_cells=`);
-//! - `[timing] persist writer=<w> <ms> dir=<dir>` once per layout write.
+//! - `[timing] persist writer=<w> <ms> dir=<dir>` once per layout write; a
+//!   `glia build` adds ` spans_ms=<a> encode_ms=<b> write_ms=<c>` (GP.4).
 //!
 //! Each `<ms>` is milliseconds with one decimal, truncated (`12.3ms`), so the
 //! printed parts of a build never sum past its printed total. Wall-clock
@@ -222,10 +223,19 @@ fn build_times_the_persist_and_a_layout_merge_times_its_passes() {
         persist.starts_with("[timing] persist writer=cli "),
         "{persist}"
     );
-    assert!(
-        persist.ends_with(&format!(" dir={}", dir.display())),
-        "{persist}"
-    );
+    // GP.4: the write's three parts follow the dir.
+    let tail = persist
+        .split_once(&format!(" dir={} ", dir.display()))
+        .map(|(_, tail)| tail)
+        .unwrap_or_else(|| panic!("no dir field: {persist}"));
+    let parts: Vec<&str> = tail.split(' ').collect();
+    assert_eq!(parts.len(), 3, "{persist}");
+    for (part, key) in parts.iter().zip(["spans_ms=", "encode_ms=", "write_ms="]) {
+        part.strip_prefix(key)
+            .unwrap_or_else(|| panic!("{key}: {persist}"))
+            .parse::<f64>()
+            .expect("a part is a number");
+    }
     let elapsed = persist.split(' ').nth(3).expect("<ms> field");
     assert!(elapsed.ends_with("ms"), "{persist}");
     elapsed

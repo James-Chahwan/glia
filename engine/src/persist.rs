@@ -60,9 +60,13 @@
 //! `[gmap] loaded <dir>: repos=<r> labeled=<l> parse_errors=<p> properties=<q> pass_undo=<u>`
 //! from [`load_layout`], and `[gmap] rebuilt <dir> (<reason>)` from
 //! [`load_or_rebuild`] each time it rebuilds (written or not). CA.9: after a
-//! write, `[timing] persist writer=<w> <ms> dir=<dir>` from [`persist_layout`]
-//! and from [`persist_graph`] (its time includes the legacy sweep and the
-//! orphan cleanup).
+//! write, `[timing] persist writer=<w> <ms> dir=<dir> spans_ms=<a> encode_ms=<b>
+//! write_ms=<c>` from [`persist_layout`] and from [`persist_graph`] (its time
+//! includes the legacy sweep and the orphan cleanup). GP.4 adds the three
+//! parts ([`glia_store::PersistTimes`], milliseconds, one decimal, truncated):
+//! `spans` the shards' core preparation (the copy, EVIDENCE interning, CODE
+//! span matching, which run on the engine pool, `EnginePersistPool`),
+//! `encode` the serial rkyv serialise, `write` the hashing and file writes.
 //!
 //! Module slot declared by L0.2: reached as `glia_engine::persist::<item>`,
 //! never flattened into the crate root.
@@ -75,8 +79,8 @@ use std::time::{Instant, SystemTime};
 use glia_graph::MergedGraph;
 use glia_store::{
     CROSS_STACK_NAME, LEGACY_GMAP_SUBDIR, LayoutMeta, LenientManifest, MANIFEST_NAME,
-    MANIFEST_VERSION, Manifest, RepoMeta, StoreError, default_gmap_dir, is_gmap_stale,
-    read_manifest_lenient, read_merged_sharded_meta, write_merged_sharded_meta,
+    MANIFEST_VERSION, Manifest, PersistPool, PersistTimes, RepoMeta, StoreError, default_gmap_dir,
+    is_gmap_stale, read_manifest_lenient, read_merged_sharded_meta, write_merged_sharded_pooled,
 };
 
 use crate::build::timing::persist_marker;
@@ -184,9 +188,55 @@ pub fn persist_layout(
     writer: &str,
 ) -> Result<(), String> {
     let started = Instant::now();
-    write_layout(merged, meta, dir, writer)?;
-    eprintln!("{}", persist_marker(writer, started.elapsed(), dir));
+    let (_, times) = write_layout(merged, meta, dir, writer)?;
+    eprintln!("{}", persist_line(writer, started.elapsed(), dir, times));
     Ok(())
+}
+
+/// GP.4: the `[timing] persist` line with the write's three parts appended.
+fn persist_line(writer: &str, took: std::time::Duration, dir: &Path, t: PersistTimes) -> String {
+    let ms = |d| {
+        crate::build::timing::ms(d)
+            .trim_end_matches("ms")
+            .to_string()
+    };
+    format!(
+        "{} spans_ms={} encode_ms={} write_ms={}",
+        persist_marker(writer, took, dir),
+        ms(t.spans),
+        ms(t.encode),
+        ms(t.write),
+    )
+}
+
+/// GP.4: the engine pool as the store's [`PersistPool`]: a layout write's
+/// per-cell work (each shard's copy, EVIDENCE decisions, CODE span reads and
+/// matches) runs in chunks through [`crate::parallel::par_map_ordered`], on
+/// the current rayon pool when called from one of its workers, else on the
+/// engine pool, else (`GLIA_THREADS=1`) as one chunk on this thread. The
+/// store writes the same bytes with or without it. A chunk's panic is caught
+/// quietly on its worker ([`crate::parallel::quiet`]) and re-raised here.
+struct EnginePersistPool;
+
+impl PersistPool for EnginePersistPool {
+    fn threads(&self) -> usize {
+        if rayon::current_thread_index().is_some() {
+            rayon::current_num_threads()
+        } else {
+            crate::parallel::threads()
+        }
+    }
+
+    fn run(&self, n: usize, job: &(dyn Fn(usize) + Sync)) {
+        let jobs: Vec<usize> = (0..n).collect();
+        let (results, _) =
+            crate::parallel::par_map_ordered(&jobs, |&i| crate::parallel::quiet(|| job(i)));
+        for result in results {
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
 
 /// [`persist_layout`], handing back the manifest the store wrote.
@@ -195,7 +245,7 @@ fn write_layout(
     meta: &LayoutMeta,
     dir: &Path,
     writer: &str,
-) -> Result<Manifest, String> {
+) -> Result<(Manifest, PersistTimes), String> {
     let labeled = meta.repos.iter().filter(|r| !r.label.is_empty()).count();
     let rooted = meta.repos.iter().filter(|r| r.root.is_some()).count();
     let rev_recorded = meta.repos.iter().filter(|r| r.rev.is_some()).count();
@@ -206,7 +256,7 @@ fn write_layout(
         property_count(merged),
         merged.pass_undo.len(),
     );
-    write_merged_sharded_meta(merged, meta, dir)
+    write_merged_sharded_pooled(merged, meta, dir, Some(&EnginePersistPool))
         .map_err(|e| format!("{writer}: persist to {}: {e}", dir.display()))
 }
 
@@ -281,7 +331,7 @@ pub fn persist_graph(
         }
     }
     let meta = layout_meta(labels, roots, parse_errors, dir);
-    let manifest = write_layout(merged, &meta, dir, writer)?;
+    let (manifest, times) = write_layout(merged, &meta, dir, writer)?;
     let live: BTreeSet<String> = manifest
         .shards
         .iter()
@@ -300,7 +350,7 @@ pub fn persist_graph(
         merged.cross_edges.len(),
     );
     remove_orphan_shards(dir, &live);
-    eprintln!("{}", persist_marker(writer, started.elapsed(), dir));
+    eprintln!("{}", persist_line(writer, started.elapsed(), dir, times));
     Ok(())
 }
 

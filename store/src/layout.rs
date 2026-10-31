@@ -11,14 +11,15 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use glia_code_domain::{GRAPH_TYPE, walk_gating};
 use glia_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
 use glia_graph::RepoGraph;
 
 use crate::code_section::{
-    CodeSource, CodeSpanStats, FsCodeSource, LayoutCounts, decode_repo_graph_counted,
-    encode_cross_edges, encode_repo_graph_counted, expand_file_evidence,
+    CodeSource, CodeSpanStats, FsCodeSource, LayoutCounts, PersistPool, WriteSource,
+    decode_repo_graph_counted, encode_cross_edges, encode_repo_graph_counted, expand_file_evidence,
 };
 use crate::container::{
     Container, FORMAT_VERSION, MmapContainer, encode_file, hex_xxhash64, read_to_owned, set_cell,
@@ -407,6 +408,8 @@ fn is_code_graph_type(t: &str) -> bool {
 /// What a sharded write records beyond the shards and the [`LayoutMeta`]:
 /// the `.glia` fingerprints (LF.1d, LC.10b), the post-pass undo (LC.10a) and
 /// the foreign shards and merge members (LC.10b). Empty for a bare writer.
+/// `pool` (GP.4) is where each shard's per-cell work runs, none for a
+/// writer that runs it on its own thread.
 #[derive(Default)]
 struct Recorded<'a> {
     external_inputs: BTreeMap<String, String>,
@@ -414,6 +417,23 @@ struct Recorded<'a> {
     pass_undo: Vec<PassUndo>,
     foreign: &'a [ForeignShard],
     members: &'a [MemberMeta],
+    pool: Option<&'a dyn PersistPool>,
+}
+
+/// GP.4: where a layout write spent its time, summed over every file it
+/// encoded (the code shards and `cross_stack.gmap`): `spans`, preparing each
+/// core (copying its nodes and edges, interning EVIDENCE, matching CODE spans
+/// in their source, the strings section: the per-cell work a
+/// [`PersistPool`] runs); `encode`, the serial serialise (the code section
+/// and the rkyv core); `write`, hashing, the skip-when-unchanged compare,
+/// the atomic writes and the manifest. The engine prints them on its
+/// `[timing] persist` line as `spans_ms=` / `encode_ms=` / `write_ms=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct PersistTimes {
+    pub spans: Duration,
+    pub encode: Duration,
+    pub write: Duration,
 }
 
 /// A foreign shard `write_sharded_with` refuses: a name that is not a plain
@@ -484,7 +504,7 @@ pub fn write_sharded_meta(
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
-    write_sharded_with(shards, cross_edges, meta, dir, Recorded::default())
+    write_sharded_with(shards, cross_edges, meta, dir, Recorded::default()).map(|(m, _)| m)
 }
 
 /// The sharded writer behind [`write_sharded_meta`] and the merged-graph
@@ -501,7 +521,7 @@ fn write_sharded_with(
     meta: &LayoutMeta,
     dir: &Path,
     recorded: Recorded<'_>,
-) -> Result<Manifest, StoreError> {
+) -> Result<(Manifest, PersistTimes), StoreError> {
     // LC.10b: every foreign shard is checked before anything is written.
     let mut taken: Vec<&str> = shards.iter().map(|(name, _)| *name).collect();
     for f in recorded.foreign {
@@ -511,7 +531,12 @@ fn write_sharded_with(
     std::fs::create_dir_all(dir)?;
     // CD.7c: after the create, so a root relative to `dir` resolves.
     let source = layout_code_source(&meta.repos, dir);
-    let source: Option<&dyn CodeSource> = source.as_ref().map(|s| s as &dyn CodeSource);
+    let source = source
+        .as_ref()
+        .map(|s| WriteSource::Shared(s as &(dyn CodeSource + Sync)));
+    let pool = recorded.pool;
+    // GP.4: the hash / compare / write time, summed beside the encode times.
+    let mut write = Duration::ZERO;
 
     // Phase 1 incremental rebuild: load prior manifest (if present) and
     // compare per-shard content hashes. Shards whose serialized bytes hash
@@ -534,8 +559,9 @@ fn write_sharded_with(
     for (name, g) in shards {
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
-        let encoded = encode_repo_graph_counted(g, source)?;
+        let encoded = encode_repo_graph_counted(g, source, pool)?;
         encoded.count_into(&mut counts);
+        let started = Instant::now();
         let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
 
@@ -554,6 +580,7 @@ fn write_sharded_with(
         } else {
             shards_skipped += 1;
         }
+        write += started.elapsed();
 
         entries.push(ShardEntry {
             name: (*name).to_string(),
@@ -565,6 +592,7 @@ fn write_sharded_with(
 
     // LC.10b: foreign-domain shards, byte for byte, after the code shards
     // (their names were checked above), skipped when unchanged like them.
+    let started = Instant::now();
     for f in recorded.foreign {
         let file_name = format!("{}.gmap", f.name);
         let shard_path = dir.join(&file_name);
@@ -586,13 +614,15 @@ fn write_sharded_with(
             graph_type: f.graph_type.clone(),
         });
     }
+    write += started.elapsed();
 
     let cross = if cross_edges.is_empty() {
         None
     } else {
         let shard_path = dir.join(CROSS_STACK_NAME);
-        let encoded = encode_cross_edges(cross_edges)?;
+        let encoded = encode_cross_edges(cross_edges, pool)?;
         encoded.count_into(&mut counts);
+        let started = Instant::now();
         let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
         let unchanged = prior_manifest
@@ -605,6 +635,7 @@ fn write_sharded_with(
         } else {
             shards_skipped += 1;
         }
+        write += started.elapsed();
         Some(ShardEntry {
             name: "cross_stack".to_string(),
             path: CROSS_STACK_NAME.to_string(),
@@ -613,6 +644,7 @@ fn write_sharded_with(
         })
     };
 
+    let started = Instant::now();
     let shard_files = entries.len() + usize::from(cross.is_some());
     let mut repos = meta.repos.clone();
     repos.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.label.cmp(&b.label)));
@@ -640,6 +672,7 @@ fn write_sharded_with(
     if !manifest_unchanged {
         write_atomic(&manifest_path, &manifest_bytes)?;
     }
+    write += started.elapsed();
     // LC.5b marker, un-gated: one line per layout write naming how many files
     // carry the code domain's section (cross_stack.gmap never does) and, since
     // CD.7b, the strings section, and how many EVIDENCE cells were interned /
@@ -677,7 +710,12 @@ fn write_sharded_with(
             },
         );
     }
-    Ok(manifest)
+    let times = PersistTimes {
+        spans: counts.prep,
+        encode: counts.encode,
+        write,
+    };
+    Ok((manifest, times))
 }
 
 /// Does `path` hold exactly `bytes`? The length is checked before the read,
@@ -837,6 +875,34 @@ pub fn write_merged_sharded_extras(
     members: &[MemberMeta],
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
+    extras_with(merged, meta, foreign, members, dir, None).map(|(m, _)| m)
+}
+
+/// GP.4: [`write_merged_sharded_meta`] with each shard's per-cell work (the
+/// copy into the core, EVIDENCE interning's decisions, the CODE span files'
+/// reads and matches) on `pool`, also handing back where the write spent its
+/// time ([`PersistTimes`]). The layout is byte for byte the one
+/// [`write_merged_sharded_meta`] writes, with any pool or none: the string
+/// tables, the payloads, the rkyv serialise and every file write stay in
+/// input order on this thread.
+pub fn write_merged_sharded_pooled(
+    merged: &glia_graph::MergedGraph,
+    meta: &LayoutMeta,
+    dir: &Path,
+    pool: Option<&dyn PersistPool>,
+) -> Result<(Manifest, PersistTimes), StoreError> {
+    extras_with(merged, meta, &[], &[], dir, pool)
+}
+
+/// [`write_merged_sharded_extras`] on `pool`, with the write's times.
+fn extras_with(
+    merged: &glia_graph::MergedGraph,
+    meta: &LayoutMeta,
+    foreign: &[ForeignShard],
+    members: &[MemberMeta],
+    dir: &Path,
+    pool: Option<&dyn PersistPool>,
+) -> Result<(Manifest, PersistTimes), StoreError> {
     // First, so a recorded root relative to `dir` (`../repo`) resolves: the
     // OS walks `dir/..` only when `dir` exists.
     std::fs::create_dir_all(dir)?;
@@ -856,6 +922,7 @@ pub fn write_merged_sharded_extras(
             external_inputs_by_repo: inputs_by_repo(meta, dir),
             foreign,
             members,
+            pool,
             ..Recorded::default()
         },
     )
@@ -894,7 +961,7 @@ pub fn write_merged_sharded_for_repo(
         external_inputs: external_inputs_fingerprint(repo_root),
         ..Recorded::default()
     };
-    write_merged_with(merged, meta, dir, recorded)
+    write_merged_with(merged, meta, dir, recorded).map(|(m, _)| m)
 }
 
 fn write_merged_with(
@@ -902,7 +969,7 @@ fn write_merged_with(
     meta: &LayoutMeta,
     dir: &Path,
     recorded: Recorded<'_>,
-) -> Result<Manifest, StoreError> {
+) -> Result<(Manifest, PersistTimes), StoreError> {
     let names: Vec<String> = merged
         .graphs
         .iter()

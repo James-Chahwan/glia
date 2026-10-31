@@ -29,9 +29,11 @@
 //! (`CodeSpan::to_json`), counted unresolved ([`CodeSpanStats`]).
 
 use std::borrow::Cow;
-use std::cell::OnceCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use glia_code_domain::code_span::{CODE_SPAN_TAG, CodeSpan};
 use glia_code_domain::evidence::{Basis, Evidence};
@@ -279,14 +281,15 @@ impl SymbolTableStore {
     }
 }
 
-/// The domain-free core of `g`: a code header, its nodes and edges, and
-/// `node_kinds` from `g.nav.kind_by_id` (sorted by the writer).
-fn code_core(g: &RepoGraph) -> Container {
+/// The domain-free core of `g` before its nodes and edges are copied in
+/// ([`prepare_core`]): a code header and `node_kinds` from `g.nav.kind_by_id`
+/// (sorted by the writer).
+fn code_core_shell(g: &RepoGraph) -> Container {
     Container {
         header: Header::for_code(),
         repo: g.repo,
-        nodes: g.nodes.clone(),
-        edges: g.edges.clone(),
+        nodes: Vec::new(),
+        edges: Vec::new(),
         node_kinds: g.nav.kind_by_id.iter().map(|(k, v)| (*k, *v)).collect(),
         sections: Vec::new(),
     }
@@ -541,17 +544,39 @@ fn decode_evidence<'s>(
 /// payload, JSON in another field order or with extra fields) is left as
 /// written and counted `kept_json`. Strings already in `table` are reused.
 pub fn intern_evidence(edges: &mut [Edge], table: &mut StringTable) -> InternStats {
+    let decisions = edges
+        .iter()
+        .flat_map(|e| &e.cells)
+        .filter(|c| c.kind == cell_type::EVIDENCE)
+        .map(|c| canonical_evidence(&c.payload))
+        .collect();
+    apply_evidence(edges, decisions, table)
+}
+
+/// The in-order half of [`intern_evidence`]: `decisions` holds each EVIDENCE
+/// cell's canonical form, in edge then cell order (`None`: keep it as
+/// written), however it was computed (in place, or by the pooled
+/// [`prepare_core`]). The strings go into `table` first-seen, in that order,
+/// so the table never depends on how the decisions were split.
+fn apply_evidence(
+    edges: &mut [Edge],
+    decisions: Vec<Option<Evidence>>,
+    table: &mut StringTable,
+) -> InternStats {
     let mut strings = Interner::new(table);
     let mut stats = InternStats::default();
-    for e in edges.iter_mut() {
-        for c in e.cells.iter_mut().filter(|c| c.kind == cell_type::EVIDENCE) {
-            match canonical_evidence(&c.payload) {
-                Some(ev) => {
-                    c.payload = CellPayload::Bytes(encode_evidence(&ev, &mut strings));
-                    stats.interned += 1;
-                }
-                None => stats.kept_json += 1,
+    let mut decisions = decisions.into_iter();
+    let cells = edges
+        .iter_mut()
+        .flat_map(|e| e.cells.iter_mut())
+        .filter(|c| c.kind == cell_type::EVIDENCE);
+    for c in cells {
+        match decisions.next().flatten() {
+            Some(ev) => {
+                c.payload = CellPayload::Bytes(encode_evidence(&ev, &mut strings));
+                stats.interned += 1;
             }
+            None => stats.kept_json += 1,
         }
     }
     stats
@@ -702,17 +727,30 @@ impl CodeSpanStats {
 }
 
 /// One source file of a shard: its bytes and, built on first use (the writer
-/// only), the byte offset each line starts at.
+/// only), the byte offset each line starts at. `Sync`, so the pooled span
+/// match ([`span_code_cells`]) reads one file from several workers.
 struct SourceFile {
     bytes: Vec<u8>,
-    line_starts: OnceCell<Vec<usize>>,
+    line_starts: OnceLock<Vec<usize>>,
 }
 
 impl SourceFile {
-    /// Byte offset of the first place on 0-based `line` (any byte of the line,
-    /// its `\n` included) at which `text` occurs verbatim.
-    fn find_on_line(&self, line: usize, text: &[u8]) -> Option<usize> {
-        let starts = self.line_starts.get_or_init(|| {
+    /// The writer's read of `file`: its bytes with the line index already
+    /// built, so the workers that match spans in it only read. `None` when
+    /// the source cannot read it.
+    fn read_indexed(source: &dyn CodeSource, repo: RepoId, file: &str) -> Option<Self> {
+        let f = SourceFile {
+            bytes: source.read(repo, file)?.into_owned(),
+            line_starts: OnceLock::new(),
+        };
+        f.line_starts();
+        Some(f)
+    }
+
+    /// The byte offset each line starts at (line 0 at 0, then one past each
+    /// `\n`), built once.
+    fn line_starts(&self) -> &[usize] {
+        self.line_starts.get_or_init(|| {
             let mut v = vec![0usize];
             v.extend(
                 self.bytes
@@ -722,7 +760,13 @@ impl SourceFile {
                     .map(|(i, _)| i + 1),
             );
             v
-        });
+        })
+    }
+
+    /// Byte offset of the first place on 0-based `line` (any byte of the line,
+    /// its `\n` included) at which `text` occurs verbatim.
+    fn find_on_line(&self, line: usize, text: &[u8]) -> Option<usize> {
+        let starts = self.line_starts();
         let from = *starts.get(line)?;
         let to = starts
             .get(line + 1)
@@ -755,7 +799,7 @@ impl<'s> ShardFiles<'s> {
         if !self.files.contains_key(file) {
             let read = self.source.read(self.repo, file).map(|b| SourceFile {
                 bytes: b.into_owned(),
-                line_starts: OnceCell::new(),
+                line_starts: OnceLock::new(),
             });
             self.files.insert(file.to_string(), read);
         }
@@ -786,35 +830,126 @@ fn first_position(cells: &[Cell]) -> Option<(String, usize)> {
 
 /// Store every CODE text of `nodes` found verbatim in its POSITION file,
 /// starting on the POSITION start line, as an interned span (the file in
-/// `strings`). Every other CODE cell is left as written.
+/// `table`, after what is already there). Every other CODE cell is left as
+/// written. `positions[i]` is node `i`'s first POSITION ([`node_chunk`]: only
+/// for a node holding a CODE text). GP.4: the files are read, and each cell's
+/// span decided, on the pool (every distinct file once, in name order); the
+/// payloads are written and the file names interned serially, in node then
+/// cell order, so the table and the bytes never depend on the pool.
 fn span_code_cells(
     nodes: &mut [Node],
-    strings: &mut Interner<'_>,
-    files: &mut ShardFiles<'_>,
+    positions: &[Option<(String, usize)>],
+    source: WriteSource<'_>,
+    repo: RepoId,
+    table: &mut StringTable,
+    pool: Option<&dyn PersistPool>,
 ) -> CodeSpanStats {
-    let mut stats = CodeSpanStats::default();
-    for n in nodes.iter_mut() {
-        let pos = first_position(&n.cells);
-        for c in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
-            let CellPayload::Text(text) = &c.payload else {
-                stats.inline += 1;
-                continue;
+    let wanted: BTreeSet<&str> = positions
+        .iter()
+        .flatten()
+        .map(|(file, _)| file.as_str())
+        .collect();
+    let wanted: Vec<&str> = wanted.into_iter().collect();
+    let read = read_source_files(&wanted, source, repo, pool);
+    let files: HashMap<&str, &SourceFile> = wanted
+        .iter()
+        .zip(&read)
+        .filter_map(|(file, f)| Some((*file, f.as_ref()?)))
+        .collect();
+    let decisions: Vec<Option<CodeSpan>> = {
+        let nodes: &[Node] = nodes;
+        par_chunks(nodes.len(), CELL_CHUNK_FLOOR, pool, |r| {
+            span_decisions(
+                nodes.get(r.clone()).unwrap_or_default(),
+                positions.get(r).unwrap_or_default(),
+                &files,
+            )
+        })
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+    apply_spans(nodes, decisions, &mut Interner::new(table))
+}
+
+/// Each CODE cell's span of `nodes` (`positions` aligned with them), in node
+/// then cell order: `Some` for a text found verbatim on its POSITION line of
+/// a file in `files`, `None` for every other CODE cell.
+fn span_decisions(
+    nodes: &[Node],
+    positions: &[Option<(String, usize)>],
+    files: &HashMap<&str, &SourceFile>,
+) -> Vec<Option<CodeSpan>> {
+    let mut out = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        let pos = positions.get(i).and_then(Option::as_ref);
+        for c in n.cells.iter().filter(|c| c.kind == cell_type::CODE) {
+            let span = match (&c.payload, pos) {
+                (CellPayload::Text(text), Some((file, line))) => files
+                    .get(file.as_str())
+                    .and_then(|f| f.find_on_line(*line, text.as_bytes()))
+                    .map(|at| CodeSpan::of(file, at as u64, text.as_bytes())),
+                _ => None,
             };
-            let found = pos.as_ref().and_then(|(file, line)| {
-                let at = files.get(file)?.find_on_line(*line, text.as_bytes())?;
-                Some(CodeSpan::of(file, at as u64, text.as_bytes()))
-            });
-            let Some(span) = found else {
-                stats.inline += 1;
-                continue;
-            };
-            let bytes = span.encode(strings.ix(&span.file));
-            stats.spanned += 1;
-            stats.saved_bytes += text.len() as i64 - bytes.len() as i64;
-            c.payload = CellPayload::Bytes(bytes);
+            out.push(span);
         }
     }
+    out
+}
+
+/// The in-order half of [`span_code_cells`]: each CODE cell of `nodes` whose
+/// decision is a span becomes its payload, the file interned first-seen;
+/// every other one is counted inline.
+fn apply_spans(
+    nodes: &mut [Node],
+    decisions: Vec<Option<CodeSpan>>,
+    strings: &mut Interner<'_>,
+) -> CodeSpanStats {
+    let mut stats = CodeSpanStats::default();
+    let mut decisions = decisions.into_iter();
+    let cells = nodes
+        .iter_mut()
+        .flat_map(|n| n.cells.iter_mut())
+        .filter(|c| c.kind == cell_type::CODE);
+    for c in cells {
+        let decision = decisions.next().flatten();
+        let (Some(span), CellPayload::Text(text)) = (decision, &c.payload) else {
+            stats.inline += 1;
+            continue;
+        };
+        let bytes = span.encode(strings.ix(&span.file));
+        stats.spanned += 1;
+        stats.saved_bytes += text.len() as i64 - bytes.len() as i64;
+        c.payload = CellPayload::Bytes(bytes);
+    }
     stats
+}
+
+/// The source files a shard's spans need, in `files`' order: read on the pool
+/// when the source may be shared across threads, else on this thread.
+fn read_source_files(
+    files: &[&str],
+    source: WriteSource<'_>,
+    repo: RepoId,
+    pool: Option<&dyn PersistPool>,
+) -> Vec<Option<SourceFile>> {
+    match source {
+        WriteSource::Shared(s) => par_chunks(files.len(), FILE_CHUNK_FLOOR, pool, |r| {
+            files
+                .get(r)
+                .unwrap_or_default()
+                .iter()
+                .map(|f| SourceFile::read_indexed(s, repo, f))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect(),
+        WriteSource::Local(s) => files
+            .iter()
+            .map(|f| SourceFile::read_indexed(s, repo, f))
+            .collect(),
+    }
 }
 
 /// Read every CODE span of `nodes` back: the text when `files` holds the file
@@ -880,47 +1015,237 @@ fn expand_file_code_spans(
     }
 }
 
-/// Intern `core`'s edge EVIDENCE and, given a `source`, its nodes' CODE spans
-/// in place for writing, and return the `"strings"` section to write beside
-/// them (`None` when nothing was interned) with the counts. EVIDENCE is
-/// interned first, in edge order, then span files in node order, so a graph
-/// with no span writes the table it wrote before CD.7c. `intern` false (a
-/// test's baseline) leaves every cell as written. An in-memory EVIDENCE or
-/// CODE cell that already holds an interned-looking payload is `Invalid`: its
-/// strings are not in this file's table, so it would read back as something
-/// else (or as `Corrupt`).
-fn intern_for_write(
-    core: &mut Container,
-    intern: bool,
-    source: Option<&dyn CodeSource>,
-) -> Result<(Option<EncodedSection>, InternStats, CodeSpanStats), StoreError> {
-    let raw = core.edges.iter().position(|e| {
-        e.cells.iter().any(|c| {
-            c.kind == cell_type::EVIDENCE
-                && matches!(&c.payload, CellPayload::Bytes(b) if b.first() == Some(&EVIDENCE_TAG))
-        })
+// ============================================================================
+// The persist pool (GP.4): a shard's per-cell work off the single core
+// ============================================================================
+
+/// GP.4: the workers a layout write runs a shard's per-cell work on: copying
+/// its nodes and edges into the core, deciding each EVIDENCE cell's canonical
+/// form, reading the CODE spans' source files and matching each CODE text in
+/// its file. The same seam as `glia_graph::ResolvePool`: the engine passes its
+/// rayon pool (`glia_engine::persist`), and with none the work runs as one
+/// chunk on the caller's thread. Interning (the `"strings"` table, filled
+/// first-seen), the rkyv serialise and the file write stay serial, so the
+/// bytes written never depend on the pool or its size.
+pub trait PersistPool: Sync {
+    /// Workers the pool runs jobs on: a shard's nodes, edges and files are
+    /// cut into about four chunks per worker.
+    fn threads(&self) -> usize;
+
+    /// Run `job(0)` .. `job(n - 1)`, each exactly once, on any threads and in
+    /// any order, and return once every one has run. A job's panic reaches
+    /// the caller.
+    fn run(&self, n: usize, job: &(dyn Fn(usize) + Sync));
+}
+
+/// The fewest nodes or edges one pooled chunk holds: each is a JSON parse or
+/// a line scan, so a smaller chunk costs more to schedule than to run.
+const CELL_CHUNK_FLOOR: usize = 2048;
+
+/// The fewest source files one pooled read chunk holds.
+const FILE_CHUNK_FLOOR: usize = 16;
+
+/// `0..len` cut into contiguous ranges, in order: one range with no pool, a
+/// one-worker pool or at most `floor` items; else about four per worker, each
+/// at least `floor` long.
+fn chunk_ranges(len: usize, floor: usize, pool: Option<&dyn PersistPool>) -> Vec<Range<usize>> {
+    let threads = pool.map_or(1, |p| p.threads().max(1));
+    if threads <= 1 || len <= floor {
+        return std::iter::once(0..len).collect();
+    }
+    let size = len.div_ceil(threads * 4).max(floor);
+    (0..len)
+        .step_by(size)
+        .map(|start| start..(start + size).min(len))
+        .collect()
+}
+
+/// `f` over [`chunk_ranges`]`(len, floor, pool)`, the results in range order
+/// whatever order the pool ran them in. A slot the pool left unfilled (it
+/// broke the run-every-job contract) is computed here, so the answer is the
+/// same either way.
+fn par_chunks<R: Send>(
+    len: usize,
+    floor: usize,
+    pool: Option<&dyn PersistPool>,
+    f: impl Fn(Range<usize>) -> R + Sync,
+) -> Vec<R> {
+    let ranges = chunk_ranges(len, floor, pool);
+    let Some(pool) = pool.filter(|_| ranges.len() > 1) else {
+        return ranges.into_iter().map(f).collect();
+    };
+    let slots: Vec<Mutex<Option<R>>> = ranges.iter().map(|_| Mutex::new(None)).collect();
+    pool.run(ranges.len(), &|i| {
+        if let (Some(range), Some(slot)) = (ranges.get(i), slots.get(i)) {
+            let out = f(range.clone());
+            *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(out);
+        }
     });
-    if let Some(i) = raw {
+    slots
+        .into_iter()
+        .zip(ranges)
+        .map(|(slot, range)| {
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(|| f(range))
+        })
+        .collect()
+}
+
+/// Where a write reads the CODE spans' source files: the public
+/// [`encode_repo_graph_with`]'s source, which need not be `Sync` and is read
+/// on the caller's thread, or a layout's, whose reads may run on the pool.
+#[derive(Clone, Copy)]
+pub(crate) enum WriteSource<'a> {
+    Local(&'a dyn CodeSource),
+    Shared(&'a (dyn CodeSource + Sync)),
+}
+
+/// Does `payload` hold the store's interned EVIDENCE form?
+fn is_interned_evidence(payload: &CellPayload) -> bool {
+    matches!(payload, CellPayload::Bytes(b) if b.first() == Some(&EVIDENCE_TAG))
+}
+
+/// Does `payload` hold the store's CODE span form?
+fn is_span_bytes(payload: &CellPayload) -> bool {
+    matches!(payload, CellPayload::Bytes(b) if b.first() == Some(&CODE_SPAN_TAG))
+}
+
+/// One chunk of a shard's edges, copied for the write: the copy, each
+/// EVIDENCE cell's canonical form in edge then cell order (only when
+/// interning), and the first edge (an index into the whole slice) holding an
+/// interned payload.
+struct EdgeChunk {
+    edges: Vec<Edge>,
+    evidence: Vec<Option<Evidence>>,
+    raw: Option<usize>,
+}
+
+fn edge_chunk(edges: &[Edge], range: Range<usize>, intern: bool) -> EdgeChunk {
+    let start = range.start;
+    let slice = edges.get(range).unwrap_or_default();
+    let mut evidence = Vec::new();
+    let mut raw = None;
+    for (i, e) in slice.iter().enumerate() {
+        for c in e.cells.iter().filter(|c| c.kind == cell_type::EVIDENCE) {
+            if raw.is_none() && is_interned_evidence(&c.payload) {
+                raw = Some(start + i);
+            }
+            if intern {
+                evidence.push(canonical_evidence(&c.payload));
+            }
+        }
+    }
+    EdgeChunk {
+        edges: slice.to_vec(),
+        evidence,
+        raw,
+    }
+}
+
+/// One chunk of a shard's nodes, copied for the write: the copy, each node's
+/// first POSITION (`(file, start_line)`, only when spanning and only for a
+/// node holding a CODE text; aligned with the copy, empty when not spanning),
+/// and the first node (an index into the whole slice) holding a span payload.
+struct NodeChunk {
+    nodes: Vec<Node>,
+    positions: Vec<Option<(String, usize)>>,
+    raw: Option<usize>,
+}
+
+fn node_chunk(nodes: &[Node], range: Range<usize>, span: bool) -> NodeChunk {
+    let start = range.start;
+    let slice = nodes.get(range).unwrap_or_default();
+    let mut positions = Vec::with_capacity(if span { slice.len() } else { 0 });
+    let mut raw = None;
+    for (i, n) in slice.iter().enumerate() {
+        let mut texts = false;
+        for c in n.cells.iter().filter(|c| c.kind == cell_type::CODE) {
+            if raw.is_none() && is_span_bytes(&c.payload) {
+                raw = Some(start + i);
+            }
+            texts |= matches!(c.payload, CellPayload::Text(_));
+        }
+        if span {
+            positions.push(if texts {
+                first_position(&n.cells)
+            } else {
+                None
+            });
+        }
+    }
+    NodeChunk {
+        nodes: slice.to_vec(),
+        positions,
+        raw,
+    }
+}
+
+/// A shard's core ready to serialise, with its `"strings"` section (`None`
+/// when nothing was interned) and what the layout markers count.
+struct PreparedCore {
+    core: Container,
+    strings: Option<EncodedSection>,
+    evidence: InternStats,
+    spans: CodeSpanStats,
+}
+
+/// Copy `nodes` and `edges` into `shell` (a core with none) and, when
+/// `intern`, intern their EVIDENCE and, given a `source`, store their CODE
+/// spans, for writing. EVIDENCE is interned first, in edge order, then span
+/// files in node order, so a graph with no span writes the table it wrote
+/// before CD.7c. `intern` false (a test's baseline) leaves every cell as
+/// written. An EVIDENCE or CODE cell that already holds an interned-looking
+/// payload is `Invalid` (the edge check first): its strings are not in this
+/// file's table, so it would read back as something else (or as `Corrupt`).
+///
+/// GP.4: the copy, the canonical-EVIDENCE decisions, the POSITION reads, the
+/// source reads and the span matches run in chunks on `pool`
+/// ([`par_chunks`]); the string table and each payload are written serially
+/// in input order ([`apply_evidence`], [`apply_spans`]), so the result is the
+/// same with any pool, or none.
+fn prepare_core(
+    mut core: Container,
+    nodes: &[Node],
+    edges: &[Edge],
+    intern: bool,
+    source: Option<WriteSource<'_>>,
+    pool: Option<&dyn PersistPool>,
+) -> Result<PreparedCore, StoreError> {
+    let span = intern && source.is_some();
+    let edge_chunks = par_chunks(edges.len(), CELL_CHUNK_FLOOR, pool, |r| {
+        edge_chunk(edges, r, intern)
+    });
+    let node_chunks = par_chunks(nodes.len(), CELL_CHUNK_FLOOR, pool, |r| {
+        node_chunk(nodes, r, span)
+    });
+    if let Some(i) = edge_chunks.iter().find_map(|c| c.raw) {
         return Err(StoreError::Invalid(format!(
             "edge {i} carries an EVIDENCE cell in the store's interned Bytes form (tag \
              {EVIDENCE_TAG:#04x}); EVIDENCE is JSON in memory (code-domain evidence.rs), and \
              read_to_owned's raw form is only written back through its own file"
         )));
     }
-    let raw_span = core.nodes.iter().position(|n| {
-        n.cells.iter().any(|c| {
-            c.kind == cell_type::CODE
-                && matches!(&c.payload, CellPayload::Bytes(b) if b.first() == Some(&CODE_SPAN_TAG))
-        })
-    });
-    if let Some(i) = raw_span {
+    if let Some(i) = node_chunks.iter().find_map(|c| c.raw) {
         return Err(StoreError::Invalid(format!(
             "node {i} carries a CODE cell in the store's span Bytes form (tag \
              {CODE_SPAN_TAG:#04x}); CODE is text (or code_span JSON) in memory, and \
              read_to_owned's raw form is only written back through its own file"
         )));
     }
-    let code_cells = || {
+    core.edges = Vec::with_capacity(edges.len());
+    let mut decisions = Vec::new();
+    for c in edge_chunks {
+        core.edges.extend(c.edges);
+        decisions.extend(c.evidence);
+    }
+    core.nodes = Vec::with_capacity(nodes.len());
+    let mut positions = Vec::new();
+    for c in node_chunks {
+        core.nodes.extend(c.nodes);
+        positions.extend(c.positions);
+    }
+    let code_cells = |core: &Container| {
         core.nodes
             .iter()
             .flat_map(|n| &n.cells)
@@ -935,36 +1260,42 @@ fn intern_for_write(
             .filter(|c| c.kind == cell_type::EVIDENCE)
             .count();
         let spans = CodeSpanStats {
-            inline: code_cells(),
+            inline: code_cells(&core),
             ..CodeSpanStats::default()
         };
-        return Ok((
-            None,
-            InternStats {
+        return Ok(PreparedCore {
+            core,
+            strings: None,
+            evidence: InternStats {
                 interned: 0,
                 kept_json,
             },
             spans,
-        ));
+        });
     }
     let mut table = StringTable::default();
-    let stats = intern_evidence(&mut core.edges, &mut table);
+    let evidence = apply_evidence(&mut core.edges, decisions, &mut table);
     let spans = match source {
         Some(source) => {
-            let mut files = ShardFiles::new(source, core.repo);
-            span_code_cells(&mut core.nodes, &mut Interner::new(&mut table), &mut files)
+            let repo = core.repo;
+            span_code_cells(&mut core.nodes, &positions, source, repo, &mut table, pool)
         }
         None => CodeSpanStats {
-            inline: code_cells(),
+            inline: code_cells(&core),
             ..CodeSpanStats::default()
         },
     };
-    let section = if table.is_empty() {
+    let strings = if table.is_empty() {
         None
     } else {
         Some(encode_section(STRINGS_SECTION, &table)?)
     };
-    Ok((section, stats, spans))
+    Ok(PreparedCore {
+        core,
+        strings,
+        evidence,
+        spans,
+    })
 }
 
 // ============================================================================
@@ -972,13 +1303,18 @@ fn intern_for_write(
 // ============================================================================
 
 /// One encoded file, and what the `[gmap] layout` / `[gmap] code spans`
-/// markers count about it.
+/// markers count about it. `prep` is the time [`prepare_core`] took (the
+/// copy, EVIDENCE interning, CODE span matching, the strings section) and
+/// `encode` the time spent serialising (the code section, the rkyv core),
+/// the `spans_ms` / `encode_ms` of GP.4's `[timing] persist` line.
 pub(crate) struct EncodedFile {
     pub(crate) bytes: Vec<u8>,
     pub(crate) has_code: bool,
     pub(crate) has_strings: bool,
     pub(crate) evidence: InternStats,
     pub(crate) spans: CodeSpanStats,
+    pub(crate) prep: Duration,
+    pub(crate) encode: Duration,
 }
 
 /// A layout write's running totals over its encoded files.
@@ -988,6 +1324,8 @@ pub(crate) struct LayoutCounts {
     pub(crate) strings_sections: usize,
     pub(crate) evidence: InternStats,
     pub(crate) spans: CodeSpanStats,
+    pub(crate) prep: Duration,
+    pub(crate) encode: Duration,
 }
 
 impl EncodedFile {
@@ -997,40 +1335,61 @@ impl EncodedFile {
         counts.strings_sections += usize::from(self.has_strings);
         counts.evidence.absorb(self.evidence);
         counts.spans.absorb(self.spans);
+        counts.prep += self.prep;
+        counts.encode += self.encode;
     }
 }
 
 /// Encode `g` as the bytes of one `.gmap`, CODE spans read through `source`
-/// when given, with what the layout markers count (code / strings sections
-/// written, EVIDENCE interned / kept, CODE spanned / inline).
+/// when given, its per-cell work on `pool` when given (GP.4: the same bytes
+/// either way), with what the layout markers count (code / strings sections
+/// written, EVIDENCE interned / kept, CODE spanned / inline, the times).
 pub(crate) fn encode_repo_graph_counted(
     g: &RepoGraph,
-    source: Option<&dyn CodeSource>,
+    source: Option<WriteSource<'_>>,
+    pool: Option<&dyn PersistPool>,
 ) -> Result<EncodedFile, StoreError> {
-    encode_shard(g, true, source)
+    encode_shard(g, true, source, pool)
 }
 
 /// `cross_stack.gmap`'s bytes: a core of `edges` (no nodes, no code section)
-/// plus the `"strings"` section their interned EVIDENCE needs.
-pub(crate) fn encode_cross_edges(edges: &[Edge]) -> Result<EncodedFile, StoreError> {
-    let mut core = Container::for_cross_edges(edges.to_vec());
-    let (strings, evidence, spans) = intern_for_write(&mut core, true, None)?;
+/// plus the `"strings"` section their interned EVIDENCE needs, the copy and
+/// the EVIDENCE decisions on `pool` when given.
+pub(crate) fn encode_cross_edges(
+    edges: &[Edge],
+    pool: Option<&dyn PersistPool>,
+) -> Result<EncodedFile, StoreError> {
+    let started = Instant::now();
+    let shell = Container::for_cross_edges(Vec::new());
+    let prepared = prepare_core(shell, &[], edges, true, None, pool)?;
+    let prep = started.elapsed();
+    let PreparedCore {
+        mut core,
+        strings,
+        evidence,
+        spans,
+    } = prepared;
     let sections: Vec<EncodedSection> = strings.into_iter().collect();
+    let started = Instant::now();
+    let bytes = encode_file(&mut core, &sections)?;
     Ok(EncodedFile {
-        bytes: encode_file(&mut core, &sections)?,
+        bytes,
         has_code: false,
         has_strings: !sections.is_empty(),
         evidence,
         spans,
+        prep,
+        encode: started.elapsed(),
     })
 }
 
 fn encode_shard(
     g: &RepoGraph,
     intern: bool,
-    source: Option<&dyn CodeSource>,
+    source: Option<WriteSource<'_>>,
+    pool: Option<&dyn PersistPool>,
 ) -> Result<EncodedFile, StoreError> {
-    let mut core = code_core(g);
+    let started = Instant::now();
     let code = CodeSection::from_repo_graph(g);
     // LC.6 marker, un-gated: one line per encoded shard that carries an
     // interface method table (owners = INTERFACE entries, methods = their sum).
@@ -1048,15 +1407,29 @@ fn encode_shard(
         sections.push(encode_section(CODE_SECTION, &code)?);
     }
     let has_code = !sections.is_empty();
-    let (strings, evidence, spans) = intern_for_write(&mut core, intern, source)?;
+    let mut encode = started.elapsed();
+    let started = Instant::now();
+    let prepared = prepare_core(code_core_shell(g), &g.nodes, &g.edges, intern, source, pool)?;
+    let prep = started.elapsed();
+    let PreparedCore {
+        mut core,
+        strings,
+        evidence,
+        spans,
+    } = prepared;
     let has_strings = strings.is_some();
     sections.extend(strings);
+    let started = Instant::now();
+    let bytes = encode_file(&mut core, &sections)?;
+    encode += started.elapsed();
     Ok(EncodedFile {
-        bytes: encode_file(&mut core, &sections)?,
+        bytes,
         has_code,
         has_strings,
         evidence,
         spans,
+        prep,
+        encode,
     })
 }
 
@@ -1089,7 +1462,7 @@ pub fn encode_repo_graph_with(
     g: &RepoGraph,
     source: Option<&dyn CodeSource>,
 ) -> Result<Vec<u8>, StoreError> {
-    Ok(encode_repo_graph_counted(g, source)?.bytes)
+    Ok(encode_repo_graph_counted(g, source.map(WriteSource::Local), None)?.bytes)
 }
 
 /// The inverse of `encode_repo_graph`: the core's nodes, edges and kinds plus
@@ -1267,7 +1640,7 @@ mod tests {
     /// does, with interning disabled (every EVIDENCE cell stays JSON, no
     /// `"strings"` section) - the pre-format-3 shard of the same graph.
     fn encode_repo_graph_uninterned(g: &RepoGraph) -> Vec<u8> {
-        encode_shard(g, false, None).unwrap().bytes
+        encode_shard(g, false, None, None).unwrap().bytes
     }
 
     /// `n` edges over 5 emitters, 7 rules and 50 files, every basis, lines up
@@ -1343,7 +1716,7 @@ mod tests {
     fn evidence_bytes_shrink() {
         let g = evidence_graph(10_000);
         let plain = encode_repo_graph_uninterned(&g);
-        let encoded = encode_repo_graph_counted(&g, None).unwrap();
+        let encoded = encode_repo_graph_counted(&g, None, None).unwrap();
         assert_eq!(
             encoded.evidence,
             InternStats {
@@ -1558,7 +1931,7 @@ mod tests {
     fn find_on_line_is_byte_exact_and_line_bounded() {
         let f = SourceFile {
             bytes: "é = 1\n    fn b() {}\nfn c() {}".as_bytes().to_vec(),
-            line_starts: OnceCell::new(),
+            line_starts: OnceLock::new(),
         };
         let at_b = f.bytes.windows(2).position(|w| w == b"fn").unwrap();
         assert_eq!(f.find_on_line(1, b"fn b() {}"), Some(at_b));
