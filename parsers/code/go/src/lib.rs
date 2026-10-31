@@ -268,12 +268,15 @@ pub fn parse_file_with_modules(
             ms.structs, ms.fields, ms.embeds, ms.skipped
         );
     }
+    // GD.13: the helper calls queued during the walk, now that every
+    // function's locals are recorded.
+    follow_wire_helpers(root, src, package_qname, repo, &mut acc);
     // DT.1e: the handler wire sites given a MESSAGE_TYPE cell and the
     // callables recorded with a slice result, per file.
     let w = &acc.wire;
     if w.responses + w.binds + w.slice_results > 0 {
         eprintln!(
-            "[go-wire] responses={} binds={} skipped_status={} unknown_status={} shapes(type={} call={} chain={} object={} open={}) slice_results={} in {file_rel_path}",
+            "[go-wire] responses={} binds={} skipped_status={} unknown_status={} shapes(type={} call={} chain={} object={} open={}) slice_results={} encoder_locals={} helper_ctx={} bind_with={} in {file_rel_path}",
             w.responses,
             w.binds,
             w.skipped_status,
@@ -283,7 +286,10 @@ pub fn parse_file_with_modules(
             w.shape_chain,
             w.shape_object,
             w.shape_open,
-            w.slice_results
+            w.slice_results,
+            w.encoder_locals,
+            w.helper_ctx,
+            w.bind_with
         );
     }
     // DT.5j: the func / method value refs, read once the whole file is
@@ -700,7 +706,7 @@ fn collect_interface_elems(
                 // CA.2a: the method's result type; the interface's own type
                 // parameters (`type Repo[T any] interface`) type nothing.
                 if let Some(ty) =
-                    result_type(elem.child_by_field_name("result"), src, &iface_params)
+                    return_type_fact(elem.child_by_field_name("result"), src, &iface_params)
                 {
                     acc.nav.record_return_type(id, &ty);
                 }
@@ -1570,7 +1576,7 @@ fn visit_function(
 
     // CA.2a: result type and parameters.
     acc.type_params = type_param_names(decl.child_by_field_name("type_parameters"), src);
-    if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
+    if let Some(ty) = return_type_fact(decl.child_by_field_name("result"), src, &acc.type_params) {
         acc.nav.record_return_type(id, &ty);
     }
     // DT.1e: a `[]T` first result, which `return_types` skips.
@@ -1655,7 +1661,7 @@ fn visit_method(
     // CA.2a: result type and parameters (the receiver is not a local:
     // SelfMethod and `self.` cover it).
     acc.type_params = receiver_type_params(receiver, src);
-    if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
+    if let Some(ty) = return_type_fact(decl.child_by_field_name("result"), src, &acc.type_params) {
         acc.nav.record_return_type(id, &ty);
     }
     // DT.1e: a `[]T` first result, which `return_types` skips.
@@ -2189,6 +2195,9 @@ fn collect_calls_at<'t>(
         // http.StatusOK, v)`, `c.ShouldBindJSON(&req)`) -> a MESSAGE_TYPE
         // cell on `from`.
         try_detect_json_wire(node, src, from, receiver_var, acc);
+        // GD.13: a call handing the caller's context / writer / request to
+        // a function of the package, read once the whole file is.
+        queue_wire_helper(node, src, from, receiver_var, acc);
     }
     // DT.5j: the func and method values this node passes, assigns or returns.
     record_value_refs(node, src, from, receiver_var, acc);
@@ -2659,17 +2668,44 @@ fn receiver_type_params(receiver: TsNode, src: &[u8]) -> Vec<String> {
 /// `result` field is `result`: a bare type, or the first declaration of a
 /// result list (`(*T, error)`, `(u *T, err error)`), as [`fact_type`] names it.
 fn result_type(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> Option<String> {
+    fact_type(first_result(result)?, src, type_params)
+}
+
+/// The type node of a callable's first result: a bare result type, or the
+/// first declaration of a result `parameter_list`.
+fn first_result(result: Option<TsNode>) -> Option<TsNode> {
     let result = result?;
-    let ty = if result.kind() == "parameter_list" {
+    if result.kind() == "parameter_list" {
         let mut c = result.walk();
         let first = result
             .named_children(&mut c)
             .find(|p| p.kind() == "parameter_declaration");
-        first?.child_by_field_name("type")?
+        first?.child_by_field_name("type")
     } else {
-        result
-    };
-    fact_type(ty, src, type_params)
+        Some(result)
+    }
+}
+
+/// The `CodeNav::return_types` text of a callable's first result: its
+/// [`result_type`], else (GD.13) the predeclared scalar it is (`int`,
+/// `string`, `bool`, `error`, .., a pointer to one too; never `any` or a
+/// type parameter), recorded as such so the Go wire resolution (DT.1f) reads
+/// a call of it as a scalar, not as a value nothing typed. A scalar owns no
+/// in-repo method, so the receiver passes type nothing through it.
+fn return_type_fact(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> Option<String> {
+    result_type(result, src, type_params).or_else(|| {
+        let mut ty = unwrap_pointer(first_result(result)?);
+        while ty.kind() == "parenthesized_type" {
+            let mut c = ty.walk();
+            ty = unwrap_pointer(ty.named_children(&mut c).next()?);
+        }
+        let name = text_of(ty, src);
+        (ty.kind() == "type_identifier"
+            && is_predeclared_type(name)
+            && !matches!(name, "any" | "comparable")
+            && !type_params.iter().any(|p| p == name))
+        .then(|| name.to_string())
+    })
 }
 
 /// DT.5j: the most distinct type texts one local's declarations may give it
@@ -3493,11 +3529,28 @@ fn record_package_vars(
 // literal (`c.JSON(errorStatus(err), ..)`, `c.JSON(status, ..)`) is recorded
 // with `status` absent (`unknown_status=`), and DT.1g never judges it.
 //
+// GD.13 (FD.43) reads three more forms:
+// * an encoder held in a local, `enc := json.NewEncoder(w); enc.Encode(v)`
+//   (`var enc = ..` too), `w` an http.ResponseWriter: the same response as
+//   the chained form ([`WireFile::note_encoder`]);
+// * gin's explicit binders `c.ShouldBindWith(&v, binding.JSON)`,
+//   `c.ShouldBindBodyWith(&v, binding.JSON)` and `c.MustBindWith(&v,
+//   binding.JSON)`, the binder gin/binding's `JSON` through this file's
+//   import (any other binder binds no JSON body);
+// * a handler that passes its context, writer or request to a FUNCTION of
+//   this file under another name (`bindRequest(c, &frm)` with `func
+//   bindRequest(ctx *gin.Context, v any) error { return
+//   ctx.ShouldBindWith(v, binding.JSON) }`): once the whole file is read,
+//   the helper's own sites through that parameter are re-read with its
+//   parameters mapped back to the caller's arguments, and the caller gets
+//   the cell at its call's line ([`follow_wire_helpers`]): one level, never
+//   the caller itself. The helper keeps its own site (its other callers may
+//   sit in other files of the package, which this parser never sees).
+//
 // Not read: a func-literal route handler's body (LA.18d leaves it to its
-// route, `collect_closure_calls`), a write through a helper that takes the
-// context (`respondJSON(c, v)`: the helper's own site is recorded on the
-// helper when its parameter is a context), and an encoder or context held in
-// a struct field or a local of another type.
+// route, `collect_closure_calls`), a helper in another file of the package
+// or a method helper, and an encoder or context held in a struct field or
+// reached through another value (`c.Writer`).
 
 /// DT.1e: what an import is to the wire detector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3512,6 +3565,9 @@ enum WireImport {
     /// `github.com/go-chi/render`: `render.JSON(w, r, v)`,
     /// `render.DecodeJSON(r.Body, &v)`, `render.Status(r, code)`.
     Render,
+    /// GD.13: `github.com/gin-gonic/gin/binding`: `binding.JSON`, the
+    /// binder `c.ShouldBindWith(&v, binding.JSON)` names.
+    GinBinding,
 }
 
 /// DT.1e: a Go web framework whose handler context writes and binds JSON.
@@ -3549,6 +3605,7 @@ impl WireImport {
             "net/http" => Some((WireImport::Http, "http")),
             "encoding/json" => Some((WireImport::Json, "json")),
             "github.com/go-chi/render" => Some((WireImport::Render, "render")),
+            "github.com/gin-gonic/gin/binding" => Some((WireImport::GinBinding, "binding")),
             _ => None,
         }
     }
@@ -3561,10 +3618,21 @@ struct WireFile {
     /// blank or dot import binds none). Filled by `record_import`, before any
     /// callable is visited (Go requires imports first); only looked up.
     frameworks: HashMap<String, WireFramework>,
-    /// The local names of `net/http`, `encoding/json` and chi `render`.
+    /// The local names of `net/http`, `encoding/json`, chi `render` and
+    /// gin's `binding` (GD.13).
     http: std::collections::HashSet<String>,
     json: std::collections::HashSet<String>,
     render: std::collections::HashSet<String>,
+    gin_binding: std::collections::HashSet<String>,
+    /// GD.13: (callable, local name) -> the http.ResponseWriter a
+    /// `json.NewEncoder(w)` declaration of it wraps; `None` once another
+    /// declaration of the name disagrees ([`WireFile::note_encoder`]). Only
+    /// looked up, never iterated.
+    encoders: HashMap<(NodeId, String), Option<String>>,
+    /// GD.13: the calls passing a handler's context / writer / request to a
+    /// bare-named function, in walk order; [`follow_wire_helpers`] reads
+    /// them once the whole file is.
+    helper_calls: Vec<HelperCall>,
     /// (callable, local name) -> the shape its declarations give it
     /// ([`WireFile::declare`]). Only looked up, never iterated.
     locals: HashMap<(NodeId, String), Shape>,
@@ -3581,6 +3649,52 @@ struct WireFile {
     shape_object: usize,
     shape_open: usize,
     slice_results: usize,
+    /// GD.13: cells written through an encoder local, through a same-file
+    /// helper the context was passed to, and by a gin `*BindWith(..,
+    /// binding.JSON)`.
+    encoder_locals: usize,
+    helper_ctx: usize,
+    bind_with: usize,
+}
+
+/// GD.13: what a handler argument carries into a helper: the handler's
+/// framework context, its http.ResponseWriter or its *http.Request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carrier {
+    Ctx(WireFramework),
+    Writer,
+    Request,
+}
+
+/// GD.13: one argument of a [`HelperCall`], read in the caller's scope when
+/// the call was walked.
+struct HelperArg {
+    /// The argument as written (a mapped value's `raw`).
+    raw: String,
+    /// What it carries when it is the caller's context / writer / request.
+    carrier: Option<Carrier>,
+    /// Its wire shape ([`wire_value`]) and the status it names
+    /// ([`wire_status`]) when the helper writes it as one.
+    shape: Shape,
+    status: WireStatus,
+}
+
+/// GD.13: a call `helper(args..)` from the callable `from` in which at least
+/// one argument is the caller's context, writer or request.
+struct HelperCall {
+    from: NodeId,
+    helper: String,
+    /// The call's 1-based line: the cell's `line` and its edge's row.
+    line: u32,
+    args: Vec<HelperArg>,
+}
+
+/// How a [`WireSite`] was read, for the `[go-wire]` marker's GD.13 counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SiteVia {
+    Direct,
+    EncoderLocal,
+    BindWith,
 }
 
 impl WireFile {
@@ -3608,7 +3722,40 @@ impl WireFile {
             WireImport::Render => {
                 self.render.insert(local);
             }
+            WireImport::GinBinding => {
+                self.gin_binding.insert(local);
+            }
         }
+    }
+
+    /// GD.13: record that `scope` declares `name` as an encoder over the
+    /// writer `writer` (`Some`) or as anything else (`None`). A name every
+    /// declaration of which wraps one writer is an encoder; a second
+    /// declaration that disagrees leaves it none. A name never declared as
+    /// an encoder records nothing.
+    fn note_encoder(&mut self, scope: NodeId, name: &str, writer: Option<String>) {
+        if name.is_empty() || name == "_" {
+            return;
+        }
+        match self.encoders.entry((scope, name.to_string())) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                if writer.is_some() {
+                    v.insert(writer);
+                }
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if *o.get() != writer {
+                    o.insert(None);
+                }
+            }
+        }
+    }
+
+    /// GD.13: the writer `scope`'s local `name` is an encoder over.
+    fn encoder(&self, scope: NodeId, name: &str) -> Option<&str> {
+        self.encoders
+            .get(&(scope, name.to_string()))
+            .and_then(|w| w.as_deref())
     }
 
     /// A site can exist in this file: it imports a framework, encoding/json
@@ -3699,6 +3846,11 @@ const CTX_JSON_WRITES: [&str; 7] = [
     "JSONPretty",
 ];
 
+/// GD.13: gin context methods that bind the request into their first
+/// argument with the binder their second names; a JSON bind only when that
+/// binder is gin/binding's `JSON`.
+const CTX_BIND_WITH: [&str; 3] = ["ShouldBindWith", "ShouldBindBodyWith", "MustBindWith"];
+
 /// Context methods that bind the request body into their first argument
 /// (`&v`): gin `ShouldBindJSON` / `BindJSON` / `ShouldBind` / `Bind`, echo
 /// `Bind`, fiber `BodyParser`.
@@ -3720,6 +3872,13 @@ struct WireSite<'t> {
     form: WireForm,
     value: TsNode<'t>,
     status: WireStatus,
+    /// GD.13: the argument a written status was read from (`None` for an
+    /// implicit status or a bind).
+    status_arg: Option<TsNode<'t>>,
+    /// GD.13: the identifier the site writes or binds through (the context,
+    /// the writer, the request), when it is one.
+    carrier: Option<String>,
+    via: SiteVia,
 }
 
 /// `node` with its wrapping parentheses removed.
@@ -3842,6 +4001,20 @@ fn implicit_status<'t>(
     WireStatus::Known(200)
 }
 
+/// GD.13: what the identifier `name` carries in `scope`: a local typed by a
+/// framework's `Context` / `Ctx` through this file's import, or by
+/// `<http>.ResponseWriter` / `<http>.Request`.
+fn carrier_of(name: &str, scope: NodeId, acc: &Acc) -> Option<Carrier> {
+    let ty = acc.nav.local_types.get(&scope)?.get(name)?;
+    let (pkg, ty) = ty.split_once('.')?;
+    match ty {
+        "Context" | "Ctx" => acc.wire.frameworks.get(pkg).copied().map(Carrier::Ctx),
+        "ResponseWriter" if acc.wire.http.contains(pkg) => Some(Carrier::Writer),
+        "Request" if acc.wire.http.contains(pkg) => Some(Carrier::Request),
+        _ => None,
+    }
+}
+
 /// The JSON write or bind `call` is, read through the recorded types of
 /// `scope`'s locals and this file's imports; `None` for any other call.
 fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Option<WireSite<'t>> {
@@ -3865,39 +4038,59 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
         if n.kind() != "identifier" {
             return None;
         }
-        let (pkg, ty) = local_ty(text_of(n, src))?.split_once('.')?;
-        if !matches!(ty, "Context" | "Ctx") {
-            return None;
+        match carrier_of(text_of(n, src), scope, acc)? {
+            Carrier::Ctx(f) => Some(f),
+            _ => None,
         }
-        wire.frameworks.get(pkg).copied()
     };
     // The identifier `n` is a local typed `<http>.<want>`.
-    let http_typed = |n: TsNode, want: &str| {
-        n.kind() == "identifier"
-            && local_ty(text_of(n, src))
-                .and_then(|t| t.split_once('.'))
-                .is_some_and(|(pkg, ty)| ty == want && wire.http.contains(pkg))
+    let http_typed = |n: TsNode, want: Carrier| {
+        n.kind() == "identifier" && carrier_of(text_of(n, src), scope, acc) == Some(want)
     };
-    let response = |value: TsNode<'t>, status| {
+    let carrier = |n: TsNode| (n.kind() == "identifier").then(|| text_of(n, src).to_string());
+    let response = |value: TsNode<'t>, status, status_arg, via, through: TsNode| {
         Some(WireSite {
             form: WireForm::JsonResponse,
             value,
             status,
+            status_arg,
+            carrier: carrier(through),
+            via,
         })
     };
-    let bind = |value: TsNode<'t>| {
+    let bind = |value: TsNode<'t>, via, through: TsNode| {
         Some(WireSite {
             form: WireForm::JsonBind,
             value,
             status: WireStatus::Unknown,
+            status_arg: None,
+            carrier: carrier(through),
+            via,
         })
+    };
+    // GD.13: `<binding>.JSON`, gin/binding's JSON binder through this
+    // file's import.
+    let binding_json = |n: TsNode| {
+        let n = unparen_expr(n);
+        n.kind() == "selector_expression"
+            && n.child_by_field_name("field")
+                .is_some_and(|f| text_of(f, src) == "JSON")
+            && n.child_by_field_name("operand")
+                .is_some_and(|op| is_pkg(&wire.gin_binding, op))
     };
 
     match operand.kind() {
         "identifier" => {
             if let Some(fw) = ctx(operand) {
                 if CTX_BINDS.contains(&method) {
-                    return bind(*args.first()?);
+                    return bind(*args.first()?, SiteVia::Direct, operand);
+                }
+                // GD.13: gin `c.ShouldBindWith(&v, binding.JSON)`.
+                if CTX_BIND_WITH.contains(&method) {
+                    if fw != WireFramework::Gin || args.len() < 2 || !binding_json(args[1]) {
+                        return None;
+                    }
+                    return bind(args[0], SiteVia::BindWith, operand);
                 }
                 if fw == WireFramework::Fiber {
                     // fiber `c.JSON(v)`: no status argument; a `c.Status(n)`
@@ -3908,12 +4101,31 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                     let name = text_of(operand, src);
                     let setter = |c| named_setter_arg(c, src, name, "Status");
                     let status = implicit_status(call, src, wire, setter);
-                    return response(*args.first()?, status);
+                    return response(*args.first()?, status, None, SiteVia::Direct, operand);
                 }
                 if !CTX_JSON_WRITES.contains(&method) || args.len() < 2 {
                     return None;
                 }
-                return response(args[1], wire_status(args[0], src, wire));
+                return response(
+                    args[1],
+                    wire_status(args[0], src, wire),
+                    Some(args[0]),
+                    SiteVia::Direct,
+                    operand,
+                );
+            }
+            // GD.13: `enc.Encode(v)`, `enc` a local every declaration of
+            // which is `json.NewEncoder(w)`; a `w.WriteHeader(x)` before it
+            // sets the status.
+            if method == "Encode"
+                && let Some(w) = wire.encoder(scope, text_of(operand, src))
+            {
+                let setter = |c| named_setter_arg(c, src, w, "WriteHeader");
+                let status = implicit_status(call, src, wire, setter);
+                let mut site =
+                    response(*args.first()?, status, None, SiteVia::EncoderLocal, operand)?;
+                site.carrier = Some(w.to_string());
+                return Some(site);
             }
             if is_pkg(&wire.render, operand) {
                 return match method {
@@ -3930,9 +4142,17 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                                 && text_of(a[0], src) == req)
                                 .then(|| a[1])
                         };
-                        response(args[2], implicit_status(call, src, wire, render_status))
+                        let status = implicit_status(call, src, wire, render_status);
+                        response(args[2], status, None, SiteVia::Direct, args[0])
                     }
-                    "DecodeJSON" if args.len() >= 2 => bind(args[1]),
+                    "DecodeJSON" if args.len() >= 2 => {
+                        let body = unparen_expr(args[0]);
+                        let through = body
+                            .child_by_field_name("operand")
+                            .filter(|_| body.kind() == "selector_expression")
+                            .unwrap_or(body);
+                        bind(args[1], SiteVia::Direct, through)
+                    }
                     _ => None,
                 };
             }
@@ -3946,7 +4166,15 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                 && method == "JSON"
                 && ctx(inner_op) == Some(WireFramework::Fiber)
             {
-                return response(*args.first()?, wire_status(*inner_args.first()?, src, wire));
+                let code = *inner_args.first()?;
+                let status = wire_status(code, src, wire);
+                return response(
+                    *args.first()?,
+                    status,
+                    Some(code),
+                    SiteVia::Direct,
+                    inner_op,
+                );
             }
             if !is_pkg(&wire.json, inner_op) {
                 return None;
@@ -3956,34 +4184,58 @@ fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Opti
                 // a `w.WriteHeader(x)` before it sets the status.
                 ("NewEncoder", "Encode") => {
                     let w = *inner_args.first()?;
-                    if !http_typed(w, "ResponseWriter") {
+                    if !http_typed(w, Carrier::Writer) {
                         return None;
                     }
                     let name = text_of(w, src);
                     let setter = |c| named_setter_arg(c, src, name, "WriteHeader");
                     let status = implicit_status(call, src, wire, setter);
-                    response(*args.first()?, status)
+                    response(*args.first()?, status, None, SiteVia::Direct, w)
                 }
                 // `json.NewDecoder(r.Body).Decode(&v)`, `r` an *http.Request.
                 ("NewDecoder", "Decode") => {
                     let body = unparen_expr(*inner_args.first()?);
-                    let from_request = body.kind() == "selector_expression"
+                    let from_body = body.kind() == "selector_expression"
                         && body
                             .child_by_field_name("field")
-                            .is_some_and(|f| text_of(f, src) == "Body")
-                        && body
-                            .child_by_field_name("operand")
-                            .is_some_and(|r| http_typed(r, "Request"));
-                    if !from_request {
-                        return None;
-                    }
-                    bind(*args.first()?)
+                            .is_some_and(|f| text_of(f, src) == "Body");
+                    let r = body
+                        .child_by_field_name("operand")
+                        .filter(|r| from_body && http_typed(*r, Carrier::Request))?;
+                    bind(*args.first()?, SiteVia::Direct, r)
                 }
                 _ => None,
             }
         }
         _ => None,
     }
+}
+
+/// GD.13: `call` is a JSON encoder constructor over an http.ResponseWriter
+/// of `scope` (`json.NewEncoder(w)`, `json` this file's encoding/json and
+/// no local) -> the writer's name.
+fn encoder_writer(call: TsNode, src: &[u8], scope: NodeId, acc: &Acc) -> Option<String> {
+    let call = unparen_expr(call);
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let (op, method) = selector_call(call, src)?;
+    let pkg = text_of(op, src);
+    let shadowed = acc
+        .nav
+        .local_types
+        .get(&scope)
+        .is_some_and(|l| l.contains_key(pkg));
+    if method != "NewEncoder"
+        || op.kind() != "identifier"
+        || !acc.wire.json.contains(pkg)
+        || shadowed
+    {
+        return None;
+    }
+    let w = unparen_expr(*call_args(call).first()?);
+    (w.kind() == "identifier" && carrier_of(text_of(w, src), scope, acc) == Some(Carrier::Writer))
+        .then(|| text_of(w, src).to_string())
 }
 
 /// DT.1e: a handler's JSON write or bind at `call` -> one ServerWire
@@ -3998,48 +4250,77 @@ fn try_detect_json_wire(
     receiver_var: Option<&str>,
     acc: &mut Acc,
 ) {
-    if !acc.wire.enabled() {
-        return;
-    }
-    let callable = acc
-        .nav
-        .kind_by_id
-        .get(&from)
-        .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD);
-    if !callable {
+    if !acc.wire.enabled() || !is_callable(acc, from) {
         return;
     }
     let Some(site) = wire_site(call, src, from, acc) else {
         return;
     };
-    let status = match (site.form, site.status) {
+    let shape = wire_value(site.value, src, from, receiver_var, &acc.wire, 1);
+    let raw = collapse_go_ws(text_of(site.value, src));
+    let line = line_at(call).saturating_add(1);
+    push_wire_cell(
+        acc,
+        from,
+        site.form,
+        site.status,
+        &raw,
+        line,
+        shape,
+        site.via,
+    );
+}
+
+/// `id` is a FUNCTION / METHOD of this file.
+fn is_callable(acc: &Acc, id: NodeId) -> bool {
+    acc.nav
+        .kind_by_id
+        .get(&id)
+        .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD)
+}
+
+/// DT.1e: write one ServerWire MESSAGE_TYPE cell of `form` on `from` at
+/// 1-based `line` and count it ([`try_detect_json_wire`]; GD.13's helper
+/// sites, [`follow_wire_helpers`]). A response of a known non-2xx `status`
+/// writes nothing and is counted as skipped; an identical payload already
+/// on the node is kept once. Returns whether a cell was written.
+#[allow(clippy::too_many_arguments)]
+fn push_wire_cell(
+    acc: &mut Acc,
+    from: NodeId,
+    form: WireForm,
+    status: WireStatus,
+    raw: &str,
+    line: u32,
+    shape: Shape,
+    via: SiteVia,
+) -> bool {
+    let status = match (form, status) {
         (WireForm::JsonResponse, WireStatus::Skip) => {
             acc.wire.skipped_status += 1;
-            return;
+            return false;
         }
         (WireForm::JsonResponse, WireStatus::Known(code)) => Some(code),
         _ => None,
     };
-    let shape = wire_value(site.value, src, from, receiver_var, &acc.wire, 1);
-    let raw = collapse_go_ws(text_of(site.value, src));
-    let mut w = ServerWire::new(site.form, &raw, line_at(call).saturating_add(1), shape);
+    let mut w = ServerWire::new(form, raw, line, shape);
     w.status = status;
     let payload = w.to_payload();
     let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == from) else {
-        return;
+        return false;
     };
     let seen = node.cells.iter().any(|c| {
         c.kind == cell_type::MESSAGE_TYPE
             && matches!(&c.payload, CellPayload::Json(j) if *j == payload)
     });
     if seen {
-        return;
+        return false;
     }
     node.cells.push(Cell {
         kind: cell_type::MESSAGE_TYPE,
         payload: CellPayload::Json(payload),
     });
-    if site.form == WireForm::JsonResponse {
+    if form == WireForm::JsonResponse {
         acc.wire.responses += 1;
         if status.is_none() {
             acc.wire.unknown_status += 1;
@@ -4047,7 +4328,227 @@ fn try_detect_json_wire(
     } else {
         acc.wire.binds += 1;
     }
+    match via {
+        SiteVia::Direct => {}
+        SiteVia::EncoderLocal => acc.wire.encoder_locals += 1,
+        SiteVia::BindWith => acc.wire.bind_with += 1,
+    }
     acc.wire.count_shape(&w.shape);
+    true
+}
+
+/// GD.13: queue `call` for [`follow_wire_helpers`] when it calls a bare
+/// name (a function of the package, never a method or another package's)
+/// from a FUNCTION / METHOD and passes at least one of the caller's
+/// context, writer or request as a plain identifier. Each argument is read
+/// now, in the caller's scope as the walk has it at the call.
+fn queue_wire_helper(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
+    if !acc.wire.enabled() || !is_callable(acc, from) {
+        return;
+    }
+    let Some(func) = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "identifier")
+    else {
+        return;
+    };
+    let args = call_args(call);
+    let carriers: Vec<Option<Carrier>> = args
+        .iter()
+        .map(|a| {
+            let a = unparen_expr(*a);
+            (a.kind() == "identifier")
+                .then(|| carrier_of(text_of(a, src), from, acc))
+                .flatten()
+        })
+        .collect();
+    if carriers.iter().all(Option::is_none) {
+        return;
+    }
+    let args = args
+        .iter()
+        .zip(carriers)
+        .map(|(a, carrier)| HelperArg {
+            raw: collapse_go_ws(text_of(*a, src)),
+            carrier,
+            shape: wire_value(*a, src, from, receiver_var, &acc.wire, 1),
+            status: wire_status(*a, src, &acc.wire),
+        })
+        .collect();
+    acc.wire.helper_calls.push(HelperCall {
+        from,
+        helper: text_of(func, src).to_string(),
+        line: line_at(call).saturating_add(1),
+        args,
+    });
+}
+
+/// GD.13: every queued [`HelperCall`] whose callee is the one FUNCTION of
+/// that name this file declares (not the caller itself, its parameters as
+/// many as the call's arguments, none variadic): each JSON write or bind in
+/// the helper's body (its func literals left out) made through one of its
+/// parameters, where the caller passes the same kind of carrier there, is
+/// written on the caller at the call's line. A value that is a parameter
+/// takes the caller's argument (`&frm` -> the caller's `frm`); a status that
+/// is a parameter takes the caller's; any other value is kept only when it
+/// is a written type ([`Shape::Named`], read in this file), since a call or
+/// field chain of the helper's scope means nothing in the caller's. One
+/// level: a helper's own helper calls are not followed. Calls run in walk
+/// order, sites in the helper's tree order.
+fn follow_wire_helpers(root: TsNode, src: &[u8], package_qname: &str, repo: RepoId, acc: &mut Acc) {
+    let calls = std::mem::take(&mut acc.wire.helper_calls);
+    if calls.is_empty() {
+        return;
+    }
+    // Top-level FUNCTIONs by name; a name declared twice (build-tag
+    // variants) is no one helper.
+    let mut decls: HashMap<&str, Option<TsNode>> = HashMap::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        if child.kind() != "function_declaration" {
+            continue;
+        }
+        let Some(name) = child.child_by_field_name("name") else {
+            continue;
+        };
+        decls
+            .entry(text_of(name, src))
+            .and_modify(|d| *d = None)
+            .or_insert(Some(child));
+    }
+    let mut cells: Vec<(NodeId, WireForm, WireStatus, String, u32, Shape)> = Vec::new();
+    for hc in &calls {
+        let Some(&Some(decl)) = decls.get(hc.helper.as_str()) else {
+            continue;
+        };
+        let qname = format!("{package_qname}::{}", hc.helper);
+        let helper = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+        if helper == hc.from || decl.child_by_field_name("type_parameters").is_some() {
+            continue;
+        }
+        let Some(params) = helper_params(decl, src) else {
+            continue;
+        };
+        if params.len() != hc.args.len() {
+            continue;
+        }
+        let index = |name: &str| params.iter().position(|p| p == name);
+        let Some(body) = decl.child_by_field_name("body") else {
+            continue;
+        };
+        for call in helper_calls_in(body) {
+            let Some(site) = wire_site(call, src, helper, acc) else {
+                continue;
+            };
+            // Through a parameter the caller fills with its own carrier of
+            // the same kind.
+            let Some(i) = site.carrier.as_deref().and_then(index) else {
+                continue;
+            };
+            let carried = site
+                .carrier
+                .as_deref()
+                .and_then(|c| carrier_of(c, helper, acc));
+            if carried.is_none() || carried != hc.args[i].carrier {
+                continue;
+            }
+            let value = strip_ref(site.value);
+            let mapped = (value.kind() == "identifier")
+                .then(|| index(text_of(value, src)))
+                .flatten();
+            let (shape, raw) = match mapped {
+                Some(j) => (hc.args[j].shape.clone(), hc.args[j].raw.clone()),
+                None => match wire_value(site.value, src, helper, None, &acc.wire, 1) {
+                    named @ Shape::Named { .. } => {
+                        (named, collapse_go_ws(text_of(site.value, src)))
+                    }
+                    _ => continue,
+                },
+            };
+            let status = match site.status_arg.map(unparen_expr) {
+                Some(a) if a.kind() == "identifier" => match index(text_of(a, src)) {
+                    Some(k) => hc.args[k].status,
+                    None => site.status,
+                },
+                _ => site.status,
+            };
+            cells.push((hc.from, site.form, status, raw, hc.line, shape));
+        }
+    }
+    for (from, form, status, raw, line, shape) in cells {
+        if push_wire_cell(acc, from, form, status, &raw, line, shape, SiteVia::Direct) {
+            acc.wire.helper_ctx += 1;
+        }
+    }
+}
+
+/// GD.13: a helper's parameter names in order (`_` and unnamed parameters
+/// hold their place as `""`); `None` for a variadic one.
+fn helper_params(decl: TsNode, src: &[u8]) -> Option<Vec<String>> {
+    let params = decl.child_by_field_name("parameters")?;
+    let mut out = Vec::new();
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        match param.kind() {
+            "parameter_declaration" => {
+                let mut nc = param.walk();
+                let names: Vec<String> = param
+                    .children_by_field_name("name", &mut nc)
+                    .map(|n| text_of(n, src).to_string())
+                    .collect();
+                if names.is_empty() {
+                    out.push(String::new());
+                } else {
+                    out.extend(
+                        names
+                            .into_iter()
+                            .map(|n| if n == "_" { String::new() } else { n }),
+                    );
+                }
+            }
+            "variadic_parameter_declaration" => return None,
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+/// GD.13: the call expressions under a helper's body in tree order, func
+/// literals left out (a deferred or spawned closure is no site of the call).
+fn helper_calls_in(body: TsNode) -> Vec<TsNode> {
+    let mut out = Vec::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "func_literal" {
+            continue;
+        }
+        if n.kind() == "call_expression" {
+            out.push(n);
+        }
+        let mut c = n.walk();
+        let kids: Vec<TsNode> = n.named_children(&mut c).collect();
+        stack.extend(kids.into_iter().rev());
+    }
+    out
+}
+
+/// `expr` with its parentheses, `&` and `*` removed.
+fn strip_ref(expr: TsNode) -> TsNode {
+    let mut e = unparen_expr(expr);
+    while e.kind() == "unary_expression"
+        && e.child_by_field_name("operator")
+            .is_some_and(|o| matches!(o.kind(), "&" | "*"))
+        && let Some(inner) = e.child_by_field_name("operand")
+    {
+        e = unparen_expr(inner);
+    }
+    e
 }
 
 /// DT.1e: the value `expr` a site writes or binds, classified as written,
@@ -4350,15 +4851,30 @@ fn record_wire_locals(
             }
         }
     };
+    // GD.13: which of these declarations wrap a writer in an encoder.
+    let note_encoders = |names: &[TsNode], values: &[TsNode], acc: &mut Acc| {
+        for (i, name) in names.iter().enumerate() {
+            if name.kind() != "identifier" {
+                continue;
+            }
+            let writer = paired(values, names.len(), i)
+                .filter(|_| values.len() == names.len())
+                .and_then(|v| encoder_writer(v, src, scope, acc));
+            acc.wire.note_encoder(scope, text_of(*name, src), writer);
+        }
+    };
     match node.kind() {
         "short_var_declaration" => {
             let names = named_kids(node.child_by_field_name("left"));
             let values = named_kids(node.child_by_field_name("right"));
             declare_paired(&names, &values, acc);
+            note_encoders(&names, &values, acc);
         }
         "var_spec" => {
             let mut nc = node.walk();
             let names: Vec<TsNode> = node.children_by_field_name("name", &mut nc).collect();
+            let values = named_kids(node.child_by_field_name("value"));
+            note_encoders(&names, &values, acc);
             if let Some(ty) = node.child_by_field_name("type") {
                 let shape = declared_wire_shape(ty, src, &acc.wire);
                 for name in names {
@@ -4374,6 +4890,7 @@ fn record_wire_locals(
                 if name.kind() == "identifier" {
                     acc.wire
                         .declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                    acc.wire.note_encoder(scope, text_of(name, src), None);
                 }
             }
         }
@@ -4382,6 +4899,7 @@ fn record_wire_locals(
                 if name.kind() == "identifier" {
                     acc.wire
                         .declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                    acc.wire.note_encoder(scope, text_of(name, src), None);
                 }
             }
         }
@@ -10156,12 +10674,15 @@ func Names() []string {
             .collect();
         got.sort();
         // `Get[T]() T` and the generic receiver's `*T` name a type parameter;
-        // `error` and `[]string` own no in-repo method.
+        // `[]string` owns no in-repo method. GD.13: a predeclared scalar
+        // (`error`) is recorded as such, for the wire's `scalar=` count.
         assert_eq!(
             got,
             pairs(&[
                 ("app::Builder::Build", "Bundle"),
+                ("app::Builder::Close", "error"),
                 ("app::Collection::Paged", "Page"),
+                ("app::N", "error"),
                 ("app::Repo::Find", "models.User"),
                 ("app::UserRepository", "repositories.UserRepository"),
             ])
@@ -13697,6 +14218,292 @@ func Grid() [][]models.Trip { return nil }
         assert!(
             fact(node_kind::FUNCTION, "store::store::Grid").is_empty(),
             "a slice of slices"
+        );
+    }
+
+    /// GD.13: an encoder held in a local is the response the chained form
+    /// is; a `w.WriteHeader(x)` before it sets the status; a name declared
+    /// once as an encoder and once as anything else is no encoder.
+    #[test]
+    fn encoder_local_is_a_response() {
+        let src = "package h
+
+import (
+\t\"encoding/json\"
+\t\"net/http\"
+)
+
+func Get(w http.ResponseWriter, r *http.Request) {
+\tvar o Order
+\tenc := json.NewEncoder(w)
+\tenc.SetIndent(\"\", \"  \")
+\tenc.Encode(o)
+}
+
+func Made(w http.ResponseWriter, r *http.Request) {
+\tvar enc = json.NewEncoder(w)
+\tw.WriteHeader(http.StatusCreated)
+\t_ = enc.Encode(&Receipt{})
+}
+
+func Twice(w http.ResponseWriter, r *http.Request, buf *bytes.Buffer) {
+\tenc := json.NewEncoder(w)
+\tif r != nil {
+\t\tenc := json.NewEncoder(buf)
+\t\tenc.Encode(Order{})
+\t}
+\tenc.Encode(Order{})
+}
+
+func Local(buf *bytes.Buffer) {
+\tenc := json.NewEncoder(buf)
+\tenc.Encode(Order{})
+}
+";
+        let p = parse(src);
+        let ws = sites(&p, "web::h::Get");
+        assert_eq!(ws.len(), 1);
+        assert_eq!(
+            (ws[0].form, ws[0].status, &ws[0].shape, ws[0].line),
+            (
+                WireForm::JsonResponse,
+                Some(200),
+                &named("Order", false),
+                12
+            )
+        );
+        let ws = sites(&p, "web::h::Made");
+        assert_eq!(
+            (ws.len(), ws[0].status, &ws[0].shape),
+            (1, Some(201), &named("Receipt", false))
+        );
+        assert!(
+            sites(&p, "web::h::Twice").is_empty(),
+            "enc wraps w once and a buffer once: no encoder"
+        );
+        assert!(
+            sites(&p, "web::h::Local").is_empty(),
+            "not a ResponseWriter"
+        );
+    }
+
+    /// GD.13: gin's explicit binders are JSON binds only with gin/binding's
+    /// `JSON` through this file's import.
+    #[test]
+    fn gin_bind_with_json() {
+        let src = "package h
+
+import (
+\t\"github.com/gin-gonic/gin\"
+\tgb \"github.com/gin-gonic/gin/binding\"
+\t\"github.com/labstack/echo/v4\"
+)
+
+func Create(c *gin.Context) {
+\tvar o Order
+\tif err := c.ShouldBindWith(&o, gb.JSON); err != nil {
+\t\treturn
+\t}
+}
+
+func Body(c *gin.Context) {
+\tvar r Refund
+\t_ = c.ShouldBindBodyWith(&r, gb.JSON)
+\tc.MustBindWith(&r, gb.JSON)
+}
+
+func Query(c *gin.Context) {
+\tvar f Filter
+\t_ = c.ShouldBindWith(&f, gb.Query)
+\t_ = c.ShouldBindWith(&f, binding.JSON)
+}
+
+func Echo(c echo.Context) {
+\tvar f Filter
+\t_ = c.ShouldBindWith(&f, gb.JSON)
+}
+";
+        let p = parse(src);
+        let ws = sites(&p, "web::h::Create");
+        assert_eq!(
+            ws.iter()
+                .map(|w| (w.form, w.status, w.shape.clone(), w.raw.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                WireForm::JsonBind,
+                None,
+                named("Order", false),
+                "&o".to_string()
+            )]
+        );
+        let ws = sites(&p, "web::h::Body");
+        assert_eq!(
+            ws.len(),
+            2,
+            "ShouldBindBodyWith and MustBindWith (two lines)"
+        );
+        assert!(
+            ws.iter()
+                .all(|w| w.form == WireForm::JsonBind && w.shape == named("Refund", false))
+        );
+        assert!(
+            sites(&p, "web::h::Query").is_empty(),
+            "a Query binder, and `binding` is no import of this file"
+        );
+        assert!(sites(&p, "web::h::Echo").is_empty(), "gin's binders only");
+    }
+
+    /// GD.13: a handler passing its context (or writer) to a function of
+    /// this file under another name gets the helper's sites, the helper's
+    /// parameters mapped back to the caller's arguments (photoprism's
+    /// `BindOAuthRequest(c, &frm)` shape); the helper keeps its own site.
+    #[test]
+    fn helper_sites_land_on_the_handler() {
+        let src = "package h
+
+import (
+\t\"encoding/json\"
+\t\"net/http\"
+
+\t\"github.com/gin-gonic/gin\"
+\t\"github.com/gin-gonic/gin/binding\"
+)
+
+func BindOAuthRequest(c *gin.Context, frm any) error {
+\treturn c.ShouldBindWith(frm, binding.JSON)
+}
+
+func Token(ctx *gin.Context) {
+\tvar frm form.OAuthCreateToken
+\tif err := BindOAuthRequest(ctx, &frm); err != nil {
+\t\treturn
+\t}
+\trespond(ctx, http.StatusCreated, Receipt{})
+\trespond(ctx, http.StatusNotFound, Problem{})
+\tfixed(ctx)
+\tchained(ctx)
+}
+
+func respond(c *gin.Context, code int, v any) {
+\tc.JSON(code, v)
+}
+
+func fixed(g *gin.Context) {
+\tg.JSON(http.StatusOK, Order{})
+}
+
+func chained(g *gin.Context) {
+\tg.JSON(http.StatusOK, g.MustGet(\"user\"))
+}
+
+func Report(w http.ResponseWriter, r *http.Request) {
+\twriteJSON(w, Report{})
+\tTwice(w, r)
+}
+
+func writeJSON(out http.ResponseWriter, v any) {
+\tenc := json.NewEncoder(out)
+\tenc.Encode(v)
+}
+
+func Twice(w http.ResponseWriter, r *http.Request) {
+\tTwice(w, r)
+}
+
+func Mismatch(c *gin.Context, w http.ResponseWriter) {
+\tBindOAuthRequest(w, &Order{})
+\tvariadic(c, Order{})
+}
+
+func variadic(c *gin.Context, vs ...any) {
+\tc.JSON(http.StatusOK, vs)
+}
+";
+        let p = parse(src);
+        let got = |q: &str| -> Vec<(WireForm, Option<u16>, Shape, String, u32)> {
+            sites(&p, q)
+                .into_iter()
+                .map(|w| (w.form, w.status, w.shape, w.raw, w.line))
+                .collect()
+        };
+        assert_eq!(
+            got("web::h::Token"),
+            vec![
+                (
+                    WireForm::JsonBind,
+                    None,
+                    named("form.OAuthCreateToken", false),
+                    "&frm".into(),
+                    17
+                ),
+                (
+                    WireForm::JsonResponse,
+                    Some(201),
+                    named("Receipt", false),
+                    "Receipt{}".into(),
+                    20
+                ),
+                (
+                    WireForm::JsonResponse,
+                    Some(200),
+                    named("Order", false),
+                    "Order{}".into(),
+                    22
+                ),
+            ],
+            "the 404 is skipped by the caller's status; a chain of the helper's scope is no value of the caller's"
+        );
+        // The helper's own site stays: an `any` parameter, open.
+        let own = sites(&p, "web::h::BindOAuthRequest");
+        assert_eq!(own.len(), 1);
+        assert!(matches!(own[0].shape, Shape::Open { .. }));
+        assert_eq!(
+            got("web::h::Report"),
+            vec![(
+                WireForm::JsonResponse,
+                Some(200),
+                named("Report", false),
+                "Report{}".into(),
+                39
+            )],
+            "a writer passed to an encoder-local helper; the self call is not followed"
+        );
+        assert!(
+            sites(&p, "web::h::Mismatch").is_empty(),
+            "a writer where the helper takes a context; a variadic helper"
+        );
+    }
+
+    /// GD.13: a predeclared scalar first result is recorded as such in
+    /// `return_types`; `any`, a type parameter and a slice are not.
+    #[test]
+    fn scalar_first_results_recorded() {
+        let src = "package h
+
+type S struct{}
+
+func N() int { return 0 }
+func E() error { return nil }
+func (s *S) Name() (name *string, err error) { return }
+func A() any { return nil }
+func G[T any]() T { var z T; return z }
+func L() []string { return nil }
+";
+        let p = parse(src);
+        let mut got: Vec<(String, String)> = p
+            .nav
+            .return_types
+            .iter()
+            .map(|(id, ty)| (p.nav.qname_by_id[id].clone(), ty.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("web::h::E".to_string(), "error".to_string()),
+                ("web::h::N".to_string(), "int".to_string()),
+                ("web::h::S::Name".to_string(), "string".to_string()),
+            ]
         );
     }
 

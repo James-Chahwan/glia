@@ -26,7 +26,10 @@
 //! A value resolves only to a STRUCT: an INTERFACE result, an external type,
 //! a generic instantiation and an ambiguous name stay unresolved and are
 //! counted. A scalar (`string`, `int`, `map[..]..`; [`json_kind`] knows its
-//! kind) is no model and is not counted.
+//! kind) is no model: it is counted `scalar`, never unresolved. GD.13: a call
+//! whose callee's first result is a predeclared scalar (`int`, `string`,
+//! `error`, ..; the Go parser records it in `return_types` as such) is a
+//! scalar too, so `unresolved=` counts only real misses.
 //!
 //! What it writes:
 //!
@@ -53,7 +56,7 @@
 //!
 //! fired_on, once per Go graph with a wire cell or a nested model:
 //! `[go-wire] resolved sites=<s>/<n> models=<m> (type=<t> call=<c> chain=<h>)
-//! unresolved=<u> uses=<e> nested=<k>`.
+//! scalar=<s> unresolved=<u> uses=<e> nested=<k>`.
 
 use std::collections::HashMap;
 
@@ -92,6 +95,9 @@ pub(super) struct WireStats {
     by_call: usize,
     /// Of `models`: through a field chain.
     by_chain: usize,
+    /// GD.13: shapes typed as a scalar (a predeclared or JSON-known type, a
+    /// scalar field, a call whose first result is one): no model, no miss.
+    scalar: usize,
     /// Shapes that could hold a model but resolved to no STRUCT (an INTERFACE
     /// result, an external type, an open expression such as `len(xs)`).
     unresolved: usize,
@@ -108,13 +114,14 @@ impl WireStats {
         (self.sites + self.nested > 0).then(|| {
             format!(
                 "[go-wire] resolved sites={}/{} models={} (type={} call={} chain={}) \
-                 unresolved={} uses={} nested={}",
+                 scalar={} unresolved={} uses={} nested={}",
                 self.resolved_sites,
                 self.sites,
                 self.models,
                 self.by_type,
                 self.by_call,
                 self.by_chain,
+                self.scalar,
                 self.unresolved,
                 self.uses,
                 self.nested
@@ -140,12 +147,13 @@ impl Via {
     }
 }
 
-/// What a field chain reads ([`Wire::chain`]).
+/// What a field chain reads ([`Wire::chain`]) or a call yields
+/// ([`Wire::call`]).
 enum Field {
     /// A STRUCT, and whether the field is an array of it.
     Model(NodeId, bool),
-    /// A field whose declared type is a scalar (`string`, `time.Time`): no
-    /// model, and no miss.
+    /// A field whose declared type, or a call whose first result, is a
+    /// scalar (`string`, `time.Time`, `error`): no model, and no miss.
     Scalar,
     /// Nothing typed it.
     Miss,
@@ -155,6 +163,7 @@ enum Field {
 #[derive(Default)]
 struct SiteModels {
     hits: Vec<(NodeId, Via)>,
+    scalar: usize,
     unresolved: usize,
 }
 
@@ -278,6 +287,7 @@ impl<'a> Wire<'a> {
         } else {
             count_open(&w.shape, 1, &mut found);
         }
+        stats.scalar += found.scalar;
         stats.unresolved += found.unresolved;
         if found.hits.is_empty() {
             return None;
@@ -381,6 +391,7 @@ impl<'a> Wire<'a> {
                     element_type(ty)
                 };
                 if is_scalar(&base) {
+                    found.scalar += 1;
                     return;
                 }
                 let hit = self.type_text(scope, &base);
@@ -389,13 +400,19 @@ impl<'a> Wire<'a> {
                 }
                 hit.map(|t| (t, Via::Type))
             }
-            Shape::Call { chain, array, .. } => {
-                let hit = self.call(scope, chain);
-                if let Some((_, true)) = hit {
-                    *array = true;
+            Shape::Call { chain, array, .. } => match self.call(scope, chain) {
+                Field::Model(t, arr) => {
+                    if arr {
+                        *array = true;
+                    }
+                    Some((t, Via::Call))
                 }
-                hit.map(|(t, _)| (t, Via::Call))
-            }
+                Field::Scalar => {
+                    found.scalar += 1;
+                    return;
+                }
+                Field::Miss => None,
+            },
             Shape::Chain { chain, array, .. } => match self.chain(scope, chain) {
                 Field::Model(t, arr) => {
                     if arr {
@@ -403,7 +420,10 @@ impl<'a> Wire<'a> {
                     }
                     Some((t, Via::Chain))
                 }
-                Field::Scalar => return,
+                Field::Scalar => {
+                    found.scalar += 1;
+                    return;
+                }
                 Field::Miss => None,
             },
             Shape::Object { fields, .. } => {
@@ -445,10 +465,13 @@ impl<'a> Wire<'a> {
     }
 
     /// The STRUCT a call chain's result is, and whether it is an array of it
-    /// (the callee's [`NavFact::SliceResult`]).
-    fn call(&self, scope: RecvScope<'a>, chain: &str) -> Option<(NodeId, bool)> {
-        let segs = receiver_segments(chain)?;
-        let callee = self.callee(scope, &segs)?;
+    /// (the callee's [`NavFact::SliceResult`]); a scalar first result is
+    /// [`Field::Scalar`].
+    fn call(&self, scope: RecvScope<'a>, chain: &str) -> Field {
+        let Some(callee) = receiver_segments(chain).and_then(|segs| self.callee(scope, &segs))
+        else {
+            return Field::Miss;
+        };
         self.result_of(scope, callee)
     }
 
@@ -502,35 +525,49 @@ impl<'a> Wire<'a> {
     }
 
     /// What calling `callee` yields: a FUNCTION / METHOD's declared first
-    /// result (read in the callee's own file), else its SliceResult element
-    /// as an array; a STRUCT itself (a conversion `T(x)`).
-    fn result_of(&self, scope: RecvScope<'a>, callee: NodeId) -> Option<(NodeId, bool)> {
-        let kind = *self.g.nav.kind_by_id.get(&callee)?;
+    /// result (read in the callee's own file; a predeclared scalar the Go
+    /// parser recorded is [`Field::Scalar`], GD.13), else its SliceResult
+    /// element as an array; a STRUCT itself (a conversion `T(x)`).
+    fn result_of(&self, scope: RecvScope<'a>, callee: NodeId) -> Field {
+        let Some(&kind) = self.g.nav.kind_by_id.get(&callee) else {
+            return Field::Miss;
+        };
         if kind == node_kind::STRUCT {
-            return Some((callee, false));
+            return Field::Model(callee, false);
         }
         if kind != node_kind::FUNCTION && kind != node_kind::METHOD {
-            return None;
+            return Field::Miss;
         }
+        if let Some(ret) = self.g.nav.return_types.get(&callee)
+            && is_scalar_result(ret)
+        {
+            return Field::Scalar;
+        }
+        let Some(module) = self.p.file_of(self.g, callee) else {
+            return Field::Miss;
+        };
         let at = RecvScope {
             func: None,
-            module: self.p.file_of(self.g, callee)?,
+            module,
             ..scope
         };
-        if let Some(ret) = self.g.nav.return_types.get(&callee) {
-            return self.type_text(at, ret).map(|t| (t, false));
-        }
-        let elem = self
-            .g
-            .nav
-            .nav_facts
-            .get(&callee)?
-            .iter()
-            .find_map(|f| match f {
-                NavFact::SliceResult { elem } => Some(elem.as_str()),
-                _ => None,
-            })?;
-        self.type_text(at, elem).map(|t| (t, true))
+        let hit = match self.g.nav.return_types.get(&callee) {
+            Some(ret) => self.type_text(at, ret).map(|t| (t, false)),
+            None => self
+                .g
+                .nav
+                .nav_facts
+                .get(&callee)
+                .and_then(|facts| {
+                    facts.iter().find_map(|f| match f {
+                        NavFact::SliceResult { elem } => Some(elem.as_str()),
+                        _ => None,
+                    })
+                })
+                .and_then(|elem| self.type_text(at, elem))
+                .map(|t| (t, true)),
+        };
+        hit.map_or(Field::Miss, |(t, arr)| Field::Model(t, arr))
     }
 
     /// What a field chain reads: the last field's declared type text in its
@@ -574,11 +611,20 @@ fn is_scalar(base: &str) -> bool {
     !matches!(json_kind(WireFormat::Go, base), JsonKind::Unknown(_))
 }
 
+/// GD.13: a recorded first-result text that is a scalar: one [`is_scalar`]
+/// knows, or a predeclared type it does not (`error`, `complex64`,
+/// `complex128`; `error` encodes as an object of no known fields, never a
+/// model).
+fn is_scalar_result(ret: &str) -> bool {
+    is_scalar(ret) || matches!(ret, "error" | "complex64" | "complex128")
+}
+
 /// [`Wire::shape`]'s miss count for a site whose handler has no scope (no
-/// file MODULE): every shape that could hold a model is unresolved.
+/// file MODULE): every shape that could hold a model is unresolved, a
+/// scalar is counted as one.
 fn count_open(shape: &Shape, depth: usize, found: &mut SiteModels) {
     match shape {
-        Shape::Named { ty, .. } if is_scalar(&element_type(ty).0) => {}
+        Shape::Named { ty, .. } if is_scalar(&element_type(ty).0) => found.scalar += 1,
         Shape::Object { fields, .. } => {
             if depth <= MAX_DEPTH {
                 for f in fields {
@@ -805,8 +851,8 @@ type H struct {
         assert_eq!(
             p.wire.marker().as_deref(),
             Some(
-                "[go-wire] resolved sites=1/1 models=1 (type=0 call=1 chain=0) unresolved=0 \
-                 uses=1 nested=4"
+                "[go-wire] resolved sites=1/1 models=1 (type=0 call=1 chain=0) scalar=0 \
+                 unresolved=0 uses=1 nested=4"
             )
         );
     }
@@ -881,7 +927,7 @@ type H struct {
         );
         assert_eq!(uses(&p.g).len(), 1);
         // `len(items)` is open (unresolved); the bool literal is a scalar.
-        assert_eq!(p.wire.unresolved, 1);
+        assert_eq!((p.wire.unresolved, p.wire.scalar), (1, 1));
         assert_eq!(
             (p.wire.sites, p.wire.resolved_sites, p.wire.by_call),
             (1, 1, 1)
@@ -973,6 +1019,123 @@ type H struct {
             ),
             (3, 2, 2, 0)
         );
+        assert_eq!(p.wire.scalar, 1, "the `ID string` field");
+    }
+
+    /// GD.13: a call whose callee's first result is a predeclared scalar
+    /// (`int`, `error`, `string` through a method) is `scalar`, never
+    /// `unresolved`; an `any` result stays a real miss.
+    #[test]
+    fn scalar_call_results() {
+        let p = build(
+            "func total() int { return 0 }\n\
+             func fail() error { return nil }\n\
+             func blob() any { return nil }\n\
+             func (h *H) Label() *string { return nil }\n\
+             func (h *H) Count(c *gin.Context) {\n\
+             \tn := total()\n\
+             \tc.JSON(http.StatusOK, gin.H{\"n\": n, \"e\": fail(), \"l\": h.Label(), \"b\": blob()})\n\
+             }",
+        );
+        assert!(uses(&p.g).is_empty());
+        assert_eq!(
+            (p.wire.sites, p.wire.scalar, p.wire.unresolved),
+            (1, 3, 1),
+            "total() / fail() / h.Label() are scalars; blob() returns any"
+        );
+        assert_eq!(
+            p.wire.marker().as_deref(),
+            Some(
+                "[go-wire] resolved sites=0/1 models=0 (type=0 call=0 chain=0) scalar=3 \
+                 unresolved=1 uses=0 nested=4"
+            )
+        );
+    }
+
+    /// GD.13: the Go parser's three new forms reach the graph as wire cells
+    /// on the handler, each typed to its STRUCT: an encoder local, gin's
+    /// `ShouldBindWith(&v, binding.JSON)`, and a same-file helper the
+    /// context is passed to (the photoprism `BindOAuthRequest(c, &frm)`
+    /// shape, the helper binding an `any` parameter).
+    #[test]
+    fn residual_forms_reach_the_handler() {
+        let web = r#"package web
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+
+	"example.com/app/models"
+)
+
+func Get(w http.ResponseWriter, r *http.Request) {
+	var it models.Item
+	enc := json.NewEncoder(w)
+	enc.Encode(it)
+}
+
+func Create(c *gin.Context) {
+	var req models.Create
+	_ = c.ShouldBindWith(&req, binding.JSON)
+}
+
+func bindRequest(ctx *gin.Context, frm any) error {
+	return ctx.ShouldBindWith(frm, binding.JSON)
+}
+
+func Token(c *gin.Context) {
+	var t models.Tag
+	if err := bindRequest(c, &t); err != nil {
+		return
+	}
+}
+"#;
+        let p = build_go_passes(
+            repo(),
+            vec![
+                parse("models/m.go", MODELS),
+                parse("store/store.go", STORE),
+                parse("web/h.go", web),
+            ],
+        );
+        let f = |n: &str| id(node_kind::FUNCTION, &format!("web::h::{n}"));
+        assert_eq!(
+            uses(&p.g),
+            vec![
+                (
+                    f("Get"),
+                    model("Item"),
+                    Confidence::Strong,
+                    "json_response".into(),
+                    Some(15)
+                ),
+                (
+                    f("Create"),
+                    model("Create"),
+                    Confidence::Strong,
+                    "json_bind".into(),
+                    Some(20)
+                ),
+                (
+                    f("Token"),
+                    model("Tag"),
+                    Confidence::Strong,
+                    "json_bind".into(),
+                    Some(29)
+                ),
+            ]
+        );
+        // The helper keeps its own site, an `any` parameter: open, no model.
+        let helper = wire_cells(&p.g, f("bindRequest"));
+        assert_eq!(helper.len(), 1);
+        assert!(!helper[0].contains("\"model\""), "{}", helper[0]);
+        assert_eq!(
+            (p.wire.sites, p.wire.resolved_sites, p.wire.unresolved),
+            (4, 3, 1)
+        );
     }
 
     #[test]
@@ -1057,7 +1220,7 @@ type H struct {
         assert_eq!(
             p.wire.marker().as_deref(),
             Some(
-                "[go-wire] resolved sites=0/0 models=0 (type=0 call=0 chain=0) unresolved=0 uses=0 nested=4"
+                "[go-wire] resolved sites=0/0 models=0 (type=0 call=0 chain=0) scalar=0 unresolved=0 uses=0 nested=4"
             )
         );
         assert!(uses(&p.g).is_empty());

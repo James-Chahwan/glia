@@ -1,0 +1,23 @@
+{
+  "framework": "go-wire-residuals",
+  "language": "go",
+  "dirs": ["."],
+  "note": "GD.13 (from FD.43; DT.1e / DT.1f residuals): the Go server wire reader's three missed forms. (1) An encoder held in a local: `enc := json.NewEncoder(w); enc.Encode(o)` with w an http.ResponseWriter is the JSON response `json.NewEncoder(w).Encode(o)` is (implicit 200). (2) gin's explicit-binding forms `c.ShouldBindWith(&v, binding.JSON)` / `c.ShouldBindBodyWith(&v, binding.JSON)` are JSON binds when the binder is gin/binding's JSON through this file's import; another binder (`binding.Query`) binds no JSON body. (3) A handler that passes its context to a same-file helper (photoprism's `BindOAuthRequest(c *gin.Context, frm any)` shape, called as `bindRequest(c, &t)`): the helper's body is read once with its parameters mapped back to the caller's arguments, so the handler, not the helper, holds the json_bind of the caller's `t` and USES TokenRequest; the helper's own site binds an `any` parameter, which types nothing. The Go build types each cell's value to its STRUCT (DT.1f) and draws handler -USES-> STRUCT, EVIDENCE graph:go_wire rule json_response / json_bind.",
+  "expect_edges": [
+    {"from": "main::get", "to": "main::Order", "category": "USES", "exact": true, "note": "enc := json.NewEncoder(w); enc.Encode(o), o a var of type Order"},
+    {"from": "main::create", "to": "main::Order", "category": "USES", "exact": true, "note": "c.ShouldBindWith(&o, binding.JSON)"},
+    {"from": "main::refund", "to": "main::Refund", "category": "USES", "exact": true, "note": "c.ShouldBindBodyWith(&rf, binding.JSON)"},
+    {"from": "token::issueToken", "to": "token::TokenRequest", "category": "USES", "exact": true, "note": "bindRequest(c, &t): the helper's ShouldBindWith(frm, binding.JSON) with frm mapped to the caller's &t"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "main::get", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_response\"", "note": "the encoder local's Encode is a JSON response"},
+    {"kind": "FUNCTION", "node": "main::get", "cell": "MESSAGE_TYPE", "contains": "\"status\":200", "note": "implicit 200: no w.WriteHeader before it"},
+    {"kind": "FUNCTION", "node": "main::create", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_bind\"", "note": "ShouldBindWith(.., binding.JSON)"},
+    {"kind": "FUNCTION", "node": "main::refund", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_bind\"", "note": "ShouldBindBodyWith(.., binding.JSON)"},
+    {"kind": "FUNCTION", "node": "token::issueToken", "cell": "MESSAGE_TYPE", "contains": "\"model\":\"token::TokenRequest\"", "note": "the helper's bind, written on the handler with the caller's argument"}
+  ],
+  "forbid": [
+    {"from": "main::search", "to": "main::Filter", "category": "USES", "rule": "json_bind", "note": "binding.Query binds the query string, not a JSON body"},
+    {"from": "token::bindRequest", "to": "token::TokenRequest", "category": "USES", "note": "the helper binds an `any` parameter: the model lands on the handler, never the helper"}
+  ]
+}
