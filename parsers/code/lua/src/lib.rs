@@ -41,7 +41,9 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with, route_qname,
 };
 use glia_code_domain::hosts::{
-    self, HostSink, HostSite, HostTally, Pattern, Shape, push_registration, registration_for,
+    self, ConfigFlavour, ConfigMatch, ConfigSide, HostSink, HostSite, HostTally, Pattern, Shape,
+    config_builder_for, config_for, host_for_require, push_config_key, push_registration,
+    registration_for, returned_config_host,
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -97,6 +99,7 @@ pub fn parse_file(
         counts: Counts::default(),
         host_bindings: vec![HashMap::new()],
         host: HostTally::default(),
+        table_keys: HashMap::new(),
     };
     w.nodes.push(Node {
         id: module_id,
@@ -219,7 +222,18 @@ struct Walk<'a> {
     /// which shadows a global of its name.
     host_bindings: Vec<HashMap<String, Option<String>>>,
     host: HostTally,
+    /// Chunk-level locals bound to a table literal (host binding
+    /// [`TABLE_LOCAL`]`<name>`): name -> the keys set on the table, each with
+    /// its site, in source order. A chunk-level `return <name>` in a file
+    /// requiring a host that reads the returned table makes them its
+    /// settings (GH.5); otherwise they are dropped. Looked up, never iterated.
+    table_keys: HashMap<String, Vec<(String, TsNode<'a>)>>,
 }
+
+/// The host-binding path of a chunk-level local bound to a table literal:
+/// `TABLE_LOCAL` + its name. It roots no host path (no row starts with it),
+/// so it shadows a host global as any local does.
+const TABLE_LOCAL: &str = "\u{1}table:";
 
 impl<'a> Walk<'a> {
     fn visit_children(&mut self, node: TsNode<'a>, ctx: &Ctx) {
@@ -266,6 +280,7 @@ impl<'a> Walk<'a> {
                     })
                     .collect();
                 for value in values {
+                    self.returned_settings(value, ctx);
                     if value.kind() == "table_constructor" {
                         self.table(value, None, ctx);
                     } else {
@@ -283,6 +298,7 @@ impl<'a> Walk<'a> {
                 self.pop_scope();
             }
             "function_call" => self.call(node, ctx),
+            "dot_index_expression" if self.setting_read(node, ctx) => {}
             _ => self.visit_children(node, ctx),
         }
     }
@@ -373,13 +389,21 @@ impl<'a> Walk<'a> {
                 .enumerate()
                 .filter(|(_, n)| n.kind() == "identifier")
                 .map(|(i, n)| {
-                    let path = values.get(i).and_then(|v| self.host_path(*v, ctx));
-                    (text(*n, self.src).to_string(), path)
+                    let name = text(*n, self.src).to_string();
+                    let path = values
+                        .get(i)
+                        .and_then(|v| self.local_host_path(&name, *v, ctx));
+                    (name, path)
                 })
                 .collect()
         } else {
             Vec::new()
         };
+        // Host settings written by this statement (GH.5), read before the
+        // values walk so a `vim.o.a = vim.o.b` defines a before it reads b.
+        for (name, value) in names.iter().zip(values.iter()) {
+            self.setting_write(*name, *value, node, ctx);
+        }
         for (i, value) in values.iter().enumerate() {
             if let Some(name) = names.get(i) {
                 if let Some(dotted) = self.dotted(*name, ctx) {
@@ -512,6 +536,9 @@ impl<'a> Walk<'a> {
             return;
         }
         if self.host_registration(node, ctx) {
+            return;
+        }
+        if self.setting_mutator(node, ctx) {
             return;
         }
         self.http_client(node, ctx);
@@ -1093,6 +1120,182 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// The host binding of `local <name> = <value>`: a host path (an alias
+    /// of a host global or of one of its fields), the required host module
+    /// (`require("wezterm")`), a builder call's result (`wezterm.config_builder()`,
+    /// path `<prefix>()`), or, at chunk level, a table literal
+    /// ([`TABLE_LOCAL`]`<name>`, its keys recorded); `None` otherwise.
+    fn local_host_path(&mut self, name: &str, value: TsNode<'a>, ctx: &Ctx) -> Option<String> {
+        match value.kind() {
+            "function_call" if self.is_require(value) => value
+                .child_by_field_name("arguments")
+                .and_then(|a| single_string(a, self.src))
+                .filter(|spec| host_for_require("lua", spec).is_some()),
+            "function_call" => {
+                let callee = value.child_by_field_name("name")?;
+                let path = self.host_path(callee, ctx)?;
+                config_builder_for("lua", &path).map(|_| format!("{path}()"))
+            }
+            "table_constructor" if ctx.key.is_none() && self.host_bindings.len() == 1 => {
+                let keys = self.literal_keys(value);
+                self.table_keys.insert(name.to_string(), keys);
+                Some(format!("{TABLE_LOCAL}{name}"))
+            }
+            _ => self.host_path(value, ctx),
+        }
+    }
+
+    /// The `<key> = <value>` fields of a table literal whose value is no
+    /// function, each with its field: a returned table's settings.
+    fn literal_keys(&self, table: TsNode<'a>) -> Vec<(String, TsNode<'a>)> {
+        let mut cursor = table.walk();
+        let fields: Vec<TsNode<'a>> = table.named_children(&mut cursor).collect();
+        fields
+            .into_iter()
+            .filter(|f| {
+                f.child_by_field_name("value")
+                    .is_some_and(|v| v.kind() != "function_definition")
+            })
+            .filter_map(|f| {
+                let key = f
+                    .child_by_field_name("name")
+                    .filter(|n| n.kind() == "identifier")?;
+                Some((text(key, self.src).to_string(), f))
+            })
+            .collect()
+    }
+
+    /// `<target> = <value>` where target is a host setting (code-domain
+    /// [`hosts::config_for`]: `vim.opt.number`, a builder local's
+    /// `config.font_size`): a DEFINES_CONFIG from the MODULE, at the
+    /// statement. A key set on a chunk-level table local is recorded for its
+    /// return. A function value is never a setting.
+    fn setting_write(&mut self, target: TsNode<'a>, value: TsNode<'a>, at: TsNode<'a>, ctx: &Ctx) {
+        if target.kind() != "dot_index_expression" || value.kind() == "function_definition" {
+            return;
+        }
+        let Some(path) = self.host_path(target, ctx) else {
+            return;
+        };
+        if let Some(rest) = path.strip_prefix(TABLE_LOCAL) {
+            if let Some((local, key)) = rest.split_once('.')
+                && is_identifier(key)
+                && let Some(keys) = self.table_keys.get_mut(local)
+            {
+                keys.push((key.to_string(), at));
+            }
+            return;
+        }
+        if let Some(found) = config_for("lua", &path) {
+            self.host_setting(&found, ConfigSide::Define, self.module_id, at);
+        }
+    }
+
+    /// `<setting>:append(..)` / `:prepend` / `:remove` on an
+    /// [`ConfigFlavour::Assign`] setting (`vim.opt.shortmess:append("c")`):
+    /// a DEFINES_CONFIG from the MODULE; the arguments walk.
+    fn setting_mutator(&mut self, node: TsNode<'a>, ctx: &Ctx) -> bool {
+        let Some(callee) = node
+            .child_by_field_name("name")
+            .filter(|c| c.kind() == "method_index_expression")
+        else {
+            return false;
+        };
+        let (Some(table), Some(method)) = (
+            callee.child_by_field_name("table"),
+            callee.child_by_field_name("method"),
+        ) else {
+            return false;
+        };
+        if !hosts::CONFIG_MUTATORS.contains(&text(method, self.src)) {
+            return false;
+        }
+        let Some(found) = self
+            .host_path(table, ctx)
+            .and_then(|p| config_for("lua", &p))
+            .filter(|m| m.flavour == ConfigFlavour::Assign)
+        else {
+            return false;
+        };
+        self.host_setting(&found, ConfigSide::Define, self.module_id, node);
+        if let Some(args) = node.child_by_field_name("arguments") {
+            self.visit(args, ctx);
+        }
+        true
+    }
+
+    /// An rvalue `<setting>` of an [`ConfigFlavour::Assign`] host
+    /// (`vim.o.background`): a READS_CONFIG from the enclosing scope. A
+    /// builder local's fields are the file's own table, never a read.
+    fn setting_read(&mut self, node: TsNode<'a>, ctx: &Ctx) -> bool {
+        let Some(found) = self
+            .host_path(node, ctx)
+            .and_then(|p| config_for("lua", &p))
+            .filter(|m| m.flavour == ConfigFlavour::Assign)
+        else {
+            return false;
+        };
+        self.host_setting(&found, ConfigSide::Read, ctx.owner, node);
+        true
+    }
+
+    /// A chunk-level returned value that is a host's config, in a file
+    /// requiring a host that reads the returned table (code-domain
+    /// [`hosts::returned_config_host`]): a table literal's keys, or the keys
+    /// recorded for a returned table local. Each a DEFINES_CONFIG from the
+    /// MODULE at its site.
+    fn returned_settings(&mut self, value: TsNode<'a>, ctx: &Ctx) {
+        let keys = match value.kind() {
+            "table_constructor" => self.literal_keys(value),
+            "identifier" => match self.host_path(value, ctx) {
+                Some(path) => match path.strip_prefix(TABLE_LOCAL) {
+                    Some(local) => self.table_keys.remove(local).unwrap_or_default(),
+                    None => return,
+                },
+                None => return,
+            },
+            _ => return,
+        };
+        if keys.is_empty() {
+            return;
+        }
+        let required: Vec<&str> = self
+            .imports
+            .iter()
+            .filter_map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        let Some(host) = returned_config_host("lua", required.into_iter()) else {
+            return;
+        };
+        for (key, at) in keys {
+            let found = ConfigMatch::new(host, ConfigFlavour::Builder, key);
+            self.host_setting(&found, ConfigSide::Define, self.module_id, at);
+        }
+    }
+
+    /// Mint a host setting's CONFIG_KEY (code-domain
+    /// [`hosts::push_config_key`]) located at `at`, its edge from `from`.
+    fn host_setting(
+        &mut self,
+        found: &ConfigMatch,
+        side: ConfigSide,
+        from: NodeId,
+        at: TsNode<'a>,
+    ) {
+        let cells: Vec<Cell> = cells(&at, self.src, self.file_rel_path)
+            .into_iter()
+            .skip(1)
+            .collect();
+        let site = HostSite::new(self.repo, self.module_id, found.host.name, row(at), cells);
+        let mut sink = HostSink::new(&mut self.nodes, &mut self.nav, &mut self.refs);
+        push_config_key(&site, found, side, from, &mut sink, &mut self.edges);
+        self.host.config += 1;
+        self.host.hit(found.host.name);
+    }
+
     /// A client call: `socket.http`'s `http.request(url[, body])` /
     /// `http.request{ url = .., method = .. }`, `resty.http`'s
     /// `x:request_uri(url[, { method = .. }])`. The URL must be a string
@@ -1532,6 +1735,12 @@ fn single_string(args: TsNode, src: &[u8]) -> Option<String> {
     };
     let content = string.child_by_field_name("content")?;
     Some(text(content, src).to_string())
+}
+
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 fn row(node: TsNode) -> u32 {
@@ -2037,5 +2246,186 @@ mod tests {
             handler_keys: &["callback"],
         };
         assert!(read_registration(args, table, src.as_bytes()).is_none());
+    }
+
+    /// `(qname, edge, from)` of every DEFINES_CONFIG / READS_CONFIG edge, in
+    /// emission order; `from` is the MODULE (`<module>`) or a function key.
+    fn config_edges(fp: &FileParse) -> Vec<(String, &'static str, String)> {
+        fp.edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::DEFINES_CONFIG
+                    || e.category == edge_category::READS_CONFIG
+            })
+            .map(|e| {
+                let side = if e.category == edge_category::DEFINES_CONFIG {
+                    "defines"
+                } else {
+                    "reads"
+                };
+                let from = fp.nav.qname_by_id[&e.from].as_str();
+                let from = if from == "lua::app::init" {
+                    "<module>".to_string()
+                } else {
+                    from.trim_start_matches("lua::app::init::").to_string()
+                };
+                (fp.nav.qname_by_id[&e.to].clone(), side, from)
+            })
+            .collect()
+    }
+
+    fn defined(fp: &FileParse) -> Vec<String> {
+        config_edges(fp)
+            .into_iter()
+            .filter(|(_, side, _)| *side == "defines")
+            .map(|(q, _, _)| q)
+            .collect()
+    }
+
+    #[test]
+    fn wezterm_builder_keys_are_host_settings_and_values_are_not() {
+        let fp = parse(
+            "local wezterm = require(\"wezterm\")\n\
+             local config = wezterm.config_builder()\n\
+             config.font_size = 12\n\
+             config.color_scheme = \"Gruvbox Dark\"\n\
+             config.font = wezterm.font(\"JetBrains Mono\")\n\
+             config.colors.background = \"#000\"\n\
+             config.font_size = 13\n\
+             return config\n",
+        );
+        assert_eq!(
+            keys(&fp, node_kind::CONFIG_KEY),
+            [
+                "config:wezterm:color_scheme",
+                "config:wezterm:font",
+                "config:wezterm:font_size"
+            ]
+        );
+        // One edge per (key, side), from the MODULE, in source order.
+        assert_eq!(
+            defined(&fp),
+            [
+                "config:wezterm:font_size",
+                "config:wezterm:color_scheme",
+                "config:wezterm:font"
+            ]
+        );
+        assert!(config_edges(&fp).iter().all(|(_, _, f)| f == "<module>"));
+        // The key node is named by its key, located at its first site.
+        let id = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "config:wezterm:font_size")
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert_eq!(fp.nav.name_by_id[&id], "font_size");
+        let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
+        assert!(matches!(
+            &node.cells[..],
+            [c] if c.kind == cell_type::POSITION
+                && matches!(&c.payload, CellPayload::Json(j) if j.contains("\"start_line\":2"))
+        ));
+        assert_eq!(fp.calls.len(), 2, "the builder and wezterm.font still call");
+    }
+
+    #[test]
+    fn a_returned_table_is_the_wezterm_config_only_when_the_file_requires_it() {
+        let literal = parse(
+            "local wezterm = require 'wezterm'\n\
+             return {\n  font_size = 11,\n  keys = {},\n  on_load = function() end,\n}\n",
+        );
+        assert_eq!(
+            defined(&literal),
+            ["config:wezterm:font_size", "config:wezterm:keys"]
+        );
+        // The idiom: a table, upgraded to the builder when there is one.
+        let local = parse(
+            "local wezterm = require(\"wezterm\")\n\
+             local config = { hide_tab_bar_if_only_one_tab = true }\n\
+             if wezterm.config_builder then\n  config = wezterm.config_builder()\nend\n\
+             config.font_size = 12\n\
+             return config\n",
+        );
+        assert_eq!(
+            defined(&local),
+            [
+                "config:wezterm:hide_tab_bar_if_only_one_tab",
+                "config:wezterm:font_size"
+            ]
+        );
+        // No wezterm require: an ordinary module table.
+        let plain = parse("local M = {}\nM.size = 3\nreturn { a = 1 }\n");
+        assert!(config_edges(&plain).is_empty());
+        assert!(keys(&plain, node_kind::CONFIG_KEY).is_empty());
+        // A returned local that is not the table, or a non-chunk return.
+        let other = parse(
+            "local wezterm = require(\"wezterm\")\n\
+             local M = {}\nM.x = 1\n\
+             local function f() local t = {}\n t.y = 2\n return t end\n\
+             return f()\n",
+        );
+        assert!(config_edges(&other).is_empty());
+        // `wezterm` as a bare global (no require) roots nothing.
+        let global = parse("local c = wezterm.config_builder()\nc.font_size = 1\n");
+        assert!(config_edges(&global).is_empty());
+    }
+
+    #[test]
+    fn neovim_options_and_globals_are_host_settings_read_where_read() {
+        let fp = parse(
+            "vim.opt.number = true\n\
+             vim.o.tabstop = 4\n\
+             vim.g.mapleader = \" \"\n\
+             vim.opt.shortmess:append(\"c\")\n\
+             local opt = vim.opt_local\n\
+             opt.spell = true\n\
+             vim.bo[0].filetype = \"lua\"\n\
+             local function toggle()\n  if vim.o.background == \"dark\" then end\n  local w = vim.opt.wrap:get()\nend\n",
+        );
+        assert_eq!(
+            config_edges(&fp),
+            [
+                (
+                    "config:neovim:number".to_string(),
+                    "defines",
+                    "<module>".to_string()
+                ),
+                (
+                    "config:neovim:tabstop".to_string(),
+                    "defines",
+                    "<module>".to_string()
+                ),
+                (
+                    "config:neovim:g.mapleader".to_string(),
+                    "defines",
+                    "<module>".to_string()
+                ),
+                (
+                    "config:neovim:shortmess".to_string(),
+                    "defines",
+                    "<module>".to_string()
+                ),
+                (
+                    "config:neovim:spell".to_string(),
+                    "defines",
+                    "<module>".to_string()
+                ),
+                (
+                    "config:neovim:background".to_string(),
+                    "reads",
+                    "toggle".to_string()
+                ),
+                (
+                    "config:neovim:wrap".to_string(),
+                    "reads",
+                    "toggle".to_string()
+                ),
+            ]
+        );
+        // A local named `vim` shadows the host.
+        let shadow = parse("local vim = {}\nvim.opt = {}\nvim.opt.number = true\n");
+        assert!(config_edges(&shadow).is_empty());
     }
 }

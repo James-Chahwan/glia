@@ -19,6 +19,14 @@
 //! | `maki` | `maki.api.register_tool{ name = "t", execute = .., restore = .. }` (and `register_command`) | CLI_COMMAND `host_cmd:maki:t` HANDLED_BY execute / restore |
 //! | `neovim` | `vim.api.nvim_create_user_command("Name", handler, opts)`, `vim.api.nvim_buf_create_user_command(buf, "Name", handler, opts)` | CLI_COMMAND `host_cmd:neovim:Name` HANDLED_BY the handler |
 //!
+//! | `wezterm` (config, GH.5) | in a file requiring `wezterm`: `local c = wezterm.config_builder()` then `c.<key> = v`; or the table the chunk returns (`return { <key> = v }`, or a chunk-level `local c = {}` it returns) | CONFIG_KEY `config:wezterm:<key>`, DEFINES_CONFIG from the MODULE |
+//! | `neovim` (config, GH.5) | `vim.opt` / `vim.opt_local` / `vim.opt_global` / `vim.o` / `vim.go` / `vim.bo` / `vim.wo` `.<key> = v` (or `:append` / `:prepend` / `:remove`), `vim.g.<key> = v` | CONFIG_KEY `config:neovim:<key>` (`config:neovim:g.<key>`), DEFINES_CONFIG from the MODULE; an rvalue read is READS_CONFIG from the enclosing scope |
+//!
+//! Only a setting's key is a node, never its value. A host's settings are
+//! its own: [`split_host_config_qname`](crate::hosts::split_host_config_qname)
+//! names them, and the config resolver never pairs one across repos (two
+//! dotfiles repos setting `font_size` share nothing).
+//!
 //! Other `maki.api.register_*` calls match the Maki row but mint nothing
 //! (counted `aux=`, PR #3's ruling). Neovim keymaps are not commands (James
 //! 2026-10-31): `vim.keymap.set` matches no row.
@@ -45,8 +53,9 @@
 
 use std::collections::BTreeMap;
 
-use glia_core::{Cell, Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
+use crate::evidence::Evidence;
 use crate::{CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind};
 
 /// One host: the program that loads plugin code and calls into it.
@@ -84,6 +93,22 @@ pub enum Gate {
     /// global itself or to one of its fields, `local api = vim.api`, reads
     /// through to it).
     Global(&'static str),
+    /// The host is a module the file requires (`require("wezterm")`): a
+    /// local bound to that require roots the host's paths (`local w =
+    /// require("wezterm")` makes `w.config_builder` the host's
+    /// `wezterm.config_builder`). A global of the module's name roots
+    /// nothing: only the require binds it.
+    Require(&'static str),
+}
+
+impl Gate {
+    /// The root every path of the row starts with: the global, or the
+    /// required module's name.
+    pub fn root(self) -> &'static str {
+        match self {
+            Gate::Global(g) | Gate::Require(g) => g,
+        }
+    }
 }
 
 /// One registration call of a host.
@@ -193,10 +218,26 @@ pub struct Callback {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConfigFlavour {
-    /// `<prefix>.<key> = v` (and the prefix's mutator calls).
+    /// `<prefix>.<key> = v` (and the prefix's [`CONFIG_MUTATORS`] calls,
+    /// `<prefix>.<key>:append(..)`); a read of `<prefix>.<key>` elsewhere is
+    /// a READS_CONFIG. The prefix is a live host global.
     Assign,
-    /// The keys of a table a `<prefix>` builder call returns.
+    /// The keys of the table a `<prefix>` builder call returns, set on the
+    /// local bound to it (`c.<key> = v`). The host reads the table the chunk
+    /// returns, so in a file whose gate holds, the keys of a returned table
+    /// literal (or of a chunk-level local bound to one and returned) are its
+    /// settings too. A function value is never a setting.
     Builder,
+}
+
+impl ConfigFlavour {
+    /// `assign` / `builder`, the flavour's EVIDENCE rule suffix.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConfigFlavour::Assign => "assign",
+            ConfigFlavour::Builder => "builder",
+        }
+    }
 }
 
 /// One way a host's settings are written: a flavour and its prefixes.
@@ -204,8 +245,17 @@ pub enum ConfigFlavour {
 #[non_exhaustive]
 pub struct ConfigRule {
     pub flavour: ConfigFlavour,
+    /// Dotted, rooted at the gate's root (`vim.opt`, `wezterm.config_builder`).
     pub prefixes: &'static [&'static str],
+    /// The prefixes (each one of `prefixes`) whose keys are a namespace of
+    /// their own, qualified by the prefix's last segment: `vim.g.leader` is
+    /// `g.leader`, a variable, never the option `leader`.
+    pub namespaced: &'static [&'static str],
 }
+
+/// The method calls on an [`ConfigFlavour::Assign`] setting that write it
+/// (Neovim's option objects: `vim.opt.shortmess:append("c")`).
+pub const CONFIG_MUTATORS: &[&str] = &["append", "prepend", "remove"];
 
 /// The host table. Order matters: on a tie in [`registration_for`] the
 /// earlier row wins. Maki first (PR #3's seed).
@@ -257,7 +307,34 @@ pub static HOSTS: &[HostRow] = &[
             },
         ],
         callbacks: &[],
-        config: &[],
+        config: &[ConfigRule {
+            flavour: ConfigFlavour::Assign,
+            prefixes: &[
+                "vim.opt",
+                "vim.opt_local",
+                "vim.opt_global",
+                "vim.o",
+                "vim.go",
+                "vim.bo",
+                "vim.wo",
+                "vim.g",
+            ],
+            namespaced: &["vim.g"],
+        }],
+    },
+    HostRow {
+        name: "wezterm",
+        lang: "lua",
+        exts: &["lua"],
+        gate: Gate::Require("wezterm"),
+        loads: &[],
+        registrations: &[],
+        callbacks: &[],
+        config: &[ConfigRule {
+            flavour: ConfigFlavour::Builder,
+            prefixes: &["wezterm.config_builder"],
+            namespaced: &[],
+        }],
     },
 ];
 
@@ -315,6 +392,179 @@ pub fn is_host_global(lang: &str, name: &str) -> bool {
     HOSTS
         .iter()
         .any(|h| h.lang == lang && matches!(h.gate, Gate::Global(g) if g == name))
+}
+
+/// The row of `lang` gated on requiring `spec` (`require("wezterm")`):
+/// the local bound to that require roots the row's paths.
+pub fn host_for_require(lang: &str, spec: &str) -> Option<&'static HostRow> {
+    HOSTS
+        .iter()
+        .find(|h| h.lang == lang && matches!(h.gate, Gate::Require(r) if r == spec))
+}
+
+/// A setting a host path names.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ConfigMatch {
+    pub host: &'static HostRow,
+    pub flavour: ConfigFlavour,
+    /// The setting's key: `font_size`, or `g.mapleader` under a namespaced
+    /// prefix.
+    pub key: String,
+}
+
+impl ConfigMatch {
+    /// A setting of `host` read by the parser itself (a returned table's key).
+    pub fn new(host: &'static HostRow, flavour: ConfigFlavour, key: impl Into<String>) -> Self {
+        Self {
+            host,
+            flavour,
+            key: key.into(),
+        }
+    }
+}
+
+/// The setting a dotted host path names among `lang`'s rows: an
+/// [`ConfigFlavour::Assign`] prefix and one identifier
+/// (`vim.opt.number`), or a [`ConfigFlavour::Builder`] prefix's call and one
+/// identifier (`wezterm.config_builder().font_size`, the path the parser
+/// gives a local bound to the builder call). The longest prefix wins, table
+/// order breaks a tie. `None` for a deeper path (`vim.opt.x.y`), a bare
+/// prefix or any other path.
+pub fn config_for(lang: &str, path: &str) -> Option<ConfigMatch> {
+    let mut best: Option<(usize, ConfigMatch)> = None;
+    for host in HOSTS.iter().filter(|h| h.lang == lang) {
+        for rule in host.config {
+            for prefix in rule.prefixes {
+                let rest = match rule.flavour {
+                    ConfigFlavour::Assign => path.strip_prefix(prefix),
+                    ConfigFlavour::Builder => {
+                        path.strip_prefix(prefix).and_then(|r| r.strip_prefix("()"))
+                    }
+                };
+                let Some(key) = rest
+                    .and_then(|r| r.strip_prefix('.'))
+                    .filter(|k| is_identifier_tail(k))
+                else {
+                    continue;
+                };
+                if best.as_ref().is_some_and(|(l, _)| prefix.len() <= *l) {
+                    continue;
+                }
+                let key = if rule.namespaced.contains(prefix) {
+                    let ns = prefix.rsplit('.').next().unwrap_or(prefix);
+                    format!("{ns}.{key}")
+                } else {
+                    key.to_string()
+                };
+                best = Some((
+                    prefix.len(),
+                    ConfigMatch {
+                        host,
+                        flavour: rule.flavour,
+                        key,
+                    },
+                ));
+            }
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
+/// The host whose [`ConfigFlavour::Builder`] prefix is exactly `callee` (a
+/// call's dotted callee expanded to its host root): a local bound to the call
+/// holds that host's settings.
+pub fn config_builder_for(lang: &str, callee: &str) -> Option<&'static HostRow> {
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.config
+            .iter()
+            .any(|r| r.flavour == ConfigFlavour::Builder && r.prefixes.contains(&callee))
+    })
+}
+
+/// The host that reads the table a chunk returns: the first row of `lang`
+/// gated on requiring one of `required` and declaring a
+/// [`ConfigFlavour::Builder`] rule.
+pub fn returned_config_host<'r>(
+    lang: &str,
+    required: impl Iterator<Item = &'r str>,
+) -> Option<&'static HostRow> {
+    let specs: Vec<&str> = required.collect();
+    HOSTS.iter().find(|h| {
+        h.lang == lang
+            && h.config.iter().any(|r| r.flavour == ConfigFlavour::Builder)
+            && matches!(h.gate, Gate::Require(r) if specs.contains(&r))
+    })
+}
+
+/// `config:<host>:<key>`.
+pub fn host_config_qname(host: &str, key: &str) -> String {
+    format!("config:{host}:{key}")
+}
+
+/// `(host, key)` of a `config:<host>:<key>` qname whose `<host>` is a
+/// [`HOSTS`] row's name; `None` for any other qname (`config:env:..`).
+pub fn split_host_config_qname(qname: &str) -> Option<(&'static str, &str)> {
+    let (segment, key) = qname.strip_prefix("config:")?.split_once(':')?;
+    let host = HOSTS.iter().find(|h| h.name == segment)?;
+    Some((host.name, key))
+}
+
+/// Which side of a setting a site is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConfigSide {
+    /// Written: DEFINES_CONFIG.
+    Define,
+    /// Read: READS_CONFIG.
+    Read,
+}
+
+/// Mint the CONFIG_KEY [`host_config_qname`]`(found.host, found.key)` (once
+/// per file; POSITION from `site`, its first site, contained by the site's
+/// MODULE as an env key is) and push one DEFINES_CONFIG / READS_CONFIG edge
+/// from `from`, unless `edges` already holds that edge. Its EVIDENCE is the
+/// host's parser's (`parser:<lang>`), rule `host_config_<flavour>`
+/// (`host_config_read` for a read), at the site's line. Returns the key's id.
+pub fn push_config_key(
+    site: &HostSite<'_>,
+    found: &ConfigMatch,
+    side: ConfigSide,
+    from: NodeId,
+    sink: &mut HostSink<'_>,
+    edges: &mut Vec<Edge>,
+) -> NodeId {
+    let key = found.key.as_str();
+    let qname = host_config_qname(found.host.name, key);
+    let kind = node_kind::CONFIG_KEY;
+    let id = NodeId::from_parts(GRAPH_TYPE, site.repo, kind, &qname);
+    if !sink.nav.qname_by_id.contains_key(&id) {
+        sink.nodes.push(Node {
+            id,
+            repo: site.repo,
+            confidence: Confidence::Strong,
+            cells: site.cells.clone(),
+        });
+        sink.nav.record(id, key, &qname, kind, Some(site.module_id));
+    }
+    let category = match side {
+        ConfigSide::Define => edge_category::DEFINES_CONFIG,
+        ConfigSide::Read => edge_category::READS_CONFIG,
+    };
+    if !edges
+        .iter()
+        .any(|e| e.from == from && e.to == id && e.category == category)
+    {
+        let rule = match side {
+            ConfigSide::Define => format!("host_config_{}", found.flavour.as_str()),
+            ConfigSide::Read => "host_config_read".to_string(),
+        };
+        let ev = Evidence::emitter(format!("parser:{}", found.host.lang))
+            .rule(rule)
+            .line(site.line);
+        edges.push(Edge::new(from, id, category, Confidence::Strong).with_cell(ev.to_cell()));
+    }
+    id
 }
 
 fn is_identifier_tail(s: &str) -> bool {
@@ -459,7 +709,7 @@ pub struct HostTally {
     pub events: usize,
     /// Host callbacks recognised.
     pub callbacks: usize,
-    /// Host settings read.
+    /// Host setting sites read (written or read), one per key per site.
     pub config: usize,
     /// Anonymous handlers minted as FUNCTIONs.
     pub minted: usize,
@@ -467,7 +717,8 @@ pub struct HostTally {
     pub aux: usize,
     /// Registrations whose name is not a string literal: nothing minted.
     pub unread: usize,
-    /// Matched registrations (read, aux and unread) per host.
+    /// Matched registrations (read, aux and unread) and setting sites per
+    /// host.
     pub hosts: BTreeMap<&'static str, usize>,
 }
 
@@ -511,9 +762,10 @@ const RESERVED_NAMES: &[&str] = &["env", "secret", "flag", "setting"];
 
 /// Every problem in `rows`: duplicate or reserved host names, empty
 /// language / extensions / callees, a callee not rooted at its row's gate
-/// global, a prefix callee with nothing to mint, a shape with an empty key or
-/// a 0 / shared argument position, and empty load globs, callback names or
-/// config prefixes. Empty = valid.
+/// root, a prefix callee with nothing to mint, a shape with an empty key or
+/// a 0 / shared argument position, empty load globs or callback names, and a
+/// config rule with no prefix, a prefix not rooted at the gate's root or a
+/// namespaced prefix it does not declare. Empty = valid.
 pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
     let mut problems = Vec::new();
     for (i, row) in rows.iter().enumerate() {
@@ -535,9 +787,9 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                 "{at}: lang and exts must be set, exts without dots"
             ));
         }
-        let Gate::Global(global) = row.gate;
+        let global = row.gate.root();
         if global.is_empty() {
-            problems.push(format!("{at}: empty gate global"));
+            problems.push(format!("{at}: empty gate root"));
         }
         for r in row.registrations {
             let callee = r.callee.text();
@@ -598,6 +850,20 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                 problems.push(format!(
                     "{at}: a {:?} config rule needs prefixes",
                     c.flavour
+                ));
+            }
+            if let Some(p) = c
+                .prefixes
+                .iter()
+                .find(|p| !p.is_empty() && !p.starts_with(&format!("{global}.")))
+            {
+                problems.push(format!(
+                    "{at}: config prefix {p:?} is not rooted at `{global}.`"
+                ));
+            }
+            if let Some(n) = c.namespaced.iter().find(|n| !c.prefixes.contains(n)) {
+                problems.push(format!(
+                    "{at}: namespaced prefix {n:?} is not one of its rule's prefixes"
                 ));
             }
             if row.config[..j].iter().any(|o| o.flavour == c.flavour) {
@@ -2165,7 +2431,7 @@ mod tests {
         assert_eq!(validate(), Vec::<String>::new());
         // Maki first: PR #3's seed.
         let names: Vec<&str> = HOSTS.iter().map(|h| h.name).collect();
-        assert_eq!(names, ["maki", "neovim"]);
+        assert_eq!(names, ["maki", "neovim", "wezterm"]);
     }
 
     #[test]
@@ -2206,11 +2472,13 @@ mod tests {
                 config: &[
                     ConfigRule {
                         flavour: ConfigFlavour::Assign,
-                        prefixes: &["x.o"],
+                        prefixes: &["x.o", "y.o"],
+                        namespaced: &["x.g"],
                     },
                     ConfigRule {
                         flavour: ConfigFlavour::Assign,
                         prefixes: &[],
+                        namespaced: &[],
                     },
                 ],
             },
@@ -2230,7 +2498,122 @@ mod tests {
         assert!(has("Assign config rule needs prefixes"));
         assert!(has("Assign config flavour declared twice"));
         assert!(has("\"maki\": duplicate name"));
-        assert_eq!(problems.len(), 11, "{problems:?}");
+        assert!(has("config prefix \"y.o\" is not rooted at `x.`"));
+        assert!(has("namespaced prefix \"x.g\" is not one of"));
+        assert_eq!(problems.len(), 13, "{problems:?}");
+    }
+
+    #[test]
+    fn config_for_reads_one_key_under_the_longest_prefix() {
+        let m = config_for("lua", "vim.opt.number").expect("neovim option");
+        assert_eq!((m.host.name, m.key.as_str()), ("neovim", "number"));
+        assert_eq!(m.flavour, ConfigFlavour::Assign);
+        // `vim.o.` is no prefix of `vim.opt_local.x`; the longer one wins.
+        let m = config_for("lua", "vim.opt_local.spell").expect("opt_local");
+        assert_eq!(m.key, "spell");
+        // vim.g keys are variables: their own namespace.
+        let m = config_for("lua", "vim.g.mapleader").expect("vim.g");
+        assert_eq!(m.key, "g.mapleader");
+        assert_eq!(
+            host_config_qname(m.host.name, &m.key),
+            "config:neovim:g.mapleader"
+        );
+        // A builder's local reads through its call.
+        let m = config_for("lua", "wezterm.config_builder().font_size").expect("builder");
+        assert_eq!((m.host.name, m.key.as_str()), ("wezterm", "font_size"));
+        assert_eq!(m.flavour, ConfigFlavour::Builder);
+        for none in [
+            "vim.opt",
+            "vim.opt.x.y",
+            "vim.api.nvim_set_option",
+            "wezterm.config_builder.font_size",
+            "wezterm.font_size",
+        ] {
+            assert!(config_for("lua", none).is_none(), "{none}");
+        }
+        assert!(config_for("python", "vim.opt.number").is_none());
+    }
+
+    #[test]
+    fn builders_requires_and_host_config_qnames() {
+        assert_eq!(
+            config_builder_for("lua", "wezterm.config_builder").map(|h| h.name),
+            Some("wezterm")
+        );
+        assert!(config_builder_for("lua", "wezterm.font").is_none());
+        assert_eq!(
+            host_for_require("lua", "wezterm").map(|h| h.name),
+            Some("wezterm")
+        );
+        // Neovim is a global, never a require.
+        assert!(host_for_require("lua", "vim").is_none());
+        assert!(!is_host_global("lua", "wezterm"));
+        assert_eq!(
+            returned_config_host("lua", ["lapis", "wezterm"].into_iter()).map(|h| h.name),
+            Some("wezterm")
+        );
+        assert!(returned_config_host("lua", ["lapis"].into_iter()).is_none());
+        assert_eq!(
+            split_host_config_qname("config:wezterm:font_size"),
+            Some(("wezterm", "font_size"))
+        );
+        assert_eq!(
+            split_host_config_qname("config:neovim:g.mapleader"),
+            Some(("neovim", "g.mapleader"))
+        );
+        assert!(split_host_config_qname("config:env:DATABASE_URL").is_none());
+        assert!(split_host_config_qname("host_cmd:neovim:Greet").is_none());
+    }
+
+    #[test]
+    fn push_config_key_mints_once_and_edges_once_per_side() {
+        let repo = RepoId(7);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "init");
+        let (mut nodes, mut nav, mut refs, mut edges) =
+            (Vec::new(), CodeNav::default(), Vec::new(), Vec::new());
+        let found = config_for("lua", "vim.o.number").expect("option");
+        let site = HostSite::new(repo, module, "neovim", 3, Vec::new());
+        let mut sink = HostSink::new(&mut nodes, &mut nav, &mut refs);
+        let a = push_config_key(
+            &site,
+            &found,
+            ConfigSide::Define,
+            module,
+            &mut sink,
+            &mut edges,
+        );
+        let b = push_config_key(
+            &site,
+            &found,
+            ConfigSide::Define,
+            module,
+            &mut sink,
+            &mut edges,
+        );
+        let c = push_config_key(
+            &site,
+            &found,
+            ConfigSide::Read,
+            module,
+            &mut sink,
+            &mut edges,
+        );
+        assert!(a == b && b == c);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nav.qname_by_id.get(&a).map(String::as_str),
+            Some("config:neovim:number")
+        );
+        let cats: Vec<_> = edges.iter().map(|e| e.category).collect();
+        assert_eq!(
+            cats,
+            [edge_category::DEFINES_CONFIG, edge_category::READS_CONFIG]
+        );
+        let ev = crate::evidence::Evidence::of(&edges[0]).expect("evidence");
+        assert_eq!(ev.emitter, "parser:lua");
+        assert_eq!(ev.rule.as_deref(), Some("host_config_assign"));
+        assert_eq!(ev.line, Some(3));
+        assert!(refs.is_empty());
     }
 
     #[test]

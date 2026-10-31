@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use glia_code_domain::{edge_category, node_kind};
+use glia_code_domain::{edge_category, hosts, node_kind};
 use glia_core::{Confidence, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
@@ -13,6 +13,10 @@ use crate::merged::MergedGraph;
 // Same env-var name consumed/defined in 2+ services → SHARES_CONFIG edge.
 // Useful drift signal (key renamed in one place but not another) and a
 // substrate query "which services depend on DB_URL?".
+//
+// A host's own setting (`config:wezterm:font_size`, `config:neovim:number`,
+// code_domain::hosts::split_host_config_qname, GH.5) is skipped: two repos
+// configuring one editor share no configuration, so it never pairs.
 // ============================================================================
 
 pub struct ConfigResolver;
@@ -28,6 +32,9 @@ impl CrossGraphResolver for ConfigResolver {
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                     continue;
                 };
+                if hosts::split_host_config_qname(qname).is_some() {
+                    continue;
+                }
                 index
                     .entry(qname.clone())
                     .or_default()
@@ -107,6 +114,19 @@ mod tests {
             .filter(|e| e.category == edge_category::SHARES_CONFIG)
             .collect();
         assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn config_resolver_never_pairs_a_host_setting() {
+        // Two dotfiles repos each setting WezTerm's font_size / Neovim's
+        // number: host settings, not shared configuration.
+        for qname in ["config:wezterm:font_size", "config:neovim:g.mapleader"] {
+            let g_a = graph_with_config(RepoId(11), qname);
+            let g_b = graph_with_config(RepoId(12), qname);
+            let mut merged = MergedGraph::new(vec![g_a, g_b]);
+            merged.run(&ConfigResolver);
+            assert!(merged.cross_edges.is_empty(), "{qname}");
+        }
     }
 
     #[test]

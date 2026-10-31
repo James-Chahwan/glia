@@ -377,6 +377,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Lua host commands are read for two hosts only: Neovim `vim.api.nvim_create_user_command(\"Name\", h, ..)` / `nvim_buf_create_user_command(buf, \"Name\", h, ..)` and Maki `maki.api.register_tool` / `register_command` with a `name` and `execute` / `restore` fields, each a CLI_COMMAND `host_cmd:<host>:<name>` HANDLED_BY its handler (an anonymous one is the FUNCTION `command <name>`). The callee must be rooted at the global `vim` / `maki`, directly or through a local alias of it or of one of its fields (`local api = vim.api`); a host table passed as a parameter, stored in a table field or reached through `require`, a local that shadows the global, a name that is not a string literal, a keymap (`vim.keymap.set`, `nvim_set_keymap`: no command), other `maki.api.register_*` calls and every other host (WezTerm, LOVE, AwesomeWM, WoW) register nothing. OpenResty is read from the nginx side: a `*.conf` (not a HOCON application.conf / reference.conf / resources conf) naming a Lua phase directive, where `content_by_lua_file <f>` in a `location <path>` / `location = <path>` / `location ^~ <path>` is the ROUTE `ANY <path>` HANDLED_BY the MODULE of <f>, and every other `<phase>_by_lua_file` a USES from that ROUTE (or from the conf's MODULE outside a served location; init / init_worker / exit_worker make the conf an ENTRYPOINT), bound by file path: the conf's directory, then the repo root, then the one longest path suffix of a file of the same extension (two at that length bind nothing). Not read: a regex (`~`, `~*`) or named (`@x`) location (no ROUTE), a path holding an nginx variable, inline `*_by_lua_block` / `*_by_lua` Lua, `include`d confs, a `.conf` over 1 MiB, and Lua run any other way (Redis EVAL / register_script, an embedded interpreter)",
         verify: "grep nvim_create_user_command / register_tool / register_command in *.lua; grep _by_lua in *.conf",
     },
+    // GH.5: host settings (code_domain::hosts' config rules), measured on
+    // patterns/lua/config_table and the Lua parser's config tests.
+    CoverageCaveat {
+        language: "lua",
+        edge_category: "DEFINES_CONFIG",
+        note: "Lua host settings are read for two hosts only, each key a CONFIG_KEY `config:<host>:<key>` (the value is never a node) DEFINES_CONFIG from the MODULE: WezTerm, in a file that binds `local <w> = require(\"wezterm\")`, `<c>.<key> = v` on a local bound to `<w>.config_builder()`, and the non-function keys of the table the chunk returns (a literal, or a chunk-level local bound to a literal, with every `<c>.<key> = v` on it); Neovim, `vim.opt` / `vim.opt_local` / `vim.opt_global` / `vim.o` / `vim.go` / `vim.bo` / `vim.wo` `.<key> = v` or `:append` / `:prepend` / `:remove`, and `vim.g.<key> = v` (key `g.<key>`), rooted at the unshadowed global `vim` or a local alias of it or of one of those tables, with an rvalue read of an option a READS_CONFIG from the enclosing function. Not read: a nested key (`config.colors.background` sets nothing; `vim.opt.x.y` reads x), an indexed table (`vim.bo[buf].ft`, `vim.g[\"x\"]`), `vim.api.nvim_set_option_value` / `vim.fn.setenv` calls, `vim.b` / `vim.w` / `vim.t` / `vim.env`, a config table passed to a function (`apply_to_config(config)`) or built in another file, and every other host. A host setting never pairs across repos: two repos setting `font_size` share no SHARES_CONFIG",
+        verify: "grep config_builder / `return {` in wezterm.lua; grep vim.opt / vim.o / vim.g / vim.bo / vim.wo in *.lua",
+    },
 ];
 
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
@@ -992,13 +1000,17 @@ mod tests {
         // readers of `ext_to_language` still see no language for `.lua`.
         assert_eq!(
             lang_rows("plugin/greet.lua", "lua"),
-            [("lua", "HANDLED_BY")]
+            [("lua", "DEFINES_CONFIG"), ("lua", "HANDLED_BY")]
         );
         let note = row_note("plugin/greet.lua", "lua", "HANDLED_BY");
         assert!(note.contains("nvim_create_user_command") && note.contains("register_tool"));
         assert!(note.contains("keymap"));
         // GH.6: the OpenResty side, read from the nginx conf.
         assert!(note.contains("content_by_lua_file") && note.contains("regex"));
+        // GH.5: host settings, the two hosts named.
+        let config = row_note("plugin/greet.lua", "lua", "DEFINES_CONFIG");
+        assert!(config.contains("config_builder") && config.contains("vim.opt"));
+        assert!(config.contains("never pairs"));
         assert!(lang_rows("src/app.py", "lua").is_empty());
         assert_eq!(ext_to_language("plugin/greet.lua"), None);
     }
