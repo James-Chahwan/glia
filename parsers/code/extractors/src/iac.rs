@@ -31,9 +31,22 @@
 //! MODULE. Binding a start to code is the host-start rules' job (GH.18);
 //! this reader records what the file says.
 //!
+//! Orchestrator starts (GH.16): a compose service's `build:` is an
+//! INFRA_REFERENCES service -> the image the Dockerfile reader names for the
+//! declared context's Dockerfile, and its `command:` / `entrypoint:` /
+//! `working_dir:` are a CODE start cell on the service (`host` `compose`); a
+//! Kubernetes workload's pod-template containers and init containers with a
+//! `command:` / `args:` / `workingDir:` are start cells on the workload
+//! (`host` `k8s`, a CronJob's trigger `schedule`); skaffold
+//! `build.artifacts[]` (and a compose service naming both `image:` and
+//! `build:`) put a `build` cell on the declared image. These are read through
+//! a small block-YAML reader (flow and block lists, anchors, `<<:` merges);
+//! a Helm `{{ }}` value is refused and counted. The overrides are applied by
+//! the host-start rules (GH.18), never here.
+//!
 //! Out of scope (deferred to v0.5+):
 //!   - Kustomize overlays (template merging is non-trivial)
-//!   - Helm chart templating
+//!   - Helm chart templating (a templated value is refused, GH.16)
 //!   - Terraform / Pulumi / CDK / serverless.yml (Terraform has a tree-sitter
 //!     parser already in parsers/code/terraform/ — IaC node emission belongs
 //!     there in a follow-up, not here)
@@ -221,10 +234,34 @@ fn emit_starts(
     out.markers.push(line);
 }
 
-/// Extract from a YAML manifest. Detects k8s `kind:` declarations and
-/// docker-compose `services:` entries. Emits one INFRA_RESOURCE per object,
-/// linking containers' `image:` refs to their host workload.
-pub fn extract_yaml(source: &str, module_id: NodeId, repo: RepoId) -> IacNodes {
+/// Extract from a YAML manifest at the repo-relative `path`. Detects k8s
+/// `kind:` declarations and docker-compose `services:` entries. Emits one
+/// INFRA_RESOURCE per object, linking containers' `image:` refs to their host
+/// workload.
+///
+/// GH.16 adds the orchestrator starts: a compose service's `build:` (a
+/// context string, or a map of `context` / `dockerfile` / `target`) is an
+/// INFRA_REFERENCES service -> `infra:image:<name>`, the name the Dockerfile
+/// reader gives that context's Dockerfile, and its `command:` /
+/// `entrypoint:` (a string is split with shell-word rules, as compose does;
+/// a list is taken as written) and `working_dir:` with the build are one
+/// CODE start cell on the service (`{"start":{"host":"compose",..}}`); each
+/// container and init container of a Deployment / StatefulSet / DaemonSet /
+/// Job / CronJob / ReplicaSet pod template with a `command:` / `args:` /
+/// `workingDir:` is one start cell on the workload (`host` `k8s`, trigger
+/// `container_start`, or `schedule` with the CronJob's schedule); a skaffold
+/// `build.artifacts[]` entry (and a compose service naming both `image:` and
+/// `build:`) puts a `{"build":{..}}` cell on the declared image naming its
+/// context and Dockerfile. Overrides are not applied here: the cells say
+/// what the file says (`null` = unset, `[]` = cleared). A Helm `{{ }}` value
+/// is refused and counted, never read.
+///
+/// fired_on (per file, in [`IacNodes::markers`]):
+/// `[compose-start] file=<p> services=<s> builds=<b> commands=<c>
+/// entrypoints=<e> refused=<r>`, `[k8s-start] file=<p> containers=<c>
+/// commands=<m> args=<a> refused=<r>` and `[skaffold-build] file=<p>
+/// artifacts=<a> dockerfiles=<d> refused=<r>`.
+pub fn extract_yaml(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> IacNodes {
     let mut out = IacNodes {
         nodes: Vec::new(),
         edges: Vec::new(),
@@ -233,6 +270,7 @@ pub fn extract_yaml(source: &str, module_id: NodeId, repo: RepoId) -> IacNodes {
     };
     extract_k8s_documents(source, module_id, repo, &mut out);
     extract_compose_services(source, module_id, repo, &mut out);
+    extract_orchestrator_starts(source, path, module_id, repo, &mut out);
     out
 }
 
@@ -2140,6 +2178,1294 @@ fn is_compose_service_name(name: &str) -> bool {
     )
 }
 
+// ----------------------------------------------------------------------------
+// GH.16: orchestrator starts. Compose services' `build:` / `command:` /
+// `entrypoint:` / `working_dir:`, Kubernetes pod-template containers'
+// `command:` / `args:` / `workingDir:` and skaffold `build.artifacts[]`, read
+// through a small block-YAML reader (below), so flow and block lists,
+// anchors and `<<:` merges read alike.
+// ----------------------------------------------------------------------------
+
+/// The Kubernetes kinds whose pod template starts containers.
+const K8S_WORKLOADS: &[&str] = &[
+    "Deployment",
+    "StatefulSet",
+    "DaemonSet",
+    "Job",
+    "CronJob",
+    "ReplicaSet",
+];
+
+/// Per-file counts behind `[compose-start]`, `[k8s-start]` and
+/// `[skaffold-build]`.
+#[derive(Debug, Default)]
+struct OrchestratorTally {
+    services: usize,
+    builds: usize,
+    commands: usize,
+    entrypoints: usize,
+    compose_refused: usize,
+    containers: usize,
+    k8s_commands: usize,
+    k8s_args: usize,
+    k8s_refused: usize,
+    /// Workload documents seen (with or without containers).
+    workloads: usize,
+    artifacts: usize,
+    dockerfiles: usize,
+    skaffold_refused: usize,
+    skaffold_docs: usize,
+}
+
+/// An argv a file writes: the words, and whether it was one string (compose
+/// splits it with shell-word rules, no shell runs) or a list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArgvField {
+    argv: Vec<String>,
+    string: bool,
+}
+
+/// One field's reading: absent, read, or refused (a Helm `{{ }}` template, a
+/// value of the wrong shape, an alias to nothing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Field<T> {
+    Absent,
+    Read(T),
+    Refused,
+}
+
+impl<T> Field<T> {
+    fn read(&self) -> Option<&T> {
+        match self {
+            Field::Read(t) => Some(t),
+            _ => None,
+        }
+    }
+    fn present(&self) -> bool {
+        !matches!(self, Field::Absent)
+    }
+}
+
+/// A declared docker build: the context and Dockerfile, repo-relative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredBuild {
+    context: String,
+    /// `None` for an inline Dockerfile (`dockerfile_inline`) or a builder
+    /// that reads none (skaffold jib / ko / buildpacks / bazel / custom).
+    dockerfile: Option<String>,
+    target: Option<String>,
+}
+
+impl DeclaredBuild {
+    /// The image name the Dockerfile reader gives this build's Dockerfile
+    /// (GH.13's `dockerfile_image_name`), so a declaring service meets it.
+    fn built_image(&self) -> Option<String> {
+        self.dockerfile
+            .as_deref()
+            .map(|d| dockerfile_image_name(d).name)
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ComposeStartCell<'a> {
+    start: ComposeStart<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct ComposeStart<'a> {
+    host: &'static str,
+    service: &'a str,
+    trigger: &'static str,
+    command: Option<&'a [String]>,
+    /// `string` (split with shell-word rules) or `list`; `null` when unset.
+    command_form: Option<&'static str>,
+    entrypoint: Option<&'a [String]>,
+    entrypoint_form: Option<&'static str>,
+    workdir: Option<&'a str>,
+    image: Option<&'a str>,
+    built_image: Option<String>,
+    context: Option<&'a str>,
+    dockerfile: Option<&'a str>,
+    target_stage: Option<&'a str>,
+    refused: Vec<&'static str>,
+    decl: String,
+}
+
+#[derive(serde::Serialize)]
+struct K8sStartCell<'a> {
+    start: K8sStart<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct K8sStart<'a> {
+    host: &'static str,
+    workload: &'a str,
+    container: Option<&'a str>,
+    init: bool,
+    trigger: &'static str,
+    schedule: Option<&'a str>,
+    image: Option<&'a str>,
+    command: Option<&'a [String]>,
+    args: Option<&'a [String]>,
+    workdir: Option<&'a str>,
+    refused: Vec<&'static str>,
+    decl: String,
+}
+
+#[derive(serde::Serialize)]
+struct BuildCell<'a> {
+    build: BuildBody<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct BuildBody<'a> {
+    host: &'static str,
+    image: &'a str,
+    builder: &'a str,
+    context: &'a str,
+    dockerfile: Option<&'a str>,
+    target_stage: Option<&'a str>,
+    built_image: Option<String>,
+    decl: String,
+}
+
+fn json_cell<T: serde::Serialize>(body: &T) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::CODE,
+        payload: glia_core::CellPayload::Json(serde_json::to_string(body).unwrap_or_default()),
+    }
+}
+
+/// Push `cell` onto the node `id` this extraction minted.
+fn attach_cell(out: &mut IacNodes, id: NodeId, cell: glia_core::Cell) {
+    if let Some(node) = out.nodes.iter_mut().find(|n| n.id == id) {
+        node.cells.push(cell);
+    }
+}
+
+fn infra_id(repo: RepoId, kind: &str, name: &str) -> NodeId {
+    NodeId::from_parts(
+        GRAPH_TYPE,
+        repo,
+        node_kind::INFRA_RESOURCE,
+        &infra::qname(kind, name),
+    )
+}
+
+/// One INFRA_REFERENCES edge `from -> to`, once.
+fn push_reference(out: &mut IacNodes, from: NodeId, to: NodeId) {
+    if out
+        .edges
+        .iter()
+        .any(|e| e.from == from && e.to == to && e.category == edge_category::INFRA_REFERENCES)
+    {
+        return;
+    }
+    out.edges.push(Edge {
+        from,
+        to,
+        category: edge_category::INFRA_REFERENCES,
+        confidence: Confidence::Medium,
+        cells: Vec::new(),
+    });
+}
+
+/// A Helm / Go template the file holds instead of a value.
+fn is_template(s: &str) -> bool {
+    s.contains("{{")
+}
+
+/// A compose `command:` / `entrypoint:`: a string (split with shell-word
+/// rules: compose runs no shell for it) or a list of scalars.
+fn read_compose_argv(v: Option<&Yv>) -> Field<ArgvField> {
+    match v {
+        None | Some(Yv::Null) => Field::Absent,
+        Some(Yv::Str(s)) if is_template(s) => Field::Refused,
+        Some(Yv::Str(s)) => Field::Read(ArgvField {
+            argv: shell_words(s),
+            string: true,
+        }),
+        Some(Yv::List(_)) => match scalar_list(v) {
+            Some(argv) => Field::Read(ArgvField {
+                argv,
+                string: false,
+            }),
+            None => Field::Refused,
+        },
+        Some(_) => Field::Refused,
+    }
+}
+
+/// A list of plain / quoted scalars, none a template.
+fn scalar_list(v: Option<&Yv>) -> Option<Vec<String>> {
+    let Some(Yv::List(items)) = v else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|(_, item)| match item {
+            Yv::Str(s) if !is_template(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A Kubernetes `command:` / `args:`: a list only (the API refuses a string).
+fn read_k8s_list(v: Option<&Yv>) -> Field<Vec<String>> {
+    match v {
+        None | Some(Yv::Null) => Field::Absent,
+        Some(Yv::List(_)) => scalar_list(v).map_or(Field::Refused, Field::Read),
+        Some(_) => Field::Refused,
+    }
+}
+
+/// A scalar setting (`working_dir:`, `image:`), refused when templated.
+fn read_scalar(v: Option<&Yv>) -> Field<String> {
+    match v {
+        None | Some(Yv::Null) => Field::Absent,
+        Some(Yv::Str(s)) if is_template(s) => Field::Refused,
+        Some(Yv::Str(s)) => Field::Read(s.clone()),
+        Some(_) => Field::Refused,
+    }
+}
+
+/// A declared build context, `rel` to the declaring file's directory `dir`,
+/// as a repo-relative path. `None` for a remote context (a URL, `git@..`),
+/// an absolute host path, an interpolated or templated one, or one that
+/// climbs out of the repo.
+fn declared_path(dir: &str, rel: &str) -> Option<String> {
+    let rel = rel.trim();
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel.contains("://")
+        || rel.starts_with("git@")
+        || rel.contains('$')
+        || is_template(rel)
+    {
+        return None;
+    }
+    let joined = if dir == "." {
+        rel.to_string()
+    } else {
+        format!("{dir}/{rel}")
+    };
+    normalise_rel(&joined)
+}
+
+/// `dockerfile` (relative to the context, `Dockerfile` when unset) under the
+/// repo-relative `context`.
+fn dockerfile_under(context: &str, dockerfile: Option<&str>) -> Option<String> {
+    let file = dockerfile.unwrap_or("Dockerfile");
+    declared_path(context, file)
+}
+
+/// A compose `build:` (a context string, or a map of `context` /
+/// `dockerfile` / `dockerfile_inline` / `target`).
+fn read_compose_build(v: Option<&Yv>, dir: &str) -> Field<DeclaredBuild> {
+    let (context, dockerfile, inline, target) = match v {
+        None | Some(Yv::Null) => return Field::Absent,
+        Some(Yv::Str(s)) => (s.as_str(), None, false, None),
+        Some(m @ Yv::Map(_)) => {
+            let context = match m.get("context") {
+                None | Some(Yv::Null) => ".",
+                Some(Yv::Str(s)) => s.as_str(),
+                Some(_) => return Field::Refused,
+            };
+            let dockerfile = match m.get("dockerfile") {
+                None | Some(Yv::Null) => None,
+                Some(Yv::Str(s)) => Some(s.as_str()),
+                Some(_) => return Field::Refused,
+            };
+            let target = match read_scalar(m.get("target")) {
+                Field::Absent => None,
+                Field::Read(t) => Some(t),
+                Field::Refused => return Field::Refused,
+            };
+            (
+                context,
+                dockerfile,
+                m.get("dockerfile_inline").is_some(),
+                target,
+            )
+        }
+        Some(_) => return Field::Refused,
+    };
+    let Some(context) = declared_path(dir, context) else {
+        return Field::Refused;
+    };
+    let dockerfile = if inline {
+        None
+    } else {
+        match dockerfile_under(&context, dockerfile) {
+            Some(d) => Some(d),
+            None => return Field::Refused,
+        }
+    };
+    Field::Read(DeclaredBuild {
+        context,
+        dockerfile,
+        target,
+    })
+}
+
+/// The `build` CODE cell on a declared image node: which context / Dockerfile
+/// builds the image a file names, for the cross-file naming join.
+fn build_cell(
+    host: &'static str,
+    image: &str,
+    builder: &str,
+    build: &DeclaredBuild,
+    path: &str,
+    row: usize,
+) -> glia_core::Cell {
+    json_cell(&BuildCell {
+        build: BuildBody {
+            host,
+            image,
+            builder,
+            context: &build.context,
+            dockerfile: build.dockerfile.as_deref(),
+            target_stage: build.target.as_deref(),
+            built_image: build.built_image(),
+            decl: format!("{path}:{}", row + 1),
+        },
+    })
+}
+
+/// GH.16: read the orchestrator starts of one YAML file (compose, k8s
+/// workloads, skaffold) into start cells, the compose service -> built image
+/// edges and the per-file markers. Files that hold none of the three skip the
+/// YAML read.
+fn extract_orchestrator_starts(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    out: &mut IacNodes,
+) {
+    if !(source.contains("services:")
+        || source.contains("containers:")
+        || source.contains("skaffold/"))
+    {
+        return;
+    }
+    let dir = dockerfile_context(path);
+    let mut tally = OrchestratorTally::default();
+    for doc in yaml_docs(source) {
+        let root = parse_yaml_doc(doc);
+        let api = root.get("apiVersion").and_then(Yv::str);
+        if api.is_some_and(|a| a.starts_with("skaffold/")) {
+            skaffold_artifacts(&root, path, &dir, module_id, repo, out, &mut tally);
+        } else if let Some(kind) = root.get("kind").and_then(Yv::str)
+            && K8S_WORKLOADS.contains(&kind)
+        {
+            k8s_containers(&root, kind, path, module_id, repo, out, &mut tally);
+        } else if api.is_none()
+            && let Some(Yv::Map(_)) = root.get("services")
+        {
+            compose_services(&root, path, &dir, module_id, repo, out, &mut tally);
+        }
+    }
+    if tally.services > 0 || tally.compose_refused > 0 {
+        out.markers.push(format!(
+            "[compose-start] file={path} services={} builds={} commands={} entrypoints={} refused={}",
+            tally.services, tally.builds, tally.commands, tally.entrypoints, tally.compose_refused
+        ));
+    }
+    if tally.workloads > 0 {
+        out.markers.push(format!(
+            "[k8s-start] file={path} containers={} commands={} args={} refused={}",
+            tally.containers, tally.k8s_commands, tally.k8s_args, tally.k8s_refused
+        ));
+    }
+    if tally.skaffold_docs > 0 {
+        out.markers.push(format!(
+            "[skaffold-build] file={path} artifacts={} dockerfiles={} refused={}",
+            tally.artifacts, tally.dockerfiles, tally.skaffold_refused
+        ));
+    }
+}
+
+/// Every service of a compose file's `services:` map.
+fn compose_services(
+    root: &Yv,
+    path: &str,
+    dir: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    out: &mut IacNodes,
+    tally: &mut OrchestratorTally,
+) {
+    let Some(Yv::Map(services)) = root.get("services") else {
+        return;
+    };
+    for (name, header_row, svc) in services {
+        if !is_compose_service_name(name) || !matches!(svc, Yv::Map(_)) {
+            continue;
+        }
+        tally.services += 1;
+        let build = read_compose_build(svc.get("build"), dir);
+        let command = read_compose_argv(svc.get("command"));
+        let entrypoint = read_compose_argv(svc.get("entrypoint"));
+        let workdir = read_scalar(svc.get("working_dir"));
+        let image = read_scalar(svc.get("image"));
+        let mut refused: Vec<&'static str> = Vec::new();
+        for (field, is_refused) in [
+            ("build", matches!(build, Field::Refused)),
+            ("command", matches!(command, Field::Refused)),
+            ("entrypoint", matches!(entrypoint, Field::Refused)),
+            ("working_dir", matches!(workdir, Field::Refused)),
+            ("image", matches!(image, Field::Refused)),
+        ] {
+            if is_refused {
+                refused.push(field);
+            }
+        }
+        tally.compose_refused += refused.len();
+        tally.builds += usize::from(build.read().is_some());
+        tally.commands += usize::from(command.read().is_some());
+        tally.entrypoints += usize::from(entrypoint.read().is_some());
+        if !(build.present() || command.present() || entrypoint.present() || workdir.present()) {
+            continue;
+        }
+        emit_resource(out, "service", name, module_id, repo);
+        let svc_id = infra_id(repo, "service", name);
+        // An interpolated `image: ${REGISTRY}/x` names no image the file
+        // shows (the line reader above skips it too).
+        let declared = image
+            .read()
+            .filter(|i| !i.contains('$'))
+            .map(|i| image_basename(i));
+        if let Some(b) = build.read() {
+            if let Some(built) = b.built_image()
+                && !built.is_empty()
+            {
+                emit_resource(out, "image", &built, module_id, repo);
+                push_reference(out, svc_id, infra_id(repo, "image", &built));
+            }
+            if let Some(decl_image) = declared.as_deref().filter(|d| !d.is_empty()) {
+                let build_row = svc.entry("build").map_or(*header_row, |(r, _)| r);
+                emit_resource(out, "image", decl_image, module_id, repo);
+                let cell = build_cell("compose", decl_image, "docker", b, path, build_row);
+                attach_cell(out, infra_id(repo, "image", decl_image), cell);
+            }
+        }
+        let decl_row = ["command", "entrypoint", "build", "working_dir"]
+            .iter()
+            .find_map(|k| svc.entry(k).map(|(r, _)| r))
+            .unwrap_or(*header_row);
+        let form =
+            |f: &Field<ArgvField>| f.read().map(|a| if a.string { "string" } else { "list" });
+        let cell = json_cell(&ComposeStartCell {
+            start: ComposeStart {
+                host: "compose",
+                service: name,
+                trigger: "container_start",
+                command: command.read().map(|a| a.argv.as_slice()),
+                command_form: form(&command),
+                entrypoint: entrypoint.read().map(|a| a.argv.as_slice()),
+                entrypoint_form: form(&entrypoint),
+                workdir: workdir.read().map(String::as_str),
+                image: declared.as_deref(),
+                built_image: build.read().and_then(DeclaredBuild::built_image),
+                context: build.read().map(|b| b.context.as_str()),
+                dockerfile: build.read().and_then(|b| b.dockerfile.as_deref()),
+                target_stage: build.read().and_then(|b| b.target.as_deref()),
+                refused,
+                decl: format!("{path}:{}", decl_row + 1),
+            },
+        });
+        attach_cell(out, svc_id, cell);
+    }
+}
+
+/// Every container (and init container) of one workload's pod template.
+fn k8s_containers(
+    root: &Yv,
+    kind: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    out: &mut IacNodes,
+    tally: &mut OrchestratorTally,
+) {
+    tally.workloads += 1;
+    let kind_lower = kind.to_ascii_lowercase();
+    let name = match read_scalar(root.path(&["metadata", "name"])) {
+        Field::Read(n) => n,
+        Field::Refused => {
+            tally.k8s_refused += 1;
+            return;
+        }
+        Field::Absent => return,
+    };
+    let cron = kind == "CronJob";
+    let (pod, schedule) = if cron {
+        (
+            root.path(&["spec", "jobTemplate", "spec", "template", "spec"]),
+            read_scalar(root.path(&["spec", "schedule"])),
+        )
+    } else {
+        (root.path(&["spec", "template", "spec"]), Field::Absent)
+    };
+    if matches!(schedule, Field::Refused) {
+        tally.k8s_refused += 1;
+    }
+    let Some(pod) = pod else {
+        return;
+    };
+    let workload_id = infra_id(repo, &kind_lower, &name);
+    for (init, key) in [(false, "containers"), (true, "initContainers")] {
+        let items = match pod.get(key) {
+            Some(Yv::List(items)) => items,
+            None | Some(Yv::Null) => continue,
+            Some(_) => {
+                tally.k8s_refused += 1;
+                continue;
+            }
+        };
+        for (item_row, c) in items {
+            if !matches!(c, Yv::Map(_)) {
+                tally.k8s_refused += 1;
+                continue;
+            }
+            tally.containers += 1;
+            let cname = c.get("name").and_then(Yv::str).filter(|n| !is_template(n));
+            let image = read_scalar(c.get("image"));
+            let command = read_k8s_list(c.get("command"));
+            let args = read_k8s_list(c.get("args"));
+            let workdir = read_scalar(c.get("workingDir"));
+            let mut refused: Vec<&'static str> = Vec::new();
+            for (field, is_refused) in [
+                ("command", matches!(command, Field::Refused)),
+                ("args", matches!(args, Field::Refused)),
+                ("workingDir", matches!(workdir, Field::Refused)),
+                ("image", matches!(image, Field::Refused)),
+            ] {
+                if is_refused {
+                    refused.push(field);
+                }
+            }
+            tally.k8s_refused += refused.len();
+            tally.k8s_commands += usize::from(command.read().is_some());
+            tally.k8s_args += usize::from(args.read().is_some());
+            if !(command.present() || args.present() || workdir.present()) {
+                continue;
+            }
+            emit_resource(out, &kind_lower, &name, module_id, repo);
+            let decl_row = ["command", "args", "workingDir"]
+                .iter()
+                .find_map(|k| c.entry(k).map(|(r, _)| r))
+                .unwrap_or(*item_row);
+            let image_base = image.read().map(|i| image_basename(i));
+            let cell = json_cell(&K8sStartCell {
+                start: K8sStart {
+                    host: "k8s",
+                    workload: &kind_lower,
+                    container: cname,
+                    init,
+                    trigger: if cron { "schedule" } else { "container_start" },
+                    schedule: schedule.read().map(String::as_str),
+                    image: image_base.as_deref(),
+                    command: command.read().map(Vec::as_slice),
+                    args: args.read().map(Vec::as_slice),
+                    workdir: workdir.read().map(String::as_str),
+                    refused,
+                    decl: format!("{path}:{}", decl_row + 1),
+                },
+            });
+            attach_cell(out, workload_id, cell);
+        }
+    }
+}
+
+/// The skaffold builders, in the order a config is read for one; `docker` is
+/// the default when an artifact names none.
+const SKAFFOLD_BUILDERS: &[&str] = &[
+    "docker",
+    "kaniko",
+    "jib",
+    "ko",
+    "buildpacks",
+    "bazel",
+    "custom",
+];
+
+/// Every `build.artifacts[]` of a skaffold config: the declared image node
+/// gains a `build` cell naming its context and Dockerfile.
+fn skaffold_artifacts(
+    root: &Yv,
+    path: &str,
+    dir: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    out: &mut IacNodes,
+    tally: &mut OrchestratorTally,
+) {
+    tally.skaffold_docs += 1;
+    let Some(Yv::List(items)) = root.path(&["build", "artifacts"]) else {
+        return;
+    };
+    for (row, a) in items {
+        let Field::Read(image) = read_scalar(a.get("image")) else {
+            tally.skaffold_refused += 1;
+            continue;
+        };
+        let context = match a.get("context") {
+            None | Some(Yv::Null) => Some(dir.to_string()),
+            Some(Yv::Str(c)) => declared_path(dir, c),
+            Some(_) => None,
+        };
+        let Some(context) = context else {
+            tally.skaffold_refused += 1;
+            continue;
+        };
+        let builder = SKAFFOLD_BUILDERS
+            .iter()
+            .copied()
+            .find(|b| a.get(b).is_some())
+            .unwrap_or("docker");
+        let dockerfile = if matches!(builder, "docker" | "kaniko") {
+            let named = a.path(&[builder, "dockerfile"]).and_then(Yv::str);
+            match dockerfile_under(&context, named) {
+                Some(d) => Some(d),
+                None => {
+                    tally.skaffold_refused += 1;
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let target = a
+            .path(&[builder, "target"])
+            .and_then(Yv::str)
+            .map(str::to_string);
+        let base = image_basename(&image);
+        if base.is_empty() {
+            tally.skaffold_refused += 1;
+            continue;
+        }
+        tally.artifacts += 1;
+        tally.dockerfiles += usize::from(dockerfile.is_some());
+        let build = DeclaredBuild {
+            context,
+            dockerfile,
+            target,
+        };
+        emit_resource(out, "image", &base, module_id, repo);
+        let cell = build_cell("skaffold", &base, builder, &build, path, *row);
+        attach_cell(out, infra_id(repo, "image", &base), cell);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// A small block-YAML reader (GH.16). Enough of YAML 1.2 for orchestrator
+// files: block maps and sequences (a sequence may sit at its key's indent),
+// flow sequences and maps over several lines, plain / single / double-quoted
+// scalars, `|` / `>` block scalars, comments, `---` documents, anchors,
+// aliases and `<<:` merge keys. Tags are dropped. A line it cannot read (a
+// Helm `{{- if .. }}` directive) is skipped; a value it cannot read is
+// `Yv::Unread`, which a reader counts as refused.
+// ----------------------------------------------------------------------------
+
+/// A YAML value. Rows are 0-based source rows.
+#[derive(Debug, Clone, PartialEq)]
+enum Yv {
+    Null,
+    Str(String),
+    List(Vec<(usize, Yv)>),
+    Map(Vec<(String, usize, Yv)>),
+    Unread,
+}
+
+impl Yv {
+    fn get(&self, key: &str) -> Option<&Yv> {
+        self.entry(key).map(|(_, v)| v)
+    }
+
+    /// The entry's row and value.
+    fn entry(&self, key: &str) -> Option<(usize, &Yv)> {
+        match self {
+            Yv::Map(entries) => entries
+                .iter()
+                .find(|(k, _, _)| k == key)
+                .map(|(_, r, v)| (*r, v)),
+            _ => None,
+        }
+    }
+
+    fn path(&self, keys: &[&str]) -> Option<&Yv> {
+        keys.iter().try_fold(self, |v, k| v.get(k))
+    }
+
+    fn str(&self) -> Option<&str> {
+        match self {
+            Yv::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// One non-blank, non-comment line: `text` with its comment stripped, `raw`
+/// as written (a block scalar's content), both without the indent.
+#[derive(Debug, Clone)]
+struct YLine {
+    row: usize,
+    indent: usize,
+    text: String,
+    raw: String,
+}
+
+/// The documents of a YAML stream, split at `---` / `...` lines.
+fn yaml_docs(source: &str) -> Vec<Vec<YLine>> {
+    let mut docs: Vec<Vec<YLine>> = vec![Vec::new()];
+    for (row, line) in source.lines().enumerate() {
+        let t = line.trim_end();
+        if t == "---" || t.starts_with("--- ") || t == "..." {
+            docs.push(Vec::new());
+            continue;
+        }
+        let body = t.trim_start();
+        if body.is_empty() || (body.starts_with('%') && t.len() == body.len()) {
+            continue;
+        }
+        let text = strip_yaml_comment(body);
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(doc) = docs.last_mut() {
+            doc.push(YLine {
+                row,
+                indent: t.len() - body.len(),
+                text: text.to_string(),
+                raw: body.to_string(),
+            });
+        }
+    }
+    docs.retain(|d| !d.is_empty());
+    docs
+}
+
+/// `s` up to a `#` comment (a `#` at the start or after whitespace, outside
+/// quotes). A quote opens only at the start of a token, so `don't` stays
+/// plain.
+fn strip_yaml_comment(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(b'\'') => {
+                if c == b'\'' {
+                    if b.get(i + 1) == Some(&b'\'') {
+                        i += 1;
+                    } else {
+                        quote = None;
+                    }
+                }
+            }
+            Some(_) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == b'"' {
+                    quote = None;
+                }
+            }
+            None => {
+                let at_token = i == 0 || matches!(b[i - 1], b' ' | b'\t' | b'[' | b'{' | b',');
+                if c == b'#' && (i == 0 || b[i - 1].is_ascii_whitespace()) {
+                    return s[..i].trim_end();
+                }
+                if (c == b'"' || c == b'\'') && at_token {
+                    quote = Some(c);
+                }
+            }
+        }
+        i += 1;
+    }
+    s
+}
+
+fn is_dash(t: &str) -> bool {
+    t == "-" || t.starts_with("- ") || t.starts_with("-\t")
+}
+
+/// A block-map line's key and value text: `key: value`, `"key": value`.
+/// `None` for a line that is no map entry.
+fn split_key(text: &str) -> Option<(String, &str)> {
+    if text.starts_with('{') || text.starts_with('[') {
+        return None;
+    }
+    let colon_at = |rest: &str, from: usize| -> Option<usize> {
+        let b = rest.as_bytes();
+        (from..b.len())
+            .find(|&i| b[i] == b':' && (i + 1 == b.len() || b[i + 1] == b' ' || b[i + 1] == b'\t'))
+    };
+    if let Some(q) = text.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let close = text[1..].find(q)? + 1;
+        let after = text[close + 1..].trim_start();
+        let value = after.strip_prefix(':')?;
+        if !(value.is_empty() || value.starts_with([' ', '\t'])) {
+            return None;
+        }
+        return Some((text[1..close].to_string(), value.trim()));
+    }
+    let at = colon_at(text, 0)?;
+    let key = text[..at].trim_end();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), text[at + 1..].trim()))
+}
+
+/// The deepest block nesting read; deeper content is `Unread`.
+const MAX_YAML_DEPTH: usize = 64;
+
+struct YamlParser {
+    lines: Vec<YLine>,
+    i: usize,
+    depth: usize,
+    /// Anchors in definition order; an alias takes the latest of its name.
+    anchors: Vec<(String, Yv)>,
+}
+
+/// One document's value (`Null` for an empty one).
+fn parse_yaml_doc(lines: Vec<YLine>) -> Yv {
+    let Some(indent) = lines.first().map(|l| l.indent) else {
+        return Yv::Null;
+    };
+    let mut p = YamlParser {
+        lines,
+        i: 0,
+        depth: 0,
+        anchors: Vec::new(),
+    };
+    p.node(indent)
+}
+
+impl YamlParser {
+    fn line(&self) -> Option<&YLine> {
+        self.lines.get(self.i)
+    }
+
+    /// Skip lines nested deeper than `indent` that no reader consumed.
+    fn skip_deeper(&mut self, indent: usize) {
+        while self.line().is_some_and(|l| l.indent > indent) {
+            self.i += 1;
+        }
+    }
+
+    /// The node starting at the current line, whose indent is `indent`.
+    /// Always consumes at least one line.
+    fn node(&mut self, indent: usize) -> Yv {
+        let Some(line) = self.line() else {
+            return Yv::Null;
+        };
+        if self.depth >= MAX_YAML_DEPTH {
+            self.i += 1;
+            self.skip_deeper(indent);
+            return Yv::Unread;
+        }
+        let text = line.text.clone();
+        self.depth += 1;
+        let v = if is_dash(&text) {
+            self.seq(indent)
+        } else if split_key(&text).is_some() {
+            self.map(indent)
+        } else {
+            self.inline(&text, indent)
+        };
+        self.depth -= 1;
+        v
+    }
+
+    /// The value nested under the line just consumed at `indent`.
+    fn child(&mut self, indent: usize, same_indent_seq: bool) -> Yv {
+        match self.line() {
+            Some(l) if l.indent > indent => {
+                let ind = l.indent;
+                self.node(ind)
+            }
+            Some(l) if same_indent_seq && l.indent == indent && is_dash(&l.text) => {
+                self.seq(indent)
+            }
+            _ => Yv::Null,
+        }
+    }
+
+    fn seq(&mut self, indent: usize) -> Yv {
+        let mut items = Vec::new();
+        while let Some(line) = self.line() {
+            if line.indent != indent || !is_dash(&line.text) {
+                break;
+            }
+            let row = line.row;
+            let rest = line.text[1..].trim_start().to_string();
+            if rest.is_empty() {
+                self.i += 1;
+                items.push((row, self.child(indent, false)));
+            } else {
+                let off = line.text.len() - rest.len();
+                let raw_rest = line.raw.get(1..).unwrap_or("").trim_start().to_string();
+                let l = &mut self.lines[self.i];
+                l.indent = indent + off;
+                l.text = rest;
+                l.raw = raw_rest;
+                items.push((row, self.node(indent + off)));
+            }
+            self.skip_deeper(indent);
+        }
+        Yv::List(items)
+    }
+
+    fn map(&mut self, indent: usize) -> Yv {
+        let mut entries: Vec<(String, usize, Yv)> = Vec::new();
+        let mut merges: Vec<Yv> = Vec::new();
+        while let Some(line) = self.line() {
+            if line.indent != indent || is_dash(&line.text) {
+                break;
+            }
+            let row = line.row;
+            let text = line.text.clone();
+            let Some((key, value)) = split_key(&text) else {
+                self.i += 1;
+                self.skip_deeper(indent);
+                continue;
+            };
+            let v = self.value(value, indent);
+            if key == "<<" {
+                merges.push(v);
+            } else if !entries.iter().any(|(k, _, _)| *k == key) {
+                entries.push((key, row, v));
+            }
+            self.skip_deeper(indent);
+        }
+        for m in merges {
+            let sources = match m {
+                Yv::List(items) => items.into_iter().map(|(_, v)| v).collect(),
+                other => vec![other],
+            };
+            for src in sources {
+                let Yv::Map(src) = src else {
+                    continue;
+                };
+                for (k, r, v) in src {
+                    if !entries.iter().any(|(e, _, _)| *e == k) {
+                        entries.push((k, r, v));
+                    }
+                }
+            }
+        }
+        Yv::Map(entries)
+    }
+
+    /// A map entry's value whose text on the key's line is `value`.
+    fn value(&mut self, value: &str, indent: usize) -> Yv {
+        let (anchor, rest) = take_anchor(value);
+        let rest = strip_tag(rest);
+        let v = if rest.is_empty() {
+            self.i += 1;
+            self.child(indent, true)
+        } else {
+            self.inline(rest, indent)
+        };
+        if let Some(a) = anchor {
+            self.anchors.push((a.to_string(), v.clone()));
+        }
+        v
+    }
+
+    /// A value written on the current line (`text`), with any continuation
+    /// lines nested deeper than `indent`.
+    fn inline(&mut self, text: &str, indent: usize) -> Yv {
+        let row = self.line().map_or(0, |l| l.row);
+        self.i += 1;
+        let (anchor, text) = take_anchor(text);
+        let text = strip_tag(text);
+        let v = if let Some(name) = text.strip_prefix('*') {
+            let name = name.trim();
+            self.anchors
+                .iter()
+                .rev()
+                .find(|(a, _)| a == name)
+                .map_or(Yv::Unread, |(_, v)| v.clone())
+        } else if is_block_scalar_header(text) {
+            let mut parts: Vec<String> = Vec::new();
+            while let Some(l) = self.line() {
+                if l.indent <= indent {
+                    break;
+                }
+                parts.push(l.raw.clone());
+                self.i += 1;
+            }
+            let sep = if text.starts_with('>') { " " } else { "\n" };
+            Yv::Str(parts.join(sep))
+        } else if text.starts_with('[') || text.starts_with('{') {
+            let mut s = text.to_string();
+            while !flow_closed(&s) {
+                match self.line() {
+                    Some(l) if l.indent > indent => {
+                        s.push(' ');
+                        s.push_str(&l.text);
+                        self.i += 1;
+                    }
+                    _ => break,
+                }
+            }
+            parse_flow(&s, row).unwrap_or(Yv::Unread)
+        } else if text.starts_with('"') || text.starts_with('\'') {
+            let mut s = text.to_string();
+            while parse_quoted(&s).is_none() {
+                match self.line() {
+                    Some(l) if l.indent > indent => {
+                        s.push(' ');
+                        s.push_str(&l.raw);
+                        self.i += 1;
+                    }
+                    _ => break,
+                }
+            }
+            match parse_quoted(&s) {
+                Some((v, rest)) if rest.trim().is_empty() => Yv::Str(v),
+                _ => Yv::Unread,
+            }
+        } else {
+            let mut s = text.to_string();
+            while let Some(l) = self.line() {
+                if l.indent <= indent {
+                    break;
+                }
+                s.push(' ');
+                s.push_str(&l.text);
+                self.i += 1;
+            }
+            plain_scalar(&s)
+        };
+        if let Some(a) = anchor {
+            self.anchors.push((a.to_string(), v.clone()));
+        }
+        v
+    }
+}
+
+/// `&name rest` -> (`name`, `rest`).
+fn take_anchor(value: &str) -> (Option<&str>, &str) {
+    match value.strip_prefix('&') {
+        Some(rest) => {
+            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+            (Some(&rest[..end]), rest[end..].trim_start())
+        }
+        None => (None, value),
+    }
+}
+
+/// `!!str x` / `!Ref x` -> `x`.
+fn strip_tag(value: &str) -> &str {
+    if value.starts_with('!') {
+        let end = value.find([' ', '\t']).unwrap_or(value.len());
+        value[end..].trim_start()
+    } else {
+        value
+    }
+}
+
+fn is_block_scalar_header(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!(chars.next(), Some('|' | '>'))
+        && chars.all(|c| c == '-' || c == '+' || c.is_ascii_digit())
+}
+
+fn plain_scalar(s: &str) -> Yv {
+    let s = s.trim();
+    if s.is_empty() || s == "~" || s == "null" || s == "Null" || s == "NULL" {
+        Yv::Null
+    } else {
+        Yv::Str(s.to_string())
+    }
+}
+
+/// Whether every `[` / `{` outside quotes is closed.
+fn flow_closed(s: &str) -> bool {
+    let mut depth: i64 = 0;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('"') if c == '\\' => {
+                chars.next();
+            }
+            Some(q) if c == q => {
+                if q == '\'' && chars.peek() == Some(&'\'') {
+                    chars.next();
+                } else {
+                    quote = None;
+                }
+            }
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth -= 1,
+                _ => {}
+            },
+        }
+    }
+    depth <= 0 && quote.is_none()
+}
+
+/// A quoted scalar at the start of `s`: its value and the text after it.
+fn parse_quoted(s: &str) -> Option<(String, &str)> {
+    let q = s.chars().next()?;
+    let mut out = String::new();
+    let mut iter = s.char_indices().skip(1).peekable();
+    while let Some((i, c)) = iter.next() {
+        if c == q {
+            if q == '\'' && iter.peek().map(|(_, n)| *n) == Some('\'') {
+                iter.next();
+                out.push('\'');
+                continue;
+            }
+            return Some((out, &s[i + c.len_utf8()..]));
+        }
+        if q == '"' && c == '\\' {
+            let (_, n) = iter.next()?;
+            out.push(match n {
+                'n' => '\n',
+                't' => '\t',
+                '0' => '\0',
+                other => other,
+            });
+            continue;
+        }
+        out.push(c);
+    }
+    None
+}
+
+/// A flow collection (`[a, "b", {c: d}]`), every item at `row`; `None` when
+/// it does not parse whole.
+fn parse_flow(s: &str, row: usize) -> Option<Yv> {
+    let mut f = Flow {
+        s,
+        pos: 0,
+        row,
+        depth: 0,
+    };
+    let v = f.value(&[])?;
+    f.ws();
+    (f.pos == s.len()).then_some(v)
+}
+
+struct Flow<'a> {
+    s: &'a str,
+    pos: usize,
+    row: usize,
+    /// Open collections; past [`MAX_YAML_DEPTH`] the value does not parse.
+    depth: usize,
+}
+
+impl Flow<'_> {
+    fn ws(&mut self) {
+        let rest = &self.s[self.pos..];
+        self.pos += rest.len() - rest.trim_start().len();
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.s[self.pos..].chars().next()
+    }
+
+    fn eat(&mut self, c: char) -> bool {
+        if self.peek() == Some(c) {
+            self.pos += c.len_utf8();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A value ending before any of `stops` (a plain scalar's terminators
+    /// beside `,` `]` `}`).
+    fn value(&mut self, stops: &[char]) -> Option<Yv> {
+        self.ws();
+        match self.peek()? {
+            '[' | '{' if self.depth >= MAX_YAML_DEPTH => None,
+            '[' => {
+                self.depth += 1;
+                let v = self.list();
+                self.depth -= 1;
+                v
+            }
+            '{' => {
+                self.depth += 1;
+                let v = self.map();
+                self.depth -= 1;
+                v
+            }
+            '"' | '\'' => {
+                let (v, rest) = parse_quoted(&self.s[self.pos..])?;
+                self.pos = self.s.len() - rest.len();
+                Some(Yv::Str(v))
+            }
+            _ => {
+                let rest = &self.s[self.pos..];
+                let end = rest
+                    .find(|c: char| c == ',' || c == ']' || c == '}' || stops.contains(&c))
+                    .unwrap_or(rest.len());
+                self.pos += end;
+                Some(plain_scalar(&rest[..end]))
+            }
+        }
+    }
+
+    fn list(&mut self) -> Option<Yv> {
+        self.eat('[');
+        let mut items = Vec::new();
+        loop {
+            self.ws();
+            if self.eat(']') {
+                return Some(Yv::List(items));
+            }
+            items.push((self.row, self.value(&[])?));
+            self.ws();
+            if self.eat(',') {
+                continue;
+            }
+            self.ws();
+            return self.eat(']').then_some(Yv::List(items));
+        }
+    }
+
+    fn map(&mut self) -> Option<Yv> {
+        self.eat('{');
+        let mut entries = Vec::new();
+        loop {
+            self.ws();
+            if self.eat('}') {
+                return Some(Yv::Map(entries));
+            }
+            let key = match self.value(&[':'])? {
+                Yv::Str(k) => k,
+                _ => return None,
+            };
+            self.ws();
+            let v = if self.eat(':') {
+                self.value(&[])?
+            } else {
+                Yv::Null
+            };
+            entries.push((key, self.row, v));
+            self.ws();
+            if self.eat(',') {
+                continue;
+            }
+            self.ws();
+            return self.eat('}').then_some(Yv::Map(entries));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2390,7 +3716,7 @@ spec:
       - name: api
         image: ghcr.io/example/api:v1.2
 "#;
-        let out = extract_yaml(src, module_id(repo), repo);
+        let out = extract_yaml(src, "deploy.yaml", module_id(repo), repo);
         let q = qnames(&out);
         assert!(q.contains(&"infra:deployment:api".to_string()));
         assert!(q.contains(&"infra:image:api".to_string()));
@@ -2439,7 +3765,7 @@ kind: Ingress
 metadata:
   name: api-ing
 "#;
-        let out = extract_yaml(src, module_id(repo), repo);
+        let out = extract_yaml(src, "deploy.yaml", module_id(repo), repo);
         let q = qnames(&out);
         assert!(q.contains(&"infra:service:api-svc".to_string()));
         assert!(q.contains(&"infra:deployment:api".to_string()));
@@ -2456,7 +3782,7 @@ kind: WeirdCustomResource
 metadata:
   name: should-skip
 "#;
-        let out = extract_yaml(src, module_id(repo), repo);
+        let out = extract_yaml(src, "deploy.yaml", module_id(repo), repo);
         assert!(out.nodes.is_empty(), "non-allowlisted kinds must not emit");
     }
 
@@ -2477,7 +3803,7 @@ services:
   redis:
     image: redis:7
 "#;
-        let out = extract_yaml(src, module_id(repo), repo);
+        let out = extract_yaml(src, "deploy.yaml", module_id(repo), repo);
         let q = qnames(&out);
         assert!(q.contains(&"infra:service:api".to_string()));
         assert!(q.contains(&"infra:service:worker".to_string()));
@@ -2516,7 +3842,7 @@ services:
     ports:
       - "8080:8080"
 "#;
-        let out = extract_yaml(src, module_id(repo), repo);
+        let out = extract_yaml(src, "deploy.yaml", module_id(repo), repo);
         let q = qnames(&out);
         // Must include `api` but not `environment` or `ports`.
         assert!(q.contains(&"infra:service:api".to_string()));
@@ -2837,5 +4163,425 @@ services:
             "{:?}",
             start_cells(&out, "lg")
         );
+    }
+
+    // ---- GH.16: orchestrator starts ----
+
+    fn yaml(path: &str, src: &str) -> IacNodes {
+        let repo = RepoId(16);
+        extract_yaml(src, path, module_id(repo), repo)
+    }
+
+    /// The CODE Json cells on `infra:<kind>:<name>`.
+    fn cells_on(out: &IacNodes, kind: &str, name: &str) -> Vec<String> {
+        let id = infra_id(RepoId(16), kind, name);
+        out.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| match &c.payload {
+                glia_core::CellPayload::Json(j) => Some(j.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn refs(out: &IacNodes) -> Vec<(String, String)> {
+        let by_id = |id: NodeId| out.nav.qname_by_id.get(&id).cloned().unwrap_or_default();
+        out.edges
+            .iter()
+            .filter(|e| e.category == edge_category::INFRA_REFERENCES)
+            .map(|e| (by_id(e.from), by_id(e.to)))
+            .collect()
+    }
+
+    const PROBE_COMPOSE: &str = "services:
+  api:
+    build: ./svc-py
+    command: gunicorn app:app
+    ports:
+      - \"8000:8000\"
+  worker:
+    build:
+      context: ./svc-py
+    command: [\"python\", \"worker.py\"]
+  gosrv:
+    build: ./svc-go
+    entrypoint: /bin/server
+  db:
+    image: postgres:16
+";
+
+    #[test]
+    fn compose_build_command_entrypoint_probe_stack() {
+        let out = yaml("docker-compose.yml", PROBE_COMPOSE);
+        assert_eq!(
+            out.markers,
+            [
+                "[compose-start] file=docker-compose.yml services=4 builds=3 commands=2 entrypoints=1 refused=0"
+            ]
+        );
+        let r = refs(&out);
+        for (svc, img) in [("api", "svc-py"), ("worker", "svc-py"), ("gosrv", "svc-go")] {
+            assert!(
+                r.contains(&(format!("infra:service:{svc}"), format!("infra:image:{img}"))),
+                "{r:?}"
+            );
+        }
+        assert!(r.contains(&("infra:service:db".into(), "infra:image:postgres".into())));
+        assert_eq!(
+            cells_on(&out, "service", "api"),
+            [
+                r#"{"start":{"host":"compose","service":"api","trigger":"container_start","command":["gunicorn","app:app"],"command_form":"string","entrypoint":null,"entrypoint_form":null,"workdir":null,"image":null,"built_image":"svc-py","context":"svc-py","dockerfile":"svc-py/Dockerfile","target_stage":null,"refused":[],"decl":"docker-compose.yml:4"}}"#
+            ]
+        );
+        let worker = cells_on(&out, "service", "worker");
+        assert!(
+            worker[0].contains(r#""command":["python","worker.py"],"command_form":"list""#),
+            "{worker:?}"
+        );
+        let gosrv = cells_on(&out, "service", "gosrv");
+        assert!(
+            gosrv[0].contains(r#""command":null,"command_form":null,"entrypoint":["/bin/server"],"entrypoint_form":"string""#),
+            "{gosrv:?}"
+        );
+        // An image-only service starts what its image says: no start cell.
+        assert!(cells_on(&out, "service", "db").is_empty());
+    }
+
+    #[test]
+    fn compose_build_map_target_dockerfile_workdir_and_subdir_file() {
+        let src = "version: \"3.8\"
+x-base: &base
+  build:
+    context: ..
+    dockerfile: ./docker/dockerfiles/rails.Dockerfile
+    target: runtime
+  working_dir: /app
+services:
+  rails:
+    <<: *base
+    image: registry.example.com/acme/rails:latest
+    entrypoint: docker/entrypoints/rails.sh
+    command: ['bundle', 'exec', 'rails', 's', '-p', '3000']
+  sidekiq:
+    <<: *base
+    command:
+      - bundle
+      - exec
+      - sidekiq
+    entrypoint: []
+";
+        let out = yaml("deploy/docker-compose.yaml", src);
+        assert_eq!(
+            out.markers,
+            [
+                "[compose-start] file=deploy/docker-compose.yaml services=2 builds=2 commands=2 entrypoints=2 refused=0"
+            ]
+        );
+        let rails = cells_on(&out, "service", "rails");
+        assert!(
+            rails[0].contains(r#""entrypoint":["docker/entrypoints/rails.sh"]"#)
+                && rails[0].contains(r#""command":["bundle","exec","rails","s","-p","3000"],"command_form":"list""#)
+                && rails[0].contains(r#""workdir":"/app","image":"rails","built_image":"rails","context":".","dockerfile":"docker/dockerfiles/rails.Dockerfile","target_stage":"runtime""#),
+            "{rails:?}"
+        );
+        // `entrypoint: []` clears the image's ENTRYPOINT: read, empty.
+        let sidekiq = cells_on(&out, "service", "sidekiq");
+        assert!(
+            sidekiq[0].contains(r#""command":["bundle","exec","sidekiq"],"command_form":"list","entrypoint":[],"entrypoint_form":"list""#),
+            "{sidekiq:?}"
+        );
+        // The declared image gains a build cell for the naming join.
+        assert_eq!(
+            cells_on(&out, "image", "rails"),
+            [
+                r#"{"build":{"host":"compose","image":"rails","builder":"docker","context":".","dockerfile":"docker/dockerfiles/rails.Dockerfile","target_stage":"runtime","built_image":"rails","decl":"deploy/docker-compose.yaml:3"}}"#
+            ]
+        );
+        let r = refs(&out);
+        assert!(
+            r.contains(&("infra:service:sidekiq".into(), "infra:image:rails".into())),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn compose_refuses_templates_remote_contexts_and_climbs() {
+        let src = "services:
+  a:
+    build: https://github.com/acme/app.git#main
+  b:
+    build: ../../outside
+    command: \"{{ .Values.cmd }}\"
+  c:
+    build: ${CTX}
+  d:
+    build: ./d
+    command: [python, -m, app.main]
+";
+        let out = yaml("compose.yaml", src);
+        assert_eq!(
+            out.markers,
+            [
+                "[compose-start] file=compose.yaml services=4 builds=1 commands=1 entrypoints=0 refused=4"
+            ]
+        );
+        let b = cells_on(&out, "service", "b");
+        assert!(
+            b[0].contains(r#""command":null"#) && b[0].contains(r#""refused":["build","command"]"#),
+            "{b:?}"
+        );
+        assert_eq!(
+            refs(&out),
+            [("infra:service:d".to_string(), "infra:image:d".to_string())]
+        );
+    }
+
+    const PROBE_K8S: &str = "apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: py-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: svc-py:latest
+          command: [\"python\"]
+          args: [\"worker.py\"]
+";
+
+    #[test]
+    fn k8s_deployment_command_args_probe_stack() {
+        let out = yaml("k8s/deploy.yaml", PROBE_K8S);
+        assert_eq!(
+            out.markers,
+            ["[k8s-start] file=k8s/deploy.yaml containers=1 commands=1 args=1 refused=0"]
+        );
+        assert_eq!(
+            cells_on(&out, "deployment", "py-worker"),
+            [
+                r#"{"start":{"host":"k8s","workload":"deployment","container":"worker","init":false,"trigger":"container_start","schedule":null,"image":"svc-py","command":["python"],"args":["worker.py"],"workdir":null,"refused":[],"decl":"k8s/deploy.yaml:11"}}"#
+            ]
+        );
+        assert!(refs(&out).contains(&(
+            "infra:deployment:py-worker".into(),
+            "infra:image:svc-py".into()
+        )));
+    }
+
+    #[test]
+    fn k8s_block_lists_two_containers_init_and_cronjob() {
+        let src = "apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: store
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: migrate
+        image: ghcr.io/acme/store:1.2
+        command:
+        - python
+        - manage.py
+        - migrate
+      containers:
+      - name: app
+        image: ghcr.io/acme/store:1.2
+        workingDir: /srv
+        args:
+          - --port
+          - \"8080\"
+      - name: sidecar
+        image: envoyproxy/envoy:v1
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly
+spec:
+  schedule: \"0 3 * * *\"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: nightly
+              image: svc-py:latest
+              command: [\"python\", \"jobs/nightly.py\"]
+          restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: store
+";
+        let out = yaml("k8s/store.yaml", src);
+        assert_eq!(
+            out.markers,
+            ["[k8s-start] file=k8s/store.yaml containers=4 commands=2 args=1 refused=0"]
+        );
+        let store = cells_on(&out, "statefulset", "store");
+        assert_eq!(store.len(), 2, "{store:?}");
+        assert!(
+            store[0].contains(r#""container":"app","init":false"#)
+                && store[0].contains(r#""command":null,"args":["--port","8080"],"workdir":"/srv""#),
+            "{store:?}"
+        );
+        assert!(
+            store[1].contains(r#""container":"migrate","init":true"#)
+                && store[1].contains(r#""command":["python","manage.py","migrate"]"#)
+                && store[1].ends_with(r#""decl":"k8s/store.yaml:11"}}"#),
+            "{store:?}"
+        );
+        let nightly = cells_on(&out, "cronjob", "nightly");
+        assert!(
+            nightly[0].contains(r#""trigger":"schedule","schedule":"0 3 * * *","image":"svc-py","command":["python","jobs/nightly.py"],"args":null"#),
+            "{nightly:?}"
+        );
+        assert!(cells_on(&out, "service", "store").is_empty());
+    }
+
+    #[test]
+    fn k8s_helm_template_values_are_refused() {
+        let src = "apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include \"chart.fullname\" . }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          command: [\"python\"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"
+          {{- with .Values.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args: [\"{{ .Values.arg }}\"]
+";
+        let out = yaml("chart/templates/deploy.yaml", src);
+        assert_eq!(
+            out.markers,
+            [
+                "[k8s-start] file=chart/templates/deploy.yaml containers=1 commands=0 args=0 refused=4"
+            ]
+        );
+        let web = cells_on(&out, "deployment", "web");
+        assert!(
+            web[0].contains(r#""image":null,"command":null,"args":null"#),
+            "{web:?}"
+        );
+        // The templated metadata.name, then command (a `toYaml` block), args and
+        // image of `web`.
+        assert!(
+            web[0].contains(r#""refused":["command","args","image"]"#),
+            "{web:?}"
+        );
+    }
+
+    #[test]
+    fn skaffold_artifacts_name_their_contexts() {
+        let src = "apiVersion: skaffold/v3
+kind: Config
+metadata:
+  name: app
+build:
+  artifacts:
+  - image: frontend
+    context: src/frontend
+  - image: cartservice
+    context: src/cartservice/src
+    docker:
+      dockerfile: Dockerfile
+  - image: adservice
+    context: src/adservice
+    jib: {}
+";
+        let out = yaml("skaffold.yaml", src);
+        assert_eq!(
+            out.markers,
+            ["[skaffold-build] file=skaffold.yaml artifacts=3 dockerfiles=2 refused=0"]
+        );
+        assert_eq!(
+            cells_on(&out, "image", "cartservice"),
+            [
+                r#"{"build":{"host":"skaffold","image":"cartservice","builder":"docker","context":"src/cartservice/src","dockerfile":"src/cartservice/src/Dockerfile","target_stage":null,"built_image":"cartservice","decl":"skaffold.yaml:9"}}"#
+            ]
+        );
+        assert!(
+            cells_on(&out, "image", "adservice")[0]
+                .contains(r#""builder":"jib","context":"src/adservice","dockerfile":null"#)
+        );
+        // A skaffold config is neither a compose file nor a k8s workload.
+        assert!(
+            !out.markers
+                .iter()
+                .any(|m| m.starts_with("[compose-start]") || m.starts_with("[k8s-start]"))
+        );
+    }
+
+    #[test]
+    fn plain_yaml_files_read_nothing() {
+        let out = yaml(
+            ".github/workflows/ci.yml",
+            "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      redis:\n        image: redis\n",
+        );
+        assert!(out.markers.is_empty(), "{:?}", out.markers);
+    }
+
+    #[test]
+    fn yaml_reader_shapes() {
+        let doc = |s: &str| parse_yaml_doc(yaml_docs(s).remove(0));
+        let v = doc(
+            "a: 1 # c\nb:\n- x\n- 'it''s'\nc: {d: [1, \"two\", ], e: f}\nd: >\n  one\n  two\ne: \"#notcomment\"\n",
+        );
+        assert_eq!(v.get("a"), Some(&Yv::Str("1".into())));
+        assert_eq!(
+            v.get("b"),
+            Some(&Yv::List(vec![
+                (2, Yv::Str("x".into())),
+                (3, Yv::Str("it's".into()))
+            ]))
+        );
+        assert_eq!(
+            v.path(&["c", "d"]),
+            Some(&Yv::List(vec![
+                (4, Yv::Str("1".into())),
+                (4, Yv::Str("two".into()))
+            ]))
+        );
+        assert_eq!(v.path(&["c", "e"]).and_then(Yv::str), Some("f"));
+        assert_eq!(v.get("d").and_then(Yv::str), Some("one two"));
+        assert_eq!(v.get("e").and_then(Yv::str), Some("#notcomment"));
+        let v = doc("k: [a,\n  b]\nm: *nope\n");
+        assert_eq!(
+            v.get("k"),
+            Some(&Yv::List(vec![
+                (0, Yv::Str("a".into())),
+                (0, Yv::Str("b".into()))
+            ]))
+        );
+        assert_eq!(v.get("m"), Some(&Yv::Unread));
+        // Pathological nesting stops at MAX_YAML_DEPTH instead of the stack.
+        let deep = format!("{}{}", "[".repeat(10_000), "]".repeat(10_000));
+        assert_eq!(parse_flow(&deep, 0), None);
+        let block: String = (0..1_000)
+            .map(|i| format!("{}k:\n", " ".repeat(i)))
+            .collect();
+        assert!(matches!(doc(&block), Yv::Map(_)));
     }
 }

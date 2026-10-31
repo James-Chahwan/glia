@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: migrate
+        image: ghcr.io/example/api:1.0
+        command:
+        - python
+        - manage.py
+        - migrate
+      containers:
+      - name: web
+        image: ghcr.io/example/api:1.0
+        command: ["gunicorn"]
+        args: ["app:app"]
+      - name: sidecar
+        image: envoyproxy/envoy:v1.30

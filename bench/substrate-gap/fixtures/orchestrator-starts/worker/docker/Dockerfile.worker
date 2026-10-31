@@ -1,0 +1,4 @@
+FROM node:20
+WORKDIR /srv
+COPY . .
+CMD ["node", "dist/main"]

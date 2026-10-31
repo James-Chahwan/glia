@@ -1,0 +1,25 @@
+{
+  "framework": "orchestrator-starts",
+  "language": "yaml",
+  "dirs": ["."],
+  "note": "GH.16 orchestrator starts (legacy-only, no matrix cell: binding a start to code is GH.18's host-start rules). A compose service's `build:` (a context string, or a map of context / dockerfile / target) is an INFRA_REFERENCES service -> the image the Dockerfile reader names for that context's Dockerfile (worker/docker/Dockerfile.worker walks up to `worker`); its command / entrypoint (a string split with shell-word rules, a flow or block list as written) and working_dir are one CODE start cell on the service, and a service naming both `image:` and `build:` puts a build cell on the declared image. Each k8s pod-template container and initContainer with command / args / workingDir is a start cell on the workload, keyed by container name; a container that overrides nothing (the envoy sidecar) has none. A Helm `{{ }}` value is refused and counted (`[k8s-start] .. refused=2` for chart/templates/deploy.yaml), never read. Before GH.16: no service -> built-image edge (infra:service:api, api-runtime and worker had none) and no start cell on any service or workload.",
+  "expect_edges": [
+    {"from": "infra:service:api", "to": "infra:image:api", "category": "INFRA_REFERENCES", "exact": true, "note": "build: ./api"},
+    {"from": "infra:service:api-runtime", "to": "infra:image:api", "category": "INFRA_REFERENCES", "exact": true, "note": "build map context ./api, target runtime"},
+    {"from": "infra:service:api-runtime", "to": "infra:image:api-runtime", "category": "INFRA_REFERENCES", "exact": true, "note": "its declared image:"},
+    {"from": "infra:service:worker", "to": "infra:image:worker", "category": "INFRA_REFERENCES", "exact": true, "note": "context ./worker + dockerfile docker/Dockerfile.worker"},
+    {"from": "infra:service:cache", "to": "infra:image:redis", "category": "INFRA_REFERENCES", "exact": true}
+  ],
+  "expect_cells": [
+    {"kind": "INFRA_RESOURCE", "node": "infra:service:api", "cell": "CODE", "contains": "\"command\":[\"gunicorn\",\"--bind\",\"0.0.0.0:8000\",\"app:app\"],\"command_form\":\"string\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:service:api-runtime", "cell": "CODE", "contains": "\"workdir\":\"/app\",\"image\":\"api-runtime\",\"built_image\":\"api\",\"context\":\"api\",\"dockerfile\":\"api/Dockerfile\",\"target_stage\":\"runtime\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:api-runtime", "cell": "CODE", "contains": "{\"build\":{\"host\":\"compose\",\"image\":\"api-runtime\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:service:worker", "cell": "CODE", "contains": "\"command\":[\"main.js\"],\"command_form\":\"list\",\"entrypoint\":[\"node\"],\"entrypoint_form\":\"list\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:deployment:api", "cell": "CODE", "contains": "\"container\":\"web\",\"init\":false,\"trigger\":\"container_start\",\"schedule\":null,\"image\":\"api\",\"command\":[\"gunicorn\"],\"args\":[\"app:app\"]"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:deployment:api", "cell": "CODE", "contains": "\"container\":\"migrate\",\"init\":true"}
+  ],
+  "forbid": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:docker", "note": "a generic directory names no image"},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:{{ .Values.image.repository }}", "note": "a Helm template is refused, never read"}
+  ]
+}

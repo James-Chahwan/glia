@@ -1,0 +1,19 @@
+services:
+  api:
+    build: ./api
+    command: gunicorn --bind 0.0.0.0:8000 app:app
+  api-runtime:
+    image: ghcr.io/example/api-runtime:1.0
+    build:
+      context: ./api
+      target: runtime
+    working_dir: /app
+  worker:
+    build:
+      context: ./worker
+      dockerfile: docker/Dockerfile.worker
+    entrypoint: ["node"]
+    command:
+      - main.js
+  cache:
+    image: redis:7
