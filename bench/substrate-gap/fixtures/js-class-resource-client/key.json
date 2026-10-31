@@ -2,7 +2,7 @@
   "framework": "js-class-resource-client",
   "language": "typescript",
   "dirs": ["client", "server"],
-  "mechanism": "http",
+  "mechanism": "http_client",
   "note": "GD.29: a JS resource client (the chatwoot ApiClient shape) builds its URL in a getter over a base-URL method and the constructor's `resource`; each subclass hands super() a literal resource and options object, and its methods call `axios.<verb>(this.url)` / `` axios.<verb>(`${this.url}/..`) `` with `axios` an ESLint `/* global axios */`. The endpoint fold binds the resource and the accountScoped branch from the literal super() arguments. Baseline before GD.29 (release CLI 0.5.5+p186044a81f3cb527 at 780e5cfa, client --with server): `[http] routes=3 endpoints=0 paired=0`: the shape-2 calls on the global `axios` minted nothing. After (debug CLI): `[endpoint-fold] class_resource classes=1 subclasses=3 hits=6 folded=4 unread=2` and `[http] routes=3 endpoints=6 paired=4`. The DynamicAPI control hands super() a runtime value and must not fold.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /api/v1/accounts/${…}/notifications", "exact": true, "note": "accountScoped subclass, bare this.url"},
