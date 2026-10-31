@@ -10,6 +10,7 @@
 //! edge_audit report --samples <glob>.. --verdicts <glob>.. --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--judge <name>] [--check]
 //!                   [--rejudge <glob>].. [--adjudication <file>]
+//!                   [--ci stratified_wilson|plugin] [--rejudge-rule matched|fd3c]
 //! ```
 //!
 //! The report's agreement check (FD.3c): a verdict file named `rejudge.jsonl`
@@ -17,6 +18,13 @@
 //! ([`rejudge_set`]); the report states Cohen's kappa per family (a first
 //! verdict file's stem) and overall, and where the two disagree the row of
 //! `adjudication.jsonl` (default: beside the plan) replaces the first verdict.
+//!
+//! GP.13: the default re-judge rule is [`RejudgeRule::Matched`] (every first
+//! `wrong` of a family plus as many `correct` ids, so a family's kappa is
+//! defined whenever its first judge found a wrong edge), and the category / tier
+//! interval is [`CiMethod::StratifiedWilson`] (never `[1, 1]` from a sample).
+//! `--ci plugin --rejudge-rule fd3c` reproduces FD.3c's committed report byte
+//! for byte.
 //!
 //! The tier is [`glia_engine::why::edge_tier`], the reading `glia why`, `check`
 //! and `glia query` print. Selection is deterministic: each candidate edge's
@@ -387,8 +395,12 @@ fn wilson(k: u64, n: u64) -> (f64, f64) {
     if n == 0 {
         return (0.0, 1.0);
     }
-    let n = n as f64;
-    let p = k as f64 / n;
+    wilson_p(k as f64 / n as f64, n as f64)
+}
+
+/// The Wilson score interval at proportion `p` over a (possibly fractional)
+/// sample size `n > 0`; [`wilson`] is this at `k / n`, bit for bit.
+fn wilson_p(p: f64, n: f64) -> (f64, f64) {
     let z2 = Z * Z;
     let denom = 1.0 + z2 / n;
     let center = (p + z2 / (2.0 * n)) / denom;
@@ -416,6 +428,69 @@ fn stratified(strata: &[(u64, u64, f64)]) -> Option<(f64, f64, f64)> {
     }
     let half = 1.96 * var.sqrt();
     Some((p, (p - half).max(0.0), (p + half).min(1.0)))
+}
+
+/// How a category's / tier's stratified interval is formed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CiMethod {
+    /// FD.3c's plug-in normal interval, `p +- 1.96 sqrt(var)`: a category
+    /// whose judged strata all sit at p 0 or 1 reads `[p, p]`.
+    Plugin,
+    /// [`stratified_wilson`] (GP.13, the default).
+    StratifiedWilson,
+}
+
+impl CiMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            CiMethod::Plugin => "plugin",
+            CiMethod::StratifiedWilson => "stratified_wilson",
+        }
+    }
+    fn parse(v: &str) -> Result<CiMethod, String> {
+        match v {
+            "plugin" => Ok(CiMethod::Plugin),
+            "stratified_wilson" => Ok(CiMethod::StratifiedWilson),
+            other => Err(format!(
+                "report: --ci `{other}` is not stratified_wilson|plugin"
+            )),
+        }
+    }
+}
+
+/// The stratified estimate of [`stratified`] with a Wilson interval: the
+/// Wilson score at `p` over the effective sample size `n_eff = p (1 - p) /
+/// var` (the stratified variance, finite population correction included);
+/// when `var` is 0 (every judged stratum at p 0 or 1, or a census), the
+/// strata's own bounds weighted by `W_h`: a sampled stratum's Wilson
+/// interval, a census stratum's exact `p_h`. So an all-correct category's
+/// lower bound is its strata's weighted Wilson lower bound, below 1 unless
+/// every stratum is a census. `None` when no stratum is judged.
+fn stratified_wilson(strata: &[(u64, u64, f64)]) -> Option<(f64, f64, f64)> {
+    let judged: Vec<&(u64, u64, f64)> = strata.iter().filter(|s| s.1 > 0).collect();
+    let total: u64 = judged.iter().map(|s| s.0).sum();
+    if total == 0 {
+        return None;
+    }
+    let (mut p, mut var, mut wlo, mut whi) = (0.0, 0.0, 0.0, 0.0);
+    for &&(nn, n, ph) in &judged {
+        let w = nn as f64 / total as f64;
+        p += w * ph;
+        let (lo, hi) = if n < nn {
+            var += w * w * ph * (1.0 - ph) / n as f64 * (1.0 - n as f64 / nn as f64);
+            wilson_p(ph, n as f64)
+        } else {
+            (ph, ph)
+        };
+        wlo += w * lo;
+        whi += w * hi;
+    }
+    if var > 0.0 {
+        let (lo, hi) = wilson_p(p, p * (1.0 - p) / var);
+        Some((p, lo, hi))
+    } else {
+        Some((p, wlo.clamp(0.0, 1.0), whi.clamp(0.0, 1.0)))
+    }
 }
 
 fn r4(x: f64) -> f64 {
@@ -504,6 +579,10 @@ struct RepoOut {
 struct ReportOut {
     floors: BTreeMap<String, f64>,
     seed: String,
+    /// The category / tier interval ([`CiMethod`]); left out for `plugin`,
+    /// FD.3c's method, whose committed report predates the field.
+    #[serde(skip_serializing_if = "is_plugin")]
+    ci_method: &'static str,
     strata: Vec<StratumOut>,
     categories: Vec<AggOut>,
     tiers: Vec<AggOut>,
@@ -511,6 +590,10 @@ struct ReportOut {
     under_floor: Vec<String>,
     /// The blind re-judge's agreement with the first verdicts (None without one).
     agreement: Option<AgreementOut>,
+}
+
+fn is_plugin(m: &&'static str) -> bool {
+    *m == CiMethod::Plugin.as_str()
 }
 
 fn stratum_out(category: &str, tier: &str, big_n: u64, c: Counts, plan: &Plan) -> StratumOut {
@@ -568,7 +651,7 @@ fn stratum_out(category: &str, tier: &str, big_n: u64, c: Counts, plan: &Plan) -
     }
 }
 
-fn agg(name: &str, strata: &[&StratumOut]) -> AggOut {
+fn agg(name: &str, strata: &[&StratumOut], ci: CiMethod) -> AggOut {
     let rows: Vec<(u64, u64, f64)> = strata
         .iter()
         .map(|s| {
@@ -580,7 +663,10 @@ fn agg(name: &str, strata: &[&StratumOut]) -> AggOut {
             (s.big_n, s.n, ph)
         })
         .collect();
-    let est = stratified(&rows);
+    let est = match ci {
+        CiMethod::Plugin => stratified(&rows),
+        CiMethod::StratifiedWilson => stratified_wilson(&rows),
+    };
     AggOut {
         name: name.to_string(),
         big_n: strata.iter().map(|s| s.big_n).sum(),
@@ -695,6 +781,9 @@ struct KappaOut {
     rejudged: u64,
     /// Ids of the rule's set with no re-judge verdict.
     missing: u64,
+    /// Those ids, sorted: the re-judge's to-do list (left out when none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing_ids: Vec<String>,
     /// Re-judged ids outside the rule's set (counted in kappa all the same).
     extra: u64,
     agree: u64,
@@ -710,6 +799,10 @@ struct KappaOut {
 
 #[derive(Debug, Clone, Serialize)]
 struct AgreementOut {
+    /// The re-judge rule ([`RejudgeRule`]); left out for `fd3c`, whose
+    /// committed report predates the field.
+    #[serde(skip_serializing_if = "is_fd3c")]
+    rule: &'static str,
     families: Vec<KappaOut>,
     overall: KappaOut,
     disagreements: u64,
@@ -767,6 +860,7 @@ fn kappa_of(name: &str, pairs: &[(&str, &str)]) -> KappaOut {
         expected: 0,
         rejudged: n,
         missing: 0,
+        missing_ids: Vec::new(),
         extra: 0,
         agree,
         raw_agreement: raw,
@@ -777,11 +871,79 @@ fn kappa_of(name: &str, pairs: &[(&str, &str)]) -> KappaOut {
     }
 }
 
-/// The ids a family's blind re-judge takes, from its sorted ids: those whose
-/// last hex digit is `0`, or the first 10% by id (rounded up, at least
-/// [`MIN_REJUDGE`], at most all), whichever set is larger (the first 10% on a
-/// tie).
-fn rejudge_set(sorted_ids: &[String]) -> BTreeSet<String> {
+/// Which ids of a family the blind re-judge takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejudgeRule {
+    /// FD.3c's rule ([`rejudge_set_fd3c`]): blind to the first verdicts, so a
+    /// family whose few wrong ids miss the set has an undefined kappa.
+    Fd3c,
+    /// GP.13's rule (the default), stratified by first verdict
+    /// ([`rejudge_set`]).
+    Matched,
+}
+
+impl RejudgeRule {
+    fn as_str(self) -> &'static str {
+        match self {
+            RejudgeRule::Fd3c => "fd3c",
+            RejudgeRule::Matched => "matched",
+        }
+    }
+    fn parse(v: &str) -> Result<RejudgeRule, String> {
+        match v {
+            "fd3c" => Ok(RejudgeRule::Fd3c),
+            "matched" => Ok(RejudgeRule::Matched),
+            other => Err(format!(
+                "report: --rejudge-rule `{other}` is not matched|fd3c"
+            )),
+        }
+    }
+    /// The family's re-judge set under this rule, from its sorted ids and
+    /// their first verdicts.
+    fn set(self, sorted_ids: &[String], first: &BTreeMap<String, String>) -> BTreeSet<String> {
+        match self {
+            RejudgeRule::Fd3c => rejudge_set_fd3c(sorted_ids),
+            RejudgeRule::Matched => rejudge_set(sorted_ids, first),
+        }
+    }
+}
+
+fn is_fd3c(r: &&'static str) -> bool {
+    *r == RejudgeRule::Fd3c.as_str()
+}
+
+/// The ids a family's blind re-judge takes (GP.13), from its ids sorted by id
+/// (the xxh64 key, so smallest key first) and their first verdicts: every
+/// `wrong` id, then as many `correct` ids, smallest first; while the set holds
+/// fewer than [`MIN_REJUDGE`], more `correct` ids, then the family's other ids
+/// (`unsure`), smallest first, until it does or the family is exhausted.
+fn rejudge_set(sorted_ids: &[String], first: &BTreeMap<String, String>) -> BTreeSet<String> {
+    let of = |v: &str| -> Vec<&String> {
+        sorted_ids
+            .iter()
+            .filter(|id| first.get(*id).map(String::as_str) == Some(v))
+            .collect()
+    };
+    let (wrong, correct) = (of("wrong"), of("correct"));
+    let want_correct = wrong.len().max(MIN_REJUDGE.saturating_sub(wrong.len()));
+    let mut set: BTreeSet<String> = wrong.into_iter().cloned().collect();
+    set.extend(correct.into_iter().take(want_correct).cloned());
+    for id in sorted_ids {
+        if set.len() >= MIN_REJUDGE {
+            break;
+        }
+        if !set.contains(id) {
+            set.insert(id.clone());
+        }
+    }
+    set
+}
+
+/// FD.3c's re-judge rule (`--rejudge-rule fd3c`), from a family's sorted ids:
+/// those whose last hex digit is `0`, or the first 10% by id (rounded up, at
+/// least [`MIN_REJUDGE`], at most all), whichever set is larger (the first 10%
+/// on a tie).
+fn rejudge_set_fd3c(sorted_ids: &[String]) -> BTreeSet<String> {
     let k = sorted_ids
         .len()
         .div_ceil(10)
@@ -868,6 +1030,7 @@ fn resolve_verdicts(
     adjudication: &[Adjudication],
     ids: &BTreeSet<String>,
     judge: Option<&str>,
+    rule: RejudgeRule,
 ) -> Result<Resolved, String> {
     // id -> judge -> verdict, and each first id's family (its file's stem).
     let mut first: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -951,14 +1114,19 @@ fn resolve_verdicts(
     let (mut families, mut all_pairs) = (Vec::new(), Vec::new());
     let (mut expected, mut missing, mut extra) = (0, 0, 0);
     for (name, fam_ids) in &by_family {
-        let want = rejudge_set(fam_ids);
+        let want = rule.set(fam_ids, &verdicts);
         let pairs: Vec<(&str, &str)> = fam_ids
             .iter()
             .filter_map(|id| Some((verdicts[id].as_str(), second.get(id)?.as_str())))
             .collect();
         let mut k = kappa_of(name, &pairs);
         k.expected = want.len() as u64;
-        k.missing = want.iter().filter(|id| !second.contains_key(*id)).count() as u64;
+        k.missing_ids = want
+            .iter()
+            .filter(|id| !second.contains_key(*id))
+            .cloned()
+            .collect();
+        k.missing = k.missing_ids.len() as u64;
         k.extra = fam_ids
             .iter()
             .filter(|id| second.contains_key(*id) && !want.contains(*id))
@@ -998,6 +1166,7 @@ fn resolve_verdicts(
     Ok(Resolved {
         verdicts,
         agreement: Some(AgreementOut {
+            rule: rule.as_str(),
             families,
             overall,
             disagreements,
@@ -1013,6 +1182,7 @@ fn build_report(
     rows: &[SampleRow],
     verdicts: &BTreeMap<String, String>,
     plan: &Plan,
+    ci: CiMethod,
 ) -> ReportOut {
     // Pooled stratum sizes and per-repo sizes.
     let mut pooled: BTreeMap<(String, String), u64> = BTreeMap::new();
@@ -1060,6 +1230,7 @@ fn build_report(
                     .iter()
                     .filter(|s| s.category == *c)
                     .collect::<Vec<_>>(),
+                ci,
             )
         })
         .collect();
@@ -1070,6 +1241,7 @@ fn build_report(
             agg(
                 t,
                 &strata.iter().filter(|s| s.tier == *t).collect::<Vec<_>>(),
+                ci,
             )
         })
         .collect();
@@ -1090,7 +1262,7 @@ fn build_report(
                 )
             })
             .collect();
-        let overall = agg(&h.label, &rs.iter().collect::<Vec<_>>());
+        let overall = agg(&h.label, &rs.iter().collect::<Vec<_>>(), ci);
         repos.insert(
             h.label.clone(),
             RepoOut {
@@ -1110,6 +1282,7 @@ fn build_report(
     ReportOut {
         floors: plan.floors.clone(),
         seed: plan.seed.clone(),
+        ci_method: ci.as_str(),
         strata,
         categories,
         tiers,
@@ -1187,9 +1360,21 @@ fn kappa_text(k: &KappaOut) -> String {
 
 fn agreement_section(md: &mut String, a: &AgreementOut) {
     md.push_str("## Agreement (blind re-judge)\n\n");
+    let rule = if a.rule == RejudgeRule::Matched.as_str() {
+        format!(
+            "every id its first judge called `wrong` and as many of its `correct` ids, smallest \
+             id first (topped up to at least {MIN_REJUDGE}, `correct` first), without reading \
+             the first verdicts; kappa is over that verdict-stratified subset, not the family's \
+             verdict mix"
+        )
+    } else {
+        format!(
+            "ids ending in hex `0` or its first 10% by id (whichever is larger, at least \
+             {MIN_REJUDGE}) without reading the first verdicts"
+        )
+    };
     md.push_str(&format!(
-        "A second judge re-judged each family's ids ending in hex `0` or its first 10% by id \
-         (whichever is larger, at least {MIN_REJUDGE}) without reading the first verdicts. \
+        "A second judge re-judged each family's {rule}. \
          Cohen's kappa is over the three verdicts, `unsure` its own category; it is undefined \
          when both judges used one verdict only. A family below {LOW_KAPPA} is LOW AGREEMENT \
          and its strata's precision is provisional. A disagreement is re-read at source and \
@@ -1254,10 +1439,17 @@ fn render_md(r: &ReportOut) -> String {
          proportion to their stratum sizes. p is correct / (correct + wrong) with a Wilson 95% \
          interval; `unsure` verdicts are excluded and counted. Per category and per tier the \
          estimate is stratified, weights N_h / N over the judged strata, with the finite \
-         population correction (a census stratum adds no variance). A stratum is under floor \
+         population correction (a census stratum adds no variance){}. A stratum is under floor \
          when p is below its tier's floor; insufficient when fewer than {} rows are judged \
          (a census excepted); noisy when unsure is over {}% of its verdicts. Floors: {}.\n\n",
         r.seed,
+        if r.ci_method == CiMethod::StratifiedWilson.as_str() {
+            "; its 95% CI (`ci_method=stratified_wilson`) is the Wilson score over the effective \
+             sample size p (1 - p) / var, or, when var is 0 (every judged stratum at p 0 or 1), \
+             the strata's Wilson bounds weighted N_h / N (a census stratum's exact p_h)"
+        } else {
+            ""
+        },
         MIN_JUDGED,
         (NOISY_SHARE * 100.0) as u32,
         r.floors
@@ -1452,6 +1644,7 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
     let (mut samples, mut verdicts, mut rejudge) = (Vec::new(), Vec::new(), Vec::new());
     let (mut plan, mut out_json, mut out_md, mut judge, mut check) =
         (None, None, None, None, false);
+    let (mut ci, mut rule) = (CiMethod::StratifiedWilson, RejudgeRule::Matched);
     let mut adjudication: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -1466,6 +1659,8 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
             "--out-md" => out_md = Some(value(args, &mut i, flag)?),
             "--judge" => judge = Some(value(args, &mut i, flag)?),
             "--check" => check = true,
+            "--ci" => ci = CiMethod::parse(&value(args, &mut i, flag)?)?,
+            "--rejudge-rule" => rule = RejudgeRule::parse(&value(args, &mut i, flag)?)?,
             other => return Err(format!("report: unknown argument {other}")),
         }
         i += 1;
@@ -1477,7 +1672,7 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
     let (second, first): (Vec<PathBuf>, Vec<PathBuf>) = verdicts
         .into_iter()
         .partition(|p| p.file_name().is_some_and(|n| n == REJUDGE_FILE));
-    let (mut verdicts, mut rejudge) = (first, [rejudge, second].concat());
+    let (verdicts, rejudge) = (first, [rejudge, second].concat());
     let adjudication = adjudication.map(PathBuf::from).unwrap_or_else(|| {
         Path::new(&plan_path)
             .parent()
@@ -1488,44 +1683,17 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
         out_json.ok_or("report: --out-json is required")?,
         out_md.ok_or("report: --out-md is required")?,
     );
-    samples.sort();
-    samples.dedup();
-    verdicts.sort();
-    verdicts.dedup();
-    rejudge.sort();
-    rejudge.dedup();
-    if samples.is_empty() {
-        return Err("report: no samples file matched".to_string());
-    }
-    let (headers, rows) = read_samples(&samples)?;
-    let mut ids = BTreeSet::new();
-    for r in &rows {
-        if !ids.insert(r.id.clone()) {
-            return Err(format!("sample {}: id appears twice", r.id));
-        }
-    }
-    let adjudication = read_adjudication(&adjudication)?;
-    let resolved = resolve_verdicts(&verdicts, &rejudge, &adjudication, &ids, judge.as_deref())?;
-    let mut report = build_report(&headers, &rows, &resolved.verdicts, &plan);
-    report.agreement = resolved.agreement;
-    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n";
-    let md = render_md(&report);
-    eprintln!(
-        "[edge-audit] report strata={} judged={} unsure={} under_floor={} insufficient={} kappa={}",
-        report.strata.len(),
-        report.strata.iter().map(|s| s.n).sum::<u64>(),
-        report.strata.iter().map(|s| s.unsure).sum::<u64>(),
-        report.under_floor.len(),
-        report
-            .strata
-            .iter()
-            .filter(|s| s.status == "insufficient")
-            .count(),
-        report
-            .agreement
-            .as_ref()
-            .map_or("-".to_string(), |a| kappa_text(&a.overall))
-    );
+    let inputs = ReportInputs {
+        samples,
+        verdicts,
+        rejudge,
+        adjudication,
+        judge,
+        ci,
+        rule,
+    };
+    let (report, json, md) = report_texts(inputs, &plan)?;
+    eprintln!("{}", report_marker(&report));
     if let Some(a) = &report.agreement {
         for f in &a.low_agreement {
             eprintln!("[edge-audit] LOW AGREEMENT family={f}: its precision is provisional");
@@ -1548,6 +1716,73 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
     std::fs::write(&out_json, json).map_err(|e| format!("{out_json}: {e}"))?;
     std::fs::write(&out_md, md).map_err(|e| format!("{out_md}: {e}"))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// What `report` reads, its files expanded.
+struct ReportInputs {
+    samples: Vec<PathBuf>,
+    verdicts: Vec<PathBuf>,
+    rejudge: Vec<PathBuf>,
+    adjudication: PathBuf,
+    judge: Option<String>,
+    ci: CiMethod,
+    rule: RejudgeRule,
+}
+
+/// The report and its JSON and markdown texts, from the samples, verdicts,
+/// re-judge, adjudication and plan.
+fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String, String), String> {
+    inp.samples.sort();
+    inp.samples.dedup();
+    inp.verdicts.sort();
+    inp.verdicts.dedup();
+    inp.rejudge.sort();
+    inp.rejudge.dedup();
+    if inp.samples.is_empty() {
+        return Err("report: no samples file matched".to_string());
+    }
+    let (headers, rows) = read_samples(&inp.samples)?;
+    let mut ids = BTreeSet::new();
+    for r in &rows {
+        if !ids.insert(r.id.clone()) {
+            return Err(format!("sample {}: id appears twice", r.id));
+        }
+    }
+    let adjudication = read_adjudication(&inp.adjudication)?;
+    let resolved = resolve_verdicts(
+        &inp.verdicts,
+        &inp.rejudge,
+        &adjudication,
+        &ids,
+        inp.judge.as_deref(),
+        inp.rule,
+    )?;
+    let mut report = build_report(&headers, &rows, &resolved.verdicts, plan, inp.ci);
+    report.agreement = resolved.agreement;
+    let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n";
+    let md = render_md(&report);
+    Ok((report, json, md))
+}
+
+/// The report's fired_on line.
+fn report_marker(report: &ReportOut) -> String {
+    format!(
+        "[edge-audit] report strata={} judged={} unsure={} under_floor={} insufficient={} kappa={} ci_method={}",
+        report.strata.len(),
+        report.strata.iter().map(|s| s.n).sum::<u64>(),
+        report.strata.iter().map(|s| s.unsure).sum::<u64>(),
+        report.under_floor.len(),
+        report
+            .strata
+            .iter()
+            .filter(|s| s.status == "insufficient")
+            .count(),
+        report
+            .agreement
+            .as_ref()
+            .map_or("-".to_string(), |a| kappa_text(&a.overall)),
+        report.ci_method
+    )
 }
 
 fn main() -> ExitCode {
@@ -1695,7 +1930,7 @@ mod tests {
             ("02".to_string(), "wrong".to_string()),
             ("03".to_string(), "correct".to_string()),
         ]);
-        let r = build_report(&[header], &rows, &verdicts, &plan());
+        let r = build_report(&[header], &rows, &verdicts, &plan(), CiMethod::Plugin);
         assert_eq!(r.strata.len(), 2);
         assert_eq!((r.strata[0].correct, r.strata[0].wrong), (1, 1));
         // Census strata (n = N) are never insufficient; .5 < .95 is under floor.
@@ -1712,9 +1947,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
-                .unwrap_err()
-                .contains("99")
+            resolve_verdicts(
+                std::slice::from_ref(&p),
+                &[],
+                &[],
+                &ids,
+                None,
+                RejudgeRule::Matched
+            )
+            .unwrap_err()
+            .contains("99")
         );
         std::fs::write(
             &p,
@@ -1723,9 +1965,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
-                .unwrap_err()
-                .contains("01")
+            resolve_verdicts(
+                std::slice::from_ref(&p),
+                &[],
+                &[],
+                &ids,
+                None,
+                RejudgeRule::Matched
+            )
+            .unwrap_err()
+            .contains("01")
         );
         std::fs::write(
             &p,
@@ -1734,13 +1983,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_verdicts(&[p.clone()], &[], &[], &ids, None)
-                .unwrap()
-                .verdicts["01"],
+            resolve_verdicts(
+                std::slice::from_ref(&p),
+                &[],
+                &[],
+                &ids,
+                None,
+                RejudgeRule::Matched
+            )
+            .unwrap()
+            .verdicts["01"],
             "unsure"
         );
         assert_eq!(
-            resolve_verdicts(&[p], &[], &[], &ids, Some("k"))
+            resolve_verdicts(&[p], &[], &[], &ids, Some("k"), RejudgeRule::Matched)
                 .unwrap()
                 .verdicts["01"],
             "wrong"
@@ -1835,25 +2091,25 @@ mod tests {
     }
 
     #[test]
-    fn rejudge_set_takes_the_larger_rule() {
+    fn rejudge_set_fd3c_takes_the_larger_rule() {
         let ids = |n: usize| -> Vec<String> { (0..n).map(|i| format!("{i:04x}")).collect() };
         // 299 ids, every 16th ends in 0 (19 of them): the first max(30, 20) win.
         let a = ids(299);
-        let s = rejudge_set(&a);
+        let s = rejudge_set_fd3c(&a);
         assert_eq!(s.len(), 30);
         assert!(s.contains("0000") && s.contains("001d") && !s.contains("001e"));
         // 50 ids: 10% is 5, the floor 20 wins over the 4 ending in 0.
-        assert_eq!(rejudge_set(&ids(50)).len(), 20);
+        assert_eq!(rejudge_set_fd3c(&ids(50)).len(), 20);
         // 1000 ids ending 0 only on every 16th = 63 < 100: the first 100.
-        assert_eq!(rejudge_set(&ids(1000)).len(), 100);
+        assert_eq!(rejudge_set_fd3c(&ids(1000)).len(), 100);
         // When more ids end in 0 than the first 10%, the 0-ending ids win.
         let zeros: Vec<String> = (0..40).map(|i| format!("{i:03x}0")).collect();
         let mut mixed = zeros.clone();
         mixed.extend((0..20).map(|i| format!("{i:03x}1")));
         mixed.sort();
-        assert_eq!(rejudge_set(&mixed), zeros.into_iter().collect());
+        assert_eq!(rejudge_set_fd3c(&mixed), zeros.into_iter().collect());
         // A family smaller than 20 is re-judged whole.
-        assert_eq!(rejudge_set(&ids(7)).len(), 7);
+        assert_eq!(rejudge_set_fd3c(&ids(7)).len(), 7);
     }
 
     #[test]
@@ -1897,6 +2153,7 @@ mod tests {
             &adj,
             &ids,
             None,
+            RejudgeRule::Matched,
         )
         .unwrap();
         // 01 agrees; 02 is adjudicated; 03 disagrees unadjudicated: unsure.
@@ -1921,7 +2178,8 @@ mod tests {
                 std::slice::from_ref(&second),
                 &bad,
                 &ids,
-                None
+                None,
+                RejudgeRule::Matched
             )
             .unwrap_err()
             .contains("02")
@@ -1938,10 +2196,196 @@ mod tests {
                 std::slice::from_ref(&second),
                 &[],
                 &ids4,
-                None
+                None,
+                RejudgeRule::Matched
             )
             .unwrap_err()
             .contains("04")
         );
+    }
+
+    #[test]
+    fn rejudge_set_takes_every_wrong_and_matched_corrects() {
+        let ids: Vec<String> = (0..300).map(|i| format!("{i:016x}")).collect();
+        // 14 wrong (every 20th id from 5), 2 unsure, the rest correct.
+        let first: BTreeMap<String, String> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let v = if i % 20 == 5 && i < 285 {
+                    "wrong"
+                } else if i == 1 || i == 2 {
+                    "unsure"
+                } else {
+                    "correct"
+                };
+                (id.clone(), v.to_string())
+            })
+            .collect();
+        let wrong: BTreeSet<String> = first
+            .iter()
+            .filter(|(_, v)| *v == "wrong")
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(wrong.len(), 14);
+        let s = rejudge_set(&ids, &first);
+        // Every wrong plus 14 corrects, the smallest ids: 0, 3, 4, 6, ..
+        assert_eq!(s.len(), 28);
+        assert!(wrong.is_subset(&s));
+        let corrects: Vec<&String> = s.iter().filter(|id| first[*id] == "correct").collect();
+        assert_eq!(corrects.len(), 14);
+        let want: Vec<&String> = ids
+            .iter()
+            .filter(|id| first[*id] == "correct")
+            .take(14)
+            .collect();
+        assert_eq!(corrects, want);
+        assert!(!s.contains(&ids[1]) && !s.contains(&ids[2]));
+        // Deterministic.
+        assert_eq!(rejudge_set(&ids, &first), s);
+        // 3 wrong: topped up to 20 with the 17 smallest corrects.
+        let few: BTreeMap<String, String> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let v = if [7, 100, 200].contains(&i) {
+                    "wrong"
+                } else {
+                    "correct"
+                };
+                (id.clone(), v.to_string())
+            })
+            .collect();
+        let s = rejudge_set(&ids, &few);
+        assert_eq!(s.len(), 20);
+        assert!(s.contains(&ids[200]) && s.contains(&ids[17]) && !s.contains(&ids[18]));
+        // A family with too few corrects is topped up from its unsure ids.
+        let small: Vec<String> = ids[..12].to_vec();
+        let mixed: BTreeMap<String, String> = small
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let v = match i % 3 {
+                    0 => "wrong",
+                    1 => "correct",
+                    _ => "unsure",
+                };
+                (id.clone(), v.to_string())
+            })
+            .collect();
+        assert_eq!(rejudge_set(&small, &mixed).len(), 12);
+        // All correct, no wrong: the 20 smallest.
+        let all: BTreeMap<String, String> = ids
+            .iter()
+            .map(|id| (id.clone(), "correct".to_string()))
+            .collect();
+        let s = rejudge_set(&ids, &all);
+        assert_eq!(s, ids[..20].iter().cloned().collect());
+    }
+
+    #[test]
+    fn stratified_wilson_is_not_one_at_p_one() {
+        // Two all-correct sampled strata, W = .25 / .75: var is 0, so the
+        // bounds are the strata's Wilson bounds weighted by W.
+        let (p, lo, hi) = stratified_wilson(&[(100, 10, 1.0), (300, 30, 1.0)]).unwrap();
+        let want = 0.25 * wilson(10, 10).0 + 0.75 * wilson(30, 30).0;
+        assert!((p - 1.0).abs() < 1e-12);
+        assert!((lo - want).abs() < 1e-12, "{lo} vs {want}");
+        assert!(lo < 1.0);
+        assert!((hi - 1.0).abs() < 1e-12);
+        assert_eq!(format!("{lo:.4}"), "0.8455");
+        // The plug-in interval it replaces reads [1, 1].
+        assert_eq!(
+            stratified(&[(100, 10, 1.0), (300, 30, 1.0)]),
+            Some((1.0, 1.0, 1.0))
+        );
+        // One sampled stratum: exactly its own Wilson interval.
+        let (_, lo, hi) = stratified_wilson(&[(96729, 32, 1.0)]).unwrap();
+        assert_eq!((lo, hi), wilson(32, 32));
+        assert_eq!(format!("{lo:.4}"), "0.8928");
+        // A census stratum is exact: its p_h, not its Wilson bound.
+        let (_, lo, _) = stratified_wilson(&[(20, 20, 1.0), (60, 30, 1.0)]).unwrap();
+        assert!((lo - (0.25 + 0.75 * wilson(30, 30).0)).abs() < 1e-12);
+        assert_eq!(stratified_wilson(&[(20, 20, 0.9)]), Some((0.9, 0.9, 0.9)));
+        // var > 0: the Wilson score over n_eff = p (1 - p) / var.
+        let rows = [(100, 100, 0.9), (300, 30, 0.8)];
+        let (p, lo, hi) = stratified_wilson(&rows).unwrap();
+        let var = 0.75f64.powi(2) * 0.8 * 0.2 / 30.0 * 0.9;
+        let (wl, wh) = wilson_p(0.825, 0.825 * 0.175 / var);
+        assert!((p - 0.825).abs() < 1e-12);
+        assert!((lo - wl).abs() < 1e-12 && (hi - wh).abs() < 1e-12);
+        assert!(lo > 0.0 && hi < 1.0 && lo < p && p < hi);
+        assert!(stratified_wilson(&[(5, 0, 0.0)]).is_none());
+        // wilson is wilson_p at k / n, bit for bit.
+        assert_eq!(wilson(27, 30), wilson_p(27.0 / 30.0, 30.0));
+    }
+
+    /// The committed FD.3c audit (bench/edge-audit/) read as `report --check`
+    /// reads it, under the given CI method and re-judge rule.
+    fn committed(ci: CiMethod, rule: RejudgeRule) -> (ReportOut, String, String) {
+        let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
+        let all = expand(&ad.join("verdicts/*.jsonl").to_string_lossy()).unwrap();
+        let (rejudge, verdicts): (Vec<PathBuf>, Vec<PathBuf>) = all
+            .into_iter()
+            .partition(|p| p.file_name().is_some_and(|n| n == REJUDGE_FILE));
+        let plan = Plan::read(&ad.join("floors.json").to_string_lossy()).unwrap();
+        let inputs = ReportInputs {
+            samples: expand(&ad.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+            verdicts,
+            rejudge,
+            adjudication: ad.join(ADJUDICATION_FILE),
+            judge: None,
+            ci,
+            rule,
+        };
+        report_texts(inputs, &plan).unwrap()
+    }
+
+    #[test]
+    fn plugin_fd3c_reproduces_the_committed_report() {
+        let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
+        let (report, json, md) = committed(CiMethod::Plugin, RejudgeRule::Fd3c);
+        assert!(
+            json == std::fs::read_to_string(ad.join("report.json")).unwrap(),
+            "report.json drifted under --ci plugin --rejudge-rule fd3c"
+        );
+        assert!(
+            md == std::fs::read_to_string(ad.join("report.md")).unwrap(),
+            "report.md drifted under --ci plugin --rejudge-rule fd3c"
+        );
+        assert!(
+            report_marker(&report).ends_with(" kappa=1.000 ci_method=plugin"),
+            "{}",
+            report_marker(&report)
+        );
+    }
+
+    #[test]
+    fn default_report_reads_the_weakest_bounds_and_the_matched_set() {
+        let (report, json, md) = committed(CiMethod::StratifiedWilson, RejudgeRule::Matched);
+        let calls = report
+            .categories
+            .iter()
+            .find(|c| c.name == "CALLS")
+            .unwrap();
+        assert_eq!((calls.p, calls.hi), (Some(1.0), Some(1.0)));
+        assert_eq!(calls.lo, Some(0.8928));
+        // Every sampled (not census) category reads a lower bound below 1; a
+        // census category (INJECTS, GRPC_CALLS, ..) is exact.
+        let sampled: Vec<&AggOut> = report.categories.iter().filter(|c| c.n < c.big_n).collect();
+        assert!(sampled.len() >= 8);
+        assert!(sampled.iter().all(|c| c.lo.is_some_and(|lo| lo < 1.0)));
+        assert!(json.contains("\"ci_method\": \"stratified_wilson\""));
+        assert!(json.contains("\"rule\": \"matched\""));
+        assert!(md.contains("ci_method=stratified_wilson"));
+        assert!(report_marker(&report).ends_with(" ci_method=stratified_wilson"));
+        // Structure's first judge found 14 wrong edges: the matched set takes
+        // all of them and 14 corrects, so the re-judge it names is 28 ids.
+        let a = report.agreement.unwrap();
+        let s = a.families.iter().find(|k| k.name == "structure").unwrap();
+        assert_eq!(s.expected, 28);
+        assert_eq!(s.missing, s.missing_ids.len() as u64);
+        let m = a.families.iter().find(|k| k.name == "mechanism").unwrap();
+        assert_eq!(m.expected, 102);
     }
 }
