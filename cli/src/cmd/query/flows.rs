@@ -40,6 +40,18 @@
 //! 2 on a build failure. It conflicts with `--features` / `--out`; the
 //! `[concept] word=.. surface=cli` line is printed inside the engine.
 //!
+//! **The semantic tier (GB.3, ruling FB-7-FUSED).** When no lexical tier
+//! matches any flow and the repo holds `.glia/vectors.jsonl` of the surface
+//! model (`glia embed`; one repo, no `--with`), the flows through the files
+//! `find --files`' fused order ranks with a `sem` score answer at tier
+//! `semantic` (heuristic), ordered by that file rank then the hop's depth;
+//! the table's `similarity` column is the matched node's cosine, an
+//! annotation. The table then opens with `_(no flow touches `<w>` by name
+//! ..; ranked by the fused file order: heuristic)_`, the lexical miss kept
+//! beside the rows. The source loads as `find --files` loads it
+//! (`semantic::open_for_surface`); `--no-semantic` never reads the sidecar.
+//! The engine prints `[flows] semantic query=..` when the tier runs.
+//!
 //! Exit 0 with zero features too (an empty `index.json` is an answer). Exit
 //! 2 for a build failure, a `--group-by` other than `feature` / `entry`, an
 //! `--out` inside a built repo but not under its `.glia/` (the next build
@@ -53,13 +65,16 @@ use glia_engine::feature_flows::{
     FlowGrouping, FlowOptions, INDEX_FILE, default_flows_dir, feature_flows, write_feature_flows,
 };
 use glia_engine::identity::Collapse;
+use std::sync::Arc;
+
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
 use glia_engine::trace::{
-    ConceptHit, ConceptOptions, DEFAULT_DEPTH, EntryFlow, concept_flows_with_live,
+    ConceptHit, ConceptOptions, ConceptTier, DEFAULT_DEPTH, EntryFlow, concept_flows_with_live,
     entry_flows_with_live,
 };
 use glia_engine::{GenerateResult, entrypoint_reachable};
 
-use crate::common::generate_for;
+use crate::common::{generate_for, load_embedder, rank_cache};
 
 #[derive(clap::Args, Debug)]
 #[command(group(clap::ArgGroup::new("feature_mode").args(["features", "out"]).multiple(true)))]
@@ -109,6 +124,13 @@ pub(crate) struct Args {
     /// multi-word query must match. Exits 1 when no flow touches it.
     #[arg(long, conflicts_with = "feature_mode")]
     concept: Option<String>,
+    /// With --concept: never read the repo's embeddings. By default, when no
+    /// flow touches the word by name, kind, mechanism, data, host or doc
+    /// heading and the repo holds vectors (`glia embed`), the flows through
+    /// the files the fused `find --files` order ranks answer at tier
+    /// `semantic` (heuristic).
+    #[arg(long, requires = "concept")]
+    no_semantic: bool,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -152,6 +174,12 @@ fn run_concept(args: &Args, result: &GenerateResult, word: &str, collapse: Colla
     opts.depth = args.depth;
     opts.collapse = collapse;
     opts.surface = "cli";
+    if !args.no_semantic {
+        opts.semantic = semantic_source(result);
+        if opts.semantic.is_some() {
+            opts.rank_cache = Some(rank_cache(result));
+        }
+    }
     let mut answer = concept_flows_with_live(
         &result.merged,
         &entrypoint_reachable(&result.merged),
@@ -179,6 +207,17 @@ fn run_concept(args: &Args, result: &GenerateResult, word: &str, collapse: Colla
     code
 }
 
+/// The repo's fused-recipe vectors and the surface model's query embedder
+/// (FB.7b's loader, `find --files`' own): None for several repos, no
+/// sidecar, no fresh vector of the model or an embedder that fails to load.
+/// The embedder itself starts only on the first semantic query.
+fn semantic_source(result: &GenerateResult) -> Option<Arc<SemanticSource>> {
+    let surface = surface_model();
+    open_for_surface(&result.merged, &result.repo_roots, surface, || {
+        load_embedder(surface).map(Arc::from)
+    })
+}
+
 fn render_concept(args: &Args, word: &str, answer: &Answer<ConceptHit>) {
     println!(
         "# glia flows `{}` --concept `{word}` (depth ≤ {})",
@@ -191,8 +230,21 @@ fn render_concept(args: &Args, word: &str, answer: &Answer<ConceptHit>) {
         crate::cmd::resolve::print_absence(a);
         return;
     }
-    println!("| # | key | entry | tier | matched | hop | depth | location |");
-    println!("|--:|---|---|---|---|---|--:|---|");
+    let semantic = answer
+        .results
+        .iter()
+        .any(|h| h.tier == ConceptTier::Semantic);
+    if semantic {
+        println!(
+            "_(no flow touches `{word}` by name, kind, mechanism, data entity, host or doc heading; ranked by the fused file order: heuristic)_"
+        );
+        println!();
+        println!("| # | key | entry | tier | matched | hop | depth | similarity | location |");
+        println!("|--:|---|---|---|---|---|--:|--:|---|");
+    } else {
+        println!("| # | key | entry | tier | matched | hop | depth | location |");
+        println!("|--:|---|---|---|---|---|--:|---|");
+    }
     for h in &answer.results {
         let hop = h
             .hop
@@ -203,8 +255,18 @@ fn render_concept(args: &Args, word: &str, answer: &Answer<ConceptHit>) {
             Some(x) => at(x.to_file.as_deref(), x.to_line),
             None => at(h.entry.file.as_deref(), h.entry.line),
         };
+        let similarity = if semantic {
+            format!(
+                " {} |",
+                h.similarity
+                    .map(|s| format!("{s:.4}"))
+                    .unwrap_or_else(|| "—".to_string())
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "| {} | `{}` | `{}` | {} | {} | {} | {} | {} |",
+            "| {} | `{}` | `{}` | {} | {} | {} | {} |{similarity} {} |",
             h.rank,
             h.key,
             h.entry.qname,

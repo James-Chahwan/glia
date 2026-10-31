@@ -1,17 +1,21 @@
 //! **cross_stack_trace** (P3, LD.4a): the ranked cross-service paths of a
 //! feature, or between two nodes; **entry_flows** (LD.4b): every entry
 //! point's forward flow; **concept_flows** (GB.1): the flows that touch a
-//! word.
+//! word, and (GB.3) its fused `semantic` tier when none does lexically.
+
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 
 use glia_engine::identity::Collapse;
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
 use glia_engine::trace::{
     ConceptOptions, TraceOptions, concept_flows_with_live, cross_stack_trace_with_live,
     entry_flows_with_live,
 };
 
 use crate::convert::to_py;
+use crate::embed::{surface_embedder, worker_dirs};
 use crate::graph::PyGraph;
 
 #[pymethods]
@@ -31,7 +35,8 @@ impl PyGraph {
     ///   repo (the service `glia arch` draws); `cross_repo` is the repo one.
     /// - `to`: two-node mode — the directed paths from `feature` to `to`, or
     ///   the shortest path over any edge walked either way (`directed` False).
-    /// - `resolved_by`: `qname`, `name`, `find`, `entry_flow`, `concept` or
+    /// - `resolved_by`: `qname`, `name`, `find`, `entry_flow`, `concept`,
+    ///   `concept_semantic` (never from this method: it reads no vectors) or
     ///   `none`. `entry_flow` (LD.4b): the feature named a dead end (no carry
     ///   edge leaves it) or nothing, and the entry flow whose key matches the
     ///   word (see `entry_flows`) seeds the trace instead. `concept` (GB.1):
@@ -115,7 +120,8 @@ impl PyGraph {
     ///   matched, hop, depth, reach, mechanisms}` (+ `blind`, the flow's
     ///   BLIND / DEGRADED caveats, when it has any). `tier` is one of
     ///   `entry`, `hop_name`, `hop_qname`, `kind`, `mechanism`,
-    ///   `data_entity`, `external_host`, `doc` (best first): the weakest of
+    ///   `data_entity`, `external_host`, `doc` (best first), or `semantic`
+    ///   (below, never beside a lexical row): the weakest of
     ///   the words' best matches. `matched` lists per word what it matched
     ///   (`cache -> kind CACHE`); `hop` is the deepest match's hop dict (the
     ///   `cross_stack_trace` hop shape), `None` when it was the entry, and
@@ -123,7 +129,17 @@ impl PyGraph {
     /// - `absence`: set exactly when `results` is empty: a fact-tier
     ///   `no_match`. Never raises for it.
     /// - `depth` and `collapse` as in `entry_flows`.
-    #[pyo3(signature = (word, depth=6, limit=20, collapse=true))]
+    /// - `semantic` (GB.3; default `None`, auto): when no lexical tier
+    ///   matches any flow and the repo holds `.glia/vectors.jsonl` of the
+    ///   surface model (one repo), the flows through the files the fused
+    ///   `find_files` order ranks with a `sem` score come back at tier
+    ///   `semantic` (heuristic), ranked by that file rank then the matched
+    ///   node's depth, each with `similarity` (the matched node's cosine, 4
+    ///   dp, an annotation; absent for a node with no vector) and one
+    ///   `matched` line `<word> -> fused file #<r> <path> (no lexical
+    ///   match)`. `False` never reads the vectors; the source is the
+    ///   PyGraph's, shared with `find_files` and `pack`.
+    #[pyo3(signature = (word, depth=6, limit=20, collapse=true, semantic=None))]
     fn concept_flows(
         &self,
         py: Python<'_>,
@@ -131,15 +147,50 @@ impl PyGraph {
         depth: usize,
         limit: usize,
         collapse: bool,
+        semantic: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let mut opts = ConceptOptions::default();
         opts.depth = depth;
         opts.limit = limit;
         opts.collapse = collapse_of(self, collapse);
         opts.surface = "py";
+        opts.semantic = self.concept_semantic(py, semantic);
+        if opts.semantic.is_some() {
+            opts.rank_cache = Some(self.rank.clone());
+        }
         let answer =
             concept_flows_with_live(&self.merged, self.live(), &self.repo_labels, word, &opts);
         to_py(py, serde_json::to_string(&answer))
+    }
+}
+
+impl PyGraph {
+    /// The held [`SemanticSource`] for `semantic` (GB.3): `Some(false)` none;
+    /// `None` / `Some(true)` the PyGraph's, loaded on first use (GIL
+    /// released) exactly as `find_files` and `pack` load it, and shared with
+    /// them. The query embedder itself starts on the first semantic query.
+    fn concept_semantic(
+        &self,
+        py: Python<'_>,
+        semantic: Option<bool>,
+    ) -> Option<Arc<SemanticSource>> {
+        if semantic == Some(false) {
+            return None;
+        }
+        if let Some(held) = self.semantic.get() {
+            return held.clone();
+        }
+        let dirs = worker_dirs(py);
+        py.detach(|| {
+            self.semantic
+                .get_or_init(|| {
+                    open_for_surface(&self.merged, &self.repo_roots, surface_model(), {
+                        let dirs = dirs.clone();
+                        move || surface_embedder(&dirs)
+                    })
+                })
+                .clone()
+        })
     }
 }
 

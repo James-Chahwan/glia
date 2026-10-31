@@ -12,7 +12,10 @@ absent on the single-repo fixture here). GB.1: `concept_flows(word, depth=6,
 limit=20, collapse=True)` returns the flows that touch a word as `{results,
 absence}`, and a dead end found by name, or an unknown word, that no entry key
 names yields to the flow that touches it (`resolved_by == "concept"`); an exact
-qname's dead end stays an absence. Shared helpers: test_build.py."""
+qname's dead end stays an absence. GB.3: `concept_flows(.., semantic=None)`
+last; the fixture holds no vectors, so `semantic=None` / `False` answer alike
+and no row carries `similarity` (the semantic tier itself is pinned by the
+engine's flows_semantic tests). Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -38,7 +41,7 @@ def main() -> int:
             params(rg.PyGraph.entry_flows))
     c.check("concept_flows signature",
             params(rg.PyGraph.concept_flows)
-            == [("word", None), ("depth", 6), ("limit", 20), ("collapse", True)],
+            == [("word", None), ("depth", 6), ("limit", 20), ("collapse", True), ("semantic", None)],
             params(rg.PyGraph.concept_flows))
     with tempfile.TemporaryDirectory(prefix="glia-surface-trace-") as tmp:
         g = rg.generate(fixture_repo(tmp))
@@ -138,6 +141,11 @@ def main() -> int:
                 none.get("results") == [] and (none.get("absence") or {}).get("reason") == "no_match"
                 and (none.get("absence") or {}).get("tier") == "fact", none)
         c.check("depth=0 walks no flow", g.concept_flows("helper", depth=0)["results"] == [])
+        c.check("no sidecar: semantic=False answers as the default",
+                g.concept_flows("zebra", semantic=False) == none
+                and g.concept_flows("helper", semantic=False) == hits)
+        c.check("no sidecar: no row carries similarity",
+                all("similarity" not in r for r in rows))
     return c.done()
 
 

@@ -455,3 +455,85 @@ fn identity_classes_collapse_unless_no_collapse() {
     let (_, lines) = identity_run(&["flows", fixture, "--json", "--no-collapse"]);
     assert!(lines.is_empty(), "{lines:?}");
 }
+
+/// GB.3: a feature that names nothing and that no flow touches lexically is
+/// the `unknown_symbol` absence without vectors; after `glia embed` (the
+/// `test-hash` model as the surface model) the concept fallback seeds from
+/// the top `semantic` flow's entry, `resolved_by=concept_semantic
+/// concept_tier=semantic`, the table saying so; `--no-semantic` is the
+/// absence again.
+#[test]
+fn an_unresolved_word_seeds_from_the_fused_semantic_flow() {
+    let root = std::env::temp_dir().join(format!("glia-gb3-trace-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (rel, src) in [
+        ("pyproject.toml", "[project]\nname = \"shop\"\n"),
+        ("shop/__init__.py", ""),
+        (
+            "shop/ledger.py",
+            "def export_ledger_rows(rows):\n    \"\"\"Export the ledger rows to a csv file on disk.\"\"\"\n    out = []\n    for r in rows:\n        out.append(r)\n    return out\n",
+        ),
+        (
+            "shop/report.py",
+            "from shop.ledger import export_ledger_rows\n\n\ndef format_report(rows):\n    return export_ledger_rows(rows)\n",
+        ),
+        (
+            "shop/cli.py",
+            "from shop.report import format_report\n\n\ndef main():\n    return format_report([])\n",
+        ),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+        std::fs::write(p, src).expect("write");
+    }
+    let path = root.to_str().expect("utf-8 temp path");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_glia"))
+            .args(args)
+            .env("GLIA_NO_PERSIST", "1")
+            .env("GLIA_EMBED_MODEL", "test-hash")
+            .output()
+            .expect("glia runs")
+    };
+    let q = "write the ledger rows out to a csv file";
+    let before = run(&["trace", path, q, "--json"]);
+    assert_eq!(before.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&before.stdout).expect("json");
+    assert_eq!(v["resolved_by"], "none", "{v}");
+
+    let embedded = run(&["embed", path, "--model", "test-hash"]);
+    assert_eq!(
+        embedded.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&embedded.stderr)
+    );
+    let after = run(&["trace", path, q, "--json"]);
+    let err = String::from_utf8_lossy(&after.stderr).into_owned();
+    let v: serde_json::Value = serde_json::from_slice(&after.stdout).expect("json");
+    assert_eq!(v["resolved_by"], "concept_semantic", "{v}\n{err}");
+    assert!(
+        v["seed"]["qname"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("main")),
+        "{v}"
+    );
+    let marker = err
+        .lines()
+        .find(|l| l.starts_with("[trace] seed="))
+        .unwrap_or_default();
+    eprintln!("{marker}");
+    assert!(
+        marker.contains(" resolved_by=concept_semantic concept_tier=semantic "),
+        "{err}"
+    );
+    let table = run(&["trace", path, q]);
+    assert!(
+        stdout(&table).contains("seeded by the top flow of the fused file order, heuristic)_"),
+        "{}",
+        stdout(&table)
+    );
+    let off = run(&["trace", path, q, "--json", "--no-semantic"]);
+    assert_eq!(off.stdout, before.stdout);
+    let _ = std::fs::remove_dir_all(&root);
+}

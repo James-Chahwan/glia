@@ -9,12 +9,24 @@
 //! location cell (`; diverged` when the members' contents differ) and
 //! `--json` carries the hop's `to_identity`. `--no-collapse` is the
 //! per-member walk.
+//!
+//! GB.3: when the feature resolves to no node, names no entry flow and no
+//! flow touches it lexically, and the repo holds vectors of the surface model
+//! (`glia embed`; one repo), the concept fallback may seed from the entry of
+//! the top `semantic` flow (`flows --concept`'s tier): `resolved_by`
+//! `concept_semantic`, heuristic, and the table opens with a line saying so.
+//! `--no-semantic` never reads the sidecar.
 
 use glia_engine::identity::{Collapse, RowIdentity};
 use glia_engine::trace::{TraceAnswer, TraceHop, TraceOptions, cross_stack_trace};
 
+use std::sync::Arc;
+
+use glia_engine::GenerateResult;
+use glia_engine::semantic::{SemanticSource, open_for_surface, surface_model};
+
 use crate::cmd::resolve::{live_glyph, print_absence};
-use crate::common::generate_for;
+use crate::common::{generate_for, load_embedder, rank_cache};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -42,6 +54,12 @@ pub(crate) struct Args {
     /// through every copy's successors.
     #[arg(long)]
     no_collapse: bool,
+    /// Never read the repo's embeddings. By default, when the feature names
+    /// nothing and no flow touches it by name, the entry of the top flow
+    /// through the files the fused `find --files` order ranks seeds the trace
+    /// (`resolved_by` `concept_semantic`, heuristic).
+    #[arg(long)]
+    no_semantic: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -64,6 +82,12 @@ pub(crate) fn run(args: Args) -> i32 {
     } else {
         Collapse::with_labels(&result.repo_labels)
     };
+    if !args.no_semantic {
+        opts.semantic = semantic_source(&result);
+        if opts.semantic.is_some() {
+            opts.rank_cache = Some(rank_cache(&result));
+        }
+    }
     let answer = cross_stack_trace(&result.merged, &args.feature, &opts);
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
@@ -71,6 +95,17 @@ pub(crate) fn run(args: Args) -> i32 {
     }
     render(&args, &answer);
     0
+}
+
+/// The repo's fused-recipe vectors and the surface model's query embedder
+/// (`find --files`' and `flows --concept`'s loader): None for several repos,
+/// no sidecar, no fresh vector of the model or an embedder that fails to
+/// load. The embedder starts only on the first semantic query.
+fn semantic_source(result: &GenerateResult) -> Option<Arc<SemanticSource>> {
+    let surface = surface_model();
+    open_for_surface(&result.merged, &result.repo_roots, surface, || {
+        load_embedder(surface).map(Arc::from)
+    })
 }
 
 fn render(args: &Args, answer: &TraceAnswer) {
@@ -90,6 +125,12 @@ fn render(args: &Args, answer: &TraceAnswer) {
         println!("{empty}");
         print_absence(a);
         return;
+    }
+    if answer.resolved_by == "concept_semantic" {
+        println!(
+            "_(`{feature}` names nothing and no flow touches it by name: seeded by the top flow of the fused file order, heuristic)_"
+        );
+        println!();
     }
     for (i, p) in answer.paths.iter().enumerate() {
         if i > 0 {

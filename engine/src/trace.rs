@@ -89,7 +89,11 @@
 //! flow, so it runs only where the answer before it was an absence; with no
 //! hit the LD.4a answer stands. The `[trace]` marker then reads
 //! `resolved_by=concept concept_tier=<tier>`, after the search's own
-//! `[concept] .. surface=trace` line.
+//! `[concept] .. surface=trace` line. With [`TraceOptions::semantic`] (GB.3)
+//! and a feature that resolved to no node, the concept search may answer at
+//! its `semantic` tier (module doc "The semantic tier"): the seed is then
+//! that flow's entry, `resolved_by = "concept_semantic"` (heuristic), the
+//! marker `resolved_by=concept_semantic concept_tier=semantic`.
 //!
 //! # Entry flows
 //!
@@ -146,7 +150,40 @@
 //! (tier, depth asc, reach desc, key, entry qname), then the flow's position
 //! in [`entry_flows`]' order, never a NodeId; `limit` keeps the first. Facts
 //! are computed once per shown node per call. An empty answer is a FACT
-//! `no_match` absence. Lexical and typed only: no similarity tier here.
+//! `no_match` absence. Lexical and typed only: the one similarity tier is
+//! GB.3's fallback below, after every lexical tier missed.
+//!
+//! # The semantic tier
+//!
+//! GB.3 (ruling FB-7-FUSED: only the blend FB.6b's gate passed). When the
+//! lexical tiers above match NO flow, [`ConceptOptions::semantic`] holds a
+//! [`SemanticSource`] and [`ConceptOptions::rank_cache`] knows exactly one
+//! repo root over a one-repo merge, the search runs `find --files`' order
+//! ([`find_files`]: `LX[IDR,FUSE[T1s,SEMp:t2]]`, or the repo's calibrated
+//! `SELf2t` pick) and keeps the files with a `sem` score, numbered 1.. in that
+//! order. A flow matches at tier `semantic` (heuristic) when its entry
+//! (depth 0) or a hop sits in such a file; its match is its least (file rank,
+//! depth) node, the entry before the hops in BFS order. Rows rank by (file
+//! rank, depth, reach desc, key, entry qname), then the flow's position: the
+//! fused file order decides, never a node's similarity. Each row's `matched`
+//! is one entry, `<query> -> fused file #<r> <path> (no lexical match)`, its
+//! `hop` / `depth` the matched node's, and [`ConceptHit::similarity`] that
+//! node's cosine to the prefixed query (4 dp; absent for a node with no
+//! vector), an annotation. Presence stays lexical: a lexical row anywhere
+//! means no semantic row, and the semantic tier never seeds a walk of its
+//! own (every flow is an entry's own walk; it only picks among them). An
+//! [`Answer`] holds an absence only with no row, so the lexical miss travels
+//! in the tier itself and in each row's `matched`; with no semantic row
+//! either, the answer is the lexical `no_match` absence unchanged.
+//!
+//! fired_on marker, one line per semantic attempt (a source set, the lexical
+//! tiers empty), before the `[concept]` line:
+//! `[flows] semantic query=<q> files=<f> flows=<n> top_file_rank=<r> not_embedded=<x>`
+//! (`files`: fused files with a `sem` score; `flows`: semantic rows before
+//! the limit; `top_file_rank`: the first row's file rank, `-` with none;
+//! `not_embedded`: rows whose matched node has no vector) — grep
+//! `^\[flows\] semantic query=`. A guard that fails (no cache, several
+//! repos, an embedder error) prints `files=0 flows=0`.
 //!
 //! fired_on marker, one line per search:
 //! `[concept] word=<w> flows=<f> hits=<h> tiers=<tier:n,..> surface=<s> ms=<t>`
@@ -203,7 +240,8 @@
 //! `^\[identity\] collapse surface=trace` / `surface=flows`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::profile::node_ext;
@@ -215,10 +253,12 @@ use glia_graph::{MergedGraph, Reach};
 use crate::absence::{self, Absence, Answer, BlindCaveat};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
 use crate::arch::{ServiceKeying, default_keying, service_of};
-use crate::find::{self, FindOptions, FoundNode};
+use crate::find::{self, FindFilesOptions, FindOptions, FoundNode, find_files};
 use crate::health;
 use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
+use crate::rank::RankCache;
+use crate::semantic::SemanticSource;
 use crate::serves::external_hosts;
 
 /// `TraceOptions::default().depth`.
@@ -236,7 +276,8 @@ const FIND_TIERS: [&str; 4] = ["exact_ci", "qname_suffix", "name_prefix", "name_
 
 /// How far and to what a trace walks. Start from `default()` and set fields:
 /// `#[non_exhaustive]` rules out a struct literal outside this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Equality compares the two shared handles by pointer.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TraceOptions {
     /// Maximum hops per path, and the depth of the `hops` tree.
@@ -248,6 +289,15 @@ pub struct TraceOptions {
     /// Identity classes (DD.11, module doc "Identity"): on by default, with
     /// no repo labels; `Collapse::off()` is the per-member walk.
     pub collapse: Collapse,
+    /// GB.3: the concept tier's semantic fallback ([`ConceptOptions::semantic`]):
+    /// with a source and a [`TraceOptions::rank_cache`], a word no lexical
+    /// concept tier matches may still seed from the top `semantic` flow
+    /// (`resolved_by` `concept_semantic`). None (the default) is GB.1's
+    /// answer byte for byte.
+    pub semantic: Option<Arc<SemanticSource>>,
+    /// GB.3: the holder's ranking cache the semantic fallback ranks files
+    /// through ([`ConceptOptions::rank_cache`]).
+    pub rank_cache: Option<Arc<RankCache>>,
 }
 
 impl Default for TraceOptions {
@@ -257,7 +307,32 @@ impl Default for TraceOptions {
             to: None,
             max_paths: DEFAULT_MAX_PATHS,
             collapse: Collapse::default(),
+            semantic: None,
+            rank_cache: None,
         }
+    }
+}
+
+impl PartialEq for TraceOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.depth == other.depth
+            && self.to == other.to
+            && self.max_paths == other.max_paths
+            && self.collapse == other.collapse
+            && same_arc(&self.semantic, &other.semantic)
+            && same_arc(&self.rank_cache, &other.rank_cache)
+    }
+}
+
+impl Eq for TraceOptions {}
+
+/// Two optional shared handles are equal when both are None or both point at
+/// one value.
+fn same_arc<T: ?Sized>(a: &Option<Arc<T>>, b: &Option<Arc<T>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+        _ => false,
     }
 }
 
@@ -323,7 +398,9 @@ pub struct TraceAnswer {
     /// end or an unresolved word yielded to the entry flow its key names,
     /// LD.4b), `concept` (no key named it, and the entry of the top
     /// [`concept_flows`] hit, the flow that touches the word, seeds instead,
-    /// GB.1) or `none`.
+    /// GB.1), `concept_semantic` (GB.3: the feature resolved to nothing, no
+    /// lexical concept tier matched, and the top [`ConceptTier::Semantic`]
+    /// flow's entry seeds it: a heuristic seed) or `none`.
     pub resolved_by: &'static str,
     /// The seed's forward BFS tree over the carry edges, in discovery order.
     pub hops: Vec<TraceHop>,
@@ -452,11 +529,16 @@ fn trace_answer(
                 near: Vec::new(),
             };
         } else if seed.by != "qname"
-            && let Some((entry, tier)) = concept_seed(merged, live, feature, opts)
+            && let Some((entry, tier)) =
+                concept_seed(merged, live, feature, opts, seed.id.is_none())
         {
             seed = Resolved {
                 id: Some(entry),
-                by: "concept",
+                by: if tier == ConceptTier::Semantic {
+                    "concept_semantic"
+                } else {
+                    "concept"
+                },
                 near: Vec::new(),
             };
             concept = Some(tier);
@@ -869,6 +951,10 @@ pub enum ConceptTier {
     ExternalHost,
     /// The heading of a DOC_SECTION with a DOCUMENTS edge into a hop node.
     Doc,
+    /// GB.3, heuristic: no lexical tier matched any flow, and the flow runs
+    /// through a file `find --files`' fused order ranks with a `sem` score
+    /// (module doc "The semantic tier"). Never mixed with the tiers above.
+    Semantic,
 }
 
 impl ConceptTier {
@@ -883,10 +969,11 @@ impl ConceptTier {
             ConceptTier::DataEntity => "data_entity",
             ConceptTier::ExternalHost => "external_host",
             ConceptTier::Doc => "doc",
+            ConceptTier::Semantic => "semantic",
         }
     }
 
-    const ALL: [ConceptTier; 8] = [
+    const ALL: [ConceptTier; 9] = [
         ConceptTier::Entry,
         ConceptTier::HopName,
         ConceptTier::HopQname,
@@ -895,12 +982,14 @@ impl ConceptTier {
         ConceptTier::DataEntity,
         ConceptTier::ExternalHost,
         ConceptTier::Doc,
+        ConceptTier::Semantic,
     ];
 }
 
 /// What [`concept_flows`] walks and keeps. Start from `default()` and set
 /// fields: `#[non_exhaustive]` rules out a struct literal outside this crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Equality compares the two shared handles by pointer.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ConceptOptions {
     /// Maximum hops each entry flow follows ([`DEFAULT_DEPTH`]).
@@ -914,6 +1003,15 @@ pub struct ConceptOptions {
     /// The surface the `[concept]` marker names (`cli`, `py`, `trace`;
     /// `lib` by default).
     pub surface: &'static str,
+    /// GB.3 (ruling FB-7-FUSED): the repo's t2 vectors and the query
+    /// embedder. With one and a [`ConceptOptions::rank_cache`] over exactly
+    /// one repo, a word the lexical tiers match in no flow gets the
+    /// [`ConceptTier::Semantic`] rows (module doc "The semantic tier"). None
+    /// (the default) is GB.1's answer byte for byte.
+    pub semantic: Option<Arc<SemanticSource>>,
+    /// GB.3: the holder's ranking cache (its `FileIndex`, calibration record
+    /// and repo root) the semantic tier's fused file order is ranked through.
+    pub rank_cache: Option<Arc<RankCache>>,
 }
 
 impl Default for ConceptOptions {
@@ -923,12 +1021,27 @@ impl Default for ConceptOptions {
             limit: DEFAULT_CONCEPT_LIMIT,
             collapse: Collapse::default(),
             surface: "lib",
+            semantic: None,
+            rank_cache: None,
         }
     }
 }
 
+impl PartialEq for ConceptOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.depth == other.depth
+            && self.limit == other.limit
+            && self.collapse == other.collapse
+            && self.surface == other.surface
+            && same_arc(&self.semantic, &other.semantic)
+            && same_arc(&self.rank_cache, &other.rank_cache)
+    }
+}
+
+impl Eq for ConceptOptions {}
+
 /// One entry flow that touches the query, with what matched and where.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ConceptHit {
     /// 1-based position in the rank order.
@@ -955,6 +1068,11 @@ pub struct ConceptHit {
     /// not serialized, otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+    /// GB.3: a [`ConceptTier::Semantic`] row's matched node's cosine to the
+    /// prefixed query, 4 dp: an annotation, never the order. None (not
+    /// serialized) on every lexical row and for a node with no vector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
 }
 
 /// **concept_flows** (GB.1): the entry flows that touch `word` — by entry
@@ -1043,6 +1161,11 @@ fn concept_search(
             .then_with(|| a.3.entry.qname.cmp(&b.3.entry.qname))
             .then_with(|| a.2.cmp(&b.2))
     });
+    // GB.3: no lexical tier matched any flow: the semantic tier, already in
+    // its own rank order.
+    if ranked.is_empty() && !query.is_empty() && opts.semantic.is_some() {
+        ranked = semantic_rows(merged, &flows, word, opts);
+    }
     let mut counts = [0usize; ConceptTier::ALL.len()];
     for (t, ..) in &ranked {
         counts[*t as usize] += 1;
@@ -1074,6 +1197,148 @@ fn concept_search(
             hit
         })
         .collect()
+}
+
+/// GB.3's semantic tier (module doc "The semantic tier"): the flows through
+/// the files `find --files`' fused order ranks with a `sem` score, each at its
+/// least (file rank, depth) node, ranked by (file rank, depth, reach desc,
+/// key, entry qname, flow position). Prints one `[flows] semantic` line per
+/// attempt; empty when there is no source, no cache, not exactly one repo,
+/// an embedder error or no such file.
+fn semantic_rows(
+    merged: &MergedGraph,
+    flows: &[WalkedFlow],
+    word: &str,
+    opts: &ConceptOptions,
+) -> Vec<(ConceptTier, usize, usize, ConceptHit)> {
+    let q = word.trim();
+    let mut files_kept = 0usize;
+    let rows = semantic_ranked(merged, flows, q, opts, &mut files_kept).unwrap_or_default();
+    let top = rows
+        .first()
+        .map(|(r, ..)| r.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let not_embedded = rows.iter().filter(|(.., h)| h.similarity.is_none()).count();
+    eprintln!(
+        "[flows] semantic query={q} files={files_kept} flows={} top_file_rank={top} not_embedded={not_embedded}",
+        rows.len()
+    );
+    rows.into_iter()
+        .map(|(rank, pos, hit)| (ConceptTier::Semantic, rank, pos, hit))
+        .collect()
+}
+
+/// [`semantic_rows`]' rows before the marker: `(file rank (1-based), flow
+/// position, hit)`, sorted. `files_kept` receives the count of fused files
+/// with a `sem` score. None on any guard (module doc).
+fn semantic_ranked(
+    merged: &MergedGraph,
+    flows: &[WalkedFlow],
+    q: &str,
+    opts: &ConceptOptions,
+    files_kept: &mut usize,
+) -> Option<Vec<(usize, usize, ConceptHit)>> {
+    let src = opts.semantic.clone()?;
+    let cache = opts.rank_cache.clone()?;
+    let roots: BTreeMap<u64, String> = cache.repo_roots().clone();
+    let repos: BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
+    let (&repo, _) = roots.iter().next()?;
+    if roots.len() != 1 || repos.len() != 1 || !repos.contains(&repo) {
+        return None;
+    }
+    let fopts = FindFilesOptions {
+        top_k: 0,
+        surface: "flows",
+        rank_cache: Some(cache.clone()),
+        select: true,
+        semantic: Some(src.clone()),
+    };
+    let answer = find_files(merged, &roots, q, &fopts).ok()?;
+    let files = cache.files(merged);
+    // The fused order's files with a `sem` score, 1-based: looked up, never
+    // iterated into an output.
+    let mut rank_of: HashMap<u32, (usize, String)> = HashMap::new();
+    for r in answer.results.into_iter().filter(|r| r.sem.is_some()) {
+        if let Some(f) = files.index_of(repo, &r.file) {
+            let next = rank_of.len() + 1;
+            rank_of.entry(f).or_insert((next, r.file));
+        }
+    }
+    *files_kept = rank_of.len();
+    if rank_of.is_empty() {
+        return Some(Vec::new());
+    }
+    let qvec = src.query_vector(q).ok()?;
+    let sims: HashMap<NodeId, f64> = src
+        .search(&qvec, src.len(), &HashSet::new())
+        .into_iter()
+        .map(|h| (h.id, h.similarity_rounded()))
+        .collect();
+    let mut out: Vec<(usize, usize, usize, ConceptHit)> = Vec::new();
+    for (pos, w) in flows.iter().enumerate() {
+        let f = &w.flow;
+        // (file rank, depth, hop index or None for the entry, node), least
+        // first; the entry counts at depth 0, then the hops in BFS order.
+        let mut best: Option<(usize, usize, Option<usize>, NodeId)> = None;
+        let nodes = std::iter::once((0usize, None, w.entry_id)).chain(
+            f.hops
+                .iter()
+                .zip(&w.hop_ids)
+                .enumerate()
+                .map(|(i, (h, id))| (h.depth, Some(i), *id)),
+        );
+        for (depth, hop, id) in nodes {
+            let Some((rank, _)) = files.file_of_node(id).and_then(|fi| rank_of.get(&fi)) else {
+                continue;
+            };
+            if best.is_none_or(|(r, d, ..)| (*rank, depth) < (r, d)) {
+                best = Some((*rank, depth, hop, id));
+            }
+        }
+        let Some((rank, depth, hop, id)) = best else {
+            continue;
+        };
+        let path = files
+            .file_of_node(id)
+            .and_then(|fi| rank_of.get(&fi))
+            .map(|(_, p)| p.as_str())
+            .unwrap_or("");
+        out.push((
+            rank,
+            depth,
+            pos,
+            ConceptHit {
+                rank: 0,
+                key: f.key.clone(),
+                entry: f.entry.clone(),
+                tier: ConceptTier::Semantic,
+                matched: vec![format!(
+                    "{q} -> fused file #{rank} {path} (no lexical match)"
+                )],
+                hop: hop.map(|i| f.hops[i].clone()),
+                depth,
+                reach: f.reach,
+                mechanisms: f.mechanisms.clone(),
+                blind: f.blind.clone(),
+                similarity: sims.get(&id).copied(),
+            },
+        ));
+    }
+    // (file rank, depth, reach desc, key, entry qname), then the flow's
+    // position: never a NodeId, never similarity alone.
+    out.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| b.3.reach.cmp(&a.3.reach))
+            .then_with(|| a.3.key.cmp(&b.3.key))
+            .then_with(|| a.3.entry.qname.cmp(&b.3.entry.qname))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    Some(
+        out.into_iter()
+            .map(|(rank, _, pos, hit)| (rank, pos, hit))
+            .collect(),
+    )
 }
 
 /// The words of `s`: runs of letters and digits, split again at each
@@ -1374,6 +1639,7 @@ fn match_flow(
         reach: f.reach,
         mechanisms: f.mechanisms.clone(),
         blind: f.blind.clone(),
+        similarity: None,
     })
 }
 
@@ -1511,17 +1777,22 @@ fn marker(
 /// The concept tier's pick for `feature` (GB.1, module doc "Seeds"): the
 /// entry of the top [`concept_flows`] hit over the trace's own depth and
 /// identity option, with its tier. Walks every entry flow, so it runs only
-/// where the LD.4b tier matched no key.
+/// where the LD.4b tier matched no key. `semantic`: GB.3's tier may answer
+/// (the feature resolved to no node at all; a lexically resolved dead end
+/// never yields to a similarity).
 fn concept_seed(
     merged: &MergedGraph,
     live: &HashSet<NodeId>,
     feature: &str,
     opts: &TraceOptions,
+    semantic: bool,
 ) -> Option<(NodeId, ConceptTier)> {
     let c = ConceptOptions {
         depth: opts.depth,
         collapse: opts.collapse.clone(),
         surface: "trace",
+        semantic: opts.semantic.clone().filter(|_| semantic),
+        rank_cache: opts.rank_cache.clone(),
         ..ConceptOptions::default()
     };
     concept_search(merged, live, &opts.collapse.repo_labels, feature, &c)

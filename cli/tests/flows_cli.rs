@@ -405,3 +405,128 @@ fn concept_lists_the_flows_that_touch_a_word() {
     assert_eq!(both.status.code(), Some(2), "{}", stderr(&both));
     assert!(!s.out().exists());
 }
+
+/// A one-repo Python tree for GB.3: `main` (shop/cli.py) -> `format_report`
+/// -> `export_ledger_rows` (shop/ledger.py, documented as writing the ledger
+/// out), and `test_warm` -> `warm_cache`. Removed on drop.
+struct LedgerTree(PathBuf);
+
+impl LedgerTree {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("glia-gb3-cli-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, src) in [
+            ("pyproject.toml", "[project]\nname = \"shop\"\n"),
+            ("shop/__init__.py", ""),
+            (
+                "shop/ledger.py",
+                "def export_ledger_rows(rows):\n    \"\"\"Export the ledger rows to a csv file on disk.\"\"\"\n    out = []\n    for r in rows:\n        out.append(r)\n    return out\n",
+            ),
+            (
+                "shop/report.py",
+                "from shop.ledger import export_ledger_rows\n\n\ndef format_report(rows):\n    return export_ledger_rows(rows)\n",
+            ),
+            ("shop/cache.py", "def warm_cache():\n    return 1\n"),
+            (
+                "shop/cli.py",
+                "from shop.report import format_report\n\n\ndef main():\n    return format_report([])\n",
+            ),
+            (
+                "tests/test_warm.py",
+                "from shop.cache import warm_cache\n\n\ndef test_warm():\n    assert warm_cache() == 1\n",
+            ),
+        ] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+            std::fs::write(p, src).expect("write");
+        }
+        LedgerTree(root)
+    }
+
+    fn path(&self) -> &str {
+        self.0.to_str().expect("utf-8 temp path")
+    }
+
+    /// `glia <args>` with the test model as the surface model, in memory.
+    fn glia(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_glia"))
+            .args(args)
+            .env("GLIA_NO_PERSIST", "1")
+            .env("GLIA_EMBED_MODEL", "test-hash")
+            .output()
+            .expect("glia runs")
+    }
+
+    /// `glia embed <tree> --model test-hash`, asserted.
+    fn embed(&self) {
+        let out = self.glia(&["embed", self.path(), "--model", "test-hash"]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert!(self.0.join(".glia/vectors.jsonl").is_file());
+    }
+}
+
+impl Drop for LedgerTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// GB.3: a word no lexical tier matches is the `no_match` absence (exit 1)
+/// without vectors; after `glia embed` it answers at tier `semantic`, the
+/// flow through the top fused file first, with the `[flows] semantic` marker,
+/// the table's lexical-miss line and its similarity column; `--no-semantic`
+/// is the absence again, and a lexical match never changes.
+#[test]
+fn concept_falls_back_to_the_fused_semantic_tier() {
+    let t = LedgerTree::new("flows");
+    let q = "write the ledger rows out to a csv file";
+    let before = t.glia(&["flows", t.path(), "--concept", q]);
+    assert_eq!(before.status.code(), Some(1), "{}", stderr(&before));
+    assert!(!stderr(&before).contains("[flows] semantic"));
+    let lexical = t.glia(&["flows", t.path(), "--concept", "ledger", "--json"]);
+    assert_eq!(lexical.status.code(), Some(0), "{}", stderr(&lexical));
+
+    t.embed();
+    let after = t.glia(&["flows", t.path(), "--concept", q, "--json"]);
+    assert_eq!(after.status.code(), Some(0), "{}", stderr(&after));
+    let marker = stderr(&after)
+        .lines()
+        .find(|l| l.starts_with("[flows] semantic query="))
+        .unwrap_or_else(|| panic!("no [flows] semantic line:\n{}", stderr(&after)))
+        .to_string();
+    eprintln!("{marker}");
+    assert!(
+        marker.starts_with(&format!("[flows] semantic query={q} files="))
+            && marker.contains(" top_file_rank=1 "),
+        "{marker}"
+    );
+    let v: Value = serde_json::from_str(&stdout(&after)).expect("json");
+    assert!(v["absence"].is_null(), "{v}");
+    let top = &v["results"][0];
+    assert_eq!(top["tier"], "semantic", "{v}");
+    assert_eq!(top["key"], "main", "{v}");
+    assert_eq!(top["hop"]["to_file"], "shop/ledger.py", "{v}");
+    assert!(top["similarity"].is_f64(), "{v}");
+
+    let table = t.glia(&["flows", t.path(), "--concept", q]);
+    assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
+    let text = stdout(&table);
+    assert!(
+        text.contains("ranked by the fused file order: heuristic)_")
+            && text.contains(
+                "| # | key | entry | tier | matched | hop | depth | similarity | location |"
+            ),
+        "{text}"
+    );
+
+    let off = t.glia(&["flows", t.path(), "--concept", q, "--no-semantic"]);
+    assert_eq!(off.status.code(), Some(1), "{}", stderr(&off));
+    assert_eq!(stdout(&off), stdout(&before));
+    assert!(!stderr(&off).contains("[flows] semantic"));
+    let lexical_after = t.glia(&["flows", t.path(), "--concept", "ledger", "--json"]);
+    assert_eq!(stdout(&lexical_after), stdout(&lexical));
+
+    // --no-semantic needs --concept.
+    let bare = t.glia(&["flows", t.path(), "--no-semantic"]);
+    assert_eq!(bare.status.code(), Some(2), "{}", stderr(&bare));
+}
