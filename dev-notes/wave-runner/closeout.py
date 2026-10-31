@@ -435,7 +435,8 @@ def main():
     # byte_identical stays its own test target (FH.18's keep-list, engine/build.rs KEEP).
     with step("tests"):
         out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
-    bi = "2 passed; 0 failed" in out
+    # Any all-pass result: GA.2 (0.5.6 W1) added a third test, so a literal count goes stale.
+    bi = re.search(r"test result: ok\. [1-9][0-9]* passed; 0 failed", out) is not None
     say(f"== byte_identical: {'green' if bi else 'RED'}")
     if not bi:
         gates.append("byte_identical")
