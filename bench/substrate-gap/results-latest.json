@@ -9636,6 +9636,7 @@
     "fixtures/data-entity-statement-sinks",
     "fixtures/data-source-jni-descriptor-words",
     "fixtures/docker-image-identity",
+    "fixtures/docker-starts",
     "fixtures/doclink-identifier-mentions",
     "fixtures/docs-adr-decision",
     "fixtures/docs-link-past-cap",
@@ -9674,6 +9675,7 @@
     "fixtures/go-overlay-data-wrapper",
     "fixtures/go-package-clause-imports",
     "fixtures/go-route-const-prefix",
+    "fixtures/go-route-group-use",
     "fixtures/go-route-mounts",
     "fixtures/go-route-per-method",
     "fixtures/go-route-registration-forms",
@@ -9718,6 +9720,7 @@
     "fixtures/java-map-put-not-route",
     "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
+    "fixtures/js-class-resource-client",
     "fixtures/js-options-object-call",
     "fixtures/k8s-multidoc-cron",
     "fixtures/kotlin-flip-guard",
@@ -9726,6 +9729,7 @@
     "fixtures/liveness-close-out-residuals",
     "fixtures/lua-nvim",
     "fixtures/lua-pure",
+    "fixtures/manifest-bins",
     "fixtures/manifest-toml-array-tables",
     "fixtures/models-dart-dio",
     "fixtures/models-declared-fields",
@@ -9751,6 +9755,7 @@
     "fixtures/openapi-servers-forms",
     "fixtures/org-packages-cargo",
     "fixtures/org-packages-go",
+    "fixtures/org-packages-maven",
     "fixtures/org-packages-npm",
     "fixtures/org-packages-pypi",
     "fixtures/overlay-declared-cells",
@@ -10088,7 +10093,7 @@
       },
       "lua/config_table": {
         "extract": [
-          0,
+          2,
           2
         ],
         "fixtures": [
@@ -10098,17 +10103,17 @@
           1,
           1
         ],
-        "level": "none",
+        "level": "full",
         "literal": [
-          0,
+          2,
           2
         ],
         "reasons": [],
         "route": [
-          0,
+          1,
           1
         ],
-        "via": null
+        "via": "config_table"
       },
       "lua/embedded_script": {
         "extract": [
@@ -10331,8 +10336,8 @@
           "routing edge missing"
         ],
         "route": [
-          0,
-          1
+          1,
+          2
         ],
         "via": "process_entry"
       },
@@ -10374,8 +10379,8 @@
     ],
     "totals": {
       "error": 0,
-      "full": 3,
-      "none": 2,
+      "full": 4,
+      "none": 1,
       "partial": 9,
       "unknown": 112
     }

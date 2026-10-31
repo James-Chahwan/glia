@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 476,
+  "fixtures": 481,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -585,6 +585,14 @@
         "INFRA_REFERENCES": 1.0
       }
     },
+    "docker-starts": {
+      "framework": "docker-starts",
+      "language": "dockerfile",
+      "per_category": {
+        "CLI_INVOKES": 1.0,
+        "DEFINES": 1.0
+      }
+    },
     "doclink-identifier-mentions": {
       "framework": "doclink-identifier-mentions",
       "language": "python",
@@ -1036,6 +1044,14 @@
         "HANDLED_BY": 1.0
       }
     },
+    "go-route-group-use": {
+      "framework": "go-route-group-use",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "go-route-mount-owners": {
       "framework": "go-route-mount-owners",
       "language": "go",
@@ -1484,6 +1500,14 @@
       "language": "java",
       "per_category": {}
     },
+    "js-class-resource-client": {
+      "framework": "js-class-resource-client",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "js-options-object-call": {
       "framework": "js-options-object-call",
       "language": "javascript+go",
@@ -1579,6 +1603,13 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "manifest-bins": {
+      "framework": "manifest-bins",
+      "language": "python+node+rust",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "manifest-toml-array-tables": {
@@ -1755,6 +1786,14 @@
     "org-packages-go": {
       "framework": "org-packages",
       "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "org-packages-maven": {
+      "framework": "org-packages",
+      "language": "java",
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
