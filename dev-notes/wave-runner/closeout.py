@@ -15,7 +15,9 @@ leap-corrections.json (ids A*.* and L*.*), and records LANDED in leap_schedule.p
 Steps (README order): commits + per-packet status from the workflow journal,
 workspace tests, fmt (F0.5), rustdoc (FD.23b), byte_identical, the out-of-workspace engram-export check
 (scripts/check-engram-export.sh), the rank gate (EG.3), the cohort gate (FH.12:
-scripts/cohort-gate.sh check, then its ratchet when every gate is green), wheel rebuild + staleness check, run.py,
+scripts/cohort-gate.sh check, then its ratchet when every gate is green), each gate's `[gate-asks]` line (GP.12: the
+packets whose acceptance named it and those whose commits touched its paths; `--plan-only` prints the asks), wheel
+rebuild + staleness check, run.py,
 matrix --emit/--check, python suites, fold the wave's followups into every
 remaining packet's correction, update baseline.json (MEASURED) and LANDED,
 schedule --verify, render the next wave, commit.
@@ -89,6 +91,49 @@ COHORT_GATE_TIMEOUT = 14400   # seconds: FH.12's baseline (cohort + health + Sib
 # (twenty alone summed ~10,200 s, medusa ~3,500 s), plus the whole Sibyl cover. The release's last
 # close-out (`remaining` empty) runs the full cohort. A partial check is never ratcheted.
 COHORT_FAST = "websocket,commons-text,click,scaffold-eth-2,shell,microservices-demo,gin-vue-admin,zora-protocol"
+# GP.12 (James 2026-10-30, 0.5.6 plan §4): wave agents never run the rank or cohort gate; a packet's acceptance
+# that names one is what the close-out checks for that packet. So each gate's result is attributed: the packets
+# whose acceptance named it (asked_by) and the packets whose commits touched its paths (touched_by), on one
+# `== [gate-asks] <gate> result=<r> asked_by=<n> (<ids>) touched_by=<m> (<ids>)` line, and a FAILED gate's
+# entry in the gates list names both. Named = a gate script run (`rank-gate.sh check|run|baseline|ratchet`,
+# `rank-gate check`, `cohort-gate.sh`) or the gate by name, unless the text says it is unaffected; the brief's
+# own quoted rule and a `grep` over a file that names the command are not asks.
+GATE_PATHS = {"rank": RANKED_PATHS, "cohort": COHORT_PATHS}
+GATE_ASK_RE = {
+    "rank": re.compile(r"rank-gate\.sh\s+(?:check|run|baseline-add|baseline|ratchet)\b|\brank-gate check\b"
+                       r"|\brank gate\b(?! unaffected| is the close-out's)", re.I),
+    "cohort": re.compile(r"cohort-gate\.sh\b|\bcohort gate\b(?! unaffected| is the close-out's)", re.I),
+}
+GATE_ASK_IGNORE = re.compile(r"`grep [^`]*`|never run the (?:full )?rank or cohort gate", re.I)
+
+
+def gate_asks(packets, ids):
+    """GP.12: {gate: sorted ids of the packets among `ids` whose acceptance names that gate}."""
+    asks = {g: [] for g in GATE_ASK_RE}
+    for i in ids:
+        text = GATE_ASK_IGNORE.sub(" ", str((packets.get(i) or {}).get("acceptance") or ""))
+        for g, rx in GATE_ASK_RE.items():
+            if rx.search(text):
+                asks[g].append(i)
+    return {g: sorted(v) for g, v in asks.items()}
+
+
+def gate_result(line):
+    """A gate's last line as one word: ok, ok-partial, skipped, FAILED, or not-run (no line)."""
+    if not line:
+        return "not-run"
+    if "check: ok" in line:
+        return "ok-partial" if "(partial: only" in line else "ok"
+    return "skipped" if "check: skipped" in line else "FAILED"
+
+
+def gate_attribution(gate, line, asked, touched_by):
+    """GP.12: (the `[gate-asks]` line, the suffix a failed gate's entry carries)."""
+    moved = sorted(i for i, ps in touched_by.items() if any(p.startswith(GATE_PATHS[gate]) for p in ps))
+    ids = lambda xs: ",".join(xs) or "-"
+    return (f"== [gate-asks] {gate} result={gate_result(line)} asked_by={len(asked)} ({ids(asked)}) "
+            f"touched_by={len(moved)} ({ids(moved)})",
+            f" (asked by {ids(asked)}; touched by {ids(moved)})")
 
 
 # FH.18 (James 2026-10-26, "should we have an options for test and build to make it quicker"):
@@ -261,19 +306,24 @@ def main():
     wave = int(args[0])
     if release:
         import importlib
-        _, _, waves = importlib.import_module(f"schedule_{release}").waves()
+        packets, _, waves = importlib.import_module(f"schedule_{release}").waves()
         ids, remaining = waves[wave], waves[wave + 1:]
     elif leap:
         import leap_schedule
-        waves = leap_schedule.schedule(*leap_schedule.load())
+        loaded = leap_schedule.load()
+        packets, waves = loaded[0], leap_schedule.schedule(*loaded)
         ids, remaining = waves[wave], waves[wave + 1:]
     else:
         import schedule
-        waves, _ = schedule.schedule(schedule.load())
+        packets = schedule.load()
+        waves, _ = schedule.schedule(packets)
         ids, remaining = waves[wave - 1], waves[wave:]
+    asks = gate_asks(packets, ids)
     if "--plan-only" in args:
         print(f"wave {wave}: {' '.join(ids)}")
         print(f"remaining waves: {len(remaining)}")
+        for g, asked in asks.items():
+            print(f"[gate-asks] {g} asked_by={len(asked)} ({','.join(asked) or '-'})")
         return
     # One run id, or several comma-separated: a packet re-run on its own (e.g. after a
     # permission fix) is merged over the wave's run, the later run winning per packet.
@@ -369,10 +419,13 @@ def main():
     if not fmt_ok:
         gates.append("fmt")
     touched = set()   # every path the wave's packet commits touch (rustdoc, the rank and cohort gates read it)
+    touched_by = {}   # GP.12: the same paths per packet, so a gate result names the packets that moved its paths
     for r in res:
+        mine = touched_by.setdefault(packet_id(r["packet"]), set())
         for c in re.findall(r"\b[0-9a-f]{7,40}\b", str(r.get("commit") or "")):
             o, _ = sh(f"git show --name-only --format= {c}")
-            touched.update(l.strip() for l in o.splitlines() if l.strip())
+            mine.update(l.strip() for l in o.splitlines() if l.strip())
+        touched |= mine
     full_doc = not remaining or any(full_due.values()) or os.environ.get("GLIA_RUSTDOC_FULL") == "1"
     with step("rustdoc"):
         rustdoc_ok, rustdoc_marker = rustdoc_check(None if full_doc else touched_crates(touched))
@@ -404,7 +457,8 @@ def main():
         if (ROOT / "bench/rank-gate/gate.json").exists():
             ranked = sorted(p for p in touched if p.startswith(RANKED_PATHS))
             if remaining and not ranked:
-                say("== [rank-gate] check: skipped - wave touched no ranked path")
+                rank_line = "[rank-gate] check: skipped - wave touched no ranked path"
+                say(f"== {rank_line}")
             else:
                 try:
                     fast = (remaining and not full_due["rank"] and os.environ.get("GLIA_RANK_GATE_FULL") != "1"
@@ -419,23 +473,27 @@ def main():
                     say(f"== {last}")
                     rank_gate_ok = last.startswith("[rank-gate] check: ok")
                     if not rank_gate_ok:
-                        gates.append("rank gate")
+                        gates.append("rank gate" + gate_attribution("rank", rank_line, asks["rank"], touched_by)[1])
                 except subprocess.TimeoutExpired:
-                    say(f"== [rank-gate] check: FAILED (timeout after {RANK_GATE_TIMEOUT}s)")
-                    gates.append("rank gate (timeout)")
+                    rank_line = f"[rank-gate] check: FAILED (timeout after {RANK_GATE_TIMEOUT}s)"
+                    say(f"== {rank_line}")
+                    gates.append("rank gate (timeout)" + gate_attribution("rank", rank_line, asks["rank"], touched_by)[1])
                 if not remaining:
                     out, _ = sh("bash scripts/rank-gate.sh coverage 2>&1")
                     last = (out.strip().splitlines() or [""])[-1]
                     say(f"== {last}")
                     if not last.startswith("[rank-gate] coverage: ok"):
                         gates.append("rank gate coverage")
+    say(gate_attribution("rank", rank_line, asks["rank"], touched_by)[0])
     with step("cohort_gate"):
         cohort_gate_ok, cohort_line, cohort_fail = cohort_gate(touched, bool(remaining), wave, release, full_due["cohort"])
     if "(partial: only" not in cohort_line and "skipped" not in cohort_line:
         last_full["cohort"] = wave
     say(cohort_line)
+    cohort_asks, cohort_suffix = gate_attribution("cohort", cohort_line, asks["cohort"], touched_by)
+    say(cohort_asks)
     if cohort_fail:
-        gates.append(cohort_fail)
+        gates.append(cohort_fail + cohort_suffix)
 
     with step("wheel"):
         sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
