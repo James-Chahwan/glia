@@ -1,0 +1,16 @@
+openapi: 3.0.0
+info:
+  title: c
+  version: "1"
+paths:
+  /c:
+    get:
+      operationId: getC
+      responses:
+        "200":
+          description: ok
+servers:
+- description: In the URL, substitute `<instance>` with the domain name
+    of your deployment.
+  url: https://<instance>/{root}/
+  variables: {root: {default: api}}

@@ -1,0 +1,12 @@
+openapi: 3.0.0
+info:
+  title: b
+  version: "1"
+servers: [{url: /v2}]
+paths:
+  /b:
+    get:
+      operationId: getB
+      responses:
+        "200":
+          description: ok

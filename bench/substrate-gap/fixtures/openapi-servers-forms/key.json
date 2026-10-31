@@ -1,0 +1,26 @@
+{
+  "framework": "openapi-servers-forms",
+  "language": "go",
+  "dirs": ["."],
+  "note": "GD.16 (seed §E W1 DF.18; 0.5.4 FD.48): parsers/code/extractors/src/contracts.rs server_bases_yaml read `servers:` only as a block indented under its key, so a sequence at the key's own indent 0 (`servers:\\n- url: /v1`, what yaml.v2 emitters write: a/openapi.yaml; c/openapi.yaml is cohort prefect's databricks shape, `servers:` after `paths:`, `url` the item's second key after a two-line description, a `<placeholder>` host and a flow `variables:`) and a flow sequence (`servers: [{url: /v2}]`, b/openapi.yaml) read as no servers: the ops were spelled `GET:/a` / `GET:/b` / `GET:/c` and paired to the chi routes only by suffix (`[contract-link] .. exact=0 .. prefix=3`). After: each op carries its base (`GET:/v1/a`, `GET:/v2/b`, `GET:/api/c`) and pairs exactly; a declared qname break.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "contract::a::openapi::GET:/v1/a", "exact": true, "note": "indent-0 servers sequence"},
+    {"kind": "DOC_SECTION", "name": "contract::b::openapi::GET:/v2/b", "exact": true, "note": "flow servers sequence"},
+    {"kind": "DOC_SECTION", "name": "contract::c::openapi::GET:/api/c", "exact": true, "note": "indent-0 item whose url is its second key, flow variables"}
+  ],
+  "expect_edges": [
+    {"from": "contract::a::openapi::GET:/v1/a", "to": "GET /v1/a", "category": "DOCUMENTS", "exact": true},
+    {"from": "contract::b::openapi::GET:/v2/b", "to": "GET /v2/b", "category": "DOCUMENTS", "exact": true},
+    {"from": "contract::c::openapi::GET:/api/c", "to": "GET /api/c", "category": "DOCUMENTS", "exact": true}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "GET /v1/a", "cell": "ORIGIN", "contains": "\"path\":\"/v1/a\",\"raw_path\":\"/a\""},
+    {"kind": "DOC_SECTION", "node": "GET /v2/b", "cell": "ORIGIN", "contains": "\"path\":\"/v2/b\",\"raw_path\":\"/b\""},
+    {"kind": "DOC_SECTION", "node": "GET /api/c", "cell": "ORIGIN", "contains": "\"path\":\"/api/c\",\"raw_path\":\"/c\""}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "contract::a::openapi::GET:/a", "note": "the base-less spelling of an indent-0 servers document"},
+    {"kind": "DOC_SECTION", "name": "contract::b::openapi::GET:/b", "note": "the base-less spelling of a flow servers document"},
+    {"kind": "DOC_SECTION", "name": "contract::c::openapi::GET:/c", "note": "the base-less spelling of the prefect shape"}
+  ]
+}

@@ -429,6 +429,15 @@ struct ServerBases {
     templated: usize,
     /// Of those, the ones whose every variable had a `default`.
     expanded: usize,
+    /// GD.16: the document has an indent-0 `servers` key (yaml only).
+    declared: bool,
+    /// Servers read (each `servers[]` entry with a `url`).
+    read: usize,
+    /// Of those, items of a sequence at the key's own indent 0 (yaml.v2).
+    block0: usize,
+    /// Of those, the ones written in flow style (`servers: [..]`, an item
+    /// `- {..}`, or a flow `variables:` mapping).
+    flow: usize,
 }
 
 impl ServerBases {
@@ -442,6 +451,7 @@ impl ServerBases {
     /// templated one folds through its defaults, or to "" when a variable
     /// has none ([`fold_server_base`]'s rule for a template).
     fn push_server(&mut self, raw_url: &str, vars: &BTreeMap<String, String>) {
+        self.read += 1;
         let url = unquote(raw_url.trim());
         let base = if url.contains('{') {
             self.templated += 1;
@@ -480,8 +490,15 @@ impl ServerBases {
     }
 
     /// The `[contracts] openapi servers:` marker, for a file with a templated
-    /// server or two or more distinct bases.
+    /// server or two or more distinct bases; and GD.16's `[openapi] servers=`
+    /// line, for a yaml document that declares an indent-0 `servers` key.
     fn report(&self, file: &str) {
+        if self.declared {
+            eprintln!(
+                "[openapi] servers={} (block0={} flow={}) path={file}",
+                self.read, self.block0, self.flow
+            );
+        }
         let multi = usize::from(self.bases.len() >= 2);
         if self.templated > 0 || multi > 0 {
             eprintln!(
@@ -533,6 +550,13 @@ fn collapse_slashes(s: &str) -> String {
 /// `servers:` (OpenAPI 3: every `- url:` item, with its sibling
 /// `variables:` defaults) or `basePath:` (Swagger 2), whichever appears first
 /// at indent 0. The servers block ends at the next indent-0 key.
+///
+/// GD.16: the block may be a sequence at the key's own indent 0
+/// (`servers:\n- url: /v1`, what yaml.v2 emitters write), each item then
+/// ending at the next indent-0 `- `; and the value may be a flow sequence
+/// (`servers: [{url: /v2}]`, which may span lines) or an item a flow mapping
+/// (`- {url: /v1}`), read through the yaml subset scanner's flow reader
+/// ([`inline_value`]).
 fn server_bases_yaml(lines: &[&str]) -> ServerBases {
     let mut out = ServerBases::default();
     for (i, line) in lines.iter().enumerate() {
@@ -540,15 +564,48 @@ fn server_bases_yaml(lines: &[&str]) -> ServerBases {
             continue;
         }
         let t = line.trim();
-        if t == "servers:" {
-            let block = lines[i + 1..]
+        if let Some(("servers", raw)) = split_key(t) {
+            out.declared = true;
+            let raw = strip_comment(raw);
+            if raw.starts_with('[') {
+                for item in flow_block(raw, &lines[i + 1..]).items() {
+                    if let Some((url, vars)) = flow_server(item) {
+                        out.flow += 1;
+                        out.push_server(&url, &vars);
+                    }
+                }
+                return out;
+            }
+            if !raw.is_empty() {
+                // A scalar, an alias or a mapping where a sequence belongs.
+                return out;
+            }
+            let mut rest = lines[i + 1..]
                 .iter()
                 .filter(|l| !is_skippable(l))
-                .take_while(|l| indent_of(l) != 0)
+                .peekable();
+            // A sequence at the key's own indent (yaml.v2): its items are the
+            // indent-0 `- ` lines and everything indented beneath them.
+            let block0 = rest
+                .peek()
+                .is_some_and(|l| indent_of(l) == 0 && list_rest(l.trim()).is_some());
+            let block = rest
+                .take_while(|l| indent_of(l) != 0 || (block0 && list_rest(l.trim()).is_some()))
                 .copied();
             for item in yaml_server_items(block) {
-                if let Some((url, vars)) = yaml_server(&item) {
-                    out.push_server(url, &vars);
+                let read = if item.first().is_some_and(|(_, t)| t.starts_with('{')) {
+                    let text: Vec<&str> = item.iter().map(|(_, t)| *t).collect();
+                    inline_value(&text.join(" "))
+                        .as_ref()
+                        .and_then(flow_server)
+                        .map(|(url, vars)| (url, vars, true))
+                } else {
+                    yaml_server(&item).map(|(url, vars, flow)| (url.to_string(), vars, flow))
+                };
+                if let Some((url, vars, flow)) = read {
+                    out.block0 += usize::from(block0);
+                    out.flow += usize::from(flow);
+                    out.push_server(&url, &vars);
                 }
             }
             return out;
@@ -559,6 +616,47 @@ fn server_bases_yaml(lines: &[&str]) -> ServerBases {
         }
     }
     out
+}
+
+/// A flow collection opened by `raw` (a key's inline value), joined with its
+/// continuation `lines` while a bracket stays open (at most
+/// [`YAML_MAX_FLOW_LINES`]; a line's trailing ` # comment` dropped), read by
+/// [`inline_value`]. Null when it never closes or does not parse.
+fn flow_block(raw: &str, lines: &[&str]) -> YNode {
+    let mut text = raw.to_string();
+    for line in lines
+        .iter()
+        .filter(|l| !is_skippable(l))
+        .take(YAML_MAX_FLOW_LINES)
+    {
+        if flow_depth(&text) <= 0 {
+            break;
+        }
+        text.push(' ');
+        text.push_str(strip_comment(line.trim()));
+    }
+    inline_value(&text).unwrap_or_else(YNode::null)
+}
+
+/// One server written as a flow mapping (`{url: /v1, variables: {..}}`): its
+/// `url` and its variables' `default`s. `None` without a url.
+fn flow_server(node: &YNode) -> Option<(String, BTreeMap<String, String>)> {
+    let url = node.get("url")?.as_str()?.to_string();
+    let mut vars = BTreeMap::new();
+    if let Some(v) = node.get("variables") {
+        flow_variables(v, &mut vars);
+    }
+    Some((url, vars))
+}
+
+/// The `default` of each variable of a flow `variables:` mapping. The first
+/// default of a name wins.
+fn flow_variables(node: &YNode, vars: &mut BTreeMap<String, String>) {
+    for (name, var) in node.entries() {
+        if let Some(d) = var.get("default").and_then(YNode::as_str) {
+            vars.entry(name.clone()).or_insert_with(|| d.to_string());
+        }
+    }
 }
 
 /// The servers block split into its list items, each as `(indent, text)`
@@ -591,13 +689,16 @@ fn yaml_server_items<'a>(block: impl Iterator<Item = &'a str>) -> Vec<Vec<(usize
     items
 }
 
-/// One server item: its raw `url` value and its variables' defaults, or
-/// `None` when it declares no url. Keys are read at the item's own column;
-/// the url key is matched as written (`url`), as before DF.18.
-fn yaml_server<'a>(item: &[(usize, &'a str)]) -> Option<(&'a str, BTreeMap<String, String>)> {
+/// One server item: its raw `url` value, its variables' defaults and
+/// whether any of them was written as a flow mapping (`variables: {..}`,
+/// GD.16), or `None` when it declares no url. Keys are read at the item's own
+/// column, in any order (a `url:` after a `description:` included); the url
+/// key is matched as written (`url`), as before DF.18.
+fn yaml_server<'a>(item: &[(usize, &'a str)]) -> Option<(&'a str, BTreeMap<String, String>, bool)> {
     let col = item.first()?.0;
     let mut url = None;
     let mut vars = BTreeMap::new();
+    let mut flow = false;
     let mut i = 0;
     while i < item.len() {
         let (ind, t) = item[i];
@@ -619,25 +720,45 @@ fn yaml_server<'a>(item: &[(usize, &'a str)]) -> Option<(&'a str, BTreeMap<Strin
             .iter()
             .position(|(d, _)| *d <= col)
             .map_or(item.len(), |p| i + p);
-        yaml_variables(&item[i..end], &mut vars);
+        let raw = strip_comment(v.trim());
+        if raw.starts_with('{') {
+            let deeper: Vec<&str> = item[i..end].iter().map(|(_, t)| *t).collect();
+            flow_variables(&flow_block(raw, &deeper), &mut vars);
+            flow = true;
+        } else {
+            flow |= yaml_variables(&item[i..end], &mut vars);
+        }
         i = end;
     }
-    Some((url?, vars))
+    Some((url?, vars, flow))
 }
 
 /// A server's `variables:` mapping: each `<name>:` at the mapping's first
 /// column, and the `default:` scalar among its direct children (quotes and a
-/// trailing comment stripped). The first default of a name wins.
-fn yaml_variables(children: &[(usize, &str)], vars: &mut BTreeMap<String, String>) {
+/// trailing comment stripped), or, GD.16, in a flow mapping written on the
+/// name's own line (`basePath: {default: v1}`). The first default of a name
+/// wins. Returns whether a flow mapping was read.
+fn yaml_variables(children: &[(usize, &str)], vars: &mut BTreeMap<String, String>) -> bool {
     let Some(&(name_col, _)) = children.first() else {
-        return;
+        return false;
     };
+    let mut flow = false;
     let mut name: Option<&str> = None;
     let mut child_col: Option<usize> = None;
     for &(ind, t) in children {
         if ind <= name_col {
             name = (ind == name_col).then(|| key_of(t)).flatten();
             child_col = None;
+            let raw = split_key(t).map_or("", |(_, v)| strip_comment(v));
+            if let Some(n) = name
+                && raw.starts_with('{')
+            {
+                let default = inline_value(raw);
+                if let Some(d) = default.as_ref().and_then(|v| v.get("default")?.as_str()) {
+                    vars.entry(n.to_string()).or_insert_with(|| d.to_string());
+                }
+                flow = true;
+            }
             continue;
         }
         let Some(n) = name else { continue };
@@ -646,6 +767,7 @@ fn yaml_variables(children: &[(usize, &str)], vars: &mut BTreeMap<String, String
                 .or_insert_with(|| value_of(t).to_string());
         }
     }
+    flow
 }
 
 /// One declared AsyncAPI channel operation: `<action> <channel>`.
@@ -3500,11 +3622,120 @@ paths:
             "contract::spec::GET:/api/v1/users"
         );
         // A block that ends at the next indent-0 key, a sequence at indent 0
-        // (read as no servers, as before), and no servers at all.
+        // (read since GD.16), and no servers at all.
         let flush = "openapi: 3.0.0\nservers:\n- url: /v9\npaths:\n  /a:\n    get: {}\n";
-        assert_eq!(scan_openapi(flush)[0].path, "/a");
+        assert_eq!(scan_openapi(flush)[0].path, "/v9/a");
         let bare = "openapi: 3.0.0\npaths:\n  /a:\n    get: {}\n";
         assert_eq!(scan_openapi(bare)[0].path, "/a");
+    }
+
+    #[test]
+    fn indent0_servers_sequence_sets_base() {
+        // GD.16: yaml.v2 writes a sequence at its key's own indent. Each item
+        // ends at the next indent-0 `- `, the block at the next indent-0 key;
+        // `url` may be an item's second key, after a multi-line description
+        // (the prefect databricks shape: `servers:` after `paths:`, a
+        // `<placeholder>` host keeping its path base).
+        let yaml = r#"openapi: 3.0.0
+paths:
+  /2.1/jobs/get:
+    get:
+      operationId: JobsGet
+      security:
+      - bearerAuth: []
+servers:
+- description: In the URL, substitute `<instance>` with the domain name
+    of your deployment.
+  url: https://<instance>/api/
+- url: https://{env}.example.com/{root}
+  variables:
+    env:
+      default: prod
+    root:
+      default: internal
+components: {}
+"#;
+        let lines: Vec<&str> = yaml.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(servers.bases, ["/api", "/internal"]);
+        assert_eq!(
+            (servers.declared, servers.read, servers.block0, servers.flow),
+            (true, 2, 2, 0)
+        );
+        assert_eq!((servers.templated, servers.expanded), (1, 1));
+        assert_eq!(scan_openapi(yaml)[0].path, "/api/2.1/jobs/get");
+        let out = extract_yaml_contracts(yaml, "jobs.yaml", module_id(), repo());
+        assert_eq!(
+            out.nav.qname_by_id[&out.nodes[0].id],
+            "contract::jobs::GET:/api/2.1/jobs/get"
+        );
+        // An indented block is still read as before, and counts no block0.
+        let indented = "openapi: 3.0.0\nservers:\n  - url: /v1\npaths:\n  /a:\n    get: {}\n";
+        let lines: Vec<&str> = indented.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!((servers.read, servers.block0, servers.flow), (1, 0, 0));
+        assert_eq!(scan_openapi(indented)[0].path, "/v1/a");
+        // An indent-0 key right after `servers:` is no server, and an
+        // indent-0 `- ` under any other key is never one.
+        let empty = "openapi: 3.0.0\nservers:\ntags:\n- name: x\npaths:\n  /a:\n    get: {}\n";
+        let lines: Vec<&str> = empty.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!((servers.declared, servers.read), (true, 0));
+        assert_eq!(scan_openapi(empty)[0].path, "/a");
+    }
+
+    #[test]
+    fn flow_servers_set_base() {
+        // GD.16: `servers: [{url: ..}]`, on one line or spanning lines, a
+        // `- {url: ..}` item, and flow `variables: {..}` mappings.
+        let one = "openapi: 3.0.0\nservers: [{url: /v2}]\npaths:\n  /b:\n    get: {}\n";
+        let lines: Vec<&str> = one.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(servers.bases, ["/v2"]);
+        assert_eq!((servers.read, servers.block0, servers.flow), (1, 0, 1));
+        assert_eq!(scan_openapi(one)[0].path, "/v2/b");
+        let spanning = r#"openapi: 3.0.0
+servers: [ # the deployments
+  {url: "https://{host}/{v}", variables: {host: {default: a.example.com}, v: {default: v3}}},
+  {url: 'https://b.example.com/other/'}
+]
+paths:
+  /x:
+    get: {}
+"#;
+        let lines: Vec<&str> = spanning.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(servers.bases, ["/v3", "/other"]);
+        assert_eq!((servers.read, servers.flow), (2, 2));
+        assert_eq!((servers.templated, servers.expanded), (1, 1));
+        assert_eq!(scan_openapi(spanning)[0].path, "/v3/x");
+        let items = r#"openapi: 3.0.0
+servers:
+  - {url: /v4}
+  - url: https://c.example.com/{root}
+    variables: {root: {default: api}}
+  - url: "{base}"
+    variables:
+      base: {default: /nested}
+paths:
+  /y:
+    get: {}
+"#;
+        let lines: Vec<&str> = items.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(servers.bases, ["/v4", "/api", "/nested"]);
+        assert_eq!((servers.read, servers.block0, servers.flow), (3, 0, 3));
+        assert_eq!((servers.templated, servers.expanded), (2, 2));
+        // A flow sequence that never closes, and an empty one, read nothing.
+        for broken in [
+            "openapi: 3.0.0\nservers: [{url: /v5}\npaths:\n  /z:\n    get: {}\n",
+            "openapi: 3.0.0\nservers: []\npaths:\n  /z:\n    get: {}\n",
+        ] {
+            let lines: Vec<&str> = broken.lines().collect();
+            let servers = server_bases_yaml(&lines);
+            assert_eq!((servers.declared, servers.read), (true, 0), "{broken}");
+            assert_eq!(scan_openapi(broken)[0].path, "/z");
+        }
     }
 
     #[test]
