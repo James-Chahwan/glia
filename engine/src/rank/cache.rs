@@ -89,7 +89,9 @@ pub struct RankCacheStats {
 /// What a guard reset clears.
 #[derive(Default)]
 struct Slots {
-    indexes: Vec<(SourceKey, Arc<PprIndex>)>,
+    /// Each index with the config it was built under (an adopted entry is
+    /// deduplicated by [`PprIndex::matches`] on that config).
+    indexes: Vec<(SourceKey, ActivationConfig, Arc<PprIndex>)>,
     carry: Option<Arc<Adjacency>>,
     /// The candidate file space (EA.3).
     files: Option<Arc<FileIndex>>,
@@ -155,8 +157,8 @@ impl RankCache {
             slots
                 .indexes
                 .iter()
-                .find(|(s, ix)| *s == source && ix.matches(config))
-                .map(|(_, ix)| Arc::clone(ix))
+                .find(|(s, _, ix)| *s == source && ix.matches(config))
+                .map(|(_, _, ix)| Arc::clone(ix))
         };
         if let Some(ix) = held {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -175,12 +177,14 @@ impl RankCache {
             let raced = slots
                 .indexes
                 .iter()
-                .find(|(s, ix)| *s == source && ix.matches(config))
-                .map(|(_, ix)| Arc::clone(ix));
+                .find(|(s, _, ix)| *s == source && ix.matches(config))
+                .map(|(_, _, ix)| Arc::clone(ix));
             let ix = match raced {
                 Some(first) => first,
                 None => {
-                    slots.indexes.push((source, Arc::clone(&built)));
+                    slots
+                        .indexes
+                        .push((source, config.clone(), Arc::clone(&built)));
                     while slots.indexes.len() > MAX_INDEXES {
                         slots.indexes.remove(0);
                     }
@@ -358,6 +362,66 @@ impl RankCache {
             }
             Some(_) => {}
         }
+    }
+
+    /// Take `other`'s graph-only entries into this cache (GP.6, the EG.7 seam
+    /// pattern): every PPR index this cache does not hold yet (by
+    /// [`SourceKey`] and [`PprIndex::matches`], in `other`'s insertion order,
+    /// the cap of 8 still evicting the oldest), the carry adjacency, and the
+    /// file index when both caches have the same repo labels. Never the
+    /// co-change index or the calibration record, which are per holder. Both
+    /// caches must have been guarded over graphs of one (nodes, edges) shape,
+    /// else nothing moves; the caller vouches that it is the same graph, as an
+    /// index is a pure function of the graph and its dials, so a shared one
+    /// ranks bit for bit as a rebuilt one. Returns the indexes taken.
+    ///
+    /// rank_eval's ANS rankers build one transient cache per query (each with
+    /// its test commit's co-change) and pool the indexes through this, so the
+    /// replay builds each index about once instead of once per query.
+    #[doc(hidden)]
+    pub fn adopt_indexes_of(&self, other: &RankCache) -> usize {
+        if std::ptr::eq(self, other) {
+            return 0;
+        }
+        let same_shape = {
+            let mine = *lock(&self.shape);
+            let theirs = *lock(&other.shape);
+            mine.is_some() && mine == theirs
+        };
+        if !same_shape {
+            return 0;
+        }
+        let (indexes, carry, files) = {
+            let theirs = lock(&other.slots);
+            (
+                theirs.indexes.clone(),
+                theirs.carry.clone(),
+                theirs.files.clone(),
+            )
+        };
+        let same_files = self.labels == other.labels;
+        let mut slots = lock(&self.slots);
+        let mut taken = 0;
+        for (source, config, ix) in indexes {
+            let held = slots
+                .indexes
+                .iter()
+                .any(|(s, _, mine)| *s == source && mine.matches(&config));
+            if !held {
+                slots.indexes.push((source, config, ix));
+                taken += 1;
+                while slots.indexes.len() > MAX_INDEXES {
+                    slots.indexes.remove(0);
+                }
+            }
+        }
+        if slots.carry.is_none() {
+            slots.carry = carry;
+        }
+        if same_files && slots.files.is_none() {
+            slots.files = files;
+        }
+        taken
     }
 
     /// Repo id -> root, as given to [`Self::new`].
@@ -570,6 +634,63 @@ mod tests {
             !Arc::ptr_eq(&adj0, &c.carry(&g1)),
             "the adjacency was dropped too"
         );
+    }
+
+    #[test]
+    fn adopted_indexes_are_shared_and_deduplicated() {
+        let g = merged(0);
+        let (pool, a, b) = (cache(), cache(), cache());
+        for c in [&pool, &a, &b] {
+            c.guard(&g);
+        }
+        let ix = a.ppr_index(&g, SourceKey::Merged, &undirected(0.5));
+        let adj = a.carry(&g);
+        let files = a.files(&g);
+        assert_eq!(pool.adopt_indexes_of(&a), 1);
+        assert_eq!(
+            pool.adopt_indexes_of(&a),
+            0,
+            "a held index is not taken twice"
+        );
+        assert_eq!(b.adopt_indexes_of(&pool), 1);
+        assert!(Arc::ptr_eq(
+            &ix,
+            &b.ppr_index(&g, SourceKey::Merged, &undirected(0.5))
+        ));
+        assert_eq!(b.stats().hits, 1);
+        assert_eq!(b.stats().built, 0);
+        assert!(Arc::ptr_eq(&adj, &b.carry(&g)));
+        assert!(Arc::ptr_eq(&files, &b.files(&g)));
+        // Another view or other dials are a separate entry, built anew.
+        b.ppr_index(&g, SourceKey::Quotient, &undirected(0.5));
+        b.ppr_index(&g, SourceKey::Merged, &undirected(WIDE_DAMPING));
+        assert_eq!(b.stats().built, 2);
+        assert_eq!(pool.adopt_indexes_of(&b), 2);
+        assert_eq!(pool.stats().entries, 3);
+        assert_eq!(pool.adopt_indexes_of(&pool), 0);
+    }
+
+    #[test]
+    fn adoption_needs_one_guarded_shape_and_labels_for_the_file_index() {
+        let (g0, g1) = (merged(0), merged(1));
+        let (a, unguarded, other) = (cache(), cache(), cache());
+        a.guard(&g0);
+        other.guard(&g1);
+        a.ppr_index(&g0, SourceKey::Merged, &undirected(0.5));
+        a.files(&g0);
+        assert_eq!(unguarded.adopt_indexes_of(&a), 0);
+        assert_eq!(
+            other.adopt_indexes_of(&a),
+            0,
+            "another shape adopts nothing"
+        );
+        assert_eq!(other.stats().entries, 0);
+        let labels: BTreeMap<u64, String> = [(1, "x".to_string())].into_iter().collect();
+        let labelled = RankCache::new("answer", &BTreeMap::new(), &labels);
+        labelled.guard(&g0);
+        assert_eq!(labelled.adopt_indexes_of(&a), 1);
+        assert!(lock(&labelled.slots).files.is_none(), "labels differ");
+        assert!(lock(&labelled.slots).cochange.is_none());
     }
 
     #[test]

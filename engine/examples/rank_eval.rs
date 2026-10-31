@@ -1389,6 +1389,11 @@ struct Ctx<'a> {
     doctie_bridged: AtomicU64,
     /// GP.9: seeded queries where the bridge appended a file the walk did not reach.
     doctie_appended: AtomicU64,
+    /// GP.6: the ANS rankers' index pool over `merged` (holder "answer", no roots, no labels,
+    /// guarded): every per-query cache adopts its PPR indexes, carry adjacency and file index
+    /// first (`RankCache::adopt_indexes_of`) and hands back what it built, so the replay builds
+    /// each index about once instead of once per query. It never holds a co-change index.
+    ans_pool: RankCache,
 }
 
 /// The replay's co-change counts at one test commit, strictly older training commits only (the
@@ -1434,12 +1439,23 @@ impl Prefix {
 /// The ANS rankers' RankCache at test commit `tc` (EA.9): the transient cache the answers build
 /// when given none ("answer", no roots, no labels), guarded, then given the commit's prefix
 /// co-change, so the gate scores the shipped co-change path (the `--repo` copy holds no
-/// `.glia/history-snapshot/`). One per call, as the answers' own transient cache is.
+/// `.glia/history-snapshot/`). One per call, as the answers' own transient cache is, but its
+/// graph-only entries (PPR indexes, carry adjacency, file index) come from `ctx.ans_pool` (GP.6):
+/// an index is a pure function of the graph and its dials, so a pooled one ranks bit for bit as
+/// one rebuilt per query. The caller hands what the answers built back with `ans_pool_return`.
 fn ans_cache(ctx: &Ctx, tc: usize) -> Option<Arc<RankCache>> {
     let p = ctx.prefix.get(tc)?;
     let c = RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new());
     c.guard(ctx.merged);
+    c.adopt_indexes_of(&ctx.ans_pool);
     Some(Arc::new(c.with_cochange(p.index(ctx.g.paths.len()))))
+}
+
+/// GP.6: the indexes a per-query ANS cache built, back into `ctx.ans_pool` for the next query.
+fn ans_pool_return(ctx: &Ctx, cache: Option<&Arc<RankCache>>) {
+    if let Some(c) = cache {
+        ctx.ans_pool.adopt_indexes_of(c);
+    }
 }
 
 #[derive(Default)]
@@ -1644,6 +1660,7 @@ fn ans_keys_seed(
     let g = ctx.g;
     let t0 = Instant::now();
     let cache = ans_cache(ctx, tc);
+    let pooled = cache.clone();
     let text = seeds
         .iter()
         .map(|&f| g.paths[f as usize].as_str())
@@ -1718,6 +1735,7 @@ fn ans_keys_seed(
         late.push(("ANS:pack@sel".to_string(), pack_sel));
     }
     late.push(("ANS:impact.files".to_string(), files));
+    ans_pool_return(ctx, pooled.as_ref());
     ctx.ans_ns
         .fetch_add(t0.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
     (
@@ -3346,6 +3364,9 @@ fn ans_intent(
                         .at_rev(&args.git, p.clone());
                 let cache = RankCache::new("answer", &res.repo_roots, &res.repo_labels);
                 cache.guard(merged);
+                // GP.6: the pooled PPR indexes and carry adjacency (the file index stays this
+                // cache's own: its repo labels differ from the pool's).
+                cache.adopt_indexes_of(&ctx.ans_pool);
                 let files = cache.files(merged);
                 let repo = files.repo(0);
                 let co =
@@ -3428,6 +3449,7 @@ fn ans_intent(
                         keys.push((slot, [base, sel]));
                     }
                 }
+                ans_pool_return(ctx, Some(&cache));
             } else {
                 for &slot in &per_tc[o] {
                     keys.push((slot, [none.clone(), none.clone()]));
@@ -5477,6 +5499,11 @@ fn main() {
             HashSet::new()
         },
         ans_ns: AtomicU64::new(0),
+        ans_pool: {
+            let pool = RankCache::new("answer", &BTreeMap::new(), &BTreeMap::new());
+            pool.guard(merged);
+            pool
+        },
         prefix,
         sel,
         doc_ties,
