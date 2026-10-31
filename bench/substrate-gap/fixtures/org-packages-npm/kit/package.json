@@ -1,0 +1,1 @@
+{"name": "@acme/kit", "exports": {".": {"types": "./dist/core.d.ts", "import": "./dist/core.mjs"}, "./utils/*": {"import": "./dist/helpers/*.mjs"}}}

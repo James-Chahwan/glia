@@ -35,7 +35,11 @@
 //! module's IMPORTS edges of EVIDENCE rule `reexport`) is followed one level
 //! at a time, at most 8 levels, and a level naming two distinct
 //! declarations binds nothing (`ambiguous`), as do two Go files of one
-//! package declaring the name. A bound site stays in `unresolved_calls`
+//! package declaring the name. A Rust module's own names are followed by its
+//! `use` bindings (GD.33: `SymbolTable.module_import_bindings`, persisted,
+//! the chain rust_paths resolved inside the crate): `pub use inner::greet`
+//! in the crate root binds `greet`, `pub use inner::greet as hi` binds `hi`,
+//! one hop, a target inside the crate's `src` dir only. A bound site stays in `unresolved_calls`
 //! (the language build did not bind it; the cross edge is the binding), so
 //! each per-repo graph is unchanged and a layout merge re-running this pass
 //! over the union draws exactly the joint build's edges.
@@ -63,17 +67,19 @@
 //! another name); a row matching neither routes nothing and is not counted.
 //!
 //! **The target.** npm: the entry the sibling's `package.json` declares,
-//! recorded on its PROJECT's ORIGIN cell by the walk (`entry`: `exports`
-//! when it is a string or its `"."` entry is one, else `main`; `subpaths`:
-//! an `exports` map's string `"./x"` entries, for `name/x`), mapped back to
-//! source (`dist/index.js` -> `src/index.ts`); else by convention: `name`
+//! recorded on its PROJECT's ORIGIN cell by the walk as FH.5's workspace
+//! reader reads it (`entry`: the `exports` `"."` target, conditions and
+//! nested conditions followed, else `module`, `types`, then `main`;
+//! `subpaths`: an `exports` map's `"./x"` entries, for `name/x`), mapped
+//! back to source (`dist/index.js` -> `src/index.ts`); a `"./x/*"` pattern
+//! key is recorded as its source pattern (`<root>/src/helpers/*`) and
+//! `name/x/y` takes the exact key, else the longest-prefix pattern with
+//! `y` substituted (GD.33); else by convention: `name`
 //! routes to `<root>/index`, else `<root>/src/index`; `name/sub/path` to
 //! `<root>/sub/path`, `<root>/sub/path/index`, `<root>/src/sub/path`, then
 //! `<root>/src/sub/path/index` - each a TS / JS file MODULE of the project's
 //! repo, matched by its file path without the extension (two files of one
-//! stem: the least path). Conditional `exports` objects, `module` and
-//! `types` are not read: such a package routes by the convention or stays
-//! `unrouted`. Go: `modpath/sub` is the package directory `<root>/sub`,
+//! stem: the least path). Go: `modpath/sub` is the package directory `<root>/sub`,
 //! bound as `resolve_imports_go` binds an in-repo package directory
 //! (`GoPackages::import_target`): the file named after the directory, else
 //! the first non-test file by stem, else the first test file; one edge per
@@ -556,7 +562,8 @@ impl Modules {
     }
 
     /// The npm module `name[/sub]` names in `project` (the module docs'
-    /// order: the recorded entry, then the convention), with its file.
+    /// order: the recorded entry or exact subpath, else the longest-prefix
+    /// `*` subpath pattern, then the convention), with its file.
     fn npm_target(&self, project: &Project, sub: &str) -> Option<(NodeId, String)> {
         let (repo, root) = (project.repo, project.root.as_str());
         let declared = if sub.is_empty() {
@@ -572,6 +579,12 @@ impl Modules {
         if let Some(hit) = declared.and_then(|f| self.file(repo, &f)) {
             return Some(hit);
         }
+        if let Some(hit) = (!sub.is_empty())
+            .then(|| self.npm_pattern(project, sub))
+            .flatten()
+        {
+            return Some(hit);
+        }
         let candidates: Vec<String> = if sub.is_empty() {
             vec![join(root, "index"), join(root, "src/index")]
         } else {
@@ -585,6 +598,35 @@ impl Modules {
             ]
         };
         self.first(repo, Eco::Npm, &candidates)
+    }
+
+    /// GD.33: the module `name/sub` names through `project`'s longest-prefix
+    /// `*` subpath pattern (`"./utils/*"` recorded as `lib/src/helpers/*`):
+    /// the `*` text of `./sub` substituted into the pattern's source path, a
+    /// TS / JS file MODULE by stem, then `<stem>/index`; a pattern recorded
+    /// as one file (its target held no `*`) is that file. Two patterns of
+    /// one prefix length: the first by key.
+    fn npm_pattern(&self, project: &Project, sub: &str) -> Option<(NodeId, String)> {
+        let key = format!("./{sub}");
+        let (_, target) = project
+            .subpaths
+            .iter()
+            .filter_map(|(k, f)| {
+                let (prefix, suffix) = k.split_once('*')?;
+                let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                Some((prefix.len(), f.replacen('*', star, 1)))
+            })
+            .fold(None, |best: Option<(usize, String)>, (len, t)| match best {
+                Some((b, _)) if b >= len => best,
+                _ => Some((len, t)),
+            })?;
+        self.file(project.repo, &target).or_else(|| {
+            self.first(
+                project.repo,
+                Eco::Npm,
+                &[target.clone(), format!("{target}/index")],
+            )
+        })
     }
 
     /// The crate module `sub` (`/`-joined path segments, `""` the crate
@@ -780,8 +822,9 @@ enum Binding {
     /// A symbol import: the sibling declaration it names.
     Decl(NodeId),
     /// A whole-module import (or a submodule named by a symbol import): the
-    /// modules whose top-level declarations `name.f` reaches.
-    Scope(Vec<NodeId>),
+    /// modules whose top-level declarations `name.f` reaches, and (cargo)
+    /// the crate's `src` dir their `pub use` re-exports must stay inside.
+    Scope(Vec<NodeId>, Option<String>),
     /// Two declarations answer the name: binds nothing, counted.
     Ambiguous,
     /// Two rows bind the name to different targets: binds nothing.
@@ -818,22 +861,49 @@ enum Lookup {
     Missing,
 }
 
-/// The top-level declarations of the target repos' modules and the TS
-/// barrels' re-export edges (DT.1q), read from persisted structure only.
+/// The top-level declarations of the target repos' modules, the TS
+/// barrels' re-export edges (DT.1q) and the Rust modules' `use` bindings
+/// (GD.33), read from persisted structure only.
 struct Decls<'a> {
     /// module -> (name -> declaration).
     symbols: HashMap<NodeId, &'a HashMap<String, NodeId>>,
     /// barrel module -> the modules it re-exports from, in edge order.
     reexports: HashMap<NodeId, Vec<NodeId>>,
+    /// Rust file MODULE -> (bound name -> target) of its `use`s
+    /// (`module_import_bindings`, rust_paths' finished re-export chains).
+    uses: HashMap<NodeId, &'a HashMap<String, NodeId>>,
+    /// The file of each `use` binding's target.
+    use_files: HashMap<NodeId, String>,
 }
 
 impl<'a> Decls<'a> {
     fn of(graphs: &'a [RepoGraph], repos: &BTreeSet<u64>) -> Self {
         let mut symbols = HashMap::new();
         let mut reexports: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut uses: HashMap<NodeId, &'a HashMap<String, NodeId>> = HashMap::new();
+        let mut use_files: HashMap<NodeId, String> = HashMap::new();
         for g in graphs.iter().filter(|g| repos.contains(&g.repo.0)) {
             for (m, names) in &g.symbols.module_symbols {
                 symbols.entry(*m).or_insert(names);
+            }
+            let rust_modules: HashSet<NodeId> = g
+                .nodes
+                .iter()
+                .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+                .filter(|n| node_ext(&n.cells).as_deref() == Some("rs"))
+                .map(|n| n.id)
+                .collect();
+            let mut targets: HashSet<NodeId> = HashSet::new();
+            for (m, names) in &g.symbols.module_import_bindings {
+                if rust_modules.contains(m) {
+                    uses.entry(*m).or_insert(names);
+                    targets.extend(names.values().copied());
+                }
+            }
+            for n in g.nodes.iter().filter(|n| targets.contains(&n.id)) {
+                if let Some((file, _)) = evidence::locate(&n.cells) {
+                    use_files.entry(n.id).or_insert(file);
+                }
             }
             for e in g
                 .edges
@@ -845,7 +915,12 @@ impl<'a> Decls<'a> {
                 }
             }
         }
-        Self { symbols, reexports }
+        Self {
+            symbols,
+            reexports,
+            uses,
+            use_files,
+        }
     }
 
     /// The distinct declarations `name` names among `modules`' own
@@ -860,9 +935,10 @@ impl<'a> Decls<'a> {
 
     /// The declaration `name` names in `scope`: its modules' own top-level
     /// names, then (npm) the modules they re-export from, one level at a
-    /// time up to [`REEXPORT_DEPTH`]; two distinct declarations on the first
-    /// level naming any is [`Lookup::Ambiguous`].
-    fn lookup(&self, eco: Eco, scope: &[NodeId], name: &str) -> Lookup {
+    /// time up to [`REEXPORT_DEPTH`], or (cargo, `krate` the crate's `src`
+    /// dir) their `use` bindings ([`Decls::used`]); two distinct
+    /// declarations on the first level naming any is [`Lookup::Ambiguous`].
+    fn lookup(&self, eco: Eco, scope: &[NodeId], name: &str, krate: Option<&str>) -> Lookup {
         let mut level: Vec<NodeId> = scope.to_vec();
         let mut seen: HashSet<NodeId> = level.iter().copied().collect();
         for depth in 0..=REEXPORT_DEPTH {
@@ -875,6 +951,9 @@ impl<'a> Decls<'a> {
                         .map_or(Lookup::Missing, |d| Lookup::Found(NodeId(*d)));
                 }
                 _ => return Lookup::Ambiguous,
+            }
+            if eco == Eco::Cargo && depth == 0 {
+                return krate.map_or(Lookup::Missing, |k| self.used(scope, name, k));
             }
             if eco != Eco::Npm || depth == REEXPORT_DEPTH {
                 break;
@@ -891,6 +970,31 @@ impl<'a> Decls<'a> {
             }
         }
         Lookup::Missing
+    }
+}
+
+impl Decls<'_> {
+    /// GD.33: what `scope`'s Rust `use` bindings bind `name` to (a `pub use
+    /// inner::greet` re-export, or `pub use inner::greet as hi` binding
+    /// `hi`), one hop: rust_paths already followed the chain inside the
+    /// crate. A target whose file lies outside the crate's `src` dir `krate`
+    /// (another workspace crate's item) binds nothing; two distinct targets
+    /// are [`Lookup::Ambiguous`].
+    fn used(&self, scope: &[NodeId], name: &str, krate: &str) -> Lookup {
+        let inside = |file: &str| file.strip_prefix(krate).is_some_and(|r| r.starts_with('/'));
+        let found: BTreeSet<u64> = scope
+            .iter()
+            .filter_map(|m| self.uses.get(m)?.get(name))
+            .filter(|t| self.use_files.get(t).is_some_and(|f| inside(f)))
+            .map(|t| t.0)
+            .collect();
+        match found.len() {
+            0 => Lookup::Missing,
+            1 => found
+                .first()
+                .map_or(Lookup::Missing, |d| Lookup::Found(NodeId(*d))),
+            _ => Lookup::Ambiguous,
+        }
     }
 }
 
@@ -920,7 +1024,9 @@ fn resolve_site(b: &Bindings, q: &CallQualifier, decls: &Decls) -> Lookup {
             _ => Lookup::Missing,
         },
         CallQualifier::Attribute { base, name } => match b.names.get(base) {
-            Some(Binding::Scope(scope)) => decls.lookup(b.eco, scope, name),
+            Some(Binding::Scope(scope, krate)) => {
+                decls.lookup(b.eco, scope, name, krate.as_deref())
+            }
             Some(Binding::Ambiguous) => Lookup::Ambiguous,
             _ => Lookup::Missing,
         },
@@ -1095,11 +1201,12 @@ fn bind_row(
     decls: &Decls,
 ) {
     let (eco, project, sub, importer) = (cx.eco, cx.project, cx.sub, cx.importer);
+    let krate = (eco == Eco::Cargo).then(|| join(&project.root, "src"));
     match &row.name {
         Some(name) if name == "*" || name == "default" => {}
         Some(name) => {
             let local = row.alias.clone().unwrap_or_else(|| name.clone());
-            let binding = match decls.lookup(eco, &routed.scope, name) {
+            let binding = match decls.lookup(eco, &routed.scope, name, krate.as_deref()) {
                 Lookup::Found(d) => Some(Binding::Decl(d)),
                 Lookup::Ambiguous => Some(Binding::Ambiguous),
                 Lookup::Missing => {
@@ -1110,7 +1217,7 @@ fn bind_row(
                         Eco::Npm | Eco::Go => None,
                     }
                     .filter(|t| t.0 != importer)
-                    .map(|t| Binding::Scope(vec![t.0]))
+                    .map(|t| Binding::Scope(vec![t.0], krate.clone()))
                 }
             };
             if let Some(binding) = binding {
@@ -1119,7 +1226,7 @@ fn bind_row(
         }
         None => {
             if let Some(alias) = &row.alias {
-                b.bind(alias.clone(), Binding::Scope(routed.scope.clone()));
+                b.bind(alias.clone(), Binding::Scope(routed.scope.clone(), krate));
                 return;
             }
             let Some(local) = import_default_binding(&row.spec, eco.lang()) else {
@@ -1136,7 +1243,7 @@ fn bind_row(
                 }
                 _ => routed.scope.clone(),
             };
-            b.bind(local, Binding::Scope(scope));
+            b.bind(local, Binding::Scope(scope, krate));
         }
     }
 }
@@ -1479,6 +1586,168 @@ mod tests {
         let (edges, report) = org_edges(&[app.build()], &[]);
         assert!(edges.is_empty());
         assert!(report.line().is_none());
+    }
+
+    /// An npm sibling at `lib` recording `origin_extra` on its ORIGIN, and
+    /// app's `main.ts` importing it through `rows`.
+    fn npm_pair(rows: &str, origin_extra: &str, lib_files: &[&str]) -> (Vec<RepoGraph>, Vec<Edge>) {
+        let mut app = G::new("app");
+        app.module("main.ts", Some(rows));
+        let d = app.dep("package:npm:@acme/lib");
+        let mut lib = G::new("lib");
+        for f in lib_files {
+            lib.module(f, None);
+        }
+        let origin = format!(
+            r#"{{"ecosystem":"npm","label":"@acme/lib","label_source":"manifest","path":"lib","provenance":"project_root"{origin_extra}}}"#
+        );
+        let p = lib.add(
+            node_kind::PROJECT,
+            "project:lib",
+            vec![json(cell_type::ORIGIN, &origin)],
+        );
+        (vec![app.build(), lib.build()], vec![same_as(p, d)])
+    }
+
+    #[test]
+    fn npm_star_subpath_routes_by_longest_prefix() {
+        let (graphs, cross) = npm_pair(
+            r#"[{"spec":"@acme/lib","name":"hello","alias":null,"line":0},{"spec":"@acme/lib/utils/slug","name":"slugify","alias":null,"line":1},{"spec":"@acme/lib/utils/deep/x","name":"x","alias":null,"line":2},{"spec":"@acme/lib/other/q","name":"q","alias":null,"line":3}]"#,
+            r#","entry":"lib/src/main.ts","subpaths":{"./utils/*":"lib/src/helpers/*","./utils/deep/*":"lib/src/deep/*"}"#,
+            &[
+                "lib/src/main.ts",
+                "lib/src/helpers/slug.ts",
+                "lib/src/deep/x/index.ts",
+                "lib/src/helpers/deep/x.ts",
+            ],
+        );
+        let (edges, report) = org_edges(&graphs, &cross);
+        assert_eq!(
+            rows(&graphs, &edges),
+            [
+                ("main.ts", "lib/src/deep/x/index.ts", "org_import", 2),
+                ("main.ts", "lib/src/helpers/slug.ts", "org_import", 1),
+                ("main.ts", "lib/src/main.ts", "org_import", 0),
+            ]
+            .map(|(a, b, r, l)| (a.to_string(), b.to_string(), r.to_string(), l))
+        );
+        assert_eq!(
+            report.line().unwrap(),
+            "[org-packages] classes=1 importers=1 rows=4 routed=3 unrouted=1 (npm=3 go=0 cargo=0 pypi=0)"
+        );
+    }
+
+    /// app (`use acme_lib::{..}` rows) and the crate `acme-lib` at `lib`
+    /// whose root binds `uses` (`(name, target qname)`), app's `run` calling
+    /// `calls` unresolved.
+    fn cargo_pair(
+        rows: &str,
+        uses: &[(&str, &str)],
+        calls: &[&str],
+    ) -> (Vec<RepoGraph>, Vec<Edge>, NodeId) {
+        let mut app = G::new("app");
+        let main = app.module("app/src/lib.rs", Some(rows));
+        let run = app.add(node_kind::FUNCTION, "app::src::lib::run", vec![]);
+        app.nav.parent_of.insert(run, main);
+        let d = app.dep("package:cargo:acme-lib");
+        let mut lib = G::new("lib");
+        let root = lib.module("lib/src/lib.rs", None);
+        lib.module("lib/src/inner.rs", None);
+        lib.module("other/src/lib.rs", None);
+        let pos = |file: &str| {
+            json(
+                cell_type::POSITION,
+                &format!(r#"{{"file":"{file}","start_line":1,"end_line":1}}"#),
+            )
+        };
+        let greet = lib.add(
+            node_kind::FUNCTION,
+            "lib::src::inner::greet",
+            vec![pos("lib/src/inner.rs")],
+        );
+        let far = lib.add(
+            node_kind::FUNCTION,
+            "other::src::lib::far",
+            vec![pos("other/src/lib.rs")],
+        );
+        let direct = lib.add(
+            node_kind::FUNCTION,
+            "lib::src::lib::direct",
+            vec![pos("lib/src/lib.rs")],
+        );
+        let p = lib.project("lib", "cargo", "acme-lib");
+        let mut lib = lib.build();
+        lib.symbols
+            .module_symbols
+            .insert(root, HashMap::from([("direct".to_string(), direct)]));
+        let by_q = |q: &str| {
+            [greet, far]
+                .into_iter()
+                .find(|id| lib.nav.qname_by_id.get(id).map(String::as_str) == Some(q))
+        };
+        let bound: HashMap<String, NodeId> = uses
+            .iter()
+            .filter_map(|(n, q)| Some((n.to_string(), by_q(q)?)))
+            .collect();
+        lib.symbols.module_import_bindings.insert(root, bound);
+        let mut app = app.build();
+        for c in calls {
+            app.unresolved_calls.push(glia_code_domain::CallSite {
+                from: run,
+                qualifier: CallQualifier::Bare(c.to_string()),
+                line: 3,
+            });
+        }
+        (vec![app, lib], vec![same_as(p, d)], run)
+    }
+
+    /// The (from qname, to qname, rule) of every CALLS edge.
+    fn calls(graphs: &[RepoGraph], edges: &[Edge]) -> Vec<(String, String, String)> {
+        let q = |id: NodeId| {
+            graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+                .unwrap_or_default()
+        };
+        edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS)
+            .map(|e| (q(e.from), q(e.to), Evidence::of(e).unwrap().rule.unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn cargo_pub_use_reexport_binds_inside_the_crate_only() {
+        let (graphs, cross, _) = cargo_pair(
+            r#"[{"spec":"acme_lib","name":"greet","alias":null,"line":0},{"spec":"acme_lib","name":"hi","alias":null,"line":0},{"spec":"acme_lib","name":"direct","alias":null,"line":0},{"spec":"acme_lib","name":"far","alias":null,"line":0}]"#,
+            &[
+                ("greet", "lib::src::inner::greet"),
+                ("hi", "lib::src::inner::greet"),
+                ("far", "other::src::lib::far"),
+            ],
+            &["greet", "hi", "direct", "far"],
+        );
+        let (edges, report) = org_edges(&graphs, &cross);
+        let run = "app::src::lib::run".to_string();
+        assert_eq!(
+            calls(&graphs, &edges),
+            [
+                (
+                    run.clone(),
+                    "lib::src::inner::greet".to_string(),
+                    "org_call".to_string()
+                ),
+                (
+                    run,
+                    "lib::src::lib::direct".to_string(),
+                    "org_call".to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            report.calls_line().unwrap(),
+            "[org-packages] calls bound=2 refs bound=0 ambiguous=0 (npm=0 go=0 cargo=2 pypi=0)"
+        );
     }
 
     #[test]

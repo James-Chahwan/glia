@@ -1,1 +1,1 @@
-{"name": "app", "dependencies": {"@acme/lib": "1.0.0"}}
+{"name": "app", "dependencies": {"@acme/lib": "1.0.0", "@acme/kit": "1.0.0"}}

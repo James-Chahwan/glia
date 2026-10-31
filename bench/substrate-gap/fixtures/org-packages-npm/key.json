@@ -1,11 +1,15 @@
 {
   "framework": "org-packages",
   "language": "typescript",
-  "dirs": ["app", "lib"],
-  "note": "FA.22: org-internal package routing over the manifest_name SAME_AS class. app declares @acme/lib, the package lib's manifest names, so app's `import { greet } from '@acme/lib'` routes to lib's entry module (src/index, by convention) as an IMPORTS cross edge, resolver:org_packages rule org_import. Baseline HEAD 18ca1151: only the SAME_AS star, no IMPORTS edge between the repos. FA.23 adds the run -> greet CALLS row (org_call).",
+  "dirs": ["app", "lib", "kit"],
+  "note": "FA.22: org-internal package routing over the manifest_name SAME_AS class. app declares @acme/lib, the package lib's manifest names, so app's `import { greet } from '@acme/lib'` routes to lib's entry module (src/index, by convention) as an IMPORTS cross edge, resolver:org_packages rule org_import. Baseline HEAD 18ca1151: only the SAME_AS star, no IMPORTS edge between the repos. FA.23 adds the run -> greet CALLS row (org_call). GD.33 adds kit, whose package.json declares only a conditional `exports` object (`\".\": {types, import}` under dist/) and a `./utils/*` pattern: the walk records its entry (src/core.ts) and the pattern's source (src/helpers/*) on kit's PROJECT ORIGIN, so app's `import { hello } from '@acme/kit'` and `import { slugify } from '@acme/kit/utils/slug'` route there (org_import) and label's calls bind (org_call). Baseline HEAD 326242e2 (probe npm3): `[org-packages] .. rows=2 routed=0 unrouted=2`, no kit edge.",
   "expect_edges": [
     {"from": "main", "to": "index", "category": "IMPORTS", "note": "org_import"},
-    {"from": "run", "to": "greet", "category": "CALLS", "note": "org_call (FA.23)"}
+    {"from": "run", "to": "greet", "category": "CALLS", "note": "org_call (FA.23)"},
+    {"from": "tag", "to": "core", "category": "IMPORTS", "note": "org_import through the conditional `.` entry (GD.33)"},
+    {"from": "tag", "to": "slug", "category": "IMPORTS", "note": "org_import through the `./utils/*` pattern (GD.33)"},
+    {"from": "label", "to": "hello", "category": "CALLS", "note": "org_call (GD.33)"},
+    {"from": "label", "to": "slugify", "category": "CALLS", "note": "org_call through the pattern subpath (GD.33)"}
   ],
   "forbid": [
     {"from": "run", "to": "main", "category": "CALLS", "note": "no self-binding"}

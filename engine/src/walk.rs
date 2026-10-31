@@ -1473,11 +1473,65 @@ fn package_entry(
     manifest: &serde_json::Value,
     dot: Option<&str>,
 ) -> Option<String> {
+    declared_entry(root, dir, manifest, dot).or_else(|| {
+        ["src/index", "index"]
+            .into_iter()
+            .find_map(|target| package_file(root, dir, target))
+    })
+}
+
+/// FH.5 / GD.33: the entry the manifest of the package at `dir` declares:
+/// the first of the `exports` `.` target (`dot`), `module`, `types` and
+/// `main` that names an existing source file ([`package_file`]); the
+/// `src/index` / `index` convention is [`package_entry`]'s alone.
+fn declared_entry(
+    root: &Path,
+    dir: &str,
+    manifest: &serde_json::Value,
+    dot: Option<&str>,
+) -> Option<String> {
     let field = |k: &str| manifest.get(k).and_then(serde_json::Value::as_str);
     dot.into_iter()
         .chain(["module", "types", "main"].into_iter().filter_map(field))
-        .chain(["src/index", "index"])
         .find_map(|target| package_file(root, dir, target))
+}
+
+/// GD.33: the repo-relative source pattern an `exports` subpath pattern's
+/// target (`./dist/helpers/*.mjs`) names in the package at `dir`, the `*`
+/// kept: its extension dropped ([`source_stem`]), and a target under an
+/// [`OUTPUT_DIRS`] dir tried as its source counterpart first (`src/helpers/*`,
+/// then `helpers/*`), then the stem itself. A candidate is kept when the
+/// directory before its `*` exists; none existing, or a target climbing out
+/// of the package, names nothing.
+fn package_pattern(root: &Path, dir: &str, target: &str) -> Option<String> {
+    let rel = target.trim().trim_start_matches("./");
+    if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|s| s == "..") {
+        return None;
+    }
+    let stem = source_stem(rel);
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some((first, rest)) = stem.split_once('/')
+        && OUTPUT_DIRS.contains(&first)
+    {
+        candidates.push(format!("src/{rest}"));
+        candidates.push(rest.to_string());
+    }
+    candidates.push(stem.to_string());
+    let base = root.join(dir);
+    candidates
+        .into_iter()
+        .find(|c| {
+            let before = c.split('*').next().unwrap_or_default();
+            let parent = before.rsplit_once('/').map_or("", |(p, _)| p);
+            base.join(parent).is_dir()
+        })
+        .map(|c| {
+            if dir.is_empty() {
+                c
+            } else {
+                format!("{dir}/{c}")
+            }
+        })
 }
 
 /// FH.5: the repo-relative source file a package target (`./dist/index.js`,
@@ -1522,16 +1576,22 @@ pub(crate) fn package_file(root: &Path, dir: &str, target: &str) -> Option<Strin
     probe(stem).map(|p| join(&p))
 }
 
-/// FA.23: the declared entry points of each npm PROJECT of a project graph
-/// ([`build_project_graph`], in `roots` order), recorded on its ORIGIN cell
-/// so a pass after the build (org routing, `resolver:org_packages`) and a
-/// layout merge read them without the manifest: `entry`, the source file
-/// `exports` names when it is a string or its `"."` entry is one, else
-/// `main`; `subpaths`, each `"./x"` entry of an `exports` map whose target is
-/// a string. Each target is mapped to the repo-relative source file
-/// [`package_file`] finds (`dist/index.js` -> `src/index.ts`); a target
-/// naming no file, a conditions object and a non-npm root record nothing,
-/// and a PROJECT with nothing to record keeps its ORIGIN byte for byte.
+/// FA.23, GD.33: the declared entry points of each npm PROJECT of a project
+/// graph ([`build_project_graph`], in `roots` order), recorded on its ORIGIN
+/// cell so a pass after the build (org routing, `resolver:org_packages`) and
+/// a layout merge read them without the manifest. Read as FH.5's workspace
+/// reader reads them ([`exports_of`], conditions and nested conditions
+/// followed): `entry`, the manifest's declared entry ([`declared_entry`]:
+/// the `exports` `"."` target, `module`, `types`, then `main`; never the
+/// `src/index` convention, which routing applies itself); `subpaths`, each
+/// `"./x"` entry of an `exports` map. Each target is mapped to the
+/// repo-relative source file [`package_file`] finds (`dist/index.js` ->
+/// `src/index.ts`, a `.d.ts` to its source); a `*` pattern key whose target
+/// holds a `*` keeps its source pattern ([`package_pattern`]:
+/// `"./utils/*": "lib/src/helpers/*"`, no extension), which routing fills
+/// with the import's `*` text. A target naming no file and a non-npm root
+/// record nothing, and a PROJECT with nothing to record keeps its ORIGIN
+/// byte for byte.
 pub(crate) fn stamp_npm_entries(g: &mut glia_graph::RepoGraph, root: &Path, roots: &[ProjectRoot]) {
     use glia_code_domain::cell_type;
     use glia_core::CellPayload;
@@ -1546,21 +1606,18 @@ pub(crate) fn stamp_npm_entries(g: &mut glia_graph::RepoGraph, root: &Path, root
         else {
             continue;
         };
-        fn string(v: &serde_json::Value) -> Option<&str> {
-            v.as_str().map(str::trim).filter(|s| !s.is_empty())
-        }
-        let exports = manifest.get("exports");
-        let dot = exports.and_then(|e| string(e).or_else(|| e.get(".").and_then(string)));
-        let file = |t: &str| package_file(root, &r.rel_path, t);
-        let entry = dot
-            .and_then(file)
-            .or_else(|| manifest.get("main").and_then(string).and_then(file));
-        let subpaths: serde_json::Map<String, serde_json::Value> = exports
-            .and_then(serde_json::Value::as_object)
+        let (dot, exported) = manifest.get("exports").map(exports_of).unwrap_or_default();
+        let entry = declared_entry(root, &r.rel_path, &manifest, dot.as_deref());
+        let subpaths: serde_json::Map<String, serde_json::Value> = exported
             .into_iter()
-            .flatten()
-            .filter(|(k, _)| k.starts_with("./") && !k.contains('*'))
-            .filter_map(|(k, v)| Some((k.clone(), string(v).and_then(file)?.into())))
+            .filter_map(|(k, t)| {
+                let file = if k.contains('*') && t.contains('*') {
+                    package_pattern(root, &r.rel_path, &t)
+                } else {
+                    package_file(root, &r.rel_path, &t)
+                };
+                Some((k, file?.into()))
+            })
             .collect();
         if entry.is_none() && subpaths.is_empty() {
             continue;
@@ -3851,5 +3908,115 @@ mod workspace_tests {
             ["@shop/money", "admin", "mono"],
             "a `!` glob excludes; a package under no workspace root is kept"
         );
+    }
+}
+
+#[cfg(test)]
+mod npm_entry_tests {
+    use super::*;
+
+    /// The ORIGIN JSON `stamp_npm_entries` leaves on the one npm PROJECT at
+    /// `pkg` of a scratch tree holding `files`.
+    fn origin_of(files: &[(&str, &str)]) -> serde_json::Value {
+        let tmp = tempfile::tempdir().unwrap();
+        for (rel, text) in files {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        let roots = [ProjectRoot::new(
+            "pkg".to_string(),
+            "npm",
+            "package.json",
+            None,
+        )];
+        let mut g = build_project_graph(&roots, RepoId(7));
+        stamp_npm_entries(&mut g, tmp.path(), &roots);
+        let cell = g.nodes[0]
+            .cells
+            .iter()
+            .find(|c| c.kind == glia_code_domain::cell_type::ORIGIN)
+            .unwrap();
+        let glia_core::CellPayload::Json(text) = &cell.payload else {
+            panic!("ORIGIN is JSON");
+        };
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn conditions_object_records_the_entry_and_star_pattern() {
+        let o = origin_of(&[
+            (
+                "pkg/package.json",
+                r#"{"name":"@acme/lib","exports":{".":{"types":"./dist/main.d.ts","import":"./dist/main.mjs"},"./utils/*":{"import":"./dist/helpers/*.mjs"}}}"#,
+            ),
+            ("pkg/src/main.ts", "export function hello() {}\n"),
+            ("pkg/src/helpers/slug.ts", "export function slugify() {}\n"),
+        ]);
+        assert_eq!(o["entry"], "pkg/src/main.ts");
+        assert_eq!(o["subpaths"]["./utils/*"], "pkg/src/helpers/*");
+    }
+
+    #[test]
+    fn nested_conditions_are_followed() {
+        let o = origin_of(&[
+            (
+                "pkg/package.json",
+                r#"{"name":"n","exports":{"node":{"import":{"default":"./dist/core.mjs"}},"browser":"./x.js"}}"#,
+            ),
+            ("pkg/src/core.ts", "export const a = 1;\n"),
+        ]);
+        assert_eq!(o["entry"], "pkg/src/core.ts");
+        assert!(o.get("subpaths").is_none());
+    }
+
+    #[test]
+    fn module_field_alone_names_the_entry() {
+        let o = origin_of(&[
+            (
+                "pkg/package.json",
+                r#"{"name":"m","module":"./dist/esm/main.js"}"#,
+            ),
+            ("pkg/src/esm/main.ts", "export const a = 1;\n"),
+        ]);
+        assert_eq!(o["entry"], "pkg/src/esm/main.ts");
+    }
+
+    #[test]
+    fn types_field_maps_a_declaration_to_its_source() {
+        let o = origin_of(&[
+            ("pkg/package.json", r#"{"name":"t","types":"./api.d.ts"}"#),
+            ("pkg/api.ts", "export const a = 1;\n"),
+        ]);
+        assert_eq!(o["entry"], "pkg/api.ts");
+    }
+
+    #[test]
+    fn star_keys_and_exact_keys_are_both_kept() {
+        let o = origin_of(&[
+            (
+                "pkg/package.json",
+                r#"{"name":"s","exports":{".":"./src/index.ts","./*":"./src/*.ts","./feat":{"require":"./dist/feat.cjs"},"./gone/*":"./dist/missing/*.js"}}"#,
+            ),
+            ("pkg/src/index.ts", "export const a = 1;\n"),
+            ("pkg/src/feat.ts", "export const b = 1;\n"),
+        ]);
+        assert_eq!(o["entry"], "pkg/src/index.ts");
+        assert_eq!(o["subpaths"]["./*"], "pkg/src/*");
+        assert_eq!(o["subpaths"]["./feat"], "pkg/src/feat.ts");
+        assert!(
+            o["subpaths"].get("./gone/*").is_none(),
+            "a pattern whose directory is absent records nothing"
+        );
+    }
+
+    #[test]
+    fn nothing_declared_keeps_the_origin() {
+        let o = origin_of(&[
+            ("pkg/package.json", r#"{"name":"plain"}"#),
+            ("pkg/src/index.ts", "export const a = 1;\n"),
+        ]);
+        assert!(o.get("entry").is_none(), "the convention is routing's");
+        assert!(o.get("subpaths").is_none());
     }
 }

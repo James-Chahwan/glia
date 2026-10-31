@@ -2,9 +2,10 @@
   "framework": "org-packages",
   "language": "rust",
   "dirs": ["app", "lib"],
-  "note": "FA.23: cargo routing over the manifest_name class. app's Cargo.toml depends on org-lib, the crate lib's Cargo.toml declares (one class: the cargo key folds - to _), so `use org_lib::util::helper` routes to the crate's src/util.rs module (IMPORTS, resolver:org_packages rule org_import) and the call `helper()` the Rust build left unresolved binds to lib's helper (CALLS, rule org_call, Medium). Baseline HEAD 63255707: only the SAME_AS star; the cargo row was not even counted.",
+  "note": "FA.23: cargo routing over the manifest_name class. app's Cargo.toml depends on org-lib, the crate lib's Cargo.toml declares (one class: the cargo key folds - to _), so `use org_lib::util::helper` routes to the crate's src/util.rs module (IMPORTS, resolver:org_packages rule org_import) and the call `helper()` the Rust build left unresolved binds to lib's helper (CALLS, rule org_call, Medium). Baseline HEAD 63255707: only the SAME_AS star; the cargo row was not even counted. GD.33: lib's crate root re-exports `pub use inner::greet` from a private module; app's `use org_lib::greet` routes to the crate root and the call `greet()` binds through the root's use binding (module_import_bindings) to inner's greet (CALLS org_call). Baseline HEAD 326242e2 (probe cargo2): `[org-packages] calls bound=1`, the re-exported name unbound.",
   "expect_edges": [
     {"from": "lib", "to": "util", "category": "IMPORTS", "note": "org_import cargo"},
-    {"from": "run", "to": "helper", "category": "CALLS", "note": "org_call cargo"}
+    {"from": "run", "to": "helper", "category": "CALLS", "note": "org_call cargo"},
+    {"from": "wave", "to": "greet", "category": "CALLS", "note": "org_call through a pub use re-export (GD.33)"}
   ]
 }
