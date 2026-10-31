@@ -44,6 +44,17 @@
 //! a Helm `{{ }}` value is refused and counted. The overrides are applied by
 //! the host-start rules (GH.18), never here.
 //!
+//! Process managers (GH.17): a `Procfile` / `Procfile.<x>`, a systemd
+//! `*.service` unit (gated on its `[Service]` section) and a supervisord
+//! conf (`supervisord.conf` / `supervisor.conf`, or a `*.conf` under
+//! `supervisor/` / `supervisord.d/`, gated on a `[program:<name>]` section)
+//! each declare INFRA_RESOURCEs `infra:process:<type>@<dir>` (a Procfile's
+//! types repeat per sub-project, so its directory is in the name),
+//! `infra:unit:<stem>` and `infra:program:<name>`, each with a CODE start
+//! cell (`host` procfile / systemd / supervisor, trigger process_type / boot /
+//! supervised, the effective argv, the workdir, the declaring file's dir and
+//! the decl). Binding a start to code is GH.18's.
+//!
 //! Out of scope (deferred to v0.5+):
 //!   - Kustomize overlays (template merging is non-trivial)
 //!   - Helm chart templating (a templated value is refused, GH.16)
@@ -3466,6 +3477,559 @@ impl Flow<'_> {
     }
 }
 
+// ----------------------------------------------------------------------------
+// GH.17: process managers (Procfile, systemd units, supervisord programs)
+// ----------------------------------------------------------------------------
+
+/// GH.17: the process-manager file kinds the walk admits and the route
+/// branches read. Each is a synthetic MODULE DEFINES-ing one INFRA_RESOURCE
+/// per process it declares, with a CODE start cell naming what it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessManager {
+    /// `Procfile` / `Procfile.<x>` (Heroku, Foreman, honcho, Overmind).
+    Procfile,
+    /// A systemd `*.service` unit.
+    Systemd,
+    /// A supervisord config: `supervisord.conf` / `supervisor.conf`, or a
+    /// `*.conf` under a `supervisor/` or `supervisord.d/` directory.
+    Supervisor,
+}
+
+impl ProcessManager {
+    /// The kind `path` names, by its path alone (the walk's admission and the
+    /// route's choice of branch). The route branch then gates on the text:
+    /// a Procfile needs a `<type>: <command>` line, a unit a `[Service]`
+    /// section, a supervisor conf a `[program:<name>]` section.
+    pub fn of_path(path: &str) -> Option<ProcessManager> {
+        if is_procfile_path(path) {
+            Some(ProcessManager::Procfile)
+        } else if is_systemd_unit_path(path) {
+            Some(ProcessManager::Systemd)
+        } else if is_supervisor_conf_path(path) {
+            Some(ProcessManager::Supervisor)
+        } else {
+            None
+        }
+    }
+
+    /// The route branch's lang key, and the start cell's `host`.
+    pub fn key(self) -> &'static str {
+        match self {
+            ProcessManager::Procfile => "procfile",
+            ProcessManager::Systemd => "systemd",
+            ProcessManager::Supervisor => "supervisor",
+        }
+    }
+}
+
+/// `Procfile`, or `Procfile.<variant>` (`Procfile.dev`): the name is
+/// case-sensitive, as Heroku and Foreman read it.
+pub fn is_procfile_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    base == "Procfile"
+        || base
+            .strip_prefix("Procfile.")
+            .is_some_and(|v| !v.is_empty() && !v.contains('.'))
+}
+
+/// A `*.service` file. Whether it is a systemd unit is the route branch's
+/// `[Service]` gate (an unrelated `.service` file mints nothing).
+pub fn is_systemd_unit_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    base.len() > ".service".len() && base.ends_with(".service")
+}
+
+/// `supervisord.conf` / `supervisor.conf`, or any `*.conf` with an ancestor
+/// directory named `supervisor` or `supervisord.d` (`deploy/supervisor/
+/// conf.d/app.conf`). A HOCON conf (`application.conf`, `resources/*.conf`)
+/// is never one.
+pub fn is_supervisor_conf_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let mut parts: Vec<&str> = norm.split('/').collect();
+    let Some(base) = parts.pop() else {
+        return false;
+    };
+    if crate::cron::is_hocon_conf_path(&norm) {
+        return false;
+    }
+    if base == "supervisord.conf" || base == "supervisor.conf" {
+        return true;
+    }
+    base.len() > ".conf".len()
+        && base.ends_with(".conf")
+        && parts
+            .iter()
+            .any(|d| *d == "supervisor" || *d == "supervisord.d")
+}
+
+/// GH.17: what one process-manager file held, summed per repo by the engine
+/// into the `[proc-start]` marker.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProcCounts {
+    /// Procfiles that declared a process type.
+    pub procfile: usize,
+    /// Process types those Procfiles declared.
+    pub types: usize,
+    /// `.service` files with a `[Service]` section.
+    pub systemd: usize,
+    /// Units minted (one per such file).
+    pub units: usize,
+    /// Supervisor confs that declared a program.
+    pub supervisor: usize,
+    /// `[program:<name>]` sections with a `command`.
+    pub programs: usize,
+    /// Files the path admitted and the text gate refused (a `.service` with
+    /// no `[Service]`, a conf with no program, a Procfile with no type).
+    pub gated_out: usize,
+    /// Starts by the target form `normalise_argv` read
+    /// (`TargetForm::as_str`).
+    pub forms: std::collections::BTreeMap<&'static str, usize>,
+    /// Starts `normalise_argv` refused, by reason (`StartTarget::refusal`).
+    pub refused: std::collections::BTreeMap<&'static str, usize>,
+}
+
+impl ProcCounts {
+    /// Add one file's counts.
+    pub fn add(&mut self, o: &ProcCounts) {
+        self.procfile += o.procfile;
+        self.types += o.types;
+        self.systemd += o.systemd;
+        self.units += o.units;
+        self.supervisor += o.supervisor;
+        self.programs += o.programs;
+        self.gated_out += o.gated_out;
+        for (k, n) in &o.forms {
+            *self.forms.entry(k).or_default() += n;
+        }
+        for (k, n) in &o.refused {
+            *self.refused.entry(k).or_default() += n;
+        }
+    }
+
+    /// The per-repo fired_on line, `None` when the repo held no
+    /// process-manager file: `[proc-start] procfile=<f> types=<t>
+    /// systemd=<s> units=<u> supervisor=<v> programs=<p> gated_out=<g>
+    /// repo=<label>`, then ` forms=(<form>=<n> ..)` when a start was read and
+    /// ` refused=<reason>:<n>,..` when one was refused.
+    pub fn marker(&self, repo_label: &str) -> Option<String> {
+        if self.procfile + self.systemd + self.supervisor + self.gated_out == 0 {
+            return None;
+        }
+        let mut line = format!(
+            "[proc-start] procfile={} types={} systemd={} units={} supervisor={} programs={} gated_out={} repo={repo_label}",
+            self.procfile,
+            self.types,
+            self.systemd,
+            self.units,
+            self.supervisor,
+            self.programs,
+            self.gated_out,
+        );
+        if !self.forms.is_empty() {
+            let forms: Vec<String> = self.forms.iter().map(|(f, n)| format!("{f}={n}")).collect();
+            line.push_str(&format!(" forms=({})", forms.join(" ")));
+        }
+        if !self.refused.is_empty() {
+            let reasons: Vec<String> = self
+                .refused
+                .iter()
+                .map(|(r, n)| format!("{r}:{n}"))
+                .collect();
+            line.push_str(&format!(" refused={}", reasons.join(",")));
+        }
+        Some(line)
+    }
+
+    fn read_argv(&mut self, argv: &[String]) {
+        let target = glia_code_domain::hosts::normalise_argv(argv);
+        match target.refusal() {
+            Some(reason) => *self.refused.entry(reason).or_default() += 1,
+            None => *self.forms.entry(target.form.as_str()).or_default() += 1,
+        }
+    }
+}
+
+/// One process-manager file's nodes and counts.
+pub struct ProcNodes {
+    pub iac: IacNodes,
+    pub counts: ProcCounts,
+}
+
+/// The start cell's JSON shape. Field order is the serialised order.
+#[derive(serde::Serialize)]
+struct ProcStartCell<'a> {
+    start: ProcStart<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct ProcStart<'a> {
+    host: &'static str,
+    /// The Procfile type, the unit stem or the program name.
+    name: &'a str,
+    trigger: &'static str,
+    /// What the file wrote (the Procfile command, the `ExecStart=` value
+    /// without its prefixes, supervisor's `command=`).
+    command: &'a str,
+    /// The effective argv: `["/bin/sh", "-c", command]` for a Procfile (a
+    /// shell runs it), the command split with shell-word rules for a systemd
+    /// unit and a supervisor program (neither runs a shell).
+    argv: &'a [String],
+    /// `WorkingDirectory=` / `directory=` as written, `null` when unset.
+    workdir: Option<&'a str>,
+    /// The declaring file's directory, repo-relative (`.` at the root): a
+    /// Procfile's processes run there.
+    dir: &'a str,
+    decl: String,
+}
+
+fn proc_nodes() -> ProcNodes {
+    ProcNodes {
+        iac: IacNodes {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: CodeNav::default(),
+            markers: Vec::new(),
+        },
+        counts: ProcCounts::default(),
+    }
+}
+
+/// One start: the resource `infra:<kind>:<name>` (DEFINES from the file's
+/// MODULE) and its start cell.
+fn push_proc_start(
+    out: &mut ProcNodes,
+    kind: &str,
+    resource: &str,
+    start: ProcStart<'_>,
+    module_id: NodeId,
+    repo: RepoId,
+) {
+    emit_resource(&mut out.iac, kind, resource, module_id, repo);
+    out.counts.read_argv(start.argv);
+    let id = infra_id(repo, kind, resource);
+    attach_cell(&mut out.iac, id, json_cell(&ProcStartCell { start }));
+}
+
+/// GH.17: a Procfile. Each `<type>: <command>` line (Heroku's
+/// `^[A-Za-z0-9_-]+:\s*(.+)$`; `#` comments) is one INFRA_RESOURCE
+/// `infra:process:<type>@<dir>` (the Procfile's repo-relative directory, `.`
+/// at the root: `web` / `worker` repeat per sub-project) with a start cell
+/// `{"start":{"host":"procfile","name":<type>,"trigger":"process_type",
+/// "command","argv":["/bin/sh","-c",<command>],"workdir":null,"dir","decl"}}`.
+/// A Procfile with no type line is gated out.
+pub fn extract_procfile(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ProcNodes {
+    let mut out = proc_nodes();
+    let dir = dockerfile_context(path);
+    for (row, line) in source.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((ty, cmd)) = line.split_once(':') else {
+            continue;
+        };
+        if ty.is_empty()
+            || !ty
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            continue;
+        }
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            continue;
+        }
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()];
+        let resource = format!("{ty}@{dir}");
+        let start = ProcStart {
+            host: "procfile",
+            name: ty,
+            trigger: "process_type",
+            command: cmd,
+            argv: &argv,
+            workdir: None,
+            dir: &dir,
+            decl: format!("{path}:{}", row + 1),
+        };
+        push_proc_start(&mut out, "process", &resource, start, module_id, repo);
+        out.counts.types += 1;
+    }
+    if out.counts.types > 0 {
+        out.counts.procfile = 1;
+    } else {
+        out.counts.gated_out = 1;
+    }
+    out
+}
+
+/// systemd's command-line prefixes (`-` ignore failure, `@` argv[0] given
+/// second, `:` no substitution, `+` / `!` / `!!` privileges), stripped; with
+/// `@` the second word is the process's argv[0], not an argument, and is
+/// dropped from the effective argv.
+fn strip_exec_prefixes(value: &str) -> (&str, bool) {
+    let rest = value.trim_start_matches(['-', '@', ':', '+', '!']);
+    let prefix = &value[..value.len() - rest.len()];
+    (rest.trim_start(), prefix.contains('@'))
+}
+
+/// GH.17: a systemd unit. Gated on a `[Service]` section; the unit is one
+/// INFRA_RESOURCE `infra:unit:<file stem>` (`worker` of `worker.service`,
+/// `app@` of a template `app@.service`). Each `ExecStart=` of `[Service]`
+/// that an empty `ExecStart=` does not reset (a oneshot unit may list
+/// several) is a start cell `{"start":{"host":"systemd","name":<stem>,
+/// "trigger":"boot","command","argv","workdir","dir","decl"}}`, its
+/// prefixes stripped and its value split with shell-word rules (systemd runs
+/// no shell); `WorkingDirectory=` (its `-` dropped) is the workdir.
+/// `ExecStartPre=` / `ExecReload=` and the other `Exec*` lines are no start.
+/// Lines continue with a trailing `\`; `#` / `;` lines are comments.
+pub fn extract_systemd_unit(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ProcNodes {
+    let mut out = proc_nodes();
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let stem = base.strip_suffix(".service").unwrap_or(base);
+    let mut in_service = false;
+    let mut has_service = false;
+    let mut workdir: Option<String> = None;
+    let mut execs: Vec<(usize, String)> = Vec::new();
+    for (row, line) in logical_lines(source) {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
+            continue;
+        }
+        if t.starts_with('[') && t.ends_with(']') {
+            in_service = t == "[Service]";
+            has_service |= in_service;
+            continue;
+        }
+        if !in_service {
+            continue;
+        }
+        let Some((key, value)) = t.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "ExecStart" if value.is_empty() => execs.clear(),
+            "ExecStart" => execs.push((row, value.to_string())),
+            "WorkingDirectory" => {
+                let w = value.strip_prefix('-').unwrap_or(value);
+                workdir = (!w.is_empty()).then(|| w.to_string());
+            }
+            _ => {}
+        }
+    }
+    if !has_service || stem.is_empty() {
+        out.counts.gated_out = 1;
+        return out;
+    }
+    out.counts.systemd = 1;
+    out.counts.units = 1;
+    emit_resource(&mut out.iac, "unit", stem, module_id, repo);
+    let dir = dockerfile_context(path);
+    for (row, value) in &execs {
+        let (command, argv0_given) = strip_exec_prefixes(value);
+        let mut argv = shell_words(command);
+        if argv0_given && argv.len() > 1 {
+            argv.remove(1);
+        }
+        if argv.is_empty() {
+            continue;
+        }
+        let start = ProcStart {
+            host: "systemd",
+            name: stem,
+            trigger: "boot",
+            command,
+            argv: &argv,
+            workdir: workdir.as_deref(),
+            dir: &dir,
+            decl: format!("{path}:{}", row + 1),
+        };
+        push_proc_start(&mut out, "unit", stem, start, module_id, repo);
+    }
+    out
+}
+
+/// systemd's logical lines: a line ending `\` continues on the next (joined
+/// with a space), each keyed by its first physical row (0-based).
+fn logical_lines(source: &str) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for (row, raw) in source.lines().enumerate() {
+        let raw = raw.trim_end_matches('\r');
+        let (text, continues) = match raw.strip_suffix('\\') {
+            Some(t) => (t, true),
+            None => (raw, false),
+        };
+        let cur = match open.take() {
+            Some((r, mut acc)) => {
+                let t = text.trim_start();
+                // A comment line inside a continuation is skipped, as systemd does.
+                if !(t.starts_with('#') || t.starts_with(';')) {
+                    acc.truncate(acc.trim_end().len());
+                    acc.push(' ');
+                    acc.push_str(t);
+                }
+                (r, acc)
+            }
+            None => (row, text.to_string()),
+        };
+        if continues {
+            open = Some(cur);
+        } else {
+            out.push(cur);
+        }
+    }
+    if let Some(cur) = open {
+        out.push(cur);
+    }
+    out
+}
+
+/// supervisor's inline comments: a `;` or `#` preceded by whitespace ends the
+/// value (configparser's `inline_comment_prefixes`, which supervisor sets).
+fn strip_ini_inline_comment(v: &str) -> &str {
+    let bytes = v.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if (*b == b';' || *b == b'#') && i > 0 && bytes[i - 1].is_ascii_whitespace() {
+            return v[..i].trim_end();
+        }
+    }
+    v.trim_end()
+}
+
+/// GH.17: a supervisord config. Each `[program:<name>]` section holding a
+/// `command` is one INFRA_RESOURCE `infra:program:<name>` with a start cell
+/// `{"start":{"host":"supervisor","name":<name>,"trigger":"supervised",
+/// "command","argv","workdir","dir","decl"}}`; the command is split with
+/// shell-word rules (supervisor runs it with no shell), `directory=` is the
+/// workdir. Read as configparser does: `=` or `:` delimits, an indented line
+/// continues the value above, `;` / `#` start a comment (inline when
+/// whitespace precedes them). A conf with no such program is gated out.
+pub fn extract_supervisor(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ProcNodes {
+    struct Program {
+        name: String,
+        command: Option<(usize, String)>,
+        directory: Option<String>,
+    }
+    let mut out = proc_nodes();
+    let mut programs: Vec<Program> = Vec::new();
+    let mut in_program = false;
+    // The key the last value line belonged to, for a continuation line.
+    let mut last_key: Option<String> = None;
+    for (row, raw) in source.lines().enumerate() {
+        let raw = raw.trim_end_matches('\r');
+        let t = raw.trim();
+        if t.is_empty() || t.starts_with(';') || t.starts_with('#') {
+            continue;
+        }
+        if raw.starts_with([' ', '\t']) {
+            // A continuation of the previous value.
+            if let (true, Some(key), Some(p)) = (in_program, &last_key, programs.last_mut()) {
+                let more = strip_ini_inline_comment(t);
+                match key.as_str() {
+                    "command" => {
+                        if let Some((_, c)) = p.command.as_mut() {
+                            c.push(' ');
+                            c.push_str(more);
+                        }
+                    }
+                    "directory" => {
+                        if let Some(d) = p.directory.as_mut() {
+                            d.push(' ');
+                            d.push_str(more);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        last_key = None;
+        if t.starts_with('[') && t.ends_with(']') {
+            let header = &t[1..t.len() - 1];
+            in_program = false;
+            if let Some(name) = header.trim().strip_prefix("program:") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    in_program = true;
+                    programs.push(Program {
+                        name: name.to_string(),
+                        command: None,
+                        directory: None,
+                    });
+                }
+            }
+            continue;
+        }
+        if !in_program {
+            continue;
+        }
+        let delim = t.find(['=', ':']);
+        let Some(at) = delim else {
+            continue;
+        };
+        let key = t[..at].trim().to_ascii_lowercase();
+        let value = strip_ini_inline_comment(t[at + 1..].trim_start()).to_string();
+        let Some(p) = programs.last_mut() else {
+            continue;
+        };
+        match key.as_str() {
+            "command" => p.command = Some((row, value)),
+            "directory" => p.directory = Some(value),
+            _ => {}
+        }
+        last_key = Some(key);
+    }
+    let dir = dockerfile_context(path);
+    for p in &programs {
+        let Some((row, command)) = &p.command else {
+            continue;
+        };
+        let argv = shell_words(command);
+        if argv.is_empty() {
+            continue;
+        }
+        let start = ProcStart {
+            host: "supervisor",
+            name: &p.name,
+            trigger: "supervised",
+            command,
+            argv: &argv,
+            workdir: p.directory.as_deref().filter(|d| !d.is_empty()),
+            dir: &dir,
+            decl: format!("{path}:{}", row + 1),
+        };
+        push_proc_start(&mut out, "program", &p.name, start, module_id, repo);
+        out.counts.programs += 1;
+    }
+    if out.counts.programs > 0 {
+        out.counts.supervisor = 1;
+    } else {
+        out.counts.gated_out = 1;
+    }
+    out
+}
+
+/// GH.17: the one entry the engine's route branch calls.
+pub fn extract_process_manager(
+    kind: ProcessManager,
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ProcNodes {
+    match kind {
+        ProcessManager::Procfile => extract_procfile(source, path, module_id, repo),
+        ProcessManager::Systemd => extract_systemd_unit(source, path, module_id, repo),
+        ProcessManager::Supervisor => extract_supervisor(source, path, module_id, repo),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4583,5 +5147,264 @@ build:
             .map(|i| format!("{}k:\n", " ".repeat(i)))
             .collect();
         assert!(matches!(doc(&block), Yv::Map(_)));
+    }
+
+    // ---- GH.17: process managers ------------------------------------------
+
+    /// The `infra:<kind>:<name>` node's start cells, as JSON text.
+    fn proc_cells(out: &ProcNodes, kind: &str, name: &str) -> Vec<String> {
+        let id = infra_id(RepoId(1), kind, name);
+        let Some(node) = out.iac.nodes.iter().find(|n| n.id == id) else {
+            return Vec::new();
+        };
+        node.cells
+            .iter()
+            .filter_map(|c| match &c.payload {
+                glia_core::CellPayload::Json(j) => Some(j.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn proc_qnames(out: &ProcNodes) -> Vec<String> {
+        let mut q: Vec<String> = out.iac.nav.qname_by_id.values().cloned().collect();
+        q.sort();
+        q
+    }
+
+    #[test]
+    fn process_manager_paths() {
+        assert_eq!(
+            ProcessManager::of_path("Procfile"),
+            Some(ProcessManager::Procfile)
+        );
+        assert_eq!(
+            ProcessManager::of_path("svc/Procfile.dev"),
+            Some(ProcessManager::Procfile)
+        );
+        assert_eq!(ProcessManager::of_path("procfile"), None);
+        assert_eq!(ProcessManager::of_path("Procfile.dev.bak"), None);
+        assert_eq!(
+            ProcessManager::of_path("deploy/worker.service"),
+            Some(ProcessManager::Systemd)
+        );
+        assert_eq!(ProcessManager::of_path("src/app/user.service.ts"), None);
+        assert_eq!(ProcessManager::of_path(".service"), None);
+        assert_eq!(
+            ProcessManager::of_path("deployments/aio/supervisor.conf"),
+            Some(ProcessManager::Supervisor)
+        );
+        assert_eq!(
+            ProcessManager::of_path("supervisord.conf"),
+            Some(ProcessManager::Supervisor)
+        );
+        assert_eq!(
+            ProcessManager::of_path("ops/supervisor/conf.d/api.conf"),
+            Some(ProcessManager::Supervisor)
+        );
+        assert_eq!(
+            ProcessManager::of_path("etc/supervisord.d/api.conf"),
+            Some(ProcessManager::Supervisor)
+        );
+        assert_eq!(ProcessManager::of_path("deploy/nginx/app.conf"), None);
+        // A HOCON conf never is one.
+        assert_eq!(
+            ProcessManager::of_path("src/main/resources/supervisor/app.conf"),
+            None
+        );
+    }
+
+    #[test]
+    fn procfile_types_are_processes_named_by_dir() {
+        let repo = RepoId(1);
+        let src = "# processes\nrelease: python manage.py migrate\nweb: gunicorn app:app\nworker: celery -A tasks worker\n\nnot a line\n";
+        let out = extract_procfile(src, "svc-py/Procfile", module_id(repo), repo);
+        assert_eq!(
+            proc_qnames(&out),
+            [
+                "infra:process:release@svc-py",
+                "infra:process:web@svc-py",
+                "infra:process:worker@svc-py"
+            ]
+        );
+        assert_eq!(
+            proc_cells(&out, "process", "web@svc-py"),
+            [
+                r#"{"start":{"host":"procfile","name":"web","trigger":"process_type","command":"gunicorn app:app","argv":["/bin/sh","-c","gunicorn app:app"],"workdir":null,"dir":"svc-py","decl":"svc-py/Procfile:3"}}"#
+            ]
+        );
+        assert_eq!((out.counts.procfile, out.counts.types), (1, 3));
+        assert_eq!(out.counts.gated_out, 0);
+        // The shell string is read through to the target.
+        assert_eq!(out.counts.forms.get("module_attr"), Some(&1));
+        assert_eq!(out.counts.forms.get("celery_app"), Some(&1));
+        // Every resource is DEFINES-d from the MODULE.
+        assert_eq!(
+            out.iac
+                .edges
+                .iter()
+                .filter(|e| e.category == edge_category::DEFINES && e.from == module_id(repo))
+                .count(),
+            3
+        );
+        // A root Procfile's dir is `.`.
+        let root = extract_procfile("web: node server.js\n", "Procfile", module_id(repo), repo);
+        assert_eq!(proc_qnames(&root), ["infra:process:web@."]);
+        assert_eq!(root.counts.forms.get("script"), Some(&1));
+        // No type line: gated out, nothing minted.
+        let none = extract_procfile("# empty\n", "Procfile", module_id(repo), repo);
+        assert!(none.iac.nodes.is_empty());
+        assert_eq!((none.counts.procfile, none.counts.gated_out), (0, 1));
+    }
+
+    #[test]
+    fn systemd_unit_exec_start_is_the_start() {
+        let repo = RepoId(1);
+        let src = "[Unit]\nDescription=worker\n\n[Service]\nType=simple\nWorkingDirectory=-/opt/app\nExecStartPre=/usr/bin/mkdir -p /run/app\nExecStart=-/usr/bin/python3 \\\n  /opt/app/worker.py --queue default\nExecReload=/bin/kill -HUP $MAINPID\n\n[Install]\nWantedBy=multi-user.target\n";
+        let out = extract_systemd_unit(src, "deploy/worker.service", module_id(repo), repo);
+        assert_eq!(proc_qnames(&out), ["infra:unit:worker"]);
+        assert_eq!(
+            proc_cells(&out, "unit", "worker"),
+            [
+                r#"{"start":{"host":"systemd","name":"worker","trigger":"boot","command":"/usr/bin/python3 /opt/app/worker.py --queue default","argv":["/usr/bin/python3","/opt/app/worker.py","--queue","default"],"workdir":"/opt/app","dir":"deploy","decl":"deploy/worker.service:8"}}"#
+            ]
+        );
+        assert_eq!((out.counts.systemd, out.counts.units), (1, 1));
+        assert_eq!(out.counts.forms.get("script"), Some(&1));
+        assert_eq!(
+            out.counts.forms.values().sum::<usize>(),
+            1,
+            "ExecStartPre / ExecReload are no start"
+        );
+    }
+
+    #[test]
+    fn systemd_prefixes_resets_and_shell_strings() {
+        let repo = RepoId(1);
+        // `@`: the second word is argv[0]; `+`: privileges. An empty
+        // ExecStart= resets the list.
+        let src = "[Service]\nExecStart=/bin/false\nExecStart=\nExecStart=@+/usr/bin/node node-app /srv/server.js\nExecStart=/bin/bash -lc 'cd /srv && exec bundle exec puma -C config/puma.rb'\n";
+        let out = extract_systemd_unit(src, "deployment/app.1.service", module_id(repo), repo);
+        let cells = proc_cells(&out, "unit", "app.1");
+        assert_eq!(cells.len(), 2, "{cells:?}");
+        assert!(
+            cells[0].contains(r#""argv":["/usr/bin/node","/srv/server.js"]"#),
+            "{}",
+            cells[0]
+        );
+        assert!(cells[0].contains(r#""decl":"deployment/app.1.service:4""#));
+        assert!(
+            cells[1].contains(
+                r#""argv":["/bin/bash","-lc","cd /srv && exec bundle exec puma -C config/puma.rb"]"#
+            ),
+            "{}",
+            cells[1]
+        );
+        assert_eq!(out.counts.forms.get("script"), Some(&1));
+        assert_eq!(out.counts.forms.get("framework"), Some(&1));
+    }
+
+    #[test]
+    fn service_file_without_service_section_is_gated_out() {
+        let repo = RepoId(1);
+        let out = extract_systemd_unit(
+            "export class UserService {}\n",
+            "src/user.service",
+            module_id(repo),
+            repo,
+        );
+        assert!(out.iac.nodes.is_empty());
+        assert_eq!(
+            (out.counts.systemd, out.counts.units, out.counts.gated_out),
+            (0, 0, 1)
+        );
+        // A [Service] section with no ExecStart is still a unit, with no start.
+        let bare = extract_systemd_unit(
+            "[Service]\nType=oneshot\n",
+            "x.service",
+            module_id(repo),
+            repo,
+        );
+        assert_eq!(proc_qnames(&bare), ["infra:unit:x"]);
+        assert!(proc_cells(&bare, "unit", "x").is_empty());
+    }
+
+    #[test]
+    fn supervisor_programs_are_starts() {
+        let repo = RepoId(1);
+        let src = "[supervisord]\nnodaemon=true\n\n[program:api]\ncommand=sh -c \"./bin/docker-entrypoint-api.sh\"   ; the API\ndirectory=/app/api\nautostart=true\n\n[program:live]\ncommand = node\n    /app/live/apps/live\n\n[program:empty]\nautostart=false\n\n[group:all]\nprograms=api,live\n";
+        let out = extract_supervisor(
+            src,
+            "deployments/aio/community/supervisor.conf",
+            module_id(repo),
+            repo,
+        );
+        assert_eq!(
+            proc_qnames(&out),
+            ["infra:program:api", "infra:program:live"]
+        );
+        assert_eq!(
+            proc_cells(&out, "program", "api"),
+            [
+                r#"{"start":{"host":"supervisor","name":"api","trigger":"supervised","command":"sh -c \"./bin/docker-entrypoint-api.sh\"","argv":["sh","-c","./bin/docker-entrypoint-api.sh"],"workdir":"/app/api","dir":"deployments/aio/community","decl":"deployments/aio/community/supervisor.conf:5"}}"#
+            ]
+        );
+        assert!(
+            proc_cells(&out, "program", "live")[0]
+                .contains(r#""argv":["node","/app/live/apps/live"]"#)
+        );
+        assert_eq!((out.counts.supervisor, out.counts.programs), (1, 2));
+        // `./bin/x.sh` run directly is GH.14's Binary; `node <file>` a Script.
+        assert_eq!(out.counts.forms.get("binary"), Some(&1));
+        assert_eq!(out.counts.forms.get("script"), Some(&1));
+        // No program: gated out.
+        let none = extract_supervisor(
+            "[supervisord]\nnodaemon=true\n",
+            "supervisord.conf",
+            module_id(repo),
+            repo,
+        );
+        assert!(none.iac.nodes.is_empty());
+        assert_eq!(none.counts.gated_out, 1);
+    }
+
+    #[test]
+    fn proc_counts_marker() {
+        let mut c = ProcCounts::default();
+        assert_eq!(c.marker("."), None);
+        let repo = RepoId(1);
+        c.add(
+            &extract_procfile(
+                "web: gunicorn app:app\nworker: celery -A tasks worker\n",
+                "svc-py/Procfile",
+                module_id(repo),
+                repo,
+            )
+            .counts,
+        );
+        c.add(
+            &extract_systemd_unit(
+                "[Service]\nExecStart=/usr/bin/python3 /opt/app/worker.py\n",
+                "deploy/worker.service",
+                module_id(repo),
+                repo,
+            )
+            .counts,
+        );
+        c.add(
+            &extract_systemd_unit(
+                "[Service]\nExecStart=$APP\n",
+                "a.service",
+                module_id(repo),
+                repo,
+            )
+            .counts,
+        );
+        assert_eq!(
+            c.marker(".").as_deref(),
+            Some(
+                "[proc-start] procfile=1 types=2 systemd=2 units=2 supervisor=0 programs=0 gated_out=0 repo=. forms=(celery_app=1 module_attr=1 script=1) refused=dynamic:1"
+            )
+        );
     }
 }

@@ -276,6 +276,7 @@ pub(crate) fn parse_repo_files_hashed(
         links_origin,
         links_template,
         links_dynamic,
+        proc_starts,
         contracts: _,
         lines: _,
     } = tally;
@@ -438,6 +439,11 @@ pub(crate) fn parse_repo_files_hashed(
             per_key.join(" ")
         );
     }
+    // GH.17 fired_on, once per repo that holds a process-manager file
+    // (gated-out ones included): `grep '^\[proc-start\] procfile='`.
+    if let Some(line) = proc_starts.and_then(|p| p.marker(repo_label)) {
+        eprintln!("{line}");
+    }
 
     // LB.9b fired_on marker: code files of two or more build groups share a
     // directory and a stem, so each names its MODULE by its file name. Only
@@ -541,7 +547,7 @@ struct RouteCtx<'a> {
 /// repo)` alone, so the DC.4 non-code memo may replay it for an unchanged
 /// file: yaml, Dockerfile, package manifest, dotenv, migration `.sql`, `.json`
 /// (settings, JSON Schema, contract), `.proto`, `.graphql`, `.avsc`, an nginx
-/// `.conf` (GH.6). Not `prisma` (it reads the build-wide A13.16 `prisma_provider`, another file's
+/// `.conf` (GH.6), a Procfile / systemd unit / supervisord conf (GH.17). Not `prisma` (it reads the build-wide A13.16 `prisma_provider`, another file's
 /// datasource) nor `angular` (the template's links hang off the LB.9b plan's
 /// MODULE id of its `.component.ts`).
 ///
@@ -561,6 +567,10 @@ const PURE_NONCODE: &[&str] = &[
     "avro",
     // GH.6: an nginx conf reads its own text only.
     "nginx",
+    // GH.17: a process manager's file reads its own text only.
+    "procfile",
+    "systemd",
+    "supervisor",
 ];
 
 /// Where a [`Routed::NonCode`] outcome came from (DC.4).
@@ -657,6 +667,9 @@ pub(crate) struct SynthTally {
     /// fold hands to `ContractCounts::record` (its op set is private, so two
     /// counts cannot be summed after the fact).
     contracts: Vec<ContractNodes>,
+    /// GH.17 `[proc-start]`: the process-manager files' counts, `None` for
+    /// every other file (boxed: `Routed` carries a tally per file).
+    proc_starts: Option<Box<glia_code_extractors::iac::ProcCounts>>,
     /// Per-file marker lines (`[cli] manifest`, `[migration]`, `[prisma]`),
     /// printed by the fold so they keep walk order on any pool size.
     lines: Vec<String>,
@@ -691,6 +704,9 @@ impl SynthTally {
         self.links_origin += t.links_origin;
         self.links_template += t.links_template;
         self.links_dynamic += t.links_dynamic;
+        if let Some(p) = &t.proc_starts {
+            self.proc_starts.get_or_insert_default().add(p);
+        }
     }
 
     /// Keep `out`'s ops for `ContractCounts::record`: ids only, no cells,
@@ -963,6 +979,37 @@ fn route_branches(
         });
         return Routed::NonCode {
             key: "dotenv",
+            fp,
+            tally: t,
+            memo: fresh(),
+        };
+    }
+
+    // GH.17: a Procfile, a systemd `*.service` or a supervisord conf (the
+    // walk admits each by path; supervisor confs before the nginx branch,
+    // which would take any `.conf`). Each process it declares is an
+    // INFRA_RESOURCE with a start cell, DEFINES-d from the file's MODULE; a
+    // file the text gate refuses (no `[Service]`, no program, no type line)
+    // mints no MODULE and counts `gated_out`.
+    if let Some(kind) = glia_code_extractors::iac::ProcessManager::of_path(path) {
+        *branch = kind.key();
+        let module_id = synthetic_module_id(repo, path);
+        let glia_code_extractors::iac::ProcNodes { iac, counts } =
+            glia_code_extractors::iac::extract_process_manager(kind, source, path, module_id, repo);
+        t.proc_starts = Some(Box::new(counts));
+        let fp = (!iac.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![iac.nodes],
+                vec![iac.edges],
+                vec![iac.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode {
+            key: kind.key(),
             fp,
             tally: t,
             memo: fresh(),
@@ -1444,7 +1491,8 @@ pub(crate) fn parse_for_cache(
 /// hands the file to a language parser, `None` for every file a non-code
 /// branch takes (yaml, Dockerfile, package manifest, dotenv, migration
 /// `.sql`, `.prisma`, `.component.html` template, `.json` contract / JSON
-/// Schema, `.proto`, `.graphql`, `.avsc`) or nothing reads. The predicates
+/// Schema, `.proto`, `.graphql`, `.avsc`, a GH.17 process manager's file) or
+/// nothing reads. The predicates
 /// run in the loop's own order, and the loop's language branch reads this
 /// function as its gate, so the LB.9b plan and the loop cannot disagree.
 pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
@@ -1459,6 +1507,7 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
         || glia_code_extractors::prisma::is_prisma_schema(path)
         || is_angular_template_path(path)
         || ext.is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        || glia_code_extractors::iac::ProcessManager::of_path(path).is_some()
     {
         return None;
     }
@@ -1746,7 +1795,7 @@ fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
 /// under (the `[modules]` marker counts these). A new non-code branch adds its
 /// key here; `synthetic_modules_are_named_by_file_name` fails on a routed key
 /// it lacks.
-const SYNTHETIC_MODULE_KEYS: [&str; 11] = [
+const SYNTHETIC_MODULE_KEYS: [&str; 14] = [
     "avro",
     "dockerfile",
     "dotenv",
@@ -1756,7 +1805,10 @@ const SYNTHETIC_MODULE_KEYS: [&str; 11] = [
     "migration",
     "nginx",
     "prisma",
+    "procfile",
     "proto",
+    "supervisor",
+    "systemd",
     "yaml",
 ];
 
@@ -1864,6 +1916,108 @@ mod tests {
             parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         parses
+    }
+
+    /// GH.17: a Procfile, a systemd unit and a supervisord conf are synthetic
+    /// MODULEs DEFINES-ing their process resources; a `.service` with no
+    /// `[Service]` section and a conf with no program mint nothing, and no
+    /// path of the three reaches a language parser.
+    #[test]
+    fn process_managers_route_to_host_resources() {
+        for path in [
+            "Procfile",
+            "svc/Procfile.dev",
+            "deploy/a.service",
+            "supervisord.conf",
+            "ops/supervisor/conf.d/x.conf",
+        ] {
+            assert_eq!(parser_route(path), None, "{path}");
+        }
+        let files: Vec<(String, String)> = [
+            (
+                "svc-py/Procfile",
+                "web: gunicorn app:app\nworker: celery -A tasks worker\n",
+            ),
+            (
+                "deploy/worker.service",
+                "[Unit]\nDescription=w\n[Service]\nExecStart=/usr/bin/python3 /opt/app/worker.py\n",
+            ),
+            ("src/user.service", "export class UserService {}\n"),
+            (
+                "ops/supervisor/conf.d/api.conf",
+                "[program:api]\ncommand=node /app/server.js\ndirectory=/app\n",
+            ),
+            (
+                "ops/supervisor/conf.d/none.conf",
+                "[supervisord]\nnodaemon=true\n",
+            ),
+        ]
+        .iter()
+        .map(|(p, s)| (p.to_string(), s.to_string()))
+        .collect();
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut keys: Vec<&str> = parses.keys().copied().collect();
+        keys.sort();
+        assert_eq!(keys, ["procfile", "supervisor", "systemd"]);
+        let mut infra: Vec<String> = parses
+            .values()
+            .flatten()
+            .flat_map(|fp| {
+                fp.nav
+                    .qname_by_id
+                    .iter()
+                    .filter(|(id, _)| {
+                        fp.nav.kind_by_id.get(*id) == Some(&node_kind::INFRA_RESOURCE)
+                    })
+                    .map(|(_, q)| q.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        infra.sort();
+        assert_eq!(
+            infra,
+            [
+                "infra:process:web@svc-py",
+                "infra:process:worker@svc-py",
+                "infra:program:api",
+                "infra:unit:worker",
+            ]
+        );
+        assert_eq!(
+            parses["systemd"].len(),
+            1,
+            "the gated-out .service mints no MODULE"
+        );
+        assert_eq!(
+            parses["supervisor"].len(),
+            1,
+            "nor the conf with no program"
+        );
+        // The marker's counts, as the fold sums them.
+        let mut counts = glia_code_extractors::iac::ProcCounts::default();
+        for (path, source) in &files {
+            let kind = glia_code_extractors::iac::ProcessManager::of_path(path)
+                .expect("a process-manager path");
+            counts.add(
+                &glia_code_extractors::iac::extract_process_manager(
+                    kind,
+                    source,
+                    path,
+                    synthetic_module_id(RepoId(1), path),
+                    RepoId(1),
+                )
+                .counts,
+            );
+        }
+        let marker = counts.marker("test").expect("a marker");
+        assert!(
+            marker.starts_with(
+                "[proc-start] procfile=1 types=2 systemd=1 units=1 supervisor=1 programs=1 gated_out=2 repo=test"
+            ),
+            "{marker}"
+        );
     }
 
     /// A13.9: a migration `.sql` becomes a MODULE whose ACCESSES_DATA edges
@@ -2991,7 +3145,7 @@ mod tests {
             "the code form keeps the stem"
         );
 
-        let cases: [(&str, &str, &str, &str); 15] = [
+        let cases: [(&str, &str, &str, &str); 18] = [
             (
                 "api/user.proto",
                 "syntax = \"proto3\";\npackage user;\nservice UserService {\n  rpc GetUser (GetUserRequest) returns (User);\n}\nmessage GetUserRequest { string id = 1; }\nmessage User { string id = 1; }\n",
@@ -3078,6 +3232,24 @@ mod tests {
                 "{\n  \"title\": \"Refund\",\n  \"type\": \"object\",\n  \"properties\": {}\n}\n",
                 "json",
                 "schemas::refund.schema.json",
+            ),
+            (
+                "svc-py/Procfile",
+                "web: gunicorn app:app\n",
+                "procfile",
+                "svc-py::Procfile",
+            ),
+            (
+                "deploy/worker.service",
+                "[Service]\nExecStart=/usr/bin/python3 /opt/app/worker.py\n",
+                "systemd",
+                "deploy::worker.service",
+            ),
+            (
+                "ops/supervisord.conf",
+                "[program:api]\ncommand=node server.js\n",
+                "supervisor",
+                "ops::supervisord.conf",
             ),
         ];
         for (path, source, key, qname) in cases {

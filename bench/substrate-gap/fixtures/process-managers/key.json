@@ -1,0 +1,25 @@
+{
+  "framework": "process-managers",
+  "language": "yaml",
+  "dirs": ["."],
+  "note": "GH.17 process managers (legacy-only, no matrix cell: binding a start to code is GH.18's host-start rules). A Procfile's `<type>: <command>` lines are INFRA_RESOURCEs `infra:process:<type>@<dir>` (the Procfile's repo-relative dir, as web / worker repeat per sub-project), each with a CODE start cell (host procfile, trigger process_type, the command and its effective argv [\"/bin/sh\", \"-c\", command]); a systemd `*.service` with a [Service] section is `infra:unit:<stem>`, its ExecStart (prefixes such as `-` stripped, split with shell-word rules; ExecStartPre / ExecReload are no start) the start cell (host systemd, trigger boot, WorkingDirectory as workdir); a supervisord conf's `[program:<n>]` sections are `infra:program:<n>` (host supervisor, trigger supervised, directory= as workdir). deploy/README.service has no [Service] section and mints nothing (`[proc-start] .. gated_out=1`). Before GH.17: none of these files was walked, no node and no marker.",
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:process:release@svc-py", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:process:web@svc-py", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:process:worker@svc-py", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:unit:worker", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:program:api", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:program:live", "exact": true}
+  ],
+  "expect_cells": [
+    {"kind": "INFRA_RESOURCE", "node": "infra:process:web@svc-py", "cell": "CODE", "contains": "{\"start\":{\"host\":\"procfile\",\"name\":\"web\",\"trigger\":\"process_type\",\"command\":\"gunicorn app:app --bind 0.0.0.0:$PORT\",\"argv\":[\"/bin/sh\",\"-c\",\"gunicorn app:app --bind 0.0.0.0:$PORT\"],\"workdir\":null,\"dir\":\"svc-py\",\"decl\":\"svc-py/Procfile:2\"}}"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:process:worker@svc-py", "cell": "CODE", "contains": "\"command\":\"celery -A tasks worker --loglevel=info\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:unit:worker", "cell": "CODE", "contains": "{\"start\":{\"host\":\"systemd\",\"name\":\"worker\",\"trigger\":\"boot\",\"command\":\"/usr/bin/python3 /opt/app/worker.py --interval 5\",\"argv\":[\"/usr/bin/python3\",\"/opt/app/worker.py\",\"--interval\",\"5\"],\"workdir\":\"/opt/app\",\"dir\":\"deploy\",\"decl\":\"deploy/worker.service:9\"}}"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:program:api", "cell": "CODE", "contains": "\"argv\":[\"sh\",\"-c\",\"gunicorn app:app --chdir /srv/svc-py\"],\"workdir\":\"/srv/svc-py\",\"dir\":\"ops\",\"decl\":\"ops/supervisord.conf:5\""},
+    {"kind": "INFRA_RESOURCE", "node": "infra:program:live", "cell": "CODE", "contains": "\"trigger\":\"supervised\",\"command\":\"node /srv/web/src/live.js\""}
+  ],
+  "forbid": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:unit:README", "note": "a .service with no [Service] section is no systemd unit"},
+    {"kind": "INFRA_RESOURCE", "name": "infra:unit:worker@", "note": "a plain unit is no template"}
+  ]
+}

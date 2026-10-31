@@ -22,6 +22,20 @@ pub struct IacResolver;
 /// and the k8s/compose/Dockerfile extractor (`code_domain::infra::qname`).
 const INFRA_PREFIX: &str = "infra:";
 
+/// GH.17: the INFRA_RESOURCE kinds that are one repo's own processes, never
+/// a resource two repos share: a Procfile type (`infra:process:web@.`) and a
+/// supervisord program (`infra:program:api`). Counted in `resources`, never
+/// paired across repos.
+const REPO_LOCAL_KINDS: [&str; 2] = ["process", "program"];
+
+/// True when `qname` is `infra:<kind>:..` of a [`REPO_LOCAL_KINDS`] kind.
+fn is_repo_local(qname: &str) -> bool {
+    qname
+        .strip_prefix(INFRA_PREFIX)
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(kind, _)| REPO_LOCAL_KINDS.contains(&kind))
+}
+
 /// Which side of the IaC graph a resource came from, derived from its POSITION
 /// cell's file extension rather than from confidence or node order. The
 /// terraform parser attaches CODE + POSITION cells to every resource; the
@@ -65,6 +79,9 @@ impl CrossGraphResolver for IacResolver {
                     } else {
                         k8s += 1;
                     }
+                }
+                if is_repo_local(qname) {
+                    continue;
                 }
                 index
                     .entry(qname.clone())
@@ -181,6 +198,37 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn iac_resolver_never_pairs_repo_local_processes() {
+        // GH.17: `web@.` in two repos' Procfiles, or a supervisord program
+        // `api` in two repos, is no shared resource. A systemd unit and an
+        // image still pair.
+        let (repo_a, repo_b) = (RepoId(11), RepoId(12));
+        for (qname, pairs) in [
+            ("infra:process:web@.", 0),
+            ("infra:program:api", 0),
+            ("infra:unit:worker", 1),
+            ("infra:image:api", 1),
+        ] {
+            let mut merged = MergedGraph::new(vec![
+                graph_with_infra(repo_a, qname),
+                graph_with_infra(repo_b, qname),
+            ]);
+            merged.run(&IacResolver);
+            assert_eq!(
+                merged
+                    .cross_edges
+                    .iter()
+                    .filter(|e| e.category == edge_category::SHARES_INFRA_REF)
+                    .count(),
+                pairs,
+                "{qname}"
+            );
+        }
+        assert!(is_repo_local("infra:process:worker@svc-py"));
+        assert!(!is_repo_local("infra:processor:x"));
     }
 
     #[test]

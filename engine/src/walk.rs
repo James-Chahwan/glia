@@ -1198,6 +1198,11 @@ fn is_bypass_path(path: &str) -> bool {
         // graft (`build::grafts`) only: no route branch takes it (detect_language
         // has no HOCON arm), so it is never parsed, const-scanned or a MODULE.
         || glia_code_extractors::cron::is_hocon_conf_path(path)
+        // GH.17: a process manager's file (`Procfile` / `Procfile.<x>`, a
+        // `*.service`, a supervisord conf). Admitted by path; the route
+        // branch gates on the text (`[Service]`, `[program:<n>]`, a type
+        // line) and mints no MODULE when it fails.
+        || glia_code_extractors::iac::ProcessManager::of_path(path).is_some()
 }
 
 /// LA.6c: an Angular CLI component template (`home.component.html`). Read only
@@ -2177,7 +2182,9 @@ mod walk_tests {
                 "deploy/nginx/plain.conf",
                 "server { location / { proxy_pass http://a; } }\n",
             ),
-            ("etc/supervisord.conf", "[program:web]\ncommand=run\n"),
+            // GH.17 admits a supervisord conf by path; any other INI conf
+            // is still dropped here.
+            ("etc/tool.conf", "[section]\nkey=value\n"),
             ("notes.conf", "# content_by_lua_file x.lua;\n"),
         ] {
             std::fs::write(root.join(rel), text).unwrap();
@@ -2186,6 +2193,49 @@ mod walk_tests {
         let read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(read, ["deploy/nginx/app.conf"]);
         assert!(crate::route::parser_route("deploy/nginx/app.conf").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH.17: process managers' files are admitted by path (the route gates
+    /// on their text): a Procfile and its variants, any `*.service`, a
+    /// supervisord conf by name or under `supervisor/` / `supervisord.d/`.
+    /// An Angular `*.service.ts` is a TS file; a `procfile` (lowercase) and
+    /// an INI conf elsewhere stay out.
+    #[test]
+    fn walk_admits_process_manager_files() {
+        let root = walk_tmp("procs");
+        for d in ["svc", "deploy", "ops/supervisor/conf.d", "etc"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, text) in [
+            ("Procfile", "web: node server.js\n"),
+            ("svc/Procfile.dev", "web: npm run dev\n"),
+            ("svc/procfile", "web: x\n"),
+            ("deploy/worker.service", "[Service]\nExecStart=/bin/true\n"),
+            ("deploy/notes.service", "not a unit\n"),
+            ("etc/supervisord.conf", "[program:web]\ncommand=run\n"),
+            (
+                "ops/supervisor/conf.d/api.conf",
+                "[program:api]\ncommand=run\n",
+            ),
+            ("etc/tool.conf", "[section]\nkey=value\n"),
+        ] {
+            std::fs::write(root.join(rel), text).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let mut read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        read.sort();
+        assert_eq!(
+            read,
+            [
+                "Procfile",
+                "deploy/notes.service",
+                "deploy/worker.service",
+                "etc/supervisord.conf",
+                "ops/supervisor/conf.d/api.conf",
+                "svc/Procfile.dev",
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
