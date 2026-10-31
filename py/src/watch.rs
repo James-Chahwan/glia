@@ -15,6 +15,7 @@
 //!   (absolute under the repo, or repo-relative; a `str` or `os.PathLike`
 //!   each), the engine's `WatchUpdate` as a native dict (LD.2): `{seq, files:
 //!   {added, modified, removed, reparsed, reused}, groups_rebuilt,
+//!   body_only (GA.4: the groups the body-only fast path re-stitched),
 //!   full_rebuild, total_nodes, total_edges, counts, nodes, edges,
 //!   phase_ms}`. An update that changed nothing leaves `seq` where it was
 //!   with empty rows. `RuntimeError` when the repo is no longer a directory.
@@ -184,7 +185,7 @@ impl PyWatchSession {
     /// the caller saw change (absolute under the repo, or repo-relative). A
     /// path not named is not re-read. Returns the update as a dict: `seq`,
     /// `files` (`added`, `modified`, `removed`, `reparsed`, `reused`),
-    /// `groups_rebuilt`, `full_rebuild`, `total_nodes`, `total_edges`,
+    /// `groups_rebuilt`, `body_only`, `full_rebuild`, `total_nodes`, `total_edges`,
     /// `counts`, `nodes`, `edges`, `phase_ms`. An update that changed
     /// nothing keeps `seq` and has no rows. RuntimeError when the repo is no
     /// longer a directory (the session keeps its previous state).
@@ -266,10 +267,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// The keys of `apply()`'s dict, in order (`WatchUpdate`'s fields).
-    const UPDATE_KEYS: [&str; 10] = [
+    const UPDATE_KEYS: [&str; 11] = [
         "seq",
         "files",
         "groups_rebuilt",
+        "body_only",
         "full_rebuild",
         "total_nodes",
         "total_edges",

@@ -6,7 +6,7 @@ incremental build held open over `glia_engine::watch` (DC.7a-c).
   `repo` is no directory. `memory_budget_mb` (GA.12) bounds the session's
   caches by the process's RSS (0: none; None keeps GLIA_MEMORY_BUDGET_MB's).
 - `apply(paths)` -> dict {seq, files: {added, modified, removed, reparsed,
-  reused}, groups_rebuilt, full_rebuild, total_nodes, total_edges, counts,
+  reused}, groups_rebuilt, body_only, full_rebuild, total_nodes, total_edges, counts,
   nodes, edges, phase_ms}; an unchanged file keeps `seq`, with no rows.
 - `poll()` -> dict | None (None when quiet).
 - `snapshot()` -> PyGraph, independent of later updates; it shares the
@@ -31,7 +31,7 @@ import time
 
 from test_build import Checks, params, rg, stderr_of, tree
 
-KEYS = ["seq", "files", "groups_rebuilt", "full_rebuild", "total_nodes", "total_edges",
+KEYS = ["seq", "files", "groups_rebuilt", "body_only", "full_rebuild", "total_nodes", "total_edges",
         "counts", "nodes", "edges", "phase_ms"]
 FILES_KEYS = ["added", "modified", "removed", "reparsed", "reused"]
 MEMORY_KEYS = ["rss_kb", "budget_mb", "cached_groups", "groups", "cache_entries", "memo_paths",
@@ -109,6 +109,9 @@ def main() -> int:
         c.check("files.modified == ['a.py']", files.get("modified") == ["a.py"], files)
         c.check("seq 1 after the first update", u.get("seq") == 1, u.get("seq"))
         c.check("full_rebuild None on a body edit", u.get("full_rebuild") is None, u.get("full_rebuild"))
+        c.check("body_only is a list of rebuilt groups (GA.4)",
+                isinstance(u.get("body_only"), list)
+                and set(u.get("body_only") or []) <= set(u.get("groups_rebuilt") or []), u)
         c.check("the edit's rows", any(n.get("qname", "").endswith("baz") for n in u.get("nodes", [])),
                 u.get("nodes"))
         c.check("counts and phase_ms are dicts",

@@ -31,6 +31,25 @@
 //! the rebuilt groups' graphs and the region / project / docs graphs only
 //! (`delta::located_delta_scoped`); every other update takes the full one.
 //!
+//! Body-only fast path (GA.4, R2-watch section 5 A2), the in-group cutoff
+//! below the group one. A group whose language has a fast path
+//! (`lang_build::fast_path_for`: python, through GA.3's
+//! `glia_graph::rebuild_python_bodies`) also keeps each parse's file, parse
+//! fingerprint and declaration-surface fingerprint (`cache::surface_fingerprint`,
+//! GA.1; only a changed file's surface is fingerprinted again). When such a
+//! group's fingerprint moved but it reads the same files in the same order,
+//! its fingerprint's other inputs (the overlay, the proto service set, the
+//! builder's `hidden_fp`) are unchanged and every file whose parse moved kept
+//! its surface, the update clones the cached build and re-stitches only the
+//! edited files against it (`lang_build::rebody_group`: the graph crate
+//! re-checks the surface and refuses, untouched, when it moved; then the
+//! evidence stamp, the canonical order, the tallies and the evidence fill a
+//! build makes). A refusal builds the group as before. Either way the group
+//! is in `groups_rebuilt` (its graph moved); `body_only` lists the ones the
+//! fast path made. The graph is a clean build's either way (the parity
+//! gates, engine/tests/watch_parity.rs). `GLIA_WATCH_FAST_PATH=0`, read at
+//! [`WatchSession::open`], turns it off.
+//!
 //! Durability (Salsa's): a path is [`Durability::Low`] (a source file: only its
 //! read moves) or [`Durability::High`] (a repo-level input: `.glia/`, a
 //! `.gitignore`, a `go.mod`, a tsconfig, the C/C++ include sources, a project
@@ -84,10 +103,15 @@
 //!   [`WatchSession::open_many`] prints
 //!   `[watch] open repos=<n> repo=<l1,l2,..> files=<n> groups=<g> nodes=<N> edges=<E> took=<ms>`
 //!   (GA.9; `files` and `groups` summed over the repos).
-//! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> took=<ms> repo=<label>`
+//! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> body_only=<k1,k2|-> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> took=<ms> repo=<label>`
 //!   once per update that rebuilt (`k` the language groups rebuilt of the
-//!   plan's `g`, `>` counts moved nodes, `~` on edges the reconfidenced ones);
+//!   plan's `g`, `body_only` those of them the fast path made, GA.4, `>`
+//!   counts moved nodes, `~` on edges the reconfidenced ones);
 //!   GA.9: `repo=` lists the repos with named paths, comma-joined.
+//! - `[watch] fast_path key=<k> files=<n> ms=<t> repo=<label>` per group
+//!   that took the body-only fast path (GA.4: `n` files re-stitched in `t`
+//!   ms), and `[watch] fast_path refused key=<k> reason=<r> repo=<label>`
+//!   per group whose re-stitch was refused and that was built instead.
 //! - `[watch] noop repo=<label> paths=<n>` for an update that changed nothing
 //!   (`n` = the paths it was given; `repo=` the repos with named paths, or
 //!   every root when none had one), and `[watch] outside repo=<label> paths=<n>`
@@ -142,12 +166,12 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use glia_code_domain::FileParse;
 use glia_code_domain::external_inputs::VECTORS_FILE;
 use glia_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE};
 use glia_code_domain::project_roots::{self, ProjectRoot};
 use glia_code_domain::snapshots::scip_dir;
 use glia_code_domain::walk_gating::{self, CONTROL_DIR, RepoIdentity, repo_identity};
+use glia_code_domain::{FileParse, evidence, node_kind};
 use glia_code_extractors::{grpc, migrations, packages};
 use glia_core::RepoId;
 use glia_graph::RepoGraph;
@@ -157,8 +181,8 @@ use twox_hash::XxHash64;
 use crate::build::assemble::{RepoBuildCtx, parse_and_graft, repo_markers};
 use crate::build::c_includes::IncludeRoots;
 use crate::build::lang_build::{
-    BUNDLER_CONFIGS, GroupCtx, GroupInput, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet,
-    build_groups, fold_groups, is_bundler_config, plan_groups,
+    BUNDLER_CONFIGS, GroupCtx, GroupInput, GroupPlan, LangBuild, LanguageGraphs, Made, Seed,
+    TsAliasSet, build_groups_seeded, fast_path_for, fold_groups, is_bundler_config, plan_groups,
 };
 use crate::build::rpc_needles::RpcContext;
 use crate::build::timing::{self, BuildTimes, PhaseTimes};
@@ -166,7 +190,7 @@ use crate::build::{
     BuildOptions, Finished, GenerateResult, aux_graphs, canonical_display, disambiguate,
     finish_build, go_module_dirs, go_modules_for,
 };
-use crate::cache::{ParseCache, parse_fingerprint};
+use crate::cache::{ParseCache, parse_fingerprint, surface_fingerprint};
 use crate::calibrate::record::CALIBRATION_DIR;
 use crate::delta::{
     DeltaCounts, DeltaEdge, DeltaNode, DeltaScope, located_delta_counted, located_delta_scoped,
@@ -357,7 +381,8 @@ pub struct WatchPhases {
 /// One [`WatchSession::apply`]'s answer: the session's `seq` after it (left
 /// unchanged by an update that changed nothing), the files that moved, the
 /// language groups rebuilt (plan keys in plan order: the groups whose
-/// fingerprint moved, DC.7b; the others reuse their cached build), the reason
+/// fingerprint moved, DC.7b; the others reuse their cached build) and those
+/// of them the body-only fast path re-stitched (GA.4), the reason
 /// the update counts as a full rebuild (`identity`, `go_modules`, `overlay`,
 /// `proto_services`; `None` otherwise; every group rebuilds under all but
 /// `go_modules`, which re-parses every file and still reuses a group whose
@@ -371,6 +396,10 @@ pub struct WatchUpdate {
     pub seq: u64,
     pub files: WatchFiles,
     pub groups_rebuilt: Vec<String>,
+    /// GA.4: the groups of `groups_rebuilt` that took the body-only fast
+    /// path (their edited files re-stitched against the cached build), in
+    /// plan order, tagged like `groups_rebuilt`.
+    pub body_only: Vec<String>,
     pub full_rebuild: Option<String>,
     pub total_nodes: usize,
     pub total_edges: usize,
@@ -428,6 +457,9 @@ pub struct WatchSession {
     evictions: u64,
     /// GA.12: times the build memos were cleared for the budget since open.
     memo_clears: u64,
+    /// GA.4: whether a rebuilt group may take the body-only fast path
+    /// (module doc, "Body-only fast path"): [`fast_path_from_env`] at open.
+    fast_path: bool,
 }
 
 /// GA.12: what a [`WatchSession`] holds, from [`WatchSession::memory`]:
@@ -609,6 +641,12 @@ struct Scan {
 struct CachedGroup {
     key: &'static str,
     fingerprint: u64,
+    /// GA.4: the fingerprint's inputs besides the parses ([`GroupPrint`]'s
+    /// `context`): a fast path needs them unchanged.
+    context: u64,
+    /// GA.4: each parse's path and fingerprints, in plan order, for a group
+    /// with a fast path ([`GroupPrint`]'s `files`); `None` otherwise.
+    files: Option<Vec<FileFp>>,
     build: LangBuild,
     /// GA.12: the session `seq` of the update (0: open) that last built or
     /// reused this group: the memory budget evicts the lowest first.
@@ -714,6 +752,8 @@ struct RepoBuilt {
     groups: Vec<&'static str>,
     /// The keys of the groups built (not reused), in plan order.
     rebuilt: Vec<&'static str>,
+    /// GA.4: the keys of `rebuilt` that took the body-only fast path.
+    body_only: Vec<&'static str>,
     /// The group cache this build leaves ([`refresh_groups`]), in plan order.
     slots: Vec<Slot>,
     /// `LanguageGraphs::keys` of the build.
@@ -942,7 +982,15 @@ impl WatchSession {
             });
         }
         let services_fp = proto_services_fp(works.iter().map(|w| w.tree.files.as_slice()));
-        let built = build(&mut repos, &mut works, opts, services_fp, started);
+        let fast_path = fast_path_from_env();
+        let built = build(
+            &mut repos,
+            &mut works,
+            opts,
+            services_fp,
+            fast_path,
+            started,
+        );
         for (repo, part) in repos.iter_mut().zip(built.repos) {
             repo.groups = refresh_groups(Vec::new(), part.slots, 0);
             repo.group_count = part.groups.len();
@@ -979,6 +1027,7 @@ impl WatchSession {
             budget: MemoryBudget::from_env(),
             evictions: 0,
             memo_clears: 0,
+            fast_path,
         };
         session.enforce_budget();
         Ok(session)
@@ -1294,6 +1343,7 @@ impl WatchSession {
             &mut works,
             &self.opts,
             services_fp,
+            self.fast_path,
             started,
         );
         let delta_started = Instant::now();
@@ -1353,6 +1403,7 @@ impl WatchSession {
         );
         let mut files = WatchFiles::default();
         let mut groups_rebuilt = Vec::new();
+        let mut body_only = Vec::new();
         let mut groups = 0usize;
         for (slot, ((repo, work), part)) in self.repos.iter_mut().zip(works).zip(parts).enumerate()
         {
@@ -1375,6 +1426,7 @@ impl WatchSession {
                 .extend(changes.modified.iter().map(|s| tag(s)));
             files.removed.extend(changes.removed.iter().map(|s| tag(s)));
             groups_rebuilt.extend(part.rebuilt.iter().map(|g| tag(g)));
+            body_only.extend(part.body_only.iter().map(|g| tag(g)));
             walk += tree.walk;
             read += tree.read;
             phases.parse += part.phases.parse;
@@ -1417,6 +1469,7 @@ impl WatchSession {
             seq: self.seq,
             files,
             groups_rebuilt,
+            body_only,
             full_rebuild: full_rebuild.map(str::to_string),
             total_nodes: self.result.total_nodes,
             total_edges: self.result.total_edges,
@@ -2106,6 +2159,7 @@ fn noop_update(
         seq,
         files: WatchFiles::default(),
         groups_rebuilt: Vec::new(),
+        body_only: Vec::new(),
         full_rebuild: None,
         total_nodes: result.total_nodes,
         total_edges: result.total_edges,
@@ -2139,6 +2193,7 @@ fn build(
     works: &mut [Work],
     opts: &BuildOptions,
     services_fp: u64,
+    fast_path: bool,
     started: Instant,
 ) -> Built {
     let mut rpc = RpcContext::default();
@@ -2169,7 +2224,11 @@ fn build(
             overlay_text: overlay_text_for(slot, opts),
         };
         let setup = work.setup.as_ref().unwrap_or(setup);
-        let stage = build_repo(&at, setup, &mut work.tree, cache, groups, services_fp, &rpc);
+        let keyed = Keyed {
+            services_fp,
+            fast_path,
+        };
+        let stage = build_repo(&at, setup, &mut work.tree, cache, groups, keyed, &rpc);
         label_inputs.push((setup.repo.0, at.label.to_string()));
         // First root wins, like `repo_label_map` (disambiguated keys never
         // repeat; a repeat is one repo given twice, which open refuses).
@@ -2227,9 +2286,13 @@ fn build_repo(
     tree: &mut Tree,
     cache: &mut ParseCache,
     cached: &[CachedGroup],
-    services_fp: u64,
+    keyed: Keyed,
     rpc: &RpcContext,
 ) -> RepoStage {
+    let Keyed {
+        services_fp,
+        fast_path,
+    } = keyed;
     let (root, label, opts) = (at.root, at.label, at.opts);
     cache.validate_context(&setup.ident.key, &setup.go.context_key());
     let input = RepoInputs {
@@ -2268,12 +2331,32 @@ fn build_repo(
         go_module_dirs: &go_module_dirs,
     };
     // DC.7b: the group fingerprints, then a clone of each matching cached
-    // build OUT into its reuse slot.
+    // build OUT into its reuse slot; GA.4: a clone of the cached build of
+    // each other group whose edits are body-only into a re-stitch seed.
     let fingerprint_started = Instant::now();
-    let fingerprints = group_fingerprints(&groups, &group_ctx, setup.overlay_fp, services_fp);
+    let prints = group_fingerprints(
+        &groups,
+        &group_ctx,
+        GroupKey {
+            overlay_fp: setup.overlay_fp,
+            services_fp,
+        },
+        cached,
+        fast_path,
+    );
     let fingerprint = fingerprint_started.elapsed();
     let clone_started = Instant::now();
-    let (reuse, kept) = reuse_slots(&keys, &fingerprints, cached);
+    let (reuse, kept) = reuse_slots(&keys, &prints, cached);
+    let seeds: Vec<Option<Seed>> = reuse
+        .into_iter()
+        .zip(&keys)
+        .zip(&prints)
+        .map(|((reuse, key), print)| match reuse {
+            Some(build) => Some(Seed::Reuse(build)),
+            None if fast_path => rebody_seed(key, print, cached),
+            None => None,
+        })
+        .collect();
     let mut clone = clone_started.elapsed();
     let rebuilt: Vec<&'static str> = keys
         .iter()
@@ -2281,13 +2364,24 @@ fn build_repo(
         .filter(|(_, kept)| kept.is_none())
         .map(|(key, _)| *key)
         .collect();
-    let builds = build_groups(groups, reuse, &group_ctx);
+    let made = build_groups_seeded(groups, seeds, &group_ctx);
+    let mut body_only = Vec::new();
+    let mut builds = Vec::with_capacity(made.len());
+    for (build, made) in made {
+        if let Some(line) = fast_path_marker(build.key(), &made, label) {
+            eprintln!("{line}");
+        }
+        if matches!(made, Made::Rebodied { .. }) {
+            body_only.push(build.key());
+        }
+        builds.push(build);
+    }
     if let Some(line) = g.dart_packages.marker(label) {
         eprintln!("{line}");
     }
     // Each rebuilt group's build cloned IN before the fold moves its graph.
     let clone_started = Instant::now();
-    let slots = cache_slots(&builds, &fingerprints, &kept);
+    let slots = cache_slots(&builds, prints, &kept);
     clone += clone_started.elapsed();
     let LanguageGraphs {
         mut graphs,
@@ -2314,6 +2408,7 @@ fn build_repo(
         part: RepoBuilt {
             groups: keys,
             rebuilt,
+            body_only,
             slots,
             graph_keys,
             graphs: graphs.len(),
@@ -2328,42 +2423,222 @@ fn build_repo(
     }
 }
 
-/// DC.7b: each group's fingerprint, in plan order: xxh64 of its key, the repo
-/// id, `overlay_fp` ([`overlay_fp`]), `services_fp` ([`proto_services_fp`]),
-/// its [`hidden_fp`] and its parse count and parses' fingerprints in plan
-/// order (`cache::parse_fingerprint`, every parse of the plan mapped on the
-/// pool at once). `None` for a group with a parse that could not be
-/// fingerprinted: it is always rebuilt and never cached.
+/// GA.4: whether the body-only fast path is on: `GLIA_WATCH_FAST_PATH=0`
+/// turns it off, any other value (or none) leaves it on. Off, every group
+/// whose fingerprint moved rebuilds, as before GA.4; the graph is the same
+/// either way (the parity gates).
+fn fast_path_from_env() -> bool {
+    fast_path_from_value(std::env::var("GLIA_WATCH_FAST_PATH").ok().as_deref())
+}
+
+/// [`fast_path_from_env`]'s reading of the variable's value.
+fn fast_path_from_value(value: Option<&str>) -> bool {
+    value.map(str::trim) != Some("0")
+}
+
+/// One build's inputs to every group key besides the group's own:
+/// [`overlay_fp`] and [`proto_services_fp`].
+#[derive(Clone, Copy)]
+struct GroupKey {
+    overlay_fp: u64,
+    services_fp: u64,
+}
+
+/// What [`build`] hands each repo's [`build_repo`] besides its own state:
+/// the build's proto service set and whether the fast path is on.
+#[derive(Clone, Copy)]
+struct Keyed {
+    services_fp: u64,
+    fast_path: bool,
+}
+
+/// GA.4: one parse of a fast-path group, as [`group_fingerprints`] keys it:
+/// its file ([`parse_path`]), its `cache::parse_fingerprint` and its
+/// `cache::surface_fingerprint` (the declaration surface, GA.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileFp {
+    path: String,
+    parse: u64,
+    surface: u64,
+}
+
+/// One group's fingerprints ([`group_fingerprints`]).
+struct GroupPrint {
+    /// DC.7b: the whole key; `None` when a parse could not be fingerprinted
+    /// (the group is always rebuilt and never cached).
+    fingerprint: Option<u64>,
+    /// GA.4: xxh64 of the key's inputs besides the parses (the group key,
+    /// the repo id, the overlay, the proto services and [`hidden_fp`]).
+    context: u64,
+    /// GA.4: every parse's [`FileFp`], in plan order, for a group with a
+    /// fast path ([`fast_path_for`], with the session's fast path on);
+    /// `None` for any other group, or when a parse has no file, a file is
+    /// named twice or a fingerprint failed: such a group never takes it.
+    files: Option<Vec<FileFp>>,
+}
+
+/// GA.4: the file a parse was read from: its MODULE's POSITION file (every
+/// code parser emits the file's MODULE first, `rpc_needles::parse_index`).
+/// `None` when its first node is no MODULE or has no file.
+fn parse_path(fp: &FileParse) -> Option<String> {
+    let first = fp.nodes.first()?;
+    if fp.nav.kind_by_id.get(&first.id) != Some(&node_kind::MODULE) {
+        return None;
+    }
+    evidence::locate(&first.cells).map(|(file, _)| file)
+}
+
+/// DC.7b: each group's fingerprints ([`GroupPrint`]), in plan order. The
+/// whole key is xxh64 of its key, the repo id, `key.overlay_fp`
+/// ([`overlay_fp`]), `key.services_fp` ([`proto_services_fp`]), its
+/// [`hidden_fp`] and its parse count and parses' fingerprints in plan order
+/// (`cache::parse_fingerprint`, every parse of the plan mapped on the pool
+/// at once).
+///
+/// GA.4: with `fast_path` on, a group whose key has a fast path also gets
+/// its [`FileFp`]s. A parse whose path and parse fingerprint equal its slot
+/// in the group's `cached` entry takes that entry's surface fingerprint (an
+/// equal parse has an equal surface); every other parse's surface is
+/// fingerprinted on the pool, so an update fingerprints only its changed
+/// files' surfaces.
 fn group_fingerprints(
     groups: &[GroupInput],
     ctx: &GroupCtx<'_>,
-    overlay_fp: u64,
-    services_fp: u64,
-) -> Vec<Option<u64>> {
+    key: GroupKey,
+    cached: &[CachedGroup],
+    fast_path: bool,
+) -> Vec<GroupPrint> {
     let parses: Vec<&FileParse> = groups.iter().flat_map(|g| &g.parses).collect();
     let (parse_fps, _threads) = crate::parallel::par_map_ordered(&parses, |p| parse_fingerprint(p));
     let mut parse_fps = parse_fps.into_iter();
-    groups
+    // The parses a fast-path group still needs a surface fingerprint for,
+    // as (group, slot): computed below in one pool pass.
+    let mut prints: Vec<GroupPrint> = Vec::with_capacity(groups.len());
+    let mut wanted: Vec<(usize, usize)> = Vec::new();
+    for (at, g) in groups.iter().enumerate() {
+        let mut h = XxHash64::with_seed(0);
+        h.write(g.key.as_bytes());
+        h.write_u8(0);
+        h.write_u64(ctx.repo.0);
+        h.write_u64(key.overlay_fp);
+        h.write_u64(key.services_fp);
+        h.write_u64(hidden_fp(g.key, ctx));
+        let context = h.finish();
+        h.write_u64(g.parses.len() as u64);
+        let fps: Vec<Option<u64>> = parse_fps.by_ref().take(g.parses.len()).collect();
+        let mut whole = true;
+        for fp in &fps {
+            match fp {
+                Some(fp) => h.write_u64(*fp),
+                None => whole = false,
+            }
+        }
+        let fingerprint = whole.then(|| h.finish());
+        let files = (fast_path && whole && fast_path_for(g.key))
+            .then(|| {
+                let old = cached
+                    .iter()
+                    .find(|c| c.key == g.key)
+                    .and_then(|c| c.files.as_deref());
+                let mut seen: BTreeSet<String> = BTreeSet::new();
+                let mut files = Vec::with_capacity(g.parses.len());
+                for (slot, (p, fp)) in g.parses.iter().zip(&fps).enumerate() {
+                    let (path, parse) = (parse_path(p)?, (*fp)?);
+                    if !seen.insert(path.clone()) {
+                        return None;
+                    }
+                    let surface = match old.and_then(|o| o.get(slot)) {
+                        Some(o) if o.path == path && o.parse == parse => o.surface,
+                        _ => {
+                            wanted.push((at, slot));
+                            0
+                        }
+                    };
+                    files.push(FileFp {
+                        path,
+                        parse,
+                        surface,
+                    });
+                }
+                Some(files)
+            })
+            .flatten();
+        prints.push(GroupPrint {
+            fingerprint,
+            context,
+            files,
+        });
+    }
+    let fresh: Vec<&FileParse> = wanted
         .iter()
-        .map(|g| {
-            let mut h = XxHash64::with_seed(0);
-            h.write(g.key.as_bytes());
-            h.write_u8(0);
-            h.write_u64(ctx.repo.0);
-            h.write_u64(overlay_fp);
-            h.write_u64(services_fp);
-            h.write_u64(hidden_fp(g.key, ctx));
-            h.write_u64(g.parses.len() as u64);
-            let mut whole = true;
-            for fp in parse_fps.by_ref().take(g.parses.len()) {
-                match fp {
-                    Some(fp) => h.write_u64(fp),
-                    None => whole = false,
+        .filter_map(|&(at, slot)| groups.get(at).and_then(|g| g.parses.get(slot)))
+        .collect();
+    let (surfaces, _threads) = crate::parallel::par_map_ordered(&fresh, |p| surface_fingerprint(p));
+    for ((at, slot), surface) in wanted.into_iter().zip(surfaces) {
+        let Some(print) = prints.get_mut(at) else {
+            continue;
+        };
+        match surface {
+            Some(fp) => {
+                if let Some(f) = print.files.as_mut().and_then(|fs| fs.get_mut(slot)) {
+                    f.surface = fp;
                 }
             }
-            whole.then(|| h.finish())
-        })
-        .collect()
+            None => print.files = None,
+        }
+    }
+    prints
+}
+
+/// GA.4: the re-stitch seed of group `key`, rebuilt this update, when its
+/// edits are body-only: its `cached` entry holds [`FileFp`]s and the same
+/// `context` (no overlay, proto service or builder input moved), the group
+/// reads the same files in the same order (none added or removed), and
+/// every file whose parse moved kept its surface fingerprint. The seed is a
+/// clone of the entry's build and the moved parses' slots. `None` sends the
+/// group to an ordinary build.
+fn rebody_seed(key: &'static str, print: &GroupPrint, cached: &[CachedGroup]) -> Option<Seed> {
+    if !fast_path_for(key) {
+        return None;
+    }
+    let entry = cached.iter().find(|c| c.key == key)?;
+    let (old, new) = (entry.files.as_deref()?, print.files.as_deref()?);
+    if entry.context != print.context || old.len() != new.len() {
+        return None;
+    }
+    let mut edited = Vec::new();
+    for (slot, (o, n)) in old.iter().zip(new).enumerate() {
+        if o.path != n.path || o.surface != n.surface {
+            return None;
+        }
+        if o.parse != n.parse {
+            edited.push(slot);
+        }
+    }
+    if edited.is_empty() {
+        return None;
+    }
+    Some(Seed::Rebody {
+        cached: entry.build.clone(),
+        edited,
+    })
+}
+
+/// GA.4's fired_on markers for one group of `label`'s build:
+/// `[watch] fast_path key=<k> files=<n> ms=<t> repo=<label>` for a group
+/// that took the body-only fast path, `[watch] fast_path refused key=<k>
+/// reason=<r> repo=<label>` for one whose re-stitch was refused (it was
+/// built instead); `None` for every other group.
+fn fast_path_marker(key: &str, made: &Made, label: &str) -> Option<String> {
+    match made {
+        Made::Rebodied { files, ms } => Some(format!(
+            "[watch] fast_path key={key} files={files} ms={ms:.1} repo={label}"
+        )),
+        Made::Refused { reason } => Some(format!(
+            "[watch] fast_path refused key={key} reason={reason} repo={label}"
+        )),
+        Made::Built | Made::Reused => None,
+    }
 }
 
 /// DC.7b: the repo-level inputs group `key`'s builder reads besides its
@@ -2410,15 +2685,15 @@ fn hidden_fp(key: &str, ctx: &GroupCtx<'_>) -> u64 {
 /// entry of `cached`, else `None`; and that entry's index in `cached`.
 fn reuse_slots(
     keys: &[&'static str],
-    fingerprints: &[Option<u64>],
+    prints: &[GroupPrint],
     cached: &[CachedGroup],
 ) -> (Vec<Option<LangBuild>>, Vec<Option<usize>>) {
     let by_key: BTreeMap<&str, usize> =
         cached.iter().enumerate().map(|(i, c)| (c.key, i)).collect();
     keys.iter()
-        .zip(fingerprints)
-        .map(|(key, fp)| {
-            let hit = fp.and_then(|fp| {
+        .zip(prints)
+        .map(|(key, print)| {
+            let hit = print.fingerprint.and_then(|fp| {
                 by_key.get(key).and_then(|&i| {
                     cached
                         .get(i)
@@ -2433,22 +2708,21 @@ fn reuse_slots(
 
 /// DC.7b: the group cache an update leaves, aligned with the plan: a reused
 /// group keeps its previous entry (`kept`), a rebuilt one with a fingerprint
-/// takes a clone of its build.
-fn cache_slots(
-    builds: &[LangBuild],
-    fingerprints: &[Option<u64>],
-    kept: &[Option<usize>],
-) -> Vec<Slot> {
+/// (built, or re-stitched by the fast path) takes a clone of its build and
+/// its prints.
+fn cache_slots(builds: &[LangBuild], prints: Vec<GroupPrint>, kept: &[Option<usize>]) -> Vec<Slot> {
     builds
         .iter()
-        .zip(fingerprints)
+        .zip(prints)
         .zip(kept)
-        .filter_map(|((build, fp), kept)| match kept {
+        .filter_map(|((build, print), kept)| match kept {
             Some(i) => Some(Slot::Kept(*i)),
-            None => fp.map(|fingerprint| {
+            None => print.fingerprint.map(|fingerprint| {
                 Slot::Fresh(Box::new(CachedGroup {
                     key: build.key(),
                     fingerprint,
+                    context: print.context,
+                    files: print.files,
                     build: build.clone(),
                     last_used: 0,
                 }))
@@ -2898,13 +3172,18 @@ fn rss_marker(
 fn update_marker(u: &WatchUpdate, groups: usize, took: Duration, label: &str) -> String {
     let c = &u.counts;
     format!(
-        "[watch] update seq={} files +{} ~{} -{} groups_rebuilt={}/{groups} full_rebuild={} \
-         nodes +{} -{} ~{} >{} edges +{} -{} ~{} took={} repo={label}",
+        "[watch] update seq={} files +{} ~{} -{} groups_rebuilt={}/{groups} body_only={} \
+         full_rebuild={} nodes +{} -{} ~{} >{} edges +{} -{} ~{} took={} repo={label}",
         u.seq,
         u.files.added.len(),
         u.files.modified.len(),
         u.files.removed.len(),
         u.groups_rebuilt.len(),
+        if u.body_only.is_empty() {
+            "-".to_string()
+        } else {
+            u.body_only.join(",")
+        },
         u.full_rebuild.as_deref().unwrap_or("none"),
         c.nodes_added,
         c.nodes_removed,
@@ -3053,6 +3332,88 @@ mod tests {
             (s.result().total_nodes, s.result().total_edges)
         );
         assert_clean(&s, &dir, tmp.path(), "body_edit");
+    }
+
+    /// GA.4: four python files, each importing the one before.
+    fn py_chain(tmp: &Path) -> PathBuf {
+        let dir = tmp.join("chain");
+        write(
+            &dir,
+            "pkg/models.py",
+            "class User:\n    def __init__(self, name):\n        self.name = name\n\n    def greet(self):\n        return \"hi \" + self.name\n",
+        );
+        write(
+            &dir,
+            "pkg/store.py",
+            "from pkg.models import User\n\n\ndef load(name):\n    return User(name)\n",
+        );
+        write(
+            &dir,
+            "pkg/service.py",
+            "from pkg.store import load\n\n\ndef greet_all(names):\n    return [load(n).greet() for n in names]\n",
+        );
+        write(
+            &dir,
+            "app.py",
+            "from pkg.service import greet_all\n\n\ndef main():\n    return greet_all([\"a\"])\n",
+        );
+        dir
+    }
+
+    #[test]
+    fn fast_path_values() {
+        assert!(fast_path_from_value(None));
+        assert!(fast_path_from_value(Some("1")));
+        assert!(fast_path_from_value(Some("")));
+        assert!(!fast_path_from_value(Some("0")));
+        assert!(!fast_path_from_value(Some(" 0 ")));
+    }
+
+    /// GA.4: a body edit takes the fast path (and a clean build's bytes); a
+    /// declaration edit does not; with the fast path off the same body edit
+    /// rebuilds the group to the same bytes.
+    #[test]
+    fn body_only_fast_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = py_chain(tmp.path());
+        let root = dir.to_str().unwrap();
+        let mut s = WatchSession::open(root, &BuildOptions::default()).unwrap();
+        s.fast_path = true;
+        write(
+            &dir,
+            "pkg/store.py",
+            "from pkg.models import User\n\n\ndef load(name):\n    user = User(name)\n    user.greet()\n    return user\n",
+        );
+        let u = s.apply(&[PathBuf::from("pkg/store.py")]).unwrap();
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        assert_eq!(u.body_only, ["python"]);
+        assert!(update_marker(&u, 1, Duration::ZERO, "chain").contains(" body_only=python "));
+        assert_clean(&s, &dir, tmp.path(), "fast_body");
+
+        // A new function: the surface moved, the group rebuilds.
+        let store = std::fs::read_to_string(dir.join("pkg/store.py")).unwrap();
+        write(
+            &dir,
+            "pkg/store.py",
+            &format!("{store}\n\ndef drop(name):\n    return name\n"),
+        );
+        let u = s.apply(&[PathBuf::from("pkg/store.py")]).unwrap();
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        assert!(u.body_only.is_empty(), "{:?}", u.body_only);
+        assert!(update_marker(&u, 1, Duration::ZERO, "chain").contains(" body_only=- "));
+        assert_clean(&s, &dir, tmp.path(), "fast_surface");
+
+        // Off: the same kind of body edit rebuilds the group.
+        s.fast_path = false;
+        write(
+            &dir,
+            "app.py",
+            "from pkg.service import greet_all\n\n\ndef main():\n    names = [\"a\", \"b\"]\n    return greet_all(names)\n",
+        );
+        let u = s.apply(&[PathBuf::from("app.py")]).unwrap();
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        assert!(u.body_only.is_empty(), "{:?}", u.body_only);
+        assert_clean(&s, &dir, tmp.path(), "fast_off");
     }
 
     #[test]

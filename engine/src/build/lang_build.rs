@@ -225,25 +225,95 @@ pub(crate) fn build_groups(
     reuse: Vec<Option<LangBuild>>,
     ctx: &GroupCtx<'_>,
 ) -> Vec<LangBuild> {
-    let mut reuse = reuse.into_iter();
-    let items: Vec<(GroupInput, Option<LangBuild>)> = groups
+    let seeds = reuse.into_iter().map(|r| r.map(Seed::Reuse)).collect();
+    build_groups_seeded(groups, seeds, ctx)
+        .into_iter()
+        .map(|(build, _)| build)
+        .collect()
+}
+
+/// GA.4: what a caller hands [`build_groups_seeded`] for one group besides
+/// its parses: a build to take as it is ([`build_groups`]' reuse), or the
+/// group's last build and the indices (into its [`GroupInput::parses`]) of
+/// the parses whose body moved, to re-stitch through [`rebody_group`].
+pub(crate) enum Seed {
+    Reuse(LangBuild),
+    Rebody {
+        cached: LangBuild,
+        edited: Vec<usize>,
+    },
+}
+
+/// GA.4: how [`build_groups_seeded`] made one group's build.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Made {
+    /// Built from its parses by [`build_one_group`].
+    Built,
+    /// Taken from a [`Seed::Reuse`].
+    Reused,
+    /// Re-stitched from a [`Seed::Rebody`]: `files` edited parses, `ms` the
+    /// re-stitch's wall time.
+    Rebodied { files: usize, ms: f64 },
+    /// A [`Seed::Rebody`] the fast path refused (`reason`, one token): the
+    /// group was built by [`build_one_group`] instead.
+    Refused { reason: String },
+}
+
+/// GA.4: [`build_groups`] with a [`Seed`] per group: a `Reuse` whose key is
+/// its group's is taken as built, a `Rebody` whose key is its group's goes
+/// through [`rebody_group`] (on the pool, like a build) and falls back to
+/// [`build_one_group`] when refused or when the re-stitch panics; every
+/// other group is built. Each build comes back with how it was made
+/// ([`Made`]), in plan order. A rebodied group counts as built in the
+/// `[groups]` line (its graph moved).
+pub(crate) fn build_groups_seeded(
+    groups: Vec<GroupInput>,
+    seeds: Vec<Option<Seed>>,
+    ctx: &GroupCtx<'_>,
+) -> Vec<(LangBuild, Made)> {
+    let mut seeds = seeds.into_iter();
+    let items: Vec<(GroupInput, Option<Seed>)> = groups
         .into_iter()
         .map(|input| {
-            let taken = reuse.next().flatten().filter(|b| b.key() == input.key);
+            let taken = seeds.next().flatten().filter(|seed| match seed {
+                Seed::Reuse(b) | Seed::Rebody { cached: b, .. } => b.key() == input.key,
+            });
             (input, taken)
         })
         .collect();
     let built: Vec<&'static str> = items
         .iter()
-        .filter(|(_, taken)| taken.is_none())
+        .filter(|(_, taken)| !matches!(taken, Some(Seed::Reuse(_))))
         .map(|(input, _)| input.key)
         .collect();
     let reused = items.len() - built.len();
     let (builds, _threads) = crate::parallel::par_map_owned(items, |(input, taken)| match taken {
-        Some(build) => Ok(build),
-        None => crate::parallel::quiet(|| build_one_group(input, ctx)),
+        Some(Seed::Reuse(build)) => Ok((build, Made::Reused)),
+        Some(Seed::Rebody { cached, edited }) => {
+            let started = std::time::Instant::now();
+            let edits: Vec<FileParse> = edited
+                .iter()
+                .filter_map(|&i| input.parses.get(i).cloned())
+                .collect();
+            let files = edits.len();
+            let refused = if files != edited.len() {
+                RebodyRefusal::NoEdits
+            } else {
+                match crate::parallel::quiet(|| rebody_group(cached, edits)) {
+                    Ok(Ok(build)) => {
+                        let ms = started.elapsed().as_secs_f64() * 1000.0;
+                        return Ok((build, Made::Rebodied { files, ms }));
+                    }
+                    Ok(Err(refused)) => refused,
+                    Err(_) => RebodyRefusal::Panicked,
+                }
+            };
+            let reason = refused.token();
+            crate::parallel::quiet(|| (build_one_group(input, ctx), Made::Refused { reason }))
+        }
+        None => crate::parallel::quiet(|| (build_one_group(input, ctx), Made::Built)),
     });
-    let builds: Vec<LangBuild> = builds
+    let builds: Vec<(LangBuild, Made)> = builds
         .into_iter()
         .map(|build| build.unwrap_or_else(|payload| std::panic::resume_unwind(payload)))
         .collect();
@@ -289,6 +359,128 @@ fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
     } else {
         build_one(key, parses, |parses| build_solo(key, parses, ctx))
     }
+}
+
+/// GA.4: whether group `key` has a body-only fast path ([`rebody_group`]):
+/// a `glia_graph::rebuild_*_bodies` entry that re-stitches edited files
+/// against the group's unchanged surface. Python only (GA.3's seam); FA.5 -
+/// FA.7 add their arms.
+pub(crate) fn fast_path_for(key: &str) -> bool {
+    matches!(key, "python")
+}
+
+/// GA.4: why [`rebody_group`] would not re-stitch a group; the caller builds
+/// it instead.
+#[derive(Debug)]
+pub(crate) enum RebodyRefusal {
+    /// The graph crate's seam refused (the surface moved, an unsupported
+    /// shape, an unknown file); the graph was not used.
+    Graph(glia_graph::Refused),
+    /// The group's key has no fast path ([`fast_path_for`]).
+    NoFastPath,
+    /// The cached build failed: there is no graph to re-stitch.
+    FailedBuild,
+    /// An edge with no EVIDENCE cell in the cached graph or an edited parse:
+    /// a clean build leaves an unattributed parse edge unstamped, which a
+    /// re-stitch cannot tell from its own new edges (`stamp_graph_edges`).
+    Unattributed,
+    /// The edited parse indices did not all name a parse of the group.
+    NoEdits,
+    /// The re-stitch panicked (caught quietly).
+    Panicked,
+}
+
+impl RebodyRefusal {
+    /// The `reason=` token of `[watch] fast_path refused`.
+    pub(crate) fn token(&self) -> String {
+        match self {
+            RebodyRefusal::Graph(r) => match r {
+                glia_graph::Refused::SurfaceMoved(_) => "surface_moved".to_string(),
+                glia_graph::Refused::Unsupported(what) => {
+                    format!("unsupported:{}", what.replace(' ', "_"))
+                }
+                glia_graph::Refused::UnknownFile(_) => "unknown_file".to_string(),
+                _ => "graph_refused".to_string(),
+            },
+            RebodyRefusal::NoFastPath => "no_fast_path".to_string(),
+            RebodyRefusal::FailedBuild => "failed_build".to_string(),
+            RebodyRefusal::Unattributed => "unattributed_edges".to_string(),
+            RebodyRefusal::NoEdits => "no_edits".to_string(),
+            RebodyRefusal::Panicked => "panicked".to_string(),
+        }
+    }
+}
+
+/// GA.4: the body-only fast path. `cached` is the group's last build (a
+/// clone of the pre-pass build a watch session keeps) and `edits` the fresh
+/// post-graft parses of the files whose body changed while their surface
+/// held. Re-stitches them through the language's
+/// `glia_graph::rebuild_*_bodies` (GA.3: refuses, leaving nothing changed,
+/// unless every edited file's surface really is the graph's), then finishes
+/// the graph exactly as [`build_one`] does: `graph:build` evidence on the
+/// edges the re-stitch drew ([`stamp_graph_edges`]), the canonical order
+/// (GA.2), the `[heritage]` tally, the `[evidence-lines]` line and the
+/// evidence fill (DC.5), so the build is the one a clean build of the edited
+/// group makes. Runs under [`EngineResolvePool`] like a build.
+///
+/// The build's `recv_bound` (the `[recv]` marker's receiver-typed binds) is
+/// the cached build's: the re-stitch binds only the edited files' sites and
+/// the count is not kept per file, so after a body edit that adds or drops a
+/// receiver-typed bind the `[recv]` line lags a clean build's by that bind
+/// until the group next rebuilds. It is a marker count only, never in the
+/// graph.
+pub(crate) fn rebody_group(
+    cached: LangBuild,
+    edits: Vec<FileParse>,
+) -> Result<LangBuild, RebodyRefusal> {
+    let LangBuild {
+        lang,
+        graph,
+        recv_bound,
+        ..
+    } = cached;
+    if !fast_path_for(lang) {
+        return Err(RebodyRefusal::NoFastPath);
+    }
+    if edits.is_empty() {
+        return Err(RebodyRefusal::NoEdits);
+    }
+    let Ok((mut g, _, _)) = graph else {
+        return Err(RebodyRefusal::FailedBuild);
+    };
+    let unstamped = |e: &glia_core::Edge| !e.cells.iter().any(|c| c.kind == cell_type::EVIDENCE);
+    if !unattributed_parse_edges(&edits).is_empty() || g.edges.iter().any(unstamped) {
+        return Err(RebodyRefusal::Unattributed);
+    }
+    let body_edits: Vec<glia_graph::BodyEdit> =
+        edits.into_iter().map(glia_graph::BodyEdit::new).collect();
+    let restitch = |g: &mut RepoGraph| match lang {
+        "python" => glia_graph::rebuild_python_bodies(g, body_edits).map(|_| ()),
+        _ => Err(glia_graph::Refused::Unsupported("no fast path")),
+    };
+    // The graph crate counts receiver binds on this thread: bracket them so
+    // nothing leaks into another build's count on it.
+    recv_stats::reset();
+    let stitched = if EngineResolvePool::threads_here() > 1 {
+        glia_graph::with_resolve_pool(std::sync::Arc::new(EngineResolvePool), || restitch(&mut g))
+    } else {
+        restitch(&mut g)
+    };
+    recv_stats::take();
+    stitched.map_err(RebodyRefusal::Graph)?;
+    stamp_graph_edges(&mut g, HashMap::new());
+    let canonical = g.canonicalize();
+    let h = HeritageTally::of(lang, &g);
+    if let Some(line) = LineTally::of(&g).marker(lang) {
+        eprintln!("{line}");
+    }
+    let fill = fill_group_evidence(&g);
+    Ok(LangBuild {
+        lang,
+        graph: Ok((g, h, fill)),
+        recv_bound,
+        canonical,
+    })
 }
 
 /// Stage 3: fold the builds, in plan order, into the repo's graphs

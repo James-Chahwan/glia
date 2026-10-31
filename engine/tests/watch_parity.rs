@@ -63,6 +63,16 @@
 //! re-run with a 1 MB budget, which evicts every cached group and the build
 //! memos at every update: checks 1-3 hold unchanged (an eviction is a cache
 //! drop, never a change of bytes).
+//!
+//! GA.4, the body-only fast path ([`scripted_py_fast_path`]): a four-file
+//! Python fixture ([`write_py_fixture`]) through a body edit, one shifting
+//! every later row of its file, two body edits in one update, a body edit
+//! then a surface edit, and a body edit in the importing file: checks 1-3
+//! after each, and `body_only` exactly `["python"]` on the body-only steps,
+//! `[]` on the surface step. The multi-language `body` step pins it too. The
+//! random half gains `py_body` (a call statement in a python file's last
+//! `def`), checks `body_only` is a python subset of `groups_rebuilt` on every
+//! flush, and the default seeds must take the fast path at least once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -493,6 +503,9 @@ enum Via {
 /// What one step must show besides parity. Table entries are exact lists.
 struct Expect {
     rebuilt_exact: Option<&'static [&'static str]>,
+    /// GA.4: the update's `body_only`, exactly (unchecked under a budget,
+    /// whose evictions leave no cached group to re-stitch).
+    body_only: Option<&'static [&'static str]>,
     rebuilt_contains: &'static [&'static str],
     rebuilt_excludes: &'static [&'static str],
     full_rebuild: Option<&'static str>,
@@ -511,6 +524,7 @@ struct Expect {
 
 const EXPECT: Expect = Expect {
     rebuilt_exact: None,
+    body_only: None,
     rebuilt_contains: &[],
     rebuilt_excludes: &[],
     full_rebuild: None,
@@ -657,6 +671,17 @@ fn assert_rows(
     if let Some(exact) = e.rebuilt_exact.filter(|_| !budgeted) {
         assert_eq!(u.groups_rebuilt, exact, "{at}: groups rebuilt");
     }
+    if let Some(exact) = e.body_only.filter(|_| !budgeted) {
+        assert_eq!(u.body_only, exact, "{at}: body_only");
+    }
+    // GA.4: the fast path's groups are rebuilt groups.
+    for key in &u.body_only {
+        assert!(
+            u.groups_rebuilt.contains(key),
+            "{at}: body_only {key} is in groups_rebuilt: {:?}",
+            u.groups_rebuilt
+        );
+    }
     for key in e.rebuilt_contains {
         assert!(
             u.groups_rebuilt.iter().any(|g| g == key),
@@ -733,6 +758,26 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
     run_with(sequence, steps, None)
 }
 
+/// A scripted sequence's fixture: the tree it writes (its root returned),
+/// and whether its first clean build must hold a pass undo record.
+#[derive(Clone, Copy)]
+struct Fixture {
+    write: fn(&Path) -> PathBuf,
+    undo: bool,
+}
+
+/// The multi-language parity fixture ([`write_fixture`]).
+const MAIN: Fixture = Fixture {
+    write: write_fixture,
+    undo: true,
+};
+
+/// GA.4's four-file Python fixture ([`write_py_fixture`]).
+const PY: Fixture = Fixture {
+    write: write_py_fixture,
+    undo: false,
+};
+
 /// [`run`], the session's memory budget set to `budget` right after open
 /// when one is given (GA.12). A budgeted run checks parity, rows and files
 /// exactly as [`run`] does, but not which groups rebuilt: the budget's
@@ -740,8 +785,18 @@ fn run(sequence: &str, steps: &[Step]) -> Vec<WatchUpdate> {
 /// plan group, checked when RSS is readable, and leaves no cached group or
 /// memo behind).
 fn run_with(sequence: &str, steps: &[Step], budget: Option<MemoryBudget>) -> Vec<WatchUpdate> {
+    run_on(MAIN, sequence, steps, budget)
+}
+
+/// [`run_with`] on `fixture`.
+fn run_on(
+    fixture: Fixture,
+    sequence: &str,
+    steps: &[Step],
+    budget: Option<MemoryBudget>,
+) -> Vec<WatchUpdate> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let repo = write_fixture(tmp.path());
+    let repo = (fixture.write)(tmp.path());
     let root = repo.to_str().expect("utf-8 root");
     if steps.iter().any(|s| matches!(s.via, Via::Poll)) {
         settle(&repo);
@@ -753,7 +808,7 @@ fn run_with(sequence: &str, steps: &[Step], budget: Option<MemoryBudget>) -> Vec
     let evicts_all = budget == Some(MemoryBudget::mb(1)) && rss_kb().is_some();
     let mut prev = generate_one(root).expect("clean build");
     assert!(
-        !prev.merged.pass_undo.is_empty(),
+        !fixture.undo || !prev.merged.pass_undo.is_empty(),
         "{sequence}: the unpaired route leaves an undo record"
     );
     assert_parity(
@@ -820,6 +875,7 @@ const BODY: Step = Step {
     via: Via::Apply(&["api/svc.py"]),
     expect: Expect {
         rebuilt_exact: Some(&["python"]),
+        body_only: Some(&["python"]),
         files_modified: &["api/svc.py"],
         ..EXPECT
     },
@@ -1320,6 +1376,142 @@ fn scripted_wrappers_memo() {
     run("wrappers_memo", SEQ_WRAPPERS);
 }
 
+// ---- GA.4: the body-only fast path ------------------------------------------
+
+/// GA.4's Python fixture at `<tmp>/repo`: four files, each importing the one
+/// before (`app` -> `pkg.service` -> `pkg.store` -> `pkg.models`).
+fn write_py_fixture(tmp: &Path) -> PathBuf {
+    let repo = tmp.join("repo");
+    for (rel, body) in PY_INLINE {
+        write(&repo, rel, body);
+    }
+    repo
+}
+
+const PY_INLINE: &[(&str, &str)] = &[
+    (
+        "pkg/models.py",
+        "class User:\n    def __init__(self, name):\n        self.name = name\n\n    def greet(self):\n        return \"hi \" + self.name\n",
+    ),
+    (
+        "pkg/store.py",
+        "from pkg.models import User\n\n\ndef load(name):\n    return User(name)\n",
+    ),
+    (
+        "pkg/service.py",
+        "from pkg.store import load\n\n\ndef greet_all(names):\n    out = []\n    for n in names:\n        out.append(load(n).greet())\n    return out\n",
+    ),
+    (
+        "app.py",
+        "from pkg.service import greet_all\n\n\ndef main():\n    return greet_all([\"a\", \"b\"])\n",
+    ),
+];
+
+fn py_body(r: &Path) {
+    replace(
+        r,
+        "pkg/store.py",
+        "    return User(name)\n",
+        "    user = User(name)\n    return user\n",
+    );
+}
+/// Two statements ahead of `greet`: every later row of models.py moves.
+fn py_body_shift(r: &Path) {
+    replace(
+        r,
+        "pkg/models.py",
+        "        self.name = name\n",
+        "        cleaned = name.strip()\n        assert cleaned is not None\n        self.name = name\n",
+    );
+}
+fn py_two_bodies(r: &Path) {
+    replace(
+        r,
+        "pkg/service.py",
+        "        out.append(load(n).greet())\n",
+        "        user = load(n)\n        out.append(user.greet())\n",
+    );
+    replace(
+        r,
+        "app.py",
+        "    return greet_all([\"a\", \"b\"])\n",
+        "    names = [\"a\", \"b\"]\n    return greet_all(names)\n",
+    );
+}
+fn py_body_again(r: &Path) {
+    replace(
+        r,
+        "pkg/store.py",
+        "    return user\n",
+        "    user.greet()\n    return user\n",
+    );
+}
+/// A new function: store.py's surface moves.
+fn py_surface(r: &Path) {
+    let store = std::fs::read_to_string(r.join("pkg/store.py")).expect("read");
+    write(
+        r,
+        "pkg/store.py",
+        &format!("{store}\n\ndef drop(name):\n    return name\n"),
+    );
+}
+/// The importing end of the chain.
+fn py_importer_body(r: &Path) {
+    replace(
+        r,
+        "app.py",
+        "    return greet_all(names)\n",
+        "    greeted = greet_all(names)\n    return greeted\n",
+    );
+}
+
+/// The fast path's expectation for a body-only step of `files`.
+const fn body_step(name: &'static str, edit: fn(&Path), files: &'static [&'static str]) -> Step {
+    Step {
+        name,
+        edit,
+        via: Via::Apply(files),
+        expect: Expect {
+            rebuilt_exact: Some(&["python"]),
+            body_only: Some(&["python"]),
+            files_modified: files,
+            ..EXPECT
+        },
+    }
+}
+
+const SEQ_PY_FAST: &[Step] = &[
+    body_step("py_body", py_body, &["pkg/store.py"]),
+    body_step("py_body_shift", py_body_shift, &["pkg/models.py"]),
+    body_step(
+        "py_two_bodies",
+        py_two_bodies,
+        &["app.py", "pkg/service.py"],
+    ),
+    body_step("py_body_again", py_body_again, &["pkg/store.py"]),
+    Step {
+        name: "py_surface",
+        edit: py_surface,
+        via: Via::Apply(&["pkg/store.py"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["python"]),
+            body_only: Some(&[]),
+            files_modified: &["pkg/store.py"],
+            row_changes: &["added"],
+            ..EXPECT
+        },
+    },
+    body_step("py_importer_body", py_importer_body, &["app.py"]),
+];
+
+/// GA.4: the body-only fast path on the Python fixture: after every step
+/// the layout is a clean build's (checks 1-3), and `body_only` is
+/// `["python"]` exactly on the body-only steps, `[]` on the surface step.
+#[test]
+fn scripted_py_fast_path() {
+    run_on(PY, "py_fast_path", SEQ_PY_FAST, None);
+}
+
 #[test]
 fn scripted_budgeted() {
     let sequences: &[(&str, &[Step])] = &[
@@ -1349,6 +1541,12 @@ fn scripted_budgeted() {
             Some(MemoryBudget::mb(1)),
         );
     }
+    run_on(
+        PY,
+        "budgeted_py_fast_path",
+        SEQ_PY_FAST,
+        Some(MemoryBudget::mb(1)),
+    );
 }
 
 // ---- the random sequences (DC.10b) ------------------------------------------
@@ -1392,6 +1590,9 @@ enum Op {
     /// A statement as the first line of the last function of a python / go /
     /// ts / rust file.
     Body,
+    /// GA.4: a call statement as the first line of the last function of a
+    /// python file: a body-only edit the fast path may re-stitch.
+    PyBody,
     /// A new function, and a call to it from a sibling file.
     Declaration,
     /// A new python or go file with one function (a python one sometimes in a
@@ -1417,8 +1618,9 @@ enum Op {
 }
 
 impl Op {
-    const ALL: [Op; 14] = [
+    const ALL: [Op; 15] = [
         Op::Body,
+        Op::PyBody,
         Op::Declaration,
         Op::AddFile,
         Op::DeleteFile,
@@ -1437,6 +1639,7 @@ impl Op {
     fn name(self) -> &'static str {
         match self {
             Op::Body => "body",
+            Op::PyBody => "py_body",
             Op::Declaration => "declaration",
             Op::AddFile => "add",
             Op::DeleteFile => "delete",
@@ -1453,12 +1656,10 @@ impl Op {
         }
     }
 
-    /// Its cards in one [`World::pick`] bag: 15 in all, one default sequence.
+    /// Its cards in one [`World::pick`] bag: 15 in all, one default
+    /// sequence (GA.4's `py_body` took one of `body`'s two).
     fn weight(self) -> usize {
-        match self {
-            Op::Body => 2,
-            _ => 1,
-        }
+        1
     }
 }
 
@@ -1497,22 +1698,26 @@ fn ext(rel: &str) -> &str {
     base.rsplit_once('.').map_or("", |(_, e)| e)
 }
 
+/// `text` (python) with `stmt` as the first line of its last `def`'s body.
+fn in_last_py_fn(text: &str, stmt: &str) -> String {
+    let (mut off, mut hit) = (0, None);
+    for line in text.split_inclusive('\n') {
+        let t = line.trim();
+        if t.starts_with("def ") && t.ends_with(':') {
+            hit = Some((off + line.len(), line.len() - line.trim_start().len()));
+        }
+        off += line.len();
+    }
+    let (end, indent) = hit.unwrap_or_else(|| panic!("no def in {text:?}"));
+    let stmt = format!("{}{stmt}\n", " ".repeat(indent + 4));
+    format!("{}{stmt}{}", &text[..end], &text[end..])
+}
+
 /// `text` with one statement for step `i` as the first line of its last
 /// function's body, by `rel`'s language.
 fn in_last_fn(rel: &str, text: &str, i: usize) -> String {
     let (at, stmt) = match ext(rel) {
-        "py" => {
-            let (mut off, mut hit) = (0, None);
-            for line in text.split_inclusive('\n') {
-                let t = line.trim();
-                if t.starts_with("def ") && t.ends_with(':') {
-                    hit = Some((off + line.len(), line.len() - line.trim_start().len()));
-                }
-                off += line.len();
-            }
-            let (end, indent) = hit.unwrap_or_else(|| panic!("{rel}: no def"));
-            (end, format!("{}_b{i} = {i}\n", " ".repeat(indent + 4)))
-        }
+        "py" => return in_last_py_fn(text, &format!("_b{i} = {i}")),
         lang @ ("go" | "rs") => {
             let kw = if lang == "go" { "func " } else { "fn " };
             let start = text
@@ -1707,6 +1912,18 @@ impl World {
                     .collect();
                 let rel = self.choose(&files);
                 let edited = in_last_fn(&rel, &self.read(&rel), i);
+                self.put(&rel, &edited);
+                vec![rel]
+            }
+            Op::PyBody => {
+                let files: Vec<String> = self
+                    .mirror
+                    .iter()
+                    .filter(|r| ext(r) == "py")
+                    .cloned()
+                    .collect();
+                let rel = self.choose(&files);
+                let edited = in_last_py_fn(&self.read(&rel), &format!("_p{i} = len([{i}])"));
                 self.put(&rel, &edited);
                 vec![rel]
             }
@@ -2072,6 +2289,15 @@ impl Want {
         if let Some(exact) = &self.rebuilt_exact {
             assert_eq!(&u.groups_rebuilt, exact, "{at}: groups rebuilt");
         }
+        // GA.4: only python has a fast path, and its groups are rebuilt ones.
+        for key in &u.body_only {
+            assert!(
+                key == "python" && u.groups_rebuilt.contains(key),
+                "{at}: body_only {key}: {:?} of {:?}",
+                u.body_only,
+                u.groups_rebuilt
+            );
+        }
         for g in &self.rebuilt_contains {
             assert!(
                 u.groups_rebuilt.iter().any(|r| r == g),
@@ -2088,6 +2314,8 @@ struct Tally {
     ops: BTreeMap<&'static str, usize>,
     routes: BTreeMap<Route, usize>,
     noops: usize,
+    /// GA.4: updates that took the body-only fast path.
+    body_only: usize,
 }
 
 /// One seed's sequence of `steps` ops on a fresh fixture and session.
@@ -2178,7 +2406,12 @@ fn random_sequence(seed: u64, steps: usize, tally: &mut Tally) {
         assert_parity(&s, &clean, &step_out, &at);
         std::fs::remove_dir_all(&step_out).expect("rm the step's layouts");
         match &update {
-            Some(u) => want.check(u, seq, &prev, &clean, &at),
+            Some(u) => {
+                want.check(u, seq, &prev, &clean, &at);
+                if !u.body_only.is_empty() {
+                    tally.body_only += 1;
+                }
+            }
             None => {
                 assert!(!want.changed, "{at}: the poll sees the edit");
                 assert_eq!(s.seq(), seq, "{at}: seq");
@@ -2233,11 +2466,12 @@ fn random_sequences() {
         random_sequence(seed, steps, &mut tally);
     }
     eprintln!(
-        "[watch-parity] random seeds={} steps={steps} ops={:?} routes={:?} noops={}",
+        "[watch-parity] random seeds={} steps={steps} ops={:?} routes={:?} noops={} body_only={}",
         seeds.len(),
         tally.ops,
         tally.routes,
-        tally.noops
+        tally.noops,
+        tally.body_only
     );
     if !soak {
         // The default seeds reach every op and route: a table edit that
@@ -2255,6 +2489,11 @@ fn random_sequences() {
             3,
             "seeds 1..=4 take every route: {:?}",
             tally.routes
+        );
+        // GA.4: the default seeds reach the body-only fast path.
+        assert!(
+            tally.body_only > 0,
+            "seeds 1..=4 never took the body-only fast path"
         );
     }
 }

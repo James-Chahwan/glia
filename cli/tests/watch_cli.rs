@@ -194,6 +194,7 @@ fn streams_an_update_and_persists_on_eof() {
         "seq",
         "files",
         "groups_rebuilt",
+        "body_only",
         "full_rebuild",
         "total_nodes",
         "total_edges",
@@ -204,6 +205,10 @@ fn streams_an_update_and_persists_on_eof() {
     ] {
         assert!(u.get(key).is_some(), "update has `{key}`: {u}");
     }
+    // GA.4: a body-only edit of a.py is re-stitched by the fast path, and
+    // `body_only` (an array, a subset of groups_rebuilt) says so.
+    assert_eq!(u["groups_rebuilt"], serde_json::json!(["python"]), "{u}");
+    assert_eq!(u["body_only"], serde_json::json!(["python"]), "{u}");
     let nodes = u["nodes"].as_array().expect("nodes rows");
     assert!(
         nodes

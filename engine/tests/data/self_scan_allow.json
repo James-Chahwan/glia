@@ -36,6 +36,7 @@
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_TR_DEBUG", "why": "engine/examples/rank_eval.rs reads the env var GLIA_TR_DEBUG"},
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_UPDATE_GOLDEN", "why": "engine/src/rules/reflexion_parity.rs reads the env var GLIA_UPDATE_GOLDEN"},
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_WATCH_BENCH", "why": "engine/src/watch.rs reads the env var GLIA_WATCH_BENCH"},
+  {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_WATCH_FAST_PATH", "why": "engine/src/watch.rs reads the env var GLIA_WATCH_FAST_PATH (GA.4: 0 turns the body-only fast path off)"},
   {"kind": "CONFIG_KEY", "qname": "config:env:GLIA_WATCH_POLL_BENCH", "why": "engine/src/watch.rs reads the env var GLIA_WATCH_POLL_BENCH"},
   {"kind": "CONFIG_KEY", "qname": "config:env:OUT_DIR", "why": "cli/build.rs reads the env var OUT_DIR (the merged test target's module list, FH.18; engine/, graph/, store/ and rules/build.rs too)"}
 ]
