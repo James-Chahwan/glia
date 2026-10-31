@@ -414,14 +414,14 @@ fn markers() {
     assert_eq!(
         with("[live] profile="),
         [
-            "[live] profile=code entrypoints=8 (kind=3 role=4 declared=1) owners=0 implementers=0 invoked=9 reached=32/82"
+            "[live] profile=code entrypoints=8 (kind=3 role=4 declared=1) owners=0 implementers=0 invoked=9 reached=32/82 init_gated=0"
         ],
         "kind: two mains and geo's init; role: two Angular components, @main, MainActivity; declared: tool"
     );
     assert_eq!(
         with("[invoked]"),
         [
-            "[invoked] rows=10 angular=1 constructor=3 flutter=0 go_runtime=3 apple_app=1 transloco=1 dio=1 sig_rejected=2"
+            "[invoked] rows=10 angular=1 constructor=3 flutter=0 go_runtime=3 apple_app=1 transloco=1 dio=1 sig_rejected=2 aliased=0 intermediate=0"
         ],
         "Point::Scan refused by its signature, Queue::Len by its missing siblings"
     );
