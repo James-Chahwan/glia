@@ -73,6 +73,20 @@ thread_local! {
 /// memory-bound, not oversubscribed; the pooled parse phase reads 18-21 s
 /// concurrent unset and 19-20 s at 4. A load-shrunk default would only slow
 /// the common lone build.
+///
+/// Re-measured after FH.21 pooled call / ref resolution (GP.8, 2026-10-31,
+/// same machine, repo, script and ABAB order, release glia 0.5.5+p1aa31748,
+/// 1-minute load 0.87 at the start): one build alone takes 16.4 / 16.2 s at
+/// 16 threads and 23.7 / 23.7 s at 4. Four concurrent builds' slowest wall is
+/// 31.7 / 31.7 s unset and 31.3 / 31.0 s at `GLIA_THREADS=4`, user + sys
+/// summed 343 / 345 s against 338 / 336 s (about 11 of 16 cores busy, was 7),
+/// involuntary context switches 34k-39k per build unset and 8k at 4. The
+/// TypeScript-family language_build no longer grows (2.5 s alone, 2.8-2.9 s
+/// concurrent at either size); what grows is the pooled parse (5.9 s alone at
+/// 16, 13.0 s at 4, 18.9-19.8 s concurrent at either size): CPU shared four
+/// ways, not a serial or memory-bound phase. The slowest concurrent wall is
+/// 1.9x the lone build, so four builds finish in less time than two run one
+/// after another, and the default stays every core.
 pub(crate) fn threads() -> usize {
     *THREADS.get_or_init(|| {
         let available = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
