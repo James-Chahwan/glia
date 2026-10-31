@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.4` · vocabulary digest `f31e7dc48404` · schema 3
+Engine `0.5.5` · vocabulary digest `f31e7dc48404` · schema 3
 
 Columns, left to right (the review's own abbreviations):
 
@@ -150,7 +150,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 354/512 applicable cells have a fixture (69.1%) — 354 full, 0 partial, 0 none, 158 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 295
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 306
 
 ## Cells routed via an alternative mechanism
 
@@ -262,7 +262,7 @@ The second axis (0.5.5): how code is USED rather than how services talk. Graded 
 
 ```
               h_cmd    h_evt     h_cb  cfg_tbl    embed   script
-python            ?        ?        ?        ?        ?        ?
+python            ●        ?        ?        ?        ?        ●
 go                ?        ?        ?        ?        ?        ?
 typescript        ?        ?        ?        ?        ?        ?
 java              ?        ?        ?        ?        ?        ?
@@ -282,7 +282,7 @@ kotlin            ?        ?        ?        ?        ?        ?
 lua               ·        ·        ◐        ·        ◐        ◐
 ```
 
-USE PATTERNS: 6/108 cells have a fixture — 0 full, 3 partial, 3 none, 102 unknown, 0 error.
+USE PATTERNS: 8/108 cells have a fixture — 2 full, 3 partial, 3 none, 100 unknown, 0 error.
 
 ## Cohort grades
 

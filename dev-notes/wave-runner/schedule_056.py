@@ -57,6 +57,7 @@ EXCLUSIVE = set()
 # Waves that have landed, by number; closeout.py --release 054 appends each one, and
 # --verify then guards that re-running the scheduler reproduces history.
 LANDED = {
+    0: "GA.1 GA.8 GA.13 GA.20 GB.1 GD.2 GD.5 GD.9 GD.10 GD.13 GD.15 GD.16 GD.21 GD.23 GD.26 GD.33 GD.36 GD.37 GH.1 GH.13 GP.1 GP.5 GP.7 GP.8 GP.9 GP.13",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = False

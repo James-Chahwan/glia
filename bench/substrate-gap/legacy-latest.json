@@ -1,6 +1,6 @@
 {
-  "engine": "0.5.4",
-  "fixtures": 460,
+  "engine": "0.5.5",
+  "fixtures": 471,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -577,6 +577,14 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "docker-image-identity": {
+      "framework": "docker-image-identity",
+      "language": "dockerfile+yaml",
+      "per_category": {
+        "DEFINES": 1.0,
+        "INFRA_REFERENCES": 1.0
+      }
+    },
     "doclink-identifier-mentions": {
       "framework": "doclink-identifier-mentions",
       "language": "python",
@@ -682,6 +690,14 @@
       "language": "rust",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "env-cli-residuals": {
+      "framework": "env-cli-residuals",
+      "language": "dart+elixir+php+javascript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "READS_CONFIG": 1.0
       }
     },
     "event-const-literal": {
@@ -1076,6 +1092,13 @@
       "language": "go",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "go-wire-residuals": {
+      "framework": "go-wire-residuals",
+      "language": "go",
+      "per_category": {
+        "USES": 1.0
       }
     },
     "go-work-modules": {
@@ -1523,6 +1546,11 @@
         "INJECTS": 1.0
       }
     },
+    "liveness-close-out-residuals": {
+      "framework": "liveness-close-out-residuals",
+      "language": "dart+go+typescript",
+      "per_category": {}
+    },
     "lua-nvim": {
       "framework": "lua-nvim",
       "language": "lua",
@@ -1694,6 +1722,13 @@
       "framework": "openapi-pact-fields",
       "language": "yaml+json",
       "per_category": {}
+    },
+    "openapi-servers-forms": {
+      "framework": "openapi-servers-forms",
+      "language": "go",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
     },
     "org-packages-cargo": {
       "framework": "org-packages",
@@ -1979,6 +2014,14 @@
         "HANDLED_BY": 1.0
       }
     },
+    "python-decorator-handlers": {
+      "framework": "python-decorator-handlers",
+      "language": "python",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "python-requirements-roots": {
       "framework": "python-requirements-roots",
       "language": "python",
@@ -2113,6 +2156,13 @@
       "language": "rust",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "rust-cross-file-impls": {
+      "framework": "rust-cross-file-impls",
+      "language": "rust",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "rust-eventbus-broadcast-vs-mpsc": {
@@ -2281,6 +2331,7 @@
       "framework": "solidity-abi-procedures",
       "language": "solidity",
       "per_category": {
+        "CONTAINS": 1.0,
         "HANDLED_BY": 1.0
       }
     },
@@ -2383,6 +2434,15 @@
       "language": "swift",
       "per_category": {}
     },
+    "swift-protocol-receivers": {
+      "framework": "swift-protocol-receivers",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "IMPLEMENTS": 1.0
+      }
+    },
     "swift-self-calls": {
       "framework": "swift-self-calls",
       "language": "swift",
@@ -2430,6 +2490,13 @@
       "framework": "test-reports-fail",
       "language": "python",
       "per_category": {}
+    },
+    "tests-name-match-scope": {
+      "framework": "tests-name-match-scope",
+      "language": "go",
+      "per_category": {
+        "TESTS": 1.0
+      }
     },
     "trpc-create-caller": {
       "framework": "trpc-create-caller",
@@ -2574,6 +2641,14 @@
         "USES": 1.0
       }
     },
+    "ts-heritage-client-wrapper": {
+      "framework": "ts-heritage-client-wrapper",
+      "language": "typescript+go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-heritage-xfile": {
       "framework": "ts-heritage-xfile",
       "language": "typescript",
@@ -2630,6 +2705,14 @@
     },
     "ts-inherited-calls": {
       "framework": "ts-inherited-calls",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPLEMENTS": 1.0
+      }
+    },
+    "ts-interface-receivers": {
+      "framework": "ts-interface-receivers",
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0,

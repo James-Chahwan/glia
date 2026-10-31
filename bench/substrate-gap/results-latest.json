@@ -9578,7 +9578,7 @@
       "unknown_graded": 0
     }
   },
-  "engine": "0.5.4",
+  "engine": "0.5.5",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/angular-inline-template-bindings",
@@ -9634,6 +9634,7 @@
     "fixtures/data-entity-literal-shape",
     "fixtures/data-entity-statement-sinks",
     "fixtures/data-source-jni-descriptor-words",
+    "fixtures/docker-image-identity",
     "fixtures/doclink-identifier-mentions",
     "fixtures/docs-adr-decision",
     "fixtures/docs-link-past-cap",
@@ -9645,6 +9646,7 @@
     "fixtures/elixir-xmodule-calls",
     "fixtures/endpoint-shape-negatives",
     "fixtures/enum-owned-methods",
+    "fixtures/env-cli-residuals",
     "fixtures/event-const-literal",
     "fixtures/event-monorepo-process",
     "fixtures/event-name-shape",
@@ -9676,6 +9678,7 @@
     "fixtures/go-split-receiver",
     "fixtures/go-sql-call-args",
     "fixtures/go-test-file-routes",
+    "fixtures/go-wire-residuals",
     "fixtures/gqlgen-resolvers",
     "fixtures/graphql-decorator-scope",
     "fixtures/graphql-op-needle-precision",
@@ -9717,6 +9720,7 @@
     "fixtures/kotlin-flip-guard",
     "fixtures/kotlin-ktor-client",
     "fixtures/kotlin-local-receivers",
+    "fixtures/liveness-close-out-residuals",
     "fixtures/lua-nvim",
     "fixtures/lua-pure",
     "fixtures/manifest-toml-array-tables",
@@ -9741,6 +9745,7 @@
     "fixtures/nest-enum-prefix-openapi",
     "fixtures/nest-handled-by",
     "fixtures/openapi-pact-fields",
+    "fixtures/openapi-servers-forms",
     "fixtures/org-packages-cargo",
     "fixtures/org-packages-go",
     "fixtures/org-packages-npm",
@@ -9762,6 +9767,7 @@
     "fixtures/py-router-prefix",
     "fixtures/py-test-cells",
     "fixtures/py-typer-argparse-cli",
+    "fixtures/python-decorator-handlers",
     "fixtures/python-requirements-roots",
     "fixtures/react-hook",
     "fixtures/rpc-event-monorepo-owner",
@@ -9769,6 +9775,7 @@
     "fixtures/ruby-rails-scope",
     "fixtures/ruby-require-in-scope",
     "fixtures/runtime-invoked-entries",
+    "fixtures/rust-cross-file-impls",
     "fixtures/rust-queue-precision",
     "fixtures/rust-trait-impl-precision",
     "fixtures/rust-typed-receivers",
@@ -9791,6 +9798,7 @@
     "fixtures/swift-local-receivers",
     "fixtures/swift-members",
     "fixtures/swift-module-qnames",
+    "fixtures/swift-protocol-receivers",
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
     "fixtures/test-fixture-paths",
@@ -9798,6 +9806,7 @@
     "fixtures/test-paths-declared-tests",
     "fixtures/test-reports-coverage",
     "fixtures/test-reports-fail",
+    "fixtures/tests-name-match-scope",
     "fixtures/trpc-create-caller",
     "fixtures/ts-abstract-class",
     "fixtures/ts-api-prefix-builder",
@@ -9810,9 +9819,11 @@
     "fixtures/ts-ethers-call-forms",
     "fixtures/ts-ethers-contract-calls",
     "fixtures/ts-hardhat-contract-calls",
+    "fixtures/ts-heritage-client-wrapper",
     "fixtures/ts-http-wrapper-forward",
     "fixtures/ts-http-wrapper-precision",
     "fixtures/ts-inherited-calls",
+    "fixtures/ts-interface-receivers",
     "fixtures/ts-method-by-value",
     "fixtures/ts-query-suffix-endpoints",
     "fixtures/ts-reexport-barrels",
@@ -10141,6 +10152,54 @@
           1
         ],
         "via": "script_entry"
+      },
+      "python/host_command": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/python/host_command"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "full",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [],
+        "route": [
+          1,
+          1
+        ],
+        "via": "host_command"
+      },
+      "python/script_entry": {
+        "extract": [
+          1,
+          1
+        ],
+        "fixtures": [
+          "patterns/python/script_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "full",
+        "literal": [
+          1,
+          1
+        ],
+        "reasons": [],
+        "route": [
+          1,
+          1
+        ],
+        "via": "script_entry"
       }
     },
     "patterns": [
@@ -10153,10 +10212,10 @@
     ],
     "totals": {
       "error": 0,
-      "full": 0,
+      "full": 2,
       "none": 3,
       "partial": 3,
-      "unknown": 102
+      "unknown": 100
     }
   },
   "schema": 3,
