@@ -1,0 +1,15 @@
+{
+  "name": "web",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prestart:prod": "node dist/migrate",
+    "start:prod": "node dist/main",
+    "queue": "npm run queue:prod",
+    "queue:prod": "NODE_ENV=production node dist/queue/consumer.js",
+    "a": "npm run b",
+    "b": "yarn c",
+    "c": "pnpm d",
+    "d": "node dist/main"
+  }
+}

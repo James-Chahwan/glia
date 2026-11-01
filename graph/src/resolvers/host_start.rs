@@ -70,8 +70,24 @@
 //!   (a `cli_invoke:<n>` CLI_INVOKES pairing, then GH.20's HANDLED_BY;
 //!   DERIVED), else a Go main package whose directory is named like it
 //!   (DERIVED); JavaMain -> `main` of the class at `a/b/Main.<ext>`
-//!   (DERIVED); Framework -> `framework=`; a package-manager script
-//!   (GH.19's) -> `missing=`.
+//!   (DERIVED); Framework -> `framework=`.
+//! - **Start indirection (GH.19).** A package-manager script (`yarn
+//!   worker:prod`, `npm run start:prod`, `pnpm x`) is looked up in the
+//!   package.json of the start's working directory, read from that MODULE's
+//!   `pkg_scripts` cell (the manifest route's
+//!   `glia_code_extractors::iac::package_scripts_cell`): mapped through the
+//!   COPY map (FACT), else the build context's root manifest (DERIVED); a
+//!   Procfile's own directory (FACT). Its command is re-read as `sh -c <cmd>`,
+//!   so a script running `npm run y` recurses, at most three hops (a fourth is
+//!   `refused=` and `refused_depth=`); a `pre<name>` script is never read. A
+//!   JavaScript launcher's build-output path (`node dist/main`, first segment
+//!   `dist` / `build` / `out` / `lib`) whose file is not walked maps to its
+//!   TypeScript source, `src/<rest>.{ts,tsx,mts,js,mjs}` then `<rest>.*` (and
+//!   a directory's `index.*`), DERIVED: the walk reads no tsconfig, so outDir /
+//!   rootDir are these conventions. The edge rule is the start's own form
+//!   (`compose:pkg_script`). A shell script a start runs (`/app/entrypoint.sh`,
+//!   `sh start.sh`) stays unbound: the build holds no `.sh` text
+//!   (`scripts_unread=`).
 //! - **Writes.** `<INFRA_RESOURCE> -HANDLED_BY-> target`, EVIDENCE emitter
 //!   `resolver:host`, rule `<host>:<form>` (`docker:script`,
 //!   `compose:module_attr`, `k8s:binary`, `procfile:celery_app`, ..), located
@@ -85,9 +101,12 @@
 //! (dynamic=<y> ambiguous=<a> framework=<w> missing=<m> external_image=<x>
 //! refused=<r>) forms=(script= py_module= module_attr= celery_app= flask_app=
 //! binary= pkg_script= jar= java_main= dll= framework=) entries=<e>
+//! hops=(pkg_script=<p> dist_src=<d>) refused_depth=<r> scripts_unread=<s>
 //! manifest_bins=<bound>/<declared> (cargo=<b>/<n> pyproject=<b>/<n>
 //! setup=<b>/<n> npm=<b>/<n> gemspec=<b>/<n> composer=<b>/<n>) attr_fallback=<f>
-//! bins_unresolved=<u>` (`refused=`: an inline, too-deep or target-less argv).
+//! bins_unresolved=<u>` (`refused=`: an inline, too-deep or target-less argv;
+//! `pkg_script=`: package-script hops taken, summed over the starts;
+//! `dist_src=`: starts bound through a build-output -> source mapping).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -408,6 +427,18 @@ const MARKER_FORMS: [TargetForm; 11] = [
 /// The kinds a binary's entry may be (a `main` FUNCTION, a `Main` METHOD).
 const ENTRY_FN_KINDS: [NodeKindId; 2] = [node_kind::FUNCTION, node_kind::METHOD];
 
+/// GH.19: the most package-manager script hops one start is read through
+/// (`yarn a` whose script runs `npm run b` whose script runs `npm run c` is
+/// 3); a fourth is refused (`refused_depth=`).
+const MAX_PKG_SCRIPT_HOPS: usize = 3;
+
+/// GH.19: the first path segments a compiled JavaScript start names its
+/// build output under (`node dist/main`): mapped back to the source tree.
+const OUTPUT_DIRS: [&str; 4] = ["dist", "build", "out", "lib"];
+
+/// GH.19: the shells a `sh <script>` start runs its script with.
+const SHELLS: [&str; 6] = ["sh", "bash", "dash", "ash", "zsh", "ksh"];
+
 /// The marker's counts of [`bind_host_starts`].
 #[derive(Debug, Default)]
 struct StartReport {
@@ -417,6 +448,15 @@ struct StartReport {
     unresolved: BTreeMap<&'static str, usize>,
     forms: BTreeMap<&'static str, usize>,
     entries: usize,
+    /// GH.19: package-manager script hops taken, summed over the starts.
+    pkg_script_hops: usize,
+    /// GH.19: starts bound through a build-output -> source mapping.
+    dist_src: usize,
+    /// GH.19: starts refused past [`MAX_PKG_SCRIPT_HOPS`].
+    refused_depth: usize,
+    /// GH.19: unbound starts whose target is a shell script, which no reader
+    /// of the build holds the text of (the walk reads no `.sh`).
+    scripts_unread: usize,
 }
 
 impl StartReport {
@@ -432,14 +472,18 @@ impl StartReport {
             .collect();
         let unresolved: usize = self.unresolved.values().sum();
         format!(
-            "starts={} bound={} (fact={} derived={}) unresolved={unresolved} ({}) forms=({}) entries={}",
+            "starts={} bound={} (fact={} derived={}) unresolved={unresolved} ({}) forms=({}) entries={} hops=(pkg_script={} dist_src={}) refused_depth={} scripts_unread={}",
             self.starts,
             self.fact + self.derived,
             self.fact,
             self.derived,
             reasons.join(" "),
             forms.join(" "),
-            self.entries
+            self.entries,
+            self.pkg_script_hops,
+            self.dist_src,
+            self.refused_depth,
+            self.scripts_unread
         )
     }
 }
@@ -590,6 +634,25 @@ struct RepoIndex {
     invocations: Vec<(String, NodeId)>,
     /// Manifest binaries GH.20 bound: `(name, form, manifest dir, target)`.
     bins: Vec<(String, String, String, NodeId)>,
+    /// GH.19: each package.json's `scripts` (its MODULE's `pkg_scripts`
+    /// cell), by repo-relative manifest path.
+    pkg_scripts: BTreeMap<String, Vec<PkgScript>>,
+}
+
+/// GH.19: one `scripts` entry of a package.json.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PkgScript {
+    name: String,
+    cmd: String,
+}
+
+/// GH.19: what one start's resolution read on the way.
+#[derive(Debug, Default)]
+struct Hops {
+    pkg_script: usize,
+    dist_src: bool,
+    refused_depth: bool,
+    script_unread: bool,
 }
 
 /// GH.18: bind every host start to the code it runs (module doc) and mark
@@ -614,13 +677,16 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
     for (launch, verdict) in launches {
         report.starts += 1;
         let ix = index.get(&launch.repo).unwrap_or(&empty);
-        let (form, outcome) = match verdict {
-            Err(reason) => (None, Err(reason)),
+        let (form, outcome, hops) = match verdict {
+            Err(reason) => (None, Err(reason), Hops::default()),
             Ok(()) => resolve_launch(ix, &adjacency, &launch),
         };
         if let Some(f) = form {
             *report.forms.entry(f.as_str()).or_default() += 1;
         }
+        report.pkg_script_hops += hops.pkg_script;
+        report.refused_depth += usize::from(hops.refused_depth);
+        report.scripts_unread += usize::from(hops.script_unread);
         let (to, fact) = match outcome {
             Ok(b) => b,
             Err(reason) => {
@@ -628,6 +694,7 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
                 continue;
             }
         };
+        report.dist_src += usize::from(hops.dist_src);
         if fact {
             report.fact += 1;
         } else {
@@ -911,23 +978,49 @@ fn external_verdict(argv: &[String]) -> &'static str {
     }
 }
 
-/// Resolve one launch: the normalised form and the target or the reason.
+/// Resolve one launch: the normalised form (the argv's own, before any
+/// hop) and the target or the reason, with the hops read on the way.
+///
+/// GH.19: a package-manager script (`yarn worker:prod`, `npm run x`) is
+/// looked up in the package.json of the start's working directory (mapped
+/// through the image's COPY map, FACT; else the build context's, DERIVED)
+/// and its command re-read as `sh -c <cmd>`, at most [`MAX_PKG_SCRIPT_HOPS`]
+/// deep; the script's extra arguments are not appended. A `pre<name>` script
+/// is never read: only the named one runs the start.
 fn resolve_launch(
     ix: &RepoIndex,
     adjacency: &HashMap<NodeId, Vec<(NodeId, glia_core::EdgeCategoryId)>>,
     l: &Launch<'_>,
-) -> (Option<TargetForm>, Result<Bound, &'static str>) {
-    let t = normalise_argv(&l.argv);
-    if let Some(why) = t.refused {
-        let reason = if why == Refusal::Dynamic {
-            "dynamic"
-        } else {
-            "refused"
+) -> (Option<TargetForm>, Result<Bound, &'static str>, Hops) {
+    let mut hops = Hops::default();
+    let mut t = normalise_argv(&l.argv);
+    let first = t.form;
+    let mut manifest_fact = true;
+    loop {
+        if let Some(why) = t.refused {
+            let reason = if why == Refusal::Dynamic {
+                "dynamic"
+            } else {
+                "refused"
+            };
+            return (Some(first), Err(reason), hops);
+        }
+        if t.form != TargetForm::PkgScript {
+            break;
+        }
+        if hops.pkg_script == MAX_PKG_SCRIPT_HOPS {
+            hops.refused_depth = true;
+            return (Some(first), Err("refused"), hops);
+        }
+        let Some((cmd, fact)) = pkg_script(ix, &l.env, &t.target) else {
+            return (Some(first), Err("missing"), hops);
         };
-        return (Some(t.form), Err(reason));
+        hops.pkg_script += 1;
+        manifest_fact &= fact;
+        t = normalise_argv(&["sh".to_string(), "-c".to_string(), cmd.to_string()]);
     }
     let outcome = match t.form {
-        TargetForm::Script => map_module(ix, &l.env, &script_candidates(&t)),
+        TargetForm::Script => script_module(ix, &l.env, &t, &mut hops),
         TargetForm::PyModule
         | TargetForm::ModuleAttr
         | TargetForm::CeleryApp
@@ -938,7 +1031,142 @@ fn resolve_launch(
         TargetForm::Framework => Err("framework"),
         _ => Err("missing"),
     };
-    (Some(t.form), outcome)
+    if outcome.is_err() && is_shell_script(&t) {
+        hops.script_unread = true;
+    }
+    let outcome = outcome.map(|(id, fact)| (id, fact && manifest_fact));
+    (Some(first), outcome, hops)
+}
+
+/// GH.19: the command of package script `name` in the package.json of the
+/// launch's working directory, and whether that manifest is FACT (named
+/// through the COPY map, or a Procfile's own directory) or DERIVED (the
+/// build context's root manifest).
+fn pkg_script<'a>(ix: &'a RepoIndex, env: &Env<'_>, name: &str) -> Option<(&'a str, bool)> {
+    let (file, fact) = match env {
+        Env::Container {
+            image,
+            context,
+            workdir,
+        } => {
+            let copied = container_path("package.json", workdir.as_deref())
+                .and_then(|p| copied_from(&image.copies, &p))
+                .and_then(|rel| join_rel(context, &rel))
+                .filter(|f| ix.pkg_scripts.contains_key(f));
+            match copied {
+                Some(f) => (f, true),
+                None => (join_rel(context, "package.json")?, false),
+            }
+        }
+        Env::Local {
+            dir,
+            workdir,
+            dir_is_fact,
+        } => {
+            let base = match workdir.as_deref() {
+                Some(w) if w.starts_with('/') => return None,
+                Some(w) => join_rel(dir, w)?,
+                None => dir.clone(),
+            };
+            (
+                join_rel(&base, "package.json")?,
+                *dir_is_fact && workdir.is_none(),
+            )
+        }
+    };
+    ix.pkg_scripts
+        .get(&file)?
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| (s.cmd.as_str(), fact))
+}
+
+/// GH.19: a target that is a shell script (`./entrypoint.sh`, `sh start.sh`),
+/// whose text no reader of the build holds.
+fn is_shell_script(t: &StartTarget) -> bool {
+    t.target.ends_with(".sh")
+        || (t.form == TargetForm::Script && t.launcher.is_some_and(|n| SHELLS.contains(&n)))
+}
+
+/// A script start's MODULE: the file as written (exact), then (GH.19) for a
+/// JavaScript launcher a build-output path mapped to its TypeScript source
+/// (DERIVED), then the written file's longest path suffix (DERIVED).
+fn script_module(
+    ix: &RepoIndex,
+    env: &Env<'_>,
+    t: &StartTarget,
+    hops: &mut Hops,
+) -> Result<Bound, &'static str> {
+    let cands = script_candidates(t);
+    if let Some(b) = map_exact(ix, env, &cands) {
+        return Ok(b);
+    }
+    if t.lang == Some("typescript") {
+        let src = dist_src_candidates(&t.target);
+        let exact: Vec<String> = src.iter().map(|(c, _)| c.clone()).collect();
+        let hit = map_exact(ix, env, &exact)
+            .map(Ok)
+            .or_else(|| map_suffix(ix, env, &src));
+        match hit {
+            Some(Ok((id, _))) => {
+                hops.dist_src = true;
+                return Ok((id, false));
+            }
+            Some(Err(why)) => return Err(why),
+            None => {}
+        }
+    }
+    let any: Vec<(String, usize)> = cands.into_iter().map(|c| (c, 1)).collect();
+    map_suffix(ix, env, &any).unwrap_or(Err("missing"))
+}
+
+/// GH.19: the TypeScript sources a compiled start's path may come from, each
+/// with the fewest trailing segments a suffix match must keep. The first
+/// segment named like a build output ([`OUTPUT_DIRS`]) is mapped to `src`
+/// (tsc's rootDir for the common layout), then dropped (a rootDir of `.`);
+/// the JavaScript extension is replaced by `.ts` / `.tsx` / `.mts` / `.js` /
+/// `.mjs`, and a directory start tries its `index.*`. Empty when no segment
+/// is a build output. The walk reads no tsconfig, so outDir / rootDir are
+/// these conventions, DERIVED.
+fn dist_src_candidates(target: &str) -> Vec<(String, usize)> {
+    let clean = target.trim_end_matches('/');
+    let clean = clean.strip_prefix("./").unwrap_or(clean);
+    let segs: Vec<&str> = clean.split('/').collect();
+    let Some(i) = segs
+        .iter()
+        .position(|s| OUTPUT_DIRS.contains(s))
+        .filter(|&i| i + 1 < segs.len())
+    else {
+        return Vec::new();
+    };
+    let mut rest: Vec<&str> = segs[i + 1..].to_vec();
+    if let Some(last) = rest.last_mut() {
+        *last = ["js", "mjs", "cjs"]
+            .iter()
+            .find_map(|e| last.strip_suffix(e).and_then(|s| s.strip_suffix('.')))
+            .unwrap_or(last);
+    }
+    let prefix = segs[..i].join("/");
+    let mut out = Vec::new();
+    for root in ["src", ""] {
+        let mut parts: Vec<&str> = Vec::new();
+        if !prefix.is_empty() || clean.starts_with('/') {
+            parts.push(&prefix);
+        }
+        if !root.is_empty() {
+            parts.push(root);
+        }
+        parts.extend(rest.iter().copied());
+        let base = parts.join("/");
+        let min = rest.len() + usize::from(!root.is_empty());
+        for ext in ["ts", "tsx", "mts", "js", "mjs"] {
+            out.push((format!("{base}.{ext}"), min));
+        }
+        for ext in ["ts", "tsx", "js"] {
+            out.push((format!("{base}/index.{ext}"), min + 1));
+        }
+    }
+    out
 }
 
 /// The files a script start may name: as written, and for a JavaScript
@@ -1039,33 +1267,27 @@ fn under(file: &str, dir: &str) -> bool {
 /// longest path suffix under the build context (container) or the repo
 /// (DERIVED); two files at that length are `ambiguous`.
 fn map_module(ix: &RepoIndex, env: &Env<'_>, cands: &[String]) -> Result<Bound, &'static str> {
+    if let Some(b) = map_exact(ix, env, cands) {
+        return Ok(b);
+    }
+    let any: Vec<(String, usize)> = cands.iter().map(|c| (c.clone(), 1)).collect();
+    map_suffix(ix, env, &any).unwrap_or(Err("missing"))
+}
+
+/// [`map_module`]'s exact half: the first candidate the COPY map (FACT) or
+/// the declaring file's directory names a walked MODULE at.
+fn map_exact(ix: &RepoIndex, env: &Env<'_>, cands: &[String]) -> Option<Bound> {
     match env {
         Env::Container {
             image,
             context,
             workdir,
-        } => {
-            for c in cands {
-                let Some(path) = container_path(c, workdir.as_deref()) else {
-                    continue;
-                };
-                if let Some(rel) = copied_from(&image.copies, &path)
-                    && let Some(file) = join_rel(context, &rel)
-                    && let Some(id) = ix.modules.get(&file)
-                {
-                    return Ok((*id, true));
-                }
-            }
-            for c in cands {
-                let path = container_path(c, workdir.as_deref()).unwrap_or_else(|| c.clone());
-                match suffix_module(ix, &path, context) {
-                    Some(Ok(id)) => return Ok((id, false)),
-                    Some(Err(())) => return Err("ambiguous"),
-                    None => {}
-                }
-            }
-            Err("missing")
-        }
+        } => cands.iter().find_map(|c| {
+            let path = container_path(c, workdir.as_deref())?;
+            let rel = copied_from(&image.copies, &path)?;
+            let file = join_rel(context, &rel)?;
+            ix.modules.get(&file).map(|id| (*id, true))
+        }),
         Env::Local {
             dir,
             workdir,
@@ -1075,38 +1297,64 @@ fn map_module(ix: &RepoIndex, env: &Env<'_>, cands: &[String]) -> Result<Bound, 
                 Some(w) if w.starts_with('/') => None,
                 Some(w) => join_rel(dir, w),
                 None => Some(dir.clone()),
-            };
-            for c in cands.iter().filter(|c| !c.starts_with('/')) {
-                if let Some(b) = &base
-                    && let Some(file) = join_rel(b, c)
-                    && let Some(id) = ix.modules.get(&file)
-                {
-                    return Ok((*id, *dir_is_fact && workdir.is_none()));
-                }
-            }
-            for c in cands {
-                let path = match workdir.as_deref() {
-                    Some(w) if w.starts_with('/') && !c.starts_with('/') => format!("{w}/{c}"),
-                    _ => c.clone(),
-                };
-                match suffix_module(ix, &path, "") {
-                    Some(Ok(id)) => return Ok((id, false)),
-                    Some(Err(())) => return Err("ambiguous"),
-                    None => {}
-                }
-            }
-            Err("missing")
+            }?;
+            cands.iter().filter(|c| !c.starts_with('/')).find_map(|c| {
+                let file = join_rel(&base, c)?;
+                ix.modules
+                    .get(&file)
+                    .map(|id| (*id, *dir_is_fact && workdir.is_none()))
+            })
         }
     }
 }
 
+/// [`map_module`]'s suffix half: the first candidate whose longest path
+/// suffix (at least its `min` trailing segments) names one walked MODULE
+/// under the build context (container) or the repo, DERIVED; `ambiguous`
+/// for two at that length, `None` when no candidate names one.
+fn map_suffix(
+    ix: &RepoIndex,
+    env: &Env<'_>,
+    cands: &[(String, usize)],
+) -> Option<Result<Bound, &'static str>> {
+    for (c, min) in cands {
+        let (path, within) = match env {
+            Env::Container {
+                context, workdir, ..
+            } => (
+                container_path(c, workdir.as_deref()).unwrap_or_else(|| c.clone()),
+                context.as_str(),
+            ),
+            Env::Local { workdir, .. } => (
+                match workdir.as_deref() {
+                    Some(w) if w.starts_with('/') && !c.starts_with('/') => format!("{w}/{c}"),
+                    _ => c.clone(),
+                },
+                "",
+            ),
+        };
+        match suffix_module(ix, &path, within, *min) {
+            Some(Ok(id)) => return Some(Ok((id, false))),
+            Some(Err(())) => return Some(Err("ambiguous")),
+            None => {}
+        }
+    }
+    None
+}
+
 /// The MODULE whose file ends with the longest suffix of `path` (whole
-/// segments) among the walked files under `within`: `Some(Ok)` for exactly
-/// one, `Some(Err)` for two or more at that length, `None` for none.
-fn suffix_module(ix: &RepoIndex, path: &str, within: &str) -> Option<Result<NodeId, ()>> {
+/// segments, at least `min` of them) among the walked files under `within`:
+/// `Some(Ok)` for exactly one, `Some(Err)` for two or more at that length,
+/// `None` for none.
+fn suffix_module(
+    ix: &RepoIndex,
+    path: &str,
+    within: &str,
+    min: usize,
+) -> Option<Result<NodeId, ()>> {
     let clean = normalise("", path)?;
     let segs: Vec<&str> = clean.split('/').collect();
-    for k in 0..segs.len() {
+    for k in 0..=segs.len().saturating_sub(min.max(1)) {
         let suffix = segs[k..].join("/");
         let tail = format!("/{suffix}");
         let hits: Vec<NodeId> = ix
@@ -1574,6 +1822,36 @@ fn collect_starts(merged: &MergedGraph) -> StartCells {
     out
 }
 
+/// GH.19: a package.json MODULE's `{"pkg_scripts":{..}}` cell (the
+/// manifest route's `iac::package_scripts_cell`): the manifest path and its
+/// scripts in cell order. `None` for any other cell.
+fn read_pkg_scripts(c: &Cell) -> Option<(String, Vec<PkgScript>)> {
+    if c.kind != cell_type::CODE {
+        return None;
+    }
+    let CellPayload::Json(text) = &c.payload else {
+        return None;
+    };
+    if !text.starts_with(r#"{"pkg_scripts":"#) {
+        return None;
+    }
+    let body = Json::parse(text)?;
+    let body = body.get("pkg_scripts")?;
+    let file = body.str_at("file")?.to_string();
+    let scripts = body
+        .get("scripts")?
+        .as_array()?
+        .iter()
+        .filter_map(|s| {
+            Some(PkgScript {
+                name: s.str_at("name")?.to_string(),
+                cmd: s.str_at("cmd")?.to_string(),
+            })
+        })
+        .collect();
+    Some((file, scripts))
+}
+
 /// `"<file>:<1-based row>"` split.
 fn split_decl(decl: &str) -> Option<(String, u32)> {
     let (file, row) = decl.rsplit_once(':')?;
@@ -1593,6 +1871,12 @@ fn repo_index(merged: &MergedGraph, bins: &[(NodeId, NodeId)]) -> HashMap<RepoId
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
                 continue;
             };
+            if kind == node_kind::MODULE {
+                for (file, scripts) in n.cells.iter().filter_map(read_pkg_scripts) {
+                    ix.pkg_scripts.entry(file).or_insert(scripts);
+                }
+                continue;
+            }
             let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
             if kind == node_kind::CLI_INVOCATION {
                 ix.invocations.push((qname, n.id));
@@ -2465,8 +2749,136 @@ mod tests {
             "starts=11 bound=10 (fact=9 derived=1) unresolved=1 (dynamic=1 ambiguous=0 \
              framework=0 missing=0 external_image=0 refused=0) forms=(script=4 py_module=1 \
              module_attr=2 celery_app=1 flask_app=0 binary=2 pkg_script=0 jar=0 java_main=0 \
-             dll=0 framework=0) entries=6"
+             dll=0 framework=0) entries=6 hops=(pkg_script=0 dist_src=0) refused_depth=0 \
+             scripts_unread=0"
         );
+    }
+
+    /// A package.json MODULE carrying the manifest route's scripts cell.
+    fn manifest(repo: RepoId, path: &str, src: &str) -> RepoGraph {
+        let mut g = G::new(repo);
+        let cell = iac::package_scripts_cell(src, path).expect("scripts cell");
+        g.node(
+            node_kind::MODULE,
+            &path.replace('/', "::"),
+            None,
+            vec![cell],
+        );
+        g.done()
+    }
+
+    /// GH.19: package-manager scripts and compiled TypeScript starts.
+    #[test]
+    fn starts_resolve_through_package_scripts_and_build_output() {
+        let repo = RepoId(19);
+        let mut code = G::new(repo);
+        code.module("server/src/main.ts", "server::src::main");
+        code.module("server/src/worker.ts", "server::src::worker");
+        code.module("server/src/jobs/index.ts", "server::src::jobs::index");
+        code.module("tools/run.js", "tools::run");
+        let pkg = r#"{
+  "name": "server",
+  "scripts": {
+    "prestart:prod": "node dist/never",
+    "start:prod": "node dist/main",
+    "worker:prod": "node dist/worker.js",
+    "jobs": "cross-env-free && npm run jobs:inner",
+    "jobs:inner": "node ./dist/jobs",
+    "a": "npm run b",
+    "b": "yarn c",
+    "c": "pnpm d",
+    "d": "node dist/main"
+  }
+}"#;
+        let tools = r#"{"name":"tools","scripts":{"go":"node run.js"}}"#;
+        let merged = resolved(
+            code,
+            vec![
+                docker(
+                    repo,
+                    "server/Dockerfile",
+                    "FROM node:20\nWORKDIR /app/server\nCOPY . .\nCMD [\"node\", \"dist/main\"]\n",
+                ),
+                yaml(
+                    repo,
+                    "server/docker-compose.yml",
+                    "services:\n  worker:\n    build: .\n    command: [\"yarn\", \"worker:prod\"]\n  api:\n    build: .\n    command: npm run start:prod\n  jobs:\n    build: .\n    command: [\"yarn\", \"jobs\"]\n  deep:\n    build: .\n    command: [\"npm\", \"run\", \"a\"]\n  gone:\n    build: .\n    command: [\"yarn\", \"nope\"]\n",
+                ),
+                manifest(repo, "server/package.json", pkg),
+                manifest(repo, "tools/package.json", tools),
+                proc_file(
+                    repo,
+                    ProcessManager::Procfile,
+                    "tools/Procfile",
+                    "web: yarn go\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            starts(&merged),
+            [
+                start(
+                    "infra:image:server",
+                    "server::src::main",
+                    Confidence::Medium,
+                    "docker:script"
+                ),
+                start(
+                    "infra:process:web@tools",
+                    "tools::run",
+                    Confidence::Strong,
+                    "procfile:pkg_script"
+                ),
+                start(
+                    "infra:service:api",
+                    "server::src::main",
+                    Confidence::Medium,
+                    "compose:pkg_script"
+                ),
+                start(
+                    "infra:service:jobs",
+                    "server::src::jobs::index",
+                    Confidence::Medium,
+                    "compose:pkg_script"
+                ),
+                start(
+                    "infra:service:worker",
+                    "server::src::worker",
+                    Confidence::Medium,
+                    "compose:pkg_script"
+                ),
+            ]
+        );
+        assert_eq!(
+            entry_cells(&merged, "server::src::worker"),
+            [
+                r#"{"decl":"server/docker-compose.yml:4","source":"host:compose","host":"infra:service:worker","trigger":"container_start"}"#
+            ]
+        );
+
+        // The over-deep chain is refused, the unknown script is missing.
+        let mut merged = merged;
+        merged.cross_edges.clear();
+        let report = bind_host_starts(&mut merged, &[]);
+        assert!(
+            report
+                .marker()
+                .ends_with("hops=(pkg_script=8 dist_src=4) refused_depth=1 scripts_unread=0"),
+            "{}",
+            report.marker()
+        );
+    }
+
+    #[test]
+    fn dist_src_candidates_map_the_output_dir_to_the_source_tree() {
+        let c = dist_src_candidates("./dist/queue-worker/queue-worker.js");
+        assert_eq!(c[0], ("src/queue-worker/queue-worker.ts".to_string(), 3));
+        assert!(c.contains(&("queue-worker/queue-worker.ts".to_string(), 2)));
+        assert!(c.contains(&("src/queue-worker/queue-worker/index.ts".to_string(), 4)));
+        let abs = dist_src_candidates("/app/server/dist/main");
+        assert_eq!(abs[0], ("/app/server/src/main.ts".to_string(), 2));
+        assert!(dist_src_candidates("src/main.js").is_empty());
+        assert!(dist_src_candidates("dist").is_empty());
     }
 
     /// A one-repo merge of `code` plus the given IaC graphs, resolved.

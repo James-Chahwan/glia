@@ -1,0 +1,32 @@
+{
+  "framework": "start-indirection",
+  "language": "dockerfile",
+  "dirs": ["."],
+  "note": "GH.19 start indirection (legacy-only, no matrix cell: patterns/typescript/process_entry grades the use pattern). A start that runs a package-manager script is read through the package.json of its working directory (the manifest route's pkg_scripts cell on the package.json MODULE): web/'s image CMD `npm run start:prod` -> `node dist/main` (package.json copied in by COPY, FACT; dist/main is a build output, mapped to src/main.ts, DERIVED); the compose queue service `yarn queue` -> `npm run queue:prod` -> `NODE_ENV=production node dist/queue/consumer.js` (two hops); ops/Procfile `yarn serve` -> `node server.js` in the Procfile's own directory (FACT). The `prestart:prod` script is never read (only the named script runs the start), and the compose deep service's four-hop chain a -> b -> c -> d is refused (at most three hops), so neither migrate.ts nor main.ts is HANDLED_BY through them. Before GH.19: every start here was unresolved (forms pkg_script, missing=). Shell entry scripts (`exec \"$@\"`, a script ending `celery -A app worker`) are not in this fixture: the walk reads no .sh, so GH.19 cannot read them (followup).",
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:web", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:queue", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:deep", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:process:web@ops", "exact": true},
+    {"kind": "MODULE", "name": "web::package.json", "exact": true},
+    {"kind": "MODULE", "name": "web::src::migrate", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:web", "to": "web::src::main", "category": "HANDLED_BY", "exact": true,
+     "note": "CMD npm run start:prod -> node dist/main -> src/main.ts"},
+    {"from": "infra:service:queue", "to": "web::src::queue::consumer", "category": "HANDLED_BY", "exact": true,
+     "note": "yarn queue -> npm run queue:prod -> node dist/queue/consumer.js -> src/queue/consumer.ts"},
+    {"from": "infra:process:web@ops", "to": "ops::server", "category": "HANDLED_BY", "exact": true,
+     "note": "Procfile yarn serve -> node server.js, in the Procfile's directory"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "web::src::main", "cell": "ENTRYPOINT", "contains": "\"source\":\"host:docker\""},
+    {"kind": "MODULE", "node": "web::src::queue::consumer", "cell": "ENTRYPOINT", "contains": "\"host\":\"infra:service:queue\""},
+    {"kind": "MODULE", "node": "ops::server", "cell": "ENTRYPOINT", "contains": "\"source\":\"host:procfile\""},
+    {"kind": "MODULE", "node": "web::package.json", "cell": "CODE", "contains": "{\"name\":\"queue:prod\",\"cmd\":\"NODE_ENV=production node dist/queue/consumer.js\",\"line\":9}"}
+  ],
+  "forbid": [
+    {"from": "infra:image:web", "to": "web::src::migrate", "category": "HANDLED_BY", "note": "prestart:prod is never read"},
+    {"from": "infra:service:deep", "to": "web::src::main", "category": "HANDLED_BY", "note": "a -> b -> c -> d is four script hops: refused"}
+  ]
+}

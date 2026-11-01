@@ -1,0 +1,7 @@
+{
+  "name": "ops",
+  "private": true,
+  "scripts": {
+    "serve": "node server.js"
+  }
+}

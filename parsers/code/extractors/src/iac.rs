@@ -3478,6 +3478,100 @@ impl Flow<'_> {
 }
 
 // ----------------------------------------------------------------------------
+// GH.19: package-manager scripts (a start's `yarn <script>` / `npm run <x>`)
+// ----------------------------------------------------------------------------
+
+/// GH.19: the most `scripts` entries one package.json cell keeps.
+pub const PKG_SCRIPTS_CAP: usize = 256;
+
+/// GH.19: the longest script command a package.json cell keeps, in bytes; a
+/// longer one is dropped (no start names a command that long).
+pub const PKG_SCRIPT_MAX_LEN: usize = 4096;
+
+/// One `scripts` entry of a package.json.
+#[derive(serde::Serialize)]
+struct PkgScriptRow<'a> {
+    name: &'a str,
+    cmd: &'a str,
+    /// 1-based line of the entry's key.
+    line: u32,
+}
+
+#[derive(serde::Serialize)]
+struct PkgScriptsBody<'a> {
+    file: &'a str,
+    scripts: Vec<PkgScriptRow<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct PkgScriptsCell<'a> {
+    pkg_scripts: PkgScriptsBody<'a>,
+}
+
+/// GH.19: a `package.json`'s `scripts` as one CODE Json cell for its
+/// MODULE, `{"pkg_scripts":{"file":"<path>","scripts":[{"name","cmd",
+/// "line"},..]}}`, sorted by name, at most [`PKG_SCRIPTS_CAP`] entries and
+/// each command at most [`PKG_SCRIPT_MAX_LEN`] bytes. A start that runs a
+/// package-manager script (`yarn worker:prod`, `npm run start:prod`) is
+/// resolved through it by the host-start rules (`resolver:host`); this reader
+/// records what the manifest says and binds nothing. `None` for any other
+/// file, a manifest that is not JSON, or one with no string script.
+pub fn package_scripts_cell(source: &str, path: &str) -> Option<glia_core::Cell> {
+    if path.rsplit('/').next() != Some("package.json") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(source).ok()?;
+    let scripts = value.get("scripts")?.as_object()?;
+    let block = source.find("\"scripts\"").unwrap_or(0);
+    let mut rows: Vec<PkgScriptRow<'_>> = scripts
+        .iter()
+        .filter_map(|(name, cmd)| {
+            let cmd = cmd.as_str()?;
+            (!name.is_empty() && !cmd.trim().is_empty() && cmd.len() <= PKG_SCRIPT_MAX_LEN).then(
+                || PkgScriptRow {
+                    name,
+                    cmd,
+                    line: key_line(source, block, name),
+                },
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.name.cmp(b.name));
+    rows.truncate(PKG_SCRIPTS_CAP);
+    if rows.is_empty() {
+        return None;
+    }
+    Some(json_cell(&PkgScriptsCell {
+        pkg_scripts: PkgScriptsBody {
+            file: path,
+            scripts: rows,
+        },
+    }))
+}
+
+/// The 1-based line of JSON key `name` written at or after byte `from` (its
+/// `"name"` followed by `:`), else the line holding `from`.
+fn key_line(source: &str, from: usize, name: &str) -> u32 {
+    let quoted = serde_json::to_string(name).unwrap_or_default();
+    let mut at = from;
+    let found = loop {
+        let Some(i) = source.get(at..).and_then(|s| s.find(&quoted)) else {
+            break from;
+        };
+        let end = at + i + quoted.len();
+        if source
+            .get(end..)
+            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+        {
+            break at + i;
+        }
+        at = end;
+    };
+    let before = source.get(..found).unwrap_or("");
+    u32::try_from(before.matches('\n').count() + 1).unwrap_or(u32::MAX)
+}
+
+// ----------------------------------------------------------------------------
 // GH.17: process managers (Procfile, systemd units, supervisord programs)
 // ----------------------------------------------------------------------------
 
@@ -5406,5 +5500,24 @@ build:
                 "[proc-start] procfile=1 types=2 systemd=2 units=2 supervisor=0 programs=0 gated_out=0 repo=. forms=(celery_app=1 module_attr=1 script=1) refused=dynamic:1"
             )
         );
+    }
+
+    #[test]
+    fn package_scripts_cell_records_each_string_script_with_its_line() {
+        let src = "{\n  \"name\": \"server\",\n  \"scripts\": {\n    \"worker:prod\": \"node dist/worker\",\n    \"build\": \"tsc -p tsconfig.json\",\n    \"blank\": \" \",\n    \"odd\": 3\n  },\n  \"build\": \"not a script\"\n}\n";
+        let cell = package_scripts_cell(src, "server/package.json").expect("cell");
+        let glia_core::CellPayload::Json(json) = &cell.payload else {
+            panic!("json cell");
+        };
+        assert_eq!(cell.kind, glia_code_domain::cell_type::CODE);
+        assert_eq!(
+            json,
+            r#"{"pkg_scripts":{"file":"server/package.json","scripts":[{"name":"build","cmd":"tsc -p tsconfig.json","line":5},{"name":"worker:prod","cmd":"node dist/worker","line":4}]}}"#
+        );
+        // Not a package.json, not JSON, no scripts: nothing.
+        assert!(package_scripts_cell(src, "server/composer.json").is_none());
+        assert!(package_scripts_cell("{ nope", "package.json").is_none());
+        assert!(package_scripts_cell(r#"{"name":"x"}"#, "package.json").is_none());
+        assert!(package_scripts_cell(r#"{"scripts":{"a":1}}"#, "package.json").is_none());
     }
 }

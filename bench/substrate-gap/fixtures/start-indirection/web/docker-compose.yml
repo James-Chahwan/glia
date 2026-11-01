@@ -1,0 +1,7 @@
+services:
+  queue:
+    build: .
+    command: ["yarn", "queue"]
+  deep:
+    build: .
+    command: ["yarn", "a"]

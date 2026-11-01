@@ -943,17 +943,22 @@ fn route_branches(
         if let Some(marker) = glia_code_extractors::cli::manifest_marker(path, &bin_out) {
             t.lines.push(marker);
         }
-        let fp = (!pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty()).then(|| {
-            synthetic_parse(
-                path,
-                module_id,
-                repo,
-                vec![pkg_out.nodes, bin_out.nodes],
-                vec![pkg_out.edges],
-                vec![pkg_out.nav, bin_out.nav],
-                vec![],
-            )
-        });
+        // GH.19: a package.json's `scripts`, one CODE cell on its MODULE, so
+        // a start's `yarn <script>` resolves through it (`resolver:host`). A
+        // manifest with scripts and nothing else still mints its MODULE.
+        let scripts = glia_code_extractors::iac::package_scripts_cell(source, path);
+        let fp = (!pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty() || scripts.is_some())
+            .then(|| {
+                synthetic_parse(
+                    path,
+                    module_id,
+                    repo,
+                    vec![pkg_out.nodes, bin_out.nodes],
+                    vec![pkg_out.edges],
+                    vec![pkg_out.nav, bin_out.nav],
+                    scripts.into_iter().collect(),
+                )
+            });
         return Routed::NonCode {
             key: "manifest",
             fp,
@@ -2614,6 +2619,35 @@ mod tests {
 
         // Neither a dependency nor a binary: nothing is stashed.
         assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
+    }
+
+    /// GH.19: a package.json's `scripts` ride one CODE cell on its MODULE,
+    /// minted for a manifest that declares nothing else.
+    #[test]
+    fn package_scripts_ride_the_manifest_module() {
+        let pkg = r#"{"name": "server", "scripts": {"worker:prod": "node dist/worker"}}"#;
+        let parses = route("server/package.json", pkg);
+        let fp = &parses["manifest"][0];
+        let module = &fp.nodes[0];
+        assert_eq!(
+            fp.nav.qname_by_id.get(&module.id).map(String::as_str),
+            Some("server::package.json")
+        );
+        let cells: Vec<&str> = module
+            .cells
+            .iter()
+            .filter(|c| c.kind == cell_type::CODE)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                r#"{"pkg_scripts":{"file":"server/package.json","scripts":[{"name":"worker:prod","cmd":"node dist/worker","line":1}]}}"#
+            ]
+        );
     }
 
     /// The PACKAGE_DEP qnames of `fp`, each a DEPENDS_ON target of
