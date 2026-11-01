@@ -1,0 +1,6 @@
+type Query { orders: [Order] upgrades(first: Int): [Upgrade] shipments: [Shipment] }
+type Mutation { linkWallet(address: String!): Wallet }
+type Order { id: ID }
+type Upgrade { impl: String }
+type Shipment { id: ID }
+type Wallet { address: String }

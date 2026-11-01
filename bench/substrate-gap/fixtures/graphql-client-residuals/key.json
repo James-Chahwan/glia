@@ -1,0 +1,37 @@
+{
+  "framework": "graphql-client-residuals",
+  "language": "typescript+graphql",
+  "dirs": ["."],
+  "note": "GD.19 (FD.59; seed W3 DH.8, W17 DT.11b, W23 DT.1k). The GraphQL client residuals. web/gql.ts: `new AC({ uri })` through `import { ApolloClient as AC }` mints its transport ENDPOINT (an aliased import was unread), and the inline anonymous `gql`query { orders { id } }`` at the call site is the operation `orders` (its first root field) minted by the template scan alone: the needle no longer mints `graphql_op:client.query` beside it. web/ns.ts: `new Apollo.ApolloClient(..)` through `import * as Apollo`. web/urql.js: `const { createClient } = require('urql')` (minted since DT.11b c8673f13 through the file's package fallback; now decided by the destructure, counted `cjs=`; kept as a regression guard). web/graphql.module.ts: apollo-angular's `httpLink.create({ uri })` on a parameter typed as the imported HttpLink. web/wallet.ts: a document built by string concatenation and sent by an in-repo fetch wrapper (zora-protocol packages/cli/src/lib/agent/smart-wallet.ts's shape). web/upgrades.ts: graphql-request `request(url, gql`{ upgrades .. }`)`, an anonymous inline document at the call site (zora-protocol legacy/1155-deployments/script/getPendingUpgrades.ts's shape): no `graphql_op:request` beside `upgrades`. mobile/lib/orders.dart: `QueryOptions(document: listShipments)` built outside `client.query(options)`, the document passed by value (was `graphql_op:client.query`). api/graphql/app_schema.rb: graphql-ruby's schema `query Types::RootQuery` makes RootQuery the Query root (a name with no QueryType suffix named no root). The `OrdersQuery` type alias's SCHEMA_FIELDS shipped with FH.20 (896c3bed): a regression guard. Markers: `[graphql] ruby_schema_roots=.. dart_by_value=.. anonymous=.. inline=.. concatenated=..`, `[graphql-transport] .. aliased=<a> namespace=<n> cjs=<c> apollo_angular=<g>`, `[model-schemas] lang=typescript .. aliases=<t>`.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "POST /graphql", "note": "aliased Apollo import"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/ns/graphql", "exact": true, "note": "namespace import"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/urql/graphql", "exact": true, "note": "CommonJS-destructured urql (regression guard, c8673f13)"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/angular/graphql", "exact": true, "note": "apollo-angular httpLink.create"},
+    {"kind": "GRAPHQL_OPERATION", "name": "orders", "note": "anonymous inline template, named by its first root field"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:LinkWallet", "exact": true, "note": "a document built by string concatenation"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:upgrades", "exact": true, "note": "anonymous inline gql at a graphql-request call (regression guard, 717cfbdd)"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:ListShipments", "exact": true, "note": "a Dart document passed by value through options built outside the call"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:invoices", "exact": true, "note": "a field of the graphql-ruby root bound through `query Types::RootQuery`"}
+  ],
+  "expect_edges": [
+    {"from": "web::gql::client", "to": "endpoint:POST:/graphql", "category": "CALLS"},
+    {"from": "web::ns::nsClient", "to": "endpoint:POST:/ns/graphql", "category": "CALLS"},
+    {"from": "web::graphql.module::createApollo", "to": "endpoint:POST:/angular/graphql", "category": "CALLS"},
+    {"from": "graphql_op:orders", "to": "graphql_resolver:orders", "category": "GRAPHQL_CALLS"},
+    {"from": "graphql_op:LinkWallet", "to": "graphql_resolver:linkWallet", "category": "GRAPHQL_CALLS"},
+    {"from": "graphql_op:ListShipments", "to": "graphql_resolver:shipments", "category": "GRAPHQL_CALLS"},
+    {"from": "graphql_op:upgrades", "to": "graphql_resolver:upgrades", "category": "GRAPHQL_CALLS"},
+    {"from": "api::graphql::app_schema", "to": "graphql_resolver:Query", "category": "CONTAINS", "note": "the Query root read from the Ruby schema's declaration"},
+    {"from": "graphql_resolver:invoices", "to": "api::graphql::app_schema::Types::RootQuery::invoices", "category": "HANDLED_BY"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/graphql", "cell": "ENDPOINT_HIT", "contains": "\"via\":\"graphql\""},
+    {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:LinkWallet", "cell": "CODE", "contains": "linkWallet(address: $address)"},
+    {"kind": "INTERFACE", "node": "web::gql::OrdersQuery", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"orders\""}
+  ],
+  "forbid": [
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:client.query", "note": "a needle named by its call text beside the document it sends (TS and Dart)"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:request", "note": "graphql-request's needle beside its inline anonymous document"}
+  ]
+}

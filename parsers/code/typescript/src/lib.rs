@@ -264,13 +264,10 @@ fn parse_file_stats(
     }
     // DT.1c: the interfaces and field-only classes given a SCHEMA_FIELDS
     // model schema, per file.
-    let ms = acc.models;
-    if ms.interfaces + ms.classes > 0 {
-        eprintln!(
-            "[model-schemas] lang=typescript interfaces={} classes={} fields={} open={} \
-             file={file_rel_path}",
-            ms.interfaces, ms.classes, ms.fields, ms.open
-        );
+    // GD.19: and the object type aliases given one (FH.20's `type X = {..}`,
+    // the TS twin of an interface), `aliases=`.
+    if let Some(line) = acc.models.marker(file_rel_path) {
+        eprintln!("{line}");
     }
     // CH.1: `abstract class` declarations and their bodiless members, per file.
     let ab = acc.abstract_stats;
@@ -2978,6 +2975,7 @@ fn visit_type_alias(
     let alias_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &alias_qname);
     let mut cells = build_cells(&n, src, file_rel);
     if schema_describes(&schema) {
+        acc.models.record_alias(&schema);
         cells.push(schema.cell());
     }
     acc.nodes.push(Node {
@@ -3174,6 +3172,8 @@ struct ModelStats {
     interfaces: usize,
     /// Field-only CLASSes given one.
     classes: usize,
+    /// GD.19: object type aliases given one ([`visit_type_alias`], FH.20).
+    aliases: usize,
     /// The fields those cells list.
     fields: usize,
     /// The cells marked `open`.
@@ -3189,6 +3189,25 @@ impl ModelStats {
         }
         self.fields += schema.fields.len();
         self.open += usize::from(schema.open);
+    }
+
+    /// GD.19: an object type alias's schema ([`visit_type_alias`]).
+    fn record_alias(&mut self, schema: &ModelSchema) {
+        self.aliases += 1;
+        self.fields += schema.fields.len();
+        self.open += usize::from(schema.open);
+    }
+
+    /// The per-file `[model-schemas] lang=typescript` line, or `None` when no
+    /// interface, field-only class or object type alias was given a schema.
+    fn marker(&self, file: &str) -> Option<String> {
+        (self.interfaces + self.classes + self.aliases > 0).then(|| {
+            format!(
+                "[model-schemas] lang=typescript interfaces={} classes={} aliases={} fields={} \
+                 open={} file={file}",
+                self.interfaces, self.classes, self.aliases, self.fields, self.open
+            )
+        })
     }
 }
 
@@ -16364,6 +16383,35 @@ export class C {
 #[cfg(test)]
 mod model_schema_tests {
     use super::*;
+
+    /// GD.19: a graphql-codegen result type is a `type X = {..}` alias: its
+    /// SCHEMA_FIELDS (format ts) are an interface's (FH.20), and the
+    /// `[model-schemas]` line counts it under `aliases=`.
+    #[test]
+    fn type_alias_schema_counts_in_the_model_schemas_marker() {
+        let src = "\
+export type OrdersQuery = { __typename?: 'Query'; orders: Array<{ id: string }> };
+export type Named = OrdersQuery & { name?: string };
+export type Plain = string;
+";
+        let parse = parse_file(src, "src/gen.ts", "src::gen", repo()).unwrap();
+        let orders = one(&parse, node_kind::INTERFACE, "src::gen::OrdersQuery");
+        assert!(orders.field("orders").is_some_and(|f| f.array));
+        assert_eq!(orders.format, glia_code_domain::wire::WireFormat::Ts);
+        assert!(schemas(&parse, node_kind::INTERFACE, "src::gen::Plain").is_empty());
+
+        let mut stats = ModelStats::default();
+        assert_eq!(stats.marker("src/gen.ts"), None);
+        stats.record_alias(&orders);
+        stats.record_alias(&one(&parse, node_kind::INTERFACE, "src::gen::Named"));
+        assert_eq!(
+            stats.marker("src/gen.ts").as_deref(),
+            Some(
+                "[model-schemas] lang=typescript interfaces=0 classes=0 aliases=2 fields=3 open=0 \
+                 file=src/gen.ts"
+            )
+        );
+    }
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://ts_models")

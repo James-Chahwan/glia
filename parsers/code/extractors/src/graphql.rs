@@ -143,6 +143,9 @@ struct NeedleTally {
     /// DH.8: set on the first kept hit of a Dart file that imports
     /// package:graphql ([`dart_imports_graphql`]).
     dart: Option<DartDocTally>,
+    /// GD.19: kept hits named by a document written inside their own call
+    /// ([`call_inline_document`]), the `[graphql] inline=` count.
+    inline: usize,
 }
 
 /// DH.8: how the kept needles of a package:graphql Dart file were named, for
@@ -154,6 +157,9 @@ struct DartDocTally {
     constant: usize,
     inline: usize,
     unread: usize,
+    /// GD.19: a document passed by value (`document: listOrders`) or an
+    /// options object built outside the call ([`DartDoc::ByValue`]).
+    by_value: usize,
 }
 
 impl NeedleTally {
@@ -188,8 +194,8 @@ impl NeedleTally {
     fn dart_marker(&self) -> Option<String> {
         let d = self.dart?;
         Some(format!(
-            "[graphql-ops] dart-document const={} inline={} unread={}",
-            d.constant, d.inline, d.unread
+            "[graphql-ops] dart-document const={} inline={} unread={} by_value={}",
+            d.constant, d.inline, d.unread, d.by_value
         ))
     }
 }
@@ -387,17 +393,36 @@ fn scan_operation_needles<'s>(
                     tally.dart = dart_imports_graphql(source).then(DartDocTally::default);
                 }
                 // The needle's `(` is its last byte.
+                let open = hit + pattern.len() - 1;
                 let document = tally.dart.as_mut().map(|d| {
-                    let found = dart_document_name(source, hit + pattern.len() - 1);
+                    let found = dart_document_name(source, open);
                     match found.as_ref().map(|(_, how, _)| *how) {
                         Some(DartDoc::Constant) => d.constant += 1,
                         Some(DartDoc::Inline) => d.inline += 1,
+                        Some(DartDoc::ByValue) => d.by_value += 1,
                         None => d.unread += 1,
                     }
                     found.map(|(name, _, doc)| (name, Some(doc)))
                 });
+                // GD.19: a document written inside the call names it before
+                // the file's first tag does. A `` gql` `` template there is
+                // minted by the template scan (Strong, at its tag), so the
+                // needle adds nothing.
+                let inline = match document {
+                    Some(_) => None,
+                    None => call_inline_document(source, open),
+                };
+                if inline.is_some() {
+                    tally.inline += 1;
+                }
+                let inline = match inline {
+                    Some(InlineDoc::Template) => break,
+                    Some(InlineDoc::Literal(name, doc)) => Some((name, Some(doc))),
+                    None => None,
+                };
                 let (op_name, doc) = document
                     .flatten()
+                    .or(inline)
                     .or_else(|| extract_gql_operation_name(source))
                     .unwrap_or_else(|| (pattern.trim_end_matches('(').to_string(), None));
                 hits.push((op_name, u32::try_from(line_no).unwrap_or(u32::MAX), doc));
@@ -683,6 +708,7 @@ pub fn extract_graphql_operation_nodes(
 
     let templates = extract_gql_template_operations(source, &mut guard);
     let (requests, request_tally) = client_request_operations(source, &mut guard);
+    let concatenated = concatenated_documents(source, path, &mut guard);
     guard.report("graphql_op");
     if graphql_debug()
         && let Some(marker) = request_tally.marker()
@@ -694,6 +720,7 @@ pub fn extract_graphql_operation_nodes(
         .map(|(name, at, doc)| (name, at, doc, Confidence::Strong));
     let requests = requests
         .iter()
+        .chain(&concatenated)
         .map(|(name, at, doc)| (name.clone(), *at, Some(doc.as_str()), Confidence::Medium));
     for (name, at, doc, confidence) in templates.chain(requests) {
         if seen.insert(name.clone()) {
@@ -717,10 +744,70 @@ pub fn extract_graphql_operation_nodes(
         }
     }
 
+    // GD.19: the operations named by their first root field (a minted
+    // document that names no operation) and how the residual forms were read.
+    let anonymous = nodes
+        .iter()
+        .filter(|n| {
+            n.cells.iter().any(|c| match &c.payload {
+                CellPayload::Text(doc) if c.kind == cell_type::CODE => {
+                    extract_operation_from_body(doc).is_none()
+                }
+                _ => false,
+            })
+        })
+        .count();
+    let residuals = ResidualCounts {
+        ruby_schema_roots: 0,
+        dart_by_value: tally.dart.map_or(0, |d| d.by_value),
+        anonymous,
+        inline: tally.inline,
+        concatenated: concatenated.len(),
+    };
+    if let Some(line) = residuals.marker() {
+        eprintln!("{line}");
+    }
+
     GraphqlNodes {
         nodes,
         nav,
         anchors,
+    }
+}
+
+/// GD.19: what the GraphQL client residuals read in one file, for the
+/// `[graphql]` marker: graphql-ruby root classes bound through their schema's
+/// `query Types::X` ([`graphql_ruby_roots_and_fields`]), Dart documents passed
+/// by value ([`DartDoc::ByValue`]), operations named by their first root
+/// field ([`doc_name`]), needles named by a document inside their own call
+/// ([`call_inline_document`]) and documents built by concatenation
+/// ([`concatenated_documents`]).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+struct ResidualCounts {
+    ruby_schema_roots: usize,
+    dart_by_value: usize,
+    anonymous: usize,
+    inline: usize,
+    concatenated: usize,
+}
+
+impl ResidualCounts {
+    /// `[graphql] ruby_schema_roots=<r> dart_by_value=<d> anonymous=<a>
+    /// inline=<i> concatenated=<c>`, or `None` when every count is 0.
+    fn marker(&self) -> Option<String> {
+        let Self {
+            ruby_schema_roots,
+            dart_by_value,
+            anonymous,
+            inline,
+            concatenated,
+        } = *self;
+        (ruby_schema_roots + dart_by_value + anonymous + inline + concatenated > 0).then(|| {
+            format!(
+                "[graphql] ruby_schema_roots={ruby_schema_roots} dart_by_value={dart_by_value} \
+                 anonymous={anonymous} inline={inline} concatenated={concatenated}"
+            )
+        })
     }
 }
 
@@ -896,7 +983,15 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
                 .iter()
                 .filter(|&&at| mask.get(at) == Some(&b' '))
                 .count();
-            graphql_ruby_roots_and_fields(source, &mask)
+            let (roots, fields, bound) = graphql_ruby_roots_and_fields(source, &mask);
+            let residuals = ResidualCounts {
+                ruby_schema_roots: bound,
+                ..ResidualCounts::default()
+            };
+            if let Some(line) = residuals.marker() {
+                eprintln!("{line}");
+            }
+            (roots, fields)
         }
         DecoratorFamily::Elixir => {
             let mask = elixir_code_mask(source);
@@ -3718,16 +3813,38 @@ fn ruby_class_fields(
 /// names its root, anchored at its class line, and its body's `field` calls
 /// are the root's fields ([`ruby_class_fields`]). An object type (`class
 /// OrderType < Types::BaseObject`) names nothing.
-fn graphql_ruby_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
+///
+/// GD.19: a schema class of the file (`class AppSchema < GraphQL::Schema`)
+/// binds its root types by name: `query Types::RootQuery` makes the file's
+/// `RootQuery` class the Query root whatever it is called
+/// ([`ruby_schema_roots`]); the count of classes bound that way, and named
+/// no root by [`ruby_root`], is the third value.
+fn graphql_ruby_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>, usize) {
     let lines = line_spans(m);
     let mut roots = RootNouns::new();
     let mut fields = Vec::new();
-    for class in ruby_classes(src, m) {
-        let Some(root) = class.name.last().and_then(|n| ruby_root(n)) else {
+    let classes = ruby_classes(src, m);
+    let declared = ruby_schema_roots(src, m, &lines, &classes);
+    let mut bound = 0usize;
+    for class in classes {
+        let Some(name) = class.name.last() else {
+            continue;
+        };
+        let by_schema = declared
+            .iter()
+            .find(|(_, path)| {
+                path.last() == Some(name)
+                    && (path.ends_with(&class.name) || class.name.ends_with(path))
+            })
+            .map(|&(root, _)| root);
+        let Some(root) = ruby_root(name).or(by_schema) else {
             continue;
         };
         if !ruby_object_superclass(&class.superclass) {
             continue;
+        }
+        if ruby_root(name).is_none() {
+            bound += 1;
         }
         if !roots.iter().any(|&(r, _)| r == root) {
             roots.push((root, line_of(src, class.class_at)));
@@ -3735,7 +3852,69 @@ fn graphql_ruby_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String
         fields.extend(ruby_class_fields(src, m, &lines, class.line));
     }
     fields.sort_by_key(|&(_, line)| line);
-    (roots, fields)
+    (roots, fields, bound)
+}
+
+/// GD.19: the root types the file's graphql-ruby schema classes declare, as
+/// (root, the class path written): in the body of a class whose superclass
+/// is `GraphQL::Schema` (the body read as [`ruby_class_fields`] reads one:
+/// the lines indented deeper than the class line), each statement that opens
+/// its line with `query` / `mutation` / `subscription` and names a constant
+/// path (`query Types::RootQuery`, `mutation(Types::MutationRoot)`). A path
+/// matches a class of the same last segment when either path ends with the
+/// other (`class RootQuery` inside `module Types`, `class Types::RootQuery`).
+fn ruby_schema_roots<'a>(
+    src: &'a str,
+    m: &[u8],
+    lines: &[(usize, usize)],
+    classes: &[RubyClass<'a>],
+) -> Vec<(&'static str, Vec<&'a str>)> {
+    let sb = src.as_bytes();
+    let indent = |(start, end): (usize, usize)| first_non_blank(sb, start, end) - start;
+    let mut out = Vec::new();
+    for class in classes {
+        if class.superclass != ["GraphQL", "Schema"] {
+            continue;
+        }
+        let Some(&class_span) = lines.get(class.line) else {
+            continue;
+        };
+        let class_indent = indent(class_span);
+        for &(start, end) in lines.iter().skip(class.line + 1) {
+            let at = first_non_blank(m, start, end);
+            if m.get(at..end).is_none_or(|r| r.trim_ascii().is_empty()) {
+                continue;
+            }
+            if indent((start, end)) <= class_indent {
+                break;
+            }
+            for (word, root) in [
+                (&b"query"[..], "Query"),
+                (b"mutation", "Mutation"),
+                (b"subscription", "Subscription"),
+            ] {
+                if m.get(at..at + word.len()) != Some(word)
+                    || m.get(at + word.len()).is_some_and(|&c| is_ident_byte(c))
+                {
+                    continue;
+                }
+                let mut from = at + word.len();
+                if m.get(from) == Some(&b'(') {
+                    from += 1;
+                } else if !m.get(from).is_some_and(|&c| c == b' ' || c == b'\t') {
+                    continue;
+                }
+                let (path, _) = ruby_path(src, m, from, end);
+                let constant = path
+                    .last()
+                    .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_uppercase()));
+                if constant && !out.iter().any(|(r, _)| *r == root) {
+                    out.push((root, path));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// DH.8: the end of the Elixir string or charlist opening at `at` (`"`,
@@ -4680,6 +4859,192 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
     None
 }
 
+/// GD.19: the name a client document is minted under: its operation name
+/// ([`extract_operation_from_body`]), else, for an anonymous document
+/// ([`is_anonymous_operation`]: `query { .. }`, `{ .. }`), its first root
+/// field ([`first_root_field`]), the rule DT.11a's templates and CL.6a's
+/// client requests already follow.
+fn doc_name(doc: &str) -> Option<String> {
+    extract_operation_from_body(doc).or_else(|| {
+        is_anonymous_operation(doc)
+            .then(|| first_root_field(doc))
+            .flatten()
+    })
+}
+
+/// GD.19: a document written inside a needle's own call
+/// ([`call_inline_document`]).
+enum InlineDoc<'s> {
+    /// A `` gql` `` template the template scan names
+    /// ([`extract_gql_template_operations`]): it mints the operation.
+    Template,
+    /// A `` graphql` `` template or a `gql(..)` / `graphql(..)` call on a
+    /// string literal: the operation's name and the literal's body.
+    Literal(String, &'s str),
+}
+
+/// GD.19: the first GraphQL document written between the `(` at `open` of a
+/// kept needle and its closing bracket: a `` gql` `` / `` graphql` `` tag, or
+/// `gql(` / `graphql(` on a string or template literal, whose body names an
+/// operation ([`doc_name`]). The tag is a whole word (`x.gql`, `mygql` are
+/// none) at code position: string literals and comments of the call are
+/// passed over. `None` when the call holds no named document (an
+/// identifier, a document built elsewhere): the needle keeps the file's
+/// first-tag rule.
+fn call_inline_document(source: &str, open: usize) -> Option<InlineDoc<'_>> {
+    let b = source.as_bytes();
+    let close = matching_close(b, open)?;
+    let mut i = open + 1;
+    while i < close {
+        let word = ["gql", "graphql"].into_iter().find(|w| {
+            b.get(i..i + w.len()) == Some(w.as_bytes())
+                && !ident_byte_before(b, i)
+                && i.checked_sub(1).and_then(|p| b.get(p)) != Some(&b'.')
+                && !b.get(i + w.len()).is_some_and(|&c| is_ident_byte(c))
+        });
+        if let Some(word) = word {
+            let after = i + word.len();
+            if b.get(after) == Some(&b'`') {
+                let doc = quoted_body(source, after + 1, b'`')?;
+                let name = doc_name(doc)?;
+                return Some(if word == "gql" {
+                    InlineDoc::Template
+                } else {
+                    InlineDoc::Literal(name, doc)
+                });
+            }
+            let paren = skip_ascii_ws(b, after);
+            if b.get(paren) == Some(&b'(') {
+                let arg = skip_ascii_ws(b, paren + 1);
+                if let Some(&q @ (b'"' | b'\'' | b'`')) = b.get(arg)
+                    && let Some(doc) = quoted_body(source, arg + 1, q)
+                    && let Some(name) = doc_name(doc)
+                {
+                    return Some(InlineDoc::Literal(name, doc));
+                }
+            }
+            i = after;
+            continue;
+        }
+        match b[i] {
+            b'"' | b'\'' | b'`' => {
+                i = skip_js_literal(b, i).unwrap_or(i + 1);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = b[i..]
+                    .iter()
+                    .position(|&x| x == b'\n')
+                    .map_or(close, |p| i + p);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = find_close(b, i + 2, b"*/", false).map_or(close, |p| p + 2);
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// GD.19: the file extensions [`concatenated_documents`] reads: JavaScript
+/// and TypeScript, where a long document is built as `"query X {" + ".."`.
+const CONCAT_EXTS: &[&str] = &[
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
+];
+
+/// GD.19: the GraphQL documents a JavaScript / TypeScript file builds by
+/// string concatenation, as (name, offset of the first literal, the joined
+/// document): a run of two or more string literals (`'..'`, `".."`, or a
+/// template with no `${`) joined by `+` whose first starts with a
+/// `query` / `mutation` / `subscription` keyword and whose joined text is ONE
+/// operation: its selection set closes ([`gql_close`]) with nothing but
+/// blanks after it and selects at least one root field
+/// ([`operation_root_fields`]). It is named by [`doc_name`]. Literals and
+/// comments of the file are passed over whole, so a document inside another
+/// string is never read; CJ.1c's `guard` must see the first literal open in
+/// code ([`LazyGuard::admits_key`]).
+fn concatenated_documents(
+    source: &str,
+    path: &str,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<(String, usize, String)> {
+    let mut out = Vec::new();
+    if !CONCAT_EXTS.iter().any(|e| path.ends_with(e)) {
+        return out;
+    }
+    let b = source.as_bytes();
+    // The body of the plain literal at `at` and the offset past it.
+    let literal = |at: usize| -> Option<(&str, usize)> {
+        let q = *b.get(at).filter(|&&q| matches!(q, b'"' | b'\'' | b'`'))?;
+        let end = skip_js_literal(b, at)?;
+        let body = source.get(at + 1..end - 1)?;
+        (q != b'`' || !body.contains("${")).then_some((body, end))
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = b[i..]
+                    .iter()
+                    .position(|&x| x == b'\n')
+                    .map_or(b.len(), |p| i + p);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2);
+                continue;
+            }
+            b'"' | b'\'' | b'`' => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        let start = i;
+        let Some((first, mut end)) = literal(start) else {
+            i = skip_js_literal(b, start).unwrap_or(start + 1);
+            continue;
+        };
+        let keyword = matches!(
+            gql_name(first, gql_skip(first.as_bytes(), 0)),
+            Some(("query" | "mutation" | "subscription", _))
+        );
+        let mut joined = first.to_string();
+        let mut pieces = 1;
+        loop {
+            let plus = skip_ascii_ws(b, end);
+            if b.get(plus) != Some(&b'+') || b.get(plus + 1) == Some(&b'+') {
+                break;
+            }
+            let Some((piece, next)) = literal(skip_ascii_ws(b, plus + 1)) else {
+                break;
+            };
+            joined.push_str(piece);
+            pieces += 1;
+            end = next;
+        }
+        i = end;
+        if !keyword || pieces < 2 || !guard.admits_key(start) {
+            continue;
+        }
+        let jb = joined.as_bytes();
+        let Some(open) = jb.iter().position(|&c| c == b'{') else {
+            continue;
+        };
+        let complete = gql_close(jb, open).is_some_and(|c| jb[c + 1..].trim_ascii().is_empty());
+        if !complete || operation_root_fields(&joined).is_empty() {
+            continue;
+        }
+        if let Some(name) = doc_name(&joined) {
+            out.push((name, start, joined));
+        }
+    }
+    out
+}
+
 // ============================================================================
 // DT.1j — SDL types, root-field return types and operation selection sets
 // ============================================================================
@@ -5610,7 +5975,21 @@ enum DartDoc {
     Constant,
     /// `gql(<literal>)`.
     Inline,
+    /// GD.19: a document passed by value (`document: listOrders`, the
+    /// identifier a same-file `gql(..)` or string constant), or the call's
+    /// options built outside it (`client.query(options)` where `final options
+    /// = QueryOptions(..)` is declared in the same file).
+    ByValue,
 }
+
+/// GD.19: graphql / graphql_flutter's options classes, whose `document:`
+/// argument is the operation a client call sends.
+const DART_OPTIONS_CLASSES: &[&str] = &[
+    "QueryOptions",
+    "WatchQueryOptions",
+    "MutationOptions",
+    "SubscriptionOptions",
+];
 
 /// DH.8: a Dart file that imports package:graphql or graphql_flutter.
 fn dart_imports_graphql(source: &str) -> bool {
@@ -5685,31 +6064,52 @@ fn dart_call_close(b: &[u8], open: usize) -> Option<usize> {
 
 /// DH.8: the operation the call opening at `open` (a kept needle's `(`)
 /// sends, read from the first `gql(..)` among its arguments that names one
-/// ([`extract_operation_from_body`]): an inline literal, or an identifier
-/// bound to a string constant in the same file ([`dart_const_document`]).
-/// `None` when no `gql(..)` in the call names an operation (an anonymous
-/// `query { .. }`, a document built in another file). DT.11a: with the
+/// ([`doc_name`]; GD.19: an anonymous `query { .. }` is named by its first
+/// root field): an inline literal, or an identifier bound to a string
+/// constant in the same file ([`dart_const_document`]). DT.11a: with the
 /// document the name was read from (the literal's body).
+///
+/// GD.19: when no `gql(..)` in the call names one, the document passed by
+/// value: a `document: <ident>` argument whose identifier a same-file
+/// declaration binds to `gql(..)` or a string ([`dart_value_document`]), or a
+/// first positional identifier argument a same-file declaration binds to a
+/// [`DART_OPTIONS_CLASSES`] constructor, read like the call itself
+/// (`client.query(options)`), both [`DartDoc::ByValue`]. `None` when nothing
+/// names an operation (a document built in another file).
 fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc, &str)> {
+    dart_call_document(source, open, true)
+}
+
+/// [`dart_document_name`], reading an options variable only when
+/// `follow_options` (one hop: a declaration's own constructor call is read
+/// without it).
+fn dart_call_document(
+    source: &str,
+    open: usize,
+    follow_options: bool,
+) -> Option<(String, DartDoc, &str)> {
     let b = source.as_bytes();
     let close = dart_call_close(b, open)?;
     let mut i = open + 1;
+    let mut by_value: Option<(String, &str)> = None;
     while i < close {
         if let Some(end) = dart_skip(b, i) {
             i = end;
             continue;
         }
-        let tag = b.get(i..i + 3) == Some(b"gql")
-            && !ident_byte_before(b, i)
-            && i.checked_sub(1).and_then(|p| b.get(p)) != Some(&b'.')
-            && !b.get(i + 3).is_some_and(|&c| is_ident_byte(c));
-        let paren = skip_ascii_ws(b, i + 3);
-        if tag && b.get(paren) == Some(&b'(') {
+        let word = |w: &[u8]| {
+            b.get(i..i + w.len()) == Some(w)
+                && !ident_byte_before(b, i)
+                && i.checked_sub(1).and_then(|p| b.get(p)) != Some(&b'.')
+                && !b.get(i + w.len()).is_some_and(|&c| is_ident_byte(c))
+        };
+        if word(b"gql") && b.get(skip_ascii_ws(b, i + 3)) == Some(&b'(') {
+            let paren = skip_ascii_ws(b, i + 3);
             let arg = skip_ascii_ws(b, paren + 1);
             let named = match dart_literal(b, arg) {
-                Some((start, end, _)) => source.get(start..end).and_then(|doc| {
-                    extract_operation_from_body(doc).map(|name| (name, DartDoc::Inline, doc))
-                }),
+                Some((start, end, _)) => source
+                    .get(start..end)
+                    .and_then(|doc| doc_name(doc).map(|name| (name, DartDoc::Inline, doc))),
                 None => {
                     let end = cs_ident_end(b, arg, close);
                     source
@@ -5722,19 +6122,56 @@ fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc, &st
             if named.is_some() {
                 return named;
             }
+        } else if by_value.is_none() && word(b"document") {
+            let colon = skip_ascii_ws(b, i + 8);
+            let arg = skip_ascii_ws(b, colon + 1);
+            let end = cs_ident_end(b, arg, close);
+            if b.get(colon) == Some(&b':')
+                && let Some(id) = source.get(arg..end).filter(|id| is_ident(id))
+                && matches!(b.get(skip_ascii_ws(b, end)), Some(b',' | b')'))
+            {
+                by_value = dart_value_document(source, id);
+            }
         }
         i += 1;
     }
-    None
+    if let Some((name, doc)) = by_value {
+        return Some((name, DartDoc::ByValue, doc));
+    }
+    if !follow_options {
+        return None;
+    }
+    // `client.query(options)`: the options declared in the same file.
+    let arg = skip_ascii_ws(b, open + 1);
+    let end = cs_ident_end(b, arg, close);
+    let id = source.get(arg..end).filter(|id| is_ident(id))?;
+    if !matches!(b.get(skip_ascii_ws(b, end)), Some(b',' | b')')) {
+        return None;
+    }
+    let mut at = dart_decl_value(source, id)?;
+    for prefix in [&b"const"[..], b"new"] {
+        if b.get(at..at + prefix.len()) == Some(prefix)
+            && b.get(at + prefix.len())
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            at = skip_ascii_ws(b, at + prefix.len());
+        }
+    }
+    let class_end = cs_ident_end(b, at, b.len());
+    if !DART_OPTIONS_CLASSES.contains(&source.get(at..class_end)?) {
+        return None;
+    }
+    let paren = call_open(b, class_end)?;
+    dart_call_document(source, paren, false).map(|(name, _, doc)| (name, DartDoc::ByValue, doc))
 }
 
-/// DH.8: the operation the same-file string constant `ident` declares:
-/// `const listOrders = r"""query Orders {..}""";` (also `final` / `var`,
-/// `static const String x = '...'`), read from the first declaration line
-/// whose words before the name are all [`DART_DECL_WORDS`] (so a commented
-/// line is none) and whose `=` binds a literal; with that literal's body
-/// (DT.11a).
-fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s str)> {
+/// GD.19: the offset of the value a same-file declaration binds `ident` to:
+/// the first line declaring it whose words before the name are each a
+/// [`DART_DECL_WORDS`] word or a type name (an upper-case first letter:
+/// `DocumentNode`, `QueryOptions<Object?>`), with one of `const` / `final` /
+/// `var` among them (so a commented line is none), followed by `=` (not `==`
+/// / `=>`).
+fn dart_decl_value(source: &str, ident: &str) -> Option<usize> {
     let b = source.as_bytes();
     source.match_indices(ident).find_map(|(at, _)| {
         let end = at + ident.len();
@@ -5743,8 +6180,15 @@ fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s 
         }
         let line_start = source.get(..at)?.rfind('\n').map_or(0, |p| p + 1);
         let words: Vec<&str> = source.get(line_start..at)?.split_whitespace().collect();
+        let type_name = |w: &str| {
+            w.starts_with(|c: char| c.is_ascii_uppercase())
+                && w.bytes()
+                    .all(|c| is_ident_byte(c) || matches!(c, b'<' | b'>' | b'?'))
+        };
         let declared = !words.is_empty()
-            && words.iter().all(|w| DART_DECL_WORDS.contains(w))
+            && words
+                .iter()
+                .all(|w| DART_DECL_WORDS.contains(w) || type_name(w))
             && words
                 .iter()
                 .any(|w| matches!(*w, "const" | "final" | "var"));
@@ -5752,9 +6196,47 @@ fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s 
         if !declared || b.get(eq) != Some(&b'=') || matches!(b.get(eq + 1), Some(b'=' | b'>')) {
             return None;
         }
-        let (start, body_end, _) = dart_literal(b, skip_ascii_ws(b, eq + 1))?;
-        let doc = source.get(start..body_end)?;
-        extract_operation_from_body(doc).map(|name| (name, doc))
+        Some(skip_ascii_ws(b, eq + 1))
+    })
+}
+
+/// DH.8: the operation the same-file string constant `ident` declares:
+/// `const listOrders = r"""query Orders {..}""";` (also `final` / `var`,
+/// `static const String x = '...'`), read from its declaration
+/// ([`dart_decl_value`]) when that binds a literal; with that literal's body
+/// (DT.11a). GD.19: an anonymous document is named by its first root field
+/// ([`doc_name`]).
+fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s str)> {
+    let b = source.as_bytes();
+    let (start, body_end, _) = dart_literal(b, dart_decl_value(source, ident)?)?;
+    let doc = source.get(start..body_end)?;
+    doc_name(doc).map(|name| (name, doc))
+}
+
+/// GD.19: the operation a document passed by value names: a same-file
+/// declaration binding `ident` to a string literal ([`dart_const_document`])
+/// or to `gql(<literal>)` / `gql(<string constant>)`.
+fn dart_value_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s str)> {
+    dart_const_document(source, ident).or_else(|| {
+        let b = source.as_bytes();
+        let at = dart_decl_value(source, ident)?;
+        if b.get(at..at + 3) != Some(b"gql") || b.get(at + 3).is_some_and(|&c| is_ident_byte(c)) {
+            return None;
+        }
+        let paren = skip_ascii_ws(b, at + 3);
+        if b.get(paren) != Some(&b'(') {
+            return None;
+        }
+        let arg = skip_ascii_ws(b, paren + 1);
+        if let Some((start, end, _)) = dart_literal(b, arg) {
+            let doc = source.get(start..end)?;
+            return doc_name(doc).map(|name| (name, doc));
+        }
+        let end = cs_ident_end(b, arg, b.len());
+        source
+            .get(arg..end)
+            .filter(|id| is_ident(id) && *id != ident)
+            .and_then(|id| dart_const_document(source, id))
     })
 }
 
@@ -6815,6 +7297,17 @@ pub struct TransportCounts {
     pub template: usize,
     /// A `ws://` / `wss://` URL, or a graphql-ws client: no ENDPOINT.
     pub skipped_ws: usize,
+    /// GD.19: client sites that minted an ENDPOINT through a renamed named
+    /// import (`import { ApolloClient as AC }`, `new AC(..)`).
+    pub aliased: usize,
+    /// GD.19: .. through a namespace (`import * as Apollo`, `new
+    /// Apollo.ApolloClient(..)`, or `const urql = require('urql')`).
+    pub namespace: usize,
+    /// GD.19: .. through a CommonJS destructure (`const { createClient } =
+    /// require('urql')`).
+    pub cjs: usize,
+    /// GD.19: .. through apollo-angular's `httpLink.create({ uri })`.
+    pub apollo_angular: usize,
 }
 
 impl TransportCounts {
@@ -6831,12 +7324,17 @@ impl TransportNodes {
         let c = self.counts;
         (c.endpoints() + c.skipped_ws > 0).then(|| {
             format!(
-                "[graphql-transport] endpoints={} (absolute={} relative={} template={}) skipped_ws={} path={path}",
+                "[graphql-transport] endpoints={} (absolute={} relative={} template={}) skipped_ws={} \
+                 aliased={} namespace={} cjs={} apollo_angular={} path={path}",
                 c.endpoints(),
                 c.absolute,
                 c.relative,
                 c.template,
-                c.skipped_ws
+                c.skipped_ws,
+                c.aliased,
+                c.namespace,
+                c.cjs,
+                c.apollo_angular
             )
         })
     }
@@ -7060,13 +7558,12 @@ fn imports_package(source: &str, packages: &[&str]) -> bool {
     })
 }
 
-/// The module an ES `import` statement binds the local name `local` from:
-/// `import { local } from 'm'`, `import { x as local } from 'm'`, `import
-/// local from 'm'` or `import local, { .. } from 'm'` (an `import type` too).
-/// `None` when no import binds it (a namespace import, a `require`, a
-/// global).
-fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
+/// Every ES `import` statement's clause (the text between `import` and its
+/// `from` keyword) and module, in source order. A side-effect import (`import
+/// 'x'`) and a dynamic `import(..)` are none.
+fn import_clauses(source: &str) -> Vec<(&str, &str)> {
     let b = source.as_bytes();
+    let mut out = Vec::new();
     for (at, _) in source.match_indices("import") {
         let end = at + "import".len();
         if ident_byte_before(b, at) || b.get(end).is_some_and(|&c| is_ident_byte(c)) {
@@ -7094,28 +7591,146 @@ fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
         let Some(&q) = b.get(module_at).filter(|&&q| q == b'\'' || q == b'"') else {
             continue;
         };
-        let Some(module) =
+        if let Some(module) =
             find_close(b, module_at + 1, &[q], true).and_then(|e| source.get(module_at + 1..e))
-        else {
-            continue;
-        };
-        let binds = clause
-            .split(['{', '}', ','])
-            .map(str::trim)
-            .filter(|item| !item.is_empty() && !item.starts_with('*'))
-            .any(|item| {
-                let item = item.strip_prefix("type ").map_or(item, str::trim_start);
-                let name = item
-                    .rsplit_once(" as ")
-                    .map_or(item, |(_, alias)| alias)
-                    .trim();
-                name == local
-            });
-        if binds {
-            return Some(module);
+        {
+            out.push((clause, module));
         }
     }
-    None
+    out
+}
+
+/// The named and default items of an import clause as `(imported, local)`:
+/// `{ x as y }` -> `(x, y)`, `{ x }` and a default `local` -> `(x, x)` (a
+/// `type` prefix dropped). A namespace item (`* as ns`) is none.
+fn clause_items(clause: &str) -> Vec<(&str, &str)> {
+    clause
+        .split(['{', '}', ','])
+        .map(str::trim)
+        .filter(|item| !item.is_empty() && !item.starts_with('*'))
+        .map(|item| {
+            let item = item.strip_prefix("type ").map_or(item, str::trim_start);
+            match item.rsplit_once(" as ") {
+                Some((imported, local)) => (imported.trim(), local.trim()),
+                None => (item, item),
+            }
+        })
+        .collect()
+}
+
+/// The module an ES `import` statement binds the local name `local` from:
+/// `import { local } from 'm'`, `import { x as local } from 'm'`, `import
+/// local from 'm'` or `import local, { .. } from 'm'` (an `import type` too).
+/// `None` when no import binds it (a namespace import, a `require`, a
+/// global).
+fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
+    import_clauses(source)
+        .into_iter()
+        .find(|(clause, _)| clause_items(clause).iter().any(|&(_, l)| l == local))
+        .map(|(_, module)| module)
+}
+
+/// GD.19: the quoted module of a `require('m')` call whose `require` starts
+/// at `at`.
+fn require_call(source: &str, at: usize) -> Option<&str> {
+    let b = source.as_bytes();
+    if b.get(at..at + 7) != Some(b"require") || ident_byte_before(b, at) {
+        return None;
+    }
+    let open = skip_ascii_ws(b, at + 7);
+    let arg = skip_ascii_ws(b, (b.get(open) == Some(&b'(')).then_some(open + 1)?);
+    let q = *b.get(arg).filter(|&&q| q == b'\'' || q == b'"')?;
+    let end = find_close(b, arg + 1, &[q], true)?;
+    if b.get(skip_ascii_ws(b, end + 1)) != Some(&b')') {
+        return None;
+    }
+    source.get(arg + 1..end)
+}
+
+/// GD.19: the CommonJS bindings of a file: `const { a, b: c } = require('m')`
+/// as `(imported, local, module)` items (`(a, a, m)`, `(b, c, m)`), and
+/// `const ns = require('m')` as a namespace `("*", ns, m)` (`let` / `var`
+/// too).
+fn require_bindings(source: &str) -> Vec<(&str, &str, &str)> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices("require") {
+        let Some(module) = require_call(source, at) else {
+            continue;
+        };
+        // Back over `= ` to the binding pattern.
+        let Some(eq) = b[..at].iter().rposition(|c| !c.is_ascii_whitespace()) else {
+            continue;
+        };
+        if b[eq] != b'='
+            || matches!(
+                eq.checked_sub(1).map(|p| b[p]),
+                Some(b'=' | b'!' | b'<' | b'>')
+            )
+        {
+            continue;
+        }
+        let Some(pat_end) = b[..eq].iter().rposition(|c| !c.is_ascii_whitespace()) else {
+            continue;
+        };
+        let (pattern, pat_start) = if b[pat_end] == b'}' {
+            let Some(open) = b[..pat_end].iter().rposition(|&c| c == b'{') else {
+                continue;
+            };
+            (&source[open + 1..pat_end], open)
+        } else {
+            let start = b[..=pat_end]
+                .iter()
+                .rposition(|&c| !is_ident_byte(c))
+                .map_or(0, |p| p + 1);
+            (&source[start..=pat_end], start)
+        };
+        let keyword_end = b[..pat_start]
+            .iter()
+            .rposition(|c| !c.is_ascii_whitespace())
+            .map_or(0, |p| p + 1);
+        let declared = ["const", "let", "var"].iter().any(|k| {
+            keyword_end >= k.len()
+                && source.get(keyword_end - k.len()..keyword_end) == Some(*k)
+                && !ident_byte_before(b, keyword_end - k.len())
+        });
+        if !declared {
+            continue;
+        }
+        if b[pat_end] == b'}' {
+            for item in pattern.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+                let (imported, local) = item
+                    .split_once(':')
+                    .map_or((item, item), |(i, l)| (i.trim(), l.trim()));
+                if is_ident(imported) && is_ident(local) {
+                    out.push((imported, local, module));
+                }
+            }
+        } else if is_ident(pattern) {
+            out.push(("*", pattern, module));
+        }
+    }
+    out
+}
+
+/// GD.19: the namespace bindings of a file as `(local, module)`: `import *
+/// as ns from 'm'` and `const ns = require('m')`.
+fn namespace_bindings(source: &str) -> Vec<(&str, &str)> {
+    let mut out: Vec<(&str, &str)> = import_clauses(source)
+        .into_iter()
+        .filter_map(|(clause, module)| {
+            let rest = clause.trim().strip_prefix('*')?.trim_start();
+            let local = rest.strip_prefix("as")?.trim();
+            is_ident(local).then_some((local, module))
+        })
+        .collect();
+    out.extend(
+        require_bindings(source)
+            .into_iter()
+            .filter(|&(imported, _, _)| imported == "*")
+            .map(|(_, local, module)| (local, module)),
+    );
+    out
 }
 
 /// DT.11b: which constructor `callee` is in this file. A named import of
@@ -7123,12 +7738,104 @@ fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
 /// when the module is another library's (`import { createClient } from
 /// 'redis'`). Unbound, the first constructor (table order) whose package the
 /// file imports.
-fn ctor_for(source: &str, callee: &str) -> Option<&'static TransportCtor> {
+///
+/// GD.19: with no ES import, a CommonJS destructure binding `callee`
+/// (`const { createClient } = require('urql')`) decides the same way; the
+/// second value says so (the site is counted `cjs=`).
+fn ctor_for(source: &str, callee: &str) -> Option<(&'static TransportCtor, bool)> {
     let mut ctors = TRANSPORT_CTORS.iter().filter(|c| c.callee == callee);
-    match import_binding(source, callee) {
-        Some(module) => ctors.find(|c| c.packages.iter().any(|p| module_is(module, p))),
-        None => ctors.find(|c| imports_package(source, c.packages)),
+    let in_module =
+        |c: &&TransportCtor, module: &str| c.packages.iter().any(|p| module_is(module, p));
+    if let Some(module) = import_binding(source, callee) {
+        return ctors.find(|c| in_module(c, module)).map(|c| (c, false));
     }
+    let required = require_bindings(source)
+        .into_iter()
+        .find(|&(_, local, _)| local == callee)
+        .map(|(_, _, module)| module);
+    match required {
+        Some(module) => ctors.find(|c| in_module(c, module)).map(|c| (c, true)),
+        None => ctors
+            .find(|c| imports_package(source, c.packages))
+            .map(|c| (c, false)),
+    }
+}
+
+/// GD.19: apollo-angular's `HttpLink` service, whose `create({ uri })` builds
+/// the transport link; read only through a receiver the file types as the
+/// imported `HttpLink` ([`apollo_angular_receivers`]).
+const APOLLO_ANGULAR_LINK: TransportCtor = TransportCtor {
+    callee: "create",
+    new: false,
+    arg: UrlArg::Options,
+    packages: &["apollo-angular", "apollo-angular-link-http"],
+    ws: false,
+    get: GetOptIn::Apollo,
+};
+
+/// GD.19: the receivers of apollo-angular's `HttpLink` in a file importing it
+/// from `apollo-angular` (`apollo-angular/http`) or
+/// `apollo-angular-link-http` (under its local name): every identifier
+/// annotated with it (`httpLink: HttpLink`, a constructor parameter or a
+/// field) or assigned `inject(HttpLink)`, in first-appearance order.
+fn apollo_angular_receivers(source: &str) -> Vec<&str> {
+    let b = source.as_bytes();
+    let mut out: Vec<&str> = Vec::new();
+    let locals: Vec<&str> = import_clauses(source)
+        .into_iter()
+        .filter(|(_, module)| {
+            APOLLO_ANGULAR_LINK
+                .packages
+                .iter()
+                .any(|p| module_is(module, p))
+        })
+        .flat_map(|(clause, _)| clause_items(clause))
+        .filter(|&(imported, _)| imported == "HttpLink")
+        .map(|(_, local)| local)
+        .collect();
+    for local in locals {
+        for (at, _) in source.match_indices(local) {
+            let end = at + local.len();
+            if ident_byte_before(b, at) || b.get(end).is_some_and(|&c| is_ident_byte(c)) {
+                continue;
+            }
+            let Some(before) = b[..at].iter().rposition(|c| !c.is_ascii_whitespace()) else {
+                continue;
+            };
+            // `recv: HttpLink` / `recv?: HttpLink`, or `recv = inject(HttpLink)`.
+            let name_end = match b[before] {
+                b':' => {
+                    let p = b[..before].iter().rposition(|c| !c.is_ascii_whitespace());
+                    p.map(|p| if b[p] == b'?' { p } else { p + 1 })
+                }
+                b'(' if before >= 6
+                    && &b[before - 6..before] == b"inject"
+                    && !ident_byte_before(b, before - 6) =>
+                {
+                    let eq = b[..before - 6]
+                        .iter()
+                        .rposition(|c| !c.is_ascii_whitespace())
+                        .filter(|&p| b[p] == b'=');
+                    eq.and_then(|p| b[..p].iter().rposition(|c| !c.is_ascii_whitespace()))
+                        .map(|p| p + 1)
+                }
+                _ => None,
+            };
+            let Some(name_end) = name_end else {
+                continue;
+            };
+            let name_start = b[..name_end]
+                .iter()
+                .rposition(|&c| !is_ident_byte(c))
+                .map_or(0, |p| p + 1);
+            if let Some(name) = source.get(name_start..name_end).filter(|n| is_ident(n))
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+    }
+    out
 }
 
 /// The GET opt-in of the options object spanning `open..=close`.
@@ -7165,6 +7872,22 @@ fn sends_get(source: &str, open: usize, close: usize, get: GetOptIn) -> bool {
     }
 }
 
+/// GD.19: how a transport site's callee was bound, for the
+/// `[graphql-transport]` counts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SiteVia {
+    /// The constructor's own name, through an ES import or the file's package.
+    Plain,
+    /// A renamed named import.
+    Aliased,
+    /// A namespace member.
+    Namespace,
+    /// A CommonJS destructure.
+    Cjs,
+    /// apollo-angular's `HttpLink.create`.
+    ApolloAngular,
+}
+
 /// One call site of a transport constructor ([`transport_sites`]).
 struct TransportSite {
     /// The offset of the URL value.
@@ -7172,22 +7895,31 @@ struct TransportSite {
     /// The span (`{` to `}`) of the call's options object, if any.
     options: Option<(usize, usize)>,
     ctor: &'static TransportCtor,
+    via: SiteVia,
 }
 
-/// Every call site of `ctor` in `source` with a URL argument: the options
-/// object's `uri` / `url` value, or (positional) the first argument and the
-/// options object after it, if any.
-fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportSite> {
+/// Every call site of `ctor` in `source`, its callee written `callee` (the
+/// constructor's name, a renamed import's local name, `ns.Name`, or
+/// `recv.create`), with a URL argument: the options object's `uri` / `url`
+/// value, or (positional) the first argument and the options object after
+/// it, if any.
+fn transport_sites(
+    source: &str,
+    ctor: &'static TransportCtor,
+    callee: &str,
+    via: SiteVia,
+) -> Vec<TransportSite> {
     let b = source.as_bytes();
     let mut out = Vec::new();
-    for (at, _) in source.match_indices(ctor.callee) {
+    for (at, _) in source.match_indices(callee) {
         if ident_byte_before(b, at)
+            || b.get(at + callee.len()).is_some_and(|&c| is_ident_byte(c))
             || in_line_comment(b, at)
             || (ctor.new && !preceded_by_new(b, at))
         {
             continue;
         }
-        let Some(open) = call_open(b, at + ctor.callee.len()) else {
+        let Some(open) = call_open(b, at + callee.len()) else {
             continue;
         };
         let arg = skip_ascii_ws(b, open + 1);
@@ -7204,6 +7936,7 @@ fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportS
                         at,
                         options: Some((arg, close)),
                         ctor,
+                        via,
                     });
                 }
             }
@@ -7220,6 +7953,7 @@ fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportS
                     at: arg,
                     options,
                     ctor,
+                    via,
                 });
             }
         }
@@ -7303,21 +8037,78 @@ pub fn graphql_transport_endpoints(
     }
     let b = source.as_bytes();
     let mut sites: Vec<TransportSite> = Vec::new();
+    // GD.19: the bound forms first, so a site the plain scan also reads (a
+    // non-`new` namespace member) keeps its binding in the dedup below.
+    // A renamed named import or CommonJS destructure.
+    let in_packages =
+        |c: &&TransportCtor, module: &str| c.packages.iter().any(|p| module_is(module, p));
+    let renamed = import_clauses(source)
+        .into_iter()
+        .flat_map(|(clause, module)| {
+            clause_items(clause)
+                .into_iter()
+                .map(move |(imported, local)| (imported, local, module, SiteVia::Aliased))
+        })
+        .chain(
+            require_bindings(source)
+                .into_iter()
+                .map(|(imported, local, module)| (imported, local, module, SiteVia::Cjs)),
+        )
+        .filter(|&(imported, local, _, _)| imported != local && imported != "*");
+    for (imported, local, module, via) in renamed {
+        let ctor = TRANSPORT_CTORS
+            .iter()
+            .find(|c| c.callee == imported && in_packages(c, module));
+        if let Some(ctor) = ctor {
+            sites.extend(transport_sites(source, ctor, local, via));
+        }
+    }
+    for (ns, module) in namespace_bindings(source) {
+        let mut callees: Vec<&str> = Vec::new();
+        for ctor in TRANSPORT_CTORS.iter().filter(|c| in_packages(c, module)) {
+            if callees.contains(&ctor.callee) {
+                continue;
+            }
+            callees.push(ctor.callee);
+            let member = format!("{ns}.{}", ctor.callee);
+            sites.extend(transport_sites(source, ctor, &member, SiteVia::Namespace));
+        }
+    }
+    for recv in apollo_angular_receivers(source) {
+        let member = format!("{recv}.create");
+        sites.extend(transport_sites(
+            source,
+            &APOLLO_ANGULAR_LINK,
+            &member,
+            SiteVia::ApolloAngular,
+        ));
+    }
     let mut callees: Vec<&str> = Vec::new();
     for c in TRANSPORT_CTORS {
         if callees.contains(&c.callee) || !source.contains(c.callee) {
             continue;
         }
         callees.push(c.callee);
-        if let Some(ctor) = ctor_for(source, c.callee) {
-            sites.extend(transport_sites(source, ctor));
+        if let Some((ctor, required)) = ctor_for(source, c.callee) {
+            let via = if required {
+                SiteVia::Cjs
+            } else {
+                SiteVia::Plain
+            };
+            sites.extend(transport_sites(source, ctor, c.callee, via));
         }
     }
     sites.sort_by_key(|s| s.at);
     sites.dedup_by_key(|s| s.at);
 
     let mut seen = std::collections::HashSet::new();
-    for TransportSite { at, options, ctor } in sites {
+    for TransportSite {
+        at,
+        options,
+        ctor,
+        via,
+    } in sites
+    {
         let Some((value, _)) = url_value(source, at) else {
             continue;
         };
@@ -7378,6 +8169,13 @@ pub fn graphql_transport_endpoints(
                 UrlForm::Relative => out.counts.relative += 1,
                 UrlForm::Template => out.counts.template += 1,
             }
+        }
+        match via {
+            SiteVia::Plain => {}
+            SiteVia::Aliased => out.counts.aliased += 1,
+            SiteVia::Namespace => out.counts.namespace += 1,
+            SiteVia::Cjs => out.counts.cjs += 1,
+            SiteVia::ApolloAngular => out.counts.apollo_angular += 1,
         }
     }
     out
@@ -7476,15 +8274,13 @@ mod tests {
             out.counts,
             TransportCounts {
                 absolute: 1,
-                relative: 0,
-                template: 0,
-                skipped_ws: 0
+                ..TransportCounts::default()
             }
         );
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
             Some(
-                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=0 path=src/client.ts"
+                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=0 aliased=0 namespace=0 cjs=0 apollo_angular=0 path=src/client.ts"
             )
         );
     }
@@ -7597,15 +8393,14 @@ mod tests {
             out.counts,
             TransportCounts {
                 absolute: 1,
-                relative: 0,
-                template: 0,
-                skipped_ws: 1
+                skipped_ws: 1,
+                ..TransportCounts::default()
             }
         );
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
             Some(
-                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=1 path=src/client.ts"
+                "[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=1 aliased=0 namespace=0 cjs=0 apollo_angular=0 path=src/client.ts"
             )
         );
         // A graphql-ws client on a non-literal URL is a WebSocket too, and
@@ -7617,7 +8412,7 @@ mod tests {
         assert_eq!(
             out.marker("src/client.ts").as_deref(),
             Some(
-                "[graphql-transport] endpoints=0 (absolute=0 relative=0 template=0) skipped_ws=3 path=src/client.ts"
+                "[graphql-transport] endpoints=0 (absolute=0 relative=0 template=0) skipped_ws=3 aliased=0 namespace=0 cjs=0 apollo_angular=0 path=src/client.ts"
             )
         );
     }
@@ -9639,7 +10434,7 @@ mod tests {
         );
         assert_eq!(
             tally.dart_marker().as_deref(),
-            Some("[graphql-ops] dart-document const=1 inline=0 unread=0")
+            Some("[graphql-ops] dart-document const=1 inline=0 unread=0 by_value=0")
         );
         // graphql_flutter, a multi-line call, a typed static constant
         // declared after its use.
@@ -9651,7 +10446,7 @@ mod tests {
         let (_, tally) = scan_operation_needles(commented, &mut LazyGuard::new("", commented));
         assert_eq!(
             tally.dart_marker().as_deref(),
-            Some("[graphql-ops] dart-document const=0 inline=0 unread=1")
+            Some("[graphql-ops] dart-document const=0 inline=0 unread=1 by_value=0")
         );
         // Without the package:graphql import the call keeps its fallback name.
         let unimported = DART_ORDERS.replace("import 'package:graphql/client.dart';\n", "");
@@ -9667,14 +10462,15 @@ mod tests {
         let (_, tally) = scan_operation_needles(inline, &mut LazyGuard::new("", inline));
         assert_eq!(
             tally.dart_marker().as_deref(),
-            Some("[graphql-ops] dart-document const=0 inline=1 unread=0")
+            Some("[graphql-ops] dart-document const=0 inline=1 unread=0 by_value=0")
         );
         // Two calls, each named by its own document.
         let two = "import 'package:graphql/client.dart';\nconst a = \"query First { a }\";\nfinal f1 = client.query(QueryOptions(document: gql(a)));\nfinal f2 = client.query(QueryOptions(document: gql(\"query Second { b }\")));\n";
         assert_eq!(op_qnames(two), ["graphql_op:First", "graphql_op:Second"]);
-        // An anonymous document names nothing.
+        // GD.19: an anonymous document is named by its first root field
+        // (it named nothing before, leaving the needle's fallback name).
         let anonymous = "import 'package:graphql/client.dart';\nfinal f = client.query(QueryOptions(document: gql(r'query { orders { id } }')));\n";
-        assert_eq!(op_qnames(anonymous), ["graphql_op:client.query"]);
+        assert_eq!(op_qnames(anonymous), ["graphql_op:orders"]);
     }
 
     #[test]
@@ -10251,5 +11047,227 @@ mod tests {
             repo(),
         );
         assert!(bare.nodes.iter().all(|n| n.cells.is_empty()));
+    }
+
+    // ---- GD.19: GraphQL client residuals ----
+
+    #[test]
+    fn gd19_inline_document_names_the_needle() {
+        // Apollo: an anonymous inline template at the call site is minted by
+        // the template scan alone (it was also minted `client.query`).
+        let apollo = "import { ApolloClient as AC, InMemoryCache, gql } from '@apollo/client';\nexport const client = new AC({ uri: '/graphql', cache: new InMemoryCache() });\nexport function loadOrders() {\n  return client.query({ query: gql`query { orders { id } }` });\n}\n";
+        assert_eq!(op_qnames(apollo), ["graphql_op:orders"]);
+        let (hits, tally) = scan_operation_needles(apollo, &mut LazyGuard::new("", apollo));
+        assert!(hits.is_empty(), "{hits:?}");
+        assert_eq!(tally.inline, 1);
+        // graphql-request: `request(url, gql`{ .. }`)` (was also `request`).
+        let request = "import { request, gql } from 'graphql-request';\nexport async function listUpgrades(url: string) {\n  return request(\n    url,\n    gql`\n      {\n        upgrades(first: 10) { impl }\n      }\n    `,\n  );\n}\n";
+        assert_eq!(op_qnames(request), ["graphql_op:upgrades"]);
+        // A `graphql(..)` literal in the call names it, where the file's
+        // first tag named another operation.
+        let call = "import { gql } from '@apollo/client';\nconst FIRST = gql`query First { a }`;\nclient.query({ query: graphql(\"query Second { b }\") });\n";
+        assert_eq!(op_qnames(call), ["graphql_op:First", "graphql_op:Second"]);
+        let out = extract_graphql_operation_nodes(call, "", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:Second"), ["query Second { b }"]);
+        // An identifier argument keeps the file's first-tag rule, and a
+        // `gql` inside a string or a member name is no document.
+        let ident = "import { gql } from '@apollo/client';\nconst ORDERS = gql`query Orders { orders { id } }`;\nclient.query({ query: ORDERS, context: { note: \"gql`query X { y }`\" } });\nclient.query({ query: api.gql`query { z }` });\n";
+        let (hits, tally) = scan_operation_needles(ident, &mut LazyGuard::new("", ident));
+        let named: Vec<&str> = hits.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(named, ["Orders", "Orders"]);
+        assert_eq!(tally.inline, 0);
+    }
+
+    #[test]
+    fn gd19_residual_marker_format() {
+        assert_eq!(ResidualCounts::default().marker(), None);
+        let c = ResidualCounts {
+            ruby_schema_roots: 1,
+            dart_by_value: 2,
+            anonymous: 3,
+            inline: 4,
+            concatenated: 5,
+        };
+        assert_eq!(
+            c.marker().as_deref(),
+            Some(
+                "[graphql] ruby_schema_roots=1 dart_by_value=2 anonymous=3 inline=4 concatenated=5"
+            )
+        );
+    }
+
+    #[test]
+    fn gd19_concatenated_document_mints_its_operation() {
+        // The cohort's shape (zora-protocol's CLI): a document built from
+        // string pieces and sent by an in-repo fetch wrapper.
+        let src = "import { graphqlRequest } from './transport';\n\nconst LINK_WALLET =\n  \"mutation LinkWallet($address: String!) {\" +\n  \" linkWallet(address: $address) { address } }\";\n\nexport const link = (a: string) => graphqlRequest(LINK_WALLET, { address: a });\n";
+        assert_eq!(
+            op_qnames_at(src, "web/wallet.ts"),
+            ["graphql_op:LinkWallet"]
+        );
+        let out = extract_graphql_operation_nodes(src, "web/wallet.ts", module_id(), repo());
+        assert_eq!(
+            op_code(&out, "graphql_op:LinkWallet"),
+            [
+                "mutation LinkWallet($address: String!) { linkWallet(address: $address) { address } }"
+            ]
+        );
+        assert_eq!(out.anchors.len(), 1);
+        assert_eq!(out.anchors[0].line, 3, "anchored at the first piece");
+        let mut guard = LazyGuard::new("web/wallet.ts", src);
+        assert_eq!(
+            concatenated_documents(src, "web/wallet.ts", &mut guard).len(),
+            1
+        );
+        // An anonymous one is named by its first root field; template pieces
+        // without `${` join too.
+        let anon = "const Q = 'query {' +\n  ` me { id }` +\n  ' }';\n";
+        assert_eq!(op_qnames_at(anon, "a.js"), ["graphql_op:me"]);
+        for (body, why) in [
+            (
+                "const q = \"query Orders { orders { id } }\";\n",
+                "one literal",
+            ),
+            (
+                "const q = \"query \" + name + \" { a }\";\n",
+                "a runtime piece",
+            ),
+            (
+                "const q = \"query Orders {\" + \" orders { id }\";\n",
+                "never closes",
+            ),
+            (
+                "const q = \"query Orders {\" + \" orders { id } }\" + \" extra\";\n",
+                "text after it",
+            ),
+            ("const q = \"query Orders {\" + \" }\";\n", "no root field"),
+            (
+                "const s = \"select rows {\" + \" a }\";\n",
+                "no operation keyword",
+            ),
+            ("// const q = \"query A {\" + \" a }\";\n", "a comment"),
+            (
+                "const t = `const q = \"query A {\" + \" a }\"`;\n",
+                "inside a template",
+            ),
+            (
+                "const q = `query A {` + `${x} }`;\n",
+                "an interpolated piece",
+            ),
+        ] {
+            assert!(op_qnames_at(body, "a.ts").is_empty(), "{why}: {body}");
+        }
+        // Read only in JavaScript / TypeScript files.
+        assert!(op_qnames_at(src, "client.py").is_empty());
+        assert!(op_qnames_at(src, "client.rs").is_empty());
+    }
+
+    #[test]
+    fn gd19_dart_document_by_value() {
+        // `document: listShipments`, the identifier a same-file gql(..).
+        let by_value = "import 'package:graphql_flutter/graphql_flutter.dart';\n\nfinal listShipments = gql(r'''\n  query ListShipments { shipments { id } }\n''');\n\nFuture<QueryResult> load(GraphQLClient client) {\n  return client.query(QueryOptions(document: listShipments));\n}\n";
+        assert_eq!(op_qnames(by_value), ["graphql_op:ListShipments"]);
+        let (_, tally) = scan_operation_needles(by_value, &mut LazyGuard::new("", by_value));
+        assert_eq!(
+            tally.dart_marker().as_deref(),
+            Some("[graphql-ops] dart-document const=0 inline=0 unread=0 by_value=1")
+        );
+        // QueryOptions built outside the call, its document a typed constant.
+        let outside = "import 'package:graphql_flutter/graphql_flutter.dart';\n\nfinal options = QueryOptions(document: gql(listShipments));\nconst String listShipments = 'query ListShipments { shipments { id } }';\n\nFuture<QueryResult> load(GraphQLClient client) {\n  return client.query(options);\n}\n";
+        assert_eq!(op_qnames(outside), ["graphql_op:ListShipments"]);
+        // Both at once, the options typed, the document anonymous.
+        let both = "import 'package:graphql/client.dart';\nfinal DocumentNode doc = gql(r'query { shipments { id } }');\nFuture<void> f(GraphQLClient client) async {\n  final QueryOptions<Object?> opts = QueryOptions(document: doc);\n  await client.query(opts);\n}\n";
+        assert_eq!(op_qnames(both), ["graphql_op:shipments"]);
+        let (_, tally) = scan_operation_needles(both, &mut LazyGuard::new("", both));
+        assert_eq!(tally.dart.map(|d| d.by_value), Some(1));
+        // An options variable from another file, or a non-options value,
+        // names nothing: the fallback.
+        for body in [
+            "import 'package:graphql/client.dart';\nfinal other = gql(text);\nFuture<void> f(GraphQLClient client) => client.query(options);\n",
+            "import 'package:graphql/client.dart';\nfinal other = gql(text);\nfinal options = buildOptions();\nFuture<void> f(GraphQLClient client) => client.query(options);\n",
+            "import 'package:graphql/client.dart';\n// final options = QueryOptions(document: gql('query A { a }'));\nFuture<void> f(GraphQLClient client) => client.query(options);\n",
+        ] {
+            assert_eq!(op_qnames(body), ["graphql_op:client.query"], "{body}");
+        }
+    }
+
+    #[test]
+    fn gd19_ruby_schema_binds_its_root_classes() {
+        let src = "class AppSchema < GraphQL::Schema\n  query Types::RootQuery\n  mutation(Types::MutationRoot)\nend\n\nmodule Types\n  class RootQuery < Types::BaseObject\n    field :invoices, [Types::InvoiceType], null: false\n\n    def invoices\n      Invoice.all\n    end\n  end\n\n  class MutationRoot < Types::BaseObject\n    field :void_invoice, mutation: Mutations::VoidInvoice\n  end\n\n  class InvoiceType < Types::BaseObject\n    field :total, Integer\n  end\nend\n";
+        assert_resolvers(
+            src,
+            "ruby",
+            &["Mutation", "Query", "invoices", "voidInvoice"],
+        );
+        let m = ruby_mask(src);
+        assert_eq!(graphql_ruby_roots_and_fields(src, &m).2, 2);
+        // Without the schema's declaration the classes name no root (the
+        // name rule alone), and a `query` line outside a schema class, or one
+        // naming no constant, binds nothing.
+        let unbound = src.replacen(
+            "  query Types::RootQuery\n  mutation(Types::MutationRoot)\n",
+            "",
+            1,
+        );
+        assert_resolvers(&unbound, "ruby", &[]);
+        let lowercase = src.replacen("query Types::RootQuery", "query root_query", 1);
+        assert_resolvers(&lowercase, "ruby", &["Mutation", "voidInvoice"]);
+        let not_schema = src.replacen("< GraphQL::Schema", "< ApplicationRecord", 1);
+        assert_resolvers(&not_schema, "ruby", &[]);
+    }
+
+    #[test]
+    fn gd19_transport_aliased_namespace_cjs_and_apollo_angular() {
+        let aliased = "import { ApolloClient as AC, InMemoryCache } from '@apollo/client';\nexport const client = new AC({ uri: '/graphql', cache: new InMemoryCache() });\n";
+        let out = transport(aliased);
+        assert_eq!(transport_qnames(aliased), ["endpoint:POST:/graphql"]);
+        assert_eq!(out.counts.aliased, 1);
+        assert_eq!(
+            out.marker("src/client.ts").as_deref(),
+            Some(
+                "[graphql-transport] endpoints=1 (absolute=0 relative=1 template=0) skipped_ws=0 aliased=1 namespace=0 cjs=0 apollo_angular=0 path=src/client.ts"
+            )
+        );
+        let namespace = "import * as Apollo from '@apollo/client';\nexport const c = new Apollo.ApolloClient({\n  uri: '/ns/graphql',\n  cache: new Apollo.InMemoryCache(),\n});\nconst u = urql.createClient({ url: '/no' });\n";
+        let out = transport(namespace);
+        assert_eq!(transport_qnames(namespace), ["endpoint:POST:/ns/graphql"]);
+        assert_eq!(out.counts.namespace, 1);
+        let required = "const urql = require('@urql/core');\nconst c = urql.createClient({ url: '/urql/graphql' });\n";
+        assert_eq!(transport_qnames(required), ["endpoint:POST:/urql/graphql"]);
+        assert_eq!(transport(required).counts.namespace, 1);
+        // CommonJS destructure, plain and renamed.
+        let cjs = "const { createClient, fetchExchange } = require('urql');\nconst c = createClient({ url: '/urql/graphql', exchanges: [fetchExchange] });\n";
+        assert_eq!(transport_qnames(cjs), ["endpoint:POST:/urql/graphql"]);
+        assert_eq!(transport(cjs).counts.cjs, 1);
+        let renamed = "const { createClient: makeClient } = require('urql');\nconst c = makeClient({ url: '/r/graphql' });\n";
+        assert_eq!(transport_qnames(renamed), ["endpoint:POST:/r/graphql"]);
+        assert_eq!(transport(renamed).counts.cjs, 1);
+        // A destructure from another package decides even when urql is
+        // required elsewhere in the file.
+        let redis = "const { createClient } = require('redis');\nconst { Client } = require('urql');\nconst r = createClient({ url: 'http://cache:6379/' });\n";
+        assert!(transport(redis).nodes.is_empty());
+        // apollo-angular: a parameter, a field and an inject() receiver.
+        let angular = "import { HttpLink } from 'apollo-angular/http';\nimport { inject } from '@angular/core';\nexport function createApollo(httpLink: HttpLink) {\n  return { link: httpLink.create({ uri: '/angular/graphql' }) };\n}\nexport class Gql {\n  private readonly link = inject(HttpLink);\n  constructor(private http?: HttpLink) {}\n  a() { return this.link.create({ uri: '/b/graphql', useGETForQueries: true }); }\n  b() { return this.http.create({ uri: environment.gql }); }\n}\n";
+        let out = transport(angular);
+        assert_eq!(
+            transport_qnames(angular),
+            [
+                "endpoint:POST:/angular/graphql",
+                "endpoint:POST:/b/graphql",
+                "endpoint:GET:/b/graphql",
+                "endpoint:POST:${…}"
+            ]
+        );
+        assert_eq!(out.counts.apollo_angular, 3);
+        // `create` on an untyped receiver, or HttpLink from another module,
+        // reads nothing; an aliased import of another package's name neither.
+        for body in [
+            "import { HttpLink } from 'apollo-angular/http';\nconst x = factory.create({ uri: '/graphql' });\n",
+            "import { HttpLink } from '@my/links';\nexport function f(httpLink: HttpLink) { return httpLink.create({ uri: '/graphql' }); }\n",
+            "import { Client as Redis } from 'redis';\nimport { gql } from '@apollo/client';\nconst r = new Redis({ url: 'http://cache/' });\n",
+            "import * as Other from 'other-lib';\nimport { gql } from '@apollo/client';\nconst o = new Other.ApolloClient({ uri: '/graphql' });\n",
+        ] {
+            assert!(transport(body).nodes.is_empty(), "{body}");
+        }
     }
 }
