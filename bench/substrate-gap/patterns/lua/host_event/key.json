@@ -16,6 +16,10 @@
     {
       "kind": "EVENT_HANDLER",
       "name": "PLAYER_LOGIN"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "client::manage"
     }
   ],
   "expect_edges": [
@@ -29,9 +33,15 @@
       "to": "on_event",
       "category": "HANDLED_BY",
       "note": "RegisterEvent names the event, SetScript(\"OnEvent\", ..) the callback"
+    },
+    {
+      "from": "client::manage",
+      "to": "on_manage",
+      "category": "HANDLED_BY",
+      "note": "an AwesomeWM class signal is named <class>::<signal>"
     }
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "0.5.5 use pattern: host events bound to callbacks, a Neovim autocmd and a WoW frame's RegisterEvent + OnEvent. INTENDED: an EVENT_HANDLER per host event HANDLED_BY the callback. Not read in 0.5.5."
+  "note": "0.5.5 use pattern: host events bound to callbacks, a Neovim autocmd, a WoW frame's RegisterEvent + OnEvent and an AwesomeWM class signal. INTENDED: an EVENT_HANDLER per host event HANDLED_BY the callback. Read since 0.5.6 (GH.3)."
 }

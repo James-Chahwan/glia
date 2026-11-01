@@ -22,6 +22,7 @@
 //! | `socket.http`'s `http.request("http://h/p")` (POST with a body) / `http.request{ url = .., method = .. }`, `resty.http`'s `httpc:request_uri("http://h/p", { method = .. })` | an `ENDPOINT` from the caller (code-domain's client helpers, `host` on the hit) |
 //! | busted `it("adds", function() .. end)` in a test file ([`is_test_file`]) | `FUNCTION`, key `<describe ..> adds` (space-joined, as Elixir's ExUnit tests), its calls its own |
 //! | a host registration (0.5.6, GH.2, code-domain [`hosts`]): Neovim `vim.api.nvim_create_user_command("Name", h, ..)` / `nvim_buf_create_user_command(buf, "Name", h, ..)`, Maki `maki.api.register_tool{ name = "t", execute = .., restore = .. }` / `register_command`, the callee rooted at the unshadowed global `vim` / `maki` or a local alias of it (`local api = vim.api`), the name a string literal | `CLI_COMMAND` `host_cmd:<host>:<name>` (no parent: the host's) + a `HANDLED_BY` ref to each handler (an anonymous one minted as `FUNCTION` `command <name>`, a second table handler `command <name> <key>`, each owning its calls) |
+//! | a host event (GH.3): a Neovim autocmd `vim.api.nvim_create_autocmd("Event", { callback = h })` (the event a string or a table of strings); in a file calling `CreateFrame` (WoW), `<r>:RegisterEvent("E")` joined with `<r>:SetScript("OnEvent", h)` on the same receiver text, either order ([`hosts::joined_for`]); in a file requiring `awful` / `gears` (AwesomeWM), `client` / `awesome` / `screen` / `tag` `.connect_signal("name", h)` or `:connect_signal` | `EVENT_HANDLER` `host_event:<host>:<event>` (AwesomeWM's `<class>::name`) + a `HANDLED_BY` ref to the handler (an anonymous one minted as `FUNCTION` `on <event>`, `::` keyed as `.`) |
 //! | a host callback (GH.4, [`hosts::callback_for`]): LOVE's `function love.update(dt)` / `love.draw = function() end`, the root `love` the unshadowed global or a local alias of it | the `FUNCTION` gets an `ENTRYPOINT` cell `{"decl":"<file>:<row>","source":"host:love"}` |
 //! | a plugin unit (GH.4, [`hosts::load_for`]): Neovim `plugin/**/*.lua`, `ftplugin/**/*.lua`, `after/**/*.lua`, a root `init.lua` reading `vim`; LOVE's root `main.lua` / `conf.lua` showing `love`; WezTerm's root `wezterm.lua` / `.wezterm.lua` requiring `wezterm` | the `MODULE` gets an `ENTRYPOINT` cell, source `host:<host>` |
 //! | a script (GH.4): a first line `#!.. lua` / `luajit` / `lua5.N` ([`hosts::shebang_entry`]), else a read of the global `arg` outside every function with no local, parameter or loop variable `arg` in scope | the `MODULE` gets an `ENTRYPOINT` cell, source `shebang` / `script_arg` (one entry cell per node, a host load first) |
@@ -45,9 +46,9 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with, route_qname,
 };
 use glia_code_domain::hosts::{
-    self, ConfigFlavour, ConfigMatch, ConfigSide, HostSink, HostSite, HostTally, Pattern, Shape,
-    config_builder_for, config_for, host_for_require, push_config_key, push_registration,
-    registration_for, returned_config_host,
+    self, ConfigFlavour, ConfigMatch, ConfigSide, Gate, HostSink, HostSite, HostTally, JoinedRole,
+    Pattern, Shape, config_builder_for, config_for, host_for_require, joined_for, push_config_key,
+    push_registration, registration_for, returned_config_host,
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -106,6 +107,8 @@ pub fn parse_file(
         table_keys: HashMap::new(),
         host_roots: BTreeSet::new(),
         script_arg: None,
+        gates_held: file_level_gates(root, src, source),
+        joined: Vec::new(),
     };
     w.nodes.push(Node {
         id: module_id,
@@ -124,6 +127,7 @@ pub fn parse_file(
     };
     w.visit_children(root, &top);
     w.settle_pending();
+    w.settle_joined();
     w.mint_classes();
     w.module_entry(source);
 
@@ -241,6 +245,32 @@ struct Walk<'a> {
     /// The 0-based row of the first chunk-level read of the global `arg`
     /// (GH.4): the file is run as a script.
     script_arg: Option<u32>,
+    /// The hosts whose file-level gate ([`Gate::is_file_level`]: a
+    /// `CreateFrame` call, an `awful` require) holds in this file, read
+    /// before the walk ([`file_level_gates`]).
+    gates_held: BTreeSet<&'static str>,
+    /// The joined registrations' calls (GH.3, [`Shape::Joined`]), in source
+    /// order, paired by receiver text once the file is read.
+    joined: Vec<JoinedSite>,
+}
+
+/// One call of a joined registration (GH.3): an event named on a receiver,
+/// or the handler set on one.
+struct JoinedSite {
+    host: &'static hosts::HostRow,
+    receiver: String,
+    side: JoinedSide,
+}
+
+enum JoinedSide {
+    /// `<r>:RegisterEvent("E")`: the event, its 0-based row and its cells.
+    Names {
+        event: String,
+        line: u32,
+        cells: Vec<Cell>,
+    },
+    /// `<r>:SetScript("OnEvent", h)`: the handler's qualifier.
+    Handles(CallQualifier),
 }
 
 /// The host-binding path of a chunk-level local bound to a table literal:
@@ -1019,20 +1049,33 @@ impl<'a> Walk<'a> {
     /// (`aux=`) and a name that is no literal (`unread=`) fall through to
     /// the ordinary call.
     fn host_registration(&mut self, node: TsNode<'a>, ctx: &Ctx) -> bool {
-        let Some(callee) = node
-            .child_by_field_name("name")
-            .filter(|c| c.kind() == "dot_index_expression")
-        else {
+        let Some(callee) = node.child_by_field_name("name") else {
             return false;
         };
-        let Some(path) = self.host_path(callee, ctx) else {
-            return false;
+        let path = match callee.kind() {
+            "dot_index_expression" => self.host_path(callee, ctx),
+            // `client:connect_signal(..)`: the receiver's path and the method.
+            "method_index_expression" => callee
+                .child_by_field_name("table")
+                .zip(callee.child_by_field_name("method"))
+                .and_then(|(table, method)| {
+                    let base = self.host_path(table, ctx)?;
+                    Some(format!("{base}.{}", text(method, self.src)))
+                }),
+            _ => None,
+        };
+        let Some(path) = path else {
+            return self.host_joined(node, callee, ctx);
         };
         let Some(found) = registration_for("lua", &path) else {
             return false;
         };
+        if !self.gate_holds(found.host) {
+            return false;
+        }
         let host = found.host.name;
         let pattern = found.registration.pattern;
+        let shape = found.registration.shape;
         self.host.hit(host);
         if !found.mints {
             self.host.aux += 1;
@@ -1040,8 +1083,20 @@ impl<'a> Walk<'a> {
         }
         let read = node
             .child_by_field_name("arguments")
-            .and_then(|args| read_registration(args, found.registration.shape, self.src));
+            .and_then(|args| read_registration(args, shape, self.src));
         let Some(read) = read else {
+            self.host.unread += 1;
+            return false;
+        };
+        // AwesomeWM: the signal is its class's (`client::manage`).
+        let names: Vec<String> = match shape {
+            Shape::RootedPositional { .. } => {
+                let root = path.split('.').next().unwrap_or(&path);
+                read.names.iter().map(|n| format!("{root}::{n}")).collect()
+            }
+            _ => read.names,
+        };
+        let Some(first) = names.first().cloned() else {
             self.host.unread += 1;
             return false;
         };
@@ -1049,7 +1104,7 @@ impl<'a> Walk<'a> {
         for (i, (field, handler)) in read.handlers.iter().enumerate() {
             // The first handler is the registration's own: `command <name>`.
             let field = if i == 0 { None } else { *field };
-            if let Some(q) = self.host_handler(*handler, pattern, &read.name, field, ctx) {
+            if let Some(q) = self.host_handler(*handler, pattern, &first, field, ctx) {
                 handlers.push(q);
             }
         }
@@ -1062,9 +1117,144 @@ impl<'a> Walk<'a> {
             .collect();
         let site = HostSite::new(self.repo, self.module_id, host, row(node), cells);
         let mut sink = HostSink::new(&mut self.nodes, &mut self.nav, &mut self.refs);
-        push_registration(&site, pattern, &read.name, &handlers, &mut sink);
-        self.host.registered(pattern);
+        for name in &names {
+            push_registration(&site, pattern, name, &handlers, &mut sink);
+            self.host.registered(pattern);
+        }
         true
+    }
+
+    /// True when `host`'s gate holds in this file: a file-level gate as
+    /// [`file_level_gates`] read it; any other gate is the callee's own
+    /// rooting, which [`Walk::host_path`] checked.
+    fn gate_holds(&self, host: &'static hosts::HostRow) -> bool {
+        !host.gate.is_file_level() || self.gates_held.contains(host.name)
+    }
+
+    /// A call of a joined registration (GH.3, [`Shape::Joined`], WoW):
+    /// `<r>:RegisterEvent("E")` records the event on the receiver text `r`,
+    /// `<r>:SetScript("OnEvent", h)` the receiver's handler (an anonymous
+    /// one minted as FUNCTION `on OnEvent`, owning its calls), both settled
+    /// by [`Walk::settle_joined`]. Only in a file whose gate holds; a name
+    /// that is no string literal is `unread=`, another slot (`OnUpdate`) an
+    /// ordinary call.
+    fn host_joined(&mut self, node: TsNode<'a>, callee: TsNode<'a>, ctx: &Ctx) -> bool {
+        if callee.kind() != "method_index_expression" {
+            return false;
+        }
+        let (Some(table), Some(method)) = (
+            callee.child_by_field_name("table"),
+            callee.child_by_field_name("method"),
+        ) else {
+            return false;
+        };
+        let Some(found) = joined_for("lua", text(method, self.src)) else {
+            return false;
+        };
+        let Shape::Joined {
+            name_arg,
+            handler_slot,
+            handler_arg,
+            ..
+        } = found.registration.shape
+        else {
+            return false;
+        };
+        if !self.gate_holds(found.host) {
+            return false;
+        }
+        let argv: Vec<TsNode<'a>> = node
+            .child_by_field_name("arguments")
+            .map(|args| {
+                let mut cursor = args.walk();
+                args.named_children(&mut cursor).collect()
+            })
+            .unwrap_or_default();
+        let receiver = text(table, self.src).to_string();
+        let host = found.host;
+        match found.role {
+            JoinedRole::Names => {
+                self.host.hit(host.name);
+                let event = name_arg
+                    .checked_sub(1)
+                    .and_then(|i| argv.get(i))
+                    .and_then(|a| string_literal(*a, self.src));
+                let Some(event) = event else {
+                    self.host.unread += 1;
+                    return false;
+                };
+                let cells: Vec<Cell> = cells(&node, self.src, self.file_rel_path)
+                    .into_iter()
+                    .skip(1)
+                    .collect();
+                self.joined.push(JoinedSite {
+                    host,
+                    receiver,
+                    side: JoinedSide::Names {
+                        event,
+                        line: row(node),
+                        cells,
+                    },
+                });
+                true
+            }
+            JoinedRole::Handles => {
+                let slot = argv.first().and_then(|a| string_literal(*a, self.src));
+                if slot.as_deref() != Some(handler_slot) {
+                    return false;
+                }
+                let handler = handler_arg.checked_sub(1).and_then(|i| argv.get(i));
+                let qualifier = handler
+                    .and_then(|h| self.host_handler(*h, Pattern::Event, handler_slot, None, ctx));
+                for (i, rest) in argv.iter().enumerate() {
+                    if i != 0 && i + 1 != handler_arg {
+                        self.visit(*rest, ctx);
+                    }
+                }
+                if let Some(q) = qualifier {
+                    self.joined.push(JoinedSite {
+                        host,
+                        receiver,
+                        side: JoinedSide::Handles(q),
+                    });
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The joined registrations, once the file is read (GH.3): each event a
+    /// receiver names is an EVENT_HANDLER at its call, HANDLED_BY every
+    /// handler set on the same receiver text of the same host (none: the
+    /// event alone), in source order.
+    fn settle_joined(&mut self) {
+        let joined = std::mem::take(&mut self.joined);
+        for site in &joined {
+            let JoinedSide::Names { event, line, cells } = &site.side else {
+                continue;
+            };
+            let mut handlers: Vec<CallQualifier> = Vec::new();
+            for other in &joined {
+                if let JoinedSide::Handles(q) = &other.side
+                    && std::ptr::eq(other.host, site.host)
+                    && other.receiver == site.receiver
+                    && !handlers.contains(q)
+                {
+                    handlers.push(q.clone());
+                }
+            }
+            let at = HostSite::new(
+                self.repo,
+                self.module_id,
+                site.host.name,
+                *line,
+                cells.clone(),
+            );
+            let mut sink = HostSink::new(&mut self.nodes, &mut self.nav, &mut self.refs);
+            push_registration(&at, Pattern::Event, event, &handlers, &mut sink);
+            self.host.registered(Pattern::Event);
+        }
     }
 
     /// The HANDLED_BY qualifier of a registration's handler: an anonymous
@@ -1081,7 +1271,10 @@ impl<'a> Walk<'a> {
     ) -> Option<CallQualifier> {
         match handler.kind() {
             "function_definition" => {
-                let key = self.unique(pattern.handler_key(name, field), handler);
+                // A key holds no `::` (the qname separator): an AwesomeWM
+                // signal `client::manage` keys `on client.manage`.
+                let name = name.replace("::", ".");
+                let key = self.unique(pattern.handler_key(&name, field), handler);
                 let id = self.mint(&key, node_kind::FUNCTION, handler);
                 self.host.minted += 1;
                 let inner = Ctx {
@@ -1679,19 +1872,31 @@ fn read_registration<'t>(args: TsNode<'t>, shape: Shape, src: &[u8]) -> Option<H
                     .map(|(_, v)| *v),
             );
             Some(HostRead {
-                name,
+                names: vec![name],
                 handlers,
                 rest,
             })
         }
+        Shape::RootedPositional {
+            name_arg,
+            handler_arg,
+        } => read_registration(
+            args,
+            Shape::Positional {
+                name_arg,
+                handler_arg,
+                handler_table: None,
+            },
+            src,
+        ),
         Shape::Positional {
             name_arg,
             handler_arg,
             handler_table,
         } => {
-            let name = argv
+            let names = argv
                 .get(name_arg.checked_sub(1)?)
-                .and_then(|a| string_literal(*a, src))?;
+                .and_then(|a| literal_names(*a, src))?;
             let mut handlers = Vec::new();
             let mut rest = Vec::new();
             let handler_at = match handler_table {
@@ -1722,13 +1927,115 @@ fn read_registration<'t>(args: TsNode<'t>, shape: Shape, src: &[u8]) -> Option<H
                     .map(|(_, a)| *a),
             );
             Some(HostRead {
-                name,
+                names,
                 handlers,
                 rest,
             })
         }
         _ => None,
     }
+}
+
+/// The hosts of `lua` whose file-level gate ([`Gate::is_file_level`]) holds
+/// in the file, read in one pass before the walk (GH.3): a [`Gate::Call`]
+/// when the file calls the function by its bare name and declares it nowhere
+/// (a `function` / `local function` of that name, or an assignment to it),
+/// a [`Gate::Globals`] when the file requires one of its modules or a
+/// submodule (`require("awful.autofocus")`). A file whose text holds no
+/// gate's name is not walked again.
+fn file_level_gates(root: TsNode, src: &[u8], source: &str) -> BTreeSet<&'static str> {
+    let rows: Vec<&'static hosts::HostRow> = hosts::HOSTS
+        .iter()
+        .filter(|h| h.lang == "lua" && h.gate.is_file_level())
+        .filter(|h| match h.gate {
+            Gate::Call(g) => source.contains(g),
+            Gate::Globals { requires, .. } => requires.iter().any(|r| source.contains(r)),
+            _ => false,
+        })
+        .collect();
+    let mut held = BTreeSet::new();
+    if rows.is_empty() {
+        return held;
+    }
+    let mut called: BTreeSet<String> = BTreeSet::new();
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    let mut required: Vec<String> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_call" => {
+                if let Some(callee) = node
+                    .child_by_field_name("name")
+                    .filter(|c| c.kind() == "identifier")
+                {
+                    let name = text(callee, src);
+                    if name == "require" {
+                        if let Some(spec) = node
+                            .child_by_field_name("arguments")
+                            .and_then(|a| single_string(a, src))
+                        {
+                            required.push(spec);
+                        }
+                    } else {
+                        called.insert(name.to_string());
+                    }
+                }
+            }
+            "function_declaration" => {
+                if let Some(name) = node
+                    .child_by_field_name("name")
+                    .filter(|n| n.kind() == "identifier")
+                {
+                    declared.insert(text(name, src).to_string());
+                }
+            }
+            "variable_list" => {
+                let mut cursor = node.walk();
+                for name in node.named_children(&mut cursor) {
+                    if name.kind() == "identifier" {
+                        declared.insert(text(name, src).to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    for host in rows {
+        let holds = match host.gate {
+            Gate::Call(g) => called.contains(g) && !declared.contains(g),
+            gate => required.iter().any(|spec| gate.held_by_require(spec)),
+        };
+        if holds {
+            held.insert(host.name);
+        }
+    }
+    held
+}
+
+/// A registration's names at one argument (GH.3): a string literal, or a
+/// table of string literals only (Neovim's `{ "BufEnter", "BufWinEnter" }`),
+/// in order, duplicates dropped; `None` for anything else or an empty table.
+fn literal_names(node: TsNode, src: &[u8]) -> Option<Vec<String>> {
+    if let Some(name) = string_literal(node, src) {
+        return Some(vec![name]);
+    }
+    if node.kind() != "table_constructor" {
+        return None;
+    }
+    let mut cursor = node.walk();
+    let mut names: Vec<String> = Vec::new();
+    for field in node.named_children(&mut cursor) {
+        if field.child_by_field_name("name").is_some() {
+            return None;
+        }
+        let name = string_literal(field.child_by_field_name("value")?, src)?;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    (!names.is_empty()).then_some(names)
 }
 
 /// A table constructor's `key = value` fields with identifier keys, and
@@ -1759,7 +2066,8 @@ fn table_fields<'t>(node: TsNode<'t>, src: &[u8]) -> Option<TableFields<'t>> {
 /// A host registration as read: its literal name, its handlers (each with
 /// the table key it sat at) and the arguments that are neither.
 struct HostRead<'t> {
-    name: String,
+    /// Each name it registers (one, but for a table of them: GH.3).
+    names: Vec<String>,
     handlers: Vec<(Option<&'static str>, TsNode<'t>)>,
     rest: Vec<TsNode<'t>>,
 }
@@ -2377,8 +2685,7 @@ mod tests {
 
     #[test]
     fn a_positional_handler_table_reads_its_keys_and_leaves_the_rest() {
-        // No 0.5.6 Lua row uses `handler_table` yet (Neovim autocmds will):
-        // read a call against the shape directly.
+        // Neovim autocmds' shape (GH.3), read against a call directly.
         let src =
             "f(\"BufWritePost\", { pattern = \"*.lua\", callback = function() end, desc = g() })";
         let mut parser = Parser::new();
@@ -2396,7 +2703,7 @@ mod tests {
             handler_table: Some((2, &["callback"])),
         };
         let read = read_registration(args, shape, src.as_bytes()).unwrap();
-        assert_eq!(read.name, "BufWritePost");
+        assert_eq!(read.names, ["BufWritePost"]);
         let handlers: Vec<(Option<&str>, &str)> =
             read.handlers.iter().map(|(k, v)| (*k, v.kind())).collect();
         assert_eq!(handlers, [(Some("callback"), "function_definition")]);
@@ -2755,5 +3062,207 @@ mod tests {
         ] {
             assert!(entries(&parse_at(src, "tools/x.lua")).is_empty(), "{src}");
         }
+    }
+
+    /// `(event qname, handler ref)` for every HANDLED_BY ref from an
+    /// EVENT_HANDLER, in emission order.
+    fn host_event_refs(fp: &FileParse) -> Vec<(String, String)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter(|r| fp.nav.kind_by_id.get(&r.from) == Some(&node_kind::EVENT_HANDLER))
+            .map(|r| {
+                (
+                    fp.nav.qname_by_id[&r.from].clone(),
+                    format!("{:?}", r.qualifier),
+                )
+            })
+            .collect()
+    }
+
+    fn events(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::EVENT_HANDLER))
+            .map(|(_, q)| q.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn pair(event: &str, handler: &str) -> (String, String) {
+        (event.to_string(), format!("Bare({handler:?})"))
+    }
+
+    #[test]
+    fn the_host_event_fixture_reads_an_autocmd_and_a_wow_frame() {
+        // bench/substrate-gap/patterns/lua/host_event/events.lua (GH.3).
+        let fp = parse(
+            "local function on_save(ev)\n  print(\"saved \" .. ev.file)\nend\n\
+             vim.api.nvim_create_autocmd(\"BufWritePost\", { pattern = \"*.lua\", callback = on_save })\n\
+             local frame = CreateFrame(\"Frame\")\n\
+             frame:RegisterEvent(\"PLAYER_LOGIN\")\n\
+             local function on_event(self, event)\n  print(event)\nend\n\
+             frame:SetScript(\"OnEvent\", on_event)\n",
+        );
+        assert_eq!(
+            events(&fp),
+            [
+                "host_event:neovim:BufWritePost",
+                "host_event:wow:PLAYER_LOGIN"
+            ]
+        );
+        assert_eq!(
+            host_event_refs(&fp),
+            [
+                pair("host_event:neovim:BufWritePost", "on_save"),
+                pair("host_event:wow:PLAYER_LOGIN", "on_event"),
+            ]
+        );
+        // Each event is the host's, located at its registration.
+        let login = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "host_event:wow:PLAYER_LOGIN")
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(!fp.nav.parent_of.contains_key(&login));
+        let node = fp.nodes.iter().find(|n| n.id == login).unwrap();
+        assert!(node.cells.iter().any(|c| c.kind == cell_type::POSITION
+            && matches!(&c.payload, CellPayload::Json(j) if j.contains("\"start_line\":5"))));
+    }
+
+    #[test]
+    fn autocmd_event_lists_anonymous_callbacks_and_command_strings() {
+        let fp = parse(
+            "local api = vim.api\n\
+             api.nvim_create_autocmd({ \"BufEnter\", \"BufWinEnter\" }, {\n  callback = function(ev)\n    print(ev.buf)\n  end,\n})\n\
+             vim.api.nvim_create_autocmd(\"VimResized\", { command = \"wincmd =\" })\n\
+             local ev = \"X\"\n\
+             vim.api.nvim_create_autocmd(ev, { callback = function() end })\n\
+             vim.keymap.set(\"n\", \"x\", function() end)\n\
+             do\n  local vim = {}\n  vim.api.nvim_create_autocmd(\"Shadowed\", { callback = print })\nend\n",
+        );
+        assert_eq!(
+            events(&fp),
+            [
+                "host_event:neovim:BufEnter",
+                "host_event:neovim:BufWinEnter",
+                "host_event:neovim:VimResized"
+            ]
+        );
+        // One anonymous callback, minted once, handles both events; a
+        // command string handles nothing.
+        assert_eq!(
+            host_event_refs(&fp),
+            [
+                pair("host_event:neovim:BufEnter", "on BufEnter"),
+                pair("host_event:neovim:BufWinEnter", "on BufEnter"),
+            ]
+        );
+        assert!(keys(&fp, node_kind::FUNCTION).contains(&"on BufEnter".to_string()));
+        let handler = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.ends_with("::on BufEnter"))
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(
+            fp.calls.iter().any(|c| c.from == handler
+                && matches!(&c.qualifier, CallQualifier::Bare(n) if n == "print"))
+        );
+    }
+
+    #[test]
+    fn wow_events_join_register_and_on_event_by_receiver_text() {
+        let fp = parse(
+            "local f = CreateFrame(\"Frame\", \"MyAddonFrame\")\n\
+             f:SetScript(\"OnEvent\", function(self, event, ...)\n  handle(event)\nend)\n\
+             f:RegisterEvent(\"ADDON_LOADED\")\n\
+             f:RegisterEvent(\"PLAYER_ENTERING_WORLD\")\n\
+             local g = CreateFrame(\"Frame\")\n\
+             g:RegisterEvent(\"BAG_UPDATE\")\n\
+             g:SetScript(\"OnUpdate\", function() end)\n\
+             f:RegisterEvent(name)\n",
+        );
+        // Every event the frame registers is HANDLED_BY its one OnEvent
+        // script, set before or after; a frame with no OnEvent in the file
+        // keeps its event with no handler.
+        assert_eq!(
+            events(&fp),
+            [
+                "host_event:wow:ADDON_LOADED",
+                "host_event:wow:BAG_UPDATE",
+                "host_event:wow:PLAYER_ENTERING_WORLD"
+            ]
+        );
+        assert_eq!(
+            host_event_refs(&fp),
+            [
+                pair("host_event:wow:ADDON_LOADED", "on OnEvent"),
+                pair("host_event:wow:PLAYER_ENTERING_WORLD", "on OnEvent"),
+            ]
+        );
+        let handler = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.ends_with("::on OnEvent"))
+            .map(|(id, _)| *id)
+            .unwrap();
+        assert!(fp.calls.iter().any(|c| c.from == handler
+            && matches!(&c.qualifier, CallQualifier::Bare(n) if n == "handle")));
+        // Not WoW: no CreateFrame call, or a CreateFrame of the file's own.
+        for src in [
+            "local f = make()\nf:RegisterEvent(\"E\")\nf:SetScript(\"OnEvent\", h)\n",
+            "local function CreateFrame() return {} end\nlocal f = CreateFrame()\nf:RegisterEvent(\"E\")\nf:SetScript(\"OnEvent\", h)\n",
+        ] {
+            assert!(events(&parse(src)).is_empty(), "{src}");
+        }
+    }
+
+    #[test]
+    fn awesome_signals_are_prefixed_by_their_class_and_gated_on_its_modules() {
+        let fp = parse(
+            "local awful = require(\"awful\")\n\
+             local function on_tag() end\n\
+             client.connect_signal(\"manage\", function(c)\n  c:connect_signal(\"focus\", function() end)\n  awful.placement.no_offscreen(c)\nend)\n\
+             tag.connect_signal(\"property::selected\", on_tag)\n\
+             awesome.connect_signal(\"startup\", on_tag)\n\
+             screen:connect_signal(\"added\", on_tag)\n",
+        );
+        assert_eq!(
+            events(&fp),
+            [
+                "host_event:awesome:awesome::startup",
+                "host_event:awesome:client::manage",
+                "host_event:awesome:screen::added",
+                "host_event:awesome:tag::property::selected"
+            ]
+        );
+        assert_eq!(
+            host_event_refs(&fp),
+            [
+                pair("host_event:awesome:client::manage", "on client.manage"),
+                pair("host_event:awesome:tag::property::selected", "on_tag"),
+                pair("host_event:awesome:awesome::startup", "on_tag"),
+                pair("host_event:awesome:screen::added", "on_tag"),
+            ]
+        );
+        // No awful / gears require: `client` is any program's global; a
+        // local `client` is the file's own.
+        for src in [
+            "client.connect_signal(\"manage\", function() end)\n",
+            "local gears = require(\"gears\")\nlocal client = {}\nclient.connect_signal(\"manage\", function() end)\n",
+        ] {
+            assert!(events(&parse(src)).is_empty(), "{src}");
+        }
+        // A submodule require shows the host too.
+        let sub = parse("require(\"awful.autofocus\")\nclient.connect_signal(\"focus\", f)\n");
+        assert_eq!(events(&sub), ["host_event:awesome:client::focus"]);
     }
 }

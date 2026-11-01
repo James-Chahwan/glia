@@ -18,6 +18,9 @@
 //! |---|---|---|
 //! | `maki` | `maki.api.register_tool{ name = "t", execute = .., restore = .. }` (and `register_command`) | CLI_COMMAND `host_cmd:maki:t` HANDLED_BY execute / restore |
 //! | `neovim` | `vim.api.nvim_create_user_command("Name", handler, opts)`, `vim.api.nvim_buf_create_user_command(buf, "Name", handler, opts)` | CLI_COMMAND `host_cmd:neovim:Name` HANDLED_BY the handler |
+//! | `neovim` (GH.3) | `vim.api.nvim_create_autocmd("Event", { callback = h })`, the event a string or a table of them (one node each); `command = ".."` handles nothing | EVENT_HANDLER `host_event:neovim:Event` HANDLED_BY h |
+//! | `wow` (GH.3, [`Gate::Call`](crate::hosts::Gate::Call): a file calling `CreateFrame`) | `<r>:RegisterEvent("E")` and `<r>:SetScript("OnEvent", h)` on the same receiver text, in either order ([`Callee::Method`](crate::hosts::Callee::Method), [`Shape::Joined`](crate::hosts::Shape::Joined), [`joined_for`](crate::hosts::joined_for)) | EVENT_HANDLER `host_event:wow:E` HANDLED_BY h, for every event the receiver registers |
+//! | `awesome` (GH.3, [`Gate::Globals`](crate::hosts::Gate::Globals): a file requiring `awful` / `gears`) | `client` / `awesome` / `screen` / `tag` `.connect_signal("name", h)` (or `:`), the class global unshadowed ([`Shape::RootedPositional`](crate::hosts::Shape::RootedPositional)) | EVENT_HANDLER `host_event:awesome:client::name` HANDLED_BY h |
 //!
 //! **Entries (GH.4).** A host that calls a function by name, or loads a file
 //! by its path, makes it an entry: the parser writes an ENTRYPOINT
@@ -157,15 +160,81 @@ pub enum Gate {
     /// `vscode.commands.registerCommand`); a named import of a member
     /// (`import { commands } from 'vscode'`) roots `vscode.commands`.
     Import(&'static str),
+    /// The host is present in a file that calls its global function (GH.3,
+    /// World of Warcraft: `CreateFrame(..)`), which the file declares
+    /// nowhere itself (no `function CreateFrame`, `local CreateFrame = ..` or
+    /// assignment to the name). The row's registrations are
+    /// [`Callee::Method`]s on any receiver: the call is the gate, never a
+    /// root of their paths.
+    Call(&'static str),
+    /// The host injects several globals whose names alone are too common to
+    /// stand behind (GH.3, AwesomeWM: `client`, `awesome`, `screen`, `tag`):
+    /// a callee is rooted at one of `globals`, unshadowed, only in a file
+    /// that requires one of `requires` or a submodule of one
+    /// (`require("awful.autofocus")`).
+    Globals {
+        globals: &'static [&'static str],
+        requires: &'static [&'static str],
+    },
 }
 
 impl Gate {
     /// The root every path of the row starts with: the global, or the
-    /// required module's name.
+    /// required module's name; a [`Gate::Call`]'s function; a
+    /// [`Gate::Globals`]'s first global (each of them roots a path: read
+    /// [`Gate::roots_path`]).
     pub fn root(self) -> &'static str {
         match self {
-            Gate::Global(g) | Gate::Require(g) | Gate::Import(g) => g,
+            Gate::Global(g) | Gate::Require(g) | Gate::Import(g) | Gate::Call(g) => g,
+            Gate::Globals { globals, .. } => globals.first().copied().unwrap_or(""),
         }
+    }
+
+    /// True when the dotted `path` starts at one of the gate's roots
+    /// (`client.connect_signal` under AwesomeWM's globals).
+    pub fn roots_path(self, path: &str) -> bool {
+        let under = |root: &str| {
+            !root.is_empty()
+                && path
+                    .strip_prefix(root)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        };
+        match self {
+            Gate::Globals { globals, .. } => globals.iter().any(|g| under(g)),
+            other => under(other.root()),
+        }
+    }
+
+    /// True when `name` is a global the gate roots paths at: a
+    /// [`Gate::Global`] or one of a [`Gate::Globals`]'s.
+    pub fn is_global(self, name: &str) -> bool {
+        match self {
+            Gate::Global(g) => g == name,
+            Gate::Globals { globals, .. } => globals.contains(&name),
+            _ => false,
+        }
+    }
+
+    /// True when requiring the module `spec` makes a [`Gate::Globals`] gate
+    /// hold: one of its `requires` or a submodule of one (`awful.autofocus`).
+    /// False for every other gate (a [`Gate::Require`] binds a local instead).
+    pub fn held_by_require(self, spec: &str) -> bool {
+        let Gate::Globals { requires, .. } = self else {
+            return false;
+        };
+        requires.iter().any(|r| {
+            spec == *r
+                || spec
+                    .strip_prefix(r)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    }
+
+    /// True when the gate is settled per file before the file is walked
+    /// ([`Gate::Call`], [`Gate::Globals`]): the parser reads it in a first
+    /// pass, so a registration above the require or the call still holds.
+    pub fn is_file_level(self) -> bool {
+        matches!(self, Gate::Call(_) | Gate::Globals { .. })
     }
 }
 
@@ -202,13 +271,17 @@ pub enum Callee {
         prefix: &'static str,
         heads: &'static [&'static str],
     },
+    /// A method called on any receiver (GH.3, WoW: `<r>:RegisterEvent(..)`),
+    /// read only by a [`Shape::Joined`] registration through [`joined_for`];
+    /// [`registration_for`] never matches it.
+    Method(&'static str),
 }
 
 impl Callee {
-    /// The callee's text: the exact name or the prefix.
+    /// The callee's text: the exact name, the prefix or the method name.
     pub fn text(&self) -> &'static str {
         match self {
-            Callee::Exact(t) => t,
+            Callee::Exact(t) | Callee::Method(t) => t,
             Callee::Prefix { prefix, .. } | Callee::Segment { prefix, .. } => prefix,
         }
     }
@@ -275,6 +348,22 @@ pub enum Shape {
     /// event `workspace.onDidSaveTextDocument`); the handler is the argument
     /// at `handler_arg`.
     CalleeSegment { segments: usize, handler_arg: usize },
+    /// Positional arguments, the name prefixed by the callee's root and
+    /// `::` (GH.3, AwesomeWM: `client.connect_signal("manage", h)` names
+    /// the event `client::manage`, the class whose signal it is).
+    RootedPositional { name_arg: usize, handler_arg: usize },
+    /// Two calls on the same receiver text in one file (GH.3, WoW): the
+    /// registration's [`Callee::Method`] (`<r>:RegisterEvent("E")`) names
+    /// the event at `name_arg`; `<r>:<handler_call>("<handler_slot>", h)`
+    /// (`SetScript("OnEvent", h)`) sets the handler, at `handler_arg`, of
+    /// every event that receiver registers, before or after it. The pairing
+    /// is settled once the file is read.
+    Joined {
+        name_arg: usize,
+        handler_call: &'static str,
+        handler_slot: &'static str,
+        handler_arg: usize,
+    },
 }
 
 impl Shape {
@@ -495,6 +584,18 @@ pub static HOSTS: &[HostRow] = &[
                     handler_table: None,
                 },
             },
+            // GH.3: an autocmd's event (a string, or a table of them), its
+            // handler the options table's `callback`; a `command = ".."`
+            // string mints the event with no handler.
+            Registration {
+                callee: Callee::Exact("vim.api.nvim_create_autocmd"),
+                pattern: Pattern::Event,
+                shape: Shape::Positional {
+                    name_arg: 1,
+                    handler_arg: 2,
+                    handler_table: Some((2, &["callback"])),
+                },
+            },
         ],
         callbacks: &[],
         config: &[ConfigRule {
@@ -643,7 +744,77 @@ pub static HOSTS: &[HostRow] = &[
             engine: "vscode",
         }),
     },
+    // GH.3: World of Warcraft. A frame registers for events by name and
+    // receives every one of them in its one OnEvent script; the file calls
+    // `CreateFrame`.
+    HostRow {
+        name: "wow",
+        lang: "lua",
+        exts: &["lua"],
+        gate: Gate::Call("CreateFrame"),
+        loads: &[],
+        registrations: &[Registration {
+            callee: Callee::Method("RegisterEvent"),
+            pattern: Pattern::Event,
+            shape: Shape::Joined {
+                name_arg: 1,
+                handler_call: "SetScript",
+                handler_slot: "OnEvent",
+                handler_arg: 2,
+            },
+        }],
+        callbacks: &[],
+        config: &[],
+        manifest: None,
+    },
+    // GH.3: AwesomeWM. Its class globals emit signals; the globals' names
+    // are common, so a file must require awful or gears for them to be the
+    // host's.
+    HostRow {
+        name: "awesome",
+        lang: "lua",
+        exts: &["lua"],
+        gate: Gate::Globals {
+            globals: AWESOME_CLASSES,
+            requires: &["awful", "gears"],
+        },
+        loads: &[],
+        registrations: &[
+            Registration {
+                callee: Callee::Exact("client.connect_signal"),
+                pattern: Pattern::Event,
+                shape: AWESOME_SIGNAL,
+            },
+            Registration {
+                callee: Callee::Exact("awesome.connect_signal"),
+                pattern: Pattern::Event,
+                shape: AWESOME_SIGNAL,
+            },
+            Registration {
+                callee: Callee::Exact("screen.connect_signal"),
+                pattern: Pattern::Event,
+                shape: AWESOME_SIGNAL,
+            },
+            Registration {
+                callee: Callee::Exact("tag.connect_signal"),
+                pattern: Pattern::Event,
+                shape: AWESOME_SIGNAL,
+            },
+        ],
+        callbacks: &[],
+        config: &[],
+        manifest: None,
+    },
 ];
+
+/// AwesomeWM's class globals (GH.3): each emits class-level signals.
+const AWESOME_CLASSES: &[&str] = &["client", "awesome", "screen", "tag"];
+
+/// `<class>.connect_signal("name", h)`: the event `<class>::name`.
+const AWESOME_SIGNAL: Shape = Shape::RootedPositional {
+    name_arg: 1,
+    handler_arg: 2,
+};
 
 /// A registration a dotted callee matched.
 #[derive(Debug, Clone, Copy)]
@@ -682,6 +853,7 @@ pub fn registration_for<'d>(lang: &str, dotted: &'d str) -> Option<RegistrationM
                                 .any(|h| rest.len() > h.len() && rest.starts_with(h))
                     })
                     .map(|rest| (rest, true)),
+                Callee::Method(_) => None,
             };
             let Some((suffix, mints)) = found else {
                 continue;
@@ -703,11 +875,60 @@ pub fn registration_for<'d>(lang: &str, dotted: &'d str) -> Option<RegistrationM
     best.map(|(_, m)| m)
 }
 
-/// True when `name` is the global a host row of `lang` is gated on.
+/// True when `name` is a global a host row of `lang` is gated on (a
+/// [`Gate::Global`], or one of a [`Gate::Globals`]'s, whose file-level
+/// require the parser checks apart).
 pub fn is_host_global(lang: &str, name: &str) -> bool {
     HOSTS
         .iter()
-        .any(|h| h.lang == lang && matches!(h.gate, Gate::Global(g) if g == name))
+        .any(|h| h.lang == lang && h.gate.is_global(name))
+}
+
+/// What a `<receiver>:<method>(..)` call is to a [`Shape::Joined`]
+/// registration (GH.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JoinedRole {
+    /// The registration's own method: it names an event
+    /// (`RegisterEvent("E")`).
+    Names,
+    /// The shape's `handler_call`: it may set the receiver's handler
+    /// (`SetScript("OnEvent", h)`), when its first argument is the slot.
+    Handles,
+}
+
+/// A method call a joined registration reads (GH.3).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct JoinedMatch {
+    pub host: &'static HostRow,
+    pub registration: &'static Registration,
+    pub role: JoinedRole,
+}
+
+/// The joined registration of `lang` whose [`Callee::Method`] or
+/// [`Shape::Joined`] `handler_call` is `method`, the first in table order;
+/// `None` for any other method. The caller checks the row's gate.
+pub fn joined_for(lang: &str, method: &str) -> Option<JoinedMatch> {
+    HOSTS
+        .iter()
+        .filter(|h| h.lang == lang)
+        .flat_map(|h| h.registrations.iter().map(move |r| (h, r)))
+        .find_map(|(host, registration)| {
+            let Shape::Joined { handler_call, .. } = registration.shape else {
+                return None;
+            };
+            let role = match registration.callee {
+                Callee::Method(m) if m == method => JoinedRole::Names,
+                _ if handler_call == method => JoinedRole::Handles,
+                _ => return None,
+            };
+            Some(JoinedMatch {
+                host,
+                registration,
+                role,
+            })
+        })
 }
 
 /// The row of `lang` gated on importing the module `spec` (GH.9:
@@ -1286,11 +1507,36 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
         if global.is_empty() {
             problems.push(format!("{at}: empty gate root"));
         }
+        if let Gate::Call(g) = row.gate
+            && !is_identifier_tail(g)
+        {
+            problems.push(format!("{at}: a call gate names one function"));
+        }
+        if let Gate::Globals { globals, requires } = row.gate
+            && (globals.is_empty()
+                || requires.is_empty()
+                || globals.iter().any(|g| !is_identifier_tail(g))
+                || requires.iter().any(|r| r.is_empty()))
+        {
+            problems.push(format!(
+                "{at}: a globals gate needs identifier globals and the modules it requires"
+            ));
+        }
         for r in row.registrations {
             let callee = r.callee.text();
-            if callee.is_empty() || !callee.starts_with(&format!("{global}.")) {
+            let method = matches!(r.callee, Callee::Method(_));
+            if method {
+                if !is_identifier_tail(callee) {
+                    problems.push(format!("{at}: method callee {callee:?} is no identifier"));
+                }
+            } else if callee.is_empty() || !row.gate.roots_path(callee) {
                 problems.push(format!(
                     "{at}: callee {callee:?} is not rooted at `{global}.`"
+                ));
+            }
+            if method != matches!(r.shape, Shape::Joined { .. }) {
+                problems.push(format!(
+                    "{at}: a method callee and a joined shape go together ({callee:?})"
                 ));
             }
             if let Callee::Prefix { mint, .. } = r.callee
@@ -1346,6 +1592,33 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     if segments == 0 || handler_arg == 0 {
                         problems.push(format!(
                             "{at}: callee-segment shape of {callee:?} needs segments and a 1-based handler"
+                        ));
+                    }
+                }
+                Shape::RootedPositional {
+                    name_arg,
+                    handler_arg,
+                } => {
+                    if name_arg == 0 || handler_arg == 0 || name_arg == handler_arg {
+                        problems.push(format!(
+                            "{at}: positional shape of {callee:?} needs distinct 1-based arguments"
+                        ));
+                    }
+                }
+                Shape::Joined {
+                    name_arg,
+                    handler_call,
+                    handler_slot,
+                    handler_arg,
+                } => {
+                    if name_arg == 0
+                        || handler_arg < 2
+                        || handler_slot.is_empty()
+                        || !is_identifier_tail(handler_call)
+                        || handler_call == callee
+                    {
+                        problems.push(format!(
+                            "{at}: joined shape of {callee:?} needs a 1-based name, a handler call of another name with its slot first and the handler after it"
                         ));
                     }
                 }
@@ -2994,7 +3267,12 @@ mod tests {
         assert_eq!(validate(), Vec::<String>::new());
         // Maki first: PR #3's seed.
         let names: Vec<&str> = HOSTS.iter().map(|h| h.name).collect();
-        assert_eq!(names, ["maki", "neovim", "wezterm", "love", "vscode"]);
+        assert_eq!(
+            names,
+            [
+                "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome"
+            ]
+        );
     }
 
     #[test]
@@ -3069,6 +3347,114 @@ mod tests {
         assert!(has("config prefix \"y.o\" is not rooted at `x.`"));
         assert!(has("namespaced prefix \"x.g\" is not one of"));
         assert_eq!(problems.len(), 13, "{problems:?}");
+    }
+
+    #[test]
+    fn host_events_rows_gates_and_joined_methods() {
+        // GH.3: Neovim autocmds through registration_for.
+        let m = registration_for("lua", "vim.api.nvim_create_autocmd").expect("autocmd");
+        assert_eq!(m.host.name, "neovim");
+        assert_eq!(m.registration.pattern, Pattern::Event);
+        // AwesomeWM's class globals root paths; their names are host globals,
+        // held only by a require of awful / gears or a submodule.
+        let m = registration_for("lua", "client.connect_signal").expect("awesome");
+        assert_eq!(m.host.name, "awesome");
+        assert!(matches!(
+            m.registration.shape,
+            Shape::RootedPositional { .. }
+        ));
+        assert!(is_host_global("lua", "tag") && !is_host_global("lua", "awful"));
+        let awesome = HOSTS.iter().find(|h| h.name == "awesome").unwrap();
+        assert!(awesome.gate.roots_path("screen.connect_signal"));
+        assert!(!awesome.gate.roots_path("screens.connect_signal"));
+        assert!(awesome.gate.held_by_require("awful"));
+        assert!(awesome.gate.held_by_require("gears.timer"));
+        assert!(!awesome.gate.held_by_require("awfully"));
+        assert!(awesome.gate.is_file_level());
+        // WoW: a method on any receiver, never a dotted registration.
+        let wow = HOSTS.iter().find(|h| h.name == "wow").unwrap();
+        assert_eq!(wow.gate, Gate::Call("CreateFrame"));
+        assert!(!wow.gate.held_by_require("CreateFrame"));
+        assert!(registration_for("lua", "RegisterEvent").is_none());
+        let names = joined_for("lua", "RegisterEvent").expect("names");
+        assert_eq!((names.host.name, names.role), ("wow", JoinedRole::Names));
+        let handles = joined_for("lua", "SetScript").expect("handles");
+        assert_eq!(handles.role, JoinedRole::Handles);
+        assert!(joined_for("lua", "UnregisterEvent").is_none());
+        assert!(joined_for("typescript", "RegisterEvent").is_none());
+        // The qnames are host-scoped; a class-prefixed signal splits once.
+        assert_eq!(
+            split_host_qname(&host_event_qname("awesome", "client::manage")),
+            Some(("awesome", "client::manage"))
+        );
+    }
+
+    #[test]
+    fn validate_reads_the_joined_and_gate_shapes() {
+        let bad = [
+            HostRow {
+                name: "a",
+                lang: "lua",
+                exts: &["lua"],
+                gate: Gate::Call("Create.Frame"),
+                loads: &[],
+                registrations: &[
+                    Registration {
+                        callee: Callee::Method("Reg"),
+                        pattern: Pattern::Event,
+                        shape: Shape::Joined {
+                            name_arg: 1,
+                            handler_call: "Reg",
+                            handler_slot: "",
+                            handler_arg: 1,
+                        },
+                    },
+                    Registration {
+                        callee: Callee::Method("Other"),
+                        pattern: Pattern::Event,
+                        shape: Shape::RootedPositional {
+                            name_arg: 1,
+                            handler_arg: 1,
+                        },
+                    },
+                ],
+                callbacks: &[],
+                config: &[],
+                manifest: None,
+            },
+            HostRow {
+                name: "b",
+                lang: "lua",
+                exts: &["lua"],
+                gate: Gate::Globals {
+                    globals: &["c"],
+                    requires: &[],
+                },
+                loads: &[],
+                registrations: &[Registration {
+                    callee: Callee::Exact("d.connect"),
+                    pattern: Pattern::Event,
+                    shape: Shape::RootedPositional {
+                        name_arg: 1,
+                        handler_arg: 2,
+                    },
+                }],
+                callbacks: &[],
+                config: &[],
+                manifest: None,
+            },
+        ];
+        let problems = validate_rows(&bad);
+        let has = |s: &str| problems.iter().any(|p| p.contains(s));
+        assert!(has("\"a\": a call gate names one function"), "{problems:?}");
+        assert!(has("joined shape of \"Reg\""));
+        assert!(has(
+            "a method callee and a joined shape go together (\"Other\")"
+        ));
+        assert!(has("positional shape of \"Other\" needs distinct"));
+        assert!(has("\"b\": a globals gate needs"));
+        assert!(has("callee \"d.connect\" is not rooted at `c.`"));
+        assert_eq!(problems.len(), 6, "{problems:?}");
     }
 
     #[test]
