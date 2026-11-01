@@ -1,0 +1,1 @@
+{ "name": "evm-ts-residuals", "private": true, "devDependencies": { "hardhat": "2.22.2", "hardhat-deploy": "0.12.4", "ethers": "^6.13.0", "viem": "^2.21.0", "ethereum-waffle": "^4.0.10", "web3-eth-contract": "^4.7.0", "@openzeppelin/hardhat-upgrades": "^3.2.0" } }

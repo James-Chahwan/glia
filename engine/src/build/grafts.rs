@@ -150,11 +150,14 @@ pub(super) fn apply_post_cache(
         });
     }
     // DT.10g: an EVM client whose ABI another file declares (a TS import, a Go
-    // constant of another file of the package) takes that file's entries, so
+    // constant of another file of the package; GD.20: through a TS barrel or
+    // an alias the TS build maps) takes that file's entries, so
     // `resolver:evm` identifies it by ABI. Here, while the nav facts it reads
     // are present, and above every stamp that adds a key to a client hit.
-    t.time("evm_abi", || evm_abi::join_evm_abis(parses_by_lang))
-        .report(repo_label);
+    t.time("evm_abi", || {
+        evm_abi::join_evm_abis(parses_by_lang, ts_aliases)
+    })
+    .report(repo_label);
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse. CH.5b: a call site read through a URL

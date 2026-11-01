@@ -43,6 +43,9 @@
 //! hardhat=<n> typechain=<n> viem=<n> web3=<n> geth=<n>) abis=<a>
 //! not_in_abi=<i> dynamic=<d> path=<file>`; c / e count the file's nodes, s
 //! its sites (split by library in the parenthesis), a the ABI bindings read.
+//! A `lang=ts` line adds, before `path=`, the GD.20 forms the reader read
+//! (`ts` step 11): `(hardhat_deploy=<n> factories=<n> waffle=<n>
+//! viem_codec=<n> web3_contract=<n> truffle=<n>)`.
 //! Grep `^\[evm-client\] `. A Go file with a method-name wrapper (DT.10f)
 //! adds the reader's `[evm-wrappers]` line (`go` step 9).
 
@@ -64,6 +67,16 @@ pub use go::read_go_const_abi;
 
 /// The language tags the TypeScript / JavaScript reader scans.
 const TS_FAMILY: &[&str] = &["typescript", "react", "angular", "vue"];
+
+/// The GD.20 form counts a `lang=ts` marker adds, in order (`ts` step 11).
+const TS_FORMS: [&str; 6] = [
+    "hardhat_deploy",
+    "factories",
+    "waffle",
+    "viem_codec",
+    "web3_contract",
+    "truffle",
+];
 
 /// How many client libraries the marker counts.
 const N_LIBS: usize = 6;
@@ -111,6 +124,9 @@ pub struct EvmCounts {
     /// Contract constructions whose ABI argument could not be read, and (Go)
     /// non-literal member names on a bound receiver.
     pub dynamic: usize,
+    /// The TypeScript reader's GD.20 form counts, in the marker's order;
+    /// zero for any other reader.
+    pub ts_forms: [usize; 6],
 }
 
 /// One call or subscription a language reader found.
@@ -138,6 +154,7 @@ pub(crate) struct Site {
 /// TS-family tag reads ethers, `go` reads go-ethereum. A language without a
 /// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
+    let mut ts_forms = [0; 6];
     let (tag, sites, abis, not_in_abi, dynamic, go_wrappers, abi_decls) = match lang {
         "go" => {
             let view = scan::code_view(source, lang);
@@ -157,6 +174,7 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
             let (sites, c) = ts::scan(source, &view);
             let decls = ts::exported_abis(source, &view);
             let none = go::WrapperCounts::default();
+            ts_forms = c.forms();
             ("ts", sites, c.abis, c.not_in_abi, c.dynamic, none, decls)
         }
         _ => return EvmNodes::default(),
@@ -166,6 +184,7 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
     out.counts.abis = abis;
     out.counts.not_in_abi = not_in_abi;
     out.counts.dynamic = dynamic;
+    out.counts.ts_forms = ts_forms;
     out.go_wrappers = go_wrappers;
     out.abi_decls = abi_decls;
     out
@@ -193,8 +212,18 @@ impl EvmNodes {
             .zip(c.by_lib)
             .map(|(lib, n)| format!("{lib}={n}"))
             .collect();
+        let forms = if c.lang == "ts" {
+            let forms: Vec<String> = TS_FORMS
+                .iter()
+                .zip(c.ts_forms)
+                .map(|(form, n)| format!("{form}={n}"))
+                .collect();
+            format!(" ({})", forms.join(" "))
+        } else {
+            String::new()
+        };
         format!(
-            "[evm-client] lang={} calls={} events={} sites={} ({}) abis={} not_in_abi={} dynamic={} path={path}",
+            "[evm-client] lang={} calls={} events={} sites={} ({}) abis={} not_in_abi={} dynamic={}{forms} path={path}",
             c.lang,
             c.calls,
             c.events,
@@ -446,7 +475,7 @@ mod tests {
         assert_eq!(
             out.markers("src/a.ts"),
             [
-                "[evm-client] lang=ts calls=0 events=0 sites=0 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=0 not_in_abi=0 dynamic=1 path=src/a.ts"
+                "[evm-client] lang=ts calls=0 events=0 sites=0 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=0 not_in_abi=0 dynamic=1 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path=src/a.ts"
             ]
         );
         let quiet = extract_evm_clients(
@@ -519,7 +548,7 @@ export class EscrowClient {
         assert_eq!(
             out.markers("src/escrow-client.ts"),
             [
-                "[evm-client] lang=ts calls=3 events=1 sites=4 (ethers=4 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=2 not_in_abi=1 dynamic=0 path=src/escrow-client.ts"
+                "[evm-client] lang=ts calls=3 events=1 sites=4 (ethers=4 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=2 not_in_abi=1 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path=src/escrow-client.ts"
             ]
         );
         let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();

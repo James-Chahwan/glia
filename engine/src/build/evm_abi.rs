@@ -37,10 +37,25 @@
 //!      written, `.ts`, `.tsx`, `.js`, `.jsx`, `/index.ts`, `/index.js`, and
 //!      for a written `.js` / `.jsx` the `.ts` / `.tsx` beside it (an ESM
 //!      `./abi.js` naming `abi.ts`). The first candidate whose (path, name)
-//!      is indexed wins. A bare package or tsconfig-alias specifier stays
-//!      unjoined (`unresolved`): aliases are mapped by the TS graph build, not
-//!      here. A re-export chain is not followed (DT.1q's ReExport facts are the
-//!      seam for that).
+//!      is indexed wins.
+//!    - TS, a bare specifier (GD.20): mapped through the repo's tsconfig
+//!      `paths`, bundler aliases and workspace packages exactly as the TS
+//!      graph build maps an import (`lang_build::resolve_ts_source_aliased`
+//!      over the [`TsAliasSet`] `apply_post_cache` holds), then tried as
+//!      above; a package nothing maps stays `unresolved`.
+//!    - TS barrels (GD.20): a candidate file that declares no such ABI but
+//!      re-exports (DT.1q's `NavFact::ReExportName` / `ReExportStar`, both on
+//!      the MODULE) is followed as ECMA-262 ResolveExport reads it: a named
+//!      re-export `export { <n> as <name> } from '<s>'` resolves `<n>` in
+//!      `<s>`; otherwise, unless the barrel's own `export` declarations
+//!      (`NavFact::Exports`) name it or it is `default`, every `export * from
+//!      '<s>'` is tried and exactly one distinct declaration joins (two are
+//!      `ambiguous`). A re-export source maps like an import (relative, then
+//!      aliases); a (file, name) pair seen once ends a cycle and depth
+//!      [`MAX_BARREL_DEPTH`] ends a chain. A from-less local export list
+//!      (`const X = [..]; export { X }`, DT.1q's `ExportLocal`) is declared
+//!      by the extractor itself (`exported_abis`), so it is an ordinary
+//!      `EvmAbi` here.
 //!    - Go (a `.go` caller): every `.go` file of the calling file's directory
 //!      (tests only for a test caller). Exactly one (file, name): joined; two
 //!      or more: `ambiguous`; none: `unresolved`.
@@ -52,19 +67,29 @@
 //!    reaches no output.
 //! 3. MARKER, once per repo with a declaration or a referencing cell:
 //!    `[evm-abi-join] joined=<j> unresolved=<u> ambiguous=<a> declarations=<d>
-//!    repo=<label>`; j / u / a count cells, d the indexed declarations.
+//!    via_barrel=<b> via_alias=<l> repo=<label>`; j / u / a count cells, d the
+//!    indexed declarations, b / l the joined cells reached through a barrel /
+//!    through an alias (GD.20).
 //!
 //! It runs above the endpoint fold (nav facts are still present) and before
 //! every stamp that adds a key to a client hit (CB.24's `hosts`), so the cell
 //! it rewrites holds only the extractor's fields.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::evm;
 use glia_code_domain::{FileParse, NavFact, node_kind};
 use glia_code_extractors::evm::read_go_const_abi;
 
+use super::lang_build::{TsAliasSet, resolve_ts_source_aliased};
 use crate::http_owner;
+
+/// The longest re-export chain a TS join follows (module doc, step 2; the
+/// depth DT.1q's barrel resolution caps at too).
+const MAX_BARREL_DEPTH: usize = 32;
+
+/// The export a star re-export never passes on.
+const DEFAULT_EXPORT: &str = "default";
 
 /// The extensions and index files a relative TS specifier is tried with, in
 /// order, after the path as written.
@@ -82,6 +107,10 @@ pub(super) struct EvmAbiJoinStats {
     pub(super) ambiguous: usize,
     /// Declarations indexed.
     pub(super) declarations: usize,
+    /// Joined cells reached through a TS re-export barrel (GD.20).
+    pub(super) via_barrel: usize,
+    /// Joined cells whose specifier an alias mapped (GD.20).
+    pub(super) via_alias: usize,
 }
 
 impl EvmAbiJoinStats {
@@ -90,8 +119,13 @@ impl EvmAbiJoinStats {
     pub(super) fn report(&self, repo_label: &str) {
         if self.declarations + self.joined + self.unresolved + self.ambiguous > 0 {
             eprintln!(
-                "[evm-abi-join] joined={} unresolved={} ambiguous={} declarations={} repo={repo_label}",
-                self.joined, self.unresolved, self.ambiguous, self.declarations
+                "[evm-abi-join] joined={} unresolved={} ambiguous={} declarations={} via_barrel={} via_alias={} repo={repo_label}",
+                self.joined,
+                self.unresolved,
+                self.ambiguous,
+                self.declarations,
+                self.via_barrel,
+                self.via_alias
             );
         }
     }
@@ -114,6 +148,56 @@ struct Index {
     ts: BTreeMap<(String, String), Option<Vec<String>>>,
     /// Go: (directory, constant name) -> its declarations, in file order.
     go: BTreeMap<(String, String), Vec<GoDecl>>,
+    /// TS barrels (GD.20): file -> its re-exports, sorted.
+    reexports: BTreeMap<String, Vec<ReExport>>,
+    /// TS (GD.20): file -> every name its own `export` declarations export.
+    exports: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// One re-export of a TS barrel (DT.1q's facts, GD.20).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ReExport {
+    /// `export { <name> as <exported> } from '<source>'`.
+    Name {
+        source: String,
+        name: String,
+        exported: String,
+    },
+    /// `export * from '<source>'`.
+    Star { source: String },
+}
+
+/// What a TS (file, name) lookup found (GD.20).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Found {
+    Hit {
+        entries: Vec<String>,
+        file: String,
+        barrel: bool,
+        alias: bool,
+    },
+    Miss,
+    Ambiguous,
+}
+
+impl Found {
+    /// The same result, reached through a barrel and (when `alias`) an alias.
+    fn through(self, alias: bool) -> Found {
+        match self {
+            Found::Hit {
+                entries,
+                file,
+                alias: a,
+                ..
+            } => Found::Hit {
+                entries,
+                file,
+                barrel: true,
+                alias: a || alias,
+            },
+            other => other,
+        }
+    }
 }
 
 impl Index {
@@ -136,6 +220,34 @@ impl Index {
                             .and_modify(|e| *e = None)
                             .or_insert_with(|| Some(entries.clone()));
                     }
+                    NavFact::ReExportName {
+                        source,
+                        name,
+                        exported,
+                        ..
+                    } if !go => {
+                        index
+                            .reexports
+                            .entry(file.clone())
+                            .or_default()
+                            .push(ReExport::Name {
+                                source: source.clone(),
+                                name: name.clone(),
+                                exported: exported.clone(),
+                            })
+                    }
+                    NavFact::ReExportStar { source, .. } if !go => index
+                        .reexports
+                        .entry(file.clone())
+                        .or_default()
+                        .push(ReExport::Star {
+                            source: source.clone(),
+                        }),
+                    NavFact::Exports { names } if !go => index
+                        .exports
+                        .entry(file.clone())
+                        .or_default()
+                        .extend(names.iter().cloned()),
                     NavFact::GoStringConst { name, value } if go => {
                         let Some(entries) = read_go_const_abi(value) else {
                             continue;
@@ -163,6 +275,10 @@ impl Index {
             decls.sort_by(|a, b| (&a.file, &a.entries).cmp(&(&b.file, &b.entries)));
             decls.dedup();
         }
+        for reexports in index.reexports.values_mut() {
+            reexports.sort();
+            reexports.dedup();
+        }
         index
     }
 
@@ -173,22 +289,123 @@ impl Index {
     }
 
     /// What one reference from `caller` resolves to.
-    fn resolve(&self, caller: &str, abi_ref: &evm::AbiRef) -> Resolved {
+    fn resolve(&self, caller: &str, abi_ref: &evm::AbiRef, aliases: &TsAliasSet) -> Resolved {
         if caller.ends_with(".go") {
             return self.resolve_go(caller, abi_ref);
         }
-        let Some(path) = relative_target(caller, &abi_ref.from) else {
+        let Some((path, alias)) = ts_target(caller, &abi_ref.from, aliases) else {
             return Resolved::Unresolved;
         };
-        for candidate in ts_candidates(&path) {
-            if let Some(Some(entries)) = self.ts.get(&(candidate.clone(), abi_ref.name.clone())) {
-                return Resolved::Joined {
-                    entries: entries.clone(),
-                    file: candidate,
-                };
+        let mut seen = BTreeSet::new();
+        match self.lookup(&path, &abi_ref.name, aliases, 0, &mut seen) {
+            Found::Hit {
+                entries,
+                file,
+                barrel,
+                alias: through_alias,
+            } => Resolved::Joined {
+                entries,
+                file,
+                barrel,
+                alias: alias || through_alias,
+            },
+            Found::Miss => Resolved::Unresolved,
+            Found::Ambiguous => Resolved::Ambiguous,
+        }
+    }
+
+    /// The declaration of export `name` of the TS module at `path` (GD.20,
+    /// module doc step 2): the first candidate file that declares it or
+    /// re-exports it.
+    fn lookup(
+        &self,
+        path: &str,
+        name: &str,
+        aliases: &TsAliasSet,
+        depth: usize,
+        seen: &mut BTreeSet<(String, String)>,
+    ) -> Found {
+        for candidate in ts_candidates(path) {
+            match self.ts.get(&(candidate.clone(), name.to_string())) {
+                Some(Some(entries)) => {
+                    return Found::Hit {
+                        entries: entries.clone(),
+                        file: candidate,
+                        barrel: false,
+                        alias: false,
+                    };
+                }
+                Some(None) => return Found::Miss,
+                None => {}
+            }
+            if let Some(found) = self.through_barrel(&candidate, name, aliases, depth, seen) {
+                return found;
             }
         }
-        Resolved::Unresolved
+        Found::Miss
+    }
+
+    /// Export `name` of barrel `file` through its re-exports; `None` when
+    /// `file` re-exports nothing.
+    fn through_barrel(
+        &self,
+        file: &str,
+        name: &str,
+        aliases: &TsAliasSet,
+        depth: usize,
+        seen: &mut BTreeSet<(String, String)>,
+    ) -> Option<Found> {
+        let reexports = self.reexports.get(file)?;
+        if depth >= MAX_BARREL_DEPTH || !seen.insert((file.to_string(), name.to_string())) {
+            return Some(Found::Miss);
+        }
+        let named = reexports.iter().find_map(|r| match r {
+            ReExport::Name {
+                source,
+                name: inner,
+                exported,
+            } if exported == name => Some((source, inner)),
+            _ => None,
+        });
+        if let Some((source, inner)) = named {
+            let Some((target, alias)) = ts_target(file, source, aliases) else {
+                return Some(Found::Miss);
+            };
+            return Some(
+                self.lookup(&target, inner, aliases, depth + 1, seen)
+                    .through(alias),
+            );
+        }
+        if name == DEFAULT_EXPORT || self.exports.get(file).is_some_and(|e| e.contains(name)) {
+            return Some(Found::Miss);
+        }
+        let mut hits: Vec<Found> = Vec::new();
+        let mut ambiguous = false;
+        for r in reexports {
+            let ReExport::Star { source } = r else {
+                continue;
+            };
+            let Some((target, alias)) = ts_target(file, source, aliases) else {
+                continue;
+            };
+            match self
+                .lookup(&target, name, aliases, depth + 1, seen)
+                .through(alias)
+            {
+                hit @ Found::Hit { .. } => {
+                    if !hits.contains(&hit) {
+                        hits.push(hit);
+                    }
+                }
+                Found::Ambiguous => ambiguous = true,
+                Found::Miss => {}
+            }
+        }
+        Some(match (hits.len(), ambiguous) {
+            (1, false) => hits.swap_remove(0),
+            (0, false) => Found::Miss,
+            _ => Found::Ambiguous,
+        })
     }
 
     fn resolve_go(&self, caller: &str, abi_ref: &evm::AbiRef) -> Resolved {
@@ -209,6 +426,8 @@ impl Index {
             [one] => Resolved::Joined {
                 entries: one.entries.clone(),
                 file: one.file.clone(),
+                barrel: false,
+                alias: false,
             },
             _ => Resolved::Ambiguous,
         }
@@ -218,7 +437,14 @@ impl Index {
 /// What one reference resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Resolved {
-    Joined { entries: Vec<String>, file: String },
+    Joined {
+        entries: Vec<String>,
+        file: String,
+        /// Reached through a TS barrel (GD.20).
+        barrel: bool,
+        /// A specifier an alias mapped (GD.20).
+        alias: bool,
+    },
     Unresolved,
     Ambiguous,
 }
@@ -252,6 +478,26 @@ fn relative_target(caller: &str, spec: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// The repo-relative path a TS specifier names from `file`, and whether an
+/// alias mapped it (GD.20): a relative specifier as [`relative_target`]
+/// reads it, any other through `aliases` as the TS graph build maps an
+/// import; `None` for a package nothing maps.
+fn ts_target(file: &str, spec: &str, aliases: &TsAliasSet) -> Option<(String, bool)> {
+    if let Some(path) = relative_target(file, spec) {
+        return Some((path, false));
+    }
+    if spec.starts_with('.') {
+        return None;
+    }
+    let module = file
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.ends_with('/') && !stem.is_empty())
+        .map_or(file, |(stem, _)| stem)
+        .replace('/', "::");
+    let qname = resolve_ts_source_aliased(&module, spec, aliases)?;
+    Some((qname.replace("::", "/"), true))
+}
+
 /// The files a resolved TS path is tried as, in order (module doc, step 2).
 fn ts_candidates(path: &str) -> Vec<String> {
     let mut out = vec![path.to_string()];
@@ -268,6 +514,7 @@ fn ts_candidates(path: &str) -> Vec<String> {
 /// it names (module doc).
 pub(super) fn join_evm_abis(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    aliases: &TsAliasSet,
 ) -> EvmAbiJoinStats {
     let index = Index::build(parses_by_lang);
     let mut stats = EvmAbiJoinStats {
@@ -305,9 +552,16 @@ pub(super) fn join_evm_abis(
                     stats.unresolved += 1;
                     continue;
                 };
-                match index.resolve(&file, abi_ref) {
-                    Resolved::Joined { entries, file } => {
+                match index.resolve(&file, abi_ref, aliases) {
+                    Resolved::Joined {
+                        entries,
+                        file,
+                        barrel,
+                        alias,
+                    } => {
                         stats.joined += 1;
+                        stats.via_barrel += usize::from(barrel);
+                        stats.via_alias += usize::from(alias);
                         hit.facts.abi = Some(entries);
                         hit.abi_from = Some(file);
                         fp.nodes[i].cells[j] = evm::client_hit_cell(&hit);
@@ -469,14 +723,15 @@ mod tests {
             "typescript",
             vec![pay, ts_decl("web/src/abi.ts", "SHOP_ABI", ESCROW)],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 1,
                 unresolved: 0,
                 ambiguous: 0,
-                declarations: 1
+                declarations: 1,
+                ..EvmAbiJoinStats::default()
             }
         );
         let got = hits(&parses, id);
@@ -488,7 +743,7 @@ mod tests {
             Some(ts_ref("SHOP_ABI", "./abi")),
             "the reference stays"
         );
-        let again = join_evm_abis(&mut parses);
+        let again = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             again.joined, 0,
             "a joined cell has its ABI: a second run joins nothing"
@@ -520,14 +775,15 @@ mod tests {
                 ts_decl("src/abi/index.ts", "SHOP_ABI", ESCROW),
             ],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 2,
                 unresolved: 0,
                 ambiguous: 0,
-                declarations: 2
+                declarations: 2,
+                ..EvmAbiJoinStats::default()
             }
         );
         let got = hits(&parses, id);
@@ -580,14 +836,15 @@ mod tests {
                 ts_decl("src/abi.ts", "SHOP_ABI", ESCROW),
             ],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 0,
                 unresolved: 4,
                 ambiguous: 0,
-                declarations: 1
+                declarations: 1,
+                ..EvmAbiJoinStats::default()
             }
         );
         for id in [a, p, u, n] {
@@ -624,14 +881,15 @@ mod tests {
             },
         );
         let mut parses = by_lang("typescript", vec![pay, abi]);
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 0,
                 unresolved: 1,
                 ambiguous: 0,
-                declarations: 0
+                declarations: 0,
+                ..EvmAbiJoinStats::default()
             }
         );
         assert_eq!(hits(&parses, id)[0].facts.abi, None);
@@ -658,14 +916,15 @@ mod tests {
                 go_decl("api/chain/paths.go", "apiBase", "/api/v1"),
             ],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 1,
                 unresolved: 0,
                 ambiguous: 0,
-                declarations: 2
+                declarations: 2,
+                ..EvmAbiJoinStats::default()
             },
             "another directory is another package; a path constant is no ABI"
         );
@@ -688,7 +947,7 @@ mod tests {
             "go",
             vec![cl, go_decl("chain/abi.go", "shopABI", &interpreted)],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(stats.joined, 1);
         assert_eq!(hits(&parses, id)[0].facts.abi, Some(keys(ESCROW)));
     }
@@ -710,14 +969,15 @@ mod tests {
                 go_decl("chain/abi_v2.go", "shopABI", RAW),
             ],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 0,
                 unresolved: 0,
                 ambiguous: 1,
-                declarations: 2
+                declarations: 2,
+                ..EvmAbiJoinStats::default()
             }
         );
         assert_eq!(hits(&parses, id)[0].facts.abi, None);
@@ -743,14 +1003,15 @@ mod tests {
             "go",
             vec![cl, t, go_decl("chain/fixture_test.go", "shopABI", RAW)],
         );
-        let stats = join_evm_abis(&mut parses);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
         assert_eq!(
             stats,
             EvmAbiJoinStats {
                 joined: 1,
                 unresolved: 1,
                 ambiguous: 0,
-                declarations: 1
+                declarations: 1,
+                ..EvmAbiJoinStats::default()
             }
         );
         assert_eq!(
@@ -777,7 +1038,7 @@ mod tests {
             "typescript",
             vec![pay, ts_decl("src/abi.ts", "SHOP_ABI", ESCROW)],
         );
-        join_evm_abis(&mut parses);
+        join_evm_abis(&mut parses, &TsAliasSet::default());
         let cell = parses["typescript"][0]
             .nodes
             .iter()
@@ -810,6 +1071,205 @@ mod tests {
     fn marker_is_quiet_without_declarations_or_references() {
         let (fp, _) = parse("src/app.ts");
         let mut parses = by_lang("typescript", vec![fp]);
-        assert_eq!(join_evm_abis(&mut parses), EvmAbiJoinStats::default());
+        assert_eq!(
+            join_evm_abis(&mut parses, &TsAliasSet::default()),
+            EvmAbiJoinStats::default()
+        );
+    }
+
+    // GD.20: barrels and aliases.
+
+    /// A TS module recording `facts` on its MODULE.
+    fn ts_facts(file: &str, facts: Vec<NavFact>) -> FileParse {
+        let (mut fp, m) = parse(file);
+        for fact in facts {
+            fp.nav.record_fact(m, fact);
+        }
+        fp
+    }
+
+    fn star(source: &str) -> NavFact {
+        NavFact::ReExportStar {
+            source: source.into(),
+            line: 0,
+        }
+    }
+
+    fn named(source: &str, name: &str, exported: &str) -> NavFact {
+        NavFact::ReExportName {
+            source: source.into(),
+            name: name.into(),
+            exported: exported.into(),
+            line: 0,
+        }
+    }
+
+    /// The `abi_from` of `id`'s single evm hit.
+    fn abi_from(by_lang: &HashMap<&'static str, Vec<FileParse>>, id: NodeId) -> Option<String> {
+        let hits = hits(by_lang, id);
+        assert_eq!(hits.len(), 1);
+        hits[0].abi_from.clone()
+    }
+
+    #[test]
+    fn ts_join_follows_named_and_star_barrels() {
+        let (use_ts, a) = client(
+            "web/use.ts",
+            "escrowAbi",
+            "release",
+            "ethers",
+            ts_ref("escrowAbi", "./abi"),
+        );
+        let (codec, b) = client(
+            "web/codec.ts",
+            "VAULT",
+            "release",
+            "viem",
+            ts_ref("VAULT", "./abi/index.js"),
+        );
+        let mut parses = by_lang(
+            "typescript",
+            vec![
+                use_ts,
+                codec,
+                ts_facts(
+                    "web/abi/index.ts",
+                    vec![
+                        named("./escrow", "ESCROW", "escrowAbi"),
+                        star("./vault"),
+                        star("./empty"),
+                    ],
+                ),
+                ts_decl("web/abi/escrow.ts", "ESCROW", ESCROW),
+                ts_decl("web/abi/vault.ts", "VAULT", VAULT),
+            ],
+        );
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(
+            stats,
+            EvmAbiJoinStats {
+                joined: 2,
+                declarations: 2,
+                via_barrel: 2,
+                ..EvmAbiJoinStats::default()
+            }
+        );
+        assert_eq!(abi_from(&parses, a).as_deref(), Some("web/abi/escrow.ts"));
+        assert_eq!(abi_from(&parses, b).as_deref(), Some("web/abi/vault.ts"));
+        assert_eq!(hits(&parses, b)[0].facts.abi, Some(keys(VAULT)));
+    }
+
+    #[test]
+    fn ts_star_barrels_refuse_ambiguity_shadowing_default_and_cycles() {
+        let refs = [
+            ("web/a.ts", "SHOP", "./both"),
+            ("web/b.ts", "SHADOWED", "./shadow"),
+            ("web/c.ts", "default", "./both"),
+            ("web/d.ts", "LOOP", "./loop1"),
+        ];
+        let mut files = Vec::new();
+        let mut ids = Vec::new();
+        for (file, name, from) in refs {
+            let (fp, id) = client(file, name, "release", "ethers", ts_ref(name, from));
+            files.push(fp);
+            ids.push(id);
+        }
+        files.extend([
+            ts_facts("web/both.ts", vec![star("./x"), star("./y")]),
+            ts_decl("web/x.ts", "SHOP", ESCROW),
+            ts_decl("web/y.ts", "SHOP", VAULT),
+            ts_decl("web/x.ts", "default", ESCROW),
+            ts_facts(
+                "web/shadow.ts",
+                vec![
+                    star("./x2"),
+                    NavFact::Exports {
+                        names: vec!["SHADOWED".into()],
+                    },
+                ],
+            ),
+            ts_decl("web/x2.ts", "SHADOWED", ESCROW),
+            ts_facts("web/loop1.ts", vec![star("./loop2")]),
+            ts_facts("web/loop2.ts", vec![star("./loop1")]),
+        ]);
+        let mut parses = by_lang("typescript", files);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(
+            stats,
+            EvmAbiJoinStats {
+                unresolved: 3,
+                ambiguous: 1,
+                declarations: 4,
+                ..EvmAbiJoinStats::default()
+            },
+            "two stars, a shadowing own export, default through a star, a cycle"
+        );
+        for id in ids {
+            assert_eq!(hits(&parses, id)[0].facts.abi, None);
+        }
+    }
+
+    #[test]
+    fn ts_join_maps_a_tsconfig_alias() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@abi/*": ["web/abi/*"] } } }"#,
+        )
+        .expect("tsconfig");
+        let aliases = TsAliasSet::read(dir.path(), &[], "fx");
+        let (pay, id) = client(
+            "web/pay.ts",
+            "escrowAbi",
+            "release",
+            "ethers",
+            ts_ref("escrowAbi", "@abi/index"),
+        );
+        let (pkg, other) = client(
+            "web/pkg.ts",
+            "X",
+            "release",
+            "ethers",
+            ts_ref("X", "some-package"),
+        );
+        let mut parses = by_lang(
+            "typescript",
+            vec![
+                pay,
+                pkg,
+                ts_facts("web/abi/index.ts", vec![star("./escrow")]),
+                ts_decl("web/abi/escrow.ts", "escrowAbi", ESCROW),
+            ],
+        );
+        let stats = join_evm_abis(&mut parses, &aliases);
+        assert_eq!(
+            stats,
+            EvmAbiJoinStats {
+                joined: 1,
+                unresolved: 1,
+                declarations: 1,
+                via_barrel: 1,
+                via_alias: 1,
+                ..EvmAbiJoinStats::default()
+            }
+        );
+        assert_eq!(abi_from(&parses, id).as_deref(), Some("web/abi/escrow.ts"));
+        assert_eq!(hits(&parses, other)[0].facts.abi, None);
+        // Without the aliases the same reference stays unjoined.
+        let (pay, _) = client(
+            "web/pay.ts",
+            "escrowAbi",
+            "release",
+            "ethers",
+            ts_ref("escrowAbi", "@abi/index"),
+        );
+        let mut bare = by_lang(
+            "typescript",
+            vec![pay, ts_decl("web/abi/escrow.ts", "escrowAbi", ESCROW)],
+        );
+        assert_eq!(
+            join_evm_abis(&mut bare, &TsAliasSet::default()).unresolved,
+            1
+        );
     }
 }

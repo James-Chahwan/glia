@@ -153,7 +153,50 @@
 //!     Every file of the family, gated or not, declares its exported ABI
 //!     bindings ([`exported_abis`]): a top-level `export (const|let|var)
 //!     <N>(: T)? = <abi literal>`, `export default <abi literal>` (name
-//!     `default`) and CommonJS `(module.)?exports.<N> = <abi literal>`.
+//!     `default`) and CommonJS `(module.)?exports.<N> = <abi literal>`, and
+//!     (GD.20) each name of a from-less `export { <N>( as <E>)? }` list whose
+//!     local is a top-level `(const|let|var) <N> = <abi literal>`, as `E`. A
+//!     barrel's `export .. from` lists are DT.1q's facts, which the engine's
+//!     join follows.
+//! 11. **The residual forms (GD.20)**, each counted in the marker's
+//!     `(hardhat_deploy= factories= waffle= viem_codec= web3_contract=
+//!     truffle=)` when it gave a binding or a site:
+//!     - hardhat-deploy `(<x>.)?ethers.getContract('<C>', ..)` is
+//!       `Scope::Contract(<C>)` (lib `hardhat`), like `getContractAt`;
+//!     - ethers `new (ethers.)?ContractFactory(<abi>, <bytecode>, ..)` is a
+//!       factory whose ABI argument reads as step 3's (an inline literal
+//!       scoped by the variable it lands in), so its `deploy` / `attach`
+//!       products carry that scope, entries and reference; a factory
+//!       rebinding `<y> = F.connect(..)` (only `connect` links) is a factory;
+//!       an awaited inline factory `(await <..>.getContractFactory('<C>'))`
+//!       gives its `.deploy(..)` / `.attach(..)` product; and
+//!       `upgrades.deployProxy` / `upgradeProxy` read a factory passed inline
+//!       (`(await )?<..>.ethers.getContractFactory('<C>')`, `new
+//!       <C>__factory(..)`);
+//!     - waffle `deployContract(<wallet>, <A>, ..)`, `deployContract`
+//!       imported from `ethereum-waffle` / `@ethereum-waffle/..` (any local
+//!       name; the import opens the ethers gate), `A` a `.json` import, is
+//!       `Scope::Contract` of the artifact's contract or file stem (lib
+//!       `ethers`); any other `A` counts `dynamic`;
+//!     - viem codecs: `encodeFunctionData` / `decodeFunctionResult` options
+//!       are a call site, `decodeEventLog` an event site, read as step 8's
+//!       option calls (a decoder with no `args` key has no arity);
+//!     - a viem options spread `...X` of a same-file `const X = {..}` (an
+//!       `as const` after it allowed) is folded in place, up to
+//!       [`MAX_SPREAD`] deep, a later key overriding (`{ ...cfg,
+//!       functionName: 'f' }`);
+//!     - `R[<K>](..)` on an ethers receiver with `K` a same-file `const K =
+//!       '<m>'` is a call of `m`, not `dynamic`;
+//!     - standalone web3.js: `new <L>(<abi>, ..)`, `L` a default or `{
+//!       Contract }` import of `web3-eth-contract` or `const L =
+//!       require('web3-eth-contract')`, read as step 9 (that import opens the
+//!       web3 gate, and such a `new` is never an ethers construction);
+//!     - truffle: a file that calls `artifacts.require(..)` and neither
+//!       imports nor declares `web3` opens the web3 gate for the global `new
+//!       web3.eth.Contract(..)`.
+//!
+//!     Not read: a subclass in another file calling an inherited
+//!     `this.<field>` (the reader sees one file).
 
 use std::collections::BTreeSet;
 
@@ -199,7 +242,30 @@ const GATE_NEEDLES: &[&str] = &[
     "viem",
     "wagmi",
     "web3",
+    "waffle",
 ];
+
+/// The import specifiers whose `deployContract` is waffle's (step 11).
+const WAFFLE_MODULES: &[&str] = &["ethereum-waffle", "@ethereum-waffle/"];
+
+/// The standalone web3.js contract package (step 11).
+const WEB3_CONTRACT: &str = "web3-eth-contract";
+
+/// The truffle global a test or migration constructs contracts on (step 11).
+const TRUFFLE_WEB3: &str = "web3";
+
+/// viem calldata codecs whose options name one contract function (step 11);
+/// `true` for a decoder, whose missing `args` key says nothing of the arity.
+const VIEM_CODEC_CALLS: &[(&str, bool)] = &[
+    ("encodeFunctionData", false),
+    ("decodeFunctionResult", true),
+];
+
+/// The viem log decoder whose options name the event it reads (step 11).
+const VIEM_CODEC_EVENTS: &[&str] = &["decodeEventLog"];
+
+/// How deep a spread of a spread is folded (step 11).
+const MAX_SPREAD: usize = 4;
 
 /// The hardhat-viem helpers on `(<x>.)?viem` that name the contract (step 8).
 const VIEM_HELPERS: &[&str] = &["deployContract", "getContractAt"];
@@ -255,7 +321,12 @@ const WEB3_EVENT_MEMBERS: &[&str] = &["getPastEvents", "once"];
 const WEB3_ALL_EVENTS: &str = "allEvents";
 
 /// The hardhat-ethers helpers on `(<x>.)?ethers` (step 7).
-const HARDHAT_HELPERS: &[&str] = &["getContractFactory", "getContractAt", "deployContract"];
+const HARDHAT_HELPERS: &[&str] = &[
+    "getContractFactory",
+    "getContractAt",
+    "deployContract",
+    "getContract",
+];
 
 /// OpenZeppelin `upgrades` helpers that take a factory, and the index of the
 /// argument that is the factory (step 7).
@@ -350,6 +421,35 @@ pub(super) struct TsCounts {
     /// a literal that reads, calls through a non-literal element key, and
     /// viem option calls with a non-literal name or no ABI to scope by.
     pub(super) dynamic: usize,
+    /// hardhat-deploy `ethers.getContract('<C>')` contracts read (step 11).
+    pub(super) hardhat_deploy: usize,
+    /// Factory forms read (step 11): ethers `new ContractFactory(..)`, a
+    /// factory rebinding, an awaited inline factory's product and a factory
+    /// passed inline to an upgrades helper.
+    pub(super) factories: usize,
+    /// waffle `deployContract(<wallet>, <artifact>)` contracts read.
+    pub(super) waffle: usize,
+    /// viem codec option calls read (`encodeFunctionData`, ..).
+    pub(super) viem_codec: usize,
+    /// Standalone `web3-eth-contract` constructions read.
+    pub(super) web3_contract: usize,
+    /// truffle global `web3.eth.Contract` constructions read.
+    pub(super) truffle: usize,
+}
+
+impl TsCounts {
+    /// The step-11 form counts in the marker's order: hardhat_deploy,
+    /// factories, waffle, viem_codec, web3_contract, truffle.
+    pub(super) fn forms(&self) -> [usize; 6] {
+        [
+            self.hardhat_deploy,
+            self.factories,
+            self.waffle,
+            self.viem_codec,
+            self.web3_contract,
+            self.truffle,
+        ]
+    }
 }
 
 /// The client API a contract binding's sites are read in.
@@ -369,6 +469,8 @@ struct Gate {
     ethers: bool,
     viem: bool,
     web3: bool,
+    /// web3.js opened by truffle's global `web3` (step 11), not an import.
+    truffle: bool,
 }
 
 impl AbiRef {
@@ -378,6 +480,7 @@ impl AbiRef {
         match self {
             AbiRef::Named(scope, abi) => Some((scope, abi, None)),
             AbiRef::Imported(local, import) => Some((Scope::Abi(local), None, Some(import))),
+            AbiRef::Bound(scope, abi, import) => Some((scope, abi, import)),
             AbiRef::Literal(_) | AbiRef::Dynamic => None,
         }
     }
@@ -393,6 +496,7 @@ impl Gate {
             ethers: self.ethers || other.ethers,
             viem: self.viem || other.viem,
             web3: self.web3 || other.web3,
+            truffle: self.truffle || other.truffle,
         }
     }
 }
@@ -471,6 +575,9 @@ struct ValueImport {
 struct JsonImport {
     name: String,
     contract: Option<String>,
+    /// The file stem of the specifier: `Lock` for `./build/Lock.json`, the
+    /// contract a waffle artifact holds (step 11).
+    stem: String,
 }
 
 /// What an ABI argument names (steps 3, 7 and 10).
@@ -481,6 +588,9 @@ enum AbiRef {
     /// An identifier a value import binds and the file does not (step 10):
     /// `Scope::Abi(<local>)` with no entries, and the reference.
     Imported(String, evm::AbiRef),
+    /// What a factory carries to its product (step 11): its scope, entries
+    /// and cross-file reference.
+    Bound(Scope, Option<Vec<AbiEntry>>, Option<evm::AbiRef>),
     /// An inline literal: scoped by the variable it lands in.
     Literal(Vec<AbiEntry>),
     /// Nothing readable.
@@ -587,21 +697,33 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         value_imports: &value_imports,
     };
 
+    let web3_locals = web3_contract_locals(&ctx);
     let mut bindings: Vec<Binding> = Vec::new();
     if gate.ethers {
-        ethers_constructions(&ctx, &mut sites, &mut counts, &mut bindings);
+        ethers_constructions(&ctx, &web3_locals, &mut sites, &mut counts, &mut bindings);
         // Step 7: the bindings that name the contract.
         let mut factories: Vec<Binding> = Vec::new();
         hardhat_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
         typechain_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+        // Step 11: ethers factories, factory rebindings, waffle.
+        ethers_factories(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+        rebind_factories(&ctx, &mut factories, &mut counts);
         factory_products(&ctx, &factories, &mut sites, &mut counts, &mut bindings);
+        waffle_deploys(&ctx, &mut sites, &mut counts, &mut bindings);
     }
     if gate.viem {
         viem_instances(&ctx, &mut sites, &mut counts, &mut bindings);
         viem_sites(&ctx, &mut sites, &mut counts);
     }
     if gate.web3 {
-        web3_bindings(&ctx, &mut sites, &mut counts, &mut bindings);
+        web3_bindings(
+            &ctx,
+            gate,
+            &web3_locals,
+            &mut sites,
+            &mut counts,
+            &mut bindings,
+        );
     }
     rebind(source, view, &decls, &mut bindings);
 
@@ -610,9 +732,15 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
             let Some(binding) = visible(&bindings, &receiver, start) else {
                 continue;
             };
-            let Some(access) = access_on(binding.api, source, view, end) else {
+            let Some(mut access) = access_on(binding.api, source, view, end) else {
                 continue;
             };
+            if matches!(access, Access::Dynamic)
+                && binding.api == Api::Ethers
+                && let Some(folded) = const_keyed(&ctx, end)
+            {
+                access = folded;
+            }
             record(&mut sites, &mut counts, binding, access);
         }
     }
@@ -621,8 +749,11 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
 }
 
 /// Step 3: every `new (ethers.)?(Contract|BaseContract)(..)`.
+/// A `new <L>(..)` whose `L` the file imports from `web3-eth-contract` is
+/// step 11's, never an ethers construction.
 fn ethers_constructions(
     ctx: &Ctx,
+    web3_locals: &[String],
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
     bindings: &mut Vec<Binding>,
@@ -633,9 +764,14 @@ fn ethers_constructions(
         if new_at > 0 && vb[new_at - 1] == b'.' {
             continue;
         }
-        let Some((open, close)) = construction(view, new_at) else {
+        let Some((open, close)) = construction(view, new_at, &["Contract", "BaseContract"]) else {
             continue;
         };
+        let callee = skip_ws(vb, new_at + "new".len());
+        if ident_end(vb, callee).is_some_and(|e| web3_locals.iter().any(|l| *l == view[callee..e]))
+        {
+            continue;
+        }
         let arg = split_args(view, open, close).get(1).copied();
         let made = Made {
             start: new_at,
@@ -674,7 +810,68 @@ fn gated(source: &str, view: &str) -> Gate {
             }
         }
     }
+    if !gate.web3 && truffle_file(view) {
+        gate.web3 = true;
+        gate.truffle = true;
+    }
     gate
+}
+
+/// Step 11: a truffle test or migration constructs on the global `web3`: the
+/// file calls `artifacts.require(..)` and neither imports nor declares
+/// `web3`.
+fn truffle_file(view: &str) -> bool {
+    let vb = view.as_bytes();
+    let required = word_hits(view, "artifacts").into_iter().any(|at| {
+        (at == 0 || vb[at - 1] != b'.')
+            && matches!(step_name(view, at + "artifacts".len()), Some("require"))
+    });
+    required && !declares(view, TRUFFLE_WEB3)
+}
+
+/// The identifier of a `.name` access starting at `from`, if one does.
+fn step_name(view: &str, from: usize) -> Option<&str> {
+    let vb = view.as_bytes();
+    let dot = skip_ws(vb, from);
+    (vb.get(dot) == Some(&b'.')).then_some(())?;
+    let at = skip_ws(vb, dot + 1);
+    Some(&view[at..ident_end(vb, at)?])
+}
+
+/// True when the file binds `name` itself: a declaration, a parameter-free
+/// import binding or a function / class of that name.
+fn declares(view: &str, name: &str) -> bool {
+    let vb = view.as_bytes();
+    word_hits(view, name).into_iter().any(|at| {
+        prev_non_ws(vb, at)
+            .and_then(|p| ident_start_before(vb, p + 1).map(|w| &view[w..=p]))
+            .is_some_and(|w| matches!(w, "const" | "let" | "var" | "import" | "function" | "class"))
+    }) || import_locals_view(view).iter().any(|l| l == name)
+}
+
+/// The locals of every `import` clause read off the view alone: names only,
+/// so the blanked specifier does not matter.
+fn import_locals_view(view: &str) -> Vec<String> {
+    let vb = view.as_bytes();
+    let mut out = Vec::new();
+    for at in word_hits(view, "import") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let k = skip_ws(vb, at + "import".len());
+        let Some(close) = (vb.get(k) == Some(&b'{'))
+            .then(|| matching(view, k))
+            .flatten()
+        else {
+            continue;
+        };
+        for (s, e) in split_args(view, k, close) {
+            if let Some(local) = view[s..e].split_whitespace().last() {
+                out.push(local.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The readers an import specifier opens (step 1): ethers for ethers
@@ -692,8 +889,15 @@ fn module_gate(spec: &str) -> Gate {
                 .split('/')
                 .any(|seg| seg == "typechain" || seg == "typechain-types"),
         viem: is("viem") || is("wagmi") || spec.starts_with("@wagmi/") || spec == "hardhat",
-        web3: is("web3"),
+        web3: is("web3") || is(WEB3_CONTRACT),
+        truffle: false,
     }
+    .union(Gate {
+        ethers: WAFFLE_MODULES
+            .iter()
+            .any(|m| spec == m.trim_end_matches('/') || (m.ends_with('/') && spec.starts_with(m))),
+        ..Gate::default()
+    })
 }
 
 /// Every `const` / `let` / `var` declarator with a plain identifier name.
@@ -758,9 +962,9 @@ fn type_end(vb: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-/// `new (ethers.)?(Contract|BaseContract)(` at `new_at`: the offsets of its
+/// `new (ethers.)?<C>(` at `new_at`, `C` one of `names`: the offsets of its
 /// argument parentheses.
-fn construction(view: &str, new_at: usize) -> Option<(usize, usize)> {
+fn construction(view: &str, new_at: usize, names: &[&str]) -> Option<(usize, usize)> {
     let vb = view.as_bytes();
     let mut k = skip_ws(vb, new_at + "new".len());
     let mut end = ident_end(vb, k)?;
@@ -772,7 +976,7 @@ fn construction(view: &str, new_at: usize) -> Option<(usize, usize)> {
         k = skip_ws(vb, dot + 1);
         end = ident_end(vb, k)?;
     }
-    if !matches!(&view[k..end], "Contract" | "BaseContract") {
+    if !names.contains(&&view[k..end]) {
         return None;
     }
     let open = skip_ws(vb, end);
@@ -961,24 +1165,40 @@ fn hardhat_bindings(
                 _ => continue,
             };
             if helper == "getContractFactory" {
-                if access(source, view, close + 1).is_some() {
-                    continue;
-                }
-                let (AbiRef::Named(scope, _), Some(target)) =
-                    (abi, binding_target(view, ctx.decls, start))
-                else {
+                let AbiRef::Named(scope, _) = abi else {
                     continue;
                 };
-                factories.push(Binding {
-                    name: target.key,
+                let factory = Binding {
+                    name: String::new(),
                     scope,
                     abi: None,
                     abi_ref: None,
                     lib: HARDHAT,
                     api: Api::Ethers,
                     at: close,
+                    block: (0, vb.len()),
+                    hoisted: false,
+                };
+                // Step 11: `(await <..>.getContractFactory('C')).deploy()`.
+                if let Some((open, rparen)) = awaited_paren(view, start, close)
+                    && let Some(made) = product(ctx, &factory, open, rparen + 1)
+                {
+                    let before = (sites.len(), bindings.len());
+                    bind_made(ctx, made, sites, counts, bindings);
+                    counts.factories += usize::from(grew(sites, bindings, before));
+                    continue;
+                }
+                if access(source, view, close + 1).is_some() {
+                    continue;
+                }
+                let Some(target) = binding_target(view, ctx.decls, start) else {
+                    continue;
+                };
+                factories.push(Binding {
+                    name: target.key,
                     block: target.block,
                     hoisted: target.hoisted,
+                    ..factory
                 });
                 continue;
             }
@@ -990,9 +1210,41 @@ fn hardhat_bindings(
                 api: Api::Ethers,
                 sync: false,
             };
+            let before = (sites.len(), bindings.len());
             bind_made(ctx, made, sites, counts, bindings);
+            if helper == "getContract" {
+                counts.hardhat_deploy += usize::from(grew(sites, bindings, before));
+            }
         }
     }
+}
+
+/// True when a reader's `bind_made` gave a site or a binding since `before`
+/// (the lengths of `sites` and `bindings` then).
+fn grew(sites: &[Site], bindings: &[Binding], before: (usize, usize)) -> bool {
+    (sites.len(), bindings.len()) != before
+}
+
+/// `(await <expr>)` around the expression `[start, close]`: the offsets of
+/// the wrapping `(` and `)`; `None` for anything else (step 11).
+fn awaited_paren(view: &str, start: usize, close: usize) -> Option<(usize, usize)> {
+    let vb = view.as_bytes();
+    let w_end = prev_non_ws(vb, start)? + 1;
+    let w = ident_start_before(vb, w_end)?;
+    (&view[w..w_end] == "await").then_some(())?;
+    let open = prev_non_ws(vb, w).filter(|&o| vb[o] == b'(')?;
+    let rparen = skip_ws(vb, close + 1);
+    (vb.get(rparen) == Some(&b')') && matching(view, open) == Some(rparen))
+        .then_some((open, rparen))
+}
+
+/// What a factory carries to its product (step 11).
+fn factory_abi(factory: &Binding) -> AbiRef {
+    AbiRef::Bound(
+        factory.scope.clone(),
+        factory.abi.clone(),
+        factory.abi_ref.clone(),
+    )
 }
 
 /// Step 7, TypeChain: `<C>__factory.connect(..)` contracts and `new
@@ -1105,21 +1357,259 @@ fn factory_products(
             let Some(&(s, e)) = split_args(view, open, close).get(index) else {
                 continue;
             };
-            if ident_end(vb, s) != Some(e) {
-                continue;
-            }
-            let Some(factory) = visible(factories, &view[s..e], s) else {
-                continue;
+            let (abi, lib, inline) = if ident_end(vb, s) == Some(e) {
+                let Some(factory) = visible(factories, &view[s..e], s) else {
+                    continue;
+                };
+                (factory_abi(factory), factory.lib, false)
+            } else {
+                // Step 11: a factory passed inline.
+                let Some((scope, lib)) = inline_factory(ctx, s, e) else {
+                    continue;
+                };
+                (AbiRef::Named(scope, None), lib, true)
             };
             let made = Made {
                 start,
                 close,
-                abi: AbiRef::Named(factory.scope.clone(), None),
-                lib: factory.lib,
+                abi,
+                lib,
                 api: Api::Ethers,
                 sync: false,
             };
+            let before = (sites.len(), bindings.len());
             bind_made(ctx, made, sites, counts, bindings);
+            if inline {
+                counts.factories += usize::from(grew(sites, bindings, before));
+            }
+        }
+    }
+}
+
+/// A factory expression `[s, e)` passed inline (step 11): `(await
+/// )?(<x>.)?ethers.getContractFactory('<C>', ..)` (lib `hardhat`) or `new
+/// <C>__factory(..)` (lib `typechain`), its contract and library; `None` for
+/// anything else.
+fn inline_factory(ctx: &Ctx, s: usize, e: usize) -> Option<(Scope, &'static str)> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut k = s;
+    if ident_end(vb, k).is_some_and(|w| &view[k..w] == "await") {
+        k = skip_ws(vb, k + "await".len());
+    }
+    let w_end = ident_end(vb, k)?;
+    if &view[k..w_end] == "new" {
+        let c = skip_ws(vb, w_end);
+        let c_end = ident_end(vb, c)?;
+        let contract = factory_contract(&view[c..c_end])?;
+        let open = paren_after(vb, c_end)?;
+        return (matching(view, open)? + 1 == e)
+            .then(|| (Scope::Contract(contract.to_string()), TYPECHAIN));
+    }
+    let helper = "getContractFactory";
+    let at = view[k..e].find(helper)? + k;
+    if member_of(view, at, "ethers") != Some(k) {
+        return None;
+    }
+    let open = paren_after(vb, at + helper.len())?;
+    let close = matching(view, open)?;
+    if close + 1 != e {
+        return None;
+    }
+    let (fs, fe) = *split_args(view, open, close).first()?;
+    let contract = contract_name(source, fs, fe)?;
+    Some((Scope::Contract(contract), HARDHAT))
+}
+
+/// Step 11: ethers `new (ethers.)?ContractFactory(<abi>, <bytecode>, ..)`, a
+/// factory whose ABI argument reads as a `new Contract` one (step 3); bound,
+/// or its product used inline.
+fn ethers_factories(
+    ctx: &Ctx,
+    factories: &mut Vec<Binding>,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    for new_at in word_hits(view, "new") {
+        if new_at > 0 && vb[new_at - 1] == b'.' {
+            continue;
+        }
+        let Some((open, close)) = construction(view, new_at, &["ContractFactory"]) else {
+            continue;
+        };
+        let arg = split_args(view, open, close).first().copied();
+        let abi = abi_ref(ctx, abi_arg(source, view, arg), new_at);
+        let target = binding_target(view, ctx.decls, new_at);
+        let (scope, entries, abi_ref) = match abi {
+            AbiRef::Literal(entries) => {
+                let Some(t) = &target else {
+                    counts.dynamic += 1;
+                    continue;
+                };
+                counts.abis += 1;
+                let base = t.key.rsplit(['.', '#']).next().unwrap_or_default();
+                (Scope::Abi(base.to_string()), Some(entries), None)
+            }
+            other => {
+                let Some(named) = other.named() else {
+                    counts.dynamic += 1;
+                    continue;
+                };
+                named
+            }
+        };
+        let factory = Binding {
+            name: String::new(),
+            scope,
+            abi: entries,
+            abi_ref,
+            lib: LIB,
+            api: Api::Ethers,
+            at: close,
+            block: (0, vb.len()),
+            hoisted: false,
+        };
+        if let Some(made) = product(ctx, &factory, new_at, close + 1) {
+            let before = (sites.len(), bindings.len());
+            bind_made(ctx, made, sites, counts, bindings);
+            counts.factories += usize::from(grew(sites, bindings, before));
+            continue;
+        }
+        if access(source, view, close + 1).is_some() {
+            continue;
+        }
+        if let Some(target) = target {
+            counts.factories += 1;
+            factories.push(Binding {
+                name: target.key,
+                block: target.block,
+                hoisted: target.hoisted,
+                ..factory
+            });
+        }
+    }
+}
+
+/// Step 11: a factory rebinding `<y> = F.connect(..)` (any binding form of
+/// step 3, `connect` links only: `attach` is a product), followed until no
+/// new one binds.
+fn rebind_factories(ctx: &Ctx, factories: &mut Vec<Binding>, counts: &mut TsCounts) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut rebound: BTreeSet<usize> = BTreeSet::new();
+    loop {
+        let mut added = Vec::new();
+        for key in keys(factories) {
+            for (start, end) in receiver_hits(view, &key) {
+                if rebound.contains(&start) {
+                    continue;
+                }
+                let mut k = end;
+                while let Some(Step::Name {
+                    name,
+                    end: n_end,
+                    dotted: true,
+                    ..
+                }) = step(source, view, k)
+                    && name == "connect"
+                    && let Some(close) = paren_after(vb, n_end).and_then(|p| matching(view, p))
+                {
+                    k = close + 1;
+                }
+                if k == end || step(source, view, k).is_some() {
+                    continue;
+                }
+                let Some(from) = visible(factories, &key, start) else {
+                    continue;
+                };
+                let Some(target) = binding_target(view, ctx.decls, start) else {
+                    continue;
+                };
+                rebound.insert(start);
+                added.push(Binding {
+                    name: target.key,
+                    scope: from.scope.clone(),
+                    abi: from.abi.clone(),
+                    abi_ref: from.abi_ref.clone(),
+                    lib: from.lib,
+                    api: from.api,
+                    at: k - 1,
+                    block: target.block,
+                    hoisted: target.hoisted,
+                });
+            }
+        }
+        if added.is_empty() {
+            return;
+        }
+        counts.factories += added.len();
+        factories.extend(added);
+    }
+}
+
+/// Step 11: waffle `deployContract(<wallet>, <A>, ..)`, `deployContract`
+/// imported from `ethereum-waffle` (or an `@ethereum-waffle/` package) under
+/// any local name, `A` a `.json` import: `Scope::Contract(<C>)`, `C` the
+/// artifact's contract (a hardhat / foundry path) or its file stem (waffle's
+/// `build/<C>.json`).
+fn waffle_deploys(
+    ctx: &Ctx,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let view = ctx.view;
+    let vb = view.as_bytes();
+    let locals: BTreeSet<&str> = ctx
+        .value_imports
+        .iter()
+        .filter(|v| v.name == "deployContract")
+        .filter(|v| {
+            WAFFLE_MODULES.iter().any(|m| {
+                v.spec == m.trim_end_matches('/') || (m.ends_with('/') && v.spec.starts_with(m))
+            })
+        })
+        .map(|v| v.local.as_str())
+        .collect();
+    for local in locals {
+        for at in word_hits(view, local) {
+            if at > 0 && matches!(vb[at - 1], b'.' | b'#') {
+                continue;
+            }
+            let Some(open) = paren_after(vb, at + local.len()) else {
+                continue;
+            };
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let Some(&(s, e)) = split_args(view, open, close).get(1) else {
+                continue;
+            };
+            let Some(import) = ctx.imports.iter().find(|i| i.name == view[s..e]) else {
+                counts.dynamic += 1;
+                continue;
+            };
+            let contract = import
+                .contract
+                .clone()
+                .unwrap_or_else(|| import.stem.clone());
+            if !is_ident(&contract) {
+                continue;
+            }
+            let made = Made {
+                start: at,
+                close,
+                abi: AbiRef::Named(Scope::Contract(contract), None),
+                lib: LIB,
+                api: Api::Ethers,
+                sync: false,
+            };
+            let before = (sites.len(), bindings.len());
+            bind_made(ctx, made, sites, counts, bindings);
+            counts.waffle += usize::from(grew(sites, bindings, before));
         }
     }
 }
@@ -1148,7 +1638,7 @@ fn product(ctx: &Ctx, factory: &Binding, start: usize, from: usize) -> Option<Ma
                 return Some(Made {
                     start,
                     close,
-                    abi: AbiRef::Named(factory.scope.clone(), None),
+                    abi: factory_abi(factory),
                     lib: factory.lib,
                     api: Api::Ethers,
                     sync: name == "attach",
@@ -1200,7 +1690,7 @@ fn viem_instances(
         let Some((open, close)) = option_call(view, at, "getContract".len()) else {
             continue;
         };
-        let Some(opts) = first_options(source, view, open, close) else {
+        let Some(opts) = first_options(ctx, open, close) else {
             continue;
         };
         let made = Made {
@@ -1218,7 +1708,7 @@ fn viem_instances(
 /// Step 8: the viem / wagmi option calls ([`VIEM_CALLS`], [`VIEM_EVENTS`])
 /// and the batch reads ([`VIEM_MULTI`]).
 fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
-    let (source, view) = (ctx.source, ctx.view);
+    let view = ctx.view;
     let vb = view.as_bytes();
     let tables = [
         (VIEM_CALLS, Some(ClientSide::Call)),
@@ -1231,11 +1721,11 @@ fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
                 let Some((open, close)) = option_call(view, at, name.len()) else {
                     continue;
                 };
-                let Some(opts) = first_options(source, view, open, close) else {
+                let Some(opts) = first_options(ctx, open, close) else {
                     continue;
                 };
                 if let Some(side) = side {
-                    option_site(ctx, side, &opts, sites, counts);
+                    option_site(ctx, side, &opts, false, sites, counts);
                     continue;
                 }
                 let Some((s, _)) = opts.get("contracts") else {
@@ -1246,17 +1736,39 @@ fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
                     continue;
                 };
                 for (es, ee) in split_args(view, s, list_close) {
-                    match (vb[es] == b'{')
-                        .then(|| options(source, view, es, ee))
-                        .flatten()
-                    {
+                    match (vb[es] == b'{').then(|| options(ctx, es, ee, 0)).flatten() {
                         Some(element) => {
-                            option_site(ctx, ClientSide::Call, &element, sites, counts)
+                            option_site(ctx, ClientSide::Call, &element, false, sites, counts)
                         }
                         None => counts.dynamic += 1,
                     }
                 }
             }
+        }
+    }
+    // Step 11: the codecs.
+    let codecs = VIEM_CODEC_CALLS
+        .iter()
+        .map(|&(name, decode)| (name, ClientSide::Call, decode))
+        .chain(
+            VIEM_CODEC_EVENTS
+                .iter()
+                .map(|&name| (name, ClientSide::Event, false)),
+        );
+    for (name, side, decode) in codecs {
+        for at in word_hits(view, name) {
+            if at > 0 && vb[at - 1] == b'.' {
+                continue;
+            }
+            let Some((open, close)) = option_call(view, at, name.len()) else {
+                continue;
+            };
+            let Some(opts) = first_options(ctx, open, close) else {
+                continue;
+            };
+            let before = sites.len();
+            option_site(ctx, side, &opts, decode, sites, counts);
+            counts.viem_codec += usize::from(sites.len() != before);
         }
     }
 }
@@ -1328,24 +1840,53 @@ struct Opts {
 }
 
 impl Opts {
+    /// The value of `key`: the last one, as a JavaScript object literal
+    /// keeps (a key after a spread overrides the spread's).
     fn get(&self, key: &str) -> Option<(usize, usize)> {
-        self.keys.iter().find(|(k, _)| k == key).map(|&(_, v)| v)
+        self.keys.iter().rfind(|(k, _)| k == key).map(|&(_, v)| v)
     }
+}
+
+/// The object a spread `...X` (the identifier at `[s, e)`) folds in (step
+/// 11): the nearest `const X = {..}` (an `as const` after it allowed) before
+/// the spread, else the first; `None` for any other spread.
+fn spread_object(ctx: &Ctx, s: usize, e: usize, depth: usize) -> Option<Opts> {
+    let vb = ctx.view.as_bytes();
+    let (s, e) = trim(vb, s, e);
+    if depth >= MAX_SPREAD || ident_end(vb, s) != Some(e) {
+        return None;
+    }
+    let name = &ctx.view[s..e];
+    let objects = || {
+        ctx.decls
+            .iter()
+            .filter(|d| d.kw == Kw::Const && d.name == name)
+            .filter_map(|d| d.init.filter(|&i| vb[i] == b'{').map(|i| (d.kw_at, i)))
+    };
+    let (_, init) = objects()
+        .filter(|&(at, _)| at < s)
+        .max_by_key(|&(at, _)| at)
+        .or_else(|| objects().next())?;
+    let close = matching(ctx.view, init)?;
+    options(ctx, init, close + 1, depth + 1)
 }
 
 /// The first `{` argument of the call whose parentheses are `open` /
 /// `close`, read as [`Opts`].
-fn first_options(source: &str, view: &str, open: usize, close: usize) -> Option<Opts> {
-    let vb = view.as_bytes();
-    let (s, e) = split_args(view, open, close)
+fn first_options(ctx: &Ctx, open: usize, close: usize) -> Option<Opts> {
+    let vb = ctx.view.as_bytes();
+    let (s, e) = split_args(ctx.view, open, close)
         .into_iter()
         .find(|&(s, _)| vb[s] == b'{')?;
-    options(source, view, s, e)
+    options(ctx, s, e, 0)
 }
 
 /// The object literal `[s, e)` (its `{` at `s`) as [`Opts`]; `None` when its
-/// braces do not close at `e`.
-fn options(source: &str, view: &str, s: usize, e: usize) -> Option<Opts> {
+/// braces do not close at `e`. A spread `...X` of a same-file `const X = {..}`
+/// (step 11) is folded in place, up to [`MAX_SPREAD`] spreads deep; any other
+/// spread sets [`Opts::spread`].
+fn options(ctx: &Ctx, s: usize, e: usize, depth: usize) -> Option<Opts> {
+    let (source, view) = (ctx.source, ctx.view);
     let vb = view.as_bytes();
     let close = matching(view, s)?;
     if close + 1 != e && !view[close + 1..e].trim_start().starts_with("as ") {
@@ -1357,7 +1898,13 @@ fn options(source: &str, view: &str, s: usize, e: usize) -> Option<Opts> {
     };
     for (ps, pe) in split_args(view, s, close) {
         if view[ps..pe].starts_with("...") {
-            opts.spread = true;
+            match spread_object(ctx, ps + 3, pe, depth) {
+                Some(inner) => {
+                    opts.spread |= inner.spread;
+                    opts.keys.extend(inner.keys);
+                }
+                None => opts.spread = true,
+            }
             continue;
         }
         let (key, key_end) = match ident_end(vb, ps) {
@@ -1418,11 +1965,13 @@ fn address_hint(ctx: &Ctx, opts: &Opts) -> Option<Scope> {
     (evm::name_key(&name) != flat).then_some(Scope::Abi(name))
 }
 
-/// The sites of one viem option call `opts` on `side` (step 8).
+/// The sites of one viem option call `opts` on `side` (step 8); a `decode`r
+/// with no `args` key gives no arity (step 11).
 fn option_site(
     ctx: &Ctx,
     side: ClientSide,
     opts: &Opts,
+    decode: bool,
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
 ) {
@@ -1470,7 +2019,7 @@ fn option_site(
             .map(|close| split_args(view, s, close).len())
             .and_then(|n| u32::try_from(n).ok()),
         Some(_) => None,
-        None => (!opts.spread).then_some(0),
+        None => (!opts.spread && !decode).then_some(0),
     };
     let binding = Binding {
         name: String::new(),
@@ -1503,9 +2052,13 @@ fn literal_name(source: &str, view: &str, s: usize, e: usize) -> Option<String> 
     signature_key(&text).map(|(name, _)| name)
 }
 
-/// Step 9: every `new <w>(.<x>)*.eth.Contract(<abi>, ..)`.
+/// Step 9: every `new <w>(.<x>)*.eth.Contract(<abi>, ..)`; step 11: every
+/// `new <L>(<abi>, ..)` with `L` a [`web3_contract_locals`] name, and (in a
+/// truffle file) `new web3.eth.Contract(..)` on the global.
 fn web3_bindings(
     ctx: &Ctx,
+    gate: Gate,
+    web3_locals: &[String],
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
     bindings: &mut Vec<Binding>,
@@ -1516,9 +2069,18 @@ fn web3_bindings(
         if new_at > 0 && vb[new_at - 1] == b'.' {
             continue;
         }
-        let Some((open, close)) = web3_construction(view, new_at) else {
-            continue;
+        let callee = skip_ws(vb, new_at + "new".len());
+        let standalone = ident_end(vb, callee)
+            .filter(|&e| web3_locals.iter().any(|l| *l == view[callee..e]))
+            .and_then(|e| paren_after(vb, e))
+            .and_then(|open| Some((open, matching(view, open)?)));
+        let (open, close) = match standalone.or_else(|| web3_construction(view, new_at)) {
+            Some(parens) => parens,
+            None => continue,
         };
+        let truffle = standalone.is_none()
+            && gate.truffle
+            && ident_end(vb, callee).is_some_and(|e| &view[callee..e] == TRUFFLE_WEB3);
         let first = split_args(view, open, close).first().copied();
         let made = Made {
             start: new_at,
@@ -1528,8 +2090,50 @@ fn web3_bindings(
             api: Api::Web3,
             sync: true,
         };
+        let before = (sites.len(), bindings.len());
         bind_made(ctx, made, sites, counts, bindings);
+        let read = usize::from(grew(sites, bindings, before));
+        if standalone.is_some() {
+            counts.web3_contract += read;
+        } else if truffle {
+            counts.truffle += read;
+        }
     }
+}
+
+/// Step 11: the local names the file binds the `web3-eth-contract` contract
+/// class to: a default or `{ Contract }` import, or `const L =
+/// require('web3-eth-contract')`.
+fn web3_contract_locals(ctx: &Ctx) -> Vec<String> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut out: Vec<String> = ctx
+        .value_imports
+        .iter()
+        .filter(|v| {
+            v.spec == WEB3_CONTRACT && matches!(v.name.as_str(), DEFAULT_EXPORT | "Contract")
+        })
+        .map(|v| v.local.clone())
+        .collect();
+    for d in ctx.decls {
+        let Some(init) = d.init else {
+            continue;
+        };
+        if ident_end(vb, init).is_none_or(|e| &view[init..e] != "require") {
+            continue;
+        }
+        let Some(open) = paren_after(vb, init + "require".len()) else {
+            continue;
+        };
+        if string_literal(source, skip_ws(vb, open + 1))
+            .is_some_and(|(spec, _)| spec == WEB3_CONTRACT)
+        {
+            out.push(d.name.clone());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// `new <w>(.<x>)*.eth.Contract(` at `new_at`: the offsets of its argument
@@ -1632,9 +2236,11 @@ fn json_imports(source: &str, view: &str, decls: &[Decl]) -> Vec<JsonImport> {
     let mut out = Vec::new();
     let mut push = |name: &str, spec: &str| {
         if is_ident(name) {
+            let file = spec.rsplit('/').next().unwrap_or(spec);
             out.push(JsonImport {
                 name: name.to_string(),
                 contract: artifact_contract(spec),
+                stem: file.strip_suffix(".json").unwrap_or(file).to_string(),
             });
         }
     };
@@ -1876,11 +2482,18 @@ pub(super) fn exported_abis(source: &str, view: &str) -> Vec<(String, Vec<AbiEnt
     let vb = view.as_bytes();
     // (offset of the statement, exported name, offset of the value)
     let mut found: Vec<(usize, String, usize)> = Vec::new();
+    // GD.20: a from-less `export { <local>( as <exported>)? }`: (statement,
+    // exported name, local name).
+    let mut local_list: Vec<(usize, String, String)> = Vec::new();
     for at in word_hits(view, "export") {
         if at > 0 && vb[at - 1] == b'.' {
             continue;
         }
         let k = skip_ws(vb, at + "export".len());
+        if vb.get(k) == Some(&b'{') {
+            local_list.extend(export_list(view, at, k));
+            continue;
+        }
         let Some(end) = ident_end(vb, k) else {
             continue;
         };
@@ -1919,6 +2532,28 @@ pub(super) fn exported_abis(source: &str, view: &str) -> Vec<(String, Vec<AbiEnt
             found.push((start, view[n..n_end].to_string(), skip_ws(vb, eq + 1)));
         }
     }
+    if !local_list.is_empty() {
+        let decls = declarations(view);
+        let mut tops: Vec<&Decl> = decls.iter().filter(|d| d.init.is_some()).collect();
+        tops.sort_by_key(|d| d.kw_at);
+        let depths = brace_depths(vb, tops.iter().map(|d| d.kw_at));
+        let top: Vec<&Decl> = tops
+            .into_iter()
+            .zip(depths)
+            .filter(|(_, depth)| *depth == 0)
+            .map(|(d, _)| d)
+            .collect();
+        for (at, exported, local) in local_list {
+            if let Some(init) = top
+                .iter()
+                .rev()
+                .find(|d| d.name == local)
+                .and_then(|d| d.init)
+            {
+                found.push((at, exported, init));
+            }
+        }
+    }
     found.sort_by_key(|f| f.0);
     let depths = brace_depths(vb, found.iter().map(|f| f.0));
     found
@@ -1926,6 +2561,34 @@ pub(super) fn exported_abis(source: &str, view: &str) -> Vec<(String, Vec<AbiEnt
         .zip(depths)
         .filter(|(_, depth)| *depth == 0)
         .filter_map(|((_, name, value), _)| Some((name, read_abi(source, view, value)?)))
+        .collect()
+}
+
+/// GD.20: the specifiers of a from-less `export { .. }` whose `{` is at
+/// `open` (the statement at `at`): `(at, exported, local)` per value
+/// specifier (a `type` one and a string export name left out); none for an
+/// `export { .. } from '..'`, which is a re-export DT.1q's facts carry.
+fn export_list(view: &str, at: usize, open: usize) -> Vec<(usize, String, String)> {
+    let vb = view.as_bytes();
+    let Some(close) = matching(view, open) else {
+        return Vec::new();
+    };
+    let after = skip_ws(vb, close + 1);
+    if ident_end(vb, after).is_some_and(|e| &view[after..e] == "from") {
+        return Vec::new();
+    }
+    split_args(view, open, close)
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let words: Vec<&str> = view[s..e].split_whitespace().collect();
+            let (local, exported) = match words.as_slice() {
+                [local] => (*local, *local),
+                [local, "as", exported] => (*local, *exported),
+                _ => return None,
+            };
+            (is_ident(local) && is_ident(exported) && local != "type")
+                .then(|| (at, exported.to_string(), local.to_string()))
+        })
         .collect()
 }
 
@@ -2560,6 +3223,47 @@ fn visible<'a>(bindings: &'a [Binding], receiver: &str, at: usize) -> Option<&'a
         .or_else(|| held().filter(|b| b.hoisted).min_by_key(|b| b.at))
 }
 
+/// Step 11: `R[<K>](..)` with `K` a same-file `const K = '<m>'` (the nearest
+/// before the use, else the first): the call of `m` a literal key gives;
+/// `None` for any other key.
+fn const_keyed(ctx: &Ctx, from: usize) -> Option<Access> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut k = skip_ws(vb, skip_links(source, view, from));
+    if vb.get(k) == Some(&b'?') && vb.get(k + 1) == Some(&b'.') {
+        k = skip_ws(vb, k + 2);
+    }
+    if vb.get(k) != Some(&b'[') {
+        return None;
+    }
+    let close = matching(view, k)?;
+    let (s, e) = trim(vb, k + 1, close);
+    if ident_end(vb, s) != Some(e) {
+        return None;
+    }
+    let name = &view[s..e];
+    let strings = || {
+        ctx.decls
+            .iter()
+            .filter(|d| d.kw == Kw::Const && d.name == name)
+            .filter_map(|d| Some((d.kw_at, d.init?)))
+    };
+    let (_, init) = strings()
+        .filter(|&(at, _)| at < s)
+        .max_by_key(|&(at, _)| at)
+        .or_else(|| strings().next())?;
+    let (text, end) = string_literal(source, init)?;
+    let rest = skip_ws(vb, end);
+    if !matches!(vb.get(rest), None | Some(b';' | b',' | b')' | b'}'))
+        && !vb[end..rest].contains(&b'\n')
+    {
+        return None;
+    }
+    let (member, arity) = signature_key(&text)?;
+    let paren = paren_after(vb, close + 1)?;
+    Some(call(view, s, member, arity, paren))
+}
+
 /// The site (or count) one access on `binding` gives.
 fn record(sites: &mut Vec<Site>, counts: &mut TsCounts, binding: &Binding, access: Access) {
     match access {
@@ -2699,7 +3403,8 @@ export async function pay(addr: string, signer: any, id: string) {{
             TsCounts {
                 abis: 1,
                 not_in_abi: 0,
-                dynamic: 0
+                dynamic: 0,
+                ..TsCounts::default()
             }
         );
     }
@@ -2750,7 +3455,8 @@ const other = new Contract(addr, artifacts.Escrow.abi, p);
             TsCounts {
                 abis: 0,
                 not_in_abi: 0,
-                dynamic: 2
+                dynamic: 2,
+                ..TsCounts::default()
             }
         );
     }
@@ -3001,7 +3707,8 @@ const inline = (a: string) => new Contract(a, ['function f()'], p).f();
             TsCounts {
                 abis: 1,
                 not_in_abi: 1,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             }
         );
     }
@@ -3112,7 +3819,8 @@ async function pay(addr: string, signer: any, id: string) {{
             TsCounts {
                 abis: 1,
                 not_in_abi: 1,
-                dynamic: 0
+                dynamic: 0,
+                ..TsCounts::default()
             },
             "withdraw is no ABI function; a stop-listed key and a malformed signature count nothing"
         );
@@ -3147,7 +3855,8 @@ function call(addr: string, p: any, name: string) {{
             TsCounts {
                 abis: 1,
                 not_in_abi: 0,
-                dynamic: 4
+                dynamic: 4,
+                ..TsCounts::default()
             },
             "four calls through a computed key on a bound receiver; an uncalled one and an unbound receiver count nothing"
         );
@@ -3265,7 +3974,8 @@ class Inline {{
             TsCounts {
                 abis: 2,
                 not_in_abi: 0,
-                dynamic: 0
+                dynamic: 0,
+                ..TsCounts::default()
             }
         );
     }
@@ -3446,7 +4156,7 @@ export class WalletService {
         assert_eq!(
             out.markers(path),
             [format!(
-                "[evm-client] lang=ts calls=13 events=0 sites=13 (ethers=13 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=2 not_in_abi=0 dynamic=0 path={path}"
+                "[evm-client] lang=ts calls=13 events=0 sites=13 (ethers=13 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=2 not_in_abi=0 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path={path}"
             )]
         );
         let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
@@ -3581,7 +4291,8 @@ async function main() {{
             TsCounts {
                 abis: 2,
                 not_in_abi: 1,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             },
             "the inline literal counts as an ABI; transfer is not in it; loadAbi() is dynamic"
         );
@@ -3758,7 +4469,8 @@ export async function wire(a: string, s: any) {
             TsCounts {
                 abis: 0,
                 not_in_abi: 0,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             }
         );
         assert_eq!(
@@ -3798,7 +4510,8 @@ it('emits', async () => {
             TsCounts {
                 abis: 0,
                 not_in_abi: 0,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             }
         );
     }
@@ -3834,12 +4547,19 @@ async function main() {
                 "call Box.retrieve args=0 abi=- line=10",
                 "call Box.store args=1 abi=- line=12",
                 "call Box.retrieve args=0 abi=- line=13",
+                "call Box.store args=1 abi=- line=16",
             ],
             "deployProxy / upgradeProxy read their factory argument; a factory's \
              connect link keeps it a factory; an inline promise and an unbound factory \
-             are not read"
+             are not read; GD.20: an awaited inline factory's product is"
         );
-        assert_eq!(counts, TsCounts::default());
+        assert_eq!(
+            counts,
+            TsCounts {
+                factories: 1,
+                ..TsCounts::default()
+            }
+        );
     }
 
     #[test]
@@ -3868,7 +4588,7 @@ async function main() {
         assert_eq!(
             out.markers("test/Escrow.test.js"),
             [
-                "[evm-client] lang=ts calls=5 events=0 sites=5 (ethers=0 hardhat=5 typechain=0 viem=0 web3=0 geth=0) abis=0 not_in_abi=0 dynamic=0 path=test/Escrow.test.js"
+                "[evm-client] lang=ts calls=5 events=0 sites=5 (ethers=0 hardhat=5 typechain=0 viem=0 web3=0 geth=0) abis=0 not_in_abi=0 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path=test/Escrow.test.js"
             ]
         );
         assert_eq!(
@@ -3885,7 +4605,7 @@ async function main() {
         assert_eq!(
             out.markers("scripts/settle.ts"),
             [
-                "[evm-client] lang=ts calls=4 events=0 sites=5 (ethers=1 hardhat=3 typechain=1 viem=0 web3=0 geth=0) abis=1 not_in_abi=0 dynamic=0 path=scripts/settle.ts"
+                "[evm-client] lang=ts calls=4 events=0 sites=5 (ethers=1 hardhat=3 typechain=1 viem=0 web3=0 geth=0) abis=1 not_in_abi=0 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path=scripts/settle.ts"
             ]
         );
         assert_eq!(
@@ -3972,7 +4692,8 @@ export async function run(client: any, wallet: any, address: `0x${string}`, id: 
             TsCounts {
                 abis: 1,
                 not_in_abi: 1,
-                dynamic: 0
+                dynamic: 0,
+                ..TsCounts::default()
             },
             "parseAbi binds the ABI; withdraw is not in it"
         );
@@ -4021,7 +4742,8 @@ export const loose = (client: any, calls: any[]) => multicall(client, { contract
             TsCounts {
                 abis: 1,
                 not_in_abi: 0,
-                dynamic: 3
+                dynamic: 3,
+                ..TsCounts::default()
             },
             "an element that is no object, a spread with no abi, a `contracts` that is no literal"
         );
@@ -4079,7 +4801,8 @@ lost.read.deposits([id]);
             TsCounts {
                 abis: 2,
                 not_in_abi: 1,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             },
             "parseAbi bound and inline; withdraw is not in the ABI; loadAbi() is dynamic"
         );
@@ -4227,7 +4950,8 @@ async function run(web3, address, id, from) {
             TsCounts {
                 abis: 1,
                 not_in_abi: 1,
-                dynamic: 1
+                dynamic: 1,
+                ..TsCounts::default()
             },
             "the object-literal ABI; withdraw is not in it; loadAbi() is dynamic"
         );
@@ -4268,7 +4992,8 @@ function writeContract({ abi, functionName }: Opts) { return functionName; }
             TsCounts {
                 abis: 0,
                 not_in_abi: 0,
-                dynamic: 5
+                dynamic: 5,
+                ..TsCounts::default()
             },
             "a variable name, an unreadable ABI, a template with ${{..}}, a spread with no \
              abi and an eventName variable; options in a variable and definitions are no call"
@@ -4303,7 +5028,8 @@ export async function viaParams(client: any, abi: Abi, id: string, address: `0x$
             TsCounts {
                 abis: 1,
                 not_in_abi: 0,
-                dynamic: 3
+                dynamic: 3,
+                ..TsCounts::default()
             },
             "a bare `address`, a literal address and a member path name nothing"
         );
@@ -4351,7 +5077,7 @@ readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'release', ar
         let line = |c: &str, l: &str, a: usize, p: &str| {
             format!(
                 "[evm-client] lang=ts {c} (ethers=0 hardhat=0 typechain=0 {l} geth=0) abis={a} \
-                 not_in_abi=0 dynamic=0 path={p}"
+                 not_in_abi=0 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path={p}"
             )
         };
         assert_eq!(
@@ -4406,5 +5132,280 @@ readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'release', ar
                 "evm_call:abi:vaultAbi.withdraw".to_string(),
             ]
         );
+    }
+
+    // GD.20 (step 11).
+
+    #[test]
+    fn hardhat_deploy_get_contract_names_the_contract() {
+        let src = "import { ethers } from 'hardhat';
+async function f() {
+  const e = await ethers.getContract('Escrow');
+  await e.release(1);
+  const d = await hre.ethers.getContract('contracts/V.sol:Vault', signer);
+  await d.deposit(2, 3);
+  const x = await ethers.getContract(name);
+  await x.nope();
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=1 abi=- line=4",
+                "call Vault.deposit args=2 abi=- line=6"
+            ]
+        );
+        assert_eq!(counts.hardhat_deploy, 2);
+        assert_eq!(libs(src)[0], "Escrow.release hardhat");
+    }
+
+    #[test]
+    fn ethers_contract_factory_deploys_and_rebinds() {
+        let src = "import { ContractFactory, ethers } from 'ethers';
+const TOKEN_ABI = ['function mint(uint256 a)', 'function burn(uint256 a)'];
+async function f(bytecode: string, signer: any, other: any) {
+  const f = new ContractFactory(TOKEN_ABI, bytecode, signer);
+  const t = await f.deploy();
+  await t.mint(1);
+  const f2 = f.connect(other);
+  const t2 = await f2.deploy();
+  await t2.burn(1);
+  const t3 = await new ethers.ContractFactory(TOKEN_ABI, bytecode, signer).deploy();
+  await t3.mint(3);
+  await t3.transfer(3);
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:TOKEN_ABI.mint args=1 abi=f:burn/1,f:mint/1 line=6",
+                "call abi:TOKEN_ABI.burn args=1 abi=f:burn/1,f:mint/1 line=9",
+                "call abi:TOKEN_ABI.mint args=1 abi=f:burn/1,f:mint/1 line=11"
+            ]
+        );
+        // f, the rebinding f2 and the inline deploy.
+        assert_eq!(counts.factories, 3);
+        assert_eq!(counts.not_in_abi, 1, "transfer");
+        assert_eq!(libs(src)[0], "abi:TOKEN_ABI.mint ethers");
+    }
+
+    #[test]
+    fn hardhat_factory_rebinding_and_inline_products() {
+        let src = "import { ethers, upgrades } from 'hardhat';
+async function f(s: any) {
+  const F = await ethers.getContractFactory('Escrow');
+  const F2 = F.connect(s);
+  const e = await F2.deploy();
+  await e.release(1);
+  const g = await (await ethers.getContractFactory('Gov')).deploy();
+  await g.propose(1);
+  const p = await upgrades.deployProxy(await ethers.getContractFactory('Pool'), []);
+  await p.stake(1);
+  const q = await upgrades.deployProxy(new Bank__factory(s), []);
+  await q.lend(1);
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=1 abi=- line=6",
+                "call Gov.propose args=1 abi=- line=8",
+                "call Pool.stake args=1 abi=- line=10",
+                "call Bank.lend args=1 abi=- line=12"
+            ]
+        );
+        // F2, the awaited Gov factory, the two inline proxies.
+        assert_eq!(counts.factories, 4);
+        assert_eq!(
+            libs(src),
+            [
+                "Escrow.release hardhat",
+                "Gov.propose hardhat",
+                "Pool.stake hardhat",
+                "Bank.lend typechain"
+            ]
+        );
+    }
+
+    #[test]
+    fn waffle_deploy_contract_reads_the_artifact() {
+        let src = "import { deployContract as deploy } from 'ethereum-waffle';
+import Lock from '../build/Lock.json';
+import Escrow from '../artifacts/contracts/Escrow.sol/Escrow.json';
+async function f(wallet: any, other: any) {
+  const lock = await deploy(wallet, Lock);
+  await lock.unlock();
+  const e = await deploy(wallet, Escrow, [1]);
+  await e.release(2);
+  const d = await deploy(wallet, other);
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Lock.unlock args=0 abi=- line=6",
+                "call Escrow.release args=1 abi=- line=8"
+            ]
+        );
+        assert_eq!(counts.waffle, 2);
+        assert_eq!(counts.dynamic, 1, "an artifact that is no json import");
+        // A bare deployContract not imported from waffle is not read.
+        let plain = "import { ethers } from 'ethers';
+import Lock from '../build/Lock.json';
+const lock = await deployContract(wallet, Lock);
+await lock.unlock();
+";
+        assert_eq!(read(plain).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn viem_codecs_name_a_function_or_an_event() {
+        let src = "import { decodeEventLog, decodeFunctionResult, encodeFunctionData } from 'viem';
+const VAULT_ABI = ['function sweep(address to)', 'event Swept(address to)'] as const;
+encodeFunctionData({ abi: VAULT_ABI, functionName: 'sweep', args: [to] });
+decodeFunctionResult({ abi: VAULT_ABI, functionName: 'sweep', data });
+decodeEventLog({ abi: VAULT_ABI, eventName: 'Swept', data, topics });
+decodeEventLog({ abi: VAULT_ABI, data, topics });
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:VAULT_ABI.sweep args=1 abi=f:sweep/1,e:Swept/1 line=3",
+                "call abi:VAULT_ABI.sweep args=- abi=f:sweep/1,e:Swept/1 line=4",
+                "event abi:VAULT_ABI.Swept args=- abi=f:sweep/1,e:Swept/1 line=5"
+            ]
+        );
+        assert_eq!(counts.viem_codec, 3);
+        assert_eq!(libs(src)[0], "abi:VAULT_ABI.sweep viem");
+    }
+
+    #[test]
+    fn spread_config_object_folds_its_keys() {
+        let src = "import { writeContract, readContract } from 'viem';
+import { escrowAbi } from './abi';
+const escrowContract = { address: ESCROW_ADDRESS, abi: escrowAbi } as const;
+const nested = { ...escrowContract, functionName: 'refund' };
+writeContract(config, { ...escrowContract, functionName: 'release', args: [id] });
+readContract(config, { ...nested, args: [id] });
+writeContract(config, { ...unknown, functionName: 'release' });
+";
+        let (sites, counts) = scan(src, &code_view(src, "typescript"));
+        let rows: Vec<String> = sites
+            .iter()
+            .map(|s| {
+                format!(
+                    "{}.{} args={:?} ref={:?}",
+                    s.scope.key(),
+                    s.member,
+                    s.args,
+                    s.abi_ref.as_ref().map(|r| (&r.name, &r.from))
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                // A folded key's site is read where the name is written.
+                "abi:escrowAbi.refund args=Some(1) ref=Some((\"escrowAbi\", \"./abi\"))",
+                "abi:escrowAbi.release args=Some(1) ref=Some((\"escrowAbi\", \"./abi\"))"
+            ]
+        );
+        assert_eq!(counts.dynamic, 1, "the unknown spread");
+    }
+
+    #[test]
+    fn const_held_element_key_is_a_call() {
+        let src = "import { Contract } from 'ethers';
+const ABI = ['function release(uint256 id)', 'function refund(uint256 id)'];
+const RELEASE = 'release';
+let picked = 'refund';
+const e = new Contract(addr, ABI, p);
+e[RELEASE](1);
+e[picked](2);
+e['refund'](3);
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:ABI.release args=1 abi=f:refund/1,f:release/1 line=6",
+                "call abi:ABI.refund args=1 abi=f:refund/1,f:release/1 line=8"
+            ]
+        );
+        assert_eq!(counts.dynamic, 1, "a let-held key stays dynamic");
+    }
+
+    #[test]
+    fn standalone_web3_eth_contract() {
+        let src = "import Contract from 'web3-eth-contract';
+import { Contract as Ethers } from 'ethers';
+const MARKET_ABI = [
+  { type: 'function', name: 'list', inputs: [{ name: 'item', type: 'uint256' }] },
+];
+const market = new Contract(MARKET_ABI, addr);
+market.methods.list(1).send({ from });
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            ["call abi:MARKET_ABI.list args=1 abi=f:list/1 line=7"]
+        );
+        assert_eq!(counts.web3_contract, 1);
+        assert_eq!(libs(src), ["abi:MARKET_ABI.list web3"]);
+        let required = "const Contract = require('web3-eth-contract');
+const c = new Contract(ABI, addr);
+c.methods.bid(1).send();
+";
+        let (rows, counts) = read(required);
+        assert_eq!(rows, ["call abi:ABI.bid args=1 abi=- line=3"]);
+        assert_eq!(counts.web3_contract, 1);
+    }
+
+    #[test]
+    fn truffle_global_web3_only_in_a_truffle_file() {
+        let src = "const Auction = artifacts.require('Auction');
+const AUCTION_ABI = [{ type: 'function', name: 'bid', inputs: [{ name: 'a', type: 'uint256' }] }];
+contract('Auction', (accounts) => {
+  it('bids', async () => {
+    const auction = new web3.eth.Contract(AUCTION_ABI, addr);
+    await auction.methods.bid(1).send({ from: accounts[0] });
+  });
+});
+";
+        let (rows, counts) = read(src);
+        assert_eq!(rows, ["call abi:AUCTION_ABI.bid args=1 abi=f:bid/1 line=6"]);
+        assert_eq!(counts.truffle, 1);
+        // No `artifacts.require`, or a declared `web3`: no truffle global.
+        let plain = "const AUCTION_ABI = [];
+const auction = new web3.eth.Contract(AUCTION_ABI, addr);
+auction.methods.bid(1).send();
+";
+        assert_eq!(read(plain).0, Vec::<String>::new());
+        let declared = "const web3 = makeWeb3();
+artifacts.require('Auction');
+const auction = new web3.eth.Contract(ABI, addr);
+auction.methods.bid(1).send();
+";
+        assert_eq!(read(declared).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn export_list_declares_a_local_abi() {
+        let src = "const vaultAbi = ['function deposit(uint256 a)'];
+const inner = () => { const hidden = ['function x()']; return hidden; };
+export { vaultAbi, vaultAbi as VAULT, inner };
+export { other } from './other';
+";
+        let view = code_view(src, "typescript");
+        let names: Vec<String> = exported_abis(src, &view)
+            .into_iter()
+            .map(|(n, e)| format!("{n}:{}", e.len()))
+            .collect();
+        assert_eq!(names, ["vaultAbi:1", "VAULT:1"]);
     }
 }

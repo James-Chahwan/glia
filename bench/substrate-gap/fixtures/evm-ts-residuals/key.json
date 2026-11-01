@@ -1,0 +1,122 @@
+{
+  "framework": "evm-ts-residuals",
+  "language": "typescript+solidity",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.20 (FD.60; seed E W20-W23, DT.10d / DT.10g / DT.10i / DT.10j residuals): the TS EVM client forms the reader did not read and the ABI join through a re-export barrel and a local export list. Base 86a74bda (debug CLI): one RPC_CALL, evm_call:abi:escrowAbi.refund, paired to Escrow.refund by name_hint only (heuristic, no ABI joined: its abi_from cell row fails); every other row absent. The escrowAbi.refund edge row passes at the base through that name hint and stays as a guard; the abi_from cell rows are what the barrel join adds.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.release",
+      "exact": true,
+      "note": "hardhat-deploy ethers.getContract('Escrow')"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowAbi.Released",
+      "exact": true,
+      "note": "viem decodeEventLog"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:Escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "hardhat-deploy getContract"
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.refund",
+      "to": "evm:Escrow.refund",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "escrowAbi imported from ./abi, a barrel re-exporting ./escrow"
+    },
+    {
+      "from": "evm_call:abi:TOKEN_ABI.mint",
+      "to": "evm:Token.mint",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "ethers new ContractFactory(abi, bytecode, signer).deploy()"
+    },
+    {
+      "from": "evm_call:abi:TOKEN_ABI.burn",
+      "to": "evm:Token.burn",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "a factory rebinding const f2 = f.connect(other)"
+    },
+    {
+      "from": "evm_call:Gov.propose",
+      "to": "evm:Gov.propose",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "(await ethers.getContractFactory('Gov')).deploy()"
+    },
+    {
+      "from": "evm_call:Pool.stake",
+      "to": "evm:Pool.stake",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "a factory passed inline to upgrades.deployProxy"
+    },
+    {
+      "from": "evm_call:Lock.unlock",
+      "to": "evm:Lock.unlock",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "waffle deployContract(wallet, Lock) with build/Lock.json"
+    },
+    {
+      "from": "evm_call:abi:vaultAbi.sweep",
+      "to": "evm:Vault.sweep",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "viem encodeFunctionData; vaultAbi is a local export list reached through export * in the barrel"
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "viem writeContract over a spread of a same-file config object"
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:escrowAbi.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true,
+      "note": "viem decodeEventLog"
+    },
+    {
+      "from": "evm_call:abi:MARKET_ABI.list",
+      "to": "evm:Market.list",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "standalone web3-eth-contract new Contract(abi, addr)"
+    },
+    {
+      "from": "evm_call:abi:AUCTION_ABI.bid",
+      "to": "evm:Auction.bid",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "truffle's global web3 in a file with artifacts.require"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:abi:escrowAbi.refund",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"abi_from\":\"web/abi/escrow.ts\""
+    },
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:abi:vaultAbi.sweep",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"abi_from\":\"web/abi/vault.ts\""
+    }
+  ]
+}
