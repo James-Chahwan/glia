@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 485,
+  "fixtures": 488,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -548,6 +548,13 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "dart-riverpod-generator-bloc": {
+      "framework": "dart-riverpod-generator-bloc",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "dart-riverpod-receivers": {
@@ -1982,6 +1989,11 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "process-managers": {
+      "framework": "process-managers",
+      "language": "yaml",
+      "per_category": {}
+    },
     "proto-field-drift": {
       "framework": "proto-field-drift",
       "language": "proto",
@@ -2937,6 +2949,15 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-value-positions": {
+      "framework": "ts-value-positions",
+      "language": "typescript+javascript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-value-references": {

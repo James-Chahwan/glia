@@ -150,7 +150,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 354/512 applicable cells have a fixture (69.1%) — 354 full, 0 partial, 0 none, 158 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 319
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 321
 
 ## Cells routed via an alternative mechanism
 
@@ -280,10 +280,10 @@ rust              ?        ?        ?        ?        ?        ?        ◐
 solidity          ?        ?        ?        ?        ?        ?        ?
 terraform         ?        ?        ?        ?        ?        ?        ?
 kotlin            ?        ?        ?        ?        ?        ?        ?
-lua               ●        ·        ◐        ●        ◐        ◐        ?
+lua               ●        ·        ●        ●        ◐        ●        ?
 ```
 
-USE PATTERNS: 14/126 cells have a fixture — 4 full, 9 partial, 1 none, 112 unknown, 0 error.
+USE PATTERNS: 14/126 cells have a fixture — 6 full, 7 partial, 1 none, 112 unknown, 0 error.
 
 ## Cohort grades
 

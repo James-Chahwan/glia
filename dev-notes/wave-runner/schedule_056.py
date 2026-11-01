@@ -62,6 +62,7 @@ LANDED = {
     2: "GA.9 GA.14 GA.21 GD.3 GD.14 GH.6 GH.14 GP.10 GP.16",
     3: "GA.3 GA.10 GD.28 GD.29 GD.32 GH.5 GH.15 GH.20 GP.11 GP.15",
     4: "GA.4 GB.5 GD.4 GD.8 GD.17 GH.16 GP.14",
+    5: "GA.7 GA.11 GD.11 GD.22 GD.24 GH.4 GH.17 GP.6",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = False

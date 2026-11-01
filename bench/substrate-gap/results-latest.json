@@ -932,20 +932,21 @@
     },
     "dart/calls": {
       "extract": [
-        13,
-        13
+        14,
+        14
       ],
       "fixtures": [
         "fixtures/dart-body-owners",
         "fixtures/dart-field-dispatch",
         "fixtures/dart-member-reads",
+        "fixtures/dart-riverpod-generator-bloc",
         "fixtures/dart-riverpod-receivers",
         "fixtures/dart-top-level-bodies",
         "matrix/dart/calls"
       ],
       "forbid": [
-        12,
-        12
+        17,
+        17
       ],
       "level": "full",
       "literal": [
@@ -956,8 +957,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        39,
-        39
+        47,
+        47
       ],
       "via": "call"
     },
@@ -9773,6 +9774,7 @@
     "fixtures/php-use-qualified-binding",
     "fixtures/php-use-unique-wrong-namespace",
     "fixtures/prisma-schema",
+    "fixtures/process-managers",
     "fixtures/proto-field-drift",
     "fixtures/py-graphene-fields",
     "fixtures/py-router-prefix",
@@ -9847,6 +9849,7 @@
     "fixtures/ts-signal-xfile-reads",
     "fixtures/ts-typed-receivers",
     "fixtures/ts-url-builder-args",
+    "fixtures/ts-value-positions",
     "fixtures/ts-value-references",
     "fixtures/ts-viem-web3-contract-calls",
     "fixtures/walk-dotnet-obj",
@@ -10157,16 +10160,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          3,
           3
         ],
         "via": "host_callback"
@@ -10231,16 +10232,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          1,
           1
         ],
         "via": "script_entry"
@@ -10383,9 +10382,9 @@
     ],
     "totals": {
       "error": 0,
-      "full": 4,
+      "full": 6,
       "none": 1,
-      "partial": 9,
+      "partial": 7,
       "unknown": 112
     }
   },
