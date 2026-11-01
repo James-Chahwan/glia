@@ -1,0 +1,58 @@
+{
+  "framework": "imports-tail-precision",
+  "language": "go+java+csharp",
+  "dirs": ["."],
+  "note": "GD.34 (I1 of the 0.5.4 edge audit, IMPORTS|heuristic): an import whose full path misses falls back to the repo-unique short name of its last segment (rule tail_unique). Baseline HEAD 067b3b5c (debug CLI, `glia query <copy> -e 'out(A,B) :- imports(A,B).'`): eight heuristic rows, the five forbidden below among them - a Go stdlib import (`encoding/json`) bound the repo's own `json.go` (json_test -> json, and json -> json, a self-loop), a foreign module (`golang.org/x/net/proxy`) bound `proxy.go` (client -> proxy, proxy -> proxy), `import java.util.ArrayList;` bound the EVENT_EMITTER an eventbus needle minted from `channel.send(new ArrayList<..>(..))`, and C# `using static Grpc.Health.V1.Health;` bound the GRPC_SERVER `grpc_server:Health`. Shapes from the public snapshots websocket@dcea2f088ce1 (json_test.go:9, client.go:23), samples@291ba126bfc1 (add_to_app/books/android_books Api.java:12) and microservices-demo@38e7348eb289 (src/cartservice/src/services/HealthCheckService.cs:19). After: a guess binds only a MODULE / PACKAGE / declaration, never the importer, never a Go path outside the repo's go.mod modules, a JDK / .NET platform root or a C# root namespace the repo declares nothing under (`[imports] tail refused ..`).",
+  "expect_edges": [
+    {
+      "from": "java::app::src::main::java::dev::example::books::Shelf",
+      "to": "java::lib::Helper",
+      "category": "IMPORTS",
+      "note": "Pattern B, kept: `import com.example.util.Helper;` with Helper.java outside a mirrored package path binds the one Helper (tail_unique)"
+    },
+    {
+      "from": "cs::src::services::HealthCheckService",
+      "to": "cartservice::cartstore",
+      "category": "IMPORTS",
+      "note": "control, kept: `using cartservice.cartstore;` names a namespace the repo declares"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "go::json_test",
+      "to": "go::json",
+      "category": "IMPORTS",
+      "note": "PRECISION: `encoding/json` is the standard library, not the repo's json.go"
+    },
+    {
+      "from": "go::json",
+      "to": "go::json",
+      "category": "IMPORTS",
+      "note": "PRECISION: a stdlib import is no self-loop"
+    },
+    {
+      "from": "go::client",
+      "to": "go::proxy",
+      "category": "IMPORTS",
+      "note": "PRECISION: `golang.org/x/net/proxy` is a foreign module, not the repo's proxy.go"
+    },
+    {
+      "from": "go::proxy",
+      "to": "go::proxy",
+      "category": "IMPORTS",
+      "note": "PRECISION: a foreign-module import is no self-loop"
+    },
+    {
+      "from": "java::app::src::main::java::dev::example::books::Api",
+      "to": "event_emit:ArrayList",
+      "category": "IMPORTS",
+      "note": "PRECISION: `java.util.ArrayList` is the JDK; an EVENT_EMITTER is never an import target"
+    },
+    {
+      "from": "cs::src::services::HealthCheckService",
+      "to": "grpc_server:Health",
+      "category": "IMPORTS",
+      "note": "PRECISION: `Grpc.Health.V1` is a namespace the repo declares nothing under; a GRPC_SERVER is never an import target"
+    }
+  ]
+}

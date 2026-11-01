@@ -432,9 +432,19 @@ enum NsStep {
 struct Namespaces {
     index: Option<NamespaceIndex>,
     stats: NamespaceStats,
+    /// GD.34: the `tail_unique` guesses this pass refused.
+    tail: TailRefused,
 }
 
 impl Namespaces {
+    /// GD.34: whether `ns` lies under a root namespace some file of the
+    /// repo declares ([`NamespaceIndex::owns_root`]).
+    fn owns_root(&mut self, g: &RepoGraph, ns: &str) -> bool {
+        self.index
+            .get_or_insert_with(|| NamespaceIndex::build(g))
+            .owns_root(ns)
+    }
+
     /// `ns` is the import's resolved module qname, `importer` its file MODULE.
     fn step(
         &mut self,
@@ -534,6 +544,193 @@ fn module_exts(g: &RepoGraph) -> HashMap<NodeId, String> {
 }
 
 // ============================================================================
+// GD.34: what a `tail_unique` guess may bind
+// ============================================================================
+
+/// The node kinds a `tail_unique` guess (an import bound by its last
+/// segment's repo-unique name) may land on: a module or namespace, or a
+/// declaration. A mechanism node (an EVENT_EMITTER, GRPC_SERVER, ROUTE,
+/// ENDPOINT ..) shares a short name with what an import names only by
+/// accident (`import java.util.ArrayList` beside `event_emit:ArrayList`).
+const TAIL_KINDS: &[NodeKindId] = &[
+    node_kind::MODULE,
+    node_kind::PACKAGE,
+    node_kind::CLASS,
+    node_kind::INTERFACE,
+    node_kind::STRUCT,
+    node_kind::ENUM,
+    node_kind::FUNCTION,
+    node_kind::STATE_VAR,
+    node_kind::COMPONENT,
+];
+
+/// JVM platform roots (`import java.util.ArrayList`): never an in-repo
+/// type, from a JVM-family importer ([`JVM_EXTS`]).
+const JVM_PLATFORM_ROOTS: &[&str] = &["java", "javax", "jdk", "sun"];
+/// The importer extensions [`JVM_PLATFORM_ROOTS`] apply to (Clojure's
+/// `(:import [java.util ArrayList])` included).
+const JVM_EXTS: &[&str] = &["java", "kt", "kts", "scala", "sc", "groovy", "clj", "cljc"];
+/// .NET platform roots (`using System.Collections.Generic;`), from a `.cs`
+/// importer.
+const DOTNET_PLATFORM_ROOTS: &[&str] = &["System", "Microsoft"];
+
+/// Why one `tail_unique` guess was refused (GD.34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailRefusal {
+    /// The guess is not a module, namespace or declaration ([`TAIL_KINDS`]).
+    Kind,
+    /// A Go import outside every go.mod module of the repo whose first path
+    /// element has no dot: the standard library (`encoding/json`).
+    Stdlib,
+    /// A Go import of a foreign module (`golang.org/x/net/proxy`).
+    ForeignModule,
+    /// A JDK / .NET platform namespace ([`JVM_PLATFORM_ROOTS`],
+    /// [`DOTNET_PLATFORM_ROOTS`]).
+    Platform,
+    /// A C# (or multi-segment PHP) import under a root namespace no file of
+    /// the repo declares (`using static Grpc.Health.V1.Health`).
+    UndeclaredNs,
+    /// The guess is the importer itself (`json.go` importing
+    /// `encoding/json`).
+    SelfLoop,
+}
+
+/// What the `tail_unique` guesses of one graph refused, the fired_on:
+///   `[imports] tail refused kind=<k> stdlib=<s> foreign_module=<f> platform=<p> undeclared_ns=<n> self=<x> repo=<id>`
+/// once per import pass that refused one. A refusal counts only a guess
+/// that would have bound (an import with no repo-unique candidate is no
+/// refusal), under the first reason that applies, path reasons first.
+/// The per-repo graph holds no repo label, so `repo=` is its RepoId (16
+/// hex digits), stable across one checkout.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TailRefused {
+    pub(crate) kind: usize,
+    pub(crate) stdlib: usize,
+    pub(crate) foreign_module: usize,
+    pub(crate) platform: usize,
+    pub(crate) undeclared_ns: usize,
+    pub(crate) self_loop: usize,
+}
+
+impl TailRefused {
+    fn count(&mut self, why: TailRefusal) {
+        let slot = match why {
+            TailRefusal::Kind => &mut self.kind,
+            TailRefusal::Stdlib => &mut self.stdlib,
+            TailRefusal::ForeignModule => &mut self.foreign_module,
+            TailRefusal::Platform => &mut self.platform,
+            TailRefusal::UndeclaredNs => &mut self.undeclared_ns,
+            TailRefusal::SelfLoop => &mut self.self_loop,
+        };
+        *slot += 1;
+    }
+
+    /// `guess` as a `tail_unique` target of `importer`, after the path
+    /// reason `path` (if any): `None`, counted, when refused.
+    fn admit(
+        &mut self,
+        g: &RepoGraph,
+        guess: Option<NodeId>,
+        importer: NodeId,
+        path: Option<TailRefusal>,
+    ) -> Option<NodeId> {
+        let id = guess?;
+        match path.or_else(|| tail_target(g, id, importer).err()) {
+            Some(why) => {
+                self.count(why);
+                None
+            }
+            None => Some(id),
+        }
+    }
+
+    fn marker(&self, repo: glia_core::RepoId) -> Option<String> {
+        let TailRefused {
+            kind,
+            stdlib,
+            foreign_module,
+            platform,
+            undeclared_ns,
+            self_loop,
+        } = *self;
+        (kind + stdlib + foreign_module + platform + undeclared_ns + self_loop > 0).then(|| {
+            format!(
+                "[imports] tail refused kind={kind} stdlib={stdlib} \
+                 foreign_module={foreign_module} platform={platform} \
+                 undeclared_ns={undeclared_ns} self={self_loop} repo={:016x}",
+                repo.0
+            )
+        })
+    }
+}
+
+/// GD.34: the one filter every `tail_unique` site reads: the guess `id`
+/// is a [`TAIL_KINDS`] node other than the importer.
+fn tail_target(g: &RepoGraph, id: NodeId, importer: NodeId) -> Result<NodeId, TailRefusal> {
+    let kind_ok = g
+        .nav
+        .kind_by_id
+        .get(&id)
+        .is_some_and(|k| TAIL_KINDS.contains(k));
+    if !kind_ok {
+        Err(TailRefusal::Kind)
+    } else if id == importer {
+        Err(TailRefusal::SelfLoop)
+    } else {
+        Ok(id)
+    }
+}
+
+/// GD.34: the path reason a dotted import's `tail_unique` guess is refused
+/// for, from its importer's extension `ext` and its `::` qname: a JDK /
+/// .NET platform root, or (C#, and PHP past one segment) a root namespace
+/// the repo declares nothing under. A one-segment PHP path names a global
+/// type, which no namespace declares, so it keeps the guess.
+fn dotted_tail_path(
+    g: &RepoGraph,
+    ns: &mut Namespaces,
+    ext: Option<&str>,
+    qname: &str,
+) -> Option<TailRefusal> {
+    let ext = ext?;
+    let root = qname.split("::").next().unwrap_or(qname);
+    let platform = (JVM_EXTS.contains(&ext) && JVM_PLATFORM_ROOTS.contains(&root))
+        || (ext == "cs" && DOTNET_PLATFORM_ROOTS.contains(&root));
+    if platform {
+        return Some(TailRefusal::Platform);
+    }
+    let namespaced = ext == "cs" || (ext == "php" && qname.contains("::"));
+    (namespaced && !ns.owns_root(g, qname)).then_some(TailRefusal::UndeclaredNs)
+}
+
+/// GD.34: whether a Go import path left without a package directory
+/// (`DirImport::NoDir`) lies under one of the repo's go.mod modules. The
+/// parser rewrites such a path to its repo-relative directory, whose first
+/// element is a top-level directory holding Go files (`top_dirs`); a
+/// stdlib or third-party path keeps its raw form (`encoding::json`,
+/// `golang.org::x::net::proxy`). `None` = under a module, the guess may run.
+fn go_tail_path(path: &str, top_dirs: &BTreeSet<String>) -> Option<TailRefusal> {
+    let first = path.split("::").next().unwrap_or(path);
+    if top_dirs.contains(first) {
+        None
+    } else if first.contains('.') {
+        Some(TailRefusal::ForeignModule)
+    } else {
+        Some(TailRefusal::Stdlib)
+    }
+}
+
+/// The first element of every MODULE qname with a directory (`internal`
+/// for `internal::store::store`): the repo's top-level Go directories.
+fn top_level_dirs(g: &RepoGraph) -> BTreeSet<String> {
+    g.symbols
+        .module_by_qname
+        .keys()
+        .filter_map(|q| q.split_once("::").map(|(first, _)| first.to_string()))
+        .collect()
+}
+
+// ============================================================================
 // Import resolution
 // ============================================================================
 
@@ -584,6 +781,9 @@ pub(crate) fn python_import_bindings(
         eprintln!("{line}");
     }
     if let Some(line) = ns.unowned_marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = ns.tail.marker(g.repo) {
         eprintln!("{line}");
     }
     if let Some(line) = stars.marker() {
@@ -668,6 +868,9 @@ fn resolve_imports_dotted(
         eprintln!("{line}");
     }
     if let Some(line) = ns.unowned_marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = ns.tail.marker(g.repo) {
         eprintln!("{line}");
     }
     stars
@@ -778,6 +981,16 @@ fn decide_imports_dotted(
                     let refused = same_pick == SamePick::Refused;
                     let guess = unique_global_function(g, tail)
                         .or_else(|| (!refused).then(|| unique_global_module(g, tail)).flatten());
+                    // GD.34: never a mechanism node, the importer itself, a
+                    // platform namespace or an undeclared C# root.
+                    let path_reason = match guess {
+                        Some(_) => {
+                            let ext = same.importer_ext(g, from_mod_id);
+                            dotted_tail_path(g, &mut ns, ext.as_deref(), &target_qname)
+                        }
+                        None => None,
+                    };
+                    let guess = ns.tail.admit(g, guess, from_mod_id, path_reason);
                     if let Some(target_id) = guess {
                         out.edge(from_mod_id, target_id, "tail_unique", stmt.line);
                         out.bind(
@@ -883,7 +1096,26 @@ fn decide_imports_dotted(
                         // where `a.b` isn't a resolvable module (flat layout)
                         // — bind the imported symbol by its unique global
                         // name. Miss-only + ambiguity-safe.
-                        NsStep::Fallthrough => (unique_global_function(g, name), "tail_unique"),
+                        // GD.34: filtered as the module arm's guess is.
+                        NsStep::Fallthrough => {
+                            let guess = unique_global_function(g, name);
+                            let path_reason = match guess {
+                                Some(_) => {
+                                    let ext = same.importer_ext(g, from_mod_id);
+                                    let qname = if target_module_qname.is_empty() {
+                                        name.as_str()
+                                    } else {
+                                        target_module_qname.as_str()
+                                    };
+                                    dotted_tail_path(g, &mut ns, ext.as_deref(), qname)
+                                }
+                                None => None,
+                            };
+                            (
+                                ns.tail.admit(g, guess, from_mod_id, path_reason),
+                                "tail_unique",
+                            )
+                        }
                     };
                     if let Some(symbol_id) = target {
                         out.edge(from_mod_id, symbol_id, rule, stmt.line);
@@ -1147,6 +1379,8 @@ pub(crate) fn resolve_imports_go(
     packages: &GoPackages,
 ) -> GoImportStats {
     let mut stats = GoImportStats::default();
+    let mut tail = TailRefused::default();
+    let mut top_dirs: Option<BTreeSet<String>> = None;
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
@@ -1176,9 +1410,18 @@ pub(crate) fn resolve_imports_go(
                 // Tail fallback (Pattern B): the go.mod-stripped path doesn't
                 // match a module qname or a package directory — bind the
                 // imported package by its unique short name (last `::`
-                // segment). Miss-only + ambiguity-safe.
+                // segment). Miss-only + ambiguity-safe. GD.34: only for a
+                // path under one of the repo's go.mod modules, never the
+                // importer itself.
                 DirImport::NoDir => {
-                    unique_global_module(g, path.rsplit("::").next().unwrap_or(path))
+                    let guess = unique_global_module(g, path.rsplit("::").next().unwrap_or(path));
+                    let path_reason = match guess {
+                        Some(_) => {
+                            go_tail_path(path, top_dirs.get_or_insert_with(|| top_level_dirs(g)))
+                        }
+                        None => None,
+                    };
+                    tail.admit(g, guess, from_mod_id, path_reason)
                         .map(|id| (id, "tail_unique"))
                 }
             },
@@ -1207,6 +1450,9 @@ pub(crate) fn resolve_imports_go(
             .entry(from_mod_id)
             .or_default()
             .insert(bound, target_id);
+    }
+    if let Some(line) = tail.marker(g.repo) {
+        eprintln!("{line}");
     }
     stats
 }
@@ -1883,7 +2129,9 @@ fn resolve_module_reference(from_module: &str, module_ref: &str, level: u32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::{build_dotted, build_python, build_typescript, build_typescript_family};
+    use crate::build::{
+        build_dotted, build_go, build_python, build_typescript, build_typescript_family,
+    };
     use crate::test_support::repo;
     use glia_code_domain::evidence::Evidence;
     use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, NavFact, cell_type};
@@ -5046,6 +5294,308 @@ mod tests {
         assert_eq!(
             edges_of(&g, edge_category::CALLS, func("main::run")),
             [func("pkg::core::helper")]
+        );
+    }
+
+    // ---- GD.34: what a tail_unique guess may bind ----------------------------
+
+    /// `import <path>` (an `ImportTarget::Module`) from MODULE `qname`.
+    fn imports_path(mut fp: FileParse, qname: &str, path: &str) -> FileParse {
+        fp.imports.push(ImportStmt {
+            from_module: qname.to_string(),
+            target: ImportTarget::Module {
+                path: path.to_string(),
+                alias: None,
+            },
+            line: 4,
+        });
+        fp
+    }
+
+    /// A node of `kind` named `name` (qname `qname`) under MODULE `parent`.
+    fn child(
+        fp: &mut FileParse,
+        parent: &str,
+        kind: NodeKindId,
+        name: &str,
+        qname: &str,
+    ) -> NodeId {
+        let id = gid(kind, qname);
+        fp.nodes.push(Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        fp.nav.record(id, name, qname, kind, Some(module(parent)));
+        id
+    }
+
+    /// Every IMPORTS edge of `g` as `(from, to, rule)`, sorted.
+    fn all_import_edges(g: &RepoGraph) -> Vec<(NodeId, NodeId, String)> {
+        let mut out: Vec<(NodeId, NodeId, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+            .map(|e| {
+                let rule = Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default();
+                (e.from, e.to, rule)
+            })
+            .collect();
+        out.sort_by_key(|(a, b, r)| (a.0, b.0, r.clone()));
+        out
+    }
+
+    /// The tail refusals of the dotted import pass, replayed on `g`.
+    fn dotted_tail(g: &RepoGraph, imports: &[ImportStmt]) -> TailRefused {
+        let mut same = same_stem_table(g);
+        let mut stars = PyStars::read(g, imports);
+        decide_imports_dotted(g, imports, &mut same, &mut stars)
+            .1
+            .tail
+    }
+
+    #[test]
+    fn go_stdlib_and_foreign_module_imports_bind_nothing() {
+        // websocket's shape: root-level files `json.go` / `json_test.go`
+        // import `encoding/json`, `client.go` / `proxy.go` import
+        // `golang.org/x/net/proxy`; the parser keeps both raw. HEAD bound
+        // json_test -> json, json -> json, client -> proxy, proxy -> proxy.
+        let parses = vec![
+            imports_path(
+                file("json.go", "json", "json", &[]),
+                "json",
+                "encoding::json",
+            ),
+            imports_path(
+                file("json_test.go", "json_test", "json_test", &[]),
+                "json_test",
+                "encoding::json",
+            ),
+            imports_path(
+                file("client.go", "client", "client", &[]),
+                "client",
+                "golang.org::x::net::proxy",
+            ),
+            imports_path(
+                file("proxy.go", "proxy", "proxy", &[]),
+                "proxy",
+                "golang.org::x::net::proxy",
+            ),
+            file(
+                "examples/echo/server.go",
+                "examples::echo::server",
+                "server",
+                &[],
+            ),
+        ];
+        let g = build_go(repo(), parses).expect("build");
+        assert_eq!(all_import_edges(&g), []);
+    }
+
+    #[test]
+    fn go_path_under_a_repo_module_keeps_the_tail_guess() {
+        // `internal::cache` names a package dir no file sits in, under the
+        // repo's own `internal/` tree: the short-name guess still runs and
+        // binds the one `cache` module (the vendored-path risk of GD.34).
+        let parses = vec![
+            imports_path(
+                file(
+                    "internal/store/store.go",
+                    "internal::store::store",
+                    "store",
+                    &[],
+                ),
+                "internal::store::store",
+                "internal::cache",
+            ),
+            file("pkg/cache.go", "pkg::cache", "cache", &[]),
+        ];
+        let g = build_go(repo(), parses).expect("build");
+        assert_eq!(
+            all_import_edges(&g),
+            [(
+                module("internal::store::store"),
+                module("pkg::cache"),
+                "tail_unique".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn go_tail_path_reasons() {
+        let dirs: BTreeSet<String> = ["internal".to_string(), "examples".to_string()].into();
+        assert_eq!(
+            go_tail_path("encoding::json", &dirs),
+            Some(TailRefusal::Stdlib)
+        );
+        assert_eq!(go_tail_path("fmt", &dirs), Some(TailRefusal::Stdlib));
+        assert_eq!(
+            go_tail_path("golang.org::x::net::proxy", &dirs),
+            Some(TailRefusal::ForeignModule)
+        );
+        assert_eq!(go_tail_path("internal::cache", &dirs), None);
+    }
+
+    #[test]
+    fn java_platform_import_never_binds_a_mechanism_node() {
+        // samples' Api.java: `import java.util.ArrayList;` beside the
+        // EVENT_EMITTER `event_emit:ArrayList @app` an eventbus needle minted
+        // in the same file. HEAD bound Api -> event_emit:ArrayList.
+        let api = "app::src::main::java::books::Api";
+        let mut fp = file("app/src/main/java/books/Api.java", api, "Api", &[]);
+        child(
+            &mut fp,
+            api,
+            node_kind::EVENT_EMITTER,
+            "ArrayList",
+            "event_emit:ArrayList @app",
+        );
+        let fp = imports_path(fp, api, "java.util.ArrayList");
+        // The same mechanism node reached by a non-platform path: refused
+        // by kind.
+        let other = "app::src::main::java::books::Other";
+        let other_fp = imports_path(
+            file("app/src/main/java/books/Other.java", other, "Other", &[]),
+            other,
+            "com.acme.ArrayList",
+        );
+        let parses = vec![fp, other_fp];
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert_eq!(all_import_edges(&g), []);
+        let tail = dotted_tail(&g, &imports);
+        assert_eq!(
+            tail,
+            TailRefused {
+                platform: 1,
+                kind: 1,
+                ..TailRefused::default()
+            }
+        );
+        assert_eq!(
+            tail.marker(g.repo).as_deref(),
+            Some(
+                format!(
+                    "[imports] tail refused kind=1 stdlib=0 foreign_module=0 platform=1 \
+                     undeclared_ns=0 self=0 repo={:016x}",
+                    g.repo.0
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn java_pattern_b_class_outside_its_package_path_still_binds() {
+        // `import com.example.util.Helper;` where Helper.java sits at
+        // `src/Helper.java` (the layout does not mirror the package): the
+        // repo-unique CLASS still binds, rule tail_unique.
+        let mut helper = file("src/Helper.java", "src::Helper", "Helper", &[]);
+        let helper_class = child(
+            &mut helper,
+            "src::Helper",
+            node_kind::CLASS,
+            "Helper",
+            "src::Helper::Helper",
+        );
+        let main = imports_path(
+            file("src/Main.java", "src::Main", "Main", &[]),
+            "src::Main",
+            "com.example.util.Helper",
+        );
+        let parses = vec![helper, main];
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert_eq!(
+            imports_of(&g, "src::Main"),
+            [(helper_class, "tail_unique".to_string())]
+        );
+        assert_eq!(dotted_tail(&g, &imports), TailRefused::default());
+    }
+
+    #[test]
+    fn csharp_using_static_of_an_undeclared_root_binds_nothing() {
+        // microservices-demo's HealthCheckService.cs: `using static
+        // Grpc.Health.V1.Health;` beside the GRPC_SERVER `grpc_server:Health`.
+        // The repo declares only `cartservice.*` namespaces. HEAD bound
+        // HealthCheckService -> grpc_server:Health; a namespace import under
+        // the repo's own root keeps binding its PACKAGE.
+        let svc = "src::services::HealthCheckService";
+        let mut fp = file(
+            "src/services/HealthCheckService.cs",
+            svc,
+            "HealthCheckService",
+            &[],
+        );
+        let m = module(svc);
+        opens(&mut fp, m, "cartservice::services");
+        child(
+            &mut fp,
+            svc,
+            node_kind::GRPC_SERVER,
+            "Health",
+            "grpc_server:Health @src",
+        );
+        fp.imports.push(ImportStmt {
+            from_module: svc.to_string(),
+            target: ImportTarget::Symbol {
+                module: "Grpc::Health::V1".to_string(),
+                name: "Health".to_string(),
+                alias: None,
+                level: 0,
+            },
+            line: 18,
+        });
+        let store = "src::cartstore::RedisCartStore";
+        let mut store_fp = file(
+            "src/cartstore/RedisCartStore.cs",
+            store,
+            "RedisCartStore",
+            &[],
+        );
+        let store_ns = opens(&mut store_fp, module(store), "cartservice::cartstore");
+        fp.imports.push(ImportStmt {
+            from_module: svc.to_string(),
+            target: ImportTarget::Symbol {
+                module: "cartservice".to_string(),
+                name: "cartstore".to_string(),
+                alias: None,
+                level: 0,
+            },
+            line: 19,
+        });
+        let parses = vec![fp, store_fp];
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert_eq!(imports_of(&g, svc), [(store_ns, "tail_unique".to_string())]);
+        assert_eq!(
+            dotted_tail(&g, &imports),
+            TailRefused {
+                undeclared_ns: 1,
+                ..TailRefused::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_tail_guess_never_binds_the_importer_itself() {
+        // `import encoding.json` from `json.py` whose own MODULE is the only
+        // `json`: HEAD drew the self-loop json -> json.
+        let parses = vec![imports_path(
+            file("json.py", "json", "json", &[]),
+            "json",
+            "encoding.json",
+        )];
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert_eq!(all_import_edges(&g), []);
+        assert_eq!(
+            dotted_tail(&g, &imports),
+            TailRefused {
+                self_loop: 1,
+                ..TailRefused::default()
+            }
         );
     }
 }
