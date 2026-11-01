@@ -1,0 +1,23 @@
+{
+  "framework": "ts-hono-route-mount",
+  "language": "typescript",
+  "dirs": ["server", "client"],
+  "note": "GD.42 include-style mounts, Hono (documenso's shape, apps/remix/server/router.ts). api/files/files.ts exports a chained `new Hono().post('/upload-pdf', ..).get('/item/:id', ..)` whose verb lines continue the declaration; api/auth.ts chains a sub-app in with `.route('/', session)`; router.ts, an app with a non-literal `basePath`, mounts both with `app.route('/svc/files', filesRoute)` / `app.route('/svc/auth', auth)` by imported name. The client calls non-`/api` prefixes, so only the mount pairs them. Baseline (pre-change CLI, glia 0.5.5+p1f568a19): ROUTEs `POST /upload-pdf`, `GET /item/:id`, `GET /session`, `POST /sign-out`, `[http] paired=0`.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "POST /svc/files/upload-pdf", "exact": true, "note": "a chained route mounted by imported name"},
+    {"kind": "ROUTE", "name": "GET /svc/files/item/:id", "exact": true, "note": "the chain's second verb"},
+    {"kind": "ROUTE", "name": "GET /svc/auth/session", "exact": true, "note": "two levels: `.route('/', session)` inside the mounted auth app"},
+    {"kind": "ROUTE", "name": "POST /svc/auth/sign-out", "exact": true, "note": "a route chained after a `.route(..)`"},
+    {"kind": "ROUTE", "name": "GET /healthz", "exact": true, "note": "a route on the root app keeps its path"}
+  ],
+  "expect_edges": [
+    {"from": "POST /svc/files/upload-pdf", "to": "POST /svc/files/upload-pdf", "category": "HTTP_CALLS", "note": "client -> mounted chained route"},
+    {"from": "GET /svc/files/item/", "to": "GET /svc/files/item/:id", "category": "HTTP_CALLS", "note": "client -> mounted param route"},
+    {"from": "GET /svc/auth/session", "to": "GET /svc/auth/session", "category": "HTTP_CALLS", "note": "client -> twice-mounted route"},
+    {"from": "POST /svc/auth/sign-out", "to": "POST /svc/auth/sign-out", "category": "HTTP_CALLS", "note": "client -> mounted app route"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "POST /upload-pdf", "note": "the unmounted local path is gone"},
+    {"kind": "ROUTE", "name": "GET /session", "note": "the unmounted local path is gone"}
+  ]
+}

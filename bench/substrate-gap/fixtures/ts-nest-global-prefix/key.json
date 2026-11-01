@@ -1,0 +1,23 @@
+{
+  "framework": "ts-nest-global-prefix",
+  "language": "typescript",
+  "dirs": ["server", "client"],
+  "note": "GD.42 include-style mounts, NestJS. main.ts calls `app.setGlobalPrefix('svc', { exclude: ['health'] })` (immich's shape, server/src/app.common.ts); app.module.ts registers `RouterModule.register([{ path: 'backoffice', module: AdminModule }])`, and admin.module.ts's `@Module({ controllers: [UsersController] })` puts UsersController under it. Every controller route takes the global prefix, AdminModule's its RouterModule path below it, and the excluded `health` keeps its own path. The client calls `/svc/..`, so only the prefixes pair it. Baseline (pre-change CLI, glia 0.5.5+p1f568a19): ROUTEs `GET /users/all`, `POST /users`, `GET /health`, `GET /version`, `[http] paired=1` (`/health` only).",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /svc/backoffice/users/all", "exact": true, "note": "global prefix, then the RouterModule path of the controller's module"},
+    {"kind": "ROUTE", "name": "POST /svc/backoffice/users", "exact": true, "note": "the controller's bare `@Post()`"},
+    {"kind": "ROUTE", "name": "GET /svc/version", "exact": true, "note": "a controller of a module with no RouterModule path: the global prefix alone"},
+    {"kind": "ROUTE", "name": "GET /health", "exact": true, "note": "excluded from the global prefix"}
+  ],
+  "expect_edges": [
+    {"from": "GET /svc/backoffice/users/all", "to": "GET /svc/backoffice/users/all", "category": "HTTP_CALLS", "note": "client -> prefixed controller route"},
+    {"from": "POST /svc/backoffice/users", "to": "POST /svc/backoffice/users", "category": "HTTP_CALLS", "note": "client -> prefixed controller route"},
+    {"from": "GET /svc/version", "to": "GET /svc/version", "category": "HTTP_CALLS", "note": "client -> globally prefixed route"},
+    {"from": "GET /health", "to": "GET /health", "category": "HTTP_CALLS", "note": "client -> excluded route at its own path"},
+    {"from": "GET /svc/backoffice/users/all", "to": "src::admin::users.controller::UsersController::all", "category": "HANDLED_BY", "exact": true, "note": "the re-keyed ROUTE keeps its decorated handler"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /users/all", "note": "the unprefixed controller path is gone"},
+    {"kind": "ROUTE", "name": "GET /svc/health", "note": "an excluded route takes no global prefix"}
+  ]
+}

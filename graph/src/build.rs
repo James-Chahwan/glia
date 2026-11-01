@@ -736,6 +736,15 @@ where
 /// graph's declarations and heritage: the family's override IMPLEMENTS and
 /// the method-level IMPLEMENTS. A body-only edit re-runs only the stitch,
 /// for the edited files ([`rebuild_ts_bodies`]).
+///
+/// GD.42: between the surface and the stitch, the include-style route mounts
+/// (`build/route_mounts.rs`, `bind_ts_mounts`): every Express / Koa / Hono
+/// router route is re-keyed to each full path its router is mounted under
+/// (`.use('/p', ..)`, `.route('/p', ..)`, same file, imported or
+/// `require(..)`d), and with a NestJS `setGlobalPrefix` or `RouterModule` each
+/// controller route to its module's and the app's prefixes, so the stitch and
+/// every later pass see the final ROUTEs; `[route-mounts] lang=typescript ..`
+/// prints what it did, once per graph with a route module.
 fn build_ts_like<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -745,7 +754,11 @@ fn build_ts_like<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (mut g, body) = ts_surface(repo, parses, &resolve_source);
+    let (mut g, mut body, stmts) = ts_surface(repo, parses, &resolve_source);
+    let mounts = route_mounts::bind_ts_mounts(&mut g, &mut body.refs, &stmts, &resolve_source);
+    if let Some(line) = mounts.marker() {
+        eprintln!("{line}");
+    }
     let mut tally = EvidenceTally::default();
     let mut inh = InheritStats::default();
     ts_stitch(&mut g, &body, inherit.then_some(&mut inh), None, &mut tally);
@@ -771,7 +784,13 @@ struct TsBody {
 /// caller's resolver, FH.5's workspace packages and FH.16's bundler aliases
 /// among them, and the IMPORTS edges), with their markers. What it builds is
 /// the group's surface index, which [`ts_stitch`] reads and never writes.
-fn ts_surface<R>(repo: RepoId, parses: Vec<FileParse>, resolve_source: &R) -> (RepoGraph, TsBody)
+/// GD.42: and the import statements, which a route mount of an imported name
+/// reads.
+fn ts_surface<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: &R,
+) -> (RepoGraph, TsBody, Vec<ImportStmt>)
 where
     R: Fn(&str, &str) -> Option<String>,
 {
@@ -780,7 +799,7 @@ where
     let mut same = same_stem_table(&g);
     resolve_imports_ts(&mut g, &all_imports, resolve_source, &mut same);
     same.report();
-    (g, TsBody { calls, refs })
+    (g, TsBody { calls, refs }, all_imports)
 }
 
 /// GA.6: the STITCH phase of [`build_ts_like`]: resolve `body`'s calls (the

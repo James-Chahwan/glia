@@ -458,7 +458,16 @@ pub(crate) fn apply_cross_cutting_extractors(
         // A3.5: not `run!` — the routes also carry HANDLED_BY refs for named
         // Express handlers (bound by the graph builder's `resolve_refs`) and
         // a count of client calls the scan declined to mint as routes.
-        let routes = ts_routes::extract_ts_backend_routes(source, path, module_id, repo);
+        // GD.42: the module qname names a router's mount slot in its routes'
+        // provisional qnames.
+        let module_qname = fp
+            .nav
+            .qname_by_id
+            .get(&module_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut routes =
+            ts_routes::extract_ts_backend_routes(source, path, module_id, &module_qname, repo);
         stats.ts_client_calls_skipped += routes.skipped_client_calls;
         // LB.11b fired_on marker: one ROUTE per (method, path), each located
         // by a POSITION per registration; `any=` counts method-agnostic ones.
@@ -473,6 +482,11 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.refs.extend(routes.refs);
         fp.nodes.extend(routes.nodes);
         merge_nav(&mut fp.nav, routes.nav);
+        // GD.42: the include-style mount facts, on `fp.nav` itself (`merge_nav`
+        // copies no build-time table); the graph's route-mount pass reads them.
+        for fact in std::mem::take(&mut routes.mount_facts) {
+            fp.nav.record_fact(module_id, fact);
+        }
         // A10.9: tRPC routers/procedures (server) and hook/vanilla calls
         // (client); CB.13: `callers=` counts the call sites read through a
         // server-side `createCaller` product (`caller.post.all()`, no hook).

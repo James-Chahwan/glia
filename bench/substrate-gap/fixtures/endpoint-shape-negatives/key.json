@@ -4,7 +4,7 @@
   "dirs": ["."],
   "note": "FH.4a precision: the shape rule needs BOTH a path-shaped string (a `/`-led path or an http(s) URL, no whitespace) AND a method signal, and a data: / blob: / mailto: / javascript: or base64 string is never an endpoint, under any rule. `log('/tmp/x')` has no method signal; `request('users list', { method })` no path; `fetch('data:image/png;base64,..')` was minted `endpoint:GET:/data:image/png;base64,..` before FH.4a (immich's spec files minted such a node); an Express registration with an inline handler stays a ROUTE; a mock definition with a `response` is no client call; a Python dict `cache.get('/users/me')` is no call either. The positive control is the Express ROUTE.",
   "expect_nodes": [
-    {"kind": "ROUTE", "name": "GET /health", "exact": true, "note": "control: the server registration is a ROUTE"}
+    {"kind": "ROUTE", "name": "GET /api/health", "exact": true, "note": "control: the server registration is a ROUTE (GD.42: at its router's mount, `app.use('/api', routes)`)"}
   ],
   "forbid": [
     {"kind": "ENDPOINT", "name": "endpoint:GET:/tmp/x", "note": "no method signal"},

@@ -1,0 +1,25 @@
+{
+  "framework": "ts-express-use-mount",
+  "language": "typescript",
+  "dirs": ["server", "client"],
+  "note": "GD.42 include-style mounts, Express. routes/users.js's `express.Router()` (exported by `module.exports = router`) is mounted by an inline `app.use('/svc/users', require('./routes/users'))`, routes/items.ts's `Router()` (`export default router`) by an imported name, `app.use('/svc/items', items)`, and a same-file router by `app.use('/svc/health', health)`; a middleware glob `app.use('/svc/*', ..)` mounts nothing and the app's own route keeps its path. The client calls non-`/api` prefixes, so only the mount pairs them. Baseline (pre-change CLI, glia 0.5.5+p1f568a19): ROUTEs `GET /list`, `POST /`, `GET /all`, `GET /ping`, `[http] paired=0`.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /svc/users/list", "exact": true, "note": "router mounted by an inline require()"},
+    {"kind": "ROUTE", "name": "POST /svc/users", "exact": true, "note": "the router's own `/` is the mount path"},
+    {"kind": "ROUTE", "name": "GET /svc/items/all", "exact": true, "note": "router mounted by its default-import name"},
+    {"kind": "ROUTE", "name": "GET /svc/health/ping", "exact": true, "note": "router declared and mounted in one file"},
+    {"kind": "ROUTE", "name": "GET /version", "exact": true, "note": "a route on the app itself is unchanged"}
+  ],
+  "expect_edges": [
+    {"from": "GET /svc/users/list", "to": "GET /svc/users/list", "category": "HTTP_CALLS", "note": "client -> mounted route"},
+    {"from": "POST /svc/users", "to": "POST /svc/users", "category": "HTTP_CALLS", "note": "client -> mounted router root"},
+    {"from": "GET /svc/items/all", "to": "GET /svc/items/all", "category": "HTTP_CALLS", "note": "client -> imported router's route"},
+    {"from": "GET /svc/health/ping", "to": "GET /svc/health/ping", "category": "HTTP_CALLS", "note": "client -> same-file router's route"},
+    {"from": "GET /svc/users/list", "to": "listUsers", "category": "HANDLED_BY", "note": "the mounted ROUTE keeps its named handler"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /list", "note": "the unmounted local path is gone"},
+    {"kind": "ROUTE", "name": "GET /all", "note": "the unmounted local path is gone"},
+    {"kind": "ROUTE", "name": "GET /ping", "note": "the unmounted local path is gone"}
+  ]
+}

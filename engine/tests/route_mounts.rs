@@ -16,6 +16,13 @@
 //! read as a router, on the fixtures `py-flask-register-blueprint` and
 //! `py-fastapi-include-router`, whose clients call non-`/api` prefixes so only
 //! the mount pairs them.
+//!
+//! GD.42, TypeScript third: Express `app.use('/p', <router>)` (an inline
+//! `require(..)`, a default import, a same-file router), Hono `app.route('/p',
+//! <sub>)` over chained sub-apps (documenso's shape), and NestJS
+//! `setGlobalPrefix('p', { exclude })` with `RouterModule.register([{ path,
+//! module }])`, on the fixtures `ts-express-use-mount`, `ts-hono-route-mount`
+//! and `ts-nest-global-prefix`, whose clients call `/svc/..` prefixes.
 
 use std::path::Path;
 
@@ -277,5 +284,126 @@ fn fastapi_include_router_chain_mounts_and_pairs() {
     assert_eq!(
         paired(&m, "/flows/filter"),
         ["POST /svc/core/v1/flows/filter"]
+    );
+}
+
+/// GD.42, Express: each router at its mount path, the app's own route
+/// unchanged, the named handler kept; each client call pairs exactly.
+#[test]
+fn express_use_mounts_and_pairs() {
+    let (_td, m) = fixture_pair(
+        "ts-express-use-mount",
+        &["app.ts", "routes/users.js", "routes/items.ts"],
+    );
+    assert_eq!(
+        routes(&m),
+        [
+            "GET /svc/health/ping",
+            "GET /svc/items/all",
+            "GET /svc/users/list",
+            "GET /version",
+            "POST /svc/users",
+        ]
+    );
+    assert_eq!(
+        position(&m, "GET /svc/users/list").as_deref(),
+        Some("routes/users.js:4")
+    );
+    assert_eq!(paired(&m, "GET:/svc/users/list"), ["GET /svc/users/list"]);
+    assert_eq!(paired(&m, "POST:/svc/users"), ["POST /svc/users"]);
+    assert_eq!(paired(&m, "GET:/svc/items/all"), ["GET /svc/items/all"]);
+    assert_eq!(paired(&m, "GET:/svc/health/ping"), ["GET /svc/health/ping"]);
+}
+
+/// GD.42, Hono: chained sub-apps mounted by imported name, two levels deep
+/// for the auth app; each client call pairs exactly.
+#[test]
+fn hono_route_mounts_and_pairs() {
+    let (_td, m) = fixture_pair(
+        "ts-hono-route-mount",
+        &["router.ts", "api/auth.ts", "api/files/files.ts"],
+    );
+    assert_eq!(
+        routes(&m),
+        [
+            "GET /healthz",
+            "GET /svc/auth/session",
+            "GET /svc/files/item/:id",
+            "POST /svc/auth/sign-out",
+            "POST /svc/files/upload-pdf",
+        ]
+    );
+    assert_eq!(
+        position(&m, "POST /svc/files/upload-pdf").as_deref(),
+        Some("api/files/files.ts:6")
+    );
+    assert_eq!(
+        paired(&m, "POST:/svc/files/upload-pdf"),
+        ["POST /svc/files/upload-pdf"]
+    );
+    assert_eq!(
+        paired(&m, "GET:/svc/auth/session"),
+        ["GET /svc/auth/session"]
+    );
+    assert_eq!(
+        paired(&m, "POST:/svc/auth/sign-out"),
+        ["POST /svc/auth/sign-out"]
+    );
+}
+
+/// GD.42, NestJS: the global prefix on every controller route, the
+/// RouterModule path below it for AdminModule's controller, the excluded
+/// `health` at its own path, the decorated handler kept; each client call
+/// pairs exactly.
+#[test]
+fn nest_global_prefix_and_router_module_pair() {
+    let (_td, m) = fixture_pair(
+        "ts-nest-global-prefix",
+        &[
+            "src/main.ts",
+            "src/app.module.ts",
+            "src/admin/admin.module.ts",
+            "src/admin/users.controller.ts",
+            "src/health/health.module.ts",
+            "src/health/health.controller.ts",
+        ],
+    );
+    assert_eq!(
+        routes(&m),
+        [
+            "GET /health",
+            "GET /svc/backoffice/users/all",
+            "GET /svc/version",
+            "POST /svc/backoffice/users",
+        ]
+    );
+    assert_eq!(
+        paired(&m, "GET:/svc/backoffice/users/all"),
+        ["GET /svc/backoffice/users/all"]
+    );
+    assert_eq!(
+        paired(&m, "POST:/svc/backoffice/users"),
+        ["POST /svc/backoffice/users"]
+    );
+    assert_eq!(paired(&m, "GET:/svc/version"), ["GET /svc/version"]);
+    assert_eq!(paired(&m, "GET:/health"), ["GET /health"]);
+    let route = m
+        .node_id_by_qname("GET /svc/backoffice/users/all")
+        .expect("route");
+    let handled: Vec<String> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.edges.iter())
+        .chain(m.cross_edges.iter())
+        .filter(|e| e.from == route && e.category == edge_category::HANDLED_BY)
+        .filter_map(|e| {
+            m.graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&e.to).cloned())
+        })
+        .collect();
+    assert_eq!(
+        handled,
+        ["src::admin::users.controller::UsersController::all"]
     );
 }

@@ -31,8 +31,8 @@
 use std::collections::BTreeMap;
 
 use glia_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, endpoint,
-    node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, IncludeTarget, Mount, NavFact, UnresolvedRef, cell_type,
+    edge_category, endpoint, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
@@ -57,6 +57,14 @@ pub struct RouteNodes {
     /// LB.11b: ROUTE nodes whose method is `ANY` (a method-agnostic
     /// registration). Feeds the per-file `[ts-routes]` marker.
     pub any: usize,
+    /// GD.42: the file's include-style mount facts
+    /// ([`NavFact::IncludeMount`]: router values, `.use(..)` / `.route(..)`
+    /// mounts, default exports, path lists, and the NestJS controller,
+    /// `@Module`, `RouterModule` and `setGlobalPrefix` facts), for the caller
+    /// to record on the file MODULE (`CodeNav::record_fact`), in scan order.
+    /// The graph crate's route-mount pass (`graph/src/build/route_mounts.rs`)
+    /// reads them.
+    pub mount_facts: Vec<NavFact>,
 }
 
 const HTTP_METHODS: &[&str] = &[
@@ -83,9 +91,12 @@ pub fn extract_ts_backend_routes(
     source: &str,
     path: &str,
     module_id: NodeId,
+    module_qname: &str,
     repo: RepoId,
 ) -> RouteNodes {
     let mut by_route: RouteMap = BTreeMap::new();
+    // GD.42: the file's router values, verb chains and mount facts.
+    let scan = MountScan::read(source);
     // (path, METHOD, handler) triples for the HANDLED_BY refs, deduped and
     // ordered; each ref leaves from its own per-method node. The value is the
     // 0-based row of the first registration that named that handler: the
@@ -128,17 +139,39 @@ pub fn extract_ts_backend_routes(
             // `const api = new Hono(); api.get('/posts', async (c) => …)` is a
             // server router named like a client. `looks_like_http_client`
             // stays as the second line for the receiverless shapes.
-            if endpoint::is_http_client_receiver(endpoint::ident_before(t, idx))
+            // GD.42: a route on a module-level router value rides that
+            // router's mount slot (its own prefix folded into the path); a
+            // declared router (`const api = new Router()`) is no client.
+            let router = scan
+                .receiver_at(t, idx, row as usize)
+                .filter(|_| !module_qname.is_empty());
+            if router.is_none()
+                && endpoint::is_http_client_receiver(endpoint::ident_before(t, idx))
                 && !has_inline_handler(after_literal)
             {
                 skipped_client_calls += 1;
                 continue;
             }
-            if looks_like_http_client(t) {
+            if router.is_none() && looks_like_http_client(t) {
                 continue;
             }
             let handler = named_handler(after_literal);
-            if let Some(key) = add_method(&mut by_route, route, method, handler.unwrap_or(""), row)
+            let added = match router.and_then(|r| scan.routers.get(r).map(|v| (r, v))) {
+                Some((var, rv)) => add_mounted(
+                    &mut by_route,
+                    &Mount::Module {
+                        module: module_qname.to_string(),
+                        var: var.to_string(),
+                        suffix: rv.own.clone(),
+                    },
+                    route,
+                    method,
+                    handler.unwrap_or(""),
+                    row,
+                ),
+                None => add_method(&mut by_route, route, method, handler.unwrap_or(""), row),
+            };
+            if let Some(key) = added
                 && let Some(h) = handler
             {
                 handled_by
@@ -212,8 +245,9 @@ pub fn extract_ts_backend_routes(
     let (mut positioned, mut any) = (0usize, 0usize);
     for ((route, method), entry) in by_route {
         // LB.5 / LB.11b: the shared builder. Every key's path is already
-        // canonical (`add_method`), so the qname is `<METHOD> <path>`.
-        let qname = endpoint::route_qname(method, &route);
+        // canonical (`add_method`), so the qname is `<METHOD> <path>`; a
+        // GD.42 provisional key is the mount qname's tail.
+        let qname = key_qname(method, &route);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
         let mut rows = entry.rows;
         rows.sort_unstable();
@@ -245,7 +279,7 @@ pub fn extract_ts_backend_routes(
     let refs = handled_by
         .into_iter()
         .map(|((route, method, handler), line)| {
-            let qname = endpoint::route_qname(method, &route);
+            let qname = key_qname(method, &route);
             let qualifier = match handler.split_once('.') {
                 Some((base, name)) => CallQualifier::Attribute {
                     base: base.to_string(),
@@ -263,6 +297,9 @@ pub fn extract_ts_backend_routes(
         })
         .collect();
 
+    let mut mount_facts = scan.facts;
+    mount_facts.extend(nest_mount_facts(source, &nest));
+
     RouteNodes {
         nodes,
         nav,
@@ -270,6 +307,7 @@ pub fn extract_ts_backend_routes(
         skipped_client_calls,
         positioned,
         any,
+        mount_facts,
     }
 }
 
@@ -320,6 +358,49 @@ fn add_method(
     entry.rows.push(row);
     Some(key)
 }
+
+/// GD.42: [`add_method`] for a registration on a module router: `mount` is
+/// its [`Mount::Module`] slot with the router's own prefix as suffix, and
+/// the key's path is the provisional mount qname's tail,
+/// `<mount:module:<module>#<var>><own + route>` ([`endpoint::mount_route_qname`]),
+/// which [`key_qname`] turns back into the qname.
+fn add_mounted(
+    by_route: &mut RouteMap,
+    mount: &Mount,
+    route: &str,
+    method: &str,
+    handler: &str,
+    row: u32,
+) -> Option<(String, &'static str)> {
+    if route.contains("${") {
+        return None;
+    }
+    let method = method_token(method)?;
+    let qname = endpoint::mount_route_qname(method, mount, route);
+    let tail = qname.split_once(' ').map(|(_, t)| t)?.to_string();
+    let key = (tail, method);
+    let entry = by_route.entry(key.clone()).or_default();
+    if entry.handler.is_empty() {
+        entry.handler = handler.to_string();
+    }
+    entry.rows.push(row);
+    Some(key)
+}
+
+/// The ROUTE qname of a [`RouteMap`] key: `<METHOD> <path>` through
+/// [`endpoint::route_qname`], or a GD.42 provisional key (its path the mount
+/// qname's tail, [`add_mounted`]) joined back as it was built.
+fn key_qname(method: &str, path: &str) -> String {
+    if path.starts_with(MOUNT_OPEN) {
+        format!("{method} {path}")
+    } else {
+        endpoint::route_qname(method, path)
+    }
+}
+
+/// The token a provisional mount ROUTE qname's path opens with
+/// ([`endpoint::mount_route_qname`]).
+const MOUNT_OPEN: &str = "<mount:";
 
 /// The top-level arguments that follow the route literal on this line, and
 /// whether the call's closing `)` was seen there. None when the literal is not
@@ -555,6 +636,9 @@ struct NestRoute {
     path: String,
     row: u32,
     handler: Option<String>,
+    /// GD.42: the class the last `class` declaration before the decorator
+    /// names (the controller), whether or not a handler method was read.
+    class: Option<String>,
 }
 
 /// The verb decorators [`nestjs_routes`] reads, with the method each serves.
@@ -610,6 +694,7 @@ fn nestjs_routes(source: &str) -> Vec<NestRoute> {
             path,
             row,
             handler,
+            class: class.map(str::to_string),
         });
     }
     out
@@ -1332,6 +1417,763 @@ fn find_balanced_close(s: &str, open: u8, close: u8) -> Option<usize> {
     None
 }
 
+// ============================================================================
+// GD.42: include-style route mounts, TypeScript / JavaScript
+// ============================================================================
+
+/// GD.42: a module-level router value: its framework family (`express`,
+/// `koa`, `hono`) and its own prefix (a Koa `new Router({ prefix: '/x' })`,
+/// a Hono `new Hono().basePath('/x')`; `""` for any other, or when the
+/// prefix is not a string literal).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouterVar {
+    family: &'static str,
+    own: String,
+}
+
+/// GD.42: what one TS / JS file says about include-style mounts, read by a
+/// text scan in the extractor's style.
+///
+/// - Router values: a declaration at brace depth 0, `[export] const|let|var
+///   <x>[: T] = <ctor>`, `<ctor>` one of `express.Router(..)`, `Router(..)`,
+///   `express()` (family `express`), `new Router(..)` / `new KoaRouter(..)`
+///   (`koa`), `new Hono(..)` / `new Hono<..>(..)` (`hono`). A route
+///   registered on one (`<x>.get('/p', ..)`, or a `.get('/p', ..)` line
+///   continuing the chain the declaration starts: Hono's `export const files
+///   = new Hono().post('/upload', ..).get(..)`) mints the provisional
+///   `<VERB> <mount:module:<module>#<x>><own + /p>`. One fact per router,
+///   `{ via: "router:<family>", target: Dynamic(<x>), prefix: <own> }`.
+/// - Mounts: `<x>.use(['/p',] <ref>..)` and `<x>.route('/p', <ref>)`, each
+///   `<ref>` argument a router variable or an imported name (`Import`), a
+///   module attribute (`users.router`, `Import`), `require('<spec>')`
+///   (`Spec`) or a Koa `<sub>.routes()` (`Import` of `<sub>`); any other
+///   argument (a call, an inline function) is skipped, and a prefix holding
+///   `*` (a middleware glob, `app.use('/api/v2/*', cors())`) or `${`
+///   records nothing. `{ via: "<express|koa|hono>:<x>", prefix: <x's own> +
+///   '/p' }`; the graph pass decides whether the target is a router (a
+///   middleware's holds no route slot and mounts nothing).
+/// - Exports: `module.exports = <x>` / `export default <x>` of a router
+///   variable, `{ via: "export_default", target: Dynamic(<x>) }`, so an
+///   importer's default or `require` binding names it.
+/// - Path lists: a depth-0 `[export] const <X>[: T] = ['/a', '/b']` whose
+///   every element is a string literal starting with `/`, one `{ via:
+///   "path_list:<X>", target: Spec(<path>) }` per element (a NestJS
+///   `exclude` may name one from another file).
+#[derive(Debug, Default)]
+struct MountScan {
+    routers: BTreeMap<String, RouterVar>,
+    /// Per 0-based row, the router variable whose declaration's statement
+    /// is still open at the row's start (depth 0 again only on a line that
+    /// continues the chain with `.`), with the declaration's own row.
+    chain_at: Vec<Option<String>>,
+    facts: Vec<NavFact>,
+}
+
+impl MountScan {
+    fn read(source: &str) -> MountScan {
+        let mut scan = MountScan::default();
+        let depths = line_depths(source);
+        let starts = line_starts(source);
+        let mut chain: Option<String> = None;
+        for (row, line) in source.split('\n').enumerate() {
+            let t = line.trim();
+            let depth = depths.get(row).copied().unwrap_or(0);
+            if depth == 0 {
+                let rest = starts
+                    .get(row)
+                    .and_then(|&at| source.get(at..))
+                    .unwrap_or("");
+                if let Some((name, rv)) = router_decl(t, rest) {
+                    scan.facts.push(NavFact::IncludeMount {
+                        line: row_u32(row),
+                        target: IncludeTarget::Dynamic(name.to_string()),
+                        prefix: rv.own.clone(),
+                        via: format!("router:{}", rv.family),
+                    });
+                    scan.routers.insert(name.to_string(), rv);
+                    chain = Some(name.to_string());
+                } else if let Some(list) = path_list_decl(t, rest) {
+                    chain = None;
+                    let (name, paths) = list;
+                    for p in paths {
+                        scan.facts.push(NavFact::IncludeMount {
+                            line: row_u32(row),
+                            target: IncludeTarget::Spec(p),
+                            prefix: String::new(),
+                            via: format!("path_list:{name}"),
+                        });
+                    }
+                } else if !(t.is_empty()
+                    || t.starts_with('.')
+                    || t.starts_with("//")
+                    || t.starts_with("/*")
+                    || t.starts_with('*'))
+                {
+                    chain = None;
+                }
+            }
+            scan.chain_at.push(chain.clone());
+        }
+        scan.read_mounts(source, &starts);
+        scan.read_exports(source, &depths);
+        scan
+    }
+
+    /// The router variable a verb call at `idx` of trimmed line `t` (0-based
+    /// `row`) registers on: its bare receiver when that is one, else, with no
+    /// receiver (`.post(` opening the line, or right after a call's `)`),
+    /// the chain open at the row.
+    fn receiver_at(&self, t: &str, idx: usize, row: usize) -> Option<&str> {
+        if let Some(r) = bare_receiver(t, idx) {
+            return self.routers.get_key_value(r).map(|(k, _)| k.as_str());
+        }
+        let before = t.get(..idx).unwrap_or("").trim_end();
+        if before.is_empty() || before.ends_with(')') {
+            return self.chain_at.get(row).and_then(|c| c.as_deref());
+        }
+        None
+    }
+
+    /// Every `<x>.use(..)` / `<x>.route(..)` mount site (see the type doc).
+    fn read_mounts(&mut self, source: &str, starts: &[usize]) {
+        for (needle, hono) in [(".use(", false), (".route(", true)] {
+            let mut from = 0;
+            while let Some(found) = source.get(from..).and_then(|r| r.find(needle)) {
+                let dot = from + found;
+                from = dot + needle.len();
+                let row = starts.partition_point(|&s| s <= dot).saturating_sub(1);
+                let line_start = starts.get(row).copied().unwrap_or(0);
+                let includer = match bare_receiver(source.get(..dot).unwrap_or(""), dot) {
+                    Some(r) => r.to_string(),
+                    None => {
+                        let before = source.get(line_start..dot).unwrap_or("").trim();
+                        match self.chain_at.get(row).and_then(|c| c.clone()) {
+                            Some(c) if before.is_empty() || before.ends_with(')') => c,
+                            _ => continue,
+                        }
+                    }
+                };
+                let Some(close) = source
+                    .get(from..)
+                    .and_then(|r| find_balanced_close(r, b'(', b')'))
+                else {
+                    continue;
+                };
+                let args = split_top_level(source.get(from..from + close).unwrap_or(""));
+                let (prefix, refs) = match args.first().and_then(|a| string_literal(a)) {
+                    Some(p) => (p, &args[1..]),
+                    None if hono => continue,
+                    None => (String::new(), &args[..]),
+                };
+                if prefix.contains('*') || prefix.contains("${") || refs.is_empty() {
+                    continue;
+                }
+                let own = self
+                    .routers
+                    .get(&includer)
+                    .map(|r| r.own.clone())
+                    .unwrap_or_default();
+                let prefix = endpoint::join_path(&own, &prefix);
+                for arg in refs {
+                    let Some((target, koa)) = mount_ref(arg) else {
+                        continue;
+                    };
+                    let family = if hono {
+                        "hono"
+                    } else if koa {
+                        "koa"
+                    } else {
+                        "express"
+                    };
+                    self.facts.push(NavFact::IncludeMount {
+                        line: row_u32(row),
+                        target,
+                        prefix: prefix.clone(),
+                        via: format!("{family}:{includer}"),
+                    });
+                }
+            }
+        }
+    }
+
+    /// `module.exports = <x>` / `export default <x>` of a router variable,
+    /// at depth 0.
+    fn read_exports(&mut self, source: &str, depths: &[i32]) {
+        for (row, line) in source.split('\n').enumerate() {
+            if depths.get(row).copied().unwrap_or(0) != 0 {
+                continue;
+            }
+            let t = line.trim().trim_end_matches(';').trim_end();
+            let Some(name) = t
+                .strip_prefix("module.exports")
+                .and_then(|r| r.trim_start().strip_prefix('='))
+                .or_else(|| t.strip_prefix("export default "))
+                .map(str::trim)
+            else {
+                continue;
+            };
+            if self.routers.contains_key(name) {
+                self.facts.push(NavFact::IncludeMount {
+                    line: row_u32(row),
+                    target: IncludeTarget::Dynamic(name.to_string()),
+                    prefix: String::new(),
+                    via: "export_default".to_string(),
+                });
+            }
+        }
+    }
+}
+
+fn row_u32(row: usize) -> u32 {
+    u32::try_from(row).unwrap_or(u32::MAX)
+}
+
+/// Byte offset of each line's start (`'\n'`-split, so row `i` of
+/// `source.split('\n')`).
+fn line_starts(source: &str) -> Vec<usize> {
+    let mut out = vec![0];
+    out.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter(|(_, b)| *b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    out
+}
+
+/// GD.42: the bracket depth (`(`, `[`, `{` together) at the start of each
+/// `'\n'`-split line, skipping string literals, comments and template text
+/// (a `${..}` hole counts as code). Never below 0. A regex literal holding a
+/// bracket can skew it; the scan it serves only needs depth 0 at top-level
+/// statements.
+fn line_depths(source: &str) -> Vec<i32> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Code,
+        Line,
+        Block,
+        Str(u8),
+        Tmpl,
+    }
+    let b = source.as_bytes();
+    let mut out = vec![0];
+    let mut depth = 0i32;
+    // Each open `${` hole: the depth it was opened at.
+    let mut holes: Vec<i32> = Vec::new();
+    let mut state = State::Code;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        if c == b'\n' {
+            if matches!(state, State::Line | State::Str(_)) {
+                state = State::Code;
+            }
+            out.push(depth.max(0));
+            i += 1;
+            continue;
+        }
+        match state {
+            State::Line => {}
+            State::Block => {
+                if c == b'*' && next == Some(b'/') {
+                    state = State::Code;
+                    i += 1;
+                }
+            }
+            State::Str(q) => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == q {
+                    state = State::Code;
+                }
+            }
+            State::Tmpl => {
+                if c == b'\\' {
+                    i += 1;
+                } else if c == b'`' {
+                    state = State::Code;
+                } else if c == b'$' && next == Some(b'{') {
+                    holes.push(depth);
+                    depth += 1;
+                    state = State::Code;
+                    i += 1;
+                }
+            }
+            State::Code => match c {
+                b'/' if next == Some(b'/') => state = State::Line,
+                b'/' if next == Some(b'*') => {
+                    state = State::Block;
+                    i += 1;
+                }
+                b'\'' | b'"' => state = State::Str(c),
+                b'`' => state = State::Tmpl,
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'}' => {
+                    depth -= 1;
+                    if holes.last() == Some(&depth) {
+                        holes.pop();
+                        state = State::Tmpl;
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    out
+}
+
+/// GD.42: the identifier right before the `.` at byte `dot` of `s` when it
+/// is a bare variable (not itself a member `a.b.use`, nor `a?.use`).
+fn bare_receiver(s: &str, dot: usize) -> Option<&str> {
+    let ident = endpoint::ident_before(s, dot);
+    if ident.is_empty() || ident.as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    let start = s.get(..dot)?.trim_end().len() - ident.len();
+    // On the receiver's own line: a comment ending the line above in `.`
+    // says nothing about it.
+    let before = s.get(..start)?;
+    let before = before.rsplit('\n').next().unwrap_or(before).trim_end();
+    if before.ends_with('.') || before.ends_with('?') {
+        return None;
+    }
+    Some(ident)
+}
+
+/// GD.42: a router declaration at a trimmed depth-0 line `t` (see
+/// [`MountScan`]): the variable and its [`RouterVar`]. `rest` is the source
+/// from the line's start, for a constructor's arguments spanning lines.
+fn router_decl<'a>(t: &'a str, rest: &str) -> Option<(&'a str, RouterVar)> {
+    let (name, rhs) = const_decl(t)?;
+    let (family, ctor_len) = [
+        ("express.Router(", "express"),
+        ("Router(", "express"),
+        ("express(", "express"),
+        ("new Router(", "koa"),
+        ("new KoaRouter(", "koa"),
+        ("new Hono(", "hono"),
+        ("new Hono<", "hono"),
+    ]
+    .iter()
+    .find(|(ctor, _)| rhs.starts_with(ctor))
+    .map(|(ctor, family)| (*family, ctor.len()))?;
+    // The constructor's `(` in `rest` (past a Hono `<..>`).
+    let rhs_at = rest.find(rhs)?;
+    let mut open = rhs_at + ctor_len - 1;
+    if rest.as_bytes().get(open) == Some(&b'<') {
+        let close = rest
+            .get(open + 1..)
+            .and_then(|r| find_balanced_close(r, b'<', b'>'))?;
+        open = open + 1 + close + 1;
+        if rest.as_bytes().get(open) != Some(&b'(') {
+            return None;
+        }
+    }
+    let close = rest
+        .get(open + 1..)
+        .and_then(|r| find_balanced_close(r, b'(', b')'))?;
+    let args = rest.get(open + 1..open + 1 + close).unwrap_or("");
+    let after = rest.get(open + 1 + close + 1..).unwrap_or("");
+    let own = match family {
+        "koa" => obj_string_field(args, "prefix").unwrap_or_default(),
+        "hono" => after
+            .trim_start()
+            .strip_prefix(".basePath(")
+            .and_then(|r| {
+                let close = find_balanced_close(r, b'(', b')')?;
+                string_literal(r.get(..close)?.trim())
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let own = if own.contains("${") {
+        String::new()
+    } else {
+        own
+    };
+    Some((name, RouterVar { family, own }))
+}
+
+/// `[export] const|let|var <name>[: T] = <rhs>` -> (name, rhs trimmed).
+fn const_decl(t: &str) -> Option<(&str, &str)> {
+    let t = t.strip_prefix("export ").map_or(t, str::trim_start);
+    let t = ["const ", "let ", "var "]
+        .iter()
+        .find_map(|kw| t.strip_prefix(kw))?
+        .trim_start();
+    let (name, end) = read_ident(t, 0)?;
+    let rest = t.get(end..)?;
+    // The first `=` that is no `==` / `=>` (a type annotation before it).
+    let bytes = rest.as_bytes();
+    let eq = (0..bytes.len()).find(|&i| {
+        bytes[i] == b'='
+            && bytes.get(i + 1) != Some(&b'=')
+            && bytes.get(i + 1) != Some(&b'>')
+            && (i == 0 || !matches!(bytes[i - 1], b'=' | b'!' | b'<' | b'>'))
+    })?;
+    let annotation = rest.get(..eq)?.trim();
+    if !(annotation.is_empty() || annotation.starts_with(':')) {
+        return None;
+    }
+    Some((name, rest.get(eq + 1..)?.trim()))
+}
+
+/// GD.42: a depth-0 `[export] const <X>[: T] = [..]` whose every element is
+/// a string literal starting with `/` (at least one): `(X, paths)`.
+fn path_list_decl<'a>(t: &'a str, rest: &str) -> Option<(&'a str, Vec<String>)> {
+    let (name, rhs) = const_decl(t)?;
+    if !rhs.starts_with('[') {
+        return None;
+    }
+    let open = rest.find(rhs)?;
+    let close = rest
+        .get(open + 1..)
+        .and_then(|r| find_balanced_close(r, b'[', b']'))?;
+    let body = rest.get(open + 1..open + 1 + close)?;
+    let mut paths = Vec::new();
+    for item in split_top_level(body) {
+        let p = string_literal(&item)?;
+        if !p.starts_with('/') || p.contains("${") {
+            return None;
+        }
+        paths.push(p);
+    }
+    (!paths.is_empty()).then_some((name, paths))
+}
+
+/// GD.42: `s`'s comma-separated items at depth 0 (brackets and strings
+/// skipped), each trimmed, empty ones (a trailing comma) dropped.
+fn split_top_level(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'\'' | b'"' | b'`' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b',' if depth == 0 => {
+                out.push(s.get(start..i).unwrap_or("").trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push(s.get(start..).unwrap_or("").trim().to_string());
+    out.retain(|a| !a.is_empty());
+    out
+}
+
+/// GD.42: the text of `s` when it is exactly one string literal (`'a'`,
+/// `"a"`, or a template with no `${` hole).
+fn string_literal(s: &str) -> Option<String> {
+    let s = s.trim();
+    let q = *s.as_bytes().first()?;
+    if !matches!(q, b'\'' | b'"' | b'`') || s.len() < 2 || s.as_bytes()[s.len() - 1] != q {
+        return None;
+    }
+    let inner = s.get(1..s.len() - 1)?;
+    if inner.contains(q as char) || (q == b'`' && inner.contains("${")) {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
+/// GD.42: what one mount argument names: `require('<spec>')` a Spec; a
+/// Koa `<sub>.routes()` an Import of `<sub>` (`true`: the Koa form); an
+/// identifier or a one-level member (`users.router`) an Import. None for
+/// anything else.
+fn mount_ref(arg: &str) -> Option<(IncludeTarget, bool)> {
+    let a = arg.trim();
+    if let Some(inner) = a.strip_prefix("require(").and_then(|r| r.strip_suffix(')')) {
+        return string_literal(inner).map(|spec| (IncludeTarget::Spec(spec), false));
+    }
+    let (name, koa) = match a.strip_suffix(".routes()") {
+        Some(sub) => (sub.trim(), true),
+        None => (a, false),
+    };
+    let is_ident = |s: &str| {
+        !s.is_empty()
+            && !s.as_bytes()[0].is_ascii_digit()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$')
+    };
+    let ok = match name.split_once('.') {
+        Some((obj, member)) => is_ident(obj) && is_ident(member),
+        None => is_ident(name),
+    };
+    ok.then(|| {
+        (
+            IncludeTarget::Import {
+                local: name.to_string(),
+            },
+            koa,
+        )
+    })
+}
+
+/// GD.42: the NestJS mount facts of a file, recorded on its MODULE:
+///
+/// - per controller route the scan read (`nest`), `{ line: <its row>, via:
+///   "nest_route", target: Dynamic(<controller class>) }`, and once per
+///   controller class `{ via: "router:nest", target: Dynamic(<class>) }`;
+/// - per `@Module({ controllers: [A, B] })`, `{ via: "router:nest_module",
+///   target: Dynamic(<module class>) }` and one `{ via:
+///   "nest_module:<module class>", target: Import(A) }` per controller;
+/// - per `RouterModule.register([{ path, module, children }])` entry, `{
+///   via: "nest_router", target: Import(<module>), prefix: <the entry's
+///   path under its parents'> }` (a bare module class among `children`
+///   takes its parent's path);
+/// - per `app.setGlobalPrefix('<p>'[, { exclude: [..] }])`, `{ via:
+///   "nest_global", prefix: <p> }`, then per excluded literal path `{ via:
+///   "nest_exclude:<METHOD|ANY>", target: Spec(<path>) }` (a `{ path,
+///   method: RequestMethod.X }` object, or a string) and per excluded
+///   identifier `{ via: "nest_exclude_ref", target: Import(<X>) }` (a
+///   [`MountScan`] path list, here or imported).
+fn nest_mount_facts(source: &str, nest: &[NestRoute]) -> Vec<NavFact> {
+    let mut out = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for r in nest {
+        if let Some(c) = &r.class
+            && !classes.contains(&c.as_str())
+        {
+            classes.push(c);
+        }
+    }
+    for c in &classes {
+        out.push(NavFact::IncludeMount {
+            line: nest
+                .iter()
+                .find(|r| r.class.as_deref() == Some(c))
+                .map_or(0, |r| r.row),
+            target: IncludeTarget::Dynamic((*c).to_string()),
+            prefix: String::new(),
+            via: "router:nest".to_string(),
+        });
+    }
+    for r in nest {
+        if let Some(c) = &r.class {
+            out.push(NavFact::IncludeMount {
+                line: r.row,
+                target: IncludeTarget::Dynamic(c.clone()),
+                prefix: String::new(),
+                via: "nest_route".to_string(),
+            });
+        }
+    }
+    let starts = line_starts(source);
+    let row_of = |at: usize| row_u32(starts.partition_point(|&s| s <= at).saturating_sub(1));
+    for (at, args) in call_args(source, "@Module(") {
+        // The class the decorator decorates: the first class declaration in
+        // the lines after the call's `)` (its own line's rest included).
+        let after = source
+            .get(at + "@Module(".len() + args.len() + 1..)
+            .unwrap_or("");
+        let Some(module) = after
+            .lines()
+            .take(8)
+            .find_map(|l| class_decl_name(l.trim()))
+        else {
+            continue;
+        };
+        let row = row_of(at);
+        out.push(NavFact::IncludeMount {
+            line: row,
+            target: IncludeTarget::Dynamic(module.to_string()),
+            prefix: String::new(),
+            via: "router:nest_module".to_string(),
+        });
+        let obj = args.trim();
+        let Some(body) = obj.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
+            continue;
+        };
+        let Some(list) = field_value(body, "controllers").and_then(array_items) else {
+            continue;
+        };
+        for c in list {
+            if let Some((IncludeTarget::Import { local }, false)) = mount_ref(&c)
+                && !local.contains('.')
+            {
+                out.push(NavFact::IncludeMount {
+                    line: row,
+                    target: IncludeTarget::Import { local },
+                    prefix: String::new(),
+                    via: format!("nest_module:{module}"),
+                });
+            }
+        }
+    }
+    for (at, args) in call_args(source, "RouterModule.register(") {
+        if let Some(items) = array_items(args.trim()) {
+            route_tree(&items, "", row_of(at), &mut out);
+        }
+    }
+    for (at, args) in call_args(source, ".setGlobalPrefix(") {
+        let items = split_top_level(args);
+        let Some(prefix) = items.first().and_then(|a| string_literal(a)) else {
+            continue;
+        };
+        let row = row_of(at);
+        out.push(NavFact::IncludeMount {
+            line: row,
+            target: IncludeTarget::Dynamic(String::new()),
+            prefix,
+            via: "nest_global".to_string(),
+        });
+        let Some(body) = items
+            .get(1)
+            .and_then(|o| o.strip_prefix('{'))
+            .and_then(|r| r.strip_suffix('}'))
+        else {
+            continue;
+        };
+        let Some(exclude) = field_value(body, "exclude") else {
+            continue;
+        };
+        let entries = match array_items(exclude) {
+            Some(list) => list,
+            None => vec![exclude.to_string()],
+        };
+        for e in entries {
+            let (method, path) = if let Some(p) = string_literal(&e) {
+                ("ANY".to_string(), p)
+            } else if let Some(inner) = e.strip_prefix('{').and_then(|r| r.strip_suffix('}')) {
+                let Some(p) = field_value(inner, "path").and_then(string_literal) else {
+                    continue;
+                };
+                let method = field_value(inner, "method")
+                    .and_then(|m| m.rsplit('.').next())
+                    .and_then(method_token)
+                    .unwrap_or(ANY);
+                (method.to_string(), p)
+            } else {
+                if let Some((IncludeTarget::Import { local }, false)) = mount_ref(&e) {
+                    out.push(NavFact::IncludeMount {
+                        line: row,
+                        target: IncludeTarget::Import { local },
+                        prefix: String::new(),
+                        via: "nest_exclude_ref".to_string(),
+                    });
+                }
+                continue;
+            };
+            out.push(NavFact::IncludeMount {
+                line: row,
+                target: IncludeTarget::Spec(path),
+                prefix: String::new(),
+                via: format!("nest_exclude:{method}"),
+            });
+        }
+    }
+    out
+}
+
+/// GD.42: each call of `needle` (ending in `(`) in `source`: the needle's
+/// byte offset and the argument text up to its balanced `)`.
+fn call_args<'s>(source: &'s str, needle: &str) -> Vec<(usize, &'s str)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = source.get(from..).and_then(|r| r.find(needle)) {
+        let at = from + found;
+        let open = at + needle.len();
+        from = open;
+        if let Some(close) = source
+            .get(open..)
+            .and_then(|r| find_balanced_close(r, b'(', b')'))
+        {
+            out.push((at, source.get(open..open + close).unwrap_or("")));
+        }
+    }
+    out
+}
+
+/// GD.42: the value text of top-level field `field` of an object body,
+/// up to the next depth-0 comma, trimmed.
+fn field_value<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    let at = find_obj_field(body, field)?;
+    let rest = body.get(at..)?;
+    let bytes = rest.as_bytes();
+    let (mut depth, mut i) = (0i32, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'\'' | b'"' | b'`' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b',' if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(rest.get(..i.min(rest.len()))?.trim())
+}
+
+/// GD.42: the items of an array literal `[a, b]`; None when `s` is no
+/// array literal.
+fn array_items(s: &str) -> Option<Vec<String>> {
+    let s = s.trim();
+    let inner = s.strip_prefix('[')?;
+    let close = find_balanced_close(inner, b'[', b']')?;
+    Some(split_top_level(inner.get(..close)?))
+}
+
+/// GD.42: the `nest_router` facts of one `RouterModule.register` array
+/// level, each entry's path under `parent`.
+fn route_tree(items: &[String], parent: &str, row: u32, out: &mut Vec<NavFact>) {
+    for item in items {
+        let push = |module: &str, path: &str, out: &mut Vec<NavFact>| {
+            if let Some((IncludeTarget::Import { local }, false)) = mount_ref(module)
+                && !local.contains('.')
+            {
+                out.push(NavFact::IncludeMount {
+                    line: row,
+                    target: IncludeTarget::Import { local },
+                    prefix: path.to_string(),
+                    via: "nest_router".to_string(),
+                });
+            }
+        };
+        let Some(body) = item.strip_prefix('{').and_then(|r| r.strip_suffix('}')) else {
+            push(item, parent, out);
+            continue;
+        };
+        let path = match field_value(body, "path") {
+            Some(v) => match string_literal(v) {
+                Some(p) => endpoint::join_path(parent, &p),
+                None => continue,
+            },
+            None => parent.to_string(),
+        };
+        if let Some(module) = field_value(body, "module") {
+            push(module, &path, out);
+        }
+        if let Some(children) = field_value(body, "children").and_then(array_items) {
+            route_tree(&children, &path, row, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1385,7 +2227,7 @@ mod tests {
     #[test]
     fn detects_express_get() {
         let src = "app.get('/users/:id', handler);";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(r.nodes.len(), 1);
         assert_eq!(qnames(&r), vec!["GET /users/:id"]);
         // LB.11b: the name is the qname, like every other server parser.
@@ -1414,14 +2256,14 @@ mod tests {
     #[test]
     fn detects_router_post() {
         let src = "router.post('/widgets', createWidget);";
-        let r = extract_ts_backend_routes(src, "routes.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "routes.ts", module_id(), "test", repo());
         assert_eq!(r.nodes.len(), 1);
     }
 
     #[test]
     fn rejects_fetch_call() {
         let src = "fetch('/api/widgets').then(r => r.json());";
-        let r = extract_ts_backend_routes(src, "client.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "client.ts", module_id(), "test", repo());
         assert_eq!(r.nodes.len(), 0);
     }
 
@@ -1430,7 +2272,7 @@ mod tests {
     #[test]
     fn detects_nextjs_pages_router() {
         let src = "// users\nexport default function handler(req, res) { res.json({}); }";
-        let r = extract_ts_backend_routes(src, "pages/api/users.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "pages/api/users.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /api/users"]);
         assert_eq!(position_rows(node(&r, "ANY /api/users")), vec![1]);
         assert_eq!(route_methods(&r, "/api/users"), vec!["ANY"]);
@@ -1442,7 +2284,8 @@ mod tests {
     #[test]
     fn detects_nextjs_app_router_named_exports() {
         let src = "export async function GET() {}\nexport async function POST() {}";
-        let r = extract_ts_backend_routes(src, "app/api/widgets/route.ts", module_id(), repo());
+        let r =
+            extract_ts_backend_routes(src, "app/api/widgets/route.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["GET /api/widgets", "POST /api/widgets"]);
         for (q, row) in [("GET /api/widgets", 0), ("POST /api/widgets", 1)] {
             let n = node(&r, q);
@@ -1459,7 +2302,8 @@ mod tests {
     #[test]
     fn converts_nextjs_dynamic_segment() {
         let src = "export default function h() {}";
-        let r = extract_ts_backend_routes(src, "pages/api/users/[id].ts", module_id(), repo());
+        let r =
+            extract_ts_backend_routes(src, "pages/api/users/[id].ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /api/users/:id"]);
     }
 
@@ -1484,7 +2328,8 @@ export class UsersController {
   destroy() {}
 }
 "#;
-        let r = extract_ts_backend_routes(src, "src/users.controller.ts", module_id(), repo());
+        let r =
+            extract_ts_backend_routes(src, "src/users.controller.ts", module_id(), "test", repo());
         assert_eq!(
             qnames(&r),
             vec![
@@ -1512,7 +2357,7 @@ export class UsersController {
     #[test]
     fn nestjs_symbolic_paths_mint_placeholders() {
         let src = "@Controller(RouteKey.User)\nexport class U {\n  @Put('me')\n  me() {}\n\n  @Get(`${RouteKey.Album}/shared`)\n  shared() {}\n\n  @Get(`${this.base}/x`)\n  dropped() {}\n\n  @Delete(ROUTE_ID, { x: 1 })\n  del() {}\n}\n@Controller({ path: 'opts' })\nexport class O {\n  @Get()\n  list() {}\n}\n";
-        let r = extract_ts_backend_routes(src, "src/u.controller.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "src/u.controller.ts", module_id(), "test", repo());
         assert_eq!(
             qnames(&r),
             vec![
@@ -1536,8 +2381,13 @@ export class UsersController {
     #[test]
     fn nestjs_routes_are_handled_by_their_decorated_method() {
         let src = "import { Controller, Get, Put } from '@nestjs/common';\n\n@Controller('users')\nexport class UsersController {\n  @Get(':id')\n  getUser(@Param('id') id: string) {\n    return { id };\n  }\n\n  @Put('me')\n  @UseGuards(AuthGuard)\n  @ApiOperation({\n    summary: 'update (me)',\n  })\n  // the caller's own profile\n  public async updateMe(\n    @Body() body: Dto,\n  ): Promise<Dto> {\n    return body;\n  }\n}\n";
-        let r =
-            extract_ts_backend_routes(src, "src/users/users.controller.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(
+            src,
+            "src/users/users.controller.ts",
+            module_id(),
+            "test",
+            repo(),
+        );
         assert_eq!(qnames(&r), vec!["GET /users/:id", "PUT /users/me"]);
         let attr = |base: &str, name: &str| CallQualifier::Attribute {
             base: base.to_string(),
@@ -1568,7 +2418,7 @@ export class UsersController {
     #[test]
     fn nestjs_handler_shapes() {
         let src = "class Helper {}\n@Controller('a') export class AController {\n  @Get('x')\n  @Post('x')\n  both() {}\n  @Get('one') one() {}\n  @Delete('gen')\n  async generic<T>(t: T) {}\n  @Patch('opt')\n  maybe?(): void {}\n}\n@Controller('b')\nexport default abstract class BController {\n  @Get()\n  static async *stream() {}\n}\n";
-        let r = extract_ts_backend_routes(src, "src/a.controller.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "src/a.controller.ts", module_id(), "test", repo());
         // Refs come in (path, METHOD) key order.
         let got: Vec<(String, String)> = handled_by(&r)
             .into_iter()
@@ -1597,7 +2447,7 @@ export class UsersController {
     #[test]
     fn nestjs_unreadable_handler_emits_route_without_ref() {
         let src = "@Get('prop')\nhandler = () => 1;\n@Controller('c')\nexport class C {\n  @Get('field')\n  field = 1;\n}\n";
-        let r = extract_ts_backend_routes(src, "src/c.controller.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "src/c.controller.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["GET /c/field", "GET /prop"]);
         assert!(r.refs.is_empty(), "no handler ref: {:?}", handled_by(&r));
         assert_eq!(nest_method_after("\n  constructor(x: X) {}"), None);
@@ -1609,7 +2459,8 @@ export class UsersController {
     #[test]
     fn nestjs_all_is_any() {
         let src = "@Controller('health')\nexport class H {\n  @All()\n  check() {}\n}\n";
-        let r = extract_ts_backend_routes(src, "src/health.controller.ts", module_id(), repo());
+        let r =
+            extract_ts_backend_routes(src, "src/health.controller.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /health"]);
         assert_eq!(position_rows(node(&r, "ANY /health")), vec![2]);
     }
@@ -1621,6 +2472,7 @@ export class UsersController {
             src,
             "src/routes/api/widgets/+server.ts",
             module_id(),
+            "test",
             repo(),
         );
         assert_eq!(qnames(&r), vec!["GET /api/widgets", "POST /api/widgets"]);
@@ -1634,6 +2486,7 @@ export class UsersController {
             src,
             "src/routes/api/users/[id]/+server.ts",
             module_id(),
+            "test",
             repo(),
         );
         assert_eq!(qnames(&r), vec!["GET /api/users/:id"]);
@@ -1716,7 +2569,7 @@ server.route({
     handler: (req, h) => 'ok',
 });
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(route_methods(&r, "/health"), vec!["GET".to_string()]);
     }
 
@@ -1729,7 +2582,7 @@ server.route({
     handler: usersHandler,
 });
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         let methods = route_methods(&r, "/users");
         assert!(methods.contains(&"GET".to_string()));
         assert!(methods.contains(&"POST".to_string()));
@@ -1743,7 +2596,7 @@ server.route([
     { method: 'POST', path: '/b', handler: hb },
 ]);
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(route_methods(&r, "/a"), vec!["GET".to_string()]);
         assert_eq!(route_methods(&r, "/b"), vec!["POST".to_string()]);
     }
@@ -1752,7 +2605,7 @@ server.route([
     #[test]
     fn hapi_wildcard_is_any() {
         let src = "server.route({ method: '*', path: '/x', handler: h });\nserver.route({ method: 'ALL', path: '/y', handler: h });";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /x", "ANY /y"]);
         assert_eq!(r.any, 2);
     }
@@ -1775,7 +2628,7 @@ server.route({ method: 'GET', path: './templates/plugin', handler: h });
 // Multi-line garbage simulating a broken string close — has newlines, parens.
 server.route({ method: 'GET', path: '/);\n});\n        it(', handler: h });
 "#;
-        let r = extract_ts_backend_routes(src, "test.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "test.ts", module_id(), "test", repo());
         assert!(
             r.nodes.is_empty(),
             "all three paths should be rejected; got {:?}",
@@ -1789,7 +2642,7 @@ server.route({ method: 'GET', path: '/);\n});\n        it(', handler: h });
 server.route({ method: 'GET', path: '/users/{id}', handler: h });
 server.route({ method: 'POST', path: '/api/v1/users', handler: h });
 "#;
-        let r = extract_ts_backend_routes(src, "test.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "test.ts", module_id(), "test", repo());
         assert_eq!(route_methods(&r, "/users/{id}"), vec!["GET".to_string()]);
         assert_eq!(route_methods(&r, "/api/v1/users"), vec!["POST".to_string()]);
     }
@@ -1800,7 +2653,7 @@ server.route({ method: 'POST', path: '/api/v1/users', handler: h });
         let src = r#"
 server.route({ method: 'GET', path: 'cache-key', handler: h });
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert!(
             r.nodes.is_empty(),
             "non-`/` path must not emit a Hapi route"
@@ -1824,7 +2677,7 @@ Bun.serve({
     },
 });
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         // '/api/health' value is a Response, not a verb object: Bun serves it
         // for every method, so it is `ANY`.
         assert_eq!(route_methods(&r, "/api/health"), vec!["ANY".to_string()]);
@@ -1843,7 +2696,7 @@ Bun.serve({
     },
 });
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(route_methods(&r, "/api/x"), vec!["GET".to_string()]);
         // No phantom route for `port`.
         assert_eq!(r.nodes.len(), 1);
@@ -1854,7 +2707,7 @@ Bun.serve({
     #[test]
     fn route_cell_carries_method_json() {
         let src = "app.get('/x', h); app.post('/x', h);";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["GET /x", "POST /x"]);
         for (q, m) in [("GET /x", "GET"), ("POST /x", "POST")] {
             let n = node(&r, q);
@@ -1874,7 +2727,7 @@ Bun.serve({
     #[test]
     fn express_methods_are_separate_route_nodes() {
         let src = "app.get('/users', listUsers);\napp.post('/users', createUser);\napp.get('/users/:id', getUser);\napp.delete('/users/:id', deleteUser);";
-        let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "app.ts", module_id(), "test", repo());
         assert_eq!(
             qnames(&r),
             vec![
@@ -1914,7 +2767,7 @@ Bun.serve({
     #[test]
     fn express_all_is_any() {
         let src = "app.all('/health', (req, res) => res.send('ok'));";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /health"]);
         assert_eq!(route_methods(&r, "/health"), vec!["ANY"]);
         assert_eq!((r.positioned, r.any), (1, 1));
@@ -1925,8 +2778,9 @@ Bun.serve({
     #[test]
     fn route_method_line_is_the_registration_line() {
         let src = "const app = express();\napp.post('/users', createUser);";
-        let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
-        let n = node(&r, "POST /users");
+        let r = extract_ts_backend_routes(src, "app.ts", module_id(), "test", repo());
+        // GD.42: `express()` is a router value, so its routes ride its slot.
+        let n = node(&r, "POST <mount:module:test#app>/users");
         assert_eq!(position_rows(n), vec![1]);
         let rm = cells(n)
             .into_iter()
@@ -1941,7 +2795,7 @@ Bun.serve({
     #[test]
     fn repeated_registration_stacks_positions() {
         let src = "app.get('/x', (req, res) => res.end());\n\n\napp.get('/x', getX);";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(r.nodes.len(), 1);
         let n = node(&r, "GET /x");
         assert_eq!(position_rows(n), vec![0, 3]);
@@ -1965,7 +2819,7 @@ Bun.serve({
     #[test]
     fn bun_single_value_route_is_any() {
         let src = "Bun.serve({\n  routes: {\n    '/api/ping': () => new Response('pong'),\n    '/api/x': { GET: hx },\n  },\n});";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(qnames(&r), vec!["ANY /api/ping", "GET /api/x"]);
         assert_eq!(r.any, 1);
     }
@@ -1976,12 +2830,12 @@ Bun.serve({
     #[test]
     fn bun_and_hapi_rows_are_source_rows() {
         let src = "// é ünïcode\nimport x from 'y';\n\nBun.serve({\n  routes: {\n    '/a': { GET: ha },\n    '/b': new Response('b'),\n  },\n});\n";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(position_rows(node(&r, "GET /a")), vec![5]);
         assert_eq!(position_rows(node(&r, "ANY /b")), vec![6]);
 
         let src = "// hapi — server\nconst s = Hapi.server();\ns.route({\n  method: 'GET',\n  path: '/h',\n  handler: h,\n});\ns.route([\n  { method: 'POST', path: '/p', handler: p },\n]);";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(position_rows(node(&r, "GET /h")), vec![2]);
         assert_eq!(position_rows(node(&r, "POST /p")), vec![8]);
     }
@@ -2004,13 +2858,13 @@ Bun.serve({
     fn client_receiver_calls_are_not_routes() {
         let src =
             "class S { constructor(private http: any) {} f() { return this.http.get('/users'); } }";
-        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), "test", repo());
         assert!(r.nodes.is_empty(), "no ROUTE from a client call");
         assert!(r.refs.is_empty());
         assert_eq!(r.skipped_client_calls, 1);
 
         let src = "this.httpClient.post('/a', b);\napiClient.put('/b', b);\n_client.delete('/c');\n$http.get('/d');\nthis.api.patch('/e', x);\nuserApi.get('/f');";
-        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), "test", repo());
         assert!(r.nodes.is_empty(), "every client receiver is rejected");
         assert_eq!(r.skipped_client_calls, 6);
     }
@@ -2022,7 +2876,7 @@ Bun.serve({
     #[test]
     fn inline_handler_overrides_client_receiver_name() {
         let src = "api.get('/posts', async (c) => {\napi.post('/posts', (c) => c.json({}));\napi.delete('/posts/:id', c => c.body(null));\napiClient.get('/legacy', function (err, res) {";
-        let r = extract_ts_backend_routes(src, "src/api.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "src/api.ts", module_id(), "test", repo());
         assert_eq!(r.skipped_client_calls, 0);
         let posts = route_methods(&r, "/posts");
         assert!(
@@ -2033,7 +2887,7 @@ Bun.serve({
         assert_eq!(route_methods(&r, "/legacy"), vec!["GET".to_string()]);
 
         let src = "this.http.get('/x', { transform: (d) => d });\nthis.http.get('/y').pipe(map((r) => r));\nthis.http.post('/z', body).subscribe(() => done());";
-        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), "test", repo());
         assert!(
             r.nodes.is_empty(),
             "arrows outside the argument list are not handlers"
@@ -2075,7 +2929,7 @@ Bun.serve({
     #[test]
     fn express_router_calls_are_still_routes() {
         let src = "app.get('/x', h);\nrouter.post('/y', h);\nserver.put('/z', h);\nthis.app.delete('/w', h);\nthis.router.patch('/v', h);";
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         assert_eq!(r.skipped_client_calls, 0);
         assert_eq!(route_methods(&r, "/x"), vec!["GET".to_string()]);
         assert_eq!(route_methods(&r, "/y"), vec!["POST".to_string()]);
@@ -2089,7 +2943,7 @@ Bun.serve({
     #[test]
     fn named_express_handler_emits_handled_by_ref() {
         let src = "app.get(\"/users/:id\", getUser);\napp.post(\"/users\", auth, createUser);\nrouter.put('/users/:id', users.update);";
-        let r = extract_ts_backend_routes(src, "server/app.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server/app.ts", module_id(), "test", repo());
         let mut refs = handled_by(&r);
         refs.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
@@ -2148,7 +3002,7 @@ app.delete("/e", this.remove);
 app.patch("/f", auth,
   patchIt);
 "#;
-        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), "test", repo());
         for p in ["/a", "/b", "/c", "/d", "/e", "/f"] {
             assert_eq!(route_methods(&r, p).len(), 1, "route {p} still emitted");
         }
@@ -2170,5 +3024,185 @@ app.patch("/f", auth,
         assert_eq!(named_handler(")"), None);
         assert_eq!(named_handler(", h"), None);
         assert_eq!(named_handler(", h]"), None);
+    }
+    // ------------------------------------------------------------------
+    // GD.42: include-style mounts
+    // ------------------------------------------------------------------
+
+    /// `(via, target, prefix)` of every mount fact, in record order.
+    fn mounts(r: &RouteNodes) -> Vec<(String, String, String)> {
+        r.mount_facts
+            .iter()
+            .filter_map(|f| match f {
+                NavFact::IncludeMount {
+                    target,
+                    prefix,
+                    via,
+                    ..
+                } => Some((
+                    via.clone(),
+                    match target {
+                        IncludeTarget::Spec(s) => format!("spec:{s}"),
+                        IncludeTarget::Import { local } => format!("import:{local}"),
+                        IncludeTarget::Dynamic(d) => format!("dyn:{d}"),
+                    },
+                    prefix.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn m(via: &str, target: &str, prefix: &str) -> (String, String, String) {
+        (via.to_string(), target.to_string(), prefix.to_string())
+    }
+
+    /// A router file: its routes on the router's slot, the router and its
+    /// default export recorded; a route on a non-router receiver stays plain.
+    #[test]
+    fn express_router_routes_ride_their_slot() {
+        let src = "const express = require('express');\nconst router = express.Router();\nrouter.get('/list', (req, res) => res.json([]));\nother.get('/plain', h);\n\nmodule.exports = router;\n";
+        let r =
+            extract_ts_backend_routes(src, "routes/users.js", module_id(), "routes::users", repo());
+        assert_eq!(
+            qnames(&r),
+            ["GET /plain", "GET <mount:module:routes::users#router>/list"]
+        );
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:express", "dyn:router", ""),
+                m("export_default", "dyn:router", ""),
+            ]
+        );
+    }
+
+    /// Mount sites: a `require(..)` is a Spec, an imported name an Import;
+    /// a glob prefix (middleware), a call and an inline function record
+    /// nothing; every candidate argument after the prefix is one fact.
+    #[test]
+    fn express_use_mounts_are_recorded() {
+        let src = "import express from 'express';\nimport items from './routes/items';\n\nconst app = express();\napp.use('/api/users', require('./routes/users'));\napp.use('/api/items', items);\napp.use('/api/v2/*', csrfMiddleware);\napp.use(cors());\napp.use('/x', (req, res, next) => next());\napp.use('/admin', auth, adminRouter);\napp.use(rootRouter);\napp.use('/v1', users.router);\n";
+        let r = extract_ts_backend_routes(src, "app.ts", module_id(), "app", repo());
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:express", "dyn:app", ""),
+                m("express:app", "spec:./routes/users", "/api/users"),
+                m("express:app", "import:items", "/api/items"),
+                m("express:app", "import:auth", "/admin"),
+                m("express:app", "import:adminRouter", "/admin"),
+                m("express:app", "import:rootRouter", ""),
+                m("express:app", "import:users.router", "/v1"),
+            ]
+        );
+    }
+
+    /// documenso's Hono shape: a chained `new Hono<E>()` whose `.post(` lines
+    /// continue its declaration (inside handler bodies too), and a root app
+    /// with a non-literal `basePath` mounting it with `.route(..)`.
+    #[test]
+    fn hono_chains_and_route_mounts() {
+        let files = "import { Hono } from 'hono';\n\nexport const filesRoute = new Hono<HonoEnv>()\n  /**\n   * Uploads.\n   */\n  .post('/upload-pdf', validator, async (c) => {\n    if (x) {\n      return c.json({ a: 1 }, 401);\n    }\n    return c.json({});\n  })\n  .get('/item/:id', async (c) => c.json({}));\n\nconst other = 1;\nfoo.get('/after', h);\n";
+        let r = extract_ts_backend_routes(files, "api/files.ts", module_id(), "api::files", repo());
+        assert_eq!(
+            qnames(&r),
+            [
+                "GET /after",
+                "GET <mount:module:api::files#filesRoute>/item/:id",
+                "POST <mount:module:api::files#filesRoute>/upload-pdf",
+            ]
+        );
+        let root = "const app = new Hono<HonoEnv>().basePath(basePath || '/');\napp.route('/api/files', filesRoute);\napp.route('/api/csc', csc);\nconst api = new Hono().basePath('/api');\napi.route('/v1', v1);\napi.get('/health', (c) => c.text('ok'));\n";
+        let r = extract_ts_backend_routes(root, "router.ts", module_id(), "router", repo());
+        assert_eq!(qnames(&r), ["GET <mount:module:router#api>/api/health"]);
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:hono", "dyn:app", ""),
+                m("router:hono", "dyn:api", "/api"),
+                m("hono:app", "import:filesRoute", "/api/files"),
+                m("hono:app", "import:csc", "/api/csc"),
+                m("hono:api", "import:v1", "/api/v1"),
+            ]
+        );
+    }
+
+    /// Koa: a router's own `prefix` joins its routes and its mounts; a
+    /// `<sub>.routes()` argument names `<sub>`, `allowedMethods()` nothing.
+    #[test]
+    fn koa_router_prefix_and_routes_mount() {
+        let src = "const Router = require('@koa/router');\nconst api = new Router({ prefix: '/v1' });\napi.get('/a', h);\napi.use('/sub', sub.routes(), sub.allowedMethods());\n";
+        let r = extract_ts_backend_routes(src, "api.js", module_id(), "api", repo());
+        assert_eq!(qnames(&r), ["GET <mount:module:api#api>/v1/a"]);
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:koa", "dyn:api", "/v1"),
+                m("koa:api", "import:sub", "/v1/sub"),
+            ]
+        );
+    }
+
+    /// NestJS: the controller's routes and slot, a module's controllers, a
+    /// RouterModule tree (children nested and bare), a global prefix with
+    /// literal (string and object) and named excludes, and a path list.
+    #[test]
+    fn nest_facts() {
+        let ctrl = "@Controller('users')\nexport class UsersController {\n  @Get('all')\n  all() {\n    return [];\n  }\n}\n";
+        let r = extract_ts_backend_routes(ctrl, "u.controller.ts", module_id(), "u", repo());
+        assert_eq!(qnames(&r), ["GET /users/all"]);
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:nest", "dyn:UsersController", ""),
+                m("nest_route", "dyn:UsersController", ""),
+            ]
+        );
+        let module = "@Module({\n  imports: [Other],\n  controllers: [UsersController, AuthController],\n  providers: [Svc],\n})\nexport class AdminModule {}\n";
+        let r = extract_ts_backend_routes(module, "admin.module.ts", module_id(), "a", repo());
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:nest_module", "dyn:AdminModule", ""),
+                m("nest_module:AdminModule", "import:UsersController", ""),
+                m("nest_module:AdminModule", "import:AuthController", ""),
+            ]
+        );
+        let app = "@Module({\n  imports: [\n    RouterModule.register([\n      { path: 'backoffice', module: AdminModule, children: [{ path: 'v2', module: V2Module }, BareModule] },\n      { path: 'pub', module: PubModule },\n    ]),\n  ],\n})\nexport class AppModule {}\n";
+        let r = extract_ts_backend_routes(app, "app.module.ts", module_id(), "m", repo());
+        assert_eq!(
+            mounts(&r),
+            [
+                m("router:nest_module", "dyn:AppModule", ""),
+                m("nest_router", "import:AdminModule", "backoffice"),
+                m("nest_router", "import:V2Module", "backoffice/v2"),
+                m("nest_router", "import:BareModule", "backoffice"),
+                m("nest_router", "import:PubModule", "pub"),
+            ]
+        );
+        let main = "export const PATHS = ['/health', '/favicon.ico'];\nasync function boot() {\n  app.setGlobalPrefix('svc', {\n    exclude: [{ path: 'status', method: RequestMethod.GET }, 'metrics', PATHS],\n  });\n  other.setGlobalPrefix('api', { exclude: excludePaths });\n}\n";
+        let r = extract_ts_backend_routes(main, "main.ts", module_id(), "main", repo());
+        assert_eq!(
+            mounts(&r),
+            [
+                m("path_list:PATHS", "spec:/health", ""),
+                m("path_list:PATHS", "spec:/favicon.ico", ""),
+                m("nest_global", "dyn:", "svc"),
+                m("nest_exclude:GET", "spec:status", ""),
+                m("nest_exclude:ANY", "spec:metrics", ""),
+                m("nest_exclude_ref", "import:PATHS", ""),
+                m("nest_global", "dyn:", "api"),
+                m("nest_exclude_ref", "import:excludePaths", ""),
+            ]
+        );
+    }
+
+    /// The depth scan: strings, comments and template text never move it, a
+    /// `${..}` hole is code.
+    #[test]
+    fn line_depths_skip_strings_and_comments() {
+        let src = "a('(', \"{\", `x ${f({})} {`, /* ( */ b) // {\nc({\n}\n";
+        assert_eq!(line_depths(src), [0, 0, 2, 1]);
     }
 }
