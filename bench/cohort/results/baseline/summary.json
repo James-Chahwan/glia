@@ -3,9 +3,9 @@
  "glia": "glia 0.5.3 (build 0.5.3+p6ebc23fbd28cc0fa)",
  "misses": {
   "glia_blind": 163,
-  "glia_wrong": 144,
-  "noisy": 22,
-  "total": 329
+  "glia_wrong": 146,
+  "noisy": 21,
+  "total": 330
  },
  "release": "baseline",
  "repos": {
@@ -869,9 +869,9 @@
     },
     "locate": {
      "error": 0,
-     "miss": 7,
+     "miss": 8,
      "n/a": 0,
-     "pass": 3
+     "pass": 2
     },
     "names": {
      "error": 0,
@@ -889,7 +889,7 @@
    "health": {
     "blind": [],
     "client_reach": 0.775,
-    "dead_symbol": 6187,
+    "dead_symbol": 6056,
     "endpoints": 89,
     "error": null,
     "http_pairs": 72,
@@ -898,8 +898,8 @@
    },
    "misses": {
     "glia_blind": 10,
-    "glia_wrong": 10,
-    "noisy": 2
+    "glia_wrong": 12,
+    "noisy": 1
    },
    "role": "app",
    "tasks": 10
@@ -2241,7 +2241,7 @@
   "squidex-6937c0fbb13a": {
    "clear": "n/a",
    "gate": "miss",
-   "locate": "pass",
+   "locate": "miss",
    "names": "miss",
    "rest": "miss"
   },

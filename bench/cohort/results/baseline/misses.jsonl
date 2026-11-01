@@ -261,7 +261,8 @@
 {"check": "locate", "class": "glia_wrong", "repo": "squidex", "scope": "drift", "task": "squidex-65b6184b2e45", "why": "no truth file in find's top 10 (first at >20)"}
 {"check": "rest", "class": "glia_blind", "repo": "squidex", "scope": "drift", "task": "squidex-65b6184b2e45", "why": "frontend/src/app/shared/model/custom.ts: no path (no boundary node in the file)"}
 {"check": "gate", "class": "glia_wrong", "repo": "squidex", "scope": "drift", "task": "squidex-65b6184b2e45", "why": "0 breaking on a breaking change"}
-{"check": "names", "class": "noisy", "repo": "squidex", "scope": "drift", "task": "squidex-65b6184b2e45", "why": "14 files flagged for 1 truth files"}
+{"check": "names", "class": "glia_wrong", "repo": "squidex", "scope": "drift", "task": "squidex-65b6184b2e45", "why": "a client truth file is reached and holds no removed name"}
+{"check": "locate", "class": "glia_wrong", "repo": "squidex", "scope": "drift", "task": "squidex-6937c0fbb13a", "why": "no truth file in find's top 10 (first at 11)"}
 {"check": "rest", "class": "glia_blind", "repo": "squidex", "scope": "drift", "task": "squidex-6937c0fbb13a", "why": "frontend/src/app/shared/components/search/search-form.component.ts: no path (paired HTTP_CALLS); frontend/src/app/shared/state/queries.ts: no path (no boundary node in the file)"}
 {"check": "gate", "class": "glia_blind", "repo": "squidex", "scope": "drift", "task": "squidex-6937c0fbb13a", "why": "frontend/src/app/shared/components/search/search-form.component.ts: no path (paired HTTP_CALLS); frontend/src/app/shared/state/queries.ts: no path (no boundary node in the file)"}
 {"check": "names", "class": "glia_blind", "repo": "squidex", "scope": "drift", "task": "squidex-6937c0fbb13a", "why": "frontend/src/app/shared/components/search/search-form.component.ts: no path (paired HTTP_CALLS); frontend/src/app/shared/state/queries.ts: no path (no boundary node in the file)"}
