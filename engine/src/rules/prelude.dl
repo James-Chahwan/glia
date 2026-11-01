@@ -68,3 +68,15 @@ cross_repo(A, B, C) :- edge(A, B, C), repo(A, R1), repo(B, R2), R1 != R2.
 
 // Module A imports module B: the import graph lifted to MODULE nodes.
 module_dep(A, B) :- module_import(A, B).
+
+// GH.18, who starts this: host resource H (an image, a compose service, a k8s
+// workload, a Procfile type, a systemd unit, a supervisord program) is HANDLED_BY
+// the code T its start runs, drawn by resolver:host; E is that edge's EVIDENCE
+// (rule `<host>:<form>`, located at the start).
+host_handles(H, T, E) :- node(H, "INFRA_RESOURCE"), edge_cell(H, T, "HANDLED_BY", "EVIDENCE", E), contains(E, '"emitter":"resolver:host"').
+
+// Host H starts T (when, and by which host first, T's ENTRYPOINT cell says).
+starts(H, T) :- host_handles(H, T, _).
+
+// N runs in host H: what the code H starts reaches over the carry edges.
+runs_in(N, H) :- starts(H, T), reaches(T, N).

@@ -159,11 +159,24 @@ or caveat. The names are a contract: renaming one would break the rules that use
 | `effect(F, S, Class)` | `edge(F, S, C), node(S, K), effect_sink(K, C, Class)` | `F` reaches effect sink `S` directly, classed by the profile (`db`, `http_call`, `queue_produce`, ...) |
 | `cross_repo(A, B, C)` | `edge(A, B, C), repo(A, R1), repo(B, R2), R1 != R2` | an edge of category `C` whose ends sit in two repositories of a merge |
 | `module_dep(A, B)` | `module_import(A, B)` | MODULE `A` imports MODULE `B` |
+| `host_handles(H, T, E)` | `node(H, "INFRA_RESOURCE"), edge_cell(H, T, "HANDLED_BY", "EVIDENCE", E), contains(E, '"emitter":"resolver:host"')` | host resource `H` (an image, a compose service, a k8s workload, a Procfile type, a systemd unit, a supervisord program) is HANDLED_BY the code `T` its start runs, `E` that edge's EVIDENCE (rule `<host>:<form>`, GH.18) |
+| `starts(H, T)` | `host_handles(H, T, _)` | host `H` starts `T` |
+| `runs_in(N, H)` | `starts(H, T), reaches(T, N)` | `N` runs in host `H`: what the code `H` starts reaches over the carry edges |
 
 `unreached` is liveness alone, not `glia gaps`' `dead_symbol`: it keeps no dispatch or
 test-fixture exclusion, and a symbol it lists may still be called (its caveats say how). `effect`
 is one hop, the edge into the sink; `glia effects` walks the carry edges to the sinks a function
 reaches.
+
+`starts` and `runs_in` read the start rules of `resolver:host` (GH.18): a HANDLED_BY drawn from a
+host resource to the script, module or binary entry its effective argv names, located at the start's
+declaration. When it starts is on the target, not a column: the first start of a target writes its
+ENTRYPOINT cell `{"decl", "source": "host:<docker|compose|k8s|procfile|systemd|supervisor>",
+"host": "<infra qname>", "trigger": "<container_start|schedule|process_type|boot|supervised>"}`
+(`cell(T, "ENTRYPOINT", P)`). A workload that overrides nothing has no row of its own: it reaches
+its image's start over INFRA_REFERENCES (`reaches(W, H, "INFRA_REFERENCES")`). What the start rules cannot see (a
+`$VAR` command, a Helm value, a package-manager script, an image built outside the repo) is the
+`host` coverage caveat of HANDLED_BY, which a negation of `starts` carries.
 
 **Engine relations.** Each is computed by the engine only when a rule the program uses reads it, and
 every column may be bound or free:

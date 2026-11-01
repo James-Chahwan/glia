@@ -200,7 +200,19 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     // GH.6: a host's conf names a script it runs (nginx `content_by_lua_file`)
     // -> the MODULE of that file, by path (HANDLED_BY from the location's
     // ROUTE, USES for every other phase). Reads nodes and nav facts only.
-    resolver!("host", HostResolver),
+    // GH.20: a manifest binary -> its implementation. GH.18: a host start
+    // (a Dockerfile, compose service, k8s container, Procfile type, systemd
+    // unit, supervisor program) -> the code it runs, HANDLED_BY from the
+    // INFRA_RESOURCE, and that code's ENTRYPOINT cell (`source` `host:<row>`,
+    // first wins). Reads nodes, cells and the CLI_INVOKES cross edges the
+    // `cli` pass drew.
+    PassSpec {
+        name: "host",
+        stage: Stage::Resolve,
+        after: &["cli"],
+        populates: &[cell_type::ENTRYPOINT],
+        run: |m, _| resolve(m, &HostResolver, "resolver:host"),
+    },
     resolver!("iac", IacResolver),
     // DT.1h: http_model SAME_AS stars, client model -> server model. It reads
     // the HTTP_CALLS edges the `http` pass drew (EVIDENCE `resolver:http`)
@@ -720,6 +732,7 @@ mod tests {
         assert_eq!(
             CODE_PROFILE.cell_populators(),
             [
+                ("host", &[cell_type::ENTRYPOINT][..]),
                 ("fill_test_cells", &[cell_type::TEST][..]),
                 ("fill_adr_decisions", &[cell_type::DECISION][..]),
                 ("tag_synthetic_provenance", &[cell_type::ORIGIN][..]),
@@ -816,13 +829,15 @@ mod tests {
     /// every declared type is written at least once.
     #[test]
     fn populates_is_exact() {
-        const FIXTURES: [&str; 6] = [
+        // GH.18: docker-starts is where `host` writes an ENTRYPOINT cell.
+        const FIXTURES: [&str; 7] = [
             "arch-monorepo-flows",
             "py-tests",
             "xstack-go-http",
             "xcut-queue-queue_flows",
             "contract-openapi-yaml",
             "docs-adr-decision",
+            "docker-starts",
         ];
         let mut observed: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
         for fixture in FIXTURES {

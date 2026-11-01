@@ -386,6 +386,16 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Lua host settings are read for two hosts only, each key a CONFIG_KEY `config:<host>:<key>` (the value is never a node) DEFINES_CONFIG from the MODULE: WezTerm, in a file that binds `local <w> = require(\"wezterm\")`, `<c>.<key> = v` on a local bound to `<w>.config_builder()`, and the non-function keys of the table the chunk returns (a literal, or a chunk-level local bound to a literal, with every `<c>.<key> = v` on it); Neovim, `vim.opt` / `vim.opt_local` / `vim.opt_global` / `vim.o` / `vim.go` / `vim.bo` / `vim.wo` `.<key> = v` or `:append` / `:prepend` / `:remove`, and `vim.g.<key> = v` (key `g.<key>`), rooted at the unshadowed global `vim` or a local alias of it or of one of those tables, with an rvalue read of an option a READS_CONFIG from the enclosing function. Not read: a nested key (`config.colors.background` sets nothing; `vim.opt.x.y` reads x), an indexed table (`vim.bo[buf].ft`, `vim.g[\"x\"]`), `vim.api.nvim_set_option_value` / `vim.fn.setenv` calls, `vim.b` / `vim.w` / `vim.t` / `vim.env`, a config table passed to a function (`apply_to_config(config)`) or built in another file, and every other host. A host setting never pairs across repos: two repos setting `font_size` share no SHARES_CONFIG",
         verify: "grep config_builder / `return {` in wezterm.lua; grep vim.opt / vim.o / vim.g / vim.bo / vim.wo in *.lua",
     },
+    // GH.18: who starts this (resolver:host's start rules over GH.15-GH.17's
+    // start cells), measured on patterns/*/process_entry and the host-start
+    // tests. Keyed `host`: a repo whose graph holds a host start
+    // (`has_host_start`).
+    CoverageCaveat {
+        language: "host",
+        edge_category: "HANDLED_BY",
+        note: "A host start (a Dockerfile's final-stage ENTRYPOINT / CMD, a compose service or k8s container that overrides command / entrypoint / args, a Procfile type, a systemd ExecStart, a supervisord command) is HANDLED_BY the code it runs only when its effective argv names it: a script or Python module through the image's COPY map and WORKDIR (fact), else the one longest path suffix under the build context, or for a process manager its file's directory then the repo (derived; two files at that length bind nothing); a built binary through its go build / cargo build / dotnet publish line (fact) or gradle / maven output (derived: the build file's mainClass is not read, so the class named like the application, else the one `main` under the build); an unbuilt binary through the manifest binary of that name (derived). Not read: a `$VAR` / `${..}` command or image and a Helm `{{ }}` value (refused), a package-manager script (`npm run x`), a compiled `dist/` path, an entry shell script's own lines, a framework runner (`rails`, `manage.py`), a workload whose image is not built in the repo, a volume-mounted file, and a HEALTHCHECK (never the main process). A workload that overrides nothing writes no edge: it reaches its image's start through INFRA_REFERENCES",
+        verify: "grep ENTRYPOINT / CMD in Dockerfile*; grep command: / entrypoint: / args: in compose and k8s YAML; read Procfile, *.service ExecStart= and supervisord command=",
+    },
 ];
 
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
@@ -467,6 +477,9 @@ fn notes(merged: &MergedGraph, keep: impl Fn(&CoverageCaveat) -> bool) -> Vec<Co
 /// Languages present in the repo, inferred from POSITION-cell file extensions.
 fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static str> {
     let mut langs = std::collections::HashSet::new();
+    if has_host_start(merged) {
+        langs.insert("host");
+    }
     for g in &merged.graphs {
         for n in &g.nodes {
             for c in &n.cells {
@@ -492,6 +505,23 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
 /// effects, gaps' cross-language pairs) keep their 0.5.5 answer.
 fn caveat_language(path: &str) -> Option<&'static str> {
     ext_to_language(path).or_else(|| path.ends_with(".lua").then_some("lua"))
+}
+
+/// GH.18: whether the graph holds a host start (the `host` caveat rows): an
+/// INFRA_RESOURCE carrying a start cell (GH.15-GH.17: a Dockerfile, compose,
+/// k8s, Procfile, systemd or supervisord start). The files declaring them
+/// are non-code MODULEs with no POSITION, so the start cell is the signal.
+fn has_host_start(merged: &MergedGraph) -> bool {
+    use glia_code_domain::{cell_type, node_kind};
+    merged.graphs.iter().any(|g| {
+        g.nodes.iter().any(|n| {
+            g.nav.kind_by_id.get(&n.id) == Some(&node_kind::INFRA_RESOURCE)
+                && n.cells.iter().any(|c| {
+                    c.kind == cell_type::CODE
+                        && matches!(&c.payload, CellPayload::Json(s) if s.starts_with(r#"{"start":"#))
+                })
+        })
+    })
 }
 
 /// Map a file path's extension to the analyzer language name used in caveats.
@@ -1017,6 +1047,60 @@ mod tests {
         assert!(config.contains("never pairs"));
         assert!(lang_rows("src/app.py", "lua").is_empty());
         assert_eq!(ext_to_language("plugin/greet.lua"), None);
+    }
+
+    #[test]
+    fn host_starts_get_the_host_start_row() {
+        // GH.18: a repo holding a host start is told what the start rules
+        // cannot see; a repo without one, or an INFRA_RESOURCE with no start
+        // cell, gets no row.
+        use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+        use glia_core::{Cell, Confidence, Node, NodeId, RepoId};
+        use glia_graph::{RepoGraph, SymbolTable};
+        let infra = |cell: &str| {
+            let repo = RepoId::from_canonical("test://coverage-host");
+            let q = "infra:image:svc";
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, q);
+            let mut nav = CodeNav::default();
+            nav.record(id, "svc", q, node_kind::INFRA_RESOURCE, None);
+            let g = RepoGraph {
+                repo,
+                nodes: vec![Node {
+                    id,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![Cell {
+                        kind: cell_type::CODE,
+                        payload: CellPayload::Json(cell.to_string()),
+                    }],
+                }],
+                edges: vec![],
+                nav,
+                symbols: SymbolTable::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            };
+            MergedGraph::new(vec![g])
+        };
+        let rows = |m: &MergedGraph| -> Vec<(&'static str, &'static str, &'static str)> {
+            coverage_report(m)
+                .iter()
+                .filter(|n| n.language == "host")
+                .map(|n| (n.language, n.edge_category, n.note))
+                .collect()
+        };
+        let with = infra(r#"{"start":{"host":"docker","argv":["python","w.py"]}}"#);
+        let got = rows(&with);
+        assert_eq!(got.len(), 1);
+        let (_, category, note) = got[0];
+        assert_eq!(category, "HANDLED_BY");
+        assert!(note.contains("COPY map") && note.contains("$VAR"));
+        assert!(note.contains("Helm") && note.contains("INFRA_REFERENCES"));
+        assert!(note.contains("HEALTHCHECK"));
+        assert!(rows(&infra(r#"{"build":{"context":"."}}"#)).is_empty());
+        assert!(lang_rows("src/app.py", "host").is_empty());
+        assert_eq!(ext_to_language("svc/Dockerfile"), None);
     }
 
     #[test]
