@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 488,
+  "fixtures": 492,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -793,6 +793,14 @@
         "USES": 1.0
       }
     },
+    "evm-ts-residuals": {
+      "framework": "evm-ts-residuals",
+      "language": "typescript+solidity",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "RPC_CALLS": 1.0
+      }
+    },
     "external-cells-sidecar": {
       "framework": "external-cells-sidecar",
       "language": "python",
@@ -1230,6 +1238,13 @@
       "framework": "guard-script-literals",
       "language": "ruby",
       "per_category": {}
+    },
+    "heritage-qualified-bases": {
+      "framework": "heritage-qualified-bases",
+      "language": "ruby",
+      "per_category": {
+        "INHERITS_FROM": 1.0
+      }
     },
     "history-cochange": {
       "framework": "history-cochange",
@@ -2013,6 +2028,13 @@
       "language": "python",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "py-django-include": {
+      "framework": "py-django-include",
+      "language": "python+typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "py-django-orm": {
@@ -2976,6 +2998,14 @@
         "HANDLED_BY": 1.0,
         "RPC_CALLS": 1.0,
         "USES": 1.0
+      }
+    },
+    "ts-wire-residuals": {
+      "framework": "ts-wire-residuals",
+      "language": "typescript+go",
+      "per_category": {
+        "CALLS": 1.0,
+        "SAME_AS": 1.0
       }
     },
     "vue-http-calls": {

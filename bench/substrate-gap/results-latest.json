@@ -5179,26 +5179,27 @@
     },
     "python/http_server": {
       "extract": [
-        2,
-        2
+        5,
+        5
       ],
       "fixtures": [
+        "fixtures/py-django-include",
         "fixtures/py-flask-handled",
         "fixtures/py-http"
       ],
       "forbid": [
-        0,
-        0
+        4,
+        4
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        2,
-        2
+        5,
+        5
       ],
       "via": "http"
     },
@@ -9660,6 +9661,7 @@
     "fixtures/event-verb-receivers",
     "fixtures/evm-abi-cross-file",
     "fixtures/evm-shop-stack",
+    "fixtures/evm-ts-residuals",
     "fixtures/external-cells-sidecar",
     "fixtures/external-channel-clients",
     "fixtures/framework-invoked-members",
@@ -9697,6 +9699,7 @@
     "fixtures/grpc-register-impl-handlers",
     "fixtures/guard-compiled-literals",
     "fixtures/guard-script-literals",
+    "fixtures/heritage-qualified-bases",
     "fixtures/history-cochange",
     "fixtures/hostless-catchall-other-project",
     "fixtures/hostless-client-two-services",
@@ -9852,6 +9855,7 @@
     "fixtures/ts-value-positions",
     "fixtures/ts-value-references",
     "fixtures/ts-viem-web3-contract-calls",
+    "fixtures/ts-wire-residuals",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-glia-control-dir",
@@ -10032,16 +10036,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          1,
           1
         ],
         "via": "process_entry"
@@ -10058,16 +10060,14 @@
           2,
           2
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          1,
           1
         ],
         "via": "process_entry"
@@ -10084,16 +10084,14 @@
           1,
           1
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          1,
           1
         ],
         "via": "process_entry"
@@ -10289,7 +10287,7 @@
           "routing edge missing"
         ],
         "route": [
-          0,
+          2,
           4
         ],
         "via": "process_entry"
@@ -10330,16 +10328,14 @@
           1,
           1
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           1,
           1
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          1,
+          2,
           2
         ],
         "via": "process_entry"
@@ -10382,9 +10378,9 @@
     ],
     "totals": {
       "error": 0,
-      "full": 6,
+      "full": 10,
       "none": 1,
-      "partial": 7,
+      "partial": 3,
       "unknown": 112
     }
   },
