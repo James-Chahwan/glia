@@ -369,10 +369,14 @@ enum Branch {
     /// DT.5k: a TS-family static member read `T.X` whose member binds
     /// nothing USES the CLASS `T`.
     StaticMember,
+    /// GD.11: a TS-family default import read by value (the parser's USES
+    /// `Attribute { <local>, default }`) binds the declaration its module
+    /// exports as `default` ([`default_export_target`]).
+    DefaultExport,
 }
 
 impl Branch {
-    const COUNT: usize = 13;
+    const COUNT: usize = 14;
 
     fn rule(self) -> &'static str {
         match self {
@@ -389,6 +393,7 @@ impl Branch {
             Branch::ReceiverState => "receiver_state",
             Branch::ReceiverReturn => "receiver_return",
             Branch::StaticMember => "static_member",
+            Branch::DefaultExport => "default_export",
         }
     }
 }
@@ -1257,7 +1262,15 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         iface_extends,
         static_member,
         static_lowercase,
+        default_bound,
+        default_unbound,
     } = counts;
+    // GD.11 fired_on, once per graph build that read a default import by
+    // value:
+    //   `[resolve] default-import uses bound=B unbound=U`
+    if default_bound + default_unbound > 0 {
+        eprintln!("[resolve] default-import uses bound={default_bound} unbound={default_unbound}");
+    }
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
@@ -1304,6 +1317,10 @@ struct RefCounts {
     static_member: usize,
     /// GD.4: the `static_member` binds of a lowercase member.
     static_lowercase: usize,
+    /// GD.11: default imports read by value: bound to their module's
+    /// default-exported declaration, and left unbound.
+    default_bound: usize,
+    default_unbound: usize,
 }
 
 impl RefCounts {
@@ -1316,6 +1333,8 @@ impl RefCounts {
         self.iface_extends.ifaces.extend(other.iface_extends.ifaces);
         self.static_member += other.static_member;
         self.static_lowercase += other.static_lowercase;
+        self.default_bound += other.default_bound;
+        self.default_unbound += other.default_unbound;
     }
 }
 
@@ -1388,6 +1407,26 @@ fn decide_ref(
                     }
                 }),
         },
+        // GD.11: a TS-family default import read by value, `setTimeout(work)`
+        // after `import work from './helper'`: the parser writes it as the
+        // member `work.default`. It binds the declaration the module exports
+        // as `default` (looking through a default import a barrel already
+        // bound to that declaration, DT.1q), and nothing else: never the
+        // MODULE, never a name guess.
+        CallQualifier::Attribute { base, name }
+            if name == DEFAULT_EXPORT
+                && r.category == edge_category::USES
+                && files.is_ts_family(r) =>
+        {
+            let hit = bindings
+                .and_then(|b| b.get(base).copied())
+                .and_then(|b| default_export_target(g, b));
+            match hit {
+                Some(_) => counts.default_bound += 1,
+                None => counts.default_unbound += 1,
+            }
+            hit.map(|to| (to, Branch::DefaultExport))
+        }
         // GD.4: a TS-family `T.lower` read (the TS parser keeps one only for
         // an import-bound, Upper-initial base) of a CLASS binds only when the
         // class declares `static lower` exactly: a static method read by value
@@ -3402,6 +3441,46 @@ fn default_import_binding(g: &RepoGraph, module: NodeId, name: &str) -> Option<N
         .filter(|b| g.nav.kind_by_id.get(b) == Some(&node_kind::MODULE))
 }
 
+/// GD.11: the ES export name a default import binds.
+const DEFAULT_EXPORT: &str = "default";
+
+/// GD.11: the declaration a TS default import bound to `bound` names. A
+/// declaration (a barrel's `default` entry DT.1q already resolved) is
+/// itself; a MODULE is looked through to the local its
+/// [`NavFact::ExportLocal`] `{ exported: "default" }` names (`export default
+/// function work`, `export default work;`, `export { work as default }`):
+/// the module's own top-level declaration of that name, else a declaration
+/// the module's own named import of it binds. A local bound to a MODULE (a
+/// namespace or default import re-exported as `default`: the binding table
+/// cannot tell the two apart) and a module with no such entry (an anonymous
+/// or object default) name none.
+fn default_export_target(g: &RepoGraph, bound: NodeId) -> Option<NodeId> {
+    let is_module = |id: NodeId| g.nav.kind_by_id.get(&id) == Some(&node_kind::MODULE);
+    if !is_module(bound) {
+        return Some(bound);
+    }
+    let local = g.nav.nav_facts.get(&bound)?.iter().find_map(|f| match f {
+        NavFact::ExportLocal {
+            local, exported, ..
+        } if exported == DEFAULT_EXPORT => Some(local.as_str()),
+        _ => None,
+    })?;
+    let own = g
+        .symbols
+        .module_symbols
+        .get(&bound)
+        .and_then(|s| s.get(local))
+        .copied();
+    own.or_else(|| {
+        g.symbols
+            .module_import_bindings
+            .get(&bound)
+            .and_then(|b| b.get(local))
+            .copied()
+    })
+    .filter(|&id| !is_module(id))
+}
+
 /// GD.3: true when `module`'s own `export` declarations export `default`
 /// (DT.1q's [`NavFact::Exports`]).
 fn default_exports(g: &RepoGraph, module: NodeId) -> bool {
@@ -5171,6 +5250,90 @@ mod tests {
         );
         assert_eq!(g.unresolved_refs.len(), 1);
         assert_eq!(g.unresolved_refs[0].from, alias);
+    }
+
+    /// GD.11: a default import read by value (the TS parser's USES
+    /// `Attribute { <local>, default }`) binds the declaration its module
+    /// exports as `default` (rule `default_export`), under any local name; a
+    /// module whose default names no declaration (an object default) binds
+    /// nothing, never the MODULE.
+    #[test]
+    fn default_import_read_by_value_looks_through_to_the_declaration() {
+        let mut h = Shape::new();
+        let mh = h.add(node_kind::MODULE, "src::helper", None);
+        let work = h.add(node_kind::FUNCTION, "src::helper::work", Some(mh));
+        h.nav.record_fact(
+            mh,
+            NavFact::ExportLocal {
+                local: "work".to_string(),
+                exported: "default".to_string(),
+                line: 0,
+            },
+        );
+        let mut o = Shape::new();
+        let mo = o.add(node_kind::MODULE, "src::obj", None);
+        o.add(node_kind::FUNCTION, "src::obj::job", Some(mo));
+        o.nav.record_fact(
+            mo,
+            NavFact::Exports {
+                names: vec!["default".to_string()],
+            },
+        );
+        let mut r = Shape::new();
+        let mr = r.add(node_kind::MODULE, "src::run", None);
+        let run = r.add(node_kind::FUNCTION, "src::run::run", Some(mr));
+        let default_import = |module: &str, local: &str| ImportStmt {
+            from_module: "src::run".to_string(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: "default".to_string(),
+                alias: Some(local.to_string()),
+                level: 0,
+            },
+            line: 0,
+        };
+        let by_value = |local: &str, line: u32| UnresolvedRef {
+            from: run,
+            from_module: mr,
+            qualifier: CallQualifier::Attribute {
+                base: local.to_string(),
+                name: "default".to_string(),
+            },
+            category: edge_category::USES,
+            line,
+        };
+        let mut run_file = r.file(
+            vec![
+                default_import("./helper", "doWork"),
+                default_import("./obj", "job"),
+            ],
+            vec![],
+            vec![by_value("doWork", 3), by_value("job", 4)],
+        );
+        place(&mut run_file, mr, "src/run.ts");
+        let g = build_typescript(
+            repo(),
+            vec![
+                h.file(vec![], vec![], vec![]),
+                o.file(vec![], vec![], vec![]),
+                run_file,
+            ],
+            |_, spec| match spec {
+                "./helper" => Some("src::helper".to_string()),
+                "./obj" => Some("src::obj".to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let uses: Vec<(NodeId, NodeId, Option<String>)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .map(|e| (e.from, e.to, Evidence::of(e).and_then(|ev| ev.rule)))
+            .collect();
+        assert_eq!(uses, vec![(run, work, Some("default_export".to_string()))]);
+        assert_eq!(g.unresolved_refs.len(), 1);
+        assert_eq!(g.unresolved_refs[0].line, 4);
     }
 
     /// Two files contributing fields to one owner (a C# `partial class`) keep

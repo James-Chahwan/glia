@@ -114,9 +114,27 @@ fn file_ext(path: &str) -> Option<&str> {
 
 /// The extension an import specifier names itself (`./util.js` -> `js`,
 /// `./util` -> None), quotes stripped as the TS source resolver strips them.
+/// GD.11: a specifier that can only name a directory (`.`, `..`, or one
+/// ending in `/`: `./app/`) answers [`DIR_ONLY`], which [`ts_target`] binds
+/// to the directory's index module alone, never a same-stem file.
 fn spec_ext(specifier: &str) -> Option<&str> {
     let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+    if is_dir_only_spec(spec) {
+        return Some(DIR_ONLY);
+    }
     file_ext(spec)
+}
+
+/// GD.11: the [`spec_ext`] answer of a specifier that names only a
+/// directory. No file extension is `/`, so no same-stem sibling has it and
+/// [`names_a_directory`] holds for it.
+const DIR_ONLY: &str = "/";
+
+/// GD.11: a specifier tsc and Node read as a directory only: `.`, `..`, or
+/// one ending in `/` (`./app/`, `../`), quotes already stripped. `./app`
+/// loads `app.ts` first; `./app/` loads `app/index.ts` only.
+fn is_dir_only_spec(spec: &str) -> bool {
+    spec == "." || spec == ".." || spec.ends_with('/')
 }
 
 impl SameStem {
@@ -1298,6 +1316,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                     "module",
                 );
                 workspace.record(ws, hit.is_some());
+                dir_index.record_dir_only(path, hit.is_some());
                 let Some((target_id, rule)) = hit else {
                     continue;
                 };
@@ -1336,6 +1355,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                     "symbol",
                 );
                 workspace.record(ws, hit.is_some());
+                dir_index.record_dir_only(module, hit.is_some());
                 let Some((target_mod_id, rule)) = hit else {
                     continue;
                 };
@@ -1372,6 +1392,9 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
         eprintln!("{line}");
     }
     if let Some(line) = dir_index.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = dir_index.dir_only_marker() {
         eprintln!("{line}");
     }
     if let Some(line) = barrels.marker() {
@@ -1630,6 +1653,11 @@ pub(crate) fn bind_dart_library_names(
 /// chooses from) is counted unresolved and never falls through to the
 /// directory: the TS resolver has no tail fallback to try after it.
 ///
+/// GD.11: a specifier [`spec_ext`] answers [`DIR_ONLY`] for (`.`, `..`,
+/// `./app/`) skips the file and same-stem lookups: tsc reads it as the
+/// directory alone, so `from './app/'` beside `app.ts` binds `app/index.ts`
+/// or nothing.
+///
 /// The directory arm runs only for a specifier that names no file
 /// extension ([`names_a_directory`]) and an importer tsc or Node resolves
 /// ([`DIR_INDEX_IMPORTERS`]), so a Dart `.dart` / Solidity `.sol` import, a
@@ -1643,16 +1671,21 @@ fn ts_target(
     importer: NodeId,
     rule: &'static str,
 ) -> Option<(NodeId, &'static str)> {
-    if let Some(id) = g.symbols.module_by_qname.get(target_qname) {
-        return Some((*id, rule));
-    }
-    match same.pick(g, target_qname, explicit_ext, importer) {
-        SamePick::Bound(id) => return Some((id, "same_stem")),
-        SamePick::Refused => {
-            same.unresolved();
-            return None;
+    // GD.11: `./app/` names the directory: the file `app.ts` and its
+    // same-stem siblings are never its module.
+    let dir_only = explicit_ext == Some(DIR_ONLY);
+    if !dir_only {
+        if let Some(id) = g.symbols.module_by_qname.get(target_qname) {
+            return Some((*id, rule));
         }
-        SamePick::NotAStem => {}
+        match same.pick(g, target_qname, explicit_ext, importer) {
+            SamePick::Bound(id) => return Some((id, "same_stem")),
+            SamePick::Refused => {
+                same.unresolved();
+                return None;
+            }
+            SamePick::NotAStem => {}
+        }
     }
     if !names_a_directory(explicit_ext) {
         return None;
@@ -1721,6 +1754,11 @@ pub(crate) struct DirIndexBinds {
     /// Any other: a tsconfig `paths` alias the source resolver mapped
     /// (`@core/models`).
     pub(crate) alias: usize,
+    /// GD.11: statements whose specifier names only a directory (`.`, `..`,
+    /// `./app/`, [`is_dir_only_spec`]), and of them those bound to the
+    /// directory's index module.
+    pub(crate) dir_only: usize,
+    pub(crate) dir_only_bound: usize,
 }
 
 impl DirIndexBinds {
@@ -1740,13 +1778,38 @@ impl DirIndexBinds {
         }
     }
 
+    /// GD.11: count one statement of specifier `spec` that resolved or not
+    /// (`bound`), when the specifier names only a directory.
+    fn record_dir_only(&mut self, spec: &str, bound: bool) {
+        if spec_ext(spec) != Some(DIR_ONLY) {
+            return;
+        }
+        self.dir_only += 1;
+        self.dir_only_bound += usize::from(bound);
+    }
+
     /// DT.1b fired_on, once per graph build that bound a directory import:
     ///   `[imports] dir-index binds=<n> (relative=<r> alias=<a>)`
     pub(crate) fn marker(&self) -> Option<String> {
-        let DirIndexBinds { relative, alias } = *self;
-        let n = relative + alias;
-        (n > 0)
-            .then(|| format!("[imports] dir-index binds={n} (relative={relative} alias={alias})"))
+        let n = self.relative + self.alias;
+        (n > 0).then(|| {
+            format!(
+                "[imports] dir-index binds={n} (relative={} alias={})",
+                self.relative, self.alias
+            )
+        })
+    }
+
+    /// GD.11 fired_on, once per graph build holding a directory-only
+    /// specifier:
+    ///   `[imports] dir_only_specifiers=<d> bound=<b>`
+    pub(crate) fn dir_only_marker(&self) -> Option<String> {
+        (self.dir_only > 0).then(|| {
+            format!(
+                "[imports] dir_only_specifiers={} bound={}",
+                self.dir_only, self.dir_only_bound
+            )
+        })
     }
 }
 
@@ -3211,6 +3274,48 @@ mod tests {
         assert!(same.module_ext.is_some());
     }
 
+    /// GD.11: `'./app/'`, `'.'` and `'..'` name only a directory, as tsc
+    /// reads them: the index module binds, the same-stem file `app.ts` never
+    /// does (`'./app'` keeps binding the file). With no index they bind
+    /// nothing.
+    #[test]
+    fn dir_only_specifiers_bind_the_index_never_the_file() {
+        assert_eq!(spec_ext("'./app/'"), Some(DIR_ONLY));
+        assert_eq!(spec_ext("."), Some(DIR_ONLY));
+        assert_eq!(spec_ext(".."), Some(DIR_ONLY));
+        assert_eq!(spec_ext("./app"), None);
+        let app = file("src/app.ts", "src::app", "app", &["y"]);
+        let app_index = file("src/app/index.ts", "src::app::index", "index", &["y"]);
+        let src_index = file("src/index.ts", "src::index", "index", &["y"]);
+        let feature = file("src/feature/page.ts", "src::feature::page", "page", &["z"]);
+        let mut dir = file("src/dir.ts", "src::dir", "dir", &["z"]);
+        import_show(&mut dir, "src::dir", "./app/", "y");
+        import_show(&mut dir, "src::dir", "./app", "y");
+        import_module(&mut dir, "src::dir", ".", Some("here"));
+        let mut page = feature;
+        import_module(&mut page, "src::feature::page", "..", Some("up"));
+        import_module(&mut page, "src::feature::page", "./none/", Some("none"));
+        let g = build_typescript(
+            repo(),
+            vec![app, app_index, src_index, dir, page],
+            ts_source,
+        )
+        .expect("build");
+        let to = |q: &str, rule: &str| (module(q), rule.to_string());
+        assert_eq!(
+            imports_from(&g, "src::dir"),
+            [
+                to("src::app::index", DIR_INDEX),
+                to("src::app", "symbol"),
+                to("src::index", DIR_INDEX),
+            ]
+        );
+        assert_eq!(
+            imports_from(&g, "src::feature::page"),
+            [to("src::index", DIR_INDEX)]
+        );
+    }
+
     #[test]
     fn named_binding_through_index() {
         let q = "src::app::core::services::account.service";
@@ -3383,7 +3488,8 @@ mod tests {
             binds,
             DirIndexBinds {
                 relative: 1,
-                alias: 2
+                alias: 2,
+                ..DirIndexBinds::default()
             }
         );
         let marker = binds.marker();

@@ -182,6 +182,9 @@ fn parse_file_stats(
     // `@Entity` class still gates it; read them all before any visit.
     (acc.typeorm.import, acc.typeorm.access) = typeorm_imports(root, src);
     acc.declared_globals = declared_globals(root, src);
+    // GD.11: likewise the `react` bindings a `memo(..)` / `forwardRef(..)`
+    // component wrapper is gated on.
+    acc.react_wrappers = react_wrapper_imports(root, src);
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -483,6 +486,15 @@ struct Acc {
     accessor_ref_seen: HashMap<(NodeId, String, bool), usize>,
     /// DT.5g: the `[ts-value-refs]` walk counters.
     value_stats: ValueRefStats,
+    /// GD.11: the local names a `react` import binds to `memo` /
+    /// `forwardRef` and to the `react` module itself
+    /// ([`react_wrapper_imports`]), read before any visit.
+    react_wrappers: ReactWrappers,
+    /// GD.11: the file's CommonJS reads (the `[ts-cjs]` marker).
+    cjs: CjsStats,
+    /// GD.11: `memo(..)` / `forwardRef(..)` consts minted as COMPONENT
+    /// FUNCTIONs (the `[ts-components]` marker).
+    component_wrappers: usize,
     /// DT.1k: typed GraphQL client calls ([`try_detect_graphql_result`]), in
     /// walk order. Gated and attached to their callables by
     /// [`attach_graphql_results`] once every import of the file is read.
@@ -657,6 +669,37 @@ struct ValueRefStats {
     const_inits: usize,
     /// Class decorators whose call arguments were walked as the class's code.
     decorators: usize,
+    /// GD.11: `export default { .. }` objects walked as the MODULE's code.
+    default_object: usize,
+}
+
+/// GD.11: the local names one file's `react` imports bind
+/// ([`react_wrapper_imports`]): what a `memo(..)` / `forwardRef(..)` /
+/// `React.memo(..)` wrapper call names.
+#[derive(Default, Debug)]
+struct ReactWrappers {
+    /// `memo` / `forwardRef` named imports, by local name.
+    fns: HashSet<String>,
+    /// The default or namespace import of `react` (`React` in `React.memo`).
+    namespaces: HashSet<String>,
+}
+
+/// GD.11: what one file's CommonJS statements recorded (the `[ts-cjs]`
+/// marker).
+#[derive(Default, Clone, Copy)]
+struct CjsStats {
+    /// Top-level `const x = require('./m')` / `const { a } = require('./m')`
+    /// / `require('./m');` statements read as imports (relative specifiers).
+    requires: usize,
+    /// `module.exports = require('..')` and `...require('..')` spreads in a
+    /// `module.exports = { .. }`, each a [`NavFact::ReExportStar`].
+    reexports: usize,
+    /// Names exported through `exports.k = ..`, `module.exports.k = ..` and
+    /// a `module.exports = { .. }` object's own members.
+    exports: usize,
+    /// Of `exports`, `exports.k = function ..` / `= () => ..` values minted
+    /// as FUNCTION `k`.
+    functions: usize,
 }
 
 /// DF.22a: what typed a local of a TS-family callable, for the `[ts-locals]`
@@ -1045,6 +1088,10 @@ fn visit_top(
             if let Some(decl) = n.child_by_field_name("declaration") {
                 // DT.1q: the names this declaration exports, node or not.
                 record_exported_names(n, decl, src, acc);
+                // GD.11: `export default function work() {}` exports the
+                // declaration `work` as `default` (ECMA-262's local export
+                // entry), what a default import's value reference binds.
+                record_default_local(n, decl, src, module_id, acc);
                 // G19: surface module-level exported data constants
                 // (`export const NAME = ...`) as STATE_VAR nodes. Arrow/function
                 // consts are still hoisted to Function nodes by visit_lexical.
@@ -1056,9 +1103,24 @@ fn visit_top(
                 // DT.1q: `export default <expr>;`.
                 acc.exported.insert(DEFAULT_EXPORT.to_string());
                 // DT.5g: `export default bootstrap;` reads `bootstrap` as a
-                // value, the MODULE's.
+                // value, the MODULE's. GD.11: and exports it as `default`.
                 if value.kind() == "identifier" {
                     push_value_ref(acc, module_id, text(value, src), line_at(value), None);
+                    acc.nav.record_fact(
+                        module_id,
+                        NavFact::ExportLocal {
+                            local: text(value, src).to_string(),
+                            exported: DEFAULT_EXPORT.to_string(),
+                            line: line_at(n),
+                        },
+                    );
+                } else if default_object(value).is_some() {
+                    // GD.11: `export default { save: onSave, onLoad }` is
+                    // built at load, as a module-level const initialiser is:
+                    // its members' values are the MODULE's value references
+                    // and its calls the MODULE's calls.
+                    collect_calls_in(value, src, module_id, None, acc);
+                    acc.value_stats.default_object += 1;
                 }
             } else {
                 collect_reexport(n, src, module_id, acc);
@@ -1091,9 +1153,16 @@ fn visit_top(
             visit_function_decl(n, src, file_rel, module_qname, module_id, repo, acc);
         }
         "lexical_declaration" | "variable_declaration" => {
+            // GD.11: `const x = require('./m')` / `const { a } = require('./m')`.
+            collect_require_imports(n, src, module_qname, acc);
             visit_lexical(n, src, file_rel, module_qname, module_id, repo, acc);
         }
         "expression_statement" => {
+            // GD.11: CommonJS `module.exports = ..` / `exports.k = ..`; an
+            // exported function value is its own FUNCTION, walked there.
+            if collect_commonjs(n, src, file_rel, module_qname, module_id, repo, acc) {
+                return;
+            }
             // Top-level calls — record with module as source.
             collect_calls_in(n, src, module_id, None, acc);
         }
@@ -1273,6 +1342,456 @@ fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
     if !clause_or_ns && let Some(source) = source {
         acc.nav
             .record_fact(module_id, NavFact::ReExportStar { source, line });
+    }
+}
+
+/// GD.11: `export default <decl>` of a named function, generator or class
+/// records [`NavFact::ExportLocal`] `{ local: <name>, exported: "default" }`,
+/// ECMA-262's local export entry for it (16.2.3.5: the declaration's bound
+/// name, export name `default`). The graph reads it to look a default
+/// import's value reference through the MODULE to the declaration
+/// (`glia_graph` calls, rule `default_export`). An anonymous declaration
+/// (`export default function () {}`) binds no name and records nothing.
+fn record_default_local(stmt: TsNode, decl: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let mut c = stmt.walk();
+    if !stmt.children(&mut c).any(|ch| ch.kind() == "default") {
+        return;
+    }
+    if !matches!(
+        decl.kind(),
+        "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration"
+    ) {
+        return;
+    }
+    let Some(name) = child_text(decl, "name", src) else {
+        return;
+    };
+    acc.nav.record_fact(
+        module_id,
+        NavFact::ExportLocal {
+            local: name.to_string(),
+            exported: DEFAULT_EXPORT.to_string(),
+            line: line_at(stmt),
+        },
+    );
+}
+
+/// GD.11: the object literal an `export default` value is: `{ .. }` itself,
+/// or one under `as T` / `satisfies T` / parentheses.
+fn default_object(value: TsNode) -> Option<TsNode> {
+    match value.kind() {
+        "object" => Some(value),
+        "as_expression" | "satisfies_expression" | "parenthesized_expression" => {
+            let mut c = value.walk();
+            let inner = value
+                .named_children(&mut c)
+                .find(|ch| ch.kind() != "comment")?;
+            default_object(inner)
+        }
+        _ => None,
+    }
+}
+
+/// GD.11: the local names the file's `import .. from 'react'` statements
+/// bind: `memo` / `forwardRef` named imports (aliases honoured) and the
+/// default or namespace import (`React`, read as `React.memo`). Imports are
+/// hoisted, so all are read before any declaration is visited.
+fn react_wrapper_imports(root: TsNode, src: &[u8]) -> ReactWrappers {
+    let mut out = ReactWrappers::default();
+    let mut cursor = root.walk();
+    for stmt in root.named_children(&mut cursor) {
+        if stmt.kind() != "import_statement" {
+            continue;
+        }
+        let Some(source) = stmt.child_by_field_name("source") else {
+            continue;
+        };
+        if strip_string_quotes(text(source, src)) != "react" {
+            continue;
+        }
+        let mut sc = stmt.walk();
+        let Some(clause) = stmt
+            .named_children(&mut sc)
+            .find(|c| c.kind() == "import_clause")
+        else {
+            continue;
+        };
+        let mut cc = clause.walk();
+        for part in clause.named_children(&mut cc) {
+            match part.kind() {
+                "identifier" => {
+                    out.namespaces.insert(text(part, src).to_string());
+                }
+                "namespace_import" => {
+                    let mut nc = part.walk();
+                    if let Some(id) = part
+                        .named_children(&mut nc)
+                        .find(|c| c.kind() == "identifier")
+                    {
+                        out.namespaces.insert(text(id, src).to_string());
+                    }
+                }
+                "named_imports" => {
+                    let mut ic = part.walk();
+                    for spec in part.named_children(&mut ic) {
+                        let Some(name) = child_text(spec, "name", src) else {
+                            continue;
+                        };
+                        if REACT_WRAPPERS.contains(&name) {
+                            let local = child_text(spec, "alias", src).unwrap_or(name);
+                            out.fns.insert(local.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// GD.11: React's component wrappers, whose function argument is the
+/// component.
+const REACT_WRAPPERS: &[&str] = &["memo", "forwardRef"];
+
+/// GD.11: the function a React component wrapper call holds: `value` is
+/// `memo(f)` / `forwardRef(f)` (a `react` named import, alias honoured) or
+/// `React.memo(f)` / `React.forwardRef(f)` (the `react` default or namespace
+/// import), type arguments allowed, and its first argument is an arrow
+/// function or function expression, or another wrapper call holding one
+/// (`memo(forwardRef(f))`). A wrapper the file does not import from `react`
+/// holds nothing.
+fn react_wrapped_fn<'t>(value: TsNode<'t>, src: &[u8], w: &ReactWrappers) -> Option<TsNode<'t>> {
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let callee = value.child_by_field_name("function")?;
+    let wrapper = match callee.kind() {
+        "identifier" => w.fns.contains(text(callee, src)),
+        "member_expression" => {
+            let object = callee.child_by_field_name("object")?;
+            let property = callee.child_by_field_name("property")?;
+            object.kind() == "identifier"
+                && w.namespaces.contains(text(object, src))
+                && REACT_WRAPPERS.contains(&text(property, src))
+        }
+        _ => false,
+    };
+    if !wrapper {
+        return None;
+    }
+    let args = value.child_by_field_name("arguments")?;
+    let mut c = args.walk();
+    let first = args
+        .named_children(&mut c)
+        .find(|a| a.kind() != "comment")?;
+    match first.kind() {
+        "arrow_function" | "function_expression" => Some(first),
+        _ => react_wrapped_fn(first, src, w),
+    }
+}
+
+/// GD.11: the `type_arguments` of each wrapper call from `value` down to the
+/// function [`react_wrapped_fn`] finds (`forwardRef<E, P>(..)`), outermost
+/// first.
+fn wrapper_type_args<'t>(value: TsNode<'t>, src: &[u8], w: &ReactWrappers) -> Vec<TsNode<'t>> {
+    let mut out = Vec::new();
+    let mut at = value;
+    while react_wrapped_fn(at, src, w).is_some() {
+        if let Some(args) = at.child_by_field_name("type_arguments") {
+            out.push(args);
+        }
+        let Some(first) = at.child_by_field_name("arguments").and_then(|a| {
+            let mut c = a.walk();
+            a.named_children(&mut c).find(|x| x.kind() != "comment")
+        }) else {
+            break;
+        };
+        at = first;
+    }
+    out
+}
+
+/// GD.11: the ROLE cell of a FUNCTION a React component wrapper holds, as
+/// LB.3a's fold writes one (`glia_graph::roles`).
+fn component_role_cell() -> Cell {
+    Cell {
+        kind: cell_type::ROLE,
+        payload: CellPayload::Json("{\"roles\":[\"COMPONENT\"]}".to_string()),
+    }
+}
+
+/// GD.11: the specifier of a `require('<spec>')` call: the callee the bare
+/// identifier `require`, its one argument a plain string literal.
+fn require_spec(n: TsNode, src: &[u8]) -> Option<String> {
+    if n.kind() != "call_expression" {
+        return None;
+    }
+    let callee = n.child_by_field_name("function")?;
+    if callee.kind() != "identifier" || text(callee, src) != "require" {
+        return None;
+    }
+    let args = n.child_by_field_name("arguments")?;
+    let mut c = args.walk();
+    let mut it = args
+        .named_children(&mut c)
+        .filter(|a| a.kind() != "comment");
+    let only = it.next()?;
+    if it.next().is_some() || only.kind() != "string" {
+        return None;
+    }
+    Some(strip_string_quotes(text(only, src)))
+}
+
+/// GD.11: a specifier naming a file or directory of this repo by path
+/// (`./m`, `../lib`, `.`, `..`): the only `require` read as an import, so a
+/// package `require('express')` adds no import binding and no gate.
+fn is_relative_spec(spec: &str) -> bool {
+    spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../")
+}
+
+/// GD.11: a top-level `const x = require('./m')` is a namespace-like import
+/// of `./m` bound to `x` (the module's exports object), `const { a, b: c } =
+/// require('./m')` named imports of `a` and `b` (bound to `a` and `c`), as
+/// the ES forms `import * as x` / `import { a, b as c }` bind. A relative
+/// specifier only ([`is_relative_spec`]); any other declarator is left to
+/// [`visit_lexical`].
+fn collect_require_imports(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+    let mut cursor = n.walk();
+    for declarator in n.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let (Some(name), Some(value)) = (
+            declarator.child_by_field_name("name"),
+            declarator.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        let Some(spec) = require_spec(value, src).filter(|s| is_relative_spec(s)) else {
+            continue;
+        };
+        let line = line_at(n);
+        match name.kind() {
+            "identifier" => acc.imports.push(ImportStmt {
+                from_module: from_module.to_string(),
+                target: ImportTarget::Module {
+                    path: spec,
+                    alias: Some(text(name, src).to_string()),
+                },
+                line,
+            }),
+            "object_pattern" => {
+                let mut pc = name.walk();
+                for prop in name.named_children(&mut pc) {
+                    let (imported, local) = match prop.kind() {
+                        "shorthand_property_identifier_pattern" => (text(prop, src), None),
+                        "pair_pattern" => {
+                            let (Some(k), Some(v)) = (
+                                prop.child_by_field_name("key"),
+                                prop.child_by_field_name("value"),
+                            ) else {
+                                continue;
+                            };
+                            if v.kind() != "identifier" {
+                                continue;
+                            }
+                            (text(k, src), Some(text(v, src).to_string()))
+                        }
+                        _ => continue,
+                    };
+                    acc.imports.push(ImportStmt {
+                        from_module: from_module.to_string(),
+                        target: ImportTarget::Symbol {
+                            module: spec.clone(),
+                            name: strip_string_quotes(imported),
+                            alias: local,
+                            level: 0,
+                        },
+                        line,
+                    });
+                }
+            }
+            _ => continue,
+        }
+        acc.cjs.requires += 1;
+    }
+}
+
+/// GD.11: the export name `left` assigns when it is `exports.<k>` or
+/// `module.exports.<k>`.
+fn commonjs_export_name<'s>(left: TsNode, src: &'s [u8]) -> Option<&'s str> {
+    if left.kind() != "member_expression" {
+        return None;
+    }
+    let object = left.child_by_field_name("object")?;
+    let property = left.child_by_field_name("property")?;
+    if property.kind() != "property_identifier" {
+        return None;
+    }
+    let on_exports = match object.kind() {
+        "identifier" => text(object, src) == "exports",
+        _ => is_module_exports(object, src),
+    };
+    on_exports.then(|| text(property, src))
+}
+
+/// GD.11: `n` is the expression `module.exports`.
+fn is_module_exports(n: TsNode, src: &[u8]) -> bool {
+    n.kind() == "member_expression"
+        && n.child_by_field_name("object")
+            .is_some_and(|o| o.kind() == "identifier" && text(o, src) == "module")
+        && n.child_by_field_name("property")
+            .is_some_and(|p| text(p, src) == "exports")
+}
+
+/// GD.11: a top-level CommonJS statement, recorded as the DT.1q export facts
+/// an ES module would record:
+/// - `module.exports = require('./x')` and each `...require('./x')` spread of
+///   a `module.exports = { .. }` -> [`NavFact::ReExportStar`] (the module's
+///   exports are `./x`'s);
+/// - a `module.exports = { .. }` member `a` / `b: c` -> [`NavFact::ExportLocal`]
+///   `a -> a` / `c -> b` (an identifier value), any other member value its
+///   name in [`NavFact::Exports`] (exported, no binding);
+/// - `exports.k = ident` / `module.exports.k = ident` -> ExportLocal `ident ->
+///   k`; `= function ..` / `= (..) => ..` mints FUNCTION `k` from the value
+///   (unless the file declares a top-level function `k`), exported as `k`;
+///   any other value exports `k` with no binding;
+/// - `require('./x');` -> a side-effect import of `./x` (relative only).
+///
+/// Returns true when it minted a FUNCTION, whose body that FUNCTION's walk
+/// reads: the caller then skips the MODULE's walk of the statement.
+fn collect_commonjs(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> bool {
+    let mut c = n.walk();
+    let Some(expr) = n.named_children(&mut c).find(|e| e.kind() != "comment") else {
+        return false;
+    };
+    let line = line_at(n);
+    if let Some(spec) = require_spec(expr, src).filter(|s| is_relative_spec(s)) {
+        acc.imports.push(ImportStmt {
+            from_module: module_qname.to_string(),
+            target: ImportTarget::Module {
+                path: spec,
+                alias: None,
+            },
+            line,
+        });
+        acc.cjs.requires += 1;
+        return false;
+    }
+    if expr.kind() != "assignment_expression" {
+        return false;
+    }
+    let (Some(left), Some(right)) = (
+        expr.child_by_field_name("left"),
+        expr.child_by_field_name("right"),
+    ) else {
+        return false;
+    };
+    let star = |acc: &mut Acc, source: String| {
+        acc.nav
+            .record_fact(module_id, NavFact::ReExportStar { source, line });
+        acc.cjs.reexports += 1;
+    };
+    let local = |acc: &mut Acc, local: &str, exported: &str| {
+        acc.nav.record_fact(
+            module_id,
+            NavFact::ExportLocal {
+                local: local.to_string(),
+                exported: exported.to_string(),
+                line,
+            },
+        );
+        acc.cjs.exports += 1;
+    };
+    if is_module_exports(left, src) {
+        if let Some(spec) = require_spec(right, src) {
+            star(acc, spec);
+            return false;
+        }
+        if right.kind() != "object" {
+            return false;
+        }
+        let mut oc = right.walk();
+        for member in right.named_children(&mut oc) {
+            match member.kind() {
+                "spread_element" => {
+                    let mut sc = member.walk();
+                    if let Some(spec) = member
+                        .named_children(&mut sc)
+                        .find(|x| x.kind() != "comment")
+                        .and_then(|x| require_spec(x, src))
+                    {
+                        star(acc, spec);
+                    }
+                }
+                "shorthand_property_identifier" => {
+                    let name = text(member, src);
+                    local(acc, name, name);
+                }
+                "pair" => {
+                    let (Some(k), Some(v)) = (
+                        member.child_by_field_name("key"),
+                        member.child_by_field_name("value"),
+                    ) else {
+                        continue;
+                    };
+                    if !matches!(k.kind(), "property_identifier" | "string") {
+                        continue;
+                    }
+                    let key = strip_string_quotes(text(k, src));
+                    if v.kind() == "identifier" {
+                        local(acc, text(v, src), &key);
+                    } else {
+                        acc.exported.insert(key);
+                        acc.cjs.exports += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return false;
+    }
+    let Some(name) = commonjs_export_name(left, src) else {
+        return false;
+    };
+    match right.kind() {
+        "identifier" => {
+            local(acc, text(right, src), name);
+            false
+        }
+        "arrow_function" | "function_expression" if !acc.module_functions.contains_key(name) => {
+            emit_function_value(
+                right,
+                name,
+                src,
+                file_rel,
+                module_qname,
+                module_id,
+                repo,
+                acc,
+            );
+            acc.exported.insert(name.to_string());
+            acc.cjs.exports += 1;
+            acc.cjs.functions += 1;
+            true
+        }
+        _ => {
+            acc.exported.insert(name.to_string());
+            acc.cjs.exports += 1;
+            false
+        }
     }
 }
 
@@ -3301,6 +3820,13 @@ fn visit_lexical(
             continue;
         };
         let name_n = declarator.child_by_field_name("name");
+        // GD.11: `const Card = memo((..) => ..)` / `forwardRef(..)` of a
+        // `react` import: the wrapped function IS the component, a FUNCTION
+        // `Card` with the COMPONENT role, never a data const.
+        let (value, component) = match react_wrapped_fn(value, src, &acc.react_wrappers) {
+            Some(inner) => (inner, true),
+            None => (value, false),
+        };
         if !matches!(value.kind(), "arrow_function" | "function_expression") {
             // GD.3: a module-level `const x = new T(..)` is an instance every
             // function of the file may read.
@@ -3344,6 +3870,25 @@ fn visit_lexical(
             repo,
             acc,
         );
+        if component {
+            let func_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::FUNCTION,
+                &format!("{module_qname}::{name}"),
+            );
+            if let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == func_id) {
+                node.cells.push(component_role_cell());
+            }
+            // The wrappers' type arguments (`forwardRef<HTMLDivElement,
+            // CardProps>`) are the component's type references.
+            if let Some(outer) = declarator.child_by_field_name("value") {
+                for args in wrapper_type_args(outer, src, &acc.react_wrappers) {
+                    collect_calls_in(args, src, func_id, None, acc);
+                }
+            }
+            acc.component_wrappers += 1;
+        }
     }
 }
 
@@ -3502,9 +4047,11 @@ fn visit_exported_const(
             continue;
         }
         let value = declarator.child_by_field_name("value");
-        // Arrow/function consts are hoisted to Function nodes by visit_lexical.
+        // Arrow/function consts are hoisted to Function nodes by visit_lexical,
+        // and so are React component wrappers (GD.11, `memo(() => ..)`).
         if let Some(v) = value
-            && matches!(v.kind(), "arrow_function" | "function_expression")
+            && (matches!(v.kind(), "arrow_function" | "function_expression")
+                || react_wrapped_fn(v, src, &acc.react_wrappers).is_some())
         {
             continue;
         }
@@ -8542,10 +9089,11 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // unresolved refs. A self-reference is dropped.
     let value_refs = std::mem::take(&mut acc.value_refs);
     let candidates = value_refs.len();
-    let (mut in_file, mut imported) = (0usize, 0usize);
+    let (mut in_file, mut imported, mut default_imported) = (0usize, 0usize, 0usize);
     {
         let inject_bindings = inject_import_bindings(&out.imports);
         let named_imports = named_import_bindings(&out.imports);
+        let default_imports = default_import_bindings(&out.imports);
         for vr in value_refs {
             let is_inject =
                 |c: &Option<String>| c.as_deref().is_some_and(|c| inject_bindings.contains(c));
@@ -8640,6 +9188,25 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                     line: row,
                 });
                 imported += 1;
+            } else if default_imports.contains(vr.name.as_str())
+                && let Some(module_id) = acc.module_id
+            {
+                // GD.11: a default import passed by value names the module's
+                // `default` export: a USES `Attribute { <local>, default }`
+                // ref, which the graph binds through the MODULE to the
+                // declaration the module exports as `default` (rule
+                // `default_export`), and leaves unbound when it exports none.
+                out.refs.push(UnresolvedRef {
+                    from: vr.from,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Attribute {
+                        base: vr.name,
+                        name: DEFAULT_EXPORT.to_string(),
+                    },
+                    category: edge_category::USES,
+                    line: row,
+                });
+                default_imported += 1;
             }
         }
     }
@@ -8674,11 +9241,26 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     }
 
     let vs = acc.value_stats;
-    if candidates + vs.const_inits + vs.decorators + accessor_edges > 0 {
+    if candidates + vs.const_inits + vs.decorators + accessor_edges + vs.default_object > 0 {
         eprintln!(
             "[ts-value-refs] refs={candidates} in_file={in_file} imported={imported} \
-             const_inits={} decorators={} accessor_calls={accessor_edges} file={}",
-            vs.const_inits, vs.decorators, acc.file_rel
+             const_inits={} decorators={} accessor_calls={accessor_edges} \
+             default_imported={default_imported} default_object={} file={}",
+            vs.const_inits, vs.decorators, vs.default_object, acc.file_rel
+        );
+    }
+    // GD.11: the file's CommonJS statements, and its React component wrappers.
+    let cjs = acc.cjs;
+    if cjs.requires + cjs.reexports + cjs.exports > 0 {
+        eprintln!(
+            "[ts-cjs] requires={} reexports={} exports={} (functions={}) file={}",
+            cjs.requires, cjs.reexports, cjs.exports, cjs.functions, acc.file_rel
+        );
+    }
+    if acc.component_wrappers > 0 {
+        eprintln!(
+            "[ts-components] wrapped={} file={}",
+            acc.component_wrappers, acc.file_rel
         );
     }
 
@@ -9113,6 +9695,22 @@ fn named_import_bindings(imports: &[ImportStmt]) -> HashSet<&str> {
             ImportTarget::Symbol { name, alias, .. } if name != DEFAULT_EXPORT => {
                 Some(alias.as_deref().unwrap_or(name.as_str()))
             }
+            _ => None,
+        })
+        .collect()
+}
+
+/// GD.11: the local names a default import binds (`X` for `import X from`),
+/// which a value reference reads as the module's `default` export.
+fn default_import_bindings(imports: &[ImportStmt]) -> HashSet<&str> {
+    imports
+        .iter()
+        .filter_map(|imp| match &imp.target {
+            ImportTarget::Symbol {
+                name,
+                alias: Some(alias),
+                ..
+            } if name == DEFAULT_EXPORT => Some(alias.as_str()),
             _ => None,
         })
         .collect()
@@ -15747,16 +16345,21 @@ class Private {}
 function helper() {}
 ";
         let got = facts(src, "src/decls.ts");
+        // GD.11: `export default class K` is also ECMA-262's local export
+        // entry `K -> default`.
         assert_eq!(
             got,
-            [exports(&[
-                "A", "B", "E", "I", "N", "T", "c1", "c2", "d1", "decl", "default", "df", "e2", "f",
-                "g", "l", "rest", "sig",
-            ])]
+            [
+                local("K", "default", 15),
+                exports(&[
+                    "A", "B", "E", "I", "N", "T", "c1", "c2", "d1", "decl", "default", "df", "e2",
+                    "f", "g", "l", "rest", "sig",
+                ])
+            ]
         );
         // The non-exported class and `K` (exported as `default` only) are
         // absent; the namespace's inner export is no module export.
-        let NavFact::Exports { names } = &got[0] else {
+        let NavFact::Exports { names } = &got[1] else {
             unreachable!()
         };
         for absent in ["Private", "helper", "K", "z", "Inner"] {
@@ -18047,5 +18650,301 @@ export function upper() { return Api.MODE; }
                 ("src::use::upper".to_string(), "Api.MODE".to_string()),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod value_position_tests {
+    //! GD.11: a default import read by value, `export default { .. }`
+    //! members, CommonJS `require` / `module.exports` / `exports.k`, and the
+    //! `memo(..)` / `forwardRef(..)` component wrappers.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-value-positions")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str, path: &str, qname: &str) -> FileParse {
+        parse_file(src, path, qname, repo()).expect("parse")
+    }
+
+    fn module_facts(p: &FileParse, qname: &str) -> Vec<NavFact> {
+        p.nav
+            .nav_facts
+            .get(&id(node_kind::MODULE, qname))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn local(local: &str, exported: &str, line: u32) -> NavFact {
+        NavFact::ExportLocal {
+            local: local.into(),
+            exported: exported.into(),
+            line,
+        }
+    }
+
+    /// The `(to, rule)` of every USES edge from `from`, sorted by target id.
+    fn uses_from(p: &FileParse, from: NodeId) -> Vec<(NodeId, String)> {
+        let mut out: Vec<(NodeId, String)> = p
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::USES)
+            .map(|e| {
+                let rule = Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default();
+                (e.to, rule)
+            })
+            .collect();
+        out.sort_by_key(|(to, _)| to.0);
+        out
+    }
+
+    fn has_component_role(p: &FileParse, node: NodeId) -> bool {
+        p.nodes
+            .iter()
+            .find(|n| n.id == node)
+            .is_some_and(|n| n.cells.contains(&component_role_cell()))
+    }
+
+    #[test]
+    fn default_import_read_by_value_is_a_default_member_ref() {
+        let src = "\
+import work, { named } from './helper';
+import * as ns from './ns';
+export function run() {
+  setTimeout(work, 1);
+  register(named, ns);
+}
+";
+        let p = parse(src, "src/run.ts", "src::run");
+        let run = id(node_kind::FUNCTION, "src::run::run");
+        let mut refs: Vec<(String, String, u32)> = p
+            .refs
+            .iter()
+            .filter(|r| r.from == run && r.category == edge_category::USES)
+            .map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => ("bare".to_string(), n.clone(), r.line),
+                CallQualifier::Attribute { base, name } => (base.clone(), name.clone(), r.line),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        refs.sort();
+        assert_eq!(
+            refs,
+            [
+                ("bare".to_string(), "named".to_string(), 4),
+                ("work".to_string(), "default".to_string(), 3),
+            ],
+            "the namespace import still records nothing"
+        );
+    }
+
+    #[test]
+    fn export_default_declarations_and_identifiers_are_default_locals() {
+        let p = parse(
+            "export default function work() { return 1; }\n",
+            "src/helper.ts",
+            "src::helper",
+        );
+        assert!(module_facts(&p, "src::helper").contains(&local("work", "default", 0)));
+        let p = parse(
+            "function boot() {}\nexport default boot;\n",
+            "src/main.ts",
+            "src::main",
+        );
+        assert!(module_facts(&p, "src::main").contains(&local("boot", "default", 1)));
+        // An anonymous default binds no name.
+        let p = parse(
+            "export default function () { return 1; }\n",
+            "src/anon.ts",
+            "src::anon",
+        );
+        assert!(
+            !module_facts(&p, "src::anon")
+                .iter()
+                .any(|f| matches!(f, NavFact::ExportLocal { .. })),
+        );
+    }
+
+    #[test]
+    fn export_default_object_members_are_module_value_refs() {
+        let src = "\
+function onSave() { return 1; }
+function onLoad() { return 2; }
+function onDrop() { return 3; }
+export default { save: onSave, onLoad, nested: { drop: onDrop } } satisfies Handlers;
+";
+        let p = parse(src, "src/handlers.ts", "src::handlers");
+        let module = id(node_kind::MODULE, "src::handlers");
+        let f = |n: &str| id(node_kind::FUNCTION, &format!("src::handlers::{n}"));
+        let mut want = vec![
+            (f("onSave"), "value_ref".to_string()),
+            (f("onLoad"), "value_ref".to_string()),
+            (f("onDrop"), "value_ref".to_string()),
+        ];
+        want.sort_by_key(|(to, _)| to.0);
+        assert_eq!(uses_from(&p, module), want);
+    }
+
+    #[test]
+    fn commonjs_reexports_exports_and_requires() {
+        let barrel = parse(
+            "module.exports = require('./impl');\n",
+            "lib/index.js",
+            "lib::index",
+        );
+        assert_eq!(
+            module_facts(&barrel, "lib::index"),
+            [NavFact::ReExportStar {
+                source: "./impl".into(),
+                line: 0
+            }]
+        );
+        let spread = parse(
+            "function b() {}\nmodule.exports = { ...require('./a'), b, c: b, d: 1 };\n",
+            "lib/all.js",
+            "lib::all",
+        );
+        assert_eq!(
+            module_facts(&spread, "lib::all"),
+            [
+                NavFact::ReExportStar {
+                    source: "./a".into(),
+                    line: 1
+                },
+                local("b", "b", 1),
+                local("b", "c", 1),
+                NavFact::Exports {
+                    names: vec!["d".to_string()]
+                },
+            ]
+        );
+        let src = "\
+const helper = require('./helper');
+exports.a = function a() { helper.go(); };
+module.exports.h = helper;
+exports.n = 1;
+";
+        let p = parse(src, "lib/impl.js", "lib::impl");
+        let a = id(node_kind::FUNCTION, "lib::impl::a");
+        assert!(
+            p.nodes.iter().any(|n| n.id == a),
+            "exports.a mints a FUNCTION"
+        );
+        assert!(
+            p.calls.iter().any(|c| c.from == a),
+            "its body is the FUNCTION's"
+        );
+        let facts = module_facts(&p, "lib::impl");
+        assert!(facts.contains(&local("helper", "h", 2)), "{facts:?}");
+        assert!(
+            facts.contains(&NavFact::Exports {
+                names: vec!["a".to_string(), "n".to_string()]
+            }),
+            "{facts:?}"
+        );
+        assert_eq!(
+            p.imports
+                .iter()
+                .map(|i| i.target.clone())
+                .collect::<Vec<_>>(),
+            [ImportTarget::Module {
+                path: "./helper".into(),
+                alias: Some("helper".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn relative_requires_are_imports_and_packages_are_not() {
+        let src = "\
+const { a, b: c } = require('../lib');
+const express = require('express');
+require('./polyfill');
+function main() { a(); c(); }
+";
+        let p = parse(src, "src/use.js", "src::use");
+        let targets: Vec<ImportTarget> = p.imports.iter().map(|i| i.target.clone()).collect();
+        let sym = |name: &str, alias: Option<&str>| ImportTarget::Symbol {
+            module: "../lib".into(),
+            name: name.into(),
+            alias: alias.map(str::to_string),
+            level: 0,
+        };
+        assert_eq!(
+            targets,
+            [
+                sym("a", None),
+                sym("b", Some("c")),
+                ImportTarget::Module {
+                    path: "./polyfill".into(),
+                    alias: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn react_wrappers_are_component_functions() {
+        let src = "\
+import React, { memo as m, forwardRef } from 'react';
+function format(s: string) { return s; }
+export const Card = m(({ t }: { t: string }) => <div>{format(t)}</div>);
+type FieldProps = { name: string };
+const Field = forwardRef<HTMLInputElement, FieldProps>((props, ref) => <input ref={ref} />);
+export const Both = React.memo(React.forwardRef(function Inner(p, r) { return format('x'); }));
+export const Plain = memoize(() => 1);
+";
+        let p = parse(src, "src/Card.tsx", "src::Card");
+        for name in ["Card", "Field", "Both"] {
+            let f = id(node_kind::FUNCTION, &format!("src::Card::{name}"));
+            assert!(has_component_role(&p, f), "{name}");
+            let sv = id(node_kind::STATE_VAR, &format!("src::Card::{name}"));
+            assert!(
+                !p.nodes.iter().any(|n| n.id == sv),
+                "{name} is no STATE_VAR"
+            );
+        }
+        let (card, format) = (
+            id(node_kind::FUNCTION, "src::Card::Card"),
+            id(node_kind::FUNCTION, "src::Card::format"),
+        );
+        assert!(
+            p.edges
+                .iter()
+                .any(|e| e.from == card && e.to == format && e.category == edge_category::CALLS),
+            "the wrapped arrow's body is the component's"
+        );
+        // The wrapper's type arguments are the component's type references.
+        let (field, props) = (
+            id(node_kind::FUNCTION, "src::Card::Field"),
+            id(node_kind::INTERFACE, "src::Card::FieldProps"),
+        );
+        assert_eq!(
+            uses_from(&p, field),
+            [(props, "type_ref".to_string())],
+            "the props type is the component's"
+        );
+        // A call no `react` import names is data, as before.
+        let plain = id(node_kind::STATE_VAR, "src::Card::Plain");
+        assert!(p.nodes.iter().any(|n| n.id == plain));
+    }
+
+    #[test]
+    fn wrappers_without_a_react_import_stay_data() {
+        let src = "\
+import { memo } from './memo';
+export const Card = memo(() => 1);
+";
+        let p = parse(src, "src/Card.tsx", "src::Card");
+        let sv = id(node_kind::STATE_VAR, "src::Card::Card");
+        assert!(p.nodes.iter().any(|n| n.id == sv));
+        let f = id(node_kind::FUNCTION, "src::Card::Card");
+        assert!(!p.nodes.iter().any(|n| n.id == f));
     }
 }

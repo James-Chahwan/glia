@@ -1,0 +1,102 @@
+{
+  "framework": "ts-value-positions",
+  "language": "typescript+javascript",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.11 (FD.40; seed W19 DT.5g, the DT.1q spec, W15 DT.1b). (1) src/run.ts passes its default import `work` by value: the USES looks through src/helper.ts's MODULE to the declaration `export default function work` names. (2) `export default { save: onSave, onLoad }` is a value position, the MODULE's. (3) lib/index.js is a CommonJS barrel, `module.exports = require('./impl')` (a re-export star), lib/impl.js exports `a` through `exports.a = function a() {}` (a FUNCTION), and src/use.js's `const { a } = require('../lib')` binds `a()` through the barrel. (4) `from './app/'` names only the directory: src/app/index.ts, never the same-stem file src/app.ts. (5) `export const Card = memo(..)` / `forwardRef(..)` of a react import are FUNCTIONs with the COMPONENT role, not STATE_VARs. The JSX-handler item moved to GD.39 (ruling 2026-10-31). Baseline HEAD 3c1f3d36 (grade.py, leap wheel; debug CLI agrees): every expect row XX (USES 0/3, IMPORTS 0/3, CALLS 0/1, nodes 0/3, ROLE 0/2) and all 4 forbid rows fire (src::dir IMPORTS src::app, STATE_VAR Card / Field, a standalone COMPONENT Card).",
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "src::Card::Card",
+      "exact": true
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Card::Field",
+      "exact": true
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "lib::impl::a",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::run::run",
+      "to": "src::helper::work",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "src::handlers",
+      "to": "src::handlers::onSave",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "src::handlers",
+      "to": "src::handlers::onLoad",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "lib::index",
+      "to": "lib::impl",
+      "category": "IMPORTS",
+      "exact": true
+    },
+    {
+      "from": "src::use",
+      "to": "lib::index",
+      "category": "IMPORTS",
+      "exact": true
+    },
+    {
+      "from": "src::use::main",
+      "to": "lib::impl::a",
+      "category": "CALLS",
+      "exact": true
+    },
+    {
+      "from": "src::dir",
+      "to": "src::app::index",
+      "category": "IMPORTS",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "src::Card::Card",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "src::Card::Field",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::dir",
+      "to": "src::app",
+      "category": "IMPORTS"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "src::Card::Card"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "src::Card::Field"
+    },
+    {
+      "kind": "COMPONENT",
+      "name": "src::Card::Card"
+    }
+  ]
+}
