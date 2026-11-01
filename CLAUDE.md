@@ -8,14 +8,14 @@ This file provides guidance to Claude Code when working in the Rust workspace. T
 
 **glia** is the Rust engine behind repo-graph. It parses source, builds a unified cross-language graph, stores it in a zero-copy `.gmap` file (rkyv + mmap), runs Personalised PageRank activation over it, and projects it to dense text or structured forms.
 
-Designed to be domain-agnostic: code is the first primitive, but other domains (video, molecules, policy, climate) slot in via the same registry model. See `dev-notes/glia-memory/project_050_domain_agnostic.md` for the direction.
+Designed to be domain-agnostic: code is the first primitive, but other domains (video, molecules, policy, climate) slot in via the same registry model. See `dev-notes/glia-memory/project_050_domain_agnostic.md` for the direction, and `docs/dpg.md` (0.5.6, GP.16) for the model as it stands: a DPG, a Domain-Parameterised Graph, a property graph whose domain profile supplies entry rules, carry edges, ranking weights and identity rules.
 
 ## Workspace Layout
 
 ```
 core/               Node, Edge, QName, shared primitives (no domain assumptions)
 code-domain/        Code-specific registries: NodeKind, EdgeCategory, CellType (u32 IDs)
-                    + the code DomainTables (profile.rs)
+                    + the code DomainTables (profile.rs) + the host table (hosts.rs, 0.5.6)
 graph/              Per-repo graph builder, universal resolver, cross-graph resolvers
                     src/ is MODULES, not one lib.rs (see "Module layout" below). Its parser
                     crates (python, go, typescript) are [dev-dependencies] only (CD.6a):
@@ -99,7 +99,11 @@ parsers/code/
                 RPC_CALL `evm_call:<scope>.<fn>` / EVENT_HANDLER `evm_event:<scope>.<E>`
                 with an evm ENDPOINT_HIT (`[evm-client] lang=ts|go ..`,
                 `[evm-wrappers]`); angular_template (DT.5a-DT.5c): the Angular
-                template / host-metadata scanner and binder (`[angular-template]`)
+                template / host-metadata scanner and binder (`[angular-template]`);
+                0.5.6: nginx (GH.6, nginx / OpenResty confs that run Lua: `*_by_lua_file`
+                locations as ROUTEs and NavFact::HostScriptRef, `[nginx]`); iac reads
+                Dockerfile, compose, k8s, skaffold, Procfile, systemd and supervisord starts
+                (GH.13, GH.15-GH.17); cli writes manifest binaries' targets (GH.20)
 stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
@@ -172,6 +176,13 @@ The facade rules:
    `import_default_binding`), and FB.14 the CLI's hidden `embed-worker` command (cli/src/main.rs,
    cmd/mod.rs) with Cargo.lock's second move: fastembed 4.9.1 -> 6.0.0, ort rc.9 -> rc.13, the
    lock 447 -> 381 packages).
+   0.5.6 had no wave 0 and moved no Cargo.lock: each packet that made a module added only its
+   own `mod` line, code-domain lib.rs's `pub mod hosts;` (GH.2, which also holds the appended
+   NavFact variants HostScriptRef GH.6, ReExportHide GD.8, IncludeMount and the IncludeTarget
+   enum GD.40, ContainerRegister / ContainerInject / Mixin GD.18, EvmContract / EvmImportSite
+   GD.31), graph build.rs's `mod partial;` (GA.3) and `mod route_mounts;` (GD.40), resolvers/mod.rs's
+   `mod host_scripts; mod host_start;` with `pub use host_scripts::HostResolver;` (GH.6, GH.18) and
+   the extractors' `pub mod nginx;` (GH.6); no engine, graph or py facade line moved.
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
@@ -200,7 +211,13 @@ engine/src/   lib.rs        facade (rules above)
                             Pipfile python roots (DE.9); a `[[project]]` label names a
                             detected root whose manifest names nothing (`relabelled=`); a
                             directory symlink is walked once: an in-repo link at its target,
-                            an outside target once, a cycle cut (FD.78, `[walk] symlinks ..`)
+                            an outside target once, a cycle cut (FD.78, `[walk] symlinks ..`);
+                            0.5.6: a source dir named `build/` / `out/` is walked unless it sits
+                            directly under the repo or a project root (or is gitignored), the
+                            build-output home (GD.25, code_domain::walk_gating::gate_dir_in,
+                            `[walk] collapsed .. build_source=<n>`); `.yarn/` is an always
+                            region beside node_modules (a11ec18d: Yarn 2+'s committed
+                            `releases/yarn-<v>.cjs` minted phantom ROUTEs once `.cjs` parsed)
               route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto; since FD.31
                             pom.xml, build.gradle(.kts) and .NET project files are manifest
                             paths, walked and routed to the manifest branch), parse cache;
@@ -250,7 +267,9 @@ engine/src/   lib.rs        facade (rules above)
                                            scans, RPC needle halves and pure non-code routing
                                            outcomes replayed for unchanged files by a caller that
                                            holds a cache across builds (watch, in-process rev
-                                           builds), `[graft-memo] const hit=..`; in memory only
+                                           builds), `[graft-memo] const hit=..`; in memory only;
+                                           0.5.6: the A16.4 IMPORTS filter (GA.20) and the
+                                           inferred-wrapper readings and wrapper scan (GA.21)
                             c_includes.rs  IncludeRoots / IncludeResolver — C/C++ include search
                                            roots (compile_commands.json, CMake, include/; CB.22)
                             timing.rs      the per-phase `[timing]` stderr timers (CA.9)
@@ -266,9 +285,9 @@ engine/src/   lib.rs        facade (rules above)
                             changed (`[evidence-split] graphs=..`); test_route_ids (DT.6a), the
                             one test-only-ROUTE predicate the `http` pass, the provenance stamp
                             and (DT.6b) gaps / suspected read
-              profile.rs    CODE_PASSES — every build pass in run order (18 Resolve passes: 15
-                            cross-graph resolvers, then models, identity and org_packages
-                            (FA.22); 9 post-passes,
+              profile.rs    CODE_PASSES — every build pass in run order (19 Resolve passes: 16
+                            cross-graph resolvers (0.5.6's `host` after `config`, GH.6), then
+                            models, identity and org_packages (FA.22); 9 post-passes,
                             evidence fill + determinism sort); run_code_passes_with(merged,
                             &CodeBuildCtx) is the whole build tail (run_code_passes is gone, DD.7);
                             CodeBuildCtx::for_merge passes a layout merge's recorded SCIP roots, so
@@ -388,6 +407,35 @@ engine/src/   lib.rs        facade (rules above)
               goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.7 (T6: goal/, clarify/;
                        T9: targets.rs): goal/mod.rs and clarify/mod.rs declare their children,
                        every child file is doc-only (`Reserved for 0.5.7`)
+  0.5.6 additions (no new slot; each extends the module named):
+              trace     GB.1 (+GB.3): concept_flows / concept_flows_with_live, ConceptOptions
+                       (`semantic`, `rank_cache`), ConceptHit (`similarity`), ConceptTier (entry,
+                       hop_name, hop_qname, kind, mechanism, data_entity, external_host, doc,
+                       semantic), DEFAULT_CONCEPT_LIMIT; TraceAnswer.resolved_by `concept` /
+                       `concept_semantic`; TraceOptions gains `semantic` / `rank_cache`
+              find      GB.2: flows_through, find_flows / find_flows_with_live, FindFlows,
+                       FlowsThrough, FlowRef, DEFAULT_FLOWS_PER_HIT (20)
+              watch     GA.8 (per-repo RepoWatch), GA.9 (open_many, roots; a multi-repo session
+                       names groups and paths `<label>:<key>` / `<label>:<rel>`), GA.4 / GA.6 /
+                       GA.7 (WatchUpdate.body_only, the fast path through lang_build's
+                       `fast_path_for` = python | go | typescript and `rebody_group`; read once
+                       at open, GLIA_WATCH_FAST_PATH=0 off), GA.12 (set_memory_budget,
+                       memory_budget, memory -> WatchMemory), GA.11 (the debounce's max-latency
+                       cap), GA.15 (embed after each update, CLI only), GA.17 (an overlay edit
+                       rebuilds only the groups whose post-graft parses it moved)
+              memory    GA.12 / GA.14: MemoryBudget (BUDGET_ENV `GLIA_MEMORY_BUDGET_MB`,
+                       from_env, rules_bytes), rss_kb public; one RSS target the watch evicts
+                       to (group builds, then memos) and the rules byte budget reads
+              cache     GA.1: Part, surface_class, surface_language, surface_fingerprint(_strict):
+                       a file's declaration surface, the fast path's body-only test
+              delta     GA.18: DeltaEdge `rule` / `was_emitter` / `was_rule`, change `restamped`,
+                       DeltaCounts.edges_restamped, RevDelta.renames
+              rules     GA.14: QueryOptions.byte_budget (default MemoryBudget::from_env()
+                       .rules_bytes()); prelude.dl gains starts/2, host_handles/3, runs_in/2 (GH.18)
+              health    GH.10: CODE_LIKE_EXTS [&str; 32] (cjs / cts / mjs / mts parsed now)
+              persist   GP.4: EnginePersistPool, the engine's rayon pool handed to
+                       glia_store::write_merged_sharded_pooled
+              engine/examples/surface_replay.rs  GA.1's replay harness (not hashed)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -441,7 +489,12 @@ graph/src/    lib.rs        facade (rules above)
                             and references through it bind there (CALLS `org_call`, USES /
                             INJECTS / HANDLED_BY `org_ref`), all Medium; npm entries by
                             convention plus package.json `main` / `exports` (`entry` /
-                            `subpaths` on the npm PROJECT's ORIGIN); the last Resolve pass;
+                            `subpaths` on the npm PROJECT's ORIGIN; 0.5.6 GD.33: conditional
+                            exports, `module` / `types`, `*` subpath patterns, cargo `pub use`
+                            re-exports); 0.5.6 GD.32: Java / Kotlin imports of a Maven / Gradle
+                            sibling, keyed by its ORIGIN `coordinate` (`package:maven:<g>:<a>`),
+                            route to its class files and calls bind through the CLASS; the last
+                            Resolve pass;
                             evm.rs gains `abi_partial` (FH.23: a partly stale ABI paired per
                             member, HEURISTIC, in why::HEURISTIC_PAIRING_RULES)
   public slots (glia_graph::<slot>::<item>):
@@ -468,6 +521,36 @@ graph/src/    lib.rs        facade (rules above)
               MountedHttpResolver::without_routes (DT.6a); and on the identity slot
               identity::{identities, HINT_VERSION} (DT.12a). The close-out adds
               build_dart (DT.5h, through the build glob)
+  0.5.6 additions:
+              build/partial.rs  (GA.3, GA.6, GA.7) the per-file stitching seam: a file's
+                            surface (declarations, nav, types, imports, heritage) vs its body
+                            stubs; build_python / build_go / build_typescript_family split into
+                            a surface phase and a per-file stitch (python_stitch, go_stitch,
+                            ts_stitch); `rebuild_python_bodies`, `rebuild_go_bodies` and
+                            `rebuild_ts_bodies` (BodyEdit, RebodyStats, Refused, through the
+                            build glob) re-stitch body-only edits against the unchanged surface
+                            or refuse (`surface_moved:<f>`, `unsupported:<what>`: shared_node,
+                            Go's mount / route / wire / type_alias, `unknown_file:<f>`), `[rebody]
+                            lang=<l> .. refused=<r>`; no Rust seam (FA.1's Rust FAIL)
+              build/route_mounts.rs  (GD.40-GD.42) include-style route mounts: NavFact
+                            IncludeMount (Django `include` / `spread`; GD.41's vias
+                            `router:<family>`, `fastapi:<x>`, `flask:<x>`, `flask_own:<x>`;
+                            GD.42's Express / Koa `app.use`, Hono `app.route`, NestJS global
+                            prefix and RouterModule) composed through CB.20's mount fixpoint
+              resolvers/host_scripts.rs  HostResolver (`resolver:host`, GH.6 / GH.7): a
+                            NavFact::HostScriptRef path -> the MODULE of that file (the
+                            conf's dir, the repo root, then a path suffix; FILE_RELATIVE_RULES,
+                            include_str / include_bytes, only beside the including file); rules
+                            the directive (`content_by_lua_file`, ..), script_file /
+                            script_call / script_eval, include_str / include_bytes
+              resolvers/host_start.rs  the start rules (GH.18-GH.20): manifest binaries
+                            (`manifest_bin`), host starts (`<host>:<form>`, through package
+                            scripts, entry shell scripts `<host>:via_script`, dist -> src)
+              calls.rs      GA.19: `resolve_calls_pooled` asks a pure hook in the decide step
+                            (the Go call hook); GP.2 / GP.3 pool merge_parses' folds,
+                            resolve_imports_ts' decide and the Go / dotted import tail fallbacks
+              GA.2: every RepoGraph's intra edges and unresolved lists sorted canonically at
+                            the end of its group build (`[canonical] ..` once per build)
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
@@ -498,6 +581,15 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     dotnet -> nuget, maven / gradle -> maven); glia_config gains ConventionDecl
                     (`[[convention]]`, FB.12a); external_inputs validates a CONV `kind`
                     `convention`; profile's Tier is glia_activation::profile::Tier (FD.7a)
+                    0.5.6: hosts (GH.2 + GH.3-GH.11, GH.14), the host table: HOSTS (one HostRow
+                    per host: its Gate, the registrations, callbacks, plugin-unit loads, config
+                    rules, manifest), the lookups the parsers call (registration_for,
+                    joined_for, callback_for, load_for, config_for, host_for_import, ..), the
+                    minting helpers (push_command / push_event / push_config_key, entry_cell,
+                    shebang_entry) and LAUNCHERS / normalise_argv / StartTarget, the launcher
+                    table the start rules read; validate() pins the rows. walk_gating gains
+                    gate_dir_in / is_build_output_home / is_build_or_out and
+                    GateCounts.build_source (GD.25), and `.yarn` in always_region (a11ec18d)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
@@ -525,6 +617,10 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               session; the wheel's `glia-embed-worker` found beside the interpreter, FB.14)
               health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.7 (T6, T9)
               vocab_sync (FB.13b) lives in snapshots.rs beside history_sync
+  0.5.6: trace.rs PyGraph.concept_flows (GB.1, GB.3), find.rs PyGraph.find_flows (GB.2),
+              query.rs `max_mb=` (GA.14), watch.rs WatchSession(.., memory_budget_mb=,
+              with_repos=, out=), `.memory()`, `.roots` and the `body_only` key (GA.4, GA.11,
+              GA.12)
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
@@ -549,6 +645,10 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
                   inputs  gaps LF.2c, history LF.5d, tests LF.6d; 0.5.1: overlay CE.3e,
                           scip/ CE.1c; 0.5.4: embed FB.5b, vocab FB.13b
                   query   0.5.4: health FH.2b
+                  0.5.6 adds no command: flags on flows (--concept, --no-semantic), trace
+                          (--no-semantic), find (--flows, --depth), query (--max-mb), watch
+                          (--with, --out, --max-latency-ms, --memory-budget-mb, --embed,
+                          --embed-model) and install-hooks (--embed)
 ```
 
 - **py:** pyo3 `multiple-pymethods` lets each module carry its own
@@ -576,14 +676,16 @@ source files
    → per-language parser (tree-sitter → ExtractedItems)
    → extractors (cross-cutting: HTTP, gRPC, queues, data_sources, CLI)
    → graph builder (resolves intra-repo references)
-   → CODE_PASSES (engine/src/profile.rs): the 15 cross-graph resolvers (HttpStack, gRPC, RPC,
-     EVM, Queue, GraphQL, gqlgen, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC),
+   → CODE_PASSES (engine/src/profile.rs): the 16 cross-graph resolvers (HttpStack, gRPC, RPC,
+     EVM, Queue, GraphQL, gqlgen, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config,
+     Host (0.5.6, GH.6 / GH.7 / GH.18-GH.20: a host's start, conf or loader -> the code it runs),
+     IaC),
      then models (the http_model / graphql_model SAME_AS stars, after http and graphql, DT.1h),
      Identity (SAME_AS stars) and org_packages (0.5.4, FA.22: imports, calls and references into
      a sibling package's project through its manifest_name class; the last Resolve pass), then
      the 9 post-passes, the evidence fill (group fills taken at language build, re-filled only
      where something changed, DC.5) and the determinism sort —
-     `[passes] domain=code resolve=18 post=9 finalize=2`
+     `[passes] domain=code resolve=19 post=9 finalize=2`
    → merged graph
    → .gmap layout at <repo>/.glia/graph/ (rkyv + mmap, sharded)
    → [optional] activation (PPR) / projection-text / pyo3 → Python
@@ -615,6 +717,53 @@ snapshot steps (CLI / pyo3, never a build, never a .gmap):
 0.5.4 adds no graph beside the region / project / docs graphs: the goal graph (GOAL_UNIT /
 TRACES) and the build-target graph (targets.gmap) moved to 0.5.7 with tracks T6 and T9.
 
+**The host graph (0.5.6, GH).** No new graph and no new id: a host is read into the code graph
+with existing kinds, categories and cells. `code_domain::hosts` is one table of hosts, and a row
+says WHAT to look for, never that something is there (James 2026-10-31: "as long as it's not a
+crutch"): a parser reads the registration call or declaration in the AST (the callee, a
+string-literal name, the handler argument or start command), gated on the host being present in
+that file or tree (its import, require, unshadowed global, manifest, layout or file kind), then
+mints the node. Plugin hosts: CLI_COMMAND `host_cmd:<host>:<name>` and EVENT_HANDLER
+`host_event:<host>:<event>` HANDLED_BY the handler (an anonymous handler becomes a FUNCTION
+`<module>::command <name>` / `on <event>`), CONFIG_KEY `config:<host>:<key>` with DEFINES_CONFIG /
+READS_CONFIG (never paired across repos), and an ENTRYPOINT cell `{"decl", "source":
+"host:<h>"}` on what the host calls by name or loads by path (LÖVE callbacks, Neovim / LÖVE /
+WezTerm plugin units, VS Code `activate`, Obsidian lifecycle methods, webpack `apply`, pytest hooks
+and fixtures) or `source` `shebang` / `main_guard` / `script_arg` on a script. Environment hosts:
+the Dockerfile reader writes one CODE Json start cell per stage with a start on its image
+INFRA_RESOURCE (`ENTRYPOINT` / `CMD`, `WORKDIR`, the `COPY` map, build-output lines; GH.15), compose
+services and k8s containers theirs (`command` / `entrypoint` / `args` / `workingDir`, GH.16),
+Procfile types, systemd units and supervisord programs mint `infra:process:<type>@<dir>`,
+`infra:unit:<stem>`, `infra:program:<name>` under synthetic procfile / systemd / supervisor MODULEs
+(GH.17); `hosts::LAUNCHERS` and `normalise_argv` read an argv down to its target form (script,
+py_module, module_attr, celery_app, flask_app, binary, pkg_script, jar, java_main, dll; GH.14).
+`resolver:host`'s start rules (GH.18) then draw INFRA_RESOURCE -HANDLED_BY-> the code each start
+runs (rule `<host>:<form>`, Strong when fact, Medium when derived, at the start's declaration) and
+write that code's ENTRYPOINT `{"decl", "source": "host:<docker|compose|k8s|procfile|systemd|
+supervisor>", "host", "trigger"}` (first wins); manifest binaries `cli:<bin>` -HANDLED_BY-> their
+implementation (rule `manifest_bin`, GH.20); a start running `npm run x` / `yarn x` / `pnpm x`
+reads that package.json's script (at most 3 hops) and a compiled `node dist/main` binds its
+TypeScript source (GH.19); a start naming a shell script reads only that script's `exec` line (else
+its last command), `exec "$@"` passes the image CMD on, and tsconfig `outDir` / `rootDir` map
+`dist/` to source (rule `<host>:via_script`, located at the script's line; GH.19b; SECURITY.md:
+shell scripts are read for their start line only). A Dockerfile stage is a launch only when a
+compose / k8s file names it (`target:`) or it is the final stage, what `docker build` produces (James
+2026-11-01, "Keep it as is"): a stage with its own ENTRYPOINT / CMD that nothing in the repo
+targets is not read as a launch, no guessing. twenty is the example: its server stage
+(`/app/entrypoint.sh` + `node dist/main`) is built by CI with `--target twenty`, which no file in
+the repo declares, so its server code gets no start edge. nginx / OpenResty `*_by_lua_file`
+locations are ROUTEs HANDLED_BY the Lua MODULE they run (GH.6); Redis `register_script` / `eval`
+of a read file and Rust `include_str!` / `include_bytes!` are USES of the script's MODULE (GH.7).
+
+**Concept search (0.5.6, GB).** Query-time over the entry flows: `trace::concept_flows` matches a
+word against each flow's entry name, hop names and qnames, node kinds, mechanisms, data entities,
+external hosts and doc headings (tiers in that order, then shallowest hop), and, with vectors of
+the surface model and no lexical hit, the flows through the files the fused `find --files` order
+ranks (tier `semantic`, heuristic, each row's `similarity`; released by GB.6's concept gate,
+`dev-notes/concept-gate-0.5.6.md`). `trace` falls back to it when a feature names nothing or only
+a dead end; `find::find_flows` lists the flows through each find hit. A similarity still never
+seeds a walk or creates a fact / derived row: it only picks which existing flows to show.
+
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
 mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
 qname, never by the RepoId-derived NodeId, so two clones of one commit (another remote or
@@ -640,6 +789,29 @@ is a stat scan (no notify crate) with a racy-mtime rule (DC.7c). Single repo; pe
 asked (`persist`, `save_cache`). After each update the replaced graph is dropped and freed heap
 returned (`memory::release_freed_memory("watch_update")`, DE.10).
 
+**Watch, 0.5.6 (GA).** GA.1's surface replay (`engine/examples/surface_replay.rs`,
+`dev-notes/surface-replay-0.5.6.md`) measured how often an edit keeps its files' declaration
+surface and what re-stitching would save: Go, the TypeScript family and Python PASS, Rust FAIL
+(body-only 0.316 < 0.40), FA.24's clone cut FAIL. So a rebuilt group whose edited files all keep
+their surface (`cache::surface_fingerprint` equal) is re-stitched from its cached build through
+`glia_graph::rebuild_python_bodies` / `rebuild_go_bodies` / `rebuild_ts_bodies` instead of rebuilt
+(`lang_build::fast_path_for` = python | go | typescript; Rust has no body-only fast path in 0.5.6);
+a refusal (the surface moved, a node two files mint, a Go mount / route / wire / type alias) rebuilds
+the group as before. `WatchUpdate.body_only` names the groups that took it (`GLIA_WATCH_FAST_PATH=0`
+read at open turns it off); the parity gates still hold every update to a clean build byte for
+byte. One session holds several repos (GA.8-GA.11: `WatchSession::open_many`, `roots`, `glia watch
+--with <repo>.. --out <dir>`, pyo3 `with_repos=` / `out=`; a joint layout never overwrites a repo's
+own `.glia/graph`; groups and paths read `<label>:<key>` / `<label>:<rel>`;
+`engine/tests/watch_parity_many.rs`), and the debounce applies a batch after `--max-latency-ms`
+(2000) even while a path keeps moving. One memory budget (GA.12-GA.14): `memory::MemoryBudget`
+from `GLIA_MEMORY_BUDGET_MB` (or `--memory-budget-mb` / `memory_budget_mb=`) is a process RSS
+target; past it a session evicts its cached group builds (least recently used), then its build
+memos, and the rules layer charges every binding a step emits against `--max-rows` and stops an
+evaluation past its byte budget (`--max-mb` / `max_mb=`, RuleError kind `memory_budget`). An
+overlay edit rebuilds only the groups it moved (GA.17); an edge whose EVIDENCE emitter or rule
+changed at the same confidence is a `restamped` delta row (GA.18); `--embed` re-embeds the changed
+nodes after each update (GA.15).
+
 **Parallel build (LG.1a–c).** The walk's reads, the per-file route / parse / extract, the
 const-table scan, the RPC needle pass, a multi-repo build's per-repo walks and the per-language
 graph builds (every build group; the TS family's one graph is the last pooled item, CA.7)
@@ -658,7 +830,8 @@ once per repo. Per-language builder markers interleave at default threads;
 build prints `reused=0`), `[const-fold] pooled queue_files=<q> event_files=<e> threads=<t>
 repo=<label>` (DC.3) and `[walk] reuse root=<r> reused=<n> read=<m> of <t>` (DC.1); for a caller
 that holds a cache, `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n>
-repo=<label>` (DC.4); once per build `[evidence-split] graphs=<g> group_filled=<n> refilled=<r>
+imports hit=<h>/<n> index=<hit|built|none> wrappers hit=<h>/<n> scan hit=<h>/<n> repo=<label>`
+(DC.4; 0.5.6 GA.20 the imports filter, GA.21 the wrapper stages); once per build `[evidence-split] graphs=<g> group_filled=<n> refilled=<r>
 fallback_graphs=<f> cross=<c>` (DC.5); per scoped delta `[delta] scoped graphs before=<b>
 after=<a> ids=<i> keys=<k> moves=<on|off>` (DC.6); the session's `[watch] open` / `update` /
 `noop` / `poll` lines (DC.7a, DC.7c); `[memory] malloc_trim site=<site> rss_mb=<before>-><after>`
@@ -671,15 +844,19 @@ milliseconds truncated to one decimal, stderr only — never a cache, `.gmap`, m
 or answer): `[timing] repo=<label> walk=<ms> parse=<ms> const_scan=<ms> grafts=<ms> language_build=<ms>`
 once per built repo, `[timing] build repos=<n> resolve=<ms> post=<ms> finalize=<ms> external_cells=<ms> total=<ms> slowest_pass=<name>:<ms>`
 once per build (a layout merge prints no `external_cells=`; the stage and per-pass times are
-`PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>` once
-per layout write.
+`PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>
+spans_ms=<a> encode_ms=<b> write_ms=<c>` once per layout write (the three tails 0.5.6's GP.4).
+0.5.6 (GA.20) adds `[timing] grafts repo=<label> <step>=<ms> ..` once per built repo, one field
+per post-cache graft in run order (modules, infer_wrappers, wrapper_scan, .., imports_filter).
 0.5.4 (FH.21): inside a language group, `resolve_calls` / `resolve_refs` run pooled through the
 `glia_graph::ResolvePool` seam (the engine installs its rayon pool around each language build
 with `with_resolve_pool`; with none installed, or for a language hook that must stay serial,
 one chunk on the calling thread), with one repo-unique name index per pass and an exact
 superclass prefilter for the TS inherited-call pass; byte-identical at any size,
 `[resolve-pool] lang=<l> calls=<c> refs=<r> chunks=<k> threads=<t> calls_ms=<ms> refs_ms=<ms>
-serial_hooks=<h>` per pooled group and `[ts-inherit] .. prefiltered=<k>` (twenty's language
+serial_hooks=<h>` per pooled group (0.5.6: the TS family's line gains ` imports_ms=<i>
+merge_ms=<m>` after refs_ms, GP.2; every line ends ` hook_pooled=<n> hook_serial=<m>`, GP.3; Go
+reads `serial_hooks=-` since GA.19 pooled its call hook) and `[ts-inherit] .. prefiltered=<k>` (twenty's language
 build 25 s -> 3.1 s serial, 2.3 s pooled). FH.22 measured the pool's default and kept it (every
 core; no new marker): four concurrent cold builds of twenty took 71.7 / 74.1 s at 16 threads
 each and 76.9 / 73.2 s at 4 each, one alone 33 s at 16 and 45 s at 4, so a load-shrunk default
@@ -739,7 +916,8 @@ only slows the lone build (`parallel::threads` documents the table).
   - Dart, per file (DT.5h adds the last five fields; it fires on more files, any initialised field):
     `[dart-calls] self=<s> bare=<b> local_skip=<l> closures=<c> creations=<o> method_refs=<m> accessor_refs=<a> tear_offs=<t> field_inits=<f> member_reads=<r> elements=<e> file=<p>`
   - Dart, per file importing Riverpod, after `[dart-flutter]` (DT.5i):
-    `[dart-riverpod] providers=<p> locals=<l> holders=<h> file=<p>`
+    `[dart-riverpod] providers=<p> generated=<g> locals=<l> holders=<h> file=<p>` (` generated=`
+    0.5.6, GD.22, which adds `[dart-bloc] receivers=<n> file=<f>` beside it)
   - Dart, per graph: `[dart-scope] provider receivers bound=<n>` (DT.5i, when the hook bound
     one), then `[reads] member reads accessor_read=<a> tear_off=<t> static_member=<s> unbound=<u>` (DT.5h)
   - Dart, per file holding a Dio interceptor (DT.5i):
@@ -770,13 +948,16 @@ only slows the lone build (`parallel::threads` documents the table).
   not_in_abi= procedures= contracts=` and `[eventbus-evm] solidity_events=<s>
   evm_subscriptions=<h> left to resolver:evm` (DT.10b); `[evm-client] lang=ts|go calls=
   events= sites= (ethers= hardhat= typechain= viem= web3= geth=) abis= not_in_abi= dynamic=
-  path=` per file (DT.10c-DT.10k; `lang=go` from DT.10e); `[evm-wrappers] wrappers=<w> (direct=
-  forwarded= ambiguous=) sites=<s> dynamic=<y> path=<f>` (DT.10f); `[evm-abi-join] joined=<j>
-  unresolved=<u> ambiguous=<a> declarations=<d> repo=<label>` (DT.10g).
+  path=` per file (DT.10c-DT.10k; `lang=go` from DT.10e; 0.5.6's `lang=ts` line gains ` (hardhat_deploy=
+  factories= waffle= viem_codec= web3_contract= truffle=)` before `path=`, GD.20); `[evm-wrappers]
+  wrappers=<w> (direct= forwarded= ambiguous=) sites=<s> dynamic=<y> path=<f>` (DT.10f; TS files too
+  since GD.30); `[evm-abi-join] joined=<j> unresolved=<u> ambiguous=<a> declarations=<d>
+  via_barrel=<b> via_alias=<a> repo=<label>` (DT.10g; ` via_barrel= via_alias=` GD.20).
 - *GraphQL (T11).* `[graphql-sdl] files=<f> resolvers=<r> types=<t>` and `[graphql-sdl] code
   types=<n> path=<p>` (DT.1j); `[graphql-root-fields] ops=<o> fields=<f> pairs=<p>
   name_key_ops=<k>` (DT.11a); `[graphql-transport] endpoints=<n> (absolute= relative= template=)
-  skipped_ws=<w> path=<f>` (DT.11b); `[gaps] graphql transports implied=<n> unpaired=<m>` (DT.11c).
+  skipped_ws=<w> aliased=<a> namespace=<n> cjs=<c> apollo_angular=<g> path=<f>` (DT.11b; the four
+  transport forms 0.5.6's GD.19); `[gaps] graphql transports implied=<n> unpaired=<m>` (DT.11c).
 - *Hints (T12).* `[cells] write .. target=hint_differs .. differs=<fields>` (DT.12b) and
   `[engram-export] hints side: <facts> facts, <hinted> v1 hints, <ms> ms -> <path>` (DT.12a).
 
@@ -884,8 +1065,9 @@ only slows the lone build (`parallel::threads` documents the table).
   check: ok` (FD.23b) and the edge audit's `[edge-audit] report strata=<s> judged=<j> unsure=<u>
   under_floor=<f> insufficient=<i> kappa=<k>` (FD.3c).
 - *Org routing (T10).* `[imports] bindings cell modules=<m> rows=<r> capped=<c> repo=<l>` (FA.21);
-  `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm= go= cargo= pypi=)` and
-  `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm= go= cargo= pypi=)`, `[evidence-rules]
+  `[org-packages] classes=<c> importers=<i> rows=<r> routed=<n> unrouted=<u> (npm= go= cargo= pypi= maven=)` and
+  `[org-packages] calls bound=<c> refs bound=<r> ambiguous=<a> (npm= go= cargo= pypi= maven=)` (` maven=`
+  0.5.6, GD.32), `[evidence-rules]
   resolver=org_packages org_import=<i> org_call=<c> org_ref=<r>` (FA.22, FA.23).
 - *The Sibyl cohort follow-up (FH).* `[health] repo=<l> role=<r> <mechanism rows> unparsed=<u>
   workspace_unresolved=<w> suspicious=<s> dead_share=<d> docs_unparsed=<x> parse=<p> verdict=<v>
@@ -922,6 +1104,122 @@ only slows the lone build (`parallel::threads` documents the table).
 - *The matrix.* `[matrix] patterns: <L> languages x <P> use patterns, <f> full, <p> partial, <n> none, <u> unknown`
   after the 30-column line (`bench/substrate-gap/matrix.py`), and a `[matrix] cell <lang>/<pattern> = ..` marker per
   pattern cell.
+
+**The 0.5.6 markers (GA-GP, waves W0-W12)**, each on stderr unless noted, grouped by what they watch:
+- *The host graph (GH).* Per file, a parser's host reading: `[host] lang=<lua|typescript|python>
+  commands=<c> events=<e> callbacks=<b> loads=<o> config=<g> minted=<m> aux=<a> unread=<u>
+  hosts=<host:n,..> file=<p>` (GH.2-GH.5, GH.8-GH.10), `[host-manifest] host=<h> commands=<c>
+  config=<g> path=<p>` (GH.9), `[host] lang=typescript script=<shebang|main_guard> module=<q> file=<p>`
+  (GH.11), `[script-entry] lang=lua source=<shebang|script_arg> module=<q> file=<p>` (GH.4),
+  `[nginx] locations=<l> lua_files=<f> inline=<i> dynamic=<d> unresolved=<u> path=<p>` and `[nginx]
+  confs sniffed=<s> admitted=<a> skipped=<k>` (GH.6), `[py-scripts] registered=<r> calls=<c> evals=<e>
+  inline=<i> dynamic=<d> ungated=<g> file=<p>` and `[rust-include] scripts=<s> other=<o> dynamic=<d>
+  file=<p>` (GH.7); `[iac-image] dockerfiles=<n> stages=<s> flags_skipped=<f> named_by=(compose= skaffold=
+  dir= walked_up=) file=<p>` (GH.13); `[docker-start] file=<p> stages=<s> starts=<n> (exec= shell=)
+  healthchecks=<h> copies=<c> builds=<b> (<tool>=<n>,..) binaries=<x>` (GH.15); `[compose-start]
+  file=<p> services=<s> builds=<b> commands=<c> entrypoints=<e> refused=<r>`, `[k8s-start] file=<p>
+  containers=<c> commands=<m> args=<a> refused=<r>` and `[skaffold-build] file=<p> artifacts=<a>
+  dockerfiles=<d> refused=<r>` (GH.16); `[proc-start] procfile=<p> types=<t> systemd=<s> units=<u>
+  supervisor=<v> programs=<g> gated_out=<o> repo=<l> forms=(..)` (GH.17); `[ts-out] projects=<p>
+  out_dir=<o> root_dir=<r> extends=<e>` (GH.19b). Per build: `[host-resolve] refs=<r> bound=<b>
+  (<rule>=<n>,..) unresolved=<u> ambiguous=<a>` (GH.6, GH.7) and one `[host-start] starts=<s>
+  bound=<b> (fact= derived=) unresolved=<u> (dynamic= ambiguous= framework= missing= external_image=
+  refused=) forms=(script= py_module= module_attr= celery_app= flask_app= binary= pkg_script= jar=
+  java_main= dll= framework=) entries=<e> hops=(pkg_script= dist_src= shell= passthrough=)
+  refused_depth=<d> scripts_unread=<u> manifest_bins=<b>/<n> (cargo= pyproject= setup= npm= gemspec=
+  composer=) attr_fallback=<f> bins_unresolved=<x>` (GH.18-GH.20, GH.19b); `[coverage]` gains a `host`
+  HANDLED_BY row. The matrix: `[matrix] patterns: 18 languages x 7 use patterns, ..` and a
+  `[matrix] cell <lang>/process_entry = ..` per language (GH.12).
+- *Watch and incremental resolution (GA).* `[surface-replay] repo=<l> lang=<g> edits=<n>
+  body_only=<loose>/<strict> group_ms=<g> update_ms=<u> build_share=<s> clone_ms=<c> saving_ms=<v>
+  controls=<ok|..> verdict=<PASS|FAIL> load=<x> threads=<t>` (the example's stdout, GA.1); `[rebody]
+  lang=<python|go|typescript> files=<f> edges -<r> +<a> calls_bound=<c> refs_bound=<r> names_ms=<ms>
+  refused=<none|reason>` (GA.3, GA.6, GA.7); `[watch] update .. groups_rebuilt=<k>/<g>
+  body_only=<k1,k2|-> full_rebuild=<r> .. restamped=<n> took=<ms> repo=<label>` (` body_only=` GA.4,
+  ` restamped=` GA.18), `[watch] fast_path key=<k> files=<n> ms=<t> repo=<label>` / `[watch] fast_path
+  refused key=<k> reason=<r> repo=<label>` (GA.4); `[watch] open repos=<n> repo=<r1,r2,..> ..`
+  (GA.9), `[watch] listening repo=<r> poll_ms=<p> debounce_ms=<d> max_latency_ms=<m>
+  persist_every=<s>[ repos=<n>]`, `[watch] persisted seq=<n> reason=<r>[ out=<dir>]` and pyo3's
+  `[watch] session repo=<r> overlay=<b>[ repos=<n> out=<dir>] surface=py` (GA.11); `[watch] rss
+  seq=<n> rss_mb=<m> budget_mb=<b|none> cached_groups=<k>/<g> evicted=<e> memo_cleared=<c>
+  repo=<label>` and `[memory] budget ignored value=<v>` (GA.12); `[watch] embed seq=<n> embedded=<e>
+  cached=<c> ms=<ms>` and `[hooks] installed .. embed=on` (GA.15); `[canonical] graphs=<g>
+  edges_moved=<e> unresolved_moved=<u>` once per build (GA.2); `[delta] base=<rev> .. ignored_moves=<m>
+  restamped=<n>` (GA.18); `[rules] mem relations=<n> bytes=<b> top=<pred/arity:rows,..> values=<v>
+  memo=<m>` per evaluation (GA.13), `[rules] budget pred=<p> bytes=<b> cap=<c> kind=memory` (GA.14),
+  `[rules] eval .. ms=<t>[ shortest_fixed=<n>]` (GA.16); `[graft-memo] ..` and `[timing] grafts ..`
+  above (GA.20, GA.21). The release RSS gate's `[watch-mem] repo=<l> run=<budgeted|..> updates=<n>
+  first_mb= plateau_mb= floor_mb= max_mb= budget_mb= evictions= ms_median=` and
+  `[watch-parity-many] seed=<s> step=<i> op=<o> path=<label>:<rel> via=<apply|poll>` (GA.10).
+- *Concept search (GB).* `[concept] word=<w> flows=<f> hits=<h> tiers=<tier:n,..> surface=<s>
+  ms=<ms>` (GB.1); `[trace] seed=<s> resolved_by=concept concept_tier=<t> ..` (GB.1); `[find-flows]
+  query=<q> hits=<h> flows=<f> with_flows=<w> surface=<s>` (GB.2); `[flows] semantic query=<q>
+  files=<f> flows=<n> top_file_rank=<r> not_embedded=<x>` (GB.3). The experiments' lines:
+  `[place-eval] repo=<l> .. verdict=<PASS|FAIL|thin> ..` (GB.4), `[concept-eval] label=<l> test=<t>
+  lexical_hit=<h> concept_queries=<q> dropped_no_truth=<d> flows=<f> ms=<ms>` and the judge's
+  `CONCEPT: C1=<yes|no> (<k>/<n>) C2=<yes|no> (<k>/<n>) -> PASS|FAIL` (GB.6).
+- *Precision and recall (GD).* TypeScript / JavaScript: `[ts-interface] interfaces=<i> members=<m>
+  file=<p>`, `[recv] interface receivers bound=<n>` and `[dead-interface] dead_symbol rows withheld: <n>
+  (interface members)` (GD.2); `[recv] ts inherited: static=<s> state=<t> accessor=<a>
+  default_import=<d> module_const=<m>` (GD.3); `[ts-receivers]` gains ` testbed=<t> awaited=<a>
+  nested_decls=<n>` before `file=` and `[resolve] static member uses bound: <n> (lowercase=<l>)` (GD.4);
+  `[ts-value-refs]` gains ` default_imported=<d> default_object=<o>`, `[ts-cjs] requires=<r>
+  reexports=<x> exports=<e> (functions=<f>) file=<p>`, `[ts-components] wrapped=<w> file=<p>`,
+  `[imports] dir_only_specifiers=<n> bound=<b>` and `[resolve] default-import uses bound=<b>
+  unbound=<u>` (GD.11); `[ts-wire]` gains ` axios_instance= then_json= ky= awaited_callsites=` (GD.12);
+  `[http-wrappers]` gains ` heritage= heritage_sites= heritage_minted= ambiguous_base=
+  routes_released=` when a heritage wrapper exists (GD.26); `[ts-types] .. imported_refs=<i>
+  abstract_refs=<a> file=<p>` and `[ts-types] imported type refs bound=<b> unbound=<u> non_type=<n>`
+  (GD.27); `[endpoint-fold] class_resource classes=<c> subclasses=<s> hits=<h> folded=<f> unread=<u>
+  repo=<l>` (GD.29); `[ts-parse] grammar=tsx error_nodes=<n> file=<p>` (GD.38); `[ts-jsx]
+  elements=<e> (in_file= imported= intrinsic=) attributes=<a> components=<c> file=<p>` (GD.39; USES
+  rules `jsx_element` / `jsx_attribute`, ROLE COMPONENT from the AST); `[angular-template] ..
+  member_reads=<m>` (GD.24); `[model-schemas] lang=typescript .. aliases=<a> ..`. Go: `[go-calls]
+  generic instantiations=<n> file=<p>` (GD.1); `[go-wire] .. encoder_locals= helper_ctx= bind_with=`
+  and `[go-wire] resolved .. scalar=<s>` (GD.13); `[go-routes] receiver-method handlers=<h>
+  local-method=<m> registering_local=<r> field_alias=<f> in <file>` and `[go-packages]
+  clause_owner_binds=<c> dot_imports=<d>` (GD.14; EVIDENCE rules `registering_local`, `field_alias`,
+  `dot_import`, `dot_import_value`, `dot_import_composite`); `[go-routes] .. mounts(.. use_chains=<u>)`
+  (GD.28). Rust: `[rust-types] .. trait_methods=<t> cross_file_self=<c> method_implements=<m>
+  external=<e> unbound=<u>` (GD.5); `[rust-uses]` unchanged, the edge's `from` moves (GD.35). Python:
+  `[anchor] python decorator sites attached=<n> path=<p>` (GD.9); `[py-mounts] routers=<r>
+  provisional=<p> includes=<i> dynamic=<d> file=<p>` and `[route-mounts] lang=<python|typescript>
+  includes=<i> spreads=<s> dynamic=<d> via(flask= fastapi= django=) .. routes=<r> mounted=<m> ..`
+  (GD.40, GD.41; the TypeScript line's `via(express= hono= koa= nest_global= nest_router=)` GD.42).
+  Others: `[swift-scope] .. protocol_receivers=<p> chain_receivers=<c> existentials=<e>` and
+  `[vapor-routes] .. self_handlers=<s>` (GD.15); `[cpp-heritage] bases=<b> bound=<n> path=<p>` and
+  `[coverage] c_cpp: residual rows declared for calls/heritage/imports` (GD.6); `[imports] dart export
+  barrels=<b> names=<n> hidden=<h> shown=<s>` (GD.8); `[dart-riverpod] .. generated=<g> ..` and
+  `[dart-bloc]` (GD.22); `[elixir-calls] .. interface_members=<i> as_aliases=<a>` (GD.17); `[queues]
+  bunny exchanges=<e> fanout_publishes=<f> binds=<b> path=<p>`, `[ruby-di] auto_inject=<a>
+  registrations=<r> mixins=<m> path=<p>`, `[ruby-di] calls bound container_key=<c> mixin_method=<m>`,
+  `[ruby-di] injects bound container_key=<c>` (GD.18); `[heritage] qualified refs=<r> bound=<b>
+  unbound_external=<x> lang=<l>` and `[heritage] self-loops refused=<n>` (GD.7); `[graphql]
+  ruby_schema_roots=<r> dart_by_value=<d> anonymous=<a> inline=<i> concatenated=<c>` and `[graphql]
+  absinthe import_fields=<f> unresolved=<u>` (GD.19, GD.17); `[evm-instances] exported=<e>
+  importers=<i> sites=<s> events=<v> unresolved=<u> repo=<l>` (GD.31); `[sol-abi] ..
+  literal_constants=<k> ..` (GD.23); `[live] .. init_gated=<n>` and `[invoked] .. aliased=<a>
+  intermediate=<i>` (GD.10); `[openapi] servers=<n> (block0= flow=) path=<p>` (GD.16); `[cli] php
+  exec= symfony_fq= args_aliases= pubspec_exec= gemspec_concat= path=` and `[config] dart env=<d>
+  elixir app_env=<a> path=<p>` (GD.21); `[packages] eco=<e> deps=<n> ..` counts the new tables (GD.37);
+  `[imports] tail refused kind=<k> stdlib=<s> foreign_module=<f> platform=<p> undeclared_ns=<u>
+  self=<x> repo=<l>` (GD.34); `[tests] module TESTS edges: <n> (snake= camel= declared=) own_dir=<o>
+  drive_hosts=<d>` (GD.36); `[walk] collapsed <n> regions (always= gitignore= bundle= dotnet= nested=
+  config= build_source=<b>)` and the self-scan's `[self-scan] pipeline functions=<f>/<n>` (GD.25).
+- *Build speed, the gates and hygiene (GP).* `[resolve-pool] ..` and `[timing] persist ..` above
+  (GP.2-GP.4); `[calibrate] text .. threads=<t>`, `[idr] replay .. threads=<t>` and `[calibrate] ppr
+  prefetch chunks=<c> queries=<q> distinct=<d> solves=<s> threads=<t> ms=<ms>` (GP.5); rank_eval's
+  `[doc-ties] label=<l> docs=<d> ties=<t> hubs=<h> bridged_queries=<b> appended_queries=<a>` and the
+  verdict `[doc-ties] verdict=FAIL glia r10=0.2551 mrr=0.4566 drops=0 snapshots=6` (GP.9, its two
+  non-gated rows `ANS:impact+doctie` / `ANS:impact.files+doctie`); `[edge-audit] report strata=<s>
+  judged=<j> unsure=<u> under_floor=<f> insufficient=<i> kappa=<k> ci_method=<stratified_wilson|plugin>`
+  (GP.13, GP.14); scripts/rank-gate.sh's `[rank-gate] run wall s=<s> jobs=<n> order=<labels>` (GP.7).
+  The close-out's own lines (dev-notes/wave-runner/closeout.py, stdout, in the close-out log and
+  commit body): `[closeout] timing fmt=<s> clippy=<s> tests=<s> rustdoc=<s> rank_gate=<s>
+  cohort_gate=<s> wheel=<s> bench=<s> engram=<s> total=<s>` (GP.7) and, per gate, `== [gate-asks]
+  <rank|cohort> result=<ok|ok-partial|skipped|FAILED|not-run> asked_by=<n> (<ids>) touched_by=<m>
+  (<ids>)` (GP.12); since 2b86bb55 a NEW blind, forbid, missing-node or missing-cell fixture row
+  fails the close-out. The release docs' check: `[release] docs=ok` (GZ.1).
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
@@ -1130,6 +1428,56 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   vitest aliases and module roots bind bare specifiers (FH.16, FH.16b); a path-shaped URL plus a
   method signal mints an ENDPOINT whatever the client library (FH.4a), and an in-repo HTTP
   wrapper is inferred from parameter flow (FH.4b, FH.17, FH.17b).
+- 0.5.6 (GD, each moving a graded cell, cohort task or cited public line):
+  - **TypeScript / JavaScript.** `.tsx` / `.jsx` / `.js` / `.mjs` / `.cjs` parse with the TSX grammar
+    (GD.38) and `.mjs` / `.cjs` / `.mts` / `.cts` are routed at all (GH.10); a `<Child />` /
+    `<Ns.Child />` tag is a USES of the component it renders (rule `jsx_element`), a component or
+    handler passed in a JSX expression a USES (`jsx_attribute`), and a capitalised top-level function
+    or arrow rendering JSX gets ROLE COMPONENT from the AST (react.rs keeps only HOOKs; GD.39). An
+    interface's method / function-typed property signature is a METHOD `<module>::<I>::<m>`, an
+    interface-typed receiver binds it and an implementing class's method IMPLEMENTS it (rule
+    `same_name`), and gaps' dead_symbol withholds every METHOD whose nav parent is an INTERFACE, in
+    any language (GD.2). Receivers through default imports (`default_import_type`), superclass statics
+    / state / accessors (`inherited_static`, `inherited_state`, `inherited_accessor_read|write`) and
+    module-level instance consts (`module_const_receiver`) bind (GD.3), as do TestBed.inject locals,
+    awaited / `.then` / `.subscribe` results through `Promise<T>` / `Observable<T>` annotations,
+    nested declarations and lowercase statics (GD.4). A default import read by value USES the
+    default-exported declaration (`default_export`), CommonJS `require` / `module.exports` /
+    `exports.k` bind, `./app/` names only the directory, `memo` / `forwardRef` consts are COMPONENT
+    FUNCTIONs (GD.11); an imported type name in a type position is a USES (`type_ref`, GD.27).
+  - **Go.** A single-type-argument instantiation `F[T](..)` is a CALLS (GD.1); `.Methods(http.MethodX)`
+    and `Method(http.MethodX, ..)` routes, constant / empty package-var prefixes, handler bases typed
+    through the registering callable (HANDLED_BY rules `registering_local`, `field_alias`), dot
+    imports (CALLS / USES `dot_import`, `dot_import_value`, `dot_import_composite`), clause-named
+    field-mount owners and block-scoped local types (GD.14); a group chained through `.Use(mw)` keeps
+    its prefix (GD.28); encoder locals, `ShouldBindWith(binding.JSON)` and context helpers write wire
+    cells (GD.13).
+  - **Rust, Swift, C++.** A trait fn is a METHOD of its INTERFACE, cross-file impls IMPLEMENTS at class
+    and method level (`trait_impl`, `trait_impl_method`), and the false MODULE -IMPLEMENTS-> trait
+    edges of a foreign / blanket impl are gone (GD.5); a `use` inside an inline `mod` imports from the
+    inline PACKAGE (GD.35). Swift protocol requirements are METHODs; protocol, chain and existential
+    (`any P` / `some P`) receivers bind (`local_receiver`, `chain_receiver`, `field_receiver`); Vapor
+    routes are HANDLED_BY the controller's own method (GD.15). C++ base clauses are INHERITS_FROM
+    (`base_clause`) and implicit / `this->` calls bind a base's member (`implicit_this`, GD.6).
+  - **Python and route mounts.** A decorator-registered handler (`@sig.connect`, `@receiver`,
+    Celery `@app.task`) is HANDLED_BY its def; `from pkg import name` through `pkg/__init__.py`'s star
+    re-export binds as fact `star_reexport` / `package_init` (GD.9). Include-style mounts compose
+    full route paths (`graph/src/build/route_mounts.rs`): Django `include()` / spreads (GD.40), Flask
+    `register_blueprint(url_prefix=)` and FastAPI `include_router(prefix=)` across files with router
+    classes (GD.41), Express / Koa `app.use`, Hono `app.route`, NestJS `setGlobalPrefix` /
+    `RouterModule` (GD.42): ROUTE qnames gain their prefixes.
+  - **Dart, Elixir, Ruby, heritage.** Dart `export '..' [show] [hide]` barrels re-export (GD.8);
+    riverpod_generator providers (`@riverpod` FUNCTIONs / CLASSes, a NavFact::RiverpodProvider on
+    them) and `context.read` / `context.watch` / `Provider.of` / `BlocProvider.of` reads type their
+    receivers (GD.22). Elixir behaviours that define functions are INTERFACEs with callable members
+    (`interface_member`), defprotocol heads and StreamData properties are FUNCTIONs, elixir-grpc and
+    Absinthe `import_fields` are read (GD.17). Ruby Bunny fanout exchanges pair, dry-auto_inject
+    readers bind through the container key, include / extend mixins make methods callable on self
+    (GD.18). A qualified heritage base (`< ActiveRecord::Base`, `extends \Vendor\Model`,
+    `extends org.x.Base`) binds only the in-repo type at that path, and no type extends itself (GD.7).
+  - **Hosts.** The host readers (the host graph, above) live in the Lua, TypeScript and Python parsers
+    and `parsers/code/extractors/src/{nginx,iac,cli}.rs`; `[py-scripts]` in the Python parser and
+    `[rust-include]` in the Rust parser record the script refs resolver:host binds.
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
@@ -1186,6 +1534,19 @@ client, DT.10a / DT.10c, `abi_ref` / `abi_from` since DT.10g); SAME_AS rules `ht
 `graphql_model` (emitter `resolver:models`); and a CODE text cell on every GRAPHQL_OPERATION read
 from a document (DT.11a).
 
+0.5.6 keeps the format too (FORMAT_VERSION 3, MANIFEST_VERSION 2), and moves content again: each
+graph's intra edges and unresolved lists in one canonical order, so every shard's bytes changed
+once (GA.2); the host graph's nodes (`host_cmd:` CLI_COMMANDs, `host_event:` EVENT_HANDLERs,
+`config:<host>:` CONFIG_KEYs, `infra:process:` / `infra:unit:` / `infra:program:` INFRA_RESOURCEs
+under synthetic procfile / systemd / supervisor MODULEs), `resolver:host` HANDLED_BY / USES edges
+and ENTRYPOINT cells with `source: host:<h>`; CODE Json cells `{"start":..}` / `{"build":..}` on
+image, compose service and k8s workload INFRA_RESOURCEs, `{"script","exec","row"}` on one whose
+start names a script, `{"manifest",..}` on manifest CLI_COMMANDs and `{"pkg_scripts":..}` on
+package.json MODULEs; ORIGIN keys `coordinate` (Maven / Gradle PROJECTs, GD.32) and `ts_out`
+(PROJECTs whose tsconfig declares outDir, GH.19b); a `*` key in an npm PROJECT's `subpaths` (GD.33);
+ROUTE qnames with their mount prefixes (GD.28, GD.40-GD.42) and OpenAPI ops with their `servers:`
+base (GD.16). Eight NavFact variants are appended (parse cache only, never a layout).
+
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
 - **Dense text** — sigil-based projection with prefix/default/module dedup and scope collapse
@@ -1212,6 +1573,7 @@ IMPORT_BINDINGS 27. IMPORT_BINDINGS is written (FA.21: each MODULE's external im
 name, alias and row, capped at 256). GOAL_UNIT, TRACES and UNIT were allocated for the goal layer
 (track T6), which moved to 0.5.7: they stay registered with no emitter, locked like
 SHARES_DEPENDENCY, in no carry, community, entry or embed list.
+0.5.6 allocates none (James 2026-10-31: the host graph reuses existing kinds, categories and cells).
 The next free ids are node 51 / edge 39 / cell 28.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
 old layout still decodes it.
@@ -1325,14 +1687,17 @@ its `pub use resolvers::{…}` list only if it must be public. Register it by ad
 pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
 `populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
 and `populates_is_exact` tests pin the order and the declared cell types.
-`resolvers/http.rs` is the canonical example. Shipped: 16 cross-graph resolvers; the first 15, in pass order
+`resolvers/http.rs` is the canonical example. Shipped: 17 cross-graph resolvers; the first 16, in pass order
 http (a written-out `PassSpec`: it takes the overlay's route mounts and, since DT.6a, leaves the
-test-only ROUTEs out of its index), then 14 `resolver!` rows: grpc, rpc, evm (EvmContractResolver,
+test-only ROUTEs out of its index), then 13 `resolver!` rows: grpc, rpc, evm (EvmContractResolver,
 DT.10b), queue, graphql, gqlgen (GqlgenResolver, DT.5f), websocket, eventbus, shared_schema, cli,
-db, cron, config, iac; then `models` (a `PassSpec` with `after: ["http", "graphql"]`, the
-http_model / graphql_model SAME_AS stars, DT.1h / DT.1k) and Identity, the last Resolve pass
-(SAME_AS, DD.5); then the 16th, `org_packages` (OrgPackageResolver, 0.5.4, FA.22 / FA.23, `after:
-["identity"]`, the last Resolve pass: it reads identity's `manifest_name` classes): 18 Resolve
+db, cron, config; then `host` (HostResolver, 0.5.6: a written-out `PassSpec` with `after: ["cli"]`
+that populates ENTRYPOINT, GH.6; `graph/src/resolvers/host_scripts.rs` binds a conf's or a loader's
+script path to its MODULE, `host_start.rs` binds starts and manifest binaries); then the `iac`
+`resolver!` row; then `models` (a `PassSpec` with `after: ["http", "graphql"]`, the
+http_model / graphql_model SAME_AS stars, DT.1h / DT.1k) and Identity
+(SAME_AS, DD.5); then the 17th, `org_packages` (OrgPackageResolver, 0.5.4, FA.22 / FA.23, `after:
+["identity"]`, the last Resolve pass: it reads identity's `manifest_name` classes): 19 Resolve
 passes in all. MessageSchema and Package were removed in 0.5.2
 (DD.16), their pairs now identity classes. `resolver:evm`'s `abi_hint` / `name_hint` pairs are
 HEURISTIC (Weak; `why::HEURISTIC_PAIRING_RULES`), as is FH.23's `abi_partial` (a partly stale
@@ -1383,8 +1748,14 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   path; a drop fails it, and only `baseline` / `baseline-add` / `ratchet` write the baselines.
   Since 0.5.4 gate.json may hold `accepted` rows (row, floor, packet, ruling): a ruled drop
   passes while it stays at or above its floor, printed `[rank-gate] base=<b> accepted <row>
-  <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted` (FD.79's four
-  glia impact rows, retired in 0.5.6 by docs as a second graph). The gate measures the shipped
+  <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted`. Six rows at 0.5.6:
+  FD.79's four glia impact rows (`glia/single/ANS:impact/r10` 0.254, `../mrr` 0.4556,
+  `glia/single/ANS:impact@sel/r10` 0.2536, `../mrr` 0.4542), which docs as a second graph was to
+  retire, but 0.5.6's GP.9 measured it FAIL (`[doc-ties] verdict=FAIL glia r10=0.2551 mrr=0.4566
+  drops=0 snapshots=6`), so they stay (James 2026-10-31, "okay fine") and section-level doc ties
+  are parked for 0.5.7 (`dev-notes/next-leap-0.5.7.md` §3); `shell/single/PT*/mrr` at 0.593 (GD.2,
+  James 2026-10-31) and `websocket/single/B0/mrr` at 0.581 (GD.34, James 2026-11-01 "Accept with a
+  floor"), each a calibrated candidate, not a default ranker. The gate measures the shipped
   fused `find --files` (FB.7c): `check` builds rank_eval with `--features sem-eval` and a
   `glia-embed-worker` (gpu-webgpu), and needs `~/.cache/glia/fastembed` and
   `$GLIA_RANK_GATE_DIR/sem` to persist (a cold cache re-embeds all six snapshots; glia ~500 s).
@@ -1412,10 +1783,17 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   cli: readme_surface, skill_surface; rules: toy, cost), each its own `[[test]]`. So `--test
   byte_identical`, `--test parallel_build` and `--test toy` above stay correct. A test that sets
   process-global state goes on the keep-list.
+- **A host row is not a crutch (0.5.6).** `code_domain::hosts` says what to look for; it never mints
+  an edge. An edge needs the parser to read the registration call or start declaration in the AST,
+  with its handler argument or start command, gated on the host being present in that file or tree
+  (its import, require, manifest, layout or file kind): no name match alone, no row without a
+  fixture (James 2026-10-31, "as long as it's not a crutch"). A URL folds only from a string
+  literal handed to a constructor / `super()`, never a runtime value, and a shell script a start
+  names is read for its start / `exec` line only (SECURITY.md).
 - **Publish gate.** Only `py/` (as `glia-py`, imported as `glia_py`, `.github/workflows/wheels-py.yml`) and, since 0.5.4, the `glia` binary (as `glia-cli`, a maturin bin wheel, `cli/pyproject.toml`, `.github/workflows/wheels-cli.yml`, artifacts prefixed `cli-wheels-`; FE.5, FE.6) publish to PyPI. Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3, 0.5.4)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3, 0.5.4, 0.5.6)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -1458,6 +1836,37 @@ notes (`note[<source>/<id>, <tier>]: ..`, at most 3, `PackedNode.notes`), and `P
 `Review.conventions` list the `[[convention]]`s over the packed or changed files (`## conventions`,
 `### Conventions`), never blocking. Named but not modelled (FB.13c): with a vocabulary snapshot,
 find's `no_match` absence gains `named_in` (`Absence.named_in`, `FindOptions.vocab_roots`).
+
+0.5.6 (GA, GB, GH). Concept search: `glia flows --concept <word>` / `PyGraph.concept_flows(word,
+depth=6, limit=20, collapse=True, semantic=None)` (`trace::concept_flows`) lists the entry flows
+that touch a word, best tier then shallowest matching hop, the hop shown; its empty answer is a fact
+`no_match` absence (exit 1); with vectors of the surface model and no lexical hit the flows through
+the fused `find --files` order answer at tier `semantic` (heuristic, `similarity` per row;
+`--no-semantic` / `semantic=False` never reads them). `trace` resolves a feature that names nothing,
+or only a dead end, through it (`resolved_by` `concept` with ` concept_tier=` on its marker, or
+`concept_semantic` from the CLI's semantic tier; pyo3 `cross_stack_trace` reads no vectors).
+`glia find --flows [--depth <n>]` / `PyGraph.find_flows(query, top_k=20, depth=6, collapse=True)`
+adds, per find row, the entry flows through it with the row's depth (`flows`: `{id, qname, kind,
+total, flows, more}`, at most 20 per row). The host graph reaches every answer as edges and entries:
+liveness, dead_symbol, flows, blast radius and PPR move where a host starts code, and blast-radius /
+impact rows can name INFRA_RESOURCEs; the prelude's `host_handles(H, T, E)` (an INFRA_RESOURCE's
+resolver:host HANDLED_BY with its EVIDENCE), `starts(H, T)` and `runs_in(N, H)` (every node a start
+reaches) ask it in `glia query`, and a program defining one of those names fails analysis as reserved.
+Rules budgets: `--max-rows` / `max_rows=` / `QueryOptions::row_budget` charge every binding each body
+step emits (the Budget message reads `reached <n> bindings ..`), and `glia query --max-mb <MB>` /
+`max_mb=` / `QueryOptions.byte_budget` (else `GLIA_MEMORY_BUDGET_MB`; 0 lifts it) stops an evaluation
+past its memory (exit 2, RuleError kind `memory_budget`, ValueError `memory budget: ..` in pyo3);
+explain witnesses are BFS-shortest at their tier (GA.16). Deltas (`glia delta`, `graph_delta`, watch
+updates) gain the change kind `restamped`, rows `rule` / `was_emitter` / `was_rule` and
+`DeltaCounts.edges_restamped` (GA.18). Watch: `glia watch [--with <repo>.. --out <dir>]
+[--max-latency-ms <n>] [--memory-budget-mb <MB>] [--embed [--embed-model <m>]]` and `WatchSession(..,
+memory_budget_mb=None, with_repos=None, out=None)` with `.memory()` / `.roots`; updates gain
+`body_only`; `glia install-hooks --embed` adds `glia embed . --limit 2000` to the rebuild hooks.
+Stored edge order is canonical (GA.2), so traversal rows (`neighbours`, `bfs`, `predecessors`,
+`edges_json`) and trace hops at one depth list by qname. `health`'s `unparsed` no longer counts
+`.mjs` / `.cjs` / `.mts` / `.cts` (`CODE_LIKE_EXTS` 36 -> 32). Not shipped: `glia place` /
+`PyGraph.place` (placement measured FAIL, `dev-notes/place-eval-2026-11.md`) and doc-tie rows in
+the impact answers (GP.9 FAIL).
 
 Identity (0.5.2, DD.8-DD.15, Q17). `find`, `blast-radius`, `trace`, `flows`, `tests-for`,
 `serves` and `arch` collapse every FACT / DERIVED identity class to one row, the class's best
@@ -2042,14 +2451,46 @@ questions over one graph computes `entrypoint_reachable` once.
   a mechanism and kept out of the 30-column totals; Lua's six read three none and three partial, the targets of
   0.5.6's host-to-plugin graph (PR #3's plugin families, generalised). No registry id, no FORMAT_VERSION /
   MANIFEST_VERSION change; Cargo.lock gains tree-sitter-lua.
+- **0.5.6 — finishing what was started: complete on `main` at wave W12 (`d3a264bf`), the release
+  docs and handoffs in W13 (GZ.1, GZ.2); awaiting the release close-out (the full rank and cohort
+  gates), the version bump and the tag.** Scope `dev-notes/next-leap-0.5.6.md`, packets
+  `dev-notes/leap-056-packets.json` (overrides and rulings `leap-056-corrections.json`), schedule and
+  LANDED waves `dev-notes/wave-runner/schedule_056.py` (runner `--release 056`, ids G*, no wave 0, no
+  tracks; 106 packets in W0-W12), the standing precision backlog `dev-notes/precision-backlog.json`
+  (real defects with no example yet; a release pulls one in once an example turns up). Groups: GA
+  watch (the surface replay, the stitching seam and the body-only fast path for Python, Go and
+  TypeScript, multi-repo watch, one memory budget, canonical edge order, restamped deltas, the pooled
+  Go call hook, `watch --embed`); GB concept search (`flows --concept`, trace's concept tier,
+  `find --flows`, the fused semantic tier); GD precision and recall (TS / JSX, Go, Rust, Swift, C++,
+  Python, route mounts for Django / Flask / FastAPI / Express / Koa / Hono / NestJS, Dart, Elixir,
+  Ruby, heritage, GraphQL, EVM, Solidity, liveness, org routing for the JVM, `tail_unique`, TESTS
+  scoping, dependency tables, `build/` / `out/` walked); GH the host graph (`code_domain::hosts`,
+  plugin hosts and environment hosts, resolver:host, the `process_entry` pattern column); GP build
+  speed (the cold-build profile, pooled TS / Go / JVM fronts and persist, the calibration replay
+  ahead of its loop), the gates (close-out timings, `[gate-asks]`, rank_eval's pooled indexes, the
+  edge-audit CI and re-run), docs as a second graph and `docs/dpg.md`; GZ these docs and the
+  handoffs. Measured (each against a rule committed before its run): surface replay Go / TypeScript
+  / Python PASS, Rust FAIL, FA.24 FAIL (`dev-notes/surface-replay-0.5.6.md`; GA.5 not-needed); the
+  concept gate `VERDICT: PASS` (`dev-notes/concept-gate-0.5.6.md`); placement `Placement: FAIL ..`
+  (`dev-notes/place-eval-2026-11.md`; GB.5 not-needed); doc ties `[doc-ties] verdict=FAIL glia
+  r10=0.2551 mrr=0.4566 drops=0 snapshots=6` (`bench/rank-gate/doc-ties/report.md`; GP.10, GP.11
+  not-needed, the FD.79 rows stay); the edge-audit re-run (`dev-notes/edge-precision-0.5.6.md`): 516
+  edges, fact 1.000, derived 0.894, heuristic 0.913, DOCUMENTS|derived 0.742 still under its floor.
+  At W12's close-out: 7653 workspace tests, 507 graded fixtures (none blind), the matrix 354 full /
+  158 unknown / 28 n/a of 512, the use-pattern grid 21 full / 105 unknown of 126, the partial rank
+  and cohort gates 0 drops. No registry id, no FORMAT_VERSION / MANIFEST_VERSION change, no
+  Cargo.lock move; the version bump is the release step after the docs. Handoffs
+  `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.6.md` (0.5.5 -> 0.5.6), pin `=0.5.6` /
+  `glia-py==0.5.6`.
 - **After 0.5.5, split in two (James 2026-10-31: *"Yeah that's probably better to make this 2 releases"*).**
   **0.5.6** (`dev-notes/next-leap-0.5.6.md`) finishes what is started: T4 (the per-language precision
   and recall residuals), T7's concept search over flows and placement (FC.15, FC.16, FB.9, FC.21,
   FC.22), T8 (Stack Graphs-style incremental resolution, watch's body-only fast path, multi-repo
   `glia watch --with`, the watch / rules memory budget), each re-verified against `v0.5.5`; the
   host-to-plugin graph (PR #3's plugin families generalised; it fills the use-pattern axis); 0.5.4's
-  W20 / W21 follow-ups, docs as a second graph (retiring the rank gate's `accepted` rows), wave agents
-  that never run the full gates and the edge-audit re-run after FD.73-FD.81. **0.5.7**
+  W20 / W21 follow-ups, docs as a second graph (it was to retire the rank gate's `accepted` rows;
+  measured FAIL, above), wave agents that never run the full gates and the edge-audit re-run after
+  FD.73-FD.81. **0.5.7**
   (`dev-notes/next-leap-0.5.7.md`) takes the new capabilities: T6 (the goal-layer connector and the
   clarification queue; it fills the reserved slots and GOAL_UNIT / TRACES / UNIT) with T7's PR intent
   (FC.19, FC.20), T9 (build-target graphs, the first non-code domain: build-domain/,

@@ -23,6 +23,9 @@ On a repo you have not seen before, run `glia health <repo> --json` first. It sa
 | What does my uncommitted change affect? A pasted diff? | `glia diff-impact <repo> --json`, `glia diff-impact <repo> --diff <file> --json` |
 | How does feature Y flow, end to end? | `glia trace <repo> Y --json` |
 | What are the entry points, and where does each go? | `glia flows <repo> --json` |
+| Which flows touch a concept (a word, not a name: `refund`, `cache`, `webhook`)? | `glia flows <repo> --concept refund --json` |
+| Which entry flows pass through X, and how deep? | `glia find <repo> X --flows --json` |
+| What starts this code (a Dockerfile, compose service, k8s container, Procfile, systemd unit)? | `glia query <repo> -e 'out(H, T) :- starts(H, T).' --json` |
 | Why are A and B connected? | `glia why <repo> A B --json` |
 | Who serves `GET /path`, or consumes topic T? | `glia serves <repo> "GET /path" --json` |
 | Who implements, extends or overrides X? | `glia implementors <repo> X --json` |
@@ -62,7 +65,11 @@ The rest of the CLI:
 - `glia scip import <repo> <index.scip>`: load a compiler-grade SCIP index; the next answer reads its references as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM.
 - `glia embed <repo> --json`: embed every node's text with a local model (bge-small, on the GPU when one works, else the CPU) into `<repo>/.glia/vectors.jsonl`. A snapshot step like `history sync`: run it once, and again after big changes (it re-embeds only nodes whose text changed). With vectors, `find --files` blends their similarity into its text key and `pack` seeds from that order when no name matches the query; `--no-semantic` on either ranks without them. Vectors never add, hide or seed a row anywhere else.
 - `glia vocab sync <repo> --json`: record every identifier the tracked files hold (`<repo>/.glia/vocab-snapshot/`). Then an empty `find` names the files a query identifier occurs in although no node is named so (`absence.named_in`), and `gaps` lists identifiers the docs cite that no node models (`named_not_modelled`).
-- `glia watch <repo>`: keep the build open in the foreground and print one NDJSON line per change saying what it did to the graph (a ready line first); it rewrites `<repo>/.glia/graph/` on exit and every 60 s. For a long session, not for one question.
+- `glia watch <repo>`: keep the build open in the foreground and print one NDJSON line per change saying what it did to the graph (a ready line first); it rewrites `<repo>/.glia/graph/` on exit and every 60 s. For a long session, not for one question. `--with <other> --out <dir>` watches several repos as one build (the joint layout goes to `<dir>`, never into a repo), `--memory-budget-mb <MB>` caps what the session keeps cached, `--embed` keeps `.glia/vectors.jsonl` current after each update.
+
+`flows --concept` matches a word against each flow's entry name, the names and qnames of its hops, node kinds, mechanisms, data entities, external hosts and doc headings, best tier first, and exits 1 with a `no_match` absence when none does; with vectors (`glia embed`) a word that matches nothing lexically answers at tier `semantic` (heuristic, each row with its `similarity`), and `--no-semantic` never reads them. `glia trace <repo> <word>` falls back to the same search when the word names no node, or only a dead end (`resolved_by: concept`). In `find --flows`, each row's `flows` lists the entry flows through it with the row's `depth` in the flow (0: the row is the entry).
+
+The host graph: a start a Dockerfile (`ENTRYPOINT` / `CMD` of the final stage, or of a stage a compose / k8s file targets), compose, k8s, a Procfile, a systemd unit or a supervisord program declares is a `HANDLED_BY` edge from its INFRA_RESOURCE to the code it runs (through `npm run` / `yarn` scripts, entry shell scripts and a compiled `dist/` path back to its TypeScript source), and that code is an entry. So are the commands, events and callbacks a plugin registers with its host (Neovim, VS Code, Obsidian, webpack, Flask, pytest, LÖVE, WezTerm, nginx / OpenResty). `starts(H, T)`, `host_handles(H, T, E)` and `runs_in(N, H)` (every node a start reaches) are prelude predicates for `glia query`.
 
 `glia <command> --help` lists every flag.
 

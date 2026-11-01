@@ -22,7 +22,11 @@
 //! command its [`EXAMPLED`] entry names (a subcommand as `overlay propose`,
 //! which must be a `cmd glia overlay propose` of the surface), which keeps the
 //! check from passing vacuously on a skill the parser reads no invocation
-//! from; a skill directory with no entry fails until one is added.
+//! from; a skill directory with no entry fails until one is added. An entry
+//! may name flags after its command path (`flows --concept`, GZ.1): then the
+//! `--json` example must also pass each of them, and each must be a flag the
+//! command declares, so a mode of an existing command (0.5.6 added modes, no
+//! command) is held to a worked example too.
 //!
 //! The task skills also name two other transports, the repo-graph MCP tool calls
 //! (`find query=..`) and `uvx mcp-repo-graph <verb> ..`. Those are repo-graph's
@@ -43,8 +47,10 @@ const SKILLS_REL: &str = "skills";
 /// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added, 0.5.2's `query` /
 /// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, 0.5.3's
 /// `history calibrate`, EZ.1, and 0.5.4's `health`, `embed` and `vocab sync`,
-/// FZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
-/// A subcommand is its surface section path, `overlay propose`. glia-init's one
+/// FZ.1, and 0.5.6's two answer modes, `flows --concept` and `find --flows`,
+/// GZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
+/// A subcommand is its surface section path, `overlay propose`; a mode is the
+/// path then its flags, `flows --concept`. glia-init's one
 /// `--json` command is `history calibrate`: `build`, `history sync`, `install-hooks`
 /// and `watch` take no `--json`, so they are checked for flags only.
 const EXAMPLED: [(&str, &[&str]); 8] = [
@@ -92,6 +98,10 @@ const EXAMPLED: [(&str, &[&str]); 8] = [
             "health",
             "embed",
             "vocab sync",
+            // 0.5.6 (GZ.1): concept search over the entry flows (GB.1, GB.3) and
+            // the flows through each find hit (GB.2), modes of `flows` / `find`.
+            "flows --concept",
+            "find --flows",
         ],
     ),
     (
@@ -541,23 +551,35 @@ fn check_skills(
             .collect::<Vec<_>>()
             .join("\n");
         let calls = invocations(&md);
-        let paths: Vec<(String, bool)> = calls
+        let paths: Vec<(String, &[String])> = calls
             .iter()
-            .map(|(_, args)| {
-                (
-                    check(surface, args).0.join(" "),
-                    args.iter().any(|w| w == "--json"),
-                )
-            })
+            .map(|(_, args)| (check(surface, args).0.join(" "), args.as_slice()))
             .collect();
         let mut missing = Vec::new();
-        for cmd in wanted.iter().copied() {
+        for entry in wanted.iter().copied() {
+            let (cmd, flags) = exampled_entry(entry);
             if !surface.flags.contains_key(cmd) {
                 problems.push(format!(
                     "{rel}: EXAMPLED names `glia {cmd}`, which has no `cmd glia {cmd}` in cli/surface"
                 ));
-            } else if !paths.iter().any(|(p, json)| p == cmd && *json) {
-                missing.push(cmd.to_string());
+                continue;
+            }
+            let undeclared: Vec<&str> = flags
+                .iter()
+                .copied()
+                .filter(|f| !surface.flags[cmd].contains_key(*f))
+                .collect();
+            if !undeclared.is_empty() {
+                problems.push(format!(
+                    "{rel}: EXAMPLED names `glia {entry}`, but `glia {cmd}` declares no {}",
+                    undeclared.join(", ")
+                ));
+            } else if !paths.iter().any(|(p, args)| {
+                p == cmd
+                    && args.iter().any(|w| w == "--json")
+                    && flags.iter().all(|f| passes_flag(args, f))
+            }) {
+                missing.push(entry.to_string());
             }
         }
         reports.push(SkillReport {
@@ -572,6 +594,21 @@ fn check_skills(
         });
     }
     (reports, problems)
+}
+
+/// An [`EXAMPLED`] entry split into its command path and the flags its
+/// example must pass: `"flows --concept"` -> (`"flows"`, `["--concept"]`).
+fn exampled_entry(entry: &str) -> (&str, Vec<&str>) {
+    match entry.find(" -") {
+        Some(at) => (&entry[..at], entry[at + 1..].split_whitespace().collect()),
+        None => (entry, Vec::new()),
+    }
+}
+
+/// Whether an invocation passes `flag`, bare or as `flag=value`.
+fn passes_flag(args: &[String], flag: &str) -> bool {
+    args.iter()
+        .any(|w| w == flag || w.split_once('=').is_some_and(|(n, _)| n == flag))
 }
 
 #[test]
@@ -713,6 +750,50 @@ fn a_broken_skills_dir_is_reported() {
         problems[1].contains("`glia overlay bogus`, which has no `cmd glia overlay bogus`"),
         "{}",
         problems[1]
+    );
+}
+
+/// GZ.1: a mode entry (`flows --concept`) is met only by a `--json` example
+/// that passes the flag (bare or `--flag=v`); the plain command's example
+/// does not meet it, and a flag the command does not declare is a problem.
+#[test]
+fn a_mode_entry_needs_an_example_with_its_flag() {
+    let surface = surface();
+    let root = std::env::temp_dir().join(format!("glia-skill-modes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let d = root.join("glia-modes");
+    std::fs::create_dir_all(&d).expect("mkdir");
+    std::fs::write(
+        d.join("SKILL.md"),
+        "---\nname: glia-modes\n---\n`glia flows . --json`\n\
+         `glia find . X --flows --json`\n`glia trace . Y --no-semantic`\n\
+         `glia query . -e x --max-mb=64 --json`\n",
+    )
+    .expect("write");
+    let exampled: [(&str, &[&str]); 1] = [(
+        "glia-modes",
+        &[
+            "flows",
+            "flows --concept",
+            "find --flows",
+            "trace --no-semantic",
+            "query --max-mb",
+            "find --bogus",
+        ],
+    )];
+    let (reports, problems) = check_skills(&surface, &root, &exampled);
+    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports[0].missing,
+        ["flows --concept", "trace --no-semantic"],
+        "flows' plain example meets `flows` only; trace's has no --json"
+    );
+    assert_eq!(problems.len(), 1, "{}", problems.join("\n"));
+    assert!(
+        problems[0].contains("`glia find --bogus`, but `glia find` declares no --bogus"),
+        "{}",
+        problems[0]
     );
 }
 

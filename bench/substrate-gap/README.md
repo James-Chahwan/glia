@@ -210,7 +210,19 @@ cell lives at `patterns/<language>/<pattern>/key.json`, declares `"cells": ["<la
 `matrix.derive` exactly like a mechanism cell, prints its own `[matrix] cell` marker, and is counted only on the
 `[matrix] patterns: <L> languages x <P> use patterns, ..` line and in COVERAGE.md's `## Use patterns` table, never in
 the 30-column totals. The keys use today's node / edge / cell vocabulary, so a pattern glia does not read yet grades
-`none` or `partial`: Lua's six are the first row, the targets of 0.5.6's host-to-plugin graph.
+`none` or `partial`: Lua's six were the first row, the targets of 0.5.6's host-to-plugin graph.
+
+0.5.6 adds a seventh pattern, `process_entry` (GH.12): the host that starts a process (a Dockerfile `ENTRYPOINT` /
+`CMD`, a compose `command`, k8s `command` / `args`, a Procfile type, a systemd `ExecStart`) -> the code it starts. Its
+kind is the starting INFRA_RESOURCE, its category HANDLED_BY (emitter `resolver:host`), its literal the started file's
+MODULE / main FUNCTION / main METHOD as that edge's target, and its `proof_cells` the ENTRYPOINT cell the start writes
+there (`source` `host:<docker|compose|k8s|procfile|systemd|supervisor>`). Its cells live at
+`patterns/<language>/process_entry/` for C#, Go, Java, Python, Rust and TypeScript. A key names what the host really
+runs: python's Dockerfile starts `worker.py` with `CMD`, so compose's `command: gunicorn app:app` replaces it as a
+second start (under `ENTRYPOINT` it would only be arguments to `worker.py`, 060bf3da). At 0.5.6's last wave the grid reads 18 languages x 7 patterns, 21 full (Lua's six,
+Python's five, TypeScript's six, and process_entry for C#, Go, Java and Rust beside Python's and TypeScript's), 0
+partial, 0 none, 105 unknown: `[matrix] patterns: 18 languages x 7 use patterns, 21 full, 0 partial, 0 none, 105
+unknown`.
 
 ## Two grades per cell: fixture / cohort (FH.10)
 

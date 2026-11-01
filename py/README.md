@@ -50,6 +50,67 @@ records its `device`, and stderr names the device on one `[embed] device=..
 backend=.. driver=.. fallback=.. batch=..` line. The devices, fallbacks and
 measured speeds are in docs/embeddings.md.
 
+## What's new in 0.5.6
+
+**Pin exactly: `glia-py==0.5.6`.**
+
+```bash
+pip install glia-py==0.5.6
+```
+
+0.5.6 adds the host graph, concept search over flows and a faster, bounded watch, and fixes
+precision and recall across most languages. The store format is unchanged (format 3) and no
+registry id is new, but graph content moves (below), so rebuild, and calibrate again after
+upgrading. Every new keyword is appended last, so positional calls keep working.
+
+- **`PyGraph.concept_flows(word, depth=6, limit=20, collapse=True, semantic=None)`**: the entry
+  flows that touch a word (by entry name, a hop's name or qname, a node kind such as `cache`, a
+  mechanism, a data entity, an external host or a doc heading), best tier then shallowest
+  matching hop first, as `{results, absence}` (`no_match` when none does). With
+  `.glia/vectors.jsonl` of the surface model, a word no lexical tier matches answers at tier
+  `semantic` (heuristic, each row with its `similarity`, ordered by the fused `find_files`
+  rank); `semantic=False` never reads the vectors. The concept gate measured that tier above a
+  lexical and a reach control (dev-notes/concept-gate-0.5.6.md, `VERDICT: PASS`).
+  `cross_stack_trace` falls back to the lexical search when its feature names no node or only a
+  dead end (`resolved_by: "concept"`; it reads no vectors).
+- **`PyGraph.find_flows(query, top_k=20, depth=6, collapse=True)`**: `find`'s rows plus `flows`,
+  per row the entry flows through it within `depth` hops and the row's depth in each (at most
+  20 per row, `more` counting the rest).
+- **The host graph.** A Dockerfile / compose / k8s / Procfile / systemd / supervisord start and a
+  manifest's binary is a `HANDLED_BY` edge (emitter `resolver:host`) from its INFRA_RESOURCE or
+  `cli:<bin>` node to the code it runs, and that code carries an ENTRYPOINT cell
+  `{"decl", "source": "host:<docker|compose|k8s|procfile|systemd|supervisor>", "host",
+  "trigger"}`; plugin hosts (Neovim, VS Code, Obsidian, webpack, Flask, pytest, LÖVE, WezTerm,
+  nginx / OpenResty, ..) add `host_cmd:<host>:<name>` CLI_COMMANDs, `host_event:<host>:<event>`
+  EVENT_HANDLERs and `config:<host>:<key>` CONFIG_KEYs. `query` gains the prelude predicates
+  `starts/2`, `host_handles/3` and `runs_in/2` (a program that defines one of those names now
+  fails analysis as reserved). Liveness, `gaps`' dead symbols, flows and blast radius move
+  where a host starts code.
+- **`WatchSession(repo, overlay=True, memory_budget_mb=None, with_repos=None, out=None)`**:
+  `with_repos` watches several repos as one build and needs `out`, the directory `persist()`
+  writes the joint layout to (a ValueError without it); `roots` lists the roots;
+  `memory_budget_mb` (else `GLIA_MEMORY_BUDGET_MB`) is an RSS target past which the session
+  evicts cached group builds, then build memos; `memory()` reports RSS, the budget and what is
+  cached. An update dict gains `body_only` (the groups re-stitched by the body-only fast path:
+  `python`, `go`, `typescript`; `GLIA_WATCH_FAST_PATH=0` turns it off), and in a multi-repo
+  session its paths and group keys read `<label>:<rel>`.
+- **`query(.., max_mb=None)` / `query_gql(.., max_mb=None)`**: a memory budget for one
+  evaluation (else `GLIA_MEMORY_BUDGET_MB`); a trip raises ValueError (`memory budget: ..`).
+  `max_rows` now counts every binding each rule step emits, so a join that multiplied
+  intermediate rows trips it earlier. `explain` witnesses are BFS-shortest at their tier.
+- **Deltas.** `graph_delta` rows, watch update rows and `delta` gain the change kind `restamped`
+  (an edge whose EVIDENCE emitter or rule changed at the same confidence) and the keys `rule`,
+  `was_emitter` and `was_rule`.
+- **Stored order.** Each graph's edges are stored in one canonical order, so `neighbours`,
+  `bfs`, `predecessors`, `edges_json` and trace hops at one depth list edges by qname, the same
+  for every build.
+- **Graph content.** ROUTE qnames gain their mount prefixes (Django `include()`, Flask
+  `url_prefix`, FastAPI `include_router`, Express / Koa `app.use`, Hono `app.route`, NestJS
+  global prefix and `RouterModule`, Go groups chained through `.Use`), so those NodeIds move;
+  OpenAPI ops gain a `servers:` base written at indent 0 or in flow style; `.mjs` / `.cjs` /
+  `.mts` / `.cts` files and source directories named `build/` / `out/` are parsed, and
+  `health()`'s `unparsed` no longer counts those extensions; `.yarn/` is a vendored region.
+
 ## What's new in 0.5.5
 
 **Pin exactly: `glia-py==0.5.5`.**
