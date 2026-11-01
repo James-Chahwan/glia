@@ -150,7 +150,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 354/512 applicable cells have a fixture (69.1%) — 354 full, 0 partial, 0 none, 158 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 324
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 328
 
 ## Cells routed via an alternative mechanism
 
@@ -263,9 +263,9 @@ The second axis (0.5.5): how code is USED rather than how services talk. Graded 
 
 ```
               h_cmd    h_evt     h_cb  cfg_tbl    embed   script     proc
-python            ●        ?        ?        ?        ?        ●        ◐
+python            ●        ?        ?        ?        ?        ●        ●
 go                ?        ?        ?        ?        ?        ?        ●
-typescript        ?        ?        ?        ?        ?        ?        ◐
+typescript        ●        ●        ●        ●        ?        ?        ●
 java              ?        ?        ?        ?        ?        ?        ●
 csharp            ?        ?        ?        ?        ?        ?        ●
 ruby              ?        ?        ?        ?        ?        ?        ?
@@ -283,7 +283,7 @@ kotlin            ?        ?        ?        ?        ?        ?        ?
 lua               ●        ·        ●        ●        ◐        ●        ?
 ```
 
-USE PATTERNS: 14/126 cells have a fixture — 10 full, 3 partial, 1 none, 112 unknown, 0 error.
+USE PATTERNS: 18/126 cells have a fixture — 16 full, 1 partial, 1 none, 108 unknown, 0 error.
 
 ## Cohort grades
 

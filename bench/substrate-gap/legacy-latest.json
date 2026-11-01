@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 492,
+  "fixtures": 498,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -801,6 +801,13 @@
         "RPC_CALLS": 1.0
       }
     },
+    "evm-ts-wrappers": {
+      "framework": "evm-ts-wrappers",
+      "language": "typescript+solidity",
+      "per_category": {
+        "RPC_CALLS": 1.0
+      }
+    },
     "external-cells-sidecar": {
       "framework": "external-cells-sidecar",
       "language": "python",
@@ -1396,6 +1403,13 @@
       "framework": "imports-local-filter",
       "language": "rust+python+java+php+c_cpp+csharp+elixir+go",
       "per_category": {}
+    },
+    "imports-tail-precision": {
+      "framework": "imports-tail-precision",
+      "language": "go+java+csharp",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
     },
     "java-camel-tests": {
       "framework": "java-camel-tests",
@@ -2053,6 +2067,14 @@
         "INJECTS": 1.0
       }
     },
+    "py-fastapi-include-router": {
+      "framework": "py-fastapi-include-router",
+      "language": "python+typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "py-field-dispatch": {
       "framework": "py-field-dispatch",
       "language": "python",
@@ -2065,6 +2087,14 @@
       "language": "python",
       "per_category": {
         "HANDLED_BY": 1.0
+      }
+    },
+    "py-flask-register-blueprint": {
+      "framework": "py-flask-register-blueprint",
+      "language": "python+typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "py-graphene-fields": {
@@ -2178,6 +2208,15 @@
       "per_category": {
         "ACCESSES_DATA": 1.0,
         "DEFINES": 1.0
+      }
+    },
+    "ruby-bunny-di-mixins": {
+      "framework": "ruby-bunny-di-mixins",
+      "language": "ruby",
+      "per_category": {
+        "CALLS": 1.0,
+        "INJECTS": 1.0,
+        "QUEUE_FLOWS": 1.0
       }
     },
     "ruby-http": {
@@ -2502,6 +2541,13 @@
       "language": "sql",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "start-indirection": {
+      "framework": "start-indirection",
+      "language": "dockerfile",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "svelte-page-fetch": {

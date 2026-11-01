@@ -5179,27 +5179,29 @@
     },
     "python/http_server": {
       "extract": [
-        5,
-        5
+        13,
+        13
       ],
       "fixtures": [
         "fixtures/py-django-include",
+        "fixtures/py-fastapi-include-router",
         "fixtures/py-flask-handled",
+        "fixtures/py-flask-register-blueprint",
         "fixtures/py-http"
       ],
       "forbid": [
-        4,
-        4
+        8,
+        8
       ],
       "level": "full",
       "literal": [
-        5,
-        5
+        13,
+        13
       ],
       "reasons": [],
       "route": [
-        5,
-        5
+        13,
+        13
       ],
       "via": "http"
     },
@@ -9662,6 +9664,7 @@
     "fixtures/evm-abi-cross-file",
     "fixtures/evm-shop-stack",
     "fixtures/evm-ts-residuals",
+    "fixtures/evm-ts-wrappers",
     "fixtures/external-cells-sidecar",
     "fixtures/external-channel-clients",
     "fixtures/framework-invoked-members",
@@ -9719,6 +9722,7 @@
     "fixtures/identity-scip-symbols",
     "fixtures/identity-vendored-subtree",
     "fixtures/imports-local-filter",
+    "fixtures/imports-tail-precision",
     "fixtures/java-declarative-clients",
     "fixtures/java-enum-members",
     "fixtures/java-http-clients",
@@ -9789,6 +9793,7 @@
     "fixtures/react-tsx-components",
     "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
+    "fixtures/ruby-bunny-di-mixins",
     "fixtures/ruby-rails-scope",
     "fixtures/ruby-require-in-scope",
     "fixtures/runtime-invoked-entries",
@@ -9810,6 +9815,7 @@
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
+    "fixtures/start-indirection",
     "fixtures/swift-implicit-self",
     "fixtures/swift-imports",
     "fixtures/swift-local-receivers",
@@ -10278,16 +10284,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           2,
           2
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          2,
+          4,
           4
         ],
         "via": "process_entry"
@@ -10340,6 +10344,102 @@
         ],
         "via": "process_entry"
       },
+      "typescript/config_table": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/typescript/config_table"
+        ],
+        "forbid": [
+          3,
+          3
+        ],
+        "level": "full",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          1,
+          1
+        ],
+        "via": "config_table"
+      },
+      "typescript/host_callback": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/typescript/host_callback"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "full",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          2,
+          2
+        ],
+        "via": "host_callback"
+      },
+      "typescript/host_command": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/typescript/host_command"
+        ],
+        "forbid": [
+          2,
+          2
+        ],
+        "level": "full",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          2,
+          2
+        ],
+        "via": "host_command"
+      },
+      "typescript/host_event": {
+        "extract": [
+          2,
+          2
+        ],
+        "fixtures": [
+          "patterns/typescript/host_event"
+        ],
+        "forbid": [
+          2,
+          2
+        ],
+        "level": "full",
+        "literal": [
+          2,
+          2
+        ],
+        "reasons": [],
+        "route": [
+          2,
+          2
+        ],
+        "via": "host_event"
+      },
       "typescript/process_entry": {
         "extract": [
           2,
@@ -10352,16 +10452,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           2,
           2
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          0,
+          4,
           4
         ],
         "via": "process_entry"
@@ -10378,10 +10476,10 @@
     ],
     "totals": {
       "error": 0,
-      "full": 10,
+      "full": 16,
       "none": 1,
-      "partial": 3,
-      "unknown": 112
+      "partial": 1,
+      "unknown": 108
     }
   },
   "schema": 3,
