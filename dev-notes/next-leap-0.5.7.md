@@ -70,6 +70,18 @@ and rebuilt with credit, never an id in a PR. To design alongside 0.5.6's graph 
   / build-group wiring, a fixture, a pattern cell; documented so a PR touching only a seam can merge.
 - **Gates a contributor can run**: a fast tier (minutes) for PRs, the full rank / cohort gates at release only.
 
+## 4b. Wave-runner: reuse unchanged gates (agreed 2026-11-01, built right after the 0.5.6 release)
+
+James, after the 0.5.6 release close-out re-ran ~65 min for a baseline-only fix: *"Yeah add after the
+release it's probably will happen if we need to run it particularly every couple of waves if a specific
+change is required"*. `closeout.py` records, per gate, the inputs of its last green run (the code tree's
+PARSER_STAMP / BUILD_STAMP and the tracked source digest for tests, fmt, clippy, rustdoc and the wheel;
+that plus `bench/rank-gate/` for the rank gate; that plus `bench/cohort/results/baseline/` and the cohort
+pins for the cohort gate; the fixture tree for run.py / matrix). A re-run whose inputs to a gate did not
+move reuses its result and says so (`[closeout] reuse <gate> from <commit>`); a gate whose inputs moved,
+or that failed, runs again. The release's last close-out still needs one full green set, built from
+reused and fresh results over the same tree. A ratchet runs only from a fresh full run.
+
 ## 5. Distribution and later
 
 - A Claude Code plugin packaging skills/, shaped by FH.13's agent-usage data (James 2026-10-24; ruled after 0.5.4).
