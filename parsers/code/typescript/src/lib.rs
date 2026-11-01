@@ -215,6 +215,8 @@ fn parse_file_stats(
     // GH.9: every declaration is known now: the host registrations' handlers
     // bind, section locals read, exported host callbacks become entries.
     settle_host(&mut acc);
+    // GH.11: a script guard or a runtime `#!` line makes the MODULE an entry.
+    settle_script_entry(&mut acc, source, module_qname);
 
     // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
     // A7.1's gate, then the file's local-typed receivers are counted.
@@ -569,6 +571,10 @@ struct Acc {
     class_urls: Vec<(NodeId, class_url::ClassUrlParts, bool)>,
     /// GH.9: the file's host bindings, registrations and `[host]` tally.
     host: HostScan,
+    /// GH.11: the 0-based row of the file's first module-level script guard
+    /// (`if (require.main === module)`, `if (import.meta.main)`), read by
+    /// [`settle_script_entry`].
+    script_guard: Option<u32>,
 }
 
 /// FH.20: a type name read in a type position by `from` (an annotation, a
@@ -1223,8 +1229,172 @@ fn visit_top(
             // Top-level calls — record with module as source.
             collect_calls_in(n, src, module_id, None, acc);
         }
+        // GH.11: a script guard's body runs as the MODULE when the file is
+        // the program's entry: its calls are MODULE CALLS. Any other
+        // module-level `if` is not read.
+        "if_statement" if is_main_guard(n, src) => {
+            acc.script_guard.get_or_insert(line_at(n));
+            if let Some(body) = n.child_by_field_name("consequence") {
+                collect_calls_in(body, src, module_id, None, acc);
+            }
+        }
         _ => {}
     }
+}
+
+/// GH.11: true for a module-level `if` whose condition is a script guard:
+/// CommonJS's `require.main === module` (or `==`, either operand first), with
+/// no top-level declaration or import of the file binding `require` or
+/// `module` (a file's own `module` is not CommonJS's), or Deno / Bun's
+/// `import.meta.main`. The condition may sit in extra parentheses.
+fn is_main_guard(stmt: TsNode, src: &[u8]) -> bool {
+    let Some(mut cond) = stmt.child_by_field_name("condition") else {
+        return false;
+    };
+    while cond.kind() == "parenthesized_expression" {
+        let mut c = cond.walk();
+        let Some(inner) = cond
+            .named_children(&mut c)
+            .find(|ch| ch.kind() != "comment")
+        else {
+            return false;
+        };
+        cond = inner;
+    }
+    let member = |n: TsNode, object_kind: &str, object: &str, property: &str| {
+        n.kind() == "member_expression"
+            && n.child_by_field_name("object")
+                .is_some_and(|o| o.kind() == object_kind && text(o, src) == object)
+            && n.child_by_field_name("property")
+                .is_some_and(|p| text(p, src) == property)
+    };
+    match cond.kind() {
+        "member_expression" => member(cond, "meta_property", "import.meta", "main"),
+        "binary_expression" => {
+            let op = cond
+                .child_by_field_name("operator")
+                .map(|o| text(o, src))
+                .unwrap_or("");
+            let (Some(l), Some(r)) = (
+                cond.child_by_field_name("left"),
+                cond.child_by_field_name("right"),
+            ) else {
+                return false;
+            };
+            let is_module = |n: TsNode| n.kind() == "identifier" && text(n, src) == "module";
+            let is_require_main = |n: TsNode| member(n, "identifier", "require", "main");
+            matches!(op, "===" | "==")
+                && ((is_require_main(l) && is_module(r)) || (is_module(l) && is_require_main(r)))
+                && !binds_commonjs_globals(stmt, src)
+        }
+        _ => false,
+    }
+}
+
+/// GH.11: true when a top-level declaration or import of `stmt`'s file binds
+/// `require` or `module`, so a guard naming them is not CommonJS's.
+fn binds_commonjs_globals(stmt: TsNode, src: &[u8]) -> bool {
+    let Some(program) = stmt.parent() else {
+        return false;
+    };
+    let mut names = BTreeSet::new();
+    let mut c = program.walk();
+    for top in program.named_children(&mut c) {
+        match top.kind() {
+            "export_statement" => {
+                if let Some(decl) = top.child_by_field_name("declaration") {
+                    declared_names(decl, src, &mut names);
+                }
+            }
+            "import_statement" => {
+                let mut ic = top.walk();
+                for clause in top.named_children(&mut ic) {
+                    if clause.kind() == "import_clause" {
+                        names.extend(import_clause_locals(clause, src));
+                    }
+                }
+            }
+            _ => declared_names(top, src, &mut names),
+        }
+    }
+    names.contains("require") || names.contains("module")
+}
+
+/// GH.11: the local names an `import_clause` binds: a default import, a
+/// namespace import's name and each named import (its alias when renamed).
+fn import_clause_locals(clause: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut c = clause.walk();
+    for part in clause.named_children(&mut c) {
+        match part.kind() {
+            "identifier" => out.push(text(part, src).to_string()),
+            "namespace_import" => {
+                let mut nc = part.walk();
+                out.extend(
+                    part.named_children(&mut nc)
+                        .filter(|n| n.kind() == "identifier")
+                        .map(|n| text(n, src).to_string()),
+                );
+            }
+            "named_imports" => {
+                let mut nc = part.walk();
+                for spec in part.named_children(&mut nc) {
+                    if spec.kind() != "import_specifier" {
+                        continue;
+                    }
+                    if let Some(local) = spec
+                        .child_by_field_name("alias")
+                        .or_else(|| spec.child_by_field_name("name"))
+                    {
+                        out.push(text(local, src).to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// GH.11: the runtimes a TypeScript / JavaScript script's `#!` line names
+/// ([`hosts::shebang_entry`]; a version tail such as `node18` matches).
+const TS_INTERPRETERS: &[&str] = &["node", "deno", "bun", "tsx", "ts-node"];
+
+/// GH.11: the MODULE's script entry, once the file is read: a module-level
+/// script guard ([`is_main_guard`]) gives an ENTRYPOINT cell
+/// [`hosts::entry_cell`] with source `main_guard` at the guard's row (the
+/// shape Python's `__main__` guard writes), else a first line `#!` naming a
+/// TypeScript / JavaScript runtime ([`TS_INTERPRETERS`]) one with source
+/// `shebang` at row 1. One entry cell per node: a MODULE that already holds
+/// one keeps it. fired_on: `[host] lang=typescript script=<main_guard|shebang>
+/// module=<q> file=<p>`.
+fn settle_script_entry(acc: &mut Acc, source: &str, module_qname: &str) {
+    let Some(module_id) = acc.module_id else {
+        return;
+    };
+    let script = match acc.script_guard {
+        Some(row0) => Some(("main_guard", row0)),
+        None => hosts::shebang_entry(source.lines().next().unwrap_or(""), TS_INTERPRETERS)
+            .map(|_| ("shebang", 0)),
+    };
+    let Some((how, row0)) = script else {
+        return;
+    };
+    let Some(node) = acc.nodes.iter_mut().find(|n| n.id == module_id) else {
+        return;
+    };
+    if node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT) {
+        return;
+    }
+    node.cells.push(hosts::entry_cell(
+        &acc.file_rel,
+        row0.saturating_add(1),
+        how,
+    ));
+    eprintln!(
+        "[host] lang=typescript script={how} module={module_qname} file={}",
+        acc.file_rel
+    );
 }
 
 // ============================================================================
@@ -21142,5 +21312,138 @@ createRoot(document.body).render(<App />);
             uses_refs(&p, f("src::Btn::Get"))
         );
         assert!(!has_component_role(&p, f("src::Btn::Get")));
+    }
+}
+
+#[cfg(test)]
+mod script_entry_tests {
+    //! GH.11: TypeScript / JavaScript scripts: a runtime `#!` line and a
+    //! module-level `require.main === module` / `import.meta.main` guard make
+    //! the MODULE an entry, and the guard's body is walked from the MODULE.
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-scripts")
+    }
+
+    fn module() -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "bin::tool")
+    }
+
+    fn func(name: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            &format!("bin::tool::{name}"),
+        )
+    }
+
+    fn parse(src: &str, path: &str) -> FileParse {
+        parse_file(src, path, "bin::tool", repo()).expect("parse")
+    }
+
+    fn entry(p: &FileParse) -> Option<String> {
+        p.nodes
+            .iter()
+            .find(|x| x.id == module())?
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENTRYPOINT)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                _ => String::new(),
+            })
+    }
+
+    fn calls(p: &FileParse, from: NodeId, to: NodeId) -> bool {
+        p.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+    }
+
+    fn cell(file: &str, row: u32, source: &str) -> Option<String> {
+        Some(format!(r#"{{"decl":"{file}:{row}","source":"{source}"}}"#))
+    }
+
+    const PROBE: &str = r#"#!/usr/bin/env node
+// A shell script: run as `count-lines.js <file>`.
+const fs = require("fs");
+
+function count(path) {
+  return fs.readFileSync(path, "utf8").split("\n").length;
+}
+
+if (require.main === module) {
+  console.log(count(process.argv[2]));
+}
+"#;
+
+    #[test]
+    fn a_require_main_guard_is_the_modules_entry_and_its_calls_are_the_modules() {
+        let p = parse(PROBE, "bin/tool.js");
+        // The guard wins over the shebang: one entry cell, at the guard's row.
+        assert_eq!(entry(&p), cell("bin/tool.js", 9, "main_guard"));
+        assert!(calls(&p, module(), func("count")), "{:?}", p.edges);
+    }
+
+    #[test]
+    fn every_guard_spelling_is_read() {
+        for (cond, ext) in [
+            ("require.main === module", "ts"),
+            ("require.main == module", "js"),
+            ("module === require.main", "js"),
+            ("((require.main === module))", "ts"),
+            ("import.meta.main", "ts"),
+        ] {
+            let src = format!("function main() {{}}\n\nif ({cond}) main();\n");
+            let path = format!("bin/tool.{ext}");
+            let p = parse(&src, &path);
+            assert_eq!(entry(&p), cell(&path, 3, "main_guard"), "{cond}");
+            assert!(calls(&p, module(), func("main")), "{cond}: {:?}", p.edges);
+        }
+    }
+
+    #[test]
+    fn a_runtime_shebang_alone_is_an_entry_at_row_one() {
+        for line in [
+            "#!/usr/bin/env node",
+            "#!/usr/local/bin/node",
+            "#!/usr/bin/env -S node --no-warnings",
+            "#!/usr/bin/env deno",
+            "#!/usr/bin/env bun",
+            "#!/usr/bin/env tsx",
+            "#!/usr/bin/env ts-node",
+            "#!/usr/bin/env node18",
+        ] {
+            let src = format!("{line}\nfunction greet() {{}}\ngreet();\n");
+            let p = parse(&src, "bin/tool.ts");
+            assert_eq!(entry(&p), cell("bin/tool.ts", 1, "shebang"), "{line}");
+        }
+    }
+
+    #[test]
+    fn other_files_are_no_script() {
+        for src in [
+            // Another program's shebang.
+            "#!/usr/bin/env python3\nfunction main() {}\n",
+            "#!/usr/bin/env nodemon\nfunction main() {}\n",
+            // A shebang that is not the first line.
+            "\n#!/usr/bin/env node\nfunction main() {}\n",
+            // Other conditions.
+            "function main() {}\nif (require.main !== module) main();\n",
+            "function main() {}\nif (require.main === mod) main();\n",
+            "function main() {}\nif (import.meta.url) main();\n",
+            "function main() {}\nif (process.env.RUN) main();\n",
+            // A file of its own `module` / `require` is not CommonJS's.
+            "const module = {};\nfunction main() {}\nif (require.main === module) main();\n",
+            "import { module } from './m';\nfunction main() {}\nif (require.main === module) main();\n",
+            "export function require() {}\nfunction main() {}\nif (require.main === module) main();\n",
+            // A guard inside a function is not module-level.
+            "function run() {\n  if (require.main === module) run();\n}\n",
+        ] {
+            let p = parse(src, "lib/tool.ts");
+            assert_eq!(entry(&p), None, "{src}");
+        }
     }
 }
