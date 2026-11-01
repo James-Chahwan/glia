@@ -2452,8 +2452,9 @@ questions over one graph computes `entrypoint_reachable` once.
   0.5.6's host-to-plugin graph (PR #3's plugin families, generalised). No registry id, no FORMAT_VERSION /
   MANIFEST_VERSION change; Cargo.lock gains tree-sitter-lua.
 - **0.5.6 — finishing what was started: complete on `main` at wave W12 (`d3a264bf`), the release
-  docs and handoffs in W13 (GZ.1, GZ.2); awaiting the release close-out (the full rank and cohort
-  gates), the version bump and the tag.** Scope `dev-notes/next-leap-0.5.6.md`, packets
+  docs and handoffs in W13 (GZ.1, GZ.2); the release close-out ran every gate in full (960da266:
+  rank `1176 rows, 95 gains, 0 drops`, cohort `21 repos, 200 tasks, 69 gains, 0 drops`); version
+  bumped, awaiting the tag.** Scope `dev-notes/next-leap-0.5.6.md`, packets
   `dev-notes/leap-056-packets.json` (overrides and rulings `leap-056-corrections.json`), schedule and
   LANDED waves `dev-notes/wave-runner/schedule_056.py` (runner `--release 056`, ids G*, no wave 0, no
   tracks; 106 packets in W0-W12), the standing precision backlog `dev-notes/precision-backlog.json`
