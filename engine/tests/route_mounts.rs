@@ -9,6 +9,13 @@
 //! into a tempdir (server and client as two repos, the fixture's `dirs`);
 //! the edge cases (two prefixes, a cycle, an unresolved and a dynamic
 //! include) are written inline.
+//!
+//! GD.41, Python second: Flask `register_blueprint(bp, url_prefix=..)` and
+//! FastAPI `include_router(<mod>.router, prefix=..)` across files, a two-level
+//! router-into-router chain and a router subclass (`ServiceRouter(prefix=..)`)
+//! read as a router, on the fixtures `py-flask-register-blueprint` and
+//! `py-fastapi-include-router`, whose clients call non-`/api` prefixes so only
+//! the mount pairs them.
 
 use std::path::Path;
 
@@ -33,6 +40,33 @@ fn write(dir: &Path, files: &[(&str, &str)]) {
 
 fn fixture_file(rel: &str) -> String {
     std::fs::read_to_string(format!("{FIXTURE}/{rel}")).expect("fixture file")
+}
+
+/// A GD.41 fixture's `server/` files and `client/web/api.ts`, built as two
+/// repos.
+fn fixture_pair(fixture: &str, server: &[&str]) -> (tempfile::TempDir, MergedGraph) {
+    let dir = format!(
+        "{}/../bench/substrate-gap/fixtures/{fixture}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let read = |rel: &str| std::fs::read_to_string(format!("{dir}/{rel}")).expect("fixture file");
+    let td = tempfile::tempdir().expect("tempdir");
+    for rel in server {
+        write(
+            &td.path().join("server"),
+            &[(rel, &read(&format!("server/{rel}")))],
+        );
+    }
+    write(
+        &td.path().join("client"),
+        &[("web/api.ts", &read("client/web/api.ts"))],
+    );
+    let repos: Vec<String> = ["server", "client"]
+        .iter()
+        .map(|d| td.path().join(d).to_string_lossy().into_owned())
+        .collect();
+    let merged = generate_many(&repos).expect("the fixture builds").merged;
+    (td, merged)
 }
 
 /// The fixture's server and client, built as two repos.
@@ -186,4 +220,62 @@ fn cycles_unresolved_and_dynamic_includes_mint_no_stray_route() {
         "{rs:?}"
     );
     assert!(rs.iter().all(|r| r.starts_with("ANY /")), "{rs:?}");
+}
+
+/// GD.41, Flask: a blueprint mounted cross-file at `/svc` by imported name,
+/// one registered by module attribute with no `url_prefix` at its own
+/// `/orders`; each client call pairs exactly.
+#[test]
+fn flask_register_blueprint_mounts_and_pairs() {
+    let (_td, m) = fixture_pair(
+        "py-flask-register-blueprint",
+        &["app.py", "svc/items.py", "svc/orders.py"],
+    );
+    assert_eq!(
+        routes(&m),
+        [
+            "DELETE /svc/items/<int:item_id>",
+            "GET /health",
+            "GET /orders/recent",
+            "GET /svc/items",
+        ]
+    );
+    assert_eq!(paired(&m, "GET:/svc/items"), ["GET /svc/items"]);
+    assert_eq!(
+        paired(&m, "DELETE:/svc/items/"),
+        ["DELETE /svc/items/<int:item_id>"]
+    );
+    assert_eq!(paired(&m, "/orders/recent"), ["GET /orders/recent"]);
+}
+
+/// GD.41, FastAPI: `users.router` and a router subclass's `flows.router`
+/// included into a prefixed package router, itself included by aliased name
+/// at `/svc`; each client call pairs exactly.
+#[test]
+fn fastapi_include_router_chain_mounts_and_pairs() {
+    let (_td, m) = fixture_pair(
+        "py-fastapi-include-router",
+        &[
+            "main.py",
+            "core/base.py",
+            "routers/__init__.py",
+            "routers/users.py",
+            "routers/flows.py",
+        ],
+    );
+    assert_eq!(
+        routes(&m),
+        [
+            "GET /health",
+            "GET /svc/core/users",
+            "POST /svc/core/users",
+            "POST /svc/core/v1/flows/filter",
+        ]
+    );
+    assert_eq!(paired(&m, "GET:/svc/core/users"), ["GET /svc/core/users"]);
+    assert_eq!(paired(&m, "POST:/svc/core/users"), ["POST /svc/core/users"]);
+    assert_eq!(
+        paired(&m, "/flows/filter"),
+        ["POST /svc/core/v1/flows/filter"]
+    );
 }

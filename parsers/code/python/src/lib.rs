@@ -72,6 +72,7 @@ pub fn parse_file(
     // prefixes so a decorator whose receiver carries one composes the real
     // path. Pre-pass for the same reason as above: routers are conventionally
     // assigned above their handlers, but this makes file order irrelevant.
+    acc.module_qname = module_qname.to_string();
     scan_router_prefixes(root, src, &mut acc);
 
     // LA.23a pre-pass: this file's class names, for the qualified-type check
@@ -167,6 +168,17 @@ pub fn parse_file(
         }
     }
 
+    // GD.41 post-pass, once the file's imports are all read: each router
+    // variable and each cross-file `include_router` / `register_blueprint`
+    // as a mount fact on the MODULE.
+    record_router_mounts(root, src, module_id, &mut acc);
+    if acc.py_mounts.routers + acc.py_mounts.includes + acc.py_mounts.dynamic > 0 {
+        let m = acc.py_mounts;
+        eprintln!(
+            "[py-mounts] routers={} provisional={} includes={} dynamic={} file={file_rel_path}",
+            m.routers, m.provisional, m.includes, m.dynamic
+        );
+    }
     if acc.django.routes + acc.django.includes + acc.django.spreads + acc.django.dynamic > 0 {
         let d = acc.django;
         eprintln!(
@@ -420,6 +432,19 @@ struct Acc {
     /// Count of routes whose path was composed from a receiver prefix. Drives
     /// the `[py-routes]` fired_on marker.
     routes_composed: usize,
+    /// GD.41: every module-level router variable (`router = APIRouter(..)`,
+    /// `bp = Blueprint(..)`, a router subclass) and its framework, from the
+    /// `scan_router_prefixes` pre-pass. A route decorated on one is minted on
+    /// the module's mount slot `<mount:module:<module>#<var>>`.
+    router_kinds: HashMap<String, RouterFamily>,
+    /// GD.41: the qname of the module being parsed (the mount slot's module).
+    module_qname: String,
+    /// GD.41: the `[py-mounts]` counters.
+    py_mounts: PyMountStats,
+    /// GD.41: module-level `NAME = "literal"` string constants (a name
+    /// assigned twice, or once to anything else, is dropped), so a router
+    /// prefix written as a constant (`prefix=user_prefix`) folds.
+    str_consts: HashMap<String, String>,
     /// LA.23a — the source of each `(class, field)` type already recorded in
     /// `nav.field_types`, so a weaker source never overwrites a stronger one
     /// (see [`FieldTypeSource`]).
@@ -447,6 +472,40 @@ struct DjangoStats {
     /// `*name` / `urlpatterns += name` spreads of an imported `urlpatterns`.
     spreads: usize,
     /// Includes and spreads of anything else (`include(router.urls)`).
+    dynamic: usize,
+}
+
+/// GD.41: which framework a module-level router variable belongs to. FastAPI
+/// composes an included router's own prefix under the include's; Flask's
+/// `register_blueprint(bp, url_prefix=..)` REPLACES the blueprint's own
+/// `url_prefix` (Flask's `BlueprintSetupState`), so a blueprint route keeps
+/// only its rule and its own prefix flows through the mount slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouterFamily {
+    FastApi,
+    Flask,
+}
+
+impl RouterFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            RouterFamily::FastApi => "fastapi",
+            RouterFamily::Flask => "flask",
+        }
+    }
+}
+
+/// GD.41: what the router-mount scan of one file read (`[py-mounts] ..`).
+#[derive(Debug, Default, Clone, Copy)]
+struct PyMountStats {
+    /// Module-level router variables.
+    routers: usize,
+    /// Routes minted on a router variable's mount slot.
+    provisional: usize,
+    /// `include_router` / `register_blueprint` calls naming a router.
+    includes: usize,
+    /// Of those calls, the ones naming anything else (a loop variable, a
+    /// computed prefix): they mount nothing.
     dynamic: usize,
 }
 
@@ -3174,19 +3233,28 @@ fn strip_string_quotes(s: &str) -> String {
 // list in `urls.py`. Method defaults to ANY because Django method dispatch
 // happens inside the view function, not the URL declaration.
 
-/// Pre-pass: harvest module-level router/blueprint path prefixes, so a route
-/// decorator can compose the prefix its *receiver* carries onto the fragment
-/// the decorator itself names.
+/// Pre-pass: harvest module-level router/blueprint variables and their path
+/// prefixes, so a route decorator on one is minted on the module's mount slot
+/// and composes the prefix its *receiver* carries.
 ///
 ///   `router = APIRouter(prefix="/api/v1/users")` + `@router.get("/{id}")`
-///       → `GET /api/v1/users/{id}` (not `GET /{id}`)
+///       → `GET <mount:module:<module>#router>/api/v1/users/{id}`, re-keyed
+///       by the graph's route-mount pass to `GET /api/v1/users/{id}` where no
+///       include mounts the router
 ///   `bp = Blueprint("orders", __name__, url_prefix="/api/v1/orders")`
-///       + `@bp.route("/<int:id>")` → `GET /api/v1/orders/<int:id>`
+///       + `@bp.route("/<int:id>")` → `GET <mount:module:<module>#bp>/<int:id>`,
+///       the blueprint's own prefix flowing through its slot (Flask's
+///       `register_blueprint(bp, url_prefix=..)` replaces it)
 ///
-/// Cross-FILE `include_router` is deliberately OUT of scope, not missed: the
-/// parser sees one file at a time, so a router defined in `routers/users.py`
-/// and mounted in `main.py` still loses the mount prefix. Composing across
-/// modules needs a graph-crate pass over the resolved import edges.
+/// GD.41: a router constructor is `APIRouter(..)` / `Blueprint(..)`, a call
+/// of a class this file declares with a base naming `APIRouter` (a router
+/// subclass, `class ServiceRouter(APIRouter)`), or any call whose callee
+/// ends in `Router` and passes `prefix=` (`PrefectRouter(prefix="/flows")`,
+/// `UserAPIRouter(prefix=..)`, imported subclasses) when a route decorator
+/// or an `include_router` uses the variable: a `XRouter(prefix=..)` of a
+/// non-web library nothing registers a route on stays a plain value.
+/// The cross-file and same-file mounts themselves are recorded after the
+/// walk ([`record_router_mounts`]), once the imports are read.
 fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
     // Top-level statements, unwrapping the `expression_statement` shell that
     // tree-sitter-python puts around a bare assignment or call.
@@ -3200,8 +3268,10 @@ fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
             stmts.push(child);
         }
     }
+    let used = router_receivers(root, src);
+    let subclasses = router_subclasses(&stmts, src);
+    acc.str_consts = string_constants(&stmts, src);
 
-    // Pass 1 — the constructor assignments.
     for stmt in &stmts {
         if stmt.kind() != "assignment" {
             continue;
@@ -3218,84 +3288,319 @@ fn scan_router_prefixes(root: TsNode, src: &[u8], acc: &mut Acc) {
         let Some(func) = rhs.child_by_field_name("function") else {
             continue;
         };
+        let var = text(lhs, src);
         // `APIRouter(...)` or `fastapi.APIRouter(...)` — match the tail.
-        let kw = match text(func, src).rsplit('.').next().unwrap_or("") {
-            "APIRouter" => "prefix",
-            "Blueprint" => "url_prefix",
+        let tail = text(func, src).rsplit('.').next().unwrap_or("");
+        let (family, kw) = match tail {
+            "APIRouter" => (RouterFamily::FastApi, "prefix"),
+            "Blueprint" => (RouterFamily::Flask, "url_prefix"),
+            t if subclasses.contains(t) => (RouterFamily::FastApi, "prefix"),
+            t if t.ends_with("Router") && used.contains(var) => (RouterFamily::FastApi, "prefix"),
+            _ => {
+                // A reassignment to anything else ends the router.
+                acc.router_kinds.remove(var);
+                acc.router_prefixes.remove(var);
+                continue;
+            }
+        };
+        acc.router_kinds.insert(var.to_string(), family);
+        match keyword_prefix_arg(rhs, kw, src, &acc.str_consts)
+            .flatten()
+            .filter(|p| !p.is_empty())
+        {
+            Some(prefix) => {
+                acc.router_prefixes.insert(var.to_string(), prefix);
+            }
+            None => {
+                acc.router_prefixes.remove(var);
+            }
+        }
+    }
+    acc.py_mounts.routers = acc.router_kinds.len();
+}
+
+/// GD.41: the receivers a route decorator (`@router.get(..)`,
+/// `@bp.route(..)`) or an `include_router` call (its receiver and its first
+/// argument) names anywhere in the file: what makes a `XRouter(prefix=..)`
+/// variable a router.
+fn router_receivers(root: TsNode, src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "decorator" => {
+                let body = text(n, src).trim_start_matches('@').trim();
+                if let Some(paren) = body.find('(')
+                    && let Some((receiver, verb)) = body[..paren].rsplit_once('.')
+                    && route_methods_for(&verb.to_ascii_lowercase(), &body[paren..]).is_some()
+                {
+                    out.insert(receiver.trim().to_string());
+                }
+            }
+            "call" => {
+                if let Some(func) = n.child_by_field_name("function")
+                    && func.kind() == "attribute"
+                    && child_text(func, "attribute", src) == Some("include_router")
+                {
+                    if let Some(object) = func.child_by_field_name("object") {
+                        out.insert(text(object, src).to_string());
+                    }
+                    if let Some(first) = n
+                        .child_by_field_name("arguments")
+                        .and_then(|a| a.named_child(0))
+                        .filter(|a| a.kind() == "identifier")
+                    {
+                        out.insert(text(first, src).to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    out
+}
+
+/// GD.41: the classes this file declares at top level with a base naming
+/// `APIRouter` (`class ServiceRouter(APIRouter)`, `(fastapi.APIRouter)`):
+/// any call of one builds a router.
+fn router_subclasses(stmts: &[TsNode], src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in stmts {
+        let class = match stmt.kind() {
+            "class_definition" => *stmt,
+            "decorated_definition" => match stmt.child_by_field_name("definition") {
+                Some(d) if d.kind() == "class_definition" => d,
+                _ => continue,
+            },
             _ => continue,
         };
-        let Some(prefix) = keyword_string_arg(rhs, kw, src) else {
+        let Some(bases) = class.child_by_field_name("superclasses") else {
             continue;
         };
-        if prefix.is_empty() {
-            continue;
-        }
-        acc.router_prefixes
-            .insert(text(lhs, src).to_string(), prefix);
-    }
-
-    // Pass 2 — same-file FastAPI mount: `app.include_router(router, prefix="/v2")`
-    // folds the mount prefix onto that router's own prefix. A second pass so
-    // the mount may sit above or below the router assignment.
-    for stmt in &stmts {
-        if stmt.kind() != "call" {
-            continue;
-        }
-        let Some(func) = stmt.child_by_field_name("function") else {
-            continue;
-        };
-        if text(func, src).rsplit('.').next() != Some("include_router") {
-            continue;
-        }
-        let Some(args) = stmt.child_by_field_name("arguments") else {
-            continue;
-        };
-        let mut cursor = args.walk();
-        let Some(first) = args
+        let mut cursor = bases.walk();
+        let names_router = bases
             .named_children(&mut cursor)
-            .find(|a| a.kind() == "identifier")
+            .filter(|b| matches!(b.kind(), "identifier" | "attribute"))
+            .any(|b| text(b, src).rsplit('.').next() == Some("APIRouter"));
+        if names_router && let Some(name) = child_text(class, "name", src) {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// GD.41: a prefix keyword argument `name` of a `call`: `None` when the call
+/// does not pass it, `Some(None)` when its value is neither a string literal
+/// nor a module-level string constant of the file (`prefix=user_prefix`,
+/// `user_prefix = "/users"`), else the prefix.
+fn keyword_prefix_arg(
+    call: TsNode,
+    name: &str,
+    src: &[u8],
+    consts: &HashMap<String, String>,
+) -> Option<Option<String>> {
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let value = args
+        .named_children(&mut cursor)
+        .find(|a| a.kind() == "keyword_argument" && child_text(*a, "name", src) == Some(name))?
+        .child_by_field_name("value");
+    Some(value.and_then(|v| match v.kind() {
+        "string" => Some(strip_string_quotes(text(v, src))),
+        "identifier" => consts.get(text(v, src)).cloned(),
+        _ => None,
+    }))
+}
+
+/// GD.41: the file's module-level string constants, `NAME = "literal"` (an
+/// f-string with a placeholder is no literal). A name assigned more than
+/// once is left out: which value a mount reads would depend on order.
+fn string_constants(stmts: &[TsNode], src: &[u8]) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut twice: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in stmts {
+        if stmt.kind() != "assignment" {
+            continue;
+        }
+        let Some(lhs) = stmt
+            .child_by_field_name("left")
+            .filter(|l| l.kind() == "identifier")
         else {
             continue;
         };
-        let Some(mount) = keyword_string_arg(*stmt, "prefix", src) else {
-            continue;
-        };
-        if mount.is_empty() {
-            continue;
+        let name = text(lhs, src).to_string();
+        let literal = stmt.child_by_field_name("right").and_then(|r| {
+            let mut cursor = r.walk();
+            (r.kind() == "string"
+                && !r
+                    .named_children(&mut cursor)
+                    .any(|c| c.kind() == "interpolation"))
+            .then(|| strip_string_quotes(text(r, src)))
+        });
+        match literal {
+            Some(v) if !out.contains_key(&name) && !twice.contains(&name) => {
+                out.insert(name, v);
+            }
+            _ => {
+                out.remove(&name);
+                twice.insert(name);
+            }
         }
-        let target = text(first, src).to_string();
-        let own = acc
-            .router_prefixes
-            .get(&target)
-            .cloned()
-            .unwrap_or_default();
-        let composed = if own.is_empty() {
-            mount
-        } else {
-            endpoint::join_path(&mount, &own)
-        };
-        acc.router_prefixes.insert(target, composed);
+    }
+    out
+}
+
+/// GD.41: a mount prefix joined onto another, either side possibly empty
+/// (an empty side adds no `/`).
+fn compose_prefix(outer: &str, inner: &str) -> String {
+    match (outer.is_empty(), inner.is_empty()) {
+        (true, _) => inner.to_string(),
+        (_, true) => outer.to_string(),
+        _ => endpoint::join_path(outer, inner),
     }
 }
 
-/// Read a `name="literal"` keyword argument off a `call`'s argument list.
-/// Only a plain string literal is accepted — a variable or a computed prefix is
-/// not something a single-file parser can resolve, and a wrong prefix would be
-/// worse than none.
-fn keyword_string_arg(call: TsNode, name: &str, src: &[u8]) -> Option<String> {
-    let args = call.child_by_field_name("arguments")?;
-    let mut cursor = args.walk();
-    for arg in args.named_children(&mut cursor) {
-        if arg.kind() != "keyword_argument" || child_text(arg, "name", src) != Some(name) {
+/// GD.41: the `via` of a router declaration fact (`router:<family>`), of a
+/// FastAPI include (`fastapi:<includer>`), a Flask register with a literal
+/// `url_prefix` (`flask:<includer>`) and one without (`flask_own:<includer>`:
+/// the blueprint's own prefix applies). Read by the graph's route-mount pass.
+const VIA_ROUTER: &str = "router";
+const VIA_FASTAPI: &str = "fastapi";
+const VIA_FLASK: &str = "flask";
+const VIA_FLASK_OWN: &str = "flask_own";
+
+/// GD.41: record this module's router mounts as [`NavFact::IncludeMount`]s
+/// on its MODULE, for the graph's route-mount pass
+/// (`graph/src/build/route_mounts.rs`):
+///
+/// - each router variable (sorted by name) as `{ target: Dynamic(<var>),
+///   prefix: <own prefix>, via: "router:<fastapi|flask>" }`, which mounts
+///   nothing by itself: it names the slot and its own prefix;
+/// - each `<x>.include_router(<ref>, prefix="..")` as `{ target:
+///   Import { local: <ref> }, prefix: <x's own prefix> + "..", via:
+///   "fastapi:<x>" }` (FastAPI composes the including router's own prefix,
+///   the include's, then the included router's, which its routes carry);
+/// - each `<x>.register_blueprint(<ref>, url_prefix="..")` as `{ prefix:
+///   "..", via: "flask:<x>" }`, or with no `url_prefix` `{ prefix: "", via:
+///   "flask_own:<x>" }`.
+///
+/// `<ref>` is a router variable of this file or a name it imports (`router`,
+/// `core_router` from `from routers import router as core_router`), or an
+/// imported module's attribute (`users.router`, local `users.router`);
+/// anything else, or a prefix that is no string literal, is
+/// `Dynamic(<text>)` and mounts nothing. Calls are read anywhere in the file
+/// (an app factory mounts inside a function), in source order.
+fn record_router_mounts(root: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let mut vars: Vec<(&String, &RouterFamily)> = acc.router_kinds.iter().collect();
+    vars.sort_by(|a, b| a.0.cmp(b.0));
+    let decls: Vec<NavFact> = vars
+        .into_iter()
+        .map(|(var, family)| NavFact::IncludeMount {
+            line: 0,
+            target: IncludeTarget::Dynamic(var.clone()),
+            prefix: acc.router_prefixes.get(var).cloned().unwrap_or_default(),
+            via: format!("{VIA_ROUTER}:{}", family.as_str()),
+        })
+        .collect();
+    for fact in decls {
+        acc.nav.record_fact(module_id, fact);
+    }
+
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let mut cursor = n.walk();
+        let kids: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(kids.into_iter().rev());
+        if n.kind() != "call" {
             continue;
         }
-        let value = arg.child_by_field_name("value")?;
-        if value.kind() != "string" {
-            return None;
+        let Some(func) = n
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "attribute")
+        else {
+            continue;
+        };
+        let (fastapi, kw) = match child_text(func, "attribute", src) {
+            Some("include_router") => (true, "prefix"),
+            Some("register_blueprint") => (false, "url_prefix"),
+            _ => continue,
+        };
+        let (Some(object), Some(first)) = (
+            func.child_by_field_name("object"),
+            n.child_by_field_name("arguments")
+                .and_then(|a| a.named_child(0))
+                .filter(|a| a.kind() != "keyword_argument"),
+        ) else {
+            continue;
+        };
+        let includer = text(object, src).to_string();
+        let given = keyword_prefix_arg(n, kw, src, &acc.str_consts).map(|p| p.ok_or(()));
+        let target = match (router_ref(first, src, acc), &given) {
+            (Some(local), None | Some(Ok(_))) => IncludeTarget::Import { local },
+            _ => IncludeTarget::Dynamic(text(first, src).to_string()),
+        };
+        let given = given.and_then(Result::ok);
+        let (prefix, via) = if fastapi {
+            let own = acc
+                .router_prefixes
+                .get(&includer)
+                .filter(|_| acc.router_kinds.get(&includer) == Some(&RouterFamily::FastApi))
+                .map(String::as_str)
+                .unwrap_or("");
+            (
+                compose_prefix(own, given.as_deref().unwrap_or("")),
+                VIA_FASTAPI,
+            )
+        } else {
+            match given {
+                Some(p) => (p, VIA_FLASK),
+                None => (String::new(), VIA_FLASK_OWN),
+            }
+        };
+        if matches!(target, IncludeTarget::Dynamic(_)) {
+            acc.py_mounts.dynamic += 1;
+        } else {
+            acc.py_mounts.includes += 1;
         }
-        return Some(strip_string_quotes(text(value, src)));
+        acc.nav.record_fact(
+            module_id,
+            NavFact::IncludeMount {
+                line: u32::try_from(n.start_position().row).unwrap_or(u32::MAX),
+                target,
+                prefix,
+                via: format!("{via}:{includer}"),
+            },
+        );
     }
-    None
+}
+
+/// GD.41: the router an include names, as the `local` of an
+/// [`IncludeTarget::Import`]: a router variable of this file or an imported
+/// name (`router`), or an imported module's attribute (`users.router`,
+/// `api.routes.users.router` for `import api.routes.users`). `None` for
+/// anything else.
+fn router_ref(arg: TsNode, src: &[u8], acc: &Acc) -> Option<String> {
+    let module = acc.module_qname.as_str();
+    match arg.kind() {
+        "identifier" => {
+            let name = text(arg, src);
+            (acc.router_kinds.contains_key(name) || imported_name(acc, module, name, false))
+                .then(|| name.to_string())
+        }
+        "attribute" => {
+            let object = arg.child_by_field_name("object")?;
+            let attr = arg.child_by_field_name("attribute")?;
+            let dotted = text(object, src);
+            let plain = dotted
+                .split('.')
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_alphanumeric() || c == '_'));
+            (plain && imported_name(acc, module, dotted, false))
+                .then(|| format!("{dotted}.{}", text(attr, src)))
+        }
+        _ => None,
+    }
 }
 
 fn check_route_decorator(
@@ -3328,25 +3633,55 @@ fn check_route_decorator(
         }
     }
     let args = &body[paren + 1..];
-    let Some(path) = first_string_literal(args) else {
+    // GD.41: on a router variable an empty rule (`@router.post("")`) is the
+    // router's own path: FastAPI's `prefix + ""`.
+    let receiver = head.rsplit_once('.').map(|(r, _)| r.trim()).unwrap_or("");
+    let empty_rule = acc.router_kinds.contains_key(receiver)
+        && (args.trim_start().starts_with("\"\"") || args.trim_start().starts_with("''"));
+    let Some(path) = first_string_literal(args).or_else(|| empty_rule.then(String::new)) else {
         return;
     };
     // substrate-gap py-router-prefix — the receiver (`router` in `@router.get`)
     // may be an APIRouter/Blueprint carrying a prefix; compose it on. With no
     // prefix `join_path("", p)` is a pure pass-through and `abs_path` only
     // normalises the leading slash, so `@app.get("/users")` stays byte-identical.
-    let receiver = head.rsplit_once('.').map(|(r, _)| r.trim()).unwrap_or("");
     let prefix = acc
         .router_prefixes
         .get(receiver)
         .map(String::as_str)
         .unwrap_or("");
-    let full = endpoint::abs_path(&endpoint::join_path(prefix, &path));
     if !prefix.is_empty() {
         acc.routes_composed += 1;
     }
-    for m in methods {
-        emit_route(m, &full, handler_id, repo, acc);
+    // GD.41: a route on a module-level router variable sits on the module's
+    // mount slot, which the graph's route-mount pass re-keys to each prefix
+    // an include mounts the router under (`/<path>` where none does). A
+    // FastAPI route carries its router's own prefix; a Flask blueprint's
+    // flows through the slot, since a register's `url_prefix` replaces it.
+    let names: Vec<String> = match acc.router_kinds.get(receiver) {
+        Some(family) => {
+            let local = match family {
+                RouterFamily::FastApi => compose_prefix(prefix, &path),
+                RouterFamily::Flask => path.clone(),
+            };
+            let mount = Mount::Module {
+                module: acc.module_qname.clone(),
+                var: receiver.to_string(),
+                suffix: String::new(),
+            };
+            acc.py_mounts.provisional += methods.len();
+            methods
+                .iter()
+                .map(|m| endpoint::mount_route_qname(m, &mount, &local))
+                .collect()
+        }
+        None => {
+            let full = endpoint::abs_path(&endpoint::join_path(prefix, &path));
+            methods.iter().map(|m| format!("{m} {full}")).collect()
+        }
+    };
+    for (m, name) in methods.into_iter().zip(names) {
+        emit_route(m, &name, handler_id, repo, acc);
     }
 }
 
@@ -3778,8 +4113,10 @@ fn emit_django_route(
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
-fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let route_name = format!("{method} {path}");
+/// One decorator route `route_name` (`<METHOD> <path>`, or GD.41's
+/// provisional `<METHOD> <mount:module:..>/<path>`) HANDLED_BY its handler.
+fn emit_route(method: &str, route_name: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
+    let route_name = route_name.to_string();
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
         id: route_id,
@@ -4330,6 +4667,40 @@ mod tests {
         )
     }
 
+    /// GD.41: a route on router `var` of `module`, as the parser mints it.
+    fn slot_route_id(method: &str, module: &str, var: &str, path: &str) -> NodeId {
+        let mount = Mount::Module {
+            module: module.to_string(),
+            var: var.to_string(),
+            suffix: String::new(),
+        };
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            &endpoint::mount_route_qname(method, &mount, path),
+        )
+    }
+
+    /// GD.41: every IncludeMount fact of the parse as `(target, prefix, via)`.
+    fn mount_facts(parse: &FileParse) -> Vec<(IncludeTarget, String, String)> {
+        let mut scopes: Vec<_> = parse.nav.nav_facts.iter().collect();
+        scopes.sort_by_key(|(id, _)| format!("{id:?}"));
+        scopes
+            .into_iter()
+            .flat_map(|(_, fs)| fs.iter())
+            .filter_map(|f| match f {
+                NavFact::IncludeMount {
+                    target,
+                    prefix,
+                    via,
+                    ..
+                } => Some((target.clone(), prefix.clone(), via.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn flask_app_get_decorator_emits_route() {
         let src = "from flask import Flask\napp = Flask(__name__)\n\n@app.get('/users')\ndef list_users():\n    return []\n";
@@ -4380,7 +4751,8 @@ mod tests {
             node_kind::FUNCTION,
             "routes::create_item",
         );
-        let rid = route_id("POST", "/items");
+        // GD.41: on the router's mount slot; the graph re-keys it.
+        let rid = slot_route_id("POST", "routes", "router", "/items");
         assert!(parse.nodes.iter().any(|n| n.id == rid));
         assert!(has_edge(&parse, rid, handler, edge_category::HANDLED_BY));
     }
@@ -4391,7 +4763,7 @@ mod tests {
     fn fastapi_router_prefix_composes() {
         let src = "from fastapi import APIRouter\nrouter = APIRouter(prefix='/api/v1/users')\n\n@router.get('/{id}')\nasync def get_user(id: int):\n    return {}\n";
         let parse = parse_file(src, "routers.py", "routers", repo()).unwrap();
-        let rid = route_id("GET", "/api/v1/users/{id}");
+        let rid = slot_route_id("GET", "routers", "router", "/api/v1/users/{id}");
         let handler =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "routers::get_user");
         assert!(
@@ -4406,7 +4778,18 @@ mod tests {
     fn flask_blueprint_url_prefix_composes() {
         let src = "from flask import Blueprint\nbp = Blueprint('orders', __name__, url_prefix='/api/v1/orders')\n\n@bp.route('/<int:id>', methods=['GET'])\ndef get_order(id):\n    return {}\n";
         let parse = parse_file(src, "routers.py", "routers", repo()).unwrap();
-        let rid = route_id("GET", "/api/v1/orders/<int:id>");
+        // GD.41: a blueprint route keeps its rule; its own `url_prefix` is
+        // the slot's (the declaration fact), which a register may replace.
+        let rid = slot_route_id("GET", "routers", "bp", "/<int:id>");
+        assert!(
+            mount_facts(&parse).contains(&(
+                IncludeTarget::Dynamic("bp".into()),
+                "/api/v1/orders".into(),
+                "router:flask".into()
+            )),
+            "{:?}",
+            mount_facts(&parse)
+        );
         let handler = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -4421,6 +4804,9 @@ mod tests {
         assert!(has_edge(&parse, rid, handler, edge_category::HANDLED_BY));
     }
 
+    /// GD.41: a same-file `include_router` is a mount fact from the app's
+    /// slot carrying the include's prefix; the route stays on its router's
+    /// slot with the router's own prefix (the graph folds `/v2`).
     #[test]
     fn include_router_prefix_folds() {
         let src = "from fastapi import APIRouter, FastAPI\napp = FastAPI()\nrouter = APIRouter(prefix='/users')\napp.include_router(router, prefix='/v2')\n\n@router.get('/{id}')\ndef get_user(id: int):\n    return {}\n";
@@ -4429,9 +4815,137 @@ mod tests {
             parse
                 .nodes
                 .iter()
-                .any(|n| n.id == route_id("GET", "/v2/users/{id}")),
-            "include_router prefix not folded; routes: {:?}",
+                .any(|n| n.id == slot_route_id("GET", "main", "router", "/users/{id}")),
+            "routes: {:?}",
             route_names(&parse)
+        );
+        assert_eq!(
+            mount_facts(&parse),
+            [
+                (
+                    IncludeTarget::Dynamic("router".into()),
+                    "/users".into(),
+                    "router:fastapi".into()
+                ),
+                (
+                    IncludeTarget::Import {
+                        local: "router".into()
+                    },
+                    "/v2".into(),
+                    "fastapi:app".into()
+                ),
+            ]
+        );
+    }
+
+    /// GD.41: the router constructor rule. A router subclass the file
+    /// declares (any call), an imported `*Router(prefix=..)` a route
+    /// decorator uses (prefect's `PrefectRouter`, mealie's `UserAPIRouter`,
+    /// annotated or not), and a `*Router(prefix=..)` nothing registers on
+    /// (a non-web library's) stays a plain value.
+    #[test]
+    fn router_classes_and_subclasses_are_routers() {
+        let src = "from fastapi import APIRouter\nfrom prefect.server.utilities.server import PrefectRouter\nfrom other.lib import MessageRouter\n\n\nclass ServiceRouter(APIRouter):\n    pass\n\n\nrouter: PrefectRouter = PrefectRouter(prefix='/flows', tags=['Flows'])\nsvc = ServiceRouter()\nbus = MessageRouter(prefix='/events')\n\n\n@router.post('/filter')\ndef filter_flows():\n    return []\n\n\n@svc.get('/ping')\ndef ping():\n    return 1\n\n\ndef handle():\n    bus.send('/x')\n";
+        let parse = parse_file(src, "flows.py", "api::flows", repo()).unwrap();
+        let names = route_names(&parse);
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == slot_route_id("POST", "api::flows", "router", "/flows/filter")),
+            "{names:?}"
+        );
+        assert!(
+            parse
+                .nodes
+                .iter()
+                .any(|n| n.id == slot_route_id("GET", "api::flows", "svc", "/ping")),
+            "{names:?}"
+        );
+        let decls: Vec<_> = mount_facts(&parse).into_iter().map(|f| f.0).collect();
+        assert_eq!(
+            decls,
+            [
+                IncludeTarget::Dynamic("router".into()),
+                IncludeTarget::Dynamic("svc".into())
+            ]
+        );
+    }
+
+    /// GD.41: mealie's shapes. A prefix-less `UserAPIRouter()` a route
+    /// decorator uses is a router; an include prefix written as a
+    /// module-level string constant folds, one assigned twice does not.
+    #[test]
+    fn prefixless_subclass_routers_and_constant_prefixes() {
+        let src = "from fastapi import APIRouter\nfrom app.base import UserAPIRouter\nfrom . import registration\n\nuser_prefix = \"/users\"\nother = \"/a\"\nother = \"/b\"\nrouter = APIRouter()\nuser_router = UserAPIRouter(tags=[\"x\"])\nrouter.include_router(registration.router, prefix=user_prefix)\nrouter.include_router(registration.router, prefix=other)\n\n\n@user_router.post(\"/logout\")\ndef logout():\n    return 1\n";
+        let parse = parse_file(src, "users/__init__.py", "users::__init__", repo()).unwrap();
+        assert!(
+            parse.nodes.iter().any(|n| n.id
+                == slot_route_id("POST", "users::__init__", "user_router", "/logout")),
+            "{:?}",
+            route_names(&parse)
+        );
+        let includes: Vec<_> = mount_facts(&parse)
+            .into_iter()
+            .filter(|f| f.2.starts_with("fastapi:"))
+            .map(|f| (f.0, f.1))
+            .collect();
+        assert_eq!(
+            includes,
+            [
+                (
+                    IncludeTarget::Import {
+                        local: "registration.router".into()
+                    },
+                    "/users".into()
+                ),
+                (
+                    IncludeTarget::Dynamic("registration.router".into()),
+                    String::new()
+                ),
+            ]
+        );
+    }
+
+    /// GD.41: cross-file mounts. A module attribute and an imported name are
+    /// Import targets, a `register_blueprint` without `url_prefix` is
+    /// `flask_own`, a loop variable or a computed prefix is Dynamic; an
+    /// including router's own prefix leads its include's.
+    #[test]
+    fn cross_file_mounts_record_import_targets() {
+        let src = "from fastapi import APIRouter\nfrom flask import Flask\nfrom . import users\nfrom .items import bp\n\nrouter = APIRouter(prefix='/api')\nrouter.include_router(users.router)\nrouter.include_router(users.router, prefix=PREFIX)\napp = Flask(__name__)\n\n\ndef create_app():\n    app.register_blueprint(bp)\n    for r in ROUTERS:\n        router.include_router(r)\n";
+        let parse = parse_file(src, "api/__init__.py", "api::__init__", repo()).unwrap();
+        assert_eq!(
+            mount_facts(&parse),
+            [
+                (
+                    IncludeTarget::Dynamic("router".into()),
+                    "/api".into(),
+                    "router:fastapi".into()
+                ),
+                (
+                    IncludeTarget::Import {
+                        local: "users.router".into()
+                    },
+                    "/api".into(),
+                    "fastapi:router".into()
+                ),
+                (
+                    IncludeTarget::Dynamic("users.router".into()),
+                    "/api".into(),
+                    "fastapi:router".into()
+                ),
+                (
+                    IncludeTarget::Import { local: "bp".into() },
+                    String::new(),
+                    "flask_own:app".into()
+                ),
+                (
+                    IncludeTarget::Dynamic("r".into()),
+                    "/api".into(),
+                    "fastapi:router".into()
+                ),
+            ]
         );
     }
 

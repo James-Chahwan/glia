@@ -1,0 +1,23 @@
+{
+  "framework": "py-fastapi-include-router",
+  "language": "python+typescript",
+  "dirs": ["server", "client"],
+  "cells": ["python/http_server"],
+  "note": "GD.41 include-style mounts, FastAPI. routers/users.py's `router = APIRouter()` and routers/flows.py's `router = ServiceRouter(prefix=\"/flows\")` (ServiceRouter subclasses APIRouter in core/base.py, the PrefectRouter / UserAPIRouter shape) are included into routers/__init__.py's `router = APIRouter(prefix=\"/core\")` by module attribute (`users.router`, `flows.router` with `prefix=\"/v1\"`), and that router into main.py's app with `prefix=\"/svc\"` (`from routers import router as core_router`): a two-level include chain whose own and include prefixes compose. The client calls non-`/api` prefixes, so only the mount pairs them.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /svc/core/users", "exact": true, "note": "two includes: /svc, then the including router's own /core"},
+    {"kind": "ROUTE", "name": "POST /svc/core/users", "exact": true, "note": "second verb on the same router"},
+    {"kind": "ROUTE", "name": "POST /svc/core/v1/flows/filter", "exact": true, "note": "router subclass own prefix /flows under include prefix /v1"},
+    {"kind": "ROUTE", "name": "GET /health", "exact": true, "note": "a route on the app itself is unchanged"}
+  ],
+  "expect_edges": [
+    {"from": "GET /svc/core/users", "to": "GET /svc/core/users", "category": "HTTP_CALLS", "note": "client -> twice-mounted route"},
+    {"from": "POST /svc/core/users", "to": "POST /svc/core/users", "category": "HTTP_CALLS", "note": "client -> twice-mounted route"},
+    {"from": "POST /svc/core/v1/flows/filter", "to": "POST /svc/core/v1/flows/filter", "category": "HTTP_CALLS", "note": "client -> router-subclass route"},
+    {"from": "POST /svc/core/v1/flows/filter", "to": "filter_flows", "category": "HANDLED_BY", "note": "the mounted ROUTE keeps its handler"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "POST /filter", "note": "the router subclass's own prefix is not lost"},
+    {"kind": "ROUTE", "name": "GET /users", "note": "the unmounted local path is gone"}
+  ]
+}

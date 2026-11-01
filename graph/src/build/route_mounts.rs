@@ -36,9 +36,28 @@
 //! to `<METHOD> /<path>`. A Dynamic include (`include(router.urls)`) is
 //! counted and mounts nothing. Structural identity only: no value flows.
 //!
-//! Deterministic: urlconf modules and facts in `g.nodes` order of their
-//! MODULE (facts in record order), roots by qname, BTree slots; the clones
-//! append in provisional order.
+//! GD.41, Python second: Flask and FastAPI. A slot is `(module, router
+//! variable)`: the Python parser mints a decorator route on a module-level
+//! router (`router = APIRouter(..)`, `bp = Blueprint(..)`, a router subclass
+//! such as `PrefectRouter(prefix="/flows")`) as `<METHOD>
+//! <mount:module:<module>#<var>>/<path>` (a FastAPI path carrying the
+//! router's own prefix, a Flask one only its rule) and records on the MODULE
+//! one [`NavFact::IncludeMount`] per router variable (`via` `router:<family>`,
+//! target `Dynamic(<var>)`, prefix its own: names the slot, mounts nothing)
+//! and one per `<x>.include_router(<ref>, prefix=..)` (`via` `fastapi:<x>`,
+//! prefix `x`'s own prefix then the include's) or `<x>.register_blueprint(
+//! <ref>, url_prefix=..)` (`via` `flask:<x>`, or `flask_own:<x>` with no
+//! `url_prefix`: the blueprint's own applies, Flask's override rule). An
+//! Import `<ref>` resolves through [`ModuleIndex::router_import`]: a router
+//! variable of the includer, an imported name (its module through the import
+//! statement, its variable the imported name) or a module attribute
+//! (`users.router`). The flow runs from the includer's slot `(module, x)`
+//! into the target's; a slot no resolved include reaches is a root holding
+//! `""`, a Flask blueprint root its own `url_prefix`.
+//!
+//! Deterministic: route slots and facts in `g.nodes` order of their MODULE
+//! (facts in record order), roots by slot, BTree slots; the clones append in
+//! provisional order.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -82,20 +101,31 @@ pub(crate) struct RouteMountStats {
     pub(crate) roots: usize,
     /// Slots the fixpoint's caps stopped.
     pub(crate) capped: usize,
+    /// GD.41: mount facts by framework: `register_blueprint` (Flask),
+    /// `include_router` (FastAPI), `include` / spread (Django).
+    pub(crate) via_flask: usize,
+    pub(crate) via_fastapi: usize,
+    pub(crate) via_django: usize,
 }
 
 impl RouteMountStats {
     /// `[route-mounts] lang=<l> includes=<i> spreads=<s> dynamic=<d>
-    /// unresolved=<u> modules=<m> routes=<r> mounted=<k> copies=<c> roots=<o>
-    /// capped=<x>`, once per graph with a route module.
+    /// via(flask=<f> fastapi=<a> django=<j>) unresolved=<u> modules=<m>
+    /// routes=<r> mounted=<k> copies=<c> roots=<o> capped=<x>`, once per
+    /// graph with a route module (a route slot: a router variable, an
+    /// includer, a provisional ROUTE's).
     pub(crate) fn marker(&self, lang: &str) -> Option<String> {
         (self.modules > 0).then(|| {
             format!(
-                "[route-mounts] lang={lang} includes={} spreads={} dynamic={} unresolved={} \
+                "[route-mounts] lang={lang} includes={} spreads={} dynamic={} \
+                 via(flask={} fastapi={} django={}) unresolved={} \
                  modules={} routes={} mounted={} copies={} roots={} capped={}",
                 self.includes,
                 self.spreads,
                 self.dynamic,
+                self.via_flask,
+                self.via_fastapi,
+                self.via_django,
                 self.unresolved,
                 self.modules,
                 self.routes,
@@ -123,11 +153,14 @@ pub(crate) fn bind_module_mounts(
         .filter(|p| matches!(p.base, Mount::Module { .. }))
         .collect();
 
-    // Route modules in `g.nodes` order, with their facts.
-    let mut route_modules: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut facts: Vec<(String, &NavFact)> = Vec::new();
+    // Route slots in `g.nodes` order of their MODULE (each module's facts in
+    // record order), then the provisionals' own; the facts beside them.
+    let mut route_slots: Vec<SlotKey> = Vec::new();
+    let mut seen: BTreeSet<SlotKey> = BTreeSet::new();
+    let mut facts: Vec<(String, Fact<'_>)> = Vec::new();
     let mut modules: Vec<(String, NodeId)> = Vec::new();
+    // GD.41: each module's router variables, with their family and own prefix.
+    let mut routers: BTreeMap<SlotKey, (String, String)> = BTreeMap::new();
     for n in &g.nodes {
         if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
             continue;
@@ -136,31 +169,40 @@ pub(crate) fn bind_module_mounts(
             continue;
         };
         modules.push((q.clone(), n.id));
-        let own: Vec<&NavFact> = g
-            .nav
-            .nav_facts
-            .get(&n.id)
-            .map(|fs| {
-                fs.iter()
-                    .filter(|f| matches!(f, NavFact::IncludeMount { .. }))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !own.is_empty() && seen.insert(q.clone()) {
-            route_modules.push(q.clone());
+        let Some(fs) = g.nav.nav_facts.get(&n.id) else {
+            continue;
+        };
+        for f in fs {
+            let Some(fact) = Fact::read(f) else {
+                continue;
+            };
+            let slot = (q.clone(), fact.includer.clone());
+            if let (Some(family), IncludeTarget::Dynamic(var)) = (&fact.router, fact.target) {
+                let slot = (q.clone(), var.clone());
+                routers.insert(slot.clone(), (family.clone(), fact.prefix.to_string()));
+                if seen.insert(slot.clone()) {
+                    route_slots.push(slot);
+                }
+                continue;
+            }
+            if seen.insert(slot.clone()) {
+                route_slots.push(slot);
+            }
+            facts.push((q.clone(), fact));
         }
-        facts.extend(own.into_iter().map(|f| (q.clone(), f)));
     }
     for p in &provisionals {
-        if let Mount::Module { module, .. } = &p.base
-            && seen.insert(module.clone())
-        {
-            route_modules.push(module.clone());
+        if let Mount::Module { module, var, .. } = &p.base {
+            let slot = (module.clone(), var.clone());
+            if seen.insert(slot.clone()) {
+                route_slots.push(slot);
+            }
         }
     }
-    if route_modules.is_empty() {
+    if route_slots.is_empty() {
         return stats;
     }
+    let route_modules: BTreeSet<&str> = route_slots.iter().map(|(m, _)| m.as_str()).collect();
     stats.modules = route_modules.len();
     stats.routes = provisionals.len();
     modules.sort_by(|a, b| a.0.cmp(&b.0));
@@ -168,58 +210,79 @@ pub(crate) fn bind_module_mounts(
     // Each include resolved to a flow into its target's slot.
     let index = ModuleIndex { g, modules };
     let mut includes: Vec<Flow> = Vec::new();
-    let mut included: BTreeSet<String> = BTreeSet::new();
+    let mut included: BTreeSet<SlotKey> = BTreeSet::new();
     for (includer, fact) in &facts {
-        let NavFact::IncludeMount {
-            target,
-            prefix,
-            via,
-            ..
-        } = fact
-        else {
-            continue;
-        };
-        let resolved = match target {
+        match fact.family {
+            Family::Django => stats.via_django += 1,
+            Family::FastApi => stats.via_fastapi += 1,
+            Family::Flask | Family::FlaskOwn => stats.via_flask += 1,
+        }
+        let resolved: Option<SlotKey> = match fact.target {
             IncludeTarget::Dynamic(_) => {
                 stats.dynamic += 1;
                 continue;
             }
-            IncludeTarget::Spec(dotted) => index.by_tail(&dotted.replace('.', "::"), includer),
-            IncludeTarget::Import { local } => index.by_import(imports, includer, local),
+            IncludeTarget::Spec(dotted) => index
+                .by_tail(&dotted.replace('.', "::"), includer)
+                .map(|m| (m, DJANGO_VAR.to_string())),
+            IncludeTarget::Import { local } if fact.family == Family::Django => index
+                .by_import(imports, includer, local)
+                .map(|m| (m, DJANGO_VAR.to_string())),
+            IncludeTarget::Import { local } => {
+                index.router_import(imports, includer, local, &routers)
+            }
         };
-        if via == VIA_SPREAD {
+        if fact.via == VIA_SPREAD {
             stats.spreads += 1;
         } else {
             stats.includes += 1;
         }
-        let Some(module) = resolved else {
+        let Some(target) = resolved else {
             stats.unresolved += 1;
             continue;
         };
-        if module != *includer {
-            included.insert(module.clone());
+        // A Flask register with no `url_prefix` mounts the blueprint at its
+        // own (FlaskOwn); any other include at its literal.
+        let prefix = match fact.family {
+            Family::FlaskOwn => routers
+                .get(&target)
+                .map(|(_, own)| own.clone())
+                .unwrap_or_default(),
+            _ => fact.prefix.to_string(),
+        };
+        let source = (includer.clone(), fact.includer.clone());
+        if target != source {
+            included.insert(target.clone());
         }
         includes.push(Flow {
-            target: Slot::Module(module, DJANGO_VAR.to_string()),
+            target: Slot::Module(target.0, target.1),
             mount: Mount::Module {
-                module: includer.clone(),
-                var: DJANGO_VAR.to_string(),
-                suffix: prefix.clone(),
+                module: source.0,
+                var: source.1,
+                suffix: prefix,
             },
         });
     }
 
-    // Roots first (by qname), then the includes in fact order.
-    let roots: BTreeSet<&String> = route_modules
+    // Roots first (by slot), then the includes in fact order. A root holds
+    // `""`, a Flask blueprint root its own `url_prefix` (its routes carry
+    // only their rule).
+    let roots: BTreeSet<&SlotKey> = route_slots
         .iter()
-        .filter(|m| !included.contains(*m))
+        .filter(|s| !included.contains(*s))
         .collect();
     stats.roots = roots.len();
     let mut flows: Vec<Flow> = roots
         .into_iter()
-        .map(|m| Flow {
-            target: Slot::Module(m.clone(), DJANGO_VAR.to_string()),
-            mount: Mount::Const(String::new()),
+        .map(|s| {
+            let own = match routers.get(s) {
+                Some((family, own)) if family == FAMILY_FLASK => own.clone(),
+                _ => String::new(),
+            };
+            Flow {
+                target: Slot::Module(s.0.clone(), s.1.clone()),
+                mount: Mount::Const(own),
+            }
         })
         .collect();
     flows.extend(includes);
@@ -228,16 +291,16 @@ pub(crate) fn bind_module_mounts(
 
     let mut plans: Vec<Vec<Final>> = Vec::with_capacity(provisionals.len());
     for p in &provisionals {
-        let (module, var) = match &p.base {
-            Mount::Module { module, var, .. } => (module.as_str(), var.as_str()),
-            _ => ("", ""),
+        let slot: SlotKey = match &p.base {
+            Mount::Module { module, var, .. } => (module.clone(), var.clone()),
+            _ => (String::new(), String::new()),
         };
         let prefixes = slots
-            .get(&Slot::Module(module.to_string(), var.to_string()))
+            .get(&Slot::Module(slot.0.clone(), slot.1.clone()))
             .filter(|s| !s.is_empty());
         let paths: BTreeSet<String> = match prefixes {
             Some(set) => {
-                if included.contains(module) {
+                if included.contains(&slot) {
                     stats.mounted += 1;
                 }
                 set.iter()
@@ -256,6 +319,66 @@ pub(crate) fn bind_module_mounts(
     }
     rekey(g, refs, &provisionals, &plans);
     stats
+}
+
+/// A mount slot: `(module qname, router variable)`.
+type SlotKey = (String, String);
+
+/// GD.41: the framework family of a router declaration fact.
+const FAMILY_FLASK: &str = "flask";
+
+/// Which mount an [`NavFact::IncludeMount`] is (its `via`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    /// GD.40: `include` / `spread`, slot var `urlpatterns`.
+    Django,
+    /// GD.41: `fastapi:<includer>`, an `include_router`.
+    FastApi,
+    /// GD.41: `flask:<includer>`, a `register_blueprint` with `url_prefix`.
+    Flask,
+    /// GD.41: `flask_own:<includer>`, one without: the blueprint's own.
+    FlaskOwn,
+}
+
+/// One [`NavFact::IncludeMount`] read: its family, the includer's slot
+/// variable and, for a GD.41 router declaration (`via` `router:<family>`,
+/// target `Dynamic(<var>)`), the router's family.
+struct Fact<'f> {
+    family: Family,
+    via: &'f str,
+    includer: String,
+    target: &'f IncludeTarget,
+    prefix: &'f str,
+    router: Option<String>,
+}
+
+impl<'f> Fact<'f> {
+    fn read(f: &'f NavFact) -> Option<Fact<'f>> {
+        let NavFact::IncludeMount {
+            target,
+            prefix,
+            via,
+            ..
+        } = f
+        else {
+            return None;
+        };
+        let (family, includer, router) = match via.split_once(':') {
+            Some(("router", family)) => (Family::FastApi, String::new(), Some(family.to_string())),
+            Some(("fastapi", x)) => (Family::FastApi, x.to_string(), None),
+            Some(("flask", x)) => (Family::Flask, x.to_string(), None),
+            Some(("flask_own", x)) => (Family::FlaskOwn, x.to_string(), None),
+            _ => (Family::Django, DJANGO_VAR.to_string(), None),
+        };
+        Some(Fact {
+            family,
+            via,
+            includer,
+            target,
+            prefix,
+            router,
+        })
+    }
 }
 
 /// The graph's MODULEs by qname, for include targets.
@@ -356,6 +479,45 @@ impl ModuleIndex<'_> {
                 }
             }
         }
+    }
+}
+
+impl ModuleIndex<'_> {
+    /// GD.41: the router slot an include's `local` names in module
+    /// `includer`: a router variable `includer` itself declares (`router`),
+    /// a name `includer` imports (`from routers.users import router [as r]`:
+    /// the module through [`Self::by_import`], the variable the imported
+    /// name), or an imported module's attribute (`users.router`: the module
+    /// `users` stands for, variable `router`). An imported name that is
+    /// itself a module (`from routers import users`) is no router: `None`.
+    fn router_import(
+        &self,
+        imports: &[ImportStmt],
+        includer: &str,
+        local: &str,
+        routers: &BTreeMap<SlotKey, (String, String)>,
+    ) -> Option<SlotKey> {
+        if let Some((object, var)) = local.rsplit_once('.') {
+            let module = self.by_import(imports, includer, object)?;
+            return Some((module, var.to_string()));
+        }
+        let own = (includer.to_string(), local.to_string());
+        if routers.contains_key(&own) {
+            return Some(own);
+        }
+        let stmt = imports.iter().rev().find(|s| {
+            s.from_module == includer
+                && matches!(&s.target, ImportTarget::Symbol { name, alias, .. }
+                    if alias.as_deref().unwrap_or(name.as_str()) == local)
+        })?;
+        let ImportTarget::Symbol { name, .. } = &stmt.target else {
+            return None;
+        };
+        let module = self.by_import(imports, includer, local)?;
+        let path = module.strip_suffix("::__init__").unwrap_or(&module);
+        let named_module = path.rsplit("::").next() == Some(name.as_str())
+            && !routers.contains_key(&(module.clone(), name.clone()));
+        (!named_module).then(|| (module.clone(), name.clone()))
     }
 }
 
@@ -477,7 +639,8 @@ mod tests {
         assert_eq!(
             s.marker("python").as_deref(),
             Some(
-                "[route-mounts] lang=python includes=3 spreads=1 dynamic=0 unresolved=0 \
+                "[route-mounts] lang=python includes=3 spreads=1 dynamic=0 \
+                 via(flask=0 fastapi=0 django=4) unresolved=0 \
                  modules=5 routes=3 mounted=3 copies=0 roots=1 capped=0"
             )
         );
@@ -564,6 +727,109 @@ mod tests {
         assert_eq!(
             positions(&g, "ANY /api/login/"),
             ["svc_a/app/auth_urls.py:3"]
+        );
+    }
+
+    /// GD.41: Flask. A blueprint with no `url_prefix` mounted cross-file at
+    /// `/svc` by imported name; one with its own `/orders` registered by
+    /// module attribute with none keeps its own; a register's `url_prefix`
+    /// REPLACES a blueprint's own; a nested blueprint composes under its
+    /// parent's.
+    #[test]
+    fn flask_register_blueprint_mounts_across_files() {
+        let items = "from flask import Blueprint\n\nbp = Blueprint(\"items\", __name__)\n\n\n@bp.route(\"/items\")\ndef list_items():\n    return []\n";
+        let orders = "from flask import Blueprint\n\norders = Blueprint(\"orders\", __name__, url_prefix=\"/orders\")\n\n\n@orders.get(\"/recent\")\ndef recent():\n    return []\n";
+        let legacy = "from flask import Blueprint\n\nold = Blueprint(\"old\", __name__, url_prefix=\"/ignored\")\nchild = Blueprint(\"child\", __name__, url_prefix=\"/child\")\nold.register_blueprint(child)\n\n\n@old.get(\"/a\")\ndef a():\n    return []\n\n\n@child.get(\"/b\")\ndef b():\n    return []\n";
+        let app = "from flask import Flask\n\nfrom svc.items import bp\nfrom svc import orders, legacy\n\napp = Flask(__name__)\napp.register_blueprint(bp, url_prefix=\"/svc\")\napp.register_blueprint(orders.orders)\napp.register_blueprint(legacy.old, url_prefix=\"/v1\")\n\n\n@app.route(\"/health\")\ndef health():\n    return \"ok\"\n";
+        let files = [
+            ("app.py", app),
+            ("svc/items.py", items),
+            ("svc/orders.py", orders),
+            ("svc/legacy.py", legacy),
+        ];
+        let g = build(&files);
+        assert_eq!(
+            routes(&g),
+            [
+                "GET /health",
+                "GET /orders/recent",
+                "GET /svc/items",
+                "GET /v1/a",
+                "GET /v1/child/b",
+            ]
+        );
+        let s = stats(&files);
+        assert_eq!(
+            (s.via_flask, s.via_fastapi, s.unresolved, s.mounted),
+            (4, 0, 0, 4)
+        );
+    }
+
+    /// GD.41: FastAPI. A two-level include chain across files (module
+    /// attribute, then an aliased imported name) composes the include
+    /// prefixes, the including router's own and the router subclass's own;
+    /// an unresolved include leaves its router at its own path.
+    #[test]
+    fn fastapi_include_router_chain_composes() {
+        let base = "from fastapi import APIRouter\n\n\nclass ServiceRouter(APIRouter):\n    pass\n";
+        let users = "from fastapi import APIRouter\n\nrouter = APIRouter()\n\n\n@router.get(\"/users\")\ndef list_users():\n    return []\n";
+        let flows = "from core.base import ServiceRouter\n\nrouter: ServiceRouter = ServiceRouter(prefix=\"/flows\")\n\n\n@router.post(\"/filter\")\ndef filter_flows():\n    return []\n";
+        let init = "from fastapi import APIRouter\n\nfrom . import flows, users\n\nrouter = APIRouter(prefix=\"/core\")\nrouter.include_router(users.router)\nrouter.include_router(flows.router, prefix=\"/v1\")\n";
+        let main = "from fastapi import FastAPI\n\nfrom routers import router as core_router\nfrom thirdparty import admin\n\napp = FastAPI()\napp.include_router(core_router, prefix=\"/svc\")\napp.include_router(admin.router)\n";
+        let files = [
+            ("main.py", main),
+            ("core/base.py", base),
+            ("routers/__init__.py", init),
+            ("routers/users.py", users),
+            ("routers/flows.py", flows),
+        ];
+        let g = build(&files);
+        assert_eq!(
+            routes(&g),
+            ["GET /svc/core/users", "POST /svc/core/v1/flows/filter"]
+        );
+        let s = stats(&files);
+        assert_eq!(
+            s.marker("python").as_deref(),
+            Some(
+                "[route-mounts] lang=python includes=4 spreads=0 dynamic=0 \
+                 via(flask=0 fastapi=4 django=0) unresolved=1 \
+                 modules=4 routes=2 mounted=2 copies=0 roots=1 capped=0"
+            )
+        );
+        // Unmounted: the same router files alone are roots at their own path.
+        let alone = build(&files[1..]);
+        assert_eq!(
+            routes(&alone),
+            ["GET /core/users", "POST /core/v1/flows/filter"]
+        );
+    }
+
+    /// GD.41: mealie's shape. Controllers on `UserAPIRouter(prefix=..)` (an
+    /// imported APIRouter subclass) inside a class, a package router with
+    /// its own prefix including them, `routes/__init__.py`'s
+    /// `APIRouter(prefix="/api")` including the package, and the app
+    /// including that inside a factory function; `@router.post("")` is the
+    /// router's own path.
+    #[test]
+    fn nested_package_routers_compose_inside_a_factory() {
+        let ctrl = "from app.routes._base.routers import UserAPIRouter\n\nrouter = UserAPIRouter(prefix=\"/households/mealplans/rules\")\n\n\nclass Controller:\n    @router.get(\"/{item_id}\")\n    def get_one(self, item_id: str):\n        return item_id\n\n    @router.post(\"\", status_code=201)\n    def create_one(self):\n        return 1\n";
+        let households = "from fastapi import APIRouter\n\nfrom . import controller_rules\n\nrouter = APIRouter()\nrouter.include_router(controller_rules.router, tags=[\"x\"])\n";
+        let routes_init = "from fastapi import APIRouter\n\nfrom . import households\n\nrouter = APIRouter(prefix=\"/api\")\nrouter.include_router(households.router)\n";
+        let app = "from fastapi import FastAPI\n\nfrom app.routes import router\n\napp = FastAPI()\n\n\ndef api_routers():\n    app.include_router(router)\n";
+        let files = [
+            ("app/app.py", app),
+            ("app/routes/__init__.py", routes_init),
+            ("app/routes/households/__init__.py", households),
+            ("app/routes/households/controller_rules.py", ctrl),
+        ];
+        let g = build(&files);
+        assert_eq!(
+            routes(&g),
+            [
+                "GET /api/households/mealplans/rules/{item_id}",
+                "POST /api/households/mealplans/rules",
+            ]
         );
     }
 }

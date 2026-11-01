@@ -1,0 +1,23 @@
+{
+  "framework": "py-flask-register-blueprint",
+  "language": "python+typescript",
+  "dirs": ["server", "client"],
+  "cells": ["python/http_server"],
+  "note": "GD.41 include-style mounts, Flask. svc/items.py declares `bp = Blueprint(\"items\", __name__)` with no url_prefix; app.py imports it (`from svc.items import bp`) and mounts it with `app.register_blueprint(bp, url_prefix=\"/svc\")`, so its routes are /svc/items and /svc/items/<int:item_id>. svc/orders.py's blueprint carries its own `url_prefix=\"/orders\"` and is registered by module attribute (`orders.orders`) with no url_prefix, so its own prefix applies. The TS client calls a non-`/api` prefix, so the resolver's default `api` strip cannot pair them: only the mount does.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /svc/items", "exact": true, "note": "blueprint route under the cross-file register_blueprint url_prefix"},
+    {"kind": "ROUTE", "name": "DELETE /svc/items/<int:item_id>", "exact": true, "note": "methods=[..] route under the same mount"},
+    {"kind": "ROUTE", "name": "GET /orders/recent", "exact": true, "note": "a register with no url_prefix keeps the blueprint's own"},
+    {"kind": "ROUTE", "name": "GET /health", "exact": true, "note": "a route on the app itself is unchanged"}
+  ],
+  "expect_edges": [
+    {"from": "GET /svc/items", "to": "GET /svc/items", "category": "HTTP_CALLS", "note": "client -> mounted blueprint route"},
+    {"from": "DELETE /svc/items/${…}", "to": "DELETE /svc/items/<int:item_id>", "category": "HTTP_CALLS", "note": "template client -> mounted route"},
+    {"from": "GET /orders/recent", "to": "GET /orders/recent", "category": "HTTP_CALLS", "note": "client -> own-prefix blueprint route"},
+    {"from": "GET /svc/items", "to": "list_items", "category": "HANDLED_BY", "note": "the mounted ROUTE keeps its handler"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /items", "note": "the unmounted local path is gone"},
+    {"kind": "ROUTE", "name": "GET /svc/orders/recent", "note": "the /svc mount is bp's, not orders'"}
+  ]
+}
