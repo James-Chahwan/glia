@@ -13,11 +13,11 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, FrontTimes, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
-    emit_method_level_implements_for, emit_method_level_implements_with, emit_override_implements,
-    enclosing_class_or_struct, enclosing_module, graph_evidence, installed_pool, push_edge,
-    resolve_calls, resolve_calls_for, resolve_calls_pooled, resolve_inherited_calls, resolve_refs,
-    unique_global_types,
+    EvidenceTally, FrontTimes, HookCounts, InheritStats, SiteFiles, chunk_ranges,
+    emit_method_level_implements, emit_method_level_implements_for,
+    emit_method_level_implements_with, emit_override_implements, enclosing_class_or_struct,
+    enclosing_module, graph_evidence, installed_pool, push_edge, resolve_calls, resolve_calls_for,
+    resolve_calls_pooled, resolve_inherited_calls, resolve_refs, run_chunks, unique_global_types,
 };
 pub use crate::calls::{ResolvePool, with_resolve_pool};
 use crate::cpp_scope::{CppScope, implicit_this};
@@ -3735,6 +3735,12 @@ impl GoPackages {
     ///
     /// Runs after [`GoPackages::bind_type_handlers`] and before
     /// `resolve_refs`; the other refs keep their order.
+    ///
+    /// GP.3: each ref's target is decided against the read-only graph and
+    /// package model ([`GoPackages::value_target`] reads no edge and keeps
+    /// no state) in chunks on the installed resolve pool, then the USES are
+    /// pushed in ref order on this thread: the edges and counts one
+    /// sequential loop writes, whatever ran the chunks.
     fn bind_value_refs(&self, g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> ValueStats {
         let (values, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) = std::mem::take(refs)
             .into_iter()
@@ -3744,13 +3750,31 @@ impl GoPackages {
             refs: values.len(),
             ..ValueStats::default()
         };
+        let pool = installed_pool();
+        let pool = pool.as_deref();
+        let ranges = chunk_ranges(values.len(), pool);
+        let decided: Vec<Option<(NodeId, &'static str)>> = {
+            let g: &RepoGraph = g;
+            run_chunks(pool, ranges.len(), |i| {
+                let range = ranges.get(i).cloned().unwrap_or_default();
+                values
+                    .get(range)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| {
+                        let own_type = |to: NodeId| g.nav.parent_of.get(&r.from) == Some(&to);
+                        self.value_target(g, r)
+                            .filter(|&(to, _)| to != r.from && !own_type(to))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .flatten()
+            .collect()
+        };
         let mut bound: Vec<(UnresolvedRef, NodeId, &'static str)> = Vec::new();
-        for r in values {
-            let own_type = |to: NodeId| g.nav.parent_of.get(&r.from) == Some(&to);
-            match self
-                .value_target(g, &r)
-                .filter(|&(to, _)| to != r.from && !own_type(to))
-            {
+        for (r, target) in values.into_iter().zip(decided) {
+            match target {
                 Some((to, rule)) => bound.push((r, to, rule)),
                 None => stats.dropped += 1,
             }

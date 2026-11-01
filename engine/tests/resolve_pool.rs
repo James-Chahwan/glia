@@ -524,3 +524,294 @@ fn typescript_import_front_is_the_same_pooled() {
         "one-statement chunks, newest first"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GP.3: the Go and JVM group fronts. The Go package hook decides on the pool
+// (GA.19), and both groups' import tail fallbacks (a path the file layout
+// does not mirror, bound by its repo-unique last segment) read one index
+// built before the statement loop instead of scanning every module per
+// statement.
+// ---------------------------------------------------------------------------
+
+/// GP.3: a Go repo exercising every rule the package hook binds through:
+/// split-file receivers (a type's methods in another file of its package),
+/// a package var's initialiser call, embedded promotion (a promoted method
+/// called on the embedder and through `self`), func and method values, a
+/// gin group mounted through a parameter, typed receivers, package calls,
+/// a tail-fallback import (a path under the module with no directory, bound
+/// by its last segment) and calls that bind nothing.
+fn go_hook_files(services: usize) -> Vec<(String, String)> {
+    let mut files = vec![
+        (
+            "go.mod".to_string(),
+            "module example.com/fx\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n"
+                .to_string(),
+        ),
+        (
+            "store/store.go".to_string(),
+            "package store\n\n\
+             type Base struct{}\n\n\
+             func (b *Base) Ping() int { return 1 }\n\n\
+             type Store struct {\n\tBase\n}\n\n\
+             func New() *Store { return &Store{} }\n\n\
+             var Default = New()\n"
+                .to_string(),
+        ),
+        (
+            "store/store_get.go".to_string(),
+            "package store\n\n\
+             func (s *Store) Get() int { return s.Ping() + s.local() }\n\n\
+             func (s *Store) local() int { return 2 }\n"
+                .to_string(),
+        ),
+        (
+            "lib/util/strs.go".to_string(),
+            "package strs\n\nfunc Upper(s string) string { return s }\n".to_string(),
+        ),
+        (
+            "api/routes.go".to_string(),
+            "package api\n\n\
+             import (\n\t\"github.com/gin-gonic/gin\"\n)\n\n\
+             func Setup() *gin.Engine {\n\tr := gin.Default()\n\tapi := r.Group(\"/api\")\n\
+             \tregister(api)\n\treturn r\n}\n\n\
+             func register(g *gin.RouterGroup) {\n\tg.GET(\"/ping\", ping)\n}\n\n\
+             func ping(c *gin.Context) {}\n"
+                .to_string(),
+        ),
+    ];
+    for i in 0..services {
+        files.push((
+            format!("svc/svc{i}.go"),
+            format!(
+                "package svc\n\n\
+                 import (\n\t\"example.com/fx/store\"\n\tstrs \"example.com/fx/lib/strs\"\n\
+                 \t\"example.com/fx/lib/text\"\n\t\"fmt\"\n)\n\n\
+                 type S{i} struct {{\n\tst *store.Store\n}}\n\n\
+                 var cache{i} = store.New()\n\n\
+                 func (s *S{i}) Run() int {{\n\
+                 \tfmt.Println(strs.Upper(\"x\"), text.Upper(\"y\"))\n\
+                 \tf := helper{i}\n\
+                 \tg := s.Twice\n\
+                 \t_ = f\n\t_ = g\n\
+                 \treturn s.st.Get() + s.st.Ping() + store.New().Get() + store.Default.Get() + cache{i}.Get() + helper{i}() + s.Twice()\n\
+                 }}\n\n\
+                 func (s *S{i}) Twice() int {{ return 2 }}\n\n\
+                 func helper{i}() int {{ return {i} + gone{i}() }}\n"
+            ),
+        ));
+    }
+    files
+}
+
+/// GP.3: a Java + Kotlin repo (one JVM graph, `build_dotted`): imports
+/// that bind by qname, imports whose package path the file layout does not
+/// mirror (bound by the class's repo-unique name, `tail_unique`), a
+/// platform import the tail never binds, typed receivers, static and
+/// constructor calls, and calls that bind nothing.
+fn jvm_files(features: usize) -> Vec<(String, String)> {
+    let mut files = vec![
+        (
+            "src/main/java/com/example/core/Repo.java".to_string(),
+            "package com.example.core;\n\n\
+             public class Repo {\n    public int load() { return 1; }\n    public static Repo open() { return new Repo(); }\n}\n"
+                .to_string(),
+        ),
+        (
+            "lib/Helper.java".to_string(),
+            "package com.example.util;\n\n\
+             public class Helper {\n    public static int twice(int x) { return x * 2; }\n}\n"
+                .to_string(),
+        ),
+        (
+            "kt/Formatter.kt".to_string(),
+            "package com.example.fmt\n\n\
+             class Formatter {\n    fun format(x: Int): String = x.toString()\n}\n"
+                .to_string(),
+        ),
+    ];
+    for i in 0..features {
+        files.push((
+            format!("src/main/java/com/example/app/Feature{i}.java"),
+            format!(
+                "package com.example.app;\n\n\
+                 import com.example.core.Repo;\n\
+                 import com.example.util.Helper;\n\
+                 import com.example.fmt.Formatter;\n\
+                 import java.util.ArrayList;\n\n\
+                 public class Feature{i} {{\n\
+                 \x20   private Repo repo = new Repo();\n\
+                 \x20   public int run() {{\n\
+                 \x20       Formatter f = new Formatter();\n\
+                 \x20       f.format({i});\n\
+                 \x20       new ArrayList<Integer>();\n\
+                 \x20       missing{i}();\n\
+                 \x20       return repo.load() + Repo.open().load() + Helper.twice({i});\n\
+                 \x20   }}\n\
+                 }}\n"
+            ),
+        ));
+        files.push((
+            format!("src/main/kotlin/com/example/app/Kt{i}.kt"),
+            format!(
+                "package com.example.app\n\n\
+                 import com.example.core.Repo\n\
+                 import com.example.util.Helper\n\
+                 import com.example.fmt.Formatter\n\n\
+                 class Kt{i}(private val repo: Repo) {{\n\
+                 \x20   fun go(): Int {{\n\
+                 \x20       Formatter().format({i})\n\
+                 \x20       absent{i}()\n\
+                 \x20       return repo.load() + Helper.twice({i})\n\
+                 \x20   }}\n\
+                 }}\n"
+            ),
+        ));
+    }
+    files
+}
+
+/// The IMPORTS edges of `g` whose EVIDENCE rule is `rule`.
+fn imports_by_rule(g: &RepoGraph, rule: &str) -> usize {
+    g.edges
+        .iter()
+        .filter(|e| e.category == glia_code_domain::edge_category::IMPORTS)
+        .filter(|e| format!("{:?}", e.cells).contains(&format!("\\\"rule\\\":\\\"{rule}\\\"")))
+        .count()
+}
+
+/// GP.3: [`same_graph_every_way`] over [`front_fingerprint`], so the import
+/// bindings and symbol tables the fronts write are compared too.
+fn same_front_every_way(label: &str, build: impl Fn() -> RepoGraph) {
+    let sequential = build();
+    assert!(
+        !sequential.unresolved_calls.is_empty(),
+        "{label}: the fixture must leave a call unresolved"
+    );
+    let want = front_fingerprint(&sequential);
+    let pooled = with_resolve_pool(Arc::new(Workers(workers(8))), &build);
+    assert_eq!(
+        front_fingerprint(&pooled),
+        want,
+        "{label}: eight workers, one-site chunks"
+    );
+    let backwards = with_resolve_pool(Arc::new(Backwards), &build);
+    assert_eq!(
+        front_fingerprint(&backwards),
+        want,
+        "{label}: one-site chunks run newest first"
+    );
+}
+
+#[test]
+fn go_hook_rules_graph_is_the_same_pooled() {
+    let repo = RepoId(25);
+    let files = go_hook_files(24);
+    let build = || {
+        let parses = files
+            .iter()
+            .filter(|(path, _)| path.ends_with(".go"))
+            .map(|(path, src)| parse_one_with(src, path, "go", repo, "example.com/fx").unwrap())
+            .collect();
+        glia_graph::build_go(repo, parses).unwrap()
+    };
+    let g = build();
+    let rules = |category| -> std::collections::BTreeMap<String, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for e in g.edges.iter().filter(|e| e.category == category) {
+            let cells = format!("{:?}", e.cells);
+            let rule = cells
+                .split("\\\"rule\\\":\\\"")
+                .nth(1)
+                .and_then(|r| r.split("\\\"").next())
+                .unwrap_or("-")
+                .to_string();
+            *out.entry(rule).or_default() += 1;
+        }
+        out
+    };
+    let calls = rules(glia_code_domain::edge_category::CALLS);
+    let imports = rules(glia_code_domain::edge_category::IMPORTS);
+    let uses = rules(glia_code_domain::edge_category::USES);
+    let defines = rules(glia_code_domain::edge_category::DEFINES);
+    for (what, table, rule) in [
+        ("split-file receiver", &defines, "split_receiver"),
+        ("promoted self call", &calls, "promoted_self"),
+        ("package var receiver", &calls, "receiver_package_var"),
+        ("field chain receiver", &calls, "receiver_field_chain"),
+        ("func value", &uses, "func_value"),
+        ("method value", &uses, "method_value"),
+    ] {
+        assert!(table.contains_key(rule), "{what} ({rule}) binds: {table:?}");
+    }
+    assert!(
+        g.nav.qname_by_id.values().any(|q| q == "GET /api/ping"),
+        "the parameter-held gin group is mounted under /api"
+    );
+    // `lib/strs` names no directory (the file is lib/util/strs.go), so it
+    // binds the repo's one `strs` module by its last segment; no module's
+    // last segment is `text`, so `lib/text` binds nothing; `fmt` is the
+    // standard library, which the tail never binds.
+    assert!(
+        imports_by_rule(&g, "tail_unique") >= 24,
+        "every service binds lib/strs by its tail: {imports:?}"
+    );
+    assert!(
+        calls.values().sum::<usize>() >= 24 * 6,
+        "the package hook binds: {calls:?}"
+    );
+    same_front_every_way("go hook rules", build);
+}
+
+#[test]
+fn jvm_graph_is_the_same_pooled() {
+    let repo = RepoId(26);
+    let files = jvm_files(24);
+    let build = || {
+        let parses = files
+            .iter()
+            .map(|(path, src)| {
+                let lang = if path.ends_with(".kt") {
+                    "kotlin"
+                } else {
+                    "java"
+                };
+                parse_one(src, path, lang, repo).unwrap()
+            })
+            .collect();
+        glia_graph::build_dotted(repo, parses).unwrap()
+    };
+    let g = build();
+    assert!(
+        imports_by_rule(&g, "tail_unique") >= 24 * 2,
+        "Helper and Formatter bind by their repo-unique names"
+    );
+    same_front_every_way("jvm", build);
+}
+
+#[test]
+fn go_and_jvm_fronts_write_the_same_layout_on_one_thread_and_sixteen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    // Enough sites that each group's calls cut into several chunks.
+    write_all(&repo, &go_hook_files(80));
+    write_all(&repo, &jvm_files(80));
+    let repo_s = repo.to_str().unwrap();
+    let mut outs = Vec::new();
+    for n in [1usize, 16] {
+        let r = workers(n).install(|| generate_one(repo_s)).unwrap();
+        assert!(
+            r.parse_errors.is_empty(),
+            "{n} threads: {:?}",
+            r.parse_errors
+        );
+        let out = tmp.path().join(format!("out_{n}"));
+        write_merged_sharded(&r.merged, &out).unwrap();
+        outs.push(out);
+    }
+    let (one, sixteen) = (dir_bytes(&outs[0]), dir_bytes(&outs[1]));
+    let names = |fs: &[(String, Vec<u8>)]| fs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&one), names(&sixteen), "1 vs 16 threads: file sets");
+    for ((name, a), (_, b)) in one.iter().zip(sixteen.iter()) {
+        assert_eq!(a, b, "1 vs 16 threads: {name} bytes differ");
+    }
+}

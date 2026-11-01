@@ -147,6 +147,12 @@ struct PoolTally {
     /// GP.2: wall time of the TypeScript-family group front, `None` for a
     /// builder that does not time it ([`EvidenceTally::note_front`]).
     front: Option<FrontTimes>,
+    /// GP.3: calls a language hook bound in the pooled decide step
+    /// ([`resolve_calls_pooled`]: Go's package hook) and in the serial
+    /// apply step (`resolve_calls`' `extra_hook`): together the
+    /// `[evidence-graph]` line's `extra_hook=`.
+    hook_pooled: usize,
+    hook_serial: usize,
 }
 
 /// GP.2: the TypeScript-family group front's wall times, in milliseconds,
@@ -217,6 +223,10 @@ pub(crate) struct GlobalNames<'g> {
     /// GD.18: every PACKAGE by its simple name, for a Ruby mixin
     /// ([`NavFact::Mixin`]); looked up, never iterated.
     packages_by_name: OnceLock<HashMap<&'g str, Vec<NodeId>>>,
+    /// GP.3: every module qname's last `::` segment to its repo-unique
+    /// module ([`unique_global_module`]'s answer), for the dotted import
+    /// tail fallback; looked up, never iterated.
+    module_tails: OnceLock<HashMap<&'g str, Option<NodeId>>>,
     /// GA.3: nanoseconds spent building the two indexes, for the `[rebody]`
     /// line's `names_ms=` (a per-file stitch builds them only when a site
     /// falls back to a repo-unique name).
@@ -233,15 +243,28 @@ impl<'g> GlobalNames<'g> {
             php: OnceLock::new(),
             containers: OnceLock::new(),
             packages_by_name: OnceLock::new(),
+            module_tails: OnceLock::new(),
             built_ns: AtomicU64::new(0),
         }
     }
 
-    /// [`unique_global_function`] of `name`.
-    fn function(&self, name: &str) -> Option<NodeId> {
+    /// [`unique_global_function`] of `name`. `pub(crate)` for the dotted
+    /// import tail fallback (GP.3, `imports::decide_imports_dotted`).
+    pub(crate) fn function(&self, name: &str) -> Option<NodeId> {
         self.functions
             .get_or_init(|| self.timed(|| unique_names(self.g, |_| true)))
             .get(name)
+            .copied()
+            .flatten()
+    }
+
+    /// GP.3: [`unique_global_module`] of `tail`, from one index of every
+    /// module qname's last segment built on the first lookup, so an import
+    /// loop's tail fallback no longer scans the module table per statement.
+    pub(crate) fn module_tail(&self, tail: &str) -> Option<NodeId> {
+        self.module_tails
+            .get_or_init(|| self.timed(|| module_tails(self.g)))
+            .get(tail)
             .copied()
             .flatten()
     }
@@ -366,6 +389,37 @@ fn unique_names<'g>(
         }
     }
     map
+}
+
+/// GP.3: every module qname's last `::` segment, to `Some(id)` when every
+/// qname of that tail names one node, `None` when two distinct nodes share
+/// it: [`unique_global_module`]'s answer for every tail at once, which never
+/// depended on the table's order either.
+fn module_tails(g: &RepoGraph) -> HashMap<&str, Option<NodeId>> {
+    let mut map: HashMap<&str, Option<NodeId>> = HashMap::new();
+    for (qname, &id) in &g.symbols.module_by_qname {
+        let tail = qname.rsplit("::").next().unwrap_or(qname);
+        map.entry(tail)
+            .and_modify(|hit| {
+                if *hit != Some(id) {
+                    *hit = None;
+                }
+            })
+            .or_insert(Some(id));
+    }
+    map
+}
+
+/// GP.3: [`module_tails`] owned, for an index that outlives a borrow of `g`:
+/// the Go import loop (`imports::resolve_imports_go`) writes IMPORTS edges
+/// and bindings as it goes, never the module table, so one index built at
+/// its first tail fallback answers every later statement alike. A tail
+/// absent from it answers `None`.
+pub(crate) fn unique_global_modules(g: &RepoGraph) -> HashMap<String, Option<NodeId>> {
+    module_tails(g)
+        .into_iter()
+        .map(|(tail, hit)| (tail.to_string(), hit))
+        .collect()
 }
 
 /// GA.19: every name's `unique_global_type` answer at once, owned, for an
@@ -599,6 +653,8 @@ impl EvidenceTally {
     /// group's MODULE file extensions, `,`-joined. GP.2: a TypeScript-family
     /// build adds ` imports_ms=<i> merge_ms=<m>` after `refs_ms`
     /// ([`Self::note_front`]); `chunks` still counts the call and ref chunks.
+    /// GP.3: ` hook_pooled=<n> hook_serial=<m>` close the line, the calls the
+    /// language hook bound on the pool and in the serial apply step.
     fn pool_marker(&self) -> Option<String> {
         let p = &self.pool;
         (p.chunks > 0).then(|| {
@@ -608,7 +664,7 @@ impl EvidenceTally {
             });
             format!(
                 "[resolve-pool] lang={} calls={} refs={} chunks={} threads={} calls_ms={:.1} \
-                 refs_ms={:.1}{} serial_hooks={}",
+                 refs_ms={:.1}{} serial_hooks={} hook_pooled={} hook_serial={}",
                 if lang.is_empty() {
                     "?".to_string()
                 } else {
@@ -621,7 +677,9 @@ impl EvidenceTally {
                 p.calls_ms,
                 p.refs_ms,
                 front,
-                self.hook.unwrap_or("-")
+                self.hook.unwrap_or("-"),
+                p.hook_pooled,
+                p.hook_serial,
             )
         })
     }
@@ -841,9 +899,13 @@ where
             }
             CallOutcome::Hooked { to, ev } => {
                 tally.extra_hook += 1;
+                tally.pool.hook_pooled += 1;
                 Some((to, ev))
             }
-            CallOutcome::Miss => extra_hook(g, site).inspect(|_| tally.extra_hook += 1),
+            CallOutcome::Miss => extra_hook(g, site).inspect(|_| {
+                tally.extra_hook += 1;
+                tally.pool.hook_serial += 1;
+            }),
         };
         match resolved {
             // LC.3b: the call expression's own row, basis site.
@@ -8526,6 +8588,40 @@ mod pool_tests {
         assert_eq!(names.type_named("F"), None, "a FUNCTION is no type");
     }
 
+    /// GP.3: the module-tail index answers every tail as
+    /// [`unique_global_module`]'s scan does: one module, one node under two
+    /// qnames, two distinct modules, and an absent tail.
+    #[test]
+    fn module_tails_answer_as_the_scan_does() {
+        let r = repo();
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, q);
+        let mut g = flow_graph();
+        let (one, alias, a, b) = (id("app::util"), id("pkg::core"), id("x::db"), id("y::db"));
+        for (q, n) in [
+            ("app::util", one),
+            ("pkg::core", alias),
+            ("core", alias),
+            ("x::db", a),
+            ("y::db", b),
+        ] {
+            g.symbols.module_by_qname.insert(q.to_string(), n);
+        }
+        let names = GlobalNames::new(&g);
+        let owned = unique_global_modules(&g);
+        for tail in ["util", "core", "db", "absent", ""] {
+            let want = unique_global_module(&g, tail);
+            assert_eq!(names.module_tail(tail), want, "{tail}");
+            assert_eq!(owned.get(tail).copied().flatten(), want, "{tail}");
+        }
+        assert_eq!(names.module_tail("util"), Some(one));
+        assert_eq!(
+            names.module_tail("core"),
+            Some(alias),
+            "one node, two qnames"
+        );
+        assert_eq!(names.module_tail("db"), None, "two distinct modules");
+    }
+
     /// One chunk with no pool; with one, about four per worker, none under
     /// the floor, covering `0..len` in order.
     #[test]
@@ -8583,12 +8679,14 @@ mod pool_tests {
             refs_ms: 0.5,
             exts: ["ts", "tsx"].iter().map(|e| e.to_string()).collect(),
             front: None,
+            hook_pooled: 0,
+            hook_serial: 0,
         };
         assert_eq!(
             tally.pool_marker().as_deref(),
             Some(
                 "[resolve-pool] lang=ts,tsx calls=10 refs=4 chunks=3 threads=16 calls_ms=1.2 \
-                 refs_ms=0.5 serial_hooks=-"
+                 refs_ms=0.5 serial_hooks=- hook_pooled=0 hook_serial=0"
             )
         );
         // GP.2: the TypeScript-family front's times follow `refs_ms`.
@@ -8600,16 +8698,71 @@ mod pool_tests {
             tally.pool_marker().as_deref(),
             Some(
                 "[resolve-pool] lang=ts,tsx calls=10 refs=4 chunks=3 threads=16 calls_ms=1.2 \
-                 refs_ms=0.5 imports_ms=12.3 merge_ms=5.0 serial_hooks=-"
+                 refs_ms=0.5 imports_ms=12.3 merge_ms=5.0 serial_hooks=- hook_pooled=0 \
+                 hook_serial=0"
             )
         );
         let mut rust = EvidenceTally::with_hook("rust_paths");
         rust.pool.chunks = 2;
+        rust.pool.hook_serial = 7;
         assert!(
             rust.pool_marker()
                 .is_some_and(|l| l.starts_with("[resolve-pool] lang=? ")
-                    && l.ends_with(" serial_hooks=rust_paths")),
+                    && l.ends_with(" serial_hooks=rust_paths hook_pooled=0 hook_serial=7")),
         );
+    }
+
+    /// GP.3: a hook bind counts where it ran: the pooled decide step's hook
+    /// as `hook_pooled`, the apply step's `extra_hook` as `hook_serial`;
+    /// together they are the `[evidence-graph]` line's `extra_hook=`.
+    #[test]
+    fn hook_binds_count_where_they_ran() {
+        let r = repo();
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, r, kind, q);
+        let (m, f, t) = (
+            id(node_kind::MODULE, "m"),
+            id(node_kind::FUNCTION, "m::f"),
+            id(node_kind::FUNCTION, "other::t"),
+        );
+        let graph = || {
+            let mut g = flow_graph();
+            for (n, k, name) in [
+                (m, node_kind::MODULE, "m"),
+                (f, node_kind::FUNCTION, "f"),
+                (t, node_kind::FUNCTION, "t"),
+            ] {
+                g.nav.kind_by_id.insert(n, k);
+                g.nav.name_by_id.insert(n, name.to_string());
+            }
+            g.nav.parent_of.insert(f, m);
+            g
+        };
+        let site = |name: &str| CallSite {
+            from: f,
+            qualifier: CallQualifier::Bare(name.to_string()),
+            line: 1,
+        };
+        let calls = vec![site("hooked"), site("hooked"), site("nothing")];
+        let ev = || graph_evidence("graph:test", "hook");
+        let hook = |_: &RepoGraph, s: &CallSite| match &s.qualifier {
+            CallQualifier::Bare(n) if n == "hooked" => Some((t, ev())),
+            _ => None,
+        };
+        let mut g = graph();
+        let mut serial = EvidenceTally::with_hook("test");
+        resolve_calls(&mut g, &calls, hook, &mut serial);
+        assert_eq!((serial.pool.hook_pooled, serial.pool.hook_serial), (0, 2));
+        assert_eq!(serial.extra_hook, 2);
+        let mut g2 = graph();
+        let mut pooled = EvidenceTally::default();
+        let pooled_hook = |g: &RepoGraph, s: &CallSite, _: &mut ()| hook(g, s);
+        let () = resolve_calls_pooled(&mut g2, &calls, pooled_hook, &mut pooled);
+        assert_eq!((pooled.pool.hook_pooled, pooled.pool.hook_serial), (2, 0));
+        assert_eq!(pooled.extra_hook, 2);
+        assert_eq!(g.edges.len(), graph().edges.len() + 2, "two hooked CALLS");
+        assert_eq!(format!("{:?}", g.edges), format!("{:?}", g2.edges));
+        assert_eq!(g.unresolved_calls.len(), 1);
+        assert_eq!(g2.unresolved_calls.len(), 1);
     }
 }
 

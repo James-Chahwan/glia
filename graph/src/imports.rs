@@ -12,8 +12,7 @@ use glia_core::{Confidence, Edge, NodeId, NodeKindId};
 
 use crate::build::{DirImport, GoPackages};
 use crate::calls::{
-    chunk_ranges, graph_evidence, installed_pool, run_chunks, unique_global_function,
-    unique_global_module,
+    GlobalNames, chunk_ranges, graph_evidence, installed_pool, run_chunks, unique_global_modules,
 };
 use crate::types::RepoGraph;
 
@@ -976,6 +975,10 @@ fn decide_imports_dotted(
 ) -> (DottedImports, Namespaces) {
     let mut ns = Namespaces::default();
     let mut out = DottedImports::default();
+    // GP.3: the tail fallbacks read one repo-unique name index each, built
+    // on the first fallback: the graph is read-only here, so every
+    // statement's answer is the per-statement scan's.
+    let names = GlobalNames::new(g);
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
@@ -1011,8 +1014,9 @@ fn decide_imports_dotted(
                     // one: a lone `core` elsewhere is not the pair's `core`.
                     let tail = path.rsplit(['.', ':', '/']).next().unwrap_or(path);
                     let refused = same_pick == SamePick::Refused;
-                    let guess = unique_global_function(g, tail)
-                        .or_else(|| (!refused).then(|| unique_global_module(g, tail)).flatten());
+                    let guess = names
+                        .function(tail)
+                        .or_else(|| (!refused).then(|| names.module_tail(tail)).flatten());
                     // GD.34: never a mechanism node, the importer itself, a
                     // platform namespace or an undeclared C# root.
                     let path_reason = match guess {
@@ -1130,7 +1134,7 @@ fn decide_imports_dotted(
                         // name. Miss-only + ambiguity-safe.
                         // GD.34: filtered as the module arm's guess is.
                         NsStep::Fallthrough => {
-                            let guess = unique_global_function(g, name);
+                            let guess = names.function(name);
                             let path_reason = match guess {
                                 Some(_) => {
                                     let ext = same.importer_ext(g, from_mod_id);
@@ -1413,6 +1417,10 @@ pub(crate) fn resolve_imports_go(
     let mut stats = GoImportStats::default();
     let mut tail = TailRefused::default();
     let mut top_dirs: Option<BTreeSet<String>> = None;
+    // GP.3: the tail fallback's module index, built on the first fallback.
+    // The loop writes IMPORTS edges and bindings, never the module table, so
+    // it answers every statement as the per-statement scan did.
+    let mut module_tails: Option<HashMap<String, Option<NodeId>>> = None;
     for stmt in imports {
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
@@ -1446,7 +1454,12 @@ pub(crate) fn resolve_imports_go(
                 // path under one of the repo's go.mod modules, never the
                 // importer itself.
                 DirImport::NoDir => {
-                    let guess = unique_global_module(g, path.rsplit("::").next().unwrap_or(path));
+                    let last = path.rsplit("::").next().unwrap_or(path);
+                    let guess = module_tails
+                        .get_or_insert_with(|| unique_global_modules(g))
+                        .get(last)
+                        .copied()
+                        .flatten();
                     let path_reason = match guess {
                         Some(_) => {
                             go_tail_path(path, top_dirs.get_or_insert_with(|| top_level_dirs(g)))
@@ -2310,6 +2323,7 @@ mod tests {
     use crate::build::{
         build_dotted, build_go, build_python, build_typescript, build_typescript_family,
     };
+    use crate::calls::unique_global_function;
     use crate::test_support::repo;
     use glia_code_domain::evidence::Evidence;
     use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, NavFact, cell_type};
