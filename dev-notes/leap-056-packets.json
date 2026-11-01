@@ -4219,6 +4219,7 @@
     "GH.17",
     "GH.18",
     "GH.19",
+    "GH.19b",
     "GH.2",
     "GH.20",
     "GH.3",
@@ -4349,6 +4350,7 @@
     "GH.17",
     "GH.18",
     "GH.19",
+    "GH.19b",
     "GH.2",
     "GH.20",
     "GH.3",
@@ -4679,6 +4681,46 @@
    },
    "depends_on": [],
    "risks": "Few concept queries: most commit subjects may name something lexically, so the tier rarely fires; then n < 5 and the verdict is INSUFFICIENT (= the tier goes to the backlog). That is the honest reading: a tier that cannot be measured does not ship. The vectors are of the head snapshot, as in FB.6 / FB.6b (same leak class, stated in the report). rank_eval is ~23k lines: GB.4 / GP.6 / GP.15 also edit it; the scheduler serialises them by files_touched."
+  },
+  {
+   "from": "GH.19 followup (W7, 9679d051 partial)",
+   "spec_pass": "w7-followup",
+   "class": "coverage",
+   "title": "Start indirection, the shell half: the exec / last command of the entry scripts a start names (never every .sh), `exec \"$@\"` passthrough, plus tsconfig outDir / rootDir for dist -> src",
+   "area": "the start rules of GH.18 / GH.19 (graph/src/resolvers/host_start.rs resolve_launch); a build-time read of the shell scripts a start cell's argv names",
+   "loc": 600,
+   "rationale": "GH.19 (9679d051) built the package-manager-script and dist -> src hops but reported partial: the build holds no `.sh` text (the walk admits no .sh and no extensionless shebang file; route.rs sees only walked (path, source) pairs and has no repo root; RepoBuildCtx carries none), and reading the scripts a start names needs engine/src/build/assemble.rs + build/mod.rs plumbing it did not own. Probe at HEAD c452b1e8 (GH.19's own run): plane apps/api prints `[host-start] .. scripts_unread=10`. The cohort shapes from GH.19's rationale stay unread: twenty Dockerfile `ENTRYPOINT [\"/app/entrypoint.sh\"]` ending `exec \"$@\"` + `CMD [\"node\", \"dist/main\"]` -> src/main.ts; plane docker-entrypoint-worker.sh ending `celery -A plane worker -l info`, docker-entrypoint-api.sh ending `exec gunicorn .. plane.asgi:application`; mealie docker/entry.sh:95 `exec mealie` -> pyproject.toml:52 `mealie = \"mealie.main:main\"`. GH.19's tsconfig follow-up rides here (its cross-env LAUNCHERS row goes to GH.10, which owns code-domain/src/hosts.rs): dist -> src maps only the dist/build/out/lib -> src convention because the walk keeps no tsconfig `compilerOptions.outDir` / `rootDir` / `extends`.",
+   "entry_points": [
+    "engine/src/build/assemble.rs parse_and_graft (repo root in hand): after routing, collect the start cells' argv script targets (a path-shaped argv[0], or the script a `sh` / `bash` / `/bin/sh -c` launcher runs) mapped through each image's COPY map / the declaring file's dir, and read each named file from disk",
+    "parsers/code/extractors/src/iac.rs: the entry-script reader (exec lines, else the last simple command)",
+    "graph/src/resolvers/host_start.rs resolve_launch: the shell / passthrough hops",
+    "engine/src/walk.rs: keep tsconfig outDir / rootDir / extends per project dir"
+   ],
+   "files_touched": [
+    "engine/src/build/assemble.rs",
+    "engine/src/build/mod.rs",
+    "engine/src/walk.rs",
+    "parsers/code/extractors/src/iac.rs",
+    "graph/src/resolvers/host_start.rs",
+    "engine/src/coverage.rs",
+    "engine/tests/data/reflexion/allow_absence.json"
+   ],
+   "implementation": "1. Script read (assemble.rs + build/mod.rs): after routing, with the repo root, gather every start cell's script target (argv[0] path-shaped, or the script argument of a shell launcher), resolved through the image's COPY map (GH.18's) else relative to the cell's workdir / dir. Read only those files, at most 4 KiB each, at most 64 per repo, never by extension and never every .sh (the James rule: shell entry scripts are read for their start / exec line only). A script that is missing, binary or over the cap is counted `scripts_unread`. 2. Reader (iac.rs): keep the `exec <cmd>` lines; with none, the last simple command (skip comments, blank lines, `set` / `export` / `cd` / `fi` / `done`, function bodies); never anything else. Record the kept line(s) as a CODE cell on the script's start target the host_start resolver reads (`{\"script\":<repo path>,\"exec\":<line>,\"row\":<1-based>}`); the script's other text is not stored. 3. Hops (host_start.rs resolve_launch): `shell` follows the script's kept command as the start's argv (rule `<host>:via_script`, the script path in the evidence); `passthrough` reads `exec \"$@\"` (normalise_argv returns Binary `$@`, refused dynamic today, chain [.., exec]) as the remaining argv: the image CMD / compose command. A script calling a script counts toward GH.19's 3-hop limit. `exec mealie` mints cli_invoke:mealie from the Dockerfile MODULE via crate::cli::argv_cell (GH.15's handoff), binding the console-script entry. 4. tsconfig (walk.rs): keep compilerOptions.outDir / rootDir (following `extends`) per project dir, and dist -> src maps those declared dirs first, the convention only when none is declared. 5. coverage.rs: update the (host, HANDLED_BY) caveat: package-manager scripts (<= 3 hops), compiled dist paths (derived) and the exec line of start-named entry scripts are read; any other shell is not. Regenerate the reflexion golden with GLIA_UPDATE_GOLDEN=1 cargo test -p glia-engine --lib rules::reflexion_parity and declare it as a cli_output break. 6. Marker: extend `[host-start] hops=(pkg_script=<p> dist_src=<d>)` to `hops=(pkg_script=<p> dist_src=<d> shell=<s> passthrough=<t>) refused_depth=<r> scripts_unread=<u>`.",
+   "fixtures": "bench/substrate-gap/fixtures/start-indirection-shell/ (new): an image ENTRYPOINT script ending `exec \"$@\"` + CMD `node dist/main` (-> src/main.ts, tsconfig outDir ./build so the declared dir is used, not the convention); a compose worker running ./bin/worker.sh ending `celery -A app worker -l info` (-> the celery app MODULE); a script whose last line is `exec gunicorn app.asgi:application`; `exec mytool` with a pyproject console script; forbid rows: a .sh file no start names gets no CODE cell and no HANDLED_BY, a script's non-exec lines bind nothing, a 4-hop script chain is refused.",
+   "acceptance": "Fixture grades full with forbid 0; start-indirection, docker-starts, orchestrator-starts, process-managers, manifest-bins and patterns/typescript/process_entry unchanged. plane apps/api: `scripts_unread=` falls from 10 and `shell=` > 0, and glia query shows the plane worker service -HANDLED_BY-> the `plane` celery app MODULE. twenty: the main image -HANDLED_BY-> packages/twenty-server/src/main.ts through passthrough=1. mealie: `exec mealie` -> mealie.main. The rank and cohort gates are the close-out's (wave agents never run them).",
+   "fired_on_marker": "[host-start] .. hops=(pkg_script=<p> dist_src=<d> shell=<s> passthrough=<t>) refused_depth=<r> scripts_unread=<u>",
+   "breaking": "graph content (more HANDLED_BY / ENTRYPOINT through shell hops; CODE cells on start-named scripts) + cli_output (the coverage caveat text and the reflexion golden). Declare both.",
+   "depends_on": [
+    "GH.19"
+   ],
+   "risks": "First time glia reads shell text: keep it to the scripts a start names and the exec / last-command line only; never store or emit other lines (SECURITY.md: no value flow; the argv is read, never evaluated). A script read from disk outside the walk must respect the walk's gitignore / skip rules: refuse a target the walk would skip.",
+   "files_note": [
+    "engine/src/build/assemble.rs + build/mod.rs: the post-routing script read with the repo root (GH.19 could not reach it from route.rs)",
+    "engine/src/walk.rs: tsconfig outDir / rootDir only; the walk still admits no .sh",
+    "engine/tests/data/reflexion/allow_absence.json: regenerated by the coverage caveat change"
+   ],
+   "id": "GH.19b",
+   "batch": "GH"
   }
  ]
 }
