@@ -16,6 +16,9 @@ Model: `bge-small`.
 
 ## The pass rule (committed before any panel run)
 
+Committed in e333904c, before rank_eval's `--concept on` existed and before any panel run; the harness and
+this report follow in the next commit. The rule text below is that commit's, unchanged.
+
 ```
 THE CONCEPT RULE (GB.6; committed before any panel run; strictness as FB-5 / FB.6b, never tuned here):
   Panel: the nine `verdict` rows of bench/rank-gate/fusion-preview.json at their pinned revs and test
@@ -79,7 +82,177 @@ pair, then the judge's `CONCEPT: C1=<yes|no> (<k>/<n>) C2=<yes|no> (<k>/<n>) -> 
 ## Report
 
 <!-- concept-gate:verdict -->
-(filled by `bash scripts/embedding-gate.sh concept-verdict` / `concept-verdict-judge`)
+### Panel
+
+| repo | language | rev | test commits | lexical hit | concept queries | dropped (no truth) | no parent | flows | port parity (queries / mismatches) | in n (>= 30) | first test sha | last test sha |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|---|
+| commons-lang | java | 4b1d8cb83c26 | 300 | 1 | 251 | 48 | 0 | 1132 | 251 / 0 | yes | ae061818e5bb | 4b1d8cb83c26 |
+| commons-io | java | f9d4c7567f91 | 300 | 33 | 242 | 25 | 0 | 1257 | 242 / 0 | yes | f03363e242e1 | e4e4fbdc3791 |
+| guzzle | php | 89f429318d52 | 300 | 0 | 0 | 300 | 0 | 0 | 0 / 0 | no | acd0bcded670 | 1e0396c29269 |
+| zod | typescript | afdac65e0f80 | 300 | 0 | 14 | 286 | 0 | 15 | 14 / 0 | no | 2849df8907b0 | 680d19f7d1e0 |
+| okhttp | kotlin | c3179301fc7d | 300 | 0 | 168 | 132 | 0 | 195 | 168 / 0 | yes | b926a030c628 | fb34d4da7462 |
+| sttp | scala | d06f987834af | 155 | 0 | 12 | 143 | 0 | 3 | 12 / 0 | no | 6fba8d10266e | 12c7fed697fa |
+| AutoMapper | csharp | f0ecba7a97d1 | 300 | 0 | 0 | 300 | 0 | 0 | 0 / 0 | no | 25afaf7e6dc6 | fec985c44d16 |
+| jq | c | bd56a745624a | 102 | 2 | 83 | 17 | 0 | 3 | 83 / 0 | yes | 154d0ee4a824 | 852c4d609611 |
+| Alamofire | swift | bda9ed57d729 | 232 | 0 | 213 | 18 | 1 | 452 | 213 / 0 | yes | c20b5602a3d5 | 3494b7c1d4e0 |
+
+n = 5 (repos with >= 30 concept queries); left out: guzzle, zod, sttp, AutoMapper.
+
+Device per repo (FB.14's `[embed] device=` line of each run):
+
+- commons-lang: `(no [embed] device= line: every vector came from the cache)`
+- commons-io: `[embed] device=NVIDIA GeForce GTX 1660 SUPER backend=webgpu driver=580.178.04 fallback=none batch=8`
+- guzzle: `(no [embed] device= line: every vector came from the cache)`
+- zod: `[embed] device=NVIDIA GeForce GTX 1660 SUPER backend=webgpu driver=580.178.04 fallback=none batch=8`
+- okhttp: `(no [embed] device= line: every vector came from the cache)`
+- sttp: `[embed] device=NVIDIA GeForce GTX 1660 SUPER backend=webgpu driver=580.178.04 fallback=none batch=8`
+- AutoMapper: `(no [embed] device= line: every vector came from the cache)`
+- jq: `(no [embed] device= line: every vector came from the cache)`
+- Alamofire: `[embed] device=NVIDIA GeForce GTX 1660 SUPER backend=webgpu driver=580.178.04 fallback=none batch=8`
+
+### Means per ranker (concept queries; k = 5)
+
+| repo | ranker | hit@1 | hit@5 | p@5 |
+|---|---|---:|---:|---:|
+| commons-lang | S | 0.5697 | 0.6056 | 0.4869 |
+| commons-lang | Clex | 0.5060 | 0.5259 | 0.4143 |
+| commons-lang | Creach | 0.1355 | 0.1355 | 0.1355 |
+| commons-lang | Crand | 0.0398 | 0.1355 | 0.0327 |
+| commons-io | S | 0.4876 | 0.5289 | 0.4587 |
+| commons-io | Clex | 0.3967 | 0.4421 | 0.3818 |
+| commons-io | Creach | 0.1529 | 0.3058 | 0.1603 |
+| commons-io | Crand | 0.0413 | 0.1736 | 0.0405 |
+| guzzle | S | 0.0000 | 0.0000 | 0.0000 |
+| guzzle | Clex | 0.0000 | 0.0000 | 0.0000 |
+| guzzle | Creach | 0.0000 | 0.0000 | 0.0000 |
+| guzzle | Crand | 0.0000 | 0.0000 | 0.0000 |
+| zod | S | 0.5714 | 0.7857 | 0.4000 |
+| zod | Clex | 0.5714 | 0.6429 | 0.2857 |
+| zod | Creach | 0.0714 | 0.5000 | 0.2857 |
+| zod | Crand | 0.0714 | 0.4286 | 0.1429 |
+| okhttp | S | 0.4226 | 0.5595 | 0.3619 |
+| okhttp | Clex | 0.3155 | 0.3929 | 0.2679 |
+| okhttp | Creach | 0.2560 | 0.3333 | 0.2095 |
+| okhttp | Crand | 0.0952 | 0.2738 | 0.0762 |
+| sttp | S | 0.8333 | 1.0000 | 0.3167 |
+| sttp | Clex | 0.5000 | 0.5000 | 0.1500 |
+| sttp | Creach | 0.5833 | 1.0000 | 0.3167 |
+| sttp | Crand | 0.6667 | 1.0000 | 0.3167 |
+| AutoMapper | S | 0.0000 | 0.0000 | 0.0000 |
+| AutoMapper | Clex | 0.0000 | 0.0000 | 0.0000 |
+| AutoMapper | Creach | 0.0000 | 0.0000 | 0.0000 |
+| AutoMapper | Crand | 0.0000 | 0.0000 | 0.0000 |
+| jq | S | 1.0000 | 1.0000 | 0.3639 |
+| jq | Clex | 0.9639 | 0.9639 | 0.3518 |
+| jq | Creach | 1.0000 | 1.0000 | 0.3639 |
+| jq | Crand | 0.6627 | 1.0000 | 0.3639 |
+| Alamofire | S | 0.5540 | 0.5775 | 0.5455 |
+| Alamofire | Clex | 0.4977 | 0.5211 | 0.4892 |
+| Alamofire | Creach | 0.1737 | 0.1737 | 0.1737 |
+| Alamofire | Crand | 0.1831 | 0.5211 | 0.1897 |
+
+### Rule rows (flow hit@5)
+
+C1 (S - Clex, CI lo > 0 on >= 3 of 5, hi >= 0 on all 5): lo > 0 on 4, hi >= 0 on 5 -> yes. C2 (S - Creach, the same): lo > 0 on 4, hi >= 0 on 5 -> yes. Only the repos in n count; the others are listed.
+
+| repo | in n | metric | a | b | a | b | a - b | 95% CI |
+|---|---|---|---|---|---:|---:|---:|---|
+| commons-lang | yes | hit5 | S | Clex | 0.6056 | 0.5259 | +0.0797 | [+0.0438, +0.1195] |
+| commons-io | yes | hit5 | S | Clex | 0.5289 | 0.4421 | +0.0868 | [+0.0496, +0.1281] |
+| guzzle | no | hit5 | S | Clex | - | - | - | (no concept queries) |
+| zod | no | hit5 | S | Clex | 0.7857 | 0.6429 | +0.1429 | [+0.0000, +0.3571] |
+| okhttp | yes | hit5 | S | Clex | 0.5595 | 0.3929 | +0.1667 | [+0.1012, +0.2321] |
+| sttp | no | hit5 | S | Clex | 1.0000 | 0.5000 | +0.5000 | [+0.2500, +0.8333] |
+| AutoMapper | no | hit5 | S | Clex | - | - | - | (no concept queries) |
+| jq | yes | hit5 | S | Clex | 1.0000 | 0.9639 | +0.0361 | [+0.0000, +0.0843] |
+| Alamofire | yes | hit5 | S | Clex | 0.5775 | 0.5211 | +0.0563 | [+0.0141, +0.1080] |
+| commons-lang | yes | hit5 | S | Creach | 0.6056 | 0.1355 | +0.4701 | [+0.3904, +0.5418] |
+| commons-io | yes | hit5 | S | Creach | 0.5289 | 0.3058 | +0.2231 | [+0.1529, +0.3017] |
+| guzzle | no | hit5 | S | Creach | - | - | - | (no concept queries) |
+| zod | no | hit5 | S | Creach | 0.7857 | 0.5000 | +0.2857 | [-0.1429, +0.6429] |
+| okhttp | yes | hit5 | S | Creach | 0.5595 | 0.3333 | +0.2262 | [+0.1548, +0.3036] |
+| sttp | no | hit5 | S | Creach | 1.0000 | 1.0000 | +0.0000 | [+0.0000, +0.0000] |
+| AutoMapper | no | hit5 | S | Creach | - | - | - | (no concept queries) |
+| jq | yes | hit5 | S | Creach | 1.0000 | 1.0000 | +0.0000 | [+0.0000, +0.0000] |
+| Alamofire | yes | hit5 | S | Creach | 0.5775 | 0.1737 | +0.4038 | [+0.3333, +0.4789] |
+
+### Information rows (never the verdict)
+
+| repo | in n | metric | a | b | a | b | a - b | 95% CI |
+|---|---|---|---|---|---:|---:|---:|---|
+| commons-lang | yes | hit5 | S | Crand | 0.6056 | 0.1355 | +0.4701 | [+0.3944, +0.5458] |
+| commons-io | yes | hit5 | S | Crand | 0.5289 | 0.1736 | +0.3554 | [+0.2810, +0.4380] |
+| guzzle | no | hit5 | S | Crand | - | - | - | (no concept queries) |
+| zod | no | hit5 | S | Crand | 0.7857 | 0.4286 | +0.3571 | [+0.1429, +0.6429] |
+| okhttp | yes | hit5 | S | Crand | 0.5595 | 0.2738 | +0.2857 | [+0.2024, +0.3690] |
+| sttp | no | hit5 | S | Crand | 1.0000 | 1.0000 | +0.0000 | [+0.0000, +0.0000] |
+| AutoMapper | no | hit5 | S | Crand | - | - | - | (no concept queries) |
+| jq | yes | hit5 | S | Crand | 1.0000 | 1.0000 | +0.0000 | [+0.0000, +0.0000] |
+| Alamofire | yes | hit5 | S | Crand | 0.5775 | 0.5211 | +0.0563 | [-0.0282, +0.1408] |
+| commons-lang | yes | hit5 | Clex | Creach | 0.5259 | 0.1355 | +0.3904 | [+0.3147, +0.4701] |
+| commons-io | yes | hit5 | Clex | Creach | 0.4421 | 0.3058 | +0.1364 | [+0.0702, +0.2107] |
+| guzzle | no | hit5 | Clex | Creach | - | - | - | (no concept queries) |
+| zod | no | hit5 | Clex | Creach | 0.6429 | 0.5000 | +0.1429 | [-0.2857, +0.5714] |
+| okhttp | yes | hit5 | Clex | Creach | 0.3929 | 0.3333 | +0.0595 | [-0.0119, +0.1369] |
+| sttp | no | hit5 | Clex | Creach | 0.5000 | 1.0000 | -0.5000 | [-0.8333, -0.2500] |
+| AutoMapper | no | hit5 | Clex | Creach | - | - | - | (no concept queries) |
+| jq | yes | hit5 | Clex | Creach | 0.9639 | 1.0000 | -0.0361 | [-0.0843, +0.0000] |
+| Alamofire | yes | hit5 | Clex | Creach | 0.5211 | 0.1737 | +0.3474 | [+0.2723, +0.4272] |
+| commons-lang | yes | hit1 | S | Clex | 0.5697 | 0.5060 | +0.0637 | [+0.0279, +0.1036] |
+| commons-io | yes | hit1 | S | Clex | 0.4876 | 0.3967 | +0.0909 | [+0.0537, +0.1322] |
+| guzzle | no | hit1 | S | Clex | - | - | - | (no concept queries) |
+| zod | no | hit1 | S | Clex | 0.5714 | 0.5714 | +0.0000 | [-0.2143, +0.2143] |
+| okhttp | yes | hit1 | S | Clex | 0.4226 | 0.3155 | +0.1071 | [+0.0536, +0.1667] |
+| sttp | no | hit1 | S | Clex | 0.8333 | 0.5000 | +0.3333 | [+0.0833, +0.5833] |
+| AutoMapper | no | hit1 | S | Clex | - | - | - | (no concept queries) |
+| jq | yes | hit1 | S | Clex | 1.0000 | 0.9639 | +0.0361 | [+0.0000, +0.0843] |
+| Alamofire | yes | hit1 | S | Clex | 0.5540 | 0.4977 | +0.0563 | [+0.0094, +0.1080] |
+| commons-lang | yes | hit1 | S | Creach | 0.5697 | 0.1355 | +0.4343 | [+0.3546, +0.5100] |
+| commons-io | yes | hit1 | S | Creach | 0.4876 | 0.1529 | +0.3347 | [+0.2686, +0.4050] |
+| guzzle | no | hit1 | S | Creach | - | - | - | (no concept queries) |
+| zod | no | hit1 | S | Creach | 0.5714 | 0.0714 | +0.5000 | [+0.1429, +0.7857] |
+| okhttp | yes | hit1 | S | Creach | 0.4226 | 0.2560 | +0.1667 | [+0.0893, +0.2560] |
+| sttp | no | hit1 | S | Creach | 0.8333 | 0.5833 | +0.2500 | [-0.0833, +0.5833] |
+| AutoMapper | no | hit1 | S | Creach | - | - | - | (no concept queries) |
+| jq | yes | hit1 | S | Creach | 1.0000 | 1.0000 | +0.0000 | [+0.0000, +0.0000] |
+| Alamofire | yes | hit1 | S | Creach | 0.5540 | 0.1737 | +0.3803 | [+0.3099, +0.4554] |
+| commons-lang | yes | p5 | S | Clex | 0.4869 | 0.4143 | +0.0725 | [+0.0422, +0.1044] |
+| commons-io | yes | p5 | S | Clex | 0.4587 | 0.3818 | +0.0769 | [+0.0446, +0.1132] |
+| guzzle | no | p5 | S | Clex | - | - | - | (no concept queries) |
+| zod | no | p5 | S | Clex | 0.4000 | 0.2857 | +0.1143 | [+0.0000, +0.3000] |
+| okhttp | yes | p5 | S | Clex | 0.3619 | 0.2679 | +0.0940 | [+0.0548, +0.1357] |
+| sttp | no | p5 | S | Clex | 0.3167 | 0.1500 | +0.1667 | [+0.0667, +0.2667] |
+| AutoMapper | no | p5 | S | Clex | - | - | - | (no concept queries) |
+| jq | yes | p5 | S | Clex | 0.3639 | 0.3518 | +0.0120 | [+0.0024, +0.0265] |
+| Alamofire | yes | p5 | S | Clex | 0.5455 | 0.4892 | +0.0563 | [+0.0150, +0.1023] |
+| commons-lang | yes | p5 | S | Creach | 0.4869 | 0.1355 | +0.3514 | [+0.2797, +0.4231] |
+| commons-io | yes | p5 | S | Creach | 0.4587 | 0.1603 | +0.2983 | [+0.2405, +0.3645] |
+| guzzle | no | p5 | S | Creach | - | - | - | (no concept queries) |
+| zod | no | p5 | S | Creach | 0.4000 | 0.2857 | +0.1143 | [-0.0000, +0.2143] |
+| okhttp | yes | p5 | S | Creach | 0.3619 | 0.2095 | +0.1524 | [+0.0940, +0.2095] |
+| sttp | no | p5 | S | Creach | 0.3167 | 0.3167 | +0.0000 | [+0.0000, +0.0000] |
+| AutoMapper | no | p5 | S | Creach | - | - | - | (no concept queries) |
+| jq | yes | p5 | S | Creach | 0.3639 | 0.3639 | +0.0000 | [+0.0000, +0.0000] |
+| Alamofire | yes | p5 | S | Creach | 0.5455 | 0.1737 | +0.3718 | [+0.3052, +0.4488] |
+
+CONCEPT: C1=yes (4/5) C2=yes (4/5) -> PASS
 <!-- /concept-gate:verdict -->
 
-VERDICT: pending
+### Notes on the run
+
+- The run: `bash scripts/embedding-gate.sh concept-verdict` on 2026-11-01, rank_eval built (release,
+  `--features sem-eval`) from HEAD 86a74bda plus this packet's rank_eval.rs and embedding-gate.sh, in an
+  isolated `git archive` tree; every repo took 32 s to 99 s.
+- Port parity held on every concept query of every repo (the `port parity` column): S's mapping is GB.3's.
+- Lexical hits are rare (0 to 33 of a repo's test commits): GB.1 needs every word of a query to match, and a
+  commit subject almost never does, so on free text the semantic tier is what answers.
+- Four repos fall below 30 concept queries and are out of n: guzzle and AutoMapper build no entry flow at
+  all (flows 0, every query dropped for no truth), zod (15 flows) and sttp (3 flows) leave 14 and 12.
+  n = 5 is exactly the rule's minimum.
+- jq has 3 flows, so any order holding all three hits at 5: Creach and Crand score 1.0 there and S - Creach
+  is 0 [0, 0] (the repo C2 misses); its C1 row is lo = 0 too. The verdict rests on commons-lang,
+  commons-io, okhttp and Alamofire for both rows.
+- In the libraries most entry flows are test functions, so a truth flow is often the test of the changed
+  file; the rule scores what the answer returns, whatever the entry's kind.
+
+VERDICT: PASS

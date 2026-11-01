@@ -186,8 +186,10 @@ use glia_engine::calibrate::{
     CalibrateOptions, Calibration, FindSignals, calibrate_snapshot, find_keys, find_order,
 };
 use glia_engine::find::{
-    FIND_FILES_FUSED, FIND_FILES_FUSION, FindFilesOptions, FindOptions, find_files_with,
+    FIND_FILES_FUSED, FIND_FILES_FUSION, FindFilesOptions, FindOptions, FoundFile, find_files,
+    find_files_with,
 };
+use glia_engine::identity::Collapse;
 use glia_engine::intent::defs::{Tree, read_defs};
 use glia_engine::intent::idr as eidr;
 use glia_engine::intent::ids::IdVocab;
@@ -200,6 +202,9 @@ use glia_engine::rank::{
 use glia_engine::review::{INTENT_FUSION_REVIEW, IntentHistory, intent_files_with};
 use glia_engine::semantic::{
     EmbedRecipe, FUSED_RECIPE, RECIPES, SemanticSource, VectorIndex, embed_text, text_hash,
+};
+use glia_engine::trace::{
+    ConceptOptions, DEFAULT_DEPTH, EntryFlow, concept_flows_with_live, entry_flows_with_live,
 };
 use glia_engine::{
     BlastOptions, GenerateResult, Locator, default_keying, entrypoint_reachable, generate_one,
@@ -385,6 +390,12 @@ struct Args {
     place_md: String,
     /// GB.4: `--place-judge <run.json>,..` applies the cross-repo pass rule to `--place on` runs.
     place_judge: String,
+    /// GB.6: `on` (needs `--sem on`) scores concept search's semantic tier on the test commits
+    /// whose subject GB.1's lexical concept search does not answer (dev-notes/concept-gate-0.5.6.md):
+    /// the `concept` JSON block, after every other row (default off).
+    concept: String,
+    /// GB.6: the per-repo concept table (`--concept on`).
+    concept_md: String,
 }
 
 fn parse_args() -> Args {
@@ -446,6 +457,8 @@ fn parse_args() -> Args {
         place: "off".into(),
         place_md: "rank_eval_place.md".into(),
         place_judge: String::new(),
+        concept: "off".into(),
+        concept_md: "rank_eval_concept.md".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -509,6 +522,8 @@ fn parse_args() -> Args {
             "--place" => a.place = v,
             "--place-md" => a.place_md = v,
             "--place-judge" => a.place_judge = v,
+            "--concept" => a.concept = v,
+            "--concept-md" => a.concept_md = v,
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -541,6 +556,14 @@ fn parse_args() -> Args {
     assert!(
         a.place == "off" || (a.tune == "on" && !a.pick.is_empty()),
         "--place on needs --tune on --pick <cfg> (Dstr:PT* reads the picked PPR)"
+    );
+    assert!(
+        a.concept == "on" || a.concept == "off",
+        "--concept: expected on or off"
+    );
+    assert!(
+        a.concept == "off" || a.sem == "on",
+        "--concept on needs --sem on (the fused find --files order S reads)"
     );
     let offline = !a.r3_compare.is_empty()
         || !a.gate_check.is_empty()
@@ -5675,6 +5698,33 @@ fn main() {
     if let Some(sem) = &sem {
         sem.log_queries(&args.label);
     }
+    // GB.6: the concept gate, after every other ranker (its block is the JSON's last).
+    let concept = (args.concept == "on").then(|| {
+        let Some(source) = sem_source.clone() else {
+            eprintln!(
+                "[concept-eval] label={} error: no t2 vectors (no SemanticSource)",
+                args.label
+            );
+            std::process::exit(2);
+        };
+        let own;
+        let hist = match &ans_intent_in {
+            Some(ai) => &ai.hist,
+            None => {
+                own = ans_history(&args, &g.paths, &commits, None);
+                &own
+            }
+        };
+        let cin = ConceptIn {
+            commits: &commits,
+            test_idx: &test_idx,
+            hist,
+            source,
+        };
+        let (doc, md) = concept_eval(&args, &res, &g, &cin);
+        std::fs::write(&args.concept_md, md).expect("write concept md");
+        doc
+    });
     if ctx.ans {
         let n_transfer: usize = transfer.iter().take(3).map(|(o, _)| o.len()).sum();
         let n_find = transfer.get(3).map_or(0, |(o, _)| o.len());
@@ -6158,6 +6208,9 @@ fn main() {
     }
     if let Some(p) = place_doc {
         doc["place"] = p;
+    }
+    if let Some(c) = concept {
+        doc["concept"] = c;
     }
     std::fs::write(&args.out, serde_json::to_string_pretty(&doc).unwrap()).expect("write json");
     let mut md = render_md(&args.label, &doc, &names, &metrics, &paired_all);
@@ -23574,6 +23627,9 @@ fn gate_pair_main(args: &Args) -> i32 {
     };
     let label = run["stats"]["label"].as_str().unwrap_or_default();
     let shape = args.gate_shape.as_str();
+    if shape == "concept" || shape.starts_with("concept:") {
+        return gate_pair_concept(args, &run, shape.strip_prefix("concept:").unwrap_or("hit5"));
+    }
     let Some(s) = gate_run_shape(&run, shape) else {
         eprintln!("[rank-gate] missing shape={shape} label={label}");
         return 2;
@@ -25017,4 +25073,481 @@ fn place_judge_main(args: &Args) -> i32 {
     );
     println!("{line}");
     0
+}
+
+// ============================================================================
+// GB.6: the concept-search semantic gate (`--concept on`)
+// ============================================================================
+
+/// The concept gate's rankers, in `rows` / `per_query` order (dev-notes/concept-gate-0.5.6.md,
+/// THE CONCEPT RULE): S (GB.3's semantic tier), Clex (the same flow mapping fed by LX[IDR,T1s]),
+/// Creach (every flow by reach desc) and Crand (a seeded order, information only).
+const CONCEPT_RANKERS: [&str; 4] = ["S", "Clex", "Creach", "Crand"];
+
+/// The cut every concept ranker is scored at: flow hit@5 and precision@5.
+const CONCEPT_K: usize = 5;
+
+/// The concept metrics, in the order a `[f64; 3]` holds them.
+const CONCEPT_METRICS: [&str; 3] = ["hit1", "hit5", "p5"];
+
+/// One head entry flow as the concept gate reads it (`trace::EntryFlow`, in `entry_flows`'
+/// order, which is the order GB.3's tier calls a flow's position).
+struct ConceptFlow {
+    key: String,
+    qname: String,
+    reach: usize,
+    /// The entry (depth 0), then the hops in BFS order: (depth, located file).
+    nodes: Vec<(usize, Option<String>)>,
+    /// The candidate files (`Graph::paths` indexes) any node sits in, sorted.
+    files: Vec<u32>,
+}
+
+impl ConceptFlow {
+    fn of(f: &EntryFlow, pidx: &HashMap<&str, u32>) -> ConceptFlow {
+        let nodes: Vec<(usize, Option<String>)> = std::iter::once((0usize, f.entry.file.clone()))
+            .chain(f.hops.iter().map(|h| (h.depth, h.to_file.clone())))
+            .collect();
+        let mut files: Vec<u32> = nodes
+            .iter()
+            .filter_map(|(_, p)| p.as_deref().and_then(|p| pidx.get(p).copied()))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        ConceptFlow {
+            key: f.key.clone(),
+            qname: f.entry.qname.clone(),
+            reach: f.reach,
+            nodes,
+            files,
+        }
+    }
+}
+
+/// trace.rs `words` (GB.1), ported: runs of letters and digits, split again at each lower-case
+/// -> upper-case step, lower-cased, tokens under two characters dropped, each once. Concept
+/// search walks nothing for a query with none, so neither does S or Clex.
+fn concept_words(s: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        if cur.chars().count() >= 2 && !out.contains(cur) {
+            out.push(std::mem::take(cur));
+        } else {
+            cur.clear();
+        }
+    };
+    for c in s.chars() {
+        if !c.is_alphanumeric() {
+            flush(&mut cur, &mut out);
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower {
+            flush(&mut cur, &mut out);
+        }
+        prev_lower = c.is_lowercase();
+        cur.extend(c.to_lowercase());
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// GB.3's flow mapping (trace.rs `semantic_ranked`), ported because the shipped call reads the
+/// history from disk: the kept rows of a `find --files` order, 1-based in order (a file once);
+/// each flow at its least (file rank, depth) node, the entry first and then the hops in BFS
+/// order, a tie to the earlier node; the flows ranked by (file rank, depth, reach desc, key,
+/// entry qname, flow position). A node's file is its located path (the shipped call reads
+/// `FileIndex::file_of_node`): the per-query parity row checks the two agree.
+fn concept_map(
+    flows: &[ConceptFlow],
+    rows: &[FoundFile],
+    keep: impl Fn(&FoundFile) -> bool,
+) -> Vec<usize> {
+    let mut rank_of: HashMap<&str, usize> = HashMap::new();
+    for r in rows.iter().filter(|r| keep(r)) {
+        let next = rank_of.len() + 1;
+        rank_of.entry(r.file.as_str()).or_insert(next);
+    }
+    if rank_of.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, usize, usize)> = Vec::new();
+    for (pos, f) in flows.iter().enumerate() {
+        let mut best: Option<(usize, usize)> = None;
+        for (depth, file) in &f.nodes {
+            let Some(&rank) = file.as_deref().and_then(|p| rank_of.get(p)) else {
+                continue;
+            };
+            if best.is_none_or(|b| (rank, *depth) < b) {
+                best = Some((rank, *depth));
+            }
+        }
+        if let Some((rank, depth)) = best {
+            out.push((rank, depth, pos));
+        }
+    }
+    out.sort_by(|a, b| {
+        let (fa, fb) = (&flows[a.2], &flows[b.2]);
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then_with(|| fb.reach.cmp(&fa.reach))
+            .then_with(|| fa.key.cmp(&fb.key))
+            .then_with(|| fa.qname.cmp(&fb.qname))
+            .then(a.2.cmp(&b.2))
+    });
+    out.into_iter().map(|x| x.2).collect()
+}
+
+/// hit@1, hit@5 and precision@5 (truth flows among the first 5, over 5) of one flow order.
+fn concept_metrics(order: &[usize], truth: &[bool]) -> [f64; 3] {
+    let top: Vec<bool> = order.iter().take(CONCEPT_K).map(|&p| truth[p]).collect();
+    let n = top.iter().filter(|x| **x).count();
+    [
+        f64::from(u8::from(top.first().copied().unwrap_or(false))),
+        f64::from(u8::from(n > 0)),
+        n as f64 / CONCEPT_K as f64,
+    ]
+}
+
+/// What one test commit is to the concept gate.
+enum ConceptOutcome {
+    /// GB.1's lexical concept search answers its subject: never scored.
+    Lexical,
+    /// No head flow has a node in a file the commit changed.
+    NoTruth,
+    /// No parent to route ids at (a root commit): left out, counted.
+    NoParent,
+    /// A concept query: per ranker (`CONCEPT_RANKERS`) its `concept_metrics`, and the port
+    /// parity (the first mismatching row, if any).
+    Scored {
+        sha: String,
+        m: [[f64; 3]; 4],
+        parity: Option<String>,
+    },
+}
+
+/// The concept gate's per-run inputs.
+struct ConceptIn<'a> {
+    commits: &'a [Commit],
+    test_idx: &'a [usize],
+    hist: &'a AnsHistory,
+    source: Arc<SemanticSource>,
+}
+
+/// GB.6 (`--concept on`, needs `--sem on`): THE CONCEPT RULE's rankers on the run's test window
+/// (dev-notes/concept-gate-0.5.6.md). Per test commit c (in parallel; ties never reach an
+/// output by thread order): the query is c's redacted subject; GB.1's lexical `concept_flows`
+/// (the CLI defaults, semantic None) answering it makes c a lexical hit, never scored; the truth
+/// is the head entry flows with a node located in a candidate file c changed (none: dropped).
+/// S is [`concept_map`] over `find_files_with(FIND_FILES_FUSED)` at c's leak-free history (as
+/// ANS:find_files: the history-sync window without c and newer, ids routed at c's parent), rows
+/// with a `sem` score; Clex the same over `find_files_with(FIND_FILES_FUSION)` with semantic
+/// None, every row; Creach every flow by (reach desc, key, entry qname, position); Crand every
+/// flow by `h64(<sha>:concept:<position>)`. Port parity, per concept query: [`concept_map`] over
+/// the shipped call's own `find_files` (no history) against the shipped `concept_flows` with the
+/// run's SemanticSource and a RankCache, row for row by (key, entry qname) within its limit.
+///
+/// Returns the `concept` JSON block and the `--concept-md` text. Fired_on, stderr, once:
+/// `[concept-eval] label=<l> test=<t> lexical_hit=<h> concept_queries=<q> dropped_no_truth=<d>
+/// flows=<f> ms=<ms>` and `[concept-eval] parity label=<l> queries=<q> mismatch=<m>` (with
+/// ` first=<..>` on a mismatch).
+fn concept_eval(
+    args: &Args,
+    res: &GenerateResult,
+    g: &Graph,
+    cin: &ConceptIn,
+) -> (serde_json::Value, String) {
+    let t0 = Instant::now();
+    let merged = &res.merged;
+    let pidx: HashMap<&str, u32> = g
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.as_str(), i as u32))
+        .collect();
+    let live = entrypoint_reachable(merged);
+    let collapse = Collapse::with_labels(&res.repo_labels);
+    let head: Vec<EntryFlow> =
+        entry_flows_with_live(merged, &live, &res.repo_labels, DEFAULT_DEPTH, &collapse);
+    let flows: Vec<ConceptFlow> = head.iter().map(|f| ConceptFlow::of(f, &pidx)).collect();
+    let nflows = flows.len();
+    let mut creach: Vec<usize> = (0..nflows).collect();
+    creach.sort_by(|&a, &b| {
+        let (fa, fb) = (&flows[a], &flows[b]);
+        fb.reach
+            .cmp(&fa.reach)
+            .then_with(|| fa.key.cmp(&fb.key))
+            .then_with(|| fa.qname.cmp(&fb.qname))
+            .then(a.cmp(&b))
+    });
+    let cache = RankCache::new("answer", &res.repo_roots, &res.repo_labels);
+    cache.guard(merged);
+    let cache = Arc::new(cache);
+    let mut lex = ConceptOptions::default();
+    lex.collapse = collapse;
+    lex.surface = "rank_eval";
+    let mut shipped = lex.clone();
+    shipped.semantic = Some(Arc::clone(&cin.source));
+    shipped.rank_cache = Some(Arc::clone(&cache));
+    let find_opts = |sem: bool, surface: &'static str| {
+        let mut fo = FindFilesOptions::default();
+        fo.top_k = 0;
+        fo.surface = surface;
+        fo.rank_cache = Some(Arc::clone(&cache));
+        fo.semantic = sem.then(|| Arc::clone(&cin.source));
+        fo
+    };
+    let (fo_s, fo_lex, fo_ship) = (
+        find_opts(true, "concept"),
+        find_opts(false, "concept"),
+        find_opts(true, "flows"),
+    );
+    let parents = git_parents(&args.git, &args.rev);
+    let fallback = ans_fallback_overlay(args);
+    let commits = cin.commits;
+    let outcomes: Vec<ConceptOutcome> = (0..cin.test_idx.len())
+        .into_par_iter()
+        .map(|o| {
+            let k = cin.test_idx[o];
+            let c = &commits[k];
+            let q = redact_untrusted(subject(&c.msg)).0;
+            let lexical = concept_flows_with_live(merged, &live, &res.repo_labels, &q, &lex);
+            if !lexical.results.is_empty() {
+                return ConceptOutcome::Lexical;
+            }
+            let truth: Vec<bool> = flows
+                .iter()
+                .map(|f| f.files.iter().any(|x| c.files.binary_search(x).is_ok()))
+                .collect();
+            if !truth.iter().any(|t| *t) {
+                return ConceptOutcome::NoTruth;
+            }
+            let Some(p) = parents.get(&c.sha).and_then(|x| x.0.clone()) else {
+                return ConceptOutcome::NoParent;
+            };
+            let exclude: BTreeSet<String> = commits[k..].iter().map(|x| x.sha.clone()).collect();
+            let vocab = match git_text(&args.git, &["show", &format!("{p}:.glia/overlay.toml")])
+                .or_else(|| fallback.clone())
+            {
+                Some(text) => IdVocab::from_config(Some(&parse_str(&text))),
+                None => IdVocab::default(),
+            };
+            let now = cin.hist.at.get(&c.sha).copied().unwrap_or(0);
+            let history =
+                IntentHistory::new(cin.hist.snap.clone(), Some(cin.hist.msgs.clone()), exclude)
+                    .with_now(now)
+                    .with_vocab(vocab)
+                    .at_rev(&args.git, p);
+            let words = !concept_words(&q).is_empty();
+            let order = |fo: &FindFilesOptions, pick: &str, sem_only: bool| -> Vec<usize> {
+                if !words {
+                    return Vec::new();
+                }
+                match find_files_with(merged, &res.repo_roots, &q, fo, Some(&history), Some(pick)) {
+                    Ok(a) => concept_map(&flows, &a.results, |r| !sem_only || r.sem.is_some()),
+                    Err(_) => Vec::new(),
+                }
+            };
+            let s = order(&fo_s, FIND_FILES_FUSED, true);
+            let clex = order(&fo_lex, FIND_FILES_FUSION, false);
+            let mut crand: Vec<usize> = (0..nflows).collect();
+            crand.sort_by_key(|&i| (h64(&format!("{}:concept:{i}", c.sha)), i));
+            // Port parity: the port over the shipped call's own find_files against the call.
+            let ship = concept_flows_with_live(merged, &live, &res.repo_labels, &q, &shipped);
+            let port: Vec<usize> = if words {
+                match find_files(merged, &res.repo_roots, &q, &fo_ship) {
+                    Ok(a) => concept_map(&flows, &a.results, |r| r.sem.is_some()),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            let want: Vec<(&str, &str)> = ship
+                .results
+                .iter()
+                .map(|h| (h.key.as_str(), h.entry.qname.as_str()))
+                .collect();
+            // The shipped answer is cut at its limit; the port's order is compared to that cut.
+            let got: Vec<(&str, &str)> = port
+                .iter()
+                .take(shipped.limit)
+                .map(|&i| (flows[i].key.as_str(), flows[i].qname.as_str()))
+                .collect();
+            let parity = (want != got).then(|| {
+                let at = want
+                    .iter()
+                    .zip(&got)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(want.len().min(got.len()));
+                format!(
+                    "{}@{at} shipped={} port={}",
+                    &c.sha[..c.sha.len().min(12)],
+                    want.len(),
+                    got.len()
+                )
+            });
+            ConceptOutcome::Scored {
+                sha: c.sha.clone(),
+                m: [
+                    concept_metrics(&s, &truth),
+                    concept_metrics(&clex, &truth),
+                    concept_metrics(&creach, &truth),
+                    concept_metrics(&crand, &truth),
+                ],
+                parity,
+            }
+        })
+        .collect();
+    let (mut lexical, mut no_truth, mut no_parent) = (0usize, 0usize, 0usize);
+    let mut per_query: Vec<serde_json::Value> = Vec::new();
+    let mut sums = [[0.0f64; 3]; 4];
+    let mut mismatch = 0usize;
+    let mut first: Option<String> = None;
+    for out in &outcomes {
+        match out {
+            ConceptOutcome::Lexical => lexical += 1,
+            ConceptOutcome::NoTruth => no_truth += 1,
+            ConceptOutcome::NoParent => no_parent += 1,
+            ConceptOutcome::Scored { sha, m, parity } => {
+                for (r, row) in m.iter().enumerate() {
+                    for (j, v) in row.iter().enumerate() {
+                        sums[r][j] += v;
+                    }
+                }
+                if let Some(p) = parity {
+                    mismatch += 1;
+                    first.get_or_insert_with(|| p.clone());
+                }
+                let by = |j: usize| -> serde_json::Value {
+                    json!({"s": m[0][j], "clex": m[1][j], "creach": m[2][j], "crand": m[3][j]})
+                };
+                per_query.push(json!({
+                    "sha": sha, "s": m[0][1], "clex": m[1][1], "creach": m[2][1], "crand": m[3][1],
+                    "hit1": by(0), "p5": by(2),
+                }));
+            }
+        }
+    }
+    let nq = per_query.len();
+    let mean = |r: usize, j: usize| {
+        if nq == 0 { 0.0 } else { sums[r][j] / nq as f64 }
+    };
+    let rows: Vec<serde_json::Value> = CONCEPT_RANKERS
+        .iter()
+        .enumerate()
+        .map(|(r, name)| {
+            json!({"ranker": name, "hit1": mean(r, 0), "hit5": mean(r, 1), "p5": mean(r, 2)})
+        })
+        .collect();
+    let ms = t0.elapsed().as_millis();
+    eprintln!(
+        "[concept-eval] label={} test={} lexical_hit={lexical} concept_queries={nq} dropped_no_truth={no_truth} flows={nflows} ms={ms}",
+        args.label,
+        cin.test_idx.len()
+    );
+    eprintln!(
+        "[concept-eval] parity label={} queries={nq} mismatch={mismatch}{}",
+        args.label,
+        first
+            .as_ref()
+            .map(|f| format!(" first={f}"))
+            .unwrap_or_default()
+    );
+    let doc = json!({
+        "label": args.label,
+        "test": cin.test_idx.len(),
+        "lexical_hit_queries": lexical,
+        "queries": nq,
+        "dropped_no_truth": no_truth,
+        "no_parent": no_parent,
+        "flows": nflows,
+        "k": CONCEPT_K,
+        "ms": ms as u64,
+        "parity": {"queries": nq, "mismatch": mismatch, "first": first},
+        "rows": rows,
+        "per_query": per_query,
+    });
+    let mut md = format!(
+        "# Concept gate rows: {}\n\ntest commits {}, lexical hit {lexical}, concept queries {nq}, dropped (no truth) {no_truth}, no parent {no_parent}, flows {nflows}, port parity mismatches {mismatch}\n\n| ranker | hit@1 | hit@5 | p@5 |\n|---|---:|---:|---:|\n",
+        args.label,
+        cin.test_idx.len()
+    );
+    for (r, name) in CONCEPT_RANKERS.iter().enumerate() {
+        md.push_str(&format!(
+            "| {name} | {:.4} | {:.4} | {:.4} |\n",
+            mean(r, 0),
+            mean(r, 1),
+            mean(r, 2)
+        ));
+    }
+    (doc, md)
+}
+
+/// `--gate-pair .. --gate-shape concept[:<metric>]` (GB.6): the pair's columns from the run's
+/// `concept.per_query` (`hit5`, the default, or `hit1` / `p5`), one query per commit, so the
+/// commit-cluster bootstrap resamples queries. Ranker names are `CONCEPT_RANKERS`. Fired_on, one
+/// line per pair: `[rank-gate] pair label=<l> shape=concept a=<a> b=<b> metric=<m> diff=<d>
+/// ci=[<lo>,<hi>] a_<m>=<x> b_<m>=<y> queries=<q> commits=<q>`.
+fn gate_pair_concept(args: &Args, run: &serde_json::Value, metric: &str) -> i32 {
+    let label = run["stats"]["label"].as_str().unwrap_or_default();
+    if !CONCEPT_METRICS.contains(&metric) {
+        eprintln!("[rank-gate] --gate-shape concept:{metric}: expected hit1, hit5 or p5");
+        return 2;
+    }
+    let Some(pq) = run["concept"]["per_query"].as_array() else {
+        eprintln!("[rank-gate] missing shape=concept label={label} (a --concept on run?)");
+        return 2;
+    };
+    let nq = pq.len();
+    if nq == 0 || args.boot == 0 {
+        eprintln!("[rank-gate] pair label={label} shape=concept: no queries");
+        return 2;
+    }
+    let commit_of: Vec<usize> = (0..nq).collect();
+    let lf = ln_fact_table(nq + 1);
+    let col = |r: &str| -> Option<Vec<f64>> {
+        let key = r.to_ascii_lowercase();
+        pq.iter()
+            .map(|q| {
+                let v = if metric == "hit5" {
+                    &q[key.as_str()]
+                } else {
+                    &q[metric][key.as_str()]
+                };
+                v.as_f64()
+            })
+            .collect()
+    };
+    let mut code = 0;
+    for pair in args.gate_pair.split(';').filter(|p| !p.trim().is_empty()) {
+        let Some((a, b)) = gate_pair_split(pair) else {
+            eprintln!("[rank-gate] bad pair `{pair}`: expected <a>,<b>");
+            code = 2;
+            continue;
+        };
+        let known = |r: &str| CONCEPT_RANKERS.contains(&r);
+        let (Some(xa), Some(xb)) = (
+            known(a).then(|| col(a)).flatten(),
+            known(b).then(|| col(b)).flatten(),
+        ) else {
+            for r in [a, b] {
+                if !known(r) {
+                    eprintln!("[rank-gate] missing ranker={r} shape=concept label={label}");
+                }
+            }
+            code = 2;
+            continue;
+        };
+        let p = paired(&xa, &xb, &commit_of, nq, args.boot, &lf);
+        eprintln!(
+            "[rank-gate] pair label={label} shape=concept a={a} b={b} metric={metric} diff={} ci=[{},{}] a_{metric}={} b_{metric}={} queries={nq} commits={nq}",
+            p.mean,
+            p.lo,
+            p.hi,
+            xa.iter().sum::<f64>() / nq as f64,
+            xb.iter().sum::<f64>() / nq as f64
+        );
+    }
+    code
 }

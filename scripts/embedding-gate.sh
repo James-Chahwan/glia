@@ -12,6 +12,12 @@
 #                                             (the end-of-0.5.4 step), each test window newer than its `after`
 #   bash scripts/embedding-gate.sh fusion-preview-judge | fusion-verdict-judge    re-judge (no build, no run)
 #   Both fusion modes write their own section of dev-notes/fusion-gate-0.5.4.md (GLIA_FUSION_REPORT).
+#   bash scripts/embedding-gate.sh concept-verdict         GB.6: the concept-search semantic gate on the same nine
+#                                             `verdict` rows (rank_eval --sem on --concept on), judged by THE CONCEPT
+#                                             RULE of dev-notes/concept-gate-0.5.6.md (committed e333904c, before any run)
+#   bash scripts/embedding-gate.sh concept-verdict-judge   re-judge the last concept runs (no build, no run)
+#   The concept modes write the report's `<!-- concept-gate:verdict -->` section and its last line
+#   (GLIA_CONCEPT_REPORT; a smoke run, GLIA_FUSION_PANEL or a model other than bge-small, needs its own).
 #
 # Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate: the shared clones and copies; this script writes
 # only sem/ (the vector cache) and sem-run/ there), GLIA_SEM_TARGET (where rank_eval is built with the model;
@@ -660,6 +666,224 @@ fusion() {   # fusion <preview|verdict> [judge]
   fjudge "$rows" "$frun" "$mode"
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# GB.6: the concept gate (THE CONCEPT RULE, dev-notes/concept-gate-0.5.6.md). The fusion verdict's panel,
+# windows, flags and vector cache, plus --concept on; its own run dir under $DIR.
+# Fired_on: rank_eval's `[concept-eval] label=<l> test=<t> lexical_hit=<h> concept_queries=<q> dropped_no_truth=<d>
+# flows=<f> ms=<ms>` and `[concept-eval] parity ..`, the pairs' `[rank-gate] pair label=<l> shape=concept a=<a> b=<b>
+# metric=hit5 diff=.. ci=[..]`, then the judge's last lines:
+#   CONCEPT: C1=<yes|no> (<k>/<n>) C2=<yes|no> (<k>/<n>) -> PASS|FAIL|INSUFFICIENT
+#   [concept-gate] verdict=<PASS|FAIL|INSUFFICIENT> report=<path>
+# ---------------------------------------------------------------------------------------------------------
+CREPORT=${GLIA_CONCEPT_REPORT:-$HERE/dev-notes/concept-gate-0.5.6.md}
+# metric:pairs (a,b = a - b); hit5 holds the rule rows C1 / C2 and two information rows.
+CPAIRS_HIT5="S,Clex;S,Creach;S,Crand;Clex,Creach"
+CPAIRS_INFO="S,Clex;S,Creach"
+
+crun() {
+  local rows=$1 crun=$2 name url rev label after flags t0 extra common=()
+  mapfile -t common < <(bash "$HERE/scripts/rank-gate.sh" flags)
+  [ "${#common[@]}" -gt 0 ] || fail "rank-gate.sh flags printed nothing"
+  export GLIA_RANK_GATE_HEAD
+  GLIA_RANK_GATE_HEAD=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
+  while read -r name url rev label after flags; do
+    t0=$(date +%s)
+    extra=()
+    [ "$after" = - ] || extra=(--test-after "$after")
+    # shellcheck disable=SC2086
+    (cd "$crun" && GLIA_NO_PERSIST=1 "$BIN" --repo "$DIR/$name@${rev:0:12}" --git "$DIR/$name.git" --rev "$rev" \
+        --label "$label" $flags "${common[@]}" "${extra[@]}" --sem on --sem-model "$MODEL" --sem-cache "$SEM" \
+        --concept on --concept-md "$crun/$label.concept.md" \
+        --out "$crun/$label.json" --md "$crun/$label.md" --r1md "$crun/$label.r1.md" \
+        --r3md "$crun/$label.r3.md" 2> "$crun/$label.log") \
+      || { tail -5 "$crun/$label.log"; fail "run $label"; }
+    grep -E '^\[(concept-eval|embed)\] |^\[rank_eval\] test-after ' "$crun/$label.log" | grep -v ' progress ' || true
+    say "concept run label=$label s=$(( $(date +%s) - t0 ))"
+  done <<< "$rows"
+}
+
+cpairs() {
+  local label q m
+  while read -r _ _ _ label _; do
+    q=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("concept", {}).get("queries", -1))' \
+        "$2/$label.json") || fail "read $label.json"
+    [ "$q" -ge 0 ] || fail "$label.json has no concept block (a --concept on run?)"
+    : > "$2/$label.pairs.log"
+    if [ "$q" -eq 0 ]; then
+      say "pairs label=$label: no concept queries"
+      continue
+    fi
+    for m in hit5 hit1 p5; do
+      local pairs=$CPAIRS_INFO
+      [ "$m" = hit5 ] && pairs=$CPAIRS_HIT5
+      "$BIN" --gate-pair "$pairs" --gate-new "$2/$label.json" --gate-shape "concept:$m" --boot 1000 \
+          2>> "$2/$label.pairs.log" || { cat "$2/$label.pairs.log"; fail "pairs $label $m"; }
+    done
+  done <<< "$1"
+}
+
+cjudge() {
+  local labels
+  labels=$(while read -r _ _ _ label _; do echo "$label"; done <<< "$1")
+  python3 -I - "$2" "$CREPORT" "$FPREVIEW" $labels <<'PY'
+import json, math, os, re, sys
+
+crun, report, panel_json = sys.argv[1:4]
+labels = sys.argv[4:]
+MIN_Q, MIN_N = 30, 5
+pat = re.compile(r"^\[rank-gate\] pair label=(\S+) shape=concept a=(\S+) b=(\S+) metric=(\S+) diff=(\S+) "
+                 r"ci=\[(\S+),(\S+)\] a_\S+?=(\S+) b_\S+?=(\S+) queries=(\d+) commits=(\d+)$")
+rows = {}   # (label, a, b, metric) -> (diff, lo, hi, a_mean, b_mean, queries)
+for l in labels:
+    for line in open(os.path.join(crun, f"{l}.pairs.log")):
+        m = pat.match(line.strip())
+        if m:
+            rows[(m[1], m[2], m[3], m[4])] = tuple(float(m[i]) for i in range(5, 10)) + (int(m[10]),)
+runs = {l: json.load(open(os.path.join(crun, f"{l}.json"))) for l in labels}
+con = {l: runs[l].get("concept") for l in labels}
+for l in labels:
+    if not isinstance(con[l], dict):
+        print(f"[concept-gate] FAILED ({l}: no concept block)")
+        sys.exit(2)
+bad = [l for l in labels if con[l]["parity"]["mismatch"] != 0]
+if bad:
+    for l in bad:
+        print(f"[concept-gate] FAILED ({l}: {con[l]['parity']['mismatch']} port parity mismatches, first "
+              f"{con[l]['parity']['first']}): the port is not GB.3's tier, no verdict")
+    sys.exit(2)
+inc = [l for l in labels if con[l]["queries"] >= MIN_Q]
+n = len(inc)
+
+def row(l, a, b, metric="hit5"):
+    k = (l, a, b, metric)
+    if k not in rows:
+        print(f"[concept-gate] FAILED (no pair {a} - {b} {metric} for {l})")
+        sys.exit(2)
+    return rows[k]
+
+def count(a, b, side, metric="hit5"):
+    return sum(1 for l in inc if (row(l, a, b, metric)[1] > 0 if side == "lo" else row(l, a, b, metric)[2] >= 0))
+
+k = math.ceil(n / 2)
+c1 = n > 0 and count("S", "Clex", "lo") >= k and count("S", "Clex", "hi") == n
+c2 = n > 0 and count("S", "Creach", "lo") >= k and count("S", "Creach", "hi") == n
+if n < MIN_N:
+    verdict = "INSUFFICIENT"
+else:
+    verdict = "PASS" if c1 and c2 else "FAIL"
+yn = lambda b: "yes" if b else "no"
+line = (f"CONCEPT: C1={yn(c1)} ({count('S', 'Clex', 'lo') if n else 0}/{n}) "
+        f"C2={yn(c2)} ({count('S', 'Creach', 'lo') if n else 0}/{n}) -> {verdict}")
+
+pins = {r["label"]: r for r in json.load(open(panel_json)).get("verdict", [])}
+
+def device(l):
+    seen = []
+    for ln in open(os.path.join(crun, f"{l}.log")):
+        if ln.startswith("[embed] device="):
+            d = ln.strip()
+            if d not in seen:
+                seen.append(d)
+    return seen or ["(no [embed] device= line: every vector came from the cache)"]
+
+f4 = lambda x: f"{x:+.4f}"
+ci = lambda r: f"[{r[1]:+.4f}, {r[2]:+.4f}]"
+sec = []
+sec.append("### Panel")
+sec.append("")
+sec.append("| repo | language | rev | test commits | lexical hit | concept queries | dropped (no truth) | no parent | "
+           "flows | port parity (queries / mismatches) | in n (>= 30) | first test sha | last test sha |")
+sec.append("|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|---|")
+for l in labels:
+    c, p = con[l], pins.get(l, {})
+    shas = runs[l].get("stats", {}).get("test_shas", [])
+    sec.append(f"| {l} | {p.get('language', '-')} | {p.get('rev', '?')[:12]} | {c['test']} | "
+               f"{c['lexical_hit_queries']} | {c['queries']} | {c['dropped_no_truth']} | {c['no_parent']} | "
+               f"{c['flows']} | {c['parity']['queries']} / {c['parity']['mismatch']} | "
+               f"{'yes' if l in inc else 'no'} | {shas[0][:12] if shas else '-'} | {shas[-1][:12] if shas else '-'} |")
+sec.append("")
+sec.append(f"n = {n} (repos with >= {MIN_Q} concept queries); left out: "
+           f"{', '.join(l for l in labels if l not in inc) or 'none'}.")
+sec.append("")
+sec.append("Device per repo (FB.14's `[embed] device=` line of each run):")
+sec.append("")
+for l in labels:
+    for d in device(l):
+        sec.append(f"- {l}: `{d}`")
+sec.append("")
+sec.append("### Means per ranker (concept queries; k = 5)")
+sec.append("")
+sec.append("| repo | ranker | hit@1 | hit@5 | p@5 |")
+sec.append("|---|---|---:|---:|---:|")
+for l in labels:
+    for r in con[l]["rows"]:
+        sec.append(f"| {l} | {r['ranker']} | {r['hit1']:.4f} | {r['hit5']:.4f} | {r['p5']:.4f} |")
+sec.append("")
+
+def table(head, pairs, note=""):
+    sec.append(f"### {head}")
+    sec.append("")
+    if note:
+        sec.append(note)
+        sec.append("")
+    sec.append("| repo | in n | metric | a | b | a | b | a - b | 95% CI |")
+    sec.append("|---|---|---|---|---|---:|---:|---:|---|")
+    for a, b, metric in pairs:
+        for l in labels:
+            if con[l]["queries"] == 0:
+                sec.append(f"| {l} | no | {metric} | {a} | {b} | - | - | - | (no concept queries) |")
+                continue
+            r = row(l, a, b, metric)
+            sec.append(f"| {l} | {'yes' if l in inc else 'no'} | {metric} | {a} | {b} | {r[3]:.4f} | {r[4]:.4f} | "
+                       f"{f4(r[0])} | {ci(r)} |")
+    sec.append("")
+
+table("Rule rows (flow hit@5)", [("S", "Clex", "hit5"), ("S", "Creach", "hit5")],
+      f"C1 (S - Clex, CI lo > 0 on >= {k} of {n}, hi >= 0 on all {n}): lo > 0 on {count('S', 'Clex', 'lo') if n else 0}, "
+      f"hi >= 0 on {count('S', 'Clex', 'hi') if n else 0} -> {yn(c1)}. C2 (S - Creach, the same): lo > 0 on "
+      f"{count('S', 'Creach', 'lo') if n else 0}, hi >= 0 on {count('S', 'Creach', 'hi') if n else 0} -> {yn(c2)}. "
+      f"Only the repos in n count; the others are listed.")
+table("Information rows (never the verdict)",
+      [("S", "Crand", "hit5"), ("Clex", "Creach", "hit5"), ("S", "Clex", "hit1"), ("S", "Creach", "hit1"),
+       ("S", "Clex", "p5"), ("S", "Creach", "p5")])
+sec.append(line)
+sec.append("")
+
+text = open(report).read() if os.path.exists(report) else ""
+b, e = "<!-- concept-gate:verdict -->", "<!-- /concept-gate:verdict -->"
+if b not in text or e not in text:
+    print(f"[concept-gate] FAILED ({report} has no {b} .. {e} section)")
+    sys.exit(2)
+pre, rest = text.split(b, 1)
+_, post = rest.split(e, 1)
+text = pre + b + "\n" + "\n".join(sec) + e + post
+body = text.rstrip("\n").split("\n")
+if body and body[-1].startswith("VERDICT: "):
+    body = body[:-1]
+body.append(f"VERDICT: {verdict}")
+with open(report, "w") as fh:
+    fh.write("\n".join(body) + "\n")
+print(line)
+print(f"[concept-gate] verdict={verdict} report={report}")
+PY
+}
+
+concept() {   # concept [judge]
+  local rows crun=$DIR/concept-verdict-run$FSMOKE
+  if [ -n "$FSMOKE" ] && [ "$CREPORT" = "$HERE/dev-notes/concept-gate-0.5.6.md" ]; then
+    fail "a smoke run (GLIA_FUSION_PANEL / a model other than bge-small) needs its own GLIA_CONCEPT_REPORT"
+  fi
+  [ -z "$ONLY" ] || fail "the concept gate runs its whole panel (GLIA_SEM_ONLY is FB.6's)"
+  rows=$(frows verdict) || exit 2
+  if [ "${1:-}" != judge ]; then
+    ffetch "$rows"
+    fbuild "$rows" "$crun"
+    crun "$rows" "$crun"
+  fi
+  cpairs "$rows" "$crun"
+  cjudge "$rows" "$crun"
+}
+
 case "${1:-}" in
   "") do_run; do_pairs; do_judge ;;
   judge) do_pairs; do_judge ;;
@@ -667,5 +891,7 @@ case "${1:-}" in
   fusion-preview-judge) fusion preview judge ;;
   fusion-verdict) fusion verdict ;;
   fusion-verdict-judge) fusion verdict judge ;;
-  *) echo "usage: $0 [judge|fusion-preview|fusion-verdict|fusion-preview-judge|fusion-verdict-judge]" >&2; exit 2 ;;
+  concept-verdict) concept ;;
+  concept-verdict-judge) concept judge ;;
+  *) echo "usage: $0 [judge|fusion-preview|fusion-verdict|fusion-preview-judge|fusion-verdict-judge|concept-verdict|concept-verdict-judge]" >&2; exit 2 ;;
 esac
