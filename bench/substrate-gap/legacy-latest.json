@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 498,
+  "fixtures": 501,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -227,6 +227,14 @@
       "language": "yaml+json+python+markdown",
       "per_category": {
         "DOCUMENTS": 1.0
+      }
+    },
+    "cpp-base-member-calls": {
+      "framework": "cpp-base-member-calls",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0,
+        "INHERITS_FROM": 1.0
       }
     },
     "cpp-call-scope": {
@@ -793,6 +801,15 @@
         "USES": 1.0
       }
     },
+    "evm-ts-imported-instance": {
+      "framework": "evm-ts-imported-instance",
+      "language": "typescript+solidity",
+      "per_category": {
+        "EVENT_FLOWS": 0.0,
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
+      }
+    },
     "evm-ts-residuals": {
       "framework": "evm-ts-residuals",
       "language": "typescript+solidity",
@@ -1182,6 +1199,16 @@
       "framework": "gqlgen-resolvers",
       "language": "go+graphql",
       "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "graphql-client-residuals": {
+      "framework": "graphql-client-residuals",
+      "language": "typescript+graphql",
+      "per_category": {
+        "CALLS": 1.0,
+        "CONTAINS": 1.0,
+        "GRAPHQL_CALLS": 1.0,
         "HANDLED_BY": 1.0
       }
     },
@@ -3610,7 +3637,9 @@
   },
   "schema": "substrate-gap-legacy/1",
   "summary": {
-    "blind_spots": [],
+    "blind_spots": [
+      "evm-ts-imported-instance: EVENT_FLOWS"
+    ],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
