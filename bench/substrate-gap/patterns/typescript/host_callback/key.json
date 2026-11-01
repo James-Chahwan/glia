@@ -1,0 +1,21 @@
+{
+  "framework": "typescript-host-callback",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "host_callback",
+  "cells": ["typescript/host_callback"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "src::extension::activate", "exact": true},
+    {"kind": "FUNCTION", "name": "src::extension::deactivate", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "src::extension::activate", "to": "src::extension::openChannel",
+     "category": "CALLS", "exact": true, "note": "the callback's body still binds"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "src::extension::activate", "cell": "ENTRYPOINT", "contains": "host:vscode"},
+    {"kind": "FUNCTION", "node": "src::extension::deactivate", "cell": "ENTRYPOINT", "contains": "host:vscode"}
+  ],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.9): VS Code calls the extension module's exported activate / deactivate by name. INTENDED: each carries an ENTRYPOINT cell (source host:vscode), an entry and never a dead_symbol; the gate is the file's import of vscode. At HEAD 067b3b5c: none (both FUNCTIONs dead_symbol)."
+}

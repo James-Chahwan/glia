@@ -1,0 +1,24 @@
+{
+  "name": "hello-settings",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Hello World",
+      "properties": {
+        "helloWorld.greeting": {
+          "type": "string",
+          "default": "Hello",
+          "description": "The greeting to show."
+        },
+        "helloWorld.excited": {
+          "type": "boolean",
+          "default": false,
+          "description": "End the greeting with an exclamation mark."
+        }
+      }
+    }
+  }
+}

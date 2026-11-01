@@ -21,6 +21,7 @@ use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint;
 use glia_code_domain::evidence;
+use glia_code_domain::hosts;
 use glia_code_domain::wire::{self, ModelField, ModelSchema, Shape, ShapeField, WireFormat};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -185,6 +186,9 @@ fn parse_file_stats(
     // GD.11: likewise the `react` bindings a `memo(..)` / `forwardRef(..)`
     // component wrapper is gated on.
     acc.react_wrappers = react_wrapper_imports(root, src);
+    // GH.9: the host modules the file imports (VS Code), before any call is
+    // read: a registration is read only under one.
+    acc.host = host_import_bindings(root, src);
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -208,6 +212,9 @@ fn parse_file_stats(
     // DT.1k: every import is read now, so the typed GraphQL client calls take
     // their import gates and land on their callables.
     attach_graphql_results(&mut acc);
+    // GH.9: every declaration is known now: the host registrations' handlers
+    // bind, section locals read, exported host callbacks become entries.
+    settle_host(&mut acc);
 
     // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
     // A7.1's gate, then the file's local-typed receivers are counted.
@@ -554,6 +561,8 @@ struct Acc {
     /// `/`-holding field or member); recorded in `resolve_intra_file`, where a
     /// class that holds a `this`-led call site is kept too.
     class_urls: Vec<(NodeId, class_url::ClassUrlParts, bool)>,
+    /// GH.9: the file's host bindings, registrations and `[host]` tally.
+    host: HostScan,
 }
 
 /// FH.20: a type name read in a type position by `from` (an annotation, a
@@ -4456,6 +4465,7 @@ fn collect_calls_in(
             try_detect_endpoint(node, src, from, enclosing_class, acc);
             try_detect_typeorm_access(node, src, from, acc);
             try_detect_graphql_result(node, src, from, acc);
+            try_detect_host(node, src, from, enclosing_class, acc);
         }
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
@@ -4475,7 +4485,10 @@ fn collect_calls_in(
         // node its calls are attributed to; a nested callback's parameters
         // and locals included, since its calls are `from`'s too.
         match kind {
-            "variable_declarator" => record_declarator_type(node, src, from, acc),
+            "variable_declarator" => {
+                record_declarator_type(node, src, from, acc);
+                record_host_section_local(node, src, from, acc);
+            }
             "arrow_function" | "function_expression" | "generator_function" => {
                 // GD.4: the first parameter of a `.then(v => ..)` /
                 // `.subscribe(v => ..)` callback holds the unwrapped result
@@ -4488,6 +4501,8 @@ fn collect_calls_in(
                     None => record_param_types(node, src, from, acc),
                 }
             }
+            // GH.9: a reassigned local may no longer hold a settings section.
+            "assignment_expression" => record_host_section_local(node, src, from, acc),
             "for_in_statement" => record_pattern_unknown(node, "left", src, from, acc),
             "catch_clause" => record_pattern_unknown(node, "parameter", src, from, acc),
             _ => {}
@@ -10899,6 +10914,613 @@ fn text<'a>(n: TsNode, src: &'a [u8]) -> &'a str {
 
 fn child_text<'a>(n: TsNode, field: &str, src: &'a [u8]) -> Option<&'a str> {
     n.child_by_field_name(field).map(|c| text(c, src))
+}
+
+// ============================================================================
+// GH.9: host registrations (code_domain::hosts' TypeScript rows: VS Code)
+// ============================================================================
+
+/// GH.9: a registration's handler, settled once every declaration of the
+/// file is known.
+enum HostHandler {
+    /// A name: a FUNCTION of this file (a direct edge), else a Bare ref the
+    /// graph binds through the imports.
+    Name(String),
+    /// `this.m` / `this.m.bind(this)` inside a class: the class's METHOD `m`.
+    Method(NodeId, String),
+    /// An anonymous function: the enclosing named scope, which owns its
+    /// calls (the parser's closure rule).
+    Scope(NodeId),
+    /// `a.b`: an attribute ref for the graph.
+    Attribute(String, String),
+}
+
+/// GH.9: a `<local>.get('<k>')` read whose local may hold a host settings
+/// section (`const c = vscode.workspace.getConfiguration('s')`), settled at
+/// the end of the file: the walk visits a scope's statements last first.
+struct PendingSectionRead {
+    scope: NodeId,
+    local: String,
+    key: String,
+    row: u32,
+    cells: Vec<Cell>,
+}
+
+/// GH.9: one file's host reading: the bindings its imports of a host module
+/// make, the registrations read, and the `[host]` tally.
+#[derive(Default)]
+struct HostScan {
+    /// `(local, dotted path)` for each import of a [`hosts::Gate::Import`]
+    /// module: `vscode` -> `vscode` (`import * as vscode`, a default import,
+    /// `import vscode = require(..)`, `const vscode = require(..)`),
+    /// `commands` -> `vscode.commands` (a named import). Empty: the file
+    /// shows no host and nothing below is read.
+    bindings: Vec<(String, String)>,
+    /// The hosts the file imports, in table order.
+    present: Vec<&'static hosts::HostRow>,
+    /// `(scope, local)` -> the host and section a local of that scope holds;
+    /// `None` when the scope binds the name twice. Looked up, never iterated.
+    sections: HashMap<(NodeId, String), Option<(&'static hosts::HostRow, String)>>,
+    pending_reads: Vec<PendingSectionRead>,
+    /// `(registration node, handler, row)`.
+    handlers: Vec<(NodeId, HostHandler, u32)>,
+    tally: hosts::HostTally,
+}
+
+/// GH.9: the local bindings the file's top-level imports of a host module
+/// make ([`hosts::host_for_import`]).
+fn host_import_bindings(root: TsNode, src: &[u8]) -> HostScan {
+    let mut scan = HostScan::default();
+    let bind = |scan: &mut HostScan, spec: &str, local: &str, member: Option<&str>| {
+        let Some(host) = hosts::host_for_import("typescript", spec) else {
+            return;
+        };
+        let module = host.gate.root();
+        let path = match member {
+            Some(m) => format!("{module}.{m}"),
+            None => module.to_string(),
+        };
+        scan.bindings.push((local.to_string(), path));
+        if !scan.present.iter().any(|h| h.name == host.name) {
+            scan.present.push(host);
+        }
+    };
+    let mut cursor = root.walk();
+    for stmt in root.named_children(&mut cursor) {
+        match stmt.kind() {
+            "import_statement" => {
+                let mut c = stmt.walk();
+                for part in stmt.named_children(&mut c) {
+                    match part.kind() {
+                        "import_clause" => {
+                            let Some(spec) = child_text(stmt, "source", src) else {
+                                continue;
+                            };
+                            let spec = strip_string_quotes(spec);
+                            let mut cc = part.walk();
+                            for clause in part.named_children(&mut cc) {
+                                match clause.kind() {
+                                    "identifier" => bind(&mut scan, &spec, text(clause, src), None),
+                                    "namespace_import" => {
+                                        let mut nc = clause.walk();
+                                        if let Some(id) = clause
+                                            .named_children(&mut nc)
+                                            .find(|n| n.kind() == "identifier")
+                                        {
+                                            bind(&mut scan, &spec, text(id, src), None);
+                                        }
+                                    }
+                                    "named_imports" => {
+                                        let mut nc = clause.walk();
+                                        for s in clause.named_children(&mut nc) {
+                                            let Some(name) = child_text(s, "name", src) else {
+                                                continue;
+                                            };
+                                            let local = child_text(s, "alias", src).unwrap_or(name);
+                                            bind(&mut scan, &spec, local, Some(name));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // `import vscode = require('vscode')`.
+                        "import_require_clause" => {
+                            let mut cc = part.walk();
+                            let id = part
+                                .named_children(&mut cc)
+                                .find(|n| n.kind() == "identifier");
+                            let spec = part
+                                .child_by_field_name("source")
+                                .map(|s| strip_string_quotes(text(s, src)));
+                            if let (Some(id), Some(spec)) = (id, spec) {
+                                bind(&mut scan, &spec, text(id, src), None);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                let mut c = stmt.walk();
+                for decl in stmt.named_children(&mut c) {
+                    let (Some(name), Some(spec)) = (
+                        decl.child_by_field_name("name"),
+                        decl.child_by_field_name("value")
+                            .and_then(|v| require_spec(v, src)),
+                    ) else {
+                        continue;
+                    };
+                    match name.kind() {
+                        "identifier" => bind(&mut scan, &spec, text(name, src), None),
+                        "object_pattern" => {
+                            let mut pc = name.walk();
+                            for prop in name.named_children(&mut pc) {
+                                match prop.kind() {
+                                    "shorthand_property_identifier_pattern" => {
+                                        let n = text(prop, src);
+                                        bind(&mut scan, &spec, n, Some(n));
+                                    }
+                                    "pair_pattern" => {
+                                        let (Some(k), Some(v)) = (
+                                            prop.child_by_field_name("key"),
+                                            prop.child_by_field_name("value"),
+                                        ) else {
+                                            continue;
+                                        };
+                                        if v.kind() == "identifier" {
+                                            let key = strip_string_quotes(text(k, src));
+                                            bind(&mut scan, &spec, text(v, src), Some(&key));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    scan
+}
+
+/// GH.9: an identifier / member chain (`code.commands.registerCommand`)
+/// expanded through the file's host bindings (`vscode.commands.
+/// registerCommand`); `None` for a chain rooted at any other name or holding
+/// anything but identifiers (a call, an index, an optional chain).
+fn host_dotted(node: TsNode, src: &[u8], scan: &HostScan) -> Option<String> {
+    if !matches!(node.kind(), "member_expression" | "identifier") {
+        return None;
+    }
+    let raw: String = text(node, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let (root, rest) = match raw.split_once('.') {
+        Some((r, rest)) => (r, Some(rest)),
+        None => (raw.as_str(), None),
+    };
+    let ident = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    if !ident(root) || rest.is_some_and(|r| !r.split('.').all(ident)) {
+        return None;
+    }
+    let (_, path) = scan.bindings.iter().find(|(local, _)| local == root)?;
+    Some(match rest {
+        Some(r) => format!("{path}.{r}"),
+        None => path.clone(),
+    })
+}
+
+/// GH.9: the named, comment-free arguments of a call.
+fn call_args<'t>(call: TsNode<'t>) -> Vec<TsNode<'t>> {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let mut c = args.walk();
+    args.named_children(&mut c)
+        .filter(|a| a.kind() != "comment")
+        .collect()
+}
+
+/// GH.9: a one-line POSITION cell at `n`.
+fn host_position(n: TsNode, file_rel: &str) -> Cell {
+    Cell {
+        kind: cell_type::POSITION,
+        payload: CellPayload::Json(glia_doc::position_json_span(&n, &n, file_rel)),
+    }
+}
+
+/// GH.9: the handler a registration argument names: a name, `this.m` (or
+/// `this.m.bind(..)`) inside a class, an anonymous function (the enclosing
+/// scope `from`), or `a.b`. `None` for anything else (a call result, a
+/// string, a spread).
+fn host_handler(
+    arg: TsNode,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+) -> Option<HostHandler> {
+    match arg.kind() {
+        "identifier" => Some(HostHandler::Name(text(arg, src).to_string())),
+        "arrow_function" | "function_expression" | "generator_function" => {
+            Some(HostHandler::Scope(from))
+        }
+        "parenthesized_expression" => host_handler(sole_named(arg)?, src, from, enclosing_class),
+        "member_expression" => {
+            let object = arg.child_by_field_name("object")?;
+            let property = text(arg.child_by_field_name("property")?, src).to_string();
+            match object.kind() {
+                "this" => enclosing_class.map(|cid| HostHandler::Method(cid, property)),
+                "identifier" => Some(HostHandler::Attribute(
+                    text(object, src).to_string(),
+                    property,
+                )),
+                _ => None,
+            }
+        }
+        // `h.bind(this)`: the bound function.
+        "call_expression" => {
+            let callee = arg.child_by_field_name("function")?;
+            if callee.kind() != "member_expression"
+                || child_text(callee, "property", src) != Some("bind")
+            {
+                return None;
+            }
+            host_handler(
+                callee.child_by_field_name("object")?,
+                src,
+                from,
+                enclosing_class,
+            )
+        }
+        _ => None,
+    }
+}
+
+/// GH.9: a call that registers with a host the file imports
+/// ([`hosts::registration_for`]): mints the CLI_COMMAND / EVENT_HANDLER and
+/// queues its handler; a settings read ([`try_host_section_read`]).
+fn try_detect_host(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+    acc: &mut Acc,
+) {
+    if acc.host.bindings.is_empty() {
+        return;
+    }
+    let Some(callee) = call.child_by_field_name("function") else {
+        return;
+    };
+    try_host_section_read(call, callee, src, from, acc);
+    let Some(dotted) = host_dotted(callee, src, &acc.host) else {
+        return;
+    };
+    let Some(found) = hosts::registration_for("typescript", &dotted) else {
+        return;
+    };
+    let host = found.host.name;
+    let pattern = found.registration.pattern;
+    acc.host.tally.hit(host);
+    if !found.mints {
+        acc.host.tally.aux += 1;
+        return;
+    }
+    let args = call_args(call);
+    let (name, handler_arg) = match found.registration.shape {
+        hosts::Shape::Positional {
+            name_arg,
+            handler_arg,
+            ..
+        } => {
+            let name = name_arg
+                .checked_sub(1)
+                .and_then(|i| args.get(i))
+                .and_then(|a| literal_string(*a, src));
+            (name, handler_arg)
+        }
+        hosts::Shape::CalleeSegment { handler_arg, .. } => (
+            found
+                .registration
+                .shape
+                .callee_name(&dotted)
+                .map(str::to_string),
+            handler_arg,
+        ),
+        _ => (None, 0),
+    };
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        acc.host.tally.unread += 1;
+        return;
+    };
+    let handler = handler_arg
+        .checked_sub(1)
+        .and_then(|i| args.get(i))
+        .and_then(|a| host_handler(*a, src, from, enclosing_class));
+    let Some(module_id) = acc.module_id else {
+        return;
+    };
+    let Some(repo) = acc.repo else {
+        return;
+    };
+    let row = line_at(call);
+    let site = hosts::HostSite::new(
+        repo,
+        module_id,
+        host,
+        row,
+        vec![host_position(call, &acc.file_rel)],
+    );
+    let mut sink = hosts::HostSink::new(&mut acc.nodes, &mut acc.nav, &mut acc.refs);
+    let id = hosts::push_registration(&site, pattern, &name, &[], &mut sink);
+    if let Some(h) = handler {
+        acc.host.handlers.push((id, h, row));
+    }
+    acc.host.tally.registered(pattern);
+}
+
+/// GH.9: `<section>.get('<k>')` (a [`hosts::SECTION_READERS`] call with a
+/// literal key) where `<section>` is a host settings section: a
+/// `vscode.workspace.getConfiguration(<literal>?)` call read now, or a local
+/// of the scope, queued for [`settle_host`].
+fn try_host_section_read(call: TsNode, callee: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    if callee.kind() != "member_expression" {
+        return;
+    }
+    let Some(method) = child_text(callee, "property", src) else {
+        return;
+    };
+    if !hosts::SECTION_READERS.contains(&method) {
+        return;
+    }
+    let Some(object) = callee.child_by_field_name("object") else {
+        return;
+    };
+    let Some(key) = call_args(call)
+        .first()
+        .and_then(|a| literal_string(*a, src))
+        .filter(|k| !k.is_empty())
+    else {
+        return;
+    };
+    match object.kind() {
+        "call_expression" => {
+            let Some((host, section)) = host_section(object, src, &mut acc.host) else {
+                return;
+            };
+            let at = host_position(call, &acc.file_rel);
+            push_host_read(acc, host, &section, &key, from, line_at(call), at);
+        }
+        "identifier" => acc.host.pending_reads.push(PendingSectionRead {
+            scope: from,
+            local: text(object, src).to_string(),
+            key,
+            row: line_at(call),
+            cells: vec![host_position(call, &acc.file_rel)],
+        }),
+        _ => {}
+    }
+}
+
+/// GH.9: the host and section a `<prefix>(<literal>?)` call names, where
+/// `<prefix>` is a [`hosts::ConfigFlavour::Section`] prefix
+/// ([`hosts::config_section_for`]); a non-literal section is counted
+/// `unread=` and read as nothing.
+fn host_section(
+    call: TsNode,
+    src: &[u8],
+    scan: &mut HostScan,
+) -> Option<(&'static hosts::HostRow, String)> {
+    let callee = call.child_by_field_name("function")?;
+    let dotted = host_dotted(callee, src, scan)?;
+    let host = hosts::config_section_for("typescript", &dotted)?;
+    let args = call_args(call);
+    match args.first() {
+        None => Some((host, String::new())),
+        Some(a) => match literal_string(*a, src) {
+            Some(s) => Some((host, s)),
+            None => {
+                scan.tally.hit(host.name);
+                scan.tally.unread += 1;
+                None
+            }
+        },
+    }
+}
+
+/// GH.9: `const <local> = vscode.workspace.getConfiguration('<s>')` (or a
+/// `<local> = ..` assignment) holds the section `<s>` in `scope`; a name the
+/// scope binds or assigns twice, to anything else included, holds none.
+fn record_host_section_local(binding: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    if acc.host.bindings.is_empty() {
+        return;
+    }
+    let (name, value) = match binding.kind() {
+        "assignment_expression" => (
+            binding.child_by_field_name("left"),
+            binding.child_by_field_name("right"),
+        ),
+        _ => (
+            binding.child_by_field_name("name"),
+            binding.child_by_field_name("value"),
+        ),
+    };
+    let (Some(name), Some(value)) = (name, value) else {
+        return;
+    };
+    if name.kind() != "identifier" {
+        return;
+    }
+    let held = (value.kind() == "call_expression")
+        .then(|| host_section(value, src, &mut acc.host))
+        .flatten();
+    let key = (scope, text(name, src).to_string());
+    match acc.host.sections.get(&key) {
+        None => {
+            acc.host.sections.insert(key, held);
+        }
+        Some(prev) => {
+            let same =
+                matches!((prev, &held), (Some((a, s)), Some((b, t))) if a.name == b.name && s == t);
+            if !same {
+                acc.host.sections.insert(key, None);
+            }
+        }
+    }
+}
+
+/// GH.9: the READS_CONFIG of `config:<host>:<section>.<key>` (the key alone
+/// with no section) from `from`.
+fn push_host_read(
+    acc: &mut Acc,
+    host: &'static hosts::HostRow,
+    section: &str,
+    key: &str,
+    from: NodeId,
+    row: u32,
+    at: Cell,
+) {
+    let (Some(module_id), Some(repo)) = (acc.module_id, acc.repo) else {
+        return;
+    };
+    let full = if section.is_empty() {
+        key.to_string()
+    } else {
+        format!("{section}.{key}")
+    };
+    let found = hosts::ConfigMatch::new(host, hosts::ConfigFlavour::Section, full);
+    let site = hosts::HostSite::new(repo, module_id, host.name, row, vec![at])
+        .with_emitter(format!("parser:{}", lang_tag(&acc.file_rel)));
+    let mut sink = hosts::HostSink::new(&mut acc.nodes, &mut acc.nav, &mut acc.refs);
+    hosts::push_config_key(
+        &site,
+        &found,
+        hosts::ConfigSide::Read,
+        from,
+        &mut sink,
+        &mut acc.edges,
+    );
+    acc.host.tally.config += 1;
+    acc.host.tally.hit(host.name);
+}
+
+/// GH.9: once the whole file is walked, bind the registrations' handlers
+/// (a FUNCTION or METHOD of this file is a direct HANDLED_BY, any other name
+/// a Bare / attribute ref), read the queued section locals, and give each
+/// exported host callback (`activate`) its ENTRYPOINT cell. Then the file's
+/// `[host]` marker.
+fn settle_host(acc: &mut Acc) {
+    if acc.host.bindings.is_empty() {
+        return;
+    }
+    let (Some(module_id), Some(_)) = (acc.module_id, acc.repo) else {
+        return;
+    };
+    let emitter = format!("parser:{}", lang_tag(&acc.file_rel));
+    let handlers = std::mem::take(&mut acc.host.handlers);
+    for (id, handler, row) in handlers {
+        let direct = match &handler {
+            HostHandler::Name(n) => acc.module_functions.get(n).copied(),
+            HostHandler::Method(cid, m) => acc.class_methods.get(&(*cid, m.clone())).copied(),
+            HostHandler::Scope(scope) => Some(*scope),
+            HostHandler::Attribute(..) => None,
+        };
+        if let Some(to) = direct {
+            let rule = match handler {
+                HostHandler::Scope(_) => "host_handler_scope",
+                _ => "host_handler",
+            };
+            let ev = evidence::Evidence::emitter(emitter.clone())
+                .rule(rule)
+                .line(row);
+            if !acc
+                .edges
+                .iter()
+                .any(|e| e.from == id && e.to == to && e.category == edge_category::HANDLED_BY)
+            {
+                acc.edges.push(
+                    Edge::new(id, to, edge_category::HANDLED_BY, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
+            }
+            continue;
+        }
+        let qualifier = match handler {
+            HostHandler::Name(n) => CallQualifier::Bare(n),
+            HostHandler::Attribute(base, name) => CallQualifier::Attribute { base, name },
+            HostHandler::Method(..) | HostHandler::Scope(_) => continue,
+        };
+        acc.refs.push(UnresolvedRef {
+            from: id,
+            from_module: module_id,
+            qualifier,
+            category: edge_category::HANDLED_BY,
+            line: row,
+        });
+    }
+    let pending = std::mem::take(&mut acc.host.pending_reads);
+    for read in pending {
+        let Some(Some((host, section))) = acc
+            .host
+            .sections
+            .get(&(read.scope, read.local.clone()))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(at) = read.cells.into_iter().next() else {
+            continue;
+        };
+        push_host_read(acc, host, &section, &read.key, read.scope, read.row, at);
+    }
+    // The exported callbacks, in name order (acc.exported is a BTreeSet).
+    let present = acc.host.present.clone();
+    let exported: Vec<String> = acc.exported.iter().cloned().collect();
+    for name in exported {
+        let Some(host) = hosts::exported_callback_for("typescript", &name, |h| {
+            present.iter().any(|p| p.name == h.name)
+        }) else {
+            continue;
+        };
+        let Some(&id) = acc.module_functions.get(&name) else {
+            continue;
+        };
+        let Some(node) = acc.nodes.iter_mut().find(|n| n.id == id) else {
+            continue;
+        };
+        if node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT) {
+            continue;
+        }
+        let row0 = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::POSITION)
+            .and_then(|c| match &c.payload {
+                CellPayload::Json(j) => serde_json::from_str::<serde_json::Value>(j).ok(),
+                _ => None,
+            })
+            .and_then(|v| v.get("start_line").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0);
+        let row1 = u32::try_from(row0).unwrap_or(u32::MAX).saturating_add(1);
+        node.cells.push(hosts::entry_cell(
+            &acc.file_rel,
+            row1,
+            &format!("host:{}", host.name),
+        ));
+        acc.host.tally.callbacks += 1;
+        acc.host.tally.hit(host.name);
+    }
+    if let Some(line) = acc.host.tally.marker("typescript", &acc.file_rel) {
+        eprintln!("{line}");
+    }
 }
 
 // ============================================================================
@@ -19433,5 +20055,321 @@ export const Card = memo(() => 1);
         assert!(p.nodes.iter().any(|n| n.id == sv));
         let f = id(node_kind::FUNCTION, "src::Card::Card");
         assert!(!p.nodes.iter().any(|n| n.id == f));
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    //! GH.9: the VS Code host row (code_domain::hosts) read by the TS parser:
+    //! commands, events, exported callbacks and settings, under the import
+    //! gate.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-hosts")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/extension.ts", "src::extension", repo()).expect("parse")
+    }
+
+    fn cmd(name: &str) -> NodeId {
+        id(node_kind::CLI_COMMAND, &format!("host_cmd:vscode:{name}"))
+    }
+
+    fn func(name: &str) -> NodeId {
+        id(node_kind::FUNCTION, &format!("src::extension::{name}"))
+    }
+
+    fn has_node(p: &FileParse, n: NodeId) -> bool {
+        p.nodes.iter().any(|x| x.id == n)
+    }
+
+    /// The EVIDENCE rule of the edge `from -category-> to`, if there is one.
+    fn edge_rule(p: &FileParse, from: NodeId, to: NodeId, category: u32) -> Option<String> {
+        p.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category.0 == category)
+            .map(|e| Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default())
+    }
+
+    fn entry(p: &FileParse, n: NodeId) -> Option<String> {
+        p.nodes
+            .iter()
+            .find(|x| x.id == n)?
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENTRYPOINT)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                _ => String::new(),
+            })
+    }
+
+    const HELLO: &str = r#"import * as vscode from 'vscode';
+
+function sayHello() {
+	const greeting = vscode.workspace.getConfiguration('helloWorld').get('greeting');
+	vscode.window.showInformationMessage(`${greeting} World!`);
+}
+
+export function activate(context: vscode.ExtensionContext) {
+	const disposable = vscode.commands.registerCommand('extension.helloWorld', sayHello);
+	context.subscriptions.push(disposable);
+	context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(onSave));
+}
+
+function onSave(doc: vscode.TextDocument) {
+	console.log(doc.fileName);
+}
+
+export function deactivate() {}
+"#;
+
+    #[test]
+    fn the_hello_world_extension_reads_whole() {
+        let p = parse(HELLO);
+        let hello = cmd("extension.helloWorld");
+        assert!(has_node(&p, hello));
+        assert_eq!(
+            edge_rule(&p, hello, func("sayHello"), edge_category::HANDLED_BY.0).as_deref(),
+            Some("host_handler")
+        );
+        let save = id(
+            node_kind::EVENT_HANDLER,
+            "host_event:vscode:workspace.onDidSaveTextDocument",
+        );
+        assert!(edge_rule(&p, save, func("onSave"), edge_category::HANDLED_BY.0).is_some());
+        let key = id(node_kind::CONFIG_KEY, "config:vscode:helloWorld.greeting");
+        assert_eq!(
+            edge_rule(&p, func("sayHello"), key, edge_category::READS_CONFIG.0).as_deref(),
+            Some("host_config_read")
+        );
+        // activate (row 8) and deactivate (row 18) are the host's entries;
+        // sayHello and onSave are reached through the registrations.
+        assert_eq!(
+            entry(&p, func("activate")).as_deref(),
+            Some(r#"{"decl":"src/extension.ts:8","source":"host:vscode"}"#)
+        );
+        assert_eq!(
+            entry(&p, func("deactivate")).as_deref(),
+            Some(r#"{"decl":"src/extension.ts:18","source":"host:vscode"}"#)
+        );
+        assert_eq!(entry(&p, func("sayHello")), None);
+        // A window call that is no event, and showInformationMessage's text,
+        // register nothing.
+        let kinds = |k| {
+            p.nodes
+                .iter()
+                .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&k))
+                .count()
+        };
+        assert_eq!(kinds(node_kind::CLI_COMMAND), 1);
+        assert_eq!(kinds(node_kind::EVENT_HANDLER), 1);
+        assert_eq!(kinds(node_kind::CONFIG_KEY), 1);
+    }
+
+    #[test]
+    fn no_vscode_import_reads_nothing() {
+        let src = HELLO.replace(
+            "import * as vscode from 'vscode';",
+            "declare const vscode: any;",
+        );
+        let p = parse(&src);
+        assert!(!has_node(&p, cmd("extension.helloWorld")));
+        assert_eq!(entry(&p, func("activate")), None);
+        assert!(
+            p.edges
+                .iter()
+                .all(|e| e.category != edge_category::READS_CONFIG
+                    && e.category != edge_category::HANDLED_BY)
+        );
+        // Another package's module is no host either.
+        let other = HELLO.replace("from 'vscode'", "from 'vscode-languageclient'");
+        assert!(!has_node(&parse(&other), cmd("extension.helloWorld")));
+    }
+
+    #[test]
+    fn every_import_form_roots_the_host() {
+        for (import, call) in [
+            (
+                "import * as code from 'vscode';",
+                "code.commands.registerCommand",
+            ),
+            (
+                "import vscode from 'vscode';",
+                "vscode.commands.registerCommand",
+            ),
+            (
+                "import { commands } from 'vscode';",
+                "commands.registerCommand",
+            ),
+            (
+                "import { commands as c } from 'vscode';",
+                "c.registerCommand",
+            ),
+            (
+                "import vscode = require('vscode');",
+                "vscode.commands.registerCommand",
+            ),
+            (
+                "const vscode = require('vscode');",
+                "vscode.commands.registerCommand",
+            ),
+            (
+                "const { commands } = require('vscode');",
+                "commands.registerCommand",
+            ),
+            (
+                "const { commands: cmds } = require('vscode');",
+                "cmds.registerCommand",
+            ),
+        ] {
+            let src = format!(
+                "{import}\nfunction run() {{}}\nexport function activate() {{\n  {call}('x.run', run);\n}}\n"
+            );
+            let p = parse(&src);
+            assert!(
+                edge_rule(&p, cmd("x.run"), func("run"), edge_category::HANDLED_BY.0).is_some(),
+                "{import}"
+            );
+            assert!(entry(&p, func("activate")).is_some(), "{import}");
+        }
+        // A named import of another member roots that member only.
+        let p = parse(
+            "import { window } from 'vscode';\nfunction run() {}\nexport function activate() {\n  window.registerCommand('x.run', run);\n  window.onDidChangeActiveTextEditor(run);\n}\n",
+        );
+        assert!(!has_node(&p, cmd("x.run")));
+        assert!(has_node(
+            &p,
+            id(
+                node_kind::EVENT_HANDLER,
+                "host_event:vscode:window.onDidChangeActiveTextEditor"
+            )
+        ));
+    }
+
+    #[test]
+    fn handlers_bind_their_scope_method_or_ref() {
+        let src = r#"import * as vscode from 'vscode';
+import { refresh } from './refresh';
+
+class Controller {
+	register(context: vscode.ExtensionContext) {
+		vscode.commands.registerCommand('x.method', this.run, this);
+		vscode.commands.registerCommand('x.bound', this.run.bind(this));
+	}
+	run() {}
+}
+
+export function activate(context: vscode.ExtensionContext) {
+	vscode.commands.registerCommand('x.inline', () => { helper(); });
+	vscode.commands.registerTextEditorCommand('x.editor', function (editor) { helper(); });
+	vscode.commands.registerCommand('x.imported', refresh);
+	vscode.commands.registerCommand(COMMAND_ID, helper);
+	vscode.commands.registerCommand(`x.${1}`, helper);
+}
+
+function helper() {}
+"#;
+        let p = parse(src);
+        let run = id(node_kind::METHOD, "src::extension::Controller::run");
+        assert!(edge_rule(&p, cmd("x.method"), run, edge_category::HANDLED_BY.0).is_some());
+        assert!(edge_rule(&p, cmd("x.bound"), run, edge_category::HANDLED_BY.0).is_some());
+        for inline in ["x.inline", "x.editor"] {
+            assert_eq!(
+                edge_rule(
+                    &p,
+                    cmd(inline),
+                    func("activate"),
+                    edge_category::HANDLED_BY.0
+                )
+                .as_deref(),
+                Some("host_handler_scope"),
+                "{inline}"
+            );
+        }
+        // An imported handler is a Bare ref the graph binds through the import.
+        assert!(p.refs.iter().any(|r| r.from == cmd("x.imported")
+            && r.category == edge_category::HANDLED_BY
+            && r.qualifier == CallQualifier::Bare("refresh".into())));
+        // An id that is no string literal registers nothing.
+        let commands = p
+            .nodes
+            .iter()
+            .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&node_kind::CLI_COMMAND))
+            .count();
+        assert_eq!(commands, 5);
+    }
+
+    #[test]
+    fn section_locals_read_within_their_scope() {
+        let src = r#"import * as vscode from 'vscode';
+
+export function a() {
+	const config = vscode.workspace.getConfiguration('ext');
+	return config.get<number>('depth', 2);
+}
+
+export function b(config: any) {
+	return config.get('depth');
+}
+
+export function c() {
+	let cfg = vscode.workspace.getConfiguration('one');
+	cfg = vscode.workspace.getConfiguration('two');
+	return cfg.get('x');
+}
+
+export function d() {
+	const all = vscode.workspace.getConfiguration();
+	return all.has('editor.fontSize') || vscode.workspace.getConfiguration(name).get('y');
+}
+"#;
+        let p = parse(src);
+        let key = |k: &str| id(node_kind::CONFIG_KEY, &format!("config:vscode:{k}"));
+        assert!(
+            edge_rule(
+                &p,
+                func("a"),
+                key("ext.depth"),
+                edge_category::READS_CONFIG.0
+            )
+            .is_some()
+        );
+        // A parameter named like another scope's local holds no section.
+        assert!(
+            edge_rule(
+                &p,
+                func("b"),
+                key("ext.depth"),
+                edge_category::READS_CONFIG.0
+            )
+            .is_none()
+        );
+        // A local bound to two sections holds none.
+        assert!(!has_node(&p, key("one.x")) && !has_node(&p, key("two.x")));
+        // No section: the key is the whole name; a non-literal section reads nothing.
+        assert!(
+            edge_rule(
+                &p,
+                func("d"),
+                key("editor.fontSize"),
+                edge_category::READS_CONFIG.0
+            )
+            .is_some()
+        );
+        assert!(!has_node(&p, key("y")));
+        let keys = p
+            .nodes
+            .iter()
+            .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&node_kind::CONFIG_KEY))
+            .count();
+        assert_eq!(keys, 2);
     }
 }

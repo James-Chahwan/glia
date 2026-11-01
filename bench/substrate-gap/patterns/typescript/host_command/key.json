@@ -1,0 +1,30 @@
+{
+  "framework": "typescript-host-command",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "host_command",
+  "cells": ["typescript/host_command"],
+  "expect_nodes": [
+    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:extension.helloWorld", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:extension.reload", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "host_cmd:vscode:extension.helloWorld", "to": "src::extension::sayHello",
+     "category": "HANDLED_BY", "exact": true,
+     "note": "registerCommand(id, sayHello): the command -> its named handler"},
+    {"from": "host_cmd:vscode:extension.reload", "to": "src::extension::activate",
+     "category": "HANDLED_BY", "exact": true,
+     "note": "an inline arrow handler: the named function that registers it, whose calls it shares"},
+    {"from": "package.json", "to": "host_cmd:vscode:extension.helloWorld",
+     "category": "DEFINES", "exact": true,
+     "note": "contributes.commands declares the same command: one qname with the code's registration"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CLI_COMMAND", "name": "Hello World", "max_nodes": 0,
+     "note": "a command's title is no command"},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:Hello World!", "max_nodes": 0,
+     "note": "showInformationMessage's text is no command"}
+  ],
+  "note": "0.5.6 use pattern (GH.9): a VS Code extension (the shape of microsoft/vscode-extension-samples helloworld-sample) registers commands with vscode.commands.registerCommand and declares them in package.json contributes.commands (engines.vscode). INTENDED: one CLI_COMMAND host_cmd:vscode:<id> per command, HANDLED_BY its handler (an inline arrow binds the named function that registers it), DEFINES-d from package.json. At HEAD 067b3b5c: none (the FUNCTIONs only; activate dead)."
+}

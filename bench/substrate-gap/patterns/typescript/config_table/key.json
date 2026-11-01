@@ -1,0 +1,32 @@
+{
+  "framework": "typescript-config-table",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "config_table",
+  "cells": ["typescript/config_table"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "config:vscode:helloWorld.greeting", "exact": true},
+    {"kind": "CONFIG_KEY", "name": "config:vscode:helloWorld.excited", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "package.json", "to": "config:vscode:helloWorld.greeting",
+     "category": "DEFINES_CONFIG", "exact": true,
+     "note": "contributes.configuration.properties declares the setting"},
+    {"from": "src::extension::greeting", "to": "config:vscode:helloWorld.greeting",
+     "category": "READS_CONFIG", "exact": true,
+     "note": "a local holding getConfiguration('helloWorld'), then .get('greeting')"},
+    {"from": "src::extension::excited", "to": "config:vscode:helloWorld.excited",
+     "category": "READS_CONFIG", "exact": true,
+     "note": "getConfiguration('helloWorld').get('excited'), chained"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "config:vscode:Hello", "max_nodes": 0,
+     "note": "a default value is no key"},
+    {"kind": "CONFIG_KEY", "name": "config:vscode:Hello World", "max_nodes": 0,
+     "note": "the configuration title is no key"},
+    {"kind": "CONFIG_KEY", "name": "config:vscode:helloWorld", "max_nodes": 0,
+     "note": "a section is no key of its own"}
+  ],
+  "note": "0.5.6 use pattern (GH.9): configuration as code a host reads. A VS Code extension's package.json contributes.configuration declares settings; the extension reads them with workspace.getConfiguration(section).get(key). INTENDED: one CONFIG_KEY config:vscode:<section>.<key> per setting, DEFINES_CONFIG from package.json, READS_CONFIG from each reading function. At HEAD 067b3b5c: none."
+}

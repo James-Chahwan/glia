@@ -45,9 +45,17 @@
 //!   - Lockfiles (`package-lock.json`, `Cargo.lock`, `go.sum`, etc.) — manifest
 //!     declarations cover declared intent
 //!   - Version-pinning analysis (we extract the name, not the constraint)
+//!
+//! GH.9: a `package.json` that is a host's plugin manifest
+//! (`code_domain::hosts::HostManifest`: `engines.vscode`) also declares that
+//! host's commands and settings (`host_manifest`), printing
+//! `[host-manifest] host=<h> commands=<c> config=<g> path=<p>`.
 
-use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, hosts, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+
+use crate::anchor;
 
 pub struct PackageNodes {
     pub nodes: Vec<Node>,
@@ -98,6 +106,11 @@ pub fn extract_for_path(source: &str, path: &str, module_id: NodeId, repo: RepoI
         _ => return extract_deps_beside(source, path, module_id, repo),
     };
     let mut out = build_nodes(names_with_eco, module_id, repo);
+    // GH.9: a host's plugin manifest (VS Code: `engines.vscode`) declares
+    // the host's commands and settings.
+    if base == "package.json" {
+        out.marker = host_manifest(source, path, module_id, repo, &mut out);
+    }
     // FD.77: the two TOML manifests say what they read, and how many
     // array-of-tables blocks (Cargo targets, Poetry sources) they skipped.
     let toml_eco = match base {
@@ -232,6 +245,146 @@ fn build_nodes(deps: Vec<(&'static str, String)>, module_id: NodeId, repo: RepoI
         nav,
         marker: None,
     }
+}
+
+// ----------------------------------------------------------------------------
+// GH.9: a host's plugin manifest (VS Code's package.json).
+// ----------------------------------------------------------------------------
+
+/// GH.9: when `source` (a `package.json`) names a host under `engines`
+/// ([`hosts::manifest_host_for`]), each `contributes.commands[].command` is
+/// the host's CLI_COMMAND `host_cmd:<host>:<id>` (the qname the extension's
+/// `registerCommand` mints, so the two are one node) DEFINES-d from the
+/// manifest's MODULE, and each key of `contributes.configuration`'s
+/// `properties` (one object or an array of them) the CONFIG_KEY
+/// `config:<host>:<key>` DEFINES_CONFIG from it, each located at its text.
+/// Returns the `[host-manifest]` marker, `None` for a file that is no host's
+/// manifest (or no JSON object). Only the keys are nodes, never a title,
+/// default or description.
+fn host_manifest(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    out: &mut PackageNodes,
+) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_str(source).ok()?;
+    let engines = doc.get("engines").and_then(serde_json::Value::as_object)?;
+    let host = hosts::manifest_host_for("package.json", |e| engines.contains_key(e))?;
+    let contributes = doc.get("contributes");
+    let from = source.find("\"contributes\"").unwrap_or(0);
+    let one_or_many = |v: Option<&serde_json::Value>| -> Vec<serde_json::Value> {
+        match v {
+            Some(serde_json::Value::Array(items)) => items.clone(),
+            Some(o @ serde_json::Value::Object(_)) => vec![o.clone()],
+            _ => Vec::new(),
+        }
+    };
+    let commands: Vec<String> = one_or_many(contributes.and_then(|c| c.get("commands")))
+        .iter()
+        .filter_map(|c| c.get("command").and_then(serde_json::Value::as_str))
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut keys: Vec<String> = Vec::new();
+    for section in one_or_many(contributes.and_then(|c| c.get("configuration"))) {
+        if let Some(props) = section
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            keys.extend(props.keys().filter(|k| !k.is_empty()).cloned());
+        }
+    }
+    let (mut n_commands, mut n_config) = (0usize, 0usize);
+    let mut refs = Vec::new();
+    for id in &commands {
+        let row = json_string_row(source, from, id, JsonRole::Value);
+        let site = hosts::HostSite::new(
+            repo,
+            module_id,
+            host.name,
+            row,
+            vec![anchor::position_cell(path, row)],
+        );
+        let mut sink = hosts::HostSink::new(&mut out.nodes, &mut out.nav, &mut refs);
+        let cmd = hosts::push_registration(&site, hosts::Pattern::Command, id, &[], &mut sink);
+        if !out
+            .edges
+            .iter()
+            .any(|e| e.from == module_id && e.to == cmd && e.category == edge_category::DEFINES)
+        {
+            let ev = Evidence::emitter(MANIFEST_EMITTER)
+                .rule("host_manifest_command")
+                .line(row);
+            out.edges.push(
+                Edge::new(module_id, cmd, edge_category::DEFINES, Confidence::Strong)
+                    .with_cell(ev.to_cell()),
+            );
+            n_commands += 1;
+        }
+    }
+    for key in &keys {
+        let row = json_string_row(source, from, key, JsonRole::Key);
+        let site = hosts::HostSite::new(
+            repo,
+            module_id,
+            host.name,
+            row,
+            vec![anchor::position_cell(path, row)],
+        )
+        .with_emitter(MANIFEST_EMITTER);
+        let found = hosts::ConfigMatch::new(host, hosts::ConfigFlavour::Manifest, key.clone());
+        let mut sink = hosts::HostSink::new(&mut out.nodes, &mut out.nav, &mut refs);
+        hosts::push_config_key(
+            &site,
+            &found,
+            hosts::ConfigSide::Define,
+            module_id,
+            &mut sink,
+            &mut out.edges,
+        );
+        n_config += 1;
+    }
+    Some(format!(
+        "[host-manifest] host={} commands={n_commands} config={n_config} path={path}",
+        host.name
+    ))
+}
+
+/// GH.9: the EVIDENCE emitter of a manifest's host edges, the manifest
+/// route's own (`extractor:<route key>`).
+const MANIFEST_EMITTER: &str = "extractor:manifest";
+
+/// Whether a JSON string is looked up as an object key (`"k":`) or as a
+/// value (`: "v"`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsonRole {
+    Key,
+    Value,
+}
+
+/// GH.9: the 0-based row of the first occurrence of `s` as a JSON string in
+/// the `role` position at or after byte `from` (the `"contributes"` key), 0
+/// when none is found.
+fn json_string_row(source: &str, from: usize, s: &str, role: JsonRole) -> u32 {
+    let Ok(quoted) = serde_json::to_string(s) else {
+        return 0;
+    };
+    let mut at = from.min(source.len());
+    while let Some(rel) = source.get(at..).and_then(|t| t.find(&quoted)) {
+        let start = at + rel;
+        let end = start + quoted.len();
+        let fits = match role {
+            JsonRole::Key => source[end..].trim_start().starts_with(':'),
+            JsonRole::Value => source[..start].trim_end().ends_with(':'),
+        };
+        if fits {
+            let rows = source[..start].bytes().filter(|b| *b == b'\n').count();
+            return u32::try_from(rows).unwrap_or(u32::MAX);
+        }
+        at = end;
+    }
+    0
 }
 
 // ----------------------------------------------------------------------------
@@ -1409,6 +1562,79 @@ mod tests {
 
     fn pkg_qnames(out: &PackageNodes) -> Vec<String> {
         out.nav.qname_by_id.values().cloned().collect()
+    }
+
+    #[test]
+    fn a_vscode_manifest_declares_commands_and_settings() {
+        // GH.9: `engines.vscode` makes package.json the host's manifest.
+        let src = r#"{
+  "name": "hello",
+  "engines": { "vscode": "^1.74.0" },
+  "contributes": {
+    "commands": [
+      { "command": "extension.helloWorld", "title": "Hello World" },
+      { "command": "extension.helloWorld", "title": "Twice" }
+    ],
+    "configuration": [
+      { "title": "A", "properties": { "hello.greeting": { "type": "string", "default": "Hi" } } },
+      { "properties": { "hello.excited": { "type": "boolean" } } }
+    ]
+  },
+  "devDependencies": { "@types/vscode": "^1.73.0" }
+}"#;
+        let repo = RepoId::from_canonical("test://host-manifest");
+        let module = module_id(repo);
+        let out = extract_for_path(src, "ext/package.json", module, repo);
+        assert_eq!(
+            out.marker.as_deref(),
+            Some("[host-manifest] host=vscode commands=1 config=2 path=ext/package.json")
+        );
+        let cmd = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CLI_COMMAND,
+            "host_cmd:vscode:extension.helloWorld",
+        );
+        let defines: Vec<&Edge> = out
+            .edges
+            .iter()
+            .filter(|e| e.from == module && e.to == cmd && e.category == edge_category::DEFINES)
+            .collect();
+        assert_eq!(defines.len(), 1);
+        let ev = Evidence::of(defines[0]).expect("evidence");
+        assert_eq!(ev.rule.as_deref(), Some("host_manifest_command"));
+        assert_eq!(ev.line, Some(5), "0-based row of the command id");
+        for key in ["hello.greeting", "hello.excited"] {
+            let id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::CONFIG_KEY,
+                &format!("config:vscode:{key}"),
+            );
+            assert!(out.edges.iter().any(|e| e.from == module
+                && e.to == id
+                && e.category == edge_category::DEFINES_CONFIG));
+        }
+        // Only keys: no title, default or description is a node; the
+        // dependency is still read.
+        let qnames = pkg_qnames(&out);
+        assert!(
+            qnames
+                .iter()
+                .all(|q| !q.contains("Hello World") && !q.contains("Hi"))
+        );
+        assert!(qnames.contains(&"package:npm:@types/vscode".to_string()));
+    }
+
+    #[test]
+    fn a_package_without_the_engine_is_no_manifest() {
+        let repo = RepoId::from_canonical("test://host-manifest-none");
+        let src = r#"{ "engines": { "node": ">=18" }, "contributes": { "commands": [ { "command": "x.y" } ] } }"#;
+        let out = extract_for_path(src, "package.json", module_id(repo), repo);
+        assert_eq!(out.marker, None);
+        assert!(out.nodes.is_empty());
+        let out = extract_for_path("not json {", "package.json", module_id(repo), repo);
+        assert_eq!(out.marker, None);
     }
 
     #[test]

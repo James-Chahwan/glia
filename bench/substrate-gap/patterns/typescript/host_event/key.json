@@ -1,0 +1,26 @@
+{
+  "framework": "typescript-host-event",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "host_event",
+  "cells": ["typescript/host_event"],
+  "expect_nodes": [
+    {"kind": "EVENT_HANDLER", "name": "host_event:vscode:workspace.onDidSaveTextDocument", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:vscode:window.onDidChangeActiveTextEditor", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "host_event:vscode:workspace.onDidSaveTextDocument", "to": "src::extension::onSave",
+     "category": "HANDLED_BY", "exact": true},
+    {"from": "host_event:vscode:window.onDidChangeActiveTextEditor", "to": "src::extension::onEditor",
+     "category": "HANDLED_BY", "exact": true,
+     "note": "a named import of `window` from 'vscode' roots vscode.window"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "EVENT_HANDLER", "name": "host_event:vscode:workspace.onDidRenameFiles", "max_nodes": 0,
+     "note": "lookalike.ts imports no vscode: its `workspace` is a local object"},
+    {"kind": "EVENT_HANDLER", "name": "host_event:vscode:window.showInformationMessage", "max_nodes": 0,
+     "note": "a window call that is no onDid* event registers nothing"}
+  ],
+  "note": "0.5.6 use pattern (GH.9): a VS Code extension subscribes to workspace / window events (vscode.workspace.onDidSaveTextDocument, window.onDidChangeActiveTextEditor through a named import). INTENDED: one EVENT_HANDLER host_event:vscode:<member>.<event> per subscription HANDLED_BY the callback; a file that does not import vscode registers nothing. At HEAD 067b3b5c: none."
+}

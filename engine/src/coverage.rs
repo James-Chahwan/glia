@@ -206,6 +206,23 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "an import of an org-internal npm package (one a sibling project of the build declares by `name`, the importer's package.json depending on it) routes to that project's module, and its calls to the module's declarations, only through: `exports` when it is a string or its \".\" entry is one, else `main`, mapped back to source (`dist/index.js` -> `src/index.ts`); for `name/x` an `exports` map's string `./x` entry; else the convention `index` / `src/index` (`name/x`: `x`, `x/index`, `src/x`, `src/x/index`). A conditional `exports` object (`import` / `require` / `types` conditions), a `./*` pattern, `module` and `types` are not read, so a package whose entry only they name stays unrouted; a re-export is followed through `export *` / `export { .. } from` barrels up to 8 levels, and a name two re-exported modules declare binds nothing",
         verify: "read the sibling's package.json `exports` / `main` and grep the imported name in its sources",
     },
+    // GH.9: the host table's TypeScript row (code_domain::hosts: VS Code),
+    // measured on patterns/typescript/host_command, host_event, host_callback
+    // and config_table and the TS parser's host tests.
+    CoverageCaveat {
+        language: "typescript",
+        edge_category: "HANDLED_BY",
+        note: "TypeScript host commands and events are read for one host only, VS Code, in a file that imports the module `vscode` (`import * as v` / a default import / `import v = require(..)` / `const v = require(..)`, any name; a named import of `commands` / `workspace` / `window` / `languages` roots that member): `commands.registerCommand(\"id\", h)` / `registerTextEditorCommand` is the CLI_COMMAND `host_cmd:vscode:<id>`, `workspace.onDid*` / `onWill*`, `window.onDid*` and `languages.onDid*` `(h)` the EVENT_HANDLER `host_event:vscode:<member>.<event>` (`workspace.onDidSaveTextDocument`), each HANDLED_BY h: a function of the file or an imported name, `this.m` (or `this.m.bind(this)`) inside a class, and for an inline arrow or function expression the named function that registers it (whose calls it shares); an extension's package.json naming `engines.vscode` declares the same CLI_COMMAND for each `contributes.commands[].command` (one node with the code's registration; a command declared and registered nowhere has no HANDLED_BY), and the exported `activate` / `deactivate` of a file importing `vscode` are entries (ENTRYPOINT `host:vscode`), never edges. Not read: a command id that is no string literal (a const, a template with `${..}`), a handler returned by a call, another event emitter (`vscode.EventEmitter`, `debug.onDid*`, `tasks.onDid*`, `extensions.onDidChange`, a TextDocument / Terminal object's own events), `contributes.menus` / `keybindings` / `activationEvents`, an extension built to `out/*.js` whose TypeScript source is not in the tree, a local or parameter that shadows the import's name, and every other plugin host (Obsidian, webpack, Electron, Chrome extensions)",
+        verify: "grep registerCommand / registerTextEditorCommand / onDid / onWill in *.ts; read package.json contributes.commands",
+    },
+    // GH.9: VS Code settings (code_domain::hosts' Section flavour and the
+    // manifest's keys), measured on patterns/typescript/config_table.
+    CoverageCaveat {
+        language: "typescript",
+        edge_category: "DEFINES_CONFIG",
+        note: "TypeScript host settings are read for VS Code only, each key a CONFIG_KEY `config:vscode:<key>` (never a default, title or description): an extension package.json naming `engines.vscode` defines each key of `contributes.configuration`'s `properties` (one object or an array of them), DEFINES_CONFIG from the package.json; in a file importing `vscode`, `workspace.getConfiguration(\"<section>\")` then `.get` / `.has` / `.inspect(\"<key>\")`, chained or through a local of the same function holding the section, is a READS_CONFIG of `<section>.<key>` (the key alone with no section) from that function. Not read: a section or key that is no string literal, a section object passed to another function or stored in a field, `.update(..)` writes, `getConfiguration(..)[\"key\"]` index reads, and settings of any other host",
+        verify: "grep getConfiguration in *.ts; read package.json contributes.configuration",
+    },
     // LA.6e: page flow (`glia pages`) judges only the links the LA.6c
     // extractor can read, so the navigations it counts but cannot judge
     // (`dynamic_skipped` in the `[nav-links]` marker) are declared here.
@@ -1047,6 +1064,23 @@ mod tests {
         assert!(config.contains("never pairs"));
         assert!(lang_rows("src/app.py", "lua").is_empty());
         assert_eq!(ext_to_language("plugin/greet.lua"), None);
+    }
+
+    #[test]
+    fn typescript_files_get_the_vscode_host_rows() {
+        // GH.9: a TS repo is told which host's commands, events and settings
+        // are read (VS Code only) and what is not.
+        let rows = lang_rows("src/extension.ts", "typescript");
+        assert!(rows.contains(&("typescript", "HANDLED_BY")), "{rows:?}");
+        assert!(rows.contains(&("typescript", "DEFINES_CONFIG")), "{rows:?}");
+        let note = row_note("src/extension.ts", "typescript", "HANDLED_BY");
+        assert!(note.contains("registerCommand") && note.contains("onDidSaveTextDocument"));
+        assert!(note.contains("ENTRYPOINT `host:vscode`") && note.contains("Obsidian"));
+        let config = row_note("src/extension.ts", "typescript", "DEFINES_CONFIG");
+        assert!(
+            config.contains("getConfiguration") && config.contains("contributes.configuration")
+        );
+        assert!(!lang_rows("plugin/greet.lua", "lua").contains(&("typescript", "HANDLED_BY")));
     }
 
     #[test]

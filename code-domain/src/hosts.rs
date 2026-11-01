@@ -42,6 +42,21 @@
 //! names them, and the config resolver never pairs one across repos (two
 //! dotfiles repos setting `font_size` share nothing).
 //!
+//! **VS Code (GH.9), the first TypeScript host.** Gated on an import of the
+//! module `vscode` ([`Gate::Import`](crate::hosts::Gate::Import), any local name; a named import of a
+//! member roots that member):
+//!
+//! | Reading | Node |
+//! |---|---|
+//! | `vscode.commands.registerCommand("id", h)` / `registerTextEditorCommand` | CLI_COMMAND `host_cmd:vscode:id` HANDLED_BY h (an anonymous handler: the enclosing named scope) |
+//! | `vscode.workspace.onDid*` / `onWill*`, `vscode.window.onDid*`, `vscode.languages.onDid*` `(h)` ([`Callee::Segment`](crate::hosts::Callee::Segment), [`Shape::CalleeSegment`](crate::hosts::Shape::CalleeSegment)) | EVENT_HANDLER `host_event:vscode:workspace.onDidSaveTextDocument` HANDLED_BY h |
+//! | the exported `activate` / `deactivate` ([`Callback::exported`](crate::hosts::Callback::exported), [`exported_callback_for`](crate::hosts::exported_callback_for)) | the FUNCTION's ENTRYPOINT cell, source `host:vscode` |
+//! | `vscode.workspace.getConfiguration("s").get("k")`, or through a local holding `getConfiguration("s")` ([`ConfigFlavour::Section`](crate::hosts::ConfigFlavour::Section), [`SECTION_READERS`](crate::hosts::SECTION_READERS)) | CONFIG_KEY `config:vscode:s.k`, READS_CONFIG from the enclosing scope |
+//! | a `package.json` naming `engines.vscode` ([`HostManifest`](crate::hosts::HostManifest), [`manifest_host_for`](crate::hosts::manifest_host_for)): `contributes.commands[].command`, `contributes.configuration[.properties]` keys | the same CLI_COMMAND (DEFINES from the manifest's MODULE) and CONFIG_KEY (DEFINES_CONFIG, [`ConfigFlavour::Manifest`](crate::hosts::ConfigFlavour::Manifest)) |
+//!
+//! The manifest route prints `[host-manifest] host=<h> commands=<c>
+//! config=<g> path=<p>` per manifest of a host.
+//!
 //! Other `maki.api.register_*` calls match the Maki row but mint nothing
 //! (counted `aux=`, PR #3's ruling). Neovim keymaps are not commands (James
 //! 2026-10-31): `vim.keymap.set` matches no row.
@@ -94,9 +109,28 @@ pub struct HostRow {
     /// The functions the host calls by name (`love.update`, GH.4), read by
     /// [`callback_for`].
     pub callbacks: &'static [Callback],
-    /// The settings a plugin or user config writes for the host. None of the
-    /// rows here declares one.
+    /// The settings a plugin or user config writes for the host.
     pub config: &'static [ConfigRule],
+    /// The manifest that declares a plugin for the host (GH.9: VS Code's
+    /// `package.json` with `engines.vscode`), read by the manifest route
+    /// through [`manifest_host_for`]; `None` for a host with no such file.
+    pub manifest: Option<HostManifest>,
+}
+
+/// A host's plugin manifest (GH.9): a JSON file whose `engines` object names
+/// the host under `engine`. Its `contributes.commands[].command` ids are the
+/// host's commands ([`host_command_qname`], the qname the code's
+/// registration mints) and the keys of `contributes.configuration`'s
+/// `properties` (one object or an array of them) the host's settings
+/// ([`host_config_qname`]). A file without `engines.<engine>` is no manifest
+/// of the host, whatever it contributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HostManifest {
+    /// The file's base name (`package.json`).
+    pub file: &'static str,
+    /// The key under `engines` that names the host (`vscode`).
+    pub engine: &'static str,
 }
 
 /// What makes a host present in a file. A registration's callee is read only
@@ -115,6 +149,14 @@ pub enum Gate {
     /// `wezterm.config_builder`). A global of the module's name roots
     /// nothing: only the require binds it.
     Require(&'static str),
+    /// The host is a module the file imports (GH.9, TypeScript: `import *
+    /// as vscode from 'vscode'`, a default import, `import vscode =
+    /// require('vscode')` or `const vscode = require('vscode')`, under any
+    /// local name): a callee is read after its local name is replaced by the
+    /// module's (`code.commands.registerCommand` with `import * as code` is
+    /// `vscode.commands.registerCommand`); a named import of a member
+    /// (`import { commands } from 'vscode'`) roots `vscode.commands`.
+    Import(&'static str),
 }
 
 impl Gate {
@@ -122,7 +164,7 @@ impl Gate {
     /// required module's name.
     pub fn root(self) -> &'static str {
         match self {
-            Gate::Global(g) | Gate::Require(g) => g,
+            Gate::Global(g) | Gate::Require(g) | Gate::Import(g) => g,
         }
     }
 }
@@ -152,6 +194,14 @@ pub enum Callee {
         prefix: &'static str,
         mint: &'static [&'static str],
     },
+    /// A prefix whose remainder is one identifier starting with one of
+    /// `heads` and longer than it (GH.9: `vscode.workspace.` + `onDid` /
+    /// `onWill`, so `vscode.workspace.onDidSaveTextDocument` matches and
+    /// `vscode.workspace.onDid` alone does not). Every match registers.
+    Segment {
+        prefix: &'static str,
+        heads: &'static [&'static str],
+    },
 }
 
 impl Callee {
@@ -159,7 +209,7 @@ impl Callee {
     pub fn text(&self) -> &'static str {
         match self {
             Callee::Exact(t) => t,
-            Callee::Prefix { prefix, .. } => prefix,
+            Callee::Prefix { prefix, .. } | Callee::Segment { prefix, .. } => prefix,
         }
     }
 }
@@ -220,16 +270,42 @@ pub enum Shape {
         handler_arg: usize,
         handler_table: Option<(usize, &'static [&'static str])>,
     },
+    /// The name is the callee itself: its last `segments` dotted segments
+    /// (GH.9: `vscode.workspace.onDidSaveTextDocument` with 2 names the
+    /// event `workspace.onDidSaveTextDocument`); the handler is the argument
+    /// at `handler_arg`.
+    CalleeSegment { segments: usize, handler_arg: usize },
+}
+
+impl Shape {
+    /// The registration's name a [`Shape::CalleeSegment`] reads from the
+    /// expanded `dotted` callee: its last `segments` segments, `None` when it
+    /// has fewer. `None` for every other shape (their name is an argument).
+    pub fn callee_name(self, dotted: &str) -> Option<&str> {
+        let Shape::CalleeSegment { segments, .. } = self else {
+            return None;
+        };
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(dotted.match_indices('.').map(|(i, _)| i + 1))
+            .collect();
+        let at = starts.len().checked_sub(segments)?;
+        (segments > 0).then(|| &dotted[starts[at]..])
+    }
 }
 
 /// Functions a host calls by name: `<prefix><name>` for each of `names`.
 /// The prefix is rooted at the gate's root (`love.`): a function declared
 /// under that path, read through [`Gate::root`] unshadowed, is the callback.
+/// With `exported` (GH.9) the prefix is empty and the callback is a function
+/// the plugin's module exports under the name (VS Code's `activate` /
+/// `deactivate`), read by [`exported_callback_for`] in a file whose gate
+/// holds.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Callback {
     pub prefix: &'static str,
     pub names: &'static [&'static str],
+    pub exported: bool,
 }
 
 /// One place a host loads plugin units from (GH.4).
@@ -302,6 +378,16 @@ pub enum ConfigFlavour {
     /// literal (or of a chunk-level local bound to one and returned) are its
     /// settings too. A function value is never a setting.
     Builder,
+    /// A `<prefix>('<section>')` call returns the section's settings object,
+    /// whose [`SECTION_READERS`] calls read `<section>.<key>` (GH.9, VS Code:
+    /// `vscode.workspace.getConfiguration('helloWorld').get('greeting')` reads
+    /// `helloWorld.greeting`; with no section the key is the whole name). A
+    /// read only: READS_CONFIG from the enclosing scope.
+    Section,
+    /// A key the host's [`HostManifest`] declares (GH.9: VS Code's
+    /// `contributes.configuration` properties). No [`ConfigRule`] names it;
+    /// the manifest route writes it.
+    Manifest,
 }
 
 impl ConfigFlavour {
@@ -310,6 +396,8 @@ impl ConfigFlavour {
         match self {
             ConfigFlavour::Assign => "assign",
             ConfigFlavour::Builder => "builder",
+            ConfigFlavour::Section => "section",
+            ConfigFlavour::Manifest => "manifest",
         }
     }
 }
@@ -330,6 +418,16 @@ pub struct ConfigRule {
 /// The method calls on an [`ConfigFlavour::Assign`] setting that write it
 /// (Neovim's option objects: `vim.opt.shortmess:append("c")`).
 pub const CONFIG_MUTATORS: &[&str] = &["append", "prepend", "remove"];
+
+/// The methods of a [`ConfigFlavour::Section`] settings object that read a
+/// key named by their first argument (VS Code's WorkspaceConfiguration:
+/// `get`, `has`, `inspect`; `update` writes and is not read).
+pub const SECTION_READERS: &[&str] = &["get", "has", "inspect"];
+
+/// VS Code's event families (GH.9): `vscode.workspace.onDid*` / `onWill*`,
+/// `vscode.window.onDid*`, `vscode.languages.onDid*`.
+const VSCODE_DID_WILL: &[&str] = &["onDid", "onWill"];
+const VSCODE_DID: &[&str] = &["onDid"];
 
 /// The host table. Order matters: on a tie in [`registration_for`] the
 /// earlier row wins. Maki first (PR #3's seed).
@@ -353,6 +451,7 @@ pub static HOSTS: &[HostRow] = &[
         }],
         callbacks: &[],
         config: &[],
+        manifest: None,
     },
     HostRow {
         name: "neovim",
@@ -412,6 +511,7 @@ pub static HOSTS: &[HostRow] = &[
             ],
             namespaced: &["vim.g"],
         }],
+        manifest: None,
     },
     HostRow {
         name: "wezterm",
@@ -435,6 +535,7 @@ pub static HOSTS: &[HostRow] = &[
             prefixes: &["wezterm.config_builder"],
             namespaced: &[],
         }],
+        manifest: None,
     },
     // GH.4: LOVE registers nothing; it calls `love.<callback>` by name and
     // runs `main.lua` / `conf.lua` from the game's root.
@@ -457,8 +558,90 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[Callback {
             prefix: "love.",
             names: LOVE_CALLBACKS,
+            exported: false,
         }],
         config: &[],
+        manifest: None,
+    },
+    // GH.9: VS Code, the first TypeScript host. Gated on an import of the
+    // module `vscode`; commands and the workspace / window / languages event
+    // families register, the exported `activate` / `deactivate` are called
+    // by name, `getConfiguration(section).get(key)` reads a setting, and an
+    // extension's package.json (`engines.vscode`) declares its commands and
+    // settings.
+    HostRow {
+        name: "vscode",
+        lang: "typescript",
+        exts: &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
+        gate: Gate::Import("vscode"),
+        loads: &[],
+        registrations: &[
+            Registration {
+                callee: Callee::Exact("vscode.commands.registerCommand"),
+                pattern: Pattern::Command,
+                shape: Shape::Positional {
+                    name_arg: 1,
+                    handler_arg: 2,
+                    handler_table: None,
+                },
+            },
+            Registration {
+                callee: Callee::Exact("vscode.commands.registerTextEditorCommand"),
+                pattern: Pattern::Command,
+                shape: Shape::Positional {
+                    name_arg: 1,
+                    handler_arg: 2,
+                    handler_table: None,
+                },
+            },
+            Registration {
+                callee: Callee::Segment {
+                    prefix: "vscode.workspace.",
+                    heads: VSCODE_DID_WILL,
+                },
+                pattern: Pattern::Event,
+                shape: Shape::CalleeSegment {
+                    segments: 2,
+                    handler_arg: 1,
+                },
+            },
+            Registration {
+                callee: Callee::Segment {
+                    prefix: "vscode.window.",
+                    heads: VSCODE_DID,
+                },
+                pattern: Pattern::Event,
+                shape: Shape::CalleeSegment {
+                    segments: 2,
+                    handler_arg: 1,
+                },
+            },
+            Registration {
+                callee: Callee::Segment {
+                    prefix: "vscode.languages.",
+                    heads: VSCODE_DID,
+                },
+                pattern: Pattern::Event,
+                shape: Shape::CalleeSegment {
+                    segments: 2,
+                    handler_arg: 1,
+                },
+            },
+        ],
+        callbacks: &[Callback {
+            prefix: "",
+            names: &["activate", "deactivate"],
+            exported: true,
+        }],
+        config: &[ConfigRule {
+            flavour: ConfigFlavour::Section,
+            prefixes: &["vscode.workspace.getConfiguration"],
+            namespaced: &[],
+        }],
+        manifest: Some(HostManifest {
+            file: "package.json",
+            engine: "vscode",
+        }),
     },
 ];
 
@@ -490,6 +673,15 @@ pub fn registration_for<'d>(lang: &str, dotted: &'d str) -> Option<RegistrationM
                     .strip_prefix(prefix)
                     .filter(|rest| is_identifier_tail(rest))
                     .map(|rest| (rest, mint.contains(&rest))),
+                Callee::Segment { prefix, heads } => dotted
+                    .strip_prefix(prefix)
+                    .filter(|rest| {
+                        is_identifier_tail(rest)
+                            && heads
+                                .iter()
+                                .any(|h| rest.len() > h.len() && rest.starts_with(h))
+                    })
+                    .map(|rest| (rest, true)),
             };
             let Some((suffix, mints)) = found else {
                 continue;
@@ -518,6 +710,57 @@ pub fn is_host_global(lang: &str, name: &str) -> bool {
         .any(|h| h.lang == lang && matches!(h.gate, Gate::Global(g) if g == name))
 }
 
+/// The row of `lang` gated on importing the module `spec` (GH.9:
+/// `import * as vscode from 'vscode'`): a local bound to the import roots
+/// the row's paths under the module's name.
+pub fn host_for_import(lang: &str, spec: &str) -> Option<&'static HostRow> {
+    HOSTS
+        .iter()
+        .find(|h| h.lang == lang && matches!(h.gate, Gate::Import(m) if m == spec))
+}
+
+/// The host that calls a function its plugin module exports as `name` (GH.9:
+/// VS Code's `activate`), among `lang`'s rows whose gate `present` says the
+/// file shows: an [`Callback::exported`] rule naming it, table order. `None`
+/// for any other name or a file showing no such host.
+pub fn exported_callback_for(
+    lang: &str,
+    name: &str,
+    present: impl Fn(&'static HostRow) -> bool,
+) -> Option<&'static HostRow> {
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.callbacks
+            .iter()
+            .any(|c| c.exported && c.names.contains(&name))
+            && present(h)
+    })
+}
+
+/// The host whose [`ConfigFlavour::Section`] prefix is exactly `callee` (a
+/// call's dotted callee expanded to its host root, GH.9:
+/// `vscode.workspace.getConfiguration`): the call returns that host's
+/// settings section.
+pub fn config_section_for(lang: &str, callee: &str) -> Option<&'static HostRow> {
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.config
+            .iter()
+            .any(|r| r.flavour == ConfigFlavour::Section && r.prefixes.contains(&callee))
+    })
+}
+
+/// The host whose [`HostManifest`] the file `base_name` is, given the keys
+/// of its `engines` object (GH.9: a `package.json` with `engines.vscode`).
+/// Table order breaks a tie; `None` for any other file.
+pub fn manifest_host_for(
+    base_name: &str,
+    mut engines: impl FnMut(&str) -> bool,
+) -> Option<&'static HostRow> {
+    HOSTS.iter().find(|h| {
+        h.manifest
+            .is_some_and(|m| m.file == base_name && engines(m.engine))
+    })
+}
+
 /// The row of `lang` gated on requiring `spec` (`require("wezterm")`):
 /// the local bound to that require roots the row's paths.
 pub fn host_for_require(lang: &str, spec: &str) -> Option<&'static HostRow> {
@@ -534,7 +777,7 @@ pub fn host_for_require(lang: &str, spec: &str) -> Option<&'static HostRow> {
 pub fn callback_for(lang: &str, path: &str) -> Option<&'static HostRow> {
     let mut best: Option<(usize, &'static HostRow)> = None;
     for host in HOSTS.iter().filter(|h| h.lang == lang) {
-        for cb in host.callbacks {
+        for cb in host.callbacks.iter().filter(|c| !c.exported) {
             let named = path
                 .strip_prefix(cb.prefix)
                 .is_some_and(|rest| cb.names.contains(&rest));
@@ -658,7 +901,8 @@ impl ConfigMatch {
 /// identifier (`wezterm.config_builder().font_size`, the path the parser
 /// gives a local bound to the builder call). The longest prefix wins, table
 /// order breaks a tie. `None` for a deeper path (`vim.opt.x.y`), a bare
-/// prefix or any other path.
+/// prefix, a [`ConfigFlavour::Section`] prefix (its key is an argument) or
+/// any other path.
 pub fn config_for(lang: &str, path: &str) -> Option<ConfigMatch> {
     let mut best: Option<(usize, ConfigMatch)> = None;
     for host in HOSTS.iter().filter(|h| h.lang == lang) {
@@ -669,6 +913,9 @@ pub fn config_for(lang: &str, path: &str) -> Option<ConfigMatch> {
                     ConfigFlavour::Builder => {
                         path.strip_prefix(prefix).and_then(|r| r.strip_prefix("()"))
                     }
+                    // A section's key is a call's argument, read by
+                    // [`config_section_for`]'s caller; no path names one.
+                    ConfigFlavour::Section | ConfigFlavour::Manifest => None,
                 };
                 let Some(key) = rest
                     .and_then(|r| r.strip_prefix('.'))
@@ -787,9 +1034,11 @@ pub fn push_config_key(
             ConfigSide::Define => format!("host_config_{}", found.flavour.as_str()),
             ConfigSide::Read => "host_config_read".to_string(),
         };
-        let ev = Evidence::emitter(format!("parser:{}", found.host.lang))
-            .rule(rule)
-            .line(site.line);
+        let emitter = site
+            .emitter
+            .clone()
+            .unwrap_or_else(|| format!("parser:{}", found.host.lang));
+        let ev = Evidence::emitter(emitter).rule(rule).line(site.line);
         edges.push(Edge::new(from, id, category, Confidence::Strong).with_cell(ev.to_cell()));
     }
     id
@@ -828,6 +1077,10 @@ pub struct HostSite<'a> {
     pub host: &'a str,
     pub line: u32,
     pub cells: Vec<Cell>,
+    /// The EVIDENCE emitter of the edges written at the site; `None` is the
+    /// host's parser, `parser:<lang>` (GH.9: a manifest's keys are
+    /// `extractor:manifest`'s).
+    pub emitter: Option<String>,
 }
 
 impl<'a> HostSite<'a> {
@@ -844,7 +1097,15 @@ impl<'a> HostSite<'a> {
             host,
             line,
             cells,
+            emitter: None,
         }
+    }
+
+    /// The site with its edges stamped by `emitter` instead of the host's
+    /// parser.
+    pub fn with_emitter(mut self, emitter: impl Into<String>) -> Self {
+        self.emitter = Some(emitter.into());
+        self
     }
 }
 
@@ -1039,6 +1300,15 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     "{at}: prefix callee {callee:?} needs identifier mint suffixes"
                 ));
             }
+            if let Callee::Segment { prefix, heads } = r.callee
+                && (!prefix.ends_with('.')
+                    || heads.is_empty()
+                    || heads.iter().any(|h| !is_identifier_tail(h)))
+            {
+                problems.push(format!(
+                    "{at}: segment callee {callee:?} needs a `.`-ended prefix and identifier heads"
+                ));
+            }
             match r.shape {
                 Shape::Table {
                     name_key,
@@ -1069,6 +1339,16 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                         ));
                     }
                 }
+                Shape::CalleeSegment {
+                    segments,
+                    handler_arg,
+                } => {
+                    if segments == 0 || handler_arg == 0 {
+                        problems.push(format!(
+                            "{at}: callee-segment shape of {callee:?} needs segments and a 1-based handler"
+                        ));
+                    }
+                }
             }
         }
         if row
@@ -1079,9 +1359,18 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
             problems.push(format!("{at}: empty or absolute load glob"));
         }
         if row.callbacks.iter().any(|c| {
-            c.prefix.is_empty() || c.names.is_empty() || c.names.iter().any(|n| n.is_empty())
+            (c.prefix.is_empty() && !c.exported)
+                || c.names.is_empty()
+                || c.names.iter().any(|n| n.is_empty())
         }) {
             problems.push(format!("{at}: a callback rule needs a prefix and names"));
+        }
+        if row
+            .callbacks
+            .iter()
+            .any(|c| c.exported && !c.prefix.is_empty())
+        {
+            problems.push(format!("{at}: an exported callback rule takes no prefix"));
         }
         if let Some(c) = row
             .callbacks
@@ -1128,6 +1417,24 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     c.flavour
                 ));
             }
+            if c.flavour == ConfigFlavour::Manifest {
+                problems.push(format!(
+                    "{at}: the Manifest config flavour is the manifest's, never a rule's"
+                ));
+            }
+        }
+        if let Some(m) = row.manifest
+            && (m.file.is_empty()
+                || m.file.contains('/')
+                || m.engine.is_empty()
+                || rows[..i].iter().any(|o| {
+                    o.manifest
+                        .is_some_and(|om| om.file == m.file && om.engine == m.engine)
+                }))
+        {
+            problems.push(format!(
+                "{at}: a manifest needs a base file name and an engine key no other row claims"
+            ));
         }
     }
     problems
@@ -2687,7 +2994,7 @@ mod tests {
         assert_eq!(validate(), Vec::<String>::new());
         // Maki first: PR #3's seed.
         let names: Vec<&str> = HOSTS.iter().map(|h| h.name).collect();
-        assert_eq!(names, ["maki", "neovim", "wezterm", "love"]);
+        assert_eq!(names, ["maki", "neovim", "wezterm", "love", "vscode"]);
     }
 
     #[test]
@@ -2727,6 +3034,7 @@ mod tests {
                 callbacks: &[Callback {
                     prefix: "",
                     names: &[],
+                    exported: false,
                 }],
                 config: &[
                     ConfigRule {
@@ -2740,6 +3048,7 @@ mod tests {
                         namespaced: &[],
                     },
                 ],
+                manifest: None,
             },
             HOSTS[0],
             HOSTS[0],
@@ -3131,8 +3440,10 @@ mod tests {
             callbacks: &[Callback {
                 prefix: "other.",
                 names: &["a b"],
+                exported: false,
             }],
             config: &[],
+            manifest: None,
         }];
         let problems = validate_rows(&bad);
         assert!(
@@ -3151,6 +3462,192 @@ mod tests {
                 .any(|p| p.contains("empty or absolute load glob"))
         );
         assert_eq!(problems.len(), 3, "{problems:?}");
+    }
+
+    #[test]
+    fn vscode_registrations_match_commands_and_event_families() {
+        // GH.9: the two command registrations, positional.
+        let m = registration_for("typescript", "vscode.commands.registerCommand")
+            .expect("registerCommand");
+        assert_eq!(m.host.name, "vscode");
+        assert_eq!(m.registration.pattern, Pattern::Command);
+        assert!(m.mints);
+        let m = registration_for("typescript", "vscode.commands.registerTextEditorCommand")
+            .expect("registerTextEditorCommand");
+        assert_eq!(m.registration.pattern, Pattern::Command);
+        // The event families: the event is the callee's last two segments.
+        let m = registration_for("typescript", "vscode.workspace.onDidSaveTextDocument")
+            .expect("workspace.onDid*");
+        assert_eq!(m.registration.pattern, Pattern::Event);
+        assert_eq!(m.suffix, "onDidSaveTextDocument");
+        assert_eq!(
+            m.registration
+                .shape
+                .callee_name("vscode.workspace.onDidSaveTextDocument"),
+            Some("workspace.onDidSaveTextDocument")
+        );
+        assert!(
+            registration_for("typescript", "vscode.workspace.onWillSaveTextDocument").is_some()
+        );
+        assert!(
+            registration_for("typescript", "vscode.window.onDidChangeActiveTextEditor").is_some()
+        );
+        assert!(
+            registration_for("typescript", "vscode.languages.onDidChangeDiagnostics").is_some()
+        );
+        // Not events: a bare head, `onWill` on window, another member, a
+        // deeper path, another language's table.
+        for miss in [
+            "vscode.workspace.onDid",
+            "vscode.window.onWillX",
+            "vscode.workspace.getConfiguration",
+            "vscode.workspace.fs.onDidX",
+            "vscode.window.showInformationMessage",
+            "vscode.commands.executeCommand",
+        ] {
+            assert!(registration_for("typescript", miss).is_none(), "{miss}");
+        }
+        assert!(registration_for("lua", "vscode.commands.registerCommand").is_none());
+    }
+
+    #[test]
+    fn callee_segment_names_take_the_last_segments() {
+        let shape = Shape::CalleeSegment {
+            segments: 2,
+            handler_arg: 1,
+        };
+        assert_eq!(shape.callee_name("a.b.c"), Some("b.c"));
+        assert_eq!(shape.callee_name("b.c"), Some("b.c"));
+        assert_eq!(shape.callee_name("c"), None);
+        let none = Shape::CalleeSegment {
+            segments: 0,
+            handler_arg: 1,
+        };
+        assert_eq!(none.callee_name("a.b"), None);
+        let positional = Shape::Positional {
+            name_arg: 1,
+            handler_arg: 2,
+            handler_table: None,
+        };
+        assert_eq!(positional.callee_name("a.b"), None);
+    }
+
+    #[test]
+    fn vscode_callbacks_imports_settings_and_manifest() {
+        let shows = |_: &'static HostRow| true;
+        let hides = |_: &'static HostRow| false;
+        assert_eq!(
+            exported_callback_for("typescript", "activate", shows).map(|h| h.name),
+            Some("vscode")
+        );
+        assert!(exported_callback_for("typescript", "deactivate", shows).is_some());
+        assert!(exported_callback_for("typescript", "activate", hides).is_none());
+        assert!(exported_callback_for("typescript", "main", shows).is_none());
+        // An exported callback is never a prefixed one: no Lua path reaches it.
+        assert!(callback_for("typescript", "activate").is_none());
+        assert_eq!(
+            host_for_import("typescript", "vscode").map(|h| h.name),
+            Some("vscode")
+        );
+        assert!(host_for_import("typescript", "vscode-languageclient").is_none());
+        assert!(host_for_import("lua", "vscode").is_none());
+        assert_eq!(
+            config_section_for("typescript", "vscode.workspace.getConfiguration").map(|h| h.name),
+            Some("vscode")
+        );
+        assert!(config_section_for("typescript", "vscode.workspace.getConfig").is_none());
+        // A section prefix names no setting by path.
+        assert!(config_for("typescript", "vscode.workspace.getConfiguration.x").is_none());
+        assert_eq!(
+            manifest_host_for("package.json", |e| e == "vscode").map(|h| h.name),
+            Some("vscode")
+        );
+        assert!(manifest_host_for("package.json", |e| e == "node").is_none());
+        assert!(manifest_host_for("composer.json", |e| e == "vscode").is_none());
+        assert_eq!(ConfigFlavour::Section.as_str(), "section");
+        assert_eq!(ConfigFlavour::Manifest.as_str(), "manifest");
+    }
+
+    #[test]
+    fn validate_reads_the_ts_shapes() {
+        let bad = [HostRow {
+            name: "t",
+            lang: "typescript",
+            exts: &["ts"],
+            gate: Gate::Import("t"),
+            loads: &[],
+            registrations: &[Registration {
+                callee: Callee::Segment {
+                    prefix: "t.x",
+                    heads: &[],
+                },
+                pattern: Pattern::Event,
+                shape: Shape::CalleeSegment {
+                    segments: 0,
+                    handler_arg: 0,
+                },
+            }],
+            callbacks: &[Callback {
+                prefix: "t.",
+                names: &["activate"],
+                exported: true,
+            }],
+            config: &[ConfigRule {
+                flavour: ConfigFlavour::Manifest,
+                prefixes: &["t.c"],
+                namespaced: &[],
+            }],
+            manifest: Some(HostManifest {
+                file: "a/package.json",
+                engine: "",
+            }),
+        }];
+        let problems = validate_rows(&bad);
+        let has = |s: &str| problems.iter().any(|p| p.contains(s));
+        assert!(
+            has("needs a `.`-ended prefix and identifier heads"),
+            "{problems:?}"
+        );
+        assert!(has("needs segments and a 1-based handler"));
+        assert!(has("an exported callback rule takes no prefix"));
+        assert!(has("never a rule's"));
+        assert!(has("a manifest needs a base file name"));
+        assert_eq!(problems.len(), 5, "{problems:?}");
+    }
+
+    #[test]
+    fn a_site_emitter_stamps_its_config_edges() {
+        let repo = RepoId::from_canonical("test://hosts-emitter");
+        let module = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "package.json");
+        let host = HOSTS.iter().find(|h| h.name == "vscode").expect("row");
+        let site =
+            HostSite::new(repo, module, "vscode", 7, Vec::new()).with_emitter("extractor:manifest");
+        let (mut nodes, mut nav, mut refs, mut edges) =
+            (Vec::new(), CodeNav::default(), Vec::new(), Vec::new());
+        let mut sink = HostSink::new(&mut nodes, &mut nav, &mut refs);
+        let found = ConfigMatch::new(host, ConfigFlavour::Manifest, "helloWorld.greeting");
+        let id = push_config_key(
+            &site,
+            &found,
+            ConfigSide::Define,
+            module,
+            &mut sink,
+            &mut edges,
+        );
+        assert_eq!(
+            id,
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::CONFIG_KEY,
+                "config:vscode:helloWorld.greeting"
+            )
+        );
+        let ev = format!("{:?}", edges[0].cells);
+        assert!(
+            ev.contains("extractor:manifest") && ev.contains("host_config_manifest"),
+            "{ev}"
+        );
     }
 }
 
