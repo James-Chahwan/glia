@@ -172,6 +172,8 @@ pub fn parse_file(
     // variable and each cross-file `include_router` / `register_blueprint`
     // as a mount fact on the MODULE.
     record_router_mounts(root, src, module_id, &mut acc);
+    // GH.7: scripts a Redis client runs, settled once the imports are read.
+    scan_host_scripts(root, src, file_rel_path, module_id, &mut acc);
     if acc.py_mounts.routers + acc.py_mounts.includes + acc.py_mounts.dynamic > 0 {
         let m = acc.py_mounts;
         eprintln!(
@@ -3471,6 +3473,428 @@ const VIA_FASTAPI: &str = "fastapi";
 const VIA_FLASK: &str = "flask";
 const VIA_FLASK_OWN: &str = "flask_own";
 
+// ============================================================================
+// GH.7: scripts a Redis client runs (register_script / eval of a read file)
+// ============================================================================
+
+/// GH.7: the Redis client packages whose import (`import redis`, `from
+/// redis.asyncio import Redis`, ..) puts a Redis host in a file, gating
+/// [`scan_host_scripts`]. A file that reaches a client only through another
+/// module's object (no such import) reads nothing (`ungated=`).
+const REDIS_ROOTS: &[&str] = &["redis", "aioredis", "coredis", "valkey", "fakeredis"];
+
+/// GH.7: the client methods that run a script given as their first argument.
+const REDIS_EVAL_METHODS: &[&str] = &["eval", "eval_ro", "evalsha"];
+
+/// GH.7: what a `register_script` / `eval` argument holds.
+enum ScriptSrc {
+    /// A file read in place: its path as written (`open("<lit>").read()`,
+    /// `Path("<lit>").read_text()`), or joined to the file's own directory
+    /// for `(Path(__file__).parent / "<lit>").read_text()` (`..` per extra
+    /// `.parent`).
+    File(String),
+    /// The script text itself (a string literal): no file, no module.
+    Inline,
+    /// Anything else (a variable, a call, an f-string path).
+    Dynamic,
+}
+
+/// GH.7 `[py-scripts]` counters.
+#[derive(Default)]
+struct PyScriptStats {
+    registered: usize,
+    calls: usize,
+    evals: usize,
+    inline: usize,
+    dynamic: usize,
+    ungated: usize,
+}
+
+/// GH.7 scope of a tree position: the chain of enclosing `function_definition`
+/// / `class_definition` nodes, innermost last, each `(node id, is_class)`.
+type ScopeChain = Vec<(usize, bool)>;
+
+/// GH.7: one `X(..)` / `X.__call__(..)` call site and its scopes.
+struct ScriptUse {
+    chain: ScopeChain,
+    name: String,
+    row: u32,
+}
+
+/// GH.7: what the tree walk of [`scan_host_scripts`] collects.
+#[derive(Default)]
+struct ScriptScan {
+    /// `(scope, name)` -> (path, row) of `name = <r>.register_script(<file>)`;
+    /// scope `None` is the module. The last in source order wins.
+    bindings: HashMap<(Option<usize>, String), String>,
+    /// `(scope, name)` bound to anything else in a function or class scope
+    /// (another assignment, a parameter): a use there never reaches an outer
+    /// binding.
+    shadows: std::collections::HashSet<(Option<usize>, String)>,
+    /// `(row, path, rule)` of each registration / eval of a read file.
+    sites: Vec<(u32, String, &'static str)>,
+    uses: Vec<ScriptUse>,
+    stats: PyScriptStats,
+}
+
+/// GH.7: a Redis client runs a Lua (or any) script file. In a file importing a
+/// [`REDIS_ROOTS`] package, a module-, class- or function-level `X =
+/// <recv>.register_script(<src>)` whose `<src>` reads a file ([`ScriptSrc::File`])
+/// binds `X` to that path: the assigning scope records rule `script_file`, and
+/// every function whose body calls `X(..)` or `X.__call__(..)` (resolved
+/// innermost scope first, then enclosing functions, then the module; a
+/// parameter or other assignment of `X` in between shadows it) records rule
+/// `script_call`. `<recv>.eval(<src>, ..)` / `eval_ro` / `evalsha` of a read
+/// file records rule `script_eval` from the calling scope. Each is a
+/// [`NavFact::HostScriptRef`] (host `redis`, conf the file, category USES)
+/// that resolver:host binds to the script's MODULE by path; the bindings are
+/// settled at end of file, so a use above its assignment binds. A string
+/// literal script (`inline=`) has no file and records nothing.
+///
+/// fired_on, per file with any such call:
+/// `[py-scripts] registered=<r> calls=<c> evals=<e> inline=<i> dynamic=<d> ungated=<g> file=<p>`.
+fn scan_host_scripts(root: TsNode, src: &[u8], file_rel: &str, module_id: NodeId, acc: &mut Acc) {
+    // Most files name neither method: skip the walk.
+    let names = |needle: &[u8]| src.windows(needle.len()).any(|w| w == needle);
+    if !names(b"register_script") && !names(b".eval") {
+        return;
+    }
+    let mut scan = ScriptScan::default();
+    let mut chain = ScopeChain::new();
+    walk_host_scripts(root, src, &mut chain, &mut scan);
+    let gated = acc.imports.iter().any(|i| {
+        let module = match &i.target {
+            ImportTarget::Module { path, .. } => path,
+            ImportTarget::Symbol { module, level, .. } if *level == 0 => module,
+            ImportTarget::Symbol { .. } => return false,
+        };
+        REDIS_ROOTS.contains(&module.split('.').next().unwrap_or(""))
+    });
+    let mut stats = std::mem::take(&mut scan.stats);
+    let file_sites = scan.sites.len() + scan.uses.len();
+    if !gated {
+        stats.ungated = scan.sites.len();
+        scan.sites.clear();
+        scan.uses.clear();
+        scan.bindings.clear();
+    }
+    // The scope a call on `row` was recorded from (its `UnresolvedCall`), the
+    // module when the walk recorded none (a module-level compound statement).
+    let from_of = |acc: &Acc, row: u32, hit: &dyn Fn(&CallQualifier) -> bool| {
+        acc.unresolved
+            .iter()
+            .find(|u| u.line == row && hit(&u.qualifier))
+            .map_or(module_id, |u| u.from)
+    };
+    let mut seen: std::collections::HashSet<(NodeId, String, &'static str)> =
+        std::collections::HashSet::new();
+    let mut out: Vec<(NodeId, String, &'static str, u32)> = Vec::new();
+    for (row, path, rule) in &scan.sites {
+        let method: &[&str] = if *rule == "script_file" {
+            &["register_script"]
+        } else {
+            REDIS_EVAL_METHODS
+        };
+        let from = from_of(acc, *row, &|q| match q {
+            CallQualifier::Attribute { name, .. }
+            | CallQualifier::ComplexReceiver { name, .. }
+            | CallQualifier::SelfMethod(name) => method.contains(&name.as_str()),
+            _ => false,
+        });
+        if seen.insert((from, path.clone(), rule)) {
+            out.push((from, path.clone(), rule, *row));
+        }
+    }
+    for u in &scan.uses {
+        let Some(path) = script_binding(&scan, &u.chain, &u.name) else {
+            continue;
+        };
+        let from = from_of(acc, u.row, &|q| match q {
+            CallQualifier::Bare(n) => *n == u.name,
+            CallQualifier::Attribute { base, name } => *base == u.name && name == "__call__",
+            _ => false,
+        });
+        stats.calls += 1;
+        if seen.insert((from, path.clone(), "script_call")) {
+            out.push((from, path.clone(), "script_call", u.row));
+        }
+    }
+    for (from, path, rule, line) in out {
+        acc.nav.record_fact(
+            from,
+            NavFact::HostScriptRef {
+                host: "redis".to_string(),
+                conf: file_rel.to_string(),
+                path,
+                category: edge_category::USES,
+                rule: rule.to_string(),
+                line,
+            },
+        );
+    }
+    let s = &stats;
+    if file_sites + s.inline + s.dynamic > 0 {
+        eprintln!(
+            "[py-scripts] registered={} calls={} evals={} inline={} dynamic={} ungated={} file={file_rel}",
+            s.registered, s.calls, s.evals, s.inline, s.dynamic, s.ungated
+        );
+    }
+}
+
+/// GH.7: the path `name` names at a use in `chain`: the innermost scope, then
+/// each enclosing function (a class body is no enclosing scope of its
+/// methods), then the module. A shadowing binding stops the walk.
+fn script_binding(scan: &ScriptScan, chain: &ScopeChain, name: &str) -> Option<String> {
+    let mut scopes: Vec<Option<usize>> = Vec::new();
+    for (i, (id, is_class)) in chain.iter().enumerate().rev() {
+        if i + 1 == chain.len() || !is_class {
+            scopes.push(Some(*id));
+        }
+    }
+    scopes.push(None);
+    for scope in scopes {
+        let key = (scope, name.to_string());
+        if let Some(path) = scan.bindings.get(&key) {
+            return Some(path.clone());
+        }
+        if scan.shadows.contains(&key) {
+            return None;
+        }
+    }
+    None
+}
+
+/// GH.7: the tree walk of [`scan_host_scripts`], in source order.
+fn walk_host_scripts(n: TsNode, src: &[u8], chain: &mut ScopeChain, scan: &mut ScriptScan) {
+    let scope = chain.last().map(|(id, _)| *id);
+    match n.kind() {
+        "function_definition" | "class_definition" => {
+            chain.push((n.id(), n.kind() == "class_definition"));
+            if let Some(params) = n.child_by_field_name("parameters") {
+                let mut cursor = params.walk();
+                for p in params.named_children(&mut cursor) {
+                    let ident = if p.kind() == "identifier" {
+                        Some(p)
+                    } else {
+                        p.child_by_field_name("name").or_else(|| {
+                            let mut c = p.walk();
+                            p.named_children(&mut c).find(|c| c.kind() == "identifier")
+                        })
+                    };
+                    if let Some(ident) = ident.filter(|i| i.kind() == "identifier") {
+                        scan.shadows
+                            .insert((Some(n.id()), text(ident, src).to_string()));
+                    }
+                }
+            }
+            if let Some(body) = n.child_by_field_name("body") {
+                walk_host_scripts(body, src, chain, scan);
+            }
+            chain.pop();
+            return;
+        }
+        "assignment" => {
+            if let Some(left) = n.child_by_field_name("left")
+                && left.kind() == "identifier"
+            {
+                let name = text(left, src).to_string();
+                let registered = n
+                    .child_by_field_name("right")
+                    .filter(|r| redis_method_call(*r, src, &["register_script"]));
+                match registered.map(|r| first_script_src(r, src)) {
+                    Some(ScriptSrc::File(path)) => {
+                        scan.stats.registered += 1;
+                        scan.sites.push((line_at(n), path.clone(), "script_file"));
+                        scan.bindings.insert((scope, name), path);
+                    }
+                    Some(ScriptSrc::Inline) => scan.stats.inline += 1,
+                    Some(ScriptSrc::Dynamic) => scan.stats.dynamic += 1,
+                    None if scope.is_some() => {
+                        scan.shadows.insert((scope, name));
+                    }
+                    None => {}
+                }
+            }
+        }
+        "call" => {
+            if redis_method_call(n, src, REDIS_EVAL_METHODS) {
+                match first_script_src(n, src) {
+                    ScriptSrc::File(path) => {
+                        scan.stats.evals += 1;
+                        scan.sites.push((line_at(n), path, "script_eval"));
+                    }
+                    ScriptSrc::Inline => scan.stats.inline += 1,
+                    ScriptSrc::Dynamic => {}
+                }
+            }
+            if let Some(func) = n.child_by_field_name("function") {
+                let name = match func.kind() {
+                    "identifier" => Some(func),
+                    "attribute"
+                        if func
+                            .child_by_field_name("attribute")
+                            .is_some_and(|a| text(a, src) == "__call__") =>
+                    {
+                        func.child_by_field_name("object")
+                            .filter(|o| o.kind() == "identifier")
+                    }
+                    _ => None,
+                };
+                if let Some(name) = name {
+                    scan.uses.push(ScriptUse {
+                        chain: chain.clone(),
+                        name: text(name, src).to_string(),
+                        row: line_at(n),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        walk_host_scripts(child, src, chain, scan);
+    }
+}
+
+/// GH.7: is `call` a `<recv>.<m>(..)` with `m` one of `methods`?
+fn redis_method_call(call: TsNode, src: &[u8], methods: &[&str]) -> bool {
+    call.kind() == "call"
+        && call
+            .child_by_field_name("function")
+            .filter(|f| f.kind() == "attribute")
+            .and_then(|f| f.child_by_field_name("attribute"))
+            .is_some_and(|a| methods.contains(&text(a, src)))
+}
+
+/// GH.7: what the first positional argument of `call` holds.
+fn first_script_src(call: TsNode, src: &[u8]) -> ScriptSrc {
+    let Some(arg) = call
+        .child_by_field_name("arguments")
+        .and_then(|a| positional_args(a).into_iter().next())
+    else {
+        return ScriptSrc::Dynamic;
+    };
+    match arg.kind() {
+        "string" | "concatenated_string" => return ScriptSrc::Inline,
+        "call" => {}
+        _ => return ScriptSrc::Dynamic,
+    }
+    let Some(func) = arg
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "attribute")
+    else {
+        return ScriptSrc::Dynamic;
+    };
+    let (Some(object), Some(method)) = (
+        func.child_by_field_name("object").map(unparen),
+        func.child_by_field_name("attribute").map(|a| text(a, src)),
+    ) else {
+        return ScriptSrc::Dynamic;
+    };
+    let path = match method {
+        // `open("<lit>"[, mode]).read()`, `io.open` / `codecs.open` too.
+        "read" if object.kind() == "call" => {
+            let callee = object
+                .child_by_field_name("function")
+                .map(|f| text(f, src))
+                .unwrap_or("");
+            if matches!(callee, "open" | "io.open" | "codecs.open") {
+                first_literal_arg(object, src)
+            } else {
+                None
+            }
+        }
+        "read_text" | "read_bytes" => path_expr(object, src),
+        _ => None,
+    };
+    path.map_or(ScriptSrc::Dynamic, ScriptSrc::File)
+}
+
+/// GH.7: a `pathlib` path expression naming one file: `Path("<lit>")` /
+/// `pathlib.Path` / `PurePath`, or `Path(__file__)` with `n >= 1` `.parent`
+/// (and any `.resolve()` / `.absolute()`) joined by `/` to string literals:
+/// the joined literals under `n - 1` `..` (relative to the file's directory).
+fn path_expr(n: TsNode, src: &[u8]) -> Option<String> {
+    let n = unparen(n);
+    match n.kind() {
+        "call" => {
+            let callee = text(n.child_by_field_name("function")?, src);
+            if matches!(
+                callee,
+                "Path" | "PurePath" | "pathlib.Path" | "pathlib.PurePath"
+            ) {
+                return first_literal_arg(n, src);
+            }
+            None
+        }
+        "binary_operator" => {
+            let op = n.child_by_field_name("operator")?;
+            if text(op, src) != "/" {
+                return None;
+            }
+            let right = plain_string_literal(n.child_by_field_name("right")?, src)?;
+            let left = unparen(n.child_by_field_name("left")?);
+            let base = match file_parent_depth(left, src) {
+                Some(depth) => "../".repeat(depth.checked_sub(1)?),
+                None => format!("{}/", path_expr(left, src)?),
+            };
+            Some(format!("{base}{}", right.trim_matches('/')))
+        }
+        _ => None,
+    }
+}
+
+/// GH.7: `Path(__file__)` followed by `.parent`s (and `.resolve()` /
+/// `.absolute()`): the number of `.parent`s; `None` for any other expression.
+fn file_parent_depth(n: TsNode, src: &[u8]) -> Option<usize> {
+    let n = unparen(n);
+    match n.kind() {
+        "attribute" => {
+            if text(n.child_by_field_name("attribute")?, src) != "parent" {
+                return None;
+            }
+            Some(file_parent_depth(n.child_by_field_name("object")?, src)? + 1)
+        }
+        "call" => {
+            let func = n.child_by_field_name("function")?;
+            if func.kind() == "attribute" {
+                let m = text(func.child_by_field_name("attribute")?, src);
+                if matches!(m, "resolve" | "absolute") {
+                    return file_parent_depth(func.child_by_field_name("object")?, src);
+                }
+                return None;
+            }
+            let callee = text(func, src);
+            let arg = n
+                .child_by_field_name("arguments")
+                .and_then(|a| positional_args(a).into_iter().next())?;
+            (matches!(callee, "Path" | "pathlib.Path") && text(arg, src) == "__file__").then_some(0)
+        }
+        _ => None,
+    }
+}
+
+/// GH.7: the first positional argument of `call` as a plain string literal.
+fn first_literal_arg(call: TsNode, src: &[u8]) -> Option<String> {
+    let arg = positional_args(call.child_by_field_name("arguments")?)
+        .into_iter()
+        .next()?;
+    plain_string_literal(arg, src)
+}
+
+/// GH.7: `n` with its `( .. )` wrappers removed.
+fn unparen(n: TsNode) -> TsNode {
+    let mut n = n;
+    while n.kind() == "parenthesized_expression" {
+        match n.named_child(0) {
+            Some(inner) => n = inner,
+            None => break,
+        }
+    }
+    n
+}
+
 /// GD.41: record this module's router mounts as [`NavFact::IncludeMount`]s
 /// on its MODULE, for the graph's route-mount pass
 /// (`graph/src/build/route_mounts.rs`):
@@ -6226,5 +6650,145 @@ def noise(cache, m):
                 .filter(|e| e.category == edge_category::CALLS)
                 .all(|e| e.cells.is_empty())
         );
+    }
+}
+
+#[cfg(test)]
+mod host_script_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://py_host_scripts")
+    }
+
+    /// `(scope qname, path, rule, 0-based line)` of every HostScriptRef, sorted.
+    fn refs(src: &str) -> Vec<(String, String, String, u32)> {
+        let p = parse_file(src, "svc/app.py", "svc::app", repo()).unwrap();
+        let mut out = Vec::new();
+        for (id, facts) in &p.nav.nav_facts {
+            for f in facts {
+                if let NavFact::HostScriptRef {
+                    host,
+                    conf,
+                    path,
+                    category,
+                    rule,
+                    line,
+                } = f
+                {
+                    assert_eq!(host, "redis");
+                    assert_eq!(conf, "svc/app.py");
+                    assert_eq!(*category, edge_category::USES);
+                    let q = p.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+                    out.push((q, path.clone(), rule.clone(), *line));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn r(q: &str, p: &str, rule: &str, line: u32) -> (String, String, String, u32) {
+        (q.into(), p.into(), rule.into(), line)
+    }
+
+    #[test]
+    fn module_level_register_script_and_its_callers() {
+        let got = refs(
+            r#"import redis
+
+r = redis.Redis()
+rate_limit = r.register_script(open("scripts/rate_limit.lua").read())
+
+
+def allow(user):
+    return rate_limit(keys=[f"rl:{user}"], args=[60]) <= 10
+
+
+def again(user):
+    return rate_limit.__call__(keys=[user])
+
+
+def shadow(rate_limit):
+    return rate_limit()
+
+
+def other():
+    return 1
+"#,
+        );
+        assert_eq!(
+            got,
+            [
+                r("svc::app", "scripts/rate_limit.lua", "script_file", 3),
+                r(
+                    "svc::app::again",
+                    "scripts/rate_limit.lua",
+                    "script_call",
+                    11
+                ),
+                r(
+                    "svc::app::allow",
+                    "scripts/rate_limit.lua",
+                    "script_call",
+                    7
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn use_before_assignment_path_forms_eval_and_locals() {
+        let got = refs(
+            r#"from pathlib import Path
+from redis.asyncio import Redis
+
+
+def early():
+    return late_script()
+
+
+late_script = client.register_script(Path("lua/late.lua").read_text())
+near = client.register_script((Path(__file__).parent / "lua" / "near.lua").read_text())
+up = client.register_script((Path(__file__).resolve().parent.parent / "x.lua").read_text())
+inline = client.register_script("return 1")
+
+
+class Store:
+    def setup(self):
+        local = self.redis.register_script(pathlib.Path("lua/local.lua").read_text())
+        return local(keys=[])
+
+    def run(self, r):
+        return r.eval(open("lua/once.lua", "r").read(), 1, "k")
+
+    def unrelated(self):
+        return local()
+"#,
+        );
+        assert_eq!(
+            got,
+            [
+                r("svc::app", "../x.lua", "script_file", 10),
+                r("svc::app", "lua/late.lua", "script_file", 8),
+                r("svc::app", "lua/near.lua", "script_file", 9),
+                r("svc::app::Store::run", "lua/once.lua", "script_eval", 20),
+                r("svc::app::Store::setup", "lua/local.lua", "script_call", 17),
+                r("svc::app::Store::setup", "lua/local.lua", "script_file", 16),
+                r("svc::app::early", "lua/late.lua", "script_call", 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_redis_import_no_ref() {
+        let got = refs(
+            r#"s = client.register_script(open("lua/a.lua").read())
+
+def f():
+    return s()
+"#,
+        );
+        assert!(got.is_empty(), "{got:?}");
     }
 }

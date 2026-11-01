@@ -15,6 +15,15 @@
 //! that leaves the repo (`../..` above the root) or names no walked file is
 //! `unresolved=`. A file never binds into another repo.
 //!
+//! GH.7 adds two readers. Python (host `redis`): a `register_script` / `eval`
+//! of a read file, rules `script_file` (the assigning scope), `script_call`
+//! (each function calling the registered script) and `script_eval`, bound as
+//! above (`open()` reads from the working directory, so the repo root is as
+//! likely as the file's directory). Rust (host `rustc`): `include_str!` /
+//! `include_bytes!` of a script file, rules `include_str` / `include_bytes`
+//! ([`FILE_RELATIVE_RULES`]), bound only relative to the including file, as
+//! rustc reads it: no root or suffix fallback.
+//!
 //! fired_on, once per build that read a ref:
 //! `[host-resolve] refs=<r> bound=<b> (<rule>=<n>,..) unresolved=<u> ambiguous=<a>`.
 
@@ -29,6 +38,11 @@ use crate::merged::MergedGraph;
 
 /// The `resolver:host` pass (module doc).
 pub struct HostResolver;
+
+/// GH.7: rules whose path the host reads relative to the referring file only
+/// (rustc's `include_str!` / `include_bytes!`), so neither the repo root nor a
+/// path suffix may stand in for it.
+const FILE_RELATIVE_RULES: &[&str] = &["include_str", "include_bytes"];
 
 /// One ref to bind: its scope, repo and fact fields.
 struct Ref {
@@ -67,7 +81,8 @@ impl CrossGraphResolver for HostResolver {
         for r in &refs {
             let empty = BTreeMap::new();
             let repo_files = files.get(&r.repo).unwrap_or(&empty);
-            let (to, confidence) = match bind(repo_files, &r.conf, &r.path) {
+            let file_relative = FILE_RELATIVE_RULES.contains(&r.rule.as_str());
+            let (to, confidence) = match bind(repo_files, &r.conf, &r.path, file_relative) {
                 Bound::Exact(id) => (id, Confidence::Strong),
                 Bound::Suffix(id) => (id, Confidence::Medium),
                 Bound::Ambiguous => {
@@ -167,18 +182,29 @@ fn module_files(merged: &MergedGraph) -> HashMap<RepoId, BTreeMap<String, (Strin
     out
 }
 
-/// Bind `path` (as the conf at `conf` wrote it) to one of `files`.
-fn bind(files: &BTreeMap<String, (String, NodeId)>, conf: &str, path: &str) -> Bound {
+/// Bind `path` (as the conf at `conf` wrote it) to one of `files`;
+/// `file_relative` (GH.7, [`FILE_RELATIVE_RULES`]) tries the conf's directory
+/// only.
+fn bind(
+    files: &BTreeMap<String, (String, NodeId)>,
+    conf: &str,
+    path: &str,
+    file_relative: bool,
+) -> Bound {
     let path = path.replace('\\', "/");
     if !path.starts_with('/') {
         let dir = conf.rsplit_once('/').map_or("", |(d, _)| d);
-        for base in [dir, ""] {
+        let bases: &[&str] = if file_relative { &[dir] } else { &[dir, ""] };
+        for base in bases {
             if let Some(rel) = normalise(base, &path)
                 && let Some((_, id)) = files.get(&rel)
             {
                 return Bound::Exact(*id);
             }
         }
+    }
+    if file_relative {
+        return Bound::Unresolved;
     }
     let Some(want) = normalise("", path.trim_start_matches('/')) else {
         return Bound::Unresolved;
@@ -384,6 +410,95 @@ mod tests {
             (ev.file.as_deref(), ev.line),
             (Some("deploy/nginx.conf"), Some(3))
         );
+    }
+
+    /// GH.7: a Python Redis script ref binds from the root (`open()` reads
+    /// the working directory); a rustc include binds only beside its file.
+    #[test]
+    fn script_refs_python_from_root_rust_file_relative_only() {
+        let repo = RepoId(5);
+        let mut g = graph(
+            repo,
+            &[
+                ("scripts/rate_limit.lua", "scripts::rate_limit"),
+                ("crates/app/plugins/init.lua", "crates::app::plugins::init"),
+                ("lua/only_at_root.lua", "lua::only_at_root"),
+            ],
+            &[],
+        );
+        let refs: [(&str, &str, &str, &str); 4] = [
+            (
+                "app::allow",
+                "app.py",
+                "scripts/rate_limit.lua",
+                "script_call",
+            ),
+            (
+                "app::render::INIT",
+                "crates/app/src/render.rs",
+                "../plugins/init.lua",
+                "include_str",
+            ),
+            (
+                "app::render::ROOT",
+                "crates/app/src/render.rs",
+                "lua/only_at_root.lua",
+                "include_str",
+            ),
+            (
+                "app::render::SUFFIX",
+                "crates/app/src/render.rs",
+                "/abs/plugins/init.lua",
+                "include_bytes",
+            ),
+        ];
+        for (qname, conf, path, rule) in refs {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, qname);
+            g.nav.record(id, qname, qname, node_kind::FUNCTION, None);
+            g.nav.record_fact(
+                id,
+                NavFact::HostScriptRef {
+                    host: "x".into(),
+                    conf: conf.into(),
+                    path: path.into(),
+                    category: edge_category::USES,
+                    rule: rule.into(),
+                    line: 1,
+                },
+            );
+            g.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
+        }
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.run(&HostResolver);
+        assert_eq!(
+            bound(&merged),
+            [
+                (
+                    "app::allow".into(),
+                    "scripts::rate_limit".into(),
+                    Confidence::Strong
+                ),
+                (
+                    "app::render::INIT".into(),
+                    "crates::app::plugins::init".into(),
+                    Confidence::Strong
+                ),
+            ]
+        );
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category == edge_category::USES)
+        );
+        let ev = Evidence::of(&merged.cross_edges[1]).unwrap();
+        assert_eq!(ev.rule.as_deref(), Some("include_str"));
+        assert_eq!(ev.file.as_deref(), Some("crates/app/src/render.rs"));
     }
 
     #[test]

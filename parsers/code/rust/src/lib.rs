@@ -6,6 +6,7 @@ use glia_code_domain::line_of;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::NavFact;
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -61,6 +62,8 @@ pub fn parse_file(
     scan_axum_routes(source, &literals, module_id, repo, &mut acc);
     scan_at_path_chains(source, &literals, repo, &mut acc);
     scan_salvo_routes(source, &literals, repo, &mut acc);
+    // GH.7: script files the crate compiles in.
+    scan_script_includes(root, src, file_rel_path, module_id, &mut acc);
 
     if acc.client_endpoints > 0 {
         eprintln!(
@@ -125,6 +128,10 @@ struct Acc {
     file_module: Option<NodeId>,
     /// The web frameworks this file names, gating [`extractor_injects`] (DG.13b).
     di: DiFrameworks,
+    /// GH.7: the byte range of each item node minted (fn, method, const /
+    /// static, inline mod), so [`scan_script_includes`] credits an
+    /// `include_str!` to the innermost item holding it.
+    item_spans: Vec<(usize, usize, NodeId)>,
 }
 
 /// Where an item is declared: the file MODULE, or an inline `mod x { .. }`
@@ -304,6 +311,8 @@ fn visit_trait_methods(
         });
         acc.nav
             .record(id, name, &qname, node_kind::METHOD, Some(trait_id));
+        acc.item_spans
+            .push((child.start_byte(), child.end_byte(), id));
         if let Some(fn_body) = child.child_by_field_name("body") {
             collect_local_types(child, fn_body, src, id, None, acc);
             collect_calls_in(fn_body, src, id, &qname, acc);
@@ -353,6 +362,8 @@ fn visit_mod(node: TsNode, scope: &Scope, src: &[u8], file_rel: &str, repo: Repo
     });
     acc.nav
         .record(id, name, &qname, node_kind::PACKAGE, Some(scope.id));
+    acc.item_spans
+        .push((node.start_byte(), node.end_byte(), id));
     let inner = Scope { qname, id };
     visit_items(body, &inner, src, file_rel, repo, acc);
 }
@@ -395,6 +406,8 @@ fn visit_function(
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
+    acc.item_spans
+        .push((node.start_byte(), node.end_byte(), id));
     extractor_injects(node, src, id, &[], acc);
 
     if let Some(body) = node.child_by_field_name("body") {
@@ -485,6 +498,8 @@ fn visit_impl(
             });
             acc.nav
                 .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+            acc.item_spans
+                .push((child.start_byte(), child.end_byte(), id));
             extractor_injects(child, src, id, &impl_params, acc);
 
             if let Some(fn_body) = child.child_by_field_name("body") {
@@ -867,6 +882,8 @@ fn visit_const_static(
     });
     acc.nav
         .record(id, name, &qname, node_kind::STATE_VAR, Some(scope.id));
+    acc.item_spans
+        .push((node.start_byte(), node.end_byte(), id));
 }
 
 /// One `use` declaration, flattened to one [`ImportStmt`] per leaf of its tree
@@ -2396,6 +2413,107 @@ fn expand_format_holes(s: &str) -> String {
         }
     }
     out
+}
+
+// ============================================================================
+// GH.7: script files compiled in (`include_str!` / `include_bytes!`)
+// ============================================================================
+
+/// GH.7: the extensions of the walked languages a host runs as source
+/// (`detect_language`'s interpreted rows): an `include_str!` of one of these
+/// embeds a script another runtime executes; any other file (a README, a
+/// template, a binary blob) is data and records nothing.
+const SCRIPT_EXTS: &[&str] = &["lua", "py", "rb", "js", "ts", "php", "exs", "clj", "cljs"];
+
+/// GH.7: every `include_str!("<lit>")` / `include_bytes!("<lit>")` (also
+/// `std::` / `core::` qualified) whose path ends in a [`SCRIPT_EXTS`]
+/// extension is a [`NavFact::HostScriptRef`] (host `rustc`, conf the file,
+/// category USES, rule the macro name, the path as written: rustc reads it
+/// relative to this file) on the innermost item holding it (fn, method,
+/// const / static, inline mod; else the file MODULE). resolver:host binds it
+/// to the script's MODULE by path. A path built by a macro (`concat!`,
+/// `env!`) is `dynamic=`.
+///
+/// fired_on, per file that compiles a script in:
+/// `[rust-include] scripts=<s> other=<o> dynamic=<d> file=<p>`.
+fn scan_script_includes(
+    root: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let (mut other, mut dynamic) = (0usize, 0usize);
+    let mut found: Vec<(NodeId, String, &'static str, u32)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "macro_invocation" {
+            let name = n
+                .child_by_field_name("macro")
+                .map(|m| text_of(m, src))
+                .unwrap_or("");
+            let rule = match name.trim_start_matches("::") {
+                "include_str" | "std::include_str" | "core::include_str" => Some("include_str"),
+                "include_bytes" | "std::include_bytes" | "core::include_bytes" => {
+                    Some("include_bytes")
+                }
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                let mut c = n.walk();
+                let tt = n.named_children(&mut c).find(|t| t.kind() == "token_tree");
+                // Exactly one string literal: `include_str!("x.lua")`.
+                let lit = tt.and_then(|tt| tt.named_child(0)).filter(|f| {
+                    f.kind() == "string_literal" && tt.is_some_and(|t| t.named_child_count() == 1)
+                });
+                match lit.map(|l| string_content(l, src)) {
+                    Some(path) if is_script_path(&path) => {
+                        let at = n.start_byte();
+                        let from = acc
+                            .item_spans
+                            .iter()
+                            .filter(|(s, e, _)| *s <= at && at < *e)
+                            .min_by_key(|(s, e, _)| e - s)
+                            .map_or(module_id, |(_, _, id)| *id);
+                        found.push((from, path, rule, line_at(n)));
+                    }
+                    Some(_) => other += 1,
+                    None => dynamic += 1,
+                }
+                continue;
+            }
+        }
+        let mut cursor = n.walk();
+        let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    let scripts = found.len();
+    for (from, path, rule, line) in found {
+        acc.nav.record_fact(
+            from,
+            NavFact::HostScriptRef {
+                host: "rustc".to_string(),
+                conf: file_rel.to_string(),
+                path,
+                category: edge_category::USES,
+                rule: rule.to_string(),
+                line,
+            },
+        );
+    }
+    if scripts > 0 {
+        eprintln!(
+            "[rust-include] scripts={scripts} other={other} dynamic={dynamic} file={file_rel}"
+        );
+    }
+}
+
+/// GH.7: does `path` end in a [`SCRIPT_EXTS`] extension (ASCII case ignored)?
+fn is_script_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    base.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && SCRIPT_EXTS.iter().any(|s| s.eq_ignore_ascii_case(ext))
+    })
 }
 
 // ============================================================================
@@ -4208,6 +4326,85 @@ pub fn free() { let s = Self::new(); }
         assert_eq!(
             locals(&fp, node_kind::FUNCTION, "m::free"),
             pairs(&[("s", "")])
+        );
+    }
+}
+
+#[cfg(test)]
+mod include_script_tests {
+    use super::*;
+    use glia_code_domain::NavFact;
+
+    /// `(scope qname, path, rule, 0-based line)` of every HostScriptRef, sorted.
+    fn refs(src: &str) -> Vec<(String, String, String, u32)> {
+        let fp = parse_file(src, "crates/app/src/render.rs", "app::render", RepoId(1)).unwrap();
+        let mut out = Vec::new();
+        for (id, facts) in &fp.nav.nav_facts {
+            for f in facts {
+                if let NavFact::HostScriptRef {
+                    host,
+                    conf,
+                    path,
+                    category,
+                    rule,
+                    line,
+                } = f
+                {
+                    assert_eq!(host, "rustc");
+                    assert_eq!(conf, "crates/app/src/render.rs");
+                    assert_eq!(*category, edge_category::USES);
+                    let q = fp.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+                    out.push((q, path.clone(), rule.clone(), *line));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn r(q: &str, p: &str, rule: &str, line: u32) -> (String, String, String, u32) {
+        (q.into(), p.into(), rule.into(), line)
+    }
+
+    #[test]
+    fn include_of_a_script_file_is_a_ref_from_its_item() {
+        let got = refs(
+            r#"const GLOB: &str = include_str!("../../plugins/glob/init.lua");
+static README: &str = include_str!("../README.md");
+
+pub fn render() -> &'static str {
+    let s = std::include_str!("lua/render.lua");
+    let b = include_bytes!("py/tool.py");
+    let d = include_str!(concat!(env!("OUT_DIR"), "/gen.lua"));
+    s
+}
+
+struct Host;
+impl Host {
+    fn boot(&self) -> &'static [u8] {
+        include_bytes!("boot.lua")
+    }
+}
+
+mod inner {
+    const X: &str = include_str!("x.rb");
+}
+"#,
+        );
+        assert_eq!(
+            got,
+            [
+                r(
+                    "app::render::GLOB",
+                    "../../plugins/glob/init.lua",
+                    "include_str",
+                    0
+                ),
+                r("app::render::Host::boot", "boot.lua", "include_bytes", 13),
+                r("app::render::inner::X", "x.rb", "include_str", 18),
+                r("app::render::render", "lua/render.lua", "include_str", 4),
+                r("app::render::render", "py/tool.py", "include_bytes", 5),
+            ]
         );
     }
 }
