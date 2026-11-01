@@ -375,9 +375,17 @@ fn liveness_follows_barrel_bindings() {
     ] {
         assert!(!dead.contains(&q(live)), "{live} is dead");
     }
-    for still_dead in [
+    // GD.27: `OrderListService::total(orders: Order[])` reads the class
+    // `Order` through the barrel as a type, an incoming USES: not live, but no
+    // dead_symbol row ("no incoming call or use"), and its constructor is a
+    // used owner's (DT.5d's INVOKED_MEMBERS), withheld too.
+    for used in [
         "core::models::order.model::Order",
         "core::models::order.model::Order::constructor",
+    ] {
+        assert!(!dead.contains(&q(used)), "{used} has a used owner");
+    }
+    for still_dead in [
         "core::models::user.model::displayName",
         "core::models::order.model::displayName",
         "features::orders::order-list.service::OrderListService",
@@ -390,7 +398,7 @@ fn liveness_follows_barrel_bindings() {
     ] {
         assert!(dead.contains(&q(still_dead)), "{still_dead} is live");
     }
-    assert_eq!(dead.len(), 11, "{dead:#?}");
+    assert_eq!(dead.len(), 9, "{dead:#?}");
 }
 
 #[test]

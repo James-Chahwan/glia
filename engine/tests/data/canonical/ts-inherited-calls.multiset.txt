@@ -4,7 +4,7 @@ N package:npm:@nestjs/common[PACKAGE_DEP] medium | ORIGIN=json:{"provenance":"de
 N package:npm:@nestjs/event-emitter[PACKAGE_DEP] medium | ORIGIN=json:{"provenance":"dependency"}
 E package.json[MODULE] -> package:npm:@nestjs/common[PACKAGE_DEP] DEPENDS_ON medium | EVIDENCE=json:{"emitter":"extractor:manifest","file":"package.json","basis":"file"}
 E package.json[MODULE] -> package:npm:@nestjs/event-emitter[PACKAGE_DEP] DEPENDS_ON medium | EVIDENCE=json:{"emitter":"extractor:manifest","file":"package.json","basis":"file"}
-## graph 1 nodes=19 edges=30 unresolved_calls=1 unresolved_refs=0
+## graph 1 nodes=19 edges=31 unresolved_calls=1 unresolved_refs=0
 N event_handle:user.requested[EVENT_HANDLER] weak | POSITION=json:{"file":"src/users.listener.ts","start_line":8,"end_line":8} ; IMPORTS=json:["@nestjs/common","@nestjs/event-emitter"] ; ORIGIN=json:{"provenance":"synthetic"}
 N src::admin-repo::AdminRepo::audit[METHOD] strong | CODE=text:audit(): void {
     this.missing();
@@ -156,6 +156,7 @@ E src::user-repo::UserRepo[CLASS] -> src::user-repo::UserRepo::fetchOne[METHOD] 
 E src::user-repo::UserRepo[CLASS] -> src::user-repo::UserRepo::find[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":13,"basis":"to_node"}
 E src::user-repo[MODULE] -> src::base-repo[MODULE] IMPORTS strong | EVIDENCE=json:{"emitter":"graph:imports","rule":"symbol","file":"src/user-repo.ts","line":1,"basis":"site"}
 E src::user-repo[MODULE] -> src::user-repo::UserRepo[CLASS] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/user-repo.ts","line":4,"basis":"to_node"}
+E src::users.listener::UsersListener::constructor[METHOD] -> src::user-repo::UserRepo[CLASS] USES strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"type_ref","file":"src/users.listener.ts","line":6,"basis":"site"}
 E src::users.listener::UsersListener::onRequested[METHOD] -> src::user-repo::UserRepo::find[METHOD] CALLS strong | EVIDENCE=json:{"emitter":"graph:calls","rule":"receiver_type","file":"src/users.listener.ts","line":10,"basis":"site"}
 E src::users.listener::UsersListener[CLASS] -> src::user-repo::UserRepo[CLASS] INJECTS strong | EVIDENCE=json:{"emitter":"graph:refs","rule":"import_binding","file":"src/users.listener.ts","line":6,"basis":"site"}
 E src::users.listener::UsersListener[CLASS] -> src::users.listener::UsersListener::constructor[METHOD] DEFINES strong | EVIDENCE=json:{"emitter":"parser:typescript","file":"src/users.listener.ts","line":6,"basis":"to_node"}

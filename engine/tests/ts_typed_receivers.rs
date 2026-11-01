@@ -300,7 +300,8 @@ fn look_alikes_bind_nothing() {
 }
 
 /// dead_symbol by membership: the 10 members and classes the new edges
-/// reach are no rows; the 16 that nothing runs stay.
+/// reach are no rows (GD.27: DraftStore too, named as a return type); the 15
+/// that nothing runs stay.
 #[test]
 fn typed_receiver_targets_leave_dead_symbol() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -321,6 +322,9 @@ fn typed_receiver_targets_leave_dead_symbol() {
         "core::countries.service::CountriesService::list",
         "features::drafts::draft.store::DraftStore::patch",
         "features::drafts::draft.store::DraftStore::reset",
+        // GD.27: `makeDraft(): DraftStore` reads the class as its return
+        // type, an incoming USES (rule `type_ref`).
+        "features::drafts::draft.store::DraftStore",
         "shared::dropzone.component::Dropzone::clear",
         "shared::filing-form.component::FilingForm::reset",
         "shared::toggle.component::Toggle::sync",
@@ -334,7 +338,6 @@ fn typed_receiver_targets_leave_dead_symbol() {
         "core::auth.service::AuthService::unusedFlag",
         "core::countries.service::LegacyCodes",
         "core::countries.service::LegacyCodes::first",
-        "features::drafts::draft.store::DraftStore",
         "features::drafts::draft.store::DraftStore::drop",
         "legacy::probe::probe",
         "legacy::router::Router",

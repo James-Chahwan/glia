@@ -544,6 +544,9 @@ struct Acc {
     type_shadows: HashSet<(NodeId, String)>,
     /// FH.20: the `[ts-types]` counters.
     type_alias_stats: TypeAliasStats,
+    /// GD.27: the abstract METHODs whose signatures [`visit_abstract_method`]
+    /// read as type references (the `[ts-types] abstract_refs=` counter).
+    abstract_type_scopes: HashSet<NodeId>,
     /// GD.3: each module-level `const x = <value>` whose value names a class
     /// ([`module_const_type`]), by name -> its type text (`T`, a call-result
     /// `f()`, a static call `T.m()`). A name declared twice keeps `""`. Read
@@ -1187,6 +1190,13 @@ fn visit_top(
 /// DT.1q: the export name of `export default ..` (ECMA-262's `"default"`):
 /// what a default import (`import X from`) names.
 const DEFAULT_EXPORT: &str = "default";
+
+/// GD.27: the member name of a type-reference ref, `Attribute { <local>,
+/// TYPE_REF_MARK }`: a named or default import binding read in a type
+/// position. No identifier can spell it, so no member access collides; the
+/// graph crate's `calls::TYPE_REF_MARK` is the same text and binds the ref to
+/// an INTERFACE / CLASS / ENUM only.
+const TYPE_REF_MARK: &str = "<type>";
 
 /// DT.1q: insert into `acc.exported` every name `export <decl>` exports.
 /// `export default <decl>` exports `default` only (`export default class K`
@@ -3745,8 +3755,10 @@ fn visit_method(
 /// (so a concrete member declared above it binds too), and the nav record. Its
 /// CODE / POSITION are the signature, opening at its first decorator (CB.4: a
 /// member's decorators are `class_body` siblings). There is no body, so no
-/// call walk; parameters are not walked either (`visit_method` walks only
-/// `collect_inject_repository` over them, which a signature never carries).
+/// call walk; parameters are not walked for calls either (`visit_method` walks
+/// only `collect_inject_repository` over them, which a signature never
+/// carries), but their and the return type's names are the METHOD's type
+/// references (GD.27, [`record_signature_types`]).
 ///
 /// A computed, string or number name mints nothing (as CG.1). A name the class
 /// already holds (a repeated signature, which TS rejects) keeps one NodeId.
@@ -3809,6 +3821,11 @@ fn visit_abstract_method(
     // one fact per METHOD.
     acc.nav.record_fact(method_id, NavFact::AbstractMethod);
     acc.abstract_stats.methods += 1;
+    // GD.27: the signature's parameter and return type names are the
+    // METHOD's type references, read as [`record_callable`] reads a
+    // callable's (FH.20).
+    record_signature_types(n, src, method_id, acc);
+    acc.abstract_type_scopes.insert(method_id);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9404,6 +9421,9 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     let value_refs = std::mem::take(&mut acc.value_refs);
     let candidates = value_refs.len();
     let (mut in_file, mut imported, mut default_imported) = (0usize, 0usize, 0usize);
+    // GD.27: the (scope, import binding) pairs a value ref queued above, so a
+    // type reference of the same pair adds no second USES.
+    let mut imported_value_refs: HashSet<(NodeId, String)> = HashSet::new();
     {
         let inject_bindings = inject_import_bindings(&out.imports);
         let named_imports = named_import_bindings(&out.imports);
@@ -9494,6 +9514,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             } else if named_imports.contains(vr.name.as_str())
                 && let Some(module_id) = acc.module_id
             {
+                imported_value_refs.insert((vr.from, vr.name.clone()));
                 out.refs.push(UnresolvedRef {
                     from: vr.from,
                     from_module: module_id,
@@ -9505,6 +9526,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             } else if default_imports.contains(vr.name.as_str())
                 && let Some(module_id) = acc.module_id
             {
+                imported_value_refs.insert((vr.from, vr.name.clone()));
                 // GD.11: a default import passed by value names the module's
                 // `default` export: a USES `Attribute { <local>, default }`
                 // ref, which the graph binds through the MODULE to the
@@ -9527,29 +9549,64 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // FH.20: a type name a scope reads that names one of the file's object
     // type aliases is a USES of the alias from that scope (rule `type_ref`),
     // at the first site's row, unless the scope binds the name itself (a
-    // type parameter, a local type declaration). An imported or global type
-    // name binds nothing here.
+    // type parameter, a local type declaration).
+    // GD.27: a type name that is instead one of the file's named or default
+    // import bindings, shadowed by no type parameter or local type of the
+    // scope or an enclosing one, is a USES ref `Attribute { <local>,
+    // TYPE_REF_MARK }` the graph crate binds through the importer's import
+    // bindings to an INTERFACE / CLASS / ENUM only (`graph:refs`, rule
+    // `type_ref`). A pair a value ref already queued adds nothing; a global
+    // type name (`Promise`, `Record`) binds nothing.
     let type_refs = std::mem::take(&mut acc.type_refs);
-    let mut type_ref_edges = 0usize;
-    for tr in type_refs {
-        let Some(&to) = acc.type_aliases.get(&tr.name) else {
-            continue;
-        };
-        if to == tr.from || acc.type_shadows.contains(&(tr.from, tr.name.clone())) {
-            continue;
+    let (mut type_ref_edges, mut imported_type_refs, mut abstract_refs) = (0usize, 0usize, 0usize);
+    {
+        let named_imports = named_import_bindings(&out.imports);
+        let default_imports = default_import_bindings(&out.imports);
+        for tr in type_refs {
+            if let Some(&to) = acc.type_aliases.get(&tr.name) {
+                if to == tr.from || acc.type_shadows.contains(&(tr.from, tr.name.clone())) {
+                    continue;
+                }
+                let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+                    .rule("type_ref")
+                    .line(tr.row);
+                out.edges.push(
+                    Edge::new(tr.from, to, edge_category::USES, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
+                type_ref_edges += 1;
+                abstract_refs += usize::from(acc.abstract_type_scopes.contains(&tr.from));
+                continue;
+            }
+            let name = tr.name.as_str();
+            if !(named_imports.contains(name) || default_imports.contains(name))
+                || type_shadowed(&out.nav, &acc.type_shadows, tr.from, name)
+                || imported_value_refs.contains(&(tr.from, tr.name.clone()))
+            {
+                continue;
+            }
+            let Some(module_id) = acc.module_id else {
+                continue;
+            };
+            abstract_refs += usize::from(acc.abstract_type_scopes.contains(&tr.from));
+            out.refs.push(UnresolvedRef {
+                from: tr.from,
+                from_module: module_id,
+                qualifier: CallQualifier::Attribute {
+                    base: tr.name,
+                    name: TYPE_REF_MARK.to_string(),
+                },
+                category: edge_category::USES,
+                line: tr.row,
+            });
+            imported_type_refs += 1;
         }
-        let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
-            .rule("type_ref")
-            .line(tr.row);
-        out.edges.push(
-            Edge::new(tr.from, to, edge_category::USES, Confidence::Strong).with_cell(ev.to_cell()),
-        );
-        type_ref_edges += 1;
     }
     let ts = acc.type_alias_stats;
-    if ts.aliases + type_ref_edges > 0 {
+    if ts.aliases + type_ref_edges + imported_type_refs > 0 {
         eprintln!(
-            "[ts-types] aliases={} object={} type_refs={type_ref_edges} file={}",
+            "[ts-types] aliases={} object={} type_refs={type_ref_edges} \
+             imported_refs={imported_type_refs} abstract_refs={abstract_refs} file={}",
             ts.aliases, ts.object, acc.file_rel
         );
     }
@@ -9911,6 +9968,27 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
 }
 
 /// DT.5k: true when `id` is `class` or a node under it (`parent_of`).
+/// GD.27: true when `name` is bound as a type by `from` or a scope enclosing
+/// it (a type parameter, a local `type` / `interface` / class declaration,
+/// FH.20's [`Acc::type_shadows`]), so a type name of `from` does not name the
+/// import of that name.
+fn type_shadowed(
+    nav: &CodeNav,
+    shadows: &HashSet<(NodeId, String)>,
+    mut from: NodeId,
+    name: &str,
+) -> bool {
+    loop {
+        if shadows.contains(&(from, name.to_string())) {
+            return true;
+        }
+        match nav.parent_of.get(&from) {
+            Some(&p) => from = p,
+            None => return false,
+        }
+    }
+}
+
 fn within(nav: &CodeNav, mut id: NodeId, class: NodeId) -> bool {
     loop {
         if id == class {
@@ -14386,9 +14464,14 @@ export function pick(): Color {
 ";
         let parse = parse_file(src, "src/paint.ts", "src::paint", repo()).unwrap();
         let pick = id(node_kind::FUNCTION, "src::paint::pick");
+        // GD.27: the return type `Color` is the import read in a type
+        // position, a type-reference ref beside the member ref.
         assert_eq!(
             uses_refs(&parse, pick),
-            vec![("Color".to_string(), "Green".to_string())]
+            vec![
+                ("Color".to_string(), TYPE_REF_MARK.to_string()),
+                ("Color".to_string(), "Green".to_string()),
+            ]
         );
         let r = parse
             .refs
@@ -20419,5 +20502,126 @@ export function d() {
             .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&node_kind::CONFIG_KEY))
             .count();
         assert_eq!(keys, 2);
+    }
+}
+
+#[cfg(test)]
+mod imported_type_ref_tests {
+    //! GD.27: a type name that is a named or default import binding of the
+    //! file, read in a type position and shadowed by no type parameter or
+    //! local type of its scope or an enclosing one, is one USES ref
+    //! `Attribute { <local>, TYPE_REF_MARK }` per (scope, name) at the lowest
+    //! row; an abstract method's signature reads its type names as a
+    //! callable's does.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-imported-type-refs")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/client.ts", "src::client", repo()).expect("parse")
+    }
+
+    /// The type-reference refs `p` holds, as `(from, local name, row)` in
+    /// emission order.
+    fn type_refs(p: &FileParse) -> Vec<(NodeId, String, u32)> {
+        p.refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, name } if name == TYPE_REF_MARK => {
+                    Some((r.from, base.clone(), r.line))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    const SRC: &str = "\
+import { UserDto, Out, makeUser } from './types';
+import { Role as AccessRole } from './models';
+import type { AxiosResponse } from 'axios';
+import Repo from './repo';
+import * as ns from './ns';
+
+export async function getUser(): Promise<UserDto> {
+  const a: UserDto = await load<UserDto>();
+  return a;
+}
+
+type LocalDto = { v: number };
+
+export abstract class Tool<T> {
+  abstract run(input: UserDto): Out;
+  abstract local(input: LocalDto): T;
+}
+
+export function grant(role: AccessRole, repo: Repo, n: ns.Thing): boolean {
+  return !!role && !!repo && !!n;
+}
+
+export function wrap<UserDto>(value: UserDto): UserDto {
+  return value;
+}
+
+export function raw(res: AxiosResponse<UserDto>) {
+  return [makeUser, res];
+}
+";
+
+    #[test]
+    fn imported_type_names_are_type_refs_of_their_scope() {
+        let p = parse(SRC);
+        let f = |n: &str| id(node_kind::FUNCTION, &format!("src::client::{n}"));
+        let m = |n: &str| id(node_kind::METHOD, &format!("src::client::Tool::{n}"));
+        let row = |from: NodeId, name: &str, line: u32| (from, name.to_string(), line);
+        // Walk order, 0-based rows; one ref per (scope, name) at its first
+        // site. `wrap`'s
+        // type parameter shadows the import; `ns.Thing` is a namespace
+        // member; `Promise` is no import binding.
+        assert_eq!(
+            type_refs(&p),
+            vec![
+                row(f("getUser"), "UserDto", 6),
+                row(m("run"), "UserDto", 14),
+                row(m("run"), "Out", 14),
+                row(f("grant"), "Repo", 18),
+                row(f("grant"), "AccessRole", 18),
+                row(f("raw"), "UserDto", 26),
+                row(f("raw"), "AxiosResponse", 26),
+            ]
+        );
+        // `makeUser` read by value is a value ref, never a type ref.
+        assert!(p.refs.iter().any(|r| r.from == f("raw")
+            && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "makeUser")));
+    }
+
+    #[test]
+    fn abstract_signatures_read_in_file_aliases() {
+        let p = parse(SRC);
+        let local = id(node_kind::METHOD, "src::client::Tool::local");
+        let alias = id(node_kind::INTERFACE, "src::client::LocalDto");
+        let uses: Vec<(NodeId, Option<String>, Option<u32>)> = p
+            .edges
+            .iter()
+            .filter(|e| e.from == local && e.category == edge_category::USES)
+            .map(|e| {
+                let ev = Evidence::of(e);
+                (
+                    e.to,
+                    ev.as_ref().and_then(|ev| ev.rule.clone()),
+                    ev.and_then(|ev| ev.line),
+                )
+            })
+            .collect();
+        assert_eq!(uses, vec![(alias, Some("type_ref".to_string()), Some(15))]);
+        // The class's type parameter `T` is no import and no alias: nothing.
+        assert!(!type_refs(&p).iter().any(|(from, ..)| *from == local));
     }
 }

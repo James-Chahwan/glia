@@ -40,11 +40,24 @@ fn blast_radius_from_a_component_lands_on_the_located_service_class() {
             "{direction:?}: the component resolves"
         );
         let hits = answer.results;
+        // GD.27: walking both ways, the component's own constructor reads
+        // `UserService` as its parameter type (USES rule `type_ref`), so it
+        // joins the answer behind the class.
+        let want = match direction {
+            Reach::Both => vec![
+                ("CLASS", "user.service::UserService"),
+                ("METHOD", "users.component::UsersComponent::constructor"),
+            ],
+            _ => vec![("CLASS", "user.service::UserService")],
+        };
         assert_eq!(
-            hits.len(),
-            1,
-            "{direction:?}: exactly one hit, got {:?}",
-            hits.iter().map(|h| (&h.kind, &h.qname)).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| (h.kind.to_string(), h.qname.to_string()))
+                .collect::<Vec<_>>(),
+            want.iter()
+                .map(|(k, q)| (k.to_string(), q.to_string()))
+                .collect::<Vec<_>>(),
+            "{direction:?}"
         );
         let hit = &hits[0];
         assert_eq!(hit.kind, "CLASS", "{direction:?}");

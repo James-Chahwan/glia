@@ -9,7 +9,8 @@
 //! (`fetchJson<{ data: X }>(..)`, `: X`, `Promise<X>`, `x as X`) is a USES of
 //! the alias from the scope that holds it (parser rule `type_ref`), one edge
 //! per (scope, alias) at the first site's row. A type parameter of that name
-//! shadows the alias. This is how a generated fetch SDK (oazapfts) whose DTOs
+//! shadows the alias; an abstract method's signature is read as a callable's
+//! (GD.27). This is how a generated fetch SDK (oazapfts) whose DTOs
 //! are aliases becomes a hop a client walk crosses: client -> SDK function
 //! -> DTO.
 
@@ -72,6 +73,11 @@ export class UserApi {
   load(): Promise<UserResponseDto> {
     return getUser('me');
   }
+}
+
+export abstract class Store<T> {
+  abstract save(dto: UpdateDto): Promise<UserResponseDto>;
+  abstract keep(item: T): void;
 }
 "#;
 
@@ -220,10 +226,14 @@ fn a_type_naming_an_alias_is_a_uses_from_its_scope() {
     };
     // 0-based rows. `getUser`'s first site is its return annotation, the
     // generic argument's `data: UserResponseDto` a later one of the same
-    // pair; `shadowed`'s type parameter hides the alias.
+    // pair; `shadowed`'s type parameter hides the alias. GD.27: an abstract
+    // method's signature (`Store::save`) reads its type names as a
+    // callable's does; `keep`'s class type parameter names no alias.
     assert_eq!(
         uses,
         vec![
+            row("Store::save", "UpdateDto", 38),
+            row("Store::save", "UserResponseDto", 38),
             row("UserApi::load", "UserResponseDto", 32),
             row("getUser", "UserResponseDto", 11),
             row("listUsers", "UserResponseDto", 19),

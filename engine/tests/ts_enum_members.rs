@@ -126,10 +126,22 @@ fn member_reads_are_uses_edges_same_file_and_imported() {
             "USES {from} -> {to} missing; USES = {uses:?}"
         );
     }
+    // GD.27: `pick(): Color` and `up(): Dir` read the imported enums in a
+    // type position, a USES of each enum (rule `type_ref`) beside the
+    // member reads.
+    for (from, to) in [
+        ("src::paint::pick", "src::color::Color"),
+        ("src::paint::up", "src::color::Dir"),
+    ] {
+        assert!(
+            uses.contains(&(from, to)),
+            "USES {from} -> {to} missing; USES = {uses:?}"
+        );
+    }
     assert_eq!(
         uses.len(),
-        4,
-        "exactly the four member reads; USES = {uses:?}"
+        6,
+        "exactly the four member reads and two type refs; USES = {uses:?}"
     );
 }
 

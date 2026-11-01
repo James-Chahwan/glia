@@ -1,0 +1,21 @@
+{
+  "framework": "ts-imported-type-refs",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "GD.27 (FH.20's follow-up): a type name in a type position (a parameter / return annotation, a generic argument) that is a named or default import binding of the file is a USES of the INTERFACE / CLASS / ENUM it imports, from the scope that reads it (graph:refs rule type_ref), bound through the importer's import bindings: a plain named import, an aliased one through a re-export barrel (`import { Role as AccessRole } from './models'`, `export * from './types'`), and a default-imported class. An abstract method's signature reads its type names the way a callable's does, so `abstract run(input: UserDto): Out` USES both and `abstract local(input: LocalDto)` USES the in-file alias (parser rule type_ref, FH.20). Not edges: a type parameter shadowing an import (`wrap<UserDto>`), an imported const named as a type (`Status`, a const + type pair: the binding names a STATE_VAR), a third-party type (`AxiosResponse`), and an imported function read by value keeps its DT.5g value_ref (rule import_binding), never a type_ref. HEAD f82594d1's debug CLI (the probe this packet was specced from): getUser -> UserDto, Tool::run -> UserDto / Out and Tool::local -> LocalDto all `_(no direct edge)_`; only the in-file `getLocal -> LocalDto` read USES type_ref.",
+  "expect_edges": [
+    {"from": "src::client::getUser", "to": "src::models::types::UserDto", "category": "USES", "exact": true, "note": "Promise<UserDto> return type and axios.get<UserDto>"},
+    {"from": "src::client::Tool::run", "to": "src::models::types::UserDto", "category": "USES", "exact": true, "note": "abstract run(input: UserDto)"},
+    {"from": "src::client::Tool::run", "to": "src::models::types::Out", "category": "USES", "exact": true, "note": "abstract run(..): Out"},
+    {"from": "src::client::Tool::local", "to": "src::client::LocalDto", "category": "USES", "exact": true, "note": "abstract local(input: LocalDto): an in-file alias"},
+    {"from": "src::client::grant", "to": "src::models::types::Role", "category": "USES", "exact": true, "note": "role: AccessRole, through the barrel src/models/index.ts"},
+    {"from": "src::client::lookup", "to": "src::repo::Repo", "category": "USES", "exact": true, "note": "repo: Repo, a default-imported class"},
+    {"from": "src::client::raw", "to": "src::models::types::UserDto", "category": "USES", "exact": true, "note": "AxiosResponse<UserDto>: the generic argument"},
+    {"from": "src::client::getLocal", "to": "src::client::LocalDto", "category": "USES", "exact": true, "note": "a control: FH.20's in-file alias, already bound at HEAD"}
+  ],
+  "forbid": [
+    {"from": "src::client::wrap", "to": "src::models::types::UserDto", "category": "USES", "note": "the type parameter UserDto shadows the import"},
+    {"from": "src::client::isActive", "to": "src::models::status::Status", "category": "USES", "note": "the import binds the const Status (a STATE_VAR): no type ref"},
+    {"from": "src::client::useMaker", "to": "src::models::types::makeUser", "category": "USES", "rule": "type_ref", "note": "makeUser is read by value (value_ref, rule import_binding), never as a type"}
+  ]
+}

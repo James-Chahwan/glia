@@ -492,10 +492,14 @@ enum Branch {
     /// GD.18: a Ruby call on self that the owner does not define binds the
     /// method of a module it `include`s / `extend`s ([`mixin_target`]).
     MixinMethod,
+    /// GD.27: a TS-family named or default import binding read in a type
+    /// position (the parser's USES `Attribute { <local>, TYPE_REF_MARK }`)
+    /// binds the INTERFACE / CLASS / ENUM it imports ([`type_ref_target`]).
+    TypeRef,
 }
 
 impl Branch {
-    const COUNT: usize = 17;
+    const COUNT: usize = 18;
 
     fn rule(self) -> &'static str {
         match self {
@@ -516,6 +520,7 @@ impl Branch {
             Branch::QualifiedHeritage => "qualified_heritage",
             Branch::ContainerKey => "container_key",
             Branch::MixinMethod => "mixin_method",
+            Branch::TypeRef => "type_ref",
         }
     }
 }
@@ -1619,6 +1624,10 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                 let ev = files.place(graph_evidence("graph:refs", branch.rule()), r);
                 push_edge(g, r.from, to, r.category, ev);
             }
+            // GD.27: an unbound type reference (a third-party or global
+            // type, a non-type binding) is counted, never kept: no later pass
+            // reads one.
+            None if is_type_ref(r) => {}
             None => g.unresolved_refs.push((*r).clone()),
         }
     }
@@ -1632,7 +1641,17 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         default_unbound,
         qualified,
         self_refused,
+        type_refs,
     } = counts;
+    // GD.27 fired_on, once per TS-family graph build that read an imported
+    // type name:
+    //   `[ts-types] imported type refs bound=B unbound=U non_type=N`
+    if type_refs.bound + type_refs.unbound + type_refs.non_type > 0 {
+        eprintln!(
+            "[ts-types] imported type refs bound={} unbound={} non_type={}",
+            type_refs.bound, type_refs.unbound, type_refs.non_type
+        );
+    }
     // GD.7 fired_on, once per language graph build that read a qualified
     // heritage base, one line per language:
     //   `[heritage] qualified refs=Q bound=B unbound_external=U lang=L`
@@ -1713,6 +1732,22 @@ struct RefCounts {
     qualified: [(usize, usize); QualifiedLang::ALL.len()],
     /// GD.7: heritage refs whose lookup answered the declaring type itself.
     self_refused: usize,
+    /// GD.27: the imported type references, by outcome.
+    type_refs: TypeRefCounts,
+}
+
+/// GD.27: what [`decide_ref`] made of the TS-family imported type references
+/// (the `[ts-types] imported type refs` marker).
+#[derive(Default, Clone, Copy)]
+struct TypeRefCounts {
+    /// Bound to an INTERFACE / CLASS / ENUM.
+    bound: usize,
+    /// The import binding names no in-repo declaration (a third-party
+    /// package, an alias that mints no node).
+    unbound: usize,
+    /// The binding names a declaration that is no type (a FUNCTION, a
+    /// STATE_VAR, a MODULE whose default export is none).
+    non_type: usize,
 }
 
 impl RefCounts {
@@ -1732,6 +1767,9 @@ impl RefCounts {
             mine.1 += theirs.1;
         }
         self.self_refused += other.self_refused;
+        self.type_refs.bound += other.type_refs.bound;
+        self.type_refs.unbound += other.type_refs.unbound;
+        self.type_refs.non_type += other.type_refs.non_type;
     }
 }
 
@@ -1810,6 +1848,29 @@ fn decide_ref(
                     }
                 }),
         },
+        // GD.27: a TS-family import binding read in a type position
+        // (`getUser(): Promise<UserDto>` after `import { UserDto } from
+        // './types'`) binds through the importer's bindings (re-export
+        // barrels, workspace packages and bundler aliases included) to the
+        // INTERFACE / CLASS / ENUM it imports, and to nothing else: never a
+        // name guess.
+        CallQualifier::Attribute { base, .. } if is_type_ref(r) => {
+            let bound = bindings.and_then(|b| b.get(base).copied());
+            match bound.map(|b| type_ref_target(g, b, base)) {
+                Some(Some(to)) => {
+                    counts.type_refs.bound += 1;
+                    Some((to, Branch::TypeRef))
+                }
+                Some(None) => {
+                    counts.type_refs.non_type += 1;
+                    None
+                }
+                None => {
+                    counts.type_refs.unbound += 1;
+                    None
+                }
+            }
+        }
         // GD.7: a Ruby / PHP / Java heritage base written with its qualifier
         // binds only the in-repo type at that path; a framework base
         // (`ActiveRecord::Base`, `org.springframework.X`) binds nothing, and
@@ -4031,6 +4092,33 @@ fn default_import_binding(g: &RepoGraph, module: NodeId, name: &str) -> Option<N
 /// GD.11: the ES export name a default import binds.
 const DEFAULT_EXPORT: &str = "default";
 
+/// GD.27: the member name the TS parser gives an import binding read in a
+/// type position (its `TYPE_REF_MARK`, the same text): no identifier spells
+/// it.
+const TYPE_REF_MARK: &str = "<type>";
+
+/// GD.27: true for a TS parser type reference, the USES `Attribute { <local>,
+/// TYPE_REF_MARK }` ref.
+fn is_type_ref(r: &UnresolvedRef) -> bool {
+    r.category == edge_category::USES
+        && matches!(&r.qualifier, CallQualifier::Attribute { name, .. } if name == TYPE_REF_MARK)
+}
+
+/// GD.27: the type an import binding read in a type position names: the
+/// binding itself, or for a default import bound to its MODULE the
+/// declaration the module exports as `default` ([`default_export_target`],
+/// [`default_class`]); kept only when it is an INTERFACE, CLASS or ENUM.
+fn type_ref_target(g: &RepoGraph, bound: NodeId, local: &str) -> Option<NodeId> {
+    let to = if g.nav.kind_by_id.get(&bound) == Some(&node_kind::MODULE) {
+        default_export_target(g, bound).or_else(|| default_class(g, bound, local))?
+    } else {
+        bound
+    };
+    matches!(g.nav.kind_by_id.get(&to), Some(&k)
+        if k == node_kind::INTERFACE || k == node_kind::CLASS || k == node_kind::ENUM)
+    .then_some(to)
+}
+
 /// GD.11: the declaration a TS default import bound to `bound` names. A
 /// declaration (a barrel's `default` entry DT.1q already resolved) is
 /// itself; a MODULE is looked through to the local its
@@ -6201,6 +6289,105 @@ mod tests {
         assert_eq!(uses, vec![(run, work, Some("default_export".to_string()))]);
         assert_eq!(g.unresolved_refs.len(), 1);
         assert_eq!(g.unresolved_refs[0].line, 4);
+    }
+
+    /// GD.27: a TS import binding read in a type position (the parser's USES
+    /// `Attribute { <local>, TYPE_REF_MARK }`) binds through the importer's
+    /// bindings to an INTERFACE / CLASS / ENUM only (rule `type_ref`): a
+    /// named import of an interface and a default import of a class bind; a
+    /// named import of a FUNCTION (non-type) and of a third-party package
+    /// (unbound) bind nothing and are not kept as unresolved refs.
+    #[test]
+    fn imported_type_refs_bind_types_only() {
+        let mut t = Shape::new();
+        let mt = t.add(node_kind::MODULE, "src::types", None);
+        let dto = t.add(node_kind::INTERFACE, "src::types::UserDto", Some(mt));
+        t.add(node_kind::FUNCTION, "src::types::makeUser", Some(mt));
+        let mut p = Shape::new();
+        let mp = p.add(node_kind::MODULE, "src::repo", None);
+        let repo_class = p.add(node_kind::CLASS, "src::repo::Repo", Some(mp));
+        p.nav.record_fact(
+            mp,
+            NavFact::Exports {
+                names: vec!["default".to_string()],
+            },
+        );
+        let mut c = Shape::new();
+        let mc = c.add(node_kind::MODULE, "src::client", None);
+        let get = c.add(node_kind::FUNCTION, "src::client::getUser", Some(mc));
+        let import = |module: &str, name: &str, alias: Option<&str>| ImportStmt {
+            from_module: "src::client".to_string(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: name.to_string(),
+                alias: alias.map(str::to_string),
+                level: 0,
+            },
+            line: 0,
+        };
+        let type_ref = |local: &str, line: u32| UnresolvedRef {
+            from: get,
+            from_module: mc,
+            qualifier: CallQualifier::Attribute {
+                base: local.to_string(),
+                name: TYPE_REF_MARK.to_string(),
+            },
+            category: edge_category::USES,
+            line,
+        };
+        let mut client_file = c.file(
+            vec![
+                import("./types", "UserDto", Some("Dto")),
+                import("./types", "makeUser", None),
+                import("./repo", "default", Some("Repo")),
+                import("axios", "AxiosResponse", None),
+            ],
+            vec![],
+            vec![
+                type_ref("Dto", 3),
+                type_ref("makeUser", 4),
+                type_ref("Repo", 5),
+                type_ref("AxiosResponse", 6),
+            ],
+        );
+        place(&mut client_file, mc, "src/client.ts");
+        let g = build_typescript(
+            repo(),
+            vec![
+                t.file(vec![], vec![], vec![]),
+                p.file(vec![], vec![], vec![]),
+                client_file,
+            ],
+            |_, spec| match spec {
+                "./types" => Some("src::types".to_string()),
+                "./repo" => Some("src::repo".to_string()),
+                _ => None,
+            },
+        )
+        .unwrap();
+        let uses: Vec<(NodeId, NodeId, Option<String>, Option<u32>)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .map(|e| {
+                let ev = Evidence::of(e);
+                (
+                    e.from,
+                    e.to,
+                    ev.as_ref().and_then(|ev| ev.rule.clone()),
+                    ev.and_then(|ev| ev.line),
+                )
+            })
+            .collect();
+        // Refs apply in input order.
+        assert_eq!(
+            uses,
+            vec![
+                (get, dto, Some("type_ref".to_string()), Some(3)),
+                (get, repo_class, Some("type_ref".to_string()), Some(5)),
+            ]
+        );
+        assert!(g.unresolved_refs.is_empty(), "{:?}", g.unresolved_refs);
     }
 
     /// Two files contributing fields to one owner (a C# `partial class`) keep
