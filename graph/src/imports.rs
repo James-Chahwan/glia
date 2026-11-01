@@ -407,6 +407,10 @@ pub(crate) struct NamespaceStats {
     /// A `.php` import into an undeclared namespace under a root namespace
     /// the repo declares: left unbound, never the short-name guess.
     pub(crate) refused_owned_root: usize,
+    /// GD.7: a `.php` import into a namespace no in-repo PACKAGE declares
+    /// under a root the repo does not own (`use Symfony\Bundle\..\Security`):
+    /// left unbound, never the short-name guess of an app type of that name.
+    pub(crate) unowned_php: usize,
     /// The importers' file extensions, for the marker's discriminator.
     pub(crate) exts: BTreeSet<String>,
 }
@@ -457,11 +461,14 @@ impl Namespaces {
             }
             NsHit::Namespace => NsStep::Fallthrough,
             NsHit::NotDeclared => {
-                if idx.owns_root(ns) && same.importer_ext(g, importer).as_deref() == Some("php") {
+                if same.importer_ext(g, importer).as_deref() != Some("php") {
+                    NsStep::Fallthrough
+                } else if idx.owns_root(ns) {
                     self.stats.refused_owned_root += 1;
                     NsStep::Refuse
                 } else {
-                    NsStep::Fallthrough
+                    self.stats.unowned_php += 1;
+                    NsStep::Refuse
                 }
             }
         };
@@ -485,6 +492,7 @@ impl Namespaces {
             missing,
             refused_owned_root,
             exts,
+            ..
         } = &self.stats;
         (bound + ambiguous + missing + refused_owned_root > 0).then(|| {
             format!(
@@ -496,6 +504,16 @@ impl Namespaces {
                     .join(",")
             )
         })
+    }
+}
+
+impl Namespaces {
+    /// GD.7 fired_on, once per [`resolve_imports_python`] call that refused
+    /// a PHP `use` of a namespace the repo does not own:
+    ///   `[imports] php unowned-namespace uses={n}`
+    fn unowned_marker(&self) -> Option<String> {
+        let n = self.stats.unowned_php;
+        (n > 0).then(|| format!("[imports] php unowned-namespace uses={n}"))
     }
 }
 
@@ -533,8 +551,11 @@ fn module_exts(g: &RepoGraph) -> HashMap<NodeId, String> {
 /// short name (`tail_unique`). A declared namespace without a unique member
 /// of the name binds nothing, and so does a `.php` import into an undeclared
 /// namespace under a root namespace the repo declares (`use App\Legal\X`
-/// beside `namespace App\Billing`); a vendor root (`Illuminate\..`) and
-/// every language without namespace PACKAGEs keep the short-name fallback.
+/// beside `namespace App\Billing`), or (GD.7) into any other namespace no
+/// in-repo PACKAGE declares: a vendor root (`use
+/// Symfony\Bundle\SecurityBundle\Security`) never binds an app type of the
+/// same short name. Every language without namespace PACKAGEs keeps the
+/// short-name fallback.
 pub(crate) fn resolve_imports_python(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
@@ -560,6 +581,9 @@ pub(crate) fn python_import_bindings(
     let (out, ns) = decide_imports_dotted(g, imports, same, &mut stars);
     out.apply_bindings(g);
     if let Some(line) = ns.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = ns.unowned_marker() {
         eprintln!("{line}");
     }
     if let Some(line) = stars.marker() {
@@ -641,6 +665,9 @@ fn resolve_imports_dotted(
     out.apply_bindings(g);
     push_import_edges(g, &out.edges);
     if let Some(line) = ns.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = ns.unowned_marker() {
         eprintln!("{line}");
     }
     stars
@@ -2587,22 +2614,22 @@ mod tests {
     }
 
     #[test]
-    fn vendor_namespace_keeps_tail() {
+    fn vendor_namespace_binds_nothing_php() {
+        // GD.7: `use Illuminate\Support\Invoicer;` from a `.php` file. No file
+        // declares an `Illuminate` namespace, so the repo does not own that
+        // root: the app's `App\Billing\Invoicer` is not what it names, and
+        // the short-name guess (`tail_unique`, HEAD) is refused.
         let mut parses = vec![php_class(
             "src/Billing/Invoicer.php",
             "src::Billing::Invoicer",
             "App::Billing",
             &["issue"],
         )];
-        // `use Illuminate\Support\Invoicer;`: no file declares an
-        // `Illuminate` namespace, so the repo does not own that root.
         parses.push(service("VendorService", "php", "Illuminate::Support"));
+        let imports = all_imports(&parses);
         let g = build_dotted(repo(), parses).expect("build");
-        let billing = class("src::Billing::Invoicer");
-        assert_eq!(
-            imports_of(&g, "src::Orders::VendorService"),
-            [(billing, "tail_unique".to_string())]
-        );
+        assert!(imports_of(&g, "src::Orders::VendorService").is_empty());
+        assert!(calls_of(&g, "VendorService").is_empty());
         let idx = NamespaceIndex::build(&g);
         assert_eq!(
             idx.member("Illuminate::Support", "Invoicer"),
@@ -2610,6 +2637,40 @@ mod tests {
         );
         assert!(!idx.owns_root("Illuminate::Support"));
         assert!(idx.owns_root("App::Legal"));
+        let mut same = same_stem_table(&g);
+        let mut ns = Namespaces::default();
+        for stmt in &imports {
+            if let ImportTarget::Symbol { module, name, .. } = &stmt.target {
+                let from = module_id(&g, &stmt.from_module);
+                ns.step(&g, &mut same, module, name, from);
+            }
+        }
+        assert_eq!(ns.stats.unowned_php, 1);
+        assert_eq!(
+            ns.unowned_marker().as_deref(),
+            Some("[imports] php unowned-namespace uses=1")
+        );
+        // The owned-namespace marker is unchanged by the refusal.
+        assert_eq!(ns.marker(), None);
+    }
+
+    #[test]
+    fn vendor_namespace_non_php_keeps_tail() {
+        // The same vendor import from a `.py` importer (no namespace
+        // PACKAGEs in its language) keeps the short-name fallback.
+        let mut parses = vec![php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        )];
+        parses.push(service("VendorService", "py", "Illuminate::Support"));
+        let g = build_dotted(repo(), parses).expect("build");
+        let billing = class("src::Billing::Invoicer");
+        assert_eq!(
+            imports_of(&g, "src::Orders::VendorService"),
+            [(billing, "tail_unique".to_string())]
+        );
     }
 
     #[test]

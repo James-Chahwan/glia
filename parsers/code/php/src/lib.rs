@@ -47,6 +47,7 @@ pub fn parse_file(
         module_qname: module_qname.to_string(),
         own_types: declared_types(root, src),
         namespace_tails: namespace_tails(root, src),
+        class_uses: class_uses(root, src),
         ..Acc::default()
     };
 
@@ -308,6 +309,10 @@ struct Acc {
     /// DH.14: the last `\` segment of every namespace this file declares
     /// ([`namespace_tails`]), read up front for [`heritage_refs`]' stopgap.
     namespace_tails: Vec<String>,
+    /// GD.7: every class `use` of the file as (local name, full `\` path),
+    /// read up front ([`class_uses`]) so [`heritage_refs`] resolves a short or
+    /// relative base to its full name.
+    class_uses: Vec<(String, String)>,
     /// DH.14: heritage names [`heritage_refs`] skipped because they equal one
     /// of `namespace_tails` — the `[php-heritage] namespace-named` count.
     namespace_named_bases: usize,
@@ -625,38 +630,37 @@ fn heritage_clause<'a>(decl: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     decl.named_children(&mut cursor).find(|k| k.kind() == kind)
 }
 
-/// DH.14: one Bare `category` ref from the declared type `from` per type name
-/// `clause` lists, in source order. The qualifier is the written name's last
-/// `\` segment: a fully-qualified `\App\Contracts\UserRepository`, a relative
-/// `Contracts\UserRepository` or `namespace\UserRepository` and an imported
-/// short name all reduce to `UserRepository`. The graph binds it
-/// (`resolve_refs`): the file's `use` bindings, then the scope's own types, then
-/// a type of that name unique in the repo; a framework base no in-repo type
-/// shares a name with binds nothing. A name equal to the declaring type's own
-/// `own` (`class TestCase extends \PHPUnit\Framework\TestCase`; PHP type
-/// names compare case-insensitively) is skipped: a type never extends itself,
-/// and the repo-unique lookup would bind it to itself. `from_module` scopes the
-/// lookup (the file MODULE, or a braced namespace's PACKAGE). Each ref's line
-/// is its name's own row (LC.3b), the clause's row unless the list wraps.
+/// DH.14, GD.7: one `category` ref from the declared type `from` per type
+/// name `clause` lists, in source order. A name written with a qualifier keeps
+/// it: a fully-qualified `\App\Contracts\UserRepository`, a relative
+/// `Contracts\UserRepository` (through a `use` of its first segment, else the
+/// declaring namespace), `namespace\UserRepository`, and a short name a class
+/// `use` imports are each resolved to their full name ([`full_type_name`]) and
+/// emitted as `Attribute { base: "::<namespace>", name }` (`base: "::"` for
+/// the global namespace), so the graph binds only the member of that in-repo
+/// namespace, never another namespace's type of the same short name
+/// (`extends \Illuminate\Database\Eloquent\Model` beside an app
+/// `App\Models\Model`). An unqualified, un-imported name stays `Bare`: the
+/// graph binds it through the scope's own types, then a type of that name
+/// unique in the repo. A Bare name equal to the declaring type's own `own`
+/// (PHP type names compare case-insensitively) is skipped: a type never
+/// extends itself. `from_module` scopes the lookup (the file MODULE, or a
+/// braced namespace's PACKAGE). Each ref's line is its name's own row (LC.3b),
+/// the clause's row unless the list wraps.
 ///
-/// STOPGAP (DH.14): a name equal to the last segment of a namespace this file
-/// declares is skipped too (`namespace App\Command; class SyncCommand extends
-/// Command`, Laravel's `namespace App\Http\Middleware; class TrimStrings
-/// extends Middleware`). `resolve_refs` binds a Bare heritage name through the
-/// file MODULE's `module_symbols`, then `unique_global_function`, and both
-/// index the file's namespace PACKAGE by that segment, so the class would
-/// INHERITS_FROM its own namespace (C# `namespace App.Command { class X :
-/// Command }` binds so at HEAD). The cost: an in-repo base of that same short
-/// name is not linked either (Slim's `DomainRecordNotFoundException extends
-/// DomainException` inside `namespace App\Domain\DomainException`, which
-/// HEAD's lookup would bind to the PACKAGE too). A namespace declared in
-/// ANOTHER file is not seen here, so that collision still binds the PACKAGE:
-/// directly, or through the IMPORTS binding the import resolver draws by name
-/// alone (`tail_unique`: `use Illuminate\Console\Command;` binds a repo's
-/// `App\Command` namespace). Removal:
-/// once `resolve_refs` restricts a heritage target to a type kind (CLASS /
-/// INTERFACE / ENUM / STRUCT / TRAIT), delete this check, `Acc::namespace_tails`,
-/// `Acc::namespace_named_bases` and its marker line.
+/// STOPGAP (DH.14): a Bare name equal to the last segment of a namespace this
+/// file declares is skipped too (`namespace App\Command; class SyncCommand
+/// extends Command`, Laravel's `namespace App\Http\Middleware; class
+/// TrimStrings extends Middleware`). `resolve_refs` binds a Bare heritage name
+/// through the file MODULE's `module_symbols`, then `unique_global_function`,
+/// and both index the file's namespace PACKAGE by that segment, so the class
+/// would INHERITS_FROM its own namespace (C# `namespace App.Command { class X
+/// : Command }` binds so at HEAD). The cost: an in-repo base of that same
+/// short name is not linked either (Slim's `DomainRecordNotFoundException
+/// extends DomainException` inside `namespace App\Domain\DomainException`).
+/// Removal: once `resolve_refs` restricts a Bare heritage target to a type
+/// kind (CLASS / INTERFACE / ENUM / STRUCT / TRAIT), delete this check,
+/// `Acc::namespace_tails`, `Acc::namespace_named_bases` and its marker line.
 fn heritage_refs(
     clause: TsNode,
     src: &[u8],
@@ -666,6 +670,12 @@ fn heritage_refs(
     category: EdgeCategoryId,
     acc: &mut Acc,
 ) {
+    let namespace = acc
+        .own_types
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(own))
+        .map(|t| t.namespace.clone())
+        .unwrap_or_default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut cursor = clause.walk();
     for written in clause.named_children(&mut cursor) {
@@ -673,29 +683,109 @@ fn heritage_refs(
             continue;
         }
         let text = text_of(written, src).trim();
-        let last = text.rsplit('\\').next().unwrap_or(text).trim();
-        if last.is_empty()
-            || last.eq_ignore_ascii_case(own)
-            || !seen.insert(last.to_ascii_lowercase())
-        {
+        let full = full_type_name(text, &namespace, &acc.class_uses);
+        let shown = full.as_deref().unwrap_or(text);
+        let (ns, last) = shown.rsplit_once('\\').unwrap_or(("", shown));
+        let last = last.trim();
+        if last.is_empty() || !seen.insert(shown.to_ascii_lowercase()) {
             continue;
         }
-        if acc
-            .namespace_tails
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case(last))
-        {
-            acc.namespace_named_bases += 1;
-            continue;
-        }
+        let qualifier = if full.is_some() {
+            CallQualifier::Attribute {
+                base: format!("::{}", ns.replace('\\', "::")),
+                name: last.to_string(),
+            }
+        } else {
+            if last.eq_ignore_ascii_case(own) {
+                continue;
+            }
+            if acc
+                .namespace_tails
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(last))
+            {
+                acc.namespace_named_bases += 1;
+                continue;
+            }
+            CallQualifier::Bare(last.to_string())
+        };
         acc.refs.push(UnresolvedRef {
             from,
             from_module,
-            qualifier: CallQualifier::Bare(last.to_string()),
+            qualifier,
             category,
             line: line_at(written),
         });
     }
+}
+
+/// GD.7: the full `\` name (leading `\` stripped) a type name written in
+/// namespace `namespace` (`::`-joined) names, by PHP's name resolution:
+/// `\A\B` is absolute, `namespace\B` is the current namespace's, `A\B`
+/// resolves its first segment through a class `use` (else the current
+/// namespace), and a short name imported by a class `use` is that import's
+/// path. `None` for an unqualified name no `use` imports: it stays Bare.
+fn full_type_name(text: &str, namespace: &str, uses: &[(String, String)]) -> Option<String> {
+    let current = namespace.replace("::", "\\");
+    let in_current = |rest: &str| {
+        if current.is_empty() {
+            rest.to_string()
+        } else {
+            format!("{current}\\{rest}")
+        }
+    };
+    let imported = |local: &str| {
+        uses.iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(local))
+            .map(|(_, path)| path.clone())
+    };
+    if let Some(abs) = text.strip_prefix('\\') {
+        return Some(abs.to_string());
+    }
+    if let Some(rest) = text
+        .get(..10)
+        .filter(|head| head.eq_ignore_ascii_case("namespace\\"))
+        .and_then(|_| text.get(10..))
+    {
+        return Some(in_current(rest));
+    }
+    match text.split_once('\\') {
+        Some((first, rest)) => Some(match imported(first) {
+            Some(path) => format!("{path}\\{rest}"),
+            None => in_current(text),
+        }),
+        None => imported(text),
+    }
+}
+
+/// GD.7: every class `use` clause of the file (statement form and inside a
+/// braced namespace) as (local name, full path): the alias, else the path's
+/// last segment.
+fn class_uses(root: TsNode, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        let kids: Vec<TsNode> = node.named_children(&mut cursor).collect();
+        for kid in kids.into_iter().rev() {
+            match kid.kind() {
+                "namespace_use_declaration" => {
+                    for c in use_clauses(kid, src) {
+                        if c.kind != UseKind::Class {
+                            continue;
+                        }
+                        let local = c.alias.clone().unwrap_or_else(|| {
+                            c.path.rsplit('\\').next().unwrap_or(&c.path).to_string()
+                        });
+                        out.push((local, c.path));
+                    }
+                }
+                "namespace_definition" | "compound_statement" => stack.push(kid),
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// DH.14: the last `\` segment of every namespace a file declares (statement
@@ -4724,7 +4814,8 @@ class AuditService
     }
 
     /// DH.14: every heritage ref of a parse as `(from qname, category,
-    /// qualifier name, 0-based line)`, in emission order.
+    /// qualifier name, 0-based line)`, in emission order; a GD.7 qualified
+    /// ref's name reads `<base>|<name>`.
     fn heritage_of(fp: &FileParse) -> Vec<(String, u32, String, u32)> {
         fp.refs
             .iter()
@@ -4734,10 +4825,12 @@ class AuditService
             })
             .map(|r| {
                 let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
-                let CallQualifier::Bare(name) = &r.qualifier else {
-                    panic!("heritage refs are Bare: {:?}", r.qualifier);
+                let name = match &r.qualifier {
+                    CallQualifier::Bare(name) => name.clone(),
+                    CallQualifier::Attribute { base, name } => format!("{base}|{name}"),
+                    other => panic!("heritage refs are Bare or Attribute: {other:?}"),
                 };
-                (from, r.category.0, name.clone(), r.line)
+                (from, r.category.0, name, r.line)
             })
             .collect()
     }
@@ -4827,7 +4920,7 @@ class AuditService
                 h("src::Report", INHERITS, "Document", 3),
                 h("src::Report", IMPLEMENTS, "Exportable", 3),
                 h("src::Report", IMPLEMENTS, "Countable", 3),
-                h("src::Report", IMPLEMENTS, "JsonSerializable", 4),
+                h("src::Report", IMPLEMENTS, "::|JsonSerializable", 4),
             ]
         );
         assert_eq!(
@@ -4850,7 +4943,7 @@ class AuditService
             heritage_of(&fp),
             [
                 h("Catalog", INHERITS, "Readable", 3),
-                h("Catalog", INHERITS, "Countable", 3)
+                h("Catalog", INHERITS, "::|Countable", 3)
             ]
         );
         let catalog = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "Catalog");
@@ -4888,19 +4981,34 @@ class AuditService
     }
 
     #[test]
-    fn qualified_name_uses_last_segment() {
-        // Fully-qualified, namespace-relative and `namespace\`-relative names
-        // all reduce to their last `\` segment; a braced namespace scopes the
-        // lookup by its PACKAGE (where its types are indexed).
+    fn qualified_names_keep_their_namespace() {
+        // GD.7: fully-qualified, namespace-relative and `namespace\`-relative
+        // names keep their full namespace as an Attribute base (rooted `::`);
+        // a braced namespace scopes the lookup by its PACKAGE.
         let source = "<?php\nnamespace App\\Repos {\n    class Users extends \\Illuminate\\Database\\Eloquent\\Model implements \\App\\Contracts\\UserRepository, Contracts\\Audited, namespace\\Local {}\n}\n";
         let fp = parse_file(source, "src/Repos.php", "src::Repos", repo()).unwrap();
         assert_eq!(
             heritage_of(&fp),
             [
-                h("App::Repos::Users", INHERITS, "Model", 2),
-                h("App::Repos::Users", IMPLEMENTS, "UserRepository", 2),
-                h("App::Repos::Users", IMPLEMENTS, "Audited", 2),
-                h("App::Repos::Users", IMPLEMENTS, "Local", 2),
+                h(
+                    "App::Repos::Users",
+                    INHERITS,
+                    "::Illuminate::Database::Eloquent|Model",
+                    2
+                ),
+                h(
+                    "App::Repos::Users",
+                    IMPLEMENTS,
+                    "::App::Contracts|UserRepository",
+                    2
+                ),
+                h(
+                    "App::Repos::Users",
+                    IMPLEMENTS,
+                    "::App::Repos::Contracts|Audited",
+                    2
+                ),
+                h("App::Repos::Users", IMPLEMENTS, "::App::Repos|Local", 2),
             ]
         );
         let package = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Repos");
@@ -4912,26 +5020,65 @@ class AuditService
     }
 
     #[test]
-    fn a_base_named_like_its_subclass_is_skipped() {
-        // `class TestCase extends \PHPUnit\Framework\TestCase` names a vendor
-        // base; its last segment is the class's own name, which the
-        // repo-unique lookup would bind to the class itself.
-        let source = "<?php\nnamespace Tests;\n\nabstract class TestCase extends \\PHPUnit\\Framework\\TestCase implements Fixture {}\n";
+    fn imported_short_names_resolve_through_use() {
+        // GD.7: a short name a class `use` imports (aliased or not), and a
+        // relative name whose first segment one imports, are their full
+        // name; an un-imported short name stays Bare.
+        let source = "<?php\nnamespace App\\Ctl;\n\nuse Symfony\\Bundle\\SecurityBundle\\Security;\nuse Vendor\\Base\\Thing as Parent_;\nuse Vendor\\Contracts;\n\nclass Guard extends Security implements Contracts\\Audited, Local {}\nclass Sub extends Parent_ {}\n";
+        let fp = parse_file(source, "src/Ctl/Guard.php", "src::Ctl::Guard", repo()).unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [
+                h(
+                    "src::Ctl::Guard",
+                    INHERITS,
+                    "::Symfony::Bundle::SecurityBundle|Security",
+                    7
+                ),
+                h(
+                    "src::Ctl::Guard",
+                    IMPLEMENTS,
+                    "::Vendor::Contracts|Audited",
+                    7
+                ),
+                h("src::Ctl::Guard", IMPLEMENTS, "Local", 7),
+                h("src::Ctl::Sub", INHERITS, "::Vendor::Base|Thing", 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_vendor_base_named_like_its_subclass_keeps_its_namespace() {
+        // `class TestCase extends \PHPUnit\Framework\TestCase` names a
+        // vendor base by its full name (GD.7): the graph binds only an
+        // in-repo `PHPUnit\Framework\TestCase`, and never the class itself.
+        // An unqualified base named like the class is still skipped.
+        let source = "<?php\nnamespace Tests;\n\nabstract class TestCase extends \\PHPUnit\\Framework\\TestCase implements Fixture {}\nclass Fixture2 extends Fixture2 {}\n";
         let fp = parse_file(source, "tests/TestCase.php", "tests::TestCase", repo()).unwrap();
         assert_eq!(
             heritage_of(&fp),
-            [h("tests::TestCase", IMPLEMENTS, "Fixture", 3)]
+            [
+                h(
+                    "tests::TestCase",
+                    INHERITS,
+                    "::PHPUnit::Framework|TestCase",
+                    3
+                ),
+                h("tests::TestCase", IMPLEMENTS, "Fixture", 3),
+            ]
         );
     }
 
     #[test]
     fn a_base_named_like_a_namespace_of_the_file_is_skipped() {
-        // DH.14's stopgap: the graph's Bare heritage lookup would bind these
-        // to the file's own namespace PACKAGE (`App::Command`,
-        // `App::Http::Middleware`); the other clause names are unaffected.
-        let symfony = "<?php\nnamespace App\\Command;\n\nuse Symfony\\Component\\Console\\Command\\Command;\n\nclass SyncCommand extends Command implements Audited {}\n";
+        // DH.14's stopgap, for an unqualified base no `use` imports: the
+        // graph's Bare heritage lookup would bind it to the file's own
+        // namespace PACKAGE (`App::Command`); the other clause names are
+        // unaffected. An imported base of that name keeps its full name
+        // (GD.7), so it no longer needs the stopgap.
+        let bare = "<?php\nnamespace App\\Command;\n\nclass SyncCommand extends Command implements Audited {}\n";
         let fp = parse_file(
-            symfony,
+            bare,
             "src/Command/SyncCommand.php",
             "src::Command::SyncCommand",
             repo(),
@@ -4939,7 +5086,7 @@ class AuditService
         .unwrap();
         assert_eq!(
             heritage_of(&fp),
-            [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 5)]
+            [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 3)]
         );
         let laravel = "<?php\n\nnamespace App\\Http\\Middleware;\n\nuse Illuminate\\Foundation\\Http\\Middleware\\TrimStrings as Middleware;\n\nclass TrimStrings extends Middleware\n{\n}\n";
         let fp = parse_file(
@@ -4949,7 +5096,15 @@ class AuditService
             repo(),
         )
         .unwrap();
-        assert!(heritage_of(&fp).is_empty(), "{:?}", heritage_of(&fp));
+        assert_eq!(
+            heritage_of(&fp),
+            [h(
+                "app::Http::Middleware::TrimStrings",
+                INHERITS,
+                "::Illuminate::Foundation::Http::Middleware|TrimStrings",
+                6
+            )]
+        );
         assert_eq!(
             namespace_tails(tree_root(laravel).root_node(), laravel.as_bytes()),
             ["Middleware"]
@@ -4967,8 +5122,9 @@ class AuditService
     #[test]
     fn eloquent_model_detection_unchanged() {
         // The Eloquent check still reads the base clause; the same clause now
-        // also yields the INHERITS_FROM ref (which binds only an in-repo
-        // `Model`).
+        // also yields the INHERITS_FROM ref, under the full name its `use`
+        // imports (GD.7: it binds only an in-repo
+        // `Illuminate\Database\Eloquent\Model`).
         let source = r#"<?php
 namespace App\Models;
 
@@ -4989,7 +5145,12 @@ class Flight extends Model
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:Flight"]);
         assert_eq!(
             heritage_of(&fp),
-            [h("app::Models::Flight", INHERITS, "Model", 5)]
+            [h(
+                "app::Models::Flight",
+                INHERITS,
+                "::Illuminate::Database::Eloquent|Model",
+                5
+            )]
         );
     }
 

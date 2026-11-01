@@ -1295,10 +1295,18 @@ fn visit_method(
 }
 
 /// G12.5: record an unresolved heritage reference (extends/implements) from a
-/// class to a supertype name. The graph's `resolve_refs` binds the
-/// `Bare(TypeName)` qualifier (for INHERITS_FROM / IMPLEMENTS) to the
-/// uniquely-named class/interface across the repo and forms the concrete edge —
-/// so we emit a REF, not a direct edge to a name-derived (phantom) NodeId.
+/// class to a supertype name. The graph's `resolve_refs` binds it and forms
+/// the concrete edge — so we emit a REF, not a direct edge to a name-derived
+/// (phantom) NodeId.
+///
+/// GD.7: a qualified supertype keeps its qualifier. `extends org.x.Base` is
+/// `Attribute { base: "org.x", name: "Base" }`, and so is a short name or
+/// the first segment of `Outer.Inner` that a single-type import names
+/// (`import org.x.Base;` then `extends Base`): the graph binds only the
+/// in-repo type at that path, never an app class sharing the last segment,
+/// and a class extending a same-named class of another package
+/// (`class X extends org.a.input.X`) binds that class, not itself. A short
+/// name no import names stays `Bare(Name)` (a same-package type).
 fn emit_heritage_ref(
     raw: &str,
     category: glia_core::EdgeCategoryId,
@@ -1307,20 +1315,51 @@ fn emit_heritage_ref(
     line: u32,
     acc: &mut Acc,
 ) {
-    // Strip generic args (e.g. `Comparable<Foo>` → `Comparable`) and take the
-    // trailing simple name (e.g. `pkg.Base` → `Base`).
-    let base = raw.split('<').next().unwrap_or(raw).trim();
-    let simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+    // Strip generic args (e.g. `Comparable<Foo>` → `Comparable`).
+    let written = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = written.rsplit(['.', ':']).next().unwrap_or(written).trim();
     if simple.is_empty() {
         return;
     }
+    let qualifier = match heritage_path(written, &acc.imports) {
+        Some(base) => CallQualifier::Attribute {
+            base,
+            name: simple.to_string(),
+        },
+        None => CallQualifier::Bare(simple.to_string()),
+    };
     acc.refs.push(UnresolvedRef {
         from: from_id,
         from_module,
-        qualifier: CallQualifier::Bare(simple.to_string()),
+        qualifier,
         category,
         line,
     });
+}
+
+/// GD.7: the dotted qualifier of a written supertype (`org.x` of
+/// `org.x.Base`), its first segment read through the file's single-type
+/// imports (`Outer.Inner` after `import a.b.Outer;` is `a.b.Outer`; `Base`
+/// after `import org.x.Base;` is `org.x`). `None` for a short name no
+/// import names.
+fn heritage_path(written: &str, imports: &[ImportStmt]) -> Option<String> {
+    let segments: Vec<&str> = written.split('.').map(str::trim).collect();
+    let (first, rest) = segments.split_first()?;
+    let imported = imports.iter().find_map(|i| match &i.target {
+        ImportTarget::Symbol { module, name, .. } if name == first => {
+            Some(module.replace("::", "."))
+        }
+        _ => None,
+    });
+    if imported.is_none() && rest.is_empty() {
+        return None;
+    }
+    let mut path: Vec<String> = imported.into_iter().collect();
+    path.push((*first).to_string());
+    path.extend(rest.iter().map(|s| (*s).to_string()));
+    // Every segment but the last is qualifier; the last is the type's name.
+    path.pop();
+    Some(path.join("."))
 }
 
 /// The DATA_ENTITY flavor of a class carrying a persistence annotation, or
@@ -3465,12 +3504,64 @@ public class X extends Base implements IFoo, IBar {
         assert!(inherits[0].from == x_id && inherits[0].from_module == module_id);
     }
 
+    /// GD.7: a qualified supertype keeps its qualifier; so does a short name
+    /// or an `Outer.Inner` first segment a single-type import names. A short
+    /// name no import names stays Bare.
+    #[test]
+    fn qualified_heritage_keeps_its_qualifier() {
+        let source = r#"
+package org.a.input.compat;
+
+import org.springframework.data.Repo;
+import com.app.Outer;
+
+public class XEx extends org.a.input.XEx implements Repo, Outer.Inner, Local, a.b.C.D<String> {
+}
+"#;
+        let fp = parse_file(
+            source,
+            "src/main/java/org/a/input/compat/XEx.java",
+            "org::a::input::compat::XEx",
+            repo(),
+        )
+        .unwrap();
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        };
+        let quals: Vec<(u32, CallQualifier)> = fp
+            .refs
+            .iter()
+            .filter(|r| {
+                r.category == edge_category::INHERITS_FROM
+                    || r.category == edge_category::IMPLEMENTS
+            })
+            .map(|r| (r.category.0, r.qualifier.clone()))
+            .collect();
+        assert_eq!(
+            quals,
+            vec![
+                (edge_category::INHERITS_FROM.0, attr("org.a.input", "XEx")),
+                (
+                    edge_category::IMPLEMENTS.0,
+                    attr("org.springframework.data", "Repo")
+                ),
+                (edge_category::IMPLEMENTS.0, attr("com.app.Outer", "Inner")),
+                (
+                    edge_category::IMPLEMENTS.0,
+                    CallQualifier::Bare("Local".to_string())
+                ),
+                (edge_category::IMPLEMENTS.0, attr("a.b.C", "D")),
+            ]
+        );
+    }
+
     #[test]
     fn interface_extends_emits_inherits_from_ref() {
         // LD.7a: `interface Catalog extends Readable, shop.Paged<T>` → one
-        // INHERITS_FROM ref per super-interface, from the interface, carrying
-        // the bare (generic- and qualifier-stripped) name. No IMPLEMENTS: an
-        // interface extends, it never implements.
+        // INHERITS_FROM ref per super-interface, from the interface, its
+        // generics stripped; a qualified name keeps its qualifier (GD.7). No
+        // IMPLEMENTS: an interface extends, it never implements.
         let source = r#"
 package shop;
 
@@ -3498,12 +3589,16 @@ public interface Catalog extends Readable, shop.Paged<String> {
             2,
             "one ref per super-interface: {inherits:?}"
         );
-        for name in ["Readable", "Paged"] {
+        let paged = CallQualifier::Attribute {
+            base: "shop".to_string(),
+            name: "Paged".to_string(),
+        };
+        for qualifier in [CallQualifier::Bare("Readable".to_string()), paged] {
             assert!(
                 inherits.iter().any(|r| r.from == iface_id
                     && r.from_module == module_id
-                    && r.qualifier == CallQualifier::Bare(name.to_string())),
-                "expected Catalog --INHERITS_FROM--> Bare({name}) ref: {inherits:?}"
+                    && r.qualifier == qualifier),
+                "expected Catalog --INHERITS_FROM--> {qualifier:?} ref: {inherits:?}"
             );
         }
         assert!(

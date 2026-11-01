@@ -598,9 +598,8 @@ fn constructor_receiver(recv: TsNode, src: &[u8]) -> bool {
 // CLASS; `build_ruby`'s `resolve_refs` binds its Bare name through the
 // module's symbols, then the repo-unique name, so a framework base
 // (`ActiveRecord::Base`, `Minitest::Test`) binds nothing. A scoped
-// superclass is reduced to its last segment (the Java G12.5 heritage-ref
-// precedent): `class Post < ActiveRecord::Base` would bind an app class
-// named `Base` when it is the repo's only one.
+// superclass keeps its qualifier (GD.7): `class Post < ActiveRecord::Base`
+// binds only an in-repo `ActiveRecord::Base`, never an app class named `Base`.
 //
 // dry-auto_inject (dry-rb.org/gems/dry-auto_inject): `Import =
 // Dry::AutoInject(Container)` builds a module per key list, and a class
@@ -615,28 +614,61 @@ fn constructor_receiver(recv: TsNode, src: &[u8]) -> bool {
 // `.` segment camelised (`user_service` -> `UserService`), dry-system's own
 // component-naming rule (Dry::Inflector over the key).
 
-/// The class a superclass expression names: a `constant` (`Base`) or the
-/// last segment of a `scope_resolution` (`Admin::Base` -> `Base`, `::Base`
-/// -> `Base`). Anything else (`Struct.new(:a)`, `DelegateClass(Foo)`)
-/// names no class the graph can bind -> None.
-fn superclass_name<'a>(class: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+/// The superclass of `class` as a qualifier: a bare constant (`< Base`) is
+/// `Bare(Base)`; a constant path keeps its qualifier (GD.7):
+/// `< ActiveRecord::Base` is `Attribute { base: "ActiveRecord", name: "Base" }`
+/// and a rooted `< ::Admin::Base` keeps its leading `::` (`base: "::Admin"`,
+/// `< ::Base` is `base: "::"`), so the graph binds only the in-repo constant
+/// at that path, never an app class sharing the last segment. Any other
+/// superclass expression (`Struct.new(..)`) is None.
+fn superclass_qualifier(class: TsNode, src: &[u8]) -> Option<CallQualifier> {
     let base = class.child_by_field_name("superclass")?.named_child(0)?;
-    let name = match base.kind() {
-        "constant" => base,
-        "scope_resolution" => base.child_by_field_name("name")?,
-        _ => return None,
-    };
-    if name.kind() != "constant" {
-        return None;
+    match base.kind() {
+        "constant" => {
+            let name = text_of(base, src);
+            (!name.is_empty()).then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "scope_resolution" => {
+            let (scope, name) = constant_path(base, src)?;
+            Some(CallQualifier::Attribute {
+                base: scope,
+                name: name.to_string(),
+            })
+        }
+        _ => None,
     }
-    Some(text_of(name, src)).filter(|n| !n.is_empty())
 }
 
-/// Emit `class_id INHERITS_FROM Bare(<superclass>)` for a class whose
-/// superclass is a constant path ([`superclass_name`]). The row is the
-/// superclass clause's own (LC.3b).
+/// A `scope_resolution` constant path split into its qualifier and last
+/// constant: `A::B::C` -> (`A::B`, `C`), `::C` -> (`::`, `C`), `::A::C` ->
+/// (`::A`, `C`). None when a segment is not a constant (`foo::Bar`).
+fn constant_path<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<(String, &'a str)> {
+    let name = node.child_by_field_name("name")?;
+    if name.kind() != "constant" || text_of(name, src).is_empty() {
+        return None;
+    }
+    let scope = match node.child_by_field_name("scope") {
+        None => "::".to_string(),
+        Some(s) if s.kind() == "constant" => text_of(s, src).to_string(),
+        Some(s) if s.kind() == "scope_resolution" => {
+            let (outer, last) = constant_path(s, src)?;
+            if outer == "::" {
+                format!("::{last}")
+            } else {
+                format!("{outer}::{last}")
+            }
+        }
+        Some(_) => return None,
+    };
+    Some((scope, text_of(name, src)))
+}
+
+/// Emit `class_id INHERITS_FROM <superclass>` for a class whose superclass
+/// is a constant or a constant path ([`superclass_qualifier`]). The row is
+/// the superclass clause's own (LC.3b).
 fn emit_superclass_ref(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
-    let (Some(name), Some(module_id)) = (superclass_name(class, src), acc.module_id) else {
+    let (Some(qualifier), Some(module_id)) = (superclass_qualifier(class, src), acc.module_id)
+    else {
         return;
     };
     let line = class
@@ -645,7 +677,7 @@ fn emit_superclass_ref(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Ac
     acc.refs.push(UnresolvedRef {
         from: class_id,
         from_module: module_id,
-        qualifier: CallQualifier::Bare(name.to_string()),
+        qualifier,
         category: edge_category::INHERITS_FROM,
         line,
     });
@@ -3064,17 +3096,30 @@ end
         );
     }
 
-    /// A scoped superclass is reduced to its last segment (the Java G12.5
-    /// heritage-ref precedent); a leading `::` is dropped the same way.
+    /// GD.7: a scoped superclass keeps its qualifier as an `Attribute`
+    /// ref (base = the constant path before the last segment); a rooted
+    /// path keeps its leading `::`, and a bare `< ::Base` is base `::`.
     #[test]
-    fn scoped_superclass_uses_last_segment() {
-        let source = "module Admin\n  class A < Admin::Base\n  end\nend\nclass B < ::Base\nend\n";
+    fn scoped_superclass_keeps_qualifier() {
+        let source = "module Admin\n  class A < Admin::Base\n  end\nend\nclass B < ::Base\nend\nclass U < ActiveRecord::Base\nend\nclass V < ::Admin::Deep::Base\nend\nclass W < Base\nend\n";
         let fp = parse_file(source, "a.rb", "a", repo()).unwrap();
+        let attr = |base: &str| {
+            format!(
+                "{:?}",
+                CallQualifier::Attribute {
+                    base: base.into(),
+                    name: "Base".into()
+                }
+            )
+        };
         assert_eq!(
             bare_refs(&fp, edge_category::INHERITS_FROM),
             vec![
-                ("a::Admin::A".into(), "Base".into(), 1),
-                ("a::B".into(), "Base".into(), 4),
+                ("a::Admin::A".into(), attr("Admin"), 1),
+                ("a::B".into(), attr("::"), 4),
+                ("a::U".into(), attr("ActiveRecord"), 6),
+                ("a::V".into(), attr("::Admin::Deep"), 8),
+                ("a::W".into(), "Base".into(), 10),
             ]
         );
         assert!(fp.refs.iter().all(|r| r.from_module == module_of("a")));
@@ -3238,7 +3283,17 @@ end
         );
         assert_eq!(
             bare_refs(&fp, edge_category::INHERITS_FROM),
-            vec![("calc_test::CalcTest".into(), "Test".into(), 1)]
+            vec![(
+                "calc_test::CalcTest".into(),
+                format!(
+                    "{:?}",
+                    CallQualifier::Attribute {
+                        base: "Minitest".into(),
+                        name: "Test".into()
+                    }
+                ),
+                1
+            )]
         );
     }
 }

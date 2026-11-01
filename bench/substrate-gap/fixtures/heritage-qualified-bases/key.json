@@ -1,0 +1,104 @@
+{
+  "framework": "heritage-qualified-bases",
+  "language": "ruby",
+  "dirs": [
+    "rb",
+    "rb-unique",
+    "php",
+    "java"
+  ],
+  "note": "GD.7 (FD.13). A qualified heritage base keeps its qualifier: it binds only the in-repo type at that path, never an app type sharing its last segment, and never the declaring class itself. rb holds two Base classes (top-level and Admin::Base); rb-unique holds one, so a name-only lookup of `ActiveRecord::Base` is unique there. Baseline HEAD ec4946df (installed leap wheel): Account INHERITS_FROM app::models::base::Base, Post INHERITS_FROM src::Models::Model, K INHERITS_FROM com::app::Base, Guard INHERITS_FROM src::Security, J INHERITS_FROM com::app::Repo, Ctl / Guard IMPORTS src::Security and the compat XEx self-loop all fire (8 forbid violations; User binds nothing on HEAD because rb holds two Base classes); Admin::Report -> Admin::Base, compat XEx -> the main XEx and Q -> the main XEx are missing (INHERITS_FROM 2/5).",
+  "expect_edges": [
+    {
+      "from": "app::admin::report::Admin::Report",
+      "to": "app::admin::base::Admin::Base",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "an in-repo qualified base binds the type at that namespace path"
+    },
+    {
+      "from": "app::models::invoice::Invoice",
+      "to": "app::models::base::Base",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "control: `< ::Base` names the top-level Base"
+    },
+    {
+      "from": "src::Models::Page",
+      "to": "src::Models::Model",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "control: `extends \\App\\Models\\Model` binds the namespace member"
+    },
+    {
+      "from": "src::main::java::org::a::input::compat::XEx",
+      "to": "src::main::java::org::a::input::XEx",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "a same-named class extended by its qualified name binds the main class (commons-io XmlStreamReaderException shape)"
+    },
+    {
+      "from": "src::main::java::com::app::Q",
+      "to": "src::main::java::org::a::input::XEx",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "a short name a single-type import names keeps the import's package"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "User",
+      "to": "app::models::base::Base",
+      "category": "INHERITS_FROM",
+      "note": "ActiveRecord::Base is not the app's Base"
+    },
+    {
+      "from": "Account",
+      "to": "app::models::base::Base",
+      "category": "INHERITS_FROM",
+      "note": "ActiveRecord::Base is not the app's Base (unique-tail repo)"
+    },
+    {
+      "from": "Post",
+      "to": "src::Models::Model",
+      "category": "INHERITS_FROM",
+      "note": "\\Illuminate\\Database\\Eloquent\\Model is not App\\Models\\Model"
+    },
+    {
+      "from": "src::Ctl::Guard",
+      "to": "src::Security",
+      "category": "INHERITS_FROM",
+      "note": "a base imported from an unowned namespace is not App\\Security"
+    },
+    {
+      "from": "src::main::java::com::app::J",
+      "to": "src::main::java::com::app::Repo",
+      "category": "INHERITS_FROM",
+      "note": "`import org.springframework.data.Repo` then `extends Repo` is not com.app.Repo"
+    },
+    {
+      "from": "src::main::java::com::app::K",
+      "to": "src::main::java::com::app::Base",
+      "category": "INHERITS_FROM",
+      "note": "org.springframework.Base is not com.app.Base"
+    },
+    {
+      "from": "src::main::java::org::a::input::compat::XEx",
+      "to": "src::main::java::org::a::input::compat::XEx",
+      "category": "INHERITS_FROM",
+      "note": "a class never extends itself"
+    },
+    {
+      "from": "Ctl",
+      "to": "Security",
+      "category": "IMPORTS",
+      "note": "`use Symfony\\Bundle\\SecurityBundle\\Security` names a namespace the repo does not own"
+    },
+    {
+      "from": "src::Ctl::Guard",
+      "to": "src::Security",
+      "category": "IMPORTS",
+      "note": "`use Symfony\\Bundle\\SecurityBundle\\Security` names a namespace the repo does not own"
+    }
+  ]
+}

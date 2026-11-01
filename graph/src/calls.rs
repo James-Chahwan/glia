@@ -187,6 +187,12 @@ pub(crate) struct GlobalNames<'g> {
     g: &'g RepoGraph,
     functions: OnceLock<HashMap<&'g str, Option<NodeId>>>,
     types: OnceLock<HashMap<&'g str, Option<NodeId>>>,
+    /// GD.7: every type (STRUCT / CLASS / INTERFACE / ENUM) by its simple
+    /// name, for [`qualified_heritage`]; looked up, never iterated.
+    types_by_name: OnceLock<HashMap<&'g str, Vec<NodeId>>>,
+    /// GD.7: the PHP namespaces ([`PhpNamespaces`]), for a PHP qualified
+    /// heritage base.
+    php: OnceLock<PhpNamespaces>,
     /// GA.3: nanoseconds spent building the two indexes, for the `[rebody]`
     /// line's `names_ms=` (a per-file stitch builds them only when a site
     /// falls back to a repo-unique name).
@@ -199,6 +205,8 @@ impl<'g> GlobalNames<'g> {
             g,
             functions: OnceLock::new(),
             types: OnceLock::new(),
+            types_by_name: OnceLock::new(),
+            php: OnceLock::new(),
             built_ns: AtomicU64::new(0),
         }
     }
@@ -219,6 +227,30 @@ impl<'g> GlobalNames<'g> {
             .get(name)
             .copied()
             .flatten()
+    }
+
+    /// GD.7: every type named `name`, in no particular order.
+    fn types_named(&self, name: &str) -> &[NodeId] {
+        self.types_by_name
+            .get_or_init(|| {
+                self.timed(|| {
+                    let mut map: HashMap<&'g str, Vec<NodeId>> = HashMap::new();
+                    for (id, n) in &self.g.nav.name_by_id {
+                        if is_type_kind(self.g, id) {
+                            map.entry(n.as_str()).or_default().push(*id);
+                        }
+                    }
+                    map
+                })
+            })
+            .get(name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// GD.7: the graph's PHP namespaces, built on the first PHP lookup.
+    fn php(&self) -> &PhpNamespaces {
+        self.php
+            .get_or_init(|| self.timed(|| PhpNamespaces::build(self.g)))
     }
 
     /// `build()`, its wall time added to [`Self::built_ns`].
@@ -321,6 +353,12 @@ impl SiteFiles {
     /// DT.5k: true when `r` was read in a TypeScript / JavaScript file (its
     /// `from_module`'s, else its `from`'s, by extension: [`is_ts_family`]).
     pub(crate) fn is_ts_family(&self, r: &UnresolvedRef) -> bool {
+        self.ext(r).is_some_and(|ext| is_ts_family(&ext))
+    }
+
+    /// The lowercase extension of the file `r` was read in (its
+    /// `from_module`'s, else its `from`'s).
+    fn ext(&self, r: &UnresolvedRef) -> Option<String> {
         self.0
             .get(&r.from_module)
             .or_else(|| self.0.get(&r.from))
@@ -329,7 +367,17 @@ impl SiteFiles {
                 base.rsplit_once('.')
                     .map(|(_, ext)| ext.to_ascii_lowercase())
             })
-            .is_some_and(|ext| is_ts_family(&ext))
+    }
+
+    /// GD.7: the language whose qualified heritage rule binds a ref read in
+    /// `r`'s file ([`QualifiedLang`]), `None` for every other language.
+    fn qualified_lang(&self, r: &UnresolvedRef) -> Option<QualifiedLang> {
+        match self.ext(r)?.as_str() {
+            "rb" => Some(QualifiedLang::Ruby),
+            "php" => Some(QualifiedLang::Php),
+            "java" => Some(QualifiedLang::Java),
+            _ => None,
+        }
     }
 
     /// `ev` at 0-based `line` of `r`'s file: its `from_module`'s, else its
@@ -373,10 +421,14 @@ enum Branch {
     /// `Attribute { <local>, default }`) binds the declaration its module
     /// exports as `default` ([`default_export_target`]).
     DefaultExport,
+    /// GD.7: a Ruby / PHP / Java heritage base written with its qualifier
+    /// (`ActiveRecord::Base`, `\\App\\Models\\Model`, `org.x.Base`) binds
+    /// the one in-repo type at that path ([`qualified_heritage`]).
+    QualifiedHeritage,
 }
 
 impl Branch {
-    const COUNT: usize = 14;
+    const COUNT: usize = 15;
 
     fn rule(self) -> &'static str {
         match self {
@@ -394,6 +446,7 @@ impl Branch {
             Branch::ReceiverReturn => "receiver_return",
             Branch::StaticMember => "static_member",
             Branch::DefaultExport => "default_export",
+            Branch::QualifiedHeritage => "qualified_heritage",
         }
     }
 }
@@ -1264,7 +1317,24 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         static_lowercase,
         default_bound,
         default_unbound,
+        qualified,
+        self_refused,
     } = counts;
+    // GD.7 fired_on, once per language graph build that read a qualified
+    // heritage base, one line per language:
+    //   `[heritage] qualified refs=Q bound=B unbound_external=U lang=L`
+    for (lang, (refs, bound)) in QualifiedLang::ALL.iter().zip(qualified) {
+        if refs > 0 {
+            eprintln!(
+                "[heritage] qualified refs={refs} bound={bound} unbound_external={} lang={}",
+                refs - bound,
+                lang.name()
+            );
+        }
+    }
+    if self_refused > 0 {
+        eprintln!("[heritage] self-loops refused={self_refused}");
+    }
     // GD.11 fired_on, once per graph build that read a default import by
     // value:
     //   `[resolve] default-import uses bound=B unbound=U`
@@ -1321,6 +1391,10 @@ struct RefCounts {
     /// default-exported declaration, and left unbound.
     default_bound: usize,
     default_unbound: usize,
+    /// GD.7: qualified heritage refs per [`QualifiedLang`]: (refs, bound).
+    qualified: [(usize, usize); QualifiedLang::ALL.len()],
+    /// GD.7: heritage refs whose lookup answered the declaring type itself.
+    self_refused: usize,
 }
 
 impl RefCounts {
@@ -1335,6 +1409,11 @@ impl RefCounts {
         self.static_lowercase += other.static_lowercase;
         self.default_bound += other.default_bound;
         self.default_unbound += other.default_unbound;
+        for (mine, theirs) in self.qualified.iter_mut().zip(other.qualified) {
+            mine.0 += theirs.0;
+            mine.1 += theirs.1;
+        }
+        self.self_refused += other.self_refused;
     }
 }
 
@@ -1407,6 +1486,20 @@ fn decide_ref(
                     }
                 }),
         },
+        // GD.7: a Ruby / PHP / Java heritage base written with its qualifier
+        // binds only the in-repo type at that path; a framework base
+        // (`ActiveRecord::Base`, `org.springframework.X`) binds nothing, and
+        // never falls back to a type of the same last segment.
+        CallQualifier::Attribute { base, name }
+            if is_heritage(r.category) && files.qualified_lang(r).is_some() =>
+        {
+            let lang = files.qualified_lang(r)?;
+            let hit = qualified_heritage(g, names, lang, base, name, r.from);
+            let slot = &mut counts.qualified[lang as usize];
+            slot.0 += 1;
+            slot.1 += usize::from(hit.is_some());
+            hit.map(|to| (to, Branch::QualifiedHeritage))
+        }
         // GD.11: a TS-family default import read by value, `setTimeout(work)`
         // after `import work from './helper'`: the parser writes it as the
         // member `work.default`. It binds the declaration the module exports
@@ -1530,6 +1623,16 @@ fn decide_ref(
         | CallQualifier::ComplexReceiver { .. } => None,
     };
 
+    // GD.7: a type never extends or implements itself; a lookup that answers
+    // the declaring type (a same-named base read in its own scope) binds
+    // nothing.
+    let resolved = match resolved {
+        Some((to, _)) if to == r.from && is_heritage(r.category) => {
+            counts.self_refused += 1;
+            None
+        }
+        other => other,
+    };
     if extends_iface {
         match resolved {
             Some(_) => counts.iface_extends.bound += 1,
@@ -1542,6 +1645,151 @@ fn decide_ref(
 
 fn is_heritage(category: EdgeCategoryId) -> bool {
     category == edge_category::INHERITS_FROM || category == edge_category::IMPLEMENTS
+}
+
+/// GD.7: the languages whose parsers write a qualified heritage base as
+/// `Attribute { base, name }`, each with its own namespace rule
+/// ([`qualified_heritage`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QualifiedLang {
+    Ruby = 0,
+    Php = 1,
+    Java = 2,
+}
+
+impl QualifiedLang {
+    const ALL: [QualifiedLang; 3] = [QualifiedLang::Ruby, QualifiedLang::Php, QualifiedLang::Java];
+
+    fn name(self) -> &'static str {
+        match self {
+            QualifiedLang::Ruby => "ruby",
+            QualifiedLang::Php => "php",
+            QualifiedLang::Java => "java",
+        }
+    }
+}
+
+/// GD.7: the PHP namespaces of one graph: the namespace PACKAGEs and their
+/// members ([`crate::imports::NamespaceIndex`], the index a PHP `use`
+/// resolves through), and the file MODULEs that open a namespace.
+struct PhpNamespaces {
+    index: crate::imports::NamespaceIndex,
+    /// File MODULEs with a CONTAINS edge to a PACKAGE (`namespace X;`).
+    namespaced: HashSet<NodeId>,
+}
+
+impl PhpNamespaces {
+    fn build(g: &RepoGraph) -> Self {
+        let namespaced = g
+            .edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::CONTAINS
+                    && g.nav.kind_by_id.get(&e.to) == Some(&node_kind::PACKAGE)
+                    && g.nav.kind_by_id.get(&e.from) == Some(&node_kind::MODULE)
+            })
+            .map(|e| e.from)
+            .collect();
+        PhpNamespaces {
+            index: crate::imports::NamespaceIndex::build(g),
+            namespaced,
+        }
+    }
+
+    /// True when the type `id` sits in PHP's global namespace: declared at
+    /// the top of a file that opens no namespace.
+    fn is_global(&self, g: &RepoGraph, id: NodeId) -> bool {
+        g.nav.parent_of.get(&id).is_some_and(|p| {
+            g.nav.kind_by_id.get(p) == Some(&node_kind::MODULE) && !self.namespaced.contains(p)
+        })
+    }
+}
+
+/// GD.7: the in-repo type a qualified heritage base names, or `None`. `base`
+/// is the qualifier, `::`- or `.`-separated; a leading `::` roots it (Ruby
+/// `< ::Admin::Base`, every PHP base: the parser resolved it to its full
+/// namespace). The rule is the language's:
+/// - Ruby: the type's constant path (its qname below its file MODULE's)
+///   equals `base::name` when rooted, else ends with it (lexical lookup).
+/// - PHP: the member `name` of the namespace PACKAGE `base` exactly; an
+///   empty base is a type of the global namespace.
+/// - Java: the type's qname ends with `base::name` (a package directory, or
+///   an outer class for `Outer.Inner`).
+///
+/// A type is never its own base (`from` is skipped), and two distinct
+/// candidates bind nothing. No repo-unique name stands in for a miss.
+fn qualified_heritage(
+    g: &RepoGraph,
+    names: &GlobalNames<'_>,
+    lang: QualifiedLang,
+    base: &str,
+    name: &str,
+    from: NodeId,
+) -> Option<NodeId> {
+    let normalised = base.replace('.', "::");
+    let rooted = normalised.starts_with("::");
+    let mut want: Vec<&str> = normalised.split("::").filter(|s| !s.is_empty()).collect();
+    let candidates: Vec<NodeId> = match lang {
+        QualifiedLang::Php => {
+            let php = names.php();
+            if want.is_empty() {
+                names
+                    .types_named(name)
+                    .iter()
+                    .copied()
+                    .filter(|&id| php.is_global(g, id))
+                    .collect()
+            } else {
+                match php.index.member(&want.join("::"), name) {
+                    crate::imports::NsHit::Unique(id) if is_type_kind(g, &id) => vec![id],
+                    _ => Vec::new(),
+                }
+            }
+        }
+        QualifiedLang::Ruby | QualifiedLang::Java => {
+            want.push(name);
+            names
+                .types_named(name)
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let Some(path) = constant_path(g, lang, *id) else {
+                        return false;
+                    };
+                    if rooted && lang == QualifiedLang::Ruby {
+                        path == want
+                    } else {
+                        path.ends_with(&want)
+                    }
+                })
+                .collect()
+        }
+    };
+    let mut hit: Option<NodeId> = None;
+    for id in candidates.into_iter().filter(|&id| id != from) {
+        match hit {
+            Some(existing) if existing == id => {}
+            Some(_) => return None,
+            None => hit = Some(id),
+        }
+    }
+    hit
+}
+
+/// GD.7: the qname segments [`qualified_heritage`] matches a type by: for
+/// Ruby the part below its file MODULE (`Admin::Base` of
+/// `app::admin::base::Admin::Base`), for Java the whole qname.
+fn constant_path(g: &RepoGraph, lang: QualifiedLang, id: NodeId) -> Option<Vec<&str>> {
+    let qname = g.nav.qname_by_id.get(&id)?;
+    let scoped = match lang {
+        QualifiedLang::Ruby => enclosing_module(&g.nav, id)
+            .and_then(|m| g.nav.qname_by_id.get(&m))
+            .and_then(|m| qname.strip_prefix(m.as_str()))
+            .and_then(|rest| rest.strip_prefix("::"))
+            .unwrap_or(qname),
+        QualifiedLang::Php | QualifiedLang::Java => qname,
+    };
+    Some(scoped.split("::").collect())
 }
 
 /// The heritage target an import binding names (A6.3): the bound node itself,
@@ -5142,6 +5390,285 @@ mod tests {
             ]
         );
         assert!(g.unresolved_refs.is_empty());
+    }
+
+    // ---- GD.7: qualified heritage bases -------------------------------------
+
+    fn attr_ref(
+        from: NodeId,
+        module: NodeId,
+        base: &str,
+        name: &str,
+        cat: EdgeCategoryId,
+    ) -> UnresolvedRef {
+        UnresolvedRef {
+            from,
+            from_module: module,
+            qualifier: CallQualifier::Attribute {
+                base: base.to_string(),
+                name: name.to_string(),
+            },
+            category: cat,
+            line: 0,
+        }
+    }
+
+    /// The (from, to) qname pairs of `g`'s heritage edges, with the rule.
+    fn heritage_rules(g: &RepoGraph) -> Vec<(String, String, String)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| is_heritage(e.category))
+            .map(|e| {
+                let rule = e
+                    .cells
+                    .iter()
+                    .find_map(|c| match &c.payload {
+                        glia_core::CellPayload::Json(j) if c.kind == cell_type::EVIDENCE => j
+                            .split("\"rule\":\"")
+                            .nth(1)?
+                            .split('"')
+                            .next()
+                            .map(str::to_string),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (q(&e.from), q(&e.to), rule)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// GD.7, Ruby: `< ActiveRecord::Base` binds no app `Base`; `< Admin::Base`
+    /// binds the `Base` under `module Admin` (not the top-level one), and a
+    /// rooted `< ::Base` binds the top-level one. Every ref is fact-tier rule
+    /// `qualified_heritage`; the name-only fallback never runs.
+    #[test]
+    fn ruby_qualified_base_binds_only_its_path() {
+        let mut top = Shape::new();
+        let mt = top.add(node_kind::MODULE, "app::models::base", None);
+        top.add(node_kind::CLASS, "app::models::base::Base", Some(mt));
+        let mut top = top.file(vec![], vec![], vec![]);
+        place(&mut top, mt, "app/models/base.rb");
+
+        let mut admin = Shape::new();
+        let ma = admin.add(node_kind::MODULE, "app::admin::base", None);
+        let pa = admin.add(node_kind::PACKAGE, "app::admin::base::Admin", Some(ma));
+        admin.add(node_kind::CLASS, "app::admin::base::Admin::Base", Some(pa));
+        let mut admin = admin.file(vec![], vec![], vec![]);
+        place(&mut admin, ma, "app/admin/base.rb");
+
+        let mut users = Shape::new();
+        let mu = users.add(node_kind::MODULE, "app::models::user", None);
+        let user = users.add(node_kind::CLASS, "app::models::user::User", Some(mu));
+        let invoice = users.add(node_kind::CLASS, "app::models::user::Invoice", Some(mu));
+        let pr = users.add(node_kind::PACKAGE, "app::models::user::Admin", Some(mu));
+        let report = users.add(
+            node_kind::CLASS,
+            "app::models::user::Admin::Report",
+            Some(pr),
+        );
+        let inherits = edge_category::INHERITS_FROM;
+        let mut users = users.file(
+            vec![],
+            vec![],
+            vec![
+                attr_ref(user, mu, "ActiveRecord", "Base", inherits),
+                attr_ref(invoice, mu, "::", "Base", inherits),
+                attr_ref(report, mu, "Admin", "Base", inherits),
+            ],
+        );
+        place(&mut users, mu, "app/models/user.rb");
+
+        let g = crate::build::build_ruby(repo(), vec![top, admin, users]).unwrap();
+        let rule = "qualified_heritage".to_string();
+        assert_eq!(
+            heritage_rules(&g),
+            vec![
+                (
+                    "app::models::user::Admin::Report".to_string(),
+                    "app::admin::base::Admin::Base".to_string(),
+                    rule.clone()
+                ),
+                (
+                    "app::models::user::Invoice".to_string(),
+                    "app::models::base::Base".to_string(),
+                    rule
+                ),
+            ]
+        );
+        assert_eq!(g.unresolved_refs.len(), 1, "{:?}", g.unresolved_refs);
+    }
+
+    /// GD.7, PHP: a base resolved to its full name binds only the member of
+    /// that namespace PACKAGE (`\App\Models\Model`), never another
+    /// namespace's type of the same short name
+    /// (`\Illuminate\Database\Eloquent\Model`); an empty base (`\Legacy`)
+    /// binds a type of the global namespace only.
+    #[test]
+    fn php_qualified_base_binds_the_namespace_member() {
+        fn opens(fp: &mut FileParse, m: NodeId, ns: &str) {
+            let pkg = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, ns);
+            fp.nodes.push(Node {
+                id: pkg,
+                repo: repo(),
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
+            let simple = ns.rsplit("::").next().unwrap_or(ns);
+            fp.nav.record(pkg, simple, ns, node_kind::PACKAGE, Some(m));
+            fp.edges.push(Edge {
+                from: m,
+                to: pkg,
+                category: edge_category::CONTAINS,
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
+        }
+        let mut model = Shape::new();
+        let mm = model.add(node_kind::MODULE, "src::Models::Model", None);
+        model.add(node_kind::CLASS, "src::Models::Model::Model", Some(mm));
+        let mut model = model.file(vec![], vec![], vec![]);
+        place(&mut model, mm, "src/Models/Model.php");
+        opens(&mut model, mm, "App::Models");
+
+        let mut legacy = Shape::new();
+        let ml = legacy.add(node_kind::MODULE, "src::Legacy", None);
+        legacy.add(node_kind::CLASS, "src::Legacy::Legacy", Some(ml));
+        let mut legacy = legacy.file(vec![], vec![], vec![]);
+        place(&mut legacy, ml, "src/Legacy.php");
+
+        let mut posts = Shape::new();
+        let mp = posts.add(node_kind::MODULE, "src::Models::Post", None);
+        let post = posts.add(node_kind::CLASS, "src::Models::Post::Post", Some(mp));
+        let page = posts.add(node_kind::CLASS, "src::Models::Post::Page", Some(mp));
+        let old = posts.add(node_kind::CLASS, "src::Models::Post::Old", Some(mp));
+        let other = posts.add(node_kind::CLASS, "src::Models::Post::Other", Some(mp));
+        let inherits = edge_category::INHERITS_FROM;
+        let mut posts = posts.file(
+            vec![],
+            vec![],
+            vec![
+                attr_ref(
+                    post,
+                    mp,
+                    "::Illuminate::Database::Eloquent",
+                    "Model",
+                    inherits,
+                ),
+                attr_ref(page, mp, "::App::Models", "Model", inherits),
+                attr_ref(old, mp, "::", "Legacy", inherits),
+                attr_ref(other, mp, "::", "Model", inherits),
+            ],
+        );
+        place(&mut posts, mp, "src/Models/Post.php");
+        opens(&mut posts, mp, "App::Models");
+
+        let g = build_dotted(repo(), vec![model, legacy, posts]).unwrap();
+        let rule = "qualified_heritage".to_string();
+        assert_eq!(
+            heritage_rules(&g),
+            vec![
+                (
+                    "src::Models::Post::Old".to_string(),
+                    "src::Legacy::Legacy".to_string(),
+                    rule.clone()
+                ),
+                (
+                    "src::Models::Post::Page".to_string(),
+                    "src::Models::Model::Model".to_string(),
+                    rule
+                ),
+            ]
+        );
+    }
+
+    /// GD.7, Java: `extends org.a.input.XEx` from a same-named class of
+    /// another package binds the main class (HEAD bound the reduced name
+    /// in-file: a fact-tier self-loop); `extends org.springframework.Base`
+    /// binds no app `com.app.Base`; and a Bare lookup that answers the
+    /// declaring class itself binds nothing.
+    #[test]
+    fn java_qualified_base_binds_by_package_path() {
+        let mut main = Shape::new();
+        let mm = main.add(
+            node_kind::MODULE,
+            "src::main::java::org::a::input::XEx",
+            None,
+        );
+        main.add(
+            node_kind::CLASS,
+            "src::main::java::org::a::input::XEx",
+            Some(mm),
+        );
+        let mut main = main.file(vec![], vec![], vec![]);
+        place(&mut main, mm, "src/main/java/org/a/input/XEx.java");
+
+        let mut compat = Shape::new();
+        let mc = compat.add(
+            node_kind::MODULE,
+            "src::main::java::org::a::input::compat::XEx",
+            None,
+        );
+        let xex = compat.add(
+            node_kind::CLASS,
+            "src::main::java::org::a::input::compat::XEx",
+            Some(mc),
+        );
+        let mut compat = compat.file(
+            vec![],
+            vec![],
+            vec![attr_ref(
+                xex,
+                mc,
+                "org.a.input",
+                "XEx",
+                edge_category::INHERITS_FROM,
+            )],
+        );
+        place(&mut compat, mc, "src/main/java/org/a/input/compat/XEx.java");
+
+        let mut app = Shape::new();
+        let ma = app.add(node_kind::MODULE, "src::main::java::com::app::K", None);
+        app.add(
+            node_kind::CLASS,
+            "src::main::java::com::app::Base",
+            Some(ma),
+        );
+        let k = app.add(node_kind::CLASS, "src::main::java::com::app::K", Some(ma));
+        let selfish = app.add(
+            node_kind::CLASS,
+            "src::main::java::com::app::Selfish",
+            Some(ma),
+        );
+        let mut app = app.file(
+            vec![],
+            vec![],
+            vec![
+                attr_ref(
+                    k,
+                    ma,
+                    "org.springframework",
+                    "Base",
+                    edge_category::INHERITS_FROM,
+                ),
+                heritage_ref(selfish, ma, "Selfish", edge_category::INHERITS_FROM),
+            ],
+        );
+        place(&mut app, ma, "src/main/java/com/app/K.java");
+
+        let g = build_dotted(repo(), vec![main, compat, app]).unwrap();
+        assert_eq!(
+            heritage_rules(&g),
+            vec![(
+                "src::main::java::org::a::input::compat::XEx".to_string(),
+                "src::main::java::org::a::input::XEx".to_string(),
+                "qualified_heritage".to_string()
+            )]
+        );
+        assert_eq!(g.unresolved_refs.len(), 2, "{:?}", g.unresolved_refs);
     }
 
     /// Cross-file: `import { Base } from "./base"` binds the heritage name to
