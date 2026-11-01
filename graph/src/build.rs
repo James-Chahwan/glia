@@ -15,7 +15,8 @@ use crate::calls::{
     EvidenceTally, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
     emit_method_level_implements_for, emit_method_level_implements_with, emit_override_implements,
     enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge, resolve_calls,
-    resolve_calls_pooled, resolve_inherited_calls, resolve_refs, unique_global_types,
+    resolve_calls_for, resolve_calls_pooled, resolve_inherited_calls, resolve_refs,
+    unique_global_types,
 };
 pub use crate::calls::{ResolvePool, with_resolve_pool};
 use crate::cpp_scope::{CppScope, implicit_this};
@@ -727,6 +728,14 @@ where
 
 /// The passes [`build_typescript`] and [`build_typescript_family`] share;
 /// `inherit` adds the family's INHERITS_FROM passes after `resolve_refs`.
+///
+/// GA.6: [`ts_surface`] (the merge, the symbol table, the imports with the
+/// DT.1q barrels), then [`ts_stitch`] over every file (calls with the DT.5k
+/// member reads, refs with DT.5g's value refs and the heritage edges, and
+/// for the family the inherited calls), then the passes that read the whole
+/// graph's declarations and heritage: the family's override IMPLEMENTS and
+/// the method-level IMPLEMENTS. A body-only edit re-runs only the stitch,
+/// for the edited files ([`rebuild_ts_bodies`]).
 fn build_ts_like<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -736,23 +745,102 @@ fn build_ts_like<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
-    build_symbol_table(&mut g);
-    let mut same = same_stem_table(&g);
-    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
-    same.report();
+    let (mut g, body) = ts_surface(repo, parses, &resolve_source);
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
-    resolve_refs(&mut g, &all_refs, &mut tally);
+    let mut inh = InheritStats::default();
+    ts_stitch(&mut g, &body, inherit.then_some(&mut inh), None, &mut tally);
     if inherit {
-        let mut inh = InheritStats::default();
-        resolve_inherited_calls(&mut g, &mut inh);
         emit_override_implements(&mut g, &mut inh);
         inh.report();
     }
     emit_method_level_implements(&mut g);
     tally.report();
     Ok(g)
+}
+
+/// GA.6: the body stubs [`ts_stitch`] resolves: call sites and refs, in
+/// parse order.
+struct TsBody {
+    calls: Vec<CallSite>,
+    refs: Vec<UnresolvedRef>,
+}
+
+/// GA.6: the SURFACE phase of [`build_ts_like`]: [`merge_parses`],
+/// [`build_symbol_table`] and `resolve_imports_ts` (the DT.1q barrels'
+/// edges and `module_symbols` rows, the import bindings through the
+/// caller's resolver, FH.5's workspace packages and FH.16's bundler aliases
+/// among them, and the IMPORTS edges), with their markers. What it builds is
+/// the group's surface index, which [`ts_stitch`] reads and never writes.
+fn ts_surface<R>(repo: RepoId, parses: Vec<FileParse>, resolve_source: &R) -> (RepoGraph, TsBody)
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let (mut g, all_imports, calls, refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    resolve_imports_ts(&mut g, &all_imports, resolve_source, &mut same);
+    same.report();
+    (g, TsBody { calls, refs })
+}
+
+/// GA.6: the STITCH phase of [`build_ts_like`]: resolve `body`'s calls (the
+/// TS receiver chain, then DT.5k's member reads), its refs (DT.5g's value
+/// refs, DT.5k's INJECTS, the heritage edges, the page-navigation lift), and
+/// with `inherit` the unbound `this.m()` / `super.m()` / typed-receiver sites
+/// and member accesses along INHERITS_FROM (CH.1b, DF.22b, GD.3). `only`
+/// (the nodes of the files re-stitched, `None` for a clean build) limits the
+/// member reads and the inherited lookups to those files' scopes and sites;
+/// the calls and refs handed in are theirs already. `tally` sums every
+/// stitch of one graph.
+fn ts_stitch(
+    g: &mut RepoGraph,
+    body: &TsBody,
+    inherit: Option<&mut InheritStats>,
+    only: Option<&HashSet<NodeId>>,
+    tally: &mut EvidenceTally,
+) {
+    match only {
+        None => resolve_calls(g, &body.calls, |_, _| None, tally),
+        Some(only) => resolve_calls_for(g, &body.calls, only, tally),
+    }
+    resolve_refs(g, &body.refs, tally);
+    if let Some(inh) = inherit {
+        resolve_inherited_calls(g, inh, only);
+    }
+}
+
+/// GA.6: re-stitch the TypeScript-family files `edits` changed in their
+/// bodies only, against the unchanged surface index of `g` (a graph
+/// [`build_typescript_family`] built), then put `g` in its canonical order:
+/// the result equals a clean [`build_typescript_family`] of the edited tree
+/// with the same `resolve_source`, after [`RepoGraph::canonicalize`].
+///
+/// `resolve_source` is the resolver the group was built with (the engine's
+/// tsconfig / bundler / workspace aliases); it is asked only for the edited
+/// files' own specifiers, whose answers a body-only edit cannot move, to
+/// draw their IMPORTS edges at their new rows. The override and method-level
+/// IMPLEMENTS are surface passes' outputs with no row: kept as they are.
+///
+/// Refuses, leaving `g` untouched, as GA.3's seam does (the surface moved,
+/// an unknown file, a node another file shares cells with, a page-navigation
+/// link, an import binding moved), and as [`Refused::SurfaceMoved`] when an
+/// owned node's ROLE or ORIGIN cell moved (the navigation lift and route
+/// index read them in other files' resolution). The model is in
+/// `build/partial.rs`.
+///
+/// fired_on, once per call on stderr:
+///   `[rebody] lang=typescript files=<f> edges -<r> +<a> calls_bound=<c> refs_bound=<n> names_ms=<ms> refused=<reason|none>`
+pub fn rebuild_ts_bodies<R>(
+    g: &mut RepoGraph,
+    edits: Vec<BodyEdit>,
+    resolve_source: R,
+) -> Result<RebodyStats, Refused>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let result = partial::rebuild_ts(g, edits, &resolve_source);
+    eprintln!("{}", partial::marker("typescript", &result));
+    result
 }
 
 /// Build a per-repo Dart graph (DT.5h): [`build_typescript`]'s passes (the

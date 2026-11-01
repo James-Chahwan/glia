@@ -299,7 +299,7 @@ pub(crate) fn build_groups_seeded(
             let refused = if files != edited.len() {
                 RebodyRefusal::NoEdits
             } else {
-                match crate::parallel::quiet(|| rebody_group(cached, edits, &input.parses)) {
+                match crate::parallel::quiet(|| rebody_group(cached, edits, &input.parses, ctx)) {
                     Ok(Ok(build)) => {
                         let ms = started.elapsed().as_secs_f64() * 1000.0;
                         return Ok((build, Made::Rebodied { files, ms }));
@@ -363,11 +363,13 @@ fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
 
 /// GA.4: whether group `key` has a body-only fast path ([`rebody_group`]):
 /// a `glia_graph::rebuild_*_bodies` entry that re-stitches edited files
-/// against the group's unchanged surface. Python (GA.3's seam) and Go
-/// (GA.7, `glia_graph::rebuild_go_bodies`, which refuses a file holding a
-/// mount fact, a route or a JSON wire cell).
+/// against the group's unchanged surface. Python (GA.3's seam), Go (GA.7,
+/// `glia_graph::rebuild_go_bodies`, which refuses a file holding a mount
+/// fact, a route or a JSON wire cell) and the TypeScript family's one group
+/// ([`TS_GROUP`], GA.6, `glia_graph::rebuild_ts_bodies` with the group's
+/// aliased resolver).
 pub(crate) fn fast_path_for(key: &str) -> bool {
-    matches!(key, "python" | "go")
+    matches!(key, "python" | "go" | TS_GROUP)
 }
 
 /// GA.4: why [`rebody_group`] would not re-stitch a group; the caller builds
@@ -425,6 +427,11 @@ impl RebodyRefusal {
 /// group makes. Runs under [`EngineResolvePool`] like a build. `group` is
 /// every parse of the group as it now is (the edits among them): Go rebuilds
 /// its package model from their import statements and embed refs (GA.7).
+/// `ctx` is the repo's builder inputs: the TypeScript family re-draws its
+/// edited files' IMPORTS edges through the aliased resolver
+/// [`build_one_group`] builds with ([`resolve_ts_source_aliased`] over
+/// `ctx.ts_aliases`, GA.6); its workspace report is the cached build's, so
+/// the resolver answers `WORKSPACE_REPORT` with nothing.
 ///
 /// The build's `recv_bound` (the `[recv]` marker's receiver-typed binds) is
 /// the cached build's: the re-stitch binds only the edited files' sites and
@@ -436,6 +443,7 @@ pub(crate) fn rebody_group(
     cached: LangBuild,
     edits: Vec<FileParse>,
     group: &[FileParse],
+    ctx: &GroupCtx<'_>,
 ) -> Result<LangBuild, RebodyRefusal> {
     let LangBuild {
         lang,
@@ -461,6 +469,13 @@ pub(crate) fn rebody_group(
     let restitch = |g: &mut RepoGraph| match lang {
         "python" => glia_graph::rebuild_python_bodies(g, body_edits).map(|_| ()),
         "go" => glia_graph::rebuild_go_bodies(g, body_edits, group).map(|_| ()),
+        TS_GROUP => glia_graph::rebuild_ts_bodies(g, body_edits, |from: &str, spec: &str| {
+            if from == WORKSPACE_REPORT {
+                return None;
+            }
+            resolve_ts_source_aliased(from, spec, ctx.ts_aliases)
+        })
+        .map(|_| ()),
         _ => Err(glia_graph::Refused::Unsupported("no fast path")),
     };
     // The graph crate counts receiver binds on this thread: bracket them so

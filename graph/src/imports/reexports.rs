@@ -50,7 +50,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use glia_code_domain::{ImportStmt, ImportTarget, NavFact, node_kind};
 use glia_core::NodeId;
 
-use super::{SameStem, import_edge, spec_ext, ts_target};
+use super::{SameStem, import_edge, spec_ext, ts_target, ts_target_tagged, untag_workspace};
+use crate::build::Refused;
 use crate::types::RepoGraph;
 
 /// DT.1q: the IMPORTS evidence rule of a barrel -> each module it
@@ -622,6 +623,225 @@ impl ReexportStats {
             )
         })
     }
+}
+
+/// GA.6: one IMPORTS edge a re-stitched TypeScript-family file draws again
+/// ([`SameStem::ts_rebind`]): an import statement's (its rule from
+/// [`ts_target`]) or a barrel's re-export ([`REEXPORT`]), at the statement's
+/// or fact's 0-based row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TsImportEdge {
+    pub(crate) from: NodeId,
+    pub(crate) to: NodeId,
+    pub(crate) rule: &'static str,
+    pub(crate) line: u32,
+}
+
+impl TsImportEdge {
+    /// Draw it, as `resolve_imports_ts` draws its edges.
+    pub(crate) fn draw(self, g: &mut RepoGraph) {
+        import_edge(g, self.from, self.to, self.rule, self.line);
+    }
+}
+
+/// GA.6: one re-stitched file for [`SameStem::ts_rebind`]: its MODULE, its
+/// path (for a refusal), its import statements and its MODULE scope's fresh
+/// nav facts (the export facts a barrel's re-export edges come from), all
+/// from the file's new parse.
+pub(crate) type TsRebindFile<'a> = (NodeId, &'a str, &'a [ImportStmt], &'a [NavFact]);
+
+/// GA.6's entry is a method of [`SameStem`] (the table it resolves through),
+/// not a free function: this module is a private child of `imports.rs`,
+/// which GA.6 does not own, so a free function here could not be named from
+/// `build/partial.rs`. A packet owning `imports.rs` may re-export it as one
+/// and drop the method form.
+impl SameStem {
+    /// GA.6: the IMPORTS edges of each file in `files`, re-derived against a
+    /// TypeScript-family graph whose symbol tables, import bindings and
+    /// barrel tables are in place (the body-only fast path,
+    /// `build::rebuild_ts_bodies`), `self` the graph's same-stem table.
+    /// Read-only and quiet (no marker, no `WORKSPACE_REPORT` call: the caller
+    /// prints one `[rebody]` line).
+    ///
+    /// Each file's edges are what `resolve_imports_ts` draws for it: its
+    /// barrel edges ([`Barrels::read`]'s statement edges, from its own export
+    /// facts, through `resolve_source` stripped of its workspace tag), then
+    /// one edge per statement whose target binds ([`ts_target_tagged`]). A
+    /// body-only edit leaves every specifier as it was (the import surface
+    /// is in the watch's fingerprint), so `resolve_source` answers as it did
+    /// and only rows move. The bindings each statement decides are compared
+    /// with the ones the graph holds for the MODULE; a differing one is
+    /// [`Refused::SurfaceMoved`]. A name only a barrel's side table can bind
+    /// (a renamed or MODULE-valued entry, or a `default` import of a barrel:
+    /// [`Barrels`] is build-local, never stored) is taken as the graph holds
+    /// it: the side table reads only other files' export facts and symbol
+    /// tables, all surface. A plain `.dart` import (DF.4b binds its
+    /// library's whole table after the statement loop) is
+    /// [`Refused::Unsupported`].
+    pub(crate) fn ts_rebind<R: Fn(&str, &str) -> Option<String>>(
+        &mut self,
+        g: &RepoGraph,
+        files: &[TsRebindFile<'_>],
+        resolve_source: &R,
+    ) -> Result<Vec<Vec<TsImportEdge>>, Refused> {
+        let untagged = |from: &str, spec: &str| {
+            resolve_source(from, spec).map(|raw| untag_workspace(&raw).1.to_string())
+        };
+        let mut out = Vec::with_capacity(files.len());
+        for &(module, path, imports, facts) in files {
+            let mut edges = module_reexport_edges(g, self, module, facts, &untagged);
+            let held = g.symbols.module_import_bindings.get(&module);
+            let mut bound: HashMap<String, NodeId> = HashMap::new();
+            for stmt in imports {
+                if g.symbols.module_by_qname.get(&stmt.from_module) != Some(&module) {
+                    continue;
+                }
+                match &stmt.target {
+                    ImportTarget::Module { path: spec, alias } => {
+                        let Some(raw) = resolve_source(&stmt.from_module, spec) else {
+                            continue;
+                        };
+                        let (ws, qname) = untag_workspace(&raw);
+                        let Some((to, rule)) =
+                            ts_target_tagged(g, self, ws, qname, spec_ext(spec), module, "module")
+                        else {
+                            continue;
+                        };
+                        edges.push(TsImportEdge {
+                            from: module,
+                            to,
+                            rule,
+                            line: stmt.line,
+                        });
+                        match alias {
+                            Some(a) => {
+                                bound.insert(a.clone(), to);
+                            }
+                            None if spec_ext(spec) == Some("dart") => {
+                                return Err(Refused::Unsupported("a dart library import"));
+                            }
+                            None => {}
+                        }
+                    }
+                    ImportTarget::Symbol {
+                        module: spec,
+                        name,
+                        alias,
+                        ..
+                    } => {
+                        let Some(raw) = resolve_source(&stmt.from_module, spec) else {
+                            continue;
+                        };
+                        let (ws, qname) = untag_workspace(&raw);
+                        let Some((target, rule)) =
+                            ts_target_tagged(g, self, ws, qname, spec_ext(spec), module, "symbol")
+                        else {
+                            continue;
+                        };
+                        edges.push(TsImportEdge {
+                            from: module,
+                            to: target,
+                            rule,
+                            line: stmt.line,
+                        });
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
+                        let barrel = is_barrel(g, target);
+                        // `Some(answer)`: decided here; `None`: the side table's.
+                        let decided = if name == DEFAULT {
+                            (!barrel).then_some(Some(target))
+                        } else {
+                            match g
+                                .symbols
+                                .module_symbols
+                                .get(&target)
+                                .and_then(|s| s.get(name))
+                            {
+                                Some(&id) => Some(Some(id)),
+                                None if barrel => None,
+                                None => Some(None),
+                            }
+                        };
+                        match decided {
+                            Some(Some(id)) => {
+                                bound.insert(local, id);
+                            }
+                            Some(None) => {}
+                            None => {
+                                if let Some(&id) = held.and_then(|h| h.get(&local)) {
+                                    bound.insert(local, id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let same_bindings = match held {
+                Some(h) => *h == bound,
+                None => bound.is_empty(),
+            };
+            if !same_bindings {
+                return Err(Refused::SurfaceMoved(path.to_string()));
+            }
+            out.push(edges);
+        }
+        Ok(out)
+    }
+}
+
+/// True when MODULE `m` holds a barrel fact (a re-export or a from-less
+/// `export { .. }`): [`Barrels`]' `barrel` flag, read off the graph's facts.
+fn is_barrel(g: &RepoGraph, m: NodeId) -> bool {
+    g.nav.nav_facts.get(&m).is_some_and(|facts| {
+        facts.iter().any(|f| {
+            matches!(
+                f,
+                NavFact::ReExportStar { .. }
+                    | NavFact::ReExportNamespace { .. }
+                    | NavFact::ReExportName { .. }
+                    | NavFact::ExportLocal { .. }
+            )
+        })
+    })
+}
+
+/// GA.6: the re-export IMPORTS edges of MODULE `m` whose export facts are
+/// `facts`, exactly as [`Barrels::read`] gives them: per re-export fact, its
+/// source through [`source_module`]; a source naming `m` itself (a cycle)
+/// or no in-repo module draws nothing; one edge per distinct (row, source),
+/// in (row, source id) order.
+fn module_reexport_edges<R: Fn(&str, &str) -> Option<String>>(
+    g: &RepoGraph,
+    same: &mut SameStem,
+    m: NodeId,
+    facts: &[NavFact],
+    resolve_source: &R,
+) -> Vec<TsImportEdge> {
+    let Some(m_q) = g.nav.qname_by_id.get(&m) else {
+        return Vec::new();
+    };
+    let mut statement_edges: BTreeSet<(u32, u64)> = BTreeSet::new();
+    for fact in facts {
+        let (source, line) = match fact {
+            NavFact::ReExportStar { source, line }
+            | NavFact::ReExportNamespace { source, line, .. }
+            | NavFact::ReExportName { source, line, .. } => (source, *line),
+            _ => continue,
+        };
+        if let Src::Module(s) = source_module(g, same, m, m_q, source, resolve_source)
+            && s != m
+        {
+            statement_edges.insert((line, s.0));
+        }
+    }
+    statement_edges
+        .into_iter()
+        .map(|(line, s)| TsImportEdge {
+            from: m,
+            to: NodeId(s),
+            rule: REEXPORT,
+            line,
+        })
+        .collect()
 }
 
 /// The five DT.1q fact variants and GD.8's [`NavFact::ReExportHide`].

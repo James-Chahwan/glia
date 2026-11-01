@@ -661,7 +661,28 @@ pub(crate) fn resolve_calls<H>(
 ) where
     H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)>,
 {
-    resolve_calls_with(g, calls, |_, _, _: &mut ()| None, extra_hook, tally);
+    resolve_calls_with(g, calls, |_, _, _: &mut ()| None, extra_hook, None, tally);
+}
+
+/// GA.6: [`resolve_calls`] with no hook for the call sites of a re-stitched
+/// TypeScript-family file (`build::rebuild_ts_bodies`): the sites bind exactly
+/// as in a clean build, and the DT.5k member-read pass that follows reads
+/// only the scopes in `only` (the files' own nodes), since every other
+/// scope's accessor edges are already in the graph.
+pub(crate) fn resolve_calls_for(
+    g: &mut RepoGraph,
+    calls: &[CallSite],
+    only: &HashSet<NodeId>,
+    tally: &mut EvidenceTally,
+) {
+    resolve_calls_with(
+        g,
+        calls,
+        |_, _, _: &mut ()| None,
+        |_, _| None,
+        Some(only),
+        tally,
+    );
 }
 
 /// GA.19: the counters a pool-safe call hook ([`resolve_calls_pooled`])
@@ -698,17 +719,20 @@ where
     C: HookCounts,
     H: Fn(&RepoGraph, &CallSite, &mut C) -> Option<(NodeId, Evidence)> + Sync,
 {
-    resolve_calls_with(g, calls, hook, |_, _| None, tally)
+    resolve_calls_with(g, calls, hook, |_, _| None, None, tally)
 }
 
 /// [`resolve_calls`] and [`resolve_calls_pooled`]: `pool_hook` is asked in
 /// the decide step (on the pool), `extra_hook` in the apply step (on this
-/// thread); each builder passes one of them as a no-op.
+/// thread); each builder passes one of them as a no-op. `only` limits the
+/// member-read pass to those scopes ([`resolve_calls_for`], GA.6); `None`
+/// reads every scope.
 fn resolve_calls_with<C, P, H>(
     g: &mut RepoGraph,
     calls: &[CallSite],
     pool_hook: P,
     extra_hook: H,
+    only: Option<&HashSet<NodeId>>,
     tally: &mut EvidenceTally,
 ) -> C
 where
@@ -849,7 +873,7 @@ where
         eprintln!("{line}");
     }
     // DT.5k: member reads that run a getter / setter of another object.
-    resolve_member_reads(g, &mut gate, &mut ts_recv);
+    resolve_member_reads(g, &mut gate, &mut ts_recv, only);
     if let Some(line) = ts_recv.marker() {
         eprintln!("{line}");
     }
@@ -1268,13 +1292,19 @@ fn is_typed_expression(g: &RepoGraph, site: &CallSite) -> bool {
 /// read by value, an inherited accessor, an unknown or external type bind
 /// nothing. Scopes are taken in `g.nodes` order (each once), each scope's
 /// accesses in the order the parser recorded them, so the edge list is
-/// stable at any thread count.
-fn resolve_member_reads(g: &mut RepoGraph, gate: &mut BareFieldGate, stats: &mut TsReceivers) {
+/// stable at any thread count. GA.6: with `only`, the scopes in it alone (a
+/// re-stitched file's): an access binds in its own scope, from surface reads.
+fn resolve_member_reads(
+    g: &mut RepoGraph,
+    gate: &mut BareFieldGate,
+    stats: &mut TsReceivers,
+    only: Option<&HashSet<NodeId>>,
+) {
     let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let mut found: Vec<(NodeId, NodeId, u32, bool)> = Vec::new();
     let names = GlobalNames::new(g);
     for n in &g.nodes {
-        if !seen.insert(n.id) {
+        if only.is_some_and(|o| !o.contains(&n.id)) || !seen.insert(n.id) {
             continue;
         }
         let Some(facts) = g.nav.nav_facts.get(&n.id) else {
@@ -3583,8 +3613,22 @@ fn nearest_member(
 /// that kept ~195k of ~196k sites out of the receiver typing (8.1 s, most
 /// of it the repo-unique type scan [`GlobalNames`] now answers in one
 /// lookup).
-pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStats) {
-    let pending = std::mem::take(&mut g.unresolved_calls);
+///
+/// GA.6: `only` (the nodes of a re-stitched TypeScript-family file; `None`
+/// for a clean build) limits the pass to their unresolved sites and member
+/// accesses: each lookup reads the INHERITS_FROM edges (the
+/// file's own re-drawn by the stitch's `resolve_refs` before this runs) and
+/// the surface tables, never another site, so the other files' sites, bound
+/// or kept by the clean build, stay as they are. The kept sites go back
+/// after the others; the caller's canonical sort orders them.
+pub(crate) fn resolve_inherited_calls(
+    g: &mut RepoGraph,
+    stats: &mut InheritStats,
+    only: Option<&HashSet<NodeId>>,
+) {
+    let (others, pending): (Vec<CallSite>, Vec<CallSite>) = std::mem::take(&mut g.unresolved_calls)
+        .into_iter()
+        .partition(|site| only.is_some_and(|o| !o.contains(&site.from)));
     let supers = superclasses(g);
     let decided: Vec<Option<(InheritWalk, Definer)>> = {
         let g: &RepoGraph = g;
@@ -3632,7 +3676,8 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
             })
             .collect()
     };
-    let mut kept: Vec<CallSite> = Vec::with_capacity(pending.len());
+    let mut kept: Vec<CallSite> = others;
+    kept.reserve(pending.len());
     for (site, lookup) in pending.into_iter().zip(decided) {
         let Some((walk, definer)) = lookup else {
             kept.push(site);
@@ -3672,7 +3717,7 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
         }
     }
     g.unresolved_calls = kept;
-    resolve_inherited_member_reads(g, &supers, &mut stats.ts);
+    resolve_inherited_member_reads(g, &supers, &mut stats.ts, only);
 }
 
 /// FH.21: every member name a superclass declares: the `class_methods` keys
@@ -4074,6 +4119,7 @@ fn resolve_inherited_member_reads(
     g: &mut RepoGraph,
     supers: &BTreeMap<u64, Vec<NodeId>>,
     stats: &mut TsInherited,
+    only: Option<&HashSet<NodeId>>,
 ) {
     let mut found: Vec<(NodeId, NodeId, EdgeCategoryId, &'static str, u32, Via)> = Vec::new();
     {
@@ -4082,7 +4128,7 @@ fn resolve_inherited_member_reads(
         let mut gate = BareFieldGate::default();
         let mut seen: HashSet<NodeId> = HashSet::new();
         for n in &g.nodes {
-            if !seen.insert(n.id) {
+            if only.is_some_and(|o| !o.contains(&n.id)) || !seen.insert(n.id) {
                 continue;
             }
             let Some(facts) = g.nav.nav_facts.get(&n.id) else {
@@ -6926,7 +6972,7 @@ mod tests {
             "build_typescript pairs nothing"
         );
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut plain, &mut stats);
+        resolve_inherited_calls(&mut plain, &mut stats, None);
         emit_override_implements(&mut plain, &mut stats);
         assert_eq!(concrete_overrides(&plain), want);
         assert_eq!(
@@ -7039,7 +7085,7 @@ mod tests {
         );
 
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut plain, &mut stats);
+        resolve_inherited_calls(&mut plain, &mut stats, None);
         emit_override_implements(&mut plain, &mut stats);
         assert_eq!(sorted_edges(&plain), sorted_edges(&g));
         assert_eq!(plain.unresolved_calls, g.unresolved_calls);
@@ -7085,7 +7131,7 @@ mod tests {
         );
         let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut plain, &mut stats);
+        resolve_inherited_calls(&mut plain, &mut stats, None);
         assert!(inherited_calls(&plain).is_empty());
         assert_eq!(plain.unresolved_calls, vec![self_call(k_go, "m", 1)]);
         assert_eq!(
@@ -7206,7 +7252,7 @@ mod tests {
         let (files, _) = receiver_files();
         let mut plain = build_typescript(repo(), files, rel).unwrap();
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut plain, &mut stats);
+        resolve_inherited_calls(&mut plain, &mut stats, None);
         emit_override_implements(&mut plain, &mut stats);
         assert_eq!(sorted_edges(&plain), sorted_edges(&g));
         assert_eq!(
@@ -7238,7 +7284,7 @@ mod tests {
         );
         let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut plain, &mut stats);
+        resolve_inherited_calls(&mut plain, &mut stats, None);
         assert!(calls_with_rule(&plain, "inherited_receiver").is_empty());
         assert_eq!(
             plain.unresolved_calls,
@@ -8371,7 +8417,7 @@ mod gd3_tests {
     fn build(files: Vec<FileParse>) -> (RepoGraph, InheritStats) {
         let mut g = crate::build::build_typescript(repo(), files, resolve).unwrap();
         let mut stats = InheritStats::default();
-        resolve_inherited_calls(&mut g, &mut stats);
+        resolve_inherited_calls(&mut g, &mut stats, None);
         emit_override_implements(&mut g, &mut stats);
         (g, stats)
     }

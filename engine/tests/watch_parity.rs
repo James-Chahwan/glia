@@ -83,6 +83,18 @@
 //! JSON handler edit (refused: `[]`, rebuilt) and a surface edit (`[]`),
 //! checks 1-3 after each. The random half gains `go_body` (a call statement
 //! in a go file's last `func`), and `body_only` may name `go` too.
+//!
+//! GA.6, the TypeScript-family fast path ([`scripted_ts_fast_path`]): a TS
+//! fixture ([`write_ts_fixture`]: an abstract base, a subclass with an
+//! inherited `this.log()`, a getter read through a typed field, a call-result
+//! receiver, a `export *` / renamed-entry barrel, a value ref, an ENDPOINT
+//! two files mint, a TypeORM entity a query site mints too) through body
+//! edits (`body_only` `["typescript"]`, the
+//! barrel's re-export rows moved by a leading comment among them), the
+//! query site's body edit (refused as a shared node: `[]`, rebuilt) and a
+//! surface edit (`[]`), checks 1-3 after each. The random half gains
+//! `ts_body` (a call statement in a ts file's last function), and
+//! `body_only` may name `typescript` too.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -804,6 +816,12 @@ const PY: Fixture = Fixture {
 /// GA.7's Go fixture ([`write_go_fixture`]).
 const GO: Fixture = Fixture {
     write: write_go_fixture,
+    undo: false,
+};
+
+/// GA.6's TypeScript fixture ([`write_ts_fixture`]).
+const TS: Fixture = Fixture {
+    write: write_ts_fixture,
     undo: false,
 };
 
@@ -1736,6 +1754,194 @@ fn scripted_go_fast_path() {
     run_on(GO, "go_fast_path", SEQ_GO_FAST, None);
 }
 
+/// GA.6's TypeScript fixture at `<tmp>/repo`: `src/base.ts` (an abstract
+/// class with a protected method and a getter), `src/store.ts` (its
+/// subclass, an inherited `this.log()`, a getter, a factory with a declared
+/// return type), `src/index.ts` (a barrel: `export *` and a renamed entry),
+/// `src/service.ts` (a typed field's getter read, a call-result receiver, an
+/// axios ENDPOINT, the renamed entry by type), `src/app.ts` (the same
+/// ENDPOINT, a value ref), and a TypeORM `@Entity` with a service whose
+/// `@InjectRepository` mints the entity too.
+fn write_ts_fixture(tmp: &Path) -> PathBuf {
+    let repo = tmp.join("repo");
+    for (rel, body) in TS_INLINE {
+        write(&repo, rel, body);
+    }
+    repo
+}
+
+const TS_INLINE: &[(&str, &str)] = &[
+    (
+        "package.json",
+        "{\n  \"name\": \"tsparity\",\n  \"dependencies\": { \"axios\": \"^1.6.0\" }\n}\n",
+    ),
+    (
+        "src/base.ts",
+        "export abstract class Base {\n  abstract run(): void;\n\n  protected log(msg: string): string {\n    return msg;\n  }\n\n  get ready(): boolean {\n    return true;\n  }\n}\n",
+    ),
+    (
+        "src/store.ts",
+        "import { Base } from './base';\n\nexport class Store extends Base {\n  private items: string[] = [];\n\n  run(): void {\n    this.log('run');\n  }\n\n  get count(): number {\n    return this.items.length;\n  }\n\n  add(x: string): number {\n    this.items.push(x);\n    return this.count;\n  }\n}\n\nexport function makeStore(): Store {\n  return new Store();\n}\n",
+    ),
+    (
+        "src/index.ts",
+        "export * from './store';\nexport { Base as Root } from './base';\n",
+    ),
+    (
+        "src/service.ts",
+        "import axios from 'axios';\nimport { Store, makeStore } from './index';\nimport { Root } from './index';\n\nexport class Service {\n  constructor(private store: Store) {}\n\n  load(): number {\n    const s = makeStore();\n    s.add('a');\n    this.store.run();\n    return this.store.count;\n  }\n\n  fetch() {\n    return axios.get('/api/items');\n  }\n\n  root(r: Root): boolean {\n    return r.ready;\n  }\n}\n",
+    ),
+    (
+        "src/app.ts",
+        "import axios from 'axios';\nimport { Service } from './service';\nimport { makeStore } from './store';\n\nconst registry: unknown[] = [];\n\nexport function main() {\n  const svc = new Service(makeStore());\n  svc.load();\n  axios.get('/api/items');\n  return svc.fetch();\n}\n\nexport function later() {\n  return registry.length;\n}\n",
+    ),
+    (
+        "src/user.entity.ts",
+        "import { Entity, Column } from 'typeorm';\n\n@Entity('users')\nexport class User {\n  @Column()\n  name: string;\n}\n",
+    ),
+    (
+        "src/users.service.ts",
+        "import { InjectRepository } from '@nestjs/typeorm';\nimport { Repository } from 'typeorm';\nimport { User } from './user.entity';\n\nexport class UsersService {\n  constructor(@InjectRepository(User) private users: Repository<User>) {}\n\n  total(): number {\n    return 1;\n  }\n}\n",
+    ),
+];
+
+/// A call through a call-result receiver and a getter read on a typed field.
+fn ts_body(r: &Path) {
+    replace(
+        r,
+        "src/service.ts",
+        "    s.add('a');\n",
+        "    s.add('a');\n    const n = this.store.count;\n    s.add(String(n));\n",
+    );
+}
+/// An inherited `this.log()` in the subclass.
+fn ts_inherited_body(r: &Path) {
+    replace(
+        r,
+        "src/store.ts",
+        "    this.items.push(x);\n",
+        "    this.items.push(x);\n    this.log(x);\n",
+    );
+}
+/// A TypeORM query site's body (it mints the entity its `@Entity` class
+/// owns: a shared node, refused, the group rebuilt).
+fn ts_repository_body(r: &Path) {
+    replace(
+        r,
+        "src/users.service.ts",
+        "    return 1;\n",
+        "    const pad = 2;\n    return pad - 1;\n",
+    );
+}
+/// A leading comment: every re-export row of the barrel moves.
+fn ts_barrel_shift(r: &Path) {
+    replace(
+        r,
+        "src/index.ts",
+        "export * from './store';\n",
+        "// the package's public face\n\nexport * from './store';\n",
+    );
+}
+fn ts_two_bodies(r: &Path) {
+    replace(
+        r,
+        "src/base.ts",
+        "    return msg;\n",
+        "    const out = msg.trim();\n    return out;\n",
+    );
+    replace(
+        r,
+        "src/app.ts",
+        "  svc.load();\n",
+        "  svc.load();\n  registry.push(Service);\n",
+    );
+}
+/// A new exported function: store.ts's surface moves.
+fn ts_surface(r: &Path) {
+    let store = std::fs::read_to_string(r.join("src/store.ts")).expect("read");
+    write(
+        r,
+        "src/store.ts",
+        &format!(
+            "{store}\nexport function dropStore(s: Store): number {{\n  return s.count;\n}}\n"
+        ),
+    );
+}
+fn ts_body_again(r: &Path) {
+    replace(
+        r,
+        "src/service.ts",
+        "    return axios.get('/api/items');\n",
+        "    const url = '/api/items';\n    this.store.add(url);\n    return axios.get('/api/items');\n",
+    );
+}
+
+/// GA.6: a TS step rebuilding the `typescript` group, through the fast path
+/// (`body_only` `["typescript"]`) or not (`[]`: the surface moved).
+const fn ts_step(
+    name: &'static str,
+    edit: fn(&Path),
+    files: &'static [&'static str],
+    fast: bool,
+) -> Step {
+    Step {
+        name,
+        edit,
+        via: Via::Apply(files),
+        expect: Expect {
+            rebuilt_exact: Some(&["typescript"]),
+            body_only: Some(if fast { &["typescript"] } else { &[] }),
+            files_modified: files,
+            ..EXPECT
+        },
+    }
+}
+
+const SEQ_TS_FAST: &[Step] = &[
+    ts_step("ts_body", ts_body, &["src/service.ts"], true),
+    ts_step(
+        "ts_inherited_body",
+        ts_inherited_body,
+        &["src/store.ts"],
+        true,
+    ),
+    ts_step("ts_barrel_shift", ts_barrel_shift, &["src/index.ts"], true),
+    ts_step(
+        "ts_repository_body",
+        ts_repository_body,
+        &["src/users.service.ts"],
+        false,
+    ),
+    ts_step(
+        "ts_two_bodies",
+        ts_two_bodies,
+        &["src/app.ts", "src/base.ts"],
+        true,
+    ),
+    Step {
+        name: "ts_surface",
+        edit: ts_surface,
+        via: Via::Apply(&["src/store.ts"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["typescript"]),
+            body_only: Some(&[]),
+            files_modified: &["src/store.ts"],
+            row_changes: &["added"],
+            ..EXPECT
+        },
+    },
+    ts_step("ts_body_again", ts_body_again, &["src/service.ts"], true),
+];
+
+/// GA.6: the TypeScript-family body-only fast path: after every step the
+/// layout is a clean build's (checks 1-3); `body_only` is `["typescript"]`
+/// on the body-only steps and `[]` on the TypeORM query site (refused, then
+/// rebuilt) and the surface step.
+#[test]
+fn scripted_ts_fast_path() {
+    run_on(TS, "ts_fast_path", SEQ_TS_FAST, None);
+}
+
 #[test]
 fn scripted_budgeted() {
     let sequences: &[(&str, &[Step])] = &[
@@ -1775,6 +1981,12 @@ fn scripted_budgeted() {
         GO,
         "budgeted_go_fast_path",
         SEQ_GO_FAST,
+        Some(MemoryBudget::mb(1)),
+    );
+    run_on(
+        TS,
+        "budgeted_ts_fast_path",
+        SEQ_TS_FAST,
         Some(MemoryBudget::mb(1)),
     );
 }
@@ -1825,6 +2037,8 @@ enum Op {
     PyBody,
     /// GA.7: the same in a go file (the Go fast path, or its refusal).
     GoBody,
+    /// GA.6: the same in a ts file (the TypeScript-family fast path).
+    TsBody,
     /// A new function, and a call to it from a sibling file.
     Declaration,
     /// A new python or go file with one function (a python one sometimes in a
@@ -1850,10 +2064,11 @@ enum Op {
 }
 
 impl Op {
-    const ALL: [Op; 16] = [
+    const ALL: [Op; 17] = [
         Op::Body,
         Op::PyBody,
         Op::GoBody,
+        Op::TsBody,
         Op::Declaration,
         Op::AddFile,
         Op::DeleteFile,
@@ -1874,6 +2089,7 @@ impl Op {
             Op::Body => "body",
             Op::PyBody => "py_body",
             Op::GoBody => "go_body",
+            Op::TsBody => "ts_body",
             Op::Declaration => "declaration",
             Op::AddFile => "add",
             Op::DeleteFile => "delete",
@@ -1890,9 +2106,9 @@ impl Op {
         }
     }
 
-    /// Its cards in one [`World::pick`] bag: 16 in all, one default
+    /// Its cards in one [`World::pick`] bag: 17 in all, one default
     /// sequence (GA.4's `py_body` took one of `body`'s two; GA.7 added
-    /// `go_body`).
+    /// `go_body`, GA.6 `ts_body`).
     fn weight(self) -> usize {
         1
     }
@@ -2174,6 +2390,23 @@ impl World {
                 let edited = in_last_fn(&rel, &text, i).replacen(
                     &format!("\t_ = {i}\n"),
                     &format!("\t_ = len(\"g{i}\")\n"),
+                    1,
+                );
+                self.put(&rel, &edited);
+                vec![rel]
+            }
+            Op::TsBody => {
+                let files: Vec<String> = self
+                    .mirror
+                    .iter()
+                    .filter(|r| ext(r) == "ts")
+                    .cloned()
+                    .collect();
+                let rel = self.choose(&files);
+                let text = self.read(&rel);
+                let edited = in_last_fn(&rel, &text, i).replacen(
+                    &format!("  const _b{i} = {i};\n"),
+                    &format!("  const _t{i} = String({i});\n"),
                     1,
                 );
                 self.put(&rel, &edited);
@@ -2548,11 +2781,12 @@ impl Want {
         if let Some(exact) = &self.rebuilt_exact {
             assert_eq!(&u.groups_rebuilt, exact, "{at}: groups rebuilt");
         }
-        // GA.4 / GA.7: only python and go have a fast path, and its groups
-        // are rebuilt ones.
+        // GA.4 / GA.7 / GA.6: only python, go and the typescript family
+        // have a fast path, and its groups are rebuilt ones.
         for key in &u.body_only {
             assert!(
-                (key == "python" || key == "go") && u.groups_rebuilt.contains(key),
+                matches!(key.as_str(), "python" | "go" | "typescript")
+                    && u.groups_rebuilt.contains(key),
                 "{at}: body_only {key}: {:?} of {:?}",
                 u.body_only,
                 u.groups_rebuilt

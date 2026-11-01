@@ -27,7 +27,7 @@
 //! calling it shares: merging stacks each file's cells on it in parse order,
 //! so its cells naming this file are one run, which is replaced in place
 //! (every cell of such a node must name a file, else
-//! [`Refused::Unsupported`]). An owned node carrying a second POSITION (two
+//! [`Refused::Unsupported`]; GA.6: or follow one that does, [`cell_owners`]). An owned node carrying a second POSITION (two
 //! parses declared one id) is refused as a shared node, never guessed.
 //!
 //! RE-STITCHING one file: (a) drop every edge whose `from` the file owns and
@@ -73,6 +73,32 @@
 //! fact, a ROUTE or HANDLED_BY ref, a JSON wire cell. The implicit and
 //! method-level IMPLEMENTS and the split DEFINES are surface outputs with no
 //! row: kept, never re-derived.
+//!
+//! GA.6, THE TYPESCRIPT FAMILY ([`rebuild_ts`]). GA.3's seam, its own stitch
+//! and import re-derivation. Surface (kept): the merge, the symbol tables,
+//! the import bindings with the DT.1q barrels' `module_symbols` rows and side
+//! table (build-local, never re-run), the override and method-level
+//! IMPLEMENTS (`graph:iface`, no row, read off declarations and heritage).
+//! Re-derived per edited file: its IMPORTS edges (statement and barrel rows,
+//! through the group's resolver, bindings compared), its calls (the TS
+//! receiver chain; DT.5k's member reads of its own scopes), its refs (DT.5g
+//! value refs, DT.5k INJECTS, the heritage edges) and the inherited calls
+//! and member accesses of its own sites (CH.1b, DF.22b, GD.3), which read
+//! the INHERITS_FROM edges the refs just drew and the surface, never another
+//! site. No TS lookup reads another file's body facts: a `ReceiverType`,
+//! `MemberRead` or `MemberWrite` is read by its own scope, the `Getter` /
+//! `Setter` / `AbstractMethod` / export facts are surface, and an Angular
+//! template edit reaches the group as its component's post-graft parse. Two
+//! cells are read across files: ROLE (the navigation lift's sole page of a
+//! module) and ORIGIN (the route index's nav routes), so an owned node whose
+//! ROLE or ORIGIN cells moved is [`Refused::SurfaceMoved`]. The lift itself
+//! runs over the whole graph after every `resolve_refs` and is idempotent on
+//! the edges it already moved. A node another file declares that the edited
+//! file mints too (a TypeORM query site's `data_entity:sql:<Model>`, owned by
+//! its `@Entity` class, or a GraphQL root `graphql_resolver:Query` every
+//! resolver file mints under its own MODULE) stays GA.3's shared node,
+//! refused: the merge stacks each minting parse's cells on it (the router's
+//! IMPORTS cell among them), and no graph holds which parse minted which.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -86,10 +112,13 @@ use glia_code_domain::{
 use glia_core::{Cell, Edge, EdgeCategoryId, Node, NodeId};
 
 use super::{
-    GoBody, PyBody, go_index, go_split_of, go_stitch, is_go_embed, merge_parses_with, python_stitch,
+    GoBody, PyBody, TsBody, go_index, go_split_of, go_stitch, is_go_embed, merge_parses_with,
+    python_stitch, ts_stitch,
 };
-use crate::calls::EvidenceTally;
-use crate::imports::{ImportEdge, RebindRefusal, python_rebind, resolve_imports_go};
+use crate::calls::{EvidenceTally, InheritStats};
+use crate::imports::{
+    ImportEdge, RebindRefusal, python_rebind, resolve_imports_go, same_stem_table,
+};
 use crate::types::RepoGraph;
 
 /// GA.3: one file whose body changed, as its fresh parse.
@@ -323,15 +352,32 @@ fn cell_file(cell: &Cell) -> Option<String> {
     evidence::locate(std::slice::from_ref(cell)).map(|(file, _)| file)
 }
 
-/// The run of `cells` naming `path`, when every cell names a file and the
-/// ones naming `path` are one non-empty run.
-fn cell_run(cells: &[Cell], path: &str) -> Option<Range<usize>> {
-    let mut hits: Vec<usize> = Vec::new();
-    for (at, c) in cells.iter().enumerate() {
-        if cell_file(c)? == path {
-            hits.push(at);
+/// The file each of `cells` belongs to: a cell naming a file is that
+/// file's; one naming none (GA.6: the IMPORTS library list an extractor
+/// writes beside an ENDPOINT's hit) is the file of the located cell before
+/// it, since a parse writes its own cells of a node together and the merge
+/// stacks them per parse. `None` when the first cell names no file.
+fn cell_owners(cells: &[Cell]) -> Option<Vec<String>> {
+    let mut owner: Option<String> = None;
+    let mut out = Vec::with_capacity(cells.len());
+    for c in cells {
+        if let Some(file) = cell_file(c) {
+            owner = Some(file);
         }
+        out.push(owner.clone()?);
     }
+    Some(out)
+}
+
+/// The run of `cells` belonging to `path` ([`cell_owners`]), when every
+/// cell belongs to a file and `path`'s are one non-empty run.
+fn cell_run(cells: &[Cell], path: &str) -> Option<Range<usize>> {
+    let hits: Vec<usize> = cell_owners(cells)?
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.as_str() == path)
+        .map(|(at, _)| at)
+        .collect();
     let (first, last) = (*hits.first()?, *hits.last()?);
     (last - first + 1 == hits.len()).then_some(first..last + 1)
 }
@@ -460,10 +506,8 @@ fn prepare(g: &RepoGraph, ctx: &Ctx, edit: BodyEdit) -> Result<Prepared, Refused
         if g.nav.parent_of.contains_key(&n.id) || mini.nav.parent_of.contains_key(&n.id) {
             return Err(Refused::Unsupported("shared node"));
         }
-        let fresh = !n.cells.is_empty()
-            && n.cells
-                .iter()
-                .all(|c| cell_file(c).as_deref() == Some(path.as_str()));
+        let fresh = cell_owners(&n.cells)
+            .is_some_and(|files| !files.is_empty() && files.iter().all(|f| *f == path));
         match cell_run(&g.nodes[at].cells, &path) {
             Some(run) if fresh => runs.push((at, run)),
             _ => return Err(Refused::Unsupported("shared node")),
@@ -889,6 +933,158 @@ fn is_go_surface_edge(e: &Edge) -> bool {
     })
 }
 
+/// GA.6: the cells another file's TypeScript-family resolution reads off a
+/// node: ROLE (`nav::lift_nav_endpoints`' sole page) and ORIGIN (the
+/// navigation route index's nav routes).
+fn cross_read_cells(cells: &[Cell]) -> Vec<&Cell> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ROLE || c.kind == cell_type::ORIGIN)
+        .collect()
+}
+
+/// GA.6: true when every node `p` replaces keeps its [`cross_read_cells`]:
+/// an owned node's whole cell list, a shared node's run.
+fn cross_read_cells_held(g: &RepoGraph, ctx: &Ctx, p: &Prepared) -> bool {
+    let runs: HashMap<usize, &Range<usize>> = p.runs.iter().map(|(at, r)| (*at, r)).collect();
+    p.nodes.iter().all(|n| {
+        let Some(&at) = ctx.index.get(&n.id) else {
+            return true;
+        };
+        let old = match runs.get(&at) {
+            Some(run) => g.nodes[at].cells.get((*run).clone()).unwrap_or_default(),
+            None => g.nodes[at].cells.as_slice(),
+        };
+        cross_read_cells(old) == cross_read_cells(&n.cells)
+    })
+}
+
+/// GA.6: an edge a TypeScript-family re-stitch keeps although its `from` is
+/// an edited file's: an IMPLEMENTS the override or method-level pass derived
+/// from declarations and heritage (`graph:iface`: `abstract_override`,
+/// `concrete_override`, `same_name`). Surface passes' outputs, carrying no
+/// row, so a body-only edit leaves them as they are.
+fn is_ts_surface_edge(e: &Edge) -> bool {
+    evidence::Evidence::of(e).is_some_and(|ev| ev.emitter == "graph:iface")
+}
+
+/// GA.6: [`super::rebuild_ts_bodies`] without its marker: GA.3's checks
+/// ([`prepare`]), the ROLE / ORIGIN cells held ([`cross_read_cells_held`]),
+/// each edited file's IMPORTS edges re-derived through `resolve_source` and
+/// its bindings compared (`SameStem::ts_rebind`), all before the first
+/// write; then the files' outputs dropped (the `graph:iface` IMPLEMENTS
+/// kept, [`is_ts_surface_edge`]), their cells, parse edges and body nav
+/// replaced, their IMPORTS edges drawn again and [`super::ts_stitch`] over
+/// their calls and refs with the inherited passes limited to their nodes;
+/// then [`RepoGraph::canonicalize`]. Why no other file's output moves: the
+/// module doc's GA.6 paragraph.
+pub(crate) fn rebuild_ts<R>(
+    g: &mut RepoGraph,
+    edits: Vec<BodyEdit>,
+    resolve_source: &R,
+) -> Result<RebodyStats, Refused>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    if !g.symbols.home_module.is_empty() {
+        return Err(Refused::Unsupported("shared package"));
+    }
+    let ctx = Ctx::read(g, Owners::new());
+    let index = &ctx.index;
+    let mut prepared = edits
+        .into_iter()
+        .map(|e| prepare(g, &ctx, e))
+        .collect::<Result<Vec<Prepared>, Refused>>()?;
+    prepared.sort_by(|a, b| a.qname.cmp(&b.qname).then(a.path.cmp(&b.path)));
+    if prepared.windows(2).any(|w| w[0].module == w[1].module) {
+        return Err(Refused::Unsupported("a file edited twice"));
+    }
+    let shared: HashSet<NodeId> = prepared
+        .iter()
+        .flat_map(|p| p.runs.iter().map(|(at, _)| g.nodes[*at].id))
+        .collect();
+    if !shared.is_empty() && g.edges.iter().any(|e| shared.contains(&e.from)) {
+        return Err(Refused::Unsupported("an edge from a shared node"));
+    }
+    if let Some(p) = prepared.iter().find(|p| !cross_read_cells_held(g, &ctx, p)) {
+        return Err(Refused::SurfaceMoved(p.path.clone()));
+    }
+    let files: Vec<(NodeId, &str, &[ImportStmt], &[NavFact])> = prepared
+        .iter()
+        .map(|p| {
+            let facts = p
+                .nav
+                .nav_facts
+                .get(&p.module)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            (p.module, p.path.as_str(), p.imports.as_slice(), facts)
+        })
+        .collect();
+    let import_edges = same_stem_table(g).ts_rebind(g, &files, resolve_source)?;
+    drop(files);
+
+    // Writes from here on.
+    let owned: HashSet<NodeId> = prepared
+        .iter()
+        .flat_map(|p| p.owned.iter().copied())
+        .collect();
+    let modules: HashSet<NodeId> = prepared.iter().map(|p| p.module).collect();
+    let dropped = drop_file_outputs(g, &owned, &modules, is_ts_surface_edge);
+    let kept = g.edges.len();
+    let mut body = TsBody {
+        calls: Vec::new(),
+        refs: Vec::new(),
+    };
+    for p in prepared {
+        let Prepared {
+            owned,
+            nodes,
+            edges,
+            nav,
+            calls,
+            refs,
+            runs,
+            block,
+            order,
+            ..
+        } = p;
+        let mut run_of: HashMap<usize, Range<usize>> = runs.into_iter().collect();
+        for n in nodes {
+            let Some(&at) = index.get(&n.id) else {
+                continue;
+            };
+            match run_of.remove(&at) {
+                Some(run) => {
+                    g.nodes[at].cells.splice(run, n.cells);
+                }
+                None => g.nodes[at].cells = n.cells,
+            }
+        }
+        reorder_block(g, block, &order);
+        g.edges.extend(edges);
+        replace_file_nav(g, &owned, &nav);
+        body.calls.extend(calls);
+        body.refs.extend(refs);
+    }
+    for edge in import_edges.into_iter().flatten() {
+        edge.draw(g);
+    }
+    let mut tally = EvidenceTally::default();
+    let mut inh = InheritStats::default();
+    ts_stitch(g, &body, Some(&mut inh), Some(&owned), &mut tally);
+    let added = g.edges.len() - kept;
+    g.canonicalize();
+    Ok(RebodyStats {
+        files: modules.len(),
+        edges_removed: dropped.edges,
+        edges_added: added,
+        calls_bound: tally.calls_bound(),
+        refs_bound: tally.refs_bound(),
+        names_ms: tally.names_ms(),
+    })
+}
+
 /// Put `g.nodes[block]` in `order` (the block's own indexes, each once): a
 /// body edit that mints a shared node at another statement moves it within
 /// its file's block, as a clean merge would.
@@ -930,7 +1126,10 @@ mod tests {
     use glia_core::RepoId;
 
     use super::*;
-    use crate::build::{build_go, build_python, rebuild_go_bodies, rebuild_python_bodies};
+    use crate::build::{
+        build_go, build_python, build_typescript_family, rebuild_go_bodies, rebuild_python_bodies,
+        rebuild_ts_bodies,
+    };
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://rebody")
@@ -1690,5 +1889,415 @@ func Show(c *gin.Context) {
             go_refused("service/service.go", &src),
             Err(Refused::SurfaceMoved(_))
         ));
+    }
+
+    // ---- GA.6: the TypeScript family -----------------------------------------
+
+    /// The MODULE qname of a TS file path: extension dropped, `/` -> `::`.
+    fn ts_qname(path: &str) -> String {
+        path.rsplit_once('.')
+            .map_or(path, |(stem, _)| stem)
+            .replace('/', "::")
+    }
+
+    fn ts_parse(path: &str, src: &str) -> FileParse {
+        glia_parser_typescript::parse_file(src, path, &ts_qname(path), repo()).expect("parse")
+    }
+
+    /// A relative specifier resolved against the importer's qname; a bare one
+    /// (`axios`) is external.
+    fn ts_source(from: &str, spec: &str) -> Option<String> {
+        if !spec.starts_with('.') {
+            return None;
+        }
+        let mut segs: Vec<&str> = from.split("::").collect();
+        segs.pop();
+        for part in spec.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segs.pop();
+                }
+                p => segs.push(p.strip_suffix(".ts").unwrap_or(p)),
+            }
+        }
+        Some(segs.join("::"))
+    }
+
+    const TS_BASE: &str = "\
+export abstract class Base {
+  abstract run(): void;
+
+  protected log(msg: string): string {
+    return msg;
+  }
+
+  get ready(): boolean {
+    return true;
+  }
+}
+";
+
+    const TS_STORE: &str = "\
+import { Base } from './base';
+
+export class Store extends Base {
+  private items: string[] = [];
+
+  run(): void {
+    this.log('run');
+  }
+
+  get count(): number {
+    return this.items.length;
+  }
+
+  add(x: string): number {
+    this.items.push(x);
+    return this.count;
+  }
+}
+
+export function makeStore(): Store {
+  return new Store();
+}
+";
+
+    const TS_INDEX: &str = "\
+export * from './store';
+export { Base as Root } from './base';
+";
+
+    const TS_SERVICE: &str = "\
+import axios from 'axios';
+import { Store, makeStore } from './index';
+import { Root } from './index';
+
+export class Service {
+  constructor(private store: Store) {}
+
+  load(): number {
+    const s = makeStore();
+    s.add('a');
+    this.store.run();
+    return this.store.count;
+  }
+
+  fetch() {
+    return axios.get('/api/items');
+  }
+
+  root(r: Root): boolean {
+    return r.ready;
+  }
+}
+";
+
+    const TS_APP: &str = "\
+import axios from 'axios';
+import { Service } from './service';
+import { makeStore } from './store';
+
+const registry: unknown[] = [];
+
+export function main() {
+  const svc = new Service(makeStore());
+  svc.load();
+  axios.get('/api/items');
+  return svc.fetch();
+}
+
+export function later() {
+  return registry.length;
+}
+";
+
+    const TS_ENTITY: &str = "\
+import { Entity, Column } from 'typeorm';
+
+@Entity('users')
+export class User {
+  @Column()
+  name: string;
+}
+";
+
+    const TS_USERS: &str = "\
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { User } from './user.entity';
+
+export class UsersService {
+  constructor(@InjectRepository(User) private users: Repository<User>) {}
+
+  total(): number {
+    return 1;
+  }
+}
+";
+
+    fn ts_base() -> Vec<(&'static str, String)> {
+        vec![
+            ("src/app.ts", TS_APP.to_string()),
+            ("src/base.ts", TS_BASE.to_string()),
+            ("src/index.ts", TS_INDEX.to_string()),
+            ("src/service.ts", TS_SERVICE.to_string()),
+            ("src/store.ts", TS_STORE.to_string()),
+            ("src/user.entity.ts", TS_ENTITY.to_string()),
+            ("src/users.service.ts", TS_USERS.to_string()),
+        ]
+    }
+
+    fn ts_parses(tree: &[(&'static str, String)]) -> Vec<FileParse> {
+        tree.iter().map(|(p, s)| ts_parse(p, s)).collect()
+    }
+
+    fn ts_clean(tree: &[(&'static str, String)]) -> RepoGraph {
+        let mut g = build_typescript_family(repo(), ts_parses(tree), ts_source).expect("build");
+        g.canonicalize();
+        g
+    }
+
+    /// Re-stitch `files` (path, new source) on the base graph, compare with
+    /// a clean build of the edited tree, and return the stats.
+    fn ts_rebody(files: &[(&str, String)], label: &str) -> RebodyStats {
+        let tree = ts_base();
+        let mut g = ts_clean(&tree);
+        let mut after = tree.clone();
+        for (path, src) in files {
+            after = edited(&after, path, src);
+        }
+        let edits = files
+            .iter()
+            .map(|(p, s)| BodyEdit::new(ts_parse(p, s)))
+            .collect();
+        let stats = rebuild_ts_bodies(&mut g, edits, ts_source)
+            .unwrap_or_else(|e| panic!("{label}: refused: {e}"));
+        assert_same(&g, &ts_clean(&after), label);
+        stats
+    }
+
+    fn ts_refused(path: &str, src: &str) -> Result<RebodyStats, Refused> {
+        let mut g = ts_clean(&ts_base());
+        let before = g.clone();
+        let got = rebuild_ts_bodies(&mut g, vec![BodyEdit::new(ts_parse(path, src))], ts_source);
+        assert!(got.is_err(), "{path}: {got:?}");
+        assert_same(&g, &before, "refused leaves the graph");
+        got
+    }
+
+    /// The fixture reaches what a TS re-stitch must keep or re-derive: a
+    /// barrel's re-export edges and renamed entry, an inherited `this.m()`,
+    /// an abstract override, a call-result receiver, a getter read through a
+    /// typed field, a shared ENDPOINT.
+    #[test]
+    fn ts_base_fixture_reaches_every_path() {
+        let g = ts_clean(&ts_base());
+        assert_eq!(rule_count(&g, "graph:imports", "reexport"), 2);
+        assert_eq!(rule_count(&g, "graph:calls", "inherited_method"), 1);
+        assert_eq!(rule_count(&g, "graph:iface", "abstract_override"), 1);
+        assert!(rule_count(&g, "graph:calls", "receiver_return") > 0);
+        assert!(rule_count(&g, "graph:calls", "receiver_accessor_read") > 0);
+        let service = g.symbols.module_by_qname["src::service"];
+        let root = g.symbols.module_import_bindings[&service]["Root"];
+        assert_eq!(
+            g.nav.qname_by_id[&root], "src::base::Base",
+            "the barrel's renamed entry binds"
+        );
+        let endpoint = g
+            .nodes
+            .iter()
+            .find(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .expect("an ENDPOINT");
+        assert_eq!(endpoint.cells.len(), 2, "one hit per calling file");
+        let entity = g
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "data_entity:sql:User")
+            .map(|(id, _)| *id)
+            .expect("the TypeORM entity");
+        let class = g.nav.parent_of.get(&entity).expect("owned by its class");
+        assert_eq!(g.nav.qname_by_id[class], "src::user.entity::User");
+        assert!(
+            g.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA && e.to == entity),
+            "the service's repository reaches it"
+        );
+    }
+
+    /// A file that mints another file's entity (a query site) edits a body:
+    /// a shared node, refused (the group rebuilds).
+    #[test]
+    fn ts_a_repository_service_is_refused() {
+        let src = TS_USERS.replace(
+            "    return 1;\n",
+            "    const pad = 2;\n    return pad - 1;\n",
+        );
+        assert_eq!(
+            ts_refused("src/users.service.ts", &src),
+            Err(Refused::Unsupported("shared node"))
+        );
+    }
+
+    #[test]
+    fn ts_a_call_added() {
+        let src = TS_SERVICE.replace(
+            "    s.add('a');\n",
+            "    s.add('a');\n    s.add('b');\n    makeStore();\n",
+        );
+        let s = ts_rebody(&[("src/service.ts", src)], "call added");
+        assert_eq!(s.files, 1);
+        assert!(s.calls_bound > 0 && s.edges_removed > 0, "{s:?}");
+    }
+
+    /// A `this.m()` the class does not define binds to the superclass's.
+    #[test]
+    fn ts_an_inherited_call_added() {
+        let src = TS_STORE.replace(
+            "    this.items.push(x);\n",
+            "    this.items.push(x);\n    this.log(x);\n",
+        );
+        ts_rebody(&[("src/store.ts", src)], "inherited call");
+    }
+
+    /// Lines above the typed-receiver calls: every row below them moves.
+    #[test]
+    fn ts_a_typed_receiver_call_moved() {
+        let src = TS_SERVICE.replace(
+            "    const s = makeStore();\n",
+            "    const pad = 1;\n    const more = pad + 1;\n    const s = makeStore();\n",
+        );
+        ts_rebody(&[("src/service.ts", src)], "receiver moved");
+    }
+
+    #[test]
+    fn ts_a_value_ref_added() {
+        let src = TS_APP.replace(
+            "  svc.load();\n",
+            "  svc.load();\n  registry.push(Service);\n",
+        );
+        ts_rebody(&[("src/app.ts", src)], "value ref");
+    }
+
+    #[test]
+    fn ts_a_getter_read_added() {
+        let src = TS_SERVICE.replace(
+            "    this.store.run();\n",
+            "    this.store.run();\n    const n = this.store.count;\n    s.add(String(n));\n",
+        );
+        ts_rebody(&[("src/service.ts", src)], "getter read");
+    }
+
+    /// A file a barrel re-exports, and the barrel itself (its re-export rows
+    /// move under a new leading comment), in one call.
+    #[test]
+    fn ts_a_barrel_and_its_source_edited() {
+        let index = format!("// the package's public face\n\n{TS_INDEX}");
+        let store = TS_STORE.replace(
+            "    return new Store();\n",
+            "    const s = new Store();\n    return s;\n",
+        );
+        let s = ts_rebody(
+            &[("src/index.ts", index), ("src/store.ts", store)],
+            "barrel",
+        );
+        assert_eq!(s.files, 2);
+    }
+
+    /// A body line above the imports' consumers in the importing file, and an
+    /// edit of the shared ENDPOINT's second calling file.
+    #[test]
+    fn ts_two_files_at_once() {
+        let app = TS_APP.replace(
+            "  svc.load();\n",
+            "  const loaded = svc.load();\n  axios.get('/api/items');\n  return loaded;\n}\n\nexport function rest() {\n  const svc = new Service(makeStore());\n",
+        );
+        let base = TS_BASE.replace(
+            "    return msg;\n",
+            "    const out = msg.trim();\n    return out;\n",
+        );
+        let tree = ts_base();
+        let mut g = ts_clean(&tree);
+        let before_app = ts_parse("src/app.ts", &app);
+        let surface_moved = before_app.nodes.len() != ts_parse("src/app.ts", TS_APP).nodes.len();
+        assert!(
+            surface_moved,
+            "the app edit adds a function: a surface edit"
+        );
+        // Only base.ts is body-only; app.ts adds `rest`: refused as a pair.
+        let got = rebuild_ts_bodies(
+            &mut g,
+            vec![
+                BodyEdit::new(ts_parse("src/base.ts", &base)),
+                BodyEdit::new(before_app),
+            ],
+            ts_source,
+        );
+        assert_eq!(got, Err(Refused::SurfaceMoved("src/app.ts".to_string())));
+        let service = TS_SERVICE.replace(
+            "    return axios.get('/api/items');\n",
+            "    const url = '/api/items';\n    return axios.get(url);\n",
+        );
+        let s = ts_rebody(
+            &[("src/base.ts", base), ("src/service.ts", service)],
+            "two files",
+        );
+        assert_eq!(s.files, 2);
+    }
+
+    #[test]
+    fn ts_an_export_added_is_refused() {
+        let src = format!("{TS_STORE}\nexport function dropStore(): void {{}}\n");
+        assert_eq!(
+            ts_refused("src/store.ts", &src),
+            Err(Refused::SurfaceMoved("src/store.ts".to_string()))
+        );
+    }
+
+    #[test]
+    fn ts_an_import_added_is_refused() {
+        let src = format!("import {{ Base }} from './base';\n{TS_APP}");
+        assert!(matches!(
+            ts_refused("src/app.ts", &src),
+            Err(Refused::SurfaceMoved(_))
+        ));
+    }
+
+    /// An ENDPOINT's cells as the engine's extractors write them: each
+    /// file's hit, then its IMPORTS library list naming no file. The list
+    /// belongs to the hit before it; a node opening with an unlocated cell
+    /// has no runs.
+    #[test]
+    fn unlocated_cells_follow_their_hit() {
+        let hit = |file: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: glia_core::CellPayload::Json(format!(
+                "{{\"method\":\"GET\",\"path\":\"/x\",\"file\":\"{file}\",\"line\":1}}"
+            )),
+        };
+        let lib = Cell {
+            kind: cell_type::IMPORTS,
+            payload: glia_core::CellPayload::Json("[\"axios\"]".to_string()),
+        };
+        let cells = vec![hit("a.ts"), lib.clone(), hit("b.ts"), lib.clone()];
+        assert_eq!(cell_run(&cells, "a.ts"), Some(0..2));
+        assert_eq!(cell_run(&cells, "b.ts"), Some(2..4));
+        assert_eq!(cell_run(&cells, "c.ts"), None);
+        assert_eq!(cell_owners(&[lib.clone(), hit("a.ts")]), None);
+        let split = vec![hit("a.ts"), hit("b.ts"), lib, hit("a.ts")];
+        assert_eq!(cell_run(&split, "a.ts"), None, "not one run");
+    }
+
+    /// The marker names the language.
+    #[test]
+    fn ts_the_marker_reads_typescript() {
+        let got: Result<RebodyStats, Refused> = Err(Refused::Unsupported("page navigation"));
+        assert!(
+            marker("typescript", &got)
+                .starts_with("[rebody] lang=typescript files=0 edges -0 +0 calls_bound=0")
+        );
+        assert!(marker("typescript", &got).ends_with("refused=unsupported:page_navigation"));
     }
 }
