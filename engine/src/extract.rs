@@ -543,7 +543,8 @@ pub(crate) fn apply_cross_cutting_extractors(
         // fold, owner pass and HttpStackResolver treat it as any client
         // ENDPOINT. Cached with the parse. fired_on, per file that minted one
         // or skipped a WebSocket client: `[graphql-transport] endpoints=<n>
-        // (absolute=<a> relative=<r> template=<t>) skipped_ws=<w> path=<file>`.
+        // (absolute=<a> relative=<r> template=<t>) skipped_ws=<w> aliased=<l>
+        // namespace=<s> cjs=<c> apollo_angular=<g> path=<file>`.
         {
             let idx = anchor::build_span_index(
                 &fp.nodes,

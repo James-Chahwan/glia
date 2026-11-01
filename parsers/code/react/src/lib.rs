@@ -3,9 +3,10 @@
 //! The engine never routes a file to `react`: `detect_language` maps `.tsx`,
 //! `.jsx` and `.js` to `typescript`, and the TypeScript parser reads such a
 //! file with tree-sitter's TSX grammar (GD.38), so the TypeScript parse IS the
-//! React parse. Components and hooks get their roles from the cross-cutting
-//! React extractor (`glia_parser_extractors::react`), folded into the
-//! declarations by the graph's role fold. [`parse_file`] stays as the
+//! React parse. Since GD.39 the TypeScript parser gives components their ROLE
+//! from the AST (and reads JSX elements and attributes as USES); the
+//! cross-cutting React extractor no longer line-scans component names in
+//! TS-family files. [`parse_file`] stays as the
 //! `"react"` arm of the engine's explicit-language dispatch.
 
 pub use glia_code_domain::{

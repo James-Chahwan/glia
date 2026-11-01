@@ -289,12 +289,13 @@ Warnings do not stop a query; they print on stderr as `<source>:<line>:<col>: wa
 
 ## The row budget
 
-An evaluation stops when it has derived more rows than its budget (5,000,000 by default; the
-engine's `QueryOptions::row_budget`), and never truncates silently: the answer is an error naming
-the predicate and its first rule.
+An evaluation stops when the bindings its rule steps emit exceed its budget (5,000,000 by default;
+the engine's `QueryOptions::row_budget`; since 0.5.6 every binding a rule step emits is charged, not
+only the rows it keeps, so a join that explodes stops even when it derives little), and never
+truncates silently: the answer is an error naming the predicate and its first rule.
 
 ```text
-rule evaluation stopped: `r/2` (<query>:1) reached 101 derived rows against a row budget of 100.
+rule evaluation stopped: `r/2` (<query>:1) reached 101 bindings against a row budget of 100.
 Its recursion is probably unseeded: bind an argument from a small relation (`r(x, y) :- seed(x), ...`),
 use reaches(x, y, "CATS") for reachability, or raise the budget.
 ```

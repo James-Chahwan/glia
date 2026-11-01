@@ -229,6 +229,32 @@ distinct `<label>/<shape>/<ranker>/<metric>` rows over both baselines. Drift mea
 or commit clusters moved: only a declared re-baseline fixes it. The harness is deterministic, so a
 rerun never clears a drop.
 
+### Accepted rows (0.5.4, FD.79)
+
+`gate.json` `accepted` holds rows James ruled may stay below their baseline: each row passes while
+it stays at or above its `floor`, printed `[rank-gate] base=<b> accepted <row> <base>-><new>
+floor=<f> (<packet>)`, and the check line gains `, <n> accepted`. At 0.5.6 there are six:
+
+- `glia/single/ANS:impact/r10` (0.254), `glia/single/ANS:impact/mrr` (0.4556),
+  `glia/single/ANS:impact@sel/r10` (0.2536), `glia/single/ANS:impact@sel/mrr` (0.4542): FD.79 removed
+  mostly-wrong doc links, and glia alone, where 39% of 2-30-file commits change docs and code
+  together, dropped. 0.5.6 GP.9 measured file-level doc ties as their replacement and it FAILED
+  (`doc-ties/report.md`), so they stay; section-level doc ties are a 0.5.7 item.
+- `shell/single/PT*/mrr` (0.593): GD.2's TS graph content (James 2026-10-31).
+- `websocket/single/B0/mrr` (0.581): GD.34 removed four wrong `tail_unique` Go IMPORTS (James
+  2026-11-01).
+
+PT* and B0 are calibrated candidates, never the default ranker; P1 / H10 and the ANS rows held.
+
+### Doc ties, measured and not gated (0.5.6, GP.9)
+
+`rank_eval --ans on` also appends `ANS:impact+doctie` and `ANS:impact.files+doctie` after every
+other row (no gated row moves): a seeded query's files tied by co-change to a doc its seeds are tied
+to, appended after diff impact's walk. They are information rows, outside `gate.json`'s rankers.
+`--doc-ties-judge` prints `[doc-ties] label=<l> docs=<d> ties=<t> hubs=<h> bridged_queries=<q>
+appended_queries=<a>` per run and `[doc-ties] verdict=<PASS|FAIL> glia r10=<x> ..`; the committed
+rule is `doc-ties/RULE.md` and its FAIL report `doc-ties/report.md`.
+
 ### Calibrated against default (EC.9b, ruling EC-9b)
 
 Each row above is judged against its own baseline, never a calibrated answer against its default:

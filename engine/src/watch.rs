@@ -37,9 +37,11 @@
 //!
 //! Body-only fast path (GA.4, R2-watch section 5 A2), the in-group cutoff
 //! below the group one. A group whose language has a fast path
-//! (`lang_build::fast_path_for`: python, through GA.3's
-//! `glia_graph::rebuild_python_bodies`) also keeps each parse's file, parse
-//! fingerprint and declaration-surface fingerprint (`cache::surface_fingerprint`,
+//! (`lang_build::fast_path_for`: python, go and the TypeScript family, through
+//! `glia_graph::rebuild_python_bodies` (GA.3), `rebuild_go_bodies` (GA.7) and
+//! `rebuild_ts_bodies` (GA.6); Rust has none, FA.1's verdict) also keeps each
+//! parse's file, parse fingerprint and declaration-surface fingerprint
+//! (`cache::surface_fingerprint`,
 //! GA.1; only a changed file's surface is fingerprinted again). When such a
 //! group's fingerprint moved but it reads the same files in the same order,
 //! its fingerprint's other inputs (the overlay, the proto service set, the

@@ -294,7 +294,7 @@ pub(crate) struct Grafted {
 /// from the cache's build memos (`build::memo`) instead of recomputing it.
 /// The memo's stats are reset first, and its fired_on line follows the
 /// grafts, once per repo build that holds a cache:
-///   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> imports hit=<h>/<n> index=<hit|built|none> repo=<label>`
+///   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> imports hit=<h>/<n> index=<hit|built|none> wrappers hit=<h>/<n> scan hit=<h>/<n> repo=<label>`
 pub(crate) fn parse_and_graft(
     files: &[(String, String)],
     mut cache: Option<&mut ParseCache>,

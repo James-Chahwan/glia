@@ -2043,7 +2043,13 @@ pub enum NavFact {
     /// `{ target: Import { local: "issue_urls" }, prefix: "", via: "spread" }`.
     /// `prefix` is the include literal as written (a `re_path` regex's `^` /
     /// `$` anchors stripped). Every route of the target module takes each of
-    /// the includer's own prefixes joined with `prefix`.
+    /// the includer's own prefixes joined with `prefix`. Later readers add
+    /// `via` values: GD.41 (Python) `router:<fastapi|flask>` (a router
+    /// variable's own prefix, mounting nothing by itself), `fastapi:<x>`
+    /// (`<x>.include_router`), `flask:<x>` / `flask_own:<x>`
+    /// (`register_blueprint` with / without `url_prefix`); GD.42 (TypeScript)
+    /// `router:<family>`, `path_list:<name>`, `<express|koa|hono>:<x>` and
+    /// `export_default`.
     IncludeMount {
         line: u32,
         target: IncludeTarget,

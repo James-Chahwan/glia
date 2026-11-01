@@ -43,6 +43,15 @@ not built and the rank gate's four FD.79 `accepted` glia rows stay. The retry: t
 the code it changes with, which needs a history snapshot that records each commit's hunks, measured the same way against
 a pass rule committed first; on PASS, build the bridge and empty `accepted`.
 
+**Declared entries seed no entry flows (found by 0.5.6 GZ.1, 2026-11-01).** `entry_flows` seeds from
+`CODE_PROFILE.tables.entry` (kinds, roles and names) only, while liveness also counts declared entries:
+a node's ENTRYPOINT cell (DT.5l's `main_guard`, 0.5.6's `host:<row>` from resolver:host, GH.4 / GH.8 /
+GH.9 / GH.10 / GH.11's host callbacks and script entries). So a host-started MODULE is live but has no
+flow: on bench/substrate-gap/patterns/python/process_entry, `glia flows` lists only `GET /health`, not
+worker.py's `loop -> process`. Seeding flows from ENTRYPOINT cells too changes `flows`, `find --flows`
+and concept search's flow set, which GB.6's gate measured on the 0.5.6 tree; so it lands with a re-run of
+the concept gate (`scripts/embedding-gate.sh concept-verdict`) under GB.6's committed rule.
+
 ## 4. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
 
 James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
