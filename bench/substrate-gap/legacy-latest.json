@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 505,
+  "fixtures": 506,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2214,6 +2214,13 @@
       "language": "typescript",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "react-jsx-refs": {
+      "framework": "react-jsx-refs",
+      "language": "typescript",
+      "per_category": {
+        "USES": 1.0
       }
     },
     "react-tsx-components": {

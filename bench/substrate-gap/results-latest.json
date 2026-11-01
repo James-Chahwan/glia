@@ -9793,6 +9793,7 @@
     "fixtures/python-decorator-handlers",
     "fixtures/python-requirements-roots",
     "fixtures/react-hook",
+    "fixtures/react-jsx-refs",
     "fixtures/react-tsx-components",
     "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
@@ -10145,16 +10146,14 @@
           0,
           0
         ],
-        "level": "partial",
+        "level": "full",
         "literal": [
           2,
           2
         ],
-        "reasons": [
-          "routing edge missing"
-        ],
+        "reasons": [],
         "route": [
-          1,
+          2,
           2
         ],
         "via": "embedded_script"
@@ -10483,9 +10482,9 @@
     ],
     "totals": {
       "error": 0,
-      "full": 17,
+      "full": 18,
       "none": 0,
-      "partial": 1,
+      "partial": 0,
       "unknown": 108
     }
   },
