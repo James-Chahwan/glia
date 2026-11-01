@@ -2103,6 +2103,8 @@ fn visit_class(
     // IMPLEMENTS (class → interface). The superclass / interfaces are usually
     // cross-file, so they are recorded as refs and bound by the graph crate.
     collect_class_heritage(n, src, class_id, module_id, acc);
+    // GH.10: a class extending a host class roots `this.` at it.
+    record_host_subclass(n, src, class_id, acc);
     // A13.15: `@Entity(…) class User` -> the model-keyed entity it defines.
     emit_typeorm_entity(n, name, class_id, src, repo, acc);
 
@@ -3956,6 +3958,9 @@ fn visit_method(
     // types an awaited / subscribed call of it (`await s.load()`), which the
     // graph reads only through those forms.
     record_return_class(n, src, method_id, acc);
+    // GH.10: an `apply(compiler)` that taps the compiler's hooks holds the
+    // webpack gate; read before its body is walked.
+    record_host_param_method(n, src, method_id, acc);
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
     }
@@ -11496,6 +11501,23 @@ struct HostScan {
     /// `(registration node, handler, row)`.
     handlers: Vec<(NodeId, HostHandler, u32)>,
     tally: hosts::HostTally,
+    /// GH.10: each class whose `extends` names a host class through the
+    /// file's import (`class P extends Plugin`, `Plugin` from `obsidian`), as
+    /// `(class, host, base path, the class node's start byte)`, walk order.
+    /// `this.` inside its body is rooted at the base path.
+    subclasses: Vec<(NodeId, &'static hosts::HostRow, String, usize)>,
+    /// GH.10: each METHOD a [`hosts::Gate::Param`] holds in (webpack's
+    /// `apply(compiler)` tapping the compiler's hooks), as `(METHOD, host,
+    /// the first parameter's local name)`, walk order.
+    param_methods: Vec<(NodeId, &'static hosts::HostRow, String)>,
+}
+
+impl HostScan {
+    /// True when the file shows no host: no import of a host module and no
+    /// METHOD a param gate holds in. Nothing is read.
+    fn idle(&self) -> bool {
+        self.bindings.is_empty() && self.param_methods.is_empty()
+    }
 }
 
 /// GH.9: the local bindings the file's top-level imports of a host module
@@ -11717,7 +11739,9 @@ fn host_handler(
 
 /// GH.9: a call that registers with a host the file imports
 /// ([`hosts::registration_for`]): mints the CLI_COMMAND / EVENT_HANDLER and
-/// queues its handler; a settings read ([`try_host_section_read`]).
+/// queues its handlers; a settings read ([`try_host_section_read`]). GH.10:
+/// also a call on `this` in a host subclass ([`host_this_dotted`]) and a
+/// call inside a param-gated METHOD ([`host_param_dotted`]).
 fn try_detect_host(
     call: TsNode,
     src: &[u8],
@@ -11725,19 +11749,33 @@ fn try_detect_host(
     enclosing_class: Option<NodeId>,
     acc: &mut Acc,
 ) {
-    if acc.host.bindings.is_empty() {
+    if acc.host.idle() {
         return;
     }
     let Some(callee) = call.child_by_field_name("function") else {
         return;
     };
     try_host_section_read(call, callee, src, from, acc);
-    let Some(dotted) = host_dotted(callee, src, &acc.host) else {
+    // The callee expanded to its host root, and the one host it may match
+    // when the root is a subclass's `this` or a gated METHOD's parameter.
+    let (dotted, only) = if let Some(d) = host_dotted(callee, src, &acc.host) {
+        (d, None)
+    } else if let Some((d, h)) = host_this_dotted(callee, src, &acc.host) {
+        (d, Some(h))
+    } else if let Some((d, h)) = host_param_dotted(callee, src, from, &acc.host) {
+        (d, Some(h))
+    } else {
         return;
     };
     let Some(found) = hosts::registration_for("typescript", &dotted) else {
         return;
     };
+    match only {
+        Some(h) if h.name != found.host.name => return,
+        // An owner class's member is read on `this` only (GH.10).
+        None if found.host.is_owner_path(&dotted) => return,
+        _ => {}
+    }
     let host = found.host.name;
     let pattern = found.registration.pattern;
     acc.host.tally.hit(host);
@@ -11746,36 +11784,90 @@ fn try_detect_host(
         return;
     }
     let args = call_args(call);
-    let (name, handler_arg) = match found.registration.shape {
+    fn arg<'t>(i: usize, args: &[TsNode<'t>]) -> Option<TsNode<'t>> {
+        i.checked_sub(1).and_then(|i| args.get(i).copied())
+    }
+    let handler_of =
+        |a: Option<TsNode>| a.and_then(|a| host_handler(a, src, from, enclosing_class));
+    let (name, handlers): (Option<String>, Vec<HostHandler>) = match found.registration.shape {
         hosts::Shape::Positional {
             name_arg,
             handler_arg,
             ..
-        } => {
-            let name = name_arg
-                .checked_sub(1)
-                .and_then(|i| args.get(i))
-                .and_then(|a| literal_string(*a, src));
-            (name, handler_arg)
-        }
+        } => (
+            arg(name_arg, &args).and_then(|a| literal_string(a, src)),
+            handler_of(arg(handler_arg, &args)).into_iter().collect(),
+        ),
         hosts::Shape::CalleeSegment { handler_arg, .. } => (
             found
                 .registration
                 .shape
                 .callee_name(&dotted)
                 .map(str::to_string),
-            handler_arg,
+            handler_of(arg(handler_arg, &args)).into_iter().collect(),
         ),
-        _ => (None, 0),
+        // GH.10: `this.addCommand({ id: 'x', callback: h })`.
+        hosts::Shape::Table {
+            name_key,
+            handler_keys,
+        } => match args.first().filter(|a| a.kind() == "object") {
+            Some(obj) => (
+                object_string_prop(*obj, name_key, src),
+                handler_keys
+                    .iter()
+                    .filter_map(|k| host_table_handler(*obj, k, src, from, enclosing_class))
+                    .collect(),
+            ),
+            None => (None, Vec::new()),
+        },
+        // GH.10: `this.registerEvent(this.app.vault.on('create', h))`.
+        hosts::Shape::Wrapped {
+            arg: at,
+            method,
+            name_arg,
+            handler_arg,
+        } => {
+            let inner = arg(at, &args).filter(|a| a.kind() == "call_expression");
+            let target = inner
+                .and_then(|c| c.child_by_field_name("function"))
+                .filter(|f| {
+                    f.kind() == "member_expression"
+                        && child_text(*f, "property", src) == Some(method)
+                })
+                .and_then(|f| f.child_by_field_name("object"));
+            match (inner, target) {
+                (Some(inner), Some(target)) => {
+                    let inner_args = call_args(inner);
+                    (
+                        host_target_name(target, arg(name_arg, &inner_args), src),
+                        handler_of(arg(handler_arg, &inner_args))
+                            .into_iter()
+                            .collect(),
+                    )
+                }
+                _ => (None, Vec::new()),
+            }
+        }
+        // GH.10: `this.registerDomEvent(document, 'click', h)`.
+        hosts::Shape::Targeted {
+            target_arg,
+            name_arg,
+            handler_arg,
+        } => (
+            arg(target_arg, &args).and_then(|t| host_target_name(t, arg(name_arg, &args), src)),
+            handler_of(arg(handler_arg, &args)).into_iter().collect(),
+        ),
+        // GH.10: `compiler.hooks.done.tap('P', h)`: the hook is the name.
+        hosts::Shape::HookName { handler_arg } => (
+            Some(found.suffix.to_string()),
+            handler_of(arg(handler_arg, &args)).into_iter().collect(),
+        ),
+        _ => (None, Vec::new()),
     };
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         acc.host.tally.unread += 1;
         return;
     };
-    let handler = handler_arg
-        .checked_sub(1)
-        .and_then(|i| args.get(i))
-        .and_then(|a| host_handler(*a, src, from, enclosing_class));
     let Some(module_id) = acc.module_id else {
         return;
     };
@@ -11792,10 +11884,238 @@ fn try_detect_host(
     );
     let mut sink = hosts::HostSink::new(&mut acc.nodes, &mut acc.nav, &mut acc.refs);
     let id = hosts::push_registration(&site, pattern, &name, &[], &mut sink);
-    if let Some(h) = handler {
+    for h in handlers {
         acc.host.handlers.push((id, h, row));
     }
     acc.host.tally.registered(pattern);
+}
+
+/// GH.10: the handler a registration table names under `key`: a pair's value
+/// ([`host_handler`]), a shorthand method `key() { .. }` (anonymous: the
+/// enclosing named scope) or a shorthand property `{ key }` (the name).
+fn host_table_handler(
+    obj: TsNode,
+    key: &str,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+) -> Option<HostHandler> {
+    let mut c = obj.walk();
+    let found = obj.named_children(&mut c).find_map(|m| match m.kind() {
+        "pair" => {
+            let k = m.child_by_field_name("key")?;
+            let named = match k.kind() {
+                "property_identifier" => text(k, src) == key,
+                "string" => strip_string_quotes(text(k, src)) == key,
+                _ => false,
+            };
+            named.then(|| host_handler(m.child_by_field_name("value")?, src, from, enclosing_class))
+        }
+        "method_definition" => {
+            (child_text(m, "name", src) == Some(key)).then_some(Some(HostHandler::Scope(from)))
+        }
+        "shorthand_property_identifier" => {
+            (text(m, src) == key).then(|| Some(HostHandler::Name(key.to_string())))
+        }
+        _ => None,
+    });
+    found.flatten()
+}
+
+/// GH.10: `<target tail>.<event>` of a [`hosts::Shape::Wrapped`] /
+/// [`hosts::Shape::Targeted`] registration: the target's last segment (an
+/// identifier, or a member access's property: `vault` of `this.app.vault`)
+/// and the event, a string literal. `None` for any other target or event.
+fn host_target_name(target: TsNode, event: Option<TsNode>, src: &[u8]) -> Option<String> {
+    let tail = match target.kind() {
+        "identifier" => text(target, src),
+        "member_expression" => child_text(target, "property", src)?,
+        "parenthesized_expression" => return host_target_name(sole_named(target)?, event, src),
+        _ => return None,
+    };
+    let event = literal_string(event?, src)?;
+    hosts::Shape::targeted_name(tail, &event)
+}
+
+/// GH.10: a `this.<a>.<b>` callee whose `this` is a host subclass (a class
+/// [`record_host_subclass`] recorded, with no `function` or object method
+/// between the call and the class body to rebind `this`), expanded to
+/// `<base>.<a>.<b>` (`obsidian.Plugin.addCommand`), with the subclass's host.
+fn host_this_dotted(
+    callee: TsNode,
+    src: &[u8],
+    scan: &HostScan,
+) -> Option<(String, &'static hosts::HostRow)> {
+    if callee.kind() != "member_expression" || scan.subclasses.is_empty() {
+        return None;
+    }
+    let raw: String = text(callee, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let rest = raw.strip_prefix("this.")?;
+    if !rest.split('.').all(host_ident) {
+        return None;
+    }
+    let class_start = this_class_start(callee)?;
+    let (_, host, base, _) = scan
+        .subclasses
+        .iter()
+        .find(|(_, _, _, start)| *start == class_start)?;
+    Some((format!("{base}.{rest}"), *host))
+}
+
+/// GH.10: the start byte of the class `this` names at `n`: the nearest
+/// enclosing class body's class, unless a `function` (declaration,
+/// expression or generator) or an object literal's method comes first and
+/// rebinds `this`. An arrow function keeps it.
+fn this_class_start(n: TsNode) -> Option<usize> {
+    let mut at = n.parent();
+    while let Some(p) = at {
+        match p.kind() {
+            "function_declaration"
+            | "function_expression"
+            | "function"
+            | "generator_function"
+            | "generator_function_declaration" => return None,
+            "method_definition" if p.parent().is_some_and(|o| o.kind() == "object") => {
+                return None;
+            }
+            "class_body" => return p.parent().map(|c| c.start_byte()),
+            _ => {}
+        }
+        at = p.parent();
+    }
+    None
+}
+
+/// GH.10: an identifier segment of a dotted callee.
+fn host_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// GH.10: a callee inside a METHOD a [`hosts::Gate::Param`] holds in
+/// (`from`), expanded: rooted at the METHOD's first parameter, the
+/// parameter read as the gate's root (`compiler.hooks.done.tap`); rooted at
+/// one of the gate's `also` names, as written (`compilation.hooks.x.tap`).
+fn host_param_dotted(
+    callee: TsNode,
+    src: &[u8],
+    from: NodeId,
+    scan: &HostScan,
+) -> Option<(String, &'static hosts::HostRow)> {
+    let (_, host, param) = scan.param_methods.iter().find(|(m, ..)| *m == from)?;
+    param_dotted(callee, src, param, host).map(|d| (d, *host))
+}
+
+/// GH.10: [`host_param_dotted`]'s expansion for the parameter `param` of a
+/// METHOD gated by `host`'s [`hosts::Gate::Param`].
+fn param_dotted(
+    callee: TsNode,
+    src: &[u8],
+    param: &str,
+    host: &'static hosts::HostRow,
+) -> Option<String> {
+    let hosts::Gate::Param { root, also, .. } = host.gate else {
+        return None;
+    };
+    if callee.kind() != "member_expression" {
+        return None;
+    }
+    let raw: String = text(callee, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if !raw.split('.').all(host_ident) {
+        return None;
+    }
+    let (head, rest) = raw.split_once('.')?;
+    if head == param {
+        Some(format!("{root}.{rest}"))
+    } else if also.contains(&head) {
+        Some(raw)
+    } else {
+        None
+    }
+}
+
+/// GH.10: a class whose `extends` clause names a member path of a host
+/// module the file imports (`extends Plugin`, `Plugin` from `obsidian`, or
+/// `extends obsidian.Plugin`) roots `this.` at that path in its body.
+fn record_host_subclass(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    if acc.host.bindings.is_empty() {
+        return;
+    }
+    let mut cursor = class.walk();
+    let Some(heritage) = class
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "class_heritage")
+    else {
+        return;
+    };
+    let mut hc = heritage.walk();
+    let Some(base) = heritage
+        .named_children(&mut hc)
+        .find(|c| c.kind() == "extends_clause")
+        .and_then(|e| e.child_by_field_name("value"))
+    else {
+        return;
+    };
+    let Some(path) = host_dotted(base, src, &acc.host) else {
+        return;
+    };
+    let Some(host) = path
+        .split_once('.')
+        .and_then(|(module, _)| hosts::host_for_import("typescript", module))
+    else {
+        return;
+    };
+    acc.host
+        .subclasses
+        .push((class_id, host, path, class.start_byte()));
+}
+
+/// GH.10: a class METHOD whose name a [`hosts::Gate::Param`] row names
+/// (webpack's `apply`) holds that gate when a call in its body, rooted at
+/// its first parameter, matches one of the row's registrations
+/// (`compiler.hooks.done.tap(..)`): the METHOD is recorded before its body
+/// is walked, so the calls read under it.
+fn record_host_param_method(method: TsNode, src: &[u8], method_id: NodeId, acc: &mut Acc) {
+    let Some(name) = child_text(method, "name", src) else {
+        return;
+    };
+    let (Some(body), Some(param)) = (
+        method.child_by_field_name("body"),
+        first_param_name(method, src).map(str::to_string),
+    ) else {
+        return;
+    };
+    for host in hosts::param_hosts("typescript", name) {
+        let mut stack = vec![body];
+        let mut holds = false;
+        while let Some(n) = stack.pop() {
+            if n.kind() == "call_expression"
+                && let Some(callee) = n.child_by_field_name("function")
+                && let Some(dotted) = param_dotted(callee, src, &param, host)
+                && dotted.starts_with(&format!("{}.", host.gate.root()))
+                && hosts::registration_for("typescript", &dotted)
+                    .is_some_and(|m| m.host.name == host.name)
+            {
+                holds = true;
+                break;
+            }
+            let mut c = n.walk();
+            stack.extend(n.named_children(&mut c));
+        }
+        if holds {
+            acc.host
+                .param_methods
+                .push((method_id, host, param.clone()));
+            return;
+        }
+    }
 }
 
 /// GH.9: `<section>.get('<k>')` (a [`hosts::SECTION_READERS`] call with a
@@ -11946,10 +12266,12 @@ fn push_host_read(
 /// GH.9: once the whole file is walked, bind the registrations' handlers
 /// (a FUNCTION or METHOD of this file is a direct HANDLED_BY, any other name
 /// a Bare / attribute ref), read the queued section locals, and give each
-/// exported host callback (`activate`) its ENTRYPOINT cell. Then the file's
-/// `[host]` marker.
+/// exported host callback (`activate`) its ENTRYPOINT cell; GH.10: each
+/// owner callback of a host subclass (`onload` of an Obsidian `Plugin`
+/// subclass) and each param-gated METHOD (webpack's `apply`) too. Then the
+/// file's `[host]` marker.
 fn settle_host(acc: &mut Acc) {
-    if acc.host.bindings.is_empty() {
+    if acc.host.idle() {
         return;
     }
     let (Some(module_id), Some(_)) = (acc.module_id, acc.repo) else {
@@ -12024,34 +12346,65 @@ fn settle_host(acc: &mut Acc) {
         let Some(&id) = acc.module_functions.get(&name) else {
             continue;
         };
-        let Some(node) = acc.nodes.iter_mut().find(|n| n.id == id) else {
-            continue;
-        };
-        if node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT) {
-            continue;
+        push_host_entry(acc, id, host.name);
+    }
+    // GH.10: the methods the host calls on its subclasses, classes in walk
+    // order, names in rule order.
+    let subclasses: Vec<(NodeId, &'static hosts::HostRow, String)> = acc
+        .host
+        .subclasses
+        .iter()
+        .map(|(c, h, b, _)| (*c, *h, b.clone()))
+        .collect();
+    for (class, host, base) in subclasses {
+        for name in host.owner_methods(&base) {
+            if let Some(&id) = acc.class_methods.get(&(class, name.to_string())) {
+                push_host_entry(acc, id, host.name);
+            }
         }
-        let row0 = node
-            .cells
-            .iter()
-            .find(|c| c.kind == cell_type::POSITION)
-            .and_then(|c| match &c.payload {
-                CellPayload::Json(j) => serde_json::from_str::<serde_json::Value>(j).ok(),
-                _ => None,
-            })
-            .and_then(|v| v.get("start_line").and_then(serde_json::Value::as_u64))
-            .unwrap_or(0);
-        let row1 = u32::try_from(row0).unwrap_or(u32::MAX).saturating_add(1);
-        node.cells.push(hosts::entry_cell(
-            &acc.file_rel,
-            row1,
-            &format!("host:{}", host.name),
-        ));
-        acc.host.tally.callbacks += 1;
-        acc.host.tally.hit(host.name);
+    }
+    // GH.10: a param-gated METHOD is the host's callback.
+    let gated: Vec<(NodeId, &'static str)> = acc
+        .host
+        .param_methods
+        .iter()
+        .map(|(m, h, _)| (*m, h.name))
+        .collect();
+    for (id, host) in gated {
+        push_host_entry(acc, id, host);
     }
     if let Some(line) = acc.host.tally.marker("typescript", &acc.file_rel) {
         eprintln!("{line}");
     }
+}
+
+/// GH.9 / GH.10: the ENTRYPOINT cell `{"decl":"<file>:<row>","source":
+/// "host:<host>"}` on the node `id` (its POSITION's 1-based start row),
+/// counted as a host callback; a node that already holds an ENTRYPOINT
+/// keeps it.
+fn push_host_entry(acc: &mut Acc, id: NodeId, host: &'static str) {
+    let file_rel = acc.file_rel.clone();
+    let Some(node) = acc.nodes.iter_mut().find(|n| n.id == id) else {
+        return;
+    };
+    if node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT) {
+        return;
+    }
+    let row0 = node
+        .cells
+        .iter()
+        .find(|c| c.kind == cell_type::POSITION)
+        .and_then(|c| match &c.payload {
+            CellPayload::Json(j) => serde_json::from_str::<serde_json::Value>(j).ok(),
+            _ => None,
+        })
+        .and_then(|v| v.get("start_line").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+    let row1 = u32::try_from(row0).unwrap_or(u32::MAX).saturating_add(1);
+    node.cells
+        .push(hosts::entry_cell(&file_rel, row1, &format!("host:{host}")));
+    acc.host.tally.callbacks += 1;
+    acc.host.tally.hit(host);
 }
 
 // ============================================================================
@@ -21445,5 +21798,311 @@ if (require.main === module) {
             let p = parse(src, "lib/tool.ts");
             assert_eq!(entry(&p), None, "{src}");
         }
+    }
+}
+
+#[cfg(test)]
+mod host_tests_gh10 {
+    //! GH.10: the Obsidian and webpack host rows read by the TS parser:
+    //! registrations on `this` in a host subclass, owner callbacks, and the
+    //! tapable hooks of an `apply(compiler)` METHOD.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-hosts-gh10")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn method(qname: &str) -> NodeId {
+        id(node_kind::METHOD, qname)
+    }
+
+    fn handled_by(p: &FileParse, from: NodeId, to: NodeId) -> Option<String> {
+        p.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::HANDLED_BY)
+            .map(|e| Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default())
+    }
+
+    fn entry(p: &FileParse, n: NodeId) -> Option<String> {
+        p.nodes
+            .iter()
+            .find(|x| x.id == n)?
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENTRYPOINT)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                _ => String::new(),
+            })
+    }
+
+    fn qnames(p: &FileParse, kind: glia_core::NodeKindId) -> Vec<String> {
+        let mut q: Vec<String> = p
+            .nodes
+            .iter()
+            .filter(|n| p.nav.kind_by_id.get(&n.id) == Some(&kind))
+            .filter_map(|n| p.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        q.sort();
+        q
+    }
+
+    const OBSIDIAN: &str = r#"import { App, Modal, Plugin, PluginSettingTab, TAbstractFile } from 'obsidian';
+
+export default class SamplePlugin extends Plugin {
+	async onload() {
+		this.addCommand({
+			id: 'open-sample-modal',
+			name: 'Open sample modal',
+			callback: () => {
+				new SampleModal(this.app).open();
+			},
+		});
+		this.addCommand({
+			id: 'toggle-sample',
+			name: 'Toggle sample',
+			checkCallback: this.toggle.bind(this),
+		});
+		this.addCommand({ id: computeId(), name: 'Dynamic', callback: () => {} });
+		this.registerEvent(this.app.vault.on('create', this.onCreate));
+		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+			console.log(evt);
+		});
+		this.addSettingTab(new SampleSettingTab(this.app, this));
+	}
+
+	toggle(checking: boolean): boolean {
+		return checking;
+	}
+
+	onCreate(file: TAbstractFile) {
+		console.log(file.path);
+	}
+
+	onunload() {}
+}
+
+class SampleModal extends Modal {
+	onOpen() {
+		this.contentEl.setText('Woah!');
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class SampleSettingTab extends PluginSettingTab {
+	display(): void {
+		this.containerEl.empty();
+	}
+}
+
+function computeId(): string {
+	return 'x';
+}
+"#;
+
+    #[test]
+    fn an_obsidian_plugin_reads_whole() {
+        let p = parse_file(OBSIDIAN, "src/main.ts", "src::main", repo()).expect("parse");
+        assert_eq!(
+            qnames(&p, node_kind::CLI_COMMAND),
+            [
+                "host_cmd:obsidian:open-sample-modal",
+                "host_cmd:obsidian:toggle-sample"
+            ]
+        );
+        assert_eq!(
+            qnames(&p, node_kind::EVENT_HANDLER),
+            [
+                "host_event:obsidian:document.click",
+                "host_event:obsidian:vault.create"
+            ]
+        );
+        let onload = method("src::main::SamplePlugin::onload");
+        let open = id(
+            node_kind::CLI_COMMAND,
+            "host_cmd:obsidian:open-sample-modal",
+        );
+        assert_eq!(
+            handled_by(&p, open, onload).as_deref(),
+            Some("host_handler_scope")
+        );
+        let toggle = id(node_kind::CLI_COMMAND, "host_cmd:obsidian:toggle-sample");
+        assert_eq!(
+            handled_by(&p, toggle, method("src::main::SamplePlugin::toggle")).as_deref(),
+            Some("host_handler")
+        );
+        let create = id(node_kind::EVENT_HANDLER, "host_event:obsidian:vault.create");
+        assert_eq!(
+            handled_by(&p, create, method("src::main::SamplePlugin::onCreate")).as_deref(),
+            Some("host_handler")
+        );
+        let click = id(
+            node_kind::EVENT_HANDLER,
+            "host_event:obsidian:document.click",
+        );
+        assert!(handled_by(&p, click, onload).is_some());
+        for (m, row) in [
+            ("SamplePlugin::onload", 4),
+            ("SamplePlugin::onunload", 33),
+            ("SampleModal::onOpen", 37),
+            ("SampleModal::onClose", 41),
+            ("SampleSettingTab::display", 47),
+        ] {
+            assert_eq!(
+                entry(&p, method(&format!("src::main::{m}"))),
+                Some(format!(
+                    r#"{{"decl":"src/main.ts:{row}","source":"host:obsidian"}}"#
+                )),
+                "{m}"
+            );
+        }
+        // Methods the host does not call by name stay plain.
+        assert_eq!(entry(&p, method("src::main::SamplePlugin::toggle")), None);
+    }
+
+    #[test]
+    fn obsidian_needs_its_import_and_its_subclass() {
+        // No import of 'obsidian': `Plugin` is a local class.
+        let local = OBSIDIAN.replacen(
+            "import { App, Modal, Plugin, PluginSettingTab, TAbstractFile } from 'obsidian';",
+            "class Plugin {}\nclass Modal {}\nclass PluginSettingTab {}",
+            1,
+        );
+        let p = parse_file(&local, "src/main.ts", "src::main", repo()).expect("parse");
+        assert!(qnames(&p, node_kind::CLI_COMMAND).is_empty());
+        assert!(qnames(&p, node_kind::EVENT_HANDLER).is_empty());
+        assert_eq!(entry(&p, method("src::main::SamplePlugin::onload")), None);
+        // A class extending something else in an Obsidian file: `this` is not
+        // a Plugin, so its addCommand and onload are its own.
+        let other = r#"import { Plugin } from 'obsidian';
+class Helper extends Base {
+	onload() {
+		this.addCommand({ id: 'x', callback: () => {} });
+	}
+}
+"#;
+        let p = parse_file(other, "src/h.ts", "src::h", repo()).expect("parse");
+        assert!(qnames(&p, node_kind::CLI_COMMAND).is_empty());
+        assert_eq!(entry(&p, method("src::h::Helper::onload")), None);
+        // `this` inside a `function` is not the plugin.
+        let func = r#"import { Plugin } from 'obsidian';
+class P extends Plugin {
+	onload() {
+		const self = function () {
+			this.addCommand({ id: 'y', callback: () => {} });
+		};
+	}
+}
+"#;
+        let p = parse_file(func, "src/f.ts", "src::f", repo()).expect("parse");
+        assert!(qnames(&p, node_kind::CLI_COMMAND).is_empty());
+    }
+
+    const WEBPACK: &str = r#"'use strict';
+
+class ReportPlugin {
+	constructor(options) {
+		this.options = options;
+	}
+
+	apply(compiler) {
+		compiler.hooks.done.tap('ReportPlugin', (stats) => {
+			this.report(stats);
+		});
+		compiler.hooks.emit.tapAsync('ReportPlugin', this.onEmit.bind(this));
+		compiler.hooks.compilation.tap('ReportPlugin', (compilation) => {
+			compilation.hooks.processAssets.tapPromise('ReportPlugin', checkAssets);
+		});
+		compiler.hooks.done.call();
+	}
+
+	onEmit(compilation, callback) {
+		callback();
+	}
+
+	report(stats) {
+		return stats.toString();
+	}
+}
+
+async function checkAssets(assets) {
+	return assets;
+}
+
+module.exports = ReportPlugin;
+"#;
+
+    #[test]
+    fn a_webpack_plugin_taps_its_hooks() {
+        let p =
+            parse_file(WEBPACK, "webpack/plugin.cjs", "webpack::plugin", repo()).expect("parse");
+        assert_eq!(
+            qnames(&p, node_kind::EVENT_HANDLER),
+            [
+                "host_event:webpack:compilation",
+                "host_event:webpack:done",
+                "host_event:webpack:emit",
+                "host_event:webpack:processAssets"
+            ]
+        );
+        let apply = method("webpack::plugin::ReportPlugin::apply");
+        let ev = |e: &str| id(node_kind::EVENT_HANDLER, &format!("host_event:webpack:{e}"));
+        assert_eq!(
+            handled_by(&p, ev("done"), apply).as_deref(),
+            Some("host_handler_scope")
+        );
+        assert_eq!(
+            handled_by(
+                &p,
+                ev("emit"),
+                method("webpack::plugin::ReportPlugin::onEmit")
+            )
+            .as_deref(),
+            Some("host_handler")
+        );
+        assert_eq!(
+            handled_by(
+                &p,
+                ev("processAssets"),
+                id(node_kind::FUNCTION, "webpack::plugin::checkAssets")
+            )
+            .as_deref(),
+            Some("host_handler")
+        );
+        assert_eq!(
+            entry(&p, apply),
+            Some(r#"{"decl":"webpack/plugin.cjs:8","source":"host:webpack"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn apply_without_a_hook_tap_is_no_plugin() {
+        // An `apply` that taps nothing, or taps another object's hooks.
+        let src = r#"class Mixin {
+	apply(target) {
+		target.mixed = true;
+	}
+}
+class Other {
+	apply(compiler) {
+		other.hooks.done.tap('x', () => {});
+	}
+}
+function apply(compiler) {
+	compiler.hooks.done.tap('y', () => {});
+}
+"#;
+        let p = parse_file(src, "lib/m.js", "lib::m", repo()).expect("parse");
+        assert!(qnames(&p, node_kind::EVENT_HANDLER).is_empty());
+        assert_eq!(entry(&p, method("lib::m::Mixin::apply")), None);
+        assert_eq!(entry(&p, method("lib::m::Other::apply")), None);
     }
 }

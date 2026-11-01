@@ -6,25 +6,31 @@
   "cells": ["typescript/host_command"],
   "expect_nodes": [
     {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:extension.helloWorld", "exact": true},
-    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:extension.reload", "exact": true}
+    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:extension.reload", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:open-sample-modal", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:toggle-sample", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:obsidian:vault.create", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:obsidian:document.click", "exact": true}
   ],
   "expect_edges": [
-    {"from": "host_cmd:vscode:extension.helloWorld", "to": "src::extension::sayHello",
-     "category": "HANDLED_BY", "exact": true,
-     "note": "registerCommand(id, sayHello): the command -> its named handler"},
-    {"from": "host_cmd:vscode:extension.reload", "to": "src::extension::activate",
-     "category": "HANDLED_BY", "exact": true,
-     "note": "an inline arrow handler: the named function that registers it, whose calls it shares"},
-    {"from": "package.json", "to": "host_cmd:vscode:extension.helloWorld",
-     "category": "DEFINES", "exact": true,
-     "note": "contributes.commands declares the same command: one qname with the code's registration"}
+    {"from": "host_cmd:vscode:extension.helloWorld", "to": "src::extension::sayHello", "category": "HANDLED_BY", "exact": true, "note": "registerCommand(id, sayHello): the command -> its named handler"},
+    {"from": "host_cmd:vscode:extension.reload", "to": "src::extension::activate", "category": "HANDLED_BY", "exact": true, "note": "an inline arrow handler: the named function that registers it, whose calls it shares"},
+    {"from": "package.json", "to": "host_cmd:vscode:extension.helloWorld", "category": "DEFINES", "exact": true, "note": "contributes.commands declares the same command: one qname with the code's registration"},
+    {"from": "host_cmd:obsidian:open-sample-modal", "to": "src::main::SamplePlugin::onload", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.addCommand({id, callback: () => ..}) in a Plugin subclass: an inline arrow binds the method that registers it"},
+    {"from": "host_cmd:obsidian:toggle-sample", "to": "src::main::SamplePlugin::toggleSample", "category": "HANDLED_BY", "exact": true, "note": "GH.10: checkCallback: this.toggleSample.bind(this) binds the METHOD"},
+    {"from": "host_event:obsidian:vault.create", "to": "src::main::SamplePlugin::onCreate", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.registerEvent(this.app.vault.on('create', h)): the event is <target tail>.<name>"},
+    {"from": "host_event:obsidian:document.click", "to": "src::main::SamplePlugin::onload", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.registerDomEvent(document, 'click', arrow)"}
   ],
-  "expect_cells": [],
+  "expect_cells": [
+    {"kind": "METHOD", "node": "src::main::SamplePlugin::onload", "cell": "ENTRYPOINT", "contains": "host:obsidian"},
+    {"kind": "METHOD", "node": "src::main::SamplePlugin::onunload", "cell": "ENTRYPOINT", "contains": "host:obsidian"},
+    {"kind": "METHOD", "node": "src::main::SampleModal::onOpen", "cell": "ENTRYPOINT", "contains": "host:obsidian"},
+    {"kind": "METHOD", "node": "src::main::SampleSettingTab::display", "cell": "ENTRYPOINT", "contains": "host:obsidian"}
+  ],
   "forbid": [
-    {"kind": "CLI_COMMAND", "name": "Hello World", "max_nodes": 0,
-     "note": "a command's title is no command"},
-    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:Hello World!", "max_nodes": 0,
-     "note": "showInformationMessage's text is no command"}
+    {"kind": "CLI_COMMAND", "name": "Hello World", "max_nodes": 0, "note": "a command's title is no command"},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:Hello World!", "max_nodes": 0, "note": "showInformationMessage's text is no command"},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:Open sample modal", "max_nodes": 0, "note": "an Obsidian command's `name` is its title, never its id"}
   ],
-  "note": "0.5.6 use pattern (GH.9): a VS Code extension (the shape of microsoft/vscode-extension-samples helloworld-sample) registers commands with vscode.commands.registerCommand and declares them in package.json contributes.commands (engines.vscode). INTENDED: one CLI_COMMAND host_cmd:vscode:<id> per command, HANDLED_BY its handler (an inline arrow binds the named function that registers it), DEFINES-d from package.json. At HEAD 067b3b5c: none (the FUNCTIONs only; activate dead)."
+  "note": "0.5.6 use pattern (GH.9): a VS Code extension (the shape of microsoft/vscode-extension-samples helloworld-sample) registers commands with vscode.commands.registerCommand and declares them in package.json contributes.commands (engines.vscode). INTENDED: one CLI_COMMAND host_cmd:vscode:<id> per command, HANDLED_BY its handler (an inline arrow binds the named function that registers it), DEFINES-d from package.json. At HEAD 067b3b5c: none (the FUNCTIONs only; activate dead). GH.10 adds src/main.ts, an Obsidian plugin (obsidianmd/obsidian-sample-plugin's shape, its second host): in a class extending Plugin imported from 'obsidian', this.addCommand({id, callback | checkCallback | ..}) is CLI_COMMAND host_cmd:obsidian:<id>, this.registerEvent(<x>.on('<e>', h)) / this.registerDomEvent(<el>, '<e>', h) EVENT_HANDLER host_event:obsidian:<x tail>.<e>, and onload / onunload (Plugin), display (PluginSettingTab), onOpen / onClose (Modal, ItemView) carry an ENTRYPOINT host:obsidian. At HEAD 56616f6e: none (`glia gaps` dead_symbol SamplePlugin, onload, onunload on the probe)."
 }

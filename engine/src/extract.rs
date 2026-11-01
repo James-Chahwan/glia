@@ -27,7 +27,11 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
                 Some("typescript")
             }
         }
-        "js" | "jsx" => Some("typescript"),
+        // GH.10: the module-flavoured extensions (`.mts` / `.cts` TypeScript,
+        // `.mjs` / `.cjs` JavaScript: a tool's `webpack.config.cjs`, an
+        // `esbuild.config.mjs`, an ESM script) read as their `.ts` / `.js`
+        // siblings; the TS parser picks the grammar by extension.
+        "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" => Some("typescript"),
         // FH.6: the `vue` tag is the single-file-component tag. A Svelte or
         // Astro file is markup around script blocks exactly as a Vue SFC is,
         // so it takes the same route: the vue crate blanks everything but its
@@ -804,5 +808,28 @@ pub(crate) fn synthetic_module_qname(path: &str) -> String {
     match p.rsplit_once('/') {
         Some((dir, file)) => format!("{}::{file}", dir.replace('/', "::")),
         None => p,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_language;
+
+    /// GH.10: the module-flavoured JS / TS extensions are parsed as their
+    /// `.js` / `.ts` siblings (GH.11 found `.mjs` scripts unread).
+    #[test]
+    fn module_flavoured_extensions_are_typescript() {
+        for path in [
+            "bin/greet.mjs",
+            "webpack.config.cjs",
+            "src/a.mts",
+            "src/b.cts",
+            "src/c.ts",
+            "src/d.js",
+        ] {
+            assert_eq!(detect_language(path), Some("typescript"), "{path}");
+        }
+        assert_eq!(detect_language("src/x.component.ts"), Some("angular"));
+        assert_eq!(detect_language("notes.md"), None);
     }
 }

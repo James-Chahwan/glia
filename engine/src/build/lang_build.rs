@@ -1115,11 +1115,11 @@ fn resolve_ts_source(from_module: &str, specifier: &str) -> Option<String> {
                 segs.pop();
             }
             p => {
-                let p = p
-                    .strip_suffix(".ts")
-                    .or_else(|| p.strip_suffix(".tsx"))
-                    .or_else(|| p.strip_suffix(".js"))
-                    .or_else(|| p.strip_suffix(".jsx"))
+                // GH.10: the module-flavoured `.mts` / `.cts` / `.mjs` /
+                // `.cjs` name a module as their `.ts` / `.js` siblings do.
+                let p = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]
+                    .iter()
+                    .find_map(|ext| p.strip_suffix(ext))
                     .unwrap_or(p);
                 segs.push(p.to_string());
             }
@@ -2698,6 +2698,23 @@ mod ts_alias_tests {
             resolve_ts_source_aliased(page, "@core/x", &TsAliasSet::default()),
             None
         );
+    }
+
+    #[test]
+    fn module_flavoured_specifiers_name_their_module() {
+        for (spec, want) in [
+            ("../lib/shout.cjs", "lib::shout"),
+            ("../lib/shout.mjs", "lib::shout"),
+            ("../lib/shout.mts", "lib::shout"),
+            ("../lib/shout.cts", "lib::shout"),
+            ("../lib/shout.js", "lib::shout"),
+        ] {
+            assert_eq!(
+                resolve_ts_source("bin::greet", spec).as_deref(),
+                Some(want),
+                "{spec}"
+            );
+        }
     }
 
     #[test]

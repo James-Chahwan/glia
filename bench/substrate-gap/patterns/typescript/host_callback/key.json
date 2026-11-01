@@ -6,16 +6,23 @@
   "cells": ["typescript/host_callback"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "src::extension::activate", "exact": true},
-    {"kind": "FUNCTION", "name": "src::extension::deactivate", "exact": true}
+    {"kind": "FUNCTION", "name": "src::extension::deactivate", "exact": true},
+    {"kind": "METHOD", "name": "webpack::plugin::ReportPlugin::apply", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:webpack:done", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:webpack:emit", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:webpack:processAssets", "exact": true}
   ],
   "expect_edges": [
-    {"from": "src::extension::activate", "to": "src::extension::openChannel",
-     "category": "CALLS", "exact": true, "note": "the callback's body still binds"}
+    {"from": "src::extension::activate", "to": "src::extension::openChannel", "category": "CALLS", "exact": true, "note": "the callback's body still binds"},
+    {"from": "host_event:webpack:done", "to": "webpack::plugin::ReportPlugin::apply", "category": "HANDLED_BY", "exact": true, "note": "GH.10: compiler.hooks.done.tap(name, arrow): an anonymous tap binds the enclosing apply"},
+    {"from": "host_event:webpack:emit", "to": "webpack::plugin::ReportPlugin::onEmit", "category": "HANDLED_BY", "exact": true, "note": "GH.10: tapAsync(name, this.onEmit.bind(this))"},
+    {"from": "host_event:webpack:processAssets", "to": "webpack::plugin::checkAssets", "category": "HANDLED_BY", "exact": true, "note": "GH.10: compilation.hooks.<E>.tap inside the gated apply"}
   ],
   "expect_cells": [
     {"kind": "FUNCTION", "node": "src::extension::activate", "cell": "ENTRYPOINT", "contains": "host:vscode"},
-    {"kind": "FUNCTION", "node": "src::extension::deactivate", "cell": "ENTRYPOINT", "contains": "host:vscode"}
+    {"kind": "FUNCTION", "node": "src::extension::deactivate", "cell": "ENTRYPOINT", "contains": "host:vscode"},
+    {"kind": "METHOD", "node": "webpack::plugin::ReportPlugin::apply", "cell": "ENTRYPOINT", "contains": "host:webpack"}
   ],
   "forbid": [],
-  "note": "0.5.6 use pattern (GH.9): VS Code calls the extension module's exported activate / deactivate by name. INTENDED: each carries an ENTRYPOINT cell (source host:vscode), an entry and never a dead_symbol; the gate is the file's import of vscode. At HEAD 067b3b5c: none (both FUNCTIONs dead_symbol)."
+  "note": "0.5.6 use pattern (GH.9): VS Code calls the extension module's exported activate / deactivate by name. INTENDED: each carries an ENTRYPOINT cell (source host:vscode), an entry and never a dead_symbol; the gate is the file's import of vscode. At HEAD 067b3b5c: none (both FUNCTIONs dead_symbol). GH.10 adds webpack/plugin.cjs, a webpack plugin (a .cjs module, parsed since GH.10): a METHOD apply(compiler) that taps compiler.hooks.<E> is the host's callback (ENTRYPOINT host:webpack), each compiler.hooks.<E>.tap|tapAsync|tapPromise / compilation.hooks.<E>.tap* an EVENT_HANDLER host_event:webpack:<E> HANDLED_BY its handler (an anonymous one: apply). At HEAD 56616f6e: none (a .cjs file was never parsed; as .js, dead_symbol ReportPlugin and apply)."
 }

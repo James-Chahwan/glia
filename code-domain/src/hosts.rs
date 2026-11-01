@@ -57,6 +57,17 @@
 //! | `vscode.workspace.getConfiguration("s").get("k")`, or through a local holding `getConfiguration("s")` ([`ConfigFlavour::Section`](crate::hosts::ConfigFlavour::Section), [`SECTION_READERS`](crate::hosts::SECTION_READERS)) | CONFIG_KEY `config:vscode:s.k`, READS_CONFIG from the enclosing scope |
 //! | a `package.json` naming `engines.vscode` ([`HostManifest`](crate::hosts::HostManifest), [`manifest_host_for`](crate::hosts::manifest_host_for)): `contributes.commands[].command`, `contributes.configuration[.properties]` keys | the same CLI_COMMAND (DEFINES from the manifest's MODULE) and CONFIG_KEY (DEFINES_CONFIG, [`ConfigFlavour::Manifest`](crate::hosts::ConfigFlavour::Manifest)) |
 //!
+//! **Obsidian and webpack (GH.10), the second TypeScript hosts.**
+//!
+//! | Reading | Node |
+//! |---|---|
+//! | in a class whose `extends` names `Plugin` imported from `obsidian` ([`Gate::Import`](crate::hosts::Gate::Import)'s `this.` rooting): `this.addCommand({ id: "x", callback: h })` (or `editorCallback` / `checkCallback` / `editorCheckCallback`; [`Shape::Table`](crate::hosts::Shape::Table)) | CLI_COMMAND `host_cmd:obsidian:x` HANDLED_BY h |
+//! | `this.registerEvent(this.app.vault.on("create", h))` ([`Shape::Wrapped`](crate::hosts::Shape::Wrapped)), `this.registerDomEvent(document, "click", h)` ([`Shape::Targeted`](crate::hosts::Shape::Targeted)) | EVENT_HANDLER `host_event:obsidian:vault.create`, `host_event:obsidian:document.click` HANDLED_BY h |
+//! | `onload` / `onunload` of a `Plugin` subclass, `display` of a `PluginSettingTab` one, `onOpen` / `onClose` of a `Modal` / `ItemView` one ([`Callback::owners`](crate::hosts::Callback::owners), [`HostRow::owner_methods`](crate::hosts::HostRow::owner_methods)) | the METHOD's ENTRYPOINT cell, source `host:obsidian` |
+//! | inside a METHOD `apply(compiler)` that taps the compiler's hooks ([`Gate::Param`](crate::hosts::Gate::Param), [`param_hosts`](crate::hosts::param_hosts)): `compiler.hooks.done.tap("P", h)` (`tapAsync`, `tapPromise`), `compilation.hooks.processAssets.tap(..)` ([`Callee::Hook`](crate::hosts::Callee::Hook), [`Shape::HookName`](crate::hosts::Shape::HookName)) | EVENT_HANDLER `host_event:webpack:done` HANDLED_BY h (an anonymous one: `apply`); `apply` gets the ENTRYPOINT cell `host:webpack` |
+//!
+//! Any tapable host (rspack, a plugin's own hooks) reads as `webpack`.
+//!
 //! The manifest route prints `[host-manifest] host=<h> commands=<c>
 //! config=<g> path=<p>` per manifest of a host.
 //!
@@ -132,6 +143,35 @@ pub struct HostRow {
     pub manifest: Option<HostManifest>,
 }
 
+impl HostRow {
+    /// The METHOD names the host calls on a subclass of the host class at
+    /// the dotted `base` (GH.10: `onload` / `onunload` of a subclass of
+    /// `obsidian.Plugin`, the heritage already expanded through the file's
+    /// import), in [`Callback::owners`] rule order; none for a base no rule
+    /// owns.
+    pub fn owner_methods<'b>(
+        &'static self,
+        base: &'b str,
+    ) -> impl Iterator<Item = &'static str> + 'b {
+        self.callbacks
+            .iter()
+            .filter(move |c| c.owners.contains(&base))
+            .flat_map(|c| c.names.iter().copied())
+    }
+
+    /// True when `dotted` is a member path of one of the row's owner classes
+    /// (GH.10: `obsidian.Plugin.addCommand`): a registration rooted there is
+    /// read on `this` inside a subclass, never through the import alone (a
+    /// static `Plugin.addCommand(..)` registers nothing).
+    pub fn is_owner_path(&self, dotted: &str) -> bool {
+        self.callbacks.iter().flat_map(|c| c.owners).any(|o| {
+            dotted
+                .strip_prefix(o)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
+    }
+}
+
 /// A host's plugin manifest (GH.9): a JSON file whose `engines` object names
 /// the host under `engine`. Its `contributes.commands[].command` ids are the
 /// host's commands ([`host_command_qname`], the qname the code's
@@ -171,6 +211,11 @@ pub enum Gate {
     /// module's (`code.commands.registerCommand` with `import * as code` is
     /// `vscode.commands.registerCommand`); a named import of a member
     /// (`import { commands } from 'vscode'`) roots `vscode.commands`.
+    /// GH.10: a class whose `extends` clause names a member path of the
+    /// module (`class P extends Plugin`, `Plugin` imported from `obsidian`)
+    /// roots `this.` at that path inside its body, where `this` is the class
+    /// (no `function` in between): `this.addCommand(..)` is
+    /// `obsidian.Plugin.addCommand`.
     Import(&'static str),
     /// The host is present in a file that calls its global function (GH.3,
     /// World of Warcraft: `CreateFrame(..)`), which the file declares
@@ -202,6 +247,20 @@ pub enum Gate {
         modules: &'static [&'static str],
         files: &'static [&'static str],
     },
+    /// The host hands a plugin object to one of its METHODs (GH.10, webpack:
+    /// `apply(compiler)`): the host is present inside a METHOD named
+    /// `method` whose first parameter, read as `root` under any local name,
+    /// starts the callee of a call one of the row's registrations matches
+    /// (`compiler.hooks.done.tap(..)`). Inside that METHOD the names `also`
+    /// root paths as they are written (`compilation.hooks.<E>.tap(..)`, the
+    /// parameter of an inner tap callback). No import gates it: the shape of
+    /// the METHOD is the evidence. The gated METHOD is the host's callback,
+    /// given the ENTRYPOINT cell `host:<h>`: the host calls it by name.
+    Param {
+        method: &'static str,
+        root: &'static str,
+        also: &'static [&'static str],
+    },
 }
 
 impl Gate {
@@ -214,6 +273,7 @@ impl Gate {
             Gate::Global(g) | Gate::Require(g) | Gate::Import(g) | Gate::Call(g) => g,
             Gate::Globals { globals, .. } => globals.first().copied().unwrap_or(""),
             Gate::Imports { modules, .. } => modules.first().copied().unwrap_or(""),
+            Gate::Param { root, .. } => root,
         }
     }
 
@@ -262,6 +322,7 @@ impl Gate {
         };
         match self {
             Gate::Globals { globals, .. } => globals.iter().any(|g| under(g)),
+            Gate::Param { root, also, .. } => under(root) || also.iter().any(|a| under(a)),
             other => under(other.root()),
         }
     }
@@ -341,6 +402,14 @@ pub enum Callee {
     /// (GH.8, Flask: `@<r>.before_request`); [`registration_for`] never
     /// matches it.
     Method(&'static str),
+    /// A tapable hook (GH.10, webpack): `<prefix><E>.<call>`, `<E>` one
+    /// identifier (the hook, the registration's suffix) and `<call>` one of
+    /// `calls` (`compiler.hooks.` + `done` + `.tap`). Read with a
+    /// [`Shape::HookName`].
+    Hook {
+        prefix: &'static str,
+        calls: &'static [&'static str],
+    },
 }
 
 impl Callee {
@@ -348,7 +417,9 @@ impl Callee {
     pub fn text(&self) -> &'static str {
         match self {
             Callee::Exact(t) | Callee::Method(t) => t,
-            Callee::Prefix { prefix, .. } | Callee::Segment { prefix, .. } => prefix,
+            Callee::Prefix { prefix, .. }
+            | Callee::Segment { prefix, .. }
+            | Callee::Hook { prefix, .. } => prefix,
         }
     }
 }
@@ -446,6 +517,30 @@ pub enum Shape {
         or_handler: bool,
         call_form: bool,
     },
+    /// The name is the hook a [`Callee::Hook`] matched (GH.10, webpack:
+    /// `compiler.hooks.done.tap('P', h)` names `done`); the handler is the
+    /// argument at `handler_arg`.
+    HookName { handler_arg: usize },
+    /// The argument at `arg` is itself a call `<target>.<method>(..)` whose
+    /// argument at `name_arg` names the event and at `handler_arg` handles
+    /// it (GH.10, Obsidian: `this.registerEvent(this.app.vault.on('create',
+    /// h))`); the event is `<target tail>.<name>` ([`Shape::targeted_name`]:
+    /// `vault.create`).
+    Wrapped {
+        arg: usize,
+        method: &'static str,
+        name_arg: usize,
+        handler_arg: usize,
+    },
+    /// Positional arguments with the event's target first (GH.10, Obsidian:
+    /// `this.registerDomEvent(document, 'click', h)`): the event is `<target
+    /// tail>.<name>` (`document.click`), the target at `target_arg`, the
+    /// name at `name_arg`, the handler at `handler_arg`.
+    Targeted {
+        target_arg: usize,
+        name_arg: usize,
+        handler_arg: usize,
+    },
 }
 
 /// The receivers a [`Shape::Decorator`] registration is read on (GH.8): a
@@ -463,6 +558,13 @@ pub struct Receivers {
 }
 
 impl Shape {
+    /// The event a [`Shape::Wrapped`] / [`Shape::Targeted`] registration
+    /// names: the target's last segment (`vault` of `this.app.vault`) and the
+    /// event, joined by `.`. `None` when either is empty.
+    pub fn targeted_name(tail: &str, event: &str) -> Option<String> {
+        (!tail.is_empty() && !event.is_empty()).then(|| format!("{tail}.{event}"))
+    }
+
     /// The event a [`Shape::Decorator`] registration of `method` names, given
     /// its argument at `name_arg` (a literal's text or a dotted name, `None`
     /// when absent) and the decorated handler's name: `method`, or
@@ -535,6 +637,14 @@ pub struct Callback {
     pub exported: bool,
     pub open_head: Option<&'static str>,
     pub decorators: &'static [&'static str],
+    /// GH.10: the host classes whose subclass's METHODs of `names` the host
+    /// calls (Obsidian calls a `Plugin` subclass's `onload` / `onunload`), as
+    /// dotted paths rooted at a [`Gate::Import`] module (`obsidian.Plugin`).
+    /// A class declares one when its `extends` clause names the path through
+    /// the file's import (`class P extends Plugin`, `Plugin` imported from
+    /// `obsidian`); read by [`HostRow::owner_methods`]. Such a rule takes no
+    /// prefix and is not exported.
+    pub owners: &'static [&'static str],
 }
 
 /// One place a host loads plugin units from (GH.4).
@@ -657,6 +767,13 @@ pub const SECTION_READERS: &[&str] = &["get", "has", "inspect"];
 /// `vscode.window.onDid*`, `vscode.languages.onDid*`.
 const VSCODE_DID_WILL: &[&str] = &["onDid", "onWill"];
 const VSCODE_DID: &[&str] = &["onDid"];
+
+/// The extensions the TypeScript parser reads (GH.9, GH.10).
+const TS_EXTS: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+
+/// tapable's tap calls (GH.10): `hook.tap(name, fn)`, `tapAsync`,
+/// `tapPromise`.
+const TAPABLE_TAPS: &[&str] = &["tap", "tapAsync", "tapPromise"];
 
 /// The host table. Order matters: on a tie in [`registration_for`] the
 /// earlier row wins. Maki first (PR #3's seed).
@@ -802,6 +919,7 @@ pub static HOSTS: &[HostRow] = &[
             exported: false,
             open_head: None,
             decorators: &[],
+            owners: &[],
         }],
         config: &[],
         manifest: None,
@@ -815,7 +933,7 @@ pub static HOSTS: &[HostRow] = &[
     HostRow {
         name: "vscode",
         lang: "typescript",
-        exts: &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
+        exts: TS_EXTS,
         gate: Gate::Import("vscode"),
         loads: &[],
         registrations: &[
@@ -877,6 +995,7 @@ pub static HOSTS: &[HostRow] = &[
             exported: true,
             open_head: None,
             decorators: &[],
+            owners: &[],
         }],
         config: &[ConfigRule {
             flavour: ConfigFlavour::Section,
@@ -1001,7 +1120,116 @@ pub static HOSTS: &[HostRow] = &[
             exported: true,
             open_head: Some("pytest_"),
             decorators: &["pytest.fixture", "pytest_asyncio.fixture"],
+            owners: &[],
         }],
+        config: &[],
+        manifest: None,
+    },
+    // GH.10: Obsidian. A plugin's default export extends `Plugin` (imported
+    // from 'obsidian'); Obsidian calls its `onload` / `onunload`, a settings
+    // tab's `display` and a modal's or view's `onOpen` / `onClose` by name,
+    // and the plugin registers commands and events on `this`.
+    HostRow {
+        name: "obsidian",
+        lang: "typescript",
+        exts: TS_EXTS,
+        gate: Gate::Import("obsidian"),
+        loads: &[],
+        registrations: &[
+            Registration {
+                callee: Callee::Exact("obsidian.Plugin.addCommand"),
+                pattern: Pattern::Command,
+                shape: Shape::Table {
+                    name_key: "id",
+                    handler_keys: &[
+                        "callback",
+                        "editorCallback",
+                        "checkCallback",
+                        "editorCheckCallback",
+                    ],
+                },
+            },
+            Registration {
+                callee: Callee::Exact("obsidian.Plugin.registerEvent"),
+                pattern: Pattern::Event,
+                shape: Shape::Wrapped {
+                    arg: 1,
+                    method: "on",
+                    name_arg: 1,
+                    handler_arg: 2,
+                },
+            },
+            Registration {
+                callee: Callee::Exact("obsidian.Plugin.registerDomEvent"),
+                pattern: Pattern::Event,
+                shape: Shape::Targeted {
+                    target_arg: 1,
+                    name_arg: 2,
+                    handler_arg: 3,
+                },
+            },
+        ],
+        callbacks: &[
+            Callback {
+                prefix: "",
+                names: &["onload", "onunload"],
+                exported: false,
+                open_head: None,
+                decorators: &[],
+                owners: &["obsidian.Plugin"],
+            },
+            Callback {
+                prefix: "",
+                names: &["display"],
+                exported: false,
+                open_head: None,
+                decorators: &[],
+                owners: &["obsidian.PluginSettingTab"],
+            },
+            Callback {
+                prefix: "",
+                names: &["onOpen", "onClose"],
+                exported: false,
+                open_head: None,
+                decorators: &[],
+                owners: &["obsidian.Modal", "obsidian.ItemView"],
+            },
+        ],
+        config: &[],
+        manifest: None,
+    },
+    // GH.10: webpack (and any tapable host: rspack, a plugin's own hooks).
+    // A plugin is an object whose `apply(compiler)` taps the compiler's
+    // hooks; no import gates it, the METHOD's shape does.
+    HostRow {
+        name: "webpack",
+        lang: "typescript",
+        exts: TS_EXTS,
+        gate: Gate::Param {
+            method: "apply",
+            root: "compiler",
+            also: &["compilation"],
+        },
+        loads: &[],
+        registrations: &[
+            Registration {
+                callee: Callee::Hook {
+                    prefix: "compiler.hooks.",
+                    calls: TAPABLE_TAPS,
+                },
+                pattern: Pattern::Event,
+                shape: Shape::HookName { handler_arg: 2 },
+            },
+            Registration {
+                callee: Callee::Hook {
+                    prefix: "compilation.hooks.",
+                    calls: TAPABLE_TAPS,
+                },
+                pattern: Pattern::Event,
+                shape: Shape::HookName { handler_arg: 2 },
+            },
+        ],
+        callbacks: &[],
         config: &[],
         manifest: None,
     },
@@ -1152,6 +1380,11 @@ pub fn registration_for<'d>(lang: &str, dotted: &'d str) -> Option<RegistrationM
                                 .any(|h| rest.len() > h.len() && rest.starts_with(h))
                     })
                     .map(|rest| (rest, true)),
+                Callee::Hook { prefix, calls } => dotted
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.split_once('.'))
+                    .filter(|(hook, call)| is_identifier_tail(hook) && calls.contains(call))
+                    .map(|(hook, _)| (hook, true)),
                 Callee::Method(_) => None,
             };
             let Some((suffix, mints)) = found else {
@@ -1319,6 +1552,18 @@ pub fn exported_callback_for(
     })
 }
 
+/// The rows of `lang` gated on a [`Gate::Param`] METHOD named `method`
+/// (GH.10: webpack's `apply`), in table order: the parser checks each one's
+/// registrations against the METHOD's body.
+pub fn param_hosts<'m>(
+    lang: &'m str,
+    method: &'m str,
+) -> impl Iterator<Item = &'static HostRow> + 'm {
+    HOSTS.iter().filter(move |h| {
+        h.lang == lang && matches!(h.gate, Gate::Param { method: m, .. } if m == method)
+    })
+}
+
 /// The host whose [`ConfigFlavour::Section`] prefix is exactly `callee` (a
 /// call's dotted callee expanded to its host root, GH.9:
 /// `vscode.workspace.getConfiguration`): the call returns that host's
@@ -1360,7 +1605,11 @@ pub fn host_for_require(lang: &str, spec: &str) -> Option<&'static HostRow> {
 pub fn callback_for(lang: &str, path: &str) -> Option<&'static HostRow> {
     let mut best: Option<(usize, &'static HostRow)> = None;
     for host in HOSTS.iter().filter(|h| h.lang == lang) {
-        for cb in host.callbacks.iter().filter(|c| !c.exported) {
+        for cb in host
+            .callbacks
+            .iter()
+            .filter(|c| !c.exported && c.owners.is_empty())
+        {
             let named = path
                 .strip_prefix(cb.prefix)
                 .is_some_and(|rest| cb.names.contains(&rest));
@@ -1899,6 +2148,15 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                 "{at}: an imports gate needs dotted module names and base file names"
             ));
         }
+        if let Gate::Param { method, root, also } = row.gate
+            && (!is_identifier_tail(method)
+                || !is_identifier_tail(root)
+                || also.iter().any(|a| !is_identifier_tail(a) || *a == root))
+        {
+            problems.push(format!(
+                "{at}: a param gate needs an identifier method, root and other roots"
+            ));
+        }
         for r in row.registrations {
             let callee = r.callee.text();
             let method = matches!(r.callee, Callee::Method(_));
@@ -1921,6 +2179,21 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
             {
                 problems.push(format!(
                     "{at}: prefix callee {callee:?} needs identifier mint suffixes"
+                ));
+            }
+            let hook = matches!(r.callee, Callee::Hook { .. });
+            if hook != matches!(r.shape, Shape::HookName { .. }) {
+                problems.push(format!(
+                    "{at}: a hook callee and a hook-name shape go together ({callee:?})"
+                ));
+            }
+            if let Callee::Hook { prefix, calls } = r.callee
+                && (!prefix.ends_with('.')
+                    || calls.is_empty()
+                    || calls.iter().any(|c| !is_identifier_tail(c)))
+            {
+                problems.push(format!(
+                    "{at}: hook callee {callee:?} needs a `.`-ended prefix and identifier calls"
                 ));
             }
             if let Callee::Segment { prefix, heads } = r.callee
@@ -1999,6 +2272,47 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                         ));
                     }
                 }
+                Shape::HookName { handler_arg } => {
+                    if handler_arg == 0 {
+                        problems.push(format!(
+                            "{at}: hook-name shape of {callee:?} needs a 1-based handler"
+                        ));
+                    }
+                }
+                Shape::Wrapped {
+                    arg,
+                    method,
+                    name_arg,
+                    handler_arg,
+                } => {
+                    if arg == 0
+                        || name_arg == 0
+                        || handler_arg == 0
+                        || name_arg == handler_arg
+                        || !is_identifier_tail(method)
+                    {
+                        problems.push(format!(
+                            "{at}: wrapped shape of {callee:?} needs a 1-based argument, an identifier method and distinct 1-based inner arguments"
+                        ));
+                    }
+                }
+                Shape::Targeted {
+                    target_arg,
+                    name_arg,
+                    handler_arg,
+                } => {
+                    if target_arg == 0
+                        || name_arg == 0
+                        || handler_arg == 0
+                        || target_arg == name_arg
+                        || target_arg == handler_arg
+                        || name_arg == handler_arg
+                    {
+                        problems.push(format!(
+                            "{at}: targeted shape of {callee:?} needs distinct 1-based arguments"
+                        ));
+                    }
+                }
                 Shape::Decorator {
                     receivers,
                     name_arg,
@@ -2032,7 +2346,7 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
             problems.push(format!("{at}: empty or absolute load glob"));
         }
         if row.callbacks.iter().any(|c| {
-            (c.prefix.is_empty() && !c.exported)
+            (c.prefix.is_empty() && !c.exported && c.owners.is_empty())
                 || (c.names.is_empty() && c.open_head.is_none() && c.decorators.is_empty())
                 || c.names.iter().any(|n| n.is_empty())
         }) {
@@ -2079,6 +2393,19 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
         }) {
             problems.push(format!(
                 "{at}: callback decorator {d:?} is not an exported rule's, rooted at a module the gate imports"
+            ));
+        }
+        if let Some(o) = row.callbacks.iter().find_map(|c| {
+            c.owners.iter().find(|o| {
+                c.exported
+                    || !c.prefix.is_empty()
+                    || c.names.is_empty()
+                    || !matches!(row.gate, Gate::Import(_))
+                    || !row.gate.roots_path(o)
+            })
+        }) {
+            problems.push(format!(
+                "{at}: owner {o:?} needs an unexported, prefix-free rule with names, rooted at the module an import gate names"
             ));
         }
         for (j, c) in row.config.iter().enumerate() {
@@ -2608,6 +2935,10 @@ pub static LAUNCHERS: &[Launcher] = &[
     Launcher::new(&["/init"], TargetForm::Wrapper),
     Launcher::new(&["exec"], TargetForm::Wrapper).values(&["-a"]),
     Launcher::new(&["env"], TargetForm::Wrapper).values(&["-u", "--unset", "-C", "--chdir"]),
+    // GH.10 (GH.19's follow-up): `cross-env K=V .. cmd`, a package.json
+    // script's portable `env`: its assignments are read as `env`'s, then the
+    // wrapped command is the launch.
+    Launcher::new(&["cross-env"], TargetForm::Wrapper),
     Launcher::new(&["nohup"], TargetForm::Wrapper),
     Launcher::new(&["dotenv"], TargetForm::Wrapper).values(&["-f", "-e", "-c", "-v"]),
     Launcher::new(&["bundle exec"], TargetForm::Wrapper).values(&["--gemfile"]),
@@ -3688,7 +4019,8 @@ mod tests {
         assert_eq!(
             names,
             [
-                "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome", "flask", "pytest"
+                "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome", "flask", "pytest",
+                "obsidian", "webpack"
             ]
         );
     }
@@ -3733,6 +4065,7 @@ mod tests {
                     exported: false,
                     open_head: None,
                     decorators: &[],
+                    owners: &[],
                 }],
                 config: &[
                     ConfigRule {
@@ -4249,6 +4582,7 @@ mod tests {
                 exported: false,
                 open_head: None,
                 decorators: &[],
+                owners: &[],
             }],
             config: &[],
             manifest: None,
@@ -4494,6 +4828,7 @@ mod tests {
                     exported: true,
                     open_head: None,
                     decorators: &["other.fixture"],
+                    owners: &[],
                 }],
                 config: &[],
                 manifest: None,
@@ -4520,6 +4855,7 @@ mod tests {
                     exported: true,
                     open_head: Some("q_"),
                     decorators: &[],
+                    owners: &[],
                 }],
                 config: &[],
                 manifest: None,
@@ -4568,6 +4904,7 @@ mod tests {
                 exported: true,
                 open_head: None,
                 decorators: &[],
+                owners: &[],
             }],
             config: &[ConfigRule {
                 flavour: ConfigFlavour::Manifest,
@@ -4625,6 +4962,145 @@ mod tests {
             ev.contains("extractor:manifest") && ev.contains("host_config_manifest"),
             "{ev}"
         );
+    }
+
+    #[test]
+    fn obsidian_registrations_and_owner_callbacks() {
+        let m = registration_for("typescript", "obsidian.Plugin.addCommand").expect("row");
+        assert_eq!(m.host.name, "obsidian");
+        assert!(matches!(
+            m.registration.shape,
+            Shape::Table { name_key: "id", .. }
+        ));
+        let m = registration_for("typescript", "obsidian.Plugin.registerEvent").expect("row");
+        assert_eq!(m.registration.pattern, Pattern::Event);
+        assert!(registration_for("typescript", "obsidian.Plugin.addRibbonIcon").is_none());
+        assert_eq!(
+            Shape::targeted_name("vault", "create").as_deref(),
+            Some("vault.create")
+        );
+        assert_eq!(Shape::targeted_name("", "create"), None);
+        let obsidian = HOSTS.iter().find(|h| h.name == "obsidian").expect("row");
+        assert_eq!(
+            obsidian
+                .owner_methods("obsidian.Plugin")
+                .collect::<Vec<_>>(),
+            ["onload", "onunload"]
+        );
+        assert_eq!(
+            obsidian
+                .owner_methods("obsidian.ItemView")
+                .collect::<Vec<_>>(),
+            ["onOpen", "onClose"]
+        );
+        // A base no rule owns calls nothing.
+        assert_eq!(obsidian.owner_methods("obsidian.Component").count(), 0);
+        assert!(obsidian.is_owner_path("obsidian.Plugin.addCommand"));
+        assert!(!obsidian.is_owner_path("obsidian.Plugins.addCommand"));
+        assert!(!obsidian.is_owner_path("obsidian.Notice"));
+        // An owner rule is never a path callback: `onload` alone is no entry.
+        assert!(callback_for("typescript", "onload").is_none());
+    }
+
+    #[test]
+    fn webpack_hooks_match_by_tap() {
+        let m = registration_for("typescript", "compiler.hooks.done.tap").expect("row");
+        assert_eq!((m.host.name, m.suffix, m.mints), ("webpack", "done", true));
+        assert_eq!(m.registration.pattern, Pattern::Event);
+        let m = registration_for("typescript", "compilation.hooks.processAssets.tapPromise")
+            .expect("row");
+        assert_eq!(m.suffix, "processAssets");
+        // Not a tap, two hook segments, or no hook at all: no registration.
+        assert!(registration_for("typescript", "compiler.hooks.done.call").is_none());
+        assert!(registration_for("typescript", "compiler.hooks.a.b.tap").is_none());
+        assert!(registration_for("typescript", "compiler.hooks.tap").is_none());
+        let rows: Vec<&str> = param_hosts("typescript", "apply").map(|h| h.name).collect();
+        assert_eq!(rows, ["webpack"]);
+        assert_eq!(param_hosts("typescript", "run").count(), 0);
+        assert!(
+            Gate::Param {
+                method: "apply",
+                root: "compiler",
+                also: &["compilation"],
+            }
+            .roots_path("compilation.hooks.x")
+        );
+    }
+
+    #[test]
+    fn validate_names_the_gh10_problems() {
+        let bad = [HostRow {
+            name: "t",
+            lang: "typescript",
+            exts: &["ts"],
+            gate: Gate::Param {
+                method: "apply",
+                root: "c",
+                also: &["c"],
+            },
+            loads: &[],
+            registrations: &[
+                Registration {
+                    callee: Callee::Hook {
+                        prefix: "c.hooks",
+                        calls: &[],
+                    },
+                    pattern: Pattern::Event,
+                    shape: Shape::HookName { handler_arg: 0 },
+                },
+                Registration {
+                    callee: Callee::Exact("c.on"),
+                    pattern: Pattern::Event,
+                    shape: Shape::HookName { handler_arg: 1 },
+                },
+                Registration {
+                    callee: Callee::Exact("c.reg"),
+                    pattern: Pattern::Event,
+                    shape: Shape::Wrapped {
+                        arg: 1,
+                        method: "",
+                        name_arg: 1,
+                        handler_arg: 1,
+                    },
+                },
+                Registration {
+                    callee: Callee::Exact("c.dom"),
+                    pattern: Pattern::Event,
+                    shape: Shape::Targeted {
+                        target_arg: 1,
+                        name_arg: 1,
+                        handler_arg: 2,
+                    },
+                },
+            ],
+            callbacks: &[Callback {
+                prefix: "",
+                names: &["onload"],
+                exported: false,
+                open_head: None,
+                decorators: &[],
+                owners: &["c.Plugin"],
+            }],
+            config: &[],
+            manifest: None,
+        }];
+        let problems = validate_rows(&bad);
+        let has = |s: &str| problems.iter().any(|p| p.contains(s));
+        assert!(
+            has("a param gate needs an identifier method, root and other roots"),
+            "{problems:?}"
+        );
+        assert!(has("needs a `.`-ended prefix and identifier calls"));
+        assert!(has(
+            "hook-name shape of \"c.hooks\" needs a 1-based handler"
+        ));
+        assert!(has(
+            "a hook callee and a hook-name shape go together (\"c.on\")"
+        ));
+        assert!(has("wrapped shape of \"c.reg\""));
+        assert!(has("targeted shape of \"c.dom\""));
+        assert!(has("owner \"c.Plugin\" needs an unexported"));
+        assert_eq!(problems.len(), 7, "{problems:?}");
     }
 }
 
@@ -5070,6 +5546,12 @@ mod launchers {
                 "app.js",
                 None,
             ),
+            (
+                &["cross-env", "NODE_ENV=production", "node", "dist/main"],
+                "script",
+                "dist/main",
+                None,
+            ),
         ];
         let mut covered: Vec<&'static str> = Vec::new();
         for (input, form, target, attr) in cases {
@@ -5109,6 +5591,19 @@ mod launchers {
         assert_eq!(
             shape(&t),
             ("script", "s.js", None, Some("node"), vec!["env"], None)
+        );
+        // GH.10: cross-env reads like env.
+        let t = norm(&["cross-env", "NODE_ENV=production", "node", "dist/main"]);
+        assert_eq!(
+            shape(&t),
+            (
+                "script",
+                "dist/main",
+                None,
+                Some("node"),
+                vec!["cross-env"],
+                None
+            )
         );
         let t = norm(&["tini", "--", "python", "-m", "x"]);
         assert_eq!(

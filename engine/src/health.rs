@@ -37,12 +37,13 @@
 //!   sides under 10) or `absent` (neither side exists).
 //! - **Parse coverage**: the walk's files by extension that no parser takes
 //!   (`extract::detect_language` is `None`), split in two. Code-looking files
-//!   ([`CODE_LIKE_EXTS`]: single-file components, server templates, `.mjs` /
-//!   `.cts` and the like) are `unparsed` and judge the `parse` row: BLIND
+//!   ([`CODE_LIKE_EXTS`]: single-file components, server templates and the like;
+//!   `.mjs` / `.cjs` / `.mts` / `.cts` are parsed since GH.10) are
+//!   `unparsed` and judge the `parse` row: BLIND
 //!   `code_unparsed` with >= 10 such files making >= 10% of the code files,
 //!   DEGRADED `code_partly_unparsed` with >= 10 making >= 2%, OK
-//!   `minor_unparsed` with fewer (a monorepo's `.mjs` / `.cjs` tool configs
-//!   are no blind spot), else OK `parsed`. Prose files
+//!   `minor_unparsed` with fewer (a monorepo's handful of templates is no
+//!   blind spot), else OK `parsed`. Prose files
 //!   ([`DOC_LIKE_EXTS`]: `.mdx`, `.rst`, `.txt`, ..) are `docs_unparsed`,
 //!   reported apart and never a flag (FH.1b: doc-heavy repos read blind with
 //!   no code component unread).
@@ -120,14 +121,13 @@ pub const ROLE_BASIS: usize = 5;
 pub const SUSPICIOUS_EXAMPLES: usize = 20;
 
 /// Code-looking extensions no parser reads: single-file components, server
-/// templates, module-flavoured JS / TS and a few languages glia does not
-/// parse. A file of one of these with no parser is an `unparsed` file.
-pub const CODE_LIKE_EXTS: [&str; 36] = [
-    "cjs",
+/// templates and a few languages glia does not parse (GH.10 took the
+/// module-flavoured JS / TS off the list: the TS parser reads them). A file
+/// of one of these with no parser is an `unparsed` file.
+pub const CODE_LIKE_EXTS: [&str; 32] = [
     "coffee",
     "cr",
     "cshtml",
-    "cts",
     "eex",
     "ejs",
     "elm",
@@ -150,9 +150,7 @@ pub const CODE_LIKE_EXTS: [&str; 36] = [
     "leex",
     "liquid",
     "marko",
-    "mjs",
     "ml",
-    "mts",
     "mustache",
     "njk",
     "pug",

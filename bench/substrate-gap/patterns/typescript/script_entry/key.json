@@ -7,22 +7,24 @@
   "expect_nodes": [
     {"kind": "MODULE", "name": "bin::count-lines", "exact": true},
     {"kind": "MODULE", "name": "bin::greet", "exact": true},
-    {"kind": "MODULE", "name": "scripts::seed", "exact": true}
+    {"kind": "MODULE", "name": "scripts::seed", "exact": true},
+    {"kind": "MODULE", "name": "bin::hello", "exact": true},
+    {"kind": "MODULE", "name": "lib::shout", "exact": true}
   ],
   "expect_edges": [
-    {"from": "bin::count-lines", "to": "bin::count-lines::count",
-     "category": "CALLS", "exact": true,
-     "note": "the require.main guard's body runs as the MODULE: its calls are MODULE CALLS"},
-    {"from": "scripts::seed", "to": "scripts::seed::main",
-     "category": "CALLS", "exact": true,
-     "note": "the import.meta.main guard's body runs as the MODULE"}
+    {"from": "bin::count-lines", "to": "bin::count-lines::count", "category": "CALLS", "exact": true, "note": "the require.main guard's body runs as the MODULE: its calls are MODULE CALLS"},
+    {"from": "scripts::seed", "to": "scripts::seed::main", "category": "CALLS", "exact": true, "note": "the import.meta.main guard's body runs as the MODULE"},
+    {"from": "bin::greet", "to": "lib::shout", "category": "IMPORTS", "exact": true, "note": "GH.10: require('../lib/shout.cjs') names the .cjs module as a .js specifier names its module"},
+    {"from": "bin::greet::greet", "to": "lib::shout::shout", "category": "CALLS", "exact": true, "note": "GH.10: the destructured require binds the call"},
+    {"from": "bin::hello", "to": "bin::hello::hello", "category": "CALLS", "exact": true, "note": "GH.10: an .mjs script's module-level call"}
   ],
   "expect_cells": [
     {"kind": "MODULE", "node": "bin::count-lines", "cell": "ENTRYPOINT", "contains": "\"source\":\"main_guard\""},
     {"kind": "MODULE", "node": "bin::count-lines", "cell": "ENTRYPOINT", "contains": "bin/count-lines.js:9"},
     {"kind": "MODULE", "node": "bin::greet", "cell": "ENTRYPOINT", "contains": "\"source\":\"shebang\""},
-    {"kind": "MODULE", "node": "scripts::seed", "cell": "ENTRYPOINT", "contains": "\"source\":\"main_guard\""}
+    {"kind": "MODULE", "node": "scripts::seed", "cell": "ENTRYPOINT", "contains": "\"source\":\"main_guard\""},
+    {"kind": "MODULE", "node": "bin::hello", "cell": "ENTRYPOINT", "contains": "\"source\":\"shebang\""}
   ],
   "forbid": [],
-  "note": "0.5.6 use pattern (GH.11): a TypeScript / JavaScript script run from a shell. A `#!` first line naming node / deno / bun / tsx / ts-node gives the MODULE an ENTRYPOINT cell {\"source\":\"shebang\"}; a module-level `if (require.main === module)` / `if (import.meta.main)` guard gives it {\"source\":\"main_guard\"} at the guard's row (the guard wins over a shebang: one entry cell per node, as Python's), and the guard's body is walked from the MODULE. bin/count-lines.js is the spec's probe. At HEAD 4ac3507c: no ENTRYPOINT cell, the guard's calls lost, `glia gaps` dead_symbol bin::count-lines::count."
+  "note": "0.5.6 use pattern (GH.11): a TypeScript / JavaScript script run from a shell. A `#!` first line naming node / deno / bun / tsx / ts-node gives the MODULE an ENTRYPOINT cell {\"source\":\"shebang\"}; a module-level `if (require.main === module)` / `if (import.meta.main)` guard gives it {\"source\":\"main_guard\"} at the guard's row (the guard wins over a shebang: one entry cell per node, as Python's), and the guard's body is walked from the MODULE. bin/count-lines.js is the spec's probe. At HEAD 4ac3507c: no ENTRYPOINT cell, the guard's calls lost, `glia gaps` dead_symbol bin::count-lines::count. GH.10 (GH.11's follow-up): .mjs / .cjs / .mts / .cts files are parsed (engine detect_language), so bin/hello.mjs, a shebang ES-module script, is a MODULE with its ENTRYPOINT, and lib/shout.cjs, a CommonJS module bin/greet.js requires by its .cjs name, is a MODULE the require IMPORTS and whose function greet CALLS. At HEAD 56616f6e: neither file had a MODULE."
 }
