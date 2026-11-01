@@ -105,14 +105,16 @@ glia merge [REPOS]... [--gmap <DIR>]... [--incremental] [--layout <DIR>] [--out 
 glia inspect <PATH> [--json]
     What a .gmap file or layout directory holds, every id named from the file's
     own header. Exits 1 on an unreadable or old-format file ("rebuild the graph").
-glia install-hooks [REPO] [--command <COMMAND>] [--pair <PAIR>] [--uninstall]
+glia install-hooks [REPO] [--command <COMMAND>] [--embed] [--pair <PAIR>] [--uninstall]
     Opt-in post-commit / post-merge / post-checkout hooks that rerun `glia build .`
     (or --command), written where git reads hooks: core.hooksPath, else the common
     dir, so one install serves every worktree of the repo. --pair <sibling> adds a
     branch-pair lock: pre-commit blocks unless the sibling has the same branch
     checked out, commit-msg pins `Glia-Pinned-At: <sibling HEAD>`. Bypass once with
     `git commit --no-verify` (both hooks) or GLIA_BRANCH_PAIR=skip (the check
-    only). Needs git >= 2.13. Never overwrites hooks glia did not write.
+    only). Needs git >= 2.13. Never overwrites hooks glia did not write. --embed
+    also runs `glia embed . --limit 2000` from each rebuild hook after the build
+    (silenced; its failure never fails the hook).
 glia cache push <REPO> <STORE> [--json] [--key-file <FILE>] [--layout] [--unsigned]
     Upload a built checkout's parse cache to an object store, one signed object per
     content address, skipping what the store holds. STORE is a directory or an
@@ -411,7 +413,7 @@ glia timeline history <REPO> <QNAME> [--category <CATEGORY>] [--json]
 glia timeline as-of <REPO> <REV> [--json]
     The graph at one rev of the window (an index, or a commit id prefix of 7+ hex
     chars): its counts by category. history and as-of read the sidecar, never rebuild.
-glia watch <REPO> [--debounce-ms <N>] [--max-latency-ms <N>] [--memory-budget-mb <MB>] [--out <DIR>] [--persist-every <S>] [--poll-ms <N>] [--with <REPO>]...
+glia watch <REPO> [--debounce-ms <N>] [--embed] [--embed-model bge-small|test-hash] [--max-latency-ms <N>] [--memory-budget-mb <MB>] [--out <DIR>] [--persist-every <S>] [--poll-ms <N>] [--with <REPO>]...
     Keep one repo's build open and stream what each change does to the graph: a
     foreground loop, no daemon, socket or pidfile. Prints a ready line, then one NDJSON
     object per update on stdout (the files that moved, the groups rebuilt, the totals,
@@ -426,6 +428,10 @@ glia watch <REPO> [--debounce-ms <N>] [--max-latency-ms <N>] [--memory-budget-mb
     a build error, 5 when a persist fails. --memory-budget-mb (else
     GLIA_MEMORY_BUDGET_MB; 0 = none) is a process RSS target: past it the session
     evicts its cached group builds, then its build memos (time, never bytes).
+    --embed re-embeds the changed and un-embedded nodes into .glia/vectors.jsonl
+    after each update (at most 2000 a run; --embed-model, else GLIA_EMBED_MODEL,
+    else bge-small), on the loop thread once the update is printed; the sidecar
+    write starts no update. Another model's sidecar exits 2 before listening.
 
 # Rules
 glia check <REPO> [--json] [--strict] [--with <WITH>]...

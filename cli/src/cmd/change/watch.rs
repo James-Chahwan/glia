@@ -78,7 +78,39 @@
 //!   more when `--memory-budget-mb` replaces the budget the session read from
 //!   `GLIA_MEMORY_BUDGET_MB` (`0`: no budget);
 //! - `[watch] exit reason=sigint|sigterm|stdin_eof|stdout_closed`, once the
-//!   loop stops, before the exit persist.
+//!   loop stops, before the exit persist;
+//! - GA.15, under `--embed`: `[watch] embed seq=<s> embedded=<e> cached=<c>
+//!   ms=<t>` once per update line printed, after it (below).
+//!
+//! Embedding (GA.15). `--embed` keeps `<repo>/.glia/vectors.jsonl` (FB.5a's
+//! sidecar, the one `glia embed` writes) up to date as the watch runs: after
+//! each update line is printed, and before the next scan, the loop thread runs
+//! `semantic::embed_repo` over the session's current graph for every watched
+//! repo in build order, at most 2000 nodes a run (the rest wait for the next
+//! update): the nodes the update changed and any still without a fresh
+//! vector. One embed per update line, never per file, so the debounce that
+//! batches an update batches its embed; the stdout stream is unchanged (the
+//! embed prints only its stderr line, `embedded` / `cached` / `ms` summed over
+//! the repos). It runs on the loop thread after `apply` has returned, so the
+//! model never shares the cores with the build's rayon pool, and its sidecar
+//! write is a query-time input the scan drops (`watch::durability`, FB.3), so
+//! it starts no update. The model is `--embed-model`, else
+//! `GLIA_EMBED_MODEL` (`semantic::surface_model`, bge-small by default),
+//! loaded once after the session opens; before the listening line, a model
+//! cache directory inside a watched repo (bge-small) or a sidecar holding
+//! another model's vectors exits 2 (`glia embed --replace` rewrites one). An
+//! embed that fails later prints `warning: watch: embed seq=<s>: <reason>`
+//! and the watch goes on. Vectors are not in the layout, so the persist
+//! cadence is unchanged. The model session lives for one run: it is dropped
+//! after it and the freed heap handed back (`[memory] malloc_trim
+//! site=watch_embed ..`), the next run loading the model again (a disk read,
+//! no download), because a resident session keeps its working memory:
+//! measured on glia's own tree, a CPU bge-small session held after its first
+//! 2000-node run left the watch at 16 GB RSS against 0.9 GB before, which no
+//! `--memory-budget-mb` can evict. While a run lasts its memory is the
+//! process's (a bge-small GPU session lives in its `embed-worker` child
+//! instead). A stop signal that arrives during a run is honoured once the run
+//! returns: an embed is never cut short.
 //!
 //! Grep them from a run: `glia watch <repo> 2>&1 >/dev/null | grep '^\[watch\] '`.
 
@@ -89,8 +121,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use glia_engine::memory::{MemoryBudget, rss_kb};
+use clap::builder::PossibleValuesParser;
+use glia_code_domain::external_inputs::{VectorRow, read_rows};
+use glia_core::RepoId;
+use glia_embed::Embedder;
+use glia_engine::memory::{MemoryBudget, release_freed_memory, rss_kb};
 use glia_engine::persist::default_layout_dir;
+use glia_engine::semantic::{EmbedOptions, VECTORS_FILE, embed_repo, surface_model};
 use glia_engine::watch::{WatchSession, WatchUpdate};
 
 use crate::common::build_options;
@@ -127,7 +164,18 @@ pub(crate) struct Args {
     /// GLIA_MEMORY_BUDGET_MB (0: no budget).
     #[arg(long, value_name = "MB")]
     memory_budget_mb: Option<u64>,
+    /// After each update, embed the changed and un-embedded nodes (at most
+    /// 2000 a run) into `<repo>/.glia/vectors.jsonl`, as `glia embed` does.
+    #[arg(long)]
+    embed: bool,
+    /// The embedding model --embed uses (default bge-small, or
+    /// GLIA_EMBED_MODEL).
+    #[arg(long, value_name = "MODEL", requires = "embed", value_parser = PossibleValuesParser::new(glia_embed::MODEL_NAMES))]
+    embed_model: Option<String>,
 }
+
+/// GA.15: the most nodes one post-update embed run embeds.
+const EMBED_LIMIT: usize = 2000;
 
 /// The shortest `--poll-ms` honoured, and the slice every wait is cut into
 /// so a stop flag is seen within it.
@@ -240,6 +288,120 @@ fn rss_mb() -> String {
 /// How a step of the loop failed: the exit code and its message.
 struct Fail(i32, String);
 
+/// GA.15: the `--embed` half of the loop: the model, loaded once.
+struct Embed {
+    /// The `glia_embed::named` model name, reloaded for each run.
+    model: &'static str,
+    /// The embedder [`Embed::open`] loaded, used by the first run; `None`
+    /// after it (each later run loads its own).
+    loaded: Option<Box<dyn Embedder>>,
+    opts: EmbedOptions,
+}
+
+impl Embed {
+    /// Load `model` after checking every watched root (module doc,
+    /// "Embedding"): the bge-small cache must sit outside each repo (checked
+    /// before the model loads), and no sidecar may hold another model's
+    /// vectors.
+    fn open(model: &'static str, roots: &[PathBuf]) -> Result<Embed, String> {
+        if model == "bge-small" {
+            for root in roots {
+                glia_embed::refuse_repo_cache(root)?;
+            }
+        }
+        let embedder = crate::common::load_embedder(model)?;
+        for root in roots {
+            refuse_foreign_sidecar(root, embedder.model())?;
+        }
+        Ok(Embed {
+            model,
+            loaded: Some(embedder),
+            opts: EmbedOptions::default().with_limit(Some(EMBED_LIMIT)),
+        })
+    }
+
+    /// Embed every watched repo of `session`'s current graph, in build order;
+    /// one `[watch] embed` line for update `seq`, or a warning when a run
+    /// failed (the watch goes on). The model session lives for this run
+    /// only: dropped after it, and the freed heap handed back
+    /// (`memory::release_freed_memory("watch_embed")`), so the watch does not
+    /// hold the model's working memory between updates (module doc).
+    fn run(&mut self, session: &WatchSession, seq: u64) {
+        let embedder = match self.loaded.take() {
+            Some(e) => e,
+            None => match crate::common::load_embedder(self.model) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("warning: watch: embed seq={seq}: {e}");
+                    return;
+                }
+            },
+        };
+        self.embed_with(embedder.as_ref(), session, seq);
+        drop(embedder);
+        release_freed_memory("watch_embed");
+    }
+
+    fn embed_with(&self, embedder: &dyn Embedder, session: &WatchSession, seq: u64) {
+        let started = Instant::now();
+        let result = session.result();
+        let (mut embedded, mut cached) = (0usize, 0usize);
+        for root in session.roots() {
+            let Some(id) = result
+                .repo_roots
+                .iter()
+                .find_map(|(id, r)| (r == root).then_some(*id))
+            else {
+                eprintln!("warning: watch: embed seq={seq}: no repo id for {root}");
+                continue;
+            };
+            match embed_repo(
+                Path::new(root),
+                &result.merged,
+                RepoId(id),
+                embedder,
+                &self.opts,
+            ) {
+                Ok(r) => {
+                    embedded += r.embedded;
+                    cached += r.cached;
+                }
+                Err(e) => {
+                    eprintln!("warning: watch: embed seq={seq}: {e}");
+                    return;
+                }
+            }
+        }
+        eprintln!(
+            "[watch] embed seq={seq} embedded={embedded} cached={cached} ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Err when `<root>/.glia/vectors.jsonl` holds a row of a model other than
+/// `model` (or one naming none): the refusal `embed_repo` would give at the
+/// first update, given before the watch starts listening.
+fn refuse_foreign_sidecar(root: &Path, model: &str) -> Result<(), String> {
+    let path = root.join(VECTORS_FILE);
+    let (rows, errors) = read_rows::<VectorRow>(&path);
+    if let Some(first) = errors.first() {
+        return Err(format!(
+            "{} has {} unreadable line(s) (first: {first}); fix or remove them before embedding",
+            path.display(),
+            errors.len()
+        ));
+    }
+    match rows.iter().find(|r| r.model.as_deref() != Some(model)) {
+        Some(other) => Err(format!(
+            "{} holds vectors of model {}; run `glia embed --replace` to rewrite it with {model}",
+            path.display(),
+            other.model.as_deref().unwrap_or("<none>")
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The watch's state between ticks.
 struct Loop {
     session: WatchSession,
@@ -257,6 +419,8 @@ struct Loop {
     /// The `--out` dir as given, for the persisted marker (`None`: the
     /// repo's default layout).
     out: Option<String>,
+    /// GA.15: `--embed`'s model, run after each update line printed.
+    embed: Option<Embed>,
 }
 
 impl Loop {
@@ -308,7 +472,11 @@ impl Loop {
             return Ok(true);
         }
         self.dirty = true;
-        emit(&update)
+        let open = emit(&update)?;
+        if open && let Some(embed) = &mut self.embed {
+            embed.run(&self.session, update.seq);
+        }
+        Ok(open)
     }
 
     /// Write the layout and the parse cache.
@@ -383,6 +551,24 @@ pub(crate) fn run(a: Args) -> i32 {
     if let Some(mb) = a.memory_budget_mb {
         session.set_memory_budget(MemoryBudget::mb(mb));
     }
+    let embed = if a.embed {
+        // The parser admits only `MODEL_NAMES`, so the name is found there.
+        let model = a
+            .embed_model
+            .as_deref()
+            .and_then(|m| glia_embed::MODEL_NAMES.iter().copied().find(|n| *n == m))
+            .unwrap_or_else(surface_model);
+        let roots: Vec<PathBuf> = roots.iter().map(PathBuf::from).collect();
+        match Embed::open(model, &roots) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
     if !sig::install() {
         eprintln!(
             "warning: watch: SIGINT / SIGTERM handlers not installed; a signal ends the watch without the exit persist"
@@ -409,6 +595,7 @@ pub(crate) fn run(a: Args) -> i32 {
         dirty: true,
         last_persist: Instant::now(),
         session,
+        embed,
     };
     let multi = !a.with.is_empty();
     let repos_field = if multi {

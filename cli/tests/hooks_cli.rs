@@ -550,3 +550,57 @@ fn install_rejects_a_pair_that_is_not_a_repo() {
         stderr(&out)
     );
 }
+
+/// GA.15: `--embed` adds `glia embed . --limit 2000` to every rebuild hook
+/// after its build line, the install line gains ` embed=on`, and a commit's
+/// post-commit hook then writes `.glia/vectors.jsonl` (the deterministic
+/// `test-hash` model through `GLIA_EMBED_MODEL`). An install without
+/// `--embed` rewrites the scripts without the line, and `--uninstall`
+/// removes them whole.
+#[test]
+fn embed_adds_the_embed_line_to_the_rebuild_hooks() {
+    let s = Scratch::new("embed");
+    let repo = init_repo(s.root(), "r");
+    let err = glia_ok(s.root(), &["install-hooks", "r", "--embed"]);
+    let hooks = repo.join(".git").join("hooks");
+    assert!(
+        err.contains(&format!(
+            "[hooks] installed 3 hook(s) into {} (skipped 0 non-managed, branch-pair=off) embed=on\n",
+            hooks.display()
+        )),
+        "{err}"
+    );
+    for hook in ["post-commit", "post-merge", "post-checkout"] {
+        let body = std::fs::read_to_string(hooks.join(hook)).expect("hook written");
+        assert!(
+            body.ends_with("\nglia build .\nglia embed . --limit 2000 >/dev/null 2>&1 || true\n"),
+            "{hook}: {body}"
+        );
+    }
+
+    // The hook runs the glia under test (first on PATH): build, then embed.
+    std::fs::write(repo.join("a.py"), "def foo():\n    return 1\n").expect("write a.py");
+    git_ok(&repo, &["add", "a.py"]);
+    let mut commit = isolated("git", &repo);
+    commit
+        .args(["commit", "-q", "-m", "a"])
+        .env("GLIA_EMBED_MODEL", "test-hash");
+    let out = run(commit);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let vectors = std::fs::read_to_string(repo.join(".glia/vectors.jsonl"))
+        .unwrap_or_else(|e| panic!("post-commit wrote no vectors ({e}): {}", stderr(&out)));
+    assert!(vectors.contains("\"qname\":\"a::foo\""), "{vectors}");
+
+    // Without --embed the scripts are the build alone again.
+    let err = glia_ok(s.root(), &["install-hooks", "r"]);
+    assert!(!err.contains("embed=on"), "{err}");
+    let body = std::fs::read_to_string(hooks.join("post-commit")).expect("hook rewritten");
+    assert!(!body.contains("glia embed"), "{body}");
+    assert!(body.ends_with("\nglia build .\n"), "{body}");
+
+    glia_ok(s.root(), &["install-hooks", "r", "--embed"]);
+    glia_ok(s.root(), &["install-hooks", "r", "--uninstall"]);
+    for hook in ["post-commit", "post-merge", "post-checkout"] {
+        assert!(!hooks.join(hook).exists(), "{hook} left behind");
+    }
+}

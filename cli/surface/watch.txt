@@ -1,6 +1,8 @@
 # CLI surface of `glia watch`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
 cmd glia watch
   arg debounce_ms pos=- long=debounce-ms short=- required=false num_args=1 action=Set default=200 value_names=N global=false hidden=false
+  arg embed pos=- long=embed short=- required=false num_args=0 action=SetTrue default=false value_names=EMBED global=false hidden=false
+  arg embed_model pos=- long=embed-model short=- required=false num_args=1 action=Set default=- value_names=MODEL global=false hidden=false values=bge-small,test-hash
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg max_latency_ms pos=- long=max-latency-ms short=- required=false num_args=1 action=Set default=2000 value_names=N global=false hidden=false
   arg memory_budget_mb pos=- long=memory-budget-mb short=- required=false num_args=1 action=Set default=- value_names=MB global=false hidden=false

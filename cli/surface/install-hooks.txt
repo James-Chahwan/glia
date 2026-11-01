@@ -1,6 +1,7 @@
 # CLI surface of `glia install-hooks`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
 cmd glia install-hooks
   arg command pos=- long=command short=- required=false num_args=1 action=Set default=- value_names=COMMAND global=false hidden=false
+  arg embed pos=- long=embed short=- required=false num_args=0 action=SetTrue default=false value_names=EMBED global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg pair pos=- long=pair short=- required=false num_args=1 action=Set default=- value_names=PAIR global=false hidden=false

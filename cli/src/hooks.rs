@@ -27,6 +27,14 @@
 //! Both scripts fail open when `glia` is not on PATH: a missing tool is an
 //! environment problem, not a branch mismatch. Needs git >= 2.13.
 //!
+//! `--embed` (GA.15) makes every rebuild hook also refresh the embedding
+//! sidecar after its build: [`EMBED_LINE`], `glia embed . --limit 2000`,
+//! silenced and `|| true`, so a missing model, another model's sidecar or no
+//! `glia` on PATH never fails the hook (post-* hooks cannot block anyway).
+//! The line is part of the managed script, so `--uninstall` removes it with
+//! the rest, and a later install without `--embed` writes the scripts
+//! without it. The install line gains ` embed=on`.
+//!
 //! `HooksCmd` is the flattened slot for the hidden `glia hook …` entry points
 //! those scripts call; it lists after `install-hooks` in `Cmd`.
 
@@ -49,6 +57,9 @@ const TRAILER: &str = "Glia-Pinned-At";
 const SKIP_ENV: &str = "GLIA_BRANCH_PAIR";
 /// What the rebuild hooks run when `--command` is not given.
 const DEFAULT_REBUILD_COMMAND: &str = "glia build .";
+/// GA.15: what `--embed` adds to each rebuild hook, after the build line: at
+/// most 2000 nodes a run (the rest wait for the next hook), never failing it.
+const EMBED_LINE: &str = "glia embed . --limit 2000 >/dev/null 2>&1 || true";
 
 /// What `git rev-parse --local-env-vars` lists (git 2.55): the variables that
 /// pin a git command to one repository. Git exports `GIT_INDEX_FILE` to every
@@ -94,6 +105,11 @@ pub(crate) struct InstallArgs {
     /// checked out, and `commit-msg` pins `Glia-Pinned-At: <sibling HEAD>`.
     #[arg(long)]
     pair: Option<String>,
+    /// Also run `glia embed . --limit 2000` from each rebuild hook after its
+    /// build, keeping .glia/vectors.jsonl fresh; its failure never fails the
+    /// hook.
+    #[arg(long)]
+    embed: bool,
 }
 
 // Hook-side subcommands, flattened into `Cmd` after `install-hooks`. A new
@@ -513,7 +529,7 @@ pub(crate) fn run(args: InstallArgs) -> i32 {
     let cmd = args.command.as_deref().unwrap_or(DEFAULT_REBUILD_COMMAND);
     let mut plan: Vec<(&str, String)> = REBUILD_HOOKS
         .iter()
-        .map(|h| (*h, rebuild_script(h, cmd)))
+        .map(|h| (*h, rebuild_script(h, cmd, args.embed)))
         .collect();
     if let Some(p) = args.pair.as_deref() {
         plan.extend(PAIR_HOOKS.iter().map(|h| (*h, pair_script(h, p))));
@@ -546,9 +562,10 @@ pub(crate) fn run(args: InstallArgs) -> i32 {
     }
 
     eprintln!(
-        "[hooks] installed {written} hook(s) into {} (skipped {skipped} non-managed, branch-pair={})",
+        "[hooks] installed {written} hook(s) into {} (skipped {skipped} non-managed, branch-pair={}){}",
         hooks.display(),
-        args.pair.as_deref().unwrap_or("off")
+        args.pair.as_deref().unwrap_or("off"),
+        if args.embed { " embed=on" } else { "" }
     );
     if args.pair.is_none() {
         let kept: Vec<&str> = PAIR_HOOKS
@@ -588,7 +605,14 @@ fn hooks_in_work_tree(repo: &Path, top: &Path, hooks: &Path) -> bool {
     hooks.starts_with(&top) && !common.is_some_and(|c| hooks.starts_with(c))
 }
 
-fn rebuild_script(hook_name: &str, cmd: &str) -> String {
+/// A rebuild hook's script: the build command, then (`embed`, GA.15)
+/// [`EMBED_LINE`].
+fn rebuild_script(hook_name: &str, cmd: &str, embed: bool) -> String {
+    let embed = if embed {
+        format!("{EMBED_LINE}\n")
+    } else {
+        String::new()
+    };
     format!(
         r#"#!/bin/sh
 {HOOK_MARKER}
@@ -597,7 +621,7 @@ fn rebuild_script(hook_name: &str, cmd: &str) -> String {
 # Edit `--command` and re-run install-hooks to change. Remove with `--uninstall`.
 
 {cmd}
-"#
+{embed}"#
     )
 }
 
@@ -817,6 +841,19 @@ mod tests {
             msg.contains("glia not on PATH - Glia-Pinned-At not written"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn rebuild_script_runs_embed_only_with_embed() {
+        let plain = rebuild_script("post-commit", "glia build .", false);
+        assert!(plain.ends_with("\nglia build .\n"), "{plain}");
+        assert!(!plain.contains("glia embed"), "{plain}");
+        let embed = rebuild_script("post-commit", "glia build .", true);
+        assert!(
+            embed.ends_with("\nglia build .\nglia embed . --limit 2000 >/dev/null 2>&1 || true\n"),
+            "{embed}"
+        );
+        assert!(embed.starts_with(&format!("#!/bin/sh\n{HOOK_MARKER}\n")));
     }
 
     #[test]

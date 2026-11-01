@@ -13,7 +13,10 @@
 //! `[watch] exit reason=...` lines; asserting them here makes them a tested
 //! contract. GA.11's tests: `--with` / `--out` over two scratch repos, the
 //! `--out` requirement, and the `--max-latency-ms` cap applying a path that
-//! never stops moving. Grep them from a run of the binary:
+//! never stops moving. GA.15's: `--embed` embeds after each update line
+//! (`[watch] embed seq=<s> embedded=<e> cached=<c> ms=<t>`), its sidecar
+//! write starting no update, and refuses another model's sidecar before
+//! listening. Grep them from a run of the binary:
 //! `glia watch <repo> 2>&1 >/dev/null </dev/null | grep '^\[watch\] '`.
 
 use std::collections::BTreeMap;
@@ -98,11 +101,17 @@ struct Watch {
 
 impl Watch {
     fn spawn(s: &Scratch, args: &[&str]) -> Watch {
+        Watch::spawn_env(s, args, &[])
+    }
+
+    /// [`Watch::spawn`] with `env` set on the child.
+    fn spawn_env(s: &Scratch, args: &[&str], env: &[(&str, &str)]) -> Watch {
         let stderr = std::fs::File::create(s.stderr_path()).expect("stderr file");
         let mut child = Command::new(env!("CARGO_BIN_EXE_glia"))
             .arg("watch")
             .arg(s.repo())
             .args(args)
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(stderr))
@@ -546,4 +555,136 @@ fn max_latency_applies_a_moving_path() {
         "{err}"
     );
     eprintln!("[ga11-test] first update after {} ms", waited.as_millis());
+}
+
+/// The `.glia/vectors.jsonl` rows of `repo`: qname -> its whole line.
+fn vector_rows(repo: &Path) -> BTreeMap<String, String> {
+    let text = std::fs::read_to_string(repo.join(".glia/vectors.jsonl")).unwrap_or_default();
+    text.lines()
+        .map(|l| {
+            let v: Value = serde_json::from_str(l).expect("vector row is JSON");
+            let q = v["qname"].as_str().expect("row qname").to_string();
+            (q, l.to_string())
+        })
+        .collect()
+}
+
+/// GA.15: with every node embedded beforehand (`glia embed`, test-hash), one
+/// edit of `foo` is one update line, then one `[watch] embed seq=1` line that
+/// re-embeds the nodes whose text changed (foo and the module holding it),
+/// rewriting foo's row and keeping bar's; the sidecar write starts no second
+/// update, and stdout carries nothing but the ready and update lines.
+#[test]
+fn embed_runs_after_each_update() {
+    let s = Scratch::new("embed");
+    let env = [("GLIA_EMBED_MODEL", "test-hash"), ("GLIA_MALLOC_TRIM", "1")];
+    let pre = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .arg("embed")
+        .arg(s.repo())
+        .envs(env.iter().copied())
+        .output()
+        .expect("run glia embed");
+    assert!(
+        pre.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
+    let before = vector_rows(&s.repo());
+    assert!(before.contains_key("a::foo"), "{before:?}");
+    let mut w = Watch::spawn_env(
+        &s,
+        &[
+            "--poll-ms",
+            "20",
+            "--debounce-ms",
+            "20",
+            "--persist-every",
+            "0",
+            "--embed",
+        ],
+        &env,
+    );
+    ready(&mut w, &s);
+    let staged = s.0.join("a.py.new");
+    std::fs::write(&staged, A_PY_EDITED).expect("stage the edit");
+    std::fs::rename(&staged, s.repo().join("a.py")).expect("edit a.py");
+    let u = w.next_json(&s, "the update");
+    assert_eq!(u["seq"], 1, "{u}");
+    // Ten scans after the embed's write: none of them may find a change.
+    let started = Instant::now();
+    while !s.stderr().contains("[watch] embed seq=1 ") {
+        assert!(
+            started.elapsed() < TIMEOUT,
+            "no embed line:\n{}",
+            s.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    drop(w.stdin.take());
+    assert_eq!(w.wait(&s), 0, "stderr:\n{}", s.stderr());
+    assert!(
+        w.lines.try_recv().is_err(),
+        "a second stdout line after the update"
+    );
+    let err = s.stderr();
+    let embed: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("[watch] embed "))
+        .collect();
+    assert_eq!(embed.len(), 1, "{err}");
+    assert!(
+        embed[0].starts_with("[watch] embed seq=1 embedded=2 cached=1 ms="),
+        "{err}"
+    );
+    assert!(!err.contains("[watch] emitted seq=2"), "{err}");
+    // The model session is dropped after its run and the heap trimmed.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    assert!(
+        err.contains("[memory] malloc_trim site=watch_embed rss_mb="),
+        "{err}"
+    );
+    assert!(err.contains("[watch] persisted seq=1 reason=exit"), "{err}");
+    let after = vector_rows(&s.repo());
+    assert_eq!(
+        after.keys().collect::<Vec<_>>(),
+        before.keys().collect::<Vec<_>>(),
+        "same nodes"
+    );
+    assert_ne!(after["a::foo"], before["a::foo"], "foo re-embedded");
+    assert_eq!(after["a::bar"], before["a::bar"], "bar kept");
+}
+
+/// GA.15: `--embed` over a sidecar of another model exits 2 before the
+/// listening line, naming `--replace`; `--embed-model` needs `--embed`.
+#[test]
+fn embed_refuses_another_models_sidecar() {
+    let s = Scratch::new("embed-foreign");
+    std::fs::create_dir_all(s.repo().join(".glia")).expect(".glia dir");
+    std::fs::write(
+        s.repo().join(".glia/vectors.jsonl"),
+        "{\"qname\":\"a::foo\",\"kind\":\"function\",\"model\":\"other/model\",\"dims\":2,\"b64\":\"AAAAAAAAAAA=\"}\n",
+    )
+    .expect("foreign sidecar");
+    let mut w = Watch::spawn_env(&s, &["--embed", "--embed-model", "test-hash"], &[]);
+    assert_eq!(w.wait(&s), 2, "stderr:\n{}", s.stderr());
+    let err = s.stderr();
+    assert!(
+        err.contains("holds vectors of model other/model; run `glia embed --replace`"),
+        "{err}"
+    );
+    assert!(!err.contains("[watch] listening"), "{err}");
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .arg("watch")
+        .arg(s.repo())
+        .args(["--embed-model", "test-hash"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run glia watch");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--embed"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
