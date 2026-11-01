@@ -2082,6 +2082,46 @@ pub enum NavFact {
     /// `include`d one from the owner's methods, an `extend`ed one from its
     /// body.
     Mixin { module: String, extend: bool },
+    /// TypeScript / JavaScript (GD.31), recorded by the engine from the EVM
+    /// client extractor on the file MODULE (engine/src/extract.rs), read by
+    /// the post-cache join (engine/src/build/evm_abi.rs); build-time only:
+    /// this MODULE exports the contract instance `name` (a top-level `export
+    /// const|let <name> = <contract binding>`, or a from-less `export { <local>
+    /// as <name> }` of one), bound in the file to `evm::Scope` `scope_key`
+    /// through client library `lib`, its sites read in `api` (`ethers`,
+    /// `viem` or `web3`), with the ABI it was built from as sorted
+    /// `evm::AbiEntry` keys (`abi`, when the file knows them) or the
+    /// cross-file reference its own sites carry (`abi_ref`, DT.10g).
+    EvmContract {
+        name: String,
+        scope_key: String,
+        lib: String,
+        api: String,
+        abi: Option<Vec<String>>,
+        abi_ref: Option<evm::AbiRef>,
+    },
+    /// TypeScript / JavaScript (GD.31), recorded by the engine from the EVM
+    /// client extractor on the file MODULE, read by the same join; build-time
+    /// only: a member access on an imported value that would be a contract
+    /// site if the import named an exported instance ([`NavFact::EvmContract`]).
+    /// `local` is the receiver as written (`escrow`, or `api.escrow` through a
+    /// namespace import), bound by `import { <name> } from '<from>'`
+    /// (`default` for a default import). The access is read in `api`: a call
+    /// of `member` with `args` arguments (`event: false`) or a subscription,
+    /// query or filter of event `member` (`event: true`), at 0-based row
+    /// `line`. `reassigned` when the file also declares or assigns `local`,
+    /// so its accesses read no import.
+    EvmImportSite {
+        local: String,
+        name: String,
+        from: String,
+        api: String,
+        event: bool,
+        member: String,
+        args: Option<u32>,
+        line: u32,
+        reassigned: bool,
+    },
 }
 
 /// GD.40: what a [`NavFact::IncludeMount`] names.

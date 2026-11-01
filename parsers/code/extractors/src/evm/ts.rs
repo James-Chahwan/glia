@@ -249,9 +249,26 @@
 //!     = d + f + a; s the wrapper sites minted, y the dynamic wrapper calls
 //!     (also in the `[evm-client]` line's `dynamic`). Grep
 //!     `^\[evm-wrappers\] `.
+//! 13. **Imported instances (GD.31).** Two kinds of `NavFact`, read by the
+//!     engine's post-cache join (engine/src/build/evm_abi.rs), which mints
+//!     the clients; this file mints no site for them.
+//!     - `EvmContract` ([`exported_contracts`]): a contract binding of steps
+//!       3, 7, 8, 9 or 11 bound at the file's top level and exported, by a
+//!       top-level `export (const|let|var) <N> = ..` or a from-less `export {
+//!       <L>( as <N>)? }`: its exported name, scope key, library, API and the
+//!       ABI entries or cross-file reference its own sites would carry.
+//!     - `EvmImportSite` ([`imported_sites`]): read whether or not a gate is
+//!       open. Each member access on a step-10 value import (and, one level,
+//!       `<ns>.<x>` on a namespace import) that steps 5-6, 8 or 9 read as a
+//!       call or an event, once per API that reads it, with the import's
+//!       name and specifier, the argument count and the member's line. A
+//!       local the file also declares or assigns is `reassigned` (the join
+//!       counts it unresolved). An import of a client library or a `node:`
+//!       builtin records nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use glia_code_domain::NavFact;
 use glia_code_domain::evm::{self, AbiEntry, ClientSide, EntryKind, Scope};
 
 use super::Site;
@@ -261,6 +278,7 @@ use super::scan::{
     enclosing_block, ident_end, ident_start_before, is_ident, is_ident_byte, matching, prev_non_ws,
     skip_ws, split_args, string_literal, trim, word_hits,
 };
+use crate::anchor::line_of;
 
 /// The client library of a `new Contract` site (steps 3 and 5).
 const LIB: &str = "ethers";
@@ -518,6 +536,17 @@ enum Api {
     Web3,
 }
 
+impl Api {
+    /// The API's name in a GD.31 fact (`NavFact::EvmContract::api`).
+    fn as_str(self) -> &'static str {
+        match self {
+            Api::Ethers => "ethers",
+            Api::Viem => "viem",
+            Api::Web3 => "web3",
+        }
+    }
+}
+
 /// The readers a file opens (step 1).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Gate {
@@ -718,13 +747,42 @@ enum Access {
 }
 
 /// The sites of one TS-family file (module doc) over its code `view`.
+#[cfg(test)]
 pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
+    let (sites, counts, _) = scan_all(source, view);
+    (sites, counts)
+}
+
+/// The sites of one TS-family file (module doc) over its code `view`, and its
+/// GD.31 facts (step 13): the contract instances it exports
+/// (`NavFact::EvmContract`) and the member accesses on its value imports
+/// (`NavFact::EvmImportSite`), in source order.
+pub(super) fn scan_all(source: &str, view: &str) -> (Vec<Site>, TsCounts, Vec<NavFact>) {
     let mut counts = TsCounts::default();
     let mut sites = Vec::new();
     let gate = gated(source, view);
-    if !gate.any() {
-        return (sites, counts);
-    }
+    let mut facts = Vec::new();
+    let bindings = if gate.any() {
+        let bindings = gated_scan(source, view, gate, &mut sites, &mut counts);
+        facts.extend(exported_contracts(view, &bindings));
+        bindings
+    } else {
+        Vec::new()
+    };
+    facts.extend(imported_sites(source, view, &bindings));
+    sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
+    (sites, counts, facts)
+}
+
+/// Steps 2-12 over a file whose `gate` is open: the sites into `sites`, the
+/// counts into `counts`; returns every contract binding read.
+fn gated_scan(
+    source: &str,
+    view: &str,
+    gate: Gate,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+) -> Vec<Binding> {
     let decls = declarations(view);
     let abis: Vec<AbiBinding> = decls
         .iter()
@@ -756,30 +814,23 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
     let mut bindings: Vec<Binding> = Vec::new();
     let mut pending: Vec<PendingName> = Vec::new();
     if gate.ethers {
-        ethers_constructions(&ctx, &web3_locals, &mut sites, &mut counts, &mut bindings);
+        ethers_constructions(&ctx, &web3_locals, sites, counts, &mut bindings);
         // Step 7: the bindings that name the contract.
         let mut factories: Vec<Binding> = Vec::new();
-        hardhat_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
-        typechain_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+        hardhat_bindings(&ctx, &mut factories, sites, counts, &mut bindings);
+        typechain_bindings(&ctx, &mut factories, sites, counts, &mut bindings);
         // Step 11: ethers factories, factory rebindings, waffle.
-        ethers_factories(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
-        rebind_factories(&ctx, &mut factories, &mut counts);
-        factory_products(&ctx, &factories, &mut sites, &mut counts, &mut bindings);
-        waffle_deploys(&ctx, &mut sites, &mut counts, &mut bindings);
+        ethers_factories(&ctx, &mut factories, sites, counts, &mut bindings);
+        rebind_factories(&ctx, &mut factories, counts);
+        factory_products(&ctx, &factories, sites, counts, &mut bindings);
+        waffle_deploys(&ctx, sites, counts, &mut bindings);
     }
     if gate.viem {
-        viem_instances(&ctx, &mut sites, &mut counts, &mut bindings);
-        viem_sites(&ctx, &mut sites, &mut counts, &mut pending);
+        viem_instances(&ctx, sites, counts, &mut bindings);
+        viem_sites(&ctx, sites, counts, &mut pending);
     }
     if gate.web3 {
-        web3_bindings(
-            &ctx,
-            gate,
-            &web3_locals,
-            &mut sites,
-            &mut counts,
-            &mut bindings,
-        );
+        web3_bindings(&ctx, gate, &web3_locals, sites, counts, &mut bindings);
     }
     rebind(source, view, &decls, &mut bindings);
 
@@ -797,13 +848,12 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
             {
                 access = folded;
             }
-            record(&mut sites, &mut counts, binding, access);
+            record(sites, counts, binding, access);
         }
     }
     // Step 12: method-name wrappers.
-    wrapper_step(&ctx, &bindings, pending, &mut sites, &mut counts);
-    sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
-    (sites, counts)
+    wrapper_step(&ctx, &bindings, pending, sites, counts);
+    bindings
 }
 
 /// Step 3: every `new (ethers.)?(Contract|BaseContract)(..)`.
@@ -2674,6 +2724,205 @@ fn export_list(view: &str, at: usize, open: usize) -> Vec<(usize, String, String
                 .then(|| (at, exported.to_string(), local.to_string()))
         })
         .collect()
+}
+
+/// Step 13 (GD.31): the contract instances the file exports, in source
+/// order: a top-level `export (const|let|var) <N> = ..` and each name of a
+/// from-less top-level `export { <L>( as <N>)? }` whose local is bound at
+/// the file's top level by a contract binding of steps 3, 7, 8, 9 or 11 (a
+/// rebinding through `.connect(..)` / `.attach(..)` included). A name whose
+/// top-level bindings disagree (two scopes, libraries, APIs or ABIs) and a
+/// name exported twice give nothing.
+fn exported_contracts(view: &str, bindings: &[Binding]) -> Vec<NavFact> {
+    if bindings.is_empty() || !view.contains("export") {
+        return Vec::new();
+    }
+    let vb = view.as_bytes();
+    // (statement offset, exported name, local name)
+    let mut found: Vec<(usize, String, String)> = Vec::new();
+    for at in word_hits(view, "export") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let k = skip_ws(vb, at + "export".len());
+        if vb.get(k) == Some(&b'{') {
+            found.extend(export_list(view, at, k));
+            continue;
+        }
+        let Some(end) = ident_end(vb, k) else {
+            continue;
+        };
+        if matches!(&view[k..end], "const" | "let" | "var") {
+            let n = skip_ws(vb, end);
+            if let Some(n_end) = ident_end(vb, n) {
+                let name = view[n..n_end].to_string();
+                found.push((at, name.clone(), name));
+            }
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    let depths = brace_depths(vb, found.iter().map(|f| f.0));
+    let mut exported: BTreeMap<String, Option<NavFact>> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for ((_, name, local), depth) in found.into_iter().zip(depths) {
+        if depth != 0 {
+            continue;
+        }
+        let top: Vec<&Binding> = bindings
+            .iter()
+            .filter(|b| b.name == local && !b.hoisted && b.block == (0, vb.len()))
+            .collect();
+        let Some(first) = top.first() else {
+            continue;
+        };
+        let agree = top.iter().all(|b| {
+            (&b.scope, b.lib, b.api, &b.abi, &b.abi_ref)
+                == (
+                    &first.scope,
+                    first.lib,
+                    first.api,
+                    &first.abi,
+                    &first.abi_ref,
+                )
+        });
+        let fact = agree.then(|| NavFact::EvmContract {
+            name: name.clone(),
+            scope_key: first.scope.key(),
+            lib: first.lib.to_string(),
+            api: first.api.as_str().to_string(),
+            abi: first.abi.as_ref().map(|entries| {
+                let mut keys: Vec<String> = entries.iter().map(AbiEntry::to_key).collect();
+                keys.sort();
+                keys.dedup();
+                keys
+            }),
+            abi_ref: first.abi_ref.clone(),
+        });
+        match exported.get_mut(&name) {
+            Some(slot) => *slot = None,
+            None => {
+                order.push(name.clone());
+                exported.insert(name, fact);
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|name| exported.remove(&name).flatten())
+        .collect()
+}
+
+/// Step 13 (GD.31): every member access on a value import that a contract
+/// instance would make a site of, in source order. The imports are step 10's
+/// value imports (named, default, `require` destructuring) plus, one level
+/// deep, each `<ns>.<x>` of a namespace import `import * as <ns>` (local
+/// `<ns>.<x>`, name `<x>`); an import of a client library itself (one that
+/// opens a reader, step 1) or of a `node:` builtin is none. Each access is
+/// read in all three APIs (steps 5-6, 8, 9), one fact per API that reads a
+/// call or an event, its line the member's. The file knows nothing of the
+/// import's value: the engine's join keeps only the accesses of a local
+/// whose import names an exported instance, in that instance's API.
+fn imported_sites(source: &str, view: &str, bindings: &[Binding]) -> Vec<NavFact> {
+    if !view.contains("import") && !view.contains("require") {
+        return Vec::new();
+    }
+    let mut imports = value_imports(source, view);
+    imports.extend(namespace_members(source, view));
+    imports.retain(|i| !i.spec.starts_with("node:") && !module_gate(&i.spec).any());
+    let mut rows: Vec<(usize, usize, NavFact)> = Vec::new();
+    for import in &imports {
+        let mut reads: Vec<(usize, usize, bool, String, Option<u32>)> = Vec::new();
+        for (_, end) in receiver_hits(view, &import.local) {
+            for (rank, api) in [Api::Ethers, Api::Viem, Api::Web3].into_iter().enumerate() {
+                match access_on(api, source, view, end) {
+                    Some(Access::Call { member, at, args }) => {
+                        reads.push((at, rank, false, member, args));
+                    }
+                    Some(Access::Event { event, at }) => reads.push((at, rank, true, event, None)),
+                    _ => {}
+                }
+            }
+        }
+        if reads.is_empty() {
+            continue;
+        }
+        let reassigned =
+            bindings.iter().any(|b| b.name == import.local) || reassigns(view, &import.local);
+        for (at, rank, event, member, args) in reads {
+            let api = [Api::Ethers, Api::Viem, Api::Web3][rank];
+            rows.push((
+                at,
+                rank,
+                NavFact::EvmImportSite {
+                    local: import.local.clone(),
+                    name: import.name.clone(),
+                    from: import.spec.clone(),
+                    api: api.as_str().to_string(),
+                    event,
+                    member,
+                    args,
+                    line: line_of(source, at),
+                    reassigned,
+                },
+            ));
+        }
+    }
+    rows.sort_by_key(|r| (r.0, r.1));
+    rows.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    rows.into_iter().map(|(_, _, fact)| fact).collect()
+}
+
+/// Step 13: `<ns>.<x>` for each namespace import `import * as <ns> from
+/// '<spec>'` (not `.json`) and each distinct `<x>` the file reads on it, as
+/// a value import of `<x>` with local `<ns>.<x>`, in first-use order.
+fn namespace_members(source: &str, view: &str) -> Vec<ValueImport> {
+    let vb = view.as_bytes();
+    let mut out: Vec<ValueImport> = Vec::new();
+    for at in word_hits(view, "import") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let Some((names, spec)) = import_clause(source, view, at + "import".len()) else {
+            continue;
+        };
+        if spec.ends_with(".json") {
+            continue;
+        }
+        for (imported, ns) in names {
+            if imported.as_deref() != Some(NAMESPACE) {
+                continue;
+            }
+            for (_, end) in receiver_hits(view, &ns) {
+                let Some(member) = step_name(view, end).filter(|m| is_ident(m)) else {
+                    continue;
+                };
+                let local = format!("{ns}.{member}");
+                if !out.iter().any(|v| v.local == local && v.spec == spec) {
+                    out.push(ValueImport {
+                        local,
+                        name: member.to_string(),
+                        spec: spec.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Step 13: whether the file declares `local` itself (a `const` / `let` /
+/// `var` / `function` / `class` of that name, at any depth) or assigns it
+/// (`<local> = ..`), so its accesses need not read the import.
+fn reassigns(view: &str, local: &str) -> bool {
+    let vb = view.as_bytes();
+    receiver_hits(view, local).into_iter().any(|(start, end)| {
+        let eq = skip_ws(vb, end);
+        let assigned = vb.get(eq) == Some(&b'=') && !matches!(vb.get(eq + 1), Some(b'=' | b'>'));
+        let declared = prev_non_ws(vb, start)
+            .and_then(|p| ident_start_before(vb, p + 1).map(|w| &view[w..=p]))
+            .is_some_and(|w| matches!(w, "const" | "let" | "var" | "function" | "class"));
+        assigned || declared
+    })
 }
 
 /// The value offset of a declarator whose name ends at `n_end`: past an
@@ -6410,6 +6659,139 @@ described('release');
         assert_eq!(
             counts.dynamic, 2,
             "the two ABI-parameter option calls stay dynamic, as before step 12"
+        );
+    }
+
+    /// GD.31: the step-13 facts of `src`, one line each.
+    fn instance_facts(src: &str) -> Vec<String> {
+        let (_, _, facts) = scan_all(src, &code_view(src, "typescript"));
+        facts
+            .iter()
+            .map(|f| match f {
+                NavFact::EvmContract {
+                    name,
+                    scope_key,
+                    lib,
+                    api,
+                    abi,
+                    abi_ref,
+                } => format!(
+                    "contract {name} scope={scope_key} lib={lib} api={api} abi={} ref={}",
+                    abi.as_ref().map_or_else(|| "-".to_string(), |a| a.join(",")),
+                    abi_ref
+                        .as_ref()
+                        .map_or_else(|| "-".to_string(), |r| format!("{}@{}", r.name, r.from))
+                ),
+                NavFact::EvmImportSite {
+                    local,
+                    name,
+                    from,
+                    api,
+                    event,
+                    member,
+                    args,
+                    line,
+                    reassigned,
+                } => format!(
+                    "{} {local}={name}@{from} {api} {member} args={} line={} reassigned={reassigned}",
+                    if *event { "event" } else { "call" },
+                    args.map_or_else(|| "-".to_string(), |a| a.to_string()),
+                    line + 1
+                ),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exported_contract_instances_are_facts() {
+        let src = format!(
+            "import {{ Contract, JsonRpcProvider }} from 'ethers';
+import {{ Escrow__factory }} from './typechain-types';
+import {{ SHOP_ABI }} from './abi';
+{ABI}\
+const provider = new JsonRpcProvider('http://localhost:8545');
+export const escrow = Escrow__factory.connect(ADDR, provider);
+export let shop = new Contract(ADDR, ESCROW_ABI, provider);
+const vault = new Contract(ADDR, SHOP_ABI, provider);
+export {{ vault as treasury }};
+const hidden = new Contract(ADDR, ESCROW_ABI, provider);
+export function make() {{
+  const inner = new Contract(ADDR, ESCROW_ABI, provider);
+  return inner;
+}}
+export const helper = {{ go: () => 1 }};
+"
+        );
+        assert_eq!(
+            instance_facts(&src),
+            [
+                "contract escrow scope=Escrow lib=typechain api=ethers abi=- ref=-",
+                "contract shop scope=abi:ESCROW_ABI lib=ethers api=ethers \
+                 abi=e:Released/2,f:deposit/1,f:release/1 ref=-",
+                "contract treasury scope=abi:SHOP_ABI lib=ethers api=ethers abi=- ref=SHOP_ABI@./abi",
+            ],
+            "a non-exported, nested or non-contract binding is no instance"
+        );
+    }
+
+    #[test]
+    fn viem_instance_export_reads_its_api() {
+        let src = "import { getContract } from 'viem';
+import { escrowAbi } from './abi';
+export const token = getContract({ address: ADDR, abi: escrowAbi, client });
+";
+        assert_eq!(
+            instance_facts(src),
+            ["contract token scope=abi:escrowAbi lib=viem api=viem abi=- ref=escrowAbi@./abi"]
+        );
+    }
+
+    #[test]
+    fn import_sites_are_read_in_every_api_ungated() {
+        let src = "import { escrow, fmt } from '@sibyl/api-client';
+import token from './token';
+import * as sdk from './contracts';
+import { ethers } from 'ethers';
+
+export async function checkout(payee: string, amount: bigint) {
+  await escrow.deposit(payee, { value: amount });
+  void escrow.on(escrow.filters.Released(), () => undefined);
+  escrow.once('Deposited', () => undefined);
+  escrow.getAddress();
+  fmt.amount(amount);
+  await token.read.balanceOf([payee]);
+  await sdk.escrow.release(payee, amount);
+  ethers.getAddress(payee);
+}
+";
+        assert_eq!(
+            instance_facts(src),
+            [
+                "call escrow=escrow@@sibyl/api-client ethers deposit args=2 line=7 reassigned=false",
+                "event escrow=escrow@@sibyl/api-client ethers Released args=- line=8 reassigned=false",
+                "event escrow=escrow@@sibyl/api-client ethers Deposited args=- line=9 reassigned=false",
+                "event escrow=escrow@@sibyl/api-client web3 Deposited args=- line=9 reassigned=false",
+                "call fmt=fmt@@sibyl/api-client ethers amount args=1 line=11 reassigned=false",
+                "call token=default@./token viem balanceOf args=1 line=12 reassigned=false",
+                "call sdk.escrow=escrow@./contracts ethers release args=2 line=13 reassigned=false",
+            ],
+            "every API that reads an access (web3.js reads `once('E')` too), a stop-listed \
+             member none, a client library's import none"
+        );
+    }
+
+    #[test]
+    fn a_redeclared_import_is_marked_reassigned() {
+        let src = "import { escrow } from './contracts';
+function f() {
+  const escrow = makeOther();
+  escrow.deposit(1);
+}
+";
+        assert_eq!(
+            instance_facts(src),
+            ["call escrow=escrow@./contracts ethers deposit args=1 line=4 reassigned=true"]
         );
     }
 }

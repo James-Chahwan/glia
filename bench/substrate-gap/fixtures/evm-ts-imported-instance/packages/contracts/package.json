@@ -1,0 +1,8 @@
+{
+  "name": "@sibyl/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "hardhat": "^2.22.15"
+  }
+}

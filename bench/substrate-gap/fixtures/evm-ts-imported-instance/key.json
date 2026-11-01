@@ -1,0 +1,95 @@
+{
+  "framework": "evm-ts-imported-instance",
+  "language": "typescript+solidity",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.31 (plan 0.5.6 section 4 bullet 1, the ts x generated-sdk case; the Sibyl evm-008 render plus a non-contract export): a pnpm workspace whose @sibyl/api-client exports a TypeChain contract instance (`export const escrow = Escrow__factory.connect(..)` in contracts.ts, re-exported by index.ts's `export *`), imported by name in apps/web/src/app.ts. Before GD.31 every expect row fails: app.ts imports no ethers / TypeChain module, the reader is per file, so the build prints no `[evm-client]` line and `[evm-link] calls=0 events=0 paired=0 edges=0`.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposit",
+      "exact": true,
+      "note": "apps/web/src/app.ts `escrow.deposit(payee, { value: amount })` on the imported instance"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.arbiter",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:Escrow.Released",
+      "exact": true,
+      "note": "`escrow.on(escrow.filters.Released(), ..)`, one site at the filter"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:Escrow.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.arbiter",
+      "to": "evm:Escrow.arbiter",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm:Escrow.Released",
+      "to": "evm_event:Escrow.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "checkout",
+      "to": "evm_call:Escrow.deposit",
+      "category": "USES",
+      "note": "owned by the calling function, as an in-file client is (A5.8)"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:Escrow.deposit",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"abi_from\":\"packages/api-client/src/contracts.ts\""
+    },
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:Escrow.deposit",
+      "cell": "POSITION",
+      "contains": "apps/web/src/app.ts"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.amount",
+      "note": "PRECISION: `fmt.amount(..)` is a call on an imported object that is no contract instance"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.on",
+      "note": "PRECISION: `on` is an ethers runtime member, never a contract call"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposit",
+      "max_nodes": 1
+    }
+  ]
+}

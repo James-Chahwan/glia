@@ -38,6 +38,13 @@
 //! referencing cell's `abi` from them, or (Go) from the package's
 //! `NavFact::GoStringConst`s through [`read_go_const_abi`].
 //!
+//! **Imported instances (GD.31).** A TS-family file's exported contract
+//! instances (`export const escrow = Escrow__factory.connect(..)`) and every
+//! member access on its value imports are [`EvmNodes::instance_facts`]; the
+//! engine records them on the MODULE, and the same post-cache join mints an
+//! importing file's `<local>.<m>(..)` calls and subscriptions as clients of
+//! the instance its import names (`ts` step 13).
+//!
 //! Marker, once per file with a site or a dynamic construction ([`EvmNodes::markers`]):
 //! `[evm-client] lang=<ts|go> calls=<c> events=<e> sites=<s> (ethers=<n>
 //! hardhat=<n> typechain=<n> viem=<n> web3=<n> geth=<n>) abis=<a>
@@ -59,7 +66,7 @@ mod ts;
 use std::collections::BTreeMap;
 
 use glia_code_domain::evm::{self, AbiEntry, AbiRef, ClientFacts, ClientHit, ClientSide, Scope};
-use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, NavFact, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor};
@@ -99,6 +106,13 @@ pub struct EvmNodes {
     /// empty for any other language. The engine moves them onto the MODULE as
     /// `NavFact::EvmAbi`.
     pub abi_decls: Vec<(String, Vec<AbiEntry>)>,
+    /// A TS-family file's GD.31 facts (`ts` step 13), in source order: each
+    /// contract instance it exports (`NavFact::EvmContract`) and each member
+    /// access on a value import (`NavFact::EvmImportSite`); empty for any
+    /// other language. The engine records them on the MODULE, and its
+    /// post-cache join (engine/src/build/evm_abi.rs) mints the clients of an
+    /// imported instance from them.
+    pub instance_facts: Vec<NavFact>,
     /// The reader's `[evm-wrappers]` counts (Go DT.10f, TS GD.30); zero for
     /// a file with no wrapper.
     wrappers: go::WrapperCounts,
@@ -157,6 +171,7 @@ pub(crate) struct Site {
 /// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
     let mut ts_forms = [0; 6];
+    let mut instance_facts = Vec::new();
     let (tag, sites, abis, not_in_abi, dynamic, wrappers, abi_decls) = match lang {
         "go" => {
             let view = scan::code_view(source, lang);
@@ -173,8 +188,9 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
         }
         l if TS_FAMILY.contains(&l) => {
             let view = scan::code_view(source, lang);
-            let (sites, c) = ts::scan(source, &view);
+            let (sites, c, facts) = ts::scan_all(source, &view);
             let decls = ts::exported_abis(source, &view);
+            instance_facts = facts;
             ts_forms = c.forms();
             (
                 "ts",
@@ -196,6 +212,7 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
     out.counts.ts_forms = ts_forms;
     out.wrappers = wrappers;
     out.abi_decls = abi_decls;
+    out.instance_facts = instance_facts;
     out
 }
 

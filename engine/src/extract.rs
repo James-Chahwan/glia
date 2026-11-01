@@ -384,6 +384,12 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.nav
             .record_fact(module_id, NavFact::EvmAbi { name, entries });
     }
+    // GD.31: its exported contract instances (`EvmContract`) and the member
+    // accesses on its value imports (`EvmImportSite`), on the MODULE the same
+    // way; the post-cache join mints an importer's clients from them.
+    for fact in std::mem::take(&mut evm.instance_facts) {
+        fp.nav.record_fact(module_id, fact);
+    }
     run_marked!(evm);
     run_with_edges!(
         "data_sources",

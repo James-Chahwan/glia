@@ -476,6 +476,12 @@ pub fn surface_class(f: &NavFact) -> Part {
         NavFact::ContainerInject { .. } => Part::Body,
         // calls (GD.18): this class's own calls on self.
         NavFact::Mixin { .. } => Part::Body,
+        // evm_abi (GD.31): the contract instance an importer in another file
+        // reads its clients from.
+        NavFact::EvmContract { .. } => Part::Surface,
+        // evm_abi (GD.31): this file's own accesses, read by the post-cache
+        // graft (re-run every update); no group resolution reads them.
+        NavFact::EvmImportSite { .. } => Part::Body,
     }
 }
 

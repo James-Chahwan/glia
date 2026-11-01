@@ -71,6 +71,36 @@
 //!    indexed declarations, b / l the joined cells reached through a barrel /
 //!    through an alias (GD.20).
 //!
+//! 4. INSTANCES (GD.31), after the cell join. A TS-family MODULE's
+//!    `NavFact::EvmContract` facts (an exported contract instance: `export
+//!    const escrow = Escrow__factory.connect(..)`, `new Contract(..)`,
+//!    `getContract({..})`) are indexed like the ABIs, keyed (declaring file,
+//!    exported name), a key declared twice dropped. Each importing file's
+//!    `NavFact::EvmImportSite` facts are grouped by import (local, name,
+//!    specifier) and the import resolved exactly as an ABI reference (step
+//!    2: relative, aliases and workspace packages, barrels). An import that
+//!    names no instance is an ordinary import and mints nothing; one that
+//!    names an instance mints its accesses read in the instance's API (a
+//!    `<local>.<m>(..)` call, a `.on(<local>.filters.<E>(), ..)` / `.on('<E>',
+//!    ..)` subscription, the viem / web3 forms) as the in-file reader mints a
+//!    site: RPC_CALL `evm_call:<scope>.<m>` / EVENT_HANDLER
+//!    `evm_event:<scope>.<E>`, Confidence::Medium, nav parent the MODULE, one
+//!    `via:evm` ENDPOINT_HIT per (lib, abi) with the sites' argument counts,
+//!    then `anchor::attach` (the A5.8 owner edges and first-site POSITION) and
+//!    the router's raw IMPORTS cell. The cell's ABI: the entries the exporting
+//!    file knows, `abi_from` that file; else the entries its own reference
+//!    joins to from the exporting file, `abi_from` the ABI's file; else none,
+//!    `abi_from` the exporting file. With entries known, a member they do not
+//!    list mints nothing. A local the importer declares or assigns, and an
+//!    import two star re-exports give, count `unresolved`. A node the file
+//!    already holds (it reads the same client itself) gains the new cell
+//!    variants. Sites go in (line, local, name, specifier, ..) order, nodes in
+//!    (side, scope, member) order, so the parse's node order is fixed.
+//!    Marker, once per repo with an exported instance: `[evm-instances]
+//!    exported=<e> importers=<i> sites=<s> events=<v> unresolved=<u>
+//!    repo=<label>`; e the indexed instances, i the files that gained a site,
+//!    s / v the call / event sites minted.
+//!
 //! It runs above the endpoint fold (nav facts are still present) and before
 //! every stamp that adds a key to a client hit (CB.24's `hosts`), so the cell
 //! it rewrites holds only the extractor's fields.
@@ -78,10 +108,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::evm;
-use glia_code_domain::{FileParse, NavFact, node_kind};
+use glia_code_domain::{FileParse, GRAPH_TYPE, NavFact, attach_imports_cell, evidence, node_kind};
+use glia_code_extractors::anchor::{self, Anchor};
 use glia_code_extractors::evm::read_go_const_abi;
+use glia_core::{Cell, Confidence, Node, NodeId};
 
 use super::lang_build::{TsAliasSet, resolve_ts_source_aliased};
+use crate::extract::detect_language;
 use crate::http_owner;
 
 /// The longest re-export chain a TS join follows (module doc, step 2; the
@@ -111,6 +144,25 @@ pub(super) struct EvmAbiJoinStats {
     pub(super) via_barrel: usize,
     /// Joined cells whose specifier an alias mapped (GD.20).
     pub(super) via_alias: usize,
+    /// The imported-instance step's tallies (GD.31).
+    pub(super) instances: InstanceStats,
+}
+
+/// The per-repo tallies of the imported-instance step (GD.31, module doc
+/// step 4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct InstanceStats {
+    /// Exported contract instances indexed.
+    pub(super) exported: usize,
+    /// Importing files that gained a client site.
+    pub(super) importers: usize,
+    /// Call sites minted.
+    pub(super) sites: usize,
+    /// Event sites minted.
+    pub(super) events: usize,
+    /// Imported locals naming an instance that mint nothing: the importer
+    /// declares or assigns the local, or two star re-exports give it.
+    pub(super) unresolved: usize,
 }
 
 impl EvmAbiJoinStats {
@@ -126,6 +178,13 @@ impl EvmAbiJoinStats {
                 self.declarations,
                 self.via_barrel,
                 self.via_alias
+            );
+        }
+        let i = &self.instances;
+        if i.exported > 0 {
+            eprintln!(
+                "[evm-instances] exported={} importers={} sites={} events={} unresolved={} repo={repo_label}",
+                i.exported, i.importers, i.sites, i.events, i.unresolved
             );
         }
     }
@@ -152,6 +211,9 @@ struct Index {
     reexports: BTreeMap<String, Vec<ReExport>>,
     /// TS (GD.20): file -> every name its own `export` declarations export.
     exports: BTreeMap<String, BTreeSet<String>>,
+    /// TS (GD.31): (declaring file, exported name) -> the contract instance;
+    /// `None` once a key is declared twice.
+    instances: BTreeMap<(String, String), Option<Instance>>,
 }
 
 /// One re-export of a TS barrel (DT.1q's facts, GD.20).
@@ -167,11 +229,12 @@ enum ReExport {
     Star { source: String },
 }
 
-/// What a TS (file, name) lookup found (GD.20).
+/// What a TS (file, name) lookup found (GD.20): an ABI's entries or (GD.31)
+/// a contract instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Found {
+enum Found<T> {
     Hit {
-        entries: Vec<String>,
+        value: T,
         file: String,
         barrel: bool,
         alias: bool,
@@ -180,17 +243,17 @@ enum Found {
     Ambiguous,
 }
 
-impl Found {
+impl<T> Found<T> {
     /// The same result, reached through a barrel and (when `alias`) an alias.
-    fn through(self, alias: bool) -> Found {
+    fn through(self, alias: bool) -> Found<T> {
         match self {
             Found::Hit {
-                entries,
+                value,
                 file,
                 alias: a,
                 ..
             } => Found::Hit {
-                entries,
+                value,
                 file,
                 barrel: true,
                 alias: a || alias,
@@ -198,6 +261,17 @@ impl Found {
             other => other,
         }
     }
+}
+
+/// One exported TS contract instance of the index (GD.31): what
+/// `NavFact::EvmContract` recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Instance {
+    scope: evm::Scope,
+    lib: String,
+    api: String,
+    abi: Option<Vec<String>>,
+    abi_ref: Option<evm::AbiRef>,
 }
 
 impl Index {
@@ -248,6 +322,30 @@ impl Index {
                         .entry(file.clone())
                         .or_default()
                         .extend(names.iter().cloned()),
+                    NavFact::EvmContract {
+                        name,
+                        scope_key,
+                        lib,
+                        api,
+                        abi,
+                        abi_ref,
+                    } if !go => {
+                        let Some(scope) = evm::Scope::parse(scope_key) else {
+                            continue;
+                        };
+                        let instance = Instance {
+                            scope,
+                            lib: lib.clone(),
+                            api: api.clone(),
+                            abi: abi.clone(),
+                            abi_ref: abi_ref.clone(),
+                        };
+                        index
+                            .instances
+                            .entry((file.clone(), name.clone()))
+                            .and_modify(|e| *e = None)
+                            .or_insert_with(|| Some(instance));
+                    }
                     NavFact::GoStringConst { name, value } if go => {
                         let Some(entries) = read_go_const_abi(value) else {
                             continue;
@@ -297,9 +395,9 @@ impl Index {
             return Resolved::Unresolved;
         };
         let mut seen = BTreeSet::new();
-        match self.lookup(&path, &abi_ref.name, aliases, 0, &mut seen) {
+        match self.lookup(&self.ts, &path, &abi_ref.name, aliases, 0, &mut seen) {
             Found::Hit {
-                entries,
+                value: entries,
                 file,
                 barrel,
                 alias: through_alias,
@@ -314,22 +412,53 @@ impl Index {
         }
     }
 
-    /// The declaration of export `name` of the TS module at `path` (GD.20,
-    /// module doc step 2): the first candidate file that declares it or
-    /// re-exports it.
-    fn lookup(
+    /// The contract instance export `name` of the TS module `from` names
+    /// from `caller` (GD.31): mapped and followed exactly as an ABI
+    /// reference is ([`Index::resolve`]).
+    fn resolve_instance(
         &self,
+        caller: &str,
+        name: &str,
+        from: &str,
+        aliases: &TsAliasSet,
+    ) -> Found<Instance> {
+        let Some((path, alias)) = ts_target(caller, from, aliases) else {
+            return Found::Miss;
+        };
+        let mut seen = BTreeSet::new();
+        match self.lookup(&self.instances, &path, name, aliases, 0, &mut seen) {
+            Found::Hit {
+                value,
+                file,
+                barrel,
+                alias: a,
+            } => Found::Hit {
+                value,
+                file,
+                barrel,
+                alias: alias || a,
+            },
+            other => other,
+        }
+    }
+
+    /// The declaration of export `name` of the TS module at `path` in
+    /// `table` (GD.20, module doc step 2): the first candidate file that
+    /// declares it or re-exports it.
+    fn lookup<T: Clone + PartialEq>(
+        &self,
+        table: &BTreeMap<(String, String), Option<T>>,
         path: &str,
         name: &str,
         aliases: &TsAliasSet,
         depth: usize,
         seen: &mut BTreeSet<(String, String)>,
-    ) -> Found {
+    ) -> Found<T> {
         for candidate in ts_candidates(path) {
-            match self.ts.get(&(candidate.clone(), name.to_string())) {
-                Some(Some(entries)) => {
+            match table.get(&(candidate.clone(), name.to_string())) {
+                Some(Some(value)) => {
                     return Found::Hit {
-                        entries: entries.clone(),
+                        value: value.clone(),
                         file: candidate,
                         barrel: false,
                         alias: false,
@@ -338,7 +467,8 @@ impl Index {
                 Some(None) => return Found::Miss,
                 None => {}
             }
-            if let Some(found) = self.through_barrel(&candidate, name, aliases, depth, seen) {
+            if let Some(found) = self.through_barrel(table, &candidate, name, aliases, depth, seen)
+            {
                 return found;
             }
         }
@@ -347,14 +477,15 @@ impl Index {
 
     /// Export `name` of barrel `file` through its re-exports; `None` when
     /// `file` re-exports nothing.
-    fn through_barrel(
+    fn through_barrel<T: Clone + PartialEq>(
         &self,
+        table: &BTreeMap<(String, String), Option<T>>,
         file: &str,
         name: &str,
         aliases: &TsAliasSet,
         depth: usize,
         seen: &mut BTreeSet<(String, String)>,
-    ) -> Option<Found> {
+    ) -> Option<Found<T>> {
         let reexports = self.reexports.get(file)?;
         if depth >= MAX_BARREL_DEPTH || !seen.insert((file.to_string(), name.to_string())) {
             return Some(Found::Miss);
@@ -372,14 +503,14 @@ impl Index {
                 return Some(Found::Miss);
             };
             return Some(
-                self.lookup(&target, inner, aliases, depth + 1, seen)
+                self.lookup(table, &target, inner, aliases, depth + 1, seen)
                     .through(alias),
             );
         }
         if name == DEFAULT_EXPORT || self.exports.get(file).is_some_and(|e| e.contains(name)) {
             return Some(Found::Miss);
         }
-        let mut hits: Vec<Found> = Vec::new();
+        let mut hits: Vec<Found<T>> = Vec::new();
         let mut ambiguous = false;
         for r in reexports {
             let ReExport::Star { source } = r else {
@@ -389,7 +520,7 @@ impl Index {
                 continue;
             };
             match self
-                .lookup(&target, name, aliases, depth + 1, seen)
+                .lookup(table, &target, name, aliases, depth + 1, seen)
                 .through(alias)
             {
                 hit @ Found::Hit { .. } => {
@@ -495,7 +626,22 @@ fn ts_target(file: &str, spec: &str, aliases: &TsAliasSet) -> Option<(String, bo
         .map_or(file, |(stem, _)| stem)
         .replace('/', "::");
     let qname = resolve_ts_source_aliased(&module, spec, aliases)?;
+    let qname = untag_workspace(&qname)?;
     Some((qname.replace("::", "/"), true))
+}
+
+/// A resolved TS qname without the FH.5 workspace-package tag the alias
+/// resolver puts before one (`\0workspace:entry\0<qname>`,
+/// `\0workspace:subpath\0<qname>`; the TS graph build reads and strips it
+/// the same way); `None` for a package with no entry (an empty qname). GD.31:
+/// before it a workspace specifier resolved to the tagged text, which names
+/// no file, so GD.20's ABI join through a workspace package joined nothing.
+fn untag_workspace(qname: &str) -> Option<&str> {
+    let qname = match qname.strip_prefix('\0') {
+        Some(tagged) => tagged.split_once('\0')?.1,
+        None => qname,
+    };
+    (!qname.is_empty()).then_some(qname)
 }
 
 /// The files a resolved TS path is tried as, in order (module doc, step 2).
@@ -572,14 +718,296 @@ pub(super) fn join_evm_abis(
             }
         }
     }
+    stats.instances = mint_instances(parses_by_lang, &index, aliases);
     stats
+}
+
+/// One `NavFact::EvmImportSite` of an importing file (GD.31).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ImportSite {
+    line: u32,
+    local: String,
+    name: String,
+    from: String,
+    api: String,
+    event: bool,
+    member: String,
+    args: Option<u32>,
+    reassigned: bool,
+}
+
+/// One cell variant of a minted client (GD.31): a [`evm::ClientHit`] less
+/// its argument counts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HitKey {
+    lib: String,
+    abi: Option<Vec<String>>,
+    abi_ref: Option<evm::AbiRef>,
+    abi_from: Option<String>,
+}
+
+impl HitKey {
+    fn into_hit(self, args: Vec<u32>) -> evm::ClientHit {
+        evm::ClientHit {
+            facts: evm::ClientFacts {
+                lib: self.lib,
+                args,
+                abi: self.abi,
+            },
+            abi_ref: self.abi_ref,
+            abi_from: self.abi_from,
+        }
+    }
+}
+
+/// One client node an importing file gains (GD.31): its scope, the
+/// argument counts per cell variant and the rows of its sites.
+#[derive(Debug, Default)]
+struct MintedClient {
+    variants: BTreeMap<HitKey, BTreeSet<u32>>,
+    lines: Vec<u32>,
+}
+
+/// GD.31, module doc step 4: mint every importing file's clients of the
+/// exported contract instances its imports name.
+fn mint_instances(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    index: &Index,
+    aliases: &TsAliasSet,
+) -> InstanceStats {
+    let mut stats = InstanceStats {
+        exported: index.instances.values().filter(|i| i.is_some()).count(),
+        ..InstanceStats::default()
+    };
+    if stats.exported == 0 {
+        return stats;
+    }
+    for fp in parses_by_lang.values_mut().flatten() {
+        mint_file(fp, index, aliases, &mut stats);
+    }
+    stats
+}
+
+/// The ABI fields an instance gives its importers' cells: the entries the
+/// exporting file knows, or those its own reference joins to (resolved from
+/// the exporting file), with the file they were read from; the exporting
+/// file when no ABI is known.
+fn instance_abi(
+    instance: &Instance,
+    decl_file: &str,
+    index: &Index,
+    aliases: &TsAliasSet,
+) -> (Option<Vec<String>>, Option<evm::AbiRef>, Option<String>) {
+    if let Some(abi) = &instance.abi {
+        return (
+            Some(abi.clone()),
+            instance.abi_ref.clone(),
+            Some(decl_file.to_string()),
+        );
+    }
+    let Some(abi_ref) = &instance.abi_ref else {
+        return (None, None, Some(decl_file.to_string()));
+    };
+    match index.resolve(decl_file, abi_ref, aliases) {
+        Resolved::Joined { entries, file, .. } => {
+            (Some(entries), Some(abi_ref.clone()), Some(file))
+        }
+        Resolved::Unresolved | Resolved::Ambiguous => (None, Some(abi_ref.clone()), None),
+    }
+}
+
+/// Whether ABI `keys` list `member` as a function (a call) or an event.
+fn abi_lists(keys: &[String], member: &str, event: bool) -> bool {
+    keys.iter()
+        .filter_map(|k| evm::AbiEntry::from_key(k))
+        .any(|e| {
+            e.name == member
+                && if event {
+                    e.kind == evm::EntryKind::Event
+                } else {
+                    e.kind == evm::EntryKind::Fn
+                }
+        })
+}
+
+/// One importing file's clients (GD.31): its `EvmImportSite`s grouped by
+/// import, each import resolved to an exported instance, the sites read in
+/// the instance's API minted as its clients and anchored by the A5.8 pass.
+fn mint_file(fp: &mut FileParse, index: &Index, aliases: &TsAliasSet, stats: &mut InstanceStats) {
+    // (module id, site): the facts sit on the file MODULE; sorted, so the
+    // HashMap order of `nav_facts` reaches nothing.
+    let mut facts: Vec<(u64, ImportSite)> = Vec::new();
+    for (scope, list) in &fp.nav.nav_facts {
+        for fact in list {
+            if let NavFact::EvmImportSite {
+                local,
+                name,
+                from,
+                api,
+                event,
+                member,
+                args,
+                line,
+                reassigned,
+            } = fact
+            {
+                facts.push((
+                    scope.0,
+                    ImportSite {
+                        line: *line,
+                        local: local.clone(),
+                        name: name.clone(),
+                        from: from.clone(),
+                        api: api.clone(),
+                        event: *event,
+                        member: member.clone(),
+                        args: *args,
+                        reassigned: *reassigned,
+                    },
+                ));
+            }
+        }
+    }
+    if facts.is_empty() {
+        return;
+    }
+    let Some(file) = http_owner::module_file(fp) else {
+        return;
+    };
+    facts.sort();
+    let module_id = NodeId(facts[0].0);
+    let Some(repo) = fp.nodes.iter().find(|n| n.id == module_id).map(|n| n.repo) else {
+        return;
+    };
+    let mut imports: BTreeMap<(&str, &str, &str), Vec<&ImportSite>> = BTreeMap::new();
+    for (_, site) in &facts {
+        imports
+            .entry((&site.local, &site.name, &site.from))
+            .or_default()
+            .push(site);
+    }
+    let mut clients: BTreeMap<(evm::ClientSide, String, String), (evm::Scope, MintedClient)> =
+        BTreeMap::new();
+    for ((_, name, from), sites) in imports {
+        let (instance, decl_file) = match index.resolve_instance(&file, name, from, aliases) {
+            Found::Hit { value, file, .. } => (value, file),
+            Found::Miss => continue,
+            Found::Ambiguous => {
+                stats.unresolved += 1;
+                continue;
+            }
+        };
+        if decl_file == file {
+            continue;
+        }
+        if sites.iter().any(|s| s.reassigned) {
+            stats.unresolved += 1;
+            continue;
+        }
+        let (abi, abi_ref, abi_from) = instance_abi(&instance, &decl_file, index, aliases);
+        for site in sites.iter().filter(|s| s.api == instance.api) {
+            if abi
+                .as_deref()
+                .is_some_and(|keys| !abi_lists(keys, &site.member, site.event))
+            {
+                continue;
+            }
+            let side = if site.event {
+                stats.events += 1;
+                evm::ClientSide::Event
+            } else {
+                stats.sites += 1;
+                evm::ClientSide::Call
+            };
+            let (_, client) = clients
+                .entry((side, instance.scope.key(), site.member.clone()))
+                .or_insert_with(|| (instance.scope.clone(), MintedClient::default()));
+            let key = HitKey {
+                lib: instance.lib.clone(),
+                abi: abi.clone(),
+                abi_ref: abi_ref.clone(),
+                abi_from: abi_from.clone(),
+            };
+            client.variants.entry(key).or_default().extend(site.args);
+            client.lines.push(site.line);
+        }
+    }
+    if clients.is_empty() {
+        return;
+    }
+    stats.importers += 1;
+    let mut anchors: Vec<Anchor> = Vec::new();
+    let first_new = fp.nodes.len();
+    for ((side, key, member), (scope, client)) in clients {
+        let (kind, qname) = match side {
+            evm::ClientSide::Call => (node_kind::RPC_CALL, evm::call_qname(&scope, &member)),
+            evm::ClientSide::Event => (node_kind::EVENT_HANDLER, evm::event_qname(&scope, &member)),
+        };
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
+        let cells: Vec<Cell> = client
+            .variants
+            .into_iter()
+            .map(|(key, args)| evm::client_hit_cell(&key.into_hit(args.into_iter().collect())))
+            .collect();
+        anchors.extend(client.lines.iter().map(|&line| Anchor { node: id, line }));
+        if let Some(node) = fp.nodes.iter_mut().find(|n| n.id == id) {
+            // The file reads the same client itself: its new variants go
+            // after its last evm cell.
+            for cell in cells {
+                if node.cells.contains(&cell) {
+                    continue;
+                }
+                let at = node
+                    .cells
+                    .iter()
+                    .rposition(|c| evm::read_client_hit(c).is_some())
+                    .map_or(0, |i| i + 1);
+                node.cells.insert(at, cell);
+            }
+            continue;
+        }
+        fp.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Medium,
+            cells,
+        });
+        fp.nav.record(
+            id,
+            &format!("{key}.{member}"),
+            &qname,
+            kind,
+            Some(module_id),
+        );
+    }
+    // A5.8: the owner edges and first-site POSITION every in-file client gets
+    // (`anchor::attach` only appends, and skips what the parse holds).
+    let first_edge = fp.edges.len();
+    anchor::attach(fp, &file, module_id, &mut anchors);
+    if let Some(added) = fp.edges.get_mut(first_edge..) {
+        evidence::stamp_missing(added, "extractor:anchor");
+    }
+    // The router's raw G15 IMPORTS cell, as every other node of the file has
+    // (`filter_imports_cells` rewrites it with the rest of the file's).
+    if fp.nodes.len() > first_new
+        && let Some(lang) = detect_language(&file)
+    {
+        let mut extra = FileParse {
+            nodes: fp.nodes.split_off(first_new),
+            imports: fp.imports.clone(),
+            ..Default::default()
+        };
+        attach_imports_cell(&mut extra, lang);
+        fp.nodes.extend(extra.nodes);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use glia_code_domain::evm::{AbiRef, ClientFacts, ClientHit, Scope, read_client_hits};
-    use glia_code_domain::{GRAPH_TYPE, cell_type};
-    use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
+    use glia_code_domain::project_roots::ProjectRoot;
+    use glia_code_domain::{cell_type, edge_category};
+    use glia_core::{CellPayload, NodeKindId, RepoId};
 
     use super::*;
 
@@ -1271,5 +1699,401 @@ mod tests {
             join_evm_abis(&mut bare, &TsAliasSet::default()).unresolved,
             1
         );
+    }
+
+    // ---- GD.31: imported contract instances ----------------------------
+
+    /// Real parses of `files` (path, source), as the router hands them over.
+    fn parsed(files: &[(&str, &str)]) -> HashMap<&'static str, Vec<FileParse>> {
+        let parses = files
+            .iter()
+            .map(|(path, src)| {
+                let mut fp =
+                    crate::extract::parse_one(src, path, "typescript", REPO).expect("parses");
+                let module = fp
+                    .nodes
+                    .iter()
+                    .find(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+                    .map(|n| n.id)
+                    .expect("module");
+                let mut stats = crate::extract::ExtractStats::default();
+                crate::extract::apply_cross_cutting_extractors(
+                    &mut fp,
+                    src,
+                    path,
+                    "typescript",
+                    module,
+                    REPO,
+                    &mut stats,
+                );
+                fp
+            })
+            .collect();
+        by_lang("typescript", parses)
+    }
+
+    /// `(qname, evm hits, file, POSITION row)` of every evm client of the
+    /// parse of `file`, in node order.
+    fn clients_of(
+        parses: &HashMap<&'static str, Vec<FileParse>>,
+        file: &str,
+    ) -> Vec<(String, Vec<ClientHit>)> {
+        let fp = parses
+            .values()
+            .flatten()
+            .find(|fp| http_owner::module_file(fp).as_deref() == Some(file))
+            .expect("file parsed");
+        fp.nodes
+            .iter()
+            .filter_map(|n| {
+                let q = fp.nav.qname_by_id.get(&n.id)?;
+                evm::split_client(q)?;
+                Some((q.clone(), read_client_hits(&n.cells)))
+            })
+            .collect()
+    }
+
+    /// The edges of `file`'s parse as `(from qname, category, to qname)`.
+    fn edges_of(
+        parses: &HashMap<&'static str, Vec<FileParse>>,
+        file: &str,
+    ) -> Vec<(String, glia_core::EdgeCategoryId, String)> {
+        let fp = parses
+            .values()
+            .flatten()
+            .find(|fp| http_owner::module_file(fp).as_deref() == Some(file))
+            .expect("file parsed");
+        let q = |id: &NodeId| fp.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        fp.edges
+            .iter()
+            .map(|e| (q(&e.from), e.category, q(&e.to)))
+            .collect()
+    }
+
+    const CONTRACTS_TS: &str = "import { JsonRpcProvider, Wallet } from 'ethers';
+import { Escrow__factory } from './typechain-types';
+
+const provider = new JsonRpcProvider('http://localhost:8545');
+const signer = Wallet.createRandom().connect(provider);
+export const escrow = Escrow__factory.connect(ESCROW_ADDRESS, signer);
+export const fmt = { amount: (n: bigint): string => n.toString() };
+";
+
+    const APP_TS: &str = "import { escrow, fmt } from 'SPEC';
+
+export async function checkout(payee: string, amount: bigint): Promise<string> {
+  await escrow.deposit(payee, { value: amount });
+  await escrow.release(payee, amount, MEMO);
+  void escrow.on(escrow.filters.Released(), () => undefined);
+  console.log(fmt.amount(amount));
+  return escrow.arbiter();
+}
+";
+
+    fn instance_stats(
+        exported: usize,
+        importers: usize,
+        sites: usize,
+        events: usize,
+        unresolved: usize,
+    ) -> InstanceStats {
+        InstanceStats {
+            exported,
+            importers,
+            sites,
+            events,
+            unresolved,
+        }
+    }
+
+    #[test]
+    fn ts_imported_instance_mints_the_importers_clients() {
+        let app = APP_TS.replace("SPEC", "../api/contracts");
+        let mut parses = parsed(&[
+            ("web/src/app.ts", &app),
+            ("web/api/contracts.ts", CONTRACTS_TS),
+        ]);
+        assert!(
+            clients_of(&parses, "web/src/app.ts").is_empty(),
+            "the per-file reader reads no client in a file that imports no client library"
+        );
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(stats.instances, instance_stats(1, 1, 3, 1, 0));
+        let got = clients_of(&parses, "web/src/app.ts");
+        let names: Vec<&str> = got.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "evm_call:Escrow.arbiter",
+                "evm_call:Escrow.deposit",
+                "evm_call:Escrow.release",
+                "evm_event:Escrow.Released",
+            ],
+            "`fmt.amount` and the ethers member `on` are no clients"
+        );
+        for (q, hits) in &got {
+            assert_eq!(hits.len(), 1, "{q}");
+            assert_eq!(hits[0].facts.lib, "typechain", "{q}");
+            assert_eq!(
+                hits[0].abi_from.as_deref(),
+                Some("web/api/contracts.ts"),
+                "{q}"
+            );
+        }
+        let deposit = &got[1].1[0];
+        assert_eq!(deposit.facts.args, vec![2], "the call's argument count");
+        let edges = edges_of(&parses, "web/src/app.ts");
+        for client in [
+            "evm_call:Escrow.arbiter",
+            "evm_call:Escrow.deposit",
+            "evm_call:Escrow.release",
+        ] {
+            assert!(
+                edges.contains(&(
+                    "web::src::app::checkout".into(),
+                    edge_category::USES,
+                    client.into()
+                )),
+                "{client}: the calling function owns it (A5.8): {edges:?}"
+            );
+        }
+        assert!(edges.contains(&(
+            "evm_event:Escrow.Released".into(),
+            edge_category::HANDLED_BY,
+            "web::src::app::checkout".into()
+        )));
+        let fp = parses
+            .values()
+            .flatten()
+            .find(|fp| http_owner::module_file(fp).as_deref() == Some("web/src/app.ts"))
+            .expect("app");
+        let deposit = fp
+            .nodes
+            .iter()
+            .find(|n| {
+                fp.nav.qname_by_id.get(&n.id).map(String::as_str) == Some("evm_call:Escrow.deposit")
+            })
+            .expect("deposit");
+        let kinds: Vec<_> = deposit.cells.iter().map(|c| c.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                cell_type::ENDPOINT_HIT,
+                cell_type::POSITION,
+                cell_type::IMPORTS
+            ],
+            "an in-file client's cell order"
+        );
+        // A second run (a held cache replays the parse) adds nothing.
+        let nodes = fp.nodes.len();
+        let edges = fp.edges.len();
+        join_evm_abis(&mut parses, &TsAliasSet::default());
+        let fp = parses
+            .values()
+            .flatten()
+            .find(|fp| http_owner::module_file(fp).as_deref() == Some("web/src/app.ts"))
+            .expect("app");
+        assert_eq!((fp.nodes.len(), fp.edges.len()), (nodes, edges));
+    }
+
+    #[test]
+    fn ts_imported_instance_through_a_barrel_and_a_workspace_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |rel: &str, text: &str| {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().expect("parent")).expect("dir");
+            std::fs::write(p, text).expect("write");
+        };
+        write("package.json", r#"{"name":"sibyl","private":true}"#);
+        write(
+            "pnpm-workspace.yaml",
+            "packages:\n  - 'apps/*'\n  - 'packages/*'\n",
+        );
+        write(
+            "packages/api-client/package.json",
+            r#"{"name":"@sibyl/api-client","main":"src/index.ts","types":"src/index.ts"}"#,
+        );
+        write(
+            "apps/web/package.json",
+            r#"{"name":"@sibyl/web","dependencies":{"@sibyl/api-client":"workspace:*"}}"#,
+        );
+        let roots: Vec<ProjectRoot> = ["", "apps/web", "packages/api-client"]
+            .iter()
+            .map(|r| ProjectRoot::new((*r).to_string(), "npm", "package.json", None))
+            .collect();
+        let app = APP_TS.replace("SPEC", "@sibyl/api-client");
+        let files = [
+            ("apps/web/src/app.ts", app.as_str()),
+            ("packages/api-client/src/contracts.ts", CONTRACTS_TS),
+            (
+                "packages/api-client/src/index.ts",
+                "export * from './contracts';\nexport * from './typechain-types';\n",
+            ),
+        ];
+        for (path, src) in files {
+            write(path, src);
+        }
+        let aliases = TsAliasSet::read(dir.path(), &roots, "fx");
+        let mut parses = parsed(&files);
+        let stats = join_evm_abis(&mut parses, &aliases);
+        assert_eq!(stats.instances, instance_stats(1, 1, 3, 1, 0));
+        let got = clients_of(&parses, "apps/web/src/app.ts");
+        assert_eq!(got.len(), 4);
+        assert_eq!(
+            got[0].1[0].abi_from.as_deref(),
+            Some("packages/api-client/src/contracts.ts")
+        );
+        // Without the workspace packages the bare specifier names nothing.
+        let mut bare = parsed(&[
+            ("apps/web/src/app.ts", &app),
+            ("packages/api-client/src/contracts.ts", CONTRACTS_TS),
+        ]);
+        let stats = join_evm_abis(&mut bare, &TsAliasSet::default());
+        assert_eq!(stats.instances, instance_stats(1, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn ts_imported_instance_through_a_tsconfig_alias_and_a_namespace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("tsconfig.json"),
+            r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@chain/*": ["web/chain/*"] } } }"#,
+        )
+        .expect("tsconfig");
+        let aliases = TsAliasSet::read(dir.path(), &[], "fx");
+        let app = APP_TS.replace("SPEC", "@chain/contracts");
+        let ns = "import * as chain from '../chain/contracts';
+export function pay(p: string) {
+  return chain.escrow.deposit(p);
+}
+";
+        let mut parses = parsed(&[
+            ("web/src/app.ts", &app),
+            ("web/src/ns.ts", ns),
+            ("web/chain/contracts.ts", CONTRACTS_TS),
+        ]);
+        let stats = join_evm_abis(&mut parses, &aliases);
+        assert_eq!(stats.instances, instance_stats(1, 2, 4, 1, 0));
+        let ns_clients: Vec<String> = clients_of(&parses, "web/src/ns.ts")
+            .into_iter()
+            .map(|(q, h)| format!("{q} args={:?}", h[0].facts.args))
+            .collect();
+        assert_eq!(ns_clients, ["evm_call:Escrow.deposit args=[1]"]);
+    }
+
+    #[test]
+    fn ts_importer_with_its_own_contract_and_the_exporters_sites_mint_once() {
+        let exporter = format!(
+            "{CONTRACTS_TS}export async function warm() {{\n  return escrow.deposit(ADDR);\n}}\n"
+        );
+        let app = "import { Contract } from 'ethers';
+import { escrow } from './contracts';
+const VAULT_ABI = ['function withdraw(uint256 a)'];
+export async function pay(signer: any) {
+  const vault = new Contract(ADDR, VAULT_ABI, signer);
+  await vault.withdraw(1);
+  await escrow.deposit(ADDR);
+}
+";
+        let mut parses = parsed(&[("web/app.ts", app), ("web/contracts.ts", &exporter)]);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(stats.instances, instance_stats(1, 1, 1, 0, 0));
+        let got: Vec<String> = clients_of(&parses, "web/app.ts")
+            .into_iter()
+            .map(|(q, h)| format!("{q} cells={}", h.len()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "evm_call:abi:VAULT_ABI.withdraw cells=1",
+                "evm_call:Escrow.deposit cells=1"
+            ],
+            "the file's own contract once, the imported one once"
+        );
+        let own: Vec<String> = clients_of(&parses, "web/contracts.ts")
+            .into_iter()
+            .map(|(q, h)| format!("{q} from={:?}", h[0].abi_from))
+            .collect();
+        assert_eq!(
+            own,
+            ["evm_call:Escrow.deposit from=None"],
+            "the exporter's own site is the in-file reader's, unchanged"
+        );
+    }
+
+    #[test]
+    fn ts_import_of_no_instance_or_a_reassigned_one_mints_nothing() {
+        let abi_only = "export const SHOP_ABI = ['function release(uint256 id)'];\n";
+        let app = "import { fmt, escrow } from './contracts';
+import { SHOP_ABI } from './abi';
+export function f() {
+  fmt.amount(1n);
+  SHOP_ABI.release(1);
+}
+";
+        let shadow = "import { escrow } from './contracts';
+export function g() {
+  let escrow = other();
+  escrow.deposit(1);
+}
+";
+        let mut parses = parsed(&[
+            ("web/app.ts", app),
+            ("web/shadow.ts", shadow),
+            ("web/abi.ts", abi_only),
+            ("web/contracts.ts", CONTRACTS_TS),
+        ]);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(
+            stats.instances,
+            instance_stats(1, 0, 0, 0, 1),
+            "a plain object, an ABI const: no instance; a redeclared local: unresolved"
+        );
+        assert!(clients_of(&parses, "web/app.ts").is_empty());
+        assert!(clients_of(&parses, "web/shadow.ts").is_empty());
+    }
+
+    #[test]
+    fn ts_instance_with_an_abi_drops_members_it_does_not_list() {
+        let exporter = "import { Contract } from 'ethers';
+import { SHOP_ABI } from './abi';
+export const shop = new Contract(ADDR, SHOP_ABI, null);
+";
+        let app = "import { shop } from './shop';
+export async function f() {
+  await shop.release(1);
+  await shop.withdraw(1);
+}
+";
+        let mut parses = parsed(&[
+            ("web/app.ts", app),
+            ("web/shop.ts", exporter),
+            (
+                "web/abi.ts",
+                "export const SHOP_ABI = ['function release(uint256 id)'];\n",
+            ),
+        ]);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(stats.instances, instance_stats(1, 1, 1, 0, 0));
+        let got = clients_of(&parses, "web/app.ts");
+        assert_eq!(got.len(), 1, "withdraw is not in the ABI: {got:?}");
+        assert_eq!(got[0].0, "evm_call:abi:SHOP_ABI.release");
+        let hit = &got[0].1[0];
+        assert_eq!(hit.facts.abi, Some(vec!["f:release/1".to_string()]));
+        assert_eq!(
+            hit.abi_from.as_deref(),
+            Some("web/abi.ts"),
+            "the ABI's own file"
+        );
+        assert_eq!(hit.abi_ref, Some(ts_ref("SHOP_ABI", "./abi")));
+    }
+
+    #[test]
+    fn instances_marker_fires_only_with_an_export() {
+        let none = EvmAbiJoinStats::default();
+        assert_eq!(none.instances.exported, 0);
+        let mut parses = parsed(&[("web/app.ts", &APP_TS.replace("SPEC", "./contracts"))]);
+        let stats = join_evm_abis(&mut parses, &TsAliasSet::default());
+        assert_eq!(stats.instances, InstanceStats::default());
     }
 }
