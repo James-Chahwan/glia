@@ -52,6 +52,16 @@ worker.py's `loop -> process`. Seeding flows from ENTRYPOINT cells too changes `
 and concept search's flow set, which GB.6's gate measured on the 0.5.6 tree; so it lands with a re-run of
 the concept gate (`scripts/embedding-gate.sh concept-verdict`) under GB.6's committed rule.
 
+**MCP servers as a host (reported by the repo-graph session, 2026-11-02, on glia-py 0.5.6).** A function
+registered as an MCP tool by decorator is no entry: on repo-graph (repo_graph/server.py, `@mcp.tool()` on a
+FastMCP / `MCPServer` instance), `glia impact repo_graph::server::get_graph --direction backward` marks all six
+tool functions dead (the same on 0.5.5 and 0.5.6, so not a regression). It fits `code_domain::hosts` as GH.8's
+Flask rows do (Shape::Decorator, Gate::Imports on `mcp` / `fastmcp`): `@<server>.tool()` / `.resource(<uri>)` /
+`.prompt()` -> a host registration (`host_cmd:mcp:<name>` / `host_event:mcp:resource:<uri>` ..) HANDLED_BY the
+function, which is then an entry; the TypeScript SDK's `server.tool(..)` / `registerTool` / `registerResource`
+/ `registerPrompt` as the call form. Repro: a shallow clone of repo-graph, the query above; a
+`patterns/python/host_command` fixture row and its TS twin.
+
 ## 4. Becoming PR-friendly (James 2026-10-31, after glia's first PR)
 
 James: *"I just realized glia is never gonna be pr friendly"*, then *"we could just auto allocate ids for a bunch of
