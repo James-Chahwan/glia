@@ -360,8 +360,6 @@ enum Rebuilt {
     Exact(&'static [(Side, &'static str)]),
     /// Every group of both repos.
     Every,
-    /// Exactly every group of this side.
-    EveryOf(Side),
     /// None of this side's (the other side's are not pinned).
     NoneOn(Side),
 }
@@ -441,15 +439,6 @@ fn run(sequence: &str, steps: &[Step]) {
             }
             Rebuilt::Every => {
                 assert_eq!(u.groups_rebuilt, fx.every_group(), "{at}: every group")
-            }
-            Rebuilt::EveryOf(side) => {
-                let groups: Vec<String> = side.groups().iter().map(|g| fx.tag(side, g)).collect();
-                assert_eq!(
-                    u.groups_rebuilt,
-                    groups,
-                    "{at}: every {} group",
-                    side.name()
-                )
             }
             Rebuilt::NoneOn(side) => {
                 let prefix = fx.tag(side, "");
@@ -773,9 +762,10 @@ fn overlay_add(fx: &Fixture) {
 }
 
 /// (g) A `.glia/overlay.toml` added to the client (no server overlay): an
-/// `overlay` full rebuild of every client group (the server's fingerprints
-/// do not read the client's overlay, so its groups are reused) whose
-/// constant folds the gateway endpoint.
+/// `overlay` full rebuild whose constant folds the gateway endpoint. GA.17:
+/// the group key holds no overlay, so only the client's `typescript` group,
+/// whose post-graft parse the pin moves, rebuilds; the client's other groups
+/// and every server group are reused.
 #[test]
 fn scripted_overlay() {
     run(
@@ -785,7 +775,7 @@ fn scripted_overlay() {
             edit: overlay_add,
             paths: &[(Side::Client, OVERLAY)],
             expect: Expect {
-                rebuilt: Rebuilt::EveryOf(Side::Client),
+                rebuilt: Rebuilt::Exact(&[(Side::Client, "typescript")]),
                 full_rebuild: Some("overlay"),
                 node_rows: &[("added", "endpoint:GET:/gw/ping")],
                 ..EXPECT

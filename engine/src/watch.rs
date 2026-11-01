@@ -18,11 +18,15 @@
 //! inputs its builder reads (`hidden_fp`). The session keeps every group's
 //! last build (`CachedGroup`) under a fingerprint of exactly those inputs
 //! (each parse's canonical bincode through `cache::parse_fingerprint`, taken
-//! after the grafts, on the pool), plus the overlay and the proto service set
-//! (so a change of either rebuilds every group, as its `full_rebuild` reason
-//! says). An update rebuilds the groups whose fingerprint moved and reuses a
-//! clone of the others' cached builds. Every group costs one deep clone per
-//! update: the passes mutate the merged graph (node confidence, cells, intra
+//! after the grafts, on the pool), plus the proto service set (so its change
+//! rebuilds every group, as its `full_rebuild` reason says). GA.17: the
+//! overlay is no part of it: every overlay section reaches a group only
+//! through the walk or the post-cache grafts, so through the post-graft
+//! parses, or not at all (a pass-time or query-time section), and an overlay
+//! edit (`full_rebuild=overlay`, still the full delta) rebuilds only the
+//! groups whose parses it moved. An update rebuilds the groups whose
+//! fingerprint moved and reuses a clone of the others' cached builds. Every
+//! group costs one deep clone per update: the passes mutate the merged graph (node confidence, cells, intra
 //! edge evidence), so a cached pre-pass graph is never handed over by
 //! reference; a reused build is cloned out of the cache, a rebuilt one is
 //! cloned in before the fold moves its graph into the merged graph. A Low
@@ -2436,8 +2440,9 @@ fn fast_path_from_value(value: Option<&str>) -> bool {
     value.map(str::trim) != Some("0")
 }
 
-/// One build's inputs to every group key besides the group's own:
-/// [`overlay_fp`] and [`proto_services_fp`].
+/// One build's inputs to every group's fingerprints besides the group's own:
+/// [`overlay_fp`] (GA.17: the fast path's `context` only) and
+/// [`proto_services_fp`] (the whole key and the context).
 #[derive(Clone, Copy)]
 struct GroupKey {
     overlay_fp: u64,
@@ -2468,7 +2473,8 @@ struct GroupPrint {
     /// (the group is always rebuilt and never cached).
     fingerprint: Option<u64>,
     /// GA.4: xxh64 of the key's inputs besides the parses (the group key,
-    /// the repo id, the overlay, the proto services and [`hidden_fp`]).
+    /// the repo id, the proto services and [`hidden_fp`]) and of the overlay
+    /// ([`overlay_fp`], GA.17: in this compare, not in the whole key).
     context: u64,
     /// GA.4: every parse's [`FileFp`], in plan order, for a group with a
     /// fast path ([`fast_path_for`], with the session's fast path on);
@@ -2489,11 +2495,20 @@ fn parse_path(fp: &FileParse) -> Option<String> {
 }
 
 /// DC.7b: each group's fingerprints ([`GroupPrint`]), in plan order. The
-/// whole key is xxh64 of its key, the repo id, `key.overlay_fp`
-/// ([`overlay_fp`]), `key.services_fp` ([`proto_services_fp`]), its
-/// [`hidden_fp`] and its parse count and parses' fingerprints in plan order
-/// (`cache::parse_fingerprint`, every parse of the plan mapped on the pool
-/// at once).
+/// whole key is xxh64 of its key, the repo id, `key.services_fp`
+/// ([`proto_services_fp`]), its [`hidden_fp`] and its parse count and
+/// parses' fingerprints in plan order (`cache::parse_fingerprint`, every
+/// parse of the plan mapped on the pool at once).
+///
+/// GA.17: `key.overlay_fp` ([`overlay_fp`]) is no part of the whole key.
+/// Every overlay section reaches a language group only through the walk or
+/// the post-cache grafts, so through the post-graft parses the key already
+/// holds, or not at all (it is read by the pass tail or at query time):
+/// [`OVERLAY_REACH`], whose test pins every section. An overlay edit then
+/// rebuilds only the groups whose parses it moved (`[groups] ..
+/// reused=<r>` counts the rest). The overlay stays in the fast path's
+/// `context`, so a group is never re-stitched against a build made under
+/// another overlay.
 ///
 /// GA.4: with `fast_path` on, a group whose key has a fast path also gets
 /// its [`FileFp`]s. A parse whose path and parse fingerprint equal its slot
@@ -2516,14 +2531,24 @@ fn group_fingerprints(
     let mut prints: Vec<GroupPrint> = Vec::with_capacity(groups.len());
     let mut wanted: Vec<(usize, usize)> = Vec::new();
     for (at, g) in groups.iter().enumerate() {
+        let hidden = hidden_fp(g.key, ctx);
+        // GA.17: the overlay reaches a group only through its post-graft
+        // parses (`OVERLAY_REACH`), so it is in the fast path's context and
+        // not in the whole key.
+        let mut c = XxHash64::with_seed(0);
+        c.write(g.key.as_bytes());
+        c.write_u8(0);
+        c.write_u64(ctx.repo.0);
+        c.write_u64(key.overlay_fp);
+        c.write_u64(key.services_fp);
+        c.write_u64(hidden);
+        let context = c.finish();
         let mut h = XxHash64::with_seed(0);
         h.write(g.key.as_bytes());
         h.write_u8(0);
         h.write_u64(ctx.repo.0);
-        h.write_u64(key.overlay_fp);
         h.write_u64(key.services_fp);
-        h.write_u64(hidden_fp(g.key, ctx));
-        let context = h.finish();
+        h.write_u64(hidden);
         h.write_u64(g.parses.len() as u64);
         let fps: Vec<Option<u64>> = parse_fps.by_ref().take(g.parses.len()).collect();
         let mut whole = true;
@@ -4707,5 +4732,99 @@ mod tests {
             timing::ms(started.elapsed())
         );
         assert!(s.changed_paths().is_empty());
+    }
+
+    /// GA.17: where an overlay section reaches a build. The whole group key
+    /// leaves the overlay out ([`group_fingerprints`]), which holds only while
+    /// no section is read by a language group's builder: a section reaches a
+    /// group only through the walk (the walked files and project roots) or
+    /// the post-cache grafts (`parse_and_graft`), both of which the post-graft
+    /// parses in the key already hold, or not at all (the pass tail, or query
+    /// time).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Reach {
+        /// `walk::plan_walk`: which files are walked, the declared project
+        /// roots; so the parses.
+        Walk,
+        /// The post-cache grafts (`parse_and_graft`: the constant table, the
+        /// `[[wrapper]]` scan): the post-graft parses.
+        Graft,
+        /// After every language group is built: the resolvers, the external
+        /// edge and cell stages, the post-passes.
+        Pass,
+        /// Read only by an answer; no build reads it.
+        Query,
+        /// Read by a language group's builder (`GroupCtx`, `hidden_fp`):
+        /// THE RULE: such a section must put `overlay_fp` back into the whole
+        /// key in [`group_fingerprints`], or a reused group goes stale.
+        Builder,
+    }
+
+    /// GA.17: every overlay section (`glia_config::SECTIONS` order) and
+    /// the stages that read it (`engine/src/` readers, checked by grep when
+    /// this landed): `[walk] skip` the walk, `[walk] tests` the wrapper scan
+    /// and the TESTS / provenance passes; `[[project]]` the walk; the
+    /// entrypoints and the declared stanzas the external cell stage (and
+    /// gaps); `[constants]` the constant table the grafts fold through;
+    /// `[[route_prefix]]` the http pass's mounts; `[[wrapper]]` the graft
+    /// scan (and gaps); `[[edge]]` the external edge stage; `[ids]`
+    /// `intent::ids` only.
+    const OVERLAY_REACH: [(&str, &[Reach]); 14] = [
+        ("walk", &[Reach::Walk, Reach::Graft, Reach::Pass]),
+        ("project", &[Reach::Walk]),
+        ("entrypoints", &[Reach::Pass, Reach::Query]),
+        ("constants", &[Reach::Graft]),
+        ("route_prefix", &[Reach::Pass]),
+        ("wrapper", &[Reach::Graft, Reach::Query]),
+        ("edge", &[Reach::Pass, Reach::Query]),
+        ("constraint", &[Reach::Pass, Reach::Query]),
+        ("decision", &[Reach::Pass, Reach::Query]),
+        ("note", &[Reach::Pass, Reach::Query]),
+        ("component", &[Reach::Pass, Reach::Query]),
+        ("layer", &[Reach::Pass, Reach::Query]),
+        ("ids", &[Reach::Query]),
+        ("convention", &[Reach::Pass, Reach::Query]),
+    ];
+
+    /// GA.17's guard: every overlay section is classified, and none reaches
+    /// a language group's builder. A new `GliaConfig` field fails to compile
+    /// here (the exhaustive destructuring) until it joins [`OVERLAY_REACH`];
+    /// a section classified `Builder` fails the assertion, naming the rule.
+    #[test]
+    fn every_overlay_section_reaches_groups_through_parses() {
+        use glia_code_domain::glia_config::{self, GliaConfig};
+        let GliaConfig {
+            // The version picks which sections load: it reaches a group only
+            // as they do.
+            version: _,
+            walk: _,
+            project: _,
+            entrypoints: _,
+            constants: _,
+            route_prefix: _,
+            wrapper: _,
+            edge: _,
+            constraint: _,
+            decision: _,
+            note: _,
+            component: _,
+            layer: _,
+            ids: _,
+            convention: _,
+        } = GliaConfig::default();
+        let names: Vec<&str> = OVERLAY_REACH.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            glia_config::SECTIONS,
+            "every overlay section is classified, in SECTIONS order"
+        );
+        for (section, reach) in OVERLAY_REACH {
+            assert!(!reach.is_empty(), "[{section}] reaches nothing?");
+            assert!(
+                !reach.contains(&Reach::Builder),
+                "[{section}] is read by a language group's builder: the whole \
+                 group key must hold overlay_fp again (group_fingerprints, GA.17)"
+            );
+        }
     }
 }

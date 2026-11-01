@@ -31,9 +31,11 @@
 //! the IMPORTS / CALLS of `example.com/parity/tools` that a clean build of
 //! the renamed module drops), and keeping the loaded
 //! overlay across a `.glia` update fails `overlay` at its layout bytes
-//! (`manifest.json` first). Dropping `overlay_fp` from the group fingerprint fails `overlay`
-//! only at its [`EVERY_GROUP`] expectation: the pin reaches the one group it
-//! moves through that group's post-graft parse. Dropping only the `go_mod`
+//! (`manifest.json` first). GA.17 dropped `overlay_fp` from the group
+//! fingerprint (the pin reaches the one group it moves through that group's
+//! post-graft parse): putting it back fails `overlay` at its `typescript` /
+//! `[]` rebuilt expectations, and every layout byte holds either way.
+//! Dropping only the `go_mod`
 //! arm of `durability` changes nothing: `go.mod` is a `project_roots::MANIFESTS`
 //! name, so it stays High (`manifest`) and still re-plans.
 //!
@@ -166,8 +168,9 @@ const COPIED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The fixture's language groups, in plan order: every one rebuilds on a full
-/// rebuild other than `go_modules` (DC.7b).
+/// The fixture's language groups, in plan order: every one rebuilds on a
+/// `proto_services` full rebuild (DC.7b); a `go_modules` or (GA.17) an
+/// `overlay` one rebuilds only the groups whose fingerprints it moved.
 const EVERY_GROUP: &[&str] = &[
     "c_cpp",
     "go",
@@ -375,6 +378,16 @@ fn overlay_edit(r: &Path) {
         "GATEWAY = \"/gw\"",
         "GATEWAY = \"/gw2\"",
     );
+}
+/// GA.17: an `[[edge]]` stanza between two python functions (a pass-time
+/// section: no parse reads it).
+fn overlay_edge_add(r: &Path) {
+    let p = r.join(".glia/overlay.toml");
+    let mut text = std::fs::read_to_string(&p).expect("read the overlay");
+    text.push_str(
+        "\n[[edge]]\nfrom = \"api::user::get_user\"\nto = \"api::svc::handle\"\ncategory = \"CALLS\"\n",
+    );
+    std::fs::write(p, text).expect("write the overlay");
 }
 fn proto_rpc_add(r: &Path) {
     replace(
@@ -1051,18 +1064,37 @@ fn scripted_cargo_member() {
     run("cargo_member", SEQ_CARGO_MEMBER);
 }
 
-/// The `[constants]` pin re-keys the env-built `${GATEWAY}/things` ENDPOINT.
-const SEQ_OVERLAY: &[Step] = &[Step {
-    name: "constants_pin",
-    edit: overlay_edit,
-    via: Via::Apply(&[".glia/overlay.toml"]),
-    expect: Expect {
-        rebuilt_exact: Some(EVERY_GROUP),
-        full_rebuild: Some("overlay"),
-        row_kinds: &["ENDPOINT"],
-        ..EXPECT
+/// GA.17: an overlay edit rebuilds only the groups whose post-graft parses
+/// it moves, every other group reused (`[groups] .. reused=` > 0). The
+/// `[constants]` pin re-keys the env-built `${GATEWAY}/things` ENDPOINT
+/// through `web/src/app/core/api.ts`'s post-graft parse, so only
+/// `typescript` rebuilds; an `[[edge]]` stanza is read only by the pass
+/// tail (the overlay edge stage), so no group rebuilds and the update's
+/// edge rows come from the passes alone. Both stay `full_rebuild=overlay`
+/// (the full delta).
+const SEQ_OVERLAY: &[Step] = &[
+    Step {
+        name: "constants_pin",
+        edit: overlay_edit,
+        via: Via::Apply(&[".glia/overlay.toml"]),
+        expect: Expect {
+            rebuilt_exact: Some(&["typescript"]),
+            full_rebuild: Some("overlay"),
+            row_kinds: &["ENDPOINT"],
+            ..EXPECT
+        },
     },
-}];
+    Step {
+        name: "edge_add",
+        edit: overlay_edge_add,
+        via: Via::Apply(&[".glia/overlay.toml"]),
+        expect: Expect {
+            rebuilt_exact: Some(&[]),
+            full_rebuild: Some("overlay"),
+            ..EXPECT
+        },
+    },
+];
 
 #[test]
 fn scripted_overlay() {
@@ -2410,9 +2442,10 @@ fn write_snapshot(repo: &Path) {
 /// now: whether anything changed (else a noop: `seq` stays, no rows), the
 /// table entries added / removed (the mirror) and modified (changed bytes,
 /// the non-table inputs aside), the `full_rebuild` reason (`full_rebuild_reason`'s
-/// precedence), and the groups: every group under an overlay or proto
-/// service change, exactly the edited files' groups when every change is an
-/// in-place source / doc edit, else at least the changed paths' groups.
+/// precedence), and the groups: every group under a proto service change,
+/// exactly the edited files' groups when every change is an in-place source
+/// / doc edit (GA.17: or the overlay, whose `GATEWAY` pin moves the
+/// `typescript` group alone), else at least the changed paths' groups.
 struct Want {
     changed: bool,
     added: Vec<String>,
@@ -2452,10 +2485,16 @@ impl Want {
         if changed.contains(SAME_STEM) && !in_both(SAME_STEM) {
             contains.insert("python");
         }
+        // GA.17: the overlay's `GATEWAY` pin re-keys api.ts's ENDPOINT, so
+        // it moves the typescript group's post-graft parse and no other.
+        if changed.contains(OVERLAY) {
+            contains.insert("typescript");
+        }
         let in_place = changed
             .iter()
+            .filter(|k| **k != OVERLAY)
             .all(|k| in_both(k) && matches!(ext(k), "py" | "go" | "ts" | "rs" | "md"));
-        let rebuilt_exact = if changed.contains(OVERLAY) || changed.contains(PROTO) {
+        let rebuilt_exact = if changed.contains(PROTO) {
             Some(EVERY_GROUP.to_vec())
         } else if in_place {
             Some(
