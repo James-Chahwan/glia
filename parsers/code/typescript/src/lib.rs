@@ -499,6 +499,12 @@ struct Acc {
     /// GD.11: `memo(..)` / `forwardRef(..)` consts minted as COMPONENT
     /// FUNCTIONs (the `[ts-components]` marker).
     component_wrappers: usize,
+    /// GD.39: the file's JSX reading (the `[ts-jsx]` marker).
+    jsx: JsxStats,
+    /// GD.39: `<Ns.Comp />` tag names as `(scope, Ns, Comp, row)`, one per
+    /// `(scope, Ns, Comp)` at its first source row; bound through `Ns`'s
+    /// import in `resolve_intra_file`.
+    jsx_members: Vec<(NodeId, String, String, u32)>,
     /// DT.1k: typed GraphQL client calls ([`try_detect_graphql_result`]), in
     /// walk order. Gated and attached to their callables by
     /// [`attach_graphql_results`] once every import of the file is read.
@@ -670,7 +676,38 @@ struct ValueRef {
     /// A7.1's class INJECTS, any other site an INJECTS from its scope
     /// (DT.5k, `resolve_intra_file`); so the USES edge's row (LC.3b) is the
     /// first site that is not one.
-    sites: Vec<(u32, Option<String>)>,
+    ///
+    /// GD.39: the third field is the EVIDENCE rule the site reads as:
+    /// `value_ref` (DT.5g), `jsx_element` (a `<Comp />` tag name) or
+    /// `jsx_attribute` (an identifier in a JSX `{..}` expression, an
+    /// attribute value or a child). The edge takes the rule of the site at
+    /// its row.
+    sites: Vec<(u32, Option<String>, &'static str)>,
+}
+
+/// GD.39: one file's JSX reading, the `[ts-jsx]` marker's fields.
+#[derive(Default, Debug, Clone, Copy)]
+struct JsxStats {
+    /// Any JSX element, self-closing element or fragment was walked.
+    seen: bool,
+    /// Component element sites: an opening / self-closing tag named by an
+    /// uppercase identifier or a member expression (`Ns.Comp`).
+    elements: usize,
+    /// Element value refs (one per `(scope, name)`) bound to an in-file
+    /// declaration (rule `jsx_element`).
+    in_file: usize,
+    /// Element refs queued for the graph through an import binding: a
+    /// named / default import (`<Child />`), or a namespace import's member
+    /// (`<Icons.Plus />`).
+    imported: usize,
+    /// Intrinsic element sites (`<div>`, `<svg:rect>`): they read nothing.
+    intrinsic: usize,
+    /// Identifier sites in a JSX `{..}` expression (an attribute value such
+    /// as `onClick={handle}`, or a child).
+    attributes: usize,
+    /// Top-level FUNCTIONs given the COMPONENT role from the AST
+    /// ([`mark_jsx_component`]).
+    components: usize,
 }
 
 /// DT.5g: what one file's walks fed the value references (the
@@ -1118,7 +1155,14 @@ fn visit_top(
                 // DT.5g: `export default bootstrap;` reads `bootstrap` as a
                 // value, the MODULE's. GD.11: and exports it as `default`.
                 if value.kind() == "identifier" {
-                    push_value_ref(acc, module_id, text(value, src), line_at(value), None);
+                    push_value_ref(
+                        acc,
+                        module_id,
+                        text(value, src),
+                        line_at(value),
+                        None,
+                        "value_ref",
+                    );
                     acc.nav.record_fact(
                         module_id,
                         NavFact::ExportLocal {
@@ -3926,7 +3970,10 @@ fn visit_lexical(
                 node_kind::FUNCTION,
                 &format!("{module_qname}::{name}"),
             );
-            if let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == func_id) {
+            // GD.39: `mark_jsx_component` may have given it the role already.
+            if let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == func_id)
+                && !node.cells.contains(&component_role_cell())
+            {
                 node.cells.push(component_role_cell());
             }
             // The wrappers' type arguments (`forwardRef<HTMLDivElement,
@@ -4206,6 +4253,8 @@ fn emit_function(
         Some(module_id),
     );
     record_callable(func_id, n, src, acc);
+    // GD.39: a capitalised function rendering JSX is a component.
+    mark_jsx_component(n, name, func_id, acc);
     // DF.22a: parameters type the receivers of the body.
     record_param_types(n, src, func_id, acc);
     // DT.5k: a declared class return type types a caller's result local.
@@ -4251,6 +4300,9 @@ fn emit_function_value(
         Some(module_id),
     );
     record_callable(func_id, value, src, acc);
+    // GD.39: a capitalised arrow / function value rendering JSX is a
+    // component, a multi-line `const Row = ({ .. }) => {` included.
+    mark_jsx_component(value, name, func_id, acc);
     // DF.22a: the arrow's / function expression's parameters type the
     // receivers of its body.
     record_param_types(value, src, func_id, acc);
@@ -4481,6 +4533,10 @@ fn collect_calls_in(
         if matches!(kind, "identifier" | "shorthand_property_identifier") {
             record_value_ref(node, src, from, acc);
         }
+        // GD.39: a JSX tag names the component it renders.
+        if matches!(kind, "jsx_opening_element" | "jsx_self_closing_element") {
+            record_jsx_tag(node, src, from, acc);
+        }
         // FH.20: a type name (an annotation, a generic argument, an `as`
         // type) is a type reference of `from`.
         if kind == "type_identifier" {
@@ -4612,6 +4668,10 @@ fn unwrapped_callback<'a>(func: TsNode, src: &'a [u8]) -> Option<(&'a str, &'sta
 /// Which reads become USES is decided in `resolve_intra_file`, once the file's
 /// enums and imports are all known.
 fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    // GD.39: a JSX tag name (`<Icons.Plus />`) is `record_jsx_tag`'s.
+    if is_jsx_tag_name(node) {
+        return;
+    }
     if let Some(parent) = node.parent()
         && parent.kind() == "call_expression"
         && parent.child_by_field_name("function") == Some(node)
@@ -4666,6 +4726,10 @@ fn record_this_ref(
     let Some(class) = enclosing_class else {
         return;
     };
+    // GD.39: `<this.Comp />` reads nothing.
+    if is_jsx_tag_name(node) {
+        return;
+    }
     let (Some(object), Some(property)) = (
         node.child_by_field_name("object"),
         node.child_by_field_name("property"),
@@ -4767,6 +4831,10 @@ fn record_member_read(
     enclosing_class: Option<NodeId>,
     acc: &mut Acc,
 ) {
+    // GD.39: a JSX tag name is `record_jsx_tag`'s.
+    if is_jsx_tag_name(node) {
+        return;
+    }
     let (Some(object), Some(property)) = (
         node.child_by_field_name("object"),
         node.child_by_field_name("property"),
@@ -4881,10 +4949,26 @@ fn record_accessor_ref(
 /// target, a key. Whether the name binds (an in-file top-level declaration or
 /// a named import, neither shadowed by a local of `from`) is decided in
 /// `resolve_intra_file`.
+///
+/// GD.39: an identifier that is a JSX `{..}` expression's whole value (an
+/// attribute's `onClick={handle}` / `render={Row}`, or a child `{icon}`) is
+/// a value position too, rule `jsx_attribute`.
 fn record_value_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     let Some(parent) = node.parent() else {
         return;
     };
+    if node.kind() == "identifier" && parent.kind() == "jsx_expression" {
+        acc.jsx.attributes += 1;
+        push_value_ref(
+            acc,
+            from,
+            text(node, src),
+            line_at(node),
+            None,
+            "jsx_attribute",
+        );
+        return;
+    }
     let callee = match (node.kind(), parent.kind()) {
         ("shorthand_property_identifier", "object") | ("identifier", "array") => None,
         ("identifier", "pair") if parent.child_by_field_name("value") == Some(node) => None,
@@ -4904,19 +4988,34 @@ fn record_value_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             .map(|c| text(c, src).to_string()),
         _ => return,
     };
-    push_value_ref(acc, from, text(node, src), line_at(node), callee);
+    push_value_ref(
+        acc,
+        from,
+        text(node, src),
+        line_at(node),
+        callee,
+        "value_ref",
+    );
 }
 
-/// DT.5g: add a site of `name` read as a value by `from` at `row`, one
-/// [`ValueRef`] per `(from, name)` in walk order.
-fn push_value_ref(acc: &mut Acc, from: NodeId, name: &str, row: u32, callee: Option<String>) {
+/// DT.5g: add a site of `name` read as a value by `from` at `row` under
+/// EVIDENCE rule `rule` (GD.39), one [`ValueRef`] per `(from, name)` in walk
+/// order.
+fn push_value_ref(
+    acc: &mut Acc,
+    from: NodeId,
+    name: &str,
+    row: u32,
+    callee: Option<String>,
+    rule: &'static str,
+) {
     if name.is_empty() {
         return;
     }
     match acc.value_ref_seen.get(&(from, name.to_string())) {
         Some(&i) => {
             if let Some(r) = acc.value_refs.get_mut(i) {
-                r.sites.push((row, callee));
+                r.sites.push((row, callee, rule));
             }
         }
         None => {
@@ -4925,9 +5024,122 @@ fn push_value_ref(acc: &mut Acc, from: NodeId, name: &str, row: u32, callee: Opt
             acc.value_refs.push(ValueRef {
                 from,
                 name: name.to_string(),
-                sites: vec![(row, callee)],
+                sites: vec![(row, callee, rule)],
             });
         }
+    }
+}
+
+/// GD.39: whether `node` is the `name` of a JSX opening, closing or
+/// self-closing tag (`Child` in `<Child />`, `Icons.Plus` in
+/// `<Icons.Plus>`). A tag name is read by [`record_jsx_tag`] alone: the
+/// member, `this.` and receiver walks skip it.
+fn is_jsx_tag_name(node: TsNode) -> bool {
+    node.parent().is_some_and(|p| {
+        matches!(
+            p.kind(),
+            "jsx_opening_element" | "jsx_self_closing_element" | "jsx_closing_element"
+        ) && p.child_by_field_name("name") == Some(node)
+    })
+}
+
+/// GD.39: read a JSX opening or self-closing tag's name, by `from` (the
+/// callable that renders it). An identifier starting uppercase names a
+/// component: a value reference, rule `jsx_element`, bound in
+/// `resolve_intra_file` like any DT.5g one (an in-file top-level
+/// declaration, else a named or default import, never a local). A member
+/// expression `Ns.Comp` on an identifier names `Comp` through `Ns`
+/// (recorded in `jsx_members`; an uppercase `Ns` is also LA.30c's member
+/// read, a lowercase one is bound only through an import binding); a deeper
+/// one (`A.B.C`) or one on `this` reads nothing. A lowercase identifier (`div`) or a namespaced name
+/// (`svg:rect`) is an intrinsic element and reads nothing. A fragment
+/// (`<>`) has no name.
+fn record_jsx_tag(tag: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    acc.jsx.seen = true;
+    let Some(name) = tag.child_by_field_name("name") else {
+        return;
+    };
+    match name.kind() {
+        "identifier" => {
+            let n = text(name, src);
+            if n.starts_with(|c: char| c.is_ascii_uppercase()) {
+                acc.jsx.elements += 1;
+                push_value_ref(acc, from, n, line_at(name), None, "jsx_element");
+            } else {
+                acc.jsx.intrinsic += 1;
+            }
+        }
+        "member_expression" => {
+            acc.jsx.elements += 1;
+            let (Some(object), Some(property)) = (
+                name.child_by_field_name("object"),
+                name.child_by_field_name("property"),
+            ) else {
+                return;
+            };
+            if object.kind() != "identifier" {
+                return;
+            }
+            let (base, member) = (text(object, src), text(property, src));
+            let row = line_at(name);
+            // An uppercase base (`Icons.Plus`) is an LA.30c member read, as
+            // it was before the tag was read: bound there in walk order.
+            if base.starts_with(|c: char| c.is_ascii_uppercase())
+                && acc
+                    .member_ref_seen
+                    .insert((from, base.to_string(), member.to_string()))
+            {
+                acc.member_refs
+                    .push((from, base.to_string(), member.to_string(), row));
+            }
+            match acc
+                .jsx_members
+                .iter_mut()
+                .find(|(f, b, m, _)| *f == from && b == base && m == member)
+            {
+                Some(entry) => entry.3 = entry.3.min(row),
+                None => acc
+                    .jsx_members
+                    .push((from, base.to_string(), member.to_string(), row)),
+            }
+        }
+        _ => acc.jsx.intrinsic += 1,
+    }
+}
+
+/// GD.39: whether `node`'s subtree holds a JSX element, self-closing element
+/// or fragment (a fragment is a `jsx_element` with no tag name).
+fn contains_jsx(node: TsNode) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if matches!(n.kind(), "jsx_element" | "jsx_self_closing_element") {
+            return true;
+        }
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
+    false
+}
+
+/// GD.39: give the top-level FUNCTION `func_id` (the last node minted, by
+/// [`emit_function`] / [`emit_function_value`]) the COMPONENT role when its
+/// name starts uppercase and `func`'s body holds JSX: the parser's reading of
+/// a React function component, a multi-line arrow included. A FUNCTION that
+/// already carries the role (GD.11's `memo(..)` / `forwardRef(..)` wrapper)
+/// gains no second cell.
+fn mark_jsx_component(func: TsNode, name: &str, func_id: NodeId, acc: &mut Acc) {
+    if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return;
+    }
+    if !func.child_by_field_name("body").is_some_and(contains_jsx) {
+        return;
+    }
+    let role = component_role_cell();
+    if let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == func_id)
+        && !node.cells.contains(&role)
+    {
+        node.cells.push(role);
+        acc.jsx.components += 1;
     }
 }
 
@@ -9445,8 +9657,8 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 && let Some(row) = vr
                     .sites
                     .iter()
-                    .filter(|(_, c)| is_inject(c))
-                    .map(|(r, _)| *r)
+                    .filter(|(_, c, _)| is_inject(c))
+                    .map(|(r, _, _)| *r)
                     .min()
             {
                 let in_file = acc
@@ -9480,18 +9692,22 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                     acc.receiver_stats.inject_refs += 1;
                 }
             }
-            let Some(row) = vr
+            // GD.39: the edge's row and rule are the first non-inject
+            // site's (`value_ref`, `jsx_element` or `jsx_attribute`; on one
+            // row, the first recorded).
+            let Some((row, rule)) = vr
                 .sites
                 .iter()
-                .filter(|(_, c)| !is_inject(c))
-                .map(|(r, _)| *r)
-                .min()
+                .filter(|(_, c, _)| !is_inject(c))
+                .map(|(r, _, rule)| (*r, *rule))
+                .min_by_key(|(r, _)| *r)
             else {
                 continue;
             };
             if shadowed {
                 continue;
             }
+            let jsx_element = vr.sites.iter().any(|(_, _, r)| *r == "jsx_element");
             let in_file_target = acc
                 .module_functions
                 .get(&vr.name)
@@ -9504,17 +9720,19 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                     continue;
                 }
                 let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
-                    .rule("value_ref")
+                    .rule(rule)
                     .line(row);
                 out.edges.push(
                     Edge::new(vr.from, to, edge_category::USES, Confidence::Strong)
                         .with_cell(ev.to_cell()),
                 );
                 in_file += 1;
+                acc.jsx.in_file += usize::from(jsx_element);
             } else if named_imports.contains(vr.name.as_str())
                 && let Some(module_id) = acc.module_id
             {
                 imported_value_refs.insert((vr.from, vr.name.clone()));
+                acc.jsx.imported += usize::from(jsx_element);
                 out.refs.push(UnresolvedRef {
                     from: vr.from,
                     from_module: module_id,
@@ -9527,6 +9745,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 && let Some(module_id) = acc.module_id
             {
                 imported_value_refs.insert((vr.from, vr.name.clone()));
+                acc.jsx.imported += usize::from(jsx_element);
                 // GD.11: a default import passed by value names the module's
                 // `default` export: a USES `Attribute { <local>, default }`
                 // ref, which the graph binds through the MODULE to the
@@ -9639,6 +9858,51 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // shape-2 candidates (`axios.get(url)`) can be filtered to only those
     // whose base is a real module-level binding.
     let alias_set = build_alias_set(&out.imports);
+
+    // GD.39: `<Ns.Comp />` binds `Comp` through `Ns`'s import binding (a
+    // namespace import's MODULE, an imported class's static). An uppercase
+    // `Ns` is LA.30c's member read below; a lowercase one (`<icons.Plus />`,
+    // which JSX reads as a component all the same) is a USES `Attribute`
+    // ref here. A local of the scope named `Ns` shadows the import.
+    for (from, base, member, row) in std::mem::take(&mut acc.jsx_members) {
+        let shadowed = out
+            .nav
+            .local_types
+            .get(&from)
+            .is_some_and(|l| l.contains_key(&base))
+            || acc.nested_decls.contains(&(from, base.clone()));
+        if shadowed || !alias_set.contains(base.as_str()) {
+            continue;
+        }
+        let Some(module_id) = acc.module_id else {
+            continue;
+        };
+        acc.jsx.imported += 1;
+        if base.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        out.refs.push(UnresolvedRef {
+            from,
+            from_module: module_id,
+            qualifier: CallQualifier::Attribute { base, name: member },
+            category: edge_category::USES,
+            line: row,
+        });
+    }
+    let jsx = acc.jsx;
+    if jsx.seen || jsx.components > 0 {
+        eprintln!(
+            "[ts-jsx] elements={} (in_file={} imported={} intrinsic={}) attributes={} \
+             components={} file={}",
+            jsx.elements,
+            jsx.in_file,
+            jsx.imported,
+            jsx.intrinsic,
+            jsx.attributes,
+            jsx.components,
+            acc.file_rel
+        );
+    }
 
     // LA.30c: `X.Y` member reads, in walk order. A member of a same-file enum
     // is a USES edge now. An import-bound base with an Upper-initial base AND
@@ -20623,5 +20887,260 @@ export function raw(res: AxiosResponse<UserDto>) {
         assert_eq!(uses, vec![(alias, Some("type_ref".to_string()), Some(15))]);
         // The class's type parameter `T` is no import and no alias: nothing.
         assert!(!type_refs(&p).iter().any(|(from, ..)| *from == local));
+    }
+}
+
+#[cfg(test)]
+mod jsx_tests {
+    //! GD.39: JSX is read. A `<Comp />` tag names the component it renders (a
+    //! USES from the rendering callable, rule `jsx_element` in-file, a USES
+    //! ref through an import), an identifier in a JSX `{..}` expression is a
+    //! value position (rule `jsx_attribute`), an intrinsic tag reads nothing,
+    //! and a capitalised top-level function or arrow whose body renders JSX
+    //! carries the COMPONENT role from the AST.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-jsx")
+    }
+
+    fn f(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    fn parse(src: &str, path: &str) -> FileParse {
+        parse_file(src, path, "src::Btn", repo()).expect("parse")
+    }
+
+    /// Every USES edge from `from`, as `(to qname, rule, 0-based row)`,
+    /// sorted.
+    fn uses(p: &FileParse, from: NodeId) -> Vec<(String, String, u32)> {
+        let mut out: Vec<_> = p
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::USES)
+            .map(|e| {
+                let ev = Evidence::of(e).expect("evidence");
+                (
+                    p.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default(),
+                    ev.rule.unwrap_or_default(),
+                    ev.line.unwrap_or(0),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every USES ref from `from`, as `(qualifier, 0-based row)`, sorted.
+    fn uses_refs(p: &FileParse, from: NodeId) -> Vec<(String, u32)> {
+        let mut out: Vec<_> = p
+            .refs
+            .iter()
+            .filter(|r| r.from == from && r.category == edge_category::USES)
+            .map(|r| {
+                let q = match &r.qualifier {
+                    CallQualifier::Bare(n) => n.clone(),
+                    CallQualifier::Attribute { base, name } => format!("{base}.{name}"),
+                    other => format!("{other:?}"),
+                };
+                (q, r.line)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn has_component_role(p: &FileParse, id: NodeId) -> bool {
+        let role = component_role_cell();
+        p.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .is_some_and(|n| n.cells.iter().filter(|c| **c == role).count() == 1)
+    }
+
+    const BTN: &str = "\
+import { Child } from './Child';
+import Panel from './Panel';
+import * as Icons from './icons';
+import * as icons from './icons';
+
+function handle(event: unknown) {
+  console.log(event);
+}
+
+function div(): string {
+  return 'div';
+}
+
+export function Btn({ rows }: { rows: string[] }) {
+  return (
+    <div className=\"btn\">
+      <Child />
+      <Panel title=\"t\"></Panel>
+      <Icons.Plus size={12} />
+      <icons.Minus />
+      <button onClick={handle} />
+      <List render={Row}>{rows}</List>
+    </div>
+  );
+}
+
+function List({ render }: { render: unknown }) {
+  return <ul>{String(render)}</ul>;
+}
+
+const Row = ({
+  label,
+}: {
+  label: string;
+}) => {
+  return <li>{label}</li>;
+};
+";
+
+    #[test]
+    fn in_file_elements_and_attributes_are_uses() {
+        let p = parse(BTN, "src/Btn.tsx");
+        let btn = f("src::Btn::Btn");
+        assert_eq!(
+            uses(&p, btn),
+            [
+                ("src::Btn::List".to_string(), "jsx_element".to_string(), 21),
+                ("src::Btn::Row".to_string(), "jsx_attribute".to_string(), 21),
+                (
+                    "src::Btn::handle".to_string(),
+                    "jsx_attribute".to_string(),
+                    20
+                ),
+            ],
+            "an intrinsic `<div>` / `<button>` never binds the function `div`, \
+             and a local (`rows`) binds nothing"
+        );
+    }
+
+    #[test]
+    fn imported_elements_are_refs() {
+        let p = parse(BTN, "src/Btn.tsx");
+        let btn = f("src::Btn::Btn");
+        assert_eq!(
+            uses_refs(&p, btn),
+            [
+                ("Child".to_string(), 16),
+                ("Icons.Plus".to_string(), 18),
+                ("Panel.default".to_string(), 17),
+                ("icons.Minus".to_string(), 19),
+            ],
+            "named import Bare, default import through `default` (GD.11), \
+             namespace members as Attribute refs; one ref per tag, the closing \
+             `</Panel>` adds none"
+        );
+    }
+
+    #[test]
+    fn component_role_from_the_ast() {
+        let p = parse(BTN, "src/Btn.tsx");
+        for q in ["src::Btn::Btn", "src::Btn::List", "src::Btn::Row"] {
+            assert!(has_component_role(&p, f(q)), "{q} renders JSX");
+        }
+        for q in ["src::Btn::handle", "src::Btn::div"] {
+            assert!(!has_component_role(&p, f(q)), "{q} is no component");
+        }
+        assert!(
+            p.nodes
+                .iter()
+                .all(|n| p.nav.kind_by_id.get(&n.id) != Some(&node_kind::COMPONENT)),
+            "the role is a cell on the FUNCTION, never a marker node"
+        );
+    }
+
+    #[test]
+    fn lowercase_function_rendering_jsx_is_no_component() {
+        let p = parse(
+            "function helper() { return <div />; }\nexport const row = () => <li />;\n",
+            "src/h.tsx",
+        );
+        assert!(!has_component_role(&p, f("src::Btn::helper")));
+        assert!(!has_component_role(&p, f("src::Btn::row")));
+    }
+
+    #[test]
+    fn capitalised_function_without_jsx_is_no_component() {
+        let p = parse(
+            "export function Config() { return { a: 1 }; }\n",
+            "src/c.tsx",
+        );
+        assert!(!has_component_role(&p, f("src::Btn::Config")));
+    }
+
+    #[test]
+    fn memo_wrapper_keeps_one_role_cell() {
+        let p = parse(
+            "import { memo } from 'react';\n\
+             export const Card = memo(() => <div />);\n",
+            "src/Card.tsx",
+        );
+        assert!(has_component_role(&p, f("src::Btn::Card")));
+    }
+
+    #[test]
+    fn this_tags_and_shadowing_locals_read_nothing() {
+        let src = "\
+import { Child } from './Child';
+export class View {
+  Comp = Child;
+  render() {
+    return <this.Comp />;
+  }
+}
+export function Pick({ on }: { on: boolean }) {
+  const Child = on ? 'a' : 'b';
+  return <Child />;
+}
+";
+        let p = parse(src, "src/View.tsx");
+        let render = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::Btn::View::render",
+        );
+        assert!(uses(&p, render).is_empty(), "{:?}", uses(&p, render));
+        assert!(uses_refs(&p, render).is_empty());
+        assert!(
+            uses_refs(&p, f("src::Btn::Pick")).is_empty(),
+            "a local `Child` shadows the import"
+        );
+    }
+
+    #[test]
+    fn module_level_render_is_the_modules() {
+        let src = "\
+import { App } from './App';
+import { createRoot } from 'react-dom/client';
+createRoot(document.body).render(<App />);
+";
+        let p = parse(src, "src/main.tsx");
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Btn");
+        assert_eq!(uses_refs(&p, module), [("App".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_ts_file_holds_no_jsx() {
+        // Under the TypeScript grammar `<T>x` is an assertion, never a tag.
+        let p = parse(
+            "import { Foo } from './foo';\nexport function Get(x: unknown) { return <Foo>x; }\n",
+            "src/g.ts",
+        );
+        // (GD.27 reads the assertion's type name as a type reference.)
+        assert!(
+            uses_refs(&p, f("src::Btn::Get"))
+                .iter()
+                .all(|(q, _)| q != "Foo"),
+            "{:?}",
+            uses_refs(&p, f("src::Btn::Get"))
+        );
+        assert!(!has_component_role(&p, f("src::Btn::Get")));
     }
 }

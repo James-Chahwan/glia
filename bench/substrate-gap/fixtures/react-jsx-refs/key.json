@@ -1,0 +1,79 @@
+{
+  "framework": "react-jsx-refs",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.39: JSX is read. src/Btn.tsx renders an imported component (`<Child />`), a namespace-imported one (`<Icons.Plus />` through `import * as Icons`) and an in-file one (`<List />`), and passes an in-file handler (`onClick={handle}`) and an imported component (`render={Row}`) as attribute expressions: each is a USES from the component that renders it. A lowercase tag (`<div>`) is an intrinsic element and binds nothing, not even the in-file function `div`. src/Row.tsx is a multi-line arrow component (`export const Row = ({` .. `}) => {`), which the retired react.rs line scan never gave a ROLE: its COMPONENT role now comes from the AST. Deliberately legacy-only (no `cells`): JSX reading has no column in the 30-mechanism vocabulary. Baseline at HEAD c2b02f6e (debug CLI on a copy; the leap wheel predates GD.39): USES Btn->Child, Btn->List, Btn->handle and Btn->Row all miss (no direct edge), ROLE COMPONENT on Row misses; USES Btn->Plus already binds (LA.30c's member read of an uppercase namespace base, graph:refs rule attribute) and Btn's ROLE comes from the retired line scan, both kept as guards; both forbid rows clean.",
+  "expect_nodes": [
+    {
+      "kind": "FUNCTION",
+      "name": "src::Row::Row",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::Child::Child",
+      "category": "USES",
+      "exact": true,
+      "note": "<Child /> through a named import"
+    },
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::icons::Plus",
+      "category": "USES",
+      "exact": true,
+      "note": "<Icons.Plus /> through a namespace import"
+    },
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::Btn::List",
+      "category": "USES",
+      "exact": true,
+      "note": "<List /> declared in the same file"
+    },
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::Btn::handle",
+      "category": "USES",
+      "exact": true,
+      "note": "onClick={handle}: an attribute expression"
+    },
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::Row::Row",
+      "category": "USES",
+      "exact": true,
+      "note": "render={Row}: an imported component passed as an attribute"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "src::Row::Row",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "src::Btn::Btn",
+      "cell": "ROLE",
+      "contains": "COMPONENT"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::Btn::Btn",
+      "to": "src::Btn::div",
+      "category": "USES",
+      "note": "<div> is an intrinsic element"
+    },
+    {
+      "kind": "COMPONENT",
+      "name": "src::Row::Row",
+      "note": "the role is a ROLE cell on the FUNCTION, never a standalone marker"
+    }
+  ]
+}

@@ -1,8 +1,15 @@
-//! React component + hook extraction.
+//! React hook extraction.
 //!
-//! Runs per-file for TS/TSX/JS/JSX under React-detected projects. Emits:
-//!   - COMPONENT nodes: capitalized function/const declarations returning JSX.
-//!   - HOOK nodes: functions whose name starts with `use` (camelCase).
+//! Runs per-file for TS/TSX/JS/JSX sources. Emits HOOK nodes: functions whose
+//! name starts with `use` (camelCase), folded into their FUNCTION by the
+//! graph's role fold (LB.3a).
+//!
+//! GD.39: components are the TypeScript parser's. It reads the JSX a
+//! capitalised top-level function or arrow renders from the AST and gives the
+//! FUNCTION the COMPONENT role itself (`glia_parser_typescript`), a multi-line
+//! arrow included, so the line scan that minted a COMPONENT marker here (it
+//! needed `=>` on the declaration's first line) is retired: every caller of
+//! [`extract_react_nodes`] is a TypeScript-family file.
 //!
 //! React Router tables (`<Route path>` trees and `createBrowserRouter([...])`)
 //! are the shared route-table walker's (`crate::nav_routes`, LA.6b), which
@@ -55,19 +62,6 @@ pub fn extract_react_nodes(
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
 
-    // --- Components: capitalized function/const whose body has JSX-ish marker.
-    for name in scan_component_names(source) {
-        let qname = format!("{module_qname}::{name}");
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::COMPONENT, &qname);
-        nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Medium,
-            cells: Vec::new(),
-        });
-        nav.record(id, &name, &qname, node_kind::COMPONENT, Some(module_id));
-    }
-
     // --- Hooks: `use<Xxx>` function / const arrow declarations.
     for name in scan_hook_names(source) {
         let qname = format!("{module_qname}::{name}");
@@ -82,51 +76,6 @@ pub fn extract_react_nodes(
     }
 
     ReactNodes { nodes, nav }
-}
-
-fn scan_component_names(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let has_jsx = source.contains("</") || source.contains("/>");
-    if !has_jsx {
-        return out;
-    }
-    for line in source.lines() {
-        let t = line.trim_start();
-        // function Foo(
-        if let Some(rest) = t.strip_prefix("export default function ") {
-            if let Some(name) = take_ident(rest)
-                && is_capitalized(&name)
-            {
-                out.push(name);
-            }
-        } else if let Some(rest) = t.strip_prefix("export function ") {
-            if let Some(name) = take_ident(rest)
-                && is_capitalized(&name)
-            {
-                out.push(name);
-            }
-        } else if let Some(rest) = t.strip_prefix("function ") {
-            if let Some(name) = take_ident(rest)
-                && is_capitalized(&name)
-            {
-                out.push(name);
-            }
-        } else if let Some(rest) = t.strip_prefix("export const ") {
-            if let Some(name) = take_ident(rest)
-                && is_capitalized(&name)
-                && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
-            {
-                out.push(name);
-            }
-        } else if let Some(rest) = t.strip_prefix("const ")
-            && let Some(name) = take_ident(rest)
-            && is_capitalized(&name)
-            && (line.contains("=>") || line.contains("React.FC") || line.contains(": FC"))
-        {
-            out.push(name);
-        }
-    }
-    dedup(out)
 }
 
 fn scan_hook_names(source: &str) -> Vec<String> {
@@ -168,10 +117,6 @@ fn take_ident(s: &str) -> Option<String> {
     }
 }
 
-fn is_capitalized(s: &str) -> bool {
-    s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
 fn is_hook_name(s: &str) -> bool {
     if !s.starts_with("use") || s.len() < 4 {
         return false;
@@ -197,29 +142,37 @@ mod tests {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "test")
     }
 
+    /// GD.39: the line scan mints no COMPONENT marker any more, a
+    /// single-line arrow or a function declaration rendering JSX included:
+    /// the TypeScript parser gives the FUNCTION its role from the AST.
     #[test]
-    fn detects_function_component() {
-        let src = r#"
-export function UserCard({ user }: Props) {
-    return <div>{user.name}</div>;
-}
-"#;
-        let r = extract_react_nodes(src, "test", module_id(), repo());
-        let comps: Vec<_> = r
-            .nav
-            .kind_by_id
-            .iter()
-            .filter(|(_, k)| **k == node_kind::COMPONENT)
-            .filter_map(|(id, _)| r.nav.name_by_id.get(id))
-            .collect();
-        assert!(comps.iter().any(|n| n.as_str() == "UserCard"));
+    fn no_component_marker() {
+        for src in [
+            "export function UserCard({ user }: Props) {\n    return <div>{user.name}</div>;\n}\n",
+            "export const Button = ({ label }) => (<button>{label}</button>);",
+            "const Card = memo(() => <div />);",
+        ] {
+            let r = extract_react_nodes(src, "test", module_id(), repo());
+            assert!(r.nodes.is_empty(), "{src}");
+            assert!(
+                r.nav
+                    .kind_by_id
+                    .values()
+                    .all(|k| *k != node_kind::COMPONENT),
+                "{src}"
+            );
+        }
     }
 
+    /// GD.39: a hook is still a HOOK, beside a component in the same file.
     #[test]
-    fn detects_arrow_component() {
-        let src = "export const Button = ({ label }) => (<button>{label}</button>);";
+    fn hook_beside_a_component() {
+        let src = "export const useTheme = () => useContext(Theme);\n\
+                   export const Panel = () => <div>{useTheme().bg}</div>;\n";
         let r = extract_react_nodes(src, "test", module_id(), repo());
-        assert!(r.nav.name_by_id.values().any(|n| n == "Button"));
+        let kinds: Vec<_> = r.nav.kind_by_id.values().copied().collect();
+        assert_eq!(kinds, [node_kind::HOOK]);
+        assert!(r.nav.name_by_id.values().any(|n| n == "useTheme"));
     }
 
     #[test]
@@ -359,16 +312,5 @@ createBrowserRouter([
             .collect();
         out.sort_unstable();
         out
-    }
-
-    #[test]
-    fn lowercase_function_not_component() {
-        let src = "function helper() { return <div />; }";
-        let r = extract_react_nodes(src, "test", module_id(), repo());
-        assert!(
-            r.nodes
-                .iter()
-                .all(|n| { r.nav.kind_by_id.get(&n.id) != Some(&node_kind::COMPONENT) })
-        );
     }
 }
