@@ -2,20 +2,21 @@
 //! passes they all run.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, NavFact,
     UnresolvedRef, bare_module_qname, edge_category, node_kind,
 };
-use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
+    EvidenceTally, FrontTimes, HookCounts, InheritStats, SiteFiles, emit_method_level_implements,
     emit_method_level_implements_for, emit_method_level_implements_with, emit_override_implements,
-    enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge, resolve_calls,
-    resolve_calls_for, resolve_calls_pooled, resolve_inherited_calls, resolve_refs,
+    enclosing_class_or_struct, enclosing_module, graph_evidence, installed_pool, push_edge,
+    resolve_calls, resolve_calls_for, resolve_calls_pooled, resolve_inherited_calls, resolve_refs,
     unique_global_types,
 };
 pub use crate::calls::{ResolvePool, with_resolve_pool};
@@ -754,12 +755,13 @@ fn build_ts_like<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (mut g, mut body, stmts) = ts_surface(repo, parses, &resolve_source);
+    let (mut g, mut body, stmts, front) = ts_surface_timed(repo, parses, &resolve_source);
     let mounts = route_mounts::bind_ts_mounts(&mut g, &mut body.refs, &stmts, &resolve_source);
     if let Some(line) = mounts.marker() {
         eprintln!("{line}");
     }
     let mut tally = EvidenceTally::default();
+    tally.note_front(front);
     let mut inh = InheritStats::default();
     ts_stitch(&mut g, &body, inherit.then_some(&mut inh), None, &mut tally);
     if inherit {
@@ -785,7 +787,36 @@ struct TsBody {
 /// among them, and the IMPORTS edges), with their markers. What it builds is
 /// the group's surface index, which [`ts_stitch`] reads and never writes.
 /// GD.42: and the import statements, which a route mount of an imported name
-/// reads.
+/// reads. GP.2: and the front's wall times for the `[resolve-pool]` line;
+/// the merge's folds and the imports' decide step run on the installed
+/// pool (the resolver itself is asked on this thread: it need not be
+/// `Sync`).
+fn ts_surface_timed<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: &R,
+) -> (RepoGraph, TsBody, Vec<ImportStmt>, FrontTimes)
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let started = Instant::now();
+    let (mut g, all_imports, calls, refs) = merge_parses(repo, parses);
+    let merge_ms = started.elapsed().as_secs_f64() * 1000.0;
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    let started = Instant::now();
+    resolve_imports_ts(&mut g, &all_imports, resolve_source, &mut same);
+    let imports_ms = started.elapsed().as_secs_f64() * 1000.0;
+    same.report();
+    let front = FrontTimes {
+        imports_ms,
+        merge_ms,
+    };
+    (g, TsBody { calls, refs }, all_imports, front)
+}
+
+/// [`ts_surface_timed`] without the times (the route-mount tests).
+#[cfg(test)]
 fn ts_surface<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -794,12 +825,8 @@ fn ts_surface<R>(
 where
     R: Fn(&str, &str) -> Option<String>,
 {
-    let (mut g, all_imports, calls, refs) = merge_parses(repo, parses);
-    build_symbol_table(&mut g);
-    let mut same = same_stem_table(&g);
-    resolve_imports_ts(&mut g, &all_imports, resolve_source, &mut same);
-    same.report();
-    (g, TsBody { calls, refs }, all_imports)
+    let (g, body, stmts, _) = ts_surface_timed(repo, parses, resolve_source);
+    (g, body, stmts)
 }
 
 /// GA.6: the STITCH phase of [`build_ts_like`]: resolve `body`'s calls (the
@@ -1244,46 +1271,38 @@ fn merge_parses_with(
     Vec<CallSite>,
     Vec<UnresolvedRef>,
 ) {
+    // CB.15: a PACKAGE several files open is one node under its first file
+    // ([`fold_parents`]), so each member records the file that declared it, read
+    // from its own parse (in file order, first entry wins) before the nav
+    // merges.
+    let shared = shared_packages(&parses);
+    let mut symbols = SymbolTable::default();
+    if !shared.is_empty() {
+        for p in &parses {
+            record_home_modules(&p.nav, &shared, &mut symbols.home_module);
+        }
+    }
+    // GP.2: the per-map folds, on the installed pool when there is one.
+    let pool = installed_pool();
+    let MergedParts {
+        nodes,
+        edges,
+        nav,
+        imports: all_imports,
+        calls: mut all_calls,
+        refs: mut all_refs,
+        properties,
+    } = merge_files(parses, pool.as_deref());
     let mut g = RepoGraph {
         repo,
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        nav: CodeNav::default(),
-        symbols: SymbolTable::default(),
+        nodes,
+        edges,
+        nav,
+        symbols,
         unresolved_calls: Vec::new(),
         unresolved_refs: Vec::new(),
-        properties: HashSet::new(),
+        properties,
     };
-
-    let mut all_imports: Vec<ImportStmt> = Vec::new();
-    let mut all_calls: Vec<CallSite> = Vec::new();
-    let mut all_refs: Vec<UnresolvedRef> = Vec::new();
-    let mut index: HashMap<NodeId, usize> = HashMap::new();
-
-    // CB.15: a PACKAGE several files open is one node under its first file
-    // (merge_nav), so each member records the file that declared it, read
-    // from its own parse before the nav merges.
-    let shared = shared_packages(&parses);
-    for p in parses {
-        if !shared.is_empty() {
-            record_home_modules(&p.nav, &shared, &mut g.symbols.home_module);
-        }
-        for n in p.nodes {
-            if let Some(&idx) = index.get(&n.id) {
-                // Duplicate NodeId — append cells onto the existing node.
-                append_cells(&mut g.nodes[idx].cells, n.cells);
-            } else {
-                index.insert(n.id, g.nodes.len());
-                g.nodes.push(n);
-            }
-        }
-        g.edges.extend(p.edges);
-        merge_nav(&mut g.nav, p.nav);
-        all_imports.extend(p.imports);
-        all_calls.extend(p.calls);
-        all_refs.extend(p.refs);
-        g.properties.extend(p.properties);
-    }
     if report && !shared.is_empty() {
         eprintln!(
             "[home-module] shared packages={} members={}",
@@ -1302,6 +1321,316 @@ fn merge_parses_with(
     }
 
     (g, all_imports, all_calls, all_refs)
+}
+
+/// GP.2: what [`merge_files`] folds the parses into.
+struct MergedParts {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    nav: CodeNav,
+    imports: Vec<ImportStmt>,
+    calls: Vec<CallSite>,
+    refs: Vec<UnresolvedRef>,
+    properties: HashSet<NodeId>,
+}
+
+/// GP.2: one fold's input, taken by the job that folds it.
+type Input<T> = Mutex<Option<Vec<T>>>;
+
+/// GP.2: take a fold's input (a poisoned lock still yields it).
+fn take_input<T>(input: &Input<T>) -> Option<Vec<T>> {
+    match input.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
+/// GP.2: the number of independent folds [`merge_files`] runs.
+const MERGE_FOLDS: usize = 16;
+
+/// GP.2: fold `parses` (in input order) into one graph's nodes, edges, nav,
+/// statements and properties: exactly what the sequential per-file loop of
+/// [`merge_parses`] built (a duplicate NodeId's cells appended to its first
+/// record, the nav maps' per-map rules below, every list in file order). Each
+/// destination is its own fold over the files in input order, and the folds
+/// read nothing another writes (the PACKAGE-aware `parent_of` fold reads the
+/// per-file `kind_by_id` maps, never the merged one), so they run as
+/// [`MERGE_FOLDS`] jobs on `pool` when one is installed and there is more
+/// than one file, else one after another on this thread. Graph content never
+/// depends on which.
+fn merge_files(parses: Vec<FileParse>, pool: Option<&dyn ResolvePool>) -> MergedParts {
+    let n = parses.len();
+    let mut nodes = Vec::with_capacity(n);
+    let mut edges = Vec::with_capacity(n);
+    let mut imports = Vec::with_capacity(n);
+    let mut calls = Vec::with_capacity(n);
+    let mut refs = Vec::with_capacity(n);
+    let mut properties = Vec::with_capacity(n);
+    let mut names = Vec::with_capacity(n);
+    let mut qnames = Vec::with_capacity(n);
+    let mut kinds = Vec::with_capacity(n);
+    let mut parents = Vec::with_capacity(n);
+    let mut children = Vec::with_capacity(n);
+    let mut fields = Vec::with_capacity(n);
+    let mut locals = Vec::with_capacity(n);
+    let mut facts = Vec::with_capacity(n);
+    let mut returns = Vec::with_capacity(n);
+    let mut sigs = Vec::with_capacity(n);
+    for p in parses {
+        let CodeNav {
+            name_by_id,
+            qname_by_id,
+            kind_by_id,
+            parent_of,
+            children_of,
+            field_types,
+            local_types,
+            nav_facts,
+            return_types,
+            method_sigs,
+        } = p.nav;
+        nodes.push(p.nodes);
+        edges.push(p.edges);
+        imports.push(p.imports);
+        calls.push(p.calls);
+        refs.push(p.refs);
+        properties.push(p.properties);
+        names.push(name_by_id);
+        qnames.push(qname_by_id);
+        kinds.push(kind_by_id);
+        parents.push(parent_of);
+        children.push(children_of);
+        fields.push(field_types);
+        locals.push(local_types);
+        facts.push(nav_facts);
+        returns.push(return_types);
+        sigs.push(method_sigs);
+    }
+    let (nodes, edges, imports, calls, refs, properties) = (
+        Mutex::new(Some(nodes)),
+        Mutex::new(Some(edges)),
+        Mutex::new(Some(imports)),
+        Mutex::new(Some(calls)),
+        Mutex::new(Some(refs)),
+        Mutex::new(Some(properties)),
+    );
+    let (names, qnames, parents, children) = (
+        Mutex::new(Some(names)),
+        Mutex::new(Some(qnames)),
+        Mutex::new(Some(parents)),
+        Mutex::new(Some(children)),
+    );
+    let (fields, locals, facts, returns, sigs) = (
+        Mutex::new(Some(fields)),
+        Mutex::new(Some(locals)),
+        Mutex::new(Some(facts)),
+        Mutex::new(Some(returns)),
+        Mutex::new(Some(sigs)),
+    );
+    let out = MergeOut::default();
+    let job = |i: usize| match i {
+        0 => fold_into(&out.nodes, &nodes, fold_nodes),
+        1 => fold_into(&out.edges, &edges, concat),
+        2 => fold_into(&out.imports, &imports, concat),
+        3 => fold_into(&out.calls, &calls, concat),
+        4 => fold_into(&out.refs, &refs, concat),
+        5 => fold_into(&out.properties, &properties, |parts| {
+            let mut all = HashSet::with_capacity(parts.iter().map(HashSet::len).sum());
+            parts.into_iter().for_each(|p| all.extend(p));
+            all
+        }),
+        6 => fold_into(&out.names, &names, fold_last),
+        7 => fold_into(&out.qnames, &qnames, fold_last),
+        8 => {
+            if out.kinds.get().is_none() {
+                let mut all = HashMap::with_capacity(kinds.iter().map(HashMap::len).sum());
+                kinds
+                    .iter()
+                    .for_each(|k| all.extend(k.iter().map(|(a, b)| (*a, *b))));
+                let _ = out.kinds.set(all);
+            }
+        }
+        9 => fold_into(&out.parents, &parents, |parts| fold_parents(parts, &kinds)),
+        10 => fold_into(&out.children, &children, |parts| {
+            let mut all: HashMap<NodeId, Vec<NodeId>> =
+                HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+            for (k, v) in parts.into_iter().flatten() {
+                all.entry(k).or_default().extend(v);
+            }
+            all
+        }),
+        11 => fold_into(&out.fields, &fields, fold_nested),
+        12 => fold_into(&out.locals, &locals, fold_nested),
+        13 => fold_into(&out.facts, &facts, |parts| {
+            let mut all: HashMap<NodeId, Vec<NavFact>> =
+                HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+            for (scope, list) in parts.into_iter().flatten() {
+                append_facts(all.entry(scope).or_default(), list);
+            }
+            all
+        }),
+        14 => fold_into(&out.returns, &returns, fold_first),
+        _ => fold_into(&out.sigs, &sigs, fold_first),
+    };
+    if let Some(pool) = pool.filter(|_| n > 1) {
+        pool.run(MERGE_FOLDS, &job);
+    }
+    // Every fold the pool did not run (all of them, with no pool) runs here;
+    // a fold already done is skipped.
+    (0..MERGE_FOLDS).for_each(job);
+    out.finish()
+}
+
+/// GP.2: [`merge_files`]' outputs, each set once by its fold.
+#[derive(Default)]
+struct MergeOut {
+    nodes: OnceLock<Vec<Node>>,
+    edges: OnceLock<Vec<Edge>>,
+    imports: OnceLock<Vec<ImportStmt>>,
+    calls: OnceLock<Vec<CallSite>>,
+    refs: OnceLock<Vec<UnresolvedRef>>,
+    properties: OnceLock<HashSet<NodeId>>,
+    names: OnceLock<HashMap<NodeId, String>>,
+    qnames: OnceLock<HashMap<NodeId, String>>,
+    kinds: OnceLock<HashMap<NodeId, NodeKindId>>,
+    parents: OnceLock<HashMap<NodeId, NodeId>>,
+    children: OnceLock<HashMap<NodeId, Vec<NodeId>>>,
+    fields: OnceLock<HashMap<NodeId, HashMap<String, String>>>,
+    locals: OnceLock<HashMap<NodeId, HashMap<String, String>>>,
+    facts: OnceLock<HashMap<NodeId, Vec<NavFact>>>,
+    returns: OnceLock<HashMap<NodeId, String>>,
+    sigs: OnceLock<HashMap<NodeId, String>>,
+}
+
+impl MergeOut {
+    /// The folded parts (a fold that never ran, impossible after
+    /// [`merge_files`]' last loop, would read empty).
+    fn finish(self) -> MergedParts {
+        MergedParts {
+            nodes: self.nodes.into_inner().unwrap_or_default(),
+            edges: self.edges.into_inner().unwrap_or_default(),
+            nav: CodeNav {
+                name_by_id: self.names.into_inner().unwrap_or_default(),
+                qname_by_id: self.qnames.into_inner().unwrap_or_default(),
+                kind_by_id: self.kinds.into_inner().unwrap_or_default(),
+                parent_of: self.parents.into_inner().unwrap_or_default(),
+                children_of: self.children.into_inner().unwrap_or_default(),
+                field_types: self.fields.into_inner().unwrap_or_default(),
+                local_types: self.locals.into_inner().unwrap_or_default(),
+                nav_facts: self.facts.into_inner().unwrap_or_default(),
+                return_types: self.returns.into_inner().unwrap_or_default(),
+                method_sigs: self.sigs.into_inner().unwrap_or_default(),
+            },
+            imports: self.imports.into_inner().unwrap_or_default(),
+            calls: self.calls.into_inner().unwrap_or_default(),
+            refs: self.refs.into_inner().unwrap_or_default(),
+            properties: self.properties.into_inner().unwrap_or_default(),
+        }
+    }
+}
+
+/// GP.2: run one fold of [`merge_files`] unless its output is already set:
+/// take its input and store `fold`'s answer.
+fn fold_into<T, U>(out: &OnceLock<U>, input: &Input<T>, fold: impl FnOnce(Vec<T>) -> U) {
+    if out.get().is_some() {
+        return;
+    }
+    if let Some(parts) = take_input(input) {
+        let _ = out.set(fold(parts));
+    }
+}
+
+/// GP.2: the per-file lists, one after another.
+fn concat<T>(parts: Vec<Vec<T>>) -> Vec<T> {
+    let mut all = Vec::with_capacity(parts.iter().map(Vec::len).sum());
+    parts.into_iter().for_each(|p| all.extend(p));
+    all
+}
+
+/// GP.2: the nodes in file order, a duplicate NodeId's cells appended onto
+/// its first record (TS re-exports, Go files of one package qname).
+fn fold_nodes(parts: Vec<Vec<Node>>) -> Vec<Node> {
+    let total = parts.iter().map(Vec::len).sum();
+    let mut nodes: Vec<Node> = Vec::with_capacity(total);
+    let mut index: HashMap<NodeId, usize> = HashMap::with_capacity(total);
+    for n in parts.into_iter().flatten() {
+        match index.get(&n.id) {
+            Some(&idx) => {
+                if let Some(first) = nodes.get_mut(idx) {
+                    append_cells(&mut first.cells, n.cells);
+                }
+            }
+            None => {
+                index.insert(n.id, nodes.len());
+                nodes.push(n);
+            }
+        }
+    }
+    nodes
+}
+
+/// GP.2: a per-file map folded last-wins (`name_by_id`, `qname_by_id`).
+fn fold_last<V>(parts: Vec<HashMap<NodeId, V>>) -> HashMap<NodeId, V> {
+    let mut all = HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    parts.into_iter().for_each(|p| all.extend(p));
+    all
+}
+
+/// GP.2: a per-file map folded first-wins (CA.2a return types, CA.3a
+/// method signatures: a callable two parses share keeps the first parse's,
+/// as `rename_nodes` keeps the surviving id's).
+fn fold_first<V>(parts: Vec<HashMap<NodeId, V>>) -> HashMap<NodeId, V> {
+    let mut all = HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    for (k, v) in parts.into_iter().flatten() {
+        all.entry(k).or_insert(v);
+    }
+    all
+}
+
+/// GP.2: a per-owner map merged per owner, later files' entries last-wins
+/// (A6.2a field types: a partial class split across files keeps every
+/// file's declared fields; LA.35a local types, per scope).
+fn fold_nested(
+    parts: Vec<HashMap<NodeId, HashMap<String, String>>>,
+) -> HashMap<NodeId, HashMap<String, String>> {
+    let mut all: HashMap<NodeId, HashMap<String, String>> =
+        HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    for (owner, inner) in parts.into_iter().flatten() {
+        all.entry(owner).or_default().extend(inner);
+    }
+    all
+}
+
+/// GP.2: `parent_of` folded last-wins, except that a node whose kind is
+/// PACKAGE once this file's kinds are merged keeps its first parent (CB.15:
+/// a PACKAGE several files open, C# `namespace`, braced PHP `namespace { }`,
+/// keeps its FIRST file as nav parent, the file its first POSITION cell
+/// names; `children_of` still lists it under every file). `kinds` are the per-file `kind_by_id` maps, in
+/// the same file order: the running PACKAGE set is the merged map's answer
+/// at that file.
+fn fold_parents(
+    parts: Vec<HashMap<NodeId, NodeId>>,
+    kinds: &[HashMap<NodeId, NodeKindId>],
+) -> HashMap<NodeId, NodeId> {
+    let mut all = HashMap::with_capacity(parts.iter().map(HashMap::len).sum());
+    let mut packages: HashSet<NodeId> = HashSet::new();
+    for (src, kind) in parts.into_iter().zip(kinds) {
+        for (id, k) in kind {
+            if *k == node_kind::PACKAGE {
+                packages.insert(*id);
+            } else if !packages.is_empty() {
+                packages.remove(id);
+            }
+        }
+        for (k, v) in src {
+            if packages.contains(&k) {
+                all.entry(k).or_insert(v);
+            } else {
+                all.insert(k, v);
+            }
+        }
+    }
+    all
 }
 
 fn append_cells(existing: &mut Vec<Cell>, incoming: Vec<Cell>) {
@@ -1373,52 +1702,6 @@ fn declaring_module(nav: &CodeNav, id: NodeId, shared: &HashSet<NodeId>) -> Opti
 // ============================================================================
 // Nav merge
 // ============================================================================
-
-fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
-    dst.name_by_id.extend(src.name_by_id);
-    dst.qname_by_id.extend(src.qname_by_id);
-    dst.kind_by_id.extend(src.kind_by_id);
-    // CB.15: a PACKAGE several files open (C# `namespace`, braced PHP
-    // `namespace { }`) keeps its FIRST file as nav parent, the file its first
-    // POSITION cell names (append_cells keeps that one first); every other
-    // record is last-wins. `children_of` still lists it under every file.
-    for (k, v) in src.parent_of {
-        if dst.kind_by_id.get(&k) == Some(&node_kind::PACKAGE) {
-            dst.parent_of.entry(k).or_insert(v);
-        } else {
-            dst.parent_of.insert(k, v);
-        }
-    }
-    for (k, v) in src.children_of {
-        dst.children_of.entry(k).or_default().extend(v);
-    }
-    // A6.2a: per-owner merge, so a partial class split across files keeps
-    // every file's declared fields.
-    for (owner, fields) in src.field_types {
-        dst.field_types.entry(owner).or_default().extend(fields);
-    }
-    // LA.35a: per-scope merge. A scope is one fn body, so it comes from one
-    // file; `extend` only matters for a fn id two parses share.
-    for (scope, locals) in src.local_types {
-        dst.local_types.entry(scope).or_default().extend(locals);
-    }
-    // CB.6: per-scope merge in parser order. A scope comes from one file, so
-    // its list moves whole; a fact already recorded for a scope two parses
-    // share is kept once, as `CodeNav::record_fact` keeps it within a parse.
-    for (scope, facts) in src.nav_facts {
-        append_facts(dst.nav_facts.entry(scope).or_default(), facts);
-    }
-    // CA.2a: one result type per callable; a callable two parses share keeps
-    // the first parse's, as `rename_nodes` keeps the surviving id's.
-    for (f, ty) in src.return_types {
-        dst.return_types.entry(f).or_insert(ty);
-    }
-    // CA.3a: one signature per METHOD; a METHOD two parses share keeps the
-    // first parse's, as `rename_nodes` keeps the surviving id's.
-    for (m, sig) in src.method_sigs {
-        dst.method_sigs.entry(m).or_insert(sig);
-    }
-}
 
 /// Append `facts` to a scope's list, dropping one already on it (CB.6).
 fn append_facts(list: &mut Vec<NavFact>, facts: Vec<NavFact>) {

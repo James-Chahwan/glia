@@ -2,15 +2,19 @@
 //! TypeScript), all of them writing IMPORTS edges and module import bindings.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 use glia_code_domain::{
     ImportStmt, ImportTarget, bare_module_qname, edge_category, evidence, node_kind,
     same_stem_order,
 };
-use glia_core::{NodeId, NodeKindId};
+use glia_core::{Confidence, Edge, NodeId, NodeKindId};
 
 use crate::build::{DirImport, GoPackages};
-use crate::calls::{graph_evidence, push_edge, unique_global_function, unique_global_module};
+use crate::calls::{
+    chunk_ranges, graph_evidence, installed_pool, run_chunks, unique_global_function,
+    unique_global_module,
+};
 use crate::types::RepoGraph;
 
 /// DT.1q: TS / JS re-export barrels (a child module, so [`ts_target`],
@@ -38,8 +42,9 @@ pub(crate) struct SameStem {
     by_bare: BTreeMap<String, Vec<(String, NodeId)>>,
     /// Every MODULE's own file extension, from its POSITION. Read the first
     /// time a pick needs an importer's, so a graph whose imports all bind
-    /// exactly (C/C++ includes name the file) never reads one.
-    module_ext: Option<HashMap<NodeId, String>>,
+    /// exactly (C/C++ includes name the file) never reads one. GP.2: a
+    /// `OnceLock`, so the pooled TS decide step reads it through `&self`.
+    module_ext: OnceLock<HashMap<NodeId, String>>,
     stats: SameStemStats,
 }
 
@@ -150,27 +155,57 @@ impl SameStem {
         explicit_ext: Option<&str>,
         importer: NodeId,
     ) -> SamePick {
+        let mut stats = self.stats;
+        let pick = self.pick_counted(g, bare, explicit_ext, importer, &mut stats);
+        self.stats = stats;
+        pick
+    }
+
+    /// GP.2: [`Self::pick`] through `&self`, its counts added to `stats`
+    /// (the pooled TS decide step counts per chunk and sums the chunks).
+    fn pick_counted(
+        &self,
+        g: &RepoGraph,
+        bare: &str,
+        explicit_ext: Option<&str>,
+        importer: NodeId,
+        stats: &mut SameStemStats,
+    ) -> SamePick {
         let Some(siblings) = self.by_bare.get(bare) else {
             return SamePick::NotAStem;
         };
         if let Some(ext) = explicit_ext
             && let Some((_, id)) = siblings.iter().find(|(e, _)| e == ext)
         {
-            self.stats.explicit += 1;
+            stats.explicit += 1;
             return SamePick::Bound(*id);
         }
-        let exts = self.module_ext.get_or_insert_with(|| module_exts(g));
-        let order = exts.get(&importer).map_or(&[][..], |e| same_stem_order(e));
+        let order = self
+            .exts(g)
+            .get(&importer)
+            .map_or(&[][..], |e| same_stem_order(e));
         let hit = order
             .iter()
             .find_map(|want| siblings.iter().find(|(e, _)| e == want).map(|(_, id)| *id));
         match hit {
             Some(id) => {
-                self.stats.importer += 1;
+                stats.importer += 1;
                 SamePick::Bound(id)
             }
             None => SamePick::Refused,
         }
+    }
+
+    /// Every MODULE's file extension, read on the first call.
+    fn exts(&self, g: &RepoGraph) -> &HashMap<NodeId, String> {
+        self.module_ext.get_or_init(|| module_exts(g))
+    }
+
+    /// GP.2: add a pooled decide step's summed counts.
+    fn add_stats(&mut self, more: SameStemStats) {
+        self.stats.explicit += more.explicit;
+        self.stats.importer += more.importer;
+        self.stats.unresolved += more.unresolved;
     }
 
     /// [`Self::pick`] of `path_qname`, else of the one ambiguous stem ending
@@ -241,10 +276,7 @@ impl SameStem {
     /// lazily-read table [`Self::pick`] uses, so a graph reads every MODULE's
     /// POSITION at most once whichever step asks first.
     fn importer_ext(&mut self, g: &RepoGraph, importer: NodeId) -> Option<String> {
-        self.module_ext
-            .get_or_insert_with(|| module_exts(g))
-            .get(&importer)
-            .cloned()
+        self.exts(g).get(&importer).cloned()
     }
 }
 
@@ -1569,32 +1601,43 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     };
     let mut barrels = reexports::Barrels::read(g, imports, &untagged, same);
     barrels.materialize(g);
-    for stmt in imports {
-        let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
+    // GP.2: three steps over the statements. (1) On this thread, in
+    // statement order: the importer's MODULE and the resolver's answer,
+    // asked exactly as one loop asks it (`resolve_source` may keep state).
+    // (2) Decide each statement against the frozen graph (the barrels are
+    // materialized, `module_symbols` is final, no edge or binding is read),
+    // in chunks on the installed pool. (3) Apply the decisions in statement
+    // order: the edges, the bindings, the Dart plain imports and every count
+    // are one sequential loop's.
+    let answers: Vec<Option<(NodeId, String)>> = imports
+        .iter()
+        .map(|stmt| {
+            let from = g.symbols.module_by_qname.get(&stmt.from_module).copied()?;
+            resolve_source(&stmt.from_module, stmt_specifier(stmt)).map(|raw| (from, raw))
+        })
+        .collect();
+    let decisions = decide_ts_imports(g, imports, &answers, same, &barrels);
+    for ((stmt, answer), decided) in imports.iter().zip(&answers).zip(decisions) {
+        let (Some((from_mod_id, _)), Some(decided)) = (answer, decided) else {
             continue;
         };
+        let from_mod_id = *from_mod_id;
+        let spec = stmt_specifier(stmt);
+        let TsImportDecision {
+            ws,
+            hit,
+            edge,
+            symbol_target,
+        } = decided;
+        workspace.record(ws, hit.is_some());
+        dir_index.record_dir_only(spec, hit.is_some());
+        let (Some((target_id, rule)), Some(edge)) = (hit, edge) else {
+            continue;
+        };
+        dir_index.record(rule, spec);
+        g.edges.push(edge);
         match &stmt.target {
             ImportTarget::Module { path, alias } => {
-                let Some(raw) = resolve_source(&stmt.from_module, path) else {
-                    continue;
-                };
-                let (ws, target_qname) = untag_workspace(&raw);
-                let hit = ts_target_tagged(
-                    g,
-                    same,
-                    ws,
-                    target_qname,
-                    spec_ext(path),
-                    from_mod_id,
-                    "module",
-                );
-                workspace.record(ws, hit.is_some());
-                dir_index.record_dir_only(path, hit.is_some());
-                let Some((target_id, rule)) = hit else {
-                    continue;
-                };
-                dir_index.record(rule, path);
-                import_edge(g, from_mod_id, target_id, rule, stmt.line);
                 // Namespace import alias is the binding; a TS bare side-effect
                 // import has none, a Dart plain import binds its library's
                 // names after the loop.
@@ -1608,50 +1651,10 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                     plain_dart.push((from_mod_id, target_id));
                 }
             }
-            ImportTarget::Symbol {
-                module,
-                name,
-                alias,
-                ..
-            } => {
-                let Some(raw) = resolve_source(&stmt.from_module, module) else {
-                    continue;
-                };
-                let (ws, target_qname) = untag_workspace(&raw);
-                let hit = ts_target_tagged(
-                    g,
-                    same,
-                    ws,
-                    target_qname,
-                    spec_ext(module),
-                    from_mod_id,
-                    "symbol",
-                );
-                workspace.record(ws, hit.is_some());
-                dir_index.record_dir_only(module, hit.is_some());
-                let Some((target_mod_id, rule)) = hit else {
-                    continue;
-                };
-                dir_index.record(rule, module);
-                import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
+            ImportTarget::Symbol { name, alias, .. } => {
                 let bound = alias.clone().unwrap_or_else(|| name.clone());
-                // Default import — bind to the module itself (or what a
-                // barrel's `default` entry names, DT.1q).
-                // Named import — bind to the specific symbol inside that module
-                // (a barrel's same-name re-exports included), else a barrel's
-                // renamed or MODULE-valued entry (DT.1q).
-                let target_id = if name == "default" {
-                    Some(barrels.default_of(target_mod_id).unwrap_or(target_mod_id))
-                } else {
-                    g.symbols
-                        .module_symbols
-                        .get(&target_mod_id)
-                        .and_then(|s| s.get(name))
-                        .copied()
-                        .or_else(|| barrels.module_entry(target_mod_id, name))
-                };
-                barrels.tally(target_mod_id, name, target_id);
-                if let Some(t) = target_id {
+                barrels.tally(target_id, name, symbol_target);
+                if let Some(t) = symbol_target {
                     g.symbols
                         .module_import_bindings
                         .entry(from_mod_id)
@@ -1682,6 +1685,121 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
         let _ = resolve_source(WORKSPACE_REPORT, &report);
     }
     barrels.stats()
+}
+
+/// The specifier a TS-family import statement names: a module import's path,
+/// a symbol import's module.
+fn stmt_specifier(stmt: &ImportStmt) -> &str {
+    match &stmt.target {
+        ImportTarget::Module { path, .. } => path,
+        ImportTarget::Symbol { module, .. } => module,
+    }
+}
+
+/// GP.2: what [`resolve_imports_ts`] decided for one statement whose
+/// importer is a MODULE and whose specifier the resolver answered.
+struct TsImportDecision {
+    /// The answer's FH.5 workspace tag ([`untag_workspace`]).
+    ws: Option<bool>,
+    /// The module bound and the IMPORTS rule ([`ts_target_tagged`]).
+    hit: Option<(NodeId, &'static str)>,
+    /// The IMPORTS edge, built here so the apply step only pushes it.
+    edge: Option<Edge>,
+    /// A symbol import's binding: the default entry, the named symbol or a
+    /// barrel's entry (DT.1q), `None` when nothing binds.
+    symbol_target: Option<NodeId>,
+}
+
+/// GP.2: the decide step of [`resolve_imports_ts`]: one decision per
+/// statement (`None` where `answers` holds none), cut into chunks on the
+/// installed [`crate::calls::ResolvePool`] (one chunk on this thread with
+/// none), each chunk counting its own same-stem picks; the counts are added
+/// to `same` in chunk order and the decisions come back in statement order.
+/// A decision reads the graph's module tables, `module_symbols`, `same` and
+/// the materialized `barrels`, all final before the first statement binds.
+fn decide_ts_imports(
+    g: &RepoGraph,
+    imports: &[ImportStmt],
+    answers: &[Option<(NodeId, String)>],
+    same: &mut SameStem,
+    barrels: &reexports::Barrels,
+) -> Vec<Option<TsImportDecision>> {
+    let pool = installed_pool();
+    let chunks = chunk_ranges(imports.len(), pool.as_deref());
+    let frozen: &SameStem = same;
+    let decided = run_chunks(pool.as_deref(), chunks.len(), |c| {
+        let mut stats = SameStemStats::default();
+        let range = chunks.get(c).cloned().unwrap_or(0..0);
+        let rows: Vec<Option<TsImportDecision>> = range
+            .map(|i| {
+                let (stmt, (from, raw)) = imports.get(i).zip(answers.get(i)?.as_ref())?;
+                Some(decide_ts_import(
+                    g, frozen, &mut stats, barrels, stmt, *from, raw,
+                ))
+            })
+            .collect();
+        (rows, stats)
+    });
+    let mut out = Vec::with_capacity(imports.len());
+    for (rows, stats) in decided {
+        same.add_stats(stats);
+        out.extend(rows);
+    }
+    out
+}
+
+/// GP.2: decide one statement of importer `from` whose specifier resolved
+/// to `raw`: the lookups [`resolve_imports_ts`]' loop made before it wrote
+/// anything.
+fn decide_ts_import(
+    g: &RepoGraph,
+    same: &SameStem,
+    stats: &mut SameStemStats,
+    barrels: &reexports::Barrels,
+    stmt: &ImportStmt,
+    from: NodeId,
+    raw: &str,
+) -> TsImportDecision {
+    let (ws, target_qname) = untag_workspace(raw);
+    let (spec, rule) = match &stmt.target {
+        ImportTarget::Module { path, .. } => (path.as_str(), "module"),
+        ImportTarget::Symbol { module, .. } => (module.as_str(), "symbol"),
+    };
+    let hit = ts_target_tagged_counted(
+        g,
+        same,
+        stats,
+        (ws, target_qname),
+        spec_ext(spec),
+        from,
+        rule,
+    );
+    let edge = hit.map(|(target, rule)| import_edge_value(from, target, rule, stmt.line));
+    // Default import: the module itself (or what a barrel's `default` entry
+    // names, DT.1q). Named import: the specific symbol inside that module (a
+    // barrel's same-name re-exports included), else a barrel's renamed or
+    // MODULE-valued entry (DT.1q).
+    let symbol_target = match (&stmt.target, hit) {
+        (ImportTarget::Symbol { name, .. }, Some((target, _))) => {
+            if name == "default" {
+                Some(barrels.default_of(target).unwrap_or(target))
+            } else {
+                g.symbols
+                    .module_symbols
+                    .get(&target)
+                    .and_then(|s| s.get(name))
+                    .copied()
+                    .or_else(|| barrels.module_entry(target, name))
+            }
+        }
+        _ => None,
+    };
+    TsImportDecision {
+        ws,
+        hit,
+        edge,
+        symbol_target,
+    }
 }
 
 /// FH.5: the IMPORTS evidence rule of an import whose bare specifier names a
@@ -1734,10 +1852,37 @@ fn ts_target_tagged(
     importer: NodeId,
     rule: &'static str,
 ) -> Option<(NodeId, &'static str)> {
+    let mut stats = same.stats;
+    let hit = ts_target_tagged_counted(
+        g,
+        same,
+        &mut stats,
+        (ws, target_qname),
+        explicit_ext,
+        importer,
+        rule,
+    );
+    same.stats = stats;
+    hit
+}
+
+/// GP.2: [`ts_target_tagged`] through `&SameStem`, its same-stem counts
+/// added to `stats` ([`ts_target_counted`]); `tagged` is the answer
+/// [`untag_workspace`] split.
+fn ts_target_tagged_counted(
+    g: &RepoGraph,
+    same: &SameStem,
+    stats: &mut SameStemStats,
+    tagged: (Option<bool>, &str),
+    explicit_ext: Option<&str>,
+    importer: NodeId,
+    rule: &'static str,
+) -> Option<(NodeId, &'static str)> {
+    let (ws, target_qname) = tagged;
     if ws.is_some() && target_qname.is_empty() {
         return None;
     }
-    let hit = ts_target(g, same, target_qname, explicit_ext, importer, rule)?;
+    let hit = ts_target_counted(g, same, stats, target_qname, explicit_ext, importer, rule)?;
     Some(match ws {
         Some(_) => (hit.0, WORKSPACE_PACKAGE),
         None => hit,
@@ -1944,6 +2089,31 @@ fn ts_target(
     importer: NodeId,
     rule: &'static str,
 ) -> Option<(NodeId, &'static str)> {
+    let mut stats = same.stats;
+    let hit = ts_target_counted(
+        g,
+        same,
+        &mut stats,
+        target_qname,
+        explicit_ext,
+        importer,
+        rule,
+    );
+    same.stats = stats;
+    hit
+}
+
+/// GP.2: [`ts_target`] through `&SameStem`, its same-stem counts added to
+/// `stats`, for the pooled decide step of [`resolve_imports_ts`].
+fn ts_target_counted(
+    g: &RepoGraph,
+    same: &SameStem,
+    stats: &mut SameStemStats,
+    target_qname: &str,
+    explicit_ext: Option<&str>,
+    importer: NodeId,
+    rule: &'static str,
+) -> Option<(NodeId, &'static str)> {
     // GD.11: `./app/` names the directory: the file `app.ts` and its
     // same-stem siblings are never its module.
     let dir_only = explicit_ext == Some(DIR_ONLY);
@@ -1951,10 +2121,10 @@ fn ts_target(
         if let Some(id) = g.symbols.module_by_qname.get(target_qname) {
             return Some((*id, rule));
         }
-        match same.pick(g, target_qname, explicit_ext, importer) {
+        match same.pick_counted(g, target_qname, explicit_ext, importer, stats) {
             SamePick::Bound(id) => return Some((id, "same_stem")),
             SamePick::Refused => {
-                same.unresolved();
+                stats.unresolved += 1;
                 return None;
             }
             SamePick::NotAStem => {}
@@ -1971,7 +2141,8 @@ fn ts_target(
         return None;
     }
     if !same
-        .importer_ext(g, importer)
+        .exts(g)
+        .get(&importer)
         .is_some_and(|ext| DIR_INDEX_IMPORTERS.contains(&ext.as_str()))
     {
         return None;
@@ -1979,10 +2150,10 @@ fn ts_target(
     if let Some(id) = exact {
         return Some((id, DIR_INDEX));
     }
-    match same.pick(g, &index, None, importer) {
+    match same.pick_counted(g, &index, None, importer, stats) {
         SamePick::Bound(id) => Some((id, DIR_INDEX)),
         SamePick::Refused => {
-            same.unresolved();
+            stats.unresolved += 1;
             None
         }
         SamePick::NotAStem => None,
@@ -2100,8 +2271,15 @@ impl DirIndexBinds {
 /// confirm).
 /// `line` is the import statement's 0-based row (LC.3b, basis site).
 fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str, line: u32) {
-    let ev = graph_evidence("graph:imports", rule).line(line);
-    push_edge(g, from, to, edge_category::IMPORTS, ev);
+    g.edges.push(import_edge_value(from, to, rule, line));
+}
+
+/// GP.2: the edge [`import_edge`] pushes (Strong, `graph:imports` evidence),
+/// for a decide step that builds it off the build thread.
+fn import_edge_value(from: NodeId, to: NodeId, rule: &str, line: u32) -> Edge {
+    let mut e = Edge::new(from, to, edge_category::IMPORTS, Confidence::Strong);
+    evidence::attach(&mut e, graph_evidence("graph:imports", rule).line(line));
+    e
 }
 
 /// Convert a (possibly relative) `from X import Y` module reference into an
@@ -2545,7 +2723,7 @@ mod tests {
             SamePick::NotAStem
         );
         assert!(
-            same.module_ext.is_none(),
+            same.module_ext.get().is_none(),
             "no pick needed an importer's extension"
         );
         assert_eq!(same.marker(), None);
@@ -3568,7 +3746,7 @@ mod tests {
             ),
             None
         );
-        assert!(same.module_ext.is_none());
+        assert!(same.module_ext.get().is_none());
         assert_eq!(
             ts_target(
                 &g,
@@ -3580,7 +3758,7 @@ mod tests {
             ),
             Some((module(index), DIR_INDEX))
         );
-        assert!(same.module_ext.is_some());
+        assert!(same.module_ext.get().is_some());
     }
 
     /// GD.11: `'./app/'`, `'.'` and `'..'` name only a directory, as tsc

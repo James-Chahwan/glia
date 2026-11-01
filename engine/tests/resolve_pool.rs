@@ -346,3 +346,181 @@ fn one_thread_and_sixteen_write_the_same_layout() {
         assert_eq!(a, b, "1 vs 16 threads: {name} bytes differ");
     }
 }
+
+// ---------------------------------------------------------------------------
+// GP.2: the TypeScript-family group front (merge_parses' per-map folds and
+// resolve_imports_ts' decide step) runs on the pool too.
+// ---------------------------------------------------------------------------
+
+/// GP.2: the import fixture: a barrel (`export *`, a renamed and a
+/// namespace re-export), a barrel of a barrel, a directory index, a default
+/// and a namespace import, a tsconfig-style alias, a side-effect import, an
+/// import of a missing file and a package import, repeated over `features`
+/// importers.
+fn ts_import_files(features: usize) -> Vec<(String, String)> {
+    let mut files = vec![
+        (
+            "src/base.ts".to_string(),
+            "export class Base {\n  greet(): string { return \"hi\"; }\n}\n\
+             export function helper(): number { return 1; }\n\
+             export default class Main {\n  start(): void {}\n}\n"
+                .to_string(),
+        ),
+        (
+            "src/models/user.ts".to_string(),
+            "export class User {\n  name(): string { return \"\"; }\n}\n".to_string(),
+        ),
+        (
+            "src/models/role.ts".to_string(),
+            "export class Role {\n  level(): number { return 0; }\n}\n\
+             export function grant(): void {}\n"
+                .to_string(),
+        ),
+        (
+            "src/models/index.ts".to_string(),
+            "export * from './user';\n\
+             export { Role as RoleModel } from './role';\n\
+             export * as roles from './role';\n"
+                .to_string(),
+        ),
+        (
+            "src/lib/index.ts".to_string(),
+            "export * from '../models';\nexport { helper } from '../base';\n".to_string(),
+        ),
+        (
+            "src/shared/thing.ts".to_string(),
+            "export class Thing {\n  poke(): void {}\n}\n".to_string(),
+        ),
+        (
+            "src/side.ts".to_string(),
+            "export const ready = true;\n".to_string(),
+        ),
+    ];
+    for i in 0..features {
+        files.push((
+            format!("src/feat{i}.ts"),
+            format!(
+                "import Main, {{ helper }} from './base';\n\
+                 import {{ User, RoleModel, roles }} from './models';\n\
+                 import {{ User as U2, helper as h2 }} from './lib';\n\
+                 import * as base from './base';\n\
+                 import {{ Thing }} from '@app/shared/thing';\n\
+                 import './side';\n\
+                 import {{ nope }} from './missing';\n\
+                 import {{ chunk }} from 'lodash';\n\
+                 export class Feature{i} {{\n\
+                 \x20 go{i}(): void {{\n\
+                 \x20   helper();\n\
+                 \x20   h2();\n\
+                 \x20   base.helper();\n\
+                 \x20   new User().name();\n\
+                 \x20   new U2().name();\n\
+                 \x20   new RoleModel().level();\n\
+                 \x20   roles.grant();\n\
+                 \x20   new Main().start();\n\
+                 \x20   new Thing().poke();\n\
+                 \x20   nope();\n\
+                 \x20   chunk();\n\
+                 \x20 }}\n\
+                 }}\n"
+            ),
+        ));
+    }
+    files
+}
+
+/// GP.2: [`ts_source`] plus the `@app/` alias a tsconfig `paths` entry
+/// maps to `src/`.
+fn ts_alias_source(from_module: &str, specifier: &str) -> Option<String> {
+    let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+    match spec.strip_prefix("@app/") {
+        Some(rest) => Some(format!("src::{}", rest.replace('/', "::"))),
+        None => ts_source(from_module, specifier),
+    }
+}
+
+/// GP.2: [`fingerprint`] plus what the front writes beside the edges: the
+/// merged nav and the symbol tables, every map sorted.
+fn front_fingerprint(g: &RepoGraph) -> String {
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+    // NodeId is Hash, not Ord: entries sort by their Debug text.
+    fn sorted<K: Debug, V: Debug>(m: &HashMap<K, V>) -> Vec<String> {
+        let mut rows: Vec<String> = m.iter().map(|(k, v)| format!("{k:?} => {v:?}")).collect();
+        rows.sort();
+        rows
+    }
+    fn nested<K: Debug, K2: Debug, V: Debug>(m: &HashMap<K, HashMap<K2, V>>) -> Vec<String> {
+        let mut rows: Vec<String> = m
+            .iter()
+            .map(|(k, v)| format!("{k:?} => {:?}", sorted(v)))
+            .collect();
+        rows.sort();
+        rows
+    }
+    let nav = &g.nav;
+    let sy = &g.symbols;
+    let mut props: Vec<String> = g.properties.iter().map(|p| format!("{p:?}")).collect();
+    props.sort();
+    let parts: Vec<Vec<String>> = vec![
+        sorted(&nav.name_by_id),
+        sorted(&nav.qname_by_id),
+        sorted(&nav.kind_by_id),
+        sorted(&nav.parent_of),
+        sorted(&nav.children_of),
+        nested(&nav.field_types),
+        nested(&nav.local_types),
+        sorted(&nav.nav_facts),
+        sorted(&nav.return_types),
+        sorted(&nav.method_sigs),
+        sorted(&sy.module_by_qname),
+        nested(&sy.module_symbols),
+        nested(&sy.module_import_bindings),
+        nested(&sy.class_methods),
+        props,
+    ];
+    format!("{}\n{parts:#?}", fingerprint(g))
+}
+
+#[test]
+fn typescript_import_front_is_the_same_pooled() {
+    let repo = RepoId(24);
+    let files = ts_import_files(40);
+    let build = || {
+        let parses = files
+            .iter()
+            .map(|(path, src)| parse_one(src, path, "typescript", repo).unwrap())
+            .collect();
+        glia_graph::build_typescript_family(repo, parses, ts_alias_source).unwrap()
+    };
+    let g = build();
+    let imports = |rule: &str| {
+        g.edges
+            .iter()
+            .filter(|e| e.category == glia_code_domain::edge_category::IMPORTS)
+            .filter(|e| format!("{:?}", e.cells).contains(&format!("\\\"rule\\\":\\\"{rule}\\\"")))
+            .count()
+    };
+    assert!(imports("reexport") >= 3, "the barrels re-export");
+    assert!(
+        imports("dir_index") >= 40 * 2,
+        "./models and ./lib bind their index"
+    );
+    assert!(
+        imports("symbol") >= 40 * 3,
+        "named imports bind their module"
+    );
+    let want = front_fingerprint(&g);
+    let pooled = with_resolve_pool(Arc::new(Workers(workers(8))), build);
+    assert_eq!(
+        front_fingerprint(&pooled),
+        want,
+        "eight workers, one-statement chunks"
+    );
+    let backwards = with_resolve_pool(Arc::new(Backwards), build);
+    assert_eq!(
+        front_fingerprint(&backwards),
+        want,
+        "one-statement chunks, newest first"
+    );
+}

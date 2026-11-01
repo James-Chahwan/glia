@@ -79,13 +79,15 @@ pub fn with_resolve_pool<R>(pool: Arc<dyn ResolvePool>, f: impl FnOnce() -> R) -
 }
 
 /// This thread's installed pool, cloned out so no borrow outlives the call.
-fn installed_pool() -> Option<Arc<dyn ResolvePool>> {
+/// `pub(crate)` for the TypeScript-family front (GP.2: `build::merge_parses`
+/// and `imports::resolve_imports_ts`).
+pub(crate) fn installed_pool() -> Option<Arc<dyn ResolvePool>> {
     RESOLVE_POOL.try_with(|p| p.borrow().clone()).ok().flatten()
 }
 
 /// `0..len` cut into contiguous chunks: one with no pool, else about four
 /// per worker and none smaller than the pool's floor (the last may be).
-fn chunk_ranges(len: usize, pool: Option<&dyn ResolvePool>) -> Vec<Range<usize>> {
+pub(crate) fn chunk_ranges(len: usize, pool: Option<&dyn ResolvePool>) -> Vec<Range<usize>> {
     let size = match pool {
         None => len.max(1),
         Some(p) => len
@@ -102,7 +104,7 @@ fn chunk_ranges(len: usize, pool: Option<&dyn ResolvePool>) -> Vec<Range<usize>>
 /// `job` over `0..n`, results in index order: on `pool` when there is one
 /// and more than one job, else on this thread. A slot the pool left unfilled
 /// is computed here, so the result never depends on the pool.
-fn run_chunks<T: Send + Sync>(
+pub(crate) fn run_chunks<T: Send + Sync>(
     pool: Option<&dyn ResolvePool>,
     n: usize,
     job: impl Fn(usize) -> T + Sync,
@@ -142,6 +144,20 @@ struct PoolTally {
     /// The extensions of the graph's MODULE files: the build group's
     /// language family.
     exts: BTreeSet<String>,
+    /// GP.2: wall time of the TypeScript-family group front, `None` for a
+    /// builder that does not time it ([`EvidenceTally::note_front`]).
+    front: Option<FrontTimes>,
+}
+
+/// GP.2: the TypeScript-family group front's wall times, in milliseconds,
+/// printed as the `[resolve-pool]` line's ` imports_ms=<i> merge_ms=<m>`.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct FrontTimes {
+    /// `resolve_imports_ts`: the barrels, the resolver answers, the pooled
+    /// decide and the in-order apply.
+    pub(crate) imports_ms: f64,
+    /// `merge_parses`: the per-map folds (pooled) and the role-overlay fold.
+    pub(crate) merge_ms: f64,
 }
 
 impl PoolTally {
@@ -570,17 +586,29 @@ impl EvidenceTally {
         self.names_ms
     }
 
+    /// GP.2: record the group front's wall times, which the `[resolve-pool]`
+    /// line then prints after `refs_ms` (only a builder that calls this
+    /// prints them).
+    pub(crate) fn note_front(&mut self, front: FrontTimes) {
+        self.pool.front = Some(front);
+    }
+
     /// FH.21 fired_on marker, `None` when no pass of this graph ran on a pool:
     /// `[resolve-pool] lang=<exts> calls=<n> refs=<m> chunks=<c> threads=<t>
     /// calls_ms=<a> refs_ms=<b> serial_hooks=<hook|->`. `lang` is the build
-    /// group's MODULE file extensions, `,`-joined.
+    /// group's MODULE file extensions, `,`-joined. GP.2: a TypeScript-family
+    /// build adds ` imports_ms=<i> merge_ms=<m>` after `refs_ms`
+    /// ([`Self::note_front`]); `chunks` still counts the call and ref chunks.
     fn pool_marker(&self) -> Option<String> {
         let p = &self.pool;
         (p.chunks > 0).then(|| {
             let lang: Vec<&str> = p.exts.iter().map(String::as_str).collect();
+            let front = p.front.map_or(String::new(), |f| {
+                format!(" imports_ms={:.1} merge_ms={:.1}", f.imports_ms, f.merge_ms)
+            });
             format!(
                 "[resolve-pool] lang={} calls={} refs={} chunks={} threads={} calls_ms={:.1} \
-                 refs_ms={:.1} serial_hooks={}",
+                 refs_ms={:.1}{} serial_hooks={}",
                 if lang.is_empty() {
                     "?".to_string()
                 } else {
@@ -592,6 +620,7 @@ impl EvidenceTally {
                 p.threads,
                 p.calls_ms,
                 p.refs_ms,
+                front,
                 self.hook.unwrap_or("-")
             )
         })
@@ -8553,12 +8582,25 @@ mod pool_tests {
             calls_ms: 1.25,
             refs_ms: 0.5,
             exts: ["ts", "tsx"].iter().map(|e| e.to_string()).collect(),
+            front: None,
         };
         assert_eq!(
             tally.pool_marker().as_deref(),
             Some(
                 "[resolve-pool] lang=ts,tsx calls=10 refs=4 chunks=3 threads=16 calls_ms=1.2 \
                  refs_ms=0.5 serial_hooks=-"
+            )
+        );
+        // GP.2: the TypeScript-family front's times follow `refs_ms`.
+        tally.note_front(FrontTimes {
+            imports_ms: 12.34,
+            merge_ms: 5.0,
+        });
+        assert_eq!(
+            tally.pool_marker().as_deref(),
+            Some(
+                "[resolve-pool] lang=ts,tsx calls=10 refs=4 chunks=3 threads=16 calls_ms=1.2 \
+                 refs_ms=0.5 imports_ms=12.3 merge_ms=5.0 serial_hooks=-"
             )
         );
         let mut rust = EvidenceTally::with_hook("rust_paths");
