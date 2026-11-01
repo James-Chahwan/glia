@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "4ac3507c",
-  "after_wave": 10,
+  "measured_at_head": "64bca53a",
+  "after_wave": 11,
   "cargo_test_workspace": {
-    "passed": 7622,
+    "passed": 7637,
     "failed": 0
   },
   "history_passed": [
@@ -176,7 +176,8 @@
     7547,
     7583,
     7608,
-    7622
+    7622,
+    7637
   ],
   "run_py": {
     "fixtures": 506,
@@ -207,7 +208,7 @@
   "test_grade_py": "all passed",
   "wheel_current_as_of_head": true,
   "gates_last_full": {
-    "rank": 7,
+    "rank": 11,
     "cohort": 27
   }
 }

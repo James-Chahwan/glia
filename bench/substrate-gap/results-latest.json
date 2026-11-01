@@ -10254,6 +10254,30 @@
         ],
         "via": "script_entry"
       },
+      "python/host_callback": {
+        "extract": [
+          3,
+          3
+        ],
+        "fixtures": [
+          "patterns/python/host_callback"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "full",
+        "literal": [
+          3,
+          3
+        ],
+        "reasons": [],
+        "route": [
+          5,
+          5
+        ],
+        "via": "host_callback"
+      },
       "python/host_command": {
         "extract": [
           1,
@@ -10277,6 +10301,30 @@
           1
         ],
         "via": "host_command"
+      },
+      "python/host_event": {
+        "extract": [
+          3,
+          3
+        ],
+        "fixtures": [
+          "patterns/python/host_event"
+        ],
+        "forbid": [
+          1,
+          1
+        ],
+        "level": "full",
+        "literal": [
+          3,
+          3
+        ],
+        "reasons": [],
+        "route": [
+          3,
+          3
+        ],
+        "via": "host_event"
       },
       "python/process_entry": {
         "extract": [
@@ -10469,6 +10517,30 @@
           4
         ],
         "via": "process_entry"
+      },
+      "typescript/script_entry": {
+        "extract": [
+          3,
+          3
+        ],
+        "fixtures": [
+          "patterns/typescript/script_entry"
+        ],
+        "forbid": [
+          0,
+          0
+        ],
+        "level": "full",
+        "literal": [
+          3,
+          3
+        ],
+        "reasons": [],
+        "route": [
+          4,
+          4
+        ],
+        "via": "script_entry"
       }
     },
     "patterns": [
@@ -10482,10 +10554,10 @@
     ],
     "totals": {
       "error": 0,
-      "full": 18,
+      "full": 21,
       "none": 0,
       "partial": 0,
-      "unknown": 108
+      "unknown": 105
     }
   },
   "schema": 3,

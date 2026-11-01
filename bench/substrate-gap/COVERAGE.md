@@ -263,9 +263,9 @@ The second axis (0.5.5): how code is USED rather than how services talk. Graded 
 
 ```
               h_cmd    h_evt     h_cb  cfg_tbl    embed   script     proc
-python            ●        ?        ?        ?        ?        ●        ●
+python            ●        ●        ●        ?        ?        ●        ●
 go                ?        ?        ?        ?        ?        ?        ●
-typescript        ●        ●        ●        ●        ?        ?        ●
+typescript        ●        ●        ●        ●        ?        ●        ●
 java              ?        ?        ?        ?        ?        ?        ●
 csharp            ?        ?        ?        ?        ?        ?        ●
 ruby              ?        ?        ?        ?        ?        ?        ?
@@ -283,7 +283,7 @@ kotlin            ?        ?        ?        ?        ?        ?        ?
 lua               ●        ●        ●        ●        ●        ●        ?
 ```
 
-USE PATTERNS: 18/126 cells have a fixture — 18 full, 0 partial, 0 none, 108 unknown, 0 error.
+USE PATTERNS: 21/126 cells have a fixture — 21 full, 0 partial, 0 none, 105 unknown, 0 error.
 
 ## Cohort grades
 
