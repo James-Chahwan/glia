@@ -139,7 +139,10 @@ pub fn is_hard_skip(name: &str) -> bool {
 /// ([`is_build_output_home`]). See [`is_build_or_out`].
 pub fn always_region(name: &str) -> Option<Collapse> {
     match name {
-        "node_modules" | "vendor" | "bower_components" | ".venv" | "site-packages" => {
+        // `.yarn`: Yarn 2+'s committed tooling (`releases/yarn-<v>.cjs`, a bundled build of Yarn
+        // itself, plus plugins / sdks / cache / unplugged). Since GH.10 parses `.cjs`, reading it minted
+        // ROUTEs from Yarn's own registry client (scaffold-eth-2: `GET /-/whoami`).
+        "node_modules" | "vendor" | "bower_components" | ".venv" | "site-packages" | ".yarn" => {
             Some(Collapse::Vendored)
         }
         "target" | "dist" | "__pycache__" | ".cache" | ".next" | ".nuxt" | ".angular"
@@ -1011,6 +1014,8 @@ mod tests {
             Gate::HardSkip
         );
         assert_eq!(always_region("node_modules"), Some(Collapse::Vendored));
+        assert_eq!(always_region(".yarn"), Some(Collapse::Vendored));
+        assert_eq!(always_region("yarn"), None);
         assert_eq!(always_region("TestResults"), Some(Collapse::BuildOutput));
         assert_eq!(always_region("src"), None);
         assert_eq!(Collapse::Submodule.provenance(), "submodule");
