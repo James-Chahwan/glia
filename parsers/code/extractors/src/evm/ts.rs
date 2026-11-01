@@ -1,6 +1,7 @@
 //! The TypeScript / JavaScript ethers client reader (DT.10c, DT.10i), with the
 //! hardhat, TypeChain and artifact bindings that name the contract (DT.10d,
-//! step 7), and the viem / wagmi and web3.js readers (DT.10j, steps 8-9).
+//! step 7), the viem / wagmi and web3.js readers (DT.10j, steps 8-9) and the
+//! method-name wrappers over them (GD.30, step 12).
 //!
 //! 1. **Gate**, per library. ethers (steps 2-7): the file imports or
 //!    requires `ethers` (`ethers/..` and an `@ethersproject/` path too),
@@ -197,13 +198,65 @@
 //!
 //!     Not read: a subclass in another file calling an inherited
 //!     `this.<field>` (the reader sees one file).
+//! 12. **Method-name wrappers (GD.30, DT.10f's Go rule ported:
+//!     [`wrapper_step`]).** A function with a block body (a declaration, a
+//!     class or object method, a function expression or arrow assigned to a
+//!     `const` / field / member / property) whose parameter `p` is handed bare
+//!     to a name position is a wrapper at `p`'s index (DIRECT), with that
+//!     position's scope, entries, reference and library, side call:
+//!     - ethers / TypeChain / hardhat: `R.getFunction(p)` on a bound ethers
+//!       receiver `R` (after its links), invoked: called straight away
+//!       (`R.getFunction(p)(..)`), through a v6 method (`.staticCall(` ..),
+//!       or stored in a `const` / `let` / `var` its block then calls either
+//!       way. `getFunction` stays in [`ETHERS_MEMBERS`]: it is no site itself;
+//!     - viem / wagmi: a step-8 option call whose `functionName` is `p`
+//!       (shorthand `functionName` when the parameter is so named, or
+//!       `functionName: p`), its ABI read as step 8's (an inline literal then
+//!       counts in `abis`).
+//!
+//!     The parameter is the innermost enclosing function's that declares it
+//!     (a destructured or rest parameter is none, a `this:` annotation no
+//!     parameter); an anonymous function's makes no wrapper. A function
+//!     handing its own parameter bare to a wrapper's index is a wrapper at
+//!     that index too (FORWARDING), with the wrapper's target, to depth
+//!     [`MAX_DEPTH`], a (function, parameter) read once.
+//!     - A method wrapper is called `<x>.W(` (`this.W(`), a function wrapper
+//!       `W(`; a definition is no call. Every call whose argument at the
+//!       index is ONE string literal (a signature key reads as its name) is a
+//!       call site at the call: the wrapper's target, args unknown, checked
+//!       against its entries as step 5's (a member they lack counts
+//!       `not_in_abi`); the anchor gives it to the calling function. A bare
+//!       parameter of a named enclosing function forwards (never dynamic);
+//!       anything else (a local, a template, a spread at or before the
+//!       index) is no site and counts `dynamic`.
+//!     - PRECISION: no value is tracked through an assignment. A name two
+//!       functions of the file declare, or a parameter reaching two targets,
+//!       is no wrapper and counts `ambiguous` (its viem hand-overs `dynamic`,
+//!       as step 8 counted them). A function named like a client member or
+//!       action ([`ETHERS_MEMBERS`], [`VIEM_CALLS`], [`VIEM_EVENTS`],
+//!       [`VIEM_MULTI`]) or `constructor` is never a wrapper. A target whose
+//!       ABI is itself a parameter (`abi`, `abi: <p>`, a `Scope::Abi` named by
+//!       one: a generic `call(abi, name)` helper) makes no wrapper and its
+//!       name stays `dynamic`: only a bound contract or fixed ABI options do.
+//!     - Same-file only: an exported wrapper called from another file has no
+//!       site there and is counted nowhere. Not read: an expression-bodied
+//!       arrow (`(m) => c.getFunction(m)()`, no block), a `getFunction` with a
+//!       literal name, an event name (`eventName`, `on(p, ..)`).
+//!
+//!     Marker, once per file with a wrapper: `[evm-wrappers] wrappers=<w>
+//!     (direct=<d> forwarded=<f> ambiguous=<a>) sites=<s> dynamic=<y>
+//!     path=<file>` (go.rs's format), one count per (function, parameter), w
+//!     = d + f + a; s the wrapper sites minted, y the dynamic wrapper calls
+//!     (also in the `[evm-client]` line's `dynamic`). Grep
+//!     `^\[evm-wrappers\] `.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use glia_code_domain::evm::{self, AbiEntry, ClientSide, EntryKind, Scope};
 
 use super::Site;
 use super::abi::read_abi;
+use super::go::WrapperCounts;
 use super::scan::{
     enclosing_block, ident_end, ident_start_before, is_ident, is_ident_byte, matching, prev_non_ws,
     skip_ws, split_args, string_literal, trim, word_hits,
@@ -435,6 +488,8 @@ pub(super) struct TsCounts {
     pub(super) web3_contract: usize,
     /// truffle global `web3.eth.Contract` constructions read.
     pub(super) truffle: usize,
+    /// The `[evm-wrappers]` marker's counts (step 12).
+    pub(super) wrappers: WrapperCounts,
 }
 
 impl TsCounts {
@@ -699,6 +754,7 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
 
     let web3_locals = web3_contract_locals(&ctx);
     let mut bindings: Vec<Binding> = Vec::new();
+    let mut pending: Vec<PendingName> = Vec::new();
     if gate.ethers {
         ethers_constructions(&ctx, &web3_locals, &mut sites, &mut counts, &mut bindings);
         // Step 7: the bindings that name the contract.
@@ -713,7 +769,7 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
     }
     if gate.viem {
         viem_instances(&ctx, &mut sites, &mut counts, &mut bindings);
-        viem_sites(&ctx, &mut sites, &mut counts);
+        viem_sites(&ctx, &mut sites, &mut counts, &mut pending);
     }
     if gate.web3 {
         web3_bindings(
@@ -744,6 +800,8 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
             record(&mut sites, &mut counts, binding, access);
         }
     }
+    // Step 12: method-name wrappers.
+    wrapper_step(&ctx, &bindings, pending, &mut sites, &mut counts);
     sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
     (sites, counts)
 }
@@ -1707,7 +1765,12 @@ fn viem_instances(
 
 /// Step 8: the viem / wagmi option calls ([`VIEM_CALLS`], [`VIEM_EVENTS`])
 /// and the batch reads ([`VIEM_MULTI`]).
-fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
+fn viem_sites(
+    ctx: &Ctx,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    pending: &mut Vec<PendingName>,
+) {
     let view = ctx.view;
     let vb = view.as_bytes();
     let tables = [
@@ -1725,7 +1788,7 @@ fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
                     continue;
                 };
                 if let Some(side) = side {
-                    option_site(ctx, side, &opts, false, sites, counts);
+                    option_site(ctx, side, &opts, false, sites, counts, pending);
                     continue;
                 }
                 let Some((s, _)) = opts.get("contracts") else {
@@ -1737,9 +1800,15 @@ fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
                 };
                 for (es, ee) in split_args(view, s, list_close) {
                     match (vb[es] == b'{').then(|| options(ctx, es, ee, 0)).flatten() {
-                        Some(element) => {
-                            option_site(ctx, ClientSide::Call, &element, false, sites, counts)
-                        }
+                        Some(element) => option_site(
+                            ctx,
+                            ClientSide::Call,
+                            &element,
+                            false,
+                            sites,
+                            counts,
+                            pending,
+                        ),
                         None => counts.dynamic += 1,
                     }
                 }
@@ -1767,7 +1836,7 @@ fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
                 continue;
             };
             let before = sites.len();
-            option_site(ctx, side, &opts, decode, sites, counts);
+            option_site(ctx, side, &opts, decode, sites, counts, pending);
             counts.viem_codec += usize::from(sites.len() != before);
         }
     }
@@ -1966,7 +2035,9 @@ fn address_hint(ctx: &Ctx, opts: &Opts) -> Option<Scope> {
 }
 
 /// The sites of one viem option call `opts` on `side` (step 8); a `decode`r
-/// with no `args` key gives no arity (step 11).
+/// with no `args` key gives no arity (step 11). A call whose `functionName`
+/// is a bare identifier over a readable ABI is `pending`: step 12 reads it
+/// as a wrapper's parameter, or counts it `dynamic`.
 fn option_site(
     ctx: &Ctx,
     side: ClientSide,
@@ -1974,6 +2045,7 @@ fn option_site(
     decode: bool,
     sites: &mut Vec<Site>,
     counts: &mut TsCounts,
+    pending: &mut Vec<PendingName>,
 ) {
     let (source, view) = (ctx.source, ctx.view);
     let vb = view.as_bytes();
@@ -1993,27 +2065,39 @@ fn option_site(
         }),
         _ => literal_name(source, view, ns, ne).map(|n| vec![(n, ns)]),
     };
-    let Some(names) = names.filter(|n| !n.is_empty()) else {
+    let resolved = match options_abi(ctx, opts, ns) {
+        AbiRef::Literal(entries) => {
+            address_hint(ctx, opts).map(|scope| (scope, Some(entries), None, true))
+        }
+        other => other
+            .named()
+            .map(|(scope, abi, abi_ref)| (scope, abi, abi_ref, false)),
+    };
+    let Some((scope, abi, abi_ref, literal)) = resolved else {
         counts.dynamic += 1;
         return;
     };
-    let (scope, abi, abi_ref) = match options_abi(ctx, opts, ns) {
-        AbiRef::Literal(entries) => {
-            let Some(scope) = address_hint(ctx, opts) else {
-                counts.dynamic += 1;
-                return;
-            };
-            counts.abis += 1;
-            (scope, Some(entries), None)
+    let Some(names) = names.filter(|n| !n.is_empty()) else {
+        if side == ClientSide::Call && ident_end(vb, ns) == Some(ne) {
+            pending.push(PendingName {
+                at: ns,
+                ident: view[ns..ne].to_string(),
+                abi_ident: option_abi_ident(ctx, opts),
+                literal,
+                target: WrapTarget {
+                    scope,
+                    abi,
+                    abi_ref,
+                    lib: VIEM,
+                    api: Api::Viem,
+                },
+            });
+        } else {
+            counts.dynamic += 1;
         }
-        other => {
-            let Some(named) = other.named() else {
-                counts.dynamic += 1;
-                return;
-            };
-            named
-        }
+        return;
     };
+    counts.abis += usize::from(literal);
     let args = match opts.get("args") {
         Some((s, _)) if vb[s] == b'[' => matching(view, s)
             .map(|close| split_args(view, s, close).len())
@@ -3329,6 +3413,681 @@ fn push_event(
         abi_ref: binding.abi_ref.clone(),
         at,
     });
+}
+
+/// How deep a forwarding chain is read (step 12, DT.10f's `MAX_DEPTH`): a
+/// direct wrapper is depth 1, a function forwarding into it depth 2.
+const MAX_DEPTH: usize = 3;
+
+/// Keywords whose `(..) {` heads a block that is no function (step 12).
+const CONTROL: &[&str] = &["if", "for", "while", "switch", "catch", "with"];
+
+/// TypeScript parameter-property modifiers a parameter may lead with.
+const PARAM_MODIFIERS: &[&str] = &["public", "private", "protected", "readonly", "override"];
+
+/// One function of the file whose body is a block (step 12).
+#[derive(Debug)]
+struct Func {
+    /// Its name; `None` for an anonymous function or arrow.
+    name: Option<String>,
+    /// The name's offset (an anonymous one's body `{`): its identity, and
+    /// never a call of it.
+    name_at: usize,
+    /// Called `<x>.W(`: a class or object method, a class-field arrow, a
+    /// `<x>.W = function ..`; else called `W(`.
+    method: bool,
+    /// The parameter names in order; `None` for a destructured or rest one.
+    params: Vec<Option<String>>,
+    /// The body's `{` and `}`.
+    body: (usize, usize),
+}
+
+/// The contract a wrapper's parameter names a member of (step 12): the
+/// binding's or the viem options' scope, entries, reference and library.
+#[derive(Debug, Clone, PartialEq)]
+struct WrapTarget {
+    scope: Scope,
+    abi: Option<Vec<AbiEntry>>,
+    abi_ref: Option<evm::AbiRef>,
+    lib: &'static str,
+    api: Api,
+}
+
+/// A viem option call whose `functionName` is a bare identifier (step 8),
+/// left to step 12.
+#[derive(Debug)]
+struct PendingName {
+    /// The identifier's offset.
+    at: usize,
+    ident: String,
+    /// The `abi` value's identifier (`<x>` or `<x>.abi`), when it is one.
+    abi_ident: Option<String>,
+    /// The ABI is an inline literal: counted in `abis` once a wrapper reads
+    /// it.
+    literal: bool,
+    target: WrapTarget,
+}
+
+/// A parameter handed bare to a name position (step 12): `getFunction(p)` /
+/// a viem `functionName` (direct) or a wrapper call's (forwarded).
+#[derive(Debug, Clone)]
+struct Handover {
+    /// The function whose parameter it is: an index into the function table.
+    func: usize,
+    /// The parameter's index.
+    arg: usize,
+    target: WrapTarget,
+    /// A viem `functionName` step 8 left uncounted: `dynamic` when no
+    /// wrapper forms.
+    dynamic: bool,
+}
+
+/// One method-name wrapper (step 12).
+#[derive(Debug)]
+struct TsWrapper {
+    /// Its function: an index into the function table.
+    func: usize,
+    /// The index of the parameter that names the member.
+    arg: usize,
+    target: WrapTarget,
+    /// 1 for a direct wrapper, up to [`MAX_DEPTH`] for a forwarding one.
+    depth: usize,
+}
+
+/// What a wrapper call hands at the wrapper's index (step 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Handed {
+    /// One string literal: the member.
+    Literal(String),
+    /// A bare parameter of a named function enclosing the call: (function,
+    /// parameter index).
+    Param(usize, usize),
+    /// Anything else: dynamic.
+    Other,
+}
+
+/// One call of a wrapper (step 12): the wrapper name's offset and what it
+/// hands at the wrapper's index.
+#[derive(Debug)]
+struct WrapperCall {
+    at: usize,
+    handed: Handed,
+}
+
+/// Step 12: the wrappers the file's `getFunction(<p>)` and viem
+/// `functionName` hand-overs make, their forwarders, and the sites of their
+/// literal calls. A `pending` viem name that makes no wrapper counts
+/// `dynamic`, as step 8 would have.
+fn wrapper_step(
+    ctx: &Ctx,
+    bindings: &[Binding],
+    pending: Vec<PendingName>,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+) {
+    let view = ctx.view;
+    let calls_get = bindings.iter().any(|b| b.api == Api::Ethers) && view.contains("getFunction");
+    if pending.is_empty() && !calls_get {
+        return;
+    }
+    let funcs = functions(view);
+    let mut direct = if calls_get {
+        get_function_handovers(ctx, bindings, &funcs)
+    } else {
+        Vec::new()
+    };
+    for p in pending {
+        let fixed = !p
+            .abi_ident
+            .iter()
+            .chain(abi_name(&p.target.scope))
+            .any(|n| param_owner(&funcs, p.at, n).is_some());
+        match param_owner(&funcs, p.at, &p.ident).filter(|&(f, _)| fixed && wraps(&funcs[f])) {
+            Some((func, arg)) => {
+                counts.abis += usize::from(p.literal);
+                direct.push(Handover {
+                    func,
+                    arg,
+                    target: p.target,
+                    dynamic: true,
+                });
+            }
+            None => counts.dynamic += 1,
+        }
+    }
+    if direct.is_empty() {
+        return;
+    }
+    let wrappers = infer_wrappers(ctx, &funcs, direct, counts);
+    wrapper_sites(ctx, &funcs, &wrappers, sites, counts);
+}
+
+/// The name a `Scope::Abi` scope is keyed by; a parameter of that name is no
+/// fixed ABI.
+fn abi_name(scope: &Scope) -> Option<&String> {
+    match scope {
+        Scope::Abi(name) => Some(name),
+        Scope::Contract(_) | Scope::Recv(_) => None,
+    }
+}
+
+/// The identifier an options object's `abi` value is (`<x>` or `<x>.abi`).
+fn option_abi_ident(ctx: &Ctx, opts: &Opts) -> Option<String> {
+    match abi_arg(ctx.source, ctx.view, Some(opts.get("abi")?)) {
+        AbiArg::Ident(name) | AbiArg::Member(name) => Some(name),
+        AbiArg::Literal(_) | AbiArg::Dynamic => None,
+    }
+}
+
+/// A function that may be a wrapper (step 12): named, and not named like a
+/// client member or action (the needles step 5 and step 8 read themselves).
+fn wraps(func: &Func) -> bool {
+    func.name.as_deref().is_some_and(|n| {
+        !(ETHERS_MEMBERS.contains(&n)
+            || VIEM_CALLS.contains(&n)
+            || VIEM_EVENTS.contains(&n)
+            || VIEM_MULTI.contains(&n)
+            || n == "constructor")
+    })
+}
+
+/// Step 12's ethers hand-overs: `R.getFunction(<p>)` on a bound ethers
+/// receiver `R` (after its links), `p` a parameter of an enclosing function,
+/// whose result is called.
+fn get_function_handovers(ctx: &Ctx, bindings: &[Binding], funcs: &[Func]) -> Vec<Handover> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut out = Vec::new();
+    for receiver in keys(bindings) {
+        for (start, end) in receiver_hits(view, &receiver) {
+            let Some(binding) =
+                visible(bindings, &receiver, start).filter(|b| b.api == Api::Ethers)
+            else {
+                continue;
+            };
+            let k = skip_links(source, view, end);
+            let Some(Step::Name {
+                name,
+                end: n_end,
+                dotted: true,
+                ..
+            }) = step(source, view, k)
+            else {
+                continue;
+            };
+            if name != "getFunction" {
+                continue;
+            }
+            let Some(paren) = paren_after(vb, n_end) else {
+                continue;
+            };
+            let Some(close) = matching(view, paren) else {
+                continue;
+            };
+            let [(s, e)] = split_args(view, paren, close)[..] else {
+                continue;
+            };
+            if ident_end(vb, s) != Some(e) || !invoked(ctx, start, close) {
+                continue;
+            }
+            let target = WrapTarget {
+                scope: binding.scope.clone(),
+                abi: binding.abi.clone(),
+                abi_ref: binding.abi_ref.clone(),
+                lib: binding.lib,
+                api: binding.api,
+            };
+            if abi_name(&target.scope).is_some_and(|n| param_owner(funcs, s, n).is_some()) {
+                continue;
+            }
+            if let Some((func, arg)) =
+                param_owner(funcs, s, &view[s..e]).filter(|&(f, _)| wraps(&funcs[f]))
+            {
+                out.push(Handover {
+                    func,
+                    arg,
+                    target,
+                    dynamic: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// True when the `getFunction(..)` call starting at `start` (its receiver)
+/// and closing at `close` is invoked: called straight away, through an
+/// ethers v6 method (`.staticCall(` ..), or stored in a `const` / `let` /
+/// `var` that its block then calls either way.
+fn invoked(ctx: &Ctx, start: usize, close: usize) -> bool {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let called = |end: usize| {
+        paren_after(vb, end).is_some()
+            || matches!(
+                step(source, view, end),
+                Some(Step::Name { name, end: m_end, dotted: true, .. })
+                    if V6_METHODS.contains(&name.as_str()) && paren_after(vb, m_end).is_some()
+            )
+    };
+    if called(close + 1) {
+        return true;
+    }
+    let Some(decl) = ctx.decls.iter().find(|d| {
+        d.init
+            .is_some_and(|i| i == start || (i < start && view[i..start].trim() == "await"))
+    }) else {
+        return false;
+    };
+    let (_, block_end) = enclosing_block(view, decl.kw_at);
+    word_hits(view, &decl.name)
+        .into_iter()
+        .filter(|&at| at > close && at < block_end)
+        .filter(|&at| prev_non_ws(vb, at).is_none_or(|p| vb[p] != b'.'))
+        .any(|at| called(at + decl.name.len()))
+}
+
+/// Step 12's levels: the wrappers the `direct` hand-overs make, then those
+/// that forward into them, to [`MAX_DEPTH`]. A (function, parameter) is read
+/// once, at its shallowest depth. A function whose name two functions of the
+/// file declare, or whose parameter reaches two targets, is no wrapper and
+/// counts `ambiguous` (its viem hand-overs `dynamic`).
+fn infer_wrappers(
+    ctx: &Ctx,
+    funcs: &[Func],
+    direct: Vec<Handover>,
+    counts: &mut TsCounts,
+) -> Vec<TsWrapper> {
+    let mut wrappers: Vec<TsWrapper> = Vec::new();
+    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut level = direct;
+    for depth in 1..=MAX_DEPTH {
+        let mut groups: BTreeMap<(usize, usize), Vec<Handover>> = BTreeMap::new();
+        for h in level {
+            if !seen.contains(&(h.func, h.arg)) {
+                groups.entry((h.func, h.arg)).or_default().push(h);
+            }
+        }
+        let mut fresh = Vec::new();
+        for ((func, arg), hs) in groups {
+            seen.insert((func, arg));
+            let unique = funcs.iter().filter(|f| f.name == funcs[func].name).count() == 1;
+            let target = &hs[0].target;
+            if unique && hs.iter().all(|h| h.target == *target) {
+                fresh.push(TsWrapper {
+                    func,
+                    arg,
+                    target: target.clone(),
+                    depth,
+                });
+            } else {
+                counts.wrappers.ambiguous += 1;
+                counts.dynamic += hs.iter().filter(|h| h.dynamic).count();
+            }
+        }
+        level = Vec::new();
+        if depth < MAX_DEPTH {
+            for w in &fresh {
+                for call in wrapper_calls(ctx, funcs, w) {
+                    if let Handed::Param(func, arg) = call.handed {
+                        level.push(Handover {
+                            func,
+                            arg,
+                            target: w.target.clone(),
+                            dynamic: false,
+                        });
+                    }
+                }
+            }
+        }
+        wrappers.extend(fresh);
+    }
+    counts.wrappers.direct = wrappers.iter().filter(|w| w.depth == 1).count();
+    counts.wrappers.forwarded = wrappers.len() - counts.wrappers.direct;
+    wrappers
+}
+
+/// Every call of the wrapper `w` in the file (step 12): `<x>.W(` for a
+/// method, `W(` for a function, never a definition, with what it hands at
+/// `w`'s index. A call with fewer arguments is none; a spread at or before
+/// the index hands `Other`.
+fn wrapper_calls(ctx: &Ctx, funcs: &[Func], w: &TsWrapper) -> Vec<WrapperCall> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let func = &funcs[w.func];
+    let Some(name) = func.name.as_deref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for at in word_hits(view, name) {
+        if funcs.iter().any(|f| f.name_at == at) {
+            continue;
+        }
+        let dotted = prev_non_ws(vb, at).is_some_and(|p| vb[p] == b'.');
+        if dotted != func.method {
+            continue;
+        }
+        let Some((open, close)) = option_call(view, at, name.len()) else {
+            continue;
+        };
+        let args = split_args(view, open, close);
+        let Some(&(s, e)) = args.get(w.arg) else {
+            continue;
+        };
+        let spread = args[..=w.arg]
+            .iter()
+            .any(|&(a, _)| view[a..].starts_with("..."));
+        let handed = if spread {
+            Handed::Other
+        } else if let Some(member) = literal_name(source, view, s, e).filter(|m| is_ident(m)) {
+            Handed::Literal(member)
+        } else if ident_end(vb, s) == Some(e) {
+            param_owner(funcs, at, &view[s..e])
+                .filter(|&(f, _)| wraps(&funcs[f]))
+                .map_or(Handed::Other, |(f, a)| Handed::Param(f, a))
+        } else {
+            Handed::Other
+        };
+        out.push(WrapperCall { at, handed });
+    }
+    out
+}
+
+/// Step 12's sites: every wrapper call handing one string literal is a call
+/// of that member on the wrapper's target (args unknown), checked against
+/// its entries as step 5's; a call handing neither a literal nor a
+/// parameter of a named enclosing function counts `dynamic`.
+fn wrapper_sites(
+    ctx: &Ctx,
+    funcs: &[Func],
+    wrappers: &[TsWrapper],
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+) {
+    for w in wrappers {
+        let binding = Binding {
+            name: String::new(),
+            scope: w.target.scope.clone(),
+            abi: w.target.abi.clone(),
+            abi_ref: w.target.abi_ref.clone(),
+            lib: w.target.lib,
+            api: w.target.api,
+            at: 0,
+            block: (0, ctx.view.len()),
+            hoisted: false,
+        };
+        for call in wrapper_calls(ctx, funcs, w) {
+            let member = match call.handed {
+                Handed::Literal(member) => member,
+                Handed::Param(..) => continue,
+                Handed::Other => {
+                    counts.wrappers.dynamic += 1;
+                    counts.dynamic += 1;
+                    continue;
+                }
+            };
+            if w.target.api == Api::Ethers && ETHERS_MEMBERS.contains(&member.as_str()) {
+                continue;
+            }
+            let before = sites.len();
+            push_call(sites, counts, &binding, member, None, call.at);
+            counts.wrappers.sites += sites.len() - before;
+        }
+    }
+}
+
+/// The innermost function enclosing `at` that declares parameter `ident`,
+/// and that parameter's index; `None` when no enclosing function does.
+fn param_owner(funcs: &[Func], at: usize, ident: &str) -> Option<(usize, usize)> {
+    let mut enclosing: Vec<usize> = (0..funcs.len())
+        .filter(|&i| funcs[i].body.0 < at && at < funcs[i].body.1)
+        .collect();
+    enclosing.sort_by_key(|&i| std::cmp::Reverse(funcs[i].body.0));
+    enclosing.into_iter().find_map(|i| {
+        funcs[i]
+            .params
+            .iter()
+            .position(|p| p.as_deref() == Some(ident))
+            .map(|a| (i, a))
+    })
+}
+
+/// Every function of the file whose body is a block, in body order (step
+/// 12): declarations, methods, function expressions and arrows.
+fn functions(view: &str) -> Vec<Func> {
+    let mut out = Vec::new();
+    for (open, _) in view.match_indices('{') {
+        let Some((name, name_at, method, params)) = function_head(view, open) else {
+            continue;
+        };
+        let Some(close) = matching(view, open) else {
+            continue;
+        };
+        out.push(Func {
+            name,
+            name_at: name_at.unwrap_or(open),
+            method,
+            params,
+            body: (open, close),
+        });
+    }
+    out
+}
+
+/// What a function head names (step 12).
+type Head = (Option<String>, Option<usize>, bool, Vec<Option<String>>);
+
+/// The function the block at `open` is the body of: its name and the name's
+/// offset (none for an anonymous one), whether it is called as a method, and
+/// its parameters; `None` when the block is no function body (a control
+/// block, a class body, an object literal).
+fn function_head(view: &str, open: usize) -> Option<Head> {
+    let vb = view.as_bytes();
+    let p = prev_non_ws(vb, open)?;
+    let arrow = vb[p] == b'>' && p > 0 && vb[p - 1] == b'=';
+    let end = if arrow { p - 1 } else { open };
+    let q = prev_non_ws(vb, end)?;
+    let single = (arrow && is_ident_byte(vb[q]))
+        .then(|| ident_start_before(vb, q + 1))
+        .flatten()
+        .filter(|&s| prev_non_ws(vb, s).is_none_or(|b| vb[b] != b':'));
+    let (params, p_open) = if vb[q] == b')' {
+        let o = open_before(vb, q)?;
+        (params_of(view, o, q), o)
+    } else if let Some(s) = single {
+        (vec![Some(view[s..=q].to_string())], s)
+    } else {
+        let colon = type_colon_before(vb, end)?;
+        let r = prev_non_ws(vb, colon).filter(|&r| vb[r] == b')')?;
+        let o = open_before(vb, r)?;
+        (params_of(view, o, r), o)
+    };
+    // A generic parameter list `<T>` before the parameters.
+    let mut lead = p_open;
+    if let Some(g) = prev_non_ws(vb, p_open).filter(|&g| vb[g] == b'>' && single.is_none()) {
+        lead = generics_open(vb, g)?;
+    }
+    let Some(k) = prev_non_ws(vb, lead) else {
+        return Some((None, None, false, params));
+    };
+    if !is_ident_byte(vb[k]) {
+        if !arrow {
+            return None;
+        }
+        let (name, name_at, method) = named_by(view, lead);
+        return Some((name, name_at, method, params));
+    }
+    let w = ident_start_before(vb, k + 1)?;
+    let word = &view[w..=k];
+    if word == "function" || word == "async" {
+        let (name, name_at, method) = named_by(view, w);
+        return Some((name, name_at, method, params));
+    }
+    if arrow {
+        return Some((None, None, false, params));
+    }
+    if CONTROL.contains(&word) {
+        return None;
+    }
+    let before = prev_non_ws(vb, w);
+    if before.is_some_and(|b| vb[b] == b'.') {
+        return None;
+    }
+    let declared = before
+        .map(|b| {
+            if vb[b] == b'*' {
+                prev_non_ws(vb, b)
+            } else {
+                Some(b)
+            }
+        })
+        .and_then(|b| b.and_then(|b| ident_start_before(vb, b + 1).map(|s| &view[s..=b])))
+        == Some("function");
+    Some((Some(word.to_string()), Some(w), !declared, params))
+}
+
+/// The name a function expression starting at `at` (its `function` /
+/// `async` keyword or its parameters) is assigned to: `<x> = ..` (a
+/// declaration or class field `<x>(: T)? = ..`, a member `<o>.<x> = ..`) or
+/// an object property `<x>: ..`; with whether it is called as a method.
+/// `(None, None, false)` for an anonymous one (an argument, a return value).
+fn named_by(view: &str, at: usize) -> (Option<String>, Option<usize>, bool) {
+    let vb = view.as_bytes();
+    let anonymous = (None, None, false);
+    let mut s = at;
+    if let Some(e) = prev_non_ws(vb, s)
+        && let Some(w) = ident_start_before(vb, e + 1)
+        && &view[w..=e] == "async"
+    {
+        s = w;
+    }
+    let Some(e) = prev_non_ws(vb, s) else {
+        return anonymous;
+    };
+    let (name_end, property) = match vb[e] {
+        b'=' if e > 0 && !b"=!<>+-*/%&|^?".contains(&vb[e - 1]) => {
+            let Some(b) = prev_non_ws(vb, e) else {
+                return anonymous;
+            };
+            let typed = !is_ident_byte(vb[b])
+                || ident_start_before(vb, b + 1)
+                    .and_then(|i| prev_non_ws(vb, i))
+                    .is_some_and(|c| vb[c] == b':');
+            if typed {
+                // `<x>: T = ..`: the name stands before the annotation.
+                let Some(colon) = type_colon_before(vb, e) else {
+                    return anonymous;
+                };
+                let Some(n) = prev_non_ws(vb, colon) else {
+                    return anonymous;
+                };
+                let n = if matches!(vb[n], b'?' | b'!') {
+                    match prev_non_ws(vb, n) {
+                        Some(n) => n,
+                        None => return anonymous,
+                    }
+                } else {
+                    n
+                };
+                (n + 1, false)
+            } else {
+                (b + 1, false)
+            }
+        }
+        b':' => match prev_non_ws(vb, e) {
+            Some(b) => (b + 1, true),
+            None => return anonymous,
+        },
+        _ => return anonymous,
+    };
+    let Some(n_start) = ident_start_before(vb, name_end) else {
+        return anonymous;
+    };
+    let name = view[n_start..name_end].to_string();
+    let member = prev_non_ws(vb, n_start).is_some_and(|c| matches!(vb[c], b'.' | b'#'));
+    let (block, _) = enclosing_block(view, n_start);
+    let field = block > 0 && is_class_body(view, block);
+    (Some(name), Some(n_start), property || member || field)
+}
+
+/// The parameter names between the parentheses at `open` / `close`: a
+/// destructured or rest parameter is `None`; a leading `this:` annotation is
+/// no parameter.
+fn params_of(view: &str, open: usize, close: usize) -> Vec<Option<String>> {
+    let mut out: Vec<Option<String>> = split_args(view, open, close)
+        .into_iter()
+        .map(|(s, e)| {
+            let mut text = &view[s..e];
+            while let Some(rest) = PARAM_MODIFIERS.iter().find_map(|m| {
+                text.strip_prefix(m)
+                    .filter(|r| r.starts_with(char::is_whitespace))
+            }) {
+                text = rest.trim_start();
+            }
+            ident_end(text.as_bytes(), 0).map(|n| text[..n].to_string())
+        })
+        .collect();
+    if out.first().is_some_and(|p| p.as_deref() == Some("this")) {
+        out.remove(0);
+    }
+    out
+}
+
+/// The `(` matching the `)` at `close`, read backwards.
+fn open_before(vb: &[u8], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in (0..=close).rev() {
+        match vb[k] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return (vb[k] == b'(').then_some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `<` opening the type parameter list whose `>` is at `close`, read
+/// backwards within [`MAX_TYPE`] bytes.
+fn generics_open(vb: &[u8], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in (close.saturating_sub(MAX_TYPE)..=close).rev() {
+        match vb[k] {
+            b'>' if k > 0 && vb[k - 1] == b'=' => {}
+            b'>' => depth += 1,
+            b'<' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            b';' | b'{' | b'}' | b'(' | b')' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The `:` that opens a type annotation ending just before `end` (a return
+/// type `): T {` / `): T =>`, a declaration's `x: T =`), read backwards over
+/// type text within [`MAX_TYPE`] bytes; `None` when anything else stands
+/// there.
+fn type_colon_before(vb: &[u8], end: usize) -> Option<usize> {
+    let lo = end.saturating_sub(MAX_TYPE);
+    let mut k = end;
+    while k > lo {
+        k -= 1;
+        match vb[k] {
+            b':' => return Some(k),
+            c if is_ident_byte(c) || c.is_ascii_whitespace() || b"<>[]|&.,?'\"`".contains(&c) => {}
+            _ => return None,
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -4992,11 +5751,17 @@ function writeContract({ abi, functionName }: Opts) { return functionName; }
             TsCounts {
                 abis: 0,
                 not_in_abi: 0,
-                dynamic: 5,
+                dynamic: 4,
+                wrappers: WrapperCounts {
+                    direct: 1,
+                    ..WrapperCounts::default()
+                },
                 ..TsCounts::default()
             },
-            "a variable name, an unreadable ABI, a template with ${{..}}, a spread with no \
-             abi and an eventName variable; options in a variable and definitions are no call"
+            "an unreadable ABI, a template with ${{..}}, a spread with no abi and an eventName \
+             variable; options in a variable and definitions are no call; `functionName: fn`, \
+             `fn` a parameter of `call`, makes `call` a wrapper (step 12) with no same-file \
+             call, so it is no longer dynamic"
         );
     }
 
@@ -5407,5 +6172,244 @@ export { other } from './other';
             .map(|(n, e)| format!("{n}:{}", e.len()))
             .collect();
         assert_eq!(names, ["vaultAbi:1", "VAULT:1"]);
+    }
+
+    /// The `[evm-wrappers]` counts: `(direct, forwarded, ambiguous, sites,
+    /// dynamic)`.
+    fn wrapped(w: (usize, usize, usize, usize, usize)) -> WrapperCounts {
+        let (direct, forwarded, ambiguous, sites, dynamic) = w;
+        WrapperCounts {
+            direct,
+            forwarded,
+            ambiguous,
+            sites,
+            dynamic,
+        }
+    }
+
+    const WRAP_ABI: &str = "const ESCROW_ABI = [
+  'function deposit(address payee) payable',
+  'function release(address payee, uint256 amount)',
+  'function arbiter() view returns (address)',
+];
+";
+
+    #[test]
+    fn ethers_get_function_wrapper_names_its_literal_calls() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{WRAP_ABI}\
+const escrow = new Contract(ADDR, ESCROW_ABI, signer);
+async function callEscrow(method: string, args: unknown[], value?: bigint): Promise<unknown> {{
+  const fn = escrow.getFunction(method);
+  return value === undefined ? fn(...args) : fn(...args, {{ value }});
+}}
+export async function deposit(payee: string, amount: bigint) {{
+  await callEscrow('deposit', [payee], amount);
+}}
+export async function release(payee: string, amount: bigint) {{
+  await callEscrow('release', [payee, amount]);
+}}
+export const arbiter = () => escrow.arbiter();
+"
+        );
+        let (rows, counts) = read(&src);
+        let abi = "abi=f:arbiter/0,f:deposit/1,f:release/2";
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:ESCROW_ABI.deposit args=- {abi} line=13"),
+                format!("call abi:ESCROW_ABI.release args=- {abi} line=16"),
+                format!("call abi:ESCROW_ABI.arbiter args=0 {abi} line=18"),
+            ],
+            "each literal call of the wrapper is a site at the call, args unknown; the \
+             getFunction line itself is none"
+        );
+        assert_eq!(counts.wrappers, wrapped((1, 0, 0, 2, 0)));
+        assert_eq!(counts.dynamic, 0);
+        assert!(libs(&src).iter().all(|l| l.ends_with(" ethers")));
+    }
+
+    #[test]
+    fn typechain_factory_bound_wrapper_and_a_class_method_wrapper() {
+        let src = "import { Escrow__factory } from './typechain-types';
+const escrow = Escrow__factory.connect(ADDR, signer);
+async function callEscrow(method: string, args: unknown[]): Promise<unknown> {
+  return escrow.getFunction(method)(...args);
+}
+export async function release(payee: string, amount: bigint) {
+  await callEscrow('release', [payee, amount]);
+}
+export class Payments {
+  private readonly vault = Escrow__factory.connect(ADDR, signer);
+  private async send(this: Payments, method: string, ...args: unknown[]) {
+    const call = this.vault.getFunction(method);
+    return call.staticCall(...args);
+  }
+  deposit(payee: string) {
+    return this.send('deposit', payee);
+  }
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=- abi=- line=7",
+                "call Escrow.deposit args=- abi=- line=16",
+            ],
+            "a `this:` annotation is no parameter; a stored getFunction called through \
+             `.staticCall(` is invoked; the method wrapper is called `this.send(`"
+        );
+        assert_eq!(counts.wrappers, wrapped((2, 0, 0, 2, 0)));
+        assert!(libs(src).iter().all(|l| l.ends_with(" typechain")));
+    }
+
+    #[test]
+    fn viem_function_name_wrappers_shorthand_and_explicit() {
+        let src = "import { createWalletClient, http } from 'viem';
+import { escrowAbi } from './abi';
+const walletClient = createWalletClient({ transport: http() });
+async function callEscrow(functionName: string, args: readonly unknown[], value?: bigint): Promise<void> {
+  await walletClient.writeContract({ address: ESCROW_ADDRESS, abi: escrowAbi, functionName, args, value } as never);
+}
+const simulate = async (name: string) => {
+  return walletClient.simulateContract({ address: ESCROW_ADDRESS, abi: escrowAbi, functionName: name });
+};
+export async function deposit(payee: `0x${string}`, amount: bigint) {
+  await callEscrow('deposit', [payee], amount);
+  await simulate('release');
+}
+";
+        let (sites, counts) = scan(src, &code_view(src, "typescript"));
+        let rows: Vec<String> = sites
+            .iter()
+            .map(|s| {
+                let r = s.abi_ref.as_ref().map(|r| format!("{}@{}", r.name, r.from));
+                format!("{}.{} {} {r:?}", s.scope.key(), s.member, s.lib)
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "abi:escrowAbi.deposit viem Some(\"escrowAbi@./abi\")",
+                "abi:escrowAbi.release viem Some(\"escrowAbi@./abi\")",
+            ],
+            "the imported ABI's reference rides on the wrapper's sites"
+        );
+        assert_eq!(counts.wrappers, wrapped((2, 0, 0, 2, 0)));
+        assert_eq!(
+            counts.dynamic, 0,
+            "the two hand-overs are no longer dynamic"
+        );
+    }
+
+    #[test]
+    fn forwarded_chain_of_two_and_a_dynamic_argument() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{WRAP_ABI}\
+const escrow = new Contract(ADDR, ESCROW_ABI, signer);
+function callEscrow(method: string, args: unknown[]) {{
+  return escrow.getFunction(method)(...args);
+}}
+function submit(label: string, method: string, args: unknown[]) {{
+  log(label);
+  return callEscrow(method, args);
+}}
+export function release(payee: string, amount: bigint) {{
+  return submit('pay', 'release', [payee, amount]);
+}}
+export function any(args: unknown[]) {{
+  const picked = pick();
+  callEscrow(picked, args);
+  callEscrow(`dep${{x}}`, args);
+  return submit('x', ...args);
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(
+            rows,
+            ["call abi:ESCROW_ABI.release args=- abi=f:arbiter/0,f:deposit/1,f:release/2 line=16"],
+            "submit forwards its second parameter into callEscrow; the literal at that index \
+             is a site at submit's call"
+        );
+        assert_eq!(
+            counts.wrappers,
+            wrapped((1, 1, 0, 1, 3)),
+            "a local, a template and a spread at the index are dynamic"
+        );
+        assert_eq!(counts.dynamic, 3);
+    }
+
+    #[test]
+    fn ambiguous_wrappers_mint_nothing() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';\n{WRAP_ABI}\
+const VAULT_ABI = ['function release(uint256 id)'];
+class A {{
+  private escrow = new Contract(ADDR, ESCROW_ABI, signer);
+  call(method: string) {{ return this.escrow.getFunction(method)(); }}
+  run() {{ return this.call('release'); }}
+}}
+class B {{
+  private escrow = new Contract(ADDR, ESCROW_ABI, signer);
+  call(method: string) {{ return this.escrow.getFunction(method)(); }}
+}}
+const escrow = new Contract(ADDR, ESCROW_ABI, signer);
+const vault = new Contract(ADDR, VAULT_ABI, signer);
+function both(method: string) {{
+  escrow.getFunction(method)();
+  return vault.getFunction(method)();
+}}
+both('release');
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(rows, Vec::<String>::new());
+        assert_eq!(
+            counts.wrappers,
+            wrapped((0, 0, 3, 0, 0)),
+            "a name two classes declare is ambiguous twice; a parameter reaching two ABIs once"
+        );
+    }
+
+    #[test]
+    fn needle_named_and_abi_parameter_wrappers_are_none() {
+        let src = format!(
+            "import {{ Contract }} from 'ethers';
+import {{ readContract }} from 'viem/actions';
+import {{ escrowAbi }} from './abi';\n{WRAP_ABI}\
+const escrow = new Contract(ADDR, ESCROW_ABI, signer);
+function connect(method: string) {{ return escrow.getFunction(method)(); }}
+connect('release');
+function read(abi: Abi, functionName: string) {{
+  return readContract(client, {{ address: ESCROW_ADDRESS, abi, functionName }});
+}}
+function generic(theAbi: Abi, functionName: string) {{
+  return readContract(client, {{ address: ESCROW_ADDRESS, abi: theAbi, functionName }});
+}}
+read(escrowAbi, 'arbiter');
+generic(escrowAbi, 'arbiter');
+function mapped(names: string[]) {{
+  return names.map((n) => escrow.getFunction(n)());
+}}
+function described(method: string) {{
+  return escrow.getFunction(method).fragment;
+}}
+described('release');
+"
+        );
+        let (rows, counts) = read(&src);
+        assert_eq!(rows, Vec::<String>::new());
+        assert_eq!(
+            counts.wrappers,
+            WrapperCounts::default(),
+            "a function named like an ethers member, a name over an ABI parameter, an \
+             anonymous callback's parameter and an uncalled getFunction make no wrapper"
+        );
+        assert_eq!(
+            counts.dynamic, 2,
+            "the two ABI-parameter option calls stay dynamic, as before step 12"
+        );
     }
 }

@@ -1,0 +1,116 @@
+{
+  "framework": "evm-ts-wrappers",
+  "language": "typescript+solidity",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.30 (plan 0.5.6 section 4, FH.11c's handoff; DT.10f's Go wrapper rule ported to TS): a function whose string parameter reaches a bound contract's ethers / TypeChain `getFunction(<p>)` or a viem call object's `functionName` is a method-name wrapper, and each same-file call passing one string literal at that index is a contract call site. The three Sibyl client shapes (evm-002 viem, evm-003 ethers, evm-006 TypeChain), one repo. Before GD.30 every expect row fails: only each file's direct getter / event sites mint.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.deposit",
+      "exact": true,
+      "note": "web/ethers.ts: ethers v6 `escrow.getFunction(method)` inside callEscrow(method)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.release",
+      "exact": true,
+      "note": "web/ethers.ts: ethers v6 `escrow.getFunction(method)` inside callEscrow(method)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.deposit",
+      "exact": true,
+      "note": "web/viem.ts: viem `writeContract({ .., functionName, args, value })` shorthand inside callEscrow(functionName)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.release",
+      "exact": true,
+      "note": "web/viem.ts: viem `writeContract({ .., functionName, args, value })` shorthand inside callEscrow(functionName)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposit",
+      "exact": true,
+      "note": "web/typechain.ts: TypeChain `Escrow__factory.connect(..)`, `escrow.getFunction(method)` inside callEscrow(method)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.release",
+      "exact": true,
+      "note": "web/typechain.ts: TypeChain `Escrow__factory.connect(..)`, `escrow.getFunction(method)` inside callEscrow(method)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:abi:ESCROW_ABI.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_ABI.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.callEscrow",
+      "note": "PRECISION: the wrapper is no contract member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.getFunction",
+      "note": "PRECISION: getFunction stays an ethers runtime member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.callEscrow",
+      "note": "PRECISION: the wrapper is no contract member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.getFunction",
+      "note": "PRECISION: getFunction stays an ethers runtime member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.callEscrow",
+      "note": "PRECISION: the wrapper is no contract member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.getFunction",
+      "note": "PRECISION: getFunction stays an ethers runtime member"
+    }
+  ]
+}

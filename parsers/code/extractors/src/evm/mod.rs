@@ -46,8 +46,10 @@
 //! A `lang=ts` line adds, before `path=`, the GD.20 forms the reader read
 //! (`ts` step 11): `(hardhat_deploy=<n> factories=<n> waffle=<n>
 //! viem_codec=<n> web3_contract=<n> truffle=<n>)`.
-//! Grep `^\[evm-client\] `. A Go file with a method-name wrapper (DT.10f)
-//! adds the reader's `[evm-wrappers]` line (`go` step 9).
+//! Grep `^\[evm-client\] `. A file with a method-name wrapper adds the
+//! reader's `[evm-wrappers] wrappers=<w> (direct=<d> forwarded=<f>
+//! ambiguous=<a>) sites=<s> dynamic=<y> path=<file>` line: Go (DT.10f, `go`
+//! step 9) and TypeScript / JavaScript (GD.30, `ts` step 12).
 
 mod abi;
 mod go;
@@ -97,9 +99,9 @@ pub struct EvmNodes {
     /// empty for any other language. The engine moves them onto the MODULE as
     /// `NavFact::EvmAbi`.
     pub abi_decls: Vec<(String, Vec<AbiEntry>)>,
-    /// The Go reader's `[evm-wrappers]` counts (DT.10f); zero for any other
-    /// reader.
-    go_wrappers: go::WrapperCounts,
+    /// The reader's `[evm-wrappers]` counts (Go DT.10f, TS GD.30); zero for
+    /// a file with no wrapper.
+    wrappers: go::WrapperCounts,
 }
 
 /// The `[evm-client]` marker's counts for one file.
@@ -155,7 +157,7 @@ pub(crate) struct Site {
 /// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
     let mut ts_forms = [0; 6];
-    let (tag, sites, abis, not_in_abi, dynamic, go_wrappers, abi_decls) = match lang {
+    let (tag, sites, abis, not_in_abi, dynamic, wrappers, abi_decls) = match lang {
         "go" => {
             let view = scan::code_view(source, lang);
             let (sites, c) = go::scan(source, &view);
@@ -173,9 +175,16 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
             let view = scan::code_view(source, lang);
             let (sites, c) = ts::scan(source, &view);
             let decls = ts::exported_abis(source, &view);
-            let none = go::WrapperCounts::default();
             ts_forms = c.forms();
-            ("ts", sites, c.abis, c.not_in_abi, c.dynamic, none, decls)
+            (
+                "ts",
+                sites,
+                c.abis,
+                c.not_in_abi,
+                c.dynamic,
+                c.wrappers,
+                decls,
+            )
         }
         _ => return EvmNodes::default(),
     };
@@ -185,7 +194,7 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
     out.counts.not_in_abi = not_in_abi;
     out.counts.dynamic = dynamic;
     out.counts.ts_forms = ts_forms;
-    out.go_wrappers = go_wrappers;
+    out.wrappers = wrappers;
     out.abi_decls = abi_decls;
     out
 }
@@ -193,14 +202,14 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
 impl EvmNodes {
     /// The file's marker lines (module doc): the `[evm-client]` line when the
     /// file had a site or a dynamic construction, then the `[evm-wrappers]`
-    /// line when it had a Go method-name wrapper.
+    /// line when it had a method-name wrapper.
     pub fn markers(&self, path: &str) -> Vec<String> {
         let c = &self.counts;
         let mut lines = Vec::new();
         if c.sites + c.dynamic > 0 {
             lines.push(self.client_marker(path));
         }
-        lines.extend(self.go_wrappers.marker(path));
+        lines.extend(self.wrappers.marker(path));
         lines
     }
 
@@ -464,6 +473,28 @@ mod tests {
             read_client_cells(&event.cells)[0].args,
             Vec::<u32>::new(),
             "a subscription passes no argument count"
+        );
+    }
+
+    #[test]
+    fn ts_wrapper_file_prints_the_wrappers_line() {
+        let src = "import { Contract } from 'ethers';
+const ESCROW_ABI = ['function deposit(address p) payable', 'function release(address p, uint256 a)'];
+const escrow = new Contract(ADDR, ESCROW_ABI, signer);
+async function callEscrow(method: string, args: unknown[]) {
+  const fn = escrow.getFunction(method);
+  return fn(...args);
+}
+export const deposit = (p: string) => callEscrow('deposit', [p]);
+export const release = (p: string, a: bigint) => callEscrow('release', [p, a]);
+";
+        let out = extract_evm_clients(src, "typescript", NodeId(1), RepoId(1));
+        assert_eq!(
+            out.markers("web/ethers.ts"),
+            [
+                "[evm-client] lang=ts calls=2 events=0 sites=2 (ethers=2 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=1 not_in_abi=0 dynamic=0 (hardhat_deploy=0 factories=0 waffle=0 viem_codec=0 web3_contract=0 truffle=0) path=web/ethers.ts",
+                "[evm-wrappers] wrappers=1 (direct=1 forwarded=0 ambiguous=0) sites=2 dynamic=0 path=web/ethers.ts",
+            ]
         );
     }
 
