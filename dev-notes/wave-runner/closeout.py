@@ -545,6 +545,11 @@ def main():
             new, gone = sorted(set(now) - set(prev)), sorted(set(prev) - set(now))
             if new:
                 say(f"   NEW {label}: {new}")
+                # A fixture newly blind / forbid-violating / missing a node or cell is a gate (W8 committed
+                # evm-ts-imported-instance blind: the packet deferred its grade to here). A new partial is
+                # allowed: a partial packet declares it.
+                if label != "partial":
+                    gates.append(f"run.py NEW {label}: {new}")
             if gone:
                 say(f"   cleared {label}: {gone}")
         if ge:
