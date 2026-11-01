@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 506,
+  "fixtures": 507,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2579,6 +2579,13 @@
     },
     "start-indirection": {
       "framework": "start-indirection",
+      "language": "dockerfile",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "start-indirection-shell": {
+      "framework": "start-indirection-shell",
       "language": "dockerfile",
       "per_category": {
         "HANDLED_BY": 1.0

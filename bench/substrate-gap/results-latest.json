@@ -9820,6 +9820,7 @@
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
     "fixtures/start-indirection",
+    "fixtures/start-indirection-shell",
     "fixtures/swift-implicit-self",
     "fixtures/swift-imports",
     "fixtures/swift-local-receivers",
@@ -10424,8 +10425,8 @@
       },
       "typescript/host_callback": {
         "extract": [
-          2,
-          2
+          3,
+          3
         ],
         "fixtures": [
           "patterns/typescript/host_callback"
@@ -10436,37 +10437,37 @@
         ],
         "level": "full",
         "literal": [
-          2,
-          2
+          3,
+          3
         ],
         "reasons": [],
         "route": [
-          2,
-          2
+          3,
+          3
         ],
         "via": "host_callback"
       },
       "typescript/host_command": {
         "extract": [
-          2,
-          2
+          4,
+          4
         ],
         "fixtures": [
           "patterns/typescript/host_command"
         ],
         "forbid": [
-          2,
-          2
+          3,
+          3
         ],
         "level": "full",
         "literal": [
-          2,
-          2
+          4,
+          4
         ],
         "reasons": [],
         "route": [
-          2,
-          2
+          6,
+          6
         ],
         "via": "host_command"
       },
@@ -10520,8 +10521,8 @@
       },
       "typescript/script_entry": {
         "extract": [
-          3,
-          3
+          5,
+          5
         ],
         "fixtures": [
           "patterns/typescript/script_entry"
@@ -10532,13 +10533,13 @@
         ],
         "level": "full",
         "literal": [
-          3,
-          3
+          5,
+          5
         ],
         "reasons": [],
         "route": [
-          4,
-          4
+          5,
+          5
         ],
         "via": "script_entry"
       }
