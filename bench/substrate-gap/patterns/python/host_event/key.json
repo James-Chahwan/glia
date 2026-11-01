@@ -1,0 +1,26 @@
+{
+  "framework": "python-host-event",
+  "language": "python",
+  "dirs": ["."],
+  "mechanism": "host_event",
+  "cells": ["python/host_event"],
+  "expect_nodes": [
+    {"kind": "EVENT_HANDLER", "name": "host_event:flask:before_app_request", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:flask:teardown_appcontext", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:flask:errorhandler:404", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "host_event:flask:before_app_request", "to": "flaskr::auth::load_logged_in_user",
+     "category": "HANDLED_BY", "exact": true, "note": "the decorator form: @bp.before_app_request on a Blueprint(..) receiver"},
+    {"from": "host_event:flask:teardown_appcontext", "to": "flaskr::db::close_db",
+     "category": "HANDLED_BY", "exact": true, "note": "the call form: app.teardown_appcontext(close_db) on the factory's app parameter"},
+    {"from": "host_event:flask:errorhandler:404", "to": "not_found",
+     "category": "HANDLED_BY", "note": "a nested def in the app factory, the event named by its argument"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "EVENT_HANDLER", "name": "host_event:flask:before_request", "max_nodes": 0,
+     "note": "jobs/bus.py imports no flask: its app.before_request(tick) is another object's method"}
+  ],
+  "note": "0.5.6 use pattern (GH.8): Flask calls an app's / blueprint's hooks when its request lifecycle fires, from the Flask tutorial's shape (flask@d086db856be1 examples/tutorial: @bp.before_app_request, app.teardown_appcontext(close_db)). INTENDED: one EVENT_HANDLER host_event:flask:<hook> per hook HANDLED_BY the registered function, gated on the file importing flask and the receiver being a Flask(..) / Blueprint(..) binding or named app / bp / blueprint. At HEAD b78eb38d: none (load_logged_in_user and close_db dead_symbol, no EVENT_HANDLER)."
+}

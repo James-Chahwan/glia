@@ -60,6 +60,18 @@
 //! The manifest route prints `[host-manifest] host=<h> commands=<c>
 //! config=<g> path=<p>` per manifest of a host.
 //!
+//! **Python (GH.8): Flask and pytest.** Gated on the file importing the host
+//! ([`Gate::Imports`](crate::hosts::Gate::Imports): `flask`; `pytest` /
+//! `_pytest` / `pluggy` / `pytest_asyncio`, or the file being a
+//! `conftest.py`):
+//!
+//! | Reading | Node |
+//! |---|---|
+//! | `@<r>.before_request` (and `before_app_request`, `after_request`, `after_app_request`, `teardown_request`, `teardown_app_request`, `teardown_appcontext`, `context_processor`, `app_context_processor`, `url_value_preprocessor`, `url_defaults`) above a `def`, or the call `<r>.<hook>(f)`; `<r>` a `Flask(..)` / `Blueprint(..)` binding or named `app` / `bp` / `blueprint` ([`Shape::Decorator`](crate::hosts::Shape::Decorator), [`Receivers`](crate::hosts::Receivers), [`decorator_registration_for`](crate::hosts::decorator_registration_for)) | EVENT_HANDLER `host_event:flask:<hook>` HANDLED_BY the function |
+//! | `@<r>.errorhandler(404)` / `app_errorhandler(Exc)`; `template_filter` / `template_global` / `template_test` (`(name)`, else the function's name) | EVENT_HANDLER `host_event:flask:errorhandler:404`, `host_event:flask:template_filter:<name>` |
+//! | a module-level function named one of pytest 8's hookspecs; in a `conftest.py`, any `pytest_<x>` ([`Callback::open_head`](crate::hosts::Callback::open_head), [`open_callback_for`](crate::hosts::open_callback_for)) | the FUNCTION's ENTRYPOINT cell, source `host:pytest` |
+//! | `@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture` (imported from pytest) on a module-level function outside a test module ([`Callback::decorators`](crate::hosts::Callback::decorators), [`decorator_callback_for`](crate::hosts::decorator_callback_for)) | the same ENTRYPOINT cell |
+//!
 //! Other `maki.api.register_*` calls match the Maki row but mint nothing
 //! (counted `aux=`, PR #3's ruling). Neovim keymaps are not commands (James
 //! 2026-10-31): `vim.keymap.set` matches no row.
@@ -176,17 +188,66 @@ pub enum Gate {
         globals: &'static [&'static str],
         requires: &'static [&'static str],
     },
+    /// The host is a package the file imports (GH.8, Python: `import flask`,
+    /// `from flask import g`, `import pytest as pt`, a submodule such as
+    /// `flask.views`), anywhere in the file, or the file's base name is one of
+    /// `files` (pytest loads every `conftest.py`, whatever it imports).
+    /// Settled per file before it is walked ([`Gate::is_file_level`]). No
+    /// path is rooted at the modules: the row's registrations are
+    /// [`Callee::Method`]s on receivers its [`Shape::Decorator`] names, its
+    /// callbacks functions of the module ([`Callback`]); a local bound to an
+    /// import of a module (`pt`, or `fixture` from `from pytest import
+    /// fixture`) reads as the module's dotted name (`pytest.fixture`).
+    Imports {
+        modules: &'static [&'static str],
+        files: &'static [&'static str],
+    },
 }
 
 impl Gate {
     /// The root every path of the row starts with: the global, or the
     /// required module's name; a [`Gate::Call`]'s function; a
     /// [`Gate::Globals`]'s first global (each of them roots a path: read
-    /// [`Gate::roots_path`]).
+    /// [`Gate::roots_path`]); a [`Gate::Imports`]'s first module.
     pub fn root(self) -> &'static str {
         match self {
             Gate::Global(g) | Gate::Require(g) | Gate::Import(g) | Gate::Call(g) => g,
             Gate::Globals { globals, .. } => globals.first().copied().unwrap_or(""),
+            Gate::Imports { modules, .. } => modules.first().copied().unwrap_or(""),
+        }
+    }
+
+    /// True when importing the dotted module `module` makes a
+    /// [`Gate::Imports`] gate hold: one of its modules or a submodule of one
+    /// (`flask.views`). False for every other gate.
+    pub fn held_by_import(self, module: &str) -> bool {
+        let Gate::Imports { modules, .. } = self else {
+            return false;
+        };
+        modules.iter().any(|m| {
+            module == *m
+                || module
+                    .strip_prefix(m)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+    }
+
+    /// True when a file whose base name is `base_name` holds a
+    /// [`Gate::Imports`] gate by its name alone (pytest's `conftest.py`).
+    pub fn held_by_file(self, base_name: &str) -> bool {
+        matches!(self, Gate::Imports { files, .. } if files.contains(&base_name))
+    }
+
+    /// True when `dotted` is rooted at one of a [`Gate::Imports`]'s modules
+    /// (`pytest.fixture`); [`Gate::roots_path`] for every other gate.
+    pub fn roots_module_path(self, dotted: &str) -> bool {
+        match self {
+            Gate::Imports { modules, .. } => modules.iter().any(|m| {
+                dotted
+                    .strip_prefix(m)
+                    .is_some_and(|rest| rest.starts_with('.'))
+            }),
+            other => other.roots_path(dotted),
         }
     }
 
@@ -234,7 +295,10 @@ impl Gate {
     /// ([`Gate::Call`], [`Gate::Globals`]): the parser reads it in a first
     /// pass, so a registration above the require or the call still holds.
     pub fn is_file_level(self) -> bool {
-        matches!(self, Gate::Call(_) | Gate::Globals { .. })
+        matches!(
+            self,
+            Gate::Call(_) | Gate::Globals { .. } | Gate::Imports { .. }
+        )
     }
 }
 
@@ -272,8 +336,10 @@ pub enum Callee {
         heads: &'static [&'static str],
     },
     /// A method called on any receiver (GH.3, WoW: `<r>:RegisterEvent(..)`),
-    /// read only by a [`Shape::Joined`] registration through [`joined_for`];
-    /// [`registration_for`] never matches it.
+    /// read only by a [`Shape::Joined`] registration through [`joined_for`]
+    /// or a [`Shape::Decorator`] one through [`decorator_registration_for`]
+    /// (GH.8, Flask: `@<r>.before_request`); [`registration_for`] never
+    /// matches it.
     Method(&'static str),
 }
 
@@ -364,9 +430,68 @@ pub enum Shape {
         handler_slot: &'static str,
         handler_arg: usize,
     },
+    /// The registration's [`Callee::Method`] decorates its handler, on a
+    /// receiver `receivers` admits (GH.8, Flask: `@<r>.before_request` /
+    /// `@<r>.errorhandler(404)` above a `def`, the handler that def). The
+    /// event is the method's name, or with `name_arg` `<method>:<argument>`
+    /// (`errorhandler:404`, the argument a literal or a dotted name); with
+    /// `or_handler` a missing argument names the event by the handler
+    /// (`@app.template_filter()` on `def reverse` is `template_filter:reverse`,
+    /// Flask's own default), else the decorator registers nothing. With
+    /// `call_form` (only without `name_arg`) the call `<r>.<method>(f)`, `f` a
+    /// named function, registers `f` too (`app.teardown_appcontext(close_db)`).
+    Decorator {
+        receivers: &'static Receivers,
+        name_arg: Option<usize>,
+        or_handler: bool,
+        call_form: bool,
+    },
+}
+
+/// The receivers a [`Shape::Decorator`] registration is read on (GH.8): a
+/// name the file binds to one of `constructors` (`app = Flask(__name__)`, the
+/// callee's last segment once an import alias is expanded) or annotates a
+/// parameter with (`app: Flask`), or one of `names` (`app`, `bp`: a factory's
+/// `def init_app(app)` parameter, an imported app object). The row's gate must
+/// hold in the file too: a name alone admits nothing in a file that does not
+/// import the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Receivers {
+    pub constructors: &'static [&'static str],
+    pub names: &'static [&'static str],
 }
 
 impl Shape {
+    /// The event a [`Shape::Decorator`] registration of `method` names, given
+    /// its argument at `name_arg` (a literal's text or a dotted name, `None`
+    /// when absent) and the decorated handler's name: `method`, or
+    /// `<method>:<arg>` (`<method>:<handler>` under `or_handler` with no
+    /// argument). `None` when the shape needs an argument it lacks, or for
+    /// every other shape.
+    pub fn decorator_event(
+        self,
+        method: &str,
+        arg: Option<&str>,
+        handler: Option<&str>,
+    ) -> Option<String> {
+        let Shape::Decorator {
+            name_arg,
+            or_handler,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if name_arg.is_none() {
+            return Some(method.to_string());
+        }
+        let fallback = if or_handler { handler } else { None };
+        arg.filter(|a| !a.is_empty())
+            .or(fallback.filter(|h| !h.is_empty()))
+            .map(|a| format!("{method}:{a}"))
+    }
+
     /// The registration's name a [`Shape::CalleeSegment`] reads from the
     /// expanded `dotted` callee: its last `segments` segments, `None` when it
     /// has fewer. `None` for every other shape (their name is an argument).
@@ -389,12 +514,27 @@ impl Shape {
 /// the plugin's module exports under the name (VS Code's `activate` /
 /// `deactivate`), read by [`exported_callback_for`] in a file whose gate
 /// holds.
+///
+/// Python (GH.8) reads a module-level function as exported: pytest calls a
+/// plugin module's or `conftest.py`'s hooks by name (`names`, its hookspec
+/// list). Two readings widen an exported rule, each only where the gate
+/// holds: `open_head`, a name head that makes any longer name the host's in
+/// a file the gate holds by its base name ([`Gate::held_by_file`]: a
+/// `conftest.py`'s `pytest_markdown_docs_globals`, another plugin's hook),
+/// read by [`open_callback_for`]; and `decorators`, the dotted decorators
+/// that make the function they decorate the host's whatever its name
+/// (`pytest.fixture`, rooted at a module of the gate), read by
+/// [`decorator_callback_for`]. The parser reads a decorated callback outside
+/// a test module only (`test_*.py`, `*_test.py`): there the function is the
+/// test file's own.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Callback {
     pub prefix: &'static str,
     pub names: &'static [&'static str],
     pub exported: bool,
+    pub open_head: Option<&'static str>,
+    pub decorators: &'static [&'static str],
 }
 
 /// One place a host loads plugin units from (GH.4).
@@ -660,6 +800,8 @@ pub static HOSTS: &[HostRow] = &[
             prefix: "love.",
             names: LOVE_CALLBACKS,
             exported: false,
+            open_head: None,
+            decorators: &[],
         }],
         config: &[],
         manifest: None,
@@ -733,6 +875,8 @@ pub static HOSTS: &[HostRow] = &[
             prefix: "",
             names: &["activate", "deactivate"],
             exported: true,
+            open_head: None,
+            decorators: &[],
         }],
         config: &[ConfigRule {
             flavour: ConfigFlavour::Section,
@@ -805,6 +949,161 @@ pub static HOSTS: &[HostRow] = &[
         config: &[],
         manifest: None,
     },
+    // GH.8: Flask, the first Python host. An app or blueprint registers the
+    // functions its request lifecycle calls, by decorator or by call, in a
+    // file that imports flask.
+    HostRow {
+        name: "flask",
+        lang: "python",
+        exts: &["py"],
+        gate: Gate::Imports {
+            modules: &["flask"],
+            files: &[],
+        },
+        loads: &[],
+        registrations: &[
+            flask_hook("before_request", FLASK_PLAIN),
+            flask_hook("before_app_request", FLASK_PLAIN),
+            flask_hook("after_request", FLASK_PLAIN),
+            flask_hook("after_app_request", FLASK_PLAIN),
+            flask_hook("teardown_request", FLASK_PLAIN),
+            flask_hook("teardown_app_request", FLASK_PLAIN),
+            flask_hook("teardown_appcontext", FLASK_PLAIN),
+            flask_hook("context_processor", FLASK_PLAIN),
+            flask_hook("app_context_processor", FLASK_PLAIN),
+            flask_hook("url_value_preprocessor", FLASK_PLAIN),
+            flask_hook("url_defaults", FLASK_PLAIN),
+            flask_hook("errorhandler", FLASK_ARG),
+            flask_hook("app_errorhandler", FLASK_ARG),
+            flask_hook("template_filter", FLASK_NAMED),
+            flask_hook("template_global", FLASK_NAMED),
+            flask_hook("template_test", FLASK_NAMED),
+        ],
+        callbacks: &[],
+        config: &[],
+        manifest: None,
+    },
+    // GH.8: pytest calls its hooks by name in a conftest.py or a module that
+    // imports it, and its fixtures by parameter name.
+    HostRow {
+        name: "pytest",
+        lang: "python",
+        exts: &["py"],
+        gate: Gate::Imports {
+            modules: &["pytest", "_pytest", "pluggy", "pytest_asyncio"],
+            files: &["conftest.py"],
+        },
+        loads: &[],
+        registrations: &[],
+        callbacks: &[Callback {
+            prefix: "",
+            names: PYTEST_HOOKS,
+            exported: true,
+            open_head: Some("pytest_"),
+            decorators: &["pytest.fixture", "pytest_asyncio.fixture"],
+        }],
+        config: &[],
+        manifest: None,
+    },
+];
+
+/// The receivers of Flask's hooks (GH.8): a `Flask(..)` / `Blueprint(..)`
+/// binding, or the names an app or blueprint goes by.
+const FLASK_RECEIVERS: Receivers = Receivers {
+    constructors: &["Flask", "Blueprint"],
+    names: &["app", "bp", "blueprint"],
+};
+
+/// A Flask hook named by its method alone, registered by decorator or call
+/// (`@app.before_request`, `app.teardown_appcontext(close_db)`).
+const FLASK_PLAIN: Shape = Shape::Decorator {
+    receivers: &FLASK_RECEIVERS,
+    name_arg: None,
+    or_handler: false,
+    call_form: true,
+};
+
+/// A Flask hook named by its argument (`@app.errorhandler(404)`).
+const FLASK_ARG: Shape = Shape::Decorator {
+    receivers: &FLASK_RECEIVERS,
+    name_arg: Some(1),
+    or_handler: false,
+    call_form: false,
+};
+
+/// A Flask template helper named by its argument, else by the function
+/// (`@app.template_filter()` on `def reverse`).
+const FLASK_NAMED: Shape = Shape::Decorator {
+    receivers: &FLASK_RECEIVERS,
+    name_arg: Some(1),
+    or_handler: true,
+    call_form: false,
+};
+
+/// One Flask hook: an event registration of `method` on the hook receivers.
+const fn flask_hook(method: &'static str, shape: Shape) -> Registration {
+    Registration {
+        callee: Callee::Method(method),
+        pattern: Pattern::Event,
+        shape,
+    }
+}
+
+/// pytest 8's hookspecs (`_pytest/hookspec.py`): the functions pytest calls
+/// by name in a plugin module or a `conftest.py` (GH.8).
+const PYTEST_HOOKS: &[&str] = &[
+    "pytest_addhooks",
+    "pytest_plugin_registered",
+    "pytest_addoption",
+    "pytest_configure",
+    "pytest_cmdline_parse",
+    "pytest_load_initial_conftests",
+    "pytest_cmdline_main",
+    "pytest_collection",
+    "pytest_collection_modifyitems",
+    "pytest_collection_finish",
+    "pytest_ignore_collect",
+    "pytest_collect_directory",
+    "pytest_collect_file",
+    "pytest_collectstart",
+    "pytest_itemcollected",
+    "pytest_collectreport",
+    "pytest_deselected",
+    "pytest_make_collect_report",
+    "pytest_pycollect_makemodule",
+    "pytest_pycollect_makeitem",
+    "pytest_pyfunc_call",
+    "pytest_generate_tests",
+    "pytest_make_parametrize_id",
+    "pytest_runtestloop",
+    "pytest_runtest_protocol",
+    "pytest_runtest_logstart",
+    "pytest_runtest_logfinish",
+    "pytest_runtest_setup",
+    "pytest_runtest_call",
+    "pytest_runtest_teardown",
+    "pytest_runtest_makereport",
+    "pytest_runtest_logreport",
+    "pytest_report_to_serializable",
+    "pytest_report_from_serializable",
+    "pytest_fixture_setup",
+    "pytest_fixture_post_finalizer",
+    "pytest_sessionstart",
+    "pytest_sessionfinish",
+    "pytest_unconfigure",
+    "pytest_assertrepr_compare",
+    "pytest_assertion_pass",
+    "pytest_report_header",
+    "pytest_report_collectionfinish",
+    "pytest_report_teststatus",
+    "pytest_terminal_summary",
+    "pytest_warning_recorded",
+    "pytest_markeval_namespace",
+    "pytest_internalerror",
+    "pytest_keyboard_interrupt",
+    "pytest_exception_interact",
+    "pytest_enter_pdb",
+    "pytest_leave_pdb",
 ];
 
 /// AwesomeWM's class globals (GH.3): each emits class-level signals.
@@ -929,6 +1228,69 @@ pub fn joined_for(lang: &str, method: &str) -> Option<JoinedMatch> {
                 role,
             })
         })
+}
+
+/// The [`Shape::Decorator`] registration of `lang` whose [`Callee::Method`]
+/// is `method` (GH.8: Flask's `before_request`), the first in table order;
+/// `None` for any other method. The caller checks the row's gate and the
+/// shape's receivers.
+pub fn decorator_registration_for(
+    lang: &str,
+    method: &str,
+) -> Option<(&'static HostRow, &'static Registration)> {
+    HOSTS
+        .iter()
+        .filter(|h| h.lang == lang)
+        .flat_map(|h| h.registrations.iter().map(move |r| (h, r)))
+        .find(|(_, r)| {
+            matches!(r.shape, Shape::Decorator { .. })
+                && matches!(r.callee, Callee::Method(m) if m == method)
+        })
+}
+
+/// The rows of `lang` whose [`Gate::Imports`] holds in a file that imports
+/// the dotted `module` (GH.8: `flask`, `flask.views`), in table order.
+pub fn hosts_imported<'m>(
+    lang: &'m str,
+    module: &'m str,
+) -> impl Iterator<Item = &'static HostRow> + 'm {
+    HOSTS
+        .iter()
+        .filter(move |h| h.lang == lang && h.gate.held_by_import(module))
+}
+
+/// The host that calls a function named `name` because the file holds its
+/// gate by its base name (GH.8: in a `conftest.py`, any `pytest_` name
+/// longer than the head is pytest's): a [`Callback::open_head`] rule of
+/// `lang`'s rows for which `by_file` holds, table order. `None` for any other
+/// name or file.
+pub fn open_callback_for(
+    lang: &str,
+    name: &str,
+    by_file: impl Fn(&'static HostRow) -> bool,
+) -> Option<&'static HostRow> {
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.callbacks.iter().any(|c| {
+            c.open_head
+                .is_some_and(|head| name.len() > head.len() && name.starts_with(head))
+        }) && by_file(h)
+    })
+}
+
+/// The host whose callbacks a function decorated with the dotted `decorator`
+/// is (GH.8: `pytest.fixture`, an import alias already expanded), among
+/// `lang`'s rows whose gate `present` says the file shows, table order.
+pub fn decorator_callback_for(
+    lang: &str,
+    decorator: &str,
+    present: impl Fn(&'static HostRow) -> bool,
+) -> Option<&'static HostRow> {
+    HOSTS.iter().filter(|h| h.lang == lang).find(|h| {
+        h.callbacks
+            .iter()
+            .any(|c| c.decorators.contains(&decorator))
+            && present(h)
+    })
 }
 
 /// The row of `lang` gated on importing the module `spec` (GH.9:
@@ -1481,7 +1843,11 @@ const RESERVED_NAMES: &[&str] = &["env", "secret", "flag", "setting"];
 /// callback rule with no prefix or names, a prefix not rooted at the gate's
 /// root or a name that is no identifier, and a
 /// config rule with no prefix, a prefix not rooted at the gate's root or a
-/// namespaced prefix it does not declare. Empty = valid.
+/// namespaced prefix it does not declare; GH.8: an imports gate with no
+/// dotted modules or a file that is no base name, a decorator shape with no
+/// identifier receivers or off an imports gate, an open-head callback off a
+/// file-held gate and a callback decorator not rooted at a gate module.
+/// Empty = valid.
 pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
     let mut problems = Vec::new();
     for (i, row) in rows.iter().enumerate() {
@@ -1522,6 +1888,17 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                 "{at}: a globals gate needs identifier globals and the modules it requires"
             ));
         }
+        if let Gate::Imports { modules, files } = row.gate
+            && (modules.is_empty()
+                || modules.iter().any(|m| !is_dotted_identifier(m))
+                || files
+                    .iter()
+                    .any(|f| f.is_empty() || f.contains('/') || f.contains('\\')))
+        {
+            problems.push(format!(
+                "{at}: an imports gate needs dotted module names and base file names"
+            ));
+        }
         for r in row.registrations {
             let callee = r.callee.text();
             let method = matches!(r.callee, Callee::Method(_));
@@ -1534,9 +1911,9 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     "{at}: callee {callee:?} is not rooted at `{global}.`"
                 ));
             }
-            if method != matches!(r.shape, Shape::Joined { .. }) {
+            if method != matches!(r.shape, Shape::Joined { .. } | Shape::Decorator { .. }) {
                 problems.push(format!(
-                    "{at}: a method callee and a joined shape go together ({callee:?})"
+                    "{at}: a method callee and a joined or decorator shape go together ({callee:?})"
                 ));
             }
             if let Callee::Prefix { mint, .. } = r.callee
@@ -1622,6 +1999,29 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                         ));
                     }
                 }
+                Shape::Decorator {
+                    receivers,
+                    name_arg,
+                    or_handler,
+                    call_form,
+                } => {
+                    let admits = receivers.constructors.len() + receivers.names.len();
+                    if admits == 0
+                        || receivers
+                            .constructors
+                            .iter()
+                            .chain(receivers.names)
+                            .any(|n| !is_identifier_tail(n))
+                        || name_arg == Some(0)
+                        || (call_form && name_arg.is_some())
+                        || (or_handler && name_arg.is_none())
+                        || !matches!(row.gate, Gate::Imports { .. })
+                    {
+                        problems.push(format!(
+                            "{at}: decorator shape of {callee:?} needs identifier receivers, an imports gate, a 1-based name argument for or_handler and none for call_form"
+                        ));
+                    }
+                }
             }
         }
         if row
@@ -1633,7 +2033,7 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
         }
         if row.callbacks.iter().any(|c| {
             (c.prefix.is_empty() && !c.exported)
-                || c.names.is_empty()
+                || (c.names.is_empty() && c.open_head.is_none() && c.decorators.is_empty())
                 || c.names.iter().any(|n| n.is_empty())
         }) {
             problems.push(format!("{at}: a callback rule needs a prefix and names"));
@@ -1662,6 +2062,24 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
             .any(|n| !n.is_empty() && !is_identifier_tail(n))
         {
             problems.push(format!("{at}: callback names must be identifiers"));
+        }
+        let by_file = matches!(row.gate, Gate::Imports { files, .. } if !files.is_empty());
+        if row.callbacks.iter().any(|c| {
+            c.open_head
+                .is_some_and(|h| !c.exported || !by_file || !is_identifier_tail(h))
+        }) {
+            problems.push(format!(
+                "{at}: an open-head callback is an exported identifier head under an imports gate held by file name"
+            ));
+        }
+        if let Some(d) = row.callbacks.iter().find_map(|c| {
+            c.decorators
+                .iter()
+                .find(|d| !c.exported || !row.gate.roots_module_path(d))
+        }) {
+            problems.push(format!(
+                "{at}: callback decorator {d:?} is not an exported rule's, rooted at a module the gate imports"
+            ));
         }
         for (j, c) in row.config.iter().enumerate() {
             if c.prefixes.is_empty() || c.prefixes.iter().any(|p| p.is_empty()) {
@@ -3270,7 +3688,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome"
+                "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome", "flask", "pytest"
             ]
         );
     }
@@ -3313,6 +3731,8 @@ mod tests {
                     prefix: "",
                     names: &[],
                     exported: false,
+                    open_head: None,
+                    decorators: &[],
                 }],
                 config: &[
                     ConfigRule {
@@ -3449,7 +3869,7 @@ mod tests {
         assert!(has("\"a\": a call gate names one function"), "{problems:?}");
         assert!(has("joined shape of \"Reg\""));
         assert!(has(
-            "a method callee and a joined shape go together (\"Other\")"
+            "a method callee and a joined or decorator shape go together (\"Other\")"
         ));
         assert!(has("positional shape of \"Other\" needs distinct"));
         assert!(has("\"b\": a globals gate needs"));
@@ -3827,6 +4247,8 @@ mod tests {
                 prefix: "other.",
                 names: &["a b"],
                 exported: false,
+                open_head: None,
+                decorators: &[],
             }],
             config: &[],
             manifest: None,
@@ -3955,6 +4377,173 @@ mod tests {
     }
 
     #[test]
+    fn the_python_rows_read_hooks_hookspecs_and_fixtures() {
+        // GH.8: Flask's hooks are decorator registrations; pytest's
+        // hookspecs, open conftest heads and fixtures are callbacks.
+        let (flask, hook) =
+            decorator_registration_for("python", "before_app_request").expect("flask hook");
+        assert_eq!(flask.name, "flask");
+        assert_eq!(hook.pattern, Pattern::Event);
+        assert!(decorator_registration_for("python", "route").is_none());
+        assert!(decorator_registration_for("lua", "before_request").is_none());
+        // WoW's joined method is no decorator registration.
+        assert!(decorator_registration_for("lua", "RegisterEvent").is_none());
+        let plain = hook.shape;
+        assert_eq!(
+            plain.decorator_event("before_app_request", None, Some("load")),
+            Some("before_app_request".into())
+        );
+        let (_, err) = decorator_registration_for("python", "errorhandler").expect("errorhandler");
+        assert_eq!(
+            err.shape
+                .decorator_event("errorhandler", Some("404"), Some("nf")),
+            Some("errorhandler:404".into())
+        );
+        assert_eq!(
+            err.shape.decorator_event("errorhandler", None, Some("nf")),
+            None
+        );
+        let (_, filt) = decorator_registration_for("python", "template_filter").expect("filter");
+        assert_eq!(
+            filt.shape
+                .decorator_event("template_filter", None, Some("reverse")),
+            Some("template_filter:reverse".into())
+        );
+        assert!(matches!(
+            plain,
+            Shape::Decorator {
+                call_form: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            err.shape,
+            Shape::Decorator {
+                call_form: false,
+                ..
+            }
+        ));
+
+        let held: Vec<&str> = hosts_imported("python", "flask.views")
+            .map(|h| h.name)
+            .collect();
+        assert_eq!(held, ["flask"]);
+        assert_eq!(
+            hosts_imported("python", "pytest")
+                .map(|h| h.name)
+                .collect::<Vec<_>>(),
+            ["pytest"]
+        );
+        assert_eq!(hosts_imported("python", "flasky").count(), 0);
+        assert_eq!(hosts_imported("typescript", "flask").count(), 0);
+        let pytest = HOSTS.iter().find(|h| h.name == "pytest").expect("pytest");
+        assert!(pytest.gate.held_by_file("conftest.py"));
+        assert!(!pytest.gate.held_by_file("test_conftest.py"));
+        assert!(!flask.gate.held_by_file("conftest.py"));
+
+        let any = |_: &'static HostRow| true;
+        let none = |_: &'static HostRow| false;
+        assert_eq!(
+            exported_callback_for("python", "pytest_configure", any).map(|h| h.name),
+            Some("pytest")
+        );
+        assert!(exported_callback_for("python", "pytest_markdown_docs_globals", any).is_none());
+        assert_eq!(
+            open_callback_for("python", "pytest_markdown_docs_globals", any).map(|h| h.name),
+            Some("pytest")
+        );
+        assert!(open_callback_for("python", "pytest_", any).is_none());
+        assert!(open_callback_for("python", "pytest_x", none).is_none());
+        assert_eq!(
+            decorator_callback_for("python", "pytest.fixture", any).map(|h| h.name),
+            Some("pytest")
+        );
+        assert!(decorator_callback_for("python", "pytest_asyncio.fixture", none).is_none());
+        assert!(decorator_callback_for("python", "app.fixture", any).is_none());
+    }
+
+    #[test]
+    fn validate_reads_the_python_shapes() {
+        const NO_RECEIVERS: Receivers = Receivers {
+            constructors: &[],
+            names: &["a b"],
+        };
+        let bad = [
+            HostRow {
+                name: "p",
+                lang: "python",
+                exts: &["py"],
+                gate: Gate::Imports {
+                    modules: &["p-q"],
+                    files: &["a/conftest.py"],
+                },
+                loads: &[],
+                registrations: &[Registration {
+                    callee: Callee::Method("hook"),
+                    pattern: Pattern::Event,
+                    shape: Shape::Decorator {
+                        receivers: &NO_RECEIVERS,
+                        name_arg: Some(1),
+                        or_handler: false,
+                        call_form: true,
+                    },
+                }],
+                callbacks: &[Callback {
+                    prefix: "",
+                    names: &[],
+                    exported: true,
+                    open_head: None,
+                    decorators: &["other.fixture"],
+                }],
+                config: &[],
+                manifest: None,
+            },
+            HostRow {
+                name: "q",
+                lang: "python",
+                exts: &["py"],
+                gate: Gate::Global("q"),
+                loads: &[],
+                registrations: &[Registration {
+                    callee: Callee::Exact("q.hook"),
+                    pattern: Pattern::Event,
+                    shape: Shape::Decorator {
+                        receivers: &FLASK_RECEIVERS,
+                        name_arg: None,
+                        or_handler: false,
+                        call_form: true,
+                    },
+                }],
+                callbacks: &[Callback {
+                    prefix: "",
+                    names: &["q_x"],
+                    exported: true,
+                    open_head: Some("q_"),
+                    decorators: &[],
+                }],
+                config: &[],
+                manifest: None,
+            },
+        ];
+        let problems = validate_rows(&bad);
+        let has = |s: &str| problems.iter().any(|p| p.contains(s));
+        assert!(
+            has("an imports gate needs dotted module names"),
+            "{problems:?}"
+        );
+        assert!(has(
+            "decorator shape of \"hook\" needs identifier receivers"
+        ));
+        assert!(has("callback decorator \"other.fixture\""));
+        assert!(has(
+            "a method callee and a joined or decorator shape go together"
+        ));
+        assert!(has("decorator shape of \"q.hook\""));
+        assert!(has("an open-head callback"));
+        assert_eq!(problems.len(), 6, "{problems:?}");
+    }
+
+    #[test]
     fn validate_reads_the_ts_shapes() {
         let bad = [HostRow {
             name: "t",
@@ -3977,6 +4566,8 @@ mod tests {
                 prefix: "t.",
                 names: &["activate"],
                 exported: true,
+                open_head: None,
+                decorators: &[],
             }],
             config: &[ConfigRule {
                 flavour: ConfigFlavour::Manifest,

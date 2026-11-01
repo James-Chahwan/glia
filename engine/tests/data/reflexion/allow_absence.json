@@ -134,6 +134,13 @@
             "note": "Flask typed route converters (e.g. <int:id>) may not normalize to the client's path param",
             "verify": "check the @app.route decorator vs the caller path",
             "edges_found": 0
+          },
+          {
+            "language": "python",
+            "edge_category": "HANDLED_BY",
+            "note": "Python host events are read for one host only, Flask, in a file that imports flask (`import flask`, `from flask import ..`, a submodule): on a receiver bound in the file to `Flask(..)` / `Blueprint(..)` (or a parameter annotated with one) or named `app` / `bp` / `blueprint`, the decorators `@<r>.before_request` / `before_app_request` / `after_request` / `after_app_request` / `teardown_request` / `teardown_app_request` / `teardown_appcontext` / `context_processor` / `app_context_processor` / `url_value_preprocessor` / `url_defaults`, and their call form `<r>.<hook>(f)` with `f` a named function, are the EVENT_HANDLER `host_event:flask:<hook>`; `@<r>.errorhandler(<code|Exc>)` / `app_errorhandler` name the event by their argument (`errorhandler:404`), `template_filter` / `template_global` / `template_test` by theirs or the function's name; each HANDLED_BY the function (a nested def of the calling scope, a module-level function, or an imported name). pytest's hooks and fixtures are entries (ENTRYPOINT `host:pytest`), never edges: a module-level function named one of pytest 8's hookspecs in a conftest.py or a file importing pytest / _pytest / pluggy / pytest_asyncio, any `pytest_<x>` in a conftest.py (another plugin's hook), and a module-level `@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture` (imported from pytest) outside a test module. Not read: a hook on any other receiver (`self.app`, a returned app, an app held in a dict), a handler given as a lambda, attribute or call, `register_error_handler` / `add_template_filter` / `add_url_rule` style registrations, blueprint `app_template_*` / `app_url_*` hooks, FastAPI events and middleware, a plugin's hook outside a conftest.py that is no pytest hookspec, `pytest_plugins` strings, a fixture method on a class and a test module's own fixtures, and every other Python host (Celery signals, Sphinx, setuptools entry points)",
+            "verify": "grep before_request / teardown_appcontext / errorhandler / template_filter in *.py; grep pytest_ and @pytest.fixture in conftest.py",
+            "edges_found": 0
           }
         ]
       }

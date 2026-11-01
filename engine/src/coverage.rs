@@ -178,6 +178,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Flask typed route converters (e.g. <int:id>) may not normalize to the client's path param",
         verify: "check the @app.route decorator vs the caller path",
     },
+    // GH.8: the host table's Python rows (code_domain::hosts: Flask,
+    // pytest), measured on patterns/python/host_event and host_callback and
+    // the Python parser's host tests.
+    CoverageCaveat {
+        language: "python",
+        edge_category: "HANDLED_BY",
+        note: "Python host events are read for one host only, Flask, in a file that imports flask (`import flask`, `from flask import ..`, a submodule): on a receiver bound in the file to `Flask(..)` / `Blueprint(..)` (or a parameter annotated with one) or named `app` / `bp` / `blueprint`, the decorators `@<r>.before_request` / `before_app_request` / `after_request` / `after_app_request` / `teardown_request` / `teardown_app_request` / `teardown_appcontext` / `context_processor` / `app_context_processor` / `url_value_preprocessor` / `url_defaults`, and their call form `<r>.<hook>(f)` with `f` a named function, are the EVENT_HANDLER `host_event:flask:<hook>`; `@<r>.errorhandler(<code|Exc>)` / `app_errorhandler` name the event by their argument (`errorhandler:404`), `template_filter` / `template_global` / `template_test` by theirs or the function's name; each HANDLED_BY the function (a nested def of the calling scope, a module-level function, or an imported name). pytest's hooks and fixtures are entries (ENTRYPOINT `host:pytest`), never edges: a module-level function named one of pytest 8's hookspecs in a conftest.py or a file importing pytest / _pytest / pluggy / pytest_asyncio, any `pytest_<x>` in a conftest.py (another plugin's hook), and a module-level `@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture` (imported from pytest) outside a test module. Not read: a hook on any other receiver (`self.app`, a returned app, an app held in a dict), a handler given as a lambda, attribute or call, `register_error_handler` / `add_template_filter` / `add_url_rule` style registrations, blueprint `app_template_*` / `app_url_*` hooks, FastAPI events and middleware, a plugin's hook outside a conftest.py that is no pytest hookspec, `pytest_plugins` strings, a fixture method on a class and a test module's own fixtures, and every other Python host (Celery signals, Sphinx, setuptools entry points)",
+        verify: "grep before_request / teardown_appcontext / errorhandler / template_filter in *.py; grep pytest_ and @pytest.fixture in conftest.py",
+    },
     CoverageCaveat {
         language: "typescript",
         edge_category: "HTTP_CALLS",
@@ -1092,6 +1101,35 @@ mod tests {
         assert!(config.contains("never pairs"));
         assert!(lang_rows("src/app.py", "lua").is_empty());
         assert_eq!(ext_to_language("plugin/greet.lua"), None);
+    }
+
+    #[test]
+    fn python_files_get_the_flask_and_pytest_host_row() {
+        // GH.8: a Python repo is told which hosts' events and entries are
+        // read (Flask, pytest) and what is not; the Flask converter row
+        // stays.
+        let rows = lang_rows("app/views.py", "python");
+        assert_eq!(
+            rows.iter()
+                .filter(|r| **r == ("python", "HANDLED_BY"))
+                .count(),
+            2,
+            "{rows:?}"
+        );
+        let notes: Vec<&str> = coverage_report(&graph_with_file("app/views.py"))
+            .iter()
+            .filter(|n| n.language == "python" && n.edge_category == "HANDLED_BY")
+            .map(|n| n.note)
+            .collect();
+        let host = notes
+            .iter()
+            .find(|n| n.contains("host_event:flask:<hook>"))
+            .expect("the host row");
+        assert!(host.contains("teardown_appcontext") && host.contains("errorhandler:404"));
+        assert!(host.contains("ENTRYPOINT `host:pytest`") && host.contains("conftest.py"));
+        assert!(host.contains("lambda") && host.contains("Celery"));
+        assert!(notes.iter().any(|n| n.contains("typed route converters")));
+        assert!(!lang_rows("src/extension.ts", "typescript").contains(&("python", "HANDLED_BY")));
     }
 
     #[test]

@@ -1,0 +1,25 @@
+{
+  "framework": "python-host-callback",
+  "language": "python",
+  "dirs": ["."],
+  "mechanism": "host_callback",
+  "cells": ["python/host_callback"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "conftest::pytest_configure", "exact": true},
+    {"kind": "FUNCTION", "name": "conftest::fresh_settings", "exact": true},
+    {"kind": "FUNCTION", "name": "src::myplug::plugin::pytest_addoption", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "conftest::pytest_configure", "to": "conftest::_marker_line",
+     "category": "CALLS", "exact": true, "note": "the hook's body still binds"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "conftest::pytest_configure", "cell": "ENTRYPOINT", "contains": "host:pytest"},
+    {"kind": "FUNCTION", "node": "conftest::pytest_markdown_docs_globals", "cell": "ENTRYPOINT", "contains": "host:pytest"},
+    {"kind": "FUNCTION", "node": "conftest::fresh_settings", "cell": "ENTRYPOINT", "contains": "host:pytest"},
+    {"kind": "FUNCTION", "node": "src::myplug::plugin::pytest_addoption", "cell": "ENTRYPOINT", "contains": "host:pytest"},
+    {"kind": "FUNCTION", "node": "src::myplug::plugin::myplug_value", "cell": "ENTRYPOINT", "contains": "host:pytest"}
+  ],
+  "forbid": [],
+  "note": "0.5.6 use pattern (GH.8): pytest calls a conftest.py's or a plugin module's hooks by name (pytest_configure, pytest_addoption; in a conftest.py any pytest_* name, another plugin's hook such as pytest-markdown-docs' pytest_markdown_docs_globals) and its fixtures (@pytest.fixture, or fixture imported from pytest) by parameter name. INTENDED: each carries an ENTRYPOINT cell (source host:pytest), an entry and never a dead_symbol; helper() and src/myplug/plugin.py's pytest_markdown_docs_globals (not a pytest hookspec, not in a conftest.py) stay ordinary functions. At HEAD b78eb38d: none (every one dead_symbol, no ENTRYPOINT cell)."
+}

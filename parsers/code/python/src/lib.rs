@@ -19,6 +19,7 @@ use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras, push_client_endpoint_with};
 use glia_code_domain::evidence;
+use glia_code_domain::hosts;
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -82,6 +83,10 @@ pub fn parse_file(
     // Django urlconf (it assigns `urlpatterns`), whose routes are minted on
     // its module mount slot for the graph's route-mount pass.
     acc.mock_patch_names = mock_patch_names(root, src);
+    // GH.8 pre-pass: the host rows whose gate holds (an import anywhere in
+    // the file, or its base name), and the receivers bound to their
+    // constructors.
+    acc.py_hosts = scan_py_hosts(root, src, file_rel_path, module_id);
     let django = DjangoScan {
         module_qname,
         file_rel: file_rel_path,
@@ -174,6 +179,9 @@ pub fn parse_file(
     record_router_mounts(root, src, module_id, &mut acc);
     // GH.7: scripts a Redis client runs, settled once the imports are read.
     scan_host_scripts(root, src, file_rel_path, module_id, &mut acc);
+    // GH.8: the call-form host registrations' handlers, once every def is
+    // read, and the `[host]` marker.
+    settle_py_hosts(file_rel_path, &mut acc);
     if acc.py_mounts.routers + acc.py_mounts.includes + acc.py_mounts.dynamic > 0 {
         let m = acc.py_mounts;
         eprintln!(
@@ -461,6 +469,8 @@ struct Acc {
     mock_patch_names: std::collections::HashSet<String>,
     /// GD.40: the `[py-django]` counters.
     django: DjangoStats,
+    /// GH.8: the file's reading of the Python host rows.
+    py_hosts: PyHosts,
     nav: CodeNav,
 }
 
@@ -1072,6 +1082,15 @@ fn visit_function(
     for deco in decorators {
         check_route_decorator(*deco, src, func_id, repo, acc);
     }
+    // GH.8: Flask hook decorators, pytest hooks and fixtures.
+    let host_fn = HostFn {
+        def: n,
+        name,
+        decorators,
+        top_level: parent_func_id.is_none(),
+        id: func_id,
+    };
+    read_py_host_function(host_fn, src, file_rel, repo, acc);
 
     // v0.4.13a — USES refs from parameter/return type annotations.
     collect_type_refs(n, src, func_id, module_id, acc);
@@ -1388,6 +1407,9 @@ fn collect_calls_in(
             // A13.17 — Django `Order.objects.filter(…)` → ACCESSES_DATA to the
             // model-keyed entity, resolvable in any file.
             try_detect_django_access(node, src, from, repo, acc);
+            // GH.8: `app.teardown_appcontext(close_db)`, a host hook's call
+            // form.
+            try_py_host_call(node, src, from, repo, file_rel, acc);
             if let Some(q) = extract_call_qualifier(node, src) {
                 acc.unresolved.push(UnresolvedCall {
                     from,
@@ -4596,6 +4618,557 @@ fn first_string_literal(s: &str) -> Option<String> {
 }
 
 // ============================================================================
+// GH.8: Python hosts (code_domain::hosts' Flask and pytest rows)
+// ============================================================================
+//
+// A row says what to look for; the AST read here mints. Flask's hooks are
+// decorator or call registrations on an app / blueprint receiver in a file
+// that imports flask: one EVENT_HANDLER `host_event:flask:<hook>` per hook
+// (`errorhandler:<code>`, `template_filter:<name>`), HANDLED_BY the function.
+// pytest's hookspecs (and, in a conftest.py, any `pytest_<x>`) and its
+// fixtures outside a test module are entries: the FUNCTION's ENTRYPOINT cell
+// `host:pytest`, never an edge.
+//
+// fired_on, per file holding a host reading (hosts::HostTally::marker):
+//   `[host] lang=python commands=0 events=<e> callbacks=<k> loads=0 config=0
+//    minted=0 aux=0 unread=<u> hosts=<h:n,..> file=<p>`
+
+/// GH.8: one file's reading of the Python host rows.
+#[derive(Default)]
+struct PyHosts {
+    /// The hosts whose gate holds in the file, in table order. Empty: the
+    /// file shows no host and nothing below is read.
+    present: Vec<&'static hosts::HostRow>,
+    /// Of those, the ones held by the file's base name (`conftest.py`).
+    by_file: Vec<&'static hosts::HostRow>,
+    /// A local bound by an import of a gate module -> its dotted name
+    /// (`pt` -> `pytest`, `fixture` -> `pytest.fixture`, `Flask` ->
+    /// `flask.Flask`). Looked up, never iterated.
+    aliases: HashMap<String, String>,
+    /// Per host, the names the file binds to one of its receivers'
+    /// constructors (`app = Flask(__name__)`) or annotates a parameter with
+    /// (`app: Flask`). Looked up, never iterated.
+    bound: HashMap<&'static str, std::collections::HashSet<String>>,
+    /// The file is a test module (`test_*.py`, `*_test.py`): its decorated
+    /// fixtures are its own, no host callbacks.
+    test_module: bool,
+    /// The file's MODULE, the minted events' module.
+    module_id: Option<NodeId>,
+    /// Call-form registrations waiting for the file's defs: settled once the
+    /// file is walked ([`settle_py_hosts`]).
+    pending: Vec<PendingHostCall>,
+    tally: hosts::HostTally,
+}
+
+/// GH.8: `<r>.<hook>(f)` read: the event, the scope the call sits in, the
+/// handler's name and the call's 0-based row.
+struct PendingHostCall {
+    event: NodeId,
+    scope: NodeId,
+    handler: String,
+    line: u32,
+}
+
+impl PyHosts {
+    fn holds(&self, host: &hosts::HostRow) -> bool {
+        self.present.iter().any(|h| h.name == host.name)
+    }
+
+    fn held_by_file(&self, host: &hosts::HostRow) -> bool {
+        self.by_file.iter().any(|h| h.name == host.name)
+    }
+
+    /// `dotted` with its first segment read through the file's host
+    /// imports (`pt.fixture` -> `pytest.fixture`, `fixture` ->
+    /// `pytest.fixture`).
+    fn expand(&self, dotted: &str) -> String {
+        let (head, rest) = match dotted.split_once('.') {
+            Some((h, r)) => (h, Some(r)),
+            None => (dotted, None),
+        };
+        match (self.aliases.get(head), rest) {
+            (Some(full), Some(r)) => format!("{full}.{r}"),
+            (Some(full), None) => full.clone(),
+            (None, _) => dotted.to_string(),
+        }
+    }
+
+    /// True when `name` is a receiver `receivers` admits for `host`: one of
+    /// its names, or a name the file binds to one of its constructors.
+    fn admits(&self, host: &hosts::HostRow, receivers: &hosts::Receivers, name: &str) -> bool {
+        receivers.names.contains(&name)
+            || self
+                .bound
+                .get(host.name)
+                .is_some_and(|names| names.contains(name))
+    }
+}
+
+/// GH.8: a test module's base name (`test_*.py`, `*_test.py`).
+fn is_test_module(base: &str) -> bool {
+    (base.starts_with("test_") && base.ends_with(".py")) || base.ends_with("_test.py")
+}
+
+/// GH.8 pre-pass: the Python host rows whose gate holds in the file (an
+/// import of one of their modules anywhere in it, or its base name), the
+/// locals those imports bind, and the names bound to a decorator
+/// registration's receiver constructors.
+fn scan_py_hosts(root: TsNode, src: &[u8], file_rel: &str, module_id: NodeId) -> PyHosts {
+    let base = file_rel.rsplit(['/', '\\']).next().unwrap_or(file_rel);
+    let mut scan = PyHosts {
+        test_module: is_test_module(base),
+        module_id: Some(module_id),
+        ..PyHosts::default()
+    };
+    let mut present: Vec<&'static hosts::HostRow> = hosts::HOSTS
+        .iter()
+        .filter(|h| h.lang == "python" && h.gate.held_by_file(base))
+        .collect();
+    scan.by_file = present.clone();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "import_statement" => {
+                let mut c = node.walk();
+                for item in node.named_children(&mut c) {
+                    let (module, local) = match item.kind() {
+                        "dotted_name" => {
+                            let module = text(item, src);
+                            // `import a.b` binds `a`, the package itself.
+                            let head = module.split('.').next().unwrap_or(module);
+                            (module, (head.to_string(), head.to_string()))
+                        }
+                        "aliased_import" => {
+                            let (Some(name), Some(alias)) = (
+                                child_text(item, "name", src),
+                                child_text(item, "alias", src),
+                            ) else {
+                                continue;
+                            };
+                            (name, (alias.to_string(), name.to_string()))
+                        }
+                        _ => continue,
+                    };
+                    let mut held = hosts::hosts_imported("python", module).peekable();
+                    if held.peek().is_none() {
+                        continue;
+                    }
+                    for host in held {
+                        if !present.iter().any(|h| h.name == host.name) {
+                            present.push(host);
+                        }
+                    }
+                    scan.aliases.insert(local.0, local.1);
+                }
+            }
+            "import_from_statement" => {
+                let Some(module_n) = node
+                    .child_by_field_name("module_name")
+                    .filter(|m| m.kind() == "dotted_name")
+                else {
+                    continue;
+                };
+                let module = text(module_n, src);
+                let mut held = hosts::hosts_imported("python", module).peekable();
+                if held.peek().is_none() {
+                    continue;
+                }
+                for host in held {
+                    if !present.iter().any(|h| h.name == host.name) {
+                        present.push(host);
+                    }
+                }
+                let mut c = node.walk();
+                for item in node.named_children(&mut c) {
+                    if item.id() == module_n.id() {
+                        continue;
+                    }
+                    let (name, local) = match item.kind() {
+                        "dotted_name" => (text(item, src), text(item, src)),
+                        "aliased_import" => {
+                            let (Some(name), Some(alias)) = (
+                                child_text(item, "name", src),
+                                child_text(item, "alias", src),
+                            ) else {
+                                continue;
+                            };
+                            (name, alias)
+                        }
+                        _ => continue,
+                    };
+                    scan.aliases
+                        .insert(local.to_string(), format!("{module}.{name}"));
+                }
+            }
+            _ => {
+                let mut c = node.walk();
+                stack.extend(node.named_children(&mut c));
+            }
+        }
+    }
+    // Table order, so a marker's and a lookup's order never hang on the walk.
+    present.sort_by_key(|h| hosts::HOSTS.iter().position(|r| r.name == h.name));
+    scan.present = present;
+    // The receivers' constructors of each present host with a decorator
+    // registration, then the names the file binds to them.
+    let ctors: Vec<(&'static str, &'static [&'static str])> = scan
+        .present
+        .iter()
+        .flat_map(|h| {
+            h.registrations.iter().filter_map(move |r| match r.shape {
+                hosts::Shape::Decorator { receivers, .. } => Some((h.name, receivers.constructors)),
+                _ => None,
+            })
+        })
+        .collect();
+    if ctors.is_empty() {
+        return scan;
+    }
+    let is_ctor = |scan: &PyHosts, callee: &str| -> Vec<&'static str> {
+        let full = scan.expand(callee);
+        let last = full.rsplit('.').next().unwrap_or(&full).to_string();
+        let mut hit: Vec<&'static str> = ctors
+            .iter()
+            .filter(|(_, cs)| cs.contains(&last.as_str()))
+            .map(|(h, _)| *h)
+            .collect();
+        hit.dedup();
+        hit
+    };
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let found: Option<(TsNode, TsNode)> = match node.kind() {
+            // `app = Flask(__name__)`: the call's callee.
+            "assignment" => node
+                .child_by_field_name("left")
+                .filter(|l| l.kind() == "identifier")
+                .zip(
+                    node.child_by_field_name("right")
+                        .filter(|r| r.kind() == "call")
+                        .and_then(|r| r.child_by_field_name("function")),
+                ),
+            // `def init_app(app: Flask)`: the annotation.
+            "typed_parameter" | "typed_default_parameter" => {
+                let name = node.child_by_field_name("name").or_else(|| {
+                    let mut c = node.walk();
+                    node.named_children(&mut c)
+                        .find(|ch| ch.kind() == "identifier")
+                });
+                name.zip(node.child_by_field_name("type"))
+            }
+            _ => None,
+        };
+        if let Some((name, ty)) = found {
+            let callee = text(ty, src).trim();
+            let callee = callee.strip_prefix('"').unwrap_or(callee);
+            let callee = callee.strip_suffix('"').unwrap_or(callee);
+            for host in is_ctor(&scan, callee) {
+                scan.bound
+                    .entry(host)
+                    .or_default()
+                    .insert(text(name, src).to_string());
+            }
+        }
+        let mut c = node.walk();
+        stack.extend(node.named_children(&mut c));
+    }
+    scan
+}
+
+/// GH.8: a decorator's callee and its argument list (`@app.errorhandler(404)`
+/// -> `app.errorhandler`, `(404)`; `@app.before_request` -> no arguments).
+fn decorator_parts(deco: TsNode) -> Option<(TsNode, Option<TsNode>)> {
+    let mut c = deco.walk();
+    let expr = deco.named_children(&mut c).next()?;
+    if expr.kind() == "call" {
+        Some((
+            expr.child_by_field_name("function")?,
+            expr.child_by_field_name("arguments"),
+        ))
+    } else {
+        Some((expr, None))
+    }
+}
+
+/// GH.8: an argument that names an event: an integer, a plain string's
+/// text, or a (dotted) name (`404`, `"reverse"`, `HTTPException`).
+fn event_argument(arg: TsNode, src: &[u8]) -> Option<String> {
+    match arg.kind() {
+        "integer" | "identifier" | "attribute" => {
+            let t = text(arg, src);
+            (arg.kind() == "integer" || t.split('.').all(|s| !s.is_empty())).then(|| t.to_string())
+        }
+        "string" => plain_string_literal(arg, src),
+        _ => None,
+    }
+}
+
+/// GH.8: the FUNCTION a host reading looks at: its `def`, name and
+/// decorators, whether it is module-level, and its id.
+struct HostFn<'a, 't> {
+    def: TsNode<'t>,
+    name: &'a str,
+    decorators: &'a [TsNode<'t>],
+    top_level: bool,
+    id: NodeId,
+}
+
+/// GH.8: the host readings of a FUNCTION's decorators and name: a Flask
+/// hook decorator mints its EVENT_HANDLER HANDLED_BY the function; a pytest
+/// hookspec name (any `pytest_<x>` in a conftest.py) or fixture decorator on
+/// a module-level function makes it an entry.
+fn read_py_host_function(
+    f: HostFn<'_, '_>,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    if acc.py_hosts.present.is_empty() {
+        return;
+    }
+    let HostFn {
+        def,
+        name,
+        decorators,
+        top_level,
+        id: func_id,
+    } = f;
+    let mut entry: Option<&'static hosts::HostRow> = None;
+    for deco in decorators {
+        let Some((callee, args)) = decorator_parts(*deco) else {
+            continue;
+        };
+        // A hook on a receiver: `@<r>.<hook>` / `@<r>.<hook>(..)`.
+        if callee.kind() == "attribute"
+            && let (Some(object), Some(method)) = (
+                callee.child_by_field_name("object"),
+                child_text(callee, "attribute", src),
+            )
+            && object.kind() == "identifier"
+            && let Some((host, reg)) = hosts::decorator_registration_for("python", method)
+            && acc.py_hosts.holds(host)
+            && let hosts::Shape::Decorator {
+                receivers,
+                name_arg,
+                ..
+            } = reg.shape
+            && acc.py_hosts.admits(host, receivers, text(object, src))
+        {
+            acc.py_hosts.tally.hit(host.name);
+            let positional = args.map(positional_args).unwrap_or_default();
+            let keyword_name = args.and_then(|a| {
+                let mut c = a.walk();
+                a.named_children(&mut c)
+                    .filter(|k| k.kind() == "keyword_argument")
+                    .find(|k| child_text(*k, "name", src) == Some("name"))
+                    .and_then(|k| k.child_by_field_name("value"))
+            });
+            let arg = name_arg
+                .and_then(|i| i.checked_sub(1))
+                .and_then(|i| positional.get(i).copied())
+                .or(keyword_name);
+            let arg_text = arg.and_then(|a| event_argument(a, src));
+            // An argument written but unreadable names no event.
+            let event = if arg.is_some() && arg_text.is_none() {
+                None
+            } else {
+                reg.shape
+                    .decorator_event(method, arg_text.as_deref(), Some(name))
+            };
+            let Some(event) = event else {
+                acc.py_hosts.tally.unread += 1;
+                continue;
+            };
+            if let Some(id) =
+                push_py_host_event(*deco, host, reg.pattern, &event, file_rel, repo, acc)
+                && !acc.edges.iter().any(|e| {
+                    e.from == id && e.to == func_id && e.category == edge_category::HANDLED_BY
+                })
+            {
+                let ev = evidence::Evidence::emitter("parser:python")
+                    .rule("host_decorator")
+                    .line(line_at(*deco));
+                acc.edges.push(
+                    Edge::new(id, func_id, edge_category::HANDLED_BY, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
+            }
+            continue;
+        }
+        // A callback decorator: `@pytest.fixture`, `@fixture(..)`.
+        if top_level && !acc.py_hosts.test_module && entry.is_none() {
+            let dotted = text(callee, src);
+            if matches!(callee.kind(), "identifier" | "attribute") {
+                let full = acc.py_hosts.expand(dotted);
+                entry = hosts::decorator_callback_for("python", &full, |h| acc.py_hosts.holds(h));
+            }
+        }
+    }
+    if top_level && entry.is_none() {
+        let hosts_seen = &acc.py_hosts;
+        entry = hosts::exported_callback_for("python", name, |h| hosts_seen.holds(h))
+            .or_else(|| hosts::open_callback_for("python", name, |h| hosts_seen.held_by_file(h)));
+    }
+    let Some(host) = entry else {
+        return;
+    };
+    let row1 = line_at(def).saturating_add(1);
+    if let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == func_id)
+        && !node.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
+    {
+        node.cells.push(hosts::entry_cell(
+            file_rel,
+            row1,
+            &format!("host:{}", host.name),
+        ));
+        acc.py_hosts.tally.callbacks += 1;
+        acc.py_hosts.tally.hit(host.name);
+    }
+}
+
+/// GH.8: mint `host`'s registration node for `event` at `at` (its POSITION),
+/// counted in the tally; `None` without a MODULE.
+fn push_py_host_event(
+    at: TsNode,
+    host: &'static hosts::HostRow,
+    pattern: hosts::Pattern,
+    event: &str,
+    file_rel: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> Option<NodeId> {
+    let module_id = acc.py_hosts.module_id?;
+    let site = hosts::HostSite::new(
+        repo,
+        module_id,
+        host.name,
+        line_at(at),
+        vec![Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(position_json(&at, file_rel)),
+        }],
+    );
+    let mut sink = hosts::HostSink::new(&mut acc.nodes, &mut acc.nav, &mut acc.refs);
+    let id = hosts::push_registration(&site, pattern, event, &[], &mut sink);
+    acc.py_hosts.tally.registered(pattern);
+    Some(id)
+}
+
+/// GH.8: the call form of a hook, `<r>.<hook>(f)` with `f` a named
+/// function, on an admitted receiver in a file whose gate holds: the event is
+/// minted now and its handler bound once the file's defs are read. A
+/// decorator's own call (`@app.errorhandler(404)`) is the decorator reader's.
+fn try_py_host_call(
+    call: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    if acc.py_hosts.present.is_empty() || call.parent().is_some_and(|p| p.kind() == "decorator") {
+        return;
+    }
+    let Some(callee) = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "attribute")
+    else {
+        return;
+    };
+    let (Some(object), Some(method)) = (
+        callee.child_by_field_name("object"),
+        child_text(callee, "attribute", src),
+    ) else {
+        return;
+    };
+    if object.kind() != "identifier" {
+        return;
+    }
+    let Some((host, reg)) = hosts::decorator_registration_for("python", method) else {
+        return;
+    };
+    let hosts::Shape::Decorator {
+        receivers,
+        call_form: true,
+        ..
+    } = reg.shape
+    else {
+        return;
+    };
+    if !acc.py_hosts.holds(host) || !acc.py_hosts.admits(host, receivers, text(object, src)) {
+        return;
+    }
+    acc.py_hosts.tally.hit(host.name);
+    let args = call
+        .child_by_field_name("arguments")
+        .map(positional_args)
+        .unwrap_or_default();
+    let handler = match args.as_slice() {
+        [f] if f.kind() == "identifier" => text(*f, src).to_string(),
+        _ => {
+            acc.py_hosts.tally.unread += 1;
+            return;
+        }
+    };
+    let Some(event) = reg.shape.decorator_event(method, None, None) else {
+        acc.py_hosts.tally.unread += 1;
+        return;
+    };
+    if let Some(id) = push_py_host_event(call, host, reg.pattern, &event, file_rel, repo, acc) {
+        acc.py_hosts.pending.push(PendingHostCall {
+            event: id,
+            scope,
+            handler,
+            line: line_at(call),
+        });
+    }
+}
+
+/// GH.8: bind each call-form registration's handler, now that the file's
+/// defs are read: the calling scope's nested def (then its enclosing
+/// function's, outwards), else a module-level function, each a direct
+/// HANDLED_BY; else a Bare HANDLED_BY ref the graph binds through the file's
+/// imports (`from .db import close_db`). Then print the `[host]` marker.
+fn settle_py_hosts(file_rel: &str, acc: &mut Acc) {
+    let pending = std::mem::take(&mut acc.py_hosts.pending);
+    for p in pending {
+        let local = nested_def(&acc.nav, &acc.nested_functions, p.scope, &p.handler)
+            .or_else(|| acc.module_functions.get(&p.handler).copied());
+        match local {
+            Some(to) => {
+                if !acc.edges.iter().any(|e| {
+                    e.from == p.event && e.to == to && e.category == edge_category::HANDLED_BY
+                }) {
+                    let ev = evidence::Evidence::emitter("parser:python")
+                        .rule("host_call")
+                        .line(p.line);
+                    acc.edges.push(
+                        Edge::new(p.event, to, edge_category::HANDLED_BY, Confidence::Strong)
+                            .with_cell(ev.to_cell()),
+                    );
+                }
+            }
+            None => {
+                let Some(module_id) = acc.py_hosts.module_id else {
+                    continue;
+                };
+                acc.refs.push(UnresolvedRef {
+                    from: p.event,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Bare(p.handler),
+                    category: edge_category::HANDLED_BY,
+                    line: p.line,
+                });
+            }
+        }
+    }
+    if let Some(line) = acc.py_hosts.tally.marker("python", file_rel) {
+        eprintln!("{line}");
+    }
+}
+
+// ============================================================================
 // Tree-sitter helpers
 // ============================================================================
 
@@ -4739,6 +5312,307 @@ mod tests {
                 CellPayload::Bytes(_) => String::new(),
             })
             .collect()
+    }
+
+    /// GH.8: the EVENT_HANDLER `host_event:<host>:<event>` id.
+    fn host_event_id(host: &str, event: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::EVENT_HANDLER,
+            &glia_code_domain::hosts::host_event_qname(host, event),
+        )
+    }
+
+    /// GH.8: the qnames of the EVENT_HANDLERs a parse minted, sorted.
+    fn host_events(parse: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::EVENT_HANDLER))
+            .filter_map(|n| parse.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// GH.8: the HANDLED_BY edge `from -> to`'s EVIDENCE rule.
+    fn handled_rule(parse: &FileParse, from: NodeId, to: NodeId) -> Option<String> {
+        parse
+            .edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::HANDLED_BY)
+            .and_then(evidence::Evidence::of)
+            .and_then(|ev| ev.rule)
+    }
+
+    /// GH.8: every ENTRYPOINT cell payload on the FUNCTION `f`.
+    fn fn_entry_cells(parse: &FileParse, f: &str) -> Vec<String> {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == fid(f))
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::ENTRYPOINT)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn flask_hooks_are_host_events_handled_by_their_function() {
+        let src = "\
+from flask import Blueprint, Flask
+
+bp = Blueprint(\"auth\", __name__)
+server = Flask(__name__)
+
+
+@bp.before_app_request
+def load_user():
+    return None
+
+
+@server.errorhandler(404)
+def not_found(e):
+    return \"nf\", 404
+
+
+@bp.app_errorhandler(HTTPException)
+def http_error(e):
+    return \"x\"
+
+
+@server.template_filter()
+def reverse(s):
+    return s[::-1]
+
+
+@server.template_global(\"site\")
+def site_name():
+    return \"s\"
+
+
+def close_db(e=None):
+    return None
+
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.after_request
+    def stamp(resp):
+        return resp
+
+    def teardown(e):
+        return None
+
+    app.teardown_request(teardown)
+    app.teardown_appcontext(close_db)
+    app.before_request(imported_hook)
+    app.before_request(lambda: None)
+    return app
+
+
+def init_app(app):
+    app.teardown_appcontext(close_db)
+";
+        let parse = parse_file(src, "flaskr/auth.py", "flaskr::auth", repo()).unwrap();
+        assert_eq!(
+            host_events(&parse),
+            [
+                "host_event:flask:after_request",
+                "host_event:flask:app_errorhandler:HTTPException",
+                "host_event:flask:before_app_request",
+                "host_event:flask:before_request",
+                "host_event:flask:errorhandler:404",
+                "host_event:flask:teardown_appcontext",
+                "host_event:flask:teardown_request",
+                "host_event:flask:template_filter:reverse",
+                "host_event:flask:template_global:site",
+            ]
+        );
+        let ev = |e: &str| host_event_id("flask", e);
+        let f = |q: &str| fid(&format!("flaskr::auth::{q}"));
+        assert_eq!(
+            handled_rule(&parse, ev("before_app_request"), f("load_user")).as_deref(),
+            Some("host_decorator")
+        );
+        assert!(handled_rule(&parse, ev("errorhandler:404"), f("not_found")).is_some());
+        assert!(handled_rule(&parse, ev("template_filter:reverse"), f("reverse")).is_some());
+        assert!(handled_rule(&parse, ev("after_request"), f("create_app::stamp")).is_some());
+        // The call form: a nested def of the calling scope, a module-level
+        // function, and an imported name left to the graph as a Bare ref.
+        assert_eq!(
+            handled_rule(&parse, ev("teardown_request"), f("create_app::teardown")).as_deref(),
+            Some("host_call")
+        );
+        assert_eq!(
+            handled_rule(&parse, ev("teardown_appcontext"), f("close_db")).as_deref(),
+            Some("host_call")
+        );
+        let teardowns = parse
+            .edges
+            .iter()
+            .filter(|e| e.from == ev("teardown_appcontext"))
+            .count();
+        assert_eq!(teardowns, 1, "two registrations of one handler, one edge");
+        assert!(parse.refs.iter().any(|r| r.from == ev("before_request")
+            && r.category == edge_category::HANDLED_BY
+            && r.qualifier == CallQualifier::Bare("imported_hook".into())));
+        // Each event is the host's, never a child of the file.
+        assert!(!parse.nav.parent_of.contains_key(&ev("before_app_request")));
+    }
+
+    #[test]
+    fn flask_hooks_need_the_import_and_an_admitted_receiver() {
+        // No flask import: an `app` of another library registers nothing.
+        let src = "\
+app = Scheduler()
+
+
+@app.before_request
+def tick():
+    return 1
+
+
+app.before_request(tick)
+";
+        let parse = parse_file(src, "jobs.py", "jobs", repo()).unwrap();
+        assert!(host_events(&parse).is_empty());
+        // flask imported, but the receiver is neither bound to Flask(..) /
+        // Blueprint(..) nor named app / bp / blueprint; a non-hook method and
+        // an unreadable argument mint nothing.
+        let src = "\
+import flask
+
+cache = make_cache()
+web = flask.Flask(__name__)
+
+
+@cache.before_request
+def warm():
+    return 1
+
+
+@web.route(\"/x\")
+def x():
+    return 1
+
+
+@web.errorhandler(codes[0])
+def bad(e):
+    return 1
+
+
+def init(web2: flask.Flask):
+    web2.teardown_appcontext(warm)
+";
+        let parse = parse_file(src, "srv.py", "srv", repo()).unwrap();
+        assert_eq!(
+            host_events(&parse),
+            ["host_event:flask:teardown_appcontext"],
+            "an annotated parameter is admitted; cache and an unread argument are not"
+        );
+    }
+
+    #[test]
+    fn pytest_hooks_and_fixtures_are_host_entries() {
+        let conftest = "\
+import pytest
+
+
+def pytest_configure(config):
+    helper()
+
+
+def pytest_markdown_docs_globals():
+    return {}
+
+
+@pytest.fixture(autouse=True)
+def settings():
+    yield {}
+
+
+def helper():
+    def pytest_unconfigure(config):
+        return None
+    return 1
+";
+        let parse = parse_file(conftest, "docs/conftest.py", "docs::conftest", repo()).unwrap();
+        let cell =
+            |row: u32| format!(r#"{{"decl":"docs/conftest.py:{row}","source":"host:pytest"}}"#);
+        assert_eq!(
+            fn_entry_cells(&parse, "docs::conftest::pytest_configure"),
+            [cell(4)]
+        );
+        assert_eq!(
+            fn_entry_cells(&parse, "docs::conftest::pytest_markdown_docs_globals"),
+            [cell(8)]
+        );
+        assert_eq!(
+            fn_entry_cells(&parse, "docs::conftest::settings"),
+            [cell(13)]
+        );
+        assert!(fn_entry_cells(&parse, "docs::conftest::helper").is_empty());
+        assert!(
+            fn_entry_cells(&parse, "docs::conftest::helper::pytest_unconfigure").is_empty(),
+            "a nested def is no module hook"
+        );
+
+        // A plugin module: hookspec names exactly, an aliased fixture import;
+        // another plugin's hook is no hook outside a conftest.py.
+        let plugin = "\
+from pytest import fixture as fx
+
+
+def pytest_addoption(parser):
+    return None
+
+
+def pytest_markdown_docs_globals():
+    return {}
+
+
+@fx
+def value():
+    return 1
+";
+        let parse = parse_file(plugin, "src/plug.py", "src::plug", repo()).unwrap();
+        assert_eq!(
+            fn_entry_cells(&parse, "src::plug::pytest_addoption").len(),
+            1
+        );
+        assert_eq!(fn_entry_cells(&parse, "src::plug::value").len(), 1);
+        assert!(fn_entry_cells(&parse, "src::plug::pytest_markdown_docs_globals").is_empty());
+
+        // A test module's own fixture is no host callback; its hookspec is.
+        let test = "\
+import pytest
+
+
+@pytest.fixture
+def data():
+    return 1
+
+
+def pytest_generate_tests(metafunc):
+    return None
+";
+        let parse = parse_file(test, "tests/test_x.py", "tests::test_x", repo()).unwrap();
+        assert!(fn_entry_cells(&parse, "tests::test_x::data").is_empty());
+        assert_eq!(
+            fn_entry_cells(&parse, "tests::test_x::pytest_generate_tests").len(),
+            1
+        );
+
+        // No pytest import and no conftest.py: a pytest_ name is ordinary.
+        let plain = "def pytest_configure(config):\n    return None\n";
+        let parse = parse_file(plain, "lib/x.py", "lib::x", repo()).unwrap();
+        assert!(fn_entry_cells(&parse, "lib::x::pytest_configure").is_empty());
     }
 
     #[test]
