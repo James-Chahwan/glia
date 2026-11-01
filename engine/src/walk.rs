@@ -1746,6 +1746,263 @@ fn stamp_origin(
     cell.payload = CellPayload::Json(serde_json::Value::Object(origin).to_string());
 }
 
+/// GH.19b: whether the walk would admit repo-relative file `rel` under
+/// `root`, given the repo's ignore stack (`IgnoreStack::for_repo`, the
+/// root's own `.gitignore` not yet pushed): no component is a hard skip, a
+/// collapsed region (vendored, build output, gitignored, `[walk] skip`, a
+/// nested repo) or a symlinked directory, and the file itself is neither
+/// gitignored nor skipped, and is a regular file (a file link only when its
+/// target stays under the root). The build reads a start-named entry script
+/// only when this holds: a script the walk would skip is never read.
+pub(crate) fn admits_start_script(root: &Path, ignores: &IgnoreStack, rel: &str) -> bool {
+    let mut ignores = ignores.clone();
+    ignores.push_dir(root);
+    let segs: Vec<&str> = rel.split('/').collect();
+    let Some((file, dirs)) = segs.split_last() else {
+        return false;
+    };
+    let mut dir = root.to_path_buf();
+    for name in dirs {
+        if name.is_empty() || matches!(*name, "." | "..") {
+            return false;
+        }
+        let path = dir.join(name);
+        let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+        if !is_dir {
+            return false;
+        }
+        let gate = walk_gating::gate_dir_in(
+            Some(root),
+            &path,
+            name,
+            ignores.is_ignored(&path, true),
+            ignores.is_excluded(&path, true),
+        );
+        if gate == Gate::HardSkip || gate.collapse().is_some() {
+            return false;
+        }
+        ignores.push_dir(&path);
+        dir = path;
+    }
+    let path = dir.join(file);
+    if file.is_empty()
+        || walk_gating::is_hard_skip(file)
+        || ignores.is_excluded(&path, false)
+        || ignores.is_ignored(&path, false)
+    {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if meta.is_file() {
+        return true;
+    }
+    meta.file_type().is_symlink()
+        && match (std::fs::canonicalize(&path), std::fs::canonicalize(root)) {
+            (Ok(target), Ok(top)) => target.starts_with(top) && target.is_file(),
+            _ => false,
+        }
+}
+
+/// GH.19b: the tsconfig files a TypeScript project's build output is read
+/// from, in order: the build config (`tsconfig.build.json`, what `nest build`
+/// / `tsc -p` compile with) before the editor one.
+const TS_OUT_CONFIGS: [&str; 2] = ["tsconfig.build.json", "tsconfig.json"];
+
+/// GH.19b: the most `extends` links one tsconfig is followed through.
+const TS_EXTENDS_DEPTH: usize = 8;
+
+/// GH.19b: stamp each project root's tsconfig `compilerOptions.outDir` /
+/// `rootDir` into its PROJECT's ORIGIN as `ts_out`, `{"tsconfig","dir",
+/// "out_dir","root_dir"}`, every path repo-relative (`null` when not
+/// declared). The first of [`TS_OUT_CONFIGS`] that declares an `outDir`, its
+/// `extends` chain followed (a relative path, at most
+/// [`TS_EXTENDS_DEPTH`] links; a package name is not read): a nearer file's
+/// option wins, each resolved against the file that declares it. The
+/// host-start rules map a compiled start (`node dist/main`) back to source
+/// through it before the dist / build / out / lib -> src convention. A
+/// project with no outDir keeps its ORIGIN byte for byte.
+///
+/// fired_on, once per build that stamped one:
+///   `[ts-out] projects=<p> out_dir=<o> root_dir=<r> extends=<e>`
+pub(crate) fn stamp_ts_out_dirs(g: &mut glia_graph::RepoGraph, root: &Path, roots: &[ProjectRoot]) {
+    let (mut projects, mut roots_declared, mut extended) = (0usize, 0usize, 0usize);
+    for (node, r) in g.nodes.iter_mut().zip(roots) {
+        let Some(read) = TS_OUT_CONFIGS.iter().find_map(|f| {
+            let file = join_repo(&r.rel_path, f)?;
+            read_ts_out(root, &file).filter(|t| t.out_dir.is_some())
+        }) else {
+            continue;
+        };
+        projects += 1;
+        roots_declared += usize::from(read.root_dir.is_some());
+        extended += usize::from(read.extended);
+        stamp_origin(node, |origin| {
+            origin.insert(
+                "ts_out".into(),
+                serde_json::json!({
+                    "tsconfig": read.tsconfig,
+                    "dir": r.rel_path,
+                    "out_dir": read.out_dir,
+                    "root_dir": read.root_dir,
+                }),
+            );
+        });
+    }
+    if projects > 0 {
+        eprintln!(
+            "[ts-out] projects={projects} out_dir={projects} root_dir={roots_declared} extends={extended}"
+        );
+    }
+}
+
+/// One project's tsconfig read ([`stamp_ts_out_dirs`]).
+struct TsOutRead {
+    tsconfig: String,
+    out_dir: Option<String>,
+    root_dir: Option<String>,
+    /// An option came from an `extends` link.
+    extended: bool,
+}
+
+/// [`stamp_ts_out_dirs`]' read of repo-relative tsconfig `file` and its
+/// `extends` chain; `None` when the file is missing or not JSONC.
+fn read_ts_out(root: &Path, file: &str) -> Option<TsOutRead> {
+    let mut out = TsOutRead {
+        tsconfig: file.to_string(),
+        out_dir: None,
+        root_dir: None,
+        extended: false,
+    };
+    let mut at = file.to_string();
+    let mut seen: Vec<String> = Vec::new();
+    for depth in 0..=TS_EXTENDS_DEPTH {
+        if seen.contains(&at) {
+            break;
+        }
+        seen.push(at.clone());
+        let text = std::fs::read_to_string(root.join(&at)).ok();
+        let value: serde_json::Value = match text.as_deref().map(strip_jsonc_lite) {
+            Some(t) => match serde_json::from_str(&t) {
+                Ok(v) => v,
+                Err(_) if depth == 0 => return None,
+                Err(_) => break,
+            },
+            None if depth == 0 => return None,
+            None => break,
+        };
+        let dir = at.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+        let opts = value.get("compilerOptions");
+        let opt = |key: &str| {
+            opts.and_then(|o| o.get(key))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|v| join_repo(&dir, v.trim()))
+        };
+        if out.out_dir.is_none()
+            && let Some(v) = opt("outDir")
+        {
+            out.out_dir = Some(v);
+            out.extended |= depth > 0;
+        }
+        if out.root_dir.is_none()
+            && let Some(v) = opt("rootDir")
+        {
+            out.root_dir = Some(v);
+            out.extended |= depth > 0;
+        }
+        let Some(next) = value
+            .get("extends")
+            .and_then(serde_json::Value::as_str)
+            .filter(|e| e.starts_with("./") || e.starts_with("../"))
+        else {
+            break;
+        };
+        let next = if next.ends_with(".json") {
+            next.to_string()
+        } else {
+            format!("{next}.json")
+        };
+        let Some(next) = join_repo(&dir, &next) else {
+            break;
+        };
+        at = next;
+    }
+    Some(out)
+}
+
+/// `base` joined with relative `path` as a repo-relative path (`.` dropped,
+/// `..` popped; `""` is the root); `None` when it climbs above the root or
+/// `path` is absolute.
+fn join_repo(base: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// tsconfig is JSONC: `//` and `/* */` comments and trailing commas dropped
+/// outside string literals.
+fn strip_jsonc_lite(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == '\\' {
+                if let Some(e) = chars.next() {
+                    out.push(e);
+                }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                if chars.by_ref().any(|n| n == '\n') {
+                    out.push('\n');
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            '}' | ']' => {
+                let end = out.trim_end().len();
+                if out[..end].ends_with(',') {
+                    out.truncate(end - 1);
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// A target without its JS / TS / declaration extension (`dist/index.d.ts`
 /// -> `dist/index`, `index.mjs` -> `index`); an extensionless one unchanged.
 fn source_stem(rel: &str) -> &str {
@@ -2236,6 +2493,104 @@ mod walk_tests {
                 "svc/Procfile.dev",
             ]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH.19b: a tsconfig's outDir / rootDir land in its PROJECT's ORIGIN,
+    /// `extends` followed and each path resolved against its own file; a
+    /// project with no outDir keeps its ORIGIN as it was.
+    #[test]
+    fn ts_out_dirs_follow_extends_into_the_project_origin() {
+        let root = walk_tmp("ts_out");
+        let files = [
+            (
+                "tsconfig.base.json",
+                "{\n  // shared\n  \"compilerOptions\": {\"rootDir\": \"./src\",},\n}\n",
+            ),
+            ("api/package.json", r#"{"name":"api"}"#),
+            (
+                "api/tsconfig.json",
+                r#"{"extends":"../tsconfig.base.json","compilerOptions":{"outDir":"./build"}}"#,
+            ),
+            (
+                "api/tsconfig.build.json",
+                r#"{"extends":"./tsconfig","compilerOptions":{"rootDir":"./app"}}"#,
+            ),
+            ("web/package.json", r#"{"name":"web"}"#),
+            (
+                "web/tsconfig.json",
+                r#"{"compilerOptions":{"strict":true}}"#,
+            ),
+        ];
+        for (rel, text) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let (_, _, _, roots) = walk_source_files(&root);
+        let mut g = build_project_graph(&roots, RepoId(5));
+        let before: Vec<Vec<glia_core::Cell>> = g.nodes.iter().map(|n| n.cells.clone()).collect();
+        stamp_ts_out_dirs(&mut g, &root, &roots);
+        let origin = |i: usize| {
+            g.nodes[i]
+                .cells
+                .iter()
+                .find_map(|c| match &c.payload {
+                    glia_core::CellPayload::Json(t)
+                        if c.kind == glia_code_domain::cell_type::ORIGIN =>
+                    {
+                        serde_json::from_str::<serde_json::Value>(t).ok()
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let api = roots.iter().position(|r| r.rel_path == "api").unwrap();
+        let web = roots.iter().position(|r| r.rel_path == "web").unwrap();
+        assert_eq!(
+            origin(api)["ts_out"],
+            serde_json::json!({
+                "tsconfig": "api/tsconfig.build.json",
+                "dir": "api",
+                "out_dir": "api/build",
+                "root_dir": "api/app",
+            })
+        );
+        assert_eq!(g.nodes[web].cells, before[web]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH.19b: a start-named script is read only where the walk would read
+    /// a file: never under a gitignored, vendored or hard-skipped directory.
+    #[test]
+    fn start_scripts_follow_the_walk_rules() {
+        let root = walk_tmp("start_scripts");
+        for rel in [
+            "bin/run.sh",
+            "private/run.sh",
+            "node_modules/x/run.sh",
+            ".git/hooks/run.sh",
+            "bin/ignored.sh",
+        ] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "#!/bin/sh\nexec x\n").unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "private/\nbin/ignored.sh\n").unwrap();
+        let ignores = IgnoreStack::for_repo(&root);
+        let admitted: Vec<&str> = [
+            "bin/run.sh",
+            "private/run.sh",
+            "node_modules/x/run.sh",
+            ".git/hooks/run.sh",
+            "bin/ignored.sh",
+            "bin/missing.sh",
+            "../outside.sh",
+        ]
+        .into_iter()
+        .filter(|rel| admits_start_script(&root, &ignores, rel))
+        .collect();
+        assert_eq!(admitted, ["bin/run.sh"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

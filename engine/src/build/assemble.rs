@@ -5,11 +5,13 @@
 //! table, Cargo and Dart packages, post-cache grafts), the per-group build of
 //! [`super::lang_build`] (plan, build, fold) and [`repo_markers`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::glia_config::LoadedConfig;
+use glia_code_domain::hosts::{Refusal, StartTarget, TargetForm, normalise_argv};
 use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::walk_gating::IgnoreStack;
 use glia_code_domain::{FileParse, cell_type, di_stats, node_kind};
 use glia_code_extractors::constants::ConstTable;
 use glia_core::RepoId;
@@ -28,6 +30,7 @@ use super::memo::{BuildMemo, ConstKey, ConstMemo, MemoStats};
 use super::rpc_needles::RpcContext;
 use super::timing::PhaseTimes;
 use crate::cache::{ParseCache, content_hash};
+use crate::external::RepoInputs;
 use crate::extract::{GoModules, detect_language};
 use crate::passes::GroupFill;
 use crate::route::parse_repo_files_hashed;
@@ -541,5 +544,666 @@ fn msgtype_marker(graphs: &[RepoGraph], repo_label: &str) {
         eprintln!(
             "[msgtype] queue_nodes={queue_nodes} typed={typed} tag_topics={tags} repo={repo_label}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GH.19b: the entry shell scripts a host start names
+// ---------------------------------------------------------------------------
+
+/// GH.19b: the most entry scripts one repo's build reads.
+const START_SCRIPT_BUDGET: usize = 64;
+
+/// GH.19b: the most hops a start is followed through (package-manager
+/// scripts and entry scripts together), as the host-start rules count them.
+const START_SCRIPT_HOPS: usize = 3;
+
+/// The shells a `sh <script>` start runs its script with.
+const START_SHELLS: [&str; 6] = ["sh", "bash", "dash", "ash", "zsh", "ksh"];
+
+/// GH.19b: read the entry shell scripts the host starts of each repo name,
+/// and put each script's kept line(s) as an `iac::entry_script_cell`
+/// (`{"script","exec","row"}`) on the host resource whose start names it,
+/// for the host-start rules (`resolver:host`) to follow.
+///
+/// Only a script a start names is read, never a file by its extension: a
+/// final Dockerfile stage's ENTRYPOINT / CMD, a compose service's or k8s
+/// container's override (with the image start it completes), a process
+/// manager's command, followed through package-manager scripts (`yarn x`,
+/// from the package.json cells), the kept lines of a script read before, and
+/// an `exec "$@"` passthrough to the start's own arguments, at most
+/// [`START_SCRIPT_HOPS`] hops. A script target is a path the start runs
+/// (`./bin/run.sh`, `/app/entrypoint.sh`) or a shell's script argument (`sh
+/// start.sh`); a container path maps through the image's COPY map to the
+/// build context, the contexts a compose service or build cell declares for
+/// the Dockerfile, and the repo root; a process manager's relative path to its
+/// file's directory (and working directory). The file must be one the walk
+/// admits ([`crate::walk::admits_start_script`]), a shell script
+/// ([`glia_code_extractors::iac::is_entry_script`]) and at most
+/// `iac::ENTRY_SCRIPT_CAP` bytes; at most [`START_SCRIPT_BUDGET`] per repo.
+/// Of its text only the `exec` lines, else the last simple command, are kept
+/// (`iac::entry_script_lines`): the shell is read, never evaluated. Script
+/// cells a graph already carries (a watch re-finishing a reused graph) are
+/// replaced, so the result is the clean build's.
+pub(crate) fn attach_start_scripts(graphs: &mut [RepoGraph], inputs: &[RepoInputs]) {
+    for input in inputs {
+        let members: Vec<usize> = (0..graphs.len())
+            .filter(|&i| graphs[i].repo == input.repo)
+            .collect();
+        for &i in &members {
+            for n in &mut graphs[i].nodes {
+                n.cells
+                    .retain(|c| glia_code_extractors::iac::parse_entry_script_cell(c).is_none());
+            }
+        }
+        let starts = StartSeeds::collect(graphs, &members);
+        if starts.seeds.is_empty() {
+            continue;
+        }
+        let mut reader = ScriptReader {
+            root: &input.root,
+            ignores: IgnoreStack::for_repo(&input.root),
+            read: BTreeMap::new(),
+            pkg_scripts: &starts.pkg_scripts,
+        };
+        let mut adds: Vec<((usize, usize), Vec<ReadLine>)> = Vec::new();
+        for seed in &starts.seeds {
+            let mut found = Vec::new();
+            reader.follow(&seed.argv, &seed.env, 0, &mut found);
+            if !found.is_empty() {
+                adds.push((seed.node, found));
+            }
+        }
+        for ((g, n), found) in adds {
+            let Some(node) = graphs.get_mut(g).and_then(|g| g.nodes.get_mut(n)) else {
+                continue;
+            };
+            for (path, line, row) in found {
+                let cell = glia_code_extractors::iac::entry_script_cell(&path, &line, row);
+                if !node.cells.contains(&cell) {
+                    node.cells.push(cell);
+                }
+            }
+        }
+    }
+}
+
+/// One kept script line the reader found: `(repo path, line, 1-based row)`.
+type ReadLine = (String, String, u32);
+
+/// Where a start's script paths are looked up ([`attach_start_scripts`]).
+#[derive(Clone)]
+enum ScriptEnv {
+    /// In an image: container paths through its COPY map, joined to each base
+    /// (the build context first, the repo root last).
+    Container {
+        copies: Vec<(String, String)>,
+        workdir: Option<String>,
+        bases: Vec<String>,
+    },
+    /// On a machine: relative paths joined to the declaring file's directory
+    /// (and a relative working directory).
+    Local { base: String },
+}
+
+impl ScriptEnv {
+    /// The repo paths `target` may name, in lookup order.
+    fn paths(&self, target: &str) -> Vec<String> {
+        match self {
+            ScriptEnv::Container {
+                copies,
+                workdir,
+                bases,
+            } => {
+                let Some(path) = container_path(target, workdir.as_deref()) else {
+                    return Vec::new();
+                };
+                let Some(rel) = copied_from(copies, &path) else {
+                    return Vec::new();
+                };
+                bases.iter().filter_map(|b| join_repo(b, &rel)).collect()
+            }
+            ScriptEnv::Local { base } => {
+                if target.starts_with('/') {
+                    return Vec::new();
+                }
+                join_repo(base, target).into_iter().collect()
+            }
+        }
+    }
+
+    /// The package.json files a package-manager script is looked up in.
+    fn manifests(&self) -> Vec<String> {
+        let mut out = self.paths("package.json");
+        match self {
+            ScriptEnv::Container { bases, .. } => {
+                out.extend(bases.first().and_then(|b| join_repo(b, "package.json")));
+            }
+            ScriptEnv::Local { base } => out.extend(join_repo(base, "package.json")),
+        }
+        out
+    }
+}
+
+/// One start to follow: the host resource it is written on, its argv and
+/// where it runs.
+struct Seed {
+    node: (usize, usize),
+    argv: Vec<String>,
+    env: ScriptEnv,
+}
+
+/// A final-stage docker start cell, as the seeds read it.
+struct DockerCell {
+    image: String,
+    stage: String,
+    is_final: bool,
+    entrypoint: Vec<String>,
+    cmd: Vec<String>,
+    argv: Vec<String>,
+    workdir: Option<String>,
+    context: String,
+    copies: Vec<(String, String)>,
+    file: String,
+    node: (usize, usize),
+}
+
+/// One repo's start seeds and package scripts.
+#[derive(Default)]
+struct StartSeeds {
+    seeds: Vec<Seed>,
+    /// package.json path -> its `(name, cmd)` scripts.
+    pkg_scripts: BTreeMap<String, Vec<(String, String)>>,
+}
+
+impl StartSeeds {
+    /// Read the start, build and package-script cells of `members` (graph
+    /// then node then cell order) into seeds, as the host-start rules'
+    /// `launches` compute them.
+    fn collect(graphs: &[RepoGraph], members: &[usize]) -> Self {
+        let mut out = StartSeeds::default();
+        let mut docker: Vec<DockerCell> = Vec::new();
+        let mut others: Vec<((usize, usize), serde_json::Value)> = Vec::new();
+        let mut contexts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut add_context = |file: &str, ctx: &str| {
+            let list = contexts.entry(file.to_string()).or_default();
+            let ctx = join_repo("", ctx).unwrap_or_default();
+            if !list.contains(&ctx) {
+                list.push(ctx);
+            }
+        };
+        for &gi in members {
+            let g = &graphs[gi];
+            for (ni, n) in g.nodes.iter().enumerate() {
+                let kind = g.nav.kind_by_id.get(&n.id).copied();
+                for c in &n.cells {
+                    if c.kind != cell_type::CODE {
+                        continue;
+                    }
+                    let glia_core::CellPayload::Json(text) = &c.payload else {
+                        continue;
+                    };
+                    if kind == Some(node_kind::MODULE) && text.starts_with(r#"{"pkg_scripts":"#) {
+                        if let Some((file, scripts)) = read_pkg_scripts(text) {
+                            out.pkg_scripts.entry(file).or_insert(scripts);
+                        }
+                        continue;
+                    }
+                    if kind != Some(node_kind::INFRA_RESOURCE)
+                        || !(text.starts_with(r#"{"start":"#) || text.starts_with(r#"{"build":"#))
+                    {
+                        continue;
+                    }
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+                        continue;
+                    };
+                    if let Some(b) = v.get("build") {
+                        if let (Some(f), Some(ctx)) =
+                            (str_at(b, "dockerfile"), str_at(b, "context"))
+                        {
+                            add_context(f, ctx);
+                        }
+                        continue;
+                    }
+                    let Some(st) = v.get("start") else {
+                        continue;
+                    };
+                    let file = str_at(st, "decl")
+                        .and_then(|d| d.rsplit_once(':'))
+                        .map(|(f, _)| f.to_string())
+                        .unwrap_or_default();
+                    if str_at(st, "host") == Some("docker") {
+                        if str_at(st, "trigger") != Some("container_start") {
+                            continue;
+                        }
+                        let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                        docker.push(DockerCell {
+                            image: qname
+                                .strip_prefix("infra:image:")
+                                .unwrap_or(&qname)
+                                .to_string(),
+                            stage: str_at(st, "stage").unwrap_or_default().to_string(),
+                            is_final: st.get("final").and_then(serde_json::Value::as_bool)
+                                == Some(true),
+                            entrypoint: strs_at(st, "entrypoint").unwrap_or_default(),
+                            cmd: strs_at(st, "cmd").unwrap_or_default(),
+                            argv: strs_at(st, "argv").unwrap_or_default(),
+                            workdir: str_at(st, "workdir").map(str::to_string),
+                            context: str_at(st, "context").unwrap_or(".").to_string(),
+                            copies: st
+                                .get("copies")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|p| {
+                                            Some((
+                                                p.get(0)?.as_str()?.to_string(),
+                                                p.get(1)?.as_str()?.to_string(),
+                                            ))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            file,
+                            node: (gi, ni),
+                        });
+                        continue;
+                    }
+                    if str_at(st, "host") == Some("compose")
+                        && let (Some(f), Some(ctx)) =
+                            (str_at(st, "dockerfile"), str_at(st, "context"))
+                    {
+                        add_context(f, ctx);
+                    }
+                    others.push(((gi, ni), st.clone()));
+                }
+            }
+        }
+        let container = |d: &DockerCell, context: Option<&str>, workdir: Option<String>| {
+            let mut bases: Vec<String> = Vec::new();
+            let mut push = |b: &str| {
+                let b = join_repo("", b).unwrap_or_default();
+                if !bases.contains(&b) {
+                    bases.push(b);
+                }
+            };
+            push(context.unwrap_or(&d.context));
+            for c in contexts.get(&d.file).into_iter().flatten() {
+                push(c);
+            }
+            push("");
+            ScriptEnv::Container {
+                copies: d.copies.clone(),
+                workdir: workdir.or_else(|| d.workdir.clone()),
+                bases,
+            }
+        };
+        for d in docker.iter().filter(|d| d.is_final) {
+            out.seeds.push(Seed {
+                node: d.node,
+                argv: d.argv.clone(),
+                env: container(d, None, None),
+            });
+        }
+        for (node, st) in &others {
+            let host = str_at(st, "host").unwrap_or_default();
+            match host {
+                "compose" | "k8s" => {
+                    let (over_ep, over_cmd) = if host == "compose" {
+                        (strs_at(st, "entrypoint"), strs_at(st, "command"))
+                    } else {
+                        (strs_at(st, "command"), strs_at(st, "args"))
+                    };
+                    if over_ep.is_none() && over_cmd.is_none() {
+                        continue;
+                    }
+                    let name = match host {
+                        "compose" => str_at(st, "built_image")
+                            .map(str::to_string)
+                            .or_else(|| str_at(st, "image").map(image_basename)),
+                        _ => str_at(st, "image").map(image_basename),
+                    };
+                    let Some(name) = name else {
+                        continue;
+                    };
+                    let dockerfile = str_at(st, "dockerfile");
+                    let stage = str_at(st, "target_stage");
+                    for d in docker.iter().filter(|d| {
+                        d.image == name
+                            && dockerfile.is_none_or(|f| f == d.file)
+                            && stage.map_or(d.is_final, |s| s == d.stage)
+                    }) {
+                        let mut argv = over_ep.clone().unwrap_or_else(|| d.entrypoint.clone());
+                        argv.extend(over_cmd.clone().unwrap_or_else(|| {
+                            if over_ep.is_some() {
+                                Vec::new()
+                            } else {
+                                d.cmd.clone()
+                            }
+                        }));
+                        let workdir = str_at(st, "workdir").map(str::to_string);
+                        out.seeds.push(Seed {
+                            node: *node,
+                            argv,
+                            env: container(d, str_at(st, "context"), workdir),
+                        });
+                    }
+                }
+                "procfile" | "systemd" | "supervisor" => {
+                    let dir = str_at(st, "dir").unwrap_or(".");
+                    let base = match str_at(st, "workdir") {
+                        Some(w) if w.starts_with('/') => continue,
+                        Some(w) => join_repo(dir, w),
+                        None => join_repo(dir, "."),
+                    };
+                    let Some(base) = base else {
+                        continue;
+                    };
+                    out.seeds.push(Seed {
+                        node: *node,
+                        argv: strs_at(st, "argv").unwrap_or_default(),
+                        env: ScriptEnv::Local { base },
+                    });
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// Reads the entry scripts of one repo ([`attach_start_scripts`]).
+struct ScriptReader<'a> {
+    root: &'a std::path::Path,
+    ignores: IgnoreStack,
+    /// repo path -> its kept lines, `None` when not read (missing, refused,
+    /// not a shell script, over the cap or past the budget). Looked up only.
+    read: BTreeMap<String, Option<Vec<(String, u32)>>>,
+    pkg_scripts: &'a BTreeMap<String, Vec<(String, String)>>,
+}
+
+impl ScriptReader<'_> {
+    /// Follow `argv` from `env`, `depth` hops in, collecting each script
+    /// line read as `(path, line, row)`.
+    fn follow(&mut self, argv: &[String], env: &ScriptEnv, depth: usize, out: &mut Vec<ReadLine>) {
+        let t = normalise_argv(argv);
+        self.follow_target(&t, env, depth, out);
+    }
+
+    fn follow_target(
+        &mut self,
+        t: &StartTarget,
+        env: &ScriptEnv,
+        depth: usize,
+        out: &mut Vec<ReadLine>,
+    ) {
+        if t.refused.is_some() || depth >= START_SCRIPT_HOPS {
+            return;
+        }
+        if t.form == TargetForm::PkgScript {
+            let mut cmds: Vec<String> = Vec::new();
+            for m in env.manifests() {
+                for (name, cmd) in self.pkg_scripts.get(&m).into_iter().flatten() {
+                    if *name == t.target && !cmds.contains(cmd) {
+                        cmds.push(cmd.clone());
+                    }
+                }
+            }
+            for cmd in cmds {
+                let argv = ["sh".to_string(), "-c".to_string(), cmd];
+                self.follow(&argv, env, depth + 1, out);
+            }
+            return;
+        }
+        let shell_launched =
+            t.form == TargetForm::Script && t.launcher.is_some_and(|n| START_SHELLS.contains(&n));
+        if !(shell_launched || (t.form == TargetForm::Binary && t.target.contains('/'))) {
+            return;
+        }
+        for path in env.paths(&t.target) {
+            let Some(lines) = self.read(&path) else {
+                continue;
+            };
+            for (line, row) in lines {
+                if !out
+                    .iter()
+                    .any(|(p, l, r)| *p == path && *l == line && *r == row)
+                {
+                    out.push((path.clone(), line.clone(), row));
+                }
+                let argv = ["sh".to_string(), "-c".to_string(), line];
+                let next = normalise_argv(&argv);
+                let passthrough = next.refused == Some(Refusal::Dynamic)
+                    && matches!(next.target.as_str(), "$@" | "$*" | "${@}" | "${*}");
+                let next = if passthrough {
+                    normalise_argv(&t.args)
+                } else {
+                    next
+                };
+                self.follow_target(&next, env, depth + 1, out);
+            }
+        }
+    }
+
+    /// The kept lines of the script at repo path `path`, read once.
+    fn read(&mut self, path: &str) -> Option<Vec<(String, u32)>> {
+        if let Some(done) = self.read.get(path) {
+            return done.clone();
+        }
+        let opened = self.read.values().filter(|v| v.is_some()).count();
+        let lines = (opened < START_SCRIPT_BUDGET)
+            .then(|| self.read_file(path))
+            .flatten();
+        self.read.insert(path.to_string(), lines.clone());
+        lines
+    }
+
+    fn read_file(&self, path: &str) -> Option<Vec<(String, u32)>> {
+        use glia_code_extractors::iac::{ENTRY_SCRIPT_CAP, entry_script_lines, is_entry_script};
+        if !crate::walk::admits_start_script(self.root, &self.ignores, path) {
+            return None;
+        }
+        let abs = self.root.join(path);
+        let len = std::fs::metadata(&abs).ok()?.len();
+        if usize::try_from(len).map_or(true, |l| l > ENTRY_SCRIPT_CAP) {
+            return None;
+        }
+        let text = String::from_utf8(std::fs::read(&abs).ok()?).ok()?;
+        is_entry_script(path, &text).then(|| entry_script_lines(&text))
+    }
+}
+
+/// A package.json MODULE's `{"pkg_scripts":{"file","scripts":[{name,cmd}]}}`.
+fn read_pkg_scripts(text: &str) -> Option<(String, Vec<(String, String)>)> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let body = v.get("pkg_scripts")?;
+    let file = str_at(body, "file")?.to_string();
+    let scripts = body
+        .get("scripts")?
+        .as_array()?
+        .iter()
+        .filter_map(|s| {
+            Some((
+                str_at(s, "name")?.to_string(),
+                str_at(s, "cmd")?.to_string(),
+            ))
+        })
+        .collect();
+    Some((file, scripts))
+}
+
+fn str_at<'v>(v: &'v serde_json::Value, key: &str) -> Option<&'v str> {
+    v.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// A string array field; `None` when absent or `null`.
+fn strs_at(v: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    let a = v.get(key)?.as_array()?;
+    Some(
+        a.iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// An image reference's repository basename (`ghcr.io/o/api:1.2` -> `api`).
+fn image_basename(image: &str) -> String {
+    let last = image.rsplit('/').next().unwrap_or(image);
+    let last = last.split('@').next().unwrap_or(last);
+    last.split(':').next().unwrap_or(last).to_string()
+}
+
+/// A container path, absolute and cleaned: `cand` when absolute, else joined
+/// to the working directory (`None` when that is unknown).
+fn container_path(cand: &str, workdir: Option<&str>) -> Option<String> {
+    let joined = if cand.starts_with('/') {
+        cand.to_string()
+    } else {
+        format!("{}/{cand}", workdir?)
+    };
+    Some(format!("/{}", join_repo("", &joined).unwrap_or_default()))
+}
+
+/// The build-context path a container path was copied from: the last COPY
+/// whose destination holds it.
+fn copied_from(copies: &[(String, String)], path: &str) -> Option<String> {
+    copies.iter().rev().find_map(|(dst, src)| {
+        let dst = format!("/{}", join_repo("", dst).unwrap_or_default());
+        let rest = if path == dst {
+            ""
+        } else if dst == "/" {
+            path.strip_prefix('/')?
+        } else {
+            path.strip_prefix(&dst)?.strip_prefix('/')?
+        };
+        Some(join_repo(src, rest).unwrap_or_default())
+    })
+}
+
+/// `base` joined with `path` as a repo-relative path (`.` dropped, `..`
+/// popped, `""` the root); `None` when it climbs above the root.
+fn join_repo(base: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+#[cfg(test)]
+mod start_script_tests {
+    use glia_code_domain::{cell_type, node_kind};
+    use glia_core::CellPayload;
+
+    fn write(root: &std::path::Path, rel: &str, text: &str) {
+        let path = root.join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// `(host qname, script cell text)` of every entry-script cell.
+    fn script_cells(result: &crate::build::GenerateResult) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for g in &result.merged.graphs {
+            for n in &g.nodes {
+                for c in &n.cells {
+                    let CellPayload::Json(t) = &c.payload else {
+                        continue;
+                    };
+                    if c.kind == cell_type::CODE && t.starts_with(r#"{"script":"#) {
+                        assert_eq!(
+                            g.nav.kind_by_id.get(&n.id),
+                            Some(&node_kind::INFRA_RESOURCE)
+                        );
+                        let q = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                        out.push((q, t.clone()));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// GH.19b: only the scripts a start names are read, and of them only the
+    /// exec / last-command line; a script the walk would skip is never read.
+    #[test]
+    fn the_build_reads_only_start_named_entry_scripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "api/Dockerfile",
+            "FROM python:3.12\nWORKDIR /code\nCOPY . .\nCMD [\"./bin/start.sh\"]\n",
+        );
+        write(
+            root,
+            "api/bin/start.sh",
+            "#!/bin/sh\nset -e\npython -m app.seed\nexec ./bin/next.sh\n",
+        );
+        write(
+            root,
+            "api/bin/next.sh",
+            "#!/bin/sh\nexec python -m app.main\n",
+        );
+        write(
+            root,
+            "api/bin/unused.sh",
+            "#!/bin/sh\nexec python -m app.unused\n",
+        );
+        write(root, "api/app/__init__.py", "");
+        write(root, "api/app/main.py", "def main():\n    pass\n");
+        write(
+            root,
+            "docker-compose.yml",
+            "services:\n  hidden:\n    build: ./api\n    command: ./private/run.sh\n",
+        );
+        // A gitignored script a start names is refused, like the walk.
+        write(root, "api/.gitignore", "private/\n");
+        write(
+            root,
+            "api/private/run.sh",
+            "#!/bin/sh\nexec python -m app.main\n",
+        );
+        let result = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        assert_eq!(
+            script_cells(&result),
+            [
+                (
+                    "infra:image:api".to_string(),
+                    r#"{"script":"api/bin/next.sh","exec":"exec python -m app.main","row":2}"#
+                        .to_string()
+                ),
+                (
+                    "infra:image:api".to_string(),
+                    r#"{"script":"api/bin/start.sh","exec":"exec ./bin/next.sh","row":4}"#
+                        .to_string()
+                ),
+            ]
+        );
+        // A second finish over the same graphs replaces, never duplicates.
+        let mut graphs = result.merged.graphs.clone();
+        let inputs = vec![crate::external::RepoInputs {
+            repo: graphs[0].repo,
+            root: root.to_path_buf(),
+            label: root.to_string_lossy().into_owned(),
+            config: None,
+        }];
+        super::attach_start_scripts(&mut graphs, &inputs);
+        let again: usize = graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter())
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| glia_code_extractors::iac::parse_entry_script_cell(c).is_some())
+            .count();
+        assert_eq!(again, 2);
     }
 }

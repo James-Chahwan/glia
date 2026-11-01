@@ -1,0 +1,41 @@
+{
+  "framework": "start-indirection-shell",
+  "language": "dockerfile",
+  "dirs": ["."],
+  "note": "GH.19b start indirection, the shell half (legacy-only, no matrix cell). The build reads only the entry scripts a start names (never a .sh by extension) and keeps their `exec` lines, else the last simple command, as `{\"script\",\"exec\",\"row\"}` CODE cells on the host resource; resolver:host follows them (rule <host>:via_script, located at the script line). api/'s image CMD ./bin/docker-entrypoint-api.sh -> `exec gunicorn .. app.asgi:application` (the `python -m app.seed` before it is not the process); the compose worker's ./bin/docker-entrypoint-worker.sh ends `celery -A app worker -l info` -> the celery app package; web/'s ENTRYPOINT script ends `exec \"$@\"`, so the image CMD `node build/main` runs (passthrough) and maps through web/tsconfig.json's declared outDir ./build / rootDir ./app to app/main.ts, not the src/ convention's decoy; tool/'s entry.sh `exec mytool` binds the pyproject console script's main. The compose deep service's hop1 -> hop2 -> hop3 -> hop4 is four script hops: refused. api/bin/unused.sh is named by no start, so it is never read and its `exec python -m app.unused` binds nothing. Before GH.19b: every start here was unresolved (scripts_unread=5).",
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:api", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:web", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:image:tool", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:worker", "exact": true},
+    {"kind": "INFRA_RESOURCE", "name": "infra:service:deep", "exact": true},
+    {"kind": "MODULE", "name": "api::app::unused", "exact": true},
+    {"kind": "MODULE", "name": "web::src::main", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "infra:image:api", "to": "api::app::asgi", "category": "HANDLED_BY", "exact": true,
+     "note": "CMD ./bin/docker-entrypoint-api.sh -> exec gunicorn .. app.asgi:application"},
+    {"from": "infra:service:worker", "to": "api::app::__init__", "category": "HANDLED_BY", "exact": true,
+     "note": "command ./bin/docker-entrypoint-worker.sh -> last command celery -A app worker"},
+    {"from": "infra:image:web", "to": "web::app::main", "category": "HANDLED_BY", "exact": true,
+     "note": "ENTRYPOINT script exec \"$@\" -> CMD node build/main -> tsconfig outDir build, rootDir app"},
+    {"from": "infra:image:tool", "to": "tool::mytool::main::main", "category": "HANDLED_BY", "exact": true,
+     "note": "entry.sh exec mytool -> [project.scripts] mytool = mytool.main:main"}
+  ],
+  "expect_cells": [
+    {"kind": "INFRA_RESOURCE", "node": "infra:service:worker", "cell": "CODE", "contains": "{\"script\":\"api/bin/docker-entrypoint-worker.sh\",\"exec\":\"celery -A app worker -l info\",\"row\":5}"},
+    {"kind": "INFRA_RESOURCE", "node": "infra:image:web", "cell": "CODE", "contains": "{\"script\":\"web/docker/entrypoint.sh\",\"exec\":\"exec \\\"$@\\\"\",\"row\":7}"},
+    {"kind": "MODULE", "node": "api::app::asgi", "cell": "ENTRYPOINT", "contains": "\"source\":\"host:docker\""},
+    {"kind": "MODULE", "node": "web::app::main", "cell": "ENTRYPOINT", "contains": "\"host\":\"infra:image:web\""},
+    {"kind": "PROJECT", "node": "project:web", "cell": "ORIGIN", "contains": "\"out_dir\":\"web/build\""}
+  ],
+  "forbid": [
+    {"from": "infra:image:web", "to": "web::src::main", "category": "HANDLED_BY", "note": "the declared rootDir wins over the dist -> src convention"},
+    {"from": "infra:image:web", "to": "web::app::migrate", "category": "HANDLED_BY", "note": "a script's non-exec line binds nothing"},
+    {"from": "infra:image:api", "to": "api::app::seed", "category": "HANDLED_BY", "note": "a script's non-exec line binds nothing"},
+    {"from": "infra:service:deep", "to": "api::app::deep", "category": "HANDLED_BY", "note": "hop1 -> hop2 -> hop3 -> hop4 is four script hops: refused"},
+    {"from": "infra:image:api", "to": "api::app::unused", "category": "HANDLED_BY", "note": "a script no start names is never read"},
+    {"from": "infra:service:worker", "to": "api::app::unused", "category": "HANDLED_BY", "note": "a script no start names is never read"},
+    {"from": "infra:service:deep", "to": "api::app::unused", "category": "HANDLED_BY", "note": "a script no start names is never read"}
+  ]
+}

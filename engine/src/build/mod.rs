@@ -642,6 +642,8 @@ pub(crate) fn aux_graphs(
     if !roots.is_empty() {
         let mut projects = build_project_graph(roots, repo);
         crate::walk::stamp_npm_entries(&mut projects, root, roots);
+        // GH.19b: each TypeScript project's declared outDir / rootDir.
+        crate::walk::stamp_ts_out_dirs(&mut projects, root, roots);
         graphs.push(projects);
     }
     let mut doc_records = FileDocSource(md).collect();
@@ -699,6 +701,10 @@ pub(crate) fn finish_build(
     started: Instant,
 ) -> Finished {
     eprintln!("{}", CanonicalTally::take().marker());
+    // GH.19b: the entry shell scripts the host starts name, read from each
+    // repo's root before the host-start rules run.
+    let mut graphs = graphs;
+    assemble::attach_start_scripts(&mut graphs, &inputs);
     let mut merged = MergedGraph::new(graphs);
     let ctx = CodeBuildCtx::new(inputs, opts).with_group_fills(fills);
     let report = run_code_passes_with(&mut merged, &ctx);

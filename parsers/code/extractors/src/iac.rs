@@ -3572,6 +3572,286 @@ fn key_line(source: &str, from: usize, name: &str) -> u32 {
 }
 
 // ----------------------------------------------------------------------------
+// GH.19b: the entry shell scripts a start names (`/app/entrypoint.sh`)
+// ----------------------------------------------------------------------------
+
+/// GH.19b: the most bytes of one entry script the build reads; a longer
+/// script is not read (`scripts_unread=`).
+pub const ENTRY_SCRIPT_CAP: usize = 4096;
+
+/// The shells an entry script's `#!` line may name (`/bin/sh`, `/usr/bin/env
+/// bash`).
+const ENTRY_SHELLS: [&str; 6] = ["sh", "bash", "dash", "ash", "zsh", "ksh"];
+
+/// The first words of a line that never starts the script's process: shell
+/// builtins, control words, assignments' keywords and file utilities. The
+/// last-command fallback ([`entry_script_lines`]) skips them.
+const ENTRY_SKIP_WORDS: [&str; 46] = [
+    "set", "export", "cd", "pushd", "popd", "fi", "done", "esac", "then", "else", "elif", "do",
+    "if", "for", "while", "until", "case", "select", "unset", "shift", "trap", "wait", "exit",
+    "return", "echo", "printf", "source", ".", "true", "false", ":", "local", "readonly",
+    "declare", "typeset", "umask", "ulimit", "sleep", "test", "[", "[[", "mkdir", "chmod", "chown",
+    "rm", "cp",
+];
+
+/// GH.19b: whether the text read at `path` is a shell script an entry start
+/// can run: a `.sh` / `.bash` file, or one whose `#!` line names a shell
+/// (`#!/bin/sh`, `#!/usr/bin/env bash`). A NUL byte in it (a binary) is
+/// never one.
+pub fn is_entry_script(path: &str, text: &str) -> bool {
+    if text.contains('\0') {
+        return false;
+    }
+    let base = path.rsplit('/').next().unwrap_or(path);
+    if base.ends_with(".sh") || base.ends_with(".bash") {
+        return true;
+    }
+    let Some(bang) = text.lines().next().and_then(|l| l.strip_prefix("#!")) else {
+        return false;
+    };
+    let mut words = bang.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let first = first.rsplit('/').next().unwrap_or(first);
+    let shell = if first == "env" {
+        words.find(|w| !w.starts_with('-')).unwrap_or("")
+    } else {
+        first
+    };
+    ENTRY_SHELLS.contains(&shell)
+}
+
+/// GH.19b: the lines of an entry script that start its process, each with its
+/// 1-based row: every top-level `exec <cmd>` line (an `exec` that only
+/// redirects, `exec >log 2>&1`, is none); with none, the last simple command.
+/// Comments, blank lines, function bodies (and the calls of the script's own
+/// functions), heredoc bodies, control words and builtin / file-utility lines
+/// are skipped; a `\`-continued line is one line at its first row. Nothing
+/// else of the script is kept: the shell is read, never evaluated (SECURITY.md).
+pub fn entry_script_lines(text: &str) -> Vec<(String, u32)> {
+    let lines = script_lines(text);
+    let functions: Vec<&str> = lines.iter().filter_map(|(l, _)| function_name(l)).collect();
+    let mut execs = Vec::new();
+    let mut last: Option<(String, u32)> = None;
+    let mut depth = 0usize;
+    let mut pending_body = false;
+    let mut heredoc: Option<String> = None;
+    for (line, row) in &lines {
+        let trimmed = line.trim();
+        if let Some(end) = &heredoc {
+            if trimmed == end {
+                heredoc = None;
+            }
+            continue;
+        }
+        let code = strip_shell_comment(trimmed);
+        if code.is_empty() {
+            continue;
+        }
+        if let Some(end) = heredoc_end(code) {
+            heredoc = Some(end);
+            continue;
+        }
+        let (open, close) = braces(code);
+        let header = function_name(code).is_some();
+        if depth > 0 || pending_body || header {
+            // A header whose `{` is on the next line opens the body there.
+            pending_body = header && open == 0 && depth == 0;
+            depth = (depth + open).saturating_sub(close);
+            continue;
+        }
+        if is_exec_line(code) {
+            execs.push((code.to_string(), *row));
+            continue;
+        }
+        let first = code.split_whitespace().next().unwrap_or("");
+        let first = first.trim_end_matches(';');
+        let assignment_only = code.split_whitespace().all(|w| {
+            w.split_once('=').is_some_and(|(k, _)| {
+                !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+        });
+        if assignment_only
+            || ENTRY_SKIP_WORDS.contains(&first)
+            || matches!(first, "{" | "}" | ";;" | ")" | "(")
+            || functions.contains(&first)
+        {
+            continue;
+        }
+        last = Some((code.to_string(), *row));
+    }
+    if execs.is_empty() {
+        last.into_iter().collect()
+    } else {
+        execs
+    }
+}
+
+/// The script's lines with `\`-continuations joined, each at its first
+/// 1-based row.
+fn script_lines(text: &str) -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    let mut open: Option<(String, u32)> = None;
+    for (i, raw) in text.lines().enumerate() {
+        let row = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        let (mut acc, start) = open.take().unwrap_or((String::new(), row));
+        let body = raw.trim_end();
+        let body = if acc.is_empty() {
+            body
+        } else {
+            body.trim_start()
+        };
+        match body.strip_suffix('\\').filter(|b| !b.ends_with('\\')) {
+            Some(head) => {
+                acc.push_str(head.trim_end());
+                acc.push(' ');
+                open = Some((acc, start));
+            }
+            None => {
+                acc.push_str(body);
+                out.push((acc, start));
+            }
+        }
+    }
+    if let Some(rest) = open {
+        out.push(rest);
+    }
+    out
+}
+
+/// `name` of a function definition line (`name() {`, `function name {`,
+/// `function name() {`).
+fn function_name(line: &str) -> Option<&str> {
+    let t = line.trim();
+    let (named, keyword) = match t.strip_prefix("function ") {
+        Some(rest) => (rest.trim_start(), true),
+        None => (t, false),
+    };
+    let end = named
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.')))
+        .unwrap_or(named.len());
+    let name = &named[..end];
+    if name.is_empty() {
+        return None;
+    }
+    let rest = named[end..].trim_start();
+    let rest = rest
+        .strip_prefix("()")
+        .map(str::trim_start)
+        .or_else(|| keyword.then_some(rest))?;
+    (rest.is_empty() || rest.starts_with('{') || rest.starts_with('(')).then_some(name)
+}
+
+/// The `{` and `}` outside quotes on a line.
+fn braces(code: &str) -> (usize, usize) {
+    let (mut open, mut close) = (0, 0);
+    let mut quote: Option<char> = None;
+    for c in code.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '{') => open += 1,
+            (None, '}') => close += 1,
+            _ => {}
+        }
+    }
+    (open, close)
+}
+
+/// A line with its trailing `# comment` (a `#` outside quotes at a word
+/// start) dropped; empty for a whole-line comment.
+fn strip_shell_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '#') if prev.is_whitespace() => return line[..i].trim_end(),
+            _ => {}
+        }
+        prev = c;
+    }
+    line
+}
+
+/// The terminator of a heredoc the line opens (`<<EOF`, `<<-'EOF'`), or
+/// `None` (a `<<<` here-string opens none).
+fn heredoc_end(code: &str) -> Option<String> {
+    let at = code.find("<<")?;
+    let rest = &code[at + 2..];
+    if rest.starts_with('<') {
+        return None;
+    }
+    let rest = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+    let word: String = rest
+        .trim_start_matches(['\'', '"'])
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!word.is_empty()).then_some(word)
+}
+
+/// A line whose command (or one of its `;` / `&&` / `||` / `then` / `else`
+/// parts) is `exec <cmd>`; an `exec` with only redirections is none.
+fn is_exec_line(code: &str) -> bool {
+    let words: Vec<&str> = code.split_whitespace().collect();
+    words.iter().enumerate().any(|(i, w)| {
+        let starts = i == 0
+            || matches!(words[i - 1], "&&" | "||" | "then" | "else" | "do")
+            || words[i - 1].ends_with(';');
+        *w == "exec"
+            && starts
+            && words.get(i + 1).is_some_and(|next| {
+                let next = next.trim_start_matches(|c: char| c.is_ascii_digit());
+                !(next.starts_with('>') || next.starts_with('<') || next.starts_with('&'))
+            })
+    })
+}
+
+#[derive(serde::Serialize)]
+struct EntryScriptCell<'a> {
+    script: &'a str,
+    exec: &'a str,
+    row: u32,
+}
+
+/// GH.19b: one kept line of entry script `path` (repo-relative) as a CODE
+/// Json cell, `{"script":"<path>","exec":"<line>","row":<1-based>}`, put by
+/// the build on the host resource whose start names the script; the
+/// host-start rules (`resolver:host`) read it as the script's command.
+pub fn entry_script_cell(path: &str, line: &str, row: u32) -> glia_core::Cell {
+    json_cell(&EntryScriptCell {
+        script: path,
+        exec: line,
+        row,
+    })
+}
+
+/// GH.19b: an [`entry_script_cell`]'s `(script path, line, row)`; `None` for
+/// any other cell.
+pub fn parse_entry_script_cell(cell: &glia_core::Cell) -> Option<(String, String, u32)> {
+    if cell.kind != glia_code_domain::cell_type::CODE {
+        return None;
+    }
+    let glia_core::CellPayload::Json(text) = &cell.payload else {
+        return None;
+    };
+    if !text.starts_with(r#"{"script":"#) {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    Some((
+        v.get("script")?.as_str()?.to_string(),
+        v.get("exec")?.as_str()?.to_string(),
+        u32::try_from(v.get("row")?.as_u64()?).ok()?,
+    ))
+}
+
+// ----------------------------------------------------------------------------
 // GH.17: process managers (Procfile, systemd units, supervisord programs)
 // ----------------------------------------------------------------------------
 
@@ -5519,5 +5799,61 @@ build:
         assert!(package_scripts_cell("{ nope", "package.json").is_none());
         assert!(package_scripts_cell(r#"{"name":"x"}"#, "package.json").is_none());
         assert!(package_scripts_cell(r#"{"scripts":{"a":1}}"#, "package.json").is_none());
+    }
+
+    #[test]
+    fn entry_script_keeps_the_exec_lines_outside_functions() {
+        let text = "#!/bin/bash\nset -e\n\nchange_user() {\n    if [ x ]; then\n        exec gosu $PUID \"$BASH_SOURCE\" \"$@\"\n    fi\n}\n\ninit() {\n  echo hi\n}\n\nchange_user\ninit\nload() { :; }\nload || exit 1\npython manage.py migrate\n# exec not-this\nexec >>/var/log/app.log 2>&1\nexec mealie\n";
+        assert_eq!(
+            entry_script_lines(text),
+            vec![("exec mealie".to_string(), 21)]
+        );
+    }
+
+    #[test]
+    fn entry_script_falls_back_to_the_last_simple_command() {
+        let text = "#!/bin/sh\nset -e\npython manage.py wait_for_db\n# Run the processes\ncelery -A plane worker -l info\nexport X=1\nY=2\nfi\n";
+        assert_eq!(
+            entry_script_lines(text),
+            vec![("celery -A plane worker -l info".to_string(), 5)]
+        );
+        let passthrough =
+            "#!/bin/sh\nset -e\nsetup() {\n  node migrate.js\n}\nsetup\nexec \"$@\"\n";
+        assert_eq!(
+            entry_script_lines(passthrough),
+            vec![("exec \"$@\"".to_string(), 7)]
+        );
+        // A continued exec is one line at its first row; a heredoc body and
+        // a brace-on-next-line function body are skipped.
+        let cont = "#!/bin/bash\nstart()\n{\n  exec nope\n}\ncat <<EOF > /tmp/x\nexec inside-heredoc\nEOF\nexec gunicorn \\\n  -w 4 app.asgi:application # serve\n";
+        assert_eq!(
+            entry_script_lines(cont),
+            vec![("exec gunicorn -w 4 app.asgi:application".to_string(), 9)]
+        );
+        assert!(entry_script_lines("#!/bin/sh\n# nothing\nset -e\n").is_empty());
+    }
+
+    #[test]
+    fn entry_scripts_are_shell_files_or_shell_shebangs() {
+        assert!(is_entry_script("bin/start.sh", "echo"));
+        assert!(is_entry_script(
+            "bin/start",
+            "#!/usr/bin/env bash\nexec x\n"
+        ));
+        assert!(is_entry_script("bin/start", "#!/bin/sh\n"));
+        assert!(!is_entry_script("bin/start", "#!/usr/bin/env node\n"));
+        assert!(!is_entry_script("bin/start", "exec x\n"));
+        assert!(!is_entry_script("bin/start.sh", "ELF\0\0"));
+        let cell = entry_script_cell("docker/entry.sh", "exec mealie", 95);
+        assert_eq!(
+            cell.payload,
+            glia_core::CellPayload::Json(
+                r#"{"script":"docker/entry.sh","exec":"exec mealie","row":95}"#.to_string()
+            )
+        );
+        assert_eq!(
+            parse_entry_script_cell(&cell),
+            Some(("docker/entry.sh".to_string(), "exec mealie".to_string(), 95))
+        );
     }
 }

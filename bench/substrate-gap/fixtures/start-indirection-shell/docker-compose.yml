@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+  worker:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    command: ./bin/docker-entrypoint-worker.sh
+  deep:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    command: ./bin/hop1.sh
+  tool:
+    build:
+      context: ./tool

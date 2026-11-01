@@ -83,11 +83,28 @@
 //!   JavaScript launcher's build-output path (`node dist/main`, first segment
 //!   `dist` / `build` / `out` / `lib`) whose file is not walked maps to its
 //!   TypeScript source, `src/<rest>.{ts,tsx,mts,js,mjs}` then `<rest>.*` (and
-//!   a directory's `index.*`), DERIVED: the walk reads no tsconfig, so outDir /
-//!   rootDir are these conventions. The edge rule is the start's own form
-//!   (`compose:pkg_script`). A shell script a start runs (`/app/entrypoint.sh`,
-//!   `sh start.sh`) stays unbound: the build holds no `.sh` text
-//!   (`scripts_unread=`).
+//!   a directory's `index.*`), DERIVED. GH.19b: a path under an output dir a
+//!   project's tsconfig declares (the walk's PROJECT ORIGIN `ts_out`:
+//!   `outDir` / `rootDir`, `extends` followed) maps to that `rootDir` (else the
+//!   project's `src`, then the project dir) first; the convention runs when
+//!   the declared mapping names no walked file (a bundled `dist/main.js` of a
+//!   project whose rootDir is `.`). The edge rule is the
+//!   start's own form (`compose:pkg_script`).
+//! - **Entry scripts (GH.19b).** The build reads the shell scripts a start
+//!   names (`/app/entrypoint.sh`, `./bin/run.sh`, `sh start.sh`; a file the
+//!   walk admits, at most 4 KiB, 64 per repo: never a `.sh` by extension) and
+//!   keeps only their `exec` lines, else the last simple command, as
+//!   `{"script","exec","row"}` CODE cells on the host resource
+//!   (`glia_code_extractors::iac::entry_script_cell`). A script target maps
+//!   through the COPY map to the build context or a context a compose service
+//!   / build cell declares for the Dockerfile (FACT), else to the repo root
+//!   (DERIVED), or for a process manager to its file's directory; its kept
+//!   line is re-read as `sh -c <line>` (several lines bind when they agree,
+//!   else `ambiguous=`), and `exec "$@"` passes the start's own arguments on
+//!   (the image CMD after an ENTRYPOINT script, `passthrough=`). Package and
+//!   entry scripts share the three-hop limit. The edge rule is
+//!   `<host>:via_script`, located at the script line that named the target; a
+//!   script target the build did not read is `scripts_unread=`.
 //! - **Writes.** `<INFRA_RESOURCE> -HANDLED_BY-> target`, EVIDENCE emitter
 //!   `resolver:host`, rule `<host>:<form>` (`docker:script`,
 //!   `compose:module_attr`, `k8s:binary`, `procfile:celery_app`, ..), located
@@ -101,12 +118,14 @@
 //! (dynamic=<y> ambiguous=<a> framework=<w> missing=<m> external_image=<x>
 //! refused=<r>) forms=(script= py_module= module_attr= celery_app= flask_app=
 //! binary= pkg_script= jar= java_main= dll= framework=) entries=<e>
-//! hops=(pkg_script=<p> dist_src=<d>) refused_depth=<r> scripts_unread=<s>
+//! hops=(pkg_script=<p> dist_src=<d> shell=<s> passthrough=<t>) refused_depth=<r>
+//! scripts_unread=<u>
 //! manifest_bins=<bound>/<declared> (cargo=<b>/<n> pyproject=<b>/<n>
 //! setup=<b>/<n> npm=<b>/<n> gemspec=<b>/<n> composer=<b>/<n>) attr_fallback=<f>
 //! bins_unresolved=<u>` (`refused=`: an inline, too-deep or target-less argv;
 //! `pkg_script=`: package-script hops taken, summed over the starts;
-//! `dist_src=`: starts bound through a build-output -> source mapping).
+//! `dist_src=`: starts bound through a build-output -> source mapping;
+//! `shell=`: entry-script hops taken; `passthrough=`: `exec "$@"` hops).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -114,6 +133,7 @@ use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::hosts::{Refusal, StartTarget, TargetForm, normalise_argv};
 use glia_code_domain::{GRAPH_TYPE, cell_type, edge_category, infra, node_kind};
 use glia_code_extractors::cli::parse_manifest_bin_cell;
+use glia_code_extractors::iac::parse_entry_script_cell;
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
 use super::host_scripts::normalise;
@@ -454,8 +474,15 @@ struct StartReport {
     dist_src: usize,
     /// GH.19: starts refused past [`MAX_PKG_SCRIPT_HOPS`].
     refused_depth: usize,
-    /// GH.19: unbound starts whose target is a shell script, which no reader
-    /// of the build holds the text of (the walk reads no `.sh`).
+    /// GH.19b: entry-script hops taken (a start's script read for its kept
+    /// command), summed over the starts.
+    shell_hops: usize,
+    /// GH.19b: `exec "$@"` passthroughs taken (the script's arguments run as
+    /// the start's command), summed over the starts.
+    passthrough: usize,
+    /// GH.19: unbound starts whose target is a shell script the build did not
+    /// read (GH.19b: missing, binary, over the cap, refused by the walk's
+    /// rules, past the per-repo budget, or keeping no line).
     scripts_unread: usize,
 }
 
@@ -472,7 +499,7 @@ impl StartReport {
             .collect();
         let unresolved: usize = self.unresolved.values().sum();
         format!(
-            "starts={} bound={} (fact={} derived={}) unresolved={unresolved} ({}) forms=({}) entries={} hops=(pkg_script={} dist_src={}) refused_depth={} scripts_unread={}",
+            "starts={} bound={} (fact={} derived={}) unresolved={unresolved} ({}) forms=({}) entries={} hops=(pkg_script={} dist_src={} shell={} passthrough={}) refused_depth={} scripts_unread={}",
             self.starts,
             self.fact + self.derived,
             self.fact,
@@ -482,6 +509,8 @@ impl StartReport {
             self.entries,
             self.pkg_script_hops,
             self.dist_src,
+            self.shell_hops,
+            self.passthrough,
             self.refused_depth,
             self.scripts_unread
         )
@@ -567,6 +596,7 @@ struct ProcStart {
 /// on an image node: the context its Dockerfile is built from.
 struct ImageBuild {
     image: NodeId,
+    repo: RepoId,
     dockerfile: Option<String>,
     context: String,
 }
@@ -637,6 +667,28 @@ struct RepoIndex {
     /// GH.19: each package.json's `scripts` (its MODULE's `pkg_scripts`
     /// cell), by repo-relative manifest path.
     pkg_scripts: BTreeMap<String, Vec<PkgScript>>,
+    /// GH.19b: each entry script the build read (the `{"script":..}` cells
+    /// on the host resources whose starts name it), by repo-relative path:
+    /// its kept lines with their 1-based rows, in cell order.
+    scripts: BTreeMap<String, Vec<ScriptLine>>,
+    /// GH.19b: the build contexts a compose service or a `{"build":..}` cell
+    /// declares for each Dockerfile, by repo-relative Dockerfile path.
+    contexts: BTreeMap<String, Vec<String>>,
+    /// GH.19b: each TypeScript project's declared output and source dirs (a
+    /// PROJECT's ORIGIN `ts_out`, read by the walk from its tsconfig).
+    ts_out: Vec<TsOut>,
+}
+
+/// GH.19b: one kept line of an entry script and its 1-based row.
+type ScriptLine = (String, u32);
+
+/// GH.19b: one PROJECT's tsconfig `compilerOptions.outDir` / `rootDir`
+/// (`extends` followed), repo-relative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TsOut {
+    dir: String,
+    out_dir: Option<String>,
+    root_dir: Option<String>,
 }
 
 /// GH.19: one `scripts` entry of a package.json.
@@ -650,6 +702,13 @@ struct PkgScript {
 #[derive(Debug, Default)]
 struct Hops {
     pkg_script: usize,
+    /// GH.19b: entry-script hops.
+    shell: usize,
+    /// GH.19b: `exec "$@"` passthroughs.
+    passthrough: usize,
+    /// GH.19b: the entry-script line (repo path, 1-based row) that named the
+    /// bound target, when the start was read through a script.
+    via: Option<(String, u32)>,
     dist_src: bool,
     refused_depth: bool,
     script_unread: bool,
@@ -667,7 +726,17 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
     {
         return report;
     }
-    let index = repo_index(merged, bins);
+    let mut index = repo_index(merged, bins);
+    for b in &cells.builds {
+        if let Some(f) = &b.dockerfile {
+            push_context(&mut index, b.repo, f, &b.context);
+        }
+    }
+    for c in &cells.compose {
+        if let (Some(f), Some(ctx)) = (&c.dockerfile, &c.context) {
+            push_context(&mut index, c.repo, f, ctx);
+        }
+    }
     let adjacency = adjacency(merged);
     let launches = launches(&cells);
     let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
@@ -685,6 +754,8 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
             *report.forms.entry(f.as_str()).or_default() += 1;
         }
         report.pkg_script_hops += hops.pkg_script;
+        report.shell_hops += hops.shell;
+        report.passthrough += hops.passthrough;
         report.refused_depth += usize::from(hops.refused_depth);
         report.scripts_unread += usize::from(hops.script_unread);
         let (to, fact) = match outcome {
@@ -700,7 +771,14 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
         } else {
             report.derived += 1;
         }
-        let form = form.map_or("binary", TargetForm::as_str);
+        let form = match hops.via {
+            Some(_) => "via_script",
+            None => form.map_or("binary", TargetForm::as_str),
+        };
+        let (at_file, at_row) = hops
+            .via
+            .clone()
+            .unwrap_or_else(|| (launch.file.clone(), launch.row));
         if seen.insert((launch.from, to)) {
             let confidence = if fact {
                 Confidence::Strong
@@ -712,7 +790,7 @@ fn bind_host_starts(merged: &mut MergedGraph, bins: &[(NodeId, NodeId)]) -> Star
                 &mut e,
                 Evidence::emitter("resolver:host")
                     .rule(format!("{}:{form}", launch.host))
-                    .at(launch.file.clone(), launch.row.saturating_sub(1)),
+                    .at(at_file, at_row.saturating_sub(1)),
             );
             edges.push(e);
         }
@@ -980,47 +1058,111 @@ fn external_verdict(argv: &[String]) -> &'static str {
 
 /// Resolve one launch: the normalised form (the argv's own, before any
 /// hop) and the target or the reason, with the hops read on the way.
-///
-/// GH.19: a package-manager script (`yarn worker:prod`, `npm run x`) is
-/// looked up in the package.json of the start's working directory (mapped
-/// through the image's COPY map, FACT; else the build context's, DERIVED)
-/// and its command re-read as `sh -c <cmd>`, at most [`MAX_PKG_SCRIPT_HOPS`]
-/// deep; the script's extra arguments are not appended. A `pre<name>` script
-/// is never read: only the named one runs the start.
 fn resolve_launch(
     ix: &RepoIndex,
     adjacency: &HashMap<NodeId, Vec<(NodeId, glia_core::EdgeCategoryId)>>,
     l: &Launch<'_>,
 ) -> (Option<TargetForm>, Result<Bound, &'static str>, Hops) {
     let mut hops = Hops::default();
-    let mut t = normalise_argv(&l.argv);
+    let t = normalise_argv(&l.argv);
     let first = t.form;
-    let mut manifest_fact = true;
+    let outcome = resolve_from(ix, adjacency, l, t, 0, &mut hops);
+    (Some(first), outcome, hops)
+}
+
+/// The target `t` names, `depth` hops into its start.
+///
+/// GH.19: a package-manager script (`yarn worker:prod`, `npm run x`) is
+/// looked up in the package.json of the start's working directory (mapped
+/// through the image's COPY map, FACT; else the build context's, DERIVED)
+/// and its command re-read as `sh -c <cmd>`; the script's extra arguments are
+/// not appended. A `pre<name>` script is never read: only the named one runs
+/// the start.
+///
+/// GH.19b: an entry shell script the start names (`/app/entrypoint.sh`, `sh
+/// start.sh`), read by the build ([`entry_script`]), is followed through its
+/// kept line(s) as `sh -c <line>`; a line that runs `exec "$@"` (the
+/// normaliser's refused `$@` target) passes the script's own arguments on as
+/// the command (`passthrough`). Several kept lines bind when they all name
+/// one target, else `ambiguous`. Package scripts and entry scripts together
+/// take at most [`MAX_PKG_SCRIPT_HOPS`] hops; a further one is refused.
+fn resolve_from(
+    ix: &RepoIndex,
+    adjacency: &HashMap<NodeId, Vec<(NodeId, glia_core::EdgeCategoryId)>>,
+    l: &Launch<'_>,
+    mut t: StartTarget,
+    mut depth: usize,
+    hops: &mut Hops,
+) -> Result<Bound, &'static str> {
+    let mut chain_fact = true;
     loop {
         if let Some(why) = t.refused {
-            let reason = if why == Refusal::Dynamic {
+            return Err(if why == Refusal::Dynamic {
                 "dynamic"
             } else {
                 "refused"
+            });
+        }
+        if t.form == TargetForm::PkgScript {
+            if depth == MAX_PKG_SCRIPT_HOPS {
+                hops.refused_depth = true;
+                return Err("refused");
+            }
+            let (cmd, fact) = pkg_script(ix, &l.env, &t.target).ok_or("missing")?;
+            hops.pkg_script += 1;
+            depth += 1;
+            chain_fact &= fact;
+            t = normalise_argv(&["sh".to_string(), "-c".to_string(), cmd.to_string()]);
+            continue;
+        }
+        if let Some((script, lines, fact)) = entry_script(ix, &l.env, &t) {
+            if depth == MAX_PKG_SCRIPT_HOPS {
+                hops.refused_depth = true;
+                return Err("refused");
+            }
+            hops.shell += 1;
+            let mut bound: Vec<Bound> = Vec::new();
+            let mut first_err: Option<&'static str> = None;
+            for (line, row) in lines {
+                let mut next = normalise_argv(&["sh".to_string(), "-c".to_string(), line.clone()]);
+                if is_passthrough(&next) {
+                    hops.passthrough += 1;
+                    next = normalise_argv(&t.args);
+                }
+                let via = hops.via.take();
+                match resolve_from(ix, adjacency, l, next, depth + 1, hops) {
+                    Ok(b) => {
+                        // The deepest script line that named the target, of
+                        // the first line that bound.
+                        let mine = hops
+                            .via
+                            .take()
+                            .unwrap_or_else(|| (script.to_string(), *row));
+                        hops.via = Some(via.unwrap_or(mine));
+                        if !bound.iter().any(|(id, _)| *id == b.0) {
+                            bound.push(b);
+                        }
+                    }
+                    Err(why) => {
+                        hops.via = via;
+                        first_err.get_or_insert(why);
+                    }
+                }
+            }
+            return match bound.as_slice() {
+                [(id, f)] => Ok((*id, *f && fact && chain_fact)),
+                [] => Err(first_err.unwrap_or("missing")),
+                _ => Err("ambiguous"),
             };
-            return (Some(first), Err(reason), hops);
         }
-        if t.form != TargetForm::PkgScript {
-            break;
-        }
-        if hops.pkg_script == MAX_PKG_SCRIPT_HOPS {
+        if depth == MAX_PKG_SCRIPT_HOPS && is_shell_script(&t) {
             hops.refused_depth = true;
-            return (Some(first), Err("refused"), hops);
+            return Err("refused");
         }
-        let Some((cmd, fact)) = pkg_script(ix, &l.env, &t.target) else {
-            return (Some(first), Err("missing"), hops);
-        };
-        hops.pkg_script += 1;
-        manifest_fact &= fact;
-        t = normalise_argv(&["sh".to_string(), "-c".to_string(), cmd.to_string()]);
+        break;
     }
     let outcome = match t.form {
-        TargetForm::Script => script_module(ix, &l.env, &t, &mut hops),
+        TargetForm::Script => script_module(ix, &l.env, &t, hops),
         TargetForm::PyModule
         | TargetForm::ModuleAttr
         | TargetForm::CeleryApp
@@ -1034,8 +1176,90 @@ fn resolve_launch(
     if outcome.is_err() && is_shell_script(&t) {
         hops.script_unread = true;
     }
-    let outcome = outcome.map(|(id, fact)| (id, fact && manifest_fact));
-    (Some(first), outcome, hops)
+    outcome.map(|(id, fact)| (id, fact && chain_fact))
+}
+
+/// GH.19b: `exec "$@"` (or a bare `"$@"` / `$*`): the normaliser refuses the
+/// `$@` target as dynamic; the start's command is the script's arguments.
+fn is_passthrough(t: &StartTarget) -> bool {
+    t.refused == Some(Refusal::Dynamic)
+        && matches!(t.target.as_str(), "$@" | "$*" | "${@}" | "${*}")
+}
+
+/// GH.19b: the kept lines of the entry script a shell-script target names
+/// (`./bin/run.sh`, `/app/entrypoint.sh`, `sh start.sh`), and whether the
+/// script is FACT: a container path mapped through the image's COPY map to
+/// the start's build context or a context a compose service / build cell
+/// declares for the Dockerfile (FACT), else to the repo root (DERIVED: the
+/// Dockerfile's own directory is not always the context its COPY sources are
+/// written against); a process manager's relative path joined to its file's
+/// directory (FACT for a Procfile) and working directory. `None` when the
+/// target is no script path or the build read no such script (a bare name is
+/// a PATH lookup, never a file of the repo).
+fn entry_script<'a>(
+    ix: &'a RepoIndex,
+    env: &Env<'_>,
+    t: &StartTarget,
+) -> Option<(&'a str, &'a [ScriptLine], bool)> {
+    let shell_launched =
+        t.form == TargetForm::Script && t.launcher.is_some_and(|n| SHELLS.contains(&n));
+    if !(shell_launched || (t.form == TargetForm::Binary && t.target.contains('/'))) {
+        return None;
+    }
+    let target = t.target.as_str();
+    let cands: Vec<(String, bool)> = match env {
+        Env::Container {
+            image,
+            context,
+            workdir,
+        } => {
+            let path = container_path(target, workdir.as_deref())?;
+            let rel = copied_from(&image.copies, &path)?;
+            let mut bases: Vec<(&str, bool)> = vec![(context.as_str(), true)];
+            for c in ix.contexts.get(&image.file).into_iter().flatten() {
+                bases.push((c.as_str(), true));
+            }
+            bases.push(("", false));
+            bases
+                .into_iter()
+                .filter_map(|(b, f)| Some((join_rel(b, &rel)?, f)))
+                .collect()
+        }
+        Env::Local {
+            dir,
+            workdir,
+            dir_is_fact,
+        } => {
+            if target.starts_with('/') {
+                return None;
+            }
+            let base = match workdir.as_deref() {
+                Some(w) if w.starts_with('/') => return None,
+                Some(w) => join_rel(dir, w)?,
+                None => dir.clone(),
+            };
+            vec![(join_rel(&base, target)?, *dir_is_fact && workdir.is_none())]
+        }
+    };
+    cands.into_iter().find_map(|(c, fact)| {
+        ix.scripts
+            .get_key_value(&c)
+            .map(|(path, lines)| (path.as_str(), lines.as_slice(), fact))
+    })
+}
+
+/// GH.19b: record `ctx` as a build context of Dockerfile `file` in `repo`.
+fn push_context(index: &mut HashMap<RepoId, RepoIndex>, repo: RepoId, file: &str, ctx: &str) {
+    let list = index
+        .entry(repo)
+        .or_default()
+        .contexts
+        .entry(file.to_string())
+        .or_default();
+    let ctx = normalise("", ctx).unwrap_or_default();
+    if !list.contains(&ctx) {
+        list.push(ctx);
+    }
 }
 
 /// GH.19: the command of package script `name` in the package.json of the
@@ -1081,8 +1305,9 @@ fn pkg_script<'a>(ix: &'a RepoIndex, env: &Env<'_>, name: &str) -> Option<(&'a s
         .map(|s| (s.cmd.as_str(), fact))
 }
 
-/// GH.19: a target that is a shell script (`./entrypoint.sh`, `sh start.sh`),
-/// whose text no reader of the build holds.
+/// GH.19: a target that is a shell script (`./entrypoint.sh`, `sh start.sh`).
+/// GH.19b: reached only when the build read no such script ([`entry_script`]),
+/// so it counts `scripts_unread=` (or, past the hop limit, `refused_depth=`).
 fn is_shell_script(t: &StartTarget) -> bool {
     t.target.ends_with(".sh")
         || (t.form == TargetForm::Script && t.launcher.is_some_and(|n| SHELLS.contains(&n)))
@@ -1090,7 +1315,8 @@ fn is_shell_script(t: &StartTarget) -> bool {
 
 /// A script start's MODULE: the file as written (exact), then (GH.19) for a
 /// JavaScript launcher a build-output path mapped to its TypeScript source
-/// (DERIVED), then the written file's longest path suffix (DERIVED).
+/// (DERIVED: GH.19b's declared tsconfig outDir first, then the convention),
+/// then the written file's longest path suffix (DERIVED).
 fn script_module(
     ix: &RepoIndex,
     env: &Env<'_>,
@@ -1102,6 +1328,19 @@ fn script_module(
         return Ok(b);
     }
     if t.lang == Some("typescript") {
+        // GH.19b: a tsconfig declares the output dir the path is under: its
+        // rootDir (else the project's `src`, then the project dir) is tried
+        // first. A declared mapping that names no walked file (a bundler's
+        // `dist/main.js` from a project whose rootDir is `.`) falls through to
+        // the convention.
+        if let Some(id) = declared_src_candidates(ix, env, &t.target)
+            .into_iter()
+            .flatten()
+            .find_map(|c| ix.modules.get(&c))
+        {
+            hops.dist_src = true;
+            return Ok((*id, false));
+        }
         let src = dist_src_candidates(&t.target);
         let exact: Vec<String> = src.iter().map(|(c, _)| c.clone()).collect();
         let hit = map_exact(ix, env, &exact)
@@ -1118,6 +1357,93 @@ fn script_module(
     }
     let any: Vec<(String, usize)> = cands.into_iter().map(|c| (c, 1)).collect();
     map_suffix(ix, env, &any).unwrap_or(Err("missing"))
+}
+
+/// GH.19b: the TypeScript sources a compiled start's path maps to through a
+/// declared tsconfig `outDir` ([`TsOut`]), in order, or `None` when no
+/// declared output dir holds any repo path the target may name. The target's
+/// repo paths: a container path through the COPY map, joined to the build
+/// context then to the repo root; a local path joined to the declaring file's
+/// directory and working directory. The part under the output dir maps to
+/// the declared `rootDir`, else `<project>/src`, then the project dir, with
+/// the extensions of [`dist_src_candidates`] (a directory's `index.*`).
+fn declared_src_candidates(ix: &RepoIndex, env: &Env<'_>, target: &str) -> Option<Vec<String>> {
+    if ix.ts_out.iter().all(|t| t.out_dir.is_none()) {
+        return None;
+    }
+    let paths: Vec<String> = match env {
+        Env::Container {
+            image,
+            context,
+            workdir,
+        } => {
+            let path = container_path(target, workdir.as_deref())?;
+            let rel = copied_from(&image.copies, &path)?;
+            [join_rel(context, &rel), join_rel("", &rel)]
+                .into_iter()
+                .flatten()
+                .collect()
+        }
+        Env::Local { dir, workdir, .. } => {
+            if target.starts_with('/') {
+                return None;
+            }
+            let base = match workdir.as_deref() {
+                Some(w) if w.starts_with('/') => return None,
+                Some(w) => join_rel(dir, w)?,
+                None => dir.clone(),
+            };
+            join_rel(&base, target).into_iter().collect()
+        }
+    };
+    let mut out = Vec::new();
+    let mut covered = false;
+    for p in &paths {
+        for ts in &ix.ts_out {
+            let Some(out_dir) = ts.out_dir.as_deref() else {
+                continue;
+            };
+            let rest = if p == out_dir {
+                ""
+            } else if let Some(r) = p.strip_prefix(out_dir).and_then(|r| r.strip_prefix('/')) {
+                r
+            } else {
+                continue;
+            };
+            covered = true;
+            let rest = ["js", "mjs", "cjs"]
+                .iter()
+                .find_map(|e| rest.strip_suffix(e).and_then(|s| s.strip_suffix('.')))
+                .unwrap_or(rest);
+            let roots: Vec<String> = match &ts.root_dir {
+                Some(r) => vec![r.clone()],
+                None => [join_rel(&ts.dir, "src"), Some(ts.dir.clone())]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
+            };
+            for root in roots {
+                let base = match (root.is_empty(), rest.is_empty()) {
+                    (_, true) => root.clone(),
+                    (true, false) => rest.to_string(),
+                    (false, false) => format!("{root}/{rest}"),
+                };
+                if !rest.is_empty() {
+                    for ext in ["ts", "tsx", "mts", "js", "mjs"] {
+                        out.push(format!("{base}.{ext}"));
+                    }
+                }
+                for ext in ["ts", "tsx", "js"] {
+                    out.push(if base.is_empty() {
+                        format!("index.{ext}")
+                    } else {
+                        format!("{base}/index.{ext}")
+                    });
+                }
+            }
+        }
+    }
+    covered.then_some(out)
 }
 
 /// GH.19: the TypeScript sources a compiled start's path may come from, each
@@ -1709,6 +2035,7 @@ fn collect_starts(merged: &MergedGraph) -> StartCells {
                     if let Some(context) = b.str_at("context") {
                         out.builds.push(ImageBuild {
                             image: n.id,
+                            repo: g.repo,
                             dockerfile: b.str_at("dockerfile").map(str::to_string),
                             context: context.to_string(),
                         });
@@ -1852,6 +2179,27 @@ fn read_pkg_scripts(c: &Cell) -> Option<(String, Vec<PkgScript>)> {
     Some((file, scripts))
 }
 
+/// GH.19b: a PROJECT's ORIGIN `ts_out` (the walk's tsconfig read:
+/// `{"dir","out_dir","root_dir"}`, repo-relative, `null` when undeclared).
+fn read_ts_out(c: &Cell) -> Option<TsOut> {
+    if c.kind != cell_type::ORIGIN {
+        return None;
+    }
+    let CellPayload::Json(text) = &c.payload else {
+        return None;
+    };
+    if !text.contains(r#""ts_out":"#) {
+        return None;
+    }
+    let v = Json::parse(text)?;
+    let ts = v.get("ts_out")?;
+    Some(TsOut {
+        dir: ts.str_at("dir")?.to_string(),
+        out_dir: ts.str_at("out_dir").map(str::to_string),
+        root_dir: ts.str_at("root_dir").map(str::to_string),
+    })
+}
+
 /// `"<file>:<1-based row>"` split.
 fn split_decl(decl: &str) -> Option<(String, u32)> {
     let (file, row) = decl.rsplit_once(':')?;
@@ -1871,6 +2219,19 @@ fn repo_index(merged: &MergedGraph, bins: &[(NodeId, NodeId)]) -> HashMap<RepoId
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
                 continue;
             };
+            if kind == node_kind::INFRA_RESOURCE {
+                for (file, line, row) in n.cells.iter().filter_map(parse_entry_script_cell) {
+                    let lines = ix.scripts.entry(file).or_default();
+                    if !lines.iter().any(|(l, r)| *l == line && *r == row) {
+                        lines.push((line, row));
+                    }
+                }
+                continue;
+            }
+            if kind == node_kind::PROJECT {
+                ix.ts_out.extend(n.cells.iter().filter_map(read_ts_out));
+                continue;
+            }
             if kind == node_kind::MODULE {
                 for (file, scripts) in n.cells.iter().filter_map(read_pkg_scripts) {
                     ix.pkg_scripts.entry(file).or_insert(scripts);
@@ -2749,7 +3110,8 @@ mod tests {
             "starts=11 bound=10 (fact=9 derived=1) unresolved=1 (dynamic=1 ambiguous=0 \
              framework=0 missing=0 external_image=0 refused=0) forms=(script=4 py_module=1 \
              module_attr=2 celery_app=1 flask_app=0 binary=2 pkg_script=0 jar=0 java_main=0 \
-             dll=0 framework=0) entries=6 hops=(pkg_script=0 dist_src=0) refused_depth=0 \
+             dll=0 framework=0) entries=6 hops=(pkg_script=0 dist_src=0 shell=0 passthrough=0) \
+             refused_depth=0 \
              scripts_unread=0"
         );
     }
@@ -2861,9 +3223,10 @@ mod tests {
         merged.cross_edges.clear();
         let report = bind_host_starts(&mut merged, &[]);
         assert!(
-            report
-                .marker()
-                .ends_with("hops=(pkg_script=8 dist_src=4) refused_depth=1 scripts_unread=0"),
+            report.marker().ends_with(
+                "hops=(pkg_script=8 dist_src=4 shell=0 passthrough=0) refused_depth=1 \
+                     scripts_unread=0"
+            ),
             "{}",
             report.marker()
         );
@@ -2879,6 +3242,200 @@ mod tests {
         assert_eq!(abs[0], ("/app/server/src/main.ts".to_string(), 2));
         assert!(dist_src_candidates("src/main.js").is_empty());
         assert!(dist_src_candidates("dist").is_empty());
+    }
+
+    /// GH.19b: put the build's entry-script cells (`(script, line, row)`) on
+    /// the host resource named `qname`.
+    fn with_scripts(graphs: &mut [RepoGraph], qname: &str, lines: &[(&str, &str, u32)]) {
+        for g in graphs.iter_mut() {
+            let Some(id) = g
+                .nav
+                .qname_by_id
+                .iter()
+                .find(|(_, q)| q.as_str() == qname)
+                .map(|(id, _)| *id)
+            else {
+                continue;
+            };
+            if let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) {
+                for (script, line, row) in lines {
+                    n.cells.push(iac::entry_script_cell(script, line, *row));
+                }
+            }
+        }
+    }
+
+    /// GH.19b: entry shell scripts, `exec "$@"` passthrough, the hop limit
+    /// shared with package scripts, and a declared tsconfig outDir.
+    #[test]
+    fn starts_resolve_through_entry_scripts() {
+        let repo = RepoId(21);
+        let mut code = G::new(repo);
+        code.module("api/app/__init__.py", "api::app");
+        code.module("api/app/asgi.py", "api::app::asgi");
+        code.module("web/server/main.ts", "web::server::main");
+        code.module("web/src/main.ts", "web::src::main");
+        code.module("ops/serve.py", "ops::serve");
+        let tool_main = code.module("tool/mytool/main.py", "tool::mytool::main");
+        code.child(node_kind::FUNCTION, tool_main, "tool::mytool::main::main");
+        let pyproject = code.node(node_kind::MODULE, "tool::pyproject.toml", None, vec![]);
+        code.bin(
+            pyproject,
+            "mytool",
+            manifest_bin_cell(
+                "pyproject",
+                Some("tool/pyproject.toml"),
+                3,
+                "mytool.main:main",
+            ),
+        );
+        code.node(
+            node_kind::PROJECT,
+            "web",
+            None,
+            vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(
+                    r#"{"source":"manifest","ts_out":{"dir":"web","out_dir":"web/build","root_dir":"web/server"}}"#
+                        .to_string(),
+                ),
+            }],
+        );
+        let mut iac_graphs = vec![
+            docker(
+                repo,
+                "api/Dockerfile",
+                "FROM python:3.12\nWORKDIR /code\nCOPY . .\nCMD [\"./bin/start.sh\"]\n",
+            ),
+            docker(
+                repo,
+                "web/Dockerfile",
+                "FROM node:20\nWORKDIR /srv\nCOPY . .\nENTRYPOINT [\"/srv/entrypoint.sh\"]\nCMD [\"node\", \"build/main\"]\n",
+            ),
+            docker(
+                repo,
+                "tool/Dockerfile",
+                "FROM python:3.12\nCOPY ./run.sh /app/run.sh\nENTRYPOINT [\"/app/run.sh\"]\n",
+            ),
+            yaml(
+                repo,
+                "docker-compose.yml",
+                "services:\n  worker:\n    build: ./api\n    command: ./bin/worker.sh\n  deep:\n    build: ./api\n    command: ./bin/a.sh\n  gone:\n    build: ./api\n    command: ./bin/missing.sh\n",
+            ),
+            proc_file(
+                repo,
+                ProcessManager::Procfile,
+                "ops/Procfile",
+                "web: bash start.sh\n",
+            ),
+        ];
+        let gunicorn =
+            "exec gunicorn -w \"$WORKERS\" -k uvicorn.workers.UvicornWorker app.asgi:application";
+        with_scripts(
+            &mut iac_graphs,
+            "infra:image:api",
+            &[("api/bin/start.sh", gunicorn, 5)],
+        );
+        with_scripts(
+            &mut iac_graphs,
+            "infra:image:web",
+            &[("web/entrypoint.sh", "exec \"$@\"", 4)],
+        );
+        with_scripts(
+            &mut iac_graphs,
+            "infra:image:tool",
+            &[("tool/run.sh", "exec mytool", 9)],
+        );
+        with_scripts(
+            &mut iac_graphs,
+            "infra:service:worker",
+            &[("api/bin/worker.sh", "celery -A app worker -l info", 3)],
+        );
+        with_scripts(
+            &mut iac_graphs,
+            "infra:service:deep",
+            &[
+                ("api/bin/a.sh", "exec ./bin/b.sh", 2),
+                ("api/bin/b.sh", "exec ./bin/c.sh", 2),
+                ("api/bin/c.sh", "exec ./bin/d.sh", 2),
+                ("api/bin/d.sh", "exec gunicorn app.asgi:application", 2),
+            ],
+        );
+        with_scripts(
+            &mut iac_graphs,
+            "infra:process:web@ops",
+            &[("ops/start.sh", "exec python serve.py", 7)],
+        );
+        let merged = resolved(code, iac_graphs);
+        assert_eq!(
+            starts(&merged),
+            [
+                start(
+                    "infra:image:api",
+                    "api::app::asgi",
+                    Confidence::Strong,
+                    "docker:via_script"
+                ),
+                start(
+                    "infra:image:tool",
+                    "tool::mytool::main::main",
+                    Confidence::Medium,
+                    "docker:via_script"
+                ),
+                start(
+                    "infra:image:web",
+                    "web::server::main",
+                    Confidence::Medium,
+                    "docker:via_script"
+                ),
+                start(
+                    "infra:process:web@ops",
+                    "ops::serve",
+                    Confidence::Strong,
+                    "procfile:via_script"
+                ),
+                start(
+                    "infra:service:worker",
+                    "api::app",
+                    Confidence::Strong,
+                    "compose:via_script"
+                ),
+            ]
+        );
+        // The edge is located at the script line; the entry at the start.
+        let at: Vec<(Option<String>, Option<u32>)> = merged
+            .cross_edges
+            .iter()
+            .filter_map(Evidence::of)
+            .filter(|e| e.rule.as_deref() == Some("compose:via_script"))
+            .map(|e| (e.file, e.line))
+            .collect();
+        assert_eq!(at, [(Some("api/bin/worker.sh".to_string()), Some(2))]);
+        assert_eq!(
+            entry_cells(&merged, "api::app"),
+            [
+                r#"{"decl":"docker-compose.yml:4","source":"host:compose","host":"infra:service:worker","trigger":"container_start"}"#
+            ]
+        );
+        // The decoy the dist convention would pick is never bound.
+        assert!(entry_cells(&merged, "web::src::main").is_empty());
+
+        let mut merged = merged;
+        merged.cross_edges.clear();
+        for g in &mut merged.graphs {
+            for n in &mut g.nodes {
+                n.cells.retain(|c| c.kind != cell_type::ENTRYPOINT);
+            }
+        }
+        let report = bind_host_starts(&mut merged, &[]);
+        assert!(
+            report.marker().ends_with(
+                "hops=(pkg_script=0 dist_src=1 shell=8 passthrough=1) refused_depth=1 \
+                 scripts_unread=1"
+            ),
+            "{}",
+            report.marker()
+        );
     }
 
     /// A one-repo merge of `code` plus the given IaC graphs, resolved.
