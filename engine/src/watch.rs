@@ -107,10 +107,12 @@
 //!   [`WatchSession::open_many`] prints
 //!   `[watch] open repos=<n> repo=<l1,l2,..> files=<n> groups=<g> nodes=<N> edges=<E> took=<ms>`
 //!   (GA.9; `files` and `groups` summed over the repos).
-//! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> body_only=<k1,k2|-> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> took=<ms> repo=<label>`
+//! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> body_only=<k1,k2|-> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> restamped=<t> took=<ms> repo=<label>`
 //!   once per update that rebuilt (`k` the language groups rebuilt of the
 //!   plan's `g`, `body_only` those of them the fast path made, GA.4, `>`
-//!   counts moved nodes, `~` on edges the reconfidenced ones);
+//!   counts moved nodes, `~` on edges the reconfidenced ones, `restamped`
+//!   the edges whose EVIDENCE emitter or rule changed at the same
+//!   confidence, GA.18: rows with change `restamped`);
 //!   GA.9: `repo=` lists the repos with named paths, comma-joined.
 //! - `[watch] fast_path key=<k> files=<n> ms=<t> repo=<label>` per group
 //!   that took the body-only fast path (GA.4: `n` files re-stitched in `t`
@@ -3198,7 +3200,7 @@ fn update_marker(u: &WatchUpdate, groups: usize, took: Duration, label: &str) ->
     let c = &u.counts;
     format!(
         "[watch] update seq={} files +{} ~{} -{} groups_rebuilt={}/{groups} body_only={} \
-         full_rebuild={} nodes +{} -{} ~{} >{} edges +{} -{} ~{} took={} repo={label}",
+         full_rebuild={} nodes +{} -{} ~{} >{} edges +{} -{} ~{} restamped={} took={} repo={label}",
         u.seq,
         u.files.added.len(),
         u.files.modified.len(),
@@ -3217,6 +3219,7 @@ fn update_marker(u: &WatchUpdate, groups: usize, took: Duration, label: &str) ->
         c.edges_added,
         c.edges_removed,
         c.edges_reconfidenced,
+        c.edges_restamped,
         timing::ms(took),
     )
 }

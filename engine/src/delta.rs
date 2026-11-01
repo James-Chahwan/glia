@@ -29,6 +29,13 @@
 //! payloads only (it skips the positional JSON the queue and cron extractors
 //! keep under CODE), so `side` hands it each SCHEMA_FIELDS payload as Text.
 //!
+//! An edge on both sides at the same confidence whose EVIDENCE stamp changed
+//! (GA.18: its emitter or rule, as when a SCIP index confirms an already
+//! Strong name-only edge, CE.1e) is a `restamped` row. Its site is left out of
+//! the compare (`evidence_stamp`): an edit above a call site moves the line
+//! of every edge below it, which is no re-stamp. An edge whose confidence moved
+//! is `reconfidenced` only.
+//!
 //! A watch update (DC.7b) that rebuilt a few graphs takes the scoped variant,
 //! `located_delta_scoped` (DC.6): the same rows and counts, folding only the
 //! ids of the rebuilt graphs (every copy) and the keys of their intra edges
@@ -37,9 +44,10 @@
 //!
 //! Fired-on markers, one of each per delta:
 //! `[delta] materialized <n> files from <rev> (gitlinks_skipped=.. symlinks=.. skipped_symlinks=.. snapshots=..)`
-//! and `[delta] base=<rev> files: reused=R reparsed=P evicted=E | nodes +A -D ~M >V | edges +a -r ~c | regions_excluded=X ignored_moves=I`;
+//! and `[delta] base=<rev> files: reused=R reparsed=P evicted=E | nodes +A -D ~M >V | edges +a -r ~c | regions_excluded=X ignored_moves=I restamped=S`;
 //! per scoped delta `[delta] scoped graphs before=<b> after=<a> ids=<i> keys=<k> moves=<on|off>`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -74,13 +82,15 @@ pub struct DeltaNode {
     pub side: &'static str,
 }
 
-/// One edge row: `change` is `added`, `removed` or `reconfidenced`.
+/// One edge row: `change` is `added`, `removed`, `reconfidenced` or
+/// `restamped` (GA.18: same confidence, another EVIDENCE emitter or rule).
 /// `confidence` is the edge's confidence on its row's side (before for a
 /// removed edge); `was_confidence` is the before confidence of a
 /// reconfidenced one. The evidence (LC.3) is read from the edge on that side:
 /// `site_file` / `site_line` (1-based) and `basis`, which says whether the
 /// line is the asserting construct (`site`) or an endpoint's declaration
-/// (`from_node` / `to_node`), plus the `emitter`.
+/// (`from_node` / `to_node`), plus the `emitter` and its `rule`.
+/// `was_emitter` / `was_rule` are a restamped edge's before evidence.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct DeltaEdge {
@@ -94,6 +104,9 @@ pub struct DeltaEdge {
     pub site_line: Option<i64>,
     pub basis: Option<&'static str>,
     pub emitter: Option<String>,
+    pub rule: Option<String>,
+    pub was_emitter: Option<String>,
+    pub was_rule: Option<String>,
 }
 
 /// The file-level work of the rev build against the working tree's parse
@@ -120,6 +133,7 @@ pub struct DeltaCounts {
     pub edges_added: usize,
     pub edges_removed: usize,
     pub edges_reconfidenced: usize,
+    pub edges_restamped: usize,
     pub regions_excluded: usize,
     pub moves_ignored: usize,
 }
@@ -146,12 +160,54 @@ pub struct RevDelta {
     pub before: GenerateResult,
     pub after: GenerateResult,
     pub delta: GraphDelta,
+    /// Git's `(old path, new path)` renames between the rev and the working
+    /// tree, repo-relative: the declared tier the move detection read, kept
+    /// so a caller pairing files across the change (contract breaks, FD.25)
+    /// reuses this one read.
+    pub renames: Vec<(String, String)>,
 }
 
 /// The cell kinds whose payloads are a node's content in every graph delta:
 /// its CODE text and its declared SCHEMA_FIELDS. One list, so every caller of
 /// [`side`] and `graph_delta` compares the same thing.
 pub(crate) const CONTENT_CELLS: &[CellTypeId] = &[cell_type::CODE, cell_type::SCHEMA_FIELDS];
+
+/// The part of an EVIDENCE payload a graph delta compares (GA.18): its
+/// `emitter` and `rule`, so a re-stamp (a SCIP confirmation, an overlay or a
+/// resolver taking an edge over) is a change and a moved site is not. `None`
+/// for a payload that is no evidence object, which the delta reads as no
+/// evidence.
+fn evidence_stamp(p: &CellPayload) -> Option<Vec<u8>> {
+    #[derive(serde::Deserialize)]
+    struct Stamp<'a> {
+        #[serde(borrow)]
+        emitter: Cow<'a, str>,
+        #[serde(borrow, default)]
+        rule: Option<Cow<'a, str>>,
+    }
+    let (CellPayload::Json(s) | CellPayload::Text(s)) = p else {
+        return None;
+    };
+    let stamp: Stamp<'_> = serde_json::from_str(s).ok()?;
+    let mut out = stamp.emitter.into_owned().into_bytes();
+    if let Some(rule) = stamp.rule {
+        // A separator no emitter holds keeps `a` + rule `b` apart from `ab`.
+        out.push(0);
+        out.extend_from_slice(rule.as_bytes());
+    }
+    Some(out)
+}
+
+/// The options of every graph delta here: [`CONTENT_CELLS`] as node content,
+/// the EVIDENCE stamp as edge content, `moves` as given.
+fn delta_options(moves: &[(NodeId, NodeId)]) -> DeltaOptions<'_> {
+    DeltaOptions {
+        content_cells: CONTENT_CELLS,
+        moves,
+        edge_cell: Some(cell_type::EVIDENCE),
+        edge_cell_key: Some(evidence_stamp),
+    }
+}
 
 /// What [`side`] borrows beyond the graph: the REGION ids it drops, and a
 /// Text copy of every node that carries a JSON SCHEMA_FIELDS payload.
@@ -340,14 +396,7 @@ pub(crate) fn located_delta_counted(
         side_nodes(after, &new_parts, |_| true),
         new_edges.iter().copied(),
     );
-    let delta = graph_delta(
-        &old_side,
-        &new_side,
-        &DeltaOptions {
-            content_cells: CONTENT_CELLS,
-            moves: &pairs,
-        },
-    );
+    let delta = graph_delta(&old_side, &new_side, &delta_options(&pairs));
     let regions_excluded = old_parts.regions().union(new_parts.regions()).count();
     locate_rows(
         before,
@@ -385,11 +434,12 @@ pub(crate) fn located_delta_counted(
 ///
 /// Exact when no graph outside the scope changed between the sides: its
 /// nodes' CONTENT_CELLS and its intra edges with their confidences are equal
-/// before and after. A clean group's pre-pass graph is a clone of its last
-/// build, and no post-pass writes CODE or SCHEMA_FIELDS, adds an intra edge
-/// or reconfidences one (they write node confidence, TEST / ORIGIN / DECISION
-/// cells and edge evidence, none of which the delta compares), so this holds
-/// on a source-only (LOW) watch update. An update that can change a clean
+/// before and after, and so are their EVIDENCE stamps (emitter, rule). A
+/// clean group's pre-pass graph is a clone of its last build, and no
+/// post-pass writes CODE or SCHEMA_FIELDS, adds an intra edge, reconfidences
+/// one or re-stamps one (they write node confidence, TEST / ORIGIN / DECISION
+/// cells and fill edge evidence sites, which the delta does not compare), so
+/// this holds on a source-only (LOW) watch update. An update that can change a clean
 /// graph (an overlay edit; a SCIP snapshot, which reconfidences intra edges)
 /// takes [`located_delta_counted`].
 ///
@@ -446,14 +496,7 @@ pub(crate) fn located_delta_scoped(
         side_nodes(after, &new_parts, id_in),
         new_edges.iter().copied(),
     );
-    let delta = graph_delta(
-        &old_side,
-        &new_side,
-        &DeltaOptions {
-            content_cells: CONTENT_CELLS,
-            moves: &pairs,
-        },
-    );
+    let delta = graph_delta(&old_side, &new_side, &delta_options(&pairs));
     let regions: BTreeSet<u64> = old_parts
         .regions()
         .union(new_parts.regions())
@@ -532,7 +575,10 @@ fn locate_rows(
 
     let (old_edges, new_edges) = (first_edges(old_edges), first_edges(new_edges));
     let mut edges = Vec::with_capacity(
-        delta.added_edges.len() + delta.removed_edges.len() + delta.reconfidenced_edges.len(),
+        delta.added_edges.len()
+            + delta.removed_edges.len()
+            + delta.reconfidenced_edges.len()
+            + delta.restamped_edges.len(),
     );
     for key in &delta.added_edges {
         edges.push(edge_row(
@@ -561,6 +607,21 @@ fn locate_rows(
             Some(*was_conf),
         ));
     }
+    // A restamped key is the after-side key; its before edge sits under the
+    // before ids of any endpoint that moved.
+    let before_id = |id: NodeId| was.get(&id).copied().unwrap_or(id);
+    for key in &delta.restamped_edges {
+        let mut row = edge_row("restamped", key, &now, new_edges.get(key).copied(), None);
+        let old_key = EdgeKey {
+            from: before_id(key.from),
+            to: before_id(key.to),
+            category: key.category,
+        };
+        let prior = old_edges.get(&old_key).copied().and_then(Evidence::of);
+        row.was_rule = prior.as_ref().and_then(|e| e.rule.clone());
+        row.was_emitter = prior.map(|e| e.emitter);
+        edges.push(row);
+    }
     edges.sort_by(|x, y| {
         (x.change, x.category, &x.from_qname, &x.to_qname).cmp(&(
             y.change,
@@ -577,6 +638,7 @@ fn locate_rows(
         edges_added: delta.added_edges.len(),
         edges_removed: delta.removed_edges.len(),
         edges_reconfidenced: delta.reconfidenced_edges.len(),
+        edges_restamped: delta.restamped_edges.len(),
         regions_excluded,
         moves_ignored: delta.ignored_moves,
     };
@@ -636,7 +698,10 @@ fn edge_row(
         // Evidence lines are 0-based rows; rows here are 1-based (LD.1).
         site_line: ev.as_ref().and_then(|e| e.line).map(|l| i64::from(l) + 1),
         basis: ev.as_ref().map(|e| basis_str(e.basis)),
+        rule: ev.as_ref().and_then(|e| e.rule.clone()),
         emitter: ev.map(|e| e.emitter),
+        was_emitter: None,
+        was_rule: None,
     }
 }
 
@@ -698,7 +763,7 @@ pub fn graph_delta_vs_rev(repo_path: &str, base: &str) -> Result<RevDelta, Strin
         counts,
     } = located_delta_counted(&before.merged, &after.merged, &renames);
     eprintln!(
-        "[delta] base={} files: reused={} reparsed={} evicted={} | nodes +{} -{} ~{} >{} | edges +{} -{} ~{} | regions_excluded={} ignored_moves={}",
+        "[delta] base={} files: reused={} reparsed={} evicted={} | nodes +{} -{} ~{} >{} | edges +{} -{} ~{} | regions_excluded={} ignored_moves={} restamped={}",
         rev.given,
         files.reused,
         files.reparsed,
@@ -712,6 +777,7 @@ pub fn graph_delta_vs_rev(repo_path: &str, base: &str) -> Result<RevDelta, Strin
         counts.edges_reconfidenced,
         counts.regions_excluded,
         counts.moves_ignored,
+        counts.edges_restamped,
     );
     let answer = GraphDeltaAnswer {
         base: rev.given,
@@ -725,6 +791,7 @@ pub fn graph_delta_vs_rev(repo_path: &str, base: &str) -> Result<RevDelta, Strin
         before,
         after,
         delta,
+        renames,
     })
 }
 

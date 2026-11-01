@@ -135,6 +135,7 @@ impl TimelineBuilder {
             &DeltaOptions {
                 content_cells: &[],
                 moves,
+                ..DeltaOptions::default()
             },
         );
         self.moves_applied += d.moved_nodes.len();

@@ -370,3 +370,134 @@ fn delta_git_errors_exit_2() {
         stderr(&o)
     );
 }
+
+/// GA.18's NAMEONLY tree (CE.1e): `Admin`'s base arrives through a star
+/// import, so glia binds the INHERITS_FROM by name alone, already Strong.
+const ADMIN_PY: &str =
+    "from app.star import *\n\n\nclass Admin(Base):\n    def go(self):\n        return 2\n";
+const BASE_PY: &str = "class Base:\n    def run(self):\n        return 1\n";
+const STAR_PY: &str = "from app.base import Base\n";
+
+/// An untracked scip-python snapshot over the work tree's CURRENT sources:
+/// `Admin` (row 3) implements `Base` and references it on its own row. The
+/// rev's admin.py differs from the edited one, so the rev build reads that
+/// document as stale and only the working tree is confirmed.
+fn nameonly_snapshot(s: &Scratch) {
+    use glia_code_domain::snapshots::{
+        ScipDefRow, ScipDocumentRecord, ScipMeta, ScipRefRow, ScipSymbolRecord, source_hash,
+        write_scip,
+    };
+    let sym = |d: &str| format!("scip-python python app 0.1 {d}");
+    let symbols = vec![
+        ScipSymbolRecord {
+            id: 0,
+            symbol: sym("`app.admin`/Admin#"),
+            implements: vec![1],
+        },
+        ScipSymbolRecord {
+            id: 1,
+            symbol: sym("`app.base`/Base#"),
+            implements: Vec::new(),
+        },
+    ];
+    let def = |s: u32, line: u32, name: &str| ScipDefRow {
+        s,
+        line,
+        name: name.to_string(),
+    };
+    let reference = |s: u32, line: u32, import: bool| ScipRefRow {
+        s,
+        line,
+        call: false,
+        write: false,
+        import,
+    };
+    let doc = |path: &str, defs, refs| ScipDocumentRecord {
+        path: path.to_string(),
+        language: "python".to_string(),
+        source_hash: source_hash(&std::fs::read(s.top.join(path)).expect("source")),
+        defs,
+        refs,
+    };
+    let documents = vec![
+        doc(
+            "app/admin.py",
+            vec![def(0, 3, "Admin")],
+            vec![reference(1, 3, false)],
+        ),
+        doc("app/base.py", vec![def(1, 0, "Base")], Vec::new()),
+        doc("app/star.py", Vec::new(), vec![reference(1, 0, true)]),
+    ];
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
+    write_scip(&s.top, meta, &documents, &symbols).expect("write snapshot");
+}
+
+/// GA.18: a SCIP confirmation of an already-Strong edge is one `restamped`
+/// row naming both evidences, in JSON and in the table, and is counted.
+#[test]
+fn delta_reports_restamped_evidence() {
+    let s = Scratch::git_repo("restamped");
+    s.write("app/admin.py", ADMIN_PY);
+    s.write("app/base.py", BASE_PY);
+    s.write("app/star.py", STAR_PY);
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-q", "-m", "nameonly"]);
+    s.write("app/admin.py", &format!("{ADMIN_PY}# reviewed\n"));
+    nameonly_snapshot(&s);
+
+    let o = s.glia(&["delta", s.path(), "--json", "--edges-only"]);
+    assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
+    let v = json(&o);
+    let edges = v["edges"].as_array().expect("edges");
+    assert_eq!(edges.len(), 1, "{v:#}");
+    let e = &edges[0];
+    assert_eq!(
+        (&e["change"], &e["category"], &e["confidence"]),
+        (
+            &Value::from("restamped"),
+            &Value::from("INHERITS_FROM"),
+            &Value::from("strong")
+        ),
+        "{v:#}"
+    );
+    assert_eq!(e["was_confidence"], Value::Null);
+    assert_eq!(
+        (&e["was_emitter"], &e["was_rule"]),
+        (&Value::from("graph:refs"), &Value::from("global_unique"))
+    );
+    assert_eq!(
+        (&e["emitter"], &e["rule"]),
+        (
+            &Value::from("scip:scip-python"),
+            &Value::from("confirms:graph:refs/global_unique")
+        )
+    );
+    assert_eq!(v["counts"]["edges_restamped"], 1, "{v:#}");
+    assert_eq!(v["counts"]["edges_reconfidenced"], 0, "{v:#}");
+    let err = stderr(&o);
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[delta] base=HEAD") && l.ends_with(" restamped=1")),
+        "the engine marker counts the re-stamp:\n{err}"
+    );
+
+    let o = s.glia(&["delta", s.path()]);
+    assert_eq!(o.status.code(), Some(0), "stderr:\n{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("~0 reconfidenced, 1 restamped"), "{out}");
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| restamped (evidence "))
+        .unwrap_or_else(|| panic!("a restamped row:\n{out}"));
+    assert!(
+        row.starts_with(
+            "| restamped (evidence graph:refs/global_unique → scip:scip-python/confirms:graph:refs/global_unique) | INHERITS_FROM | `app::admin::Admin` | `app::base::Base` | app/admin.py:4 |"
+        ),
+        "{row}"
+    );
+}

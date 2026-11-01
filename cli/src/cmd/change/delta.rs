@@ -4,7 +4,11 @@
 //!
 //! Table mode prints the counts of the whole delta, then one table of node
 //! rows (`--edges-only` leaves it out) and one of edge rows (`--category`
-//! keeps the named categories only). `--json` prints the engine's
+//! keeps the named categories only). An edge row's change is `added`,
+//! `removed`, `reconfidenced (<was> → <now>)` or, for an edge whose EVIDENCE
+//! emitter or rule changed at the same confidence (GA.18, a SCIP confirmation
+//! of an already Strong edge), `restamped (evidence <was> → <now>)`, each
+//! side `emitter/rule`. `--json` prints the engine's
 //! `GraphDeltaAnswer` (`{base, files, counts, nodes, edges}`) with the same
 //! two filters applied to its rows; `counts` is always the whole delta's.
 //! Every `file:line` is the record's own 1-based line (LD.1), printed as is.
@@ -111,8 +115,26 @@ fn node_location(n: &DeltaNode, base: &str) -> String {
     }
 }
 
-/// An edge row's change cell: a reconfidenced edge shows `was → now`.
+/// `emitter/rule`, `emitter`, or `—` (no evidence).
+fn stamp(emitter: Option<&str>, rule: Option<&str>) -> String {
+    match (emitter, rule) {
+        (Some(e), Some(r)) => format!("{e}/{r}"),
+        (Some(e), None) => e.to_string(),
+        _ => "—".to_string(),
+    }
+}
+
+/// An edge row's change cell: a reconfidenced edge shows `was → now`, a
+/// restamped one (GA.18) `evidence <was emitter/rule> → <emitter/rule>`.
 fn edge_change(e: &DeltaEdge) -> String {
+    if e.change == "restamped" {
+        return format!(
+            "{} (evidence {} → {})",
+            e.change,
+            stamp(e.was_emitter.as_deref(), e.was_rule.as_deref()),
+            stamp(e.emitter.as_deref(), e.rule.as_deref())
+        );
+    }
     match e.was_confidence {
         Some(was) => format!("{} ({was} → {})", e.change, e.confidence),
         None => e.change.to_string(),
@@ -146,7 +168,7 @@ fn print_table(repo: &str, a: &GraphDeltaAnswer, empty: bool) {
     println!("# glia delta `{repo}` vs {}", a.base);
     println!();
     println!(
-        "- nodes: +{} added, -{} removed, ~{} modified, >{} moved | edges: +{} added, -{} removed, ~{} reconfidenced | files: {} reused, {} reparsed, {} evicted",
+        "- nodes: +{} added, -{} removed, ~{} modified, >{} moved | edges: +{} added, -{} removed, ~{} reconfidenced, {} restamped | files: {} reused, {} reparsed, {} evicted",
         c.nodes_added,
         c.nodes_removed,
         c.nodes_modified,
@@ -154,6 +176,7 @@ fn print_table(repo: &str, a: &GraphDeltaAnswer, empty: bool) {
         c.edges_added,
         c.edges_removed,
         c.edges_reconfidenced,
+        c.edges_restamped,
         a.files.reused,
         a.files.reparsed,
         a.files.evicted,

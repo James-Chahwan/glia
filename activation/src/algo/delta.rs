@@ -1,6 +1,6 @@
 //! Graph delta (LE.1a): what a change did to the GRAPH between two snapshots:
 //! nodes added / removed / modified / moved, and edges added / removed /
-//! reconfidenced.
+//! reconfidenced / restamped.
 //!
 //! Domain-free like the rest of [`crate::algo`]: a side is a caller-built list
 //! of core [`Node`]s and [`Edge`]s ([`DeltaSide`]), and the cell kinds that
@@ -18,8 +18,12 @@
 //!   would mark every such node below an edited line as modified.
 //! - Edges repeat (a node folded from two graphs is walked twice), so they are
 //!   compared as a set keyed by `(from, to, category)` that keeps the strongest
-//!   confidence seen. Edge cells are not compared: an edit above a call site
-//!   shifts the evidence line of every edge below it.
+//!   confidence seen. Edge cells are not compared wholesale: an edit above a
+//!   call site shifts the evidence line of every edge below it. A caller may
+//!   name ONE edge cell kind ([`DeltaOptions::edge_cell`]) and the part of its
+//!   payload that counts ([`DeltaOptions::edge_cell_key`], GA.18): a key on
+//!   both sides at the same confidence whose set of such parts differs is
+//!   restamped. A confidence change is reconfidenced only, never both.
 //! - Before-side ids are remapped through the move map first, so a moved
 //!   file's nodes and edges are reported as moved, not as removed + added.
 //!
@@ -84,6 +88,20 @@ impl PartialOrd for EdgeKey {
     }
 }
 
+/// The part of an edge cell's payload that [`graph_delta`] compares
+/// ([`DeltaOptions::edge_cell_key`]): `None` when the payload says nothing
+/// comparable, which the delta reads as no cell.
+pub type EdgeCellKey = fn(&CellPayload) -> Option<Vec<u8>>;
+
+/// The whole payload as bytes: a Text or Json payload's UTF-8, a Bytes
+/// payload's bytes. The [`DeltaOptions::edge_cell_key`] default.
+pub fn whole_payload(p: &CellPayload) -> Option<Vec<u8>> {
+    Some(match p {
+        CellPayload::Text(s) | CellPayload::Json(s) => s.as_bytes().to_vec(),
+        CellPayload::Bytes(b) => b.clone(),
+    })
+}
+
 /// What counts as a change.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeltaOptions<'a> {
@@ -98,6 +116,17 @@ pub struct DeltaOptions<'a> {
     /// away (a swap or a chain). Anything else would fold two before ids into
     /// one. Pairs that do not apply are counted in [`GraphDelta::ignored_moves`].
     pub moves: &'a [(NodeId, NodeId)],
+    /// The edge cell kind whose payload is compared (GA.18). Each copy of an
+    /// edge contributes its FIRST cell of this kind, read through
+    /// [`Self::edge_cell_key`]; a key's value is the set of those parts over
+    /// its copies (so neither copy order nor count marks it). A key on both
+    /// sides with the same strongest confidence and a different set goes to
+    /// [`GraphDelta::restamped_edges`]. `None` compares no edge cell.
+    pub edge_cell: Option<CellTypeId>,
+    /// The part of an [`Self::edge_cell`] payload that counts, so a domain
+    /// can leave a positional part (a site line every edit above it shifts)
+    /// out. `None` is [`whole_payload`].
+    pub edge_cell_key: Option<EdgeCellKey>,
 }
 
 /// The graph-level difference `after - before`. Every list is sorted by raw
@@ -119,6 +148,10 @@ pub struct GraphDelta {
     /// `(key, before, after)`: an edge on both sides whose strongest
     /// confidence changed.
     pub reconfidenced_edges: Vec<(EdgeKey, Confidence, Confidence)>,
+    /// An edge on both sides at the same strongest confidence whose
+    /// [`DeltaOptions::edge_cell`] parts differ (GA.18). Empty when no cell
+    /// kind is named. After-side keys.
+    pub restamped_edges: Vec<EdgeKey>,
     /// `DeltaOptions::moves` pairs that did not apply.
     pub ignored_moves: usize,
 }
@@ -126,8 +159,22 @@ pub struct GraphDelta {
 /// Node id -> its content: sorted, deduplicated `(cell kind, text)`.
 type Content<'a> = BTreeMap<u64, Vec<(u32, &'a str)>>;
 
-/// Remapped key -> (strongest confidence, the key as the edge was given).
-type EdgeSet = BTreeMap<EdgeKey, (Confidence, EdgeKey)>;
+/// Remapped key -> its fold: the strongest confidence, the key as the first
+/// copy gave it, and the set of the copies' compared edge-cell parts.
+type EdgeSet = BTreeMap<EdgeKey, Folded>;
+
+struct Folded {
+    confidence: Confidence,
+    given: EdgeKey,
+    cell: BTreeSet<Vec<u8>>,
+}
+
+/// Which edge cell [`fold_edges`] reads, and the part of it that counts.
+#[derive(Clone, Copy)]
+struct CellRead {
+    kind: CellTypeId,
+    key: EdgeCellKey,
+}
 
 /// The difference between two graph snapshots (see the module docs).
 pub fn graph_delta(
@@ -166,12 +213,20 @@ pub fn graph_delta(
         .map(|(&b, &a)| (NodeId(b), NodeId(a)))
         .collect();
 
-    let old_edges = fold_edges(&before.edges, remap);
-    let new_edges = fold_edges(&after.edges, |id| id);
-    for (key, &(then, given)) in &old_edges {
+    let cell = opts.edge_cell.map(|kind| CellRead {
+        kind,
+        key: opts.edge_cell_key.unwrap_or(whole_payload),
+    });
+    let old_edges = fold_edges(&before.edges, remap, cell);
+    let new_edges = fold_edges(&after.edges, |id| id, cell);
+    for (key, then) in &old_edges {
         match new_edges.get(key) {
-            None => d.removed_edges.push(given),
-            Some(&(now, _)) if now != then => d.reconfidenced_edges.push((*key, then, now)),
+            None => d.removed_edges.push(then.given),
+            Some(now) if now.confidence != then.confidence => {
+                d.reconfidenced_edges
+                    .push((*key, then.confidence, now.confidence))
+            }
+            Some(now) if now.cell != then.cell => d.restamped_edges.push(*key),
             Some(_) => {}
         }
     }
@@ -185,7 +240,7 @@ pub fn graph_delta(
 
     if super::algo_debug() {
         eprintln!(
-            "[algo] delta nodes +{} -{} ~{} >{} | edges +{} -{} ~{} | ignored_moves={}",
+            "[algo] delta nodes +{} -{} ~{} >{} | edges +{} -{} ~{} restamped={} | ignored_moves={}",
             d.added_nodes.len(),
             d.removed_nodes.len(),
             d.modified_nodes.len(),
@@ -193,6 +248,7 @@ pub fn graph_delta(
             d.added_edges.len(),
             d.removed_edges.len(),
             d.reconfidenced_edges.len(),
+            d.restamped_edges.len(),
             d.ignored_moves,
         );
     }
@@ -278,8 +334,9 @@ fn accept_moves(
 }
 
 /// Fold edges under `remap`ped endpoints into a set, keeping the strongest
-/// confidence of a repeated key and the key as the first copy gave it.
-fn fold_edges(edges: &[&Edge], remap: impl Fn(u64) -> u64) -> EdgeSet {
+/// confidence of a repeated key, the key as the first copy gave it and, when
+/// `cell` names a kind, every copy's compared part of its first such cell.
+fn fold_edges(edges: &[&Edge], remap: impl Fn(u64) -> u64, cell: Option<CellRead>) -> EdgeSet {
     let mut out = EdgeSet::new();
     for &e in edges {
         let key = EdgeKey {
@@ -287,9 +344,22 @@ fn fold_edges(edges: &[&Edge], remap: impl Fn(u64) -> u64) -> EdgeSet {
             to: NodeId(remap(e.to.0)),
             category: e.category,
         };
-        let slot = out.entry(key).or_insert((e.confidence, EdgeKey::from(e)));
-        if strength(e.confidence) > strength(slot.0) {
-            slot.0 = e.confidence;
+        let slot = out.entry(key).or_insert_with(|| Folded {
+            confidence: e.confidence,
+            given: EdgeKey::from(e),
+            cell: BTreeSet::new(),
+        });
+        if strength(e.confidence) > strength(slot.confidence) {
+            slot.confidence = e.confidence;
+        }
+        if let Some(read) = cell
+            && let Some(part) = e
+                .cells
+                .iter()
+                .find(|c| c.kind == read.kind)
+                .and_then(|c| (read.key)(&c.payload))
+        {
+            slot.cell.insert(part);
         }
     }
     out
@@ -368,6 +438,7 @@ mod tests {
         let opts = DeltaOptions {
             content_cells,
             moves: &moves,
+            ..DeltaOptions::default()
         };
         graph_delta(&DeltaSide::new(b.0, b.1), &DeltaSide::new(a.0, a.1), &opts)
     }
@@ -482,6 +553,130 @@ mod tests {
         assert_eq!(
             delta((&nodes, &before), (&nodes, &after), CONTENT, &[]),
             GraphDelta::default()
+        );
+    }
+
+    const EV: CellTypeId = CellTypeId(9);
+
+    /// `edge(from, to, c)` carrying one EV cell `"<rule>@<line>"`.
+    fn stamped(from: u64, to: u64, c: Confidence, rule: &str, line: u32) -> Edge {
+        edge(from, to, c).with_cell(Cell {
+            kind: EV,
+            payload: text(&format!("{rule}@{line}")),
+        })
+    }
+
+    /// The rule part of a `"<rule>@<line>"` payload: the site is left out.
+    fn rule_part(p: &CellPayload) -> Option<Vec<u8>> {
+        match p {
+            CellPayload::Text(s) => s.split('@').next().map(|r| r.as_bytes().to_vec()),
+            _ => None,
+        }
+    }
+
+    fn cell_delta(before: &[Edge], after: &[Edge], key: Option<EdgeCellKey>) -> GraphDelta {
+        let nodes = [bare(1), bare(2), bare(3)];
+        let opts = DeltaOptions {
+            content_cells: CONTENT,
+            edge_cell: Some(EV),
+            edge_cell_key: key,
+            ..DeltaOptions::default()
+        };
+        graph_delta(
+            &DeltaSide::new(&nodes, before),
+            &DeltaSide::new(&nodes, after),
+            &opts,
+        )
+    }
+
+    #[test]
+    fn edge_cell_change_at_same_confidence_is_restamped() {
+        let before = [
+            stamped(1, 2, Confidence::Strong, "name", 3),
+            stamped(2, 3, Confidence::Weak, "name", 4),
+        ];
+        let after = [
+            stamped(1, 2, Confidence::Strong, "index", 3),
+            stamped(2, 3, Confidence::Strong, "index", 4),
+        ];
+        let d = cell_delta(&before, &after, None);
+        assert_eq!(d.restamped_edges, vec![key(1, 2)]);
+        // A confidence change is reconfidenced only, never both.
+        assert_eq!(
+            d.reconfidenced_edges,
+            vec![(key(2, 3), Confidence::Weak, Confidence::Strong)]
+        );
+        assert!(d.added_edges.is_empty() && d.removed_edges.is_empty());
+        // No cell kind named: today's delta, the re-stamp unseen.
+        let nodes = [bare(1), bare(2), bare(3)];
+        let plain = delta((&nodes, &before), (&nodes, &after), CONTENT, &[]);
+        assert!(plain.restamped_edges.is_empty());
+        assert_eq!(plain.reconfidenced_edges, d.reconfidenced_edges);
+    }
+
+    #[test]
+    fn edge_cell_key_leaves_the_site_out() {
+        let before = [stamped(1, 2, Confidence::Strong, "name", 3)];
+        let shifted = [stamped(1, 2, Confidence::Strong, "name", 9)];
+        // The whole payload differs; the rule part does not.
+        assert_eq!(
+            cell_delta(&before, &shifted, None).restamped_edges,
+            vec![key(1, 2)]
+        );
+        assert_eq!(
+            cell_delta(&before, &shifted, Some(rule_part)),
+            GraphDelta::default()
+        );
+        let restamped = [stamped(1, 2, Confidence::Strong, "index", 9)];
+        assert_eq!(
+            cell_delta(&before, &restamped, Some(rule_part)).restamped_edges,
+            vec![key(1, 2)]
+        );
+    }
+
+    #[test]
+    fn edge_cell_copies_fold_as_a_set() {
+        let a = stamped(1, 2, Confidence::Strong, "name", 3);
+        let b = stamped(1, 2, Confidence::Strong, "index", 3);
+        // Copy order and count do not matter.
+        let before = [a.clone(), b.clone()];
+        let after = [b.clone(), a.clone(), b.clone()];
+        assert_eq!(cell_delta(&before, &after, None), GraphDelta::default());
+        let only_b = [b.clone()];
+        // A copy losing its stamp changes the set.
+        assert_eq!(
+            cell_delta(&before, &only_b, None).restamped_edges,
+            vec![key(1, 2)]
+        );
+        // An edge that gains its first cell is restamped; a copy without the
+        // cell adds nothing to the set.
+        let bare_edge = edge(1, 2, Confidence::Strong);
+        let only_bare = [bare_edge.clone()];
+        assert_eq!(
+            cell_delta(&only_bare, &only_b, None).restamped_edges,
+            vec![key(1, 2)]
+        );
+        assert_eq!(
+            cell_delta(&only_b, &[bare_edge, b], None),
+            GraphDelta::default()
+        );
+    }
+
+    #[test]
+    fn restamped_edges_are_sorted_after_side_keys() {
+        let before = [
+            stamped(3, 1, Confidence::Medium, "name", 0),
+            stamped(1, 3, Confidence::Medium, "name", 0),
+            stamped(2, 1, Confidence::Medium, "name", 0),
+        ];
+        let after = [
+            stamped(2, 1, Confidence::Medium, "index", 0),
+            stamped(3, 1, Confidence::Medium, "index", 0),
+            stamped(1, 3, Confidence::Medium, "index", 0),
+        ];
+        assert_eq!(
+            cell_delta(&before, &after, None).restamped_edges,
+            vec![key(1, 3), key(2, 1), key(3, 1)]
         );
     }
 

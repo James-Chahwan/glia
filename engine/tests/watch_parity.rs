@@ -658,12 +658,14 @@ fn assert_delta(u: &WatchUpdate, prev: &GenerateResult, clean: &GenerateResult, 
             c.edges_added,
             c.edges_removed,
             c.edges_reconfidenced,
+            c.edges_restamped,
             c.moves_ignored
         ],
         [
             d.added_edges.len(),
             d.removed_edges.len(),
             d.reconfidenced_edges.len(),
+            d.restamped_edges.len(),
             d.ignored_moves
         ],
         "{at}: edge counts and ignored moves"

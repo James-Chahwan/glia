@@ -42,8 +42,10 @@ fn graph_delta_answer(repo_path: &str, base: &str) -> Result<GraphDeltaAnswer, S
 /// side}` (`change` is `added` / `removed` / `modified` / `moved`, `side`
 /// `before` for a removed node, located in the rev); `edges` the rows
 /// `{change, from_qname, to_qname, category, confidence, was_confidence,
-/// site_file, site_line, basis, emitter}` (`added` / `removed` /
-/// `reconfidenced`). Lines are 1-based; ids are exact ints.
+/// site_file, site_line, basis, emitter, rule, was_emitter, was_rule}`
+/// (`added` / `removed` / `reconfidenced` / `restamped`: GA.18, the same
+/// confidence with another EVIDENCE emitter or rule, `was_emitter` /
+/// `was_rule` its before evidence). Lines are 1-based; ids are exact ints.
 ///
 /// Saves the working tree's parse-cache sidecar
 /// (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as

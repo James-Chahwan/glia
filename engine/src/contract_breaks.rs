@@ -382,15 +382,13 @@ pub fn contract_breaks_vs_rev(
 ) -> Result<ContractBreaks, String> {
     check_mode(args)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
-    let repo = Path::new(repo_path);
-    let renames = git_rev::declared_renames(repo, &git_rev::resolve_rev(repo, base)?);
     let names = name_breaks(base, repo_path, &rev.after, &name_args(args))?.rows;
     Ok(breaks_of(
         &rev.answer.base,
         &rev.before.merged,
         &rev.after,
         &rev.delta,
-        Some(&renames),
+        Some(&rev.renames),
         names,
         args,
     ))
@@ -584,7 +582,9 @@ fn distinct_clients(repo_path: &str, clients: &[String]) -> Result<Vec<String>, 
 }
 
 /// The contract breaks of an already computed rev delta (module docs).
-/// Nothing is built; `base` is `rev.answer.base`. The name rows read the
+/// Nothing is built; `base` is `rev.answer.base`, and spec files pair across
+/// the delta's own git renames (`rev.renames`, FD.25), as
+/// [`contract_breaks_vs_rev`] pairs them. The name rows read the
 /// delta's one repo root as the working tree (module docs NAMES IN THE
 /// ANSWER).
 pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBreaks {
@@ -594,7 +594,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
         &rev.before.merged,
         &rev.after,
         &rev.delta,
-        None,
+        Some(&rev.renames),
         names,
         args,
     )

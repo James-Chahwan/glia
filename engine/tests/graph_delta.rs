@@ -503,3 +503,152 @@ paths:
         rows(&d)
     );
 }
+
+/// GA.18's NAMEONLY tree (CE.1e's probe): `Admin`'s base `Base` arrives
+/// through a star import, so glia binds the INHERITS_FROM by name alone
+/// (`graph:refs` / `global_unique`), Strong but not a located fact.
+const NAMEONLY: &[(&str, &str)] = &[
+    (
+        "app/admin.py",
+        "from app.star import *\n\n\nclass Admin(Base):\n    def go(self):\n        return 2\n",
+    ),
+    (
+        "app/base.py",
+        "class Base:\n    def run(self):\n        return 1\n",
+    ),
+    ("app/star.py", "from app.base import Base\n"),
+];
+
+/// A scip-python snapshot over the work tree's CURRENT sources: `Admin`
+/// (row 3 of app/admin.py) implements `Base`, and its base-class expression
+/// references `Base` on the same row. A source edited after the write is a
+/// stale document the build skips.
+fn nameonly_snapshot(repo: &GitRepo) {
+    use glia_code_domain::snapshots::{
+        ScipDefRow, ScipDocumentRecord, ScipMeta, ScipRefRow, ScipSymbolRecord, source_hash,
+        write_scip,
+    };
+    let sym = |d: &str| format!("scip-python python app 0.1 {d}");
+    let symbols = vec![
+        ScipSymbolRecord {
+            id: 0,
+            symbol: sym("`app.admin`/Admin#"),
+            implements: vec![1],
+        },
+        ScipSymbolRecord {
+            id: 1,
+            symbol: sym("`app.base`/Base#"),
+            implements: Vec::new(),
+        },
+    ];
+    let def = |s: u32, line: u32, name: &str| ScipDefRow {
+        s,
+        line,
+        name: name.to_string(),
+    };
+    let reference = |s: u32, line: u32, import: bool| ScipRefRow {
+        s,
+        line,
+        call: false,
+        write: false,
+        import,
+    };
+    let doc = |path: &str, defs, refs| ScipDocumentRecord {
+        path: path.to_string(),
+        language: "python".to_string(),
+        source_hash: source_hash(&std::fs::read(repo.root().join(path)).expect("source")),
+        defs,
+        refs,
+    };
+    let documents = vec![
+        doc(
+            "app/admin.py",
+            vec![def(0, 3, "Admin")],
+            vec![reference(1, 3, false)],
+        ),
+        doc("app/base.py", vec![def(1, 0, "Base")], Vec::new()),
+        doc("app/star.py", Vec::new(), vec![reference(1, 0, true)]),
+    ];
+    let meta = ScipMeta::new(
+        "scip-python".to_string(),
+        "0.6.0".to_string(),
+        String::new(),
+        0,
+    );
+    write_scip(repo.root(), meta, &documents, &symbols).expect("write snapshot");
+}
+
+fn nameonly() -> GitRepo {
+    let repo = GitRepo::init();
+    for (p, text) in NAMEONLY {
+        repo.write(p, text);
+    }
+    repo.commit("nameonly");
+    repo
+}
+
+/// GA.18: a SCIP CONFIRM of an already-Strong edge changes its EVIDENCE and
+/// not its confidence. The snapshot is untracked, so the rev build reads it
+/// too, but it was written over the EDITED admin.py: the rev's admin.py is a
+/// stale document there, and only the working tree is confirmed. The edge is
+/// one `restamped` row naming both evidences, never `reconfidenced`.
+#[test]
+fn scip_confirm_of_strong_edge_is_restamped() {
+    let repo = nameonly();
+    let admin = NAMEONLY[0].1;
+    repo.write("app/admin.py", &format!("{admin}# reviewed\n"));
+    nameonly_snapshot(&repo);
+    let d = delta(&repo, "HEAD");
+    let row = edge(&d, "restamped", "INHERITS_FROM", "::Admin", "::Base")
+        .unwrap_or_else(|| panic!("Admin -> Base is restamped:\n{}", rows(&d)));
+    assert_eq!(row.confidence, "strong", "already Strong at the rev");
+    assert_eq!(row.was_confidence, None);
+    assert_eq!(
+        (row.was_emitter.as_deref(), row.was_rule.as_deref()),
+        (Some("graph:refs"), Some("global_unique"))
+    );
+    assert_eq!(
+        (row.emitter.as_deref(), row.rule.as_deref()),
+        (
+            Some("scip:scip-python"),
+            Some("confirms:graph:refs/global_unique")
+        )
+    );
+    assert_eq!(
+        (row.site_file.as_deref(), row.site_line),
+        (Some("app/admin.py"), Some(4))
+    );
+    assert!(
+        !d.answer.edges.iter().any(|e| e.change == "reconfidenced"),
+        "{}",
+        rows(&d)
+    );
+    assert_eq!(d.answer.counts.edges_restamped, 1, "{}", rows(&d));
+    assert_eq!(d.answer.counts.edges_reconfidenced, 0, "{}", rows(&d));
+    assert_eq!(d.delta.restamped_edges.len(), 1);
+    assert_eq!(
+        d.answer
+            .edges
+            .iter()
+            .filter(|e| e.change == "restamped")
+            .count(),
+        1,
+        "{}",
+        rows(&d)
+    );
+}
+
+/// GA.18's control: the same snapshot over an unchanged tree confirms the
+/// edge on both sides, so nothing is restamped and the delta is empty.
+#[test]
+fn scip_confirm_on_both_sides_is_no_delta() {
+    let repo = nameonly();
+    nameonly_snapshot(&repo);
+    let d = delta(&repo, "HEAD");
+    assert!(
+        d.answer.nodes.is_empty() && d.answer.edges.is_empty(),
+        "{}",
+        rows(&d)
+    );
+    assert_eq!(d.answer.counts.edges_restamped, 0);
+}
