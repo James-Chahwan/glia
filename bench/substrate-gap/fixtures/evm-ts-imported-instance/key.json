@@ -49,7 +49,7 @@
       "exact": true
     },
     {
-      "from": "evm:Escrow.Released",
+      "from": "packages::contracts::contracts::Escrow::Escrow::Released",
       "to": "evm_event:Escrow.Released",
       "category": "EVENT_FLOWS",
       "exact": true
