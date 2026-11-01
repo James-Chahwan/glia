@@ -3783,7 +3783,8 @@
    "files_touched": [
     "code-domain/src/hosts.rs",
     "parsers/code/typescript/src/lib.rs",
-    "bench/substrate-gap/patterns/typescript"
+    "bench/substrate-gap/patterns/typescript",
+    "engine/src/extract.rs"
    ],
    "implementation": "obsidian row (gate: import from 'obsidian'; owner base ExternalBase {library: obsidian, name: Plugin} as DT.5l's owner_bases): `this.addCommand({..})` Table name_key `id`, handler keys callback / editorCallback / checkCallback / editorCheckCallback -> CLI_COMMAND `host_cmd:obsidian:<id>`; `this.registerEvent(<x>.on('<e>', h))` -> EVENT_HANDLER `host_event:obsidian:<x tail>.<e>` (`vault.create`), `this.registerDomEvent(<el>, '<e>', h)`; callbacks onload / onunload on the Plugin subclass, display on a PluginSettingTab subclass, onOpen / onClose on Modal / ItemView subclasses -> ENTRYPOINT host:obsidian. webpack row (gate: a METHOD `apply` whose first parameter's `.hooks.` is tapped in its body, or a package.json with webpack in dependencies / peerDependencies): `<p>.hooks.<E>.tap|tapAsync|tapPromise(name, h)` and `compilation.hooks.<E>.tap*` CalleeSegment -> EVENT_HANDLER `host_event:webpack:<E>` HANDLED_BY h (anonymous: the enclosing apply); the apply METHOD -> ENTRYPOINT host:webpack.",
    "fixtures": "second cases inside the TS pattern dirs NEW.plug.7 creates (each dir stays <= 2 source files: a file per host, so this packet adds one file to host_command and host_event and one to host_callback, or a note when the budget is full)",
@@ -3797,7 +3798,8 @@
    "risks": "tapable is used outside webpack (rspack, html-webpack-plugin's own hooks); the event qname names `webpack` for all of them: acceptable, a tapable host.",
    "files_note": [
     "code-domain/src/hosts.rs (obsidian, webpack rows)",
-    "bench/substrate-gap/patterns/typescript/{host_command,host_event,host_callback}/ (second cases)"
+    "bench/substrate-gap/patterns/typescript/{host_command,host_event,host_callback}/ (second cases)",
+    "engine/src/extract.rs: detect_language maps mjs / cjs / mts / cts (GH.11's follow-up, folded here)"
    ],
    "id": "GH.10",
    "batch": "GH"
