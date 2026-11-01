@@ -2032,6 +2032,38 @@ pub enum NavFact {
         hidden: Vec<String>,
         line: u32,
     },
+    /// GD.40: a route module mounts another one's routes BY REFERENCE,
+    /// recorded by the Python parser on the file MODULE of a Django urlconf
+    /// (a module that assigns `urlpatterns`) and read by the graph crate's
+    /// route-mount pass (`graph/src/build/route_mounts.rs`); build-time only.
+    /// `path("api/", include("plane.app.urls"))` on 0-based row `line` is
+    /// `{ target: Spec("plane.app.urls"), prefix: "api/", via: "include" }`;
+    /// `*issue_urls` in the `urlpatterns` list, `issue_urls` imported as
+    /// `from .issue import urlpatterns as issue_urls`, is
+    /// `{ target: Import { local: "issue_urls" }, prefix: "", via: "spread" }`.
+    /// `prefix` is the include literal as written (a `re_path` regex's `^` /
+    /// `$` anchors stripped). Every route of the target module takes each of
+    /// the includer's own prefixes joined with `prefix`.
+    IncludeMount {
+        line: u32,
+        target: IncludeTarget,
+        prefix: String,
+        via: String,
+    },
+}
+
+/// GD.40: what a [`NavFact::IncludeMount`] names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum IncludeTarget {
+    /// A dotted module path as written (`plane.app.urls`), matched to a file
+    /// MODULE of the graph by qname tail (`pkg` reads `pkg::__init__` too).
+    Spec(String),
+    /// A name the file imports (`issue_urls`, bound by an import statement
+    /// of the same file to a module or to a module's `urlpatterns`).
+    Import { local: String },
+    /// An include of anything else (DRF `include(router.urls)`, a local
+    /// variable): the expression text. Counted `dynamic`; mounts nothing.
+    Dynamic(String),
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,
@@ -2055,6 +2087,15 @@ pub enum Mount {
     Field {
         owner: String,
         field: String,
+        suffix: String,
+    },
+    /// GD.40: router value `var` of the file MODULE `module` (its qname), then
+    /// `suffix`: a route registered on a module-level router another module
+    /// mounts by reference (Django: `var` = `urlpatterns`, the module a
+    /// [`NavFact::IncludeMount`] names).
+    Module {
+        module: String,
+        var: String,
         suffix: String,
     },
 }
@@ -2578,6 +2619,7 @@ pub mod endpoint {
     /// Param { Register, 0, "" },    "/u"  -> "GET <mount:param:api::routes::Register#0>/u"
     /// Param { Register, 0, "/me" }, "p"   -> "GET <mount:param:api::routes::Register#0>/me/p"
     /// Field { api::Server, admin, "" }, "/x" -> "GET <mount:field:api::Server.admin>/x"
+    /// Module { app::urls, urlpatterns, "" }, "x/" -> "ANY <mount:module:app::urls#urlpatterns>/x/"
     /// Const("/api/v2"),             "users" -> "GET /api/v2/users"
     /// Const("${const:api.P}/x"),    "/s"  -> "GET <mount:const:${const:api.P}/x>/s"
     /// ```
@@ -2599,6 +2641,11 @@ pub mod endpoint {
                 field,
                 suffix,
             } => (format!("field:{owner}.{field}"), suffix),
+            Mount::Module {
+                module,
+                var,
+                suffix,
+            } => (format!("module:{module}#{var}"), suffix),
         };
         let path = canonical_http_path(&join_path(suffix, local_path)).into_owned();
         format!("{method} {MOUNT_OPEN}{token}>{path}")
@@ -2636,6 +2683,17 @@ pub mod endpoint {
             Mount::Param {
                 fn_qname: fn_qname.to_string(),
                 index: index.parse().ok()?,
+                suffix: String::new(),
+            }
+        } else if let Some(m) = token.strip_prefix("module:") {
+            // GD.40: a module qname holds no `#`; the var is an identifier.
+            let (module, var) = m.rsplit_once('#')?;
+            if module.is_empty() || var.is_empty() {
+                return None;
+            }
+            Mount::Module {
+                module: module.to_string(),
+                var: var.to_string(),
                 suffix: String::new(),
             }
         } else {
@@ -5073,6 +5131,56 @@ mod tests {
             mount_route_qname("GET", &Mount::Const("/api/v1".into()), "/items"),
             "GET /api/v1/items"
         );
+    }
+
+    /// GD.40: a Django route on a module slot round-trips: the module qname
+    /// (which may hold `__init__`), the var, and the local path canonical
+    /// (an empty Django path stays empty; `<uuid:pk>` survives, the token
+    /// ending at its own `>`).
+    #[test]
+    fn module_mount_route_qname_round_trips() {
+        use endpoint::{mount_route_qname, parse_mount_route_qname};
+        let m = Mount::Module {
+            module: "app::urls::__init__".into(),
+            var: "urlpatterns".into(),
+            suffix: String::new(),
+        };
+        let q = mount_route_qname("ANY", &m, "admins/<uuid:pk>/");
+        assert_eq!(
+            q,
+            "ANY <mount:module:app::urls::__init__#urlpatterns>/admins/<uuid:pk>/"
+        );
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some((
+                "ANY".to_string(),
+                m.clone(),
+                "/admins/<uuid:pk>/".to_string()
+            ))
+        );
+        let empty = mount_route_qname("ANY", &m, "");
+        assert_eq!(empty, "ANY <mount:module:app::urls::__init__#urlpatterns>");
+        assert_eq!(
+            parse_mount_route_qname(&empty),
+            Some(("ANY".to_string(), m.clone(), String::new()))
+        );
+        // A suffix folds into the path, as for Param / Field.
+        let suffixed = Mount::Module {
+            module: "app::urls::__init__".into(),
+            var: "urlpatterns".into(),
+            suffix: "v2/".into(),
+        };
+        assert_eq!(
+            parse_mount_route_qname(&mount_route_qname("GET", &suffixed, "x/")),
+            Some(("GET".to_string(), m, "/v2/x/".to_string()))
+        );
+        for bad in [
+            "ANY <mount:module:#urlpatterns>/x",
+            "ANY <mount:module:app::urls#>/x",
+            "ANY <mount:module:app::urls>/x",
+        ] {
+            assert_eq!(parse_mount_route_qname(bad), None, "{bad}");
+        }
     }
 
     /// CB.6: a canonical ROUTE qname, and anything not in the exact

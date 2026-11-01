@@ -76,7 +76,7 @@ const MAX_ROUNDS: usize = 16;
 
 /// Prefixes one slot may hold: a helper mounted by N callers mints N ROUTEs
 /// per registration, and past this many the slot stops growing.
-const MAX_PREFIXES: usize = 32;
+pub(crate) const MAX_PREFIXES: usize = 32;
 
 /// What [`bind`] did to one Go graph; [`MountStats::marker`] prints it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -139,44 +139,58 @@ impl MountStats {
 
 /// Where a mount's prefixes collect: parameter `index` of the fn with that
 /// id (receiver excluded), or field `field` of the struct `owner`
-/// (`<package dir qname>::<Type>`, as the parser writes it). Keyed by the raw
-/// id so the slot table is a BTreeMap (a NodeId is Hash, not Ord).
+/// (`<package dir qname>::<Type>`, as the parser writes it), or (GD.40)
+/// router value `var` of the file MODULE `module` (its qname). Keyed by the
+/// raw id so the slot table is a BTreeMap (a NodeId is Hash, not Ord).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Slot {
+pub(crate) enum Slot {
     Param(u64, u32),
     Field(String, String),
+    Module(String, String),
 }
 
-/// One mount flowing into a slot: a bound `MountArg` or a `FieldMount`.
-struct Flow {
-    target: Slot,
-    mount: Mount,
+/// One mount flowing into a slot: a bound `MountArg` or a `FieldMount`; for
+/// GD.40, a resolved include (`build/route_mounts.rs`).
+pub(crate) struct Flow {
+    pub(crate) target: Slot,
+    pub(crate) mount: Mount,
 }
 
 /// A provisional ROUTE: what its qname says and what it carries.
-struct Provisional {
-    id: NodeId,
-    method: String,
+pub(crate) struct Provisional {
+    pub(crate) id: NodeId,
+    pub(crate) method: String,
     /// The mount with its suffix folded into `path` (always an empty suffix).
-    base: Mount,
+    pub(crate) base: Mount,
     /// The mount's suffix joined with the registration's path, canonical.
-    path: String,
-    owner: Option<String>,
+    pub(crate) path: String,
+    pub(crate) owner: Option<String>,
     confidence: Confidence,
     /// The node's cells, its incident edges and its refs as they were before
     /// any re-key: what each clone copies.
     cells: Vec<Cell>,
     edges: Vec<Edge>,
-    refs: Vec<UnresolvedRef>,
+    pub(crate) refs: Vec<UnresolvedRef>,
 }
 
 /// One final ROUTE of a provisional.
-struct Final {
+pub(crate) struct Final {
     id: NodeId,
     /// With the LB.4a owner, when the provisional had one.
     qname: String,
     /// Without it: the display name every owner-qualified ROUTE carries.
     name: String,
+}
+
+impl Final {
+    /// The final ROUTE `<method> <path>` (`path` canonical) of graph `g`,
+    /// qualified with `owner` when there is one.
+    pub(crate) fn new(g: &RepoGraph, method: &str, path: &str, owner: Option<&str>) -> Final {
+        let name = route_qname(method, path);
+        let qname = with_owner(&name, owner.unwrap_or(""));
+        let id = NodeId::from_parts(GRAPH_TYPE, g.repo, node_kind::ROUTE, &qname);
+        Final { id, qname, name }
+    }
 }
 
 /// Re-key every provisional mount ROUTE of the Go graph `g` (see the module
@@ -210,7 +224,8 @@ pub(crate) fn bind(
 
     let fn_ids = param_fn_ids(g, &provisionals);
     let flows = collect_flows(g, owner_dir, &mut stats);
-    let slots = fixpoint(&flows, &fn_ids, &mut stats);
+    let (slots, capped) = fixpoint(&flows, &fn_ids);
+    stats.capped = capped;
     let consts = package_consts(g);
 
     // Finals per provisional, sorted; empty slot -> the local path. DF.7:
@@ -245,30 +260,39 @@ pub(crate) fn bind(
             }
         };
         stats.extra_mounts += paths.len().saturating_sub(1);
-        let owner = p.owner.as_deref().unwrap_or("");
         plans.push(
             paths
                 .into_iter()
-                .map(|path| {
-                    let name = route_qname(&p.method, &path);
-                    let qname = with_owner(&name, owner);
-                    let id = NodeId::from_parts(GRAPH_TYPE, g.repo, node_kind::ROUTE, &qname);
-                    Final { id, qname, name }
-                })
+                .map(|path| Final::new(g, &p.method, &path, p.owner.as_deref()))
                 .collect(),
         );
     }
+    rekey(g, refs, &provisionals, &plans);
+    stats
+}
 
-    // The first final: one batched rename (merges into an existing ROUTE of
-    // that id, as two registrations of one full path do).
+/// Re-key each provisional ROUTE to its finals (`plans`, one list per
+/// provisional, in the provisionals' order): the first final through one
+/// batched [`rename_nodes`] (which merges into an existing ROUTE of that id,
+/// as two registrations of one full path do), every further one as a clone
+/// of the provisional as it was ([`clone_route`]), appended to `g.nodes` /
+/// `g.edges` / `refs` in provisional then final order. A provisional with no
+/// final keeps its node. Shared by the Go mount pass and GD.40's module
+/// mounts (`build/route_mounts.rs`).
+pub(crate) fn rekey(
+    g: &mut RepoGraph,
+    refs: &mut Vec<UnresolvedRef>,
+    provisionals: &[Provisional],
+    plans: &[Vec<Final>],
+) {
     let renames: Vec<(NodeId, NodeId)> = provisionals
         .iter()
-        .zip(&plans)
+        .zip(plans)
         .filter_map(|(p, finals)| finals.first().map(|f| (p.id, f.id)))
         .collect();
     let absorbed = rename_nodes(g, &mut [], refs, &renames);
     let remap: HashMap<NodeId, NodeId> = renames.iter().copied().collect();
-    for (p, finals) in provisionals.iter().zip(&plans) {
+    for (p, finals) in provisionals.iter().zip(plans) {
         if let Some(f) = finals.first()
             && !absorbed.contains(&p.id)
         {
@@ -280,12 +304,11 @@ pub(crate) fn bind(
     // Every further final: a clone of the provisional as it was.
     let mut at: HashMap<NodeId, usize> =
         g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
-    for (p, finals) in provisionals.iter().zip(&plans) {
+    for (p, finals) in provisionals.iter().zip(plans) {
         for f in finals.iter().skip(1) {
             clone_route(g, refs, &mut at, &remap, p, f);
         }
     }
-    stats
 }
 
 /// DF.7: the package string constants of `g`, `(package dir, name)` ->
@@ -368,7 +391,7 @@ fn substitute(
 
 /// Every ROUTE whose qname (owner stripped) parses as a provisional mount
 /// qname, in `g.nodes` order, with its cells, incident edges and refs.
-fn collect_provisionals(g: &RepoGraph, refs: &[UnresolvedRef]) -> Vec<Provisional> {
+pub(crate) fn collect_provisionals(g: &RepoGraph, refs: &[UnresolvedRef]) -> Vec<Provisional> {
     let mut out: Vec<Provisional> = Vec::new();
     for n in &g.nodes {
         if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -457,13 +480,14 @@ fn param_fn_ids(g: &RepoGraph, provisionals: &[Provisional]) -> BTreeMap<String,
 
 /// The slot a mount reads: `None` for a Const (it holds its prefix itself)
 /// and for a Param whose fn is not a node of this graph.
-fn slot_of(mount: &Mount, fn_ids: &BTreeMap<String, NodeId>) -> Option<Slot> {
+pub(crate) fn slot_of(mount: &Mount, fn_ids: &BTreeMap<String, NodeId>) -> Option<Slot> {
     match mount {
         Mount::Const(_) => None,
         Mount::Param {
             fn_qname, index, ..
         } => fn_ids.get(fn_qname).map(|id| Slot::Param(id.0, *index)),
         Mount::Field { owner, field, .. } => Some(Slot::Field(owner.clone(), field.clone())),
+        Mount::Module { module, var, .. } => Some(Slot::Module(module.clone(), var.clone())),
     }
 }
 
@@ -601,7 +625,9 @@ fn resolve(
 ) -> BTreeSet<String> {
     let suffix = match mount {
         Mount::Const(p) => return BTreeSet::from([p.clone()]),
-        Mount::Param { suffix, .. } | Mount::Field { suffix, .. } => suffix,
+        Mount::Param { suffix, .. }
+        | Mount::Field { suffix, .. }
+        | Mount::Module { suffix, .. } => suffix,
     };
     let Some(prefixes) = slot_of(mount, fn_ids).and_then(|s| slots.get(&s)) else {
         return BTreeSet::new();
@@ -622,12 +648,12 @@ fn resolve(
 /// (a round sees the prefixes an earlier flow of the same round added). A
 /// slot holds at most [`MAX_PREFIXES`]. After [`MAX_ROUNDS`] the slots stay
 /// as they are, and one more round, run on a copy, names the ones still
-/// growing: counted capped with those a full slot refused.
-fn fixpoint(
+/// growing: counted capped with those a full slot refused. Returns the slots
+/// and that capped count.
+pub(crate) fn fixpoint(
     flows: &[Flow],
     fn_ids: &BTreeMap<String, NodeId>,
-    stats: &mut MountStats,
-) -> BTreeMap<Slot, BTreeSet<String>> {
+) -> (BTreeMap<Slot, BTreeSet<String>>, usize) {
     let mut slots: BTreeMap<Slot, BTreeSet<String>> = BTreeMap::new();
     let mut capped: BTreeSet<Slot> = BTreeSet::new();
     let mut grew = !flows.is_empty();
@@ -642,8 +668,7 @@ fn fixpoint(
         capped.extend(round(&mut next, flows, fn_ids, &mut refused));
         capped.extend(refused);
     }
-    stats.capped = capped.len();
-    slots
+    (slots, capped.len())
 }
 
 /// One round of [`fixpoint`]: every flow in order adds what its mount

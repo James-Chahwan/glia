@@ -1,0 +1,26 @@
+{
+  "framework": "py-django-include",
+  "language": "python+typescript",
+  "dirs": ["server", "client"],
+  "cells": ["python/http_server"],
+  "note": "GD.40 include-style route mounts. proj/urls.py includes app.urls under `api/` and app.auth_urls under `auth/` by dotted module path; app/urls/__init__.py spreads `*issue_urls` (`from .issue import urlpatterns as issue_urls`) and includes app.urls.nested under `v2/`. Each Django pattern is a ROUTE at its full path, located at its `path(..)` call, and the include() lines mint no ROUTE. The TS client calls pair exactly by path (a Django ROUTE is ANY).",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "ANY /api/workspaces/<str:slug>/issues/", "exact": true, "note": "a spread-imported urlpatterns under the `api/` include"},
+    {"kind": "ROUTE", "name": "ANY /api/v2/things/", "exact": true, "note": "a nested include: `api/` then `v2/`"},
+    {"kind": "ROUTE", "name": "ANY /auth/login/", "exact": true, "note": "a second root include"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/workspaces/${…}/issues/", "to": "ANY /api/workspaces/<str:slug>/issues/", "category": "HTTP_CALLS", "note": "template client -> spread route"},
+    {"from": "GET /api/v2/things/", "to": "ANY /api/v2/things/", "category": "HTTP_CALLS", "note": "client -> nested-include route"},
+    {"from": "POST /auth/login/", "to": "ANY /auth/login/", "category": "HTTP_CALLS", "note": "client -> included route"}
+  ],
+  "expect_cells": [
+    {"kind": "ROUTE", "node": "ANY /api/workspaces/<str:slug>/issues/", "cell": "POSITION", "contains": "\"file\":\"app/urls/issue.py\"", "note": "located at its path() call"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "ANY api/", "note": "the include() line itself is no ROUTE"},
+    {"kind": "ROUTE", "name": "ANY auth/", "note": "the include() line itself is no ROUTE"},
+    {"kind": "ROUTE", "name": "ANY v2/", "note": "the nested include() line is no ROUTE"},
+    {"kind": "ROUTE", "name": "ANY /api/", "note": "nor, with a slash, the include prefix"}
+  ]
+}

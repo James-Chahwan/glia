@@ -29,8 +29,8 @@ use glia_graph::{MergedGraph, Reach};
 /// outranks the in-scope `local_dep` globally. A flask route and a `requests`
 /// call give us a ROUTE node (no POSITION, located via the handler it is
 /// HANDLED_BY — A3.6) and an ENDPOINT node (located via its ENDPOINT_HIT
-/// `file`). A Django `path(...)` registration names no handler, so its ROUTE
-/// is genuinely unlocatable. Two markdown docs, one at the root and one under
+/// `file`). A Django `path(...)` registration names no handler; since GD.40
+/// its ROUTE carries a POSITION at the call. Two markdown docs, one at the root and one under
 /// `docs/`, both name `handle()` (FD.79: a lone word binds only as a call)
 /// so `governing_docs` has something to narrow.
 fn write_fixture(dir: &Path) {
@@ -52,6 +52,14 @@ fn write_fixture(dir: &Path) {
         dir.join("services/api/app.py"),
         "from flask import Flask\n\napp = Flask(__name__)\n\n\n\
          @app.route(\"/v1/items\")\ndef items():\n    return []\n",
+    )
+    .unwrap();
+    // A Django model's DATA_ENTITY carries only its table cell: no locate
+    // tier places it (the keep-unlocatable case since GD.40 located the
+    // Django route).
+    std::fs::write(
+        dir.join("services/api/models.py"),
+        "from django.db import models\n\n\nclass Ledger(models.Model):\n    total = models.IntegerField()\n",
     )
     .unwrap();
     std::fs::write(
@@ -239,20 +247,38 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
             .unwrap_or_else(|| panic!("fixture should emit `{q}`"))
     };
 
-    // (f) KEEP-UNLOCATABLE. The Django route's ROUTE_METHOD is the bare verb
-    // and it names no handler, so no `locate_node` tier places it: it must be
-    // KEPT under any scope. Dropping unlocatables would silently delete them
+    // (f) KEEP-UNLOCATABLE. A node no `locate_node` tier places must be
+    // KEPT under any scope: dropping unlocatables would silently delete them
     // from a scoped answer, which is the cross-service half of the result.
-    let orphan = by_qname("ANY /v1/legacy");
-    assert_eq!(
-        locate_node(m, orphan).file,
-        None,
-        "a handler-less route has no span"
-    );
+    let unlocatable: Vec<_> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter())
+        .map(|n| n.id)
+        .filter(|id| locate_node(m, *id).file.is_none())
+        .collect();
     assert!(
-        node_in_scope(m, orphan, Some("no/such/dir")),
-        "unlocatable nodes must be kept under any scope"
+        !unlocatable.is_empty(),
+        "the fixture should hold an unlocatable node"
     );
+    for id in &unlocatable {
+        assert!(
+            node_in_scope(m, *id, Some("no/such/dir")),
+            "unlocatable nodes must be kept under any scope ({:?})",
+            locate_node(m, *id).kind
+        );
+    }
+
+    // GD.40: the Django route, which names no handler, carries a POSITION at
+    // its `path(..)` call, so it is located and scoped where it is registered.
+    let django = by_qname("ANY /v1/legacy");
+    assert_eq!(
+        locate_node(m, django).file.as_deref(),
+        Some("services/api/urls.py"),
+        "a Django route is located at its path() call"
+    );
+    assert!(node_in_scope(m, django, Some(SCOPE)));
+    assert!(!node_in_scope(m, django, Some("web")));
 
     // A3.6: the flask ROUTE has no POSITION and only the bare verb, but it is
     // HANDLED_BY `items`, so it is located at — and scoped by — its handler's

@@ -6759,6 +6759,16 @@ fn mount_then(mount: Mount, lit: &str) -> Mount {
             field,
             suffix: join_path(&suffix, lit),
         },
+        // GD.40: a module slot (Python's include mounts); Go records none.
+        Mount::Module {
+            module,
+            var,
+            suffix,
+        } => Mount::Module {
+            module,
+            var,
+            suffix: join_path(&suffix, lit),
+        },
     }
 }
 
@@ -7966,7 +7976,7 @@ fn emit_route_from_call(
         .split_once(' ')
         .map_or_else(String::new, |(_, path)| path.to_string());
     match mount {
-        Mount::Const(_) => {}
+        Mount::Const(_) | Mount::Module { .. } => {}
         Mount::Param { .. } => acc.mounts.param += 1,
         Mount::Field { .. } => acc.mounts.field += 1,
     }

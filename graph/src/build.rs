@@ -35,6 +35,7 @@ mod dart;
 mod go_wire;
 mod lua;
 mod partial;
+mod route_mounts;
 
 pub use partial::{BodyEdit, RebodyStats, Refused};
 
@@ -54,8 +55,18 @@ pub use partial::{BodyEdit, RebodyStats, Refused};
 /// (the IMPORTS edges, calls, refs and method-level IMPLEMENTS of the files
 /// handed to it). A clean build stitches every file at once, so its edges,
 /// unresolved lists and markers are the single-pass build's, in its order.
+///
+/// GD.40: between the two, the include-style route mounts
+/// (`build/route_mounts.rs`): every Django urlconf route is
+/// re-keyed to each full path its module is included under, so the stitch
+/// and every later pass see the final ROUTEs; `[route-mounts] ..` prints what
+/// it did, once per graph with a route module.
 pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (mut g, surface, body) = python_surface(repo, parses);
+    let (mut g, surface, mut body) = python_surface(repo, parses);
+    let mounts = route_mounts::bind_module_mounts(&mut g, &mut body.refs, &surface.stmts);
+    if let Some(line) = mounts.marker("python") {
+        eprintln!("{line}");
+    }
     let mut tally = EvidenceTally::default();
     python_stitch(&mut g, &surface.imports, &body, None, &mut tally);
     tally.report();
@@ -63,9 +74,11 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 }
 
 /// GA.3: what [`python_surface`] decided for the stitch phase: every IMPORTS
-/// edge, in statement order (bound, not yet drawn).
+/// edge, in statement order (bound, not yet drawn). GD.40: and the import
+/// statements themselves, which an include of an imported name reads.
 struct PySurface {
     imports: Vec<ImportEdge>,
+    stmts: Vec<ImportStmt>,
 }
 
 /// GA.3: the body stubs [`python_stitch`] resolves: call sites and refs, in
@@ -87,7 +100,14 @@ fn python_surface(repo: RepoId, parses: Vec<FileParse>) -> (RepoGraph, PySurface
     let mut same = same_stem_table(&g);
     let imports = python_import_bindings(&mut g, &all_imports, &mut same);
     same.report();
-    (g, PySurface { imports }, PyBody { calls, refs })
+    (
+        g,
+        PySurface {
+            imports,
+            stmts: all_imports,
+        },
+        PyBody { calls, refs },
+    )
 }
 
 /// GA.3: the STITCH phase of [`build_python`]: draw `imports` (the IMPORTS

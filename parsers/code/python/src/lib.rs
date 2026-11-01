@@ -23,6 +23,7 @@ pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use glia_code_domain::{IncludeTarget, Mount, NavFact};
 
 /// Parse one Python source file.
 ///
@@ -76,6 +77,16 @@ pub fn parse_file(
     // LA.23a pre-pass: this file's class names, for the qualified-type check
     // in `record_field_type` (a field may be typed above the class it names).
     acc.file_classes = collect_file_class_names(root, src);
+    // GD.40 pre-passes: the mock `patch` names, and whether this module is a
+    // Django urlconf (it assigns `urlpatterns`), whose routes are minted on
+    // its module mount slot for the graph's route-mount pass.
+    acc.mock_patch_names = mock_patch_names(root, src);
+    let django = DjangoScan {
+        module_qname,
+        file_rel: file_rel_path,
+        module_id,
+        urlconf: assigns_urlpatterns(root, src),
+    };
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -121,7 +132,7 @@ pub fn parse_file(
                 // Top-level calls — record them with module as source.
                 collect_calls_in(child, src, module_id, None, repo, file_rel_path, &mut acc);
                 // Django-style path('/x', view) registrations in urls.py scan.
-                scan_django_routes(child, src, repo, &mut acc);
+                scan_django_routes(child, src, repo, &django, &mut acc);
                 // glia v5 G19 — module-level constant assignments
                 // (`MAX_RETRIES = …`). Only UPPERCASE names.
                 collect_state_vars(
@@ -136,7 +147,7 @@ pub fn parse_file(
             }
             "assignment" => {
                 // urlpatterns = [ path(...), re_path(...) ] lives here too.
-                scan_django_routes(child, src, repo, &mut acc);
+                scan_django_routes(child, src, repo, &django, &mut acc);
             }
             // DT.5l: `if __name__ == "__main__":` runs its block when the
             // file is executed as a script, so its calls are the MODULE's and
@@ -156,6 +167,17 @@ pub fn parse_file(
         }
     }
 
+    if acc.django.routes + acc.django.includes + acc.django.spreads + acc.django.dynamic > 0 {
+        let d = acc.django;
+        eprintln!(
+            "[py-django] urlconf={} routes={} includes={} spreads={} dynamic={} file={file_rel_path}",
+            u8::from(django.urlconf),
+            d.routes,
+            d.includes,
+            d.spreads,
+            d.dynamic
+        );
+    }
     if acc.routes_composed > 0 {
         eprintln!(
             "[py-routes] composed {} routes under {} router prefixes in {}",
@@ -406,7 +428,26 @@ struct Acc {
     /// pre-pass, so a qualified field type naming one of them can be refused
     /// wherever it appears in the file (see [`record_field_type`]).
     file_classes: std::collections::HashSet<String>,
+    /// GD.40: the local names a top-level `from unittest.mock import patch`
+    /// / `from mock import patch` binds (a pre-pass), so `@patch("a.b.c")`
+    /// on a test is a mock target, never a PATCH route.
+    mock_patch_names: std::collections::HashSet<String>,
+    /// GD.40: the `[py-django]` counters.
+    django: DjangoStats,
     nav: CodeNav,
+}
+
+/// GD.40: what the Django scan of one file read (`[py-django] ..`).
+#[derive(Debug, Default, Clone, Copy)]
+struct DjangoStats {
+    /// `path` / `re_path` / `url` registrations minted as ROUTEs.
+    routes: usize,
+    /// `include(..)` mounts of a dotted module path or an imported name.
+    includes: usize,
+    /// `*name` / `urlpatterns += name` spreads of an imported `urlpatterns`.
+    spreads: usize,
+    /// Includes and spreads of anything else (`include(router.urls)`).
+    dynamic: usize,
 }
 
 /// LA.23a — a field's declared type as an annotation or constructor spells it.
@@ -3277,6 +3318,15 @@ fn check_route_decorator(
     let Some(methods) = route_methods_for(&verb, &body[paren..]) else {
         return;
     };
+    // GD.40: `@mock.patch("pkg.mod.name")` / `@patch(..)` (patch imported
+    // from unittest.mock or mock) patches a test target: no PATCH route.
+    if verb == "patch" {
+        let receiver = head.rsplit_once('.').map(|(r, _)| r.trim()).unwrap_or("");
+        let mock_receiver = matches!(receiver, "mock" | "unittest.mock");
+        if mock_receiver || (receiver.is_empty() && acc.mock_patch_names.contains(head.trim())) {
+            return;
+        }
+    }
     let args = &body[paren + 1..];
     let Some(path) = first_string_literal(args) else {
         return;
@@ -3352,29 +3402,380 @@ fn flask_route_methods(args: &str) -> Vec<&'static str> {
     out
 }
 
-/// Django `urls.py` scan — finds `path('/url', view)` / `re_path(r'/url', …)`
-/// / `url(r'/url', …)` calls inside the node and emits one Route per path.
-/// Method is ANY because Django views dispatch internally.
-fn scan_django_routes(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call"
-            && let Some(func) = n.child_by_field_name("function")
+/// GD.40: the module a Django scan runs in.
+struct DjangoScan<'a> {
+    module_qname: &'a str,
+    file_rel: &'a str,
+    module_id: NodeId,
+    /// The module assigns `urlpatterns` at top level: a urlconf, whose routes
+    /// sit on its module mount slot and whose `include(..)`s are mounts.
+    urlconf: bool,
+}
+
+/// GD.40: the variable a Django urlconf registers its routes in.
+const URLPATTERNS: &str = "urlpatterns";
+
+/// GD.40: does a top-level statement assign or extend `urlpatterns`
+/// (`urlpatterns = [..]`, `urlpatterns += [..]`)? A pre-pass, so the routes
+/// of a file are minted the same way whichever statement comes first.
+fn assigns_urlpatterns(root: TsNode, src: &[u8]) -> bool {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .any(|stmt| urlpatterns_rhs(stmt, src).is_some())
+}
+
+/// GD.40: the right-hand side of `urlpatterns = <rhs>` / `urlpatterns +=
+/// <rhs>` when `stmt` (a top-level expression statement, or its assignment)
+/// is one.
+fn urlpatterns_rhs<'t>(stmt: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let assign = match stmt.kind() {
+        "expression_statement" => stmt.named_child(0)?,
+        _ => stmt,
+    };
+    if !matches!(assign.kind(), "assignment" | "augmented_assignment") {
+        return None;
+    }
+    let left = assign.child_by_field_name("left")?;
+    (left.kind() == "identifier" && text(left, src) == URLPATTERNS)
+        .then(|| assign.child_by_field_name("right"))
+        .flatten()
+}
+
+/// GD.40: the local names a top-level `from unittest.mock import patch [as
+/// p]` / `from mock import patch` binds.
+fn mock_patch_names(root: TsNode, src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut cursor = root.walk();
+    for stmt in root.named_children(&mut cursor) {
+        if stmt.kind() != "import_from_statement"
+            || !child_text(stmt, "module_name", src)
+                .is_some_and(|m| m == "unittest.mock" || m == "mock")
         {
-            let name = text(func, src);
-            let is_django = matches!(name, "path" | "re_path" | "url") || name.ends_with(".path");
-            if is_django && let Some(args) = n.child_by_field_name("arguments") {
-                let arg_text = text(args, src);
-                if let Some(path) = first_string_literal(&arg_text[1..]) {
-                    emit_route_no_handler("ANY", &path, repo, acc);
+            continue;
+        }
+        let mut inner = stmt.walk();
+        for name in stmt.children_by_field_name("name", &mut inner) {
+            let (imported, local) = match name.kind() {
+                "aliased_import" => (
+                    child_text(name, "name", src),
+                    child_text(name, "alias", src),
+                ),
+                _ => (Some(text(name, src)), Some(text(name, src))),
+            };
+            if imported == Some("patch")
+                && let Some(local) = local
+            {
+                out.insert(local.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// GD.40: the text of a Django pattern literal (`"api/"`, `r"^admin/$"`),
+/// empty allowed (`path("", view)` is the prefix itself). A `re_path` /
+/// `url` regex loses its leading `^` and trailing `$` anchors, so its
+/// literal prefix composes like a `path` one. `None` for any other node or
+/// an f-string with a placeholder.
+fn django_literal(n: TsNode, src: &[u8], regex: bool) -> Option<String> {
+    if n.kind() != "string" {
+        return None;
+    }
+    let mut cursor = n.walk();
+    if n.named_children(&mut cursor)
+        .any(|c| c.kind() == "interpolation")
+    {
+        return None;
+    }
+    let value = strip_string_quotes(text(n, src));
+    let value = value.trim();
+    let value = if regex {
+        let v = value.strip_prefix('^').unwrap_or(value);
+        v.strip_suffix('$').unwrap_or(v)
+    } else {
+        value
+    };
+    Some(value.to_string())
+}
+
+/// GD.40: is `local` bound by an import statement of this module so far?
+/// `urlpatterns_only`: only as a module's `urlpatterns` (`from .issue import
+/// urlpatterns as issue_urls`); otherwise as a module (`import x.urls as u`,
+/// `from . import issue`) or any imported name.
+fn imported_name(acc: &Acc, module_qname: &str, local: &str, urlpatterns_only: bool) -> bool {
+    acc.imports.iter().any(|stmt| {
+        stmt.from_module == module_qname
+            && match &stmt.target {
+                ImportTarget::Module { path, alias } => {
+                    !urlpatterns_only && alias.as_deref().unwrap_or(path.as_str()) == local
+                }
+                ImportTarget::Symbol { name, alias, .. } => {
+                    alias.as_deref().unwrap_or(name.as_str()) == local
+                        && (!urlpatterns_only || name == URLPATTERNS)
+                }
+            }
+    })
+}
+
+/// GD.40: record one include / spread on the urlconf MODULE.
+fn record_include(
+    django: &DjangoScan<'_>,
+    line: usize,
+    target: IncludeTarget,
+    prefix: &str,
+    via: &str,
+    acc: &mut Acc,
+) {
+    match (&target, via) {
+        (IncludeTarget::Dynamic(_), _) => acc.django.dynamic += 1,
+        (_, "spread") => acc.django.spreads += 1,
+        _ => acc.django.includes += 1,
+    }
+    acc.nav.record_fact(
+        django.module_id,
+        NavFact::IncludeMount {
+            line: u32::try_from(line).unwrap_or(u32::MAX),
+            target,
+            prefix: prefix.to_string(),
+            via: via.to_string(),
+        },
+    );
+}
+
+/// GD.40: the target of `include(<arg>)`: a dotted module string (or the
+/// first string of an `include(("app.urls", "ns"))` tuple), a name this
+/// module imports, or anything else (`router.urls`, a local) as Dynamic.
+/// `None` for an inline `include([..])` list, which the caller walks.
+fn include_target(
+    arg: TsNode,
+    src: &[u8],
+    django: &DjangoScan<'_>,
+    acc: &Acc,
+) -> Option<IncludeTarget> {
+    let first = match arg.kind() {
+        "tuple" => arg.named_child(0)?,
+        "list" => return None,
+        _ => arg,
+    };
+    if let Some(spec) = django_literal(first, src, false).filter(|s| !s.is_empty()) {
+        return Some(IncludeTarget::Spec(spec));
+    }
+    let name = text(first, src);
+    if first.kind() == "identifier" && imported_name(acc, django.module_qname, name, false) {
+        return Some(IncludeTarget::Import {
+            local: name.to_string(),
+        });
+    }
+    Some(IncludeTarget::Dynamic(name.to_string()))
+}
+
+/// GD.40: the spreads of a `urlpatterns` right-hand side: `*name` in its
+/// list, an `urlpatterns += name`, or a `+` operand naming an imported
+/// `urlpatterns` (`from .issue import urlpatterns as issue_urls`) or a
+/// module's (`*issue.urlpatterns`, `issue` imported), each one Import
+/// include with an empty prefix; any other spread operand is Dynamic.
+fn scan_urlpatterns_spreads(rhs: TsNode, src: &[u8], django: &DjangoScan<'_>, acc: &mut Acc) {
+    let operand = |n: TsNode, acc: &Acc| -> Option<IncludeTarget> {
+        match n.kind() {
+            "identifier" => {
+                let local = text(n, src);
+                Some(if imported_name(acc, django.module_qname, local, true) {
+                    IncludeTarget::Import {
+                        local: local.to_string(),
+                    }
+                } else {
+                    IncludeTarget::Dynamic(local.to_string())
+                })
+            }
+            "attribute" => {
+                let object = n.child_by_field_name("object")?;
+                let attr = n.child_by_field_name("attribute")?;
+                let local = text(object, src);
+                Some(
+                    if object.kind() == "identifier"
+                        && text(attr, src) == URLPATTERNS
+                        && imported_name(acc, django.module_qname, local, false)
+                    {
+                        IncludeTarget::Import {
+                            local: local.to_string(),
+                        }
+                    } else {
+                        IncludeTarget::Dynamic(text(n, src).to_string())
+                    },
+                )
+            }
+            // A list, a call, a comprehension: its own `path(..)`s are minted
+            // where they stand.
+            _ => None,
+        }
+    };
+    let mut stack = vec![rhs];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "list" => {
+                let mut cursor = n.walk();
+                let kids: Vec<TsNode> = n.named_children(&mut cursor).collect();
+                for k in kids {
+                    if k.kind() == "list_splat"
+                        && let Some(inner) = k.named_child(0)
+                        && let Some(t) = operand(inner, acc)
+                    {
+                        record_include(django, k.start_position().row, t, "", "spread", acc);
+                    }
+                }
+            }
+            "binary_operator" => {
+                for side in ["right", "left"] {
+                    if let Some(c) = n.child_by_field_name(side) {
+                        stack.push(c);
+                    }
+                }
+            }
+            "parenthesized_expression" => {
+                if let Some(c) = n.named_child(0) {
+                    stack.push(c);
+                }
+            }
+            _ => {
+                if let Some(t) = operand(n, acc) {
+                    record_include(django, n.start_position().row, t, "", "spread", acc);
                 }
             }
         }
-        let mut cursor = n.walk();
-        for c in n.named_children(&mut cursor) {
-            stack.push(c);
+    }
+}
+
+/// Django `urls.py` scan — finds `path('url/', view)` / `re_path(r'^url/', …)`
+/// / `url(r'^url/', …)` calls inside the statement and emits one ROUTE per
+/// pattern with a POSITION at the call. Method is ANY because Django views
+/// dispatch internally.
+///
+/// GD.40: in a urlconf (a module assigning `urlpatterns`) a pattern is minted
+/// on the module's mount slot, `ANY <mount:module:<module>#urlpatterns>/<path>`
+/// ([`endpoint::mount_route_qname`]), which the graph's route-mount pass
+/// re-keys to each prefix the module is included under; `path("api/",
+/// include("app.urls"))` records a [`NavFact::IncludeMount`] and mints no
+/// ROUTE, and an inline `include([..])` mints its patterns under its prefix.
+/// Elsewhere a pattern is the canonical `ANY /<path>`.
+fn scan_django_routes(
+    stmt: TsNode,
+    src: &[u8],
+    repo: RepoId,
+    django: &DjangoScan<'_>,
+    acc: &mut Acc,
+) {
+    if django.urlconf
+        && let Some(rhs) = urlpatterns_rhs(stmt, src)
+    {
+        scan_urlpatterns_spreads(rhs, src, django, acc);
+    }
+    // (node, inline include prefix), depth first in source order.
+    let mut stack: Vec<(TsNode, String)> = vec![(stmt, String::new())];
+    while let Some((n, prefix)) = stack.pop() {
+        let mut descend = true;
+        if n.kind() == "call"
+            && let Some(func) = n.child_by_field_name("function")
+            && let Some(args) = n.child_by_field_name("arguments")
+        {
+            let name = text(func, src);
+            let regex = matches!(name, "re_path" | "url") || name.ends_with(".re_path");
+            let is_django = regex || name == "path" || name.ends_with(".path");
+            let mut cursor = args.walk();
+            let positional: Vec<TsNode> = args
+                .named_children(&mut cursor)
+                .filter(|a| a.kind() != "keyword_argument" && a.kind() != "comment")
+                .collect();
+            if is_django
+                && let Some(literal) = positional
+                    .first()
+                    .and_then(|a| django_literal(*a, src, regex))
+            {
+                let local = endpoint::join_path(&prefix, &literal);
+                let include = positional.get(1).filter(|v| {
+                    v.kind() == "call"
+                        && v.child_by_field_name("function").is_some_and(|f| {
+                            let f = text(f, src);
+                            f == "include" || f.ends_with(".include")
+                        })
+                });
+                match include.and_then(|c| c.child_by_field_name("arguments")) {
+                    Some(inc_args) => {
+                        descend = false;
+                        let Some(arg) = inc_args.named_child(0) else {
+                            continue;
+                        };
+                        match include_target(arg, src, django, acc) {
+                            Some(target) if django.urlconf => {
+                                record_include(
+                                    django,
+                                    n.start_position().row,
+                                    target,
+                                    &local,
+                                    "include",
+                                    acc,
+                                );
+                            }
+                            Some(_) => {}
+                            None => stack.push((arg, local)),
+                        }
+                    }
+                    None => {
+                        emit_django_route(n, &local, repo, django, acc);
+                    }
+                }
+            }
+        }
+        if descend {
+            let mut cursor = n.walk();
+            let kids: Vec<TsNode> = n.named_children(&mut cursor).collect();
+            for c in kids.into_iter().rev() {
+                stack.push((c, prefix.clone()));
+            }
         }
     }
+}
+
+/// GD.40: one Django pattern as a ROUTE with a POSITION at its `call`: on the
+/// urlconf's module mount slot, else canonical.
+fn emit_django_route(
+    call: TsNode,
+    local: &str,
+    repo: RepoId,
+    django: &DjangoScan<'_>,
+    acc: &mut Acc,
+) {
+    let route_name = if django.urlconf {
+        endpoint::mount_route_qname(
+            "ANY",
+            &Mount::Module {
+                module: django.module_qname.to_string(),
+                var: URLPATTERNS.to_string(),
+                suffix: String::new(),
+            },
+            local,
+        )
+    } else {
+        endpoint::route_qname("ANY", &endpoint::abs_path(local))
+    };
+    acc.django.routes += 1;
+    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+    acc.nodes.push(Node {
+        id: route_id,
+        repo,
+        confidence: Confidence::Medium,
+        cells: vec![
+            Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Text("ANY".to_string()),
+            },
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(position_json(&call, django.file_rel)),
+            },
+        ],
+    });
+    acc.nav
+        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
 fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
@@ -3395,22 +3796,6 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
         cells: Vec::new(),
-    });
-    acc.nav
-        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
-}
-
-fn emit_route_no_handler(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
-    let route_name = format!("{method} {path}");
-    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
-    acc.nodes.push(Node {
-        id: route_id,
-        repo,
-        confidence: Confidence::Medium,
-        cells: vec![Cell {
-            kind: cell_type::ROUTE_METHOD,
-            payload: CellPayload::Text(method.to_string()),
-        }],
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
@@ -4071,22 +4456,176 @@ mod tests {
         out
     }
 
+    /// GD.40: a urlconf's patterns sit on its module mount slot, each with a
+    /// POSITION at its call; a regex pattern loses its `^` / `$` anchors.
     #[test]
     fn django_path_call_emits_route_without_handler() {
-        let src = "from django.urls import path, re_path\nfrom . import views\n\nurlpatterns = [\n    path('users/', views.user_list),\n    re_path(r'^admin/', views.admin),\n]\n";
+        let src = "from django.urls import path, re_path\nfrom . import views\n\nurlpatterns = [\n    path('users/', views.user_list),\n    re_path(r'^admin/$', views.admin),\n]\n";
         let parse = parse_file(src, "urls.py", "urls", repo()).unwrap();
+        let users = route_id("ANY", "<mount:module:urls#urlpatterns>/users/");
+        let node = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == users)
+            .expect("users/ on the module slot");
+        assert!(node.cells.iter().any(|c| c.kind == cell_type::POSITION
+            && matches!(&c.payload, CellPayload::Json(j) if j.contains("\"file\":\"urls.py\"") && j.contains("\"start_line\":4"))));
         assert!(
             parse
                 .nodes
                 .iter()
-                .any(|n| n.id == route_id("ANY", "users/"))
+                .any(|n| n.id == route_id("ANY", "<mount:module:urls#urlpatterns>/admin/"))
         );
-        assert!(
+        assert!(parse.nav.nav_facts.values().flatten().next().is_none());
+    }
+
+    /// GD.40: `include(..)` is a mount, never a ROUTE: a dotted string, a
+    /// tuple's first string, an imported name, and anything else as Dynamic;
+    /// an inline `include([..])` mints its patterns under its prefix; a
+    /// spread of an imported `urlpatterns` (or `mod.urlpatterns`) is an
+    /// Import include with an empty prefix.
+    #[test]
+    fn django_includes_and_spreads_are_mount_facts() {
+        let src = "\
+from django.urls import include, path, re_path
+from . import billing
+from .issue import urlpatterns as issue_urls
+from .api import urls as api_urls
+
+urlpatterns = [
+    path(\"api/\", include(\"app.urls\")),
+    re_path(r\"^auth/\", include((\"app.auth_urls\", \"auth\"), namespace=\"auth\")),
+    path(\"v1/\", include(api_urls)),
+    path(\"w/<str:slug>/\", include(router.urls)),
+    path(\"inline/\", include([path(\"a/\", view_a)])),
+    *issue_urls,
+    *billing.urlpatterns,
+]
+urlpatterns += local_patterns
+";
+        let parse = parse_file(src, "app/urls/__init__.py", "app::urls::__init__", repo()).unwrap();
+        let module =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app::urls::__init__");
+        let facts = &parse.nav.nav_facts[&module];
+        let fact =
+            |line: u32, target: IncludeTarget, prefix: &str, via: &str| NavFact::IncludeMount {
+                line,
+                target,
+                prefix: prefix.into(),
+                via: via.into(),
+            };
+        assert_eq!(
+            facts,
+            &vec![
+                fact(
+                    11,
+                    IncludeTarget::Import {
+                        local: "issue_urls".into()
+                    },
+                    "",
+                    "spread"
+                ),
+                fact(
+                    12,
+                    IncludeTarget::Import {
+                        local: "billing".into()
+                    },
+                    "",
+                    "spread"
+                ),
+                fact(6, IncludeTarget::Spec("app.urls".into()), "api/", "include"),
+                fact(
+                    7,
+                    IncludeTarget::Spec("app.auth_urls".into()),
+                    "auth/",
+                    "include"
+                ),
+                fact(
+                    8,
+                    IncludeTarget::Import {
+                        local: "api_urls".into()
+                    },
+                    "v1/",
+                    "include"
+                ),
+                fact(
+                    9,
+                    IncludeTarget::Dynamic("router.urls".into()),
+                    "w/<str:slug>/",
+                    "include"
+                ),
+                fact(
+                    14,
+                    IncludeTarget::Dynamic("local_patterns".into()),
+                    "",
+                    "spread"
+                ),
+            ]
+        );
+        let routes: Vec<&str> = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE))
+            .filter_map(|n| parse.nav.qname_by_id.get(&n.id).map(String::as_str))
+            .collect();
+        assert_eq!(
+            routes,
+            ["ANY <mount:module:app::urls::__init__#urlpatterns>/inline/a/"]
+        );
+    }
+
+    /// GD.40: a module that never assigns `urlpatterns` is no urlconf: its
+    /// pattern is the canonical `ANY /<path>` with a POSITION, and an include
+    /// there mounts nothing.
+    #[test]
+    fn django_outside_a_urlconf_is_canonical() {
+        let src = "from django.urls import include, path\n\npatterns = [path('ping/', ping), path('x/', include('a.urls'))]\n";
+        let parse = parse_file(src, "misc.py", "misc", repo()).unwrap();
+        let ping = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == route_id("ANY", "/ping/"))
+            .expect("canonical route");
+        assert!(ping.cells.iter().any(|c| c.kind == cell_type::POSITION));
+        assert_eq!(
             parse
                 .nodes
                 .iter()
-                .any(|n| n.id == route_id("ANY", "^admin/"))
+                .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE))
+                .count(),
+            1
         );
+        assert!(parse.nav.nav_facts.is_empty());
+    }
+
+    /// GD.40: `@mock.patch("..")` and `@patch("..")` with `patch` from
+    /// unittest.mock patch a test target; a router's `.patch` is a route.
+    #[test]
+    fn mock_patch_decorators_are_no_routes() {
+        let src = "\
+from unittest import mock
+from unittest.mock import patch as p
+
+@mock.patch(\"pkg.views.storage\")
+def test_a(m):
+    pass
+
+@p(\"pkg.views.other\")
+def test_b(m):
+    pass
+
+@router.patch(\"/items/{id}\")
+def update(id):
+    pass
+";
+        let parse = parse_file(src, "tests/test_x.py", "tests::test_x", repo()).unwrap();
+        let routes: Vec<&str> = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE))
+            .filter_map(|n| parse.nav.qname_by_id.get(&n.id).map(String::as_str))
+            .collect();
+        assert_eq!(routes, ["PATCH /items/{id}"]);
     }
 
     #[test]

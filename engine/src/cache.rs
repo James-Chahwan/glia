@@ -466,6 +466,9 @@ pub fn surface_class(f: &NavFact) -> Part {
         // resolver:host (GH.6): this conf's own outgoing script ref, bound
         // after every group build; no group resolution reads it.
         NavFact::HostScriptRef { .. } => Part::Body,
+        // build/route_mounts (GD.40): the included module's routes, in
+        // another file, take this include's prefix.
+        NavFact::IncludeMount { .. } => Part::Surface,
     }
 }
 
@@ -652,7 +655,8 @@ fn without_row(f: &NavFact) -> NavFact {
         | NavFact::ReExportHide { line, .. }
         | NavFact::ExportLocal { line, .. }
         | NavFact::MemberRead { line, .. }
-        | NavFact::MemberWrite { line, .. } => *line = 0,
+        | NavFact::MemberWrite { line, .. }
+        | NavFact::IncludeMount { line, .. } => *line = 0,
         _ => {}
     }
     f
@@ -1472,6 +1476,20 @@ mod tests {
                 source: "src/svc.dart".into(),
                 hidden: vec!["Hidden".into()],
                 line: 0,
+            },
+            NavFact::IncludeMount {
+                line: 3,
+                target: glia_code_domain::IncludeTarget::Spec("app.urls".into()),
+                prefix: "api/".into(),
+                via: "include".into(),
+            },
+            NavFact::IncludeMount {
+                line: 5,
+                target: glia_code_domain::IncludeTarget::Import {
+                    local: "issue_urls".into(),
+                },
+                prefix: String::new(),
+                via: "spread".into(),
             },
         ]
     }
