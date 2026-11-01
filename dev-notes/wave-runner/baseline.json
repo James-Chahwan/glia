@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "f82594d1",
-  "after_wave": 8,
+  "measured_at_head": "beb6fc62",
+  "after_wave": 9,
   "cargo_test_workspace": {
-    "passed": 7583,
+    "passed": 7608,
     "failed": 0
   },
   "history_passed": [
@@ -174,19 +174,18 @@
     7443,
     7495,
     7547,
-    7583
+    7583,
+    7608
   ],
   "run_py": {
-    "fixtures": 501,
-    "blind_spots": 1,
-    "blind_spot_detail": "blind: ['evm-ts-imported-instance: EVENT_FLOWS']; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 505,
+    "blind_spots": 0,
+    "blind_spot_detail": "blind: []; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
-    "blind_list": [
-      "evm-ts-imported-instance: EVENT_FLOWS"
-    ],
+    "blind_list": [],
     "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],

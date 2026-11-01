@@ -9845,14 +9845,18 @@
     "fixtures/ts-enum-members",
     "fixtures/ts-ethers-call-forms",
     "fixtures/ts-ethers-contract-calls",
+    "fixtures/ts-express-use-mount",
     "fixtures/ts-hardhat-contract-calls",
     "fixtures/ts-heritage-client-wrapper",
+    "fixtures/ts-hono-route-mount",
     "fixtures/ts-http-wrapper-forward",
     "fixtures/ts-http-wrapper-precision",
+    "fixtures/ts-imported-type-refs",
     "fixtures/ts-inherited-calls",
     "fixtures/ts-inherited-receivers",
     "fixtures/ts-interface-receivers",
     "fixtures/ts-method-by-value",
+    "fixtures/ts-nest-global-prefix",
     "fixtures/ts-query-suffix-endpoints",
     "fixtures/ts-reexport-barrels",
     "fixtures/ts-route-per-method",
@@ -10205,8 +10209,8 @@
       },
       "lua/host_event": {
         "extract": [
-          0,
-          2
+          3,
+          3
         ],
         "fixtures": [
           "patterns/lua/host_event"
@@ -10215,17 +10219,17 @@
           0,
           0
         ],
-        "level": "none",
+        "level": "full",
         "literal": [
-          0,
-          2
+          3,
+          3
         ],
         "reasons": [],
         "route": [
-          0,
-          2
+          3,
+          3
         ],
-        "via": null
+        "via": "host_event"
       },
       "lua/script_entry": {
         "extract": [
@@ -10479,8 +10483,8 @@
     ],
     "totals": {
       "error": 0,
-      "full": 16,
-      "none": 1,
+      "full": 17,
+      "none": 0,
       "partial": 1,
       "unknown": 108
     }

@@ -1,6 +1,6 @@
 {
   "engine": "0.5.5",
-  "fixtures": 501,
+  "fixtures": 505,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -805,7 +805,7 @@
       "framework": "evm-ts-imported-instance",
       "language": "typescript+solidity",
       "per_category": {
-        "EVENT_FLOWS": 0.0,
+        "EVENT_FLOWS": 1.0,
         "RPC_CALLS": 1.0,
         "USES": 1.0
       }
@@ -2829,6 +2829,14 @@
         "USES": 1.0
       }
     },
+    "ts-express-use-mount": {
+      "framework": "ts-express-use-mount",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-field-dispatch": {
       "framework": "ts-field-dispatch",
       "language": "typescript",
@@ -2862,6 +2870,13 @@
         "INHERITS_FROM": 1.0
       }
     },
+    "ts-hono-route-mount": {
+      "framework": "ts-hono-route-mount",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-http-fetch": {
       "framework": "ts-http-fetch",
       "language": "typescript",
@@ -2891,6 +2906,13 @@
       "per_category": {
         "IMPLEMENTS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "ts-imported-type-refs": {
+      "framework": "ts-imported-type-refs",
+      "language": "typescript",
+      "per_category": {
+        "USES": 1.0
       }
     },
     "ts-imports": {
@@ -2944,6 +2966,14 @@
       "language": "typescript",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "ts-nest-global-prefix": {
+      "framework": "ts-nest-global-prefix",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "ts-param-local-receivers": {
@@ -3637,9 +3667,7 @@
   },
   "schema": "substrate-gap-legacy/1",
   "summary": {
-    "blind_spots": [
-      "evm-ts-imported-instance: EVENT_FLOWS"
-    ],
+    "blind_spots": [],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
