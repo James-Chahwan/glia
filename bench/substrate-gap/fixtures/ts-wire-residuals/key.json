@@ -1,0 +1,16 @@
+{
+  "framework": "ts-wire-residuals",
+  "language": "typescript+go",
+  "dirs": ["."],
+  "note": "GD.12 (from FD.42; DT.1d residuals): four TypeScript client wire forms the DT.1d reader missed. (1) A receiver field typed AxiosInstance / AxiosStatic in a file importing axios (`constructor(private http: AxiosInstance)`, `this.http.post('/users', u)`) fixes axios's body position, so the second argument is the request, as for an `axios` import alias. (2) A fetch chain `.then((r) => r.json())` typed by its next `.then((o: Order) => ..)` parameter (or an `as T`, a declarator annotation, or the enclosing function's `Promise<T>` return) is the response. (3) ky's `ky.get(u).json<User[]>()` types the response after the call. (4) `await this.repo.find<Order>(id)` parses with the `await` inside the callee (tree-sitter-typescript 0.23.2), which hid the CallSite: the method now CALLS Repo::find as its unawaited form does. The gin server (`r.POST(\"/users\", create)`) pairs the client calls.",
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/users", "cell": "ENDPOINT_HIT", "contains": "\"request\":{\"type\":\"User\"}", "note": "the AxiosInstance field's post: its second argument's declared parameter type"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/users", "cell": "ENDPOINT_HIT", "contains": "\"response\":{\"array\":true,\"type\":\"User\"}", "note": "ky.get('/users').json<User[]>()"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/orders/${…}", "cell": "ENDPOINT_HIT", "contains": "\"response\":{\"type\":\"Order\"}", "note": "fetch(..).then((r) => r.json()).then((o: Order) => o)"}
+  ],
+  "expect_edges": [
+    {"from": "web::repo::Store::load", "to": "web::repo::Repo::find", "category": "CALLS", "exact": true, "note": "return await this.repo.find<Order>(id): the awaited generic call is a CallSite"},
+    {"from": "web::models::User", "to": "server::main::User", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model: the models pass compares the AxiosInstance post's request shape against gin's ShouldBindJSON(&u) User"},
+    {"from": "web::api::Api::save", "to": "endpoint:POST:/users", "category": "CALLS", "exact": true, "note": "the AxiosInstance receiver's post mints its ENDPOINT (regression guard: shipped before GD.12)"}
+  ]
+}

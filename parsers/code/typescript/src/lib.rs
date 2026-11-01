@@ -522,6 +522,10 @@ struct Acc {
     receiver_stats: ReceiverStats,
     /// FH.4a: the `[endpoint-shape]` counters.
     shape_stats: ShapeStats,
+    /// GD.12: CallSites read through the awaited generic callee quirk
+    /// ([`awaited_generic_target`]), the `[ts-wire] awaited_callsites=`
+    /// counter.
+    awaited_callsites: usize,
     /// FH.20: this file's object type aliases ([`visit_type_alias`]) by
     /// name: the INTERFACE nodes a type reference binds in-file.
     type_aliases: HashMap<String, NodeId>,
@@ -4441,6 +4445,7 @@ fn collect_calls_in(
             if let Some(q) = extract_call_qualifier(node, src)
                 && !(nested && this_rooted(&q))
             {
+                acc.awaited_callsites += usize::from(awaited_generic_target(node).is_some());
                 acc.unresolved.push(UnresolvedCall {
                     from,
                     enclosing_class,
@@ -5766,10 +5771,20 @@ fn try_named_endpoint(
         });
         // DT.1d: the init object's `body: JSON.stringify(<expr>)` and the
         // awaited response's `.json() as T`.
+        // GD.12: else a `.then((r) => r.json())` chain's typing.
+        let (response, then_json) = match fetch_response(call, src) {
+            Some(s) => (Some(s), false),
+            None => {
+                let s = then_json_response(call, src);
+                let read = s.is_some();
+                (s, read)
+            }
+        };
         let wire = WireRead {
             fetch: true,
-            response: fetch_response(call, src).map(|s| (s, WireSource::Fetch)),
+            response: response.map(|s| (s, WireSource::Fetch)),
             fetch_request: init.and_then(|i| fetch_request(i, src)),
+            then_json,
             ..WireRead::default()
         };
         let site_url = class_url::site_url(first, src);
@@ -7463,10 +7478,13 @@ fn endpoint_hit_cell(
 //   import alias, `axios.get<T>(..)`); for `fetch`, `(await fetch(..)).json()
 //   as T`, or on `const r = await fetch(..)` in the same callable,
 //   `(await r.json()) as T`, `r.json() as Promise<T>` or `const d: T = await
-//   r.json()`. No type argument, no response key. A typing after the call
-//   (ky's `.json<T>()`, an RxJS `map`) is not read.
+//   r.json()`. No type argument, no response key. GD.12 adds a fetch
+//   `.then((r) => r.json())` chain ([`then_json_response`]) and ky / got's
+//   `.json<T>()` after the call ([`json_after_call`]); any other typing
+//   after the call (an RxJS `map`) is not read.
 // - request: the body argument whose position the client fixes
-//   ([`request_of`]): Angular HttpClient's and axios's second argument of
+//   ([`request_of`]): Angular HttpClient's, axios's (an import alias or,
+//   GD.12, an `AxiosInstance` / `AxiosStatic` receiver field) second argument of
 //   `post` / `put` / `patch`, ky's and got's `json:` option, fetch's
 //   `body: JSON.stringify(<expr>)`. A body is read as an object literal's
 //   keys, a declared type (a parameter or local annotation, `x as T`, `x
@@ -7518,6 +7536,14 @@ struct WireRead {
     json_option: Option<(Shape, WireSource)>,
     /// The callee was reached through [`awaited_generic_callee`].
     awaited_generic: bool,
+    /// GD.12: the typing of the call's `.json()` after it (ky / got
+    /// `<call>.json<T>()`, or `.json()` given `as T` / a declarator
+    /// annotation): the response when the client is ky or got
+    /// ([`json_after_call`]).
+    json_after: Option<(Shape, WireSource)>,
+    /// GD.12: the `fetch` response was read through a `.then((r) => r.json())`
+    /// chain ([`then_json_response`]).
+    then_json: bool,
 }
 
 /// DT.1d: what [`request_of`] found for one emitted call site.
@@ -7545,10 +7571,28 @@ struct WireStats {
     fetch: usize,
     unknown_client: usize,
     awaited_generic: usize,
+    /// GD.12: requests read through a receiver field typed `AxiosInstance` /
+    /// `AxiosStatic`.
+    axios_instance: usize,
+    /// GD.12: fetch responses read through a `.then((r) => r.json())` chain.
+    then_json: usize,
+    /// GD.12: ky / got responses read from `.json<T>()` after the call.
+    ky: usize,
+    /// GD.12: CallSites read through the awaited generic callee quirk.
+    awaited_callsites: usize,
 }
 
 impl WireStats {
-    fn record(&mut self, cand: &EndpointCandidate, request: &RequestRead) {
+    /// `axios_instance`: the request was read through an `AxiosInstance` /
+    /// `AxiosStatic` receiver field; `ky`: the response is the ky / got
+    /// `.json<T>()` typing.
+    fn record(
+        &mut self,
+        cand: &EndpointCandidate,
+        request: &RequestRead,
+        axios_instance: bool,
+        ky: bool,
+    ) {
         let mut source = |s: WireSource| match s {
             WireSource::Typed => self.typed += 1,
             WireSource::Inline => self.inline += 1,
@@ -7567,17 +7611,22 @@ impl WireStats {
         self.requests += usize::from(matches!(request, RequestRead::Body(Some(_))));
         self.unknown_client += usize::from(matches!(request, RequestRead::UnknownClient));
         self.awaited_generic += usize::from(cand.wire.awaited_generic);
+        self.axios_instance +=
+            usize::from(axios_instance && matches!(request, RequestRead::Body(Some(_))));
+        self.then_json += usize::from(cand.wire.then_json && cand.wire.response.is_some());
+        self.ky += usize::from(ky && cand.wire.response.is_some());
     }
 
     fn report(&self, file: &str) {
         #[cfg(test)]
         LAST_WIRE_STATS.with(|w| *w.borrow_mut() = self.clone());
-        if self.responses + self.requests + self.awaited_generic == 0 {
+        if self.responses + self.requests + self.awaited_generic + self.awaited_callsites == 0 {
             return;
         }
         eprintln!(
             "[ts-wire] responses={} requests={} (typed={} inline={} literal={} annotated={} fetch={}) \
-             request_unknown_client={} awaited_generic={} file={file}",
+             request_unknown_client={} awaited_generic={} axios_instance={} then_json={} ky={} \
+             awaited_callsites={} file={file}",
             self.responses,
             self.requests,
             self.typed,
@@ -7587,6 +7636,10 @@ impl WireStats {
             self.fetch,
             self.unknown_client,
             self.awaited_generic,
+            self.axios_instance,
+            self.then_json,
+            self.ky,
+            self.awaited_callsites,
         );
     }
 }
@@ -7629,7 +7682,8 @@ const BODY_DEPTH: u8 = 2;
 /// unawaited generic call (`function: member_expression`) and an awaited
 /// call without type arguments (`await_expression(call_expression)`)
 /// included. The unary / update conflicts (`!x.get<T>(..)`) are not
-/// unwrapped. CallSites keep HEAD's reading ([`extract_call_qualifier`]).
+/// unwrapped. CallSites read the same quirk through
+/// [`awaited_generic_target`] (GD.12).
 fn awaited_generic_callee<'t>(call: TsNode<'t>) -> Option<(TsNode<'t>, TsNode<'t>)> {
     let func = call.child_by_field_name("function")?;
     if func.kind() != "await_expression" {
@@ -7676,7 +7730,50 @@ fn member_call_wire(
             .and_then(|a| object_property(a, "json", src))
             .and_then(|v| body_shape(v, src)),
         awaited_generic,
+        json_after: json_after_call(call, src),
+        then_json: false,
     }
+}
+
+/// GD.12: the typing of `<call>.json()` right after `call`, which ky and got
+/// return a response promise with: the `.json<T>()` type argument (also in
+/// the awaited form, whose `await` tree-sitter-typescript 0.23.2 puts inside
+/// the callee, [`awaited_generic_callee`]), else the `.json()` result's `as
+/// T` / declarator annotation ([`json_result_type`]). `None` when no
+/// `.json()` follows the call or nothing types it.
+fn json_after_call(call: TsNode, src: &[u8]) -> Option<(Shape, WireSource)> {
+    let member = call.parent()?;
+    if member.kind() != "member_expression"
+        || member.child_by_field_name("object") != Some(call)
+        || member
+            .child_by_field_name("property")
+            .is_none_or(|p| text(p, src) != "json")
+    {
+        return None;
+    }
+    let up = member.parent()?;
+    let json_call = match up.kind() {
+        "call_expression" if up.child_by_field_name("function") == Some(member) => up,
+        "await_expression" => up.parent().filter(|c| {
+            c.kind() == "call_expression"
+                && c.child_by_field_name("function") == Some(up)
+                && c.child_by_field_name("type_arguments").is_some()
+        })?,
+        _ => return None,
+    };
+    if let Some(t) = json_call
+        .child_by_field_name("type_arguments")
+        .and_then(first_named)
+    {
+        let shape = ts_type_shape(t, src);
+        let source = if matches!(shape, Shape::Object { .. }) {
+            WireSource::Inline
+        } else {
+            WireSource::Typed
+        };
+        return Some((shape, source));
+    }
+    json_result_type(json_call, src).map(|s| (s, WireSource::Annotated))
 }
 
 /// DT.1d: the request of one emitted call site. `receiver_type` is a shape-1
@@ -7687,6 +7784,9 @@ fn member_call_wire(
 /// - a receiver field typed `HttpClient` (`private http: HttpClient`,
 ///   `inject(HttpClient)`): the second argument of `post` / `put` / `patch`;
 ///   `get` / `delete`'s second argument is an options object, never a body.
+/// - a receiver field typed `AxiosInstance` / `AxiosStatic` in a file that
+///   imports `axios` (`axios_file`, GD.12): the second argument of `post` /
+///   `put` / `patch`, as for the alias.
 /// - an alias imported from `axios`: the second argument of `post` / `put` /
 ///   `patch` (`axios.post(url, data, config)`).
 /// - an alias imported from `ky` / `got`: the `json:` property of the second
@@ -7697,6 +7797,7 @@ fn request_of<'c>(
     cand: &'c EndpointCandidate,
     receiver_type: Option<&str>,
     alias_module: Option<&str>,
+    axios_file: bool,
 ) -> RequestRead<'c> {
     let w = &cand.wire;
     if w.fetch {
@@ -7720,6 +7821,7 @@ fn request_of<'c>(
     if cand.receiver_field.is_some() {
         return match receiver_type {
             Some("HttpClient") => second(),
+            Some(t) if axios_file && AXIOS_INSTANCE_TYPES.contains(&t) => second(),
             _ => unknown(),
         };
     }
@@ -7731,6 +7833,22 @@ fn request_of<'c>(
         Some("ky" | "ky-universal" | "got") => RequestRead::NoBody,
         _ => unknown(),
     }
+}
+
+/// GD.12: the axios client types whose `post` / `put` / `patch` take the body
+/// second, as the `axios` default export does.
+const AXIOS_INSTANCE_TYPES: &[&str] = &["AxiosInstance", "AxiosStatic"];
+
+/// The client libraries whose response promise is typed by `.json<T>()`
+/// after the call (GD.12, [`json_after_call`]).
+const JSON_AFTER_MODULES: &[&str] = &["ky", "ky-universal", "got"];
+
+/// GD.12: whether the file imports the module `module` (any import form).
+fn imports_module(imports: &[ImportStmt], module: &str) -> bool {
+    imports.iter().any(|imp| match &imp.target {
+        ImportTarget::Symbol { module: m, .. } => m == module,
+        ImportTarget::Module { path, .. } => path == module,
+    })
 }
 
 /// DT.1d: the module the import binding `binding` comes from (`axios` for
@@ -8263,6 +8381,149 @@ fn fetch_response(call: TsNode, src: &[u8]) -> Option<Shape> {
     }
 }
 
+/// GD.12: a `fetch` call's response through a promise chain
+/// `fetch(..).then((r) => r.json())` (the callback's body `r.json()`, or a
+/// block returning it, on its first parameter `r`), typed by, in order:
+///
+/// - the next `.then((x: T) => ..)` callback's first parameter annotation;
+/// - the inner `r.json() as T` / `as Promise<T>`;
+/// - the chain's own `as T` / `as Promise<T>` or the annotation of the
+///   `const` it initialises, through `await` ([`json_result_type`]);
+/// - the enclosing function's declared `Promise<T>` return type, when the
+///   chain (awaited or not) is the whole returned expression or an arrow
+///   function's whole body.
+///
+/// `None` when the call is no such chain's head or nothing types it.
+fn then_json_response(call: TsNode, src: &[u8]) -> Option<Shape> {
+    let mut head = call;
+    while let Some(p) = head.parent() {
+        if !matches!(p.kind(), "parenthesized_expression" | "non_null_expression") {
+            break;
+        }
+        head = p;
+    }
+    let then_call = then_call_of(head, src)?;
+    let callback = then_call
+        .child_by_field_name("arguments")?
+        .named_child(0)
+        .filter(|a| matches!(a.kind(), "arrow_function" | "function_expression"))?;
+    let inner_json = callback_json_call(callback, src)?;
+    if let Some(next) = then_call_of(then_call, src)
+        && let Some(ty) = next
+            .child_by_field_name("arguments")
+            .and_then(|a| a.named_child(0))
+            .filter(|a| matches!(a.kind(), "arrow_function" | "function_expression"))
+            .and_then(first_param_type)
+    {
+        return Some(ts_type_shape(ty, src));
+    }
+    if let Some(s) = json_result_type(inner_json, src) {
+        return Some(s);
+    }
+    if let Some(s) = json_result_type(then_call, src) {
+        return Some(s);
+    }
+    returned_promise_type(then_call, src)
+}
+
+/// The `<node>.then(..)` call `node` is the receiver of, if any.
+fn then_call_of<'t>(node: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let member = node.parent()?;
+    if member.kind() != "member_expression"
+        || member.child_by_field_name("object") != Some(node)
+        || member
+            .child_by_field_name("property")
+            .is_none_or(|p| text(p, src) != "then")
+    {
+        return None;
+    }
+    let call = member.parent()?;
+    (call.kind() == "call_expression" && call.child_by_field_name("function") == Some(member))
+        .then_some(call)
+}
+
+/// The `<r>.json()` call a `.then` callback returns on its first parameter
+/// `r`: an expression body, or a block whose only statement returns it.
+fn callback_json_call<'t>(callback: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let param = first_param_name(callback, src)?;
+    let body = callback.child_by_field_name("body")?;
+    let mut expr = if body.kind() == "statement_block" {
+        let mut cursor = body.walk();
+        let stmts: Vec<TsNode> = body
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() != "comment")
+            .collect();
+        match stmts.as_slice() {
+            [ret] if ret.kind() == "return_statement" => first_named(*ret)?,
+            _ => return None,
+        }
+    } else {
+        body
+    };
+    while matches!(
+        expr.kind(),
+        "parenthesized_expression" | "as_expression" | "satisfies_expression"
+    ) {
+        expr = first_named(expr)?;
+    }
+    let func = expr.child_by_field_name("function")?;
+    let is_json = expr.kind() == "call_expression"
+        && func.kind() == "member_expression"
+        && func
+            .child_by_field_name("object")
+            .is_some_and(|o| o.kind() == "identifier" && text(o, src) == param)
+        && func
+            .child_by_field_name("property")
+            .is_some_and(|p| text(p, src) == "json");
+    is_json.then_some(expr)
+}
+
+/// The first parameter of an arrow / function expression: its name.
+fn first_param_name<'s>(callback: TsNode, src: &'s [u8]) -> Option<&'s str> {
+    if let Some(p) = callback.child_by_field_name("parameter") {
+        return (p.kind() == "identifier").then(|| text(p, src));
+    }
+    let params = callback.child_by_field_name("parameters")?;
+    let first = params.named_child(0)?;
+    let pattern = first.child_by_field_name("pattern")?;
+    (pattern.kind() == "identifier").then(|| text(pattern, src))
+}
+
+/// The declared type of an arrow / function expression's first parameter.
+fn first_param_type(callback: TsNode) -> Option<TsNode> {
+    let params = callback.child_by_field_name("parameters")?;
+    let first = params.named_child(0)?;
+    if !matches!(first.kind(), "required_parameter" | "optional_parameter") {
+        return None;
+    }
+    first.child_by_field_name("type").and_then(first_named)
+}
+
+/// `T` of the enclosing function's declared `Promise<T>` return type, when
+/// `expr` (through `await` and parentheses) is the whole returned expression
+/// or an arrow function's whole body.
+fn returned_promise_type(expr: TsNode, src: &[u8]) -> Option<Shape> {
+    let mut node = expr;
+    loop {
+        let p = node.parent()?;
+        match p.kind() {
+            "await_expression" | "parenthesized_expression" | "non_null_expression" => node = p,
+            "return_statement" => break,
+            "arrow_function" if p.child_by_field_name("body") == Some(node) => break,
+            _ => return None,
+        }
+    }
+    let callable = enclosing_callable(node);
+    let ret = callable
+        .child_by_field_name("return_type")
+        .and_then(first_named)?;
+    let is_promise = ret.kind() == "generic_type"
+        && ret
+            .child_by_field_name("name")
+            .is_some_and(|n| text(n, src) == "Promise");
+    is_promise.then(|| ts_type_shape(unwrap_promise(ret, src), src))
+}
+
 /// The type a `.json()` call's result is given: climbing through `await`,
 /// parentheses and `!`, an `as T` / `satisfies T` (`Promise<T>` unwrapped to
 /// `T`), or the annotation of the `const` / `let` it initialises.
@@ -8325,8 +8586,27 @@ fn enclosing_callable(n: TsNode) -> TsNode {
     cur
 }
 
-fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
+/// GD.12: the callee of an awaited generic call, `await recv.m<T>(..)` or
+/// `await f<T>(..)`: tree-sitter-typescript 0.23.2 parses it with the `await`
+/// inside the callee ([`awaited_generic_callee`]), so the call's `function`
+/// is an `await_expression` whose operand is the member or identifier the
+/// unawaited form calls. `None` for every other call.
+fn awaited_generic_target(call: TsNode) -> Option<TsNode> {
     let func = call.child_by_field_name("function")?;
+    if func.kind() != "await_expression" {
+        return None;
+    }
+    call.child_by_field_name("type_arguments")?;
+    first_named(func).filter(|f| matches!(f.kind(), "member_expression" | "identifier"))
+}
+
+/// The CallSite qualifier of `call`; an awaited generic call is read through
+/// its unawaited callee ([`awaited_generic_target`], GD.12).
+fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
+    let func = match awaited_generic_target(call) {
+        Some(f) => f,
+        None => call.child_by_field_name("function")?,
+    };
     match func.kind() {
         "identifier" => Some(CallQualifier::Bare(text(func, src).to_string())),
         "member_expression" => {
@@ -9448,11 +9728,17 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
 
     let mut endpoint_nav_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let repo = acc.repo.expect("Acc.repo set in parse_file");
-    let mut wire_stats = WireStats::default();
+    let mut wire_stats = WireStats {
+        awaited_callsites: acc.awaited_callsites,
+        ..WireStats::default()
+    };
+    // GD.12: an `AxiosInstance` / `AxiosStatic` field is axios's only in a
+    // file that imports axios.
+    let axios_file = imports_module(&out.imports, "axios");
     // GD.29: an ESLint `/* global axios */` binds `axios` like an import.
     let http_aliases = http_alias_set(&out.imports, &acc.declared_globals);
     let mut site_classes: BTreeSet<String> = BTreeSet::new();
-    for cand in acc.endpoints {
+    for mut cand in acc.endpoints {
         if let Some(req) = cand.requires_import_alias.as_ref()
             && !http_aliases.contains(req.as_str())
         {
@@ -9484,8 +9770,19 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             .requires_import_alias
             .as_deref()
             .and_then(|a| import_module(&out.imports, a));
-        let request = request_of(&cand, receiver_type, alias_module);
-        wire_stats.record(&cand, &request);
+        // GD.12: ky / got type the response after the call (`.json<T>()`).
+        let ky = cand.wire.response.is_none()
+            && cand.receiver_field.is_none()
+            && alias_module.is_some_and(|m| JSON_AFTER_MODULES.contains(&m))
+            && cand.wire.json_after.is_some();
+        if ky {
+            cand.wire.response = cand.wire.json_after.take();
+        }
+        let axios_instance = cand.receiver_field.is_some()
+            && axios_file
+            && receiver_type.is_some_and(|t| AXIOS_INSTANCE_TYPES.contains(&t));
+        let request = request_of(&cand, receiver_type, alias_module, axios_file);
+        wire_stats.record(&cand, &request, axios_instance, ky);
         let request = match request {
             RequestRead::Body(r) => r.map(|(s, _)| s.clone()),
             RequestRead::UnknownClient | RequestRead::NoBody => None,
@@ -16037,6 +16334,196 @@ mod wire_shape_tests {
             Some("{\"array\":true,\"type\":\"Order\"}")
         );
         assert_eq!(last_stats().awaited_generic, 2);
+    }
+
+    /// GD.12: a receiver field typed `AxiosInstance` / `AxiosStatic` in a
+    /// file importing axios takes axios's body position (the second argument
+    /// of `post` / `put` / `patch`); the same field in a file with no axios
+    /// import stays an unknown client.
+    #[test]
+    fn axios_instance_field_writes_request() {
+        let src = "import axios, { AxiosInstance, AxiosStatic } from 'axios';\n\
+                   export class Api {\n  \
+                   private raw: AxiosStatic = axios;\n  \
+                   constructor(private http: AxiosInstance = axios.create()) {}\n  \
+                   save(u: User) { return this.http.post('/api/users', u); }\n  \
+                   patch(id: string) { return this.raw.patch(`/api/users/${id}`, { name: 'n' }); }\n  \
+                   list() { return this.http.get<User[]>('/api/users', { params: {} }); }\n}\n";
+        let p = parse(src, "src/api.ts");
+        assert_eq!(
+            shapes(&sole(&p, "POST", "/api/users")).1.as_deref(),
+            Some("{\"type\":\"User\"}")
+        );
+        let patch = sole(&p, "PATCH", "/api/users/${…}");
+        assert!(
+            shapes(&patch)
+                .1
+                .is_some_and(|r| r.contains("\"name\":\"name\"")),
+            "{patch}"
+        );
+        let get = sole(&p, "GET", "/api/users");
+        assert_eq!(shapes(&get).1, None, "get's second argument is config");
+        let st = last_stats();
+        assert_eq!(
+            (st.axios_instance, st.requests, st.unknown_client),
+            (2, 2, 0)
+        );
+
+        // No axios import: the type name alone is no axios client.
+        let src = "import { AxiosInstance } from './my-http';\n\
+                   export class Api {\n  \
+                   constructor(private http: AxiosInstance) {}\n  \
+                   save(u: User) { return this.http.post('/api/users', u); }\n}\n";
+        let p = parse(src, "src/api.ts");
+        assert_eq!(shapes(&sole(&p, "POST", "/api/users")).1, None);
+        let st = last_stats();
+        assert_eq!((st.axios_instance, st.unknown_client), (0, 1));
+    }
+
+    /// GD.12: `fetch(..).then((r) => r.json())` typed by the next `.then`
+    /// callback's parameter, an `as Promise<T>`, a declarator annotation or
+    /// the enclosing function's `Promise<T>` return; an untyped chain and a
+    /// chain that maps the JSON further before returning stay untyped.
+    #[test]
+    fn fetch_then_json_chain_types_response() {
+        let src = "export function a(id: number) {\n  \
+                   return fetch(`/api/a/${id}`).then((r) => r.json()).then((o: Order) => o);\n}\n\
+                   export function b(): Promise<Item[]> {\n  \
+                   return fetch('/api/b').then(res => res.json());\n}\n\
+                   export async function c() {\n  \
+                   const d: Stats = await fetch('/api/c').then(function (r) { return r.json(); });\n  \
+                   return d;\n}\n\
+                   export function d() {\n  \
+                   return fetch('/api/d').then((r) => r.json() as Promise<Ping>);\n}\n\
+                   export function e() {\n  \
+                   return fetch('/api/e').then((r) => r.json());\n}\n\
+                   export function f(): Promise<Order> {\n  \
+                   return fetch('/api/f').then((r) => r.json()).then((x) => x.order);\n}\n\
+                   export const g = (): Promise<Order> => fetch('/api/g').then((r) => r.json());\n";
+        let p = parse(src, "src/fetches.ts");
+        let resp = |m: &str, path: &str| shapes(&sole(&p, m, path)).0;
+        assert_eq!(
+            resp("GET", "/api/a/${…}").as_deref(),
+            Some("{\"type\":\"Order\"}")
+        );
+        assert_eq!(
+            resp("GET", "/api/b").as_deref(),
+            Some("{\"array\":true,\"type\":\"Item\"}")
+        );
+        assert_eq!(
+            resp("GET", "/api/c").as_deref(),
+            Some("{\"type\":\"Stats\"}")
+        );
+        assert_eq!(
+            resp("GET", "/api/d").as_deref(),
+            Some("{\"type\":\"Ping\"}")
+        );
+        assert_eq!(resp("GET", "/api/e"), None, "nothing types the chain");
+        assert_eq!(
+            resp("GET", "/api/f"),
+            None,
+            "the return is the mapped value"
+        );
+        assert_eq!(
+            resp("GET", "/api/g").as_deref(),
+            Some("{\"type\":\"Order\"}")
+        );
+        let st = last_stats();
+        assert_eq!((st.then_json, st.fetch, st.responses), (5, 5, 5));
+    }
+
+    /// GD.12: ky's (and got's) `.json<T>()` after the call types the
+    /// response, awaited or not; an `as T` on `.json()` too; a library the
+    /// file does not import as ky / got never reads it.
+    #[test]
+    fn ky_json_after_call_types_response() {
+        let src = "import ky from 'ky';\n\
+                   export async function users() { return ky.get('/api/users').json<User[]>(); }\n\
+                   export async function one() { const u = await ky.get('/api/one').json<User>(); return u; }\n\
+                   export async function save(u: User) {\n  \
+                   return ky.post('/api/users', { json: u }).json<{ id: string }>();\n}\n\
+                   export async function cast() { return (await ky.get('/api/cast').json()) as Ping; }\n";
+        let p = parse(src, "src/ky.ts");
+        let resp = |m: &str, path: &str| shapes(&sole(&p, m, path));
+        assert_eq!(
+            resp("GET", "/api/users").0.as_deref(),
+            Some("{\"array\":true,\"type\":\"User\"}")
+        );
+        assert_eq!(
+            resp("GET", "/api/one").0.as_deref(),
+            Some("{\"type\":\"User\"}")
+        );
+        let save = resp("POST", "/api/users");
+        assert!(save.0.is_some_and(|r| r.contains("\"name\":\"id\"")));
+        assert_eq!(save.1.as_deref(), Some("{\"type\":\"User\"}"));
+        assert_eq!(
+            resp("GET", "/api/cast").0.as_deref(),
+            Some("{\"type\":\"Ping\"}")
+        );
+        assert_eq!(last_stats().ky, 4);
+
+        let src = "import axios from 'axios';\n\
+                   export async function users() { return axios.get('/api/users').json<User[]>(); }\n";
+        let p = parse(src, "src/ax.ts");
+        assert_eq!(shapes(&sole(&p, "GET", "/api/users")).0, None);
+        assert_eq!(last_stats().ky, 0);
+    }
+
+    /// GD.12: `await recv.m<T>(..)` / `await f<T>(..)` are CallSites read
+    /// through the unawaited callee, as `recv.m<T>(..)` is; the file's
+    /// `[ts-wire]` counts them.
+    #[test]
+    fn awaited_generic_call_is_a_callsite() {
+        let src = "export class Repo {\n  async find<T>(id: number): Promise<T> { return {} as T; }\n}\n\
+                   export async function load<T>(u: string): Promise<T> { return {} as T; }\n\
+                   export class Store {\n  constructor(private repo: Repo) {}\n  \
+                   async get(id: number) { return await this.repo.find<Order>(id); }\n  \
+                   async other(r: Repo) { return await r.find<Order>(1); }\n  \
+                   async bare() { return await load<Order>('/x'); }\n}\n";
+        let p = parse_file(src, "src/repo.ts", "src::repo", repo()).unwrap();
+        let get = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::repo::Store::get",
+        );
+        let other = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::repo::Store::other",
+        );
+        let bare = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::repo::Store::bare",
+        );
+        let find = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "src::repo::Repo::find",
+        );
+        let load = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::repo::load");
+        let called = |from: NodeId, name: &str, to: NodeId| {
+            p.edges
+                .iter()
+                .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+                || p.calls.iter().any(|c| {
+                    c.from == from
+                        && match &c.qualifier {
+                            CallQualifier::Bare(n) => n == name,
+                            CallQualifier::Attribute { name: n, .. }
+                            | CallQualifier::ComplexReceiver { name: n, .. } => n == name,
+                            _ => false,
+                        }
+                })
+        };
+        assert!(called(get, "find", find), "{:?} {:?}", p.calls, p.edges);
+        assert!(called(other, "find", find), "{:?}", p.calls);
+        assert!(called(bare, "load", load), "{:?}", p.calls);
+        assert_eq!(last_stats().awaited_callsites, 3);
     }
 
     /// fetch: the init's `body: JSON.stringify(<expr>)` is the request, and

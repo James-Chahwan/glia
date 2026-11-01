@@ -1,0 +1,8 @@
+{
+  "name": "ts-wire-residuals-web",
+  "private": true,
+  "dependencies": {
+    "axios": "^1.7.0",
+    "ky": "^1.7.0"
+  }
+}
