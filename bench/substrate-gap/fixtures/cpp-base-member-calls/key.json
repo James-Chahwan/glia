@@ -1,0 +1,22 @@
+{
+  "framework": "cpp-base-member-calls",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "GD.6 (FD.12; DF.5 / DF.21 residual 'C++ heritage'): parsers/code/c_cpp/src/lib.rs read no base_class_clause, so a derived class had no INHERITS_FROM, graph/src/cpp_scope.rs CppScope.bases stayed empty, and a call to an inherited member from a derived class (implicit `Show()` and `this->Show()`, the Flutter Windows runner's shape) bound nothing. HEAD 7092bc1f (debug CLI): nodes Base, Base::Show, win.cpp::Win, win.cpp::Win::Run; no INHERITS_FROM, no CALLS. After: the base clause is an INHERITS_FROM ref bound through C++ lookup over the include closure, and both calls bind Base::Show (rule implicit_this).",
+  "expect_edges": [
+    {
+      "from": "win.cpp::Win",
+      "to": "Base",
+      "category": "INHERITS_FROM",
+      "note": "class Win : public Base, Base declared in the included win.h"
+    },
+    {
+      "from": "win.cpp::Win::Run",
+      "to": "Base::Show",
+      "category": "CALLS",
+      "note": "implicit Show() and this->Show() bind the base's member"
+    }
+  ]
+}

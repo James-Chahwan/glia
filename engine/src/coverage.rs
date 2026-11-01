@@ -330,8 +330,16 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "c_cpp",
         edge_category: "CALLS",
-        note: "C/C++ calls resolve by name, and a qname carries no signature, so an overload set is one node. A bare call in a member binds the class's own member first; `Type::m()` / `ns::f()` bind through C++ name lookup; a call on a receiver binds through the declared type of a field, parameter or typed local (`using` applied), or of an `auto` local initialised by an unqualified call (`auto b = make_box(); b.get()`, typed by the callee's declared return type, rule receiver_return), and a virtual call binds that static type's member, never an override. A call inside a lambda body is a call of the function holding the lambda (its parameters and locals are that function's). A function in another file is reached only through an include glia resolves (see IMPORTS); one reached through a header prototype binds when exactly one non-static definition of it sits in a .c / .cc / .cpp / .cxx file, or, among several, the one beside the declaring header. Not bound: a member only a base class declares (the C/C++ parser emits no INHERITS_FROM, so `get()` / `this->put()` in a subclass binds nothing), a call through a function pointer or a variable holding a lambda (`f(3)`; a lambda is no node), a template-dependent call (`t.f()` on a template parameter), a macro-expanded call, a chain or a direct return (`make().f()`), and a receiver that is an `auto` local initialised by a qualified call (`auto u = ns::make()`), a member call (`auto c = b.clone()`) or a function declared with a trailing return type (`auto make() -> Box`), or a lambda init-capture (`[k = make()]`)",
+        note: "C/C++ calls resolve by name, and a qname carries no signature, so an overload set is one node. A bare call in a member binds the class's own member first, then the member of the nearest base class that declares it (the base clause's INHERITS_FROM, see that row; `this->m()` alike, rule implicit_this; two bases of one level both declaring it bind neither); `Type::m()` / `ns::f()` bind through C++ name lookup; a call on a receiver binds through the declared type of a field, parameter or typed local (`using` applied), or of an `auto` local initialised by an unqualified call (`auto b = make_box(); b.get()`, typed by the callee's declared return type, rule receiver_return), and a virtual call binds that static type's member, never an override. A call inside a lambda body is a call of the function holding the lambda (its parameters and locals are that function's). A function in another file is reached only through an include glia resolves (see IMPORTS); one reached through a header prototype binds when exactly one non-static definition of it sits in a .c / .cc / .cpp / .cxx file, or, among several, the one beside the declaring header. Not bound: a member of a base class the base clause does not bind (a system or third-party header's base, a base a template parameter names), a call through a function pointer or a variable holding a lambda (`f(3)`; a lambda is no node), a template-dependent call (`t.f()` on a template parameter), a macro-expanded call, a chain or a direct return (`make().f()`), and a receiver that is an `auto` local initialised by a qualified call (`auto u = ns::make()`), a member call (`auto c = b.clone()`) or a function declared with a trailing return type (`auto make() -> Box`), or a lambda init-capture (`[k = make()]`)",
         verify: "grep the callee name across the .c / .cc / .cpp / .h / .hpp files",
+    },
+    // GD.6: the base clause is INHERITS_FROM, measured on
+    // fixtures/cpp-base-member-calls plus a probe of each not-bound shape.
+    CoverageCaveat {
+        language: "c_cpp",
+        edge_category: "INHERITS_FROM",
+        note: "a class's or struct's base clause (`class Win : public Base, private ns::Mixin`) is INHERITS_FROM, the base looked up as a type from the scope enclosing the class over its file's include closure (`using` applied, a rooted `::Base` from the global namespace alone); a template base binds its template by name only (`Base<T>` -> `Base`, every specialisation one node). Not bound: a base no included file declares (a system or third-party header's QWidget, or an in-repo class reached only through an include glia does not resolve, see IMPORTS), a name two visible types share, a template-dependent base (`: public T`, `: T::Inner`), a base named through a typedef or alias (`using B = Impl;`), `decltype(..)` and a pack expansion",
+        verify: "grep the base name in the class's base clause and the headers its file includes",
     },
     CoverageCaveat {
         language: "c_cpp",
@@ -441,9 +449,10 @@ pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
             "[coverage] kotlin: residual rows declared for calls/heritage/imports/routes/http clients"
         );
     }
-    // CB.26: a C/C++ repo is told its CALLS / IMPORTS residual.
+    // CB.26: a C/C++ repo is told its CALLS / IMPORTS residual (GD.6: and
+    // its INHERITS_FROM one).
     if langs.contains("c_cpp") {
-        eprintln!("[coverage] c_cpp: residual rows declared for calls/imports");
+        eprintln!("[coverage] c_cpp: residual rows declared for calls/heritage/imports");
     }
     notes(merged, |c| c.language == "*" || langs.contains(c.language))
 }
@@ -916,6 +925,19 @@ mod tests {
             [("swift", "IMPLEMENTS"), ("swift", "INHERITS_FROM")]
         );
         assert_eq!(rows("src/lib.rs"), [("rust", "INHERITS_FROM")]);
+        // GD.6: the C++ base clause is extracted; the row names the residual
+        // (template-dependent and invisible bases).
+        assert_eq!(rows("src/win.cpp"), [("c_cpp", "INHERITS_FROM")]);
+        let cpp = row_note("src/win.cpp", "c_cpp", "INHERITS_FROM");
+        for part in [
+            "base clause",
+            "include closure",
+            "`Base<T>` -> `Base`",
+            "template-dependent base",
+            "system or third-party header",
+        ] {
+            assert!(cpp.contains(part), "{part}: {cpp}");
+        }
         assert!(rows("Repo.java").is_empty());
         let go = coverage_report(&graph_with_file("main.go"));
         let go_row = go.iter().find(|n| n.language == "go").map(|n| n.note);
@@ -1152,7 +1174,11 @@ mod tests {
             );
             assert_eq!(ext_to_language(&path), Some("c_cpp"), "{path}");
         }
-        let want = [("c_cpp", "CALLS"), ("c_cpp", "IMPORTS")];
+        let want = [
+            ("c_cpp", "CALLS"),
+            ("c_cpp", "IMPORTS"),
+            ("c_cpp", "INHERITS_FROM"),
+        ];
         assert_eq!(lang_rows("src/a.cpp", "c_cpp"), want);
         assert_eq!(lang_rows("include/a.hh", "c_cpp"), want);
         assert_eq!(lang_rows("lib/codec.c", "c_cpp"), want);
@@ -1401,8 +1427,10 @@ mod tests {
         );
         assert!(bound.contains("auto b = make_box()"), "DF.5: {calls}");
         assert!(unbound.contains("(`make().f()`)"), "{calls}");
-        // The bound half no longer claims an inherited member binds.
-        assert!(!bound.contains("inherited"), "{calls}");
+        // GD.6: a base class's member binds through the base clause.
+        assert!(bound.contains("nearest base class"), "GD.6: {calls}");
+        assert!(!unbound.contains("emits no INHERITS_FROM"), "GD.6: {calls}");
+        assert!(unbound.contains("template parameter names"), "{calls}");
 
         let imports = row_note("include/a.hh", "c_cpp", "IMPORTS");
         assert!(

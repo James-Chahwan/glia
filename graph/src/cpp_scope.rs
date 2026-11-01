@@ -39,20 +39,36 @@
 //! up from the callee's own file and scope) types the receiver, rule
 //! `receiver_return`.
 //!
-//! fired_on marker, once per C/C++ graph:
+//! A class's bases (GD.6) are its `base_class_clause`'s INHERITS_FROM refs,
+//! bound by [`CppScope::bind_bases`] before any call resolves: the type the
+//! base names, looked up from the scope enclosing the class over its file's
+//! include closure, as above (`using` applied, a rooted `::B` from the global
+//! namespace alone). A base no visible file declares (a system or third-party
+//! header) or two visible types of its name bind nothing; a template base is
+//! its template (`Base<T>` -> `Base`). The bound bases feed implicit `this`
+//! and `this->m()` (rule `implicit_this`): the nearest base declaring `m`.
+//!
+//! fired_on markers, once per C/C++ graph:
 //! `[cpp-scope] implicit_this=<a> qualified=<b> receiver_using=<c> prototype=<d> using=<e> ambiguous=<f> receiver_return=<g>`
-//! — grep `^\[cpp-scope\]`.
+//! — grep `^\[cpp-scope\]`; with a base clause in the graph, `[cpp-scope]
+//! base member calls bound=<n>` (the calls bound to a base's member) and, per
+//! file with a base clause, `[cpp-heritage] bases=<n> bound=<b> path=<p>`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
-use glia_code_domain::evidence::Evidence;
-use glia_code_domain::{CallQualifier, CallSite, CodeNav, NavFact, edge_category, node_kind};
+use glia_code_domain::evidence::{Evidence, locate};
+use glia_code_domain::{
+    CallQualifier, CallSite, CodeNav, NavFact, UnresolvedRef, edge_category, node_kind,
+};
 use glia_core::NodeId;
 
 use crate::build::{cpp_join, cpp_name, cpp_ns_prefixes, is_cpp_type};
-use crate::calls::{enclosing_class_or_struct, enclosing_module, graph_evidence, receiver_type};
+use crate::calls::{
+    SiteFiles, enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge,
+    receiver_type,
+};
 use crate::types::RepoGraph;
 
 /// The EVIDENCE emitter of every edge the hook binds.
@@ -72,6 +88,8 @@ const RECEIVER_USING: &str = "receiver_using";
 const PROTOTYPE: &str = "prototype";
 const USING: &str = "using";
 const RECEIVER_RETURN: &str = "receiver_return";
+/// GD.6: the INHERITS_FROM rule of a base bound from a base clause.
+const BASE_CLAUSE: &str = "base_clause";
 
 /// A namespace-scope FUNCTION: its file MODULE, its C++ namespace and
 /// whether it is a definition a prototype elsewhere can name (a source file's
@@ -163,8 +181,13 @@ pub(crate) struct CppScope {
     /// Every file's `using`s, `g.nodes` order then fact order.
     usings: Vec<Using>,
     /// CLASS / STRUCT -> its bases, from INHERITS_FROM edges already in the
-    /// graph when the pass runs, edge order.
+    /// graph when the pass runs, edge order, then the base clauses
+    /// [`CppScope::bind_bases`] bound (GD.6), ref order.
     bases: HashMap<NodeId, Vec<NodeId>>,
+    /// GD.6: a base clause was read in this graph (the base-member marker).
+    base_clauses: bool,
+    /// GD.6: calls bound to a base's member, rule `implicit_this`.
+    base_calls: Cell<usize>,
     qualified: Cell<usize>,
     receiver_using: Cell<usize>,
     prototype: Cell<usize>,
@@ -293,6 +316,8 @@ impl CppScope {
             prototypes,
             usings,
             bases,
+            base_clauses: false,
+            base_calls: Cell::new(0),
             qualified: Cell::new(0),
             receiver_using: Cell::new(0),
             prototype: Cell::new(0),
@@ -335,9 +360,10 @@ impl CppScope {
     }
 
     /// The `[cpp-scope]` fired_on line, `implicit_this` being
-    /// [`implicit_this`]'s count.
+    /// [`implicit_this`]'s count; in a graph that read a base clause (GD.6),
+    /// a second line `[cpp-scope] base member calls bound=<n>`.
     pub(crate) fn marker(&self, implicit_this: usize) -> String {
-        format!(
+        let line = format!(
             "[cpp-scope] implicit_this={implicit_this} qualified={} receiver_using={} \
              prototype={} using={} ambiguous={} receiver_return={}",
             self.qualified.get(),
@@ -346,7 +372,99 @@ impl CppScope {
             self.using.get(),
             self.ambiguous.get(),
             self.receiver_return.get()
-        )
+        );
+        if self.base_clauses {
+            format!(
+                "{line}\n[cpp-scope] base member calls bound={}",
+                self.base_calls.get()
+            )
+        } else {
+            line
+        }
+    }
+
+    /// GD.6: bind the base-clause INHERITS_FROM refs the C/C++ parser
+    /// records on a CLASS / STRUCT, before any call resolves, so implicit
+    /// `this` and `this->m()` see the bases. Each base is looked up as a type
+    /// from the scope enclosing the class over its file's include closure
+    /// ([`Self::lookup_type`]; `Bare(B)` is `B`, `Attribute { base: q, name:
+    /// B }` is `q::B`, an empty `q` the rooted `::B`); one visible type binds
+    /// an INHERITS_FROM edge (emitter `graph:cpp_scope`, rule `base_clause`,
+    /// at the base's row), and none or several leave the ref in
+    /// `g.unresolved_refs` (several counted ambiguous). A type never extends
+    /// itself. The refs taken are removed from `refs`, so the generic
+    /// resolver never binds a C++ base by a repo-unique name; every other ref
+    /// stays, in order. Prints one `[cpp-heritage] bases=<n> bound=<b>
+    /// path=<p>` per file with a base clause, in file order.
+    pub(crate) fn bind_bases(&mut self, g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) {
+        let (mine, rest): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+            std::mem::take(refs).into_iter().partition(|r| {
+                r.category == edge_category::INHERITS_FROM && is_cpp_type(&g.nav, r.from)
+            });
+        *refs = rest;
+        if mine.is_empty() {
+            return;
+        }
+        self.base_clauses = true;
+        let files = SiteFiles::of(g);
+        // File MODULE -> (bases, bound), first-ref order; `slot_of` is a
+        // lookup only, never iterated.
+        let mut per_file: Vec<(NodeId, usize, usize)> = Vec::new();
+        let mut slot_of: HashMap<NodeId, usize> = HashMap::new();
+        for r in mine {
+            let full = match &r.qualifier {
+                CallQualifier::Bare(name) => name.clone(),
+                CallQualifier::Attribute { base, name } => format!("{base}::{name}"),
+                _ => String::new(),
+            };
+            let vis = self.visible(r.from_module);
+            let scope = def_scope(&g.nav, r.from);
+            let to = match self.lookup_type(&vis, &scope, &full) {
+                Found::One(to) if to != r.from => Some(to),
+                Found::Many => {
+                    self.ambiguous.set(self.ambiguous.get() + 1);
+                    None
+                }
+                _ => None,
+            };
+            let slot = *slot_of.entry(r.from_module).or_insert_with(|| {
+                per_file.push((r.from_module, 0, 0));
+                per_file.len() - 1
+            });
+            if let Some(entry) = per_file.get_mut(slot) {
+                entry.1 += 1;
+                entry.2 += usize::from(to.is_some());
+            }
+            let Some(to) = to else {
+                g.unresolved_refs.push(r);
+                continue;
+            };
+            let known = self.bases.entry(r.from).or_default();
+            if known.contains(&to) {
+                continue;
+            }
+            known.push(to);
+            let ev = files.place(graph_evidence(EMITTER, BASE_CLAUSE), &r);
+            push_edge(g, r.from, to, edge_category::INHERITS_FROM, ev);
+        }
+        let mut paths: HashMap<NodeId, String> = HashMap::new();
+        for n in &g.nodes {
+            if slot_of.contains_key(&n.id)
+                && !paths.contains_key(&n.id)
+                && let Some((file, _)) = locate(&n.cells)
+            {
+                paths.insert(n.id, file);
+            }
+        }
+        for (module, bases, bound) in per_file {
+            let path = paths
+                .remove(&module)
+                .or_else(|| g.nav.qname_by_id.get(&module).map(|q| q.replace("::", "/")))
+                .unwrap_or_default();
+            // GD.6 fired_on, per file with a base clause:
+            //   `glia analyze <repo> 2>&1 | grep '^\[cpp-heritage\]'`
+            eprintln!("[cpp-heritage] bases={bases} bound={bound} path={path}");
+        }
     }
 
     /// A lookup's answer as the hook's: one node binds under `rule` (and is
@@ -354,6 +472,9 @@ impl CppScope {
     fn settle(&self, found: Found, rule: &'static str) -> Option<(NodeId, Evidence)> {
         match found {
             Found::One(to) => {
+                if rule == IMPLICIT_THIS {
+                    self.base_calls.set(self.base_calls.get() + 1);
+                }
                 let count = match rule {
                     QUALIFIED => Some(&self.qualified),
                     RECEIVER_USING => Some(&self.receiver_using),
@@ -978,6 +1099,19 @@ mod tests {
             self
         }
 
+        /// GD.6: a base-clause INHERITS_FROM ref from type `from`, as the
+        /// parser records it.
+        fn base(mut self, from: &str, qualifier: CallQualifier) -> Self {
+            self.parse.refs.push(UnresolvedRef {
+                from: self.ids[from],
+                from_module: gid(node_kind::MODULE, &self.module),
+                qualifier,
+                category: edge_category::INHERITS_FROM,
+                line: 0,
+            });
+            self
+        }
+
         fn call(mut self, from: &str, qualifier: CallQualifier) -> Self {
             let line = u32::try_from(self.parse.calls.len()).unwrap_or(0);
             self.parse.calls.push(CallSite {
@@ -1156,6 +1290,177 @@ mod tests {
         assert_eq!(implicit_this(&g, &scope, &mut calls), 1);
         assert_eq!(calls[0].qualifier, CallQualifier::SelfMethod("ping".into()));
         assert_eq!(calls[1].qualifier, bare("Derived"));
+    }
+
+    /// GD.6: the INHERITS_FROM edges out of `from` (a CLASS qname): target
+    /// qname and evidence rule.
+    fn bases_from(g: &RepoGraph, from: &str) -> Vec<(String, String)> {
+        let from = gid(node_kind::CLASS, from);
+        g.edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::INHERITS_FROM)
+            .map(|e| {
+                let to = g.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default();
+                let ev = Evidence::of(e).expect("every INHERITS_FROM edge carries EVIDENCE");
+                assert_eq!(ev.emitter, EMITTER);
+                (to, ev.rule.unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// `src::win.h`: `class Base { Show(); }`, plus `src::win.cpp` including
+    /// it with `class Win { Run(); }` (its base clause and calls added by
+    /// each test).
+    fn win_files() -> (File, File) {
+        let h = File::new("src::win.h")
+            .item(node_kind::CLASS, "Base", "Base", None)
+            .item(node_kind::METHOD, "Base::Show", "Show", Some("Base"));
+        let cpp = File::new("src::win.cpp")
+            .include("win.h")
+            .item(node_kind::CLASS, "src::win.cpp::Win", "Win", None)
+            .item(
+                node_kind::METHOD,
+                "src::win.cpp::Win::Run",
+                "Run",
+                Some("src::win.cpp::Win"),
+            );
+        (h, cpp)
+    }
+
+    /// GD.6: `class Win : public Base` (Base in the included header) is an
+    /// INHERITS_FROM edge, rule `base_clause`, so the implicit `Show()` and
+    /// `this->Show()` bind the base's member (rule `implicit_this`). HEAD:
+    /// no INHERITS_FROM, no CALLS.
+    #[test]
+    fn base_clause_binds_base_member_calls() {
+        let (h, cpp) = win_files();
+        let cpp = cpp
+            .base("src::win.cpp::Win", bare("Base"))
+            .call("src::win.cpp::Win::Run", bare("Show"))
+            .call(
+                "src::win.cpp::Win::Run",
+                CallQualifier::SelfMethod("Show".into()),
+            );
+        let g = build(vec![h, cpp]);
+        assert_eq!(
+            bases_from(&g, "src::win.cpp::Win"),
+            [("Base".to_string(), BASE_CLAUSE.to_string())]
+        );
+        assert_eq!(
+            calls_from(&g, node_kind::METHOD, "src::win.cpp::Win::Run"),
+            [
+                edge("Base::Show", EMITTER, IMPLICIT_THIS),
+                edge("Base::Show", EMITTER, IMPLICIT_THIS)
+            ]
+        );
+        assert!(g.unresolved_refs.is_empty());
+    }
+
+    /// GD.6: multiple inheritance - a member one base declares binds there;
+    /// a member both bases declare binds nothing (ambiguous); a base in a
+    /// header the file does not include (a system header's `QWidget`, even
+    /// with an unincluded in-repo class of that name) binds nothing and its
+    /// ref stays unresolved, never a repo-unique name.
+    #[test]
+    fn base_clause_multiple_bases_and_invisible_base() {
+        let h = File::new("src::win.h")
+            .item(node_kind::CLASS, "Base", "Base", None)
+            .item(node_kind::METHOD, "Base::Show", "Show", Some("Base"))
+            .item(node_kind::METHOD, "Base::Ping", "Ping", Some("Base"))
+            .item(node_kind::CLASS, "Mixin", "Mixin", None)
+            .item(node_kind::METHOD, "Mixin::Hide", "Hide", Some("Mixin"))
+            .item(node_kind::METHOD, "Mixin::Ping", "Ping", Some("Mixin"));
+        let other = File::new("src::other.h").item(node_kind::CLASS, "QWidget", "QWidget", None);
+        let cpp = File::new("src::win.cpp")
+            .include("win.h")
+            .item(node_kind::CLASS, "src::win.cpp::Win", "Win", None)
+            .item(
+                node_kind::METHOD,
+                "src::win.cpp::Win::Run",
+                "Run",
+                Some("src::win.cpp::Win"),
+            )
+            .item(node_kind::CLASS, "src::win.cpp::View", "View", None)
+            .base("src::win.cpp::Win", bare("Base"))
+            .base("src::win.cpp::Win", bare("Mixin"))
+            .base("src::win.cpp::View", bare("QWidget"))
+            .call("src::win.cpp::Win::Run", bare("Show"))
+            .call(
+                "src::win.cpp::Win::Run",
+                CallQualifier::SelfMethod("Hide".into()),
+            )
+            .call("src::win.cpp::Win::Run", bare("Ping"));
+        let g = build(vec![h, other, cpp]);
+        assert_eq!(
+            bases_from(&g, "src::win.cpp::Win"),
+            [
+                ("Base".to_string(), BASE_CLAUSE.to_string()),
+                ("Mixin".to_string(), BASE_CLAUSE.to_string())
+            ]
+        );
+        assert_eq!(
+            calls_from(&g, node_kind::METHOD, "src::win.cpp::Win::Run"),
+            [
+                edge("Base::Show", EMITTER, IMPLICIT_THIS),
+                edge("Mixin::Hide", EMITTER, IMPLICIT_THIS)
+            ]
+        );
+        assert!(bases_from(&g, "src::win.cpp::View").is_empty());
+        assert_eq!(g.unresolved_refs.len(), 1);
+        assert_eq!(g.unresolved_refs[0].qualifier, bare("QWidget"));
+    }
+
+    /// GD.6: a qualified base (`ui::Base`, the parser's `Attribute { base:
+    /// "ui", name: "Base" }`) binds the type at that path though another
+    /// visible namespace declares a `Base` too; a bare base two visible
+    /// namespaces declare, looked up from the global scope, binds nothing;
+    /// a type never extends itself.
+    #[test]
+    fn base_clause_qualified_and_ambiguous() {
+        let h = File::new("src::ui.h")
+            .item(node_kind::PACKAGE, "src::ui.h::ui", "ui", None)
+            .item(node_kind::CLASS, "ui::Base", "Base", Some("src::ui.h::ui"))
+            .item(node_kind::PACKAGE, "src::ui.h::legacy", "legacy", None)
+            .item(
+                node_kind::CLASS,
+                "legacy::Base",
+                "Base",
+                Some("src::ui.h::legacy"),
+            )
+            .item(node_kind::CLASS, "Node", "Node", None);
+        let cpp = File::new("src::win.cpp")
+            .include("ui.h")
+            .item(node_kind::CLASS, "src::win.cpp::Win", "Win", None)
+            .item(node_kind::CLASS, "src::win.cpp::Old", "Old", None)
+            .base("src::win.cpp::Win", attr("ui", "Base"))
+            .base("src::win.cpp::Old", attr("legacy", "Base"))
+            .fact(NavFact::UsingNamespace {
+                within: String::new(),
+                ns: "ui".into(),
+            })
+            .fact(NavFact::UsingNamespace {
+                within: String::new(),
+                ns: "legacy".into(),
+            });
+        let node = File::new("src::node.cpp")
+            .include("ui.h")
+            .item(node_kind::CLASS, "src::node.cpp::Leaf", "Leaf", None)
+            .base("src::node.cpp::Leaf", bare("Base"));
+        let mut h = h;
+        h = h.base("Node", attr("", "Node"));
+        let g = build(vec![h, cpp, node]);
+        assert_eq!(
+            bases_from(&g, "src::win.cpp::Win"),
+            [("ui::Base".to_string(), BASE_CLAUSE.to_string())]
+        );
+        assert_eq!(
+            bases_from(&g, "src::win.cpp::Old"),
+            [("legacy::Base".to_string(), BASE_CLAUSE.to_string())]
+        );
+        // node.cpp has no `using`: `Base` names no global type.
+        assert!(bases_from(&g, "src::node.cpp::Leaf").is_empty());
+        assert!(bases_from(&g, "Node").is_empty());
+        assert_eq!(g.unresolved_refs.len(), 2);
     }
 
     /// C5: `Cart::count()` from a member names the class through C++ lookup

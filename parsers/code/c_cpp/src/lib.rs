@@ -889,6 +889,7 @@ fn visit_type(
     acc.local_types
         .entry(key.clone())
         .or_insert_with(|| (id, qname.clone()));
+    heritage_refs(node, src, id, acc);
 
     let me = Outer {
         qname: &qname,
@@ -896,6 +897,77 @@ fn visit_type(
         key: &key,
     };
     visit_members(body, src, file_rel, scope, me, repo, acc);
+}
+
+/// GD.6: each base of a class / struct's `base_class_clause` (`class Win :
+/// public Base, private virtual ns::Mixin<T>`) is an INHERITS_FROM
+/// [`UnresolvedRef`] from the type, at the base's row: access specifiers,
+/// `virtual` and attributes are skipped; a plain name is `Bare(Base)`, a
+/// qualified one keeps its qualifier (`Attribute { base: "ns", name: "Mixin"
+/// }`, a rooted `::Base` the empty base, GD.7's rule), and a template base is
+/// named by its template (`Base<T>` -> `Base`, arguments dropped). A base the
+/// enclosing templates' parameters name (`: public T`, `: T::Inner`) is
+/// dependent and records nothing; `decltype(..)` and pack expansions are no
+/// type name. The graph crate binds the refs through C++ lookup
+/// (`graph/src/cpp_scope.rs`, `CppScope::bind_bases`).
+fn heritage_refs(node: TsNode, src: &[u8], id: NodeId, acc: &mut Acc) {
+    let mut cursor = node.walk();
+    let clauses: Vec<TsNode> = node
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "base_class_clause")
+        .collect();
+    for clause in clauses {
+        let mut c2 = clause.walk();
+        for base in clause.named_children(&mut c2) {
+            if !matches!(
+                base.kind(),
+                "type_identifier" | "qualified_identifier" | "template_type"
+            ) {
+                continue;
+            }
+            let Some(qualifier) = base_qualifier(text_of(base, src), &acc.template_params) else {
+                continue;
+            };
+            acc.refs.push(UnresolvedRef {
+                from: id,
+                from_module: acc.module_id,
+                qualifier,
+                category: edge_category::INHERITS_FROM,
+                line: line_at(base),
+            });
+        }
+    }
+}
+
+/// GD.6: the ref qualifier of one base type's text (see [`heritage_refs`]):
+/// template arguments and whitespace dropped, then split at the last `::`.
+/// `None` for an empty name or a template-dependent base.
+fn base_qualifier(text: &str, template_params: &[String]) -> Option<CallQualifier> {
+    let mut name = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if depth == 0 && !c.is_whitespace() => name.push(c),
+            _ => {}
+        }
+    }
+    let head = name
+        .trim_start_matches("::")
+        .split("::")
+        .next()
+        .unwrap_or("");
+    if head.is_empty() || name.ends_with("::") || template_params.iter().any(|p| p == head) {
+        return None;
+    }
+    Some(match name.rsplit_once("::") {
+        Some((base, last)) => CallQualifier::Attribute {
+            base: base.to_string(),
+            name: last.to_string(),
+        },
+        None => CallQualifier::Bare(name),
+    })
 }
 
 /// The members of a class / struct / union body, including those inside
@@ -4113,5 +4185,61 @@ int Api::create(const std::string &body) {
         {
             assert_eq!(fp.nav.kind_by_id.get(&e.from), Some(&node_kind::METHOD));
         }
+    }
+
+    /// GD.6: every base of a `base_class_clause` is an INHERITS_FROM ref from
+    /// its type at the base's row: access specifiers and `virtual` skipped, a
+    /// qualified base keeps its qualifier (a rooted `::B` the empty one), a
+    /// template base is its template, and a base a template parameter names
+    /// records nothing. HEAD: no ref at all.
+    #[test]
+    fn base_class_clause_is_inherits_from_refs() {
+        let source = r#"
+namespace ui { class Base { public: void Show() {} }; }
+class Win : public ui::Base, private virtual Mixin<int, Opts<2>>, ::Root {
+    void Run() { Show(); this->Show(); }
+};
+struct Pod : Plain {};
+template <typename T> class Wrap : public T, public Holder<T> {};
+class Alone {};
+"#;
+        let fp = parse_file(source, "src/win.cpp", "src::win.cpp", Dialect::Cpp, repo()).unwrap();
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), kind, q);
+        let refs: Vec<(NodeId, CallQualifier, u32)> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INHERITS_FROM)
+            .map(|r| (r.from, r.qualifier.clone(), r.line))
+            .collect();
+        let win = id(node_kind::CLASS, "src::win.cpp::Win");
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.into(),
+            name: name.into(),
+        };
+        assert_eq!(
+            refs,
+            [
+                (win, attr("ui", "Base"), 2),
+                (win, CallQualifier::Bare("Mixin".into()), 2),
+                (win, attr("", "Root"), 2),
+                (
+                    id(node_kind::STRUCT, "src::win.cpp::Pod"),
+                    CallQualifier::Bare("Plain".into()),
+                    5
+                ),
+                (
+                    id(node_kind::CLASS, "src::win.cpp::Wrap"),
+                    CallQualifier::Bare("Holder".into()),
+                    6
+                ),
+            ]
+        );
+        assert!(refs.iter().all(|(_, _, line)| *line != 0));
+        assert_eq!(
+            base_qualifier("T::Inner", &["T".to_string()]),
+            None,
+            "a dependent qualified base"
+        );
+        assert_eq!(base_qualifier("ns::", &[]), None);
     }
 }

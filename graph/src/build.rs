@@ -1084,7 +1084,10 @@ where
         &resolve_source,
         &mut SameStem::default(),
     );
-    let cpp = CppScope::new(&g, &defining);
+    let mut cpp = CppScope::new(&g, &defining);
+    // GD.6: the base clauses bind before any call, so implicit `this` and
+    // `this->m()` see the bases.
+    cpp.bind_bases(&mut g, &mut all_refs);
     let rewritten = implicit_this(&g, &cpp, &mut all_calls);
     let scope = CppCallScope::new(&g, defining);
     let mut tally = EvidenceTally::with_hook("cpp_scope");
