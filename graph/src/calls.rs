@@ -193,6 +193,14 @@ pub(crate) struct GlobalNames<'g> {
     /// GD.7: the PHP namespaces ([`PhpNamespaces`]), for a PHP qualified
     /// heritage base.
     php: OnceLock<PhpNamespaces>,
+    /// GD.18: every Ruby dry-container key the repo registers
+    /// ([`NavFact::ContainerRegister`]) to its class, `None` when two
+    /// registrations disagree or the value names no class; looked up, never
+    /// iterated.
+    containers: OnceLock<HashMap<&'g str, Option<&'g str>>>,
+    /// GD.18: every PACKAGE by its simple name, for a Ruby mixin
+    /// ([`NavFact::Mixin`]); looked up, never iterated.
+    packages_by_name: OnceLock<HashMap<&'g str, Vec<NodeId>>>,
     /// GA.3: nanoseconds spent building the two indexes, for the `[rebody]`
     /// line's `names_ms=` (a per-file stitch builds them only when a site
     /// falls back to a repo-unique name).
@@ -207,6 +215,8 @@ impl<'g> GlobalNames<'g> {
             types: OnceLock::new(),
             types_by_name: OnceLock::new(),
             php: OnceLock::new(),
+            containers: OnceLock::new(),
+            packages_by_name: OnceLock::new(),
             built_ns: AtomicU64::new(0),
         }
     }
@@ -237,6 +247,56 @@ impl<'g> GlobalNames<'g> {
                     let mut map: HashMap<&'g str, Vec<NodeId>> = HashMap::new();
                     for (id, n) in &self.g.nav.name_by_id {
                         if is_type_kind(self.g, id) {
+                            map.entry(n.as_str()).or_default().push(*id);
+                        }
+                    }
+                    map
+                })
+            })
+            .get(name)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// GD.18: the class the repo's dry-container registers under `key`:
+    /// `None` when no file registers it, `Some(None)` when registrations
+    /// disagree or name no class. Built from every file's
+    /// [`NavFact::ContainerRegister`] on the first lookup; a key's answer does
+    /// not depend on the order the facts are met in.
+    fn container(&self, key: &str) -> Option<Option<&'g str>> {
+        self.containers
+            .get_or_init(|| {
+                self.timed(|| {
+                    let mut map: HashMap<&'g str, Option<&'g str>> = HashMap::new();
+                    for facts in self.g.nav.nav_facts.values() {
+                        for f in facts {
+                            let NavFact::ContainerRegister { key, class } = f else {
+                                continue;
+                            };
+                            let class = Some(class.as_str()).filter(|c| !c.is_empty());
+                            map.entry(key.as_str())
+                                .and_modify(|seen| {
+                                    if *seen != class {
+                                        *seen = None;
+                                    }
+                                })
+                                .or_insert(class);
+                        }
+                    }
+                    map
+                })
+            })
+            .get(key)
+            .copied()
+    }
+
+    /// GD.18: every PACKAGE named `name`, in no particular order.
+    fn packages_named(&self, name: &str) -> &[NodeId] {
+        self.packages_by_name
+            .get_or_init(|| {
+                self.timed(|| {
+                    let mut map: HashMap<&'g str, Vec<NodeId>> = HashMap::new();
+                    for (id, n) in &self.g.nav.name_by_id {
+                        if self.g.nav.kind_by_id.get(id) == Some(&node_kind::PACKAGE) {
                             map.entry(n.as_str()).or_default().push(*id);
                         }
                     }
@@ -425,10 +485,17 @@ enum Branch {
     /// (`ActiveRecord::Base`, `\\App\\Models\\Model`, `org.x.Base`) binds
     /// the one in-repo type at that path ([`qualified_heritage`]).
     QualifiedHeritage,
+    /// GD.18: a Ruby dry-auto_inject reader (`user_service.find(id)`) or an
+    /// INJECTS typed through the repo's dry-container registration of its key
+    /// ([`container_receiver`], [`container_inject`]).
+    ContainerKey,
+    /// GD.18: a Ruby call on self that the owner does not define binds the
+    /// method of a module it `include`s / `extend`s ([`mixin_target`]).
+    MixinMethod,
 }
 
 impl Branch {
-    const COUNT: usize = 15;
+    const COUNT: usize = 17;
 
     fn rule(self) -> &'static str {
         match self {
@@ -447,6 +514,8 @@ impl Branch {
             Branch::StaticMember => "static_member",
             Branch::DefaultExport => "default_export",
             Branch::QualifiedHeritage => "qualified_heritage",
+            Branch::ContainerKey => "container_key",
+            Branch::MixinMethod => "mixin_method",
         }
     }
 }
@@ -695,12 +764,19 @@ where
         hook_counts.merge(chunk_hook_counts);
         decided.extend(outcomes);
     }
+    // GD.18: this pass's Ruby container-key and mixin binds.
+    let mut ruby_di = (0usize, 0usize);
     for (site, outcome) in calls.iter().zip(decided) {
         let resolved = match outcome {
             CallOutcome::NoModule => None,
             CallOutcome::Bound { to, branch, recv } => {
                 if recv {
                     recv_stats::record();
+                }
+                match branch {
+                    Branch::ContainerKey => ruby_di.0 += 1,
+                    Branch::MixinMethod => ruby_di.1 += 1,
+                    _ => {}
                 }
                 tally.calls[branch as usize] += 1;
                 Some((to, graph_evidence("graph:calls", branch.rule())))
@@ -730,6 +806,14 @@ where
     } = counts;
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
+    }
+    // GD.18 fired_on, once per pass that bound one:
+    //   `[ruby-di] calls bound container_key=<c> mixin_method=<m>`
+    if ruby_di.0 + ruby_di.1 > 0 {
+        eprintln!(
+            "[ruby-di] calls bound container_key={} mixin_method={}",
+            ruby_di.0, ruby_di.1
+        );
     }
     if enum_hits.self_method + enum_hits.attribute > 0 {
         eprintln!(
@@ -897,6 +981,22 @@ fn decide_call(
     };
     let mut recv = false;
 
+    // GD.18: a Ruby dry-auto_inject reader whose key the repo's container
+    // registers is typed by the registration (in any file); a key registered
+    // with no class, or two classes, types nothing. A key no file registers
+    // keeps the parser's field type (the camelised key) below.
+    let container = match resolved {
+        Some(_) => None,
+        None => container_receiver(g, site, from_module, gate, names),
+    };
+    let resolved = match container {
+        Some(hit) => {
+            recv = hit.is_some();
+            hit.map(|to| (to, Branch::ContainerKey))
+        }
+        None => resolved,
+    };
+
     // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
     // declared field of the enclosing type, and CL.5a: `new Calc().add()`
     // on the type it constructs; DF.17: a TS-family `this.store.draft()`
@@ -904,6 +1004,9 @@ fn decide_call(
     // above, so an import binding or module symbol that shares the
     // field's name keeps today's target.
     let resolved = resolved.or_else(|| {
+        if container.is_some() {
+            return None;
+        }
         let (to, branch, typed) =
             resolve_via_receiver_type(g, site, from_module, gate, names, &mut counts.constructed)?;
         recv = typed;
@@ -923,10 +1026,186 @@ fn decide_call(
     if is_class_scope_receiver(g, site) {
         counts.class_scope.tally(resolved.is_some());
     }
+    // GD.18: last, a Ruby call on self binds a mixed-in module's method.
+    let resolved =
+        resolved.or_else(|| mixin_target(g, site, names).map(|to| (to, Branch::MixinMethod)));
     match resolved {
         Some((to, branch)) => CallOutcome::Bound { to, branch, recv },
         None => CallOutcome::Miss,
     }
+}
+
+/// GD.18: the dry-auto_inject key the CLASS enclosing `from` reads through
+/// the reader `reader` ([`NavFact::ContainerInject`]).
+fn injected_key<'g>(g: &'g RepoGraph, from: NodeId, reader: &str) -> Option<&'g str> {
+    let owner = enclosing_class_or_struct(&g.nav, from)?;
+    g.nav.nav_facts.get(&owner)?.iter().find_map(|f| match f {
+        NavFact::ContainerInject { key, reader: r, .. } if r == reader => Some(key.as_str()),
+        _ => None,
+    })
+}
+
+/// GD.18: a Ruby `reader.m(..)` call (`Attribute { reader, m }`) whose reader
+/// is a dry-auto_inject dependency of the enclosing class: `None` when it is
+/// not one or no file registers its key (the parser's field type then
+/// applies), `Some(None)` when the key's registration types nothing (no
+/// class, two classes, a class or method the repo does not hold), else
+/// `Some(Some(method))` of the registered class.
+fn container_receiver(
+    g: &RepoGraph,
+    site: &CallSite,
+    from_module: NodeId,
+    gate: &mut BareFieldGate,
+    names: &GlobalNames<'_>,
+) -> Option<Option<NodeId>> {
+    let CallQualifier::Attribute { base, name } = &site.qualifier else {
+        return None;
+    };
+    let key = injected_key(g, site.from, base)?;
+    let class = names.container(key)?;
+    Some(class.and_then(|class| {
+        let (type_id, _) = receiver_type_node(g, site, from_module, class, gate, names, false)?;
+        type_method(g, type_id, name)
+    }))
+}
+
+/// GD.18: an INJECTS ref the Ruby parser wrote for a dry-auto_inject key
+/// (`Bare(<its type>)` at the include's row, matched to the class's
+/// [`NavFact::ContainerInject`]) whose key the repo's container registers
+/// as another class than the parser's: `Some(Some(class))` of the registered
+/// class, `Some(None)` when the registration types nothing; `None` for any
+/// other ref, for a key no file registers and for a registration that agrees
+/// with the parser (the parser's type then binds as before).
+fn container_inject(
+    g: &RepoGraph,
+    r: &UnresolvedRef,
+    names: &GlobalNames<'_>,
+) -> Option<Option<NodeId>> {
+    let CallQualifier::Bare(ty) = &r.qualifier else {
+        return None;
+    };
+    if r.category != edge_category::INJECTS {
+        return None;
+    }
+    let key = g.nav.nav_facts.get(&r.from)?.iter().find_map(|f| match f {
+        NavFact::ContainerInject {
+            key, ty: t, line, ..
+        } if t == ty && *line == r.line => Some(key.as_str()),
+        _ => None,
+    })?;
+    let class = names.container(key)?;
+    if class == Some(ty.as_str()) {
+        return None;
+    }
+    Some(class.and_then(|class| {
+        g.symbols
+            .module_symbols
+            .get(&r.from_module)
+            .and_then(|s| s.get(class).copied())
+            .filter(|id| is_type_kind(g, id))
+            .or_else(|| names.type_named(class))
+    }))
+}
+
+/// GD.18: a Ruby call on self (`Bare` / `SelfMethod`) bound through the
+/// caller's mixins ([`NavFact::Mixin`]): from a METHOD of a CLASS / PACKAGE,
+/// the modules its owner `include`s (or `prepend`s); from the CLASS /
+/// PACKAGE body itself, the modules it `extend`s. The owner's own method of
+/// that name wins (Ruby looks a class up before its modules), so then
+/// nothing binds here; the last mixin written is looked up first, as Ruby's
+/// ancestor chain does. A module path binds the one in-repo PACKAGE it names
+/// ([`mixin_module`]); an external module (`Comparable`) binds nothing.
+fn mixin_target(g: &RepoGraph, site: &CallSite, names: &GlobalNames<'_>) -> Option<NodeId> {
+    let name = match &site.qualifier {
+        CallQualifier::Bare(n) | CallQualifier::SelfMethod(n) => n.as_str(),
+        _ => return None,
+    };
+    let is_owner = |id: &NodeId| matches!(g.nav.kind_by_id.get(id).copied(), Some(k) if k == node_kind::CLASS || k == node_kind::PACKAGE);
+    let (owner, extend) = if is_owner(&site.from) {
+        (site.from, true)
+    } else if g.nav.kind_by_id.get(&site.from) == Some(&node_kind::METHOD) {
+        let parent = *g.nav.parent_of.get(&site.from)?;
+        if !is_owner(&parent) {
+            return None;
+        }
+        (parent, false)
+    } else {
+        return None;
+    };
+    let facts = g.nav.nav_facts.get(&owner)?;
+    if !facts.iter().any(|f| matches!(f, NavFact::Mixin { .. }))
+        || own_method(g, owner, name).is_some()
+    {
+        return None;
+    }
+    facts.iter().rev().find_map(|f| match f {
+        NavFact::Mixin { module, extend: e } if *e == extend => {
+            own_method(g, mixin_module(g, names, owner, module)?, name)
+        }
+        _ => None,
+    })
+}
+
+/// GD.18: the METHOD `name` a CLASS (`class_methods`) or PACKAGE (its
+/// `module_symbols`) declares itself.
+fn own_method(g: &RepoGraph, owner: NodeId, name: &str) -> Option<NodeId> {
+    g.symbols
+        .class_methods
+        .get(&owner)
+        .and_then(|m| m.get(name).copied())
+        .or_else(|| {
+            g.symbols
+                .module_symbols
+                .get(&owner)
+                .and_then(|m| m.get(name).copied())
+                .filter(|id| g.nav.kind_by_id.get(id) == Some(&node_kind::METHOD))
+        })
+}
+
+/// GD.18: the in-repo PACKAGE a Ruby mixin path names from `owner`: every
+/// PACKAGE whose qname ends with the path (`Helpers`, `Sinatra::Helpers`; a
+/// rooted `::Helpers` as `Helpers`), then Ruby's lexical lookup: the one
+/// whose namespace is the longest prefix of the owner's qname, else the only
+/// candidate. Two candidates the lookup cannot tell apart bind none.
+fn mixin_module(
+    g: &RepoGraph,
+    names: &GlobalNames<'_>,
+    owner: NodeId,
+    module: &str,
+) -> Option<NodeId> {
+    let path = module.trim_start_matches("::");
+    let last = path.rsplit("::").next().unwrap_or(path);
+    let suffix = format!("::{path}");
+    let candidates: Vec<(NodeId, &str)> = names
+        .packages_named(last)
+        .iter()
+        .filter_map(|id| Some((*id, g.nav.qname_by_id.get(id)?.as_str())))
+        .filter(|(_, q)| q.ends_with(&suffix) || *q == path)
+        .collect();
+    if let [(only, _)] = candidates.as_slice() {
+        return Some(*only);
+    }
+    let owner_q = g.nav.qname_by_id.get(&owner)?;
+    let mut best: Option<(usize, NodeId)> = None;
+    let mut tie = false;
+    for (id, q) in &candidates {
+        let ns = &q[..q.len().saturating_sub(suffix.len())];
+        if ns.is_empty() || !(owner_q.starts_with(&format!("{ns}::"))) {
+            continue;
+        }
+        match best {
+            Some((len, _)) if len == ns.len() => tie = true,
+            Some((len, _)) if len > ns.len() => {}
+            _ => {
+                best = Some((ns.len(), *id));
+                tie = false;
+            }
+        }
+    }
+    if tie {
+        return None;
+    }
+    best.map(|(_, id)| id)
 }
 
 /// DT.5k's per-graph tally of TS-family receivers typed in this packet's
@@ -1299,9 +1578,13 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         counts.merge(chunk_counts);
         decided.extend(chunk);
     }
+    let mut container_injects = 0usize;
     for (r, resolved) in refs.iter().zip(decided) {
         match resolved {
             Some((to, branch)) => {
+                if let Branch::ContainerKey = branch {
+                    container_injects += 1;
+                }
                 tally.refs[branch as usize] += 1;
                 let ev = files.place(graph_evidence("graph:refs", branch.rule()), r);
                 push_edge(g, r.from, to, r.category, ev);
@@ -1334,6 +1617,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     }
     if self_refused > 0 {
         eprintln!("[heritage] self-loops refused={self_refused}");
+    }
+    // GD.18 fired_on, once per graph build that bound one:
+    //   `[ruby-di] injects bound container_key=<n>`
+    if container_injects > 0 {
+        eprintln!("[ruby-di] injects bound container_key={container_injects}");
     }
     // GD.11 fired_on, once per graph build that read a default import by
     // value:
@@ -1428,6 +1716,12 @@ fn decide_ref(
     counts: &mut RefCounts,
 ) -> Option<(NodeId, Branch)> {
     let extends_iface = extends_interface(g, r);
+    // GD.18: a Ruby dry-auto_inject INJECTS whose key the repo's container
+    // registers binds the registered class (or nothing), not the parser's
+    // camelised guess.
+    if let Some(hit) = container_inject(g, r, names) {
+        return hit.map(|to| (to, Branch::ContainerKey));
+    }
     let bindings = g.symbols.module_import_bindings.get(&r.from_module);
     let resolved: Option<(NodeId, Branch)> = match &r.qualifier {
         CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
@@ -7623,6 +7917,281 @@ mod tests {
             );
             assert_eq!(g.unresolved_refs.len(), 1, "{read} {path}");
         }
+    }
+
+    // ---- GD.18: Ruby dry-container keys and mixins ---------------------------
+
+    /// `app::svc`: `class UserService; def find; end` and `class SmtpMailer;
+    /// def deliver; end`, plus `class Mailer; def deliver; end` (the key
+    /// `mailer` camelised).
+    fn ruby_services() -> (FileParse, NodeId, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "app::svc", None);
+        let us = s.add(node_kind::CLASS, "app::svc::UserService", Some(m));
+        let find = s.add(node_kind::METHOD, "app::svc::UserService::find", Some(us));
+        let smtp = s.add(node_kind::CLASS, "app::svc::SmtpMailer", Some(m));
+        let deliver = s.add(
+            node_kind::METHOD,
+            "app::svc::SmtpMailer::deliver",
+            Some(smtp),
+        );
+        let mailer = s.add(node_kind::CLASS, "app::svc::Mailer", Some(m));
+        s.add(node_kind::METHOD, "app::svc::Mailer::deliver", Some(mailer));
+        (s.file(vec![], vec![], vec![]), find, smtp, deliver)
+    }
+
+    /// `app::ctl`: `class Ctl; include Import["user_service", "mailer"]` (the
+    /// parser's facts and field types: no registration in this file, so each
+    /// reader is typed by its camelised key), `def show = user_service.find`,
+    /// `def notify = mailer.deliver`.
+    fn ruby_consumer() -> (FileParse, NodeId, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "app::ctl", None);
+        let ctl = s.add(node_kind::CLASS, "app::ctl::Ctl", Some(m));
+        let show = s.add(node_kind::METHOD, "app::ctl::Ctl::show", Some(ctl));
+        let notify = s.add(node_kind::METHOD, "app::ctl::Ctl::notify", Some(ctl));
+        for (key, ty) in [("user_service", "UserService"), ("mailer", "Mailer")] {
+            s.nav.record_field_type(ctl, key, ty);
+            s.nav.record_fact(
+                ctl,
+                NavFact::ContainerInject {
+                    key: key.into(),
+                    reader: key.into(),
+                    ty: ty.into(),
+                    line: 1,
+                },
+            );
+        }
+        let calls = vec![
+            CallSite {
+                from: show,
+                qualifier: attr("user_service", "find"),
+                line: 3,
+            },
+            CallSite {
+                from: notify,
+                qualifier: attr("mailer", "deliver"),
+                line: 5,
+            },
+        ];
+        let refs = ["UserService", "Mailer"]
+            .into_iter()
+            .map(|ty| UnresolvedRef {
+                from: ctl,
+                from_module: m,
+                qualifier: bare(ty),
+                category: edge_category::INJECTS,
+                line: 1,
+            })
+            .collect();
+        (s.file(vec![], calls, refs), ctl, show, notify)
+    }
+
+    /// The file MODULE `qname` holding the registrations, one fact each.
+    fn ruby_container(qname: &str, regs: &[(&str, &str)]) -> FileParse {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, qname, None);
+        for (key, class) in regs {
+            s.nav.record_fact(
+                m,
+                NavFact::ContainerRegister {
+                    key: (*key).into(),
+                    class: (*class).into(),
+                },
+            );
+        }
+        s.file(vec![], vec![], vec![])
+    }
+
+    /// A reader bound through a registration in ANOTHER file binds the
+    /// registered class's method (rule `container_key`), and so does the
+    /// INJECTS, never the camelised `Mailer`; a key no file registers keeps
+    /// the parser's field type (rule `receiver_type`).
+    #[test]
+    fn container_key_registered_elsewhere_types_the_reader() {
+        let (svc, find, smtp, deliver) = ruby_services();
+        let (ctl_file, ctl, show, notify) = ruby_consumer();
+        let mailer = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "app::svc::Mailer");
+        let user_service = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "app::svc::UserService",
+        );
+
+        // Base: no registration file. The camelised key types each reader.
+        let g = crate::build::build_ruby(repo(), vec![svc.clone(), ctl_file.clone()]).unwrap();
+        assert_eq!(
+            evidence_rule(&g, show, find, edge_category::CALLS),
+            calls_rule("receiver_type")
+        );
+        let mailer_deliver = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "app::svc::Mailer::deliver",
+        );
+        assert!(edges_of(&g, edge_category::CALLS).contains(&(notify, mailer_deliver)));
+        assert!(edges_of(&g, edge_category::INJECTS).contains(&(ctl, mailer)));
+
+        // `register("mailer") { SmtpMailer.new }` in another file.
+        let reg = ruby_container(
+            "app::container",
+            &[("mailer", "SmtpMailer"), ("user_service", "UserService")],
+        );
+        let g = crate::build::build_ruby(repo(), vec![svc.clone(), ctl_file.clone(), reg]).unwrap();
+        assert_eq!(
+            evidence_rule(&g, notify, deliver, edge_category::CALLS),
+            calls_rule("container_key")
+        );
+        assert_eq!(
+            evidence_rule(&g, show, find, edge_category::CALLS),
+            calls_rule("container_key")
+        );
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(notify, mailer_deliver)));
+        let injects = edges_of(&g, edge_category::INJECTS);
+        assert!(injects.contains(&(ctl, smtp)), "{injects:?}");
+        assert!(injects.contains(&(ctl, user_service)));
+        assert!(!injects.contains(&(ctl, mailer)));
+        // A registration that agrees with the parser's type leaves its
+        // INJECTS as the generic pass bound it.
+        assert_ne!(
+            evidence_rule(&g, ctl, user_service, edge_category::INJECTS),
+            Some(("graph:refs".to_string(), Some("container_key".to_string())))
+        );
+        assert_eq!(
+            evidence_rule(&g, ctl, smtp, edge_category::INJECTS),
+            Some(("graph:refs".to_string(), Some("container_key".to_string())))
+        );
+
+        // Two files register `mailer` to different classes: the key types
+        // nothing, neither the camelised guess nor either registration.
+        let a = ruby_container("app::container", &[("mailer", "SmtpMailer")]);
+        let b = ruby_container("app::container2", &[("mailer", "Mailer")]);
+        let g = crate::build::build_ruby(repo(), vec![svc, ctl_file, a, b]).unwrap();
+        let calls = edges_of(&g, edge_category::CALLS);
+        assert!(!calls.iter().any(|(f, _)| *f == notify), "{calls:?}");
+        let injects = edges_of(&g, edge_category::INJECTS);
+        assert!(!injects.contains(&(ctl, smtp)) && !injects.contains(&(ctl, mailer)));
+        assert!(injects.contains(&(ctl, user_service)));
+    }
+
+    /// `module Helpers; def content_type; end`, `module Routing; def route;
+    /// end`, and `class Base; include Helpers; extend Routing; route "/";
+    /// def call! = content_type; def own = helper; def helper; end`.
+    fn ruby_mixins(include_own: bool) -> (RepoGraph, NodeId, NodeId, NodeId, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "app::helpers", None);
+        let helpers = s.add(node_kind::PACKAGE, "app::helpers::Helpers", Some(m));
+        let ct = s.add(
+            node_kind::METHOD,
+            "app::helpers::Helpers::content_type",
+            Some(helpers),
+        );
+        s.add(
+            node_kind::METHOD,
+            "app::helpers::Helpers::helper",
+            Some(helpers),
+        );
+        let routing = s.add(node_kind::PACKAGE, "app::helpers::Routing", Some(m));
+        let route = s.add(
+            node_kind::METHOD,
+            "app::helpers::Routing::route",
+            Some(routing),
+        );
+        let base = s.add(node_kind::CLASS, "app::helpers::Base", Some(m));
+        let call = s.add(node_kind::METHOD, "app::helpers::Base::call!", Some(base));
+        let own = s.add(node_kind::METHOD, "app::helpers::Base::own", Some(base));
+        if include_own {
+            s.add(node_kind::METHOD, "app::helpers::Base::helper", Some(base));
+        }
+        for (module, extend) in [("Helpers", false), ("Routing", true), ("Comparable", false)] {
+            s.nav.record_fact(
+                base,
+                NavFact::Mixin {
+                    module: module.into(),
+                    extend,
+                },
+            );
+        }
+        let site = |from, name: &str, line| CallSite {
+            from,
+            qualifier: bare(name),
+            line,
+        };
+        let calls = vec![
+            site(base, "route", 4),
+            site(call, "content_type", 5),
+            site(own, "helper", 6),
+            // `route` from a method: Routing is extended, not included.
+            site(call, "route", 7),
+            // `content_type` from the body: Helpers is included, not extended.
+            site(base, "content_type", 8),
+        ];
+        let g = crate::build::build_ruby(repo(), vec![s.file(vec![], calls, vec![])]).unwrap();
+        (g, base, call, own, ct, route)
+    }
+
+    /// An included module's method is callable from the class's methods, an
+    /// extended module's from its body (rule `mixin_method`); the other way
+    /// round binds nothing, and the class's own method shadows a mixin's.
+    #[test]
+    fn ruby_mixin_methods_bind_on_self() {
+        let (g, base, call, own, ct, route) = ruby_mixins(false);
+        let calls = edges_of(&g, edge_category::CALLS);
+        assert_eq!(
+            evidence_rule(&g, call, ct, edge_category::CALLS),
+            calls_rule("mixin_method")
+        );
+        assert_eq!(
+            evidence_rule(&g, base, route, edge_category::CALLS),
+            calls_rule("mixin_method")
+        );
+        let helper = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "app::helpers::Helpers::helper",
+        );
+        assert!(calls.contains(&(own, helper)));
+        assert!(!calls.contains(&(call, route)), "{calls:?}");
+        assert!(!calls.contains(&(base, ct)), "{calls:?}");
+
+        // `Base#helper` of its own: Ruby finds it before the module's.
+        let (g, _, _, own, _, _) = ruby_mixins(true);
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(own, helper)));
+    }
+
+    /// The mixin path picks the PACKAGE it names: a qualified path by its
+    /// qname tail, an unqualified one by Ruby's lexical lookup (the nearest
+    /// enclosing namespace of the owner); two it cannot tell apart bind none.
+    #[test]
+    fn ruby_mixin_module_lookup() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "lib::a", None);
+        let outer = s.add(node_kind::PACKAGE, "lib::a::Shop", Some(m));
+        let shop_helpers = s.add(node_kind::PACKAGE, "lib::a::Shop::Helpers", Some(outer));
+        let other = s.add(node_kind::PACKAGE, "lib::a::Admin", Some(m));
+        let admin_helpers = s.add(node_kind::PACKAGE, "lib::a::Admin::Helpers", Some(other));
+        let cart = s.add(node_kind::CLASS, "lib::a::Shop::Cart", Some(outer));
+        let top = s.add(node_kind::CLASS, "lib::a::Top", Some(m));
+        let fp = s.file(vec![], vec![], vec![]);
+        let g = crate::build::build_ruby(repo(), vec![fp]).unwrap();
+        let names = GlobalNames::new(&g);
+        assert_eq!(
+            mixin_module(&g, &names, cart, "Helpers"),
+            Some(shop_helpers)
+        );
+        assert_eq!(
+            mixin_module(&g, &names, top, "Admin::Helpers"),
+            Some(admin_helpers)
+        );
+        assert_eq!(
+            mixin_module(&g, &names, top, "::Shop::Helpers"),
+            Some(shop_helpers)
+        );
+        assert_eq!(mixin_module(&g, &names, top, "Helpers"), None);
+        assert_eq!(mixin_module(&g, &names, top, "Comparable"), None);
     }
 }
 

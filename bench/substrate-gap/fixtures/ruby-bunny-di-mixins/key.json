@@ -1,0 +1,22 @@
+{
+  "framework": "ruby-bunny-di-mixins",
+  "language": "ruby",
+  "dirs": ["."],
+  "note": "GD.18 (FD.55). Bunny fanout exchange: the key-less `x.publish` produces to the exchange `logs`, the server-named queue's `q.bind(\"logs\")` consumes it. dry-auto_inject: `user_service.find(id)` binds through the injected reader's type, and `mailer` binds through the container registration in another file (SmtpMailer, not the camelised Mailer). Ruby mixins: `include Helpers` makes Helpers#content_type callable from Base's methods, `extend Routing` makes Routing#route callable from Base's class body.",
+  "expect_nodes": [
+    {"kind": "QUEUE_CONSUMER", "name": "logs"},
+    {"kind": "QUEUE_PRODUCER", "name": "logs"}
+  ],
+  "expect_edges": [
+    {"from": "show", "to": "find", "category": "CALLS"},
+    {"from": "notify", "to": "SmtpMailer::deliver", "category": "CALLS", "note": "registered in container.rb"},
+    {"from": "Ctl", "to": "SmtpMailer", "category": "INJECTS", "note": "the container key, not the camelised name"},
+    {"from": "call!", "to": "Helpers::content_type", "category": "CALLS", "note": "include Helpers"},
+    {"from": "Base", "to": "Routing::route", "category": "CALLS", "note": "extend Routing, a class-body call"},
+    {"from": "queue_producer:logs", "to": "queue_consumer:logs", "category": "QUEUE_FLOWS"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:rabbitmq", "note": "the fanout publish names its exchange"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:rabbitmq", "note": "the bound subscribe consumes the exchange"}
+  ]
+}

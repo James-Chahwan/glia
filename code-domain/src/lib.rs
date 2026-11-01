@@ -2050,6 +2050,38 @@ pub enum NavFact {
         prefix: String,
         via: String,
     },
+    /// Ruby (GD.18): a dry-container registration, recorded by the Ruby parser
+    /// on the file MODULE that holds it and read by `graph/src/calls.rs`, which
+    /// indexes every registration of the repo by key (a key two registrations
+    /// give different classes names none). `register("user_service") {
+    /// UserService.new }` (or `register(:k, K.new)` / `register("k", K)`,
+    /// inside `namespace(..)` blocks the key `.`-joined) is `{ key:
+    /// "user_service", class: "UserService" }`; a value naming no class records
+    /// `class: ""`, which types nothing.
+    ContainerRegister { key: String, class: String },
+    /// Ruby (GD.18): dry-auto_inject, recorded by the Ruby parser on the
+    /// consumer CLASS for each key of `include Import["user_service"]` on
+    /// 0-based row `line`: the class reads the dependency through the reader
+    /// method `reader` (the key's last `.` segment, or an alias's name), and
+    /// the parser typed it `ty` (its own file's registration, else the key
+    /// camelised; `""` = untyped). `graph/src/calls.rs` binds a call on
+    /// `reader` and the class's INJECTS through the repo's
+    /// [`NavFact::ContainerRegister`] of `key` when there is one.
+    ContainerInject {
+        key: String,
+        reader: String,
+        ty: String,
+        line: u32,
+    },
+    /// Ruby (GD.18): `include M` / `prepend M` (`extend: false`) or `extend M`
+    /// (`extend: true`) in a class or module body, recorded by the Ruby parser
+    /// on that CLASS / PACKAGE; `module` is the constant path as written
+    /// (`Helpers`, `Sinatra::Helpers`, `::Helpers`). Read by
+    /// `graph/src/calls.rs`: a call on self that the owner does not define
+    /// binds the in-repo module's method (CALLS rule `mixin_method`), an
+    /// `include`d one from the owner's methods, an `extend`ed one from its
+    /// body.
+    Mixin { module: String, extend: bool },
 }
 
 /// GD.40: what a [`NavFact::IncludeMount`] names.

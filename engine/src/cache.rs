@@ -469,6 +469,13 @@ pub fn surface_class(f: &NavFact) -> Part {
         // build/route_mounts (GD.40): the included module's routes, in
         // another file, take this include's prefix.
         NavFact::IncludeMount { .. } => Part::Surface,
+        // calls (GD.18): an include of the key in another file binds through
+        // this registration.
+        NavFact::ContainerRegister { .. } => Part::Surface,
+        // calls (GD.18): this class's own injected readers and INJECTS.
+        NavFact::ContainerInject { .. } => Part::Body,
+        // calls (GD.18): this class's own calls on self.
+        NavFact::Mixin { .. } => Part::Body,
     }
 }
 
@@ -656,7 +663,8 @@ fn without_row(f: &NavFact) -> NavFact {
         | NavFact::ExportLocal { line, .. }
         | NavFact::MemberRead { line, .. }
         | NavFact::MemberWrite { line, .. }
-        | NavFact::IncludeMount { line, .. } => *line = 0,
+        | NavFact::IncludeMount { line, .. }
+        | NavFact::ContainerInject { line, .. } => *line = 0,
         _ => {}
     }
     f
@@ -1491,6 +1499,20 @@ mod tests {
                 prefix: String::new(),
                 via: "spread".into(),
             },
+            NavFact::ContainerRegister {
+                key: "user_service".into(),
+                class: "UserService".into(),
+            },
+            NavFact::ContainerInject {
+                key: "user_service".into(),
+                reader: "user_service".into(),
+                ty: "UserService".into(),
+                line: 1,
+            },
+            NavFact::Mixin {
+                module: "Helpers".into(),
+                extend: false,
+            },
         ]
     }
 
@@ -1549,12 +1571,12 @@ mod tests {
             }
             p
         };
-        let fwd: Vec<u64> = (0..32).collect();
-        let rev: Vec<u64> = (0..32).rev().collect();
+        let fwd: Vec<u64> = (0..48).collect();
+        let rev: Vec<u64> = (0..48).rev().collect();
         let parse = fill(&fwd);
         // Scope `500 + i` holds the first `i % len + 1` facts, so scope
-        // `500 + len - 1` holds them all (`fill` covers 32 scopes).
-        assert!(facts.len() <= 32, "every_nav_fact outgrew fill's 32 scopes");
+        // `500 + len - 1` holds them all (`fill` covers 48 scopes).
+        assert!(facts.len() <= 48, "every_nav_fact outgrew fill's 48 scopes");
         assert_eq!(
             parse.nav.nav_facts[&NodeId(500 + facts.len() as u64 - 1)],
             facts,
@@ -2190,6 +2212,8 @@ mod tests {
                 NavFact::ReceiverType { .. } => "ReceiverType",
                 NavFact::MemberWrite { .. } => "MemberWrite",
                 NavFact::HostScriptRef { .. } => "HostScriptRef",
+                NavFact::ContainerInject { .. } => "ContainerInject",
+                NavFact::Mixin { .. } => "Mixin",
                 _ => "other",
             })
             .collect();
@@ -2204,7 +2228,9 @@ mod tests {
                 "MemberRead",
                 "ReceiverType",
                 "MemberWrite",
-                "HostScriptRef"
+                "HostScriptRef",
+                "ContainerInject",
+                "Mixin"
             ]
         );
         assert_eq!(surface_language("a/b.py"), Some("python"));

@@ -1,3 +1,4 @@
+use glia_code_domain::NavFact;
 use glia_code_domain::data_entity;
 use glia_code_domain::endpoint::{
     ClientEndpoint, abs_path, join_path, push_client_endpoint, url_to_path,
@@ -32,7 +33,20 @@ pub fn parse_file(
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.module_id = Some(module_id);
-    acc.registered = container_registrations(root, src);
+    let registrations = container_registrations(root, src);
+    acc.registered = registered_by_key(&registrations);
+    // GD.18: every registration is a fact of the file, so an include in
+    // another file binds through it (the graph indexes them by key).
+    for (key, class) in registrations {
+        acc.registrations += 1;
+        acc.nav.record_fact(
+            module_id,
+            NavFact::ContainerRegister {
+                key,
+                class: class.unwrap_or_default(),
+            },
+        );
+    }
     acc.nodes.push(Node {
         id: module_id,
         repo,
@@ -83,6 +97,15 @@ pub fn parse_file(
         eprintln!(
             "[ruby-types] superclass_refs={} auto_inject_refs={} constructed_calls={} path={}",
             acc.superclass_refs, acc.auto_inject_refs, acc.constructed_calls, file_rel_path
+        );
+    }
+
+    // GD.18 fired_on marker:
+    //   `... 2>&1 | grep '^\[ruby-di\]'`
+    if acc.auto_inject_keys + acc.registrations + acc.mixins > 0 {
+        eprintln!(
+            "[ruby-di] auto_inject={} registrations={} mixins={} path={}",
+            acc.auto_inject_keys, acc.registrations, acc.mixins, file_rel_path
         );
     }
 
@@ -149,6 +172,15 @@ struct Acc {
     /// `X.new.m(..)` call sites emitted as constructed receivers
     /// (`[ruby-types]` marker).
     constructed_calls: usize,
+    /// GD.18: dry-auto_inject keys recorded as [`NavFact::ContainerInject`]
+    /// (`[ruby-di]` marker).
+    auto_inject_keys: usize,
+    /// GD.18: dry-container registrations recorded as
+    /// [`NavFact::ContainerRegister`] (`[ruby-di]` marker).
+    registrations: usize,
+    /// GD.18: `include` / `extend` / `prepend` mixins recorded as
+    /// [`NavFact::Mixin`] (`[ruby-di]` marker).
+    mixins: usize,
 }
 
 fn visit_body(
@@ -171,8 +203,12 @@ fn visit_body(
             "call" => {
                 collect_require(child, src, acc);
                 collect_call(child, src, parent_id, false, acc);
-                if acc.nav.kind_by_id.get(&parent_id) == Some(&node_kind::CLASS) {
+                let owner_kind = acc.nav.kind_by_id.get(&parent_id).copied();
+                if owner_kind == Some(node_kind::CLASS) {
                     collect_auto_inject(child, src, parent_id, acc);
+                }
+                if owner_kind == Some(node_kind::CLASS) || owner_kind == Some(node_kind::PACKAGE) {
+                    collect_mixins(child, src, parent_id, acc);
                 }
             }
             _ => {}
@@ -687,12 +723,15 @@ fn emit_superclass_ref(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Ac
 /// A dry-auto_inject strategy method: `Import.args[..]` and friends.
 const AUTO_INJECT_STRATEGIES: &[&str] = &["args", "hash", "kwargs"];
 
-/// The dependency keys of `include <Import>[..]` when `call` is that shape:
-/// the argument is one `element_reference` whose object is a constant path
-/// (optionally `.args` / `.hash` / `.kwargs`), and whose elements are all
-/// literal keys (strings, symbols, or `alias: "key"` pairs). Any other
+/// The dependencies of `include <Import>[..]` when `call` is that shape, each
+/// `(reader, key)`: the argument is one `element_reference` whose object is a
+/// constant path (optionally `.args` / `.hash` / `.kwargs`), and whose
+/// elements are all literal keys (strings, symbols, or `alias: "key"` pairs).
+/// The reader is the method the class reads the dependency through (GD.18):
+/// an alias pair's name, else the key's last `.` segment (dry-auto_inject's
+/// own rule: `"repositories.orders"` is read as `orders`). Any other
 /// `include` (`include Comparable`, `include Mod[some_var]`) -> None.
-fn auto_inject_keys(call: TsNode, src: &[u8]) -> Option<Vec<String>> {
+fn auto_inject_keys(call: TsNode, src: &[u8]) -> Option<Vec<(String, String)>> {
     if call.child_by_field_name("receiver").is_some()
         || text_of(call.child_by_field_name("method")?, src) != "include"
     {
@@ -729,11 +768,22 @@ fn auto_inject_keys(call: TsNode, src: &[u8]) -> Option<Vec<String>> {
         if el.id() == object.id() || el.kind() == "comment" {
             continue;
         }
-        let key = match el.kind() {
-            "pair" => literal_key(el.child_by_field_name("value")?, src),
-            _ => literal_key(el, src),
-        }?;
-        keys.push(key);
+        let (reader, key) = match el.kind() {
+            "pair" => {
+                let key = literal_key(el.child_by_field_name("value")?, src)?;
+                let alias = el.child_by_field_name("key")?;
+                let reader = match alias.kind() {
+                    "hash_key_symbol" | "identifier" => text_of(alias, src).to_string(),
+                    _ => literal_key(alias, src)?,
+                };
+                (reader, key)
+            }
+            _ => {
+                let key = literal_key(el, src)?;
+                (key.rsplit('.').next().unwrap_or(&key).to_string(), key)
+            }
+        };
+        keys.push((reader, key));
     }
     (!keys.is_empty()).then_some(keys)
 }
@@ -780,18 +830,35 @@ fn key_class_name(key: &str) -> Option<String> {
 /// the key's camelised name ([`key_class_name`]). A key this file registers
 /// with a value naming no class gives nothing: the convention would be a
 /// guess the registration contradicts.
+///
+/// GD.18: each key is also a [`NavFact::ContainerInject`] on the class, and
+/// its reader is a field of that type (`nav.field_types`), so
+/// `user_service.find(id)` in a method binds on the injected type through
+/// the graph's receiver-type pass; the graph re-types the reader and the
+/// INJECTS through a registration of the key in any other file.
 fn collect_auto_inject(call: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
     let (Some(keys), Some(module_id)) = (auto_inject_keys(call, src), acc.module_id) else {
         return;
     };
-    for key in keys {
+    for (reader, key) in keys {
         let ty = match acc.registered.get(&key) {
             Some(registered) => registered.clone(),
             None => key_class_name(&key),
         };
+        acc.auto_inject_keys += 1;
+        acc.nav.record_fact(
+            class_id,
+            NavFact::ContainerInject {
+                key: key.clone(),
+                reader: reader.clone(),
+                ty: ty.clone().unwrap_or_default(),
+                line: line_at(call),
+            },
+        );
         let Some(ty) = ty else {
             continue;
         };
+        acc.nav.record_field_type(class_id, &reader, &ty);
         if !acc.inject_seen.insert((class_id, ty.clone())) {
             continue;
         }
@@ -806,18 +873,14 @@ fn collect_auto_inject(call: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc
     }
 }
 
-/// Every dry-container registration in the file: `register(<key>) { <v> }`,
-/// `register(<key>, <v>)` (any receiver: `extend Dry::Container::Mixin`
-/// registers on the class, `container.register` on an instance), keyed by
-/// the full key, `namespace(<ns>) do .. end` blocks `.`-joined in front.
-/// The value names a class when it is `K.new(..)`, `K` or `A::K` (last
-/// segment); a value naming none, or a key two registrations give different
-/// classes, maps to `None`.
-fn container_registrations(
-    root: TsNode,
-    src: &[u8],
-) -> std::collections::HashMap<String, Option<String>> {
-    let mut out = std::collections::HashMap::new();
+/// Every dry-container registration in the file, in source order:
+/// `register(<key>) { <v> }`, `register(<key>, <v>)` (any receiver: `extend
+/// Dry::Container::Mixin` registers on the class, `container.register` on an
+/// instance), keyed by the full key, `namespace(<ns>) do .. end` blocks
+/// `.`-joined in front. The value names a class when it is `K.new(..)`, `K`
+/// or `A::K` (last segment), else `None`.
+fn container_registrations(root: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
+    let mut found: Vec<(usize, String, Option<String>)> = Vec::new();
     let mut stack = vec![(root, String::new())];
     while let Some((n, prefix)) = stack.pop() {
         let mut child_prefix = prefix.clone();
@@ -829,16 +892,7 @@ fn container_registrations(
                 "namespace" if n.child_by_field_name("block").is_some() => {
                     child_prefix = format!("{full}.");
                 }
-                "register" => {
-                    let class = registered_class(n, src);
-                    out.entry(full)
-                        .and_modify(|seen: &mut Option<String>| {
-                            if *seen != class {
-                                *seen = None;
-                            }
-                        })
-                        .or_insert(class);
-                }
+                "register" => found.push((n.start_byte(), full, registered_class(n, src))),
                 _ => {}
             }
         }
@@ -847,7 +901,69 @@ fn container_registrations(
             stack.push((child, child_prefix.clone()));
         }
     }
+    found.sort_by_key(|(at, _, _)| *at);
+    found
+        .into_iter()
+        .map(|(_, key, class)| (key, class))
+        .collect()
+}
+
+/// The file's registrations by key ([`container_registrations`]): a key two
+/// registrations give different classes maps to `None`.
+fn registered_by_key(
+    registrations: &[(String, Option<String>)],
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut out = std::collections::HashMap::new();
+    for (key, class) in registrations {
+        out.entry(key.clone())
+            .and_modify(|seen: &mut Option<String>| {
+                if seen != class {
+                    *seen = None;
+                }
+            })
+            .or_insert_with(|| class.clone());
+    }
     out
+}
+
+/// GD.18: Ruby mixins. `include M` / `prepend M` / `extend M` with one or
+/// more constant-path arguments, no receiver, in a class or module body: one
+/// [`NavFact::Mixin`] per argument on `owner`, the path as written. Any
+/// other argument (`extend self`, `include Import["k"]`, `include
+/// mixin_for(x)`) records nothing for that argument.
+fn collect_mixins(call: TsNode, src: &[u8], owner: NodeId, acc: &mut Acc) {
+    if call.child_by_field_name("receiver").is_some() {
+        return;
+    }
+    let Some(method) = call.child_by_field_name("method") else {
+        return;
+    };
+    let extend = match text_of(method, src) {
+        "include" | "prepend" => false,
+        "extend" => true,
+        _ => return,
+    };
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if !matches!(arg.kind(), "constant" | "scope_resolution") {
+            continue;
+        }
+        let module = text_of(arg, src);
+        if module.is_empty() {
+            continue;
+        }
+        acc.mixins += 1;
+        acc.nav.record_fact(
+            owner,
+            NavFact::Mixin {
+                module: module.to_string(),
+                extend,
+            },
+        );
+    }
 }
 
 /// `("register" | "namespace", key)` when `call` is one of those with a
@@ -3203,6 +3319,138 @@ end
                 (c.clone(), "RedisCache".into(), 15),
                 (c.clone(), "SmtpMailer".into(), 15),
                 (c, "SystemClock".into(), 15),
+            ]
+        );
+    }
+
+    /// The nav facts `qname`'s scope recorded, in parser order.
+    fn facts_of(fp: &FileParse, qname: &str) -> Vec<NavFact> {
+        fp.nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .and_then(|(id, _)| fp.nav.nav_facts.get(id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// GD.18: each auto_inject key is a ContainerInject fact on the class
+    /// (reader = the key's last segment or the alias), and the reader is a
+    /// field of the type the parser gave the key, so `user_service.find(id)`
+    /// is typed; a key registered here with no class records `ty` "" and no
+    /// field. Every registration is a ContainerRegister fact of the file, in
+    /// source order.
+    #[test]
+    fn auto_inject_records_readers_and_registrations() {
+        let source = r#"
+class Container
+  extend Dry::Container::Mixin
+  register("mailer") { SmtpMailer.new }
+  register("builder") { build_thing }
+  namespace(:repositories) do
+    register(:users) { Repos::PgUsers.new(db) }
+  end
+end
+
+class Ctl
+  include Import["user_service", "mailer", "builder", repo: "repositories.users"]
+  def show(id) = user_service.find(id)
+end
+"#;
+        let fp = parse_file(source, "app.rb", "app", repo()).unwrap();
+        let inject = |key: &str, reader: &str, ty: &str| NavFact::ContainerInject {
+            key: key.into(),
+            reader: reader.into(),
+            ty: ty.into(),
+            line: 11,
+        };
+        assert_eq!(
+            facts_of(&fp, "app::Ctl"),
+            vec![
+                inject("user_service", "user_service", "UserService"),
+                inject("mailer", "mailer", "SmtpMailer"),
+                inject("builder", "builder", ""),
+                inject("repositories.users", "repo", "PgUsers"),
+            ]
+        );
+        let ctl = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "app::Ctl");
+        let mut fields: Vec<(String, String)> = fp.nav.field_types[&ctl]
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        fields.sort();
+        assert_eq!(
+            fields,
+            vec![
+                ("mailer".into(), "SmtpMailer".into()),
+                ("repo".into(), "PgUsers".into()),
+                ("user_service".into(), "UserService".into()),
+            ]
+        );
+        let register = |key: &str, class: &str| NavFact::ContainerRegister {
+            key: key.into(),
+            class: class.into(),
+        };
+        assert_eq!(
+            facts_of(&fp, "app"),
+            vec![
+                register("mailer", "SmtpMailer"),
+                register("builder", ""),
+                register("repositories.users", "PgUsers"),
+            ]
+        );
+        // `user_service.find(id)` goes out as an Attribute on the reader.
+        assert!(fp.calls.iter().any(|c| c.qualifier
+            == CallQualifier::Attribute {
+                base: "user_service".into(),
+                name: "find".into()
+            }));
+    }
+
+    /// GD.18: `include` / `prepend` / `extend` of constant paths in a class
+    /// or module body are Mixin facts on that scope, one per argument, the
+    /// path as written; `extend self`, an auto_inject include, a computed
+    /// argument and a receiver-qualified include record nothing.
+    #[test]
+    fn mixins_are_recorded_per_scope() {
+        let source = r#"
+module Sinatra
+  module Helpers
+    extend self
+    include Rack::Utils
+  end
+  class Base
+    include Helpers
+    include Templates, ::Comparable
+    prepend Tracing
+    extend Routing
+    include Import["user_service"]
+    include mixin_for(:x)
+    obj.include Other
+  end
+end
+"#;
+        let fp = parse_file(source, "base.rb", "base", repo()).unwrap();
+        let mixin = |module: &str, extend: bool| NavFact::Mixin {
+            module: module.into(),
+            extend,
+        };
+        assert_eq!(
+            facts_of(&fp, "base::Sinatra::Helpers"),
+            vec![mixin("Rack::Utils", false)]
+        );
+        let base: Vec<NavFact> = facts_of(&fp, "base::Sinatra::Base")
+            .into_iter()
+            .filter(|f| matches!(f, NavFact::Mixin { .. }))
+            .collect();
+        assert_eq!(
+            base,
+            vec![
+                mixin("Helpers", false),
+                mixin("Templates", false),
+                mixin("::Comparable", false),
+                mixin("Tracing", false),
+                mixin("Routing", true),
             ]
         );
     }

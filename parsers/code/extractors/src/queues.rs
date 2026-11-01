@@ -4343,6 +4343,43 @@ fn emit_queue_nodes(
         },
     );
 
+    // GD.18: Bunny exchanges. A key-less publish on a declared exchange
+    // produces to the exchange; a server-named queue's `q.bind(<exchange>)`
+    // consumes it, and so does that queue's unnamed subscribe.
+    if is_ruby_path(path) && signals_present(&lower, BUNNY_GATE) {
+        let bunny = BunnyFile::read(source);
+        bind_bunny_exchanges(
+            &bunny,
+            DeclareCtx {
+                source,
+                path,
+                repo,
+                kind,
+                prefix,
+                resolve,
+                lower: &lower,
+            },
+            &mut DeclareState {
+                pending: &mut pending,
+                seen: &mut seen,
+                spans: &mut spans,
+                callbacks: &mut callbacks,
+                callback_rows: &mut callback_rows,
+                callback_seen: &mut callback_seen,
+                guard: &mut guard,
+                counts,
+            },
+        );
+        // fired_on, once per Bunny file that declares an exchange:
+        //   `[queues] bunny exchanges=<e> fanout_publishes=<p> binds=<b> path=<f>`
+        if resolve.is_none()
+            && kind == node_kind::QUEUE_CONSUMER
+            && let Some(line) = bunny.marker(path)
+        {
+            eprintln!("{line}");
+        }
+    }
+
     // CL.1: the deferred tags, in row order. `named` is taken BEFORE any tag
     // is recorded, so a tag never explains another.
     let named_len = pending.len();
@@ -4653,6 +4690,318 @@ fn bind_declared_queues(
             }
         }
     }
+}
+
+// ---- GD.18: Bunny exchanges ---------------------------------------------------
+// Bunny names a RabbitMQ exchange where it declares it: `x = ch.fanout("logs")`
+// (or `.topic(` / `.direct(` / `.headers(`). A fanout publish carries no
+// routing key, `x.publish("m")`, and the subscriber reaches it through a
+// server-named queue bound to the exchange: `q = ch.queue("", exclusive:
+// true); q.bind("logs")` (or `q.bind(x)`); `q.subscribe { .. }`. The exchange
+// is the only name both sides share, so it is the topic of both: the publish
+// is a producer site of it, the bind a consumer site, and the bound queue's
+// unnamed subscribe a consumer site too. A keyed publish keeps its routing
+// key (DH.1), and a publish or bind naming no declared exchange or literal
+// names nothing.
+// ---------------------------------------------------------------------------
+
+/// The Bunny exchange-declaring methods on a channel.
+const BUNNY_EXCHANGE_KINDS: &[&str] = &["fanout", "topic", "direct", "headers"];
+
+/// GD.18: what one Bunny file declares, publishes and binds.
+#[derive(Default)]
+struct BunnyFile {
+    /// `(variable, exchange name)` per `<var> = <ch>.<kind>("<name>"..)`, in
+    /// source order; a variable assigned two names holds the first only when
+    /// both agree ([`BunnyFile::exchange_of`] refuses a conflict).
+    exchanges: Vec<(String, String)>,
+    /// Exchange declarations read (with or without a variable).
+    declared: usize,
+    /// `(needle offset of .publish(, exchange name)` of each key-less publish
+    /// on a declared exchange.
+    publishes: Vec<(usize, String)>,
+    /// `(needle offset of .bind(, queue variable, exchange name)`.
+    binds: Vec<(usize, String, String)>,
+}
+
+impl BunnyFile {
+    fn read(source: &str) -> Self {
+        let mut out = BunnyFile::default();
+        // (closing paren offset, exchange name) of every declaration, for an
+        // inline `ch.fanout("logs").publish(..)`.
+        let mut inline: Vec<(usize, String)> = Vec::new();
+        for kind in BUNNY_EXCHANGE_KINDS {
+            let needle = format!(".{kind}(");
+            for (at, _) in source.match_indices(&needle) {
+                let after = at + needle.len();
+                if in_ruby_comment(source, at) || ruby_bare_receiver(source, at).is_none() {
+                    continue;
+                }
+                let Some(region) = queue_topic::region_body(source.get(after..).unwrap_or(""))
+                else {
+                    continue;
+                };
+                let Some(name) = queue_topic::split_args(region)
+                    .first()
+                    .and_then(|a| ruby_string_literal(a))
+                else {
+                    continue;
+                };
+                out.declared += 1;
+                let close = after + region.len();
+                if source.as_bytes().get(close) == Some(&b')') {
+                    inline.push((close, name.clone()));
+                }
+                if let Some(var) = ruby_assigned_var(source, at) {
+                    out.exchanges.push((var.to_string(), name));
+                }
+            }
+        }
+        for (at, _) in source.match_indices(".publish(") {
+            if in_ruby_comment(source, at) {
+                continue;
+            }
+            let exchange = match ruby_bare_receiver(source, at) {
+                Some(var) => out.exchange_of(var),
+                None => inline
+                    .iter()
+                    .find(|(close, _)| close + 1 == at)
+                    .map(|(_, n)| n.clone()),
+            };
+            let Some(exchange) = exchange else { continue };
+            let region =
+                queue_topic::region_body(source.get(at + ".publish(".len()..).unwrap_or(""))
+                    .unwrap_or("");
+            if region.contains("routing_key") {
+                continue;
+            }
+            out.publishes.push((at, exchange));
+        }
+        for (at, _) in source.match_indices(".bind(") {
+            if in_ruby_comment(source, at) {
+                continue;
+            }
+            let Some(queue) = ruby_bare_receiver(source, at) else {
+                continue;
+            };
+            let region = queue_topic::region_body(source.get(at + ".bind(".len()..).unwrap_or(""))
+                .unwrap_or("");
+            let Some(first) = queue_topic::split_args(region).first().map(|a| a.trim()) else {
+                continue;
+            };
+            let exchange = ruby_string_literal(first)
+                .or_else(|| is_ruby_var(first).then(|| out.exchange_of(first)).flatten());
+            if let Some(exchange) = exchange {
+                out.binds.push((at, queue.to_string(), exchange));
+            }
+        }
+        out
+    }
+
+    /// The exchange the variable `var` holds: its one name, `None` when the
+    /// file assigns it none or two different ones.
+    fn exchange_of(&self, var: &str) -> Option<String> {
+        let mut names = self
+            .exchanges
+            .iter()
+            .filter(|(v, _)| v == var)
+            .map(|(_, n)| n);
+        let first = names.next()?;
+        names.all(|n| n == first).then(|| first.clone())
+    }
+
+    /// `[queues] bunny exchanges=<e> fanout_publishes=<p> binds=<b> path=<f>`,
+    /// or `None` for a file that declares, publishes and binds no exchange.
+    fn marker(&self, path: &str) -> Option<String> {
+        (self.declared + self.publishes.len() + self.binds.len() > 0).then(|| {
+            format!(
+                "[queues] bunny exchanges={} fanout_publishes={} binds={} path={path}",
+                self.declared,
+                self.publishes.len(),
+                self.binds.len()
+            )
+        })
+    }
+}
+
+/// GD.18: record what [`BunnyFile`] read. Producer side: each key-less
+/// publish span becomes a site of its exchange. Consumer side: each bind is a
+/// site of its exchange, and each still-unbound subscribe span on a bound
+/// queue variable a site of the queue's first bound exchange (every bound
+/// exchange is a site of it). A recorded span is `declared`, so the deferred
+/// tag pass never mints `unresolved:rabbitmq` for it.
+fn bind_bunny_exchanges(bunny: &BunnyFile, ctx: DeclareCtx<'_>, st: &mut DeclareState<'_, '_, '_>) {
+    let framework = QueueFramework::RabbitMQ;
+    let record = |st: &mut DeclareState<'_, '_, '_>, topic: &str, at: usize| {
+        let line = queue_topic::line_of(ctx.source, at);
+        if record_site(
+            st.pending,
+            st.seen,
+            topic,
+            &framework,
+            ctx.repo,
+            ctx.kind,
+            ctx.prefix,
+            Confidence::Medium,
+            (line, at),
+        ) && debug_enabled()
+        {
+            eprintln!(
+                "[queues] bunny exchange={topic} side={} file={}",
+                if ctx.kind == node_kind::QUEUE_CONSUMER {
+                    "consumer"
+                } else {
+                    "producer"
+                },
+                ctx.path
+            );
+        }
+        st.seen.get(&format!("{topic}:{framework:?}")).copied()
+    };
+    let unbound = |s: &HitSpan<'_>, needle: &str| {
+        *s.framework == framework
+            && s.named.is_none()
+            && s.declared.is_none()
+            && s.needle.starts_with(needle)
+    };
+    if ctx.kind != node_kind::QUEUE_CONSUMER {
+        for (at, exchange) in &bunny.publishes {
+            let hit = (0..st.spans.len()).find(|&i| {
+                st.spans
+                    .get(i)
+                    .is_some_and(|s| s.start == *at && unbound(s, ".publish("))
+            });
+            if let Some(i) = hit {
+                let idx = record(st, exchange, *at);
+                if let Some(s) = st.spans.get_mut(i) {
+                    s.declared = idx;
+                }
+            }
+        }
+        return;
+    }
+    for (at, _, exchange) in &bunny.binds {
+        record(st, exchange, *at);
+    }
+    for i in 0..st.spans.len() {
+        let Some((start, needle, handler, row)) = st
+            .spans
+            .get(i)
+            .filter(|s| unbound(s, ".subscribe"))
+            .map(|s| (s.start, s.needle, s.handler, s.row))
+        else {
+            continue;
+        };
+        let Some(queue) = ruby_bare_receiver(ctx.source, start) else {
+            continue;
+        };
+        let mut first: Option<usize> = None;
+        for (_, q, exchange) in &bunny.binds {
+            if q != queue {
+                continue;
+            }
+            let idx = record(st, exchange, start);
+            first = first.or(idx);
+        }
+        let Some(idx) = first else { continue };
+        if let Some(s) = st.spans.get_mut(i) {
+            s.declared = Some(idx);
+        }
+        if let (Some(h), Some(id)) = (handler, st.pending.get(idx).map(|p| p.id)) {
+            let found = handlers_at(ctx.source, start, needle, h);
+            push_row_callbacks(
+                st.callbacks,
+                st.callback_rows,
+                st.callback_seen,
+                id,
+                found,
+                row,
+            );
+        }
+    }
+}
+
+/// GD.18: a Ruby source file.
+fn is_ruby_path(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".rb")
+}
+
+/// GD.18: `offset` sits after a `#` on its line outside a string: a Ruby
+/// comment (a `#` inside quotes, `"#{x}"`, is not one).
+fn in_ruby_comment(source: &str, offset: usize) -> bool {
+    let start = source
+        .get(..offset)
+        .map_or(0, |h| h.rfind('\n').map_or(0, |i| i + 1));
+    let mut quote: Option<char> = None;
+    for c in source.get(start..offset).unwrap_or("").chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' => return true,
+            None => {}
+        }
+    }
+    false
+}
+
+/// GD.18: a Ruby local or instance variable name (`x`, `logs_x`, `@x`).
+fn is_ruby_var(s: &str) -> bool {
+    let name = s.strip_prefix('@').unwrap_or(s);
+    name.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// GD.18: the bare variable a `.method(` at `offset` is called on (`x` of
+/// `x.publish(`, `@q` of `@q.bind(`); `None` for a chain (`ch.x.publish(`),
+/// a constant or a call result.
+fn ruby_bare_receiver(source: &str, offset: usize) -> Option<&str> {
+    let head = source.get(..offset)?;
+    let b = head.as_bytes();
+    let mut i = b.len();
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'@') {
+        i -= 1;
+    }
+    if i > 0 && matches!(b[i - 1], b'.' | b':') {
+        return None;
+    }
+    let name = head.get(i..)?;
+    is_ruby_var(name).then_some(name)
+}
+
+/// GD.18: the variable a statement assigns when the call whose `.method(`
+/// sits at `offset` is its right-hand side: `x = ch.fanout(` -> `x`. The
+/// receiver chain before `offset` is stepped over; anything else on the line
+/// before the `=` (a second statement, a comparison) assigns nothing.
+fn ruby_assigned_var(source: &str, offset: usize) -> Option<&str> {
+    let head = source.get(..offset)?;
+    let line_start = head.rfind('\n').map_or(0, |i| i + 1);
+    let line = head.get(line_start..)?;
+    let b = line.as_bytes();
+    let mut i = b.len();
+    while i > 0 && (is_chain_byte(b[i - 1]) || b[i - 1] == b'@') {
+        i -= 1;
+    }
+    let lhs = line.get(..i)?.trim_end().strip_suffix('=')?;
+    if lhs.ends_with(['=', '!', '<', '>', '+', '-', '*', '/', '|', '&']) {
+        return None;
+    }
+    let var = lhs.trim();
+    is_ruby_var(var).then_some(var)
+}
+
+/// GD.18: the text of a plain, non-empty Ruby string literal argument
+/// (`"logs"`, `'logs'`); an interpolated string or any other expression is
+/// none.
+fn ruby_string_literal(arg: &str) -> Option<String> {
+    let t = arg.trim();
+    let quote = t.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let inner = t.strip_prefix(quote)?.strip_suffix(quote)?;
+    let plain = !inner.is_empty()
+        && !inner.contains(quote)
+        && !inner.contains('\\')
+        && !inner.contains("#{");
+    plain.then(|| inner.to_string())
 }
 
 /// The id [`record_site`] gave (topic, framework) in this file.
@@ -10622,10 +10971,13 @@ await myconsumer.run({ eachMessage: notMine });\n";
         // A topic exchange's routing key is read the same way.
         let topic_x = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nx = ch.topic(\"events\")\nx.publish(payload, routing_key: \"orders.created\", persistent: true)\n";
         assert_eq!(rb(topic_x).1, strs(&["queue_producer:orders.created"]));
-        // A publish with no routing key names nothing: the framework tag.
+        // GD.18: a key-less publish on a declared exchange produces to the
+        // exchange; a key-less publish on anything else names nothing.
         let fanout = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nx = ch.fanout(\"logs\")\nx.publish(\"hello\")\n";
+        assert_eq!(rb(fanout).1, strs(&["queue_producer:logs"]));
+        let unknown = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nx = make_exchange(ch)\nx.publish(\"hello\")\n";
         assert_eq!(
-            rb(fanout).1,
+            rb(unknown).1,
             strs(&[&format!("queue_producer:{UNRESOLVED_PREFIX}rabbitmq")])
         );
         // Guard: eventbus.rs mints no verb-fallback EVENT_EMITTER beside the
@@ -10641,6 +10993,65 @@ await myconsumer.run({ eachMessage: notMine });\n";
             "{:?}",
             ev.nav.qname_by_id.values().collect::<Vec<_>>()
         );
+    }
+
+    /// GD.18: Bunny exchanges. A key-less publish names its exchange (a
+    /// variable or an inline declaration, any exchange kind); a keyed one
+    /// keeps its routing key. `q.bind("logs")` / `q.bind(x)` consumes the
+    /// exchange, and the bound queue's unnamed subscribe is a site of it, so
+    /// no `unresolved:rabbitmq` tag is left; a bind naming no exchange, a
+    /// commented-out publish and a file without Bunny read nothing.
+    #[test]
+    fn ruby_bunny_fanout_exchange_pairs_publish_and_bind() {
+        let head = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\n";
+        let rb_at = |body: &str| rb(&format!("{head}{body}"));
+        // Producer side.
+        for body in [
+            "x = ch.fanout(\"logs\")\nx.publish(\"m\")\n",
+            "@x = ch.topic('logs', durable: true)\n@x.publish(payload, persistent: true)\n",
+            "ch.fanout(\"logs\").publish(\"m\")\n",
+        ] {
+            assert_eq!(rb_at(body).1, strs(&["queue_producer:logs"]), "{body}");
+        }
+        let keyed = "x = ch.topic(\"events\")\nx.publish(m, routing_key: \"orders.created\")\n";
+        assert_eq!(rb_at(keyed).1, strs(&["queue_producer:orders.created"]));
+        let commented = "x = ch.fanout(\"logs\")\n# x.publish(\"m\")\n";
+        assert_eq!(rb_at(commented).1, Vec::<String>::new());
+        // Consumer side: the bind, and the bound queue's subscribe.
+        for body in [
+            "q = ch.queue(\"\", exclusive: true)\nq.bind(\"logs\")\nq.subscribe(block: true) { |_, _, b| p b }\n",
+            "x = ch.fanout(\"logs\")\nq = ch.queue(\"\", exclusive: true)\nq.bind(x)\nq.subscribe do |_, _, b|\n  p b\nend\n",
+            "q = ch.queue(\"\")\nq.bind(\"logs\", routing_key: \"#\")\n",
+        ] {
+            assert_eq!(rb_at(body).0, strs(&["queue_consumer:logs"]), "{body}");
+        }
+        let c = extract_queue_consumer_nodes(
+            &format!(
+                "{head}q = ch.queue(\"\", exclusive: true)\nq.bind(\"logs\")\nq.subscribe(block: true) {{ |_, _, b| p b }}\n"
+            ),
+            "app/sub.rb",
+            module_id(),
+            repo(),
+        );
+        // Sites: the bind (row 3) and the subscribe (row 4).
+        let mut lines: Vec<u32> = c.anchors.iter().map(|a| a.line).collect();
+        lines.sort_unstable();
+        assert_eq!(lines, vec![3, 4]);
+        // A named queue bound to an exchange consumes both.
+        let named = "q = ch.queue(\"orders\")\nq.bind(\"logs\")\nq.subscribe { |_, _, b| p b }\n";
+        assert_eq!(
+            rb_at(named).0,
+            strs(&["queue_consumer:logs", "queue_consumer:orders"])
+        );
+        // A bind on an unknown exchange variable names nothing.
+        let unknown = "q = ch.queue(\"\")\nq.bind(exchange)\nq.subscribe { |_, _, b| p b }\n";
+        assert_eq!(
+            rb_at(unknown).0,
+            strs(&[&format!("queue_consumer:{UNRESOLVED_PREFIX}rabbitmq")])
+        );
+        // No Bunny gate: no exchange reading at all.
+        let plain = "x = ch.fanout(\"logs\")\nx.publish(\"m\")\nq.bind(\"logs\")\n";
+        assert_eq!(rb(plain), (vec![], vec![]));
     }
 
     /// matrix/ruby/kafka, the routing file and the WaterDrop producer.
