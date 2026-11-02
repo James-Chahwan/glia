@@ -43,6 +43,20 @@
 //! | scoped | the link sits under a SCOPED catch-all (`/docs/**`, `/docs/[...slug]`) | Medium |
 //! | suffix | the route's segments are a proper suffix of the link's (a child table whose parent prefix is in another file) | Weak |
 //!
+//! # Opaque heads (HQ.6)
+//!
+//! A route table whose parent `path` is computed (`frontendURL('a/b')`, a
+//! constant, a template) writes its pages under an opaque head segment
+//! `~<name>` (`/~frontendURL/a/b/list`, the extractors' `nav_routes`): the
+//! head stands for at least one segment of unknown text. Such a page is
+//! an opaque shape: never an exact or param target. A link whose own path
+//! holds a `~` head (a redirect from inside that table) matches only an
+//! opaque page with the same head text and a matching tail (`exact` when the
+//! page's tail holds no parameter, else `param`); any other link matches it
+//! only in the suffix tier, by its known tail (non-empty, with a literal
+//! segment, shorter than the link). An unmatched `~` link is never reported
+//! dead: its prefix is unknown, so it is counted `opaque_unmatched`.
+//!
 //! A plain-anchor (`href:`) edge is capped at Medium. Every edge's EVIDENCE is
 //! `graph:nav` with its tier as the rule (`href_<tier>` for a plain anchor,
 //! LC.3d). A ROOT catch-all (`**`,
@@ -135,6 +149,9 @@ pub(crate) struct NavStats {
     pub(crate) href_unmatched: usize,
     pub(crate) orphan: usize,
     pub(crate) lifted: usize,
+    /// HQ.6: links with an opaque `~` head (a redirect inside a computed
+    /// parent's table) no opaque page matched: never dead.
+    pub(crate) opaque_unmatched: usize,
 }
 
 impl NavStats {
@@ -145,11 +162,17 @@ impl NavStats {
     }
 
     /// `[nav] links=L resolved=R (exact=E param=P scoped=C suffix=S) dead=D
-    /// catchall=A server=V no_router=N href_unmatched=H orphan=O lifted=F`.
+    /// catchall=A server=V no_router=N href_unmatched=H orphan=O lifted=F`,
+    /// then ` opaque_unmatched=U` only when U > 0 (HQ.6).
     pub(crate) fn marker(&self) -> String {
+        let opaque = if self.opaque_unmatched > 0 {
+            format!(" opaque_unmatched={}", self.opaque_unmatched)
+        } else {
+            String::new()
+        };
         format!(
             "[nav] links={} resolved={} (exact={} param={} scoped={} suffix={}) dead={} \
-             catchall={} server={} no_router={} href_unmatched={} orphan={} lifted={}",
+             catchall={} server={} no_router={} href_unmatched={} orphan={} lifted={}{}",
             self.links,
             self.exact + self.param + self.scoped + self.suffix,
             self.exact,
@@ -163,6 +186,7 @@ impl NavStats {
             self.href_unmatched,
             self.orphan,
             self.lifted,
+            opaque,
         )
     }
 
@@ -222,6 +246,22 @@ enum Shape {
     Scoped { prefix: Vec<Seg>, optional: bool },
     /// The whole path is the wildcard: `**`, `*`, `/:pathMatch(.*)*`.
     Root,
+    /// HQ.6: a page under a computed parent: `head` the normalised path up to
+    /// and including its last `~<name>` segment (the unknown prefix), `tail`
+    /// the normalised segments after it (the known text).
+    Opaque { head: String, tail: Vec<Seg> },
+}
+
+/// HQ.6: `(head, tail)` of a path holding an opaque `~<name>` segment, split
+/// at its LAST one (a lazy mount may prefix the head, HQ.5): the head is the
+/// normalised text through that segment, the tail the normalised segments
+/// after it. `None` for a path with no such segment.
+fn opaque_split(raw: &str) -> Option<(String, Vec<Seg>)> {
+    let segs: Vec<&str> = raw.trim().split('/').filter(|s| !s.is_empty()).collect();
+    let at = segs.iter().rposition(|s| s.starts_with('~'))?;
+    let head = normalise_http_path(&segs[..=at].join("/"));
+    let tail = segs_of(&normalise_http_path(&segs[at + 1..].join("/")));
+    Some((head, tail))
 }
 
 /// `Some(optional)` when `seg` is a catch-all segment: `*`, `**`,
@@ -249,6 +289,9 @@ fn wildcard(seg: &str) -> Option<bool> {
 }
 
 fn classify(raw: &str) -> Shape {
+    if let Some((head, tail)) = opaque_split(raw) {
+        return Shape::Opaque { head, tail };
+    }
     let segs: Vec<&str> = raw.trim().split('/').filter(|s| !s.is_empty()).collect();
     if let Some((last, before)) = segs.split_last()
         && let Some(optional) = wildcard(last)
@@ -353,7 +396,7 @@ impl NavIndex {
                     idx.root_catchall = true;
                     continue;
                 }
-                Shape::Scoped { .. } => {}
+                Shape::Scoped { .. } | Shape::Opaque { .. } => {}
                 Shape::Plain(segs) => {
                     if segs.iter().all(|s| matches!(s, Seg::Lit(_))) {
                         idx.exact
@@ -420,7 +463,9 @@ impl NavIndex {
         let suffix: Vec<usize> = (0..self.routes.len())
             .filter(ok)
             .filter(|&at| match &self.routes[at].shape {
-                Shape::Plain(segs) => {
+                // HQ.6: an opaque page's head stands for at least one segment,
+                // so its known tail must be a proper suffix too.
+                Shape::Plain(segs) | Shape::Opaque { tail: segs, .. } => {
                     !segs.is_empty()
                         && segs.len() < link.len()
                         && segs.iter().any(|s| matches!(s, Seg::Lit(_)))
@@ -430,6 +475,35 @@ impl NavIndex {
             })
             .collect();
         (!suffix.is_empty()).then(|| (Tier::Suffix, ids(suffix)))
+    }
+
+    /// HQ.6: the opaque pages a link with an opaque head reaches: the same
+    /// head text and a tail matching segment by segment; `exact` when the
+    /// page's tail holds no parameter, else `param`. Restricted to routes of
+    /// `owner` when one is given. `None` for no hit.
+    fn lookup_opaque(
+        &self,
+        head: &str,
+        link_tail: &[Seg],
+        owner: Option<&str>,
+    ) -> Option<(Tier, Vec<NodeId>)> {
+        let mut tier = Tier::Exact;
+        let mut hits: Vec<NodeId> = Vec::new();
+        for r in &self.routes {
+            if owner.is_some_and(|o| r.owner.as_deref() != Some(o)) {
+                continue;
+            }
+            let Shape::Opaque { head: h, tail } = &r.shape else {
+                continue;
+            };
+            if h == head && segs_match(tail, link_tail) {
+                if tail.iter().any(|s| matches!(s, Seg::Param)) {
+                    tier = Tier::Param;
+                }
+                hits.push(r.id);
+            }
+        }
+        (!hits.is_empty()).then_some((tier, hits))
     }
 
     /// The project a ref links from: a redirect's own ROUTE owner, else the
@@ -541,10 +615,17 @@ pub(crate) fn resolve_nav_links(
         let norm = normalise_http_path(path);
         let link = segs_of(&norm);
         let owner = idx.owner_of(g, &pos, r);
-        let hit = owner
-            .as_deref()
-            .and_then(|o| idx.lookup(&norm, &link, Some(o)))
-            .or_else(|| idx.lookup(&norm, &link, None));
+        let opaque = opaque_split(path);
+        let hit = match &opaque {
+            Some((head, tail)) => owner
+                .as_deref()
+                .and_then(|o| idx.lookup_opaque(head, tail, Some(o)))
+                .or_else(|| idx.lookup_opaque(head, tail, None)),
+            None => owner
+                .as_deref()
+                .and_then(|o| idx.lookup(&norm, &link, Some(o)))
+                .or_else(|| idx.lookup(&norm, &link, None)),
+        };
         match hit {
             Some((tier, targets)) => {
                 s.count(tier);
@@ -563,6 +644,7 @@ pub(crate) fn resolve_nav_links(
                     }
                 }
             }
+            None if opaque.is_some() => s.opaque_unmatched += 1,
             None if !idx.any_nav => s.no_router += 1,
             None if idx.server_paths.contains(&norm) => s.server += 1,
             None if href => s.href_unmatched += 1,
@@ -845,5 +927,100 @@ mod tests {
         let bare = index(&[("/{}", classify("/:id"))]);
         assert_eq!(look(&bare, "/a/b"), None);
         assert_eq!(look(&idx, "/nowhere"), None);
+    }
+
+    fn look_opaque(idx: &NavIndex, link: &str) -> Option<(Tier, Vec<NodeId>)> {
+        let (head, tail) = opaque_split(link).expect("an opaque link");
+        idx.lookup_opaque(&head, &tail, None)
+    }
+
+    #[test]
+    fn opaque_heads_classify_by_their_last_tilde_segment() {
+        let lit = |s: &str| Seg::Lit(s.to_string());
+        assert_eq!(
+            classify("/~frontendURL/accounts/:accountId/roles"),
+            Shape::Opaque {
+                head: "/~frontendURL".to_string(),
+                tail: vec![lit("accounts"), Seg::Param, lit("roles")],
+            }
+        );
+        // A lazy mount prefix (HQ.5) stays inside the head.
+        assert_eq!(
+            classify("/app/~tpl/list"),
+            Shape::Opaque {
+                head: "/app/~tpl".to_string(),
+                tail: vec![lit("list")],
+            }
+        );
+        assert_eq!(
+            classify("/~ROUTES.SETTINGS"),
+            Shape::Opaque {
+                head: "/~ROUTES.SETTINGS".to_string(),
+                tail: vec![],
+            }
+        );
+        assert_eq!(opaque_split("/settings/general"), None);
+    }
+
+    #[test]
+    fn opaque_pages_bind_redirects_exactly_and_links_only_by_suffix() {
+        let roles = "/~frontendURL/accounts/:accountId/settings/custom-roles";
+        let list = format!("{roles}/list");
+        let idx = index(&[
+            ("", classify(roles)),
+            ("", classify(&list)),
+            ("", classify("/~frontendURL/teams/:teamId/edit")),
+            ("", classify("/~ROUTES.SETTINGS")),
+            ("/home", classify("/home")),
+        ]);
+        // A redirect inside the table: same head, same tail; a parameter in
+        // the page's tail is the param tier, as for a plain page.
+        assert_eq!(
+            look_opaque(&idx, &list),
+            Some((Tier::Param, vec![NodeId(1)]))
+        );
+        assert_eq!(
+            look_opaque(&idx, roles),
+            Some((Tier::Param, vec![NodeId(0)]))
+        );
+        assert_eq!(
+            look_opaque(&idx, "/~ROUTES.SETTINGS"),
+            Some((Tier::Exact, vec![NodeId(3)]))
+        );
+        assert_eq!(
+            look_opaque(&idx, "/~frontendURL/teams/7/edit"),
+            Some((Tier::Param, vec![NodeId(2)]))
+        );
+        // Another head never matches, nor does a plain page.
+        assert_eq!(look_opaque(&idx, "/~other/list"), None);
+        assert_eq!(look_opaque(&idx, "/~frontendURL/home"), None);
+        // A literal link binds the known tail as a proper suffix, Weak.
+        assert_eq!(
+            look(&idx, "/app/accounts/${id}/settings/custom-roles/list"),
+            Some((Tier::Suffix, vec![NodeId(1)]))
+        );
+        // The tail alone is no match: the head stands for a segment or more.
+        assert_eq!(look(&idx, "/accounts/7/settings/custom-roles/list"), None);
+        // A one-segment literal link never binds an opaque page.
+        assert_eq!(look(&idx, "/list"), None);
+        // An empty tail never suffix-binds.
+        assert_eq!(look(&idx, "/a/b"), None);
+        // A plain page still binds exactly.
+        assert_eq!(look(&idx, "/home"), Some((Tier::Exact, vec![NodeId(4)])));
+    }
+
+    #[test]
+    fn opaque_unmatched_is_appended_only_when_it_fires() {
+        let mut s = NavStats {
+            links: 1,
+            ..NavStats::default()
+        };
+        assert!(!s.marker().contains("opaque_unmatched"), "{}", s.marker());
+        s.opaque_unmatched = 2;
+        assert!(
+            s.marker().ends_with(" lifted=0 opaque_unmatched=2"),
+            "{}",
+            s.marker()
+        );
     }
 }

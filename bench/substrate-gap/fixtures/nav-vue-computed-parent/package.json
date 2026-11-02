@@ -1,0 +1,8 @@
+{
+  "name": "nav-vue-computed-parent",
+  "private": true,
+  "dependencies": {
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0"
+  }
+}

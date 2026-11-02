@@ -112,6 +112,9 @@ pub(crate) fn parse_repo_files_hashed(
     let mut nav_children = 0usize;
     let mut nav_rejected = 0usize;
     let mut nav_catchalls = 0usize;
+    // HQ.6: records under a computed parent path, same caveat.
+    let mut nav_opaque_parents = 0usize;
+    let mut nav_opaque_children = 0usize;
     // A3.5 `[extract] ts-routes` marker counter, same reparsed-only caveat.
     let mut ts_client_calls_skipped = 0usize;
     // A13.16: a prismaSchemaFolder schema declares its `datasource` in one
@@ -219,6 +222,8 @@ pub(crate) fn parse_repo_files_hashed(
                         nav_children += stats.nav_children;
                         nav_rejected += stats.nav_rejected;
                         nav_catchalls += stats.nav_catchalls;
+                        nav_opaque_parents += stats.nav_opaque_parents;
+                        nav_opaque_children += stats.nav_opaque_children;
                         ts_client_calls_skipped += stats.ts_client_calls_skipped;
                         tally.links_router += stats.nav_links_router;
                         tally.links_href += stats.nav_links_href;
@@ -354,7 +359,8 @@ pub(crate) fn parse_repo_files_hashed(
         eprintln!(
             "[extract] nav-routes marked: {nav_routes_marked} (page-qnamed {page_qnamed}) \
              (bound={nav_bound} redirects={nav_redirects} children={nav_children} \
-             rejected={nav_rejected} catchall={nav_catchalls})"
+             rejected={nav_rejected} catchall={nav_catchalls} \
+             opaque_parents={nav_opaque_parents} opaque_children={nav_opaque_children})"
         );
     }
     // A3.5 fired_on marker: ts_routes declined to mint a server ROUTE from an

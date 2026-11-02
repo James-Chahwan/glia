@@ -233,6 +233,11 @@ pub(crate) struct ExtractStats {
     pub nav_rejected: usize,
     /// LA.6b: nav ROUTEs whose path ends in a wildcard (`**`, `*`, `:x*`).
     pub nav_catchalls: usize,
+    /// HQ.6: route records whose `path` is computed (a call, an identifier
+    /// path, a `${..}` template), minted under an opaque `~<name>` head.
+    pub nav_opaque_parents: usize,
+    /// HQ.6: relative route records composed under one of them.
+    pub nav_opaque_children: usize,
     /// A3.5: ts_routes Express-scan matches rejected because the receiver is
     /// an HTTP client (`this.http.get('/users')`) — phantom server ROUTEs no
     /// longer minted.
@@ -582,6 +587,8 @@ pub(crate) fn apply_cross_cutting_extractors(
         stats.nav_children += tables.children;
         stats.nav_rejected += tables.rejected;
         stats.nav_catchalls += tables.catchalls;
+        stats.nav_opaque_parents += tables.opaque_parents;
+        stats.nav_opaque_children += tables.opaque_children;
         fp.refs.extend(tables.refs);
         fp.nodes.extend(tables.nodes);
         merge_nav(&mut fp.nav, tables.nav);

@@ -1,0 +1,56 @@
+{
+  "framework": "nav-vue-computed-parent",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "page:/~appURL/teams/:teamId/roles/list",
+      "note": "the `list` child composed under its computed parent `appURL('teams/:teamId/roles')`: the opaque head `~appURL` stands for the prefix the helper adds, the call's literal argument is the known tail"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "page:/~appURL/teams/:teamId/roles",
+      "to": "RolesWrapper",
+      "category": "HANDLED_BY",
+      "note": "the computed parent is a page of its own; at BASE it is no node"
+    },
+    {
+      "from": "page:/~appURL/teams/:teamId/roles/list",
+      "to": "RolesList",
+      "category": "HANDLED_BY",
+      "note": "the true route -> component edge liveness reads, kept under the opaque head"
+    },
+    {
+      "from": "page:/~appURL/teams/:teamId/roles",
+      "to": "page:/~appURL/teams/:teamId/roles/list",
+      "category": "NAVIGATES_TO",
+      "exact": true,
+      "note": "the `''` child's `redirect: 'list'` resolves against its computed parent and keeps the opaque prefix"
+    },
+    {
+      "from": "page:/settings",
+      "to": "page:/settings/general",
+      "category": "NAVIGATES_TO",
+      "exact": true,
+      "note": "positive control, holds at BASE: a literal parent's `''` -> `general` redirect (rule exact)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "page:/list",
+      "note": "the computed parent's child composed as if the parent were the app root"
+    },
+    {
+      "from": "page:/",
+      "to": "page:/list",
+      "category": "NAVIGATES_TO",
+      "note": "the `''` -> `list` redirect of the computed parent read from the root"
+    }
+  ],
+  "note": "HQ.6. chatwoot's public shape: a vue-router record whose `path` is a helper call (`appURL('teams/:teamId/roles')`, chatwoot's `frontendURL(..)`) parents relative children and a relative redirect. Baseline HEAD (a78f399b): the computed record is dropped, its children compose from the root: ROUTEs page:/, page:/list, page:/settings, page:/settings/general; `page:/ -> page:/list` (rule exact) and page:/list -HANDLED_BY-> RolesList; the control page:/settings -> page:/settings/general (exact) holds."
+}

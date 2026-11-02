@@ -63,6 +63,22 @@
 //! provisional page under each prefix its file is mounted at; a file no mount
 //! reaches keeps its own paths. JSX `<Route>` trees and Next.js pages are
 //! minted final.
+//!
+//! # Computed parents (HQ.6)
+//!
+//! A record whose `path` is not a plain literal but a call
+//! (`frontendURL('accounts/:accountId/settings/custom-roles')`), an identifier
+//! path (`ROUTES.SETTINGS`) or a template holding `${..}` names a prefix only
+//! the running app knows. It is no root: its relative children (`''`, `list`)
+//! and relative redirects belong under it. So it is minted under an OPAQUE
+//! head segment, `/~<head>` (the callee or identifier path, `tpl`
+//! for a template), followed by the text known to come last (the call's one
+//! string-literal argument, a template's text after its last `}`), and its
+//! children compose onto that path like onto any parent:
+//! `/~frontendURL/accounts/:accountId/settings/custom-roles/list`. The graph's
+//! link resolver (`graph/src/nav.rs`) matches such a page by its known tail
+//! only (suffix, Weak), and a redirect from inside the table by the same head
+//! exactly. Any other expression (`base + '/x'`) is still no table entry.
 
 use std::collections::HashSet;
 
@@ -130,6 +146,11 @@ pub struct NavRouteOut {
     pub rejected: usize,
     /// Nav ROUTE nodes whose path ends in a wildcard.
     pub catchalls: usize,
+    /// HQ.6: records whose `path` is computed (a call, an identifier path, a
+    /// template holding `${..}`), minted under an opaque head `~<name>`.
+    pub opaque_parents: usize,
+    /// HQ.6: relative records composed under an opaque one, at any depth.
+    pub opaque_children: usize,
     /// HQ.5: the file's lazy `loadChildren` mounts, each a
     /// [`NavFact::IncludeMount`] the engine records on the file MODULE, in
     /// source order.
@@ -172,6 +193,8 @@ pub fn extract_route_tables(
     let mut out = emit(slots, module_id, repo);
     out.children = scan.children;
     out.rejected = scan.rejected;
+    out.opaque_parents = scan.opaque_parents;
+    out.opaque_children = scan.opaque_children;
     out.mounts = scan.mounts.into_iter().map(LazyMount::fact).collect();
     out
 }
@@ -288,6 +311,10 @@ struct Scan {
     mounts: Vec<LazyMount>,
     children: usize,
     rejected: usize,
+    /// HQ.6, the object walker only: records with a computed `path`.
+    opaque_parents: usize,
+    /// HQ.6, the object walker only: relative records under one of them.
+    opaque_children: usize,
 }
 
 /// HQ.5: what a route record's `loadChildren` names.
@@ -382,6 +409,174 @@ fn is_route_path(p: &str) -> bool {
         )
         .collect();
     looks_like_url_path(&masked.join("/"))
+}
+
+/// HQ.6: the opaque head segment's marker. No literal route path a router
+/// table declares starts a segment with it in practice, and the graph's
+/// `nav::classify` reads a segment starting with it as an unknown prefix.
+const OPAQUE_MARK: char = '~';
+
+/// Byte cap on an opaque head's name.
+const MAX_OPAQUE_HEAD: usize = 64;
+
+/// HQ.6: a computed route `path` (see the module doc).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Opaque {
+    /// The callee's identifier path (`frontendURL`, `paths.app`), the
+    /// identifier path itself (`ROUTES.SETTINGS`) or `tpl` for a template;
+    /// sanitised to identifier bytes and `.`, clipped to [`MAX_OPAQUE_HEAD`].
+    head: String,
+    /// The text known to end the path: a call's single string-literal
+    /// argument, a template's text after its last `}`; `""` when none.
+    tail: String,
+}
+
+impl Opaque {
+    /// The record's own path: `/~<head>` then the normalised tail.
+    fn path(&self) -> String {
+        let tail = normalize(&self.tail);
+        if tail == "/" {
+            format!("/{OPAQUE_MARK}{}", self.head)
+        } else {
+            format!("/{OPAQUE_MARK}{}{tail}", self.head)
+        }
+    }
+}
+
+/// `name` reduced to ASCII identifier bytes and `.` (anything else becomes
+/// `_`), clipped to [`MAX_OPAQUE_HEAD`] bytes.
+fn opaque_head(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(MAX_OPAQUE_HEAD)
+        .collect()
+}
+
+/// Index of the `)` closing the `(` at `open` in `b` (strings skipped), or
+/// `None` when it never closes.
+fn closing_paren(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_quoted(b, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// HQ.6: a `path` value that is computed but still names a table entry: a
+/// call `f(..)` / `a.b(..)` (the whole value), an identifier path, or a
+/// template literal holding `${..}`. `None` for anything else (a plain
+/// literal, `base + '/x'`, an arrow).
+fn opaque_path(v: &str) -> Option<Opaque> {
+    let v = v.trim();
+    if v.starts_with('`') {
+        let raw = literal(v)?;
+        let close = raw.rfind('}')?;
+        if !raw.contains("${") {
+            return None;
+        }
+        return Some(Opaque {
+            head: "tpl".to_string(),
+            tail: raw.get(close + 1..).unwrap_or("").to_string(),
+        });
+    }
+    if let Some(name) = ident_path(v) {
+        return Some(Opaque {
+            head: opaque_head(&name),
+            tail: String::new(),
+        });
+    }
+    let open = v.find('(')?;
+    let callee = ident_path(v.get(..open)?)?;
+    if closing_paren(v.as_bytes(), open)? + 1 != v.len() {
+        return None;
+    }
+    let args = v.get(open + 1..v.len() - 1).unwrap_or("");
+    let tail = literal(args)
+        .filter(|t| !t.contains("${"))
+        .unwrap_or_default();
+    Some(Opaque {
+        head: opaque_head(&callee),
+        tail,
+    })
+}
+
+/// HQ.6: the object closing at `close` is a binding pattern, not a value:
+/// a destructuring target (`const { path: p, component: C } = route`) or a
+/// function parameter (`({ path: p, component: C }) => ..`,
+/// `function f({ path: p }, x) {..}`). Its `path` names a local, never a
+/// computed route.
+fn is_binding_pattern(src: &str, close: usize) -> bool {
+    let b = src.as_bytes();
+    let skip_ws = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    let after_params = |i: usize| {
+        let j = skip_ws(i + 1);
+        b.get(j) == Some(&b'{') || src.get(j..).is_some_and(|t| t.starts_with("=>"))
+    };
+    let i = skip_ws(close + 1);
+    match b.get(i) {
+        Some(b'=') => !matches!(b.get(i + 1), Some(b'=') | Some(b'>')),
+        Some(b')') => after_params(i),
+        Some(b',') => {
+            // The rest of a parameter list: find its `)` at depth 0.
+            let mut depth = 0usize;
+            let mut j = i + 1;
+            while j < b.len() {
+                match b[j] {
+                    b'\'' | b'"' | b'`' => {
+                        j = skip_quoted(b, j);
+                        continue;
+                    }
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' if depth == 0 => return after_params(j),
+                    b')' | b']' | b'}' => match depth.checked_sub(1) {
+                        Some(d) => depth = d,
+                        None => return false,
+                    },
+                    b';' if depth == 0 => return false,
+                    _ => {}
+                }
+                j += 1;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// `p` without its opaque head segments (`/~frontendURL/a/b` -> `/a/b`), for
+/// the [`is_route_path`] check of a path under a computed parent.
+fn without_opaque_heads(p: &str) -> String {
+    let rest: Vec<&str> = p
+        .split('/')
+        .filter(|s| !s.is_empty() && !s.starts_with(OPAQUE_MARK))
+        .collect();
+    format!("/{}", rest.join("/"))
 }
 
 /// Collapse `//`, drop `.` segments, resolve `..`, force the leading `/`, drop
@@ -1262,6 +1457,9 @@ struct Found {
     redirect_rel_own: Option<String>,
     /// HQ.5: what its `loadChildren` loads.
     lazy: Option<Lazy>,
+    /// HQ.6: the record's `path` is computed; `path` then holds its opaque
+    /// path ([`Opaque::path`]).
+    opaque: Option<Opaque>,
 }
 
 /// Object-literal route tables (see the module doc).
@@ -1277,18 +1475,47 @@ fn scan_route_records(source: &str) -> Scan {
             .keys
             .iter()
             .any(|k| ROUTER_KEYS.contains(&k.name.as_str()));
+        let mut opaque = None;
         let path = match o.key("path") {
-            Some(k) => match literal(clip(value(k), MAX_VALUE)) {
-                Some(p) => {
-                    if !has_router_key || p.contains("${") {
-                        scan.rejected += 1;
-                        continue;
+            Some(k) => {
+                let v = clip(value(k), MAX_VALUE);
+                match literal(v) {
+                    // HQ.6: a template holding `${..}` is a computed parent.
+                    Some(p) if has_router_key && p.contains("${") => {
+                        match opaque_path(v).filter(|_| !is_binding_pattern(source, o.close)) {
+                            Some(op) => {
+                                let own = op.path();
+                                opaque = Some(op);
+                                Some(own)
+                            }
+                            None => {
+                                scan.rejected += 1;
+                                continue;
+                            }
+                        }
                     }
-                    Some(p)
+                    Some(p) => {
+                        if !has_router_key || p.contains("${") {
+                            scan.rejected += 1;
+                            continue;
+                        }
+                        Some(p)
+                    }
+                    // HQ.6: a call or an identifier path is a computed parent;
+                    // any other computed path (`path: base + '/x'`) is not a
+                    // table entry.
+                    None => match opaque_path(v)
+                        .filter(|_| has_router_key && !is_binding_pattern(source, o.close))
+                    {
+                        Some(op) => {
+                            let own = op.path();
+                            opaque = Some(op);
+                            Some(own)
+                        }
+                        None => continue,
+                    },
                 }
-                // A computed path (`path: base + '/x'`) is not a table entry.
-                None => continue,
-            },
+            }
             None => {
                 // React Router `{ index: true, element }`: the parent's page.
                 let index = o.key("index").is_some_and(|k| value(k).trim() == "true");
@@ -1310,6 +1537,7 @@ fn scan_route_records(source: &str) -> Scan {
             redirect_rel_parent: None,
             redirect_rel_own: None,
             lazy: None,
+            opaque,
         };
         for k in &o.keys {
             let v = clip(value(k), MAX_VALUE);
@@ -1345,6 +1573,8 @@ fn scan_route_records(source: &str) -> Scan {
     // its path is known when a child is reached. `enclosing` holds the records
     // whose span is still open at the current record.
     let mut composed: Vec<Option<String>> = Vec::with_capacity(found.len());
+    // HQ.6: per record, whether its path sits under an opaque head.
+    let mut under_opaque: Vec<bool> = Vec::with_capacity(found.len());
     let mut enclosing: Vec<usize> = Vec::new();
     for (at, f) in found.iter().enumerate() {
         while enclosing.last().is_some_and(|&p| found[p].close < f.open) {
@@ -1363,13 +1593,30 @@ fn scan_route_records(source: &str) -> Scan {
             Some(p) => compose(base, p),
             None => normalize(base),
         };
-        if !is_route_path(&own) {
+        // An opaque record's own path is absolute (`/~<head>..`), so it
+        // stands alone; a relative record under one keeps its head.
+        let absolute = f.path.as_deref().is_some_and(|p| p.starts_with('/'));
+        let opaque_child =
+            f.opaque.is_none() && !absolute && parent.is_some_and(|p| under_opaque[p]);
+        let in_opaque = f.opaque.is_some() || opaque_child;
+        let checked = if in_opaque {
+            is_route_path(&without_opaque_heads(&own))
+        } else {
+            is_route_path(&own)
+        };
+        if !checked {
             scan.rejected += 1;
             composed.push(None);
+            under_opaque.push(false);
             continue;
         }
-        if parent_path.is_some() && !f.path.as_deref().is_some_and(|p| p.starts_with('/')) {
+        if parent_path.is_some() && !absolute {
             scan.children += 1;
+        }
+        if f.opaque.is_some() {
+            scan.opaque_parents += 1;
+        } else if opaque_child {
+            scan.opaque_children += 1;
         }
         let relative = |t: &str| !t.trim_start().starts_with('/');
         let (redirect, relative_redirect) = match f
@@ -1404,6 +1651,7 @@ fn scan_route_records(source: &str) -> Scan {
         });
         scan.relative_redirect.push(relative_redirect);
         composed.push(Some(own));
+        under_opaque.push(in_opaque);
     }
     scan
 }
@@ -1905,5 +2153,146 @@ const routes = [{ path: '/a', element: <A /> }];
             out.refs[0].line, 7,
             "the record's row is the ref's site line"
         );
+    }
+
+    // ---- HQ.6: computed parents -------------------------------------------
+
+    const COMPUTED: &str = r#"
+const routes = [
+  {
+    path: frontendURL('accounts/:accountId/settings/custom-roles'),
+    component: SettingsWrapper,
+    children: [
+      { path: '', redirect: 'list' },
+      { path: 'list', component: CustomRolesHome },
+      { path: 'new', component: NewRole, children: [ { path: 'step', component: Step } ] },
+      { path: '/abs', component: Abs },
+    ],
+  },
+  { path: ROUTES.SETTINGS, component: Settings, children: [ { path: 'general', component: General } ] },
+  { path: `${base}/teams`, component: Teams, children: [ { path: 'edit', component: Edit } ] },
+  { path: base + '/x', component: Skipped, children: [ { path: 'y', component: Y } ] },
+  { path: helper(a, 'b'), component: TwoArgs },
+  { path: ROUTES.NONE, mode: 1 },
+];
+"#;
+
+    #[test]
+    fn computed_call_parent_is_an_opaque_head() {
+        let out = extract_route_tables(COMPUTED, module_id(), "", repo());
+        let p = paths(&out);
+        let head = "/~frontendURL/accounts/:accountId/settings/custom-roles";
+        assert!(p.contains(&head.to_string()), "{p:?}");
+        assert!(p.contains(&format!("{head}/list")), "{p:?}");
+        assert!(has_ref(&out, head, "SettingsWrapper", "HANDLED_BY"));
+        assert!(has_ref(
+            &out,
+            &format!("{head}/list"),
+            "CustomRolesHome",
+            "HANDLED_BY"
+        ));
+        // The `''` child's relative redirect keeps the opaque prefix.
+        assert!(has_ref(&out, head, &format!("{head}/list"), "NAVIGATES_TO"));
+        // Nothing composes from the root.
+        for phantom in ["/", "/list", "/new", "/new/step", "/general", "/edit"] {
+            assert!(!p.contains(&phantom.to_string()), "{phantom} leaked: {p:?}");
+        }
+    }
+
+    #[test]
+    fn computed_identifier_and_template_parents() {
+        let out = extract_route_tables(COMPUTED, module_id(), "", repo());
+        let p = paths(&out);
+        assert!(p.contains(&"/~ROUTES.SETTINGS".to_string()), "{p:?}");
+        assert!(
+            p.contains(&"/~ROUTES.SETTINGS/general".to_string()),
+            "{p:?}"
+        );
+        // A template keeps its text after the last `}` as the known tail.
+        assert!(p.contains(&"/~tpl/teams".to_string()), "{p:?}");
+        assert!(p.contains(&"/~tpl/teams/edit".to_string()), "{p:?}");
+        // A call with two arguments has a head and no known tail.
+        assert!(p.contains(&"/~helper".to_string()), "{p:?}");
+    }
+
+    #[test]
+    fn computed_parents_nest_and_absolute_children_stand_alone() {
+        let out = extract_route_tables(COMPUTED, module_id(), "", repo());
+        let p = paths(&out);
+        let head = "/~frontendURL/accounts/:accountId/settings/custom-roles";
+        assert!(p.contains(&format!("{head}/new/step")), "{p:?}");
+        assert!(p.contains(&"/abs".to_string()), "{p:?}");
+        assert!(!p.contains(&format!("{head}/abs")), "{p:?}");
+        // frontendURL, ROUTES.SETTINGS, the template, helper(..).
+        assert_eq!(out.opaque_parents, 4);
+        // '' / list / new / new>step under frontendURL, general, edit.
+        assert_eq!(out.opaque_children, 6);
+    }
+
+    #[test]
+    fn concatenated_path_is_still_no_table_entry() {
+        let out = extract_route_tables(COMPUTED, module_id(), "", repo());
+        let p = paths(&out);
+        // The `base + '/x'` record mints nothing; its children compose from
+        // the enclosing record (here the root) as before HQ.6.
+        assert!(!refs(&out).iter().any(|(_, q, _)| q == "Skipped"));
+        assert!(has_ref(&out, "/y", "Y", "HANDLED_BY"));
+        // A computed path without a router key is no record and no rejection.
+        assert!(!p.contains(&"/~ROUTES.NONE".to_string()), "{p:?}");
+        assert_eq!(out.rejected, 0);
+    }
+
+    #[test]
+    fn opaque_path_reader() {
+        let op = |v: &str| opaque_path(v).map(|o| o.path());
+        assert_eq!(op("frontendURL('a/b')"), Some("/~frontendURL/a/b".into()));
+        assert_eq!(op("paths.app(`x/y`)"), Some("/~paths.app/x/y".into()));
+        assert_eq!(op("f(`a/${id}`)"), Some("/~f".into()));
+        assert_eq!(op("f(g('x'))"), Some("/~f".into()));
+        assert_eq!(op("ROUTES.SETTINGS"), Some("/~ROUTES.SETTINGS".into()));
+        assert_eq!(op("`${a}/b/c`"), Some("/~tpl/b/c".into()));
+        assert_eq!(op("`${a}`"), Some("/~tpl".into()));
+        // `..` in the known tail never climbs out of the head.
+        assert_eq!(op("f('../x')"), Some("/~f/x".into()));
+        assert_eq!(op("base + '/x'"), None);
+        assert_eq!(op("f(a) + g(b)"), None);
+        assert_eq!(op("'/plain'"), None);
+        assert_eq!(op("() => x"), None);
+        let long = format!("{}()", "a".repeat(100));
+        assert_eq!(
+            opaque_path(&long).map(|o| o.head.len()),
+            Some(MAX_OPAQUE_HEAD)
+        );
+    }
+
+    #[test]
+    fn binding_patterns_are_no_computed_parents() {
+        for src in [
+            "const { path, children } = route;",
+            "const { path: p, component: C } = route;",
+            "const h = ({ path: p, component: C }) => p;",
+            "function k({ path: p, component: C }, x) {}",
+            "function m({ path: p, component: C }) { return p; }",
+            "const mk = (path, component) => ({ path, component });",
+        ] {
+            let out = extract_route_tables(src, module_id(), "", repo());
+            assert!(paths(&out).is_empty(), "{src}: {:?}", paths(&out));
+            assert_eq!(out.opaque_parents, 0, "{src}");
+        }
+        // A call argument and a mapped record are values.
+        for (src, want) in [
+            ("register({ path: base, component: C }, 1);", "/~base"),
+            (
+                "rs.map(r => ({ path: r.path, component: r.component }));",
+                "/~r.path",
+            ),
+            (
+                "const r = { path: ROUTES.X, component: C } == y;",
+                "/~ROUTES.X",
+            ),
+        ] {
+            let out = extract_route_tables(src, module_id(), "", repo());
+            assert_eq!(paths(&out), vec![want.to_string()], "{src}");
+        }
     }
 }
