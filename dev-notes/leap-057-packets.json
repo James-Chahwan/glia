@@ -1468,6 +1468,7 @@
     "HQ.11",
     "HQ.12",
     "HQ.13",
+    "HQ.14",
     "HQ.2",
     "HQ.3",
     "HQ.4",
@@ -1535,6 +1536,7 @@
     "HQ.11",
     "HQ.12",
     "HQ.13",
+    "HQ.14",
     "HQ.2",
     "HQ.3",
     "HQ.4",
@@ -2220,6 +2222,35 @@
     "HP.7"
    ],
    "risks": "The re-judge must not see the first verdicts: it reads the rule, the rubric and `show` output only. If the matched set is under 20 for a family, take the rule's minimum as the rule states."
+  },
+  {
+   "id": "HQ.14",
+   "from": "new (HP.7 follow-up: the re-measure's one wrong edge)",
+   "spec_pass": "integrator",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 130,
+   "area": "HQ precision: JPQL / HQL `JOIN FETCH` names no entity `fetch`",
+   "title": "A JPQL / HQL `JOIN FETCH <entity-or-path>` reads the name after FETCH, never `fetch` itself, as the joined entity (raw SQL extractor, `clause_table` and `sql_clause_verb`)",
+   "rationale": "HP.7's re-measure (28ff5d5e) judged 71 fresh held-out edges at the release candidate: 70 correct, 1 wrong, and that one is the only stratum under its floor in the provisional RULE-0.5.7b report: tolgee ACCESSES_DATA|fact -> `data_entity:sql:fetch`, from a Spring Data JPQL `@Query` with `left join fetch Permission p`. engine extractors' `clause_table` (parsers/code/extractors/src/data_entities.rs) skips an `ONLY` / `LATERAL` modifier after FROM / JOIN but not JPQL's `FETCH`, so `fetch` becomes the table name; `sql_clause_verb`'s look-behind likewise skips only ONLY / LATERAL. James 2026-11-02: false edges found in this release are fixed in it (\"Oh we should fix now since we added it now\").",
+   "entry_points": [
+    "parsers/code/extractors/src/data_entities.rs: clause_table (the ONLY / LATERAL skip), sql_clause_verb (the matching look-behind), SQL_NAME_KEYWORDS, scan_sql_tables",
+    "the existing data-entity fixtures under bench/substrate-gap/fixtures/ (grep `data_entity:sql:` in their key.json) pin the true FROM / JOIN cases"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/data_entities.rs",
+    "bench/substrate-gap/fixtures/sql-jpql-join-fetch/key.json",
+    "bench/substrate-gap/fixtures/sql-jpql-join-fetch/src/main/java/shop/repo/UserRepository.java",
+    "bench/substrate-gap/fixtures/sql-jpql-join-fetch/src/main/java/shop/model/User.java",
+    "bench/substrate-gap/fixtures/sql-jpql-join-fetch/src/main/java/shop/model/Permission.java"
+   ],
+   "implementation": "1. PROBE first and quote it: a from-scratch Spring Data repository with `@Query(\"select u from User u left join fetch Permission p where p.user = u\")` and `@Query(\"select u from User u join fetch u.roles\")` gives `data_entity:sql:fetch` at HEAD (`GLIA_NO_PERSIST=1 glia query <dir> -e 'out(A,E) :- edge(A,E,\"ACCESSES_DATA\").'`).\n2. clause_table: for Clause::Join, a first word FETCH (any case) is skipped like ONLY / LATERAL (re-read the next identifier). A dotted path after FETCH (`u.roles`) is an association path, not an entity: return None (no edge) unless canonical_sql_name already reads a dotted name as schema.table for this dialect: decide from the code, say which, and keep SQL's `schema.table` behaviour unchanged.\n3. sql_clause_verb: a FETCH word before the name steps back once more to JOIN, so the access verb stays Read.\n4. Add `FETCH` to SQL_NAME_KEYWORDS so no path ever names a table `fetch`.\n5. Marker: the per-file data-entities stats line gains ` jpql_fetch=<n>` (count of skipped FETCH words), or a new `[data-entity] jpql join fetch skipped=<n> path=<p>` line when n > 0; name it in the commit.\n6. Fixture sql-jpql-join-fetch (written from scratch, a Spring Data repo): expect the ACCESSES_DATA edge to the entity after `join fetch` (Permission) and the FROM entity (User); forbid any `data_entity:sql:fetch` node / edge. Grade at HEAD before the change (it must fail on the forbid) and on the debug CLI after.",
+   "fixtures": "bench/substrate-gap/fixtures/sql-jpql-join-fetch: expect ACCESSES_DATA from the repository's query method / module to data_entity:sql:user and data_entity:sql:permission (the extractor's canonical names: read them from an existing fixture's key); forbid data_entity:sql:fetch. Fails at HEAD on the forbid.",
+   "acceptance": "cargo test -p glia-code-extractors (new unit tests: `left join fetch Permission p` names permission; `join fetch u.roles` names no `fetch`; plain `join roles r` unchanged; `FETCH FIRST 10 ROWS ONLY` after ORDER BY mints nothing new); the existing data-entity fixtures grade unchanged on the wave-end wheel; `git grep -n 'data_entity:sql:fetch' bench/` prints only the new fixture's forbid row.",
+   "fired_on_marker": "` jpql_fetch=<n>` on the data-entities stats line (or `[data-entity] jpql join fetch skipped=<n> path=<p>`), grep `GLIA_NO_PERSIST=1 glia build <fixture> 2>&1 | grep -i 'jpql'`",
+   "breaking": "graph_content (declared): JPQL / HQL repos lose `data_entity:sql:fetch` nodes and their ACCESSES_DATA edges and gain the entity a `join fetch` names. PARSER_STAMP moves (parsers/ edit). Can move cohort cells on Java / Kotlin repos with Spring Data queries (tolgee).",
+   "depends_on": [],
+   "risks": "A real table named `fetch` stops being read after JOIN (no example exists; say so in the coverage caveat only if one turns up). Measured after the draw: HP.7 / HP.8's sample was drawn before this fix, so the re-measure still counts the wrong edge; the release docs say so."
   }
  ]
 }
