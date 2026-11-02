@@ -1,0 +1,24 @@
+{
+  "framework": "csharp-aspnet-verb-route-split",
+  "language": "csharp",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /boards/{board}", "exact": true, "note": "[HttpGet] + [Route(\"boards/{board}\")] is ONE route: the template-less verb constrains the template (HQ.2)"},
+    {"kind": "ROUTE", "name": "PUT /boards/{board}/", "exact": true, "note": "[HttpPut] + [Route(\"boards/{board}/\")]"},
+    {"kind": "ROUTE", "name": "DELETE /boards/{board}/", "exact": true, "note": "[HttpDelete] + [Route(\"boards/{board}/\")]"},
+    {"kind": "ROUTE", "name": "GET /boards/{board}/columns/completion", "exact": true, "note": "squidex's GetPreviewUrlsCompletion shape"},
+    {"kind": "ROUTE", "name": "GET /api/cards/{id}", "note": "positive control: controller [Route] + templated [HttpGet(\"{id}\")] composes"},
+    {"kind": "ROUTE", "name": "POST /api/cards", "note": "positive control: bare [HttpPost] with no [Route] of its own inherits the controller template"}
+  ],
+  "expect_edges": [
+    {"from": "GET /boards/{board}/columns/completion", "to": "GetColumnsCompletion", "category": "HANDLED_BY", "note": "the verb-constrained route is handled by its action"},
+    {"from": "GET /boards/${…}", "to": "GET /boards/{board}", "category": "HTTP_CALLS", "exact": true, "note": "the GET call pairs with the GET route, not by rule any with a verb-less template"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /", "note": "a template-less [HttpGet] beside a [Route] is no route of its own"},
+    {"kind": "ROUTE", "name": "ANY /boards/{board}", "note": "the [Route] beside [HttpGet] carries the GET verb"},
+    {"from": "GET /boards/${…}", "to": "PUT /boards/{board}/", "category": "HTTP_CALLS"},
+    {"from": "GET /boards/${…}", "to": "ANY /boards/{board}/", "category": "HTTP_CALLS"}
+  ],
+  "note": "HQ.2, squidex's shape built from scratch: [HttpX] + [Route(t)] on one action is one X route at t (ASP.NET's attribute routing). Legacy-only: no matrix cell claimed."
+}

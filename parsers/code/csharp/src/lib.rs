@@ -86,6 +86,14 @@ pub fn parse_file(
         );
     }
 
+    // HQ.2 fired_on: `glia analyze <repo> 2>&1 | grep '\[csharp-routes\] verb constraints'`
+    if acc.route_templates_constrained > 0 {
+        eprintln!(
+            "[csharp-routes] verb constraints applied={} route_templates={} in {file_rel_path}",
+            acc.verb_constraints_applied, acc.route_templates_constrained
+        );
+    }
+
     if acc.minimal_api_routes > 0 {
         eprintln!(
             "[csharp-minimal-api] {} top-level Map* routes in {file_rel_path}",
@@ -156,6 +164,10 @@ struct Acc {
     /// counted separately from the attribute-routing pass so a regression in
     /// either is visible on its own fired-on line.
     minimal_api_routes: usize,
+    /// HQ.2 marker counters: template-less verb attributes folded onto an
+    /// action's `[Route]` templates, and the `[Route]` templates that took one.
+    verb_constraints_applied: usize,
+    route_templates_constrained: usize,
     /// A13.11: `[Table("x")]` on the classes of this file, simple class name →
     /// table. Filled lazily by the first DbContext the visit meets, so a file
     /// without one never pays for the walk, and a context declared ABOVE its
@@ -1413,6 +1425,17 @@ const HTTP_VERB_ATTRS: [(&str, &str); 7] = [
 /// glia-graph refuses to index a route whose path does not start with
 /// `/` — a relative ASP.NET route is invisible to every HTTP client resolver.
 ///
+/// The attributes split as ASP.NET's attribute routing reads them (HQ.2):
+/// TEMPLATES are `[Route(t)]` and a verb attribute with a positional template
+/// (`[HttpGet("t")]`, `[HttpGet("")]` included); an UNBOUND verb is a verb
+/// attribute with no positional argument (`[HttpGet]`, `[HttpGet(Name =
+/// "x")]`). An unbound verb is only an HTTP-method constraint on the action's
+/// `[Route]` templates: `[HttpGet][Route("apps/{app}")]` is one route `GET
+/// /apps/{app}`. It is a route of its own (`<VERB> <prefix>`, the controller
+/// template) only when the action has no template at all. A templated verb
+/// beside unbound ones keeps its own verb only (ASP.NET would OR the methods;
+/// kept conservative).
+///
 /// Returns the number of routes emitted (the fired-on marker's count).
 #[allow(clippy::too_many_arguments)]
 fn check_route_attrs(
@@ -1425,17 +1448,27 @@ fn check_route_attrs(
     action_name: &str,
     acc: &mut Acc,
 ) -> usize {
-    let mut emitted = 0usize;
-    for (attr, arg) in own_attributes(node, src) {
-        let method = if attr == "Route" {
-            "ANY"
-        } else {
-            match HTTP_VERB_ATTRS.iter().find(|(a, _)| *a == attr) {
-                Some((_, verb)) => verb,
-                None => continue,
-            }
+    // (verb or None for `[Route]`, written template) in attribute order.
+    let mut templates: Vec<(Option<&'static str>, String)> = Vec::new();
+    let mut unbound: Vec<&'static str> = Vec::new();
+    for (attr, arg, attr_node) in own_attribute_nodes(node, src) {
+        if attr == "Route" {
+            templates.push((None, arg.unwrap_or_default()));
+            continue;
+        }
+        let Some((_, verb)) = HTTP_VERB_ATTRS.iter().find(|(a, _)| *a == attr) else {
+            continue;
         };
-        let raw = arg.unwrap_or_default();
+        if arg.is_some() || attr_has_positional_arg(attr_node) {
+            // A positional template, literal or not (a non-literal one reads
+            // as the controller template, as before).
+            templates.push((Some(verb), arg.unwrap_or_default()));
+        } else if !unbound.contains(verb) {
+            unbound.push(verb);
+        }
+    }
+
+    let compose = |raw: &str| -> String {
         // The override test is on the WRITTEN template, never on a normalised
         // one: `[HttpGet("/")]` is an explicit root override, while a bare
         // `[HttpPost]` (and `[HttpPost("")]`) means "the controller template
@@ -1448,14 +1481,62 @@ fn check_route_attrs(
             // the prefix as-is, which is exactly "inherit the controller
             // template"; with no prefix it degrades to `/`, today's behaviour
             // for a bare verb attribute outside a routed controller.
-            let rel = if raw.is_empty() { "/" } else { raw.as_str() };
+            let rel = if raw.is_empty() { "/" } else { raw };
             endpoint::abs_path(&endpoint::join_path(class_prefix, rel))
         };
-        let path = substitute_route_tokens(&composed, type_name, action_name);
-        emit_route(method, &path, handler_id, repo, acc);
-        emitted += 1;
+        substitute_route_tokens(&composed, type_name, action_name)
+    };
+
+    let mut routes: Vec<(&str, String)> = Vec::new();
+    let mut push = |method: &'static str, path: String| {
+        if !routes.iter().any(|(m, p)| *m == method && *p == path) {
+            routes.push((method, path));
+        }
+    };
+    if templates.is_empty() {
+        for verb in &unbound {
+            push(verb, compose(""));
+        }
+    } else {
+        let mut constrained = 0usize;
+        for (verb, raw) in &templates {
+            let path = compose(raw);
+            match verb {
+                Some(v) => push(v, path),
+                None if unbound.is_empty() => push("ANY", path),
+                None => {
+                    constrained += 1;
+                    for v in &unbound {
+                        push(v, path.clone());
+                    }
+                }
+            }
+        }
+        if constrained > 0 {
+            acc.verb_constraints_applied += unbound.len();
+            acc.route_templates_constrained += constrained;
+        }
     }
-    emitted
+
+    for (method, path) in &routes {
+        emit_route(method, path, handler_id, repo, acc);
+    }
+    routes.len()
+}
+
+/// Does this attribute carry a POSITIONAL argument (a template), literal or
+/// not? `[HttpGet(Name = "x")]` carries only a named one and does not.
+fn attr_has_positional_arg(attr: TsNode) -> bool {
+    let mut cursor = attr.walk();
+    let Some(args) = attr
+        .children(&mut cursor)
+        .find(|c| c.kind() == "attribute_argument_list")
+    else {
+        return false;
+    };
+    let mut ac = args.walk();
+    args.named_children(&mut ac)
+        .any(|c| c.kind() == "attribute_argument" && c.child_by_field_name("name").is_none())
 }
 
 /// The controller's own `[Route("...")]` template with the `[controller]` token
@@ -2712,6 +2793,130 @@ public class OrdersController : ControllerBase {
             route_names(&fp).iter().any(|n| n == "ANY /api/v2/orders"),
             "controller [Route] must still emit its own ANY route"
         );
+    }
+
+    /// HQ.2: parse one controller and return its ROUTE names sorted, so a
+    /// test can pin the WHOLE route set (an extra bogus route fails it).
+    fn sorted_routes(source: &str) -> Vec<String> {
+        let fp = parse_file(
+            source,
+            "server/BoardsController.cs",
+            "server::BoardsController",
+            repo(),
+        )
+        .unwrap();
+        let mut names = route_names(&fp);
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn aspnet_verb_attribute_constrains_route_template() {
+        // squidex's shape: no controller [Route], a template-less [HttpGet]
+        // beside the action's [Route]. ASP.NET reads ONE route, GET
+        // /apps/{app}: the verb attribute is only a method constraint.
+        let source = r#"
+[ApiController]
+public class AppsController : ControllerBase {
+    [HttpGet]
+    [Route("apps/{app}")]
+    public IActionResult GetApp(string app) { return Ok(); }
+}
+"#;
+        assert_eq!(sorted_routes(source), vec!["GET /apps/{app}".to_string()]);
+    }
+
+    #[test]
+    fn aspnet_two_verbs_constrain_one_template() {
+        let source = r#"
+public class XController : ControllerBase {
+    [HttpGet]
+    [HttpHead]
+    [Route("x")]
+    public IActionResult X() { return Ok(); }
+}
+"#;
+        assert_eq!(
+            sorted_routes(source),
+            vec!["GET /x".to_string(), "HEAD /x".to_string()]
+        );
+    }
+
+    #[test]
+    fn aspnet_one_verb_constrains_two_templates() {
+        let source = r#"
+public class AbController : ControllerBase {
+    [Route("a")]
+    [Route("b")]
+    [HttpPost]
+    public IActionResult Post() { return Ok(); }
+}
+"#;
+        assert_eq!(
+            sorted_routes(source),
+            vec!["POST /a".to_string(), "POST /b".to_string()]
+        );
+    }
+
+    #[test]
+    fn aspnet_verb_constraint_composes_under_controller_template() {
+        let source = r#"
+[Route("api/[controller]")]
+public class WidgetsController : ControllerBase {
+    [HttpPut]
+    [Route("{id}")]
+    public IActionResult Put(int id) { return Ok(); }
+}
+"#;
+        assert_eq!(
+            sorted_routes(source),
+            vec![
+                "ANY /api/widgets".to_string(),
+                "PUT /api/widgets/{id}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn aspnet_templated_verb_beside_route_keeps_both() {
+        // A verb attribute WITH a template is a route of its own; the [Route]
+        // beside it has no unbound verb to take, so it stays ANY.
+        let source = r#"
+public class XyController : ControllerBase {
+    [HttpGet("x")]
+    [Route("y")]
+    public IActionResult Xy() { return Ok(); }
+}
+"#;
+        assert_eq!(
+            sorted_routes(source),
+            vec!["ANY /y".to_string(), "GET /x".to_string()]
+        );
+    }
+
+    #[test]
+    fn aspnet_lone_route_attribute_stays_any() {
+        let source = r#"
+public class ZController : ControllerBase {
+    [Route("z")]
+    public IActionResult Z() { return Ok(); }
+}
+"#;
+        assert_eq!(sorted_routes(source), vec!["ANY /z".to_string()]);
+    }
+
+    #[test]
+    fn aspnet_named_verb_attribute_is_unbound() {
+        // `Name = ".."` is a route name, never a template: the verb still
+        // constrains the [Route] beside it.
+        let source = r#"
+public class NController : ControllerBase {
+    [HttpDelete(Name = "drop")]
+    [Route("n/{id}")]
+    public IActionResult Drop(int id) { return Ok(); }
+}
+"#;
+        assert_eq!(sorted_routes(source), vec!["DELETE /n/{id}".to_string()]);
     }
 
     #[test]
