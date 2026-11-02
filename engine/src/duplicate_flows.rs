@@ -11,7 +11,8 @@
 //! different nodes is pattern conformance's job (`patterns`, LE.7a).
 //!
 //! ENTRIES are `glia flows`' entries (`trace::entries`: the entry rule
-//! liveness seeds from, in graph then node order), so every entry a group
+//! liveness seeds from, plus every node carrying an ENTRYPOINT cell since
+//! 0.5.7's HF.1, in graph then node order), so every entry a group
 //! names is one a user can `glia flows` / `glia trace`. [`DupFlowArgs::scope`]
 //! (a path or a project label, resolved once) keeps the entries located under
 //! it; an unlocatable entry is kept, as `answers::node_in_scope` keeps it.

@@ -65,7 +65,9 @@ A cell is a fixture filed under the matrix's layout.
 
 - `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
   the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
-- `python3 bench/substrate-gap/matrix.py --check` (exit 0) and `python3 bench/substrate-gap/test_matrix.py`.
+- `python3 bench/substrate-gap/matrix.py --fail-on-error` (what `pr-check.sh` runs: it fails on a cell error, not on the
+  committed artefacts drifting, which a new cell always does until the release re-emits them) and
+  `python3 bench/substrate-gap/test_matrix.py`.
 - `python3 bench/substrate-gap/grade.py matrix/<language>/<mechanism>` (or `patterns/..`) for the one cell.
 - A pull request never regenerates `bench/substrate-gap/COVERAGE.md`, `results-latest.json` or `legacy-latest.json`
   (`matrix.py --emit`, `run.py --emit`): a release does that once, after its wheel is built.
