@@ -33,7 +33,7 @@ LANDED = {
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = True
-GROUP_ORDER = {"P": 0, "F": 1, "T": 2, "C": 3, "Z": 9}
+GROUP_ORDER = {"P": 0, "F": 1, "T": 2, "C": 3, "Q": 4, "Z": 9}
 
 # Earlier releases' packets are shipped: a depends_on naming one is satisfied from the start.
 E_DONE = re.compile(r"[CDEFG][0-9A-Z]\.\d+[a-z]?")

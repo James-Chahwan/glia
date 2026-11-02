@@ -310,6 +310,66 @@
    "question": "Keep FC.24 (pack adds a short 'goal context' list: the requirements / tasks / decisions that name or are cited by the packed files, spending at most a tenth of the token budget and only what the code sections left over, never changing which code is packed)? It was added by the 0.5.4 integrator as the 'onboarding / agent context' benefit and never ruled (INT-9).",
    "answer": "default: (a) keep it",
    "by": "default (James 2026-11-02: the rest take their defaults)"
+  },
+  {
+   "agent": "fix057:qa",
+   "question": "HQ.4: two same-named Solidity contracts / interfaces in two files share one `evm:<Contract>.<fn>` procedure (DT.10a keys it by ABI name, since an EVM client names a contract, not a file). Keep that and only fix each HANDLED_BY's site (HQ.4 as written), or give each file's copy its own procedure node?",
+   "answer": "default: Keep one procedure per contract name; site each HANDLED_BY at its own copy",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qa",
+   "question": "HQ.3: an emit bound through Solidity's heritage edges, which today all bind by repo-unique name (graph:refs global_unique, heuristic), reads heuristic (rule `inherited_event_by_name`). Accept heuristic for these, or also make Solidity named imports (`import {I} from \"./I.sol\"`) bind their names so `contract C is I` becomes a fact edge and the events with it?",
+   "answer": "default: Heuristic for now (HQ.3 as written); Solidity import bindings later",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qb",
+   "question": "HQ.5: after composition squidex's `navigate(['/404'])` binds no page and is a dead link the root `**` absorbs (counted `catchall`, listed by `glia pages`). Should a literal link that no page serves bind a NAVIGATES_TO to the root catch-all instead?",
+   "answer": "default: no: keep LA.6a",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qb",
+   "question": "HQ.6: for a computed parent `frontendURL('accounts/:accountId/settings/custom-roles')`, fold the call's single string-literal argument into the route's known tail (`page:/~frontendURL/accounts/:accountId/settings/custom-roles/list`, links bind by suffix, Weak), or keep only the callee as an opaque head (`page:/~frontendURL/list`: parents sharing a helper and a child name merge, and nothing binds by suffix past one segment)?",
+   "answer": "default: fold the one literal argument",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qb",
+   "question": "HQ.8: apply the camel-middle refusal (`StaleRedisKeysJob` names no client) outside test files too?",
+   "answer": "default: no: test files only",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qc",
+   "question": "HQ.9: an assignment `self.X = v` where an ANCESTOR in another file declares X as a @property is a setter call, not an attribute, but the parser cannot see the ancestor. Leave it (still an ATTRIBUTE), or add a graph-side prune after INHERITS_FROM binds (removes surface nodes in the stitch: the GA.3 rebody path must run it too)?",
+   "answer": "default: leave it (parser-only fix, residual noted)",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qc",
+   "question": "HQ.10: when more than three same-stem candidates tie on the new key, pair none (refuse) or keep the old cap of three in candidate order?",
+   "answer": "default: refuse (ambiguous=<n> counted)",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qc",
+   "question": "HQ.10: squidex Contents/ExtensionsTests still pairs a near miss by path; its truth is named only by the C# `using ExtensionSut = ..Operations.Extensions;` alias. Add an import key (a candidate the test module IMPORTS, or whose namespace a C# using / alias names, ranks first) in this packet or a later one?",
+   "answer": "in this packet (import key ranks first)",
+   "by": "integrator override of the default by James's \"fix now\" (2026-11-02)"
+  },
+  {
+   "agent": "fix057:qc",
+   "question": "HQ.11 probe: a Rails `concern :x do resources :comments end` block mints `ANY /comments` at the root, a route Rails does not serve (it serves /<parent>/:<parent>_id/comments under each `concerns: :x`). Add a second precision-backlog entry for it?",
+   "answer": "default: yes, backlog entry",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
+  },
+  {
+   "agent": "fix057:qc",
+   "question": "HQ.12: skip model-rested pairs for http_model identity (no class), or write them as a HEURISTIC same-as candidate (never collapses or walks) under a new identity rule name?",
+   "answer": "default: skip (no class)",
+   "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; the spec questions take their defaults)"
   }
  ],
  "packets": [
@@ -450,6 +510,18 @@
     "HF.4",
     "HF.5",
     "HP.4",
+    "HQ.1",
+    "HQ.10",
+    "HQ.11",
+    "HQ.12",
+    "HQ.2",
+    "HQ.3",
+    "HQ.4",
+    "HQ.5",
+    "HQ.6",
+    "HQ.7",
+    "HQ.8",
+    "HQ.9",
     "HT.4",
     "HT.5",
     "HT.6",
@@ -1370,6 +1442,18 @@
     "HP.4",
     "HP.5",
     "HP.6",
+    "HQ.1",
+    "HQ.10",
+    "HQ.11",
+    "HQ.12",
+    "HQ.2",
+    "HQ.3",
+    "HQ.4",
+    "HQ.5",
+    "HQ.6",
+    "HQ.7",
+    "HQ.8",
+    "HQ.9",
     "HT.1",
     "HT.10",
     "HT.2",
@@ -1422,6 +1506,18 @@
     "HP.4",
     "HP.5",
     "HP.6",
+    "HQ.1",
+    "HQ.10",
+    "HQ.11",
+    "HQ.12",
+    "HQ.2",
+    "HQ.3",
+    "HQ.4",
+    "HQ.5",
+    "HQ.6",
+    "HQ.7",
+    "HQ.8",
+    "HQ.9",
     "HT.1",
     "HT.10",
     "HT.2",
@@ -1434,6 +1530,539 @@
     "HT.9"
    ],
    "risks": ""
+  },
+  {
+   "id": "HQ.1",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QA.1",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 230,
+   "area": "graph/src/calls.rs (decide_ref, GlobalNames), parsers/code/php/src/lib.rs (DH.14 stopgap removed), engine/src/coverage.rs (the PHP heritage caveat)",
+   "title": "A heritage base binds a type, never a namespace: a Bare INHERITS_FROM / IMPLEMENTS ref whose module_symbols or repo-unique lookup answers a PACKAGE (C# / PHP namespace, Solidity library, Ruby / Elixir module, Rust mod) or MODULE is refused there and looked up again among non-namespace nodes; DH.14's PHP stopgap, written to be deleted by exactly this rule, goes",
+   "rationale": "BASE 57b0e22c. HC.3 held-out panel (dev-notes/confidence-gate-0.5.7.md item 6: INHERITS_FROM|fact 10/11, INHERITS_FROM|heuristic 9/10). The two wrong verdicts (bench/edge-audit/verdicts/heldout.jsonl), both squidex@f828dd717edc: 04776b3e806f123a `Squidex::Domain::Apps::Entities::Teams::DomainObject::TeamDomainObject -INHERITS_FROM-> Squidex::Domain::Apps::Entities::Teams::DomainObject` (PACKAGE), graph:refs rule module_symbol, site Teams/DomainObject/TeamDomainObject.cs:32: 'DomainObject<Team> is the generic base class DomainObject<T> of Squidex.Infrastructure, not the TeamDomainObject's own namespace Teams.DomainObject'; 00efd26aeb251fdf `Squidex::Providers::SqlServer::Migrations::Initial -INHERITS_FROM-> Squidex::Domain::Apps::Entities::Contents::Migration` (PACKAGE), rule global_unique: 'Initial : Migration is EF Core's Microsoft.EntityFrameworkCore.Migrations.Migration, not the Contents.Migration namespace'. Cause, by symbol: graph/src/calls.rs `decide_ref`, arm `CallQualifier::Bare(name)`: with no import binding it takes `g.symbols.module_symbols[from_module][name]` (Branch::ModuleSymbol), and C#'s file-scoped `namespace Squidex.Domain.Apps.Entities.Teams.DomainObject;` puts the namespace PACKAGE in its file's table under its last segment `DomainObject`; failing that, the heritage fallback `names.function(name)` (`GlobalNames::function`, `unique_names(g, |_| true)`) is unique over every kind, so the one PACKAGE named `Migration` wins. The comment at that fallback even says module_symbols holds 'namespace/PACKAGE members'. `is_type_kind` exists beside it but only the types / types_named indexes read it. The PHP parser already knows the bug: `heritage_refs`' STOPGAP (DH.14, parsers/code/php/src/lib.rs, `Acc::namespace_tails`, `Acc::namespace_named_bases`, the `[php-heritage] namespace-named bases skipped=` line) drops a Bare base named like its own namespace's last segment and documents 'Removal: once `resolve_refs` restricts a Bare heritage target to a type kind ..., delete this check'; its cost is the true in-repo base of that name (Slim's `DomainRecordNotFoundException extends DomainException` inside `namespace App\\Domain\\DomainException`), and the php coverage caveat (engine/src/coverage.rs) still warns that a base 'named like a namespace declared in another file can bind that namespace instead of a type'. Size: full squidex@f828dd717edc, 48 INHERITS_FROM edges into a PACKAGE (7 fact module_symbol `*DomainObject` -> its own namespace, 41 heuristic global_unique EF migrations -> Contents.Migration); zora-protocol@32c2931a 0 and 0 into a MODULE on either. Across every committed edge-audit sample (bench/edge-audit/samples/*.jsonl) heritage -> PACKAGE was sampled exactly twice, both these, both wrong; no heritage edge to a PACKAGE was ever judged correct. True cases kept: an in-file / same-namespace base still binds by module_symbol (a CLASS / INTERFACE in the table is untouched), TS's STATE_VAR base (hoppscotch `type Body = HoppRESTReqBody & ..`, judged correct, rule import_binding) is not a namespace kind and is untouched, Elixir behaviours are INTERFACE nodes (DH.17b) so `@behaviour` IMPLEMENTS is untouched.",
+   "entry_points": [
+    "graph/src/calls.rs `decide_ref` (the `CallQualifier::Bare` arm's module_symbols lookup and its heritage global fallback; the GD.7 self-loop refusal beside which the new refusal is counted)",
+    "graph/src/calls.rs `GlobalNames` (new lazily built index `heritage_bases`, beside `functions` / `types`) and `is_type_kind`",
+    "graph/src/calls.rs `RefCounts` and `resolve_refs` (the `[heritage] self-loops refused=` marker block)",
+    "parsers/code/php/src/lib.rs `heritage_refs` (DH.14 STOPGAP), `namespace_tails`, `Acc::namespace_tails`, `Acc::namespace_named_bases`, test `a_base_named_like_a_namespace_of_the_file_is_skipped`",
+    "engine/src/coverage.rs the php INHERITS_FROM caveat note"
+   ],
+   "files_touched": [
+    "graph/src/calls.rs",
+    "parsers/code/php/src/lib.rs",
+    "engine/src/coverage.rs",
+    "bench/substrate-gap/fixtures/csharp-heritage-not-namespace/key.json",
+    "bench/substrate-gap/fixtures/csharp-heritage-not-namespace/Core/Commands/DomainObject.cs",
+    "bench/substrate-gap/fixtures/csharp-heritage-not-namespace/Teams/DomainObject/TeamDomainObject.cs",
+    "bench/substrate-gap/fixtures/csharp-heritage-not-namespace/Contents/Migration/MigrateContentsJob.cs",
+    "bench/substrate-gap/fixtures/csharp-heritage-not-namespace/Data/Migrations/Initial.cs",
+    "bench/substrate-gap/fixtures/php-heritage-namespace-named/key.json",
+    "bench/substrate-gap/fixtures/php-heritage-namespace-named/src/Domain/DomainException/DomainException.php",
+    "bench/substrate-gap/fixtures/php-heritage-namespace-named/src/Domain/DomainException/DomainRecordNotFoundException.php"
+   ],
+   "implementation": "1. graph/src/calls.rs: `fn is_namespace_kind(g, id) -> bool` = nav kind PACKAGE or MODULE (a supertype is a type, never a namespace or a file; A6.3 already says so for MODULE through `heritage_through_module`). 2. `decide_ref`, Bare arm, no import binding: for a heritage ref (`is_heritage(r.category)`) the module_symbols hit is kept only when `!is_namespace_kind`; a refused hit counts `counts.namespace_refused.module_symbol += 1` and falls through to the global fallback exactly as a miss does. 3. The heritage global fallback reads a new `GlobalNames::heritage_base(name)` = `unique_names(g, |id| !is_namespace_kind(g, id))`, built once on first lookup like `functions` (timed through `timed`), instead of `names.function(name)`; HANDLED_BY and INJECTS keep `names.function` unchanged. When `names.function(name)` would have answered a namespace node, count `namespace_refused.global_unique += 1`; when the new lookup then answers a type, count `rebound += 1` (same Branch::GlobalUnique, so its tier stays heuristic, `why`'s NAME_ONLY_RULES). 4. Belt: at the GD.7 self-loop refusal, also refuse any heritage result whose target `is_namespace_kind` (import binding or Attribute arms), counted under module_symbol / other. 5. Marker, in `resolve_refs` beside `[heritage] self-loops refused=`: when n > 0, `[heritage] namespace targets refused=<n> (module_symbol=<m> global_unique=<g> other=<o>) rebound=<r>`; RefCounts gains the fields and `merge` adds them (FH.21's chunked decide). 6. parsers/code/php/src/lib.rs: delete DH.14's stopgap as its doc comment instructs: the `namespace_tails` check in `heritage_refs`, `Acc::namespace_tails` / `namespace_named_bases`, `fn namespace_tails` and the `[php-heritage] namespace-named bases skipped=` line; the test `a_base_named_like_a_namespace_of_the_file_is_skipped` becomes `a_base_named_like_a_namespace_of_the_file_is_a_bare_ref` (SyncCommand now records `INHERITS Command` Bare beside `IMPLEMENTS Audited`; the Laravel aliased-import half is unchanged). 7. engine/src/coverage.rs: the php note drops 'a base named like the last segment of a namespace its own file declares (...) is not linked, and one named like a namespace declared in another file can bind that namespace instead of a type' and says instead 'a base name that only a namespace carries stays unresolved' (the csharp rows name no namespace binding; unchanged). 8. Tests (graph/src/calls.rs tests, beside `heritage_edges` / `heritage_rules`): a C# file-scoped namespace `DomainObject` plus `class X : DomainObject<T>` binds the repo's CLASS DomainObject (rule global_unique), never the PACKAGE; a base named only by a PACKAGE elsewhere (`Initial : Migration`) stays in `unresolved_refs`; an in-file CLASS base still binds module_symbol; the self-loop test unchanged.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/csharp-heritage-not-namespace/ (language csharp, dirs [\".\"], no matrix cell; written from scratch in squidex's shape): Core/Commands/DomainObject.cs `namespace Shop.Core.Commands; public abstract class DomainObject<T>`; Teams/DomainObject/TeamDomainObject.cs `using Shop.Core.Commands; namespace Shop.Teams.DomainObject;` with `class TeamEntity`, `class Team : TeamEntity` and `class TeamDomainObject : DomainObject<Team>`; Contents/Migration/MigrateContentsJob.cs `namespace Shop.Contents.Migration; class MigrateContentsJob`; Data/Migrations/Initial.cs `using Microsoft.EntityFrameworkCore.Migrations; namespace Shop.Data.Migrations; public partial class Initial : Migration`. key: expect_edges INHERITS_FROM TeamDomainObject -> `Shop::Core::Commands::DomainObject` (exact: the lenient matcher would accept the PACKAGE, whose name is also DomainObject) and Team -> TeamEntity (positive control, module_symbol); forbid INHERITS_FROM `Shop::Teams::DomainObject::TeamDomainObject` -> `Shop::Teams::DomainObject` and `Shop::Data::Migrations::Initial` -> `Shop::Contents::Migration`. BASE: both forbids fire and the exact expect misses (probe below). NEW bench/substrate-gap/fixtures/php-heritage-namespace-named/ (language php): src/Domain/DomainException/DomainException.php `namespace App\\Domain\\DomainException; abstract class DomainException extends Exception` and DomainRecordNotFoundException.php in the same namespace `extends DomainException`; key: expect INHERITS_FROM DomainRecordNotFoundException -> `src::Domain::DomainException::DomainException` (exact; the CLASS), forbid INHERITS_FROM `src::Domain::DomainException::DomainRecordNotFoundException` -> the PACKAGE `App::Domain::DomainException` (its qname at BASE; the CLASS and the file MODULE share the qname `src::Domain::DomainException::DomainException`, which is why the namespace forbid names the PACKAGE). BASE: no supertype at all (the stopgap). Existing fixtures that pin the true cases and must stay 1.00: solidity-heritage-xfile (Bare base bound by the unique-type fallback), solidity-inherits_from, heritage-qualified-bases, csharp-aspnet, csharp-iface-methods, scala-inherits_from, java-spring-inherits, py-inherits, dart-heritage, ts-heritage-xfile, matrix/{php,ruby,elixir,rust,dart,lua,typescript}/impl.",
+   "acceptance": "cargo test -p glia-graph --lib calls:: and cargo test -p glia-parser-php (or the crate's name in parsers/code/php/Cargo.toml) green; grade.py on both new fixtures 1.00 with FORBID VIOLATIONS 0 on the wave-end wheel, and the fixtures listed above unchanged; on a git archive of squidex@f828dd717edc: `glia query . -e 'h(A,B) :- inherits(A,B), node(B,\"PACKAGE\").'` 0 rows (BASE 48), `glia why . Squidex::Domain::Apps::Entities::Teams::DomainObject::TeamDomainObject Squidex::Infrastructure::Commands::DomainObject` shows INHERITS_FROM graph:refs global_unique, and stderr carries `[heritage] namespace targets refused=` with module_symbol=7 global_unique=41 (or the counts the archive gives); zora-protocol@32c2931a builds with no such line (0 namespace targets).",
+   "fired_on_marker": "[heritage] namespace targets refused=<n> (module_symbol=<m> global_unique=<g> other=<o>) rebound=<r>  (once per graph build with n > 0, beside `[heritage] self-loops refused=`); `[php-heritage] namespace-named bases skipped=` is retired",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "No INHERITS_FROM / IMPLEMENTS edge ends at a PACKAGE or MODULE: squidex loses 48 (7 fact, 41 heuristic) and gains up to 7 heuristic global_unique edges to Squidex.Infrastructure.Commands.DomainObject; PHP gains the in-repo bases DH.14 skipped (heuristic or module_symbol). implementors / gaps dead_symbol dispatch / blast radius over heritage move with them. The `[php-heritage] namespace-named bases skipped=` stderr line is removed; a new `[heritage] namespace targets refused=` line."
+   },
+   "depends_on": [],
+   "risks": "A language whose parser mints a real supertype as PACKAGE would lose it: audited at BASE, Solidity libraries cannot be inherited, a Ruby class cannot subclass a module (mixins are GD.18 NavFacts, not heritage), Elixir behaviours are INTERFACE, Rust traits bind through rust_paths, C++ / PHP / C# namespaces are not types; no committed fixture or sample has a heritage edge to a PACKAGE judged correct. The rebind through the non-namespace unique index is still a name guess (heuristic tier, NAME_ONLY_RULES): a repo with exactly one in-repo `Migration` class would bind EF's base to it, as any other bare external base already does. Not done here: C# `using Ns;` member lookup (binding `DomainObject` through `using Squidex.Infrastructure.Commands;` at fact tier) is a separate, larger change; see notes."
+  },
+  {
+   "id": "HQ.2",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QA.2",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 190,
+   "area": "parsers/code/csharp/src/lib.rs (check_route_attrs: ASP.NET's verb-constraint vs route-template attributes)",
+   "title": "ASP.NET: a template-less verb attribute (`[HttpGet]`) beside an action's `[Route(\"t\")]` constrains that route's verb instead of minting its own `GET <controller prefix>` route: `[HttpGet][Route(\"apps/{app}\")]` is one ROUTE `GET /apps/{app}`, not `GET /` plus `ANY /apps/{app}` (also fixes the HTTP_CALLS `any` pairing to a PUT / DELETE-only template)",
+   "rationale": "BASE 57b0e22c. HC.3 held-out panel (confidence-gate-0.5.7.md item 4a, HANDLED_BY|fact under floor; and the above-floor HTTP_CALLS|derived 10/11 note). Wrong verdicts, squidex@f828dd717edc: 00b4588f57e712b5 `GET / @backend/src/Squidex -HANDLED_BY-> Squidex::Areas::Api::Controllers::Schemas::SchemasController::GetPreviewUrlsCompletion`, parser:csharp, site SchemasController.cs:376: 'GetPreviewUrlsCompletion serves GET api/apps/{app}/schemas/{schema}/completion/prview-urls ([Route] beside [HttpGet]); no GET / route exists'; 01beee55da2cde04 `endpoint:GET:/api/apps/${…} @frontend -HTTP_CALLS-> ANY /apps/{app}/ @backend/src/Squidex`, resolver:http rule any: 'the GET /api/apps/{name} call is served by [HttpGet][Route(\"apps/{app}\")] GetApp; the apps/{app}/ template paired here carries only the PUT and DELETE actions'. One cause, by symbol: parsers/code/csharp/src/lib.rs `check_route_attrs` loops over `own_attributes(node)` and emits one ROUTE per attribute: `[Route(t)]` -> `ANY <prefix>/t`, and a verb attribute with no template (`[HttpGet]`) -> `<VERB> <prefix>` (with no controller `[Route]` the prefix is `/`). ASP.NET Core's attribute routing (DefaultApplicationModelProvider selectors) reads them as one route: a verb attribute without a template is only an HTTP-method constraint applied to the action's template routes; it is a route of its own only when the action has no template-bearing attribute. So every squidex action written `[HttpX]` + `[Route(\"..\")]` (the whole API, 54 controllers) gives one bogus `<VERB> /` ROUTE shared by every such action in the repo, and its real path as verb-less `ANY`, which resolver:http pairs by rule `any` to whichever ANY template matches (PutApp / DeleteApp's `apps/{app}/`). Size: full squidex: `GET / @backend/src/Squidex` HANDLED_BY 108 actions, `POST /` 54, `PUT /` 60, `DELETE /` 31 (253 false HANDLED_BY|fact), and 207 `ANY /..` ROUTEs in *Controller.cs files. A second reader already works around it: parsers/code/extractors/src/openapi_annot.rs `handled_routes`' 'Precision guard' refuses to key an op on the `GET <prefix>` half of the pair and 'keys by itself once the parser composes the pair' (squidex: `[openapi-annot] .. ops=4 unkeyed=201` summed over the build). True cases kept and pinned: `[HttpGet(\"{id}\")]` under a controller `[Route]` (fixture csharp-aspnet-composed, test `aspnet_relative_template_composes`), bare `[HttpPost]` inheriting the controller template (`aspnet_bare_verb_attribute_inherits_prefix`), absolute `[HttpDelete(\"/admin/..\")]` (`aspnet_absolute_action_template_overrides_prefix`), a lone `[Route]` action staying ANY, the controller's own ANY route (`aspnet_full_methods_and_route_attr`).",
+   "entry_points": [
+    "parsers/code/csharp/src/lib.rs `check_route_attrs` (called from `visit_method`)",
+    "parsers/code/csharp/src/lib.rs `own_attributes`, `HTTP_VERB_ATTRS`, `substitute_route_tokens`, `emit_route` (unchanged helpers)",
+    "parsers/code/csharp/src/lib.rs `visit_type_decl`'s `[csharp-routes] composed .. action routes` marker"
+   ],
+   "files_touched": [
+    "parsers/code/csharp/src/lib.rs",
+    "bench/substrate-gap/fixtures/csharp-aspnet-verb-route-split/key.json",
+    "bench/substrate-gap/fixtures/csharp-aspnet-verb-route-split/server/BoardsController.cs",
+    "bench/substrate-gap/fixtures/csharp-aspnet-verb-route-split/server/CardsController.cs",
+    "bench/substrate-gap/fixtures/csharp-aspnet-verb-route-split/client/boards.ts"
+   ],
+   "implementation": "1. `check_route_attrs`: read the action's own attributes once and split them into TEMPLATES (`[Route(t)]`, and a verb attribute WITH a positional template `[HttpGet(\"t\")]`, `t` possibly empty, `[HttpGet(\"\")]` included) and UNBOUND VERBS (a verb attribute whose positional template is absent: `[HttpGet]`, `[HttpGet(Name = \"x\")]`), keeping attribute order. 2. No TEMPLATES: each unbound verb emits `<VERB> <prefix>` exactly as today (bare `[HttpPost]` inherits the controller template). 3. Otherwise: a verb template `[HttpX(t)]` emits `X <compose(t)>` as today; a `[Route(t)]` emits one ROUTE per unbound verb, `<VERB> <compose(t)>`, or `ANY <compose(t)>` when there is none; unbound verbs then emit nothing of their own. `compose` is the existing override / relative / `join_path` / `substitute_route_tokens` code, unchanged. Duplicate (verb, path) pairs on one action emit once. 4. The return value stays the routes emitted, so `[csharp-routes] composed <n> action routes ..` reports the new count; add one line per file when any pair was folded: `[csharp-routes] verb constraints applied=<v> route_templates=<t> in <file>` (v = unbound verbs folded onto a Route template, t = Route templates that took one). 5. Tests in the csharp crate: `aspnet_verb_attribute_constrains_route_template` (`[HttpGet][Route(\"apps/{app}\")]` -> only `GET /apps/{app}`; no `GET /`, no `ANY /apps/{app}`); `[HttpGet][HttpHead][Route(\"x\")]` -> `GET /x` + `HEAD /x`; `[Route(\"a\")][Route(\"b\")][HttpPost]` -> `POST /a` + `POST /b`; with a controller `[Route(\"api/[controller]\")]` + `[HttpPut][Route(\"{id}\")]` -> `PUT /api/<c>/{id}`; `[HttpGet(\"x\")][Route(\"y\")]` -> `GET /x` + `ANY /y`; a lone `[Route(\"z\")]` stays `ANY /z`; the existing route tests unchanged. openapi_annot's split guard and its test `split_verb_and_route_attributes_are_not_keyed` stay as they are (the test builds its FileParse by hand); real C# builds simply stop feeding it the split pair.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/csharp-aspnet-verb-route-split/ (language csharp, dirs [\"server\", \"client\"], cells [\"csharp/http_server\"] not claimed, legacy-only; from scratch in squidex's shape): server/BoardsController.cs, an `[ApiController]` with no controller `[Route]`: `[HttpGet][Route(\"boards/{board}\")] GetBoard`, `[HttpPut][Route(\"boards/{board}/\")] PutBoard`, `[HttpDelete][Route(\"boards/{board}/\")] DeleteBoard`, `[HttpGet][Route(\"boards/{board}/columns/completion\")] GetColumnsCompletion`; server/CardsController.cs, a positive control in the existing composed shape (`[Route(\"api/cards\")]`, `[HttpGet(\"{id}\")] GetCard`, bare `[HttpPost] CreateCard`); client/boards.ts `fetch(`/boards/${name}`, { method: \"GET\" })`. key: expect_nodes ROUTE `GET /boards/{board}`, `PUT /boards/{board}/`, `DELETE /boards/{board}/`, `GET /boards/{board}/columns/completion` (exact), `GET /api/cards/{id}`, `POST /api/cards`; expect_edges HANDLED_BY `GET /boards/{board}/columns/completion` -> GetColumnsCompletion, HTTP_CALLS the client endpoint -> `GET /boards/{board}` (exact); forbid node ROUTE `GET /`, node ROUTE `ANY /boards/{board}`, HTTP_CALLS from the client endpoint (its name per --dump, `GET /boards/${…}` in csharp-aspnet-composed's spelling) -> `PUT /boards/{board}/` and -> `ANY /boards/{board}/`. BASE: the four exact verb ROUTEs are missing (they read ANY), and `GET /` exists (probe below).",
+   "acceptance": "cargo test for the csharp parser crate green (the six existing aspnet_* tests unchanged, the new ones above); grade.py on the new fixture 1.00 / FORBID VIOLATIONS 0, csharp-aspnet, csharp-aspnet-composed, csharp-minimal-api, csharp-primary-ctor, csharp-fromservices, csharp-di-dispatch, contract-annot-swashbuckle and matrix/csharp/{http_server_composed,service} unchanged, on the wave-end wheel; on a git archive of squidex@f828dd717edc: `glia query . -e 'h(H) :- qname(R,\"GET / @backend/src/Squidex\"), handles(R,H).'` -> 0 rows (BASE 108), `glia serves . \"GET /apps/{app}\"` lists only `GET /apps/{app}` (GetApp), stderr `[csharp-routes] verb constraints applied=` on the 54 controller files, and the summed `[openapi-annot] .. unkeyed=` falls from 201.",
+   "fired_on_marker": "[csharp-routes] verb constraints applied=<v> route_templates=<t> in <file>  (new, per C# file that folded a template-less verb onto a [Route] template; the existing `[csharp-routes] composed <n> action routes ..` count drops accordingly)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "C# ROUTE qnames: an action with `[HttpX]` + `[Route(t)]` is `X /t` (was `X <prefix>` + `ANY /t`); the shared `<VERB> /` ROUTEs disappear (squidex: 253 HANDLED_BY), HTTP_CALLS re-pair by verb (rule exact / verb tiers instead of `any`), serves / arch / health / gaps unpaired_route and spec-status move; ApiExplorer / Swashbuckle annotation ops on such actions become keyed (DOCUMENTS / contract rows appear)."
+   },
+   "depends_on": [],
+   "risks": "ASP.NET corner cases kept conservative: a verb attribute with a template plus an unbound verb on the same action (rare) keeps the templated verb only (ASP.NET would OR the methods); `[AcceptVerbs(..)]` and `[HttpMethod]`-derived custom attributes are not read (unchanged). The squidex cohort cells (http reach / pairs) will move: expected gains (fewer ANY pairs to wrong actions); the cohort gate reads it as a change to ratchet, not a drop to investigate, unless a squidex task pinned the bogus `GET /`. The `/api` prefix the squidex frontend calls with is resolved as today (unchanged)."
+  },
+  {
+   "id": "HQ.3",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QA.3",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 420,
+   "area": "parsers/code/solidity/src/lib.rs (collect_emits_in), graph/src/build/solidity.rs (new: inherited / qualified event binding), graph/src/build.rs (one call + `mod solidity;`), graph/src/calls.rs (EVENT_FLOWS kind guard in decide_ref), engine/src/why.rs (two name-only rules), code-domain/src/evidence.rs (emitter doc), engine/src/coverage.rs (one solidity caveat row)",
+   "title": "Solidity `emit E(..)` / `emit I.E(..)` of an event the emitting contract does not declare binds the event its interface / base chain (or the named type) declares, instead of a dangling EVENT_FLOWS edge to a `<contract>::E` id no node has",
+   "rationale": "BASE 57b0e22c. HC.3 held-out panel (confidence-gate-0.5.7.md item 3: EVENT_FLOWS|fact 2/8, 0.250 [0.071, 0.591], no fit row). The six wrong verdicts, all zora-protocol@32c2931a, all parser:solidity EVENT_FLOWS to `(unknown:<id>)`: 002056463deb4820 ZoraSparks1155::_emitTransferSingleIfData 'emits TransferSingleWithData, declared in-repo in IZoraSparks1155Managed; the edge's target is an unresolved placeholder'; 03a8eb401f8a7f6f CallerAndCommenterSwapAndCommentTest::testSellOnSecondaryAndComment 'emits IComments.Commented and ICallerAndCommenter.SwappedOnSecondaryAndCommented, both declared in-repo'; 03de56984c72151a ERC721::_burn 'emits Transfer, declared by IERC721 in the same file'; 03fd3333c73ab314 ZoraCreator1155Impl::updateContractMetadata 'ContractMetadataUpdated (IZoraCreator1155) and ContractURIUpdated (IERC7572)'; 045e6efec4e080df ERC20Minter::resetSale 'SaleSet, declared in-repo in IERC20Minter'; 04f6b1670744a00f ProtocolRewards::depositBatch 'Deposit, declared in-repo in shared-contracts IProtocolRewards'. Cause, by symbol: parsers/code/solidity/src/lib.rs `collect_emits_in` writes every emit as an intra Edge to `NodeId::from_parts(.., EVENT_EMITTER, \"<contract qname>::<event text>\")`, assuming 'The event is declared in the same contract' (its doc comment); an inherited event (the normal Solidity shape: events live in the interface) or a qualified `emit IComments.Commented(..)` (text `IComments.Commented`) names an id no node carries, so the layout stores a dangling edge the edge audit samples as `(unknown:..)` and every answer drops. Size: zora-protocol full archive, 216 of 291 distinct EVENT_FLOWS (from, to) pairs end at `(unknown:..)` (74%); a source count of the repo's 322 `emit`s: 77 name an event of their own contract, 56 are qualified `I.E`, 189 name an unqualified event of a base or another file. True case kept and pinned: fixture solidity-event_flows (`bid()` emits its own contract's `BidPlaced`), parser test `event_emitter_node_and_event_flows_edge`.",
+   "entry_points": [
+    "parsers/code/solidity/src/lib.rs `collect_emits_in` (called from `visit_function`), `visit_contract` (the contract body walk that sees `event_definition`), `visit_event`",
+    "graph/src/build.rs `build_ts_like` (Solidity builds through `build_typescript`, lang_build's default arm of `build_solo`)",
+    "graph/src/calls.rs `decide_ref` (an EVENT_FLOWS ref may bind only an EVENT_EMITTER) and `superclasses` / `nearest_member` (the level walk this mirrors over CLASS and INTERFACE ends)",
+    "engine/src/why.rs `NAME_ONLY_RULES`"
+   ],
+   "files_touched": [
+    "parsers/code/solidity/src/lib.rs",
+    "graph/src/build/solidity.rs",
+    "graph/src/build.rs",
+    "graph/src/calls.rs",
+    "engine/src/why.rs",
+    "code-domain/src/evidence.rs",
+    "engine/src/coverage.rs",
+    "bench/substrate-gap/fixtures/solidity-inherited-events/key.json",
+    "bench/substrate-gap/fixtures/solidity-inherited-events/src/interfaces/IGuestbook.sol",
+    "bench/substrate-gap/fixtures/solidity-inherited-events/src/Guestbook.sol",
+    "bench/substrate-gap/fixtures/solidity-inherited-events/test/Guestbook.t.sol"
+   ],
+   "implementation": "1. Parser: `visit_contract` gathers the contract body's own `event_definition` names (a pre-pass over the body's named children, so an event declared after the function counts) and hands the set to `visit_function` -> `collect_emits_in`. An unqualified emit of an own event keeps today's direct edge (fact, byte-identical). Any other emit pushes an UnresolvedRef { from: the function, from_module, category: EVENT_FLOWS, qualifier: Bare(E) for `emit E(..)`, Attribute { base: I, name: E } for `emit I.E(..)` (split on the last `.`; a deeper path keeps its last two segments), line: the emit's row } and no edge. Count per file: `[sol-events] own=<o> refs=<r> (bare=<b> qualified=<q>) path=<f>` when r > 0. 2. graph/src/calls.rs `decide_ref`: an EVENT_FLOWS ref may resolve only to an EVENT_EMITTER (a file-level event in the same file, which module_symbols holds, binds; a same-named struct or function is refused and the ref stays unresolved); no global name fallback is added there. 3. New graph/src/build/solidity.rs (a child of build.rs like dart.rs / lua.rs), `pub(crate) fn resolve_emit_refs(g: &mut RepoGraph)`, called from `build_ts_like` right after `ts_stitch` (TS / Terraform graphs hold no EVENT_FLOWS ref, so the partition is empty there): takes the EVENT_FLOWS refs out of `g.unresolved_refs` (others keep their order); bases map = every INHERITS_FROM / IMPLEMENTS edge whose both ends are CLASS or INTERFACE nodes (Solidity contract `is` interface is IMPLEMENTS, contract `is` contract and interface `is` interface INHERITS_FROM), keyed by subclass id, sorted, deduped (`calls::superclasses` reads CLASS->CLASS INHERITS_FROM only, so it is not reused); the owner = the nav parent of `from`. Bare(E): level walk from the owner's direct bases, `MAX_INHERIT_LEVELS` (make it pub(crate) in calls.rs), visited set: the first level where a base has a nav child of kind EVENT_EMITTER named E decides; one distinct event -> edge, two -> ambiguous, none -> kept unresolved. Attribute{I, E}: the first base on that walk whose name is I, else the one CLASS / INTERFACE / PACKAGE (a library) named I in the graph (unique by nav name; two -> ambiguous); its EVENT_EMITTER child E -> edge. 4. Evidence: emitter `graph:solidity`, rule `inherited_event` / `qualified_event` when every heritage edge the walk crossed carries an EVIDENCE rule outside the name-only set (graph:refs global_unique), else `inherited_event_by_name` / `qualified_event_by_name`; a qualified base found by unique name is `qualified_event_by_name`; `.line(r.line)` via `push_edge`. engine/src/why.rs NAME_ONLY_RULES gains (`graph:solidity`, `inherited_event_by_name`) and (`graph:solidity`, `qualified_event_by_name`), so those read heuristic (at BASE every Solidity heritage edge is global_unique, so in practice zora's new edges read heuristic: a deliberate, honest drop from the dangling 'fact'). code-domain/src/evidence.rs's emitter list names `graph:solidity`. 5. Marker, once per graph with any EVENT_FLOWS ref: `[sol-events] bound=<b> (inherited=<i> qualified=<q> by_name=<n>) ambiguous=<a> unbound=<u>`. 6. engine/src/coverage.rs: a solidity EVENT_FLOWS caveat row: 'an emit of an event a base outside the repo declares (an OpenZeppelin ERC20 `Transfer`) has no edge; one reached only through a name-matched heritage edge is heuristic'. Check `GLIA_UPDATE_GOLDEN=1 cargo test -p glia-engine --lib rules::reflexion_parity` leaves engine/tests/data/reflexion/allow_absence.json unchanged (a per-language row; regenerate and declare if not). 7. Tests: solidity crate (an own-event emit stays an edge; an inherited emit and `I.E` are refs with the right qualifier and line; an event declared after the function is own); graph tests in build/solidity.rs (contract -> interface IMPLEMENTS -> event binds; contract -> base contract -> interface two levels; diamond to one event binds once; two bases at one level each declaring E -> ambiguous, no edge; `I.E` with I not a base binds by unique name; external event stays unresolved); an engine test that no EVENT_FLOWS edge of a Solidity build ends at an id with no node.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/solidity-inherited-events/ (language solidity, dirs [\".\"], cells [\"solidity/eventbus\"] not claimed; from scratch in zora's shape): src/interfaces/IGuestbook.sol `interface IGuestbook { event Signed(address indexed guest, string note); event Cleared(uint256 count); function sign(string calldata) external; }`; src/Guestbook.sol `contract Guestbook is IGuestbook` with its own `event Opened(address owner)`, `open()` emitting Opened (positive control, local), `sign()` emitting Signed (inherited), `clear()` emitting `IGuestbook.Cleared` (qualified, base); test/Guestbook.t.sol `contract GuestbookTest` (no heritage) with `testSignEmits()` emitting `IGuestbook.Signed` (qualified, by name). key: expect_edges EVENT_FLOWS open -> Opened, sign -> Signed, clear -> Cleared, testSignEmits -> Signed (each `to` exact on the interface's event qname `src::interfaces::IGuestbook::IGuestbook::Signed` etc.); forbid EVENT_FLOWS sign -> `src::Guestbook::Guestbook::Signed` (the id the parser guesses today; no node, so the forbid is a guard for a future node, not the BASE failure). BASE: the three non-local expect rows miss (their edges end at no node). Note found while probing, not fixed here: an emit inside a `constructor` is never visited (`visit_contract` walks only `function_definition` bodies), so the control uses a function, not the constructor.",
+   "acceptance": "cargo test for the solidity parser crate, cargo test -p glia-graph --lib build::solidity, cargo test -p glia-engine --lib why:: green; grade.py on the new fixture 1.00 / FORBID VIOLATIONS 0 and solidity-event_flows, solidity-heritage-xfile, solidity-inherits_from, evm-shop-stack, evm-abi-cross-file unchanged, on the wave-end wheel; on a git archive of zora-protocol@32c2931a: `glia query . -e 'e(A,B) :- edge(A,B,\"EVENT_FLOWS\").' --limit 5000 | grep -c unknown:` -> 0 (BASE 216), `glia why . legacy::sparks::src::ZoraSparks1155::ZoraSparks1155::_emitTransferSingleIfData legacy::sparks::src::interfaces::IZoraSparks1155Managed::IZoraSparks1155Managed::TransferSingleWithData` shows EVENT_FLOWS graph:solidity inherited_event_by_name, and stderr `[sol-events] bound=` with bound > 150.",
+   "fired_on_marker": "[sol-events] bound=<b> (inherited=<i> qualified=<q> by_name=<n>) ambiguous=<a> unbound=<u>  (once per Solidity graph with an EVENT_FLOWS ref) and per file `[sol-events] own=<o> refs=<r> (bare=<b> qualified=<q>) path=<f>`",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "No Solidity EVENT_FLOWS edge ends at a missing node: an emit of an inherited or qualified event is an EVENT_FLOWS edge to the declaring interface / base / library's EVENT_EMITTER (emitter graph:solidity, new rules inherited_event[_by_name], qualified_event[_by_name], the _by_name ones heuristic), or nothing; zora: 216 dangling 'fact' edges become bound edges (mostly heuristic) or vanish. effects / flows / blast radius / resolver:evm's event subscriptions now reach the interface events. New stderr lines `[sol-events] ..`."
+   },
+   "depends_on": [
+    "HC.4"
+   ],
+   "risks": "Solidity heritage binds by repo-unique name today (graph:refs global_unique, its own known false edges: zora binds an OpenZeppelin `ERC1155` base to an in-repo test copy), so an event found through such an edge inherits that guess: hence the `_by_name` rules and the heuristic tier rather than fact. A contract overriding nothing but redeclaring an interface's event is own (local first), as Solidity resolves it. Ambiguity (two bases at one level declaring E) binds nothing. The emits inside constructors / modifiers stay unread (a recall gap, noted, out of scope)."
+  },
+  {
+   "id": "HQ.4",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QA.4",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 150,
+   "area": "parsers/code/solidity/src/lib.rs (emit_procedures: each HANDLED_BY located at its own declaration), bench/substrate-gap/grade.py + README.md + test_grade.py (a `site` filter on forbid edge rows)",
+   "title": "Solidity: an evm: procedure two same-named contracts share is HANDLED_BY each copy's METHOD at that copy's own file and line, not at whichever file's declaration won the node merge; the fixture grader gains a forbid `site` filter to pin it",
+   "rationale": "BASE 57b0e22c. HC.3 held-out panel (confidence-gate-0.5.7.md item 4b, HANDLED_BY|fact under floor). Wrong verdicts, zora-protocol@32c2931a, parser:solidity: 0058c6def80871ca `evm:ZoraCreator1155PreminterTest.setUp -HANDLED_BY-> legacy::1155-contracts::test::premint::ZoraCreator1155PremintExecutor_aa.t::ZoraCreator1155PreminterTest::setUp`, site ZoraCreator1155PremintExecutor.t.sol:61: 'the site is setUp of ZoraCreator1155PreminterTest in ZoraCreator1155PremintExecutor.t.sol; the edge binds the same-named contract's setUp in the _aa.t.sol file'; 0115d1c037b1e4d3 `evm:INonfungiblePositionManager.transferFrom -HANDLED_BY-> packages::shared-contracts::..::INonfungiblePositionManager::transferFrom`, site packages/coins/src/interfaces/INonfungiblePositionManager.sol:93: 'the site declares transferFrom in packages/coins' INonfungiblePositionManager; the edge binds the same-named interface's copy in shared-contracts'. Cause, by symbol: parsers/code/solidity/src/lib.rs `emit_procedures` mints the RPC_PROCEDURE id from `evm::procedure_qname(contract, member)` (`evm:<Contract>.<fn>`, keyed by the ABI name on purpose, DT.10a: an EVM client names a contract, never a file) and pushes its HANDLED_BY with `cells: Vec::new()`. Two files declaring one contract name give ONE procedure node (the first file's POSITION) with two HANDLED_BY edges, and the evidence fill (engine/src/passes.rs `fill_edge` -> code-domain `Evidence::fill`, HANDLED_BY's default basis is the from node) locates BOTH edges at the procedure's single POSITION, so the edge to the second copy reads as asserted in the first copy's file. The edge itself is the DT.10a model (one ABI member implemented by every same-named copy); its site is what is false. Size: zora full archive, 291 of 2834 procedure HANDLED_BY rows sit on a procedure with two or more handlers, about half of them located in the other copy's file. The grader cannot see an edge's site today (`forbid` filters by EVIDENCE `rule` only, FD.24, through `g.why`), so the fixture needs a `site` filter beside `rule`.",
+   "entry_points": [
+    "parsers/code/solidity/src/lib.rs `emit_procedures` (its HANDLED_BY Edge), `ProcEntry` (`handler`, `position`), `visit_contract` (passes `file_rel`)",
+    "code-domain/src/evidence.rs `Evidence::emitter(..).at(file, line)` (a recorded site is never overwritten by `Evidence::fill`)",
+    "bench/substrate-gap/grade.py `_grade_forbid`, `_evidence_rules`, `FORBID_EDGE_FIELDS`"
+   ],
+   "files_touched": [
+    "parsers/code/solidity/src/lib.rs",
+    "bench/substrate-gap/grade.py",
+    "bench/substrate-gap/README.md",
+    "bench/substrate-gap/test_grade.py",
+    "bench/substrate-gap/fixtures/solidity-twin-contracts/key.json",
+    "bench/substrate-gap/fixtures/solidity-twin-contracts/vault/src/IPriceOracle.sol",
+    "bench/substrate-gap/fixtures/solidity-twin-contracts/lending/src/IPriceOracle.sol"
+   ],
+   "implementation": "1. `emit_procedures` takes `file_rel` (from `visit_contract`) and gives each HANDLED_BY one EVIDENCE cell `Evidence::emitter(\"parser:solidity\").at(file_rel, row).to_cell()` where row is the 0-based start row of the handler's own declaration (the row `ProcEntry.position` records for this file's first declaration, read once when the entry is made: add `row: u32` to ProcEntry rather than re-parsing the cell). `Evidence::fill` never overwrites a recorded file, so each copy's edge keeps its own site; the CONTAINS fallback (no handler) is unchanged. The procedure node, its qname and its single POSITION are unchanged (DT.10a identity; resolver:evm pairs by it). 2. Count it in the existing `[sol-abi] procedures=<n> ..` line: append ` handled_sited=<h>` before ` path=`. 3. grade.py: FORBID_EDGE_FIELDS gains `site` (a non-empty string, repo-relative file): an edge row with `site` fires only on a matching edge whose `why` row's `site.file` equals it, read through the same `g.why` call `_evidence_rules` makes (generalise it to return (rule, site_file) pairs); `rule` and `site` combine with AND; README.md's vocabulary block and Semantics list `site` beside `rule` (FD.24's paragraph); test_grade.py pins: a `site` forbid fires on the edge sited there, not on the same pair sited elsewhere, a non-string `site` raises, a key with no `site` grades as before. 4. Solidity crate test: two parses of one contract name in two files each carry a HANDLED_BY whose EVIDENCE file is its own; an engine test (two-file build) that the merged procedure's two HANDLED_BY edges have distinct EVIDENCE files.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/solidity-twin-contracts/ (language solidity, dirs [\".\"]; from scratch in zora's shape, an interface copied into two packages): vault/src/IPriceOracle.sol `interface IPriceOracle { function latestPrice(address) external view returns (uint256); }` and lending/src/IPriceOracle.sol the same interface with an extra `decimals()` first. key: expect_edges HANDLED_BY `evm:IPriceOracle.latestPrice` -> `vault::src::IPriceOracle::IPriceOracle::latestPrice` and -> `lending::src::IPriceOracle::IPriceOracle::latestPrice` (both exact: one ABI member, two implementations, kept), forbid HANDLED_BY `evm:IPriceOracle.latestPrice` -> `vault::src::IPriceOracle::IPriceOracle::latestPrice` with `site` `lending/src/IPriceOracle.sol`, and the mirror forbid (lending method sited in vault/src) so the fixture fails whichever file the merge keeps. BASE: one of the two forbids fires (probe: the vault edge sits at lending/src/IPriceOracle.sol:8).",
+   "acceptance": "cargo test for the solidity parser crate green; python3 bench/substrate-gap/test_grade.py (or its pytest form, as the other grade tests run) green; grade.py on the new fixture 1.00 / FORBID VIOLATIONS 0 and solidity-abi-procedures, evm-shop-stack, evm-abi-cross-file, evm-ts-* unchanged, on the wave-end wheel; on a git archive of zora-protocol@32c2931a: `glia why . evm:ZoraCreator1155PreminterTest.setUp legacy::1155-contracts::test::premint::ZoraCreator1155PremintExecutor_aa.t::ZoraCreator1155PreminterTest::setUp` shows site `legacy/1155-contracts/test/premint/ZoraCreator1155PremintExecutor_aa.t.sol:<its line>` (BASE: ZoraCreator1155PremintExecutor.t.sol:61).",
+   "fired_on_marker": "[sol-abi] procedures=<n> (functions=.. getters=.. abstract=..) contracts=<c> literal_constants=<k> handled_sited=<h> path=<f>  (new field ` handled_sited=`); grade.py prints `forbid site=<file>` in a violation row as it prints `forbid rule=`",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "Every Solidity procedure HANDLED_BY edge carries an explicit EVIDENCE site (basis site, its own file and line) instead of a from_node fill: `why` / review / delta rows for those edges show the handler's line; zora's twin-contract edges move to their own files. The `[sol-abi]` line gains ` handled_sited=`. grade.py's frozen key.json vocabulary gains forbid `site` (README declares it)."
+   },
+   "depends_on": [
+    "HQ.3"
+   ],
+   "risks": "Keeps the DT.10a decision that one ABI name is one procedure; if James would rather the two copies be two procedures (a file-keyed qname), that breaks resolver:evm's contract-name pairing and every evm: qname, so it is a question, not this packet. The delta / review readers see the restamped site on every Solidity procedure edge once (GA.18 `restamped`)."
+  },
+  {
+   "id": "HQ.5",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QB.1",
+   "class": "precision",
+   "batch": "HQ",
+   "title": "Angular lazy child tables compose their parent prefix: a route record's `loadChildren` (`() => import('<spec>').then(m => m.X)`, the NgModule form one import hop on, and the legacy `'<spec>#X'` string) is a mount, and every object-table nav ROUTE is minted on a provisional module slot that GD.40-GD.42's fixpoint re-keys (`page:/:schemaName` becomes `page:/app/:appName/schemas/:schemaName`; a table no mount reaches keeps its own path), so a literal `navigate(['/404'])` no longer param-binds a one-segment page nested under parents",
+   "area": "parsers/code/extractors/src/nav_routes.rs (loadChildren read, provisional nav qnames and redirect links), code-domain/src/lib.rs endpoint (nav mount qname mint / parse), graph/src/build/route_mounts.rs (bind_nav_mounts), graph/src/build.rs (build_ts_like call), engine/src/extract.rs (module qname to the extractor), engine/src/coverage.rs (NAVIGATES_TO caveat)",
+   "loc": 560,
+   "rationale": "HC.3 (dev-notes/confidence-gate-0.5.7.md, under-floor cluster 7): NAVIGATES_TO|derived held out 2/10 = 0.200 [0.057, 0.510], no fit row. The 8 wrong rows are all squidex@f828dd717edc, emitter graph:nav rule `param`, verdict reason each time \"navigate(['/404']) goes to the '**' not-found route, not a :schemaName page (and the spec only verifies a mock)\": 0c5a7119e6259247 team-must-exist.guard.spec -> page:/:schemaName, 186fa29f86bd0cba schema-must-exist-published.guard.spec -> page:/:ruleId, 188ae620e7ebb4a6 user-must-exist.guard -> page:/:schemaName, 1d4bca79e7737117 app-must-exist.guard.spec -> page:/:schemaName, 22f572894030b882 user-must-exist.guard.spec -> page:/:schemaName, 26d93ad533effcc8 team-must-exist.guard -> page:/:ruleId, 289cba57c93cdf51 team-must-exist.guard.spec -> page:/:ruleId, 29bf653677a532fc rule-must-exist.guard.spec -> page:/:ruleId. Cause, read at BASE: squidex's app.routes.ts mounts each feature table with `loadChildren: () => import('./features/schemas/routes').then(m => m.SCHEMAS_ROUTES)` under `app/:appName/schemas`; nav_routes.rs `scan_route_records` composes children only inside one file, so features/schemas/routes.ts's `:schemaName` child is minted `page:/:schemaName` (its real path `/app/:appName/schemas/:schemaName`) and features/rules/routes.ts's `:ruleId` `page:/:ruleId`. graph/src/nav.rs `NavIndex::lookup`'s param tier (`segs_match`: a route `{}` takes any link segment) then binds the one-segment literal `/404` to both. The same missing prefix merges every lazy table's `''` page into the app root `page:/` (squidex: `page:/ -> page:/users` is administration's `'' -> users` redirect) and leaves a true deep link dead (the sample below: `['/app/items', id]` is `dead` at BASE because `page:/:itemId` has no literal for the suffix tier). The LA.6a caveat already admits it: \"lazily loaded child tables in another file match only by path suffix (Weak)\". Fixing the input, not the tier: once the page carries its prefix, `/404` has no same-length page and is the dead link the root catch-all absorbs (`[nav] .. catchall=`), which `glia pages` lists. GD.40-GD.42 (graph/src/build/route_mounts.rs, `bind_ts_mounts`) already re-key include-style HTTP mounts across TS files through CB.20's fixpoint (`go_mounts::fixpoint` / `rekey`); this packet gives client-router tables the same treatment.",
+   "entry_points": [
+    "parsers/code/extractors/src/nav_routes.rs: `scan_route_records`, `Found`, `RouteRecord`, `extract_route_tables`, `emit_nav_routes`, `nav_route_qname`, `lazy_import_handler` (sibling `lazy_import_target` returns (spec, export)), `absolute_link`, `ROUTER_KEYS`",
+    "code-domain/src/lib.rs `endpoint` module: `mount_route_qname`, `parse_mount_route_qname`, `MOUNT_OPEN`, `split_owner` (new `nav_mount_route_qname` / `parse_nav_mount_route_qname`); `NavFact::IncludeMount`, `IncludeTarget::Spec`",
+    "graph/src/build/route_mounts.rs: `bind_ts_mounts`, `TsResolver::spec_module` (reused for the import specifier), `TsMountStats` (model for `NavMountStats`)",
+    "graph/src/go_mounts.rs: `fixpoint`, `rekey`, `collect_provisionals`, `rename_nodes`, `Final`",
+    "graph/src/build.rs: `build_ts_like` (the `bind_ts_mounts` call; the new call sits beside it)",
+    "graph/src/nav.rs: `resolve_nav_links`, `NavIndex::lookup` (unchanged; read for the acceptance), `split_link`",
+    "graph/src/build/partial.rs: the `Refused::Unsupported(\"page navigation\")` refusal (a nav-table file already refuses body-only; pinned by a new test)",
+    "engine/src/extract.rs: the LA.6b `nav_routes::extract_route_tables(source, module_id, repo)` call",
+    "engine/src/coverage.rs: the typescript NAVIGATES_TO caveat row (`lazily loaded child tables in another file match only by path suffix (Weak)`)"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/nav_routes.rs",
+    "parsers/code/extractors/src/angular.rs",
+    "parsers/code/extractors/src/react.rs",
+    "parsers/code/extractors/src/vue.rs",
+    "code-domain/src/lib.rs",
+    "graph/src/build/route_mounts.rs",
+    "graph/src/build.rs",
+    "graph/src/build/partial.rs",
+    "engine/src/extract.rs",
+    "engine/src/coverage.rs",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/key.json",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/package.json",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/app.routes.ts",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/pages.ts",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/routes.ts",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/items-page.component.ts",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/item-page.component.ts",
+    "bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/shared/item-must-exist.guard.ts"
+   ],
+   "implementation": "1. EXTRACTOR, the mount. In `scan_route_records`, a record whose `loadChildren` value is `() => import('<spec>').then(m => m.<X>)` (any arrow / function spelling `lazy_import_handler` already reads; new sibling `lazy_import_target(v) -> Option<(String, String)>` returns spec and export) or the legacy string `'<spec>#<X>'` records one mount: `(own composed path, spec, X, line)`. `extract_route_tables` records each as `NavFact::IncludeMount { line, target: IncludeTarget::Spec(spec), prefix: <own path, leading '/' stripped>, via: \"nav_lazy:<X>\" }` on the file MODULE (no new NavFact variant, no new id; `via` keeps nav mounts apart from GD.42's `express:` / `hono:` / .. rows, which `TsFacts::read` must skip: it reads only its own families). A dynamic spec (template with `${`, a variable) records `IncludeTarget::Dynamic(text)` and is counted.\n2. EXTRACTOR, provisional qnames. `extract_route_tables` takes the file's MODULE qname (new parameter; engine/src/extract.rs passes `fp.nav.qname_by_id[&module_id]`, as the react call below it does). Every OBJECT-table record (not the JSX `<Route>` trees, which stay final) is minted `page:<mount:module:<module qname>#nav>/<path>` through new `endpoint::nav_mount_route_qname(module, path)`; `nav_route_path` / `is_nav_route` callers see it only before the pass. A redirect whose raw target was RELATIVE (composed by `absolute_link(base, t)`) is written as the same provisional form `<mount:module:<module>#nav>/<composed>`; an absolute target (`/login`) stays as written. One slot per file (`#nav`): every table of a file mounts together (risk below).\n3. GRAPH, `route_mounts::bind_nav_mounts(g, refs, imports, resolve_source) -> NavMountStats`, called in `build_ts_like` right after `bind_ts_mounts` (before the stitch, so HANDLED_BY refs from the routes and NAVIGATES_TO refs see final ids): (a) collect the provisional nav ROUTEs (new `parse_nav_mount_route_qname`; the `page:` analogue of `collect_provisionals`, same edges / refs capture); (b) read every `via` `nav_lazy:*` IncludeMount; resolve its spec with `TsResolver::spec_module` (the builder's `resolve_source`, then `<q>::index`); if that MODULE holds no provisional nav ROUTE, follow the includer-independent IMPORTS of the target (its import statements through `resolve_source`) one hop to the unique imported module that holds one (the NgModule form: `x.module.ts` imports `x-routing.module.ts`), else count `no_table`; (c) flows: each resolved mount flows the includer slot's prefixes joined with its own `prefix` into the target slot `(module, nav)`; a slot no resolved mount reaches is a ROOT holding `\"\"` (GD.40's rule), so a repo without `loadChildren` keeps every nav qname; run `go_mounts::fixpoint` (its caps, `capped`); (d) re-key: each provisional to `page:/<prefix>/<path>` (normalised, `nav_route_qname`) once per prefix, the first by rename, each further one a clone (`go_mounts::rekey`'s path with a `Final` built from the nav qname; two provisionals reaching one final qname are absorbed into one node exactly as two same-path pages merge today); (e) rewrite every NAVIGATES_TO ref whose link holds the provisional head (and its clones' copies) to `/<prefix><rest>` of the slot it names. Print `NavMountStats::marker` once per graph holding a provisional nav ROUTE.\n4. A provisional head can never reach `resolve_nav_links`: debug-assert it in `resolve_nav_links` and, in release, treat a left-over head as the root prefix (no edge to a phantom).\n5. coverage.rs: replace the caveat clause \"lazily loaded child tables in another file match only by path suffix (Weak)\" with \"Angular `loadChildren` tables compose their parent's path (an import that resolves to no module, a `loadChildren` naming a variable, React Router `lazy` / `children` from another file and Vue route spreads do not: those tables keep their own path and match only by path suffix (Weak))\". The reflexion golden embeds no typescript row (checked: `grep 'lazily loaded' engine/tests/data` is empty), so no regeneration.\n6. Tests: nav_routes.rs unit tests (loadChildren import / string / dynamic forms, the provisional qname and relative redirect link); route_mounts.rs `nav_lazy_tables_compose` (the fixture's three files plus a two-level chain and an unresolved spec), `nav_root_tables_keep_their_paths` (nav-angular-routes' source: qnames byte-equal to BASE); partial.rs: a body-only edit of a lazy routes file is refused (`page navigation`).",
+   "fixtures": "NEW bench/substrate-gap/fixtures/nav-angular-lazy-children/ (cells: none; framework nav-angular-lazy-children, language typescript, dirs [\".\"]), written from scratch in squidex's public shape: app.routes.ts (APP_ROUTES: '' HomeComponent, 'app' ShellComponent with child { path: 'items', loadChildren: () => import('./features/items/routes').then(m => m.ITEM_ROUTES) }, '**' NotFoundComponent); features/items/routes.ts (ITEM_ROUTES: '' ItemsPageComponent, ':itemId' ItemPageComponent); items-page.component.ts (`this.router.navigate(['/app/items', id])`); shared/item-must-exist.guard.ts (`router.navigate(['/404'])`). Key: expect_nodes ROUTE `page:/app/items/:itemId` (exact); expect_edges `/app/items/:itemId` -HANDLED_BY-> ItemPageComponent, ItemsPageComponent -NAVIGATES_TO-> `/app/items/:itemId` (dead at BASE); forbid ROUTE `page:/:itemId`, forbid edge `src::app::shared::item-must-exist.guard` -NAVIGATES_TO-> `page:/:itemId`, the `''` merge: expect `page:/` -HANDLED_BY-> HomeComponent and forbid `page:/` -HANDLED_BY-> ItemsPageComponent (at BASE ITEM_ROUTES' `''` merges into the root page). At BASE (probed on the same files): `page:/:itemId` exists, the guard binds it (rule param), the true link is dead -> FAIL; after: 1.00. True cases pinned elsewhere and re-graded unchanged: nav-angular-routes (in-file children, loadComponent, redirects, `**`), nav-angular-links, nav-react-routes, nav-react-links, nav-vue-links, nav-next-pages.",
+   "acceptance": "cargo test -p glia-extractors nav_routes; cargo test -p glia-graph route_mounts (nav_lazy_tables_compose, nav_root_tables_keep_their_paths) and partial; grade.py on nav-angular-lazy-children 1.00 and the six nav-* fixtures unchanged on the wave-end wheel. On a `git archive` copy of squidex@f828dd717edc (frontend/package.json, frontend/src/app/app.routes.ts, features/*/routes.ts, shared/guards/*must-exist*, features/administration/guards/*): `glia query . -e 'out(A,B,E) :- edge_cell(A,B,\"NAVIGATES_TO\",\"EVIDENCE\",E).'` lists no edge to `page:/:schemaName` / `page:/:ruleId` (both nodes gone: `page:/app/:appName/schemas/:schemaName`, `page:/app/:appName/rules/:ruleId` instead), `[nav] links=16 resolved=2 (exact=2 param=0 ..) dead=14 catchall=14` (BASE: `resolved=16 (exact=2 param=14 ..) dead=0 catchall=0`), the redirects read `page:/app/administration -> page:/app/administration/users` and `page:/app/:appName/settings/backups -> page:/app/:appName/settings/jobs`; stderr `[nav-mounts] lazy=10 .. unresolved=0 ..`. Cohort gate: squidex's nav rows move (declared); no other cohort repo prints `[nav-mounts]` with mounted>0 unless it uses loadChildren.",
+   "fired_on_marker": "[nav-mounts] lazy=<l> (import=<i> string=<s> ngmodule_hop=<h> dynamic=<d>) unresolved=<u> no_table=<t> tables=<n> routes=<r> mounted=<m> copies=<c> roots=<o> capped=<x> links_rewritten=<w>  (once per TS-family graph holding a provisional nav ROUTE)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "answer_content"
+    ],
+    "what_changes": "Nav ROUTE qnames of Angular lazy child tables gain their parent prefix (squidex: `page:/:schemaName` -> `page:/app/:appName/schemas/:schemaName`; a lazy table's `''` page no longer merges into `page:/`), so their NodeIds, HANDLED_BY / NAVIGATES_TO endpoints and `glia pages` rows move; literal links that param-bound a prefix-less page become dead links the catch-all absorbs; true deep links into lazy tables bind (param tier). A repo without `loadChildren` keeps every nav qname (roots hold \"\"). Parse cache content moves (provisional nav qnames, IncludeMount facts): PARSER_STAMP changes by itself. No new id, no FORMAT_VERSION change."
+   },
+   "depends_on": [],
+   "risks": "(1) One slot per file: a file holding two route tables mounted at different prefixes mounts both tables at both prefixes (clones). Rare in Angular (one `Routes` export per routes file); the marker's `copies=` shows it. (2) The NgModule hop takes the UNIQUE imported module holding a table; two candidates count `no_table` and keep their own paths (today's behaviour). (3) Nav-route qnames now pass through the mount pass in every TS-family build; a pass bug would rename every nav route, so `nav_root_tables_keep_their_paths` pins byte-equal qnames for the existing nav fixtures and the byte_identical / parallel_build tests run. (4) A lazy table imported by a path alias (`@app/features/x/routes`) resolves only when the builder's `resolve_source` resolves that alias (tsconfig paths, FH.16): unresolved counts `unresolved` and keeps today's paths. (5) The `/404` links become dead links: `glia pages` lists 14 more on squidex (each absorbed by `**`, which the dead-link row already reports) - see question 1."
+  },
+  {
+   "id": "HQ.6",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QB.2",
+   "class": "precision",
+   "batch": "HQ",
+   "title": "A route record whose `path` is computed (a call such as chatwoot's `frontendURL('accounts/:accountId/settings/custom-roles')`, a constant, a `${..}` template) is an opaque parent: it and its relative children are minted under an opaque head segment `~<name>` (plus the call's one string-literal argument as known tail), and its child redirects keep that prefix, instead of composing as if the parent were the root (`page:/ -> page:/list`)",
+   "area": "parsers/code/extractors/src/nav_routes.rs (scan_route_records: opaque parents), graph/src/nav.rs (Shape::Opaque matching), engine/src/extract.rs + engine/src/route.rs (marker fields), engine/src/coverage.rs (caveat)",
+   "loc": 260,
+   "rationale": "HC.3 (dev-notes/confidence-gate-0.5.7.md, cluster 8): NAVIGATES_TO|fact held out 9/10, no fit row. The wrong row: f65c793cc0899f27, chatwoot@3564ec1e961f, emitter graph:nav rule `exact`, app/javascript/dashboard/routes/dashboard/settings/customRoles/customRole.routes.js:14, `page:/ -> page:/list`, reason \"the '' -> 'list' redirect is a child of settings/custom-roles; page:/ and page:/list name the app root and a top-level /list, neither is that route\". Cause, read at BASE: the parent record is `{ path: frontendURL('accounts/:accountId/settings/custom-roles'), component: SettingsWrapper, children: [{ path: '', redirect: 'list' }, { path: 'list', component: CustomRolesHome }] }`. `scan_route_records` drops a record whose `path` is not a literal (\"A computed path (`path: base + '/x'`) is not a table entry\" -> `continue`), and a literal holding `${` the same way, so it is no `Found`, and its children find no enclosing parent and compose from the root: `''` -> `/`, `list` -> `/list`, the redirect `list` -> `/list` (`absolute_link(base=\"\", ..)`). Chatwoot routes every settings / dashboard table through `frontendURL(..)`: at BASE its whole frontend (app/javascript) yields 69 nav ROUTEs, 68 of them prefix-less phantoms (`page:/list`, `page:/new`, `page:/:teamId/edit`, ..), which merge across files (every `''` child is `page:/`) and wait for a literal link to bind them. The HC.3 text asks that a child redirect keep its parent prefix and a relative redirect resolve against the parent: the parent's prefix is unknown text here, so it is carried as an opaque head, not guessed. Dropping the subtree instead would lose the true route -HANDLED_BY-> component edges (CustomRolesHome is a page) that liveness reads; an opaque head keeps them.",
+   "entry_points": [
+    "parsers/code/extractors/src/nav_routes.rs: `scan_route_records` (the `o.key(\"path\")` match: `None => continue` and the `p.contains(\"${\")` reject), `Found`, `compose`, `absolute_link`, `is_route_path`, `looks_like_url_path`, `literal`, `ident_path`, `Scan`, `NavRouteOut`",
+    "graph/src/nav.rs: `classify`, `Shape`, `NavIndex::build`, `NavIndex::lookup`, `segs_match`, `nav_route_path`",
+    "engine/src/extract.rs: `ExtractStats.nav_rejected` and siblings (new `nav_opaque_parents`, `nav_opaque_children`); engine/src/route.rs: the `[extract] nav-routes marked:` line",
+    "engine/src/coverage.rs: the typescript NAVIGATES_TO caveat row"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/nav_routes.rs",
+    "graph/src/nav.rs",
+    "engine/src/extract.rs",
+    "engine/src/route.rs",
+    "engine/src/coverage.rs",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/key.json",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/package.json",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/helper.js",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/routes/index.js",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/routes/Home.vue",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/routes/roles/roles.routes.js",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/routes/roles/RolesWrapper.vue",
+    "bench/substrate-gap/fixtures/nav-vue-computed-parent/src/routes/roles/RolesList.vue"
+   ],
+   "implementation": "1. `scan_route_records`: a record with a router key whose `path` value is not a plain literal - a call, an identifier / member path, a template literal holding `${..}` - becomes a `Found` with new field `opaque: Some(Opaque { head, tail })` instead of being skipped: `head` = the callee's identifier path for a call (`frontendURL`, `paths.app`), the identifier path itself (`ROUTES.SETTINGS`), or `tpl` for a template; `tail` = for a call whose ONLY argument is a plain literal (or a template without `${`), that literal; for a template, the literal text after its last `}`; else empty. Anything else (`base + '/x'`) stays skipped as today. A record without a router key is still `rejected`.\n2. Composition: an opaque record's own path is `/~<head>` joined with `tail` (normalised); `is_route_path` is applied to the path with the `~<head>` segment removed (the head is identifier bytes and `.` only, sanitised and clipped to 64 bytes). Its children compose onto that path as onto any parent, so `''` is the parent's page, `list` is `/~frontendURL/accounts/:accountId/settings/custom-roles/list`, and a relative redirect resolves against it through the unchanged `absolute_link(base, t)`. An absolute child (`/x`) still stands alone. Counts: `opaque_parents` (records), `opaque_children` (records composed under one, at any depth).\n3. nav.rs `classify`: a raw path whose first segment starts with `~` is `Shape::Opaque { head, tail: Vec<Seg> }` (tail normalised as today). It is never in `exact` / `by_len` / the scoped scan. `lookup`: (a) a link whose first segment starts with `~` (a redirect from an opaque table) matches only an Opaque route with the same head and `segs_match(tail, link_tail)` - tier `exact` when the tail holds no `{}`, else `param`; (b) any other link matches an Opaque route only in the suffix tier: tail non-empty with a literal segment, `tail.len() < link.len()` (the head stands for at least one segment) and `segs_match(tail, &link[link.len()-tail.len()..])`, Weak, rule `suffix` - so `/app/accounts/${id}/settings/custom-roles/list` binds and `/list` never does. An unmatched link with a `~` head (an internal redirect whose prefix is unknown) is never reported dead: it is counted in a new NavStats field `opaque_unmatched`, appended last to the `[nav]` line only when non-zero.\n4. engine/src/extract.rs / route.rs: thread the two counts and append ` opaque_parents=<o> opaque_children=<c>` inside the `[extract] nav-routes marked:` parenthesis (after `catchall=`).\n5. coverage.rs NAVIGATES_TO caveat: add \"a route under a parent whose path is computed (a call such as `frontendURL('..')`, a constant, a template) keeps an opaque head `~<name>` and matches links only by its known tail (suffix, Weak)\".\n6. Unit tests in nav_routes.rs (call with one literal, identifier, template, `base + '/x'` still skipped, nested opaque, absolute child) and nav.rs (opaque redirect exact, suffix-only binding, a one-segment literal link never binds).",
+   "fixtures": "NEW bench/substrate-gap/fixtures/nav-vue-computed-parent/ (framework nav-vue-computed-parent, language typescript, dirs [\".\"]), from scratch in chatwoot's public shape: src/helper.js `export const appURL = (path) => `/app/${path}``; src/routes/roles/roles.routes.js `{ path: appURL('teams/:teamId/roles'), component: RolesWrapper, children: [{ path: '', redirect: 'list' }, { path: 'list', component: RolesList }] }`; src/routes/index.js (createRouter) with `{ path: '/', component: Home }`, a LITERAL parent `{ path: '/settings', component: Home, children: [{ path: '', redirect: 'general' }, { path: 'general', component: Home }] }` and `...roles.routes`. Key: forbid ROUTE `page:/list`; forbid edge `page:/` -NAVIGATES_TO-> `page:/list`; expect_edges `teams/:teamId/roles` -HANDLED_BY-> RolesWrapper (the opaque parent is a page of its own; at BASE it is no node); expect_nodes ROUTE `teams/:teamId/roles/list` (lenient); expect_edges `teams/:teamId/roles/list` -HANDLED_BY-> RolesList, `teams/:teamId/roles` -NAVIGATES_TO-> `teams/:teamId/roles/list`; positive control that holds at BASE: `/settings` -NAVIGATES_TO-> `/settings/general` (exact). BASE probe of the same files: `page:/ -> page:/list` (rule exact) and `page:/list` -HANDLED_BY-> RolesList -> FAIL; after 1.00. True cases pinned: nav-vue-links, nav-react-routes, nav-angular-routes (literal parents, redirects) unchanged.",
+   "acceptance": "cargo test -p glia-extractors nav_routes; cargo test -p glia-graph nav; grade.py nav-vue-computed-parent 1.00 and the nav-* fixtures unchanged on the wave-end wheel. On a `git archive` copy of chatwoot@3564ec1e961f (app/javascript + package.json): `glia query . -e 'out(A,B,E) :- node(A,\"ROUTE\"), edge_cell(A,B,\"NAVIGATES_TO\",\"EVIDENCE\",E).'` has no `page:/ -> page:/list` row and lists `page:/~frontendURL/accounts/:accountId/settings/custom-roles -> page:/~frontendURL/accounts/:accountId/settings/custom-roles/list`; `glia query . -e 'out(A) :- node(A,\"ROUTE\").'` lists no `page:/list` / `page:/new` (BASE: 69 nav ROUTEs, 68 prefix-less); stderr `[extract] nav-routes marked: .. opaque_parents=<o> opaque_children=<c>)` with o > 0. The chatwoot cohort tasks that read routes are re-graded (declared moves only).",
+   "fired_on_marker": "[extract] nav-routes marked: <n> (page-qnamed <p>) (bound=<b> redirects=<r> children=<c> rejected=<x> catchall=<a> opaque_parents=<o> opaque_children=<k>)  (two new fields; and `[nav] .. opaque_unmatched=<u>` appended only when it fires)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "answer_content",
+     "cli_output"
+    ],
+    "what_changes": "Nav ROUTEs under a computed parent path move from prefix-less qnames (`page:/list`) to opaque-head ones (`page:/~frontendURL/accounts/:accountId/settings/custom-roles/list`); they stop merging across files; their redirects keep the prefix; literal links bind them only by suffix. `[extract] nav-routes marked:` gains two fields. Parse cache content moves (PARSER_STAMP changes by itself). No new id."
+   },
+   "depends_on": [
+    "HQ.5"
+   ],
+   "risks": "(1) Folding a helper call's single literal argument assumes the helper PREFIXES it (chatwoot's frontendURL, most `url(..)` helpers); a helper that rewrites the argument gives a wrong known tail. The match is suffix-only and Weak, and question 2 offers head-only. (2) An opaque head never matches a plain link exactly, so a repo whose computed prefix is the empty string (`path: BASE` with BASE = '') loses exact matches it had by accident; its links still bind by suffix when the tail has a literal. (3) `~` in a qname is new text in `glia pages` / nav_route_path consumers (repo-graph renders the qname as is)."
+  },
+  {
+   "id": "HQ.7",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QB.3",
+   "class": "precision",
+   "batch": "HQ",
+   "title": "The A2.9 generic Redis pub/sub rows (`.subscribe(` / `.psubscribe(` / `.publish(` and the `->` spellings) read their `redis` gate only where the word ends (the next source byte is no ASCII lowercase letter), so `fireDisconnected` in a STOMP-over-SockJS test no longer turns `client.subscribe(CHANNEL, cb)` into a redis QUEUE_CONSUMER",
+   "area": "parsers/code/extractors/src/queues.rs (the generic-verb gate)",
+   "loc": 90,
+   "rationale": "HC.3 (dev-notes/confidence-gate-0.5.7.md, cluster 2): CONTAINS|fact held out 12/13. The wrong row: 3a8445c103547127, tolgee@43e6654422b1, emitter extractor:queues, webapp/src/websocket-client/WebsocketClient.test.ts:34, `webapp::src::websocket-client::WebsocketClient.test -> queue_consumer:unresolved:redispubsub @webapp` (QUEUE_CONSUMER), reason \"WebsocketClient is a STOMP-over-SockJS client (client.subscribe on a stomp channel); the test holds no redis pubsub consumer\". Cause, read at BASE: the file never names redis; the A2.9 row (`\".subscribe(\", QueueFramework::RedisPubSub, &[\"redis\"], TopicRule::ArgLiteral`) is gated by `signals_present(&lower, signals)`, a plain substring test over the lowercased file, and `fireDisconnected` lowercases to `firedisconnected`, which contains `redis`. `CHANNEL` is no leading literal, so the hit mints the `unresolved:redispubsub` tag. The control proves it: renaming `fireDisconnected` in the from-scratch sample removes every false consumer. HC.3 suggested gating on a redis client import / receiver; an import-only gate would lose a subscriber whose client is injected (`this.redis.subscribe('ch')`, a receiver named redis), which today's gate reads, so the fix keeps \"the word anywhere\" and only requires it to be a word. Scanned at each repo's HEAD in the cohort clones (tolgee, hoppscotch, chatwoot, twenty, medusa, immich): of the 13 files holding a `.subscribe(` / `.psubscribe(` / `->subscribe(` verb and the letters `redis`, exactly one passes the gate only inside a longer word, tolgee's WebsocketClient.test.ts; in bench/substrate-gap (fixtures, matrix, patterns) none of the 9 such files does.",
+   "entry_points": [
+    "parsers/code/extractors/src/queues.rs: the main row loop's gate (`signals_present(&lower, signals)` before `queue_topic::scan_guarded`), `signals_present`, `is_generic_verb_row`, `GENERIC_VERB_NEEDLES`, the A2.9 CONSUMER_PATTERNS / PRODUCER_PATTERNS RedisPubSub rows and DH.2's `->subscribe(` / `->publish(` redis rows, `broker_signal_present` (read: kept as is)"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/queues.rs",
+    "bench/substrate-gap/fixtures/queue-stomp-not-redis/key.json",
+    "bench/substrate-gap/fixtures/queue-stomp-not-redis/package.json",
+    "bench/substrate-gap/fixtures/queue-stomp-not-redis/src/live.ts",
+    "bench/substrate-gap/fixtures/queue-stomp-not-redis/src/live.test.ts",
+    "bench/substrate-gap/fixtures/queue-stomp-not-redis/src/orders.ts"
+   ],
+   "implementation": "1. New `fn signal_word_present(source: &str, lower: &str, signal: &str) -> bool`: some occurrence of `signal` in `lower` whose following byte in `source` (same offset, ASCII lowercasing keeps byte offsets) is absent or not an ASCII lowercase letter. `ioredis'`, `'redis'`, `go-redis`, `redis-py`, `StackExchange.Redis;`, `RedisClient` (next byte `C`), `this.redis.` and `Predis\\` pass; `firedisconnected` (next `c`) does not.\n2. In the row loop, for a row where `is_generic_verb_row(pattern, framework)` holds AND the framework is `QueueFramework::RedisPubSub`, the gate is `signals.iter().any(|s| signal_word_present(source, &lower, s))` instead of `signals_present`. The MQTT generic rows keep the substring gate (rust `rumqttc` spells `mqtt` inside a longer word: matrix/rust/mqtt's `use rumqttc::..` would fail a word gate), and every library row keeps it (package gates such as `package:redis/` end in punctuation and are read as today).\n3. `broker_signal_present` (eventbus.rs's suppression of its own `.subscribe(` twin) is NOT changed: a file whose only `redis` is inside a word still counts as a broker file there, so eventbus mints nothing new (probe: the renamed control file mints no EVENT node either way).\n4. When a RedisPubSub generic row's substring gate passed but the word gate refused it, print once per file `[queues] gate word refused framework=RedisPubSub side=<consumer|producer> signal=redis path=<p>`.\n5. Unit tests: `redis_gate_needs_a_word` (the STOMP shape with `fireDisconnected` mints nothing on either side; `ioredis`, `require('redis')`, `this.redis.subscribe('ch')`, `RedisClient` and phpredis `new Redis()` still mint `queue_consumer:<ch>`), and the existing A2.9 / DH.2 tests unchanged.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/queue-stomp-not-redis/ (framework queue-stomp-not-redis, language typescript, dirs [\".\"]; cells none), from scratch: src/live.ts (`import { Client } from '@stomp/stompjs'`, `client.subscribe(`/projects/${id}/changes`, cb)`, `client.subscribe('/user/notifications', cb)`, a local `fireDisconnected`), src/live.test.ts (vitest, `const fireDisconnected = vi.fn()`, `client.subscribe(CHANNEL, () => {})`), src/orders.ts (`import Redis from 'ioredis'; const sub = new Redis(); sub.subscribe('orders', ..)`). Key: forbid QUEUE_CONSUMER `queue_consumer:/user/notifications`, `queue_consumer:/projects/${id}/changes`, `queue_consumer:unresolved:redispubsub` (and the CONTAINS edges from `src::live` / `src::live.test` to them); expect_nodes QUEUE_CONSUMER `queue_consumer:orders` (holds at BASE: the positive row). BASE probe: the three forbidden consumers exist -> FAIL; after 1.00. True cases pinned: xcut-queue-redis-pubsub, matrix/<lang>/redis (11 cells) and matrix/<lang>/mqtt unchanged.",
+   "acceptance": "cargo test -p glia-extractors queues; grade.py queue-stomp-not-redis 1.00, xcut-queue-redis-pubsub unchanged, `matrix.py` redis / mqtt columns unchanged on the wave-end wheel. On a `git archive` copy of tolgee@43e6654422b1 (webapp/src/websocket-client, webapp/package.json): `glia query . -e 'out(A,B,E) :- edge_cell(A,B,C,\"EVIDENCE\",E), node(B,\"QUEUE_CONSUMER\").'` has no row (BASE: 1, `WebsocketClient.test -> queue_consumer:unresolved:redispubsub`), stderr `[queues] gate word refused framework=RedisPubSub side=consumer signal=redis path=webapp/src/websocket-client/WebsocketClient.test.ts` and no `[queues] tag framework=RedisPubSub ..` line.",
+   "fired_on_marker": "[queues] gate word refused framework=RedisPubSub side=<consumer|producer> signal=redis path=<p>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content"
+    ],
+    "what_changes": "Files that name `redis` only inside a longer identifier stop minting Redis pub/sub QUEUE_CONSUMER / QUEUE_PRODUCER nodes (and their CONTAINS / QUEUE_FLOWS edges) from generic `.subscribe(` / `.publish(` calls. Cohort: tolgee loses one consumer node. PARSER_STAMP moves by itself."
+   },
+   "depends_on": [],
+   "risks": "A file whose only Redis signal is a compound lowercase word (`redisclient` in an all-lowercase import path, `redisearch`) stops passing the generic-verb gate; Redisson (`org.redisson`) never reads through these verbs (its pub/sub is RTopic.addListener). The cohort / fixture scans above found no such true case. MQTT stays substring-gated, so the same collision (`mqtt` inside a word) remains possible there; none was observed."
+  },
+  {
+   "id": "HQ.8",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QB.4",
+   "class": "precision",
+   "batch": "HQ",
+   "title": "In a test file, a store client the file mocks is no data access: `extractor:data_sources` drops a provider any of whose occurrences sits in a mock construct (`mockDeep<PrismaService>()`, `instance_double(..)`, `mockk<..>`, `@MockBean`, `MagicMock(spec=..)`, `Substitute.For<..>`, ..), and in test files reads a capitalised needle neither in a camel middle (`ProcessStaleRedisKeysJob`, `mockPrisma`) nor inside quoted text off an import line (a Kotlin backtick test name, an `it('..')` title)",
+   "area": "parsers/code/extractors/src/data_sources.rs, engine/src/extract.rs (passes the test-file bit)",
+   "loc": 230,
+   "rationale": "HC.3 (dev-notes/confidence-gate-0.5.7.md, cluster 1): ACCESSES_DATA|fact held out 7/10 = 0.700 [0.397, 0.892], floor 0.95, the largest gap in K (0.300). The three wrong rows are all `extractor:data_sources` on a test module: 02ca1dcdf5ce8cc9 hoppscotch@63273f8e599e packages/hoppscotch-backend/src/mock-server/mock-server.service.spec.ts -> data_source:prisma (\"the spec only imports the PrismaService type and drives mockDeep<PrismaService>(); it never reaches a prisma database\"); 0029181fe878eb1d chatwoot@3564ec1e961f spec/jobs/internal/remove_stale_redis_keys_job_spec.rb -> data_source:redis (\"the spec only expects ProcessStaleRedisKeysJob.perform_later; nothing in it reads or writes redis\"); 00be3f5736ad00e1 tolgee@43e6654422b1 backend/app/src/test/kotlin/io/tolgee/cache/EnumNameKryo5CodecTest.kt -> data_source:redis (\"the test only round-trips values through a Redisson Kryo5Codec in memory; it opens no redis connection\"). Cause, read at BASE: `extract_data_source_nodes` is a substring scan over PATTERNS; FD.73's `word_tail_ok` refuses only a needle running on into a lowercase word, so `Prisma` in `PrismaService` / `mockDeep<PrismaService>` (camel tail), `Redis` in `RemoveStaleRedisKeysJob` / `ProcessStaleRedisKeysJob` (camel middle) and `Redisson` in the Kotlin backtick test name `` `keeps writing names when Redisson rebinds the codec to a classloader` `` (prose, not code: CJ.1c's guard lexes only .rs / .py) all count. The one correct test row on the panel must stay: 004403066c9a7db8 mealie tests/unit_tests/repository_tests/test_food_repository.py -> data_source:sqlalchemy (`import sqlalchemy as sa`, `sa.select(..)` run through the test session), so an import line still counts and nothing changes outside test files (the fit panel's two data_sources rows, microservices-demo RedisCartStore.cs / Startup.cs, are app code).",
+   "entry_points": [
+    "parsers/code/extractors/src/data_sources.rs: `extract_data_source_nodes` (the PATTERNS loop, `seen`, the `[data-sources] refused ..` marker), `word_tail_ok`, `in_jvm_descriptor`, `is_ident_byte`, `PATTERNS`",
+    "engine/src/extract.rs: the `data_sources::extract_data_source_nodes(source, path, module_id, repo)` call in `run_with_edges!(\"data_sources\", ..)`",
+    "engine/src/passes.rs: `is_test_file` (CG.2a's path rule; read, reused: pub(crate))"
+   ],
+   "files_touched": [
+    "parsers/code/extractors/src/data_sources.rs",
+    "engine/src/extract.rs",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/key.json",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/package.json",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/src/orders/orders.service.spec.ts",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/spec/jobs/purge_stale_redis_keys_job_spec.rb",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/spec/jobs/cache_warm_spec.rb",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/src/test/kotlin/shop/NameCodecTest.kt",
+    "bench/substrate-gap/fixtures/data-source-test-doubles/tests/test_repo.py"
+   ],
+   "implementation": "1. `extract_data_source_nodes` gains `test_file: bool`; engine/src/extract.rs passes `crate::passes::is_test_file(path)` (CG.2a: `_spec.rb`, `.spec.ts`, `/test/` dirs, `test_*.py`, ..). The extractors crate's own tests pass `false` except the new ones. Nothing changes when `test_file` is false.\n2. Mock constructs (test files only). A const table `MOCK_OPENERS` of opener texts, each with its argument span: up to the matching `>` for a generic opener, the matching `)` for a call, the rest of the declaration (to `;` / end of line, then the next line for an annotation alone on its line) for an annotation; spans clipped at 256 bytes. Rows: TS / JS `mockDeep<`, `mock<`, `createMock<`, `DeepMockProxy<`, `Mocked<`, `jest.mock(`, `vi.mock(`, `jest.mocked(`, `vi.mocked(`; Python `MagicMock(`, `AsyncMock(`, `create_autospec(`, `patch(`, `patch.object(`, `mocker.patch(`; Ruby `instance_double(`, `class_double(`, `object_double(`, `double(`, `spy(`; JVM `mock(`, `Mockito.mock(`, `mockk<`, `mockk(`, `spyk(`, `@Mock`, `@MockBean`, `@MockK`, `@SpyBean`; C# `new Mock<`, `Substitute.For<`, `A.Fake<`. An opener counts at an identifier boundary only (`double(` not `toDouble(`). A provider is MOCKED in the file when any of its PATTERNS occurs inside a mock span (word-tail and descriptor rules as today); a mocked provider is skipped (`test_mocked`), whatever its other occurrences (the import of the mocked type included).\n3. In a test file, an occurrence of a CAPITALISED word needle (the FD.73 `word_tail_ok` class: first byte uppercase, last a letter) preceded by an ASCII alphanumeric byte is a camel middle and does not count (`test_camel`): `RemoveStaleRedisKeysJob`, `mockPrisma`. A lowercase / dotted / path needle is unaffected.\n4. In a test file, an occurrence inside quoted text (`'`, `\"`, `` ` ``: an odd count of that unescaped quote before it on its line, a Kotlin backtick name included) on a line that is no import line (`import `, `from `, `require`, `require_relative`, `use `, `using `, `@import`, `#include`) does not count (`test_quoted`). Import strings keep counting, as FD.5a intends (`require 'redis'`, `import 'package:redis/redis.dart'`).\n5. Marker: the existing `[data-sources] refused jvm_descriptor=<j> word_tail=<w> path=<p>` line gains ` test_mocked=<m> test_camel=<c> test_quoted=<q>` before `path=`, printed when any of the five is > 0.\n6. Unit tests: the hoppscotch shape (mockDeep + import) -> no prisma edge; the RSpec perform_later shape -> no redis edge; the Kotlin backtick Redisson name -> no redis edge; a test file using `Redis.new.set(..)` -> redis kept; `import sqlalchemy as sa` in tests/test_x.py -> kept; the same three wrong shapes with `test_file = false` -> unchanged from BASE (edges kept).",
+   "fixtures": "NEW bench/substrate-gap/fixtures/data-source-test-doubles/ (framework data-source-test-doubles, language typescript, dirs [\".\"]; cells none), from scratch: src/orders/orders.service.spec.ts (`import { mockDeep } from 'jest-mock-extended'; import { PrismaService } from '../prisma/prisma.service'; const mockPrisma = mockDeep<PrismaService>(); .. mockPrisma.order.findMany.mockResolvedValue([])`), spec/jobs/purge_stale_redis_keys_job_spec.rb (`RSpec.describe PurgeStaleRedisKeysJob`, `expect(FlushRedisKeysJob).to receive(:perform_later)`), spec/jobs/cache_warm_spec.rb (`redis = Redis.new; redis.set('warm', '1')`), src/test/kotlin/shop/NameCodecTest.kt (`import org.redisson.codec.Kryo5Codec`, a backtick test name naming Redisson, `Kryo5Codec().encode(\"x\")`), tests/test_repo.py (`import sqlalchemy as sa`, `session.execute(sa.select(sa.func.count()))`). Key: forbid edges `src::orders::orders.service.spec` -ACCESSES_DATA-> `data_source:prisma`, `spec::jobs::purge_stale_redis_keys_job_spec` -ACCESSES_DATA-> `data_source:redis`, `src::test::kotlin::shop::NameCodecTest` -ACCESSES_DATA-> `data_source:redis`; expect_edges `cache_warm_spec` -ACCESSES_DATA-> `redis` and `test_repo` -ACCESSES_DATA-> `sqlalchemy` (both hold at BASE). BASE probe: all five edges exist -> FAIL on the three forbids; after 1.00. True cases pinned and re-graded unchanged: data-source-jni-descriptor-words (FD.73), xdata-source-shares, py-accesses-data, go-accesses-data, ts-typeorm, java-spring-accessdata, ruby-rails-accesses_data, prisma-schema.",
+   "acceptance": "cargo test -p glia-extractors data_sources; cargo test -p glia-engine --test engine_tests self_scan:: (the self-scan reads data_sources too); grade.py data-source-test-doubles 1.00 and the eight fixtures above unchanged on the wave-end wheel. On `git archive` copies at the cohort pins: hoppscotch@63273f8e599e mock-server.service.spec.ts, chatwoot@3564ec1e961f remove_stale_redis_keys_job_spec.rb and tolgee@43e6654422b1 EnumNameKryo5CodecTest.kt each give `glia query . -e 'out(A,B) :- edge(A,B,\"ACCESSES_DATA\").'` no `data_source:*` row (BASE: one each) with `[data-sources] refused .. test_mocked=1 ..` / `test_camel=..` / `test_quoted=..` on stderr; mealie@0b2801bfb42b tests/unit_tests/repository_tests/test_food_repository.py keeps `-> data_source:sqlalchemy`. The edge-audit's held-out ids 02ca1dcdf5ce8cc9, 0029181fe878eb1d, 00be3f5736ad00e1 no longer exist in a rebuilt sample (HP.5 / the next audit).",
+   "fired_on_marker": "[data-sources] refused jvm_descriptor=<j> word_tail=<w> test_mocked=<m> test_camel=<c> test_quoted=<q> path=<p>  (three new fields on FD.73's line)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "answer_content"
+    ],
+    "what_changes": "Test modules that mock a store client, or name one only in a camel-middle identifier or a test title, lose their ACCESSES_DATA -> data_source:* edge (and a DATA_SOURCE node no other module reaches). `effects`, blast radius, `gaps` and `splits` blockers read fewer data sinks from test code. App code is unchanged. The `[data-sources] refused` line gains three fields. PARSER_STAMP moves by itself."
+   },
+   "depends_on": [
+    "HQ.6"
+   ],
+   "risks": "(1) A test that mocks one client of a provider and really uses another of the same provider (rare) loses the edge: the mock rule is per provider. (2) The quoted-text rule is a per-line quote count, not a lexer: a quote inside a regex or a multi-line string can flip it (test files only, and only to drop an occurrence). (3) The test-file bit is CG.2a's path rule; `[walk] tests` declared paths are not read here (the extractor runs before the walk config reaches it), so a declared-only test module keeps BASE behaviour. (4) Sibling not in scope: hoppscotch's same spec also carries `-> data_entity:sql:users` from `extractor:data_entities` (not judged by HC.3); see notes."
+  },
+  {
+   "id": "HQ.9",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QC.1",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 250,
+   "area": "Python parser: class attributes (HAS_ATTRIBUTE|fact)",
+   "title": "Python: a `self.X` read declares no class ATTRIBUTE when X is the class's own METHOD / property, or when the class has a base and never assigns X (an inherited member); an assignment to the class's own property is a setter call, not an attribute",
+   "rationale": "HC.3 held-out verdict 00378bb623cebf6d (mealie@0b2801bf, wrong): `mealie::routes::recipe::comments::RecipeCommentsController -HAS_ATTRIBUTE-> ...RecipeCommentsController::repos`, emitter parser:python, reason \"RecipeCommentsController declares no repos; it reads self.repos, a property of BaseUserController\". The cause is v0.4.13's `collect_self_attr_assignments` (parsers/code/python/src/lib.rs), which turns EVERY `self.<attr>` attribute node in a method body into an ATTRIBUTE via `emit_class_attribute`, reads included (on purpose: marshmallow's metaclass-set `Schema.opts`, pinned by `class_attribute_emits_has_attribute_edge`). Reads also mint: (a) the class's own methods (`self.render(..)` mints ATTRIBUTE `render` beside METHOD `render`, same qname), (b) inherited members (`self.repos`, `self.assertEqual`, `self.request`). Measured at BASE on mealie's Python tree: 3513 HAS_ATTRIBUTE edges, of which 388 name a METHOD the class itself DEFINES, 253 a METHOD of an INHERITS_FROM ancestor and 554 an ancestor's ATTRIBUTE. DECISION (asked: should only an assignment declare, and not even one to a base's property?): (1) an assignment `self.X = ..` (also augmented, tuple / list target, `for self.X in`) declares X: Python creates an instance attribute unless X is a data descriptor on the type; (2) a class-level `X = ..` / `X: T` declares X (unchanged); (3) neither declares when X is a METHOD of the class itself (a property's assignment calls its setter; a read of a method is the method, already a node); (4) a read-only X (never assigned in the class, not class-level) declares X only when the class names no base other than `object` / `ABC` / `Protocol` (a subscript base like `Generic[T]` is not recorded as a base today): with a real base the name is presumed inherited (or set by the base's metaclass) and belongs to whoever declares it. That keeps the rule's reason for reads (the base-less metaclass-attached `Schema.opts`) and drops the audit's false edge. NOT decided in the parser: an assignment to a property an ANCESTOR declares in another file (a setter call, no attribute) - the parser cannot see it; it stays an ATTRIBUTE (residual, see questions). Every rule is parser-side because a Python class body is one file (own methods and bases are read where the class is), so no graph-side node removal and no GA.3 / watch fast-path surface change.",
+   "entry_points": [
+    "parsers/code/python/src/lib.rs `collect_self_attr_assignments`: record each `self.<attr>` access as (name, is_write) into a new per-class pending list on `Acc` instead of calling `emit_class_attribute`; is_write when the attribute node is the `left` of an `assignment` / `augmented_assignment`, an element of a `pattern_list` / `tuple_pattern` / `list_pattern` that is one, or the `left` of a `for_statement`",
+    "parsers/code/python/src/lib.rs `visit_class`: after the body loop, settle the pending list (rules 1-4 in rationale) using `acc.class_methods` keyed by this class_id and `acc.class_bases` (ignore `object`, `ABC`, `Protocol`), emitting through `emit_class_attribute` in source order",
+    "parsers/code/python/src/lib.rs `collect_self_attr_rhs_types`: its USES refs `from` an ATTRIBUTE id are dropped for a name rule 3 settled to no node (filter `acc.refs` against the dropped ids once per file, not per class); `record_field_type` is unchanged (a property's field type still types `self.prop.m()`)",
+    "parsers/code/python/src/lib.rs: per-file stderr marker `[py-attrs] declared=<d> own_member=<m> inherited_read=<i> file=<p>` when m + i > 0"
+   ],
+   "files_touched": [
+    "parsers/code/python/src/lib.rs",
+    "engine/tests/cell_write_api.rs",
+    "bench/substrate-gap/fixtures/py-inherited-attribute-reads/key.json",
+    "bench/substrate-gap/fixtures/py-inherited-attribute-reads/shop/base.py",
+    "bench/substrate-gap/fixtures/py-inherited-attribute-reads/shop/orders.py",
+    "bench/substrate-gap/fixtures/py-inherited-attribute-reads/shop/schema.py"
+   ],
+   "implementation": "1. PROBE at HEAD and quote it in the commit (the reverify_note's two commands).\n2. Acc gains `self_attr_pending: Vec<(NodeId, String, bool)>` (class id, name, is_write) and `dropped_attrs: HashSet<NodeId>`.\n3. `collect_self_attr_assignments` (rename to `collect_self_attr_accesses`) pushes (class_id, name, is_write) per `self.<attr>` attribute node; the write test walks the attribute node's parent chain (tree-sitter `parent()`): `assignment.left` / `augmented_assignment.left`, through `pattern_list` / `tuple_pattern` / `list_pattern`, and `for_statement.left`. `self.a.b = v` writes `b` on `self.a`'s value, so `a` stays a read (the inner attribute node is not the left itself).\n4. `visit_class`, after the member loop: own = names of `acc.class_methods` entries whose key is this class_id; has_base = `acc.class_bases[class_id]` holds a name outside {object, ABC, Protocol}. Fold the pending entries of this class by name (write if any occurrence writes), in first-occurrence order; dunders skipped as today. For each: own member -> own_member += 1, record its would-be ATTRIBUTE id in `dropped_attrs`; read-only and has_base -> inherited_read += 1; else `emit_class_attribute` (its dedupe against class-level attributes is unchanged). Nested classes: the pending entries carry their own class id, so an inner class settles its own.\n5. End of the file's parse: `acc.refs.retain(|r| !acc.dropped_attrs.contains(&r.from))` (the RHS-constructor USES of a property setter's value), then print `[py-attrs] ..` when own_member + inherited_read > 0.\n6. Unit tests in the parser's test module: (a) `class_attribute_emits_has_attribute_edge` unchanged and green (base-less Schema keeps `opts`); (b) a subclass reading an inherited `@property` and calling an inherited method mints neither; (c) `self.helper()` beside `def helper` mints no ATTRIBUTE `helper`; (d) `self.amount = v` in `__init__` with an own `@property amount` + `@amount.setter` mints no ATTRIBUTE `amount`, while the setter's `self._amount = ..` does, and no USES ref starts at the dropped id; (e) a subclass ASSIGNING `self.last = x` keeps ATTRIBUTE `last`; (f) `self.a, self.b = 1, 2` and `for self.i in xs` are writes.\n7. engine/tests/cell_write_api.rs: `CART` relied on the bug for its METHOD / ATTRIBUTE twin (`self.total` read beside `def total`). Make the twin a real one the parser still mints: a class-level `total = 0` before `def total(self)` (a class-level attribute is rule 2); `a_hint_singles_out_one_of_two_twins` and `twins_keep_their_own_vector_rows` keep their assertions.\n8. The new fixture (fixtures field), graded before (FAIL) and after.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/py-inherited-attribute-reads/ (language python, dirs [\".\"], mechanism \"attributes\"), sources written from scratch (copy of /tmp/claude-1000/-home-ivy-Code-glia/d5e972f9-2cac-4540-9069-a2cd24391f5a/scratchpad/fix057/work-qc/fx-pyattr): shop/base.py `class BaseController` with `__init__` assigning self.session / self._repos and a `@property repos`; shop/orders.py `class OrdersController(BaseController)` whose `list_orders` reads `self.repos[..]` and calls `self.render(..)`, whose `render` assigns `self.last_status`, plus a base-less `class Price` whose `__init__` assigns `self.amount` through its own `@property amount` / `@amount.setter` (the setter assigns `self._amount`); shop/schema.py a metaclass `SchemaMeta` setting `klass.opts` and a base-less `class Schema(metaclass=SchemaMeta)` reading `self.opts`. key REQUIRES (exact) HAS_ATTRIBUTE BaseController -> shop/base/BaseController/session and -> _repos, OrdersController -> shop/orders/OrdersController/last_status, Price -> shop/orders/Price/_amount, Schema -> shop/schema/Schema/opts. key FORBIDS HAS_ATTRIBUTE OrdersController -> shop/orders/OrdersController/repos (the audit's shape), -> shop/orders/OrdersController/render (own method), Price -> shop/orders/Price/amount (own property setter). At BASE (probe binary on these exact sources) all three forbidden edges are emitted: FAIL; after, 5/5 required and 0 forbid violations.",
+   "acceptance": "(1) `cargo test -p glia-parser-python` green, incl. the six unit cases. (2) `cargo test -p glia-engine --test engine_tests cell_write_api::` green. (3) `python3 bench/substrate-gap/grade.py bench/substrate-gap/fixtures/py-inherited-attribute-reads` reads 1.00 with FORBID VIOLATIONS: 0 on the wave-end wheel; `python3 bench/substrate-gap/run.py` shows no other fixture row moved. (4) `cargo test -p glia-engine --test byte_identical` and `--test watch_parity` green. (5) On the mealie archive (reverify_note), `glia query <dir> -e 'out(C, A) :- edge(C, A, \"HAS_ATTRIBUTE\"), qname(C, Q), contains(Q, \"RecipeCommentsController\").'` exits 1 (no row). RULING: Wave agents never run scripts/rank-gate.sh or scripts/cohort-gate.sh (James 2026-10-30): an acceptance line naming them is what the close-out checks for this packet.",
+   "fired_on_marker": "[py-attrs] declared=<d> own_member=<m> inherited_read=<i> file=<p> (per Python file where m + i > 0)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content"
+    ],
+    "what_changes": "Python repos: fewer ATTRIBUTE nodes and HAS_ATTRIBUTE edges (a class's own method or property read or assigned through self, and a read-only self.X in a class with a base). The METHOD / ATTRIBUTE qname twins those reads made disappear, so a cell write or `glia find` on such a qname is no longer ambiguous. No id, format or API change.",
+    "in_repo_consumers": [
+     "engine/tests/cell_write_api.rs (CART twin, rewritten in step 7)",
+     "bench/substrate-gap results-latest (regenerated by the close-out)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph and Engram: Python ATTRIBUTE counts drop; DT.12b hints of the removed ATTRIBUTE twins no longer bind (they named nodes that were wrong)"
+    ]
+   },
+   "depends_on": [],
+   "risks": "A read-only name in a class with a base that the base never declares and nothing assigns (set by external code through setattr / monkeypatching) loses its ATTRIBUTE: accepted, the read alone never showed the class declares it. A mixin with a base that reads an attribute its concrete subclass sets loses it the same way. The parent-chain write test must not treat `self.x[i] = v` (a subscript store) as a write of x: it is a read of x (the subscript is the left, not the attribute)."
+  },
+  {
+   "id": "HQ.10",
+   "from": "new (HC.3 follow-up)",
+   "spec_pass": "fix057:QC.2",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 240,
+   "area": "TESTS pass: module name_match (TESTS|derived)",
+   "title": "TESTS name_match ranks same-stem candidates by the directory segments they share with the test (then the shared trailing run, then the old common prefix) and refuses a tie wider than the 3-target cap, so a spec pairs its own namespace's twin and never an unrelated tree's",
+   "rationale": "HC.3 held-out verdicts (pass:tests rule name_match, TESTS|derived 10/12 under the 0.90 floor): 006073f089e88b00 chatwoot@3564ec1e `spec::controllers::stripe::callbacks_controller_spec -> app::controllers::google::callbacks_controller` (wrong: \"the spec tests the Stripe OAuth callback (app/controllers/stripe/callbacks_controller.rb), not Google::CallbacksController\"); 000055e3c941c3fa squidex@f828dd71 `backend::tests::Squidex.Data.Tests::MongoDb::Domain::Contents::ExtensionsTests -> backend::tests::Squidex.Data.Tests.CodeGenerator::Extensions` (wrong: \"tests Squidex.Domain.Apps.Entities.Contents.Operations.Extensions (aliased ExtensionSut), not the CodeGenerator's Extensions\"). Cause, engine/src/passes.rs `select_test_targets`: after GD.36's own-directory narrowing (no own-dir candidate here) every candidate is scored by `common_prefix_len` of the qname parents, the best kept, then `kept.truncate(MAX_TEST_TARGETS)` (3). A Rails spec (`spec::..`) shares no prefix with any `app::..` controller, so all eleven `callbacks_controller` modules tie at 0 and the cap keeps the first three in candidate order (api/v1/accounts, google, instagram): the stripe spec never pairs stripe. In squidex the `tests` segment the test root shares with the CodeGenerator project out-scores every `src` candidate (prefix 2 vs 1). The fix keeps GD.36 (own dir first, Go own package only, drive hosts) and changes the score of what is left: (1) shared = how many of the test's parent tokens (qname parent segments split on `.`, test-tree words test / tests / spec / specs / __tests__ / testing dropped, case-insensitive) the candidate's parent tokens hold; (2) trailing = the length of the shared trailing run of those token lists (nearest directory); (3) the old common prefix. Best key kept; when more than MAX_TEST_TARGETS remain after the LB.13 sibling pick, the pairing is ambiguous and none is drawn (before, the cap kept three in arbitrary candidate order). Simulated over the cohort trees' file lists (path tokens, own-dir rule, cap; not a build): chatwoot 1014 specs 1445 -> 980 edges, 343 changed, 1 refused (spec/controllers/twilio/callbacks_controller_spec.rb, whose controller is twilio/callback_controller.rb: no right candidate exists); squidex 380 -> 370, 11 changed, all to the namespace twin (Security/ExtensionsTests -> Squidex.Infrastructure/Security/Extensions.cs); medusa 618 -> 488 (10 refused: integration specs whose stem matched three arbitrary modules); hoppscotch 117 -> 110; immich, tolgee, twenty unchanged; photoprism -3 (Go's own-package rule already decides).",
+   "entry_points": [
+    "engine/src/passes.rs `select_test_targets`: replace the single `common_prefix_len` score with the key (shared tokens, trailing run, common prefix); refuse when the kept set after the LB.13 sibling pick exceeds MAX_TEST_TARGETS (return a third value or a small enum: targets, narrowed, ambiguous)",
+    "engine/src/passes.rs: new private `pair_tokens(key) -> Vec<&str>` (qname_parent_segments split on '.', test-tree words dropped) and `trailing_run(a, b)`; `common_prefix_len` and `qname_parent_segments` stay",
+    "engine/src/passes.rs `TestsEdgeStats`: fields `nearest` (test modules whose shared / trailing key dropped a candidate the prefix rule kept) and `ambiguous` (test modules refused), marker gains ` nearest=<n> ambiguous=<a>`; `tests_module_edges` fills them"
+   ],
+   "files_touched": [
+    "engine/src/passes.rs",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/key.json",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/app/controllers/stripe/callbacks_controller.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/app/controllers/google/callbacks_controller.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/app/controllers/slack/callbacks_controller.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/app/controllers/github/callbacks_controller.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/spec/controllers/stripe/callbacks_controller_spec.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/rb/spec/controllers/twilio/callbacks_controller_spec.rb",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/cs/src/Acme.Core/Security/Extensions.cs",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/cs/tests/Acme.Tests.Tools/Extensions.cs",
+    "bench/substrate-gap/fixtures/tests-name-match-nearest/cs/tests/Acme.Core.Tests/Security/ExtensionsTests.cs"
+   ],
+   "implementation": "1. PROBE at HEAD and quote it (reverify_note commands).\n2. `pair_tokens(key)`: `qname_parent_segments(key)` flat-mapped over `split('.')`, empty and test-tree tokens (test, tests, spec, specs, __tests__, testing; ASCII case-insensitive) dropped. Use the MODULE key (bare form for LB.9b file-named modules), so modules with no POSITION (the unit tests' Hand graphs) score as file-located ones do.\n3. `select_test_targets`: after the GD.36 block, score each pooled candidate `(shared, trailing, prefix)` with shared = |set(test tokens) n set(cand tokens)|, trailing = equal tokens counted from the end of both lists, prefix = `common_prefix_len` as today; keep the max key (tuple order). `nearest` counts a test where the kept set differs from the old prefix-max set.\n4. LB.13's sibling pick runs on the kept set as today; then `if kept.len() > MAX_TEST_TARGETS { ambiguous }` -> no targets (drop the `truncate`). `tests_module_edges` counts `stats.ambiguous`.\n5. Marker: `[tests] module TESTS edges: <n> (snake= camel= declared=) own_dir=<o> drive_hosts=<h> nearest=<k> ambiguous=<a>`, printed when n + o + h + k + a > 0. Update every `TestsEdgeStats { .. }` literal and the three marker strings in passes.rs's tests (tests_module_edges_pair_camel_and_snake_modules, declared_test_module_pairs_by_stem, tests_own_directory_candidate_wins, tests_go_own_package_only_python_unchanged, tests_flutter_drive_hosts_pair_nothing).\n6. New unit tests: (a) the chatwoot shape (spec::controllers::stripe::x_spec with four app::controllers::<ns>::x) pairs stripe alone; (b) a twilio spec with four non-matching namespaces pairs nothing, ambiguous=1; (c) the squidex shape (tests::Acme.Core.Tests::Security::ExtensionsTests vs src::Acme.Core::Security::Extensions and tests::Acme.Tests.Tools::Extensions) pairs the Security one; (d) the Maven layout (src::test::java::x::FooTest vs src::main::java::x::Foo and lib::Foo) pairs main; (e) a Python tests/test_calc.py with one src/pkg/calc.py still pairs (no token, prefix decides).\n7. The new fixture, graded before (FAIL) and after.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/tests-name-match-nearest/ (language ruby, dirs [\".\"], mechanism \"tests\"), written from scratch (copy of /tmp/claude-1000/-home-ivy-Code-glia/d5e972f9-2cac-4540-9069-a2cd24391f5a/scratchpad/fix057/work-qc/fx-tests): rb/app/controllers/{stripe,google,slack,github}/callbacks_controller.rb (each `module <Ns>; class CallbacksController < ApplicationController; def show; head :ok; end; end; end`), rb/spec/controllers/stripe/callbacks_controller_spec.rb (`RSpec.describe Stripe::CallbacksController`) and rb/spec/controllers/twilio/callbacks_controller_spec.rb (no twilio controller of that stem); cs/src/Acme.Core/Security/Extensions.cs, cs/tests/Acme.Tests.Tools/Extensions.cs and cs/tests/Acme.Core.Tests/Security/ExtensionsTests.cs. key REQUIRES (exact) TESTS rb/spec/controllers/stripe/callbacks_controller_spec -> rb/app/controllers/stripe/callbacks_controller and cs/tests/Acme.Core.Tests/Security/ExtensionsTests -> cs/src/Acme.Core/Security/Extensions. key FORBIDS TESTS from the stripe spec to the google / slack / github controllers, from the twilio spec to each of the four, and from ExtensionsTests to cs/tests/Acme.Tests.Tools/Extensions. At BASE (probe binary, these sources): the stripe spec pairs github, google, slack and not stripe; the twilio spec pairs the same three; ExtensionsTests pairs Acme.Tests.Tools only: required 0/2, 7 forbid violations. After: 2/2, 0. Existing pins of the true cases, kept green: fixtures tests-name-match-scope (GD.36), py-tests, ts-tests, java-camel-tests, csharp-camel-tests, test-paths-declared-tests, module-cross-language, py-test-cells, and passes.rs's six TESTS unit tests.",
+   "acceptance": "(1) `cargo test -p glia-engine --lib passes::` green (the updated and new tests). (2) `python3 bench/substrate-gap/grade.py bench/substrate-gap/fixtures/tests-name-match-nearest` 1.00, FORBID VIOLATIONS: 0, and tests-name-match-scope / py-tests / ts-tests / java-camel-tests / csharp-camel-tests / test-paths-declared-tests / module-cross-language / py-test-cells unchanged, on the wave-end wheel. (3) `cargo test -p glia-engine --test byte_identical` green. (4) On the chatwoot archive (reverify_note) the TESTS query lists `spec::controllers::stripe::callbacks_controller_spec -> app::controllers::stripe::callbacks_controller` and no stripe -> google row, and `[tests] .. ambiguous=1`. RULING: Wave agents never run scripts/rank-gate.sh or scripts/cohort-gate.sh (James 2026-10-30): an acceptance line naming them is what the close-out checks for this packet (TESTS feeds tests-for and the cohort's test tasks: the close-out's cohort gate is the check).",
+   "fired_on_marker": "[tests] module TESTS edges: <n> (snake=<s> camel=<c> declared=<d>) own_dir=<o> drive_hosts=<h> nearest=<k> ambiguous=<a> (two new trailing fields)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "Module-level TESTS edges (pass:tests name_match / declared_name): a test with several same-stem candidates pairs the one(s) sharing most directory names with it (fewer edges overall: chatwoot simulated 1445 -> 980), and a tie wider than three pairs nothing. tests-for / review's tests to run, TEST cells and the dead_symbol / gaps readings that count TESTS move with it. The `[tests]` stderr marker gains two fields.",
+    "in_repo_consumers": [
+     "engine/src/passes.rs unit tests (updated)",
+     "bench/substrate-gap results-latest",
+     "bench/cohort baselines (tests-for tasks; the close-out's cohort gate)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph tests-for answers"
+    ]
+   },
+   "depends_on": [],
+   "risks": "squidex's Contents/ExtensionsTests stays a near miss: by path it now pairs Squidex.Data.MongoDb/Domain/Apps/Entities/Contents/Extensions.cs (shares MongoDb, Domain, Contents) while the truth is Contents/Operations/Extensions.cs, named only by the C# `using ExtensionSut = ..Operations.Extensions;` alias; better than the CodeGenerator pairing, still wrong (see questions: an import-evidence key). The refusal can drop a test whose right target is one of four or more equally-named tied modules: in the simulations every refusal was a test with no right same-stem candidate. Token overlap counts generic names (`controllers`, `models`) equally for every candidate, so they never decide alone."
+  },
+  {
+   "id": "HQ.11",
+   "from": "new (HF.5 follow-up)",
+   "spec_pass": "fix057:QC.3",
+   "class": "coverage",
+   "batch": "HQ",
+   "loc": 45,
+   "area": "coverage caveats: Ruby / Rails routes",
+   "title": "coverage.rs gains a `ruby` HANDLED_BY caveat row for Rails routes: resource routes are method-agnostic ANY, and `shallow: true`, `concerns` / `concern` blocks and `draw(:file)` route files are not read",
+   "rationale": "HF.5's follow-up (followups_057.txt, HF.5 block): \"engine/src/coverage.rs Ruby caveat row: name `shallow: true`, `concerns` and `draw(:file)` route files as not read\". At BASE there is NO ruby row at all: `COVERAGE_CAVEATS` holds `*`, python, typescript, rust, go, php, swift, dart, c_cpp, kotlin, lua and host rows; `ext_to_language` maps `.rb` to `ruby` but nothing keys on it. HF.5 (e2ac26ea) wrote the limits only as a comment in parsers/code/ruby/src/lib.rs (\"Every resource route stays method-agnostic `ANY`. Not read: `shallow: true`, `concerns` and `draw(:file)`.\"), and `is_rails_routes_file` gates the route reader to files named routes.rb, so a `config/routes/<name>.rb` that `draw(:name)` loads is never read. Probed: a concern's own block is walked where it is declared, so `concern :commentable do resources :comments end` mints `ANY /comments` at the root, a path Rails serves only under each `concerns: :commentable` user (see questions: a backlog entry).",
+   "entry_points": [
+    "engine/src/coverage.rs `COVERAGE_CAVEATS`: one `CoverageCaveat { language: \"ruby\", edge_category: \"HANDLED_BY\", note, verify }` after the go rows",
+    "engine/src/coverage.rs `coverage_report`: `[coverage] ruby: residual rows declared for rails routes` when `langs.contains(\"ruby\")`, beside the kotlin / c_cpp lines",
+    "engine/src/coverage.rs tests: `ruby_files_get_the_rails_route_row` over `graph_with_file(\"config/routes.rb\")` with `lang_rows` / `row_note`"
+   ],
+   "files_touched": [
+    "engine/src/coverage.rs"
+   ],
+   "implementation": "1. The row. note: \"Rails routes are read from files named routes.rb only. `resources :r` is `ANY /r` plus `ANY /r/:id` (dropped when only: / except: leave none of show / update / destroy / edit), method-agnostic: a client verb the controller has no action for still pairs (rule any); nested resources, member / collection blocks, `on:` and symbol verbs compose their paths. Not read: `shallow: true` (shallow member routes keep the nested path), `concern` / `concerns:` (a concern's routes are read once where the concern is declared, never under each resource that names it), `draw(:file)` (config/routes/<file>.rb is never read), constraints and `mount`ed engines.\" verify: \"read config/routes.rb and config/routes/*.rb for shallow, concern / concerns and draw, and `bin/rails routes` when it runs\". Check the mount claim against the parser before writing it (keep only what the code does not read).\n2. The marker line in `coverage_report`.\n3. The unit test: a repo holding only config/routes.rb gets exactly one ruby row, HANDLED_BY, whose note contains `shallow: true`, `concerns` and `draw(:file)`; a .py-only repo gets none.\n4. Golden: engine/tests/data/reflexion/allow_absence.json embeds only `*` and `python` rows (its fixture is Python; checked at BASE: caveats[0..13] are 11 `*` rows and 3 python rows), and rows are filtered by the languages present, so a ruby row does not move it: no GLIA_UPDATE_GOLDEN regeneration; `rules::reflexion_parity` stays green as the check.",
+   "fixtures": "No substrate-gap fixture: grade.py reads graph content, never coverage rows (a fixture cannot fail on a caveat). The pin is the coverage.rs unit test in step 3, failing at BASE (no ruby row) and passing after; the probe below is its live form.",
+   "acceptance": "(1) `cargo test -p glia-engine --lib coverage::` green incl. ruby_files_get_the_rails_route_row. (2) `cargo test -p glia-engine --lib rules::reflexion_parity` green with allow_absence.json unchanged. (3) `glia coverage <rails dir> --json` lists a ruby HANDLED_BY row and stderr has `[coverage] ruby: residual rows declared for rails routes`. RULING: Wave agents never run scripts/rank-gate.sh or scripts/cohort-gate.sh (James 2026-10-30): an acceptance line naming them is what the close-out checks for this packet.",
+   "fired_on_marker": "[coverage] ruby: residual rows declared for rails routes",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cli_output"
+    ],
+    "what_changes": "`glia coverage` (and every absence / check / query caveat list reading HANDLED_BY on a repo with .rb files) gains one ruby row. No graph content.",
+    "in_repo_consumers": [
+     "engine/tests/data/reflexion/allow_absence.json (unchanged: python fixture)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph coverage / absence output on Ruby repos"
+    ]
+   },
+   "depends_on": [],
+   "risks": "None beyond wording: the row must say only what the parser does not read (re-read `walk_rails` / `walk_rails_resources` before writing it)."
+  },
+  {
+   "id": "HQ.12",
+   "from": "new (HC.1 follow-up)",
+   "spec_pass": "fix057:QC.4",
+   "class": "precision",
+   "batch": "HQ",
+   "loc": 150,
+   "area": "models pass: http_model identity over model-written pairings",
+   "title": "The models pass compares an HTTP pairing's BASE rule (the `/overlay_llm` suffix stripped) against WEAK_RULE, and forms no http_model SAME_AS class from a client <-> server model pair whose every join rests on an `/overlay_llm` pairing",
+   "rationale": "HC.1 (104fd310) suffixes a pairing that rests on an `origin = \"llm\"` overlay stanza `<tier>/overlay_llm` (graph/src/resolvers/http.rs `MatchTier::model_rule`, `MODEL_RESTED_SUFFIX`), which why tiers heuristic: HC's hard line, \"a model step is heuristic tier and never decides a fact row\" / \"A model step never decides a derived row\" (HC.1 commit body). graph/src/resolvers/models.rs `wires_in` still compares the full rule, `if rule == WEAK_RULE` (\"suffix\"), so (a) a `suffix/overlay_llm` pairing, the weakest HTTP tier on a model's stanza, is kept as a pairing to build identity on while plain `suffix` is skipped; (b) every `/overlay_llm` pairing feeds `model_stars`, and `http_model` (CODE_TABLES identity rule, DERIVED, walks) makes a walking DERIVED class from it: the class collapses answers (Q17) and is one node in blast radius / trace / PPR (DD.10-DD.12), so a model's [constants] pin or [[wrapper]] guess silently merges two nodes. Probed at BASE: the HTTP_CALLS edge reads heuristic but the SAME_AS it enabled reads derived. DECISION: skip such pairs for identity (no heuristic http_model variant exists: an identity rule's tier is one CODE_TABLES row, and a HEURISTIC candidate would need a new rule name; see questions). client_wires / wire_pairs / contract_fields / model_breaks keep the pairing (they are answers whose rows carry the rule `exact/overlay_llm`, tiered heuristic by why's reading of the joining edge, so advisory).",
+   "entry_points": [
+    "graph/src/resolvers/models.rs `wires_in`: `let base = rule.strip_suffix(super::http::MODEL_RESTED_SUFFIX).unwrap_or(&rule); if base == WEAK_RULE { weak.insert(key) }` (WEAK_RULE stays \"suffix\")",
+    "graph/src/resolvers/models.rs `ModelJoin`: new field `rule: String` (the pairing's full HTTP rule, from `pairs_of`'s `pair.rule`), part of its sort key after handler_qname",
+    "graph/src/resolvers/models.rs http_model star build (the fn holding `let takes = |p: &ModelPair| ctx.takes(rule, p.client, p.server);` and `model_stars(&wp.model_pairs, ..)`): a ModelPair none of whose joins has a rule without the suffix is not taken (counted `model_rested`); the SAME_AS EVIDENCE site is the first join without the suffix",
+    "graph/src/resolvers/models.rs the `[models] classes=..` marker (fn printing `embed_reduced={}`): gains ` model_rested=<m>`"
+   ],
+   "files_touched": [
+    "graph/src/resolvers/models.rs",
+    "engine/tests/overlay_llm_tier.rs",
+    "bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/key.json",
+    "bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/web/src/client.ts",
+    "bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/web/.glia/overlay.toml",
+    "bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/api/go.mod",
+    "bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/api/main.go"
+   ],
+   "implementation": "1. PROBE at HEAD and quote it (reverify_note).\n2. Base-rule compare in `wires_in` as in entry_points.\n3. `ModelJoin.rule`; `pairs_of` copies `pair.rule` into each join; joins stay sorted (route qname, direction, file, line, handler qname, path, rule).\n4. In the http_model star build: `let rested = |p: &ModelPair| p.joins.iter().all(|j| j.rule.ends_with(MODEL_RESTED_SUFFIX));` and `takes = |p| ctx.takes(..) && !rested(p)`; `report.model_rested` counts the rested pairs `ctx.takes` admitted. The EVIDENCE site loop reads `p.joins.iter().find(|j| !j.rule.ends_with(MODEL_RESTED_SUFFIX))`. `p.diverged` stays as computed (any join): a pair kept through a human join that diverged only on the llm join still reads `/diverged` (note it in the doc comment; recompute only if a test shows it matters).\n5. Unit tests in models.rs's test module (the `http_edge` / `exchange` helpers): an `exact/overlay_llm` exchange alone forms no class and `model_rested=1`; the same exchange with a second, plain `exact` join forms the class located at the plain join; a `suffix/overlay_llm` pairing counts in `weak_pairing`. Update the two `embed_reduced=` marker assertions (append ` model_rested=0`).\n6. engine/tests/overlay_llm_tier.rs: a case with a typed axios client behind the `[constants]` pin and a gin server returning the matching struct: no SAME_AS between the two models; the no-overlay control (a literal path) keeps its http_model class.\n7. The new fixture, graded before (FAIL) and after.",
+   "fixtures": "NEW bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity/ (language typescript, dirs [\"web\", \"api\"], mechanism \"http\"), written from scratch (copy of /tmp/claude-1000/-home-ivy-Code-glia/d5e972f9-2cac-4540-9069-a2cd24391f5a/scratchpad/fix057/work-qc/hc1probe): web/src/client.ts imports axios, declares `interface User {id; name}` and `interface Account {id; plan}`, `const GATEWAY = process.env.GATEWAY_URL`, `listUsers` = `axios.get<User[]>(`${GATEWAY}/users`)` and `listAccounts` = `axios.get<Account[]>('/api/accounts')`; web/.glia/overlay.toml `[constants] GATEWAY = \"/api\"` (no origin: llm by default); api/go.mod (gin) and api/main.go with `type User struct {ID int `json:\"id\"`; Name string `json:\"name\"`}`, `type Account struct {ID; Plan}`, handlers `c.JSON(200, users)` / `c.JSON(200, accounts)` registered `r.GET(\"/api/users\", ..)` / `r.GET(\"/api/accounts\", ..)`. key REQUIRES HTTP_CALLS endpoint:GET:/api/users -> GET /api/users and endpoint:GET:/api/accounts -> GET /api/accounts, and SAME_AS src/client/Account -> main/Account (exact; the positive control, a literal-path pairing). key FORBIDS SAME_AS src/client/User -> main/User (rests on the llm pin). At BASE both SAME_AS edges are emitted (`[models] classes=2`): FAIL on the forbid; after, classes=1 model_rested=1. Existing true-case pins kept green: fixtures models-http-shop (DT.1h's five classes, engine/tests/model_identity.rs), xcut-overlay-const-mount, xcut-overlay-wrapper; engine/tests/overlay_llm_tier.rs.",
+   "acceptance": "(1) `cargo test -p glia-graph` green (models.rs unit tests). (2) `cargo test -p glia-engine --test engine_tests overlay_llm_tier:: model_identity::` green. (3) `python3 bench/substrate-gap/grade.py bench/substrate-gap/fixtures/xcut-overlay-llm-model-identity` 1.00 and FORBID VIOLATIONS: 0, models-http-shop / xcut-overlay-const-mount / xcut-overlay-wrapper unchanged, on the wave-end wheel. (4) `glia query web --with api` on the fixture prints the HTTP_CALLS `exact/overlay_llm` row and no User SAME_AS row; stderr `[models] classes=1 .. model_rested=1`. RULING: Wave agents never run scripts/rank-gate.sh or scripts/cohort-gate.sh (James 2026-10-30): an acceptance line naming them is what the close-out checks for this packet.",
+   "fired_on_marker": "[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a> ambiguous_project=<p> embed_reduced=<r> model_rested=<m> (new trailing field)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "Repos with `origin = \"llm\"` (or unmarked) [[wrapper]] / [constants] / [[route_prefix]] stanzas: an http_model SAME_AS class that rested only on such a pairing is no longer written, so answers no longer collapse or walk through it (`glia identity`, find / blast-radius / trace collapse, PPR quotient). A `suffix/overlay_llm` pairing now counts as weak_pairing. `ModelJoin` gains `rule` (#[non_exhaustive], additive). The `[models] classes=` marker gains a field.",
+    "in_repo_consumers": [
+     "engine/tests/model_identity.rs and the models-http-shop fixture (no overlay: unchanged)",
+     "engine/tests/overlay_llm_tier.rs (new case)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph and Engram: fewer http_model identity classes on repos with model-written overlay stanzas (HZ.2 should list it beside HC.1's `/overlay_llm`)"
+    ]
+   },
+   "depends_on": [],
+   "risks": "A person who wrote a stanza without `origin = \"human\"` loses the class too (HC.1's declared default; docs/overlay.md already says to mark human stanzas). graphql_model is not touched: the graphql resolver writes no `/overlay_llm` rule (HC.1 covered http and queue only)."
   }
  ]
 }

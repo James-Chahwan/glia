@@ -1678,6 +1678,41 @@
    "note": "Found while re-verifying FD.41 at 06012cc6: glia reads no Go Sprintf-built URL, so there is no Go endpoint to trim a query suffix from. James 2026-10-31: \"yeah precision backlog\" until a public example turns up.",
    "loc": null,
    "depends_on": []
+  },
+  {
+   "from": "0.5.7 HF.5 follow-up (ruling: \"keep method-agnostic ANY routes; per-action verbs go to dev-notes/precision-backlog.json\")",
+   "spec_pass": "followups-057",
+   "class": "precision_backlog",
+   "title": "Ruby / Rails: `resources` emits one route per REST action Rails would route (GET /r, POST /r, GET /r/:id, PATCH|PUT /r/:id, DELETE /r/:id, GET /r/new, GET /r/:id/edit), narrowed by only: / except:, instead of method-agnostic ANY /r and ANY /r/:id",
+   "area": "FD per-language precision: Ruby (HF.5 residual)",
+   "loc": 160,
+   "rationale": "HF.5 (e2ac26ea) keeps every resource route method-agnostic `ANY` by ruling; the http resolver pairs any client verb with it (rule `any`), so `resources :posts, only: [:index, :show]` admits `POST /posts/:id` and `DELETE /posts`, which Rails would answer 404. Probed at 57b0e22c (from-scratch: api/config/routes.rb `resources :posts, only: [:index, :show]`, web/src/posts.ts `axios.post(`/posts/${id}`, body)` and `axios.delete('/posts')`): `glia query web --with api -e 'out(A, B, R) :- edge(A, B, \"HTTP_CALLS\"), edge_cell(A, B, \"HTTP_CALLS\", \"EVIDENCE\", R).'` -> `endpoint:DELETE:/posts -> ANY /posts` and `endpoint:POST:/posts/${..} -> ANY /posts/:id`, both rule any, derived; `[http] routes=2 endpoints=2 paired=2 (exact=0 any=2 ..)`. No public cohort example yet (chatwoot's resources mostly declare the actions they serve); pull it in once a cohort task or graded cell shows a false verb pairing.",
+   "entry_points": [
+    "parsers/code/ruby/src/lib.rs `walk_rails_resources`: emit one ROUTE per kept action instead of the two ANY routes (`rails_action_list` already reads only: / except:; a plural resource's actions index / create / new / show / edit / update / destroy, a singular one's create / new / show / edit / update / destroy without :id), each `<VERB> <path>` (update as PATCH and PUT, both)",
+    "parsers/code/ruby/src/lib.rs `rails_has_member_action`: superseded by the per-action set",
+    "marker: `[ruby-routes] composed ..` gains ` actions=<a>`",
+    "bench/substrate-gap/fixtures/ruby-rails-resource-verbs/ (new): key forbids HTTP_CALLS from a POST client to a show-only resource and requires the GET pairing"
+   ],
+   "files_touched": [
+    "parsers/code/ruby/src/lib.rs",
+    "bench/substrate-gap/fixtures/ruby-rails-resource-verbs/key.json",
+    "bench/substrate-gap/fixtures/ruby-rails-nested-resources/key.json"
+   ],
+   "implementation": "1. Re-verify at the release HEAD with the probe above. 2. Per kept action, `emit_rails_route(<verb>, path, None, ..)` with the Rails 7 resourceful table (member actions at /r/:id or `param:`, new / edit suffixes); nested, member and collection composition unchanged. 3. Re-key: ROUTE qnames move from `ANY /r` to `GET /r` etc. (graph_content + cli_output break; the ruby-rails-nested-resources and ruby-rails-scope keys move with it). 4. A controller action lookup is NOT part of this (Rails routes the verb whether or not the action exists; the table is the routing contract).",
+   "fixtures": "NEW bench/substrate-gap/fixtures/ruby-rails-resource-verbs/ (dirs [\"web\", \"api\"]): api/config/routes.rb `resources :posts, only: [:index, :show]` and `resources :tags, except: [:destroy]`; web client GET /posts/1, POST /posts/1, DELETE /tags/2, POST /tags. key REQUIRES GET /posts/:id <- endpoint:GET:/posts/.., POST /tags pairing; FORBIDS HTTP_CALLS from endpoint:POST:/posts/.. and endpoint:DELETE:/tags/.. (both pair `any` at 57b0e22c).",
+   "acceptance": "grade.py on the new fixture 1.00 / 0 forbid; ruby-rails-nested-resources, ruby-rails-scope, http-any-method unchanged in recall; matrix ruby/http_server stays full; the cohort gate's chatwoot http reach does not drop (close-out).",
+   "fired_on_marker": "[ruby-routes] composed <r> rails routes under <s> scopes nested=<n> member=<m> collection=<c> id_routes=<i> actions=<a> in <file>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content",
+     "cli_output"
+    ],
+    "what_changes": "Rails resource ROUTE qnames: `ANY /r` / `ANY /r/:id` become one ROUTE per routed verb."
+   },
+   "depends_on": [],
+   "risks": "More ROUTE nodes per resource (up to 8); a client verb a custom route (`match via:`) serves must still pair through that route. Rails `resources` with a block of `member` verbs keeps those verbs as written.",
+   "note": "HF.5 ruling (dev-notes/leap-057-corrections.json): default accepted, keep ANY in 0.5.7; this entry is the deferred half."
   }
  ]
 }
