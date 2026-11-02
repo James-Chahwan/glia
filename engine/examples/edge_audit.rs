@@ -6,11 +6,14 @@
 //! ```text
 //! edge_audit sample --repo <dir> --label <l> --rev <sha> [--skip <prefix>].. [--repo ..]..
 //!                   --plan bench/edge-audit/floors.json --out <samples.jsonl>
-//!                   [--panel fit|heldout]
+//!                   [--panel fit|heldout|heldout_rc]
+//! edge_audit keep   --samples <heldout_rc.jsonl> --from-samples <heldout.jsonl>
+//!                   --from-verdicts <heldout verdicts.jsonl> --judge <name>
+//!                   --out <heldout_rc verdicts.jsonl>
 //! edge_audit show   <samples.jsonl> --root <dir> [--label <l>] [--id <hex>]
 //! edge_audit report --samples <glob>.. --verdicts <glob>.. --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--judge <name>] [--check]
-//!                   [--panel all|fit|heldout]
+//!                   [--panel all|fit|heldout|heldout_rc|all_rc]
 //!                   [--rejudge <glob>].. [--adjudication <file>]
 //!                   [--ci stratified_wilson|plugin] [--rejudge-rule matched|fd3c]
 //! edge_audit report --calibration --fit <report.json> [--fit-samples <glob>]..
@@ -28,12 +31,23 @@
 //! samples and verdicts beside it never move it; since HP.5 that is `report
 //! --panel fit`, and the default `--panel all` reads both panels,
 //! post-stratified per panel ([`stratum_parts`]), and judges the 0.5.7 proof
-//! run by `bench/edge-audit/RULE-0.5.7.md` ([`rule_057_lines`]: `[edge-audit]
+//! run by `bench/edge-audit/RULE-0.5.7.md` ([`rule_lines`]: `[edge-audit]
 //! rule 0.5.7 verdict=<PASS|FAIL> ..`), its kappa over the re-judge pairs no
 //! first judge re-judged itself ([`IndependenceOut`]). `report --calibration` judges
 //! the held-out strata against the fit report by the rule committed in
 //! [`CAL_RULE`] ([`compare_strata`]: K, R1, R2, R3) and prints
 //! `[edge-audit] calibration ..` and `CONFIDENCE: .. -> PASS|FAIL|INSUFFICIENT`.
+//!
+//! The re-measure (HP.7, `bench/edge-audit/RULE-0.5.7b.md`): `sample --panel
+//! heldout_rc` re-draws the held-out repos with the release candidate's build
+//! by HC.2's key, seed and n, each row's id re-keyed by the panel
+//! ([`panel_id`]) so it never collides with a `heldout` id of the same edge;
+//! `keep` copies HC.3's verdict onto every re-drawn row whose claim HC.3
+//! judged (`kept_from`); `report --panel all_rc` reads the fit plus
+//! `heldout_rc`, and the default `--panel all` report prints the 0.5.7b rule
+//! lines over `all_rc` beside the 0.5.7 ones ([`rule_lines`]). A row's panel
+//! is its samples file's header's, so `heldout` and `heldout_rc` share labels;
+//! `calibrate` reads `heldout` only.
 //!
 //! HC.4: on that rule's PASS, `report --calibration --emit-table [<path>]`
 //! (default `engine/src/confidence/table.json` beside the plan's checkout)
@@ -95,6 +109,9 @@ const NOISY_SHARE: f64 = 0.10;
 const PANEL_HELDOUT: &str = "heldout";
 /// The held-out sample's n per pooled (category, tier) stratum (HC.2).
 const HELDOUT_N: u64 = 10;
+/// The held-out panel re-drawn at the 0.5.7 release candidate (HP.7,
+/// `RULE-0.5.7b.md`): HC.2's repos, key, seed and n, its own ids.
+const PANEL_HELDOUT_RC: &str = "heldout_rc";
 
 #[derive(Debug, Clone, Deserialize)]
 struct Plan {
@@ -146,6 +163,12 @@ struct SampleRow {
     site: Site,
     from: End,
     to: End,
+    /// The panel of the header this row follows in its samples file (HP.7):
+    /// `fit`, `heldout` or `heldout_rc`; empty for a row built in memory or
+    /// read with no header of its label before it in its file, whose panel
+    /// is then its label's. Never written.
+    #[serde(skip)]
+    panel: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -322,6 +345,7 @@ fn population(spec: &RepoSpec, seed: &str) -> Result<Population, String> {
             site,
             from: end_of(&from),
             to: end_of(&to),
+            panel: String::new(),
         };
         cands.push((key, stratum, row));
     }
@@ -379,6 +403,25 @@ fn allocate(n: u64, sizes: &[(String, u64)]) -> Vec<u64> {
     quota
 }
 
+/// A sampled row's id: the key's 16 hex digits, except in the `heldout_rc`
+/// panel (HP.7), whose ids are the xxh64 of the panel name and those digits,
+/// so a re-drawn row never shares an id with the `heldout` row of the same
+/// edge (both panels' files sit in one directory and every id is unique
+/// across them). Selection and row order stay by the key.
+fn panel_id(key: u64, panel: Option<&str>) -> String {
+    let hex = format!("{key:016x}");
+    match panel {
+        Some(p) if p == PANEL_HELDOUT_RC => {
+            let mut h = XxHash64::with_seed(0);
+            h.write(p.as_bytes());
+            h.write(&[0x1f]);
+            h.write(hex.as_bytes());
+            format!("{:016x}", h.finish())
+        }
+        _ => hex,
+    }
+}
+
 /// Sample every spec into one JSONL text (per label: its header line, then its
 /// rows sorted by (category, tier, key)) and the per-repo marker lines. A
 /// `panel` (HC.2: [`PANEL_HELDOUT`]) is written into every header and named on
@@ -416,7 +459,9 @@ fn sample_text(
                 continue;
             };
             for (key, row) in rows.iter().take(quota[ri] as usize) {
-                picked[ri].push((row.category.clone(), row.tier.clone(), *key, row.clone()));
+                let mut row = row.clone();
+                row.id = panel_id(*key, panel);
+                picked[ri].push((row.category.clone(), row.tier.clone(), *key, row));
             }
         }
     }
@@ -878,10 +923,19 @@ fn wildcard(pat: &str, s: &str) -> bool {
     }
 }
 
+/// A header's panel name: `fit` for a header with none.
+fn panel_name(h: &Header) -> String {
+    h.panel.clone().unwrap_or_else(|| "fit".to_string())
+}
+
+/// Every header and row of the samples files, each row tagged with the panel
+/// of the last header of its label before it in its file (HP.7: `heldout` and
+/// `heldout_rc` share labels, so a row's panel is its file's, not its label's).
 fn read_samples(paths: &[PathBuf]) -> Result<(Vec<Header>, Vec<SampleRow>), String> {
     let (mut headers, mut rows) = (Vec::new(), Vec::new());
     for p in paths {
         let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let mut file_panel: BTreeMap<String, String> = BTreeMap::new();
         for (i, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -889,15 +943,15 @@ fn read_samples(paths: &[PathBuf]) -> Result<(Vec<Header>, Vec<SampleRow>), Stri
             let v: serde_json::Value = serde_json::from_str(line)
                 .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?;
             if v.get("stratum_sizes").is_some() {
-                headers.push(
-                    serde_json::from_value(v)
-                        .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?,
-                );
+                let h: Header = serde_json::from_value(v)
+                    .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?;
+                file_panel.insert(h.label.clone(), panel_name(&h));
+                headers.push(h);
             } else {
-                rows.push(
-                    serde_json::from_value(v)
-                        .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?,
-                );
+                let mut r: SampleRow = serde_json::from_value(v)
+                    .map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?;
+                r.panel = file_panel.get(&r.label).cloned().unwrap_or_default();
+                rows.push(r);
             }
         }
     }
@@ -1420,7 +1474,6 @@ fn build_report(
 ) -> ReportOut {
     // Pooled stratum sizes per panel (one panel unless `--panel all`, HP.5)
     // and per-repo sizes.
-    let panel_name = |h: &Header| h.panel.clone().unwrap_or_else(|| "fit".to_string());
     let panel_of: BTreeMap<&str, String> = headers
         .iter()
         .map(|h| (h.label.as_str(), panel_name(h)))
@@ -1898,9 +1951,11 @@ fn run_sample(args: &[String]) -> Result<ExitCode, String> {
                 let v = value(args, &mut i, flag)?;
                 panel = match v.as_str() {
                     "fit" => None,
-                    PANEL_HELDOUT => Some(v),
+                    PANEL_HELDOUT | PANEL_HELDOUT_RC => Some(v),
                     other => {
-                        return Err(format!("sample: --panel `{other}` is not fit|heldout"));
+                        return Err(format!(
+                            "sample: --panel `{other}` is not fit|heldout|heldout_rc"
+                        ));
                     }
                 };
             }
@@ -1910,8 +1965,9 @@ fn run_sample(args: &[String]) -> Result<ExitCode, String> {
     }
     let mut plan = Plan::read(&plan.ok_or("sample: --plan is required")?)?;
     if panel.is_some() {
-        // The held-out panel (HC.2): HELDOUT_N per pooled stratum, structural
-        // categories too; key, seed and exclusions are the fit's.
+        // The held-out panel (HC.2) and its re-draw (HP.7): HELDOUT_N per
+        // pooled stratum, structural categories too; key, seed and exclusions
+        // are the fit's.
         plan.n_per_stratum = HELDOUT_N;
         plan.n_structural = HELDOUT_N;
     }
@@ -1930,6 +1986,194 @@ fn run_sample(args: &[String]) -> Result<ExitCode, String> {
     for m in markers {
         eprintln!("{m}");
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+// ------------------------------------------------------------- keep (HP.7)
+
+/// A verdict row as `keep` writes it: RUBRIC.md's four fields and, on a row
+/// that keeps an earlier panel's verdict, `kept_from` (that panel's id).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct VerdictOut {
+    id: String,
+    verdict: String,
+    #[serde(default)]
+    reason: String,
+    judge: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept_from: Option<String>,
+}
+
+/// Two sampled rows state one claim: every field but the id and the panel.
+fn same_claim(a: &SampleRow, b: &SampleRow) -> bool {
+    let strip = |r: &SampleRow| SampleRow {
+        id: String::new(),
+        panel: String::new(),
+        ..r.clone()
+    };
+    strip(a) == strip(b)
+}
+
+/// What [`keep_text`] did, for its marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeepStats {
+    sampled: u64,
+    kept: u64,
+    fresh: u64,
+    /// Fresh rows with a verdict already in the out file.
+    judged: u64,
+    /// Out-file rows whose id the re-draw no longer samples.
+    dropped: u64,
+    /// The fresh rows still without a verdict, as `<label> <id>`.
+    pending: Vec<String>,
+}
+
+/// The `heldout_rc` verdict file (HP.7, `RULE-0.5.7b.md`): for every re-drawn
+/// row, in sample order, either `judge`'s verdict on the `heldout` row that
+/// states the same claim (the id [`panel_id`] maps to it, [`same_claim`]),
+/// copied with `kept_from`, or the fresh rows the out file already holds for
+/// it (a later judge's; kept rows of the out file are regenerated). An out
+/// row whose id the re-draw does not sample is dropped and counted; two rows
+/// of one judge on one id are an error.
+fn keep_text(
+    rc_rows: &[SampleRow],
+    from_rows: &[SampleRow],
+    from_verdicts: &[VerdictOut],
+    judge: &str,
+    existing: &[VerdictOut],
+) -> Result<(String, KeepStats), String> {
+    let mut by_from: BTreeMap<&str, &VerdictOut> = BTreeMap::new();
+    for v in from_verdicts.iter().filter(|v| v.judge == judge) {
+        if by_from.insert(v.id.as_str(), v).is_some() {
+            return Err(format!("keep: {}: two verdicts from judge `{judge}`", v.id));
+        }
+    }
+    // Each earlier row under the id its claim takes in the re-draw.
+    let mut source: BTreeMap<String, &SampleRow> = BTreeMap::new();
+    for r in from_rows {
+        let key = u64::from_str_radix(&r.id, 16)
+            .map_err(|e| format!("keep: earlier id {}: {e}", r.id))?;
+        source.insert(panel_id(key, Some(PANEL_HELDOUT_RC)), r);
+    }
+    let rc_ids: BTreeSet<&str> = rc_rows.iter().map(|r| r.id.as_str()).collect();
+    let mut fresh_rows: BTreeMap<&str, Vec<&VerdictOut>> = BTreeMap::new();
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut stats = KeepStats::default();
+    for v in existing {
+        if !seen.insert((v.id.as_str(), v.judge.as_str())) {
+            return Err(format!(
+                "keep: {}: two verdicts from judge `{}`",
+                v.id, v.judge
+            ));
+        }
+        if !rc_ids.contains(v.id.as_str()) {
+            stats.dropped += 1;
+        } else if v.kept_from.is_none() {
+            fresh_rows.entry(v.id.as_str()).or_default().push(v);
+        }
+    }
+    let mut out = String::new();
+    for r in rc_rows {
+        stats.sampled += 1;
+        let kept = source
+            .get(&r.id)
+            .filter(|f| same_claim(f, r))
+            .and_then(|f| by_from.get(f.id.as_str()).map(|v| (f, v)));
+        let rows: Vec<VerdictOut> = match kept {
+            Some((f, v)) => {
+                stats.kept += 1;
+                vec![VerdictOut {
+                    id: r.id.clone(),
+                    kept_from: Some(f.id.clone()),
+                    ..(*v).clone()
+                }]
+            }
+            None => {
+                stats.fresh += 1;
+                let have: Vec<VerdictOut> = fresh_rows
+                    .get(r.id.as_str())
+                    .map(|v| v.iter().map(|x| (*x).clone()).collect())
+                    .unwrap_or_default();
+                if have.is_empty() {
+                    stats.pending.push(format!("{} {}", r.label, r.id));
+                } else {
+                    stats.judged += 1;
+                }
+                have
+            }
+        };
+        for v in rows {
+            out.push_str(&serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            out.push('\n');
+        }
+    }
+    Ok((out, stats))
+}
+
+/// One verdict file's rows as written (an absent file is none).
+fn read_verdict_rows(p: &Path) -> Result<Vec<VerdictOut>, String> {
+    if !p.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push(
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", p.display(), i + 1))?,
+        );
+    }
+    Ok(out)
+}
+
+fn run_keep(args: &[String]) -> Result<ExitCode, String> {
+    let (mut samples, mut from_samples, mut from_verdicts, mut judge, mut out) =
+        (None, None, None, None, None);
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            "--samples" => samples = Some(value(args, &mut i, flag)?),
+            "--from-samples" => from_samples = Some(value(args, &mut i, flag)?),
+            "--from-verdicts" => from_verdicts = Some(value(args, &mut i, flag)?),
+            "--judge" => judge = Some(value(args, &mut i, flag)?),
+            "--out" => out = Some(value(args, &mut i, flag)?),
+            other => return Err(format!("keep: unknown argument {other}")),
+        }
+        i += 1;
+    }
+    let (samples, from_samples, from_verdicts, judge, out) = (
+        samples.ok_or("keep: --samples is required")?,
+        from_samples.ok_or("keep: --from-samples is required")?,
+        from_verdicts.ok_or("keep: --from-verdicts is required")?,
+        judge.ok_or("keep: --judge is required")?,
+        out.ok_or("keep: --out is required")?,
+    );
+    let (h, r) = read_samples(&[PathBuf::from(&samples)])?;
+    let rc = split_panel(h, r, Some(PANEL_HELDOUT_RC))?;
+    if rc.headers.is_empty() {
+        return Err(format!("keep: {samples} holds no heldout_rc panel"));
+    }
+    let (h, r) = read_samples(&[PathBuf::from(&from_samples)])?;
+    let held = split_panel(h, r, Some(PANEL_HELDOUT))?;
+    let fv = read_verdict_rows(Path::new(&from_verdicts))?;
+    let existing = read_verdict_rows(Path::new(&out))?;
+    let (text, stats) = keep_text(&rc.rows, &held.rows, &fv, &judge, &existing)?;
+    std::fs::write(&out, text).map_err(|e| format!("{out}: {e}"))?;
+    for p in &stats.pending {
+        println!("{p}");
+    }
+    eprintln!(
+        "[edge-audit] keep panel={PANEL_HELDOUT_RC} sampled={} kept={} fresh={} judged={} pending={} dropped={} from_judge={judge}",
+        stats.sampled,
+        stats.kept,
+        stats.fresh,
+        stats.judged,
+        stats.pending.len(),
+        stats.dropped
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2015,15 +2259,28 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
         rule,
         panel,
     };
-    let (report, json, md) = report_texts(inputs, &plan)?;
+    let (report, json, md) = report_texts(inputs.clone(), &plan)?;
     eprintln!("{}", report_marker(&report));
-    if Path::new(&plan_path)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(RULE_057_FILE)
-        .is_file()
-    {
-        for line in rule_057_lines(&report, panel) {
+    let plan_dir = Path::new(&plan_path).parent().unwrap_or(Path::new("."));
+    if plan_dir.join(RULE_057.file).is_file() {
+        for line in rule_lines(&RULE_057, &report, panel) {
+            eprintln!("{line}");
+        }
+    }
+    if plan_dir.join(RULE_057B.file).is_file() {
+        // The default `--panel all` report also judges RULE-0.5.7b over its
+        // own panel (`all_rc`), written nowhere: report.json stays the
+        // `all` report (HP.7).
+        let lines = if panel == ReportPanel::All {
+            let rc = ReportInputs {
+                panel: RULE_057B.panel,
+                ..inputs
+            };
+            rule_lines(&RULE_057B, &report_texts(rc, &plan)?.0, RULE_057B.panel)
+        } else {
+            rule_lines(&RULE_057B, &report, panel)
+        };
+        for line in lines {
             eprintln!("{line}");
         }
     }
@@ -2052,6 +2309,7 @@ fn run_report(args: &[String]) -> Result<ExitCode, String> {
 }
 
 /// What `report` reads, its files expanded.
+#[derive(Debug, Clone)]
 struct ReportInputs {
     samples: Vec<PathBuf>,
     verdicts: Vec<PathBuf>,
@@ -2066,12 +2324,15 @@ struct ReportInputs {
 
 /// Which panel `report` reads (HP.5): both, post-stratified per panel (`all`,
 /// the default since the 0.5.7 claim reads it), the fit (HC.2's report) or
-/// the held-out.
+/// the held-out; since HP.7 also the held-out re-drawn at the release
+/// candidate (`heldout_rc`) and the fit with it (`all_rc`, `RULE-0.5.7b.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReportPanel {
     Fit,
     Heldout,
     All,
+    HeldoutRc,
+    AllRc,
 }
 
 impl ReportPanel {
@@ -2080,7 +2341,11 @@ impl ReportPanel {
             "fit" => Ok(ReportPanel::Fit),
             PANEL_HELDOUT => Ok(ReportPanel::Heldout),
             "all" => Ok(ReportPanel::All),
-            other => Err(format!("report: --panel `{other}` is not fit|heldout|all")),
+            PANEL_HELDOUT_RC => Ok(ReportPanel::HeldoutRc),
+            "all_rc" => Ok(ReportPanel::AllRc),
+            other => Err(format!(
+                "report: --panel `{other}` is not fit|heldout|all|heldout_rc|all_rc"
+            )),
         }
     }
     fn as_str(self) -> &'static str {
@@ -2088,6 +2353,8 @@ impl ReportPanel {
             ReportPanel::Fit => "fit",
             ReportPanel::Heldout => PANEL_HELDOUT,
             ReportPanel::All => "all",
+            ReportPanel::HeldoutRc => PANEL_HELDOUT_RC,
+            ReportPanel::AllRc => "all_rc",
         }
     }
 }
@@ -2108,19 +2375,22 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
     // The fit report reads the fit panel only (HC.2): held-out samples and
     // their verdicts may sit beside it, and never enter it. `--panel all`
     // reads both (HP.5).
+    let both = |held_panel: &str| -> Result<PanelSplit, String> {
+        let fit = split_panel(headers.clone(), rows.clone(), None)?;
+        let held = split_panel(headers.clone(), rows.clone(), Some(held_panel))?;
+        Ok(PanelSplit {
+            headers: [fit.headers, held.headers].concat(),
+            rows: [fit.rows, held.rows].concat(),
+            scope: fit.scope.union(&held.scope).cloned().collect(),
+            known: fit.known,
+        })
+    };
     let split = match inp.panel {
         ReportPanel::Fit => split_panel(headers, rows, None)?,
         ReportPanel::Heldout => split_panel(headers, rows, Some(PANEL_HELDOUT))?,
-        ReportPanel::All => {
-            let fit = split_panel(headers.clone(), rows.clone(), None)?;
-            let held = split_panel(headers, rows, Some(PANEL_HELDOUT))?;
-            PanelSplit {
-                headers: [fit.headers, held.headers].concat(),
-                rows: [fit.rows, held.rows].concat(),
-                scope: fit.scope.union(&held.scope).cloned().collect(),
-                known: fit.known,
-            }
-        }
+        ReportPanel::HeldoutRc => split_panel(headers, rows, Some(PANEL_HELDOUT_RC))?,
+        ReportPanel::All => both(PANEL_HELDOUT)?,
+        ReportPanel::AllRc => both(PANEL_HELDOUT_RC)?,
     };
     let (headers, rows) = (split.headers, split.rows);
     let adjudication = read_adjudication(&inp.adjudication)?;
@@ -2134,6 +2404,9 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
         inp.rule,
     )?;
     let mut report = build_report(&headers, &rows, &resolved.verdicts, plan, inp.ci);
+    if report.panel.is_some() {
+        report.panel = Some(inp.panel.as_str());
+    }
     report.agreement = resolved.agreement;
     if report.panel.is_none()
         && let Some(a) = report.agreement.as_mut()
@@ -2158,18 +2431,21 @@ struct PanelSplit {
 }
 
 /// The headers and rows of one panel (`None` = the fit panel, a header with
-/// no `panel`), every id checked unique across all panels; a row belongs to
-/// its label's panel, and a label with headers in two panels is an error.
+/// no `panel`), every id checked unique across all panels. A row belongs to
+/// the panel [`read_samples`] tagged it with, else to its label's panel. A
+/// label of the fit with a header in another panel is an error; the two
+/// held-out panels (`heldout`, `heldout_rc`, HP.7) are draws of the same repos
+/// and share their labels, so an untagged row of such a label is an error.
 fn split_panel(
     headers: Vec<Header>,
     rows: Vec<SampleRow>,
     want: Option<&str>,
 ) -> Result<PanelSplit, String> {
-    let mut panel_of: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut panels_of: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for h in &headers {
-        if let Some(prev) = panel_of.insert(h.label.clone(), h.panel.clone())
-            && prev != h.panel
-        {
+        let set = panels_of.entry(h.label.clone()).or_default();
+        set.insert(panel_name(h));
+        if set.len() > 1 && set.contains("fit") {
             return Err(format!("sample label {}: headers in two panels", h.label));
         }
     }
@@ -2179,12 +2455,32 @@ fn split_panel(
             return Err(format!("sample {}: id appears twice", r.id));
         }
     }
-    let in_panel = |label: &str| panel_of.get(label).cloned().flatten().as_deref() == want;
+    let want_name = want.unwrap_or("fit");
+    let mut kept = Vec::new();
+    for r in rows {
+        let panel = if r.panel.is_empty() {
+            match panels_of.get(&r.label) {
+                Some(set) if set.len() > 1 => {
+                    return Err(format!(
+                        "sample {}: label {} has headers in several panels and the row none",
+                        r.id, r.label
+                    ));
+                }
+                Some(set) => set.iter().next().cloned().unwrap_or_default(),
+                None => "fit".to_string(),
+            }
+        } else {
+            r.panel.clone()
+        };
+        if panel == want_name {
+            kept.push(r);
+        }
+    }
     let headers: Vec<Header> = headers
         .into_iter()
         .filter(|h| h.panel.as_deref() == want)
         .collect();
-    let rows: Vec<SampleRow> = rows.into_iter().filter(|r| in_panel(&r.label)).collect();
+    let rows = kept;
     let scope = rows.iter().map(|r| r.id.clone()).collect();
     Ok(PanelSplit {
         headers,
@@ -2215,23 +2511,56 @@ fn report_marker(report: &ReportOut) -> String {
     )
 }
 
+/// A committed pass rule over one report panel: `report` judges by it when
+/// its file sits beside the plan.
+struct PanelRule {
+    /// The name the lines print (`rule <name> ..`).
+    name: &'static str,
+    /// The rule's file, beside the plan.
+    file: &'static str,
+    /// The panel the rule reads.
+    panel: ReportPanel,
+}
+
 /// The 0.5.7 proof run's pass rule (HP.5), committed before its sample was
-/// drawn; `report` judges by it when the file sits beside the plan.
-const RULE_057_FILE: &str = "RULE-0.5.7.md";
+/// drawn: the fit plus the held-out panel as HC.3 judged it.
+const RULE_057: PanelRule = PanelRule {
+    name: "0.5.7",
+    file: "RULE-0.5.7.md",
+    panel: ReportPanel::All,
+};
+/// The re-measure's pass rule (HP.7), committed before the `heldout_rc`
+/// sample was drawn: RULE-0.5.7's conditions over the fit plus the held-out
+/// panel re-drawn at the release candidate.
+const RULE_057B: PanelRule = PanelRule {
+    name: "0.5.7b",
+    file: "RULE-0.5.7b.md",
+    panel: ReportPanel::AllRc,
+};
 /// Rule condition 3: the independent pairs' kappa floor and their minimum count.
 const RULE_057_KAPPA: f64 = 0.80;
 const RULE_057_MIN_PAIRS: u64 = MIN_REJUDGE as u64;
 
-/// `RULE-0.5.7.md`'s verdict over a report: PASS iff `under_floor` is empty,
-/// each tier of the plan's floors has a stratified p at or above its floor,
-/// and the independent re-judge pairs number at least [`RULE_057_MIN_PAIRS`]
-/// with kappa at least [`RULE_057_KAPPA`]. The rule reads `--panel all`; on
-/// another panel only a refusal line is printed.
-fn rule_057_lines(report: &ReportOut, panel: ReportPanel) -> Vec<String> {
-    if panel != ReportPanel::All {
+/// A rule's verdict over a report (`RULE-0.5.7.md`, `RULE-0.5.7b.md`: one
+/// rule, two panels): PASS iff `under_floor` is empty, each tier of the
+/// plan's floors has a stratified p at or above its floor, and the
+/// independent re-judge pairs number at least [`RULE_057_MIN_PAIRS`] with
+/// kappa at least [`RULE_057_KAPPA`]. On a report of another panel only a
+/// refusal line is printed, and on the rule's panel with its held-out part
+/// missing (a one-panel report) a `not judged` line.
+fn rule_lines(rule: &PanelRule, report: &ReportOut, panel: ReportPanel) -> Vec<String> {
+    let name = rule.name;
+    if panel != rule.panel {
         return vec![format!(
-            "[edge-audit] rule 0.5.7 not judged: panel {} (the rule reads --panel all)",
-            panel.as_str()
+            "[edge-audit] rule {name} not judged: panel {} (the rule reads --panel {})",
+            panel.as_str(),
+            rule.panel.as_str()
+        )];
+    }
+    if report.panel != Some(rule.panel.as_str()) {
+        return vec![format!(
+            "[edge-audit] rule {name} not judged: no held-out samples of panel {}",
+            rule.panel.as_str()
         )];
     }
     let tier_p = |t: &str| {
@@ -2256,7 +2585,7 @@ fn rule_057_lines(report: &ReportOut, panel: ReportPanel) -> Vec<String> {
     let p = |t: &str| f3(tier_p(t));
     vec![
         format!(
-            "[edge-audit] rule 0.5.7 verdict={} under_floor={} fact={} derived={} heuristic={} kappa={}",
+            "[edge-audit] rule {name} verdict={} under_floor={} fact={} derived={} heuristic={} kappa={}",
             if pass { "PASS" } else { "FAIL" },
             if report.under_floor.is_empty() {
                 "none".to_string()
@@ -2270,7 +2599,7 @@ fn rule_057_lines(report: &ReportOut, panel: ReportPanel) -> Vec<String> {
                 .map_or("-".to_string(), |k| format!("{k:.3}"))
         ),
         format!(
-            "[edge-audit] rule 0.5.7 rejudge independent={} self={}",
+            "[edge-audit] rule {name} rejudge independent={} self={}",
             ind.map_or(0, |i| i.independent),
             ind.map_or(0, |i| i.self_pairs)
         ),
@@ -3413,7 +3742,8 @@ fn main() -> ExitCode {
         Some("sample") => run_sample(rest),
         Some("show") => run_show(rest),
         Some("report") => run_report(rest),
-        _ => Err("usage: edge_audit sample|show|report ..".to_string()),
+        Some("keep") => run_keep(rest),
+        _ => Err("usage: edge_audit sample|keep|show|report ..".to_string()),
     };
     match result {
         Ok(code) => code,
@@ -3576,6 +3906,7 @@ mod tests {
                 file: None,
                 line: None,
             },
+            panel: String::new(),
         };
         let header = Header {
             label: "t".to_string(),
@@ -3722,6 +4053,139 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert!(!rows.is_empty());
         assert!(headers[0].excluded.get("skip").copied().unwrap_or(0) > 0);
+
+        // HP.7: the re-drawn held-out panel takes the same rows by the same
+        // key, each under its own id, and its header round-trips.
+        let (held, mh) =
+            sample_text(std::slice::from_ref(&spec), &plan(), Some(PANEL_HELDOUT)).unwrap();
+        let (rc, mr) =
+            sample_text(std::slice::from_ref(&spec), &plan(), Some(PANEL_HELDOUT_RC)).unwrap();
+        assert!(mh[0].ends_with(" panel=heldout"), "{}", mh[0]);
+        assert!(mr[0].ends_with(" panel=heldout_rc"), "{}", mr[0]);
+        let write = |name: &str, text: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let (hp, rp) = (
+            write("heldout.jsonl", &held),
+            write("heldout_rc.jsonl", &rc),
+        );
+        let first_line = rc.lines().next().unwrap();
+        assert!(
+            first_line.ends_with(",\"panel\":\"heldout_rc\"}"),
+            "{first_line}"
+        );
+        let (rh, rr) = read_samples(std::slice::from_ref(&rp)).unwrap();
+        assert_eq!(rh[0].panel.as_deref(), Some(PANEL_HELDOUT_RC));
+        assert_eq!(serde_json::to_string(&rh[0]).unwrap(), first_line);
+        assert!(rr.iter().all(|r| r.panel == PANEL_HELDOUT_RC));
+        let (hh, hr) = read_samples(std::slice::from_ref(&hp)).unwrap();
+        assert_eq!(hr.len(), rr.len());
+        for (h, r) in hr.iter().zip(&rr) {
+            let key = u64::from_str_radix(&h.id, 16).unwrap();
+            assert_eq!(h.id, panel_id(key, None));
+            assert_eq!(r.id, panel_id(key, Some(PANEL_HELDOUT_RC)));
+            assert_ne!(r.id, h.id);
+            assert_eq!(r.id.len(), 16);
+            assert!(same_claim(h, r));
+        }
+        // Both draws in one directory: one label, two held-out panels, every
+        // row in its own file's panel.
+        let (ah, ar) = read_samples(&[hp, rp]).unwrap();
+        let s_held = split_panel(ah.clone(), ar.clone(), Some(PANEL_HELDOUT)).unwrap();
+        let s_rc = split_panel(ah, ar, Some(PANEL_HELDOUT_RC)).unwrap();
+        assert_eq!((s_held.headers.len(), s_rc.headers.len()), (1, 1));
+        assert_eq!(s_held.rows, hr);
+        assert_eq!(s_rc.rows, rr);
+        assert_eq!(s_held.known, s_rc.known);
+        assert!(s_held.scope.is_disjoint(&s_rc.scope));
+        assert_eq!(hh[0].stratum_sizes, rh[0].stratum_sizes);
+    }
+
+    #[test]
+    fn keep_copies_the_earlier_verdict_of_the_same_claim_only() {
+        let rc_of = |r: &SampleRow| SampleRow {
+            id: panel_id(
+                u64::from_str_radix(&r.id, 16).unwrap(),
+                Some(PANEL_HELDOUT_RC),
+            ),
+            ..r.clone()
+        };
+        let a = sample_row("00000000000000aa", "l", "CALLS", "fact", "x");
+        let b = sample_row("00000000000000bb", "l", "CALLS", "fact", "x");
+        let c = sample_row("00000000000000cc", "l", "USES", "fact", "x");
+        // `b`'s re-drawn row moved its site: the same id key, another claim.
+        let mut b_rc = rc_of(&b);
+        b_rc.site.line = Some(9);
+        let fresh = sample_row("00000000000000dd", "l", "USES", "fact", "y");
+        let fresh_rc = rc_of(&fresh);
+        let rc_rows = vec![rc_of(&a), b_rc.clone(), rc_of(&c), fresh_rc.clone()];
+        let v = |id: &str, verdict: &str, judge: &str| VerdictOut {
+            id: id.to_string(),
+            verdict: verdict.to_string(),
+            reason: format!("{judge} read {id}"),
+            judge: judge.to_string(),
+            kept_from: None,
+        };
+        let from_v = vec![
+            v(&a.id, "wrong", "HC.3"),
+            v(&b.id, "correct", "HC.3"),
+            v(&c.id, "correct", "HC.3r"),
+        ];
+        let existing = vec![
+            v(&fresh_rc.id, "correct", "HP.7"),
+            v("ffffffffffffffff", "wrong", "HP.7"),
+        ];
+        let (text, stats) = keep_text(
+            &rc_rows,
+            &[a.clone(), b, c.clone()],
+            &from_v,
+            "HC.3",
+            &existing,
+        )
+        .unwrap();
+        let rows: Vec<VerdictOut> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                VerdictOut {
+                    id: rc_of(&a).id,
+                    kept_from: Some(a.id.clone()),
+                    ..v(&a.id, "wrong", "HC.3")
+                },
+                v(&fresh_rc.id, "correct", "HP.7"),
+            ]
+        );
+        assert_eq!(
+            stats,
+            KeepStats {
+                sampled: 4,
+                kept: 1,
+                fresh: 3,
+                judged: 1,
+                dropped: 1,
+                pending: vec![format!("l {}", b_rc.id), format!("l {}", rc_of(&c).id)],
+            }
+        );
+        // Re-running over its own output is a fixed point.
+        let (again, _) =
+            keep_text(&rc_rows, std::slice::from_ref(&a), &from_v, "HC.3", &rows).unwrap();
+        assert_eq!(again, text);
+        assert!(
+            keep_text(
+                &rc_rows,
+                &[a],
+                &from_v,
+                "HC.3",
+                &[existing[0].clone(), existing[0].clone()]
+            )
+            .unwrap_err()
+            .contains("two verdicts")
+        );
     }
 
     #[test]
@@ -4081,7 +4545,7 @@ mod tests {
             agreement: Some(a),
             ..report
         };
-        let lines = rule_057_lines(&report, ReportPanel::All);
+        let lines = rule_lines(&RULE_057, &report, ReportPanel::All);
         assert!(
             lines[0].starts_with(
                 "[edge-audit] rule 0.5.7 verdict=FAIL under_floor=ACCESSES_DATA|fact,"
@@ -4257,6 +4721,7 @@ mod tests {
                 file: Some("a.py".to_string()),
                 line: Some(2),
             },
+            panel: String::new(),
         }
     }
 
@@ -4549,6 +5014,94 @@ mod tests {
         assert!(all_json.contains("\"panels\": ["));
         assert!(all_md.contains("## Strata by panel"));
 
+        // HP.7: the held-out panel re-drawn at the release candidate
+        // (`heldout_rc`, the same label) beside them moves neither the
+        // calibration, its table nor the `--panel all` report, and
+        // `--panel all_rc` reads the fit with it.
+        let report = |panel: ReportPanel| {
+            let (first, second) =
+                split_rejudge(expand(&d.join("verdicts/*.jsonl").to_string_lossy()).unwrap());
+            report_texts(
+                ReportInputs {
+                    samples: expand(&d.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+                    verdicts: first,
+                    rejudge: second,
+                    adjudication: d.join(ADJUDICATION_FILE),
+                    judge: None,
+                    ci: CiMethod::StratifiedWilson,
+                    rule: RejudgeRule::Matched,
+                    panel,
+                },
+                &plan(),
+            )
+            .unwrap()
+        };
+        let table = precision_table(&cal, &json, &plan()).unwrap();
+        let (no_rc, _, _) = report(ReportPanel::AllRc);
+        assert!(no_rc.panel.is_none(), "the fit alone");
+        assert_eq!(
+            rule_lines(&RULE_057B, &no_rc, ReportPanel::AllRc),
+            vec!["[edge-audit] rule 0.5.7b not judged: no held-out samples of panel all_rc"]
+        );
+        let (mut rc_rows, mut rc_v) = (Vec::new(), String::new());
+        for s in 0..16 {
+            let cat = format!("C{s:02}");
+            for i in 0..10 {
+                let id = format!("r{s:02}{i:02}");
+                rc_rows.push(sample_row(&id, "held", &cat, "fact", "r"));
+                let v = if i == 0 { "wrong" } else { "correct" };
+                rc_v.push_str(&verdict_line(&id, v, "HP.7"));
+            }
+        }
+        std::fs::write(
+            d.join("samples/heldout_rc.jsonl"),
+            jsonl(&[header("held", &sizes(&held_sizes), Some(PANEL_HELDOUT_RC))])
+                + &jsonl(&rc_rows),
+        )
+        .unwrap();
+        std::fs::write(d.join("verdicts/heldout_rc.jsonl"), &rc_v).unwrap();
+        let (cal2, json2, md2) = calibration_texts(inputs(), &plan()).unwrap();
+        assert_eq!(
+            (&json, &md),
+            (&json2, &md2),
+            "calibrate reads no heldout_rc file"
+        );
+        assert_eq!(precision_table(&cal2, &json2, &plan()).unwrap(), table);
+        let (_, all_json2, all_md2) = report(ReportPanel::All);
+        assert_eq!((&all_json, &all_md), (&all_json2, &all_md2));
+        let (rc, rc_json, _) = report(ReportPanel::AllRc);
+        assert_eq!(rc.panel, Some("all_rc"));
+        assert!(rc_json.contains("\"panel\": \"all_rc\""));
+        assert_eq!(rc.repos.keys().collect::<Vec<_>>(), vec!["fit", "held"]);
+        assert_eq!(
+            rc.repos["held"].strata.iter().map(|s| s.n).sum::<u64>(),
+            160
+        );
+        assert_eq!(rc.strata.iter().map(|s| s.n).sum::<u64>(), 192 + 160);
+        let (held_rc, _, _) = report(ReportPanel::HeldoutRc);
+        assert_eq!(held_rc.strata.iter().map(|s| s.wrong).sum::<u64>(), 16);
+        // The 0.5.7b rule reads `all_rc` (no re-judge here: FAIL, kappa `-`);
+        // the 0.5.7 rule refuses that panel and 0.5.7b refuses `all`.
+        let lines = rule_lines(&RULE_057B, &rc, ReportPanel::AllRc);
+        assert!(
+            lines[0].starts_with("[edge-audit] rule 0.5.7b verdict=FAIL under_floor=none fact="),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with(" kappa=-"), "{}", lines[0]);
+        assert_eq!(
+            lines[1],
+            "[edge-audit] rule 0.5.7b rejudge independent=0 self=0"
+        );
+        assert_eq!(
+            rule_lines(&RULE_057, &rc, ReportPanel::AllRc),
+            vec!["[edge-audit] rule 0.5.7 not judged: panel all_rc (the rule reads --panel all)"]
+        );
+        assert_eq!(
+            rule_lines(&RULE_057B, &all, ReportPanel::All),
+            vec!["[edge-audit] rule 0.5.7b not judged: panel all (the rule reads --panel all_rc)"]
+        );
+
         // Fit samples that do not reproduce the fit report are refused.
         std::fs::write(
             d.join("fit/structure.jsonl"),
@@ -4637,7 +5190,7 @@ mod tests {
             .0
         };
         let report = run(&(indep.clone() + &held_self));
-        let lines = rule_057_lines(&report, ReportPanel::All);
+        let lines = rule_lines(&RULE_057, &report, ReportPanel::All);
         assert_eq!(
             lines,
             vec![
@@ -4661,13 +5214,13 @@ mod tests {
         // Self pairs alone never satisfy the rule's kappa.
         let report = run(&held_self);
         assert_eq!(
-            rule_057_lines(&report, ReportPanel::All)[0],
+            rule_lines(&RULE_057, &report, ReportPanel::All)[0],
             "[edge-audit] rule 0.5.7 verdict=FAIL under_floor=none fact=1.000 derived=1.000 \
              heuristic=0.900 kappa=-"
         );
         // Another panel is refused, never judged.
         assert_eq!(
-            rule_057_lines(&report, ReportPanel::Fit),
+            rule_lines(&RULE_057, &report, ReportPanel::Fit),
             vec!["[edge-audit] rule 0.5.7 not judged: panel fit (the rule reads --panel all)"]
         );
     }

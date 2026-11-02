@@ -1,0 +1,371 @@
+{"id":"08492ca5a3ab49ef","verdict":"correct","reason":"the test builds sa.select(...) statements and runs them through user.repos.session.execute against the test database","judge":"HC.3","kept_from":"004403066c9a7db8"}
+{"id":"d6961ae08f054850","verdict":"correct","reason":"main calls time_request(url), which does requests.get(url) on /api/recipes","judge":"HC.3","kept_from":"97944dc9d77bddd4"}
+{"id":"4c60d47f0346b522","verdict":"correct","reason":"the test calls random_email() imported from tests.utils.factories","judge":"HC.3","kept_from":"000049c92db26f6d"}
+{"id":"1345f2298ccd6818","verdict":"correct","reason":"tandoor.py declares def parse_times at module level","judge":"HC.3","kept_from":"0010cb6a758c3bed"}
+{"id":"c585e3468fb9babb","verdict":"correct","reason":"the e2e docker-compose.yml sets LDAP_USER_FILTER in the service environment","judge":"HC.3","kept_from":"0db7c4d964e55a5e"}
+{"id":"419be15eec6003dd","verdict":"correct","reason":"frontend/package.json depends on nuxt ^4.4.6","judge":"HC.3","kept_from":"01936bab7e0392d9"}
+{"id":"2969f3dc7cb47835","verdict":"correct","reason":"the section's settings rule names AppSettings itself (\"Never instantiate AppSettings() directly\"), the class in core/settings/settings.py","judge":"HC.3","kept_from":"0b3147313c64b35b"}
+{"id":"bba10a64d0a8ebf2","verdict":"correct","reason":"the image ENTRYPOINT is docker/entry.sh (copied as run.sh), whose exec mealie runs the console script mealie.main:main","judge":"HC.3","kept_from":"268e6ff0940ab08a"}
+{"id":"125ad413ff0d3b2f","verdict":"correct","reason":"[project.scripts] mealie = \"mealie.main:main\"","judge":"HC.3","kept_from":"b8fc3ab641deff88"}
+{"id":"329ad58583e8214f","verdict":"correct","reason":"@router.post(\"\") on start_data_migration under the groups migrations router","judge":"HC.3","kept_from":"01c514507171a26b"}
+{"id":"7411b9ae211943ab","verdict":"correct","reason":"Household declares preferences: Mapped[HouseholdPreferencesModel] = orm.relationship(..)","judge":"HC.3","kept_from":"002f749b0111487e"}
+{"id":"40e8aa367aef600d","verdict":"correct","reason":"SaveInviteToken declares household_id: UUID","judge":"HC.3","kept_from":"0060e31142d2caa4"}
+{"id":"5693266c3fb3726f","verdict":"correct","reason":"ImagePosition enum declares member left","judge":"HC.3","kept_from":"006c9097732a5e96"}
+{"id":"5f0539fed03ec0d3","verdict":"correct","reason":"UserBase declares admin: bool = False","judge":"HC.3","kept_from":"007d1e4e883a3a27"}
+{"id":"5b439d29cb617fab","verdict":"correct","reason":"AIPromptOverrideUpdate declares content: str = Field(..)","judge":"HC.3","kept_from":"00954bfdf7ccaa23"}
+{"id":"9afd6759b151f907","verdict":"correct","reason":"GroupRecipeAction declares title mapped_column","judge":"HC.3","kept_from":"009ab4331b710bea"}
+{"id":"48168e52fc1cca11","verdict":"correct","reason":"PlanRulesDay declares wednesday = \"wednesday\"","judge":"HC.3","kept_from":"00c882a1ae379998"}
+{"id":"0609a4f39079e684","verdict":"correct","reason":"OrganizerResolver.__init__ sets self.fuzzy_match_threshold, an attribute the class holds","judge":"HP.7"}
+{"id":"cd65aac8c5800c28","verdict":"correct","reason":"requests.get(f\"http://localhost:9000/api/recipes/{name}\") reaches @router.get(\"/{slug}\") under /api/recipes","judge":"HC.3","kept_from":"068891695139a3e8"}
+{"id":"cdc1df1df6462ee2","verdict":"correct","reason":"BaseCRUDAPI implements CrudAPIInterface declared in the same file","judge":"HC.3","kept_from":"45080ffb3eed51fa"}
+{"id":"fb125a2b02f2421f","verdict":"correct","reason":"from tests.utils.factories import random_string","judge":"HC.3","kept_from":"0022549085c1f101"}
+{"id":"ec0b8f928505f244","verdict":"correct","reason":"from mealie.schema._mealie import MealieModel: the package __init__ re-exports MealieModel from mealie_model.py","judge":"HC.3","kept_from":"0061d944e8084ad8"}
+{"id":"ea54e47bbe9cef5c","verdict":"correct","reason":"ShoppingList(SqlAlchemyBase) with SqlAlchemyBase declared in the same migration file","judge":"HC.3","kept_from":"000489b30a44a8db"}
+{"id":"a34b4fde7dc13b7f","verdict":"correct","reason":"Event(MealieModel), MealieModel imported from mealie.schema._mealie","judge":"HC.3","kept_from":"0077df2f20ee5da2"}
+{"id":"9d23550292a19dac","verdict":"correct","reason":"get_all takes q: PaginationQuery = Depends(PaginationQuery)","judge":"HC.3","kept_from":"05241b5280a753cc"}
+{"id":"6254babfc6fff041","verdict":"correct","reason":"nuxt.config.ts reads process.env.THEME_DARK_ERROR","judge":"HC.3","kept_from":"105ce29ed0907371"}
+{"id":"2af4743a14e9c073","verdict":"correct","reason":"resolve_substitutions returns list[tuple[GUID | None, str | None]], GUID the TypeDecorator class","judge":"HC.3","kept_from":"028b6c4256987706"}
+{"id":"945ffc6a73b64fa1","verdict":"correct","reason":"calculate_group_storage(..) -> GroupStorage","judge":"HC.3","kept_from":"037566a50c8a981f"}
+{"id":"1658521f8e702b92","verdict":"correct","reason":"get_all returns PaginationBase[RecipeSummary]","judge":"HC.3","kept_from":"03f96c8a3fc4fe47"}
+{"id":"1834d5b00c21f326","verdict":"correct","reason":"recipe_share_tokens returns GroupRepositoryGeneric[..]","judge":"HC.3","kept_from":"04a27a2fb6a7cf01"}
+{"id":"d4b28f03e1a1956b","verdict":"correct","reason":"test_ai_provider(..) -> AIProviderTestResult","judge":"HC.3","kept_from":"04b6e00925aeef78"}
+{"id":"a67ec88c3a055a97","verdict":"correct","reason":"mock_resilient_fetch(url) -> FetchResult, imported from mealie.pkgs.safehttp.fetch","judge":"HC.3","kept_from":"053f7b0b6643a5a1"}
+{"id":"3e11670244dbbded","verdict":"correct","reason":"get_all returns PaginationBase[ReadCookBook]","judge":"HC.3","kept_from":"0645bbe86318c5d7"}
+{"id":"13fa8bc2e4acf31a","verdict":"correct","reason":"update_many returns list[GroupInDB]","judge":"HC.3","kept_from":"07cfc2b69a00fd46"}
+{"id":"b2a06fc333fffeb3","verdict":"correct","reason":"get_logging_settings() -> AppLoggingSettings","judge":"HC.3","kept_from":"07f52e3d178623ec"}
+{"id":"95ff326461203038","verdict":"correct","reason":"foods_by_alias returns dict[str, IngredientFood]","judge":"HC.3","kept_from":"083d162557924b10"}
+{"id":"43f8da731d8c7762","verdict":"correct","reason":"stale.yml schedules cron '30 1 * * *'","judge":"HC.3","kept_from":"08f2b8dd4810a89b"}
+{"id":"66f10c3918bd523b","verdict":"correct","reason":"the test module imports and exercises delete_old_checked_shopping_list_items","judge":"HC.3","kept_from":"0028360a6fcde3cc"}
+{"id":"a5d2421c0d9b8aed","verdict":"correct","reason":"the test calls _create_recipe(api_client, unique_user)","judge":"HC.3","kept_from":"0007ff10e60fea4e"}
+{"id":"2d5f12b1899c1b08","verdict":"correct","reason":"the test calls random_string()","judge":"HC.3","kept_from":"0046134907ca7ab9"}
+{"id":"071f6f82d5464cff","verdict":"correct","reason":"the test constructs Recipe(..)","judge":"HC.3","kept_from":"005326fef07bd778"}
+{"id":"ca84350495b5b31b","verdict":"correct","reason":"the test calls _patch_fetch(monkeypatch, ..)","judge":"HC.3","kept_from":"00709c5f135194bf"}
+{"id":"06a5db5321cf8307","verdict":"correct","reason":"the test calls _migration()","judge":"HC.3","kept_from":"00995d491d2844bf"}
+{"id":"e39d911d830da102","verdict":"correct","reason":"the test calls _create_food(..)","judge":"HC.3","kept_from":"0099ca5708fa2c63"}
+{"id":"66254c9dfca2e4da","verdict":"correct","reason":"the test constructs StubContext(url=..)","judge":"HC.3","kept_from":"009dad722f1c5c66"}
+{"id":"6834487027085616","verdict":"correct","reason":"the test calls random_string()","judge":"HC.3","kept_from":"00c8d334847ff56e"}
+{"id":"d5b514014787bd2c","verdict":"correct","reason":"the test constructs ShoppingListSave(..)","judge":"HC.3","kept_from":"0117aea447e36fd5"}
+{"id":"3a02982e0c0153db","verdict":"correct","reason":"test_no_mealplans calls create_mealplan_timeline_events()","judge":"HC.3","kept_from":"013a10303f047ca1"}
+{"id":"afd83cfd190ea70b","verdict":"correct","reason":"document_type: EventDocumentType = EventDocumentType.cookbook names the enum","judge":"HC.3","kept_from":"00167089d4873925"}
+{"id":"5065b2abf37a25ab","verdict":"correct","reason":"report_entries: list[ReportEntryCreate] names the class","judge":"HC.3","kept_from":"0025bf85d44673c0"}
+{"id":"7e239d9c64534bcd","verdict":"correct","reason":"set_account runs Account.find(params[:account_id])","judge":"HC.3","kept_from":"0032537679d22aaf"}
+{"id":"d0f3b0b11f14a0f9","verdict":"correct","reason":"the migration create_table :companies","judge":"HC.3","kept_from":"00c612368605a3b1"}
+{"id":"61d13e94879be1d1","verdict":"correct","reason":"the ActiveRecord migration runs add_column :attachments through ActiveRecord","judge":"HP.7"}
+{"id":"81ee2f30b0e35199","verdict":"correct","reason":"the spec calls removeQueryParamsFromUrl('theme') imported from portalThemeHelper","judge":"HC.3","kept_from":"00039c70a3fb4710"}
+{"id":"57a62cfc55e4dcfb","verdict":"correct","reason":"the file declares module Concerns::TwilioVoiceCredentials","judge":"HC.3","kept_from":"0002a5fd02f6649e"}
+{"id":"95b073860ab10801","verdict":"correct","reason":"RecoverRunsJob declares def perform","judge":"HC.3","kept_from":"00015bbf7ff1e648"}
+{"id":"fb9d8ce8b7d21abc","verdict":"correct","reason":"docker/Dockerfile ARG/ENV RAILS_SERVE_STATIC_FILES","judge":"HC.3","kept_from":"008abcc209b4ac27"}
+{"id":"74359ad98a60f4ef","verdict":"correct","reason":"package.json depends on @chatwoot/ninja-keys 1.2.3","judge":"HC.3","kept_from":"0046e1497c716cf1"}
+{"id":"c94a9376c556e8e6","verdict":"correct","reason":"swagger post .../inbox_members documents the accounts-scoped resources :inbox_members (only create, show) route","judge":"HC.3","kept_from":"0381bde6dbd1e4af"}
+{"id":"416c45665e0dd04b","verdict":"correct","reason":"widget conversation action emits ON_CONVERSATION_CREATED; PreChatForm listens on the same constant","judge":"HC.3","kept_from":"07aca4705aade069"}
+{"id":"452e2c7fc88c4447","verdict":"correct","reason":"MfaSettings emits BUS_EVENTS.MFA_STATE_CHANGED; LowBackupCodesBanner listens on it","judge":"HC.3","kept_from":"2ecb17d5943977be"}
+{"id":"fe831cc75cf6757b","verdict":"correct","reason":"widget actionCable emits ON_AGENT_MESSAGE_RECEIVED; widget App.vue listens on it","judge":"HC.3","kept_from":"3e3b2cc160445ead"}
+{"id":"967219bb624cc768","verdict":"correct","reason":"Message.vue emits BUS_EVENTS.TOGGLE_REPLY_TO_MESSAGE; ReplyBox listens on it","judge":"HC.3","kept_from":"484a2094e1466c9f"}
+{"id":"7394834c45383671","verdict":"correct","reason":"conversations store emits BUS_EVENTS.SCROLL_TO_MESSAGE; MessagesView listens on it","judge":"HC.3","kept_from":"50d95987472ea323"}
+{"id":"9bfe99fd7cc14b34","verdict":"correct","reason":"widget ChatAttachment emits BUS_EVENTS.SHOW_ALERT; widget Banner listens on it","judge":"HC.3","kept_from":"5782262f0bf089ad"}
+{"id":"8000ac363092f086","verdict":"correct","reason":"mitt.spec subscribes emitter.on('event') and emits emitter.emit('event') on the same emitter","judge":"HC.3","kept_from":"5fe7f3ee00159754"}
+{"id":"7ee0c3fab1fc9da4","verdict":"correct","reason":"the portals_categories_articles_index route's component is PortalsArticlesIndexPage, the lazy import const at line 9","judge":"HP.7"}
+{"id":"886469d68dc76dd7","verdict":"correct","reason":"the notion route's component is Notion, imported from ./Notion.vue in the same routes file","judge":"HP.7"}
+{"id":"5d1a92683301e093","verdict":"correct","reason":"widget router path /campaigns component: () => import('./views/Campaigns.vue')","judge":"HC.3","kept_from":"00b0c78d6deaf9d1"}
+{"id":"0dd694905f9e2742","verdict":"correct","reason":"the monitors route's component is MonitorsIndex, imported from ./monitors/MonitorsIndex.vue","judge":"HP.7"}
+{"id":"133e271b246ce3dd","verdict":"correct","reason":"the segments/:segmentId child route's component is ContactsIndex, imported from ./pages/ContactsIndex.vue","judge":"HP.7"}
+{"id":"16215579d5d712e2","verdict":"correct","reason":"the teams edit agents route's component is EditAgents, imported from ./Edit/EditAgents.vue","judge":"HP.7"}
+{"id":"20792b15d9ba9cdf","verdict":"correct","reason":"the google_translate route's component is GoogleTranslate, imported from ./GoogleTranslate.vue","judge":"HP.7"}
+{"id":"149aff520be2662c","verdict":"correct","reason":"EnterpriseAccountAPI (accountScoped, enterprise) GETs billing_summary; enterprise routes declare get :billing_summary","judge":"HC.3","kept_from":"0043d3fe9debeb99"}
+{"id":"a5ff7e760aad24c6","verdict":"correct","reason":"assistants API GETs /{id}/faq_stats; routes declare get :faq_stats on captain assistants members","judge":"HC.3","kept_from":"016191e55a898993"}
+{"id":"e6b110f0df89aa30","verdict":"correct","reason":"inboxes API POSTs /{id}/set_inbound_calls; routes declare post :set_inbound_calls, on: :member","judge":"HC.3","kept_from":"01b25c2017622b47"}
+{"id":"babb5e54af999ef1","verdict":"correct","reason":"UserNotificationSettings extends ApiClient and overrides update","judge":"HC.3","kept_from":"0082e74cc5d2335a"}
+{"id":"2fd523b3795d23d6","verdict":"correct","reason":"import { getConversationAPI } from '../../api/conversation' resolves to widget/api/conversation.js","judge":"HC.3","kept_from":"008a24ae3fafaca1"}
+{"id":"ad17c7b15cbc35c7","verdict":"correct","reason":"NotionOAuthClient extends ApiClient imported from ./ApiClient","judge":"HC.3","kept_from":"03658a700af008d9"}
+{"id":"03ebdb0d18103ae1","verdict":"correct","reason":"Folder < ApplicationRecord, app/models/application_record.rb","judge":"HC.3","kept_from":"0030192e866b5835"}
+{"id":"697d4a3c2088c940","verdict":"correct","reason":"class Contacts::FilterService < FilterService: the compact form resolves FilterService at top level, app/services/filter_service.rb","judge":"HC.3","kept_from":"00ef61ebabf5cf3d"}
+{"id":"fa07ad8fc4d3d643","verdict":"correct","reason":"class Webhooks::WhatsappEventsJob < MutexApplicationJob, the only MutexApplicationJob (app/jobs)","judge":"HP.7"}
+{"id":"37742561ffd47a8c","verdict":"correct","reason":"class MacrosExecutionJob < ApplicationJob, the only ApplicationJob (app/jobs/application_job.rb)","judge":"HP.7"}
+{"id":"6ed834d44cd0d511","verdict":"correct","reason":"the custom-roles '' child redirects to 'list', the sibling route custom-roles/list","judge":"HP.7"}
+{"id":"375e632f48b2e33c","verdict":"correct","reason":"the spec's router declares /accounts/:accountId/reports and router.push({ path: '/accounts/1/reports' }) navigates to it","judge":"HC.3","kept_from":"fbae39d93d88ef62"}
+{"id":"4a3f300daa92e474","verdict":"correct","reason":"router.push('/app/accounts/${accountId}/settings/inboxes/${inboxId}/collaborators') matches the inboxes ':inboxId/:tab?' route under frontendURL","judge":"HP.7"}
+{"id":"b5eb2820c6f820a8","verdict":"correct","reason":"router.push('/app/accounts/${accountId}/contacts?page=1') is the frontendURL('accounts/:accountId/contacts') route","judge":"HP.7"}
+{"id":"2b38b3cf468f1b40","verdict":"correct","reason":"router.push('/app/accounts/${accountId}/settings/inboxes/${inboxId}/collaborators') matches the inboxes ':inboxId/:tab?' route under frontendURL","judge":"HP.7"}
+{"id":"0b1efc8232810de5","verdict":"correct","reason":"frontend_url = ENV.fetch('FRONTEND_URL', '')","judge":"HC.3","kept_from":"0195629f898c6678"}
+{"id":"f102a9ba69f5edee","verdict":"correct","reason":"linear_redirect_uri reads ENV.fetch('FRONTEND_URL', nil)","judge":"HC.3","kept_from":"01c696bc5e154ef3"}
+{"id":"e244fd10bd7af024","verdict":"correct","reason":"rack_attack reads ENV.fetch('RATE_LIMIT_AGENT_CREATE', '100')","judge":"HC.3","kept_from":"02943524e53e65b7"}
+{"id":"820d57f4499115b3","verdict":"correct","reason":"Redis::Config reads ENV.fetch('REDIS_SENTINEL_MASTER_NAME', 'mymaster')","judge":"HC.3","kept_from":"0385dc0ea6f2611e"}
+{"id":"a3a774d41747d343","verdict":"correct","reason":"GET .../reports/conversations and .../conversations/ are one route once the trailing slash is normalised (two documented operations, diverged)","judge":"HC.3","kept_from":"b0049cbd2ba4dde7"}
+{"id":"f1633592e026a1b2","verdict":"correct","reason":"schedule.yml cron '0 * * * *' class Internal::TriggerHourlyScheduledItemsJob","judge":"HC.3","kept_from":"0690ec9d5f82e32e"}
+{"id":"bac5ce3fbb498139","verdict":"correct","reason":"schedule.yml cron '*/30 * * * * *' class Internal::CheckRingingTimeoutsJob","judge":"HC.3","kept_from":"388535a037ddfa69"}
+{"id":"62cf212ee5658872","verdict":"correct","reason":"schedule.yml cron '*/30 * * * *' class AutoAssignment::PeriodicAssignmentJob","judge":"HC.3","kept_from":"500b6268ca834627"}
+{"id":"1ab4fbec05ec507f","verdict":"correct","reason":"schedule.yml cron '*/1 * * * *' class Inboxes::FetchImapEmailInboxesJob","judge":"HC.3","kept_from":"58ff4969d89e125c"}
+{"id":"3e1a590407a12a84","verdict":"correct","reason":"schedule.yml cron '* * * * *' class Internal::DispatchConversationMonitorsJob","judge":"HC.3","kept_from":"5af3d6723aa87ef2"}
+{"id":"4d34c189c431c03b","verdict":"correct","reason":"lock.yml schedules cron '0 * * * *'","judge":"HC.3","kept_from":"69b76ea5a32a5f05"}
+{"id":"5333101d75cab785","verdict":"correct","reason":"stale.yml schedules cron '28 3 * * *'","judge":"HC.3","kept_from":"6a048ecdb47c39bc"}
+{"id":"9e401b9716d7f7de","verdict":"correct","reason":"settingsHelper.spec imports and tests getI18nKey from ../settingsHelper","judge":"HC.3","kept_from":"0006027c5fb37d31"}
+{"id":"718ccaaddb6f92d8","verdict":"correct","reason":"the spec describes ContactIdentifyAction from app/actions/contact_identify_action.rb","judge":"HC.3","kept_from":"001a2399709be903"}
+{"id":"0c9e8adf92792446","verdict":"correct","reason":"the spec describes Captain::Llm::MessageTranslationService","judge":"HC.3","kept_from":"0059248ff6b13263"}
+{"id":"36222426e0b700ad","verdict":"correct","reason":"getters.spec reads customRoleList imported from ./fixtures","judge":"HC.3","kept_from":"001690945ade0b90"}
+{"id":"205ecda0d6647dd5","verdict":"correct","reason":"the consumer subscribes channel 'RoomChannel', served by app/channels/room_channel.rb","judge":"HC.3","kept_from":"17b3daa4e2c71b66"}
+{"id":"6397f76efa2f38c3","verdict":"correct","reason":"the MySQL Initial migration creates the States_UISettings table","judge":"HC.3","kept_from":"004d2ffd56bb3212"}
+{"id":"786558284c900c9f","verdict":"correct","reason":"UpdateRuleDto.init calls this.cleanup(this), the method of the same class","judge":"HC.3","kept_from":"000438748ed181e8"}
+{"id":"75ba80a20b1f8a14","verdict":"correct","reason":"postAssetFile maps the response through AssetDto.fromJSON(event.body)","judge":"HC.3","kept_from":"000ff7b6e1fad619"}
+{"id":"24a7fb431db85b82","verdict":"correct","reason":"the MakeAssetPropertiesNullable migration file declares namespace Squidex.Providers.MySql.App.Migrations","judge":"HC.3","kept_from":"000a98e229eeb2a3"}
+{"id":"6a92e2baee00a54d","verdict":"correct","reason":"RemoveContributor.cs declares namespace Squidex.Domain.Apps.Entities.Teams.Commands","judge":"HC.3","kept_from":"000c45c5365de57c"}
+{"id":"fb3fbc1cf1d3bea7","verdict":"correct","reason":"UIController.cs declares namespace Squidex.Areas.Api.Controllers.UI","judge":"HC.3","kept_from":"006008ce217b337f"}
+{"id":"31e8b425ea05145a","verdict":"correct","reason":"QueryModelDto.cs declares namespace Squidex.Areas.Api.Controllers.Schemas.Models","judge":"HC.3","kept_from":"00874116bca53278"}
+{"id":"4b263e5670319038","verdict":"correct","reason":"SearchResult.cs declares namespace Squidex.Domain.Apps.Entities.Search","judge":"HC.3","kept_from":"008bcdd2ad1f4360"}
+{"id":"da74fe1fff63b5db","verdict":"correct","reason":"TextIndexTestBase.cs declares namespace Squidex.Domain.Apps.Entities.Contents.Text","judge":"HC.3","kept_from":"00c920d56a7b2231"}
+{"id":"7526a11ae9c83e3d","verdict":"correct","reason":"Run.cs declares namespace TestSuite.LoadTests","judge":"HC.3","kept_from":"00c9fd4059eeac05"}
+{"id":"850fcf5547d7d31a","verdict":"correct","reason":"AsyncLock.cs declares namespace Squidex.Infrastructure.Tasks","judge":"HC.3","kept_from":"00e25bc92474492f"}
+{"id":"69336380684368d6","verdict":"correct","reason":"the file declares class ContentCleanupTests","judge":"HC.3","kept_from":"000582d38fa970ff"}
+{"id":"303d81dc5bd987e7","verdict":"correct","reason":"the file declares class DynamicUserContextBuilder","judge":"HC.3","kept_from":"0005a0e23d88d498"}
+{"id":"52769638a8ace953","verdict":"correct","reason":"appsettings.json defines messaging.type = \"MongoDb\"","judge":"HC.3","kept_from":"0018870f25d63272"}
+{"id":"525bc16138702176","verdict":"correct","reason":"the test appSettings.json defines eventStore.configuration","judge":"HC.3","kept_from":"005e42692e1a5510"}
+{"id":"891561cf1c40736c","verdict":"correct","reason":"appsettings.json defines scripting.logs.enabled","judge":"HC.3","kept_from":"01915e70d2f9ec34"}
+{"id":"1ac61b8215d54cd4","verdict":"correct","reason":"appsettings.json defines graphQL.maxComplexity","judge":"HC.3","kept_from":"0245935c33106b45"}
+{"id":"f82a2c268619190e","verdict":"correct","reason":"docker-compose-base.yml sets IDENTITY__ADMINEMAIL, the .NET override of IDENTITY:ADMINEMAIL","judge":"HC.3","kept_from":"026418cbdc75abe5"}
+{"id":"4599e40ff4b7231c","verdict":"correct","reason":"Squidex.Web.Tests.csproj PackageReference Meziantou.Analyzer","judge":"HC.3","kept_from":"0119ed50da4127f7"}
+{"id":"906b422cc2770a03","verdict":"correct","reason":"Squidex.Domain.Apps.Core.Model.csproj PackageReference Microsoft.Extensions.Configuration.UserSecrets","judge":"HC.3","kept_from":"01e3b63b106e50d2"}
+{"id":"d80a956062ab275b","verdict":"correct","reason":"the contract operation and the route are the same [HttpDelete] [Route(apps/{app}/backups/{id})] action of BackupsController","judge":"HP.7"}
+{"id":"f635cca624d7c68d","verdict":"correct","reason":"the 7.8.0 entry names ErrorDto (the one ErrorDto class, Squidex.Web) as the shared OpenAPI model it changed","judge":"HC.3","kept_from":"04097a63a4032f75"}
+{"id":"ee1d83dfe2270785","verdict":"correct","reason":"ENTRYPOINT [\"dotnet\", \"Squidex.dll\"] runs the Squidex project's Program.Main","judge":"HC.3","kept_from":"d334fc6b10210b72"}
+{"id":"de3f5c578dc87965","verdict":"correct","reason":"the content 'extension' route's component is ContentsPluginComponent","judge":"HP.7"}
+{"id":"4833c9b355fad372","verdict":"correct","reason":"getApp GETs /api/apps/${appName}; AppsController's [HttpGet] [Route(apps/{app})] is served under the /api area","judge":"HP.7"}
+{"id":"be0673e1d370b7c2","verdict":"correct","reason":"ContributorsMetadataDto implements IContributorsMetadataDto in the same file","judge":"HC.3","kept_from":"0006dd4cda444d99"}
+{"id":"3cdcac58aaf81e9b","verdict":"correct","reason":"FieldDefaultValue implements FieldPropertiesVisitor<any> and defines visitDateTime","judge":"HC.3","kept_from":"00178642e318ef8e"}
+{"id":"68d265551dd07f20","verdict":"correct","reason":"DynamicRuleDto extends ResourceDto and redeclares the static fromJSON ResourceDto declares","judge":"HC.3","kept_from":"002473b8e926daa8"}
+{"id":"18c2429276d1cc7d","verdict":"correct","reason":"ContentRestored : IMigrated<IEvent> implements Migrate()","judge":"HC.3","kept_from":"003c12ad77876eec"}
+{"id":"7b8f16fbe7a00562","verdict":"correct","reason":"WorkflowTransitionDto implements IWorkflowTransitionDto","judge":"HC.3","kept_from":"00492ae87d02e902"}
+{"id":"613437e5b127f0c2","verdict":"correct","reason":"MongoMigrationStatus implements IMigrationStatus and its UnlockAsync is that interface's UnlockAsync","judge":"HP.7"}
+{"id":"7b36e0c7db3daa29","verdict":"correct","reason":"using Squidex.Domain.Apps.Entities.Assets.Commands names that namespace","judge":"HP.7"}
+{"id":"fc47a0e7a15f74bf","verdict":"correct","reason":"using Squidex.Infrastructure.Commands names that namespace","judge":"HP.7"}
+{"id":"434a699d28d0eb01","verdict":"correct","reason":"using Squidex.Infrastructure names that namespace","judge":"HP.7"}
+{"id":"8bf1a0f79ae0d221","verdict":"correct","reason":"ContentCommandMiddleware : CachingDomainObjectMiddleware<..>, in Squidex.Infrastructure.Commands","judge":"HP.7"}
+{"id":"9353dd8ddecd538d","verdict":"correct","reason":"TestSqlBuilder(..) : SqlQueryBuilder(..), with using Squidex.Infrastructure.Queries; the only SqlQueryBuilder","judge":"HP.7"}
+{"id":"8ebdfbf24eb69f43","verdict":"correct","reason":"EFAssetFolderEntity : AssetFolder, with using Squidex.Domain.Apps.Core.Assets; the only AssetFolder","judge":"HP.7"}
+{"id":"0add7cabd3f57735","verdict":"correct","reason":"UserMappingTests : GivenContext, with using Squidex.Domain.Apps.Entities.TestHelpers","judge":"HP.7"}
+{"id":"582bc540e1bc2377","verdict":"correct","reason":"the component's constructor injects ContentsService","judge":"HC.3","kept_from":"026372e1e6d11f68"}
+{"id":"576514a667f78813","verdict":"correct","reason":"AppWorkflowsController's primary constructor takes ICommandBus commandBus","judge":"HC.3","kept_from":"0022d0454a4aa721"}
+{"id":"b6e1d93a031c259f","verdict":"correct","reason":"AppsController's primary constructor takes ICommandBus commandBus","judge":"HC.3","kept_from":"0089ecb1f4e89394"}
+{"id":"ea5286e793719546","verdict":"correct","reason":"AssetChangedTriggerHandler's primary constructor takes IAssetRepository","judge":"HC.3","kept_from":"00bc11fa20b36801"}
+{"id":"80796452f91df93e","verdict":"correct","reason":"AppPlansController's primary constructor takes IUsageGate","judge":"HC.3","kept_from":"0180d175bb25e625"}
+{"id":"05bf42ab658d0fa9","verdict":"correct","reason":"team.component.html has [routerLink]=\"['/app/teams', team.id]\", the app.routes teams/:teamName route","judge":"HP.7"}
+{"id":"47af5cc8c7e1a3d1","verdict":"correct","reason":"the settings 'backups' route has redirectTo: 'jobs', the sibling jobs route","judge":"HP.7"}
+{"id":"44f0b151bf8ff21c","verdict":"correct","reason":"app.component.html links ['/app', app.name, 'settings'], the :appName/settings route","judge":"HP.7"}
+{"id":"da67328f49a5dd28","verdict":"correct","reason":"apps-menu.component.html links ['/app', app.name], the app/:appName route","judge":"HP.7"}
+{"id":"7bf15c96943dc888","verdict":"correct","reason":"app.component.html links ['/app', app.name, 'assets'], the :appName/assets route","judge":"HP.7"}
+{"id":"49bf9cfd389e4b6e","verdict":"correct","reason":"apps-menu.component.html links ['/app/teams', team.id], the teams/:teamName route","judge":"HP.7"}
+{"id":"7fabe8bc184105af","verdict":"correct","reason":"app.component.html links ['/app', app.name, 'content'], the :appName/content route","judge":"HP.7"}
+{"id":"cc4b4d7980c55be8","verdict":"correct","reason":"app.component.html links ['/app', app.name], the app/:appName route","judge":"HP.7"}
+{"id":"2b23ab9561995a23","verdict":"correct","reason":"the catch branch calls this.router.navigate(['/'])","judge":"HP.7"}
+{"id":"c1a0101599257a08","verdict":"correct","reason":"apps-menu.component.html has routerLink=\"/app\"","judge":"HP.7"}
+{"id":"94965c42d93f7336","verdict":"correct","reason":"the catch branch calls this.router.navigate(['/'], ..)","judge":"HP.7"}
+{"id":"eca5d787a0209b2c","verdict":"correct","reason":"navigateByUrl(path || '/app') navigates to /app when no stored path","judge":"HP.7"}
+{"id":"fc7938050d8f2871","verdict":"correct","reason":"the auth interceptor calls router.navigate(['/forbidden'])","judge":"HC.3","kept_from":"42c3035b01b4723c"}
+{"id":"98297932763fcf78","verdict":"correct","reason":"the fixture reads TestConfig.Configuration[\"azureText:serviceEndpoint\"]","judge":"HC.3","kept_from":"07bc9f0b2746ff95"}
+{"id":"01e1e79df6f59320","verdict":"correct","reason":"the test calls sut.RunAsync on MigrateContentsJob","judge":"HC.3","kept_from":"0004378046a4f8d6"}
+{"id":"ff006e699c80711b","verdict":"correct","reason":"ContentsJintExtensionTests tests ContentsJintExtension","judge":"HC.3","kept_from":"000f160b48c326cc"}
+{"id":"b3c5a019e4361767","verdict":"correct","reason":"the test calls sut.GetEmbeddedAssetIds(..), sut a StringReferenceExtractor","judge":"HP.7"}
+{"id":"df991ce339140ab8","verdict":"correct","reason":"APP_ROUTES uses canActivate: [mustBeNotAuthenticatedGuard]","judge":"HC.3","kept_from":"000fcff977ad0d3a"}
+{"id":"60e014a7338dc0bd","verdict":"correct","reason":"postAssetFolder returns Observable<AssetFolderDto>","judge":"HC.3","kept_from":"0025fe532ad0abee"}
+{"id":"1b6213bceb6429bf","verdict":"correct","reason":"NotificationSettingRepository : JpaRepository<NotificationSetting, Long> reads and writes NotificationSetting rows","judge":"HC.3","kept_from":"00843c915bb51e3d"}
+{"id":"3c5a9ddb53e16a9b","verdict":"correct","reason":"createJobWithStatus runs the native query UPDATE tolgee_batch_job through the test's EntityManager","judge":"HC.3","kept_from":"00e17844d074a91e"}
+{"id":"42264bca97d0d7f6","verdict":"wrong","reason":"`left join fetch Permission p` is JPQL fetch-join syntax: `fetch` is a keyword, the joined entity is Permission; no table named fetch","judge":"HP.7"}
+{"id":"54b5b8ec6dfe74db","verdict":"correct","reason":"requireClientForTokenRequest throws OAuth2Error(..), constructing the class in io.tolgee.security.oauth2","judge":"HC.3","kept_from":"000158f7fdc9fbad"}
+{"id":"aef8eed0dcf7b3e6","verdict":"correct","reason":"the cypress spec calls getAndFocusRow(0), declared at line 166 of the same file","judge":"HC.3","kept_from":"0001d8866d8a0073"}
+{"id":"80aaa8524df73102","verdict":"correct","reason":"the test calls parked(budget, ..), the private method of the same class","judge":"HC.3","kept_from":"00053b4f72fa8a4a"}
+{"id":"3533b20b582ce820","verdict":"correct","reason":"the file declares type Props = {..}","judge":"HC.3","kept_from":"0001b3b7df16c16e"}
+{"id":"b53c7fcabaaf7a82","verdict":"correct","reason":"the file declares export const PrefilterTask = (..) =>","judge":"HC.3","kept_from":"00034e1dcbd75dec"}
+{"id":"002c28e3e13c85c2","verdict":"correct","reason":"ImportNamespaceSelectionTestData declares var userAccount: UserAccount","judge":"HC.3","kept_from":"00044e5a14df8495"}
+{"id":"74bbeaa5fe1fd708","verdict":"correct","reason":"the observability compose file sets GF_AUTH_ANONYMOUS_ENABLED=true","judge":"HC.3","kept_from":"057f4dfa677f8d89"}
+{"id":"575882caacd4e2de","verdict":"correct","reason":"backend/app/build.gradle implementation spring-boot-starter-batch-jdbc","judge":"HC.3","kept_from":"003d9ab8eea96582"}
+{"id":"7c9ed0bc67129bed","verdict":"correct","reason":"section 3 introduces QueryTranslationFiltering as one of its two subject classes","judge":"HC.3","kept_from":"01202e0061770f9d"}
+{"id":"65f18091fe0ccb04","verdict":"correct","reason":"@PutMapping projects/{projectId}/ai-prompt-customization under @RequestMapping /v2/ on setPromptProjectCustomization","judge":"HC.3","kept_from":"003f4cb6e45220a3"}
+{"id":"c6e40efd8fb514b6","verdict":"correct","reason":"the PARAMS enum declares ORGANIZATION_SLUG = 'slug'","judge":"HC.3","kept_from":"02d885bbd023c301"}
+{"id":"b17ff1ba43b1c0ff","verdict":"correct","reason":"DELETE /v2/projects/{projectId}/branches/{branchId} reaches BranchController (/v2/projects/{projectId}/branches) @DeleteMapping /{branchId}","judge":"HC.3","kept_from":"008dcf952823c23d"}
+{"id":"0a10beee7e1d2d52","verdict":"correct","reason":"POST .../content-storages/{id}/test reaches ContentStorageController @PostMapping /{id}/test","judge":"HC.3","kept_from":"02f30af3a0b6a975"}
+{"id":"d3f173135457fe43","verdict":"correct","reason":"GET /v2/projects/{projectId}/ai-prompt-customization reaches @GetMapping under /v2/","judge":"HC.3","kept_from":"0351054f2318d831"}
+{"id":"391d6af862846116","verdict":"correct","reason":"LabelServiceOssStub : LabelService overrides deleteLabelsByProjectId","judge":"HC.3","kept_from":"002c79ae1fb170a8"}
+{"id":"381832a508ecffaa","verdict":"correct","reason":"CimdMetadataFetcher : Logging, imported io.tolgee.util.Logging, an interface","judge":"HC.3","kept_from":"006f5ddc1b4dcfc7"}
+{"id":"8b9cb41cb7123007","verdict":"correct","reason":"OnEntityPreUpdate implements EntityPreCommitEvent<T> from the same package","judge":"HC.3","kept_from":"0170547a81152129"}
+{"id":"2488517d2147a04d","verdict":"correct","reason":"GithubOAuthDelegate(..) : ThirdPartyAuthDelegate, an interface of the same package","judge":"HP.7"}
+{"id":"ec7ae9aa52fdaf28","verdict":"correct","reason":"GoogleMachineTranslationProperties(..) : MachineTranslationServiceProperties, an interface of the same package","judge":"HP.7"}
+{"id":"7a16f3acc8fcea22","verdict":"correct","reason":"S3ContentStorageConfig(..) : S3Config, an interface of the same package","judge":"HP.7"}
+{"id":"05c31f352373ab8b","verdict":"correct","reason":"S3ContentStorageConfigProcessor : ContentStorageConfigProcessor<S3ContentStorageConfig>, an interface of the same package","judge":"HP.7"}
+{"id":"257d5dd5366b1b24","verdict":"correct","reason":"import { HOST } from '../../common/constants' resolves to e2e/cypress/common/constants.ts","judge":"HC.3","kept_from":"0005b4224fec0819"}
+{"id":"a7798b1f5d2dae7f","verdict":"correct","reason":"import io.tolgee.AbstractMcpTest names the class in backend/testing package io.tolgee","judge":"HC.3","kept_from":"0006b53575a517a0"}
+{"id":"3fb1896992672eb5","verdict":"correct","reason":"import io.tolgee.batch.AbstractChunkProcessor names that class","judge":"HC.3","kept_from":"000bbc2077e2ba74"}
+{"id":"7151084807b69e2d","verdict":"correct","reason":"import io.tolgee.ee.service.qa.LanguageToolCategory names that data class","judge":"HC.3","kept_from":"001654b4266049c5"}
+{"id":"964b110ddd68280b","verdict":"correct","reason":"import io.tolgee.security.authentication.JwtService names the class in that package","judge":"HC.3","kept_from":"001c1b996d9116cf"}
+{"id":"e152878558e50659","verdict":"correct","reason":"import io.tolgee.formats.genericTable.TableEntry names the data class in TableModel.kt of that package","judge":"HC.3","kept_from":"001e7fc2e83005af"}
+{"id":"7d9e3eb683f58cac","verdict":"correct","reason":"import io.tolgee.dtos.PromptResult names that class","judge":"HC.3","kept_from":"00256acb65a51372"}
+{"id":"8aaa783f4f602dd3","verdict":"correct","reason":"import io.tolgee.service.key.TagService names that class","judge":"HC.3","kept_from":"0026a187a3483d26"}
+{"id":"0c2475f9bc2c5699","verdict":"correct","reason":"import io.tolgee.repository.oauth2.OAuth2ClientDocumentCheckRepository names that interface","judge":"HC.3","kept_from":"0031a575438b6c19"}
+{"id":"625bd3917d3bb7ac","verdict":"correct","reason":"import io.tolgee.fixtures.andIsOk names the extension property val ResultActions.andIsOk in package io.tolgee.fixtures","judge":"HP.7"}
+{"id":"16578cbece733263","verdict":"correct","reason":"TaskControllerBranchingTest : ProjectAuthControllerTest(\"/v2/projects/\")","judge":"HC.3","kept_from":"01dfb83cc29cd7e2"}
+{"id":"d3d5ddcbe5756338","verdict":"correct","reason":"BranchServiceOssStub : AbstractBranchService(..) from the same package","judge":"HC.3","kept_from":"00108fc1331af301"}
+{"id":"bdf3ee5efee0101e","verdict":"correct","reason":"class ImageConverter(..) : ImageProcessor(imageStream), the abstract class of the same package","judge":"HP.7"}
+{"id":"b93ab3779a0b9e48","verdict":"correct","reason":"class ProjectSwitchingTestData : BaseTestData(..), the open class of the same package","judge":"HP.7"}
+{"id":"f5cc7485a12bd8db","verdict":"correct","reason":"constructor parameter mtProviderCatching: MtProviderCatching","judge":"HC.3","kept_from":"000f3425c4e322c9"}
+{"id":"ad7b49f9edfacdd6","verdict":"correct","reason":"constructor parameter emailVerificationService: EmailVerificationService","judge":"HC.3","kept_from":"00636a5fdc66bfc9"}
+{"id":"5082ce80f97954f5","verdict":"correct","reason":"constructor parameter branchMergeChangeModelAssembler: BranchMergeChangeModelAssembler","judge":"HC.3","kept_from":"009b392e27dd5b77"}
+{"id":"429ac13ded65c373","verdict":"correct","reason":"constructor parameter projectHolder: ProjectHolder","judge":"HC.3","kept_from":"009eecb8a2ed40fd"}
+{"id":"221e48929d9045d7","verdict":"correct","reason":"constructor parameter promptService: PromptServiceEeImpl","judge":"HC.3","kept_from":"00bd2bf0a28a5d68"}
+{"id":"1d01c2cb9ec0a2ca","verdict":"correct","reason":"@Autowired lateinit var enabledFeaturesProvider: PublicEnabledFeaturesProvider","judge":"HC.3","kept_from":"013ca0c1191d7f73"}
+{"id":"d6c4362be887431d","verdict":"correct","reason":"constructor parameter rateLimitService: RateLimitService","judge":"HC.3","kept_from":"01a81baf40763cb1"}
+{"id":"d6a60ee92b787ead","verdict":"correct","reason":"@Autowired lateinit var asyncMethodConfiguration: AsyncMethodConfiguration","judge":"HC.3","kept_from":"014d70602fd90902"}
+{"id":"a09113500f38eab5","verdict":"correct","reason":"constructor parameter userAccountService: UserAccountService (same package)","judge":"HC.3","kept_from":"0167a75195ee9533"}
+{"id":"cb807f9cfb1e9996","verdict":"correct","reason":"constructor parameter oauth2AuthorizationService: OAuth2AuthorizationService (same package)","judge":"HC.3","kept_from":"01bb18b7688f48de"}
+{"id":"e3c2c6c084f5c69b","verdict":"correct","reason":"@Autowired @MockitoSpyBean lateinit var batchJobProjectLockingManager: BatchJobProjectLockingManager","judge":"HC.3","kept_from":"0273dc83413d562a"}
+{"id":"7da35328d0676eaa","verdict":"correct","reason":"constructor parameter selfHostedLimitsProvider: SelfHostedLimitsProvider (same package)","judge":"HC.3","kept_from":"04f2067d2f9d4886"}
+{"id":"b5f23298ad3f92e6","verdict":"correct","reason":"index.tsx reads import.meta.env.VITE_APP_TOLGEE_API_KEY","judge":"HC.3","kept_from":"08d8e4e07d74d8ce"}
+{"id":"2d63c46d00404626","verdict":"correct","reason":"inactive-issues.yml schedules cron \"30 1 * * *\"","judge":"HC.3","kept_from":"68554486c946e0d7"}
+{"id":"625ba3b1eea1419d","verdict":"correct","reason":"ProjectStatsServiceTest imports and tests io.tolgee.service.project.ProjectStatsService","judge":"HC.3","kept_from":"0016166a3b930e18"}
+{"id":"b438fd3fb898875d","verdict":"correct","reason":"TranslationVisual renders <TranslationPlurals ..>, the component in TranslationPlurals.tsx","judge":"HC.3","kept_from":"005657816f029c4d"}
+{"id":"9b8b67e205bcdcff","verdict":"correct","reason":"new WebSocket(`${protocol}//${host}/ws/qa-preview`) reaches the handler registered at /ws/qa-preview","judge":"HC.3","kept_from":"52cbf278c55b543f"}
+{"id":"bc6c000735b61e2f","verdict":"correct","reason":"schema.prisma declares model Team (line 41), the Team table the schema module defines","judge":"HP.7"}
+{"id":"4068ff73f16e8405","verdict":"correct","reason":"bearer.ts imports parseTemplateString from @hoppscotch/data and calls it at line 13","judge":"HC.3","kept_from":"0005433ed584ecec"}
+{"id":"9cc1d665ad366c60","verdict":"correct","reason":"team-invitation.resolver declares @Query fields, so the module holds part of the shared Query root resolver","judge":"HC.3","kept_from":"0339b169c1fd8350"}
+{"id":"2fc871324699d1bd","verdict":"correct","reason":"InfraConfigResolver declares its constructor","judge":"HC.3","kept_from":"00172c03a0b5ca16"}
+{"id":"9898a1ee6f723b56","verdict":"correct","reason":"prod.Dockerfile line 8 ENV GOLANG_VERSION=1.26.7","judge":"HC.3","kept_from":"0a76932309db846b"}
+{"id":"6cd7ab7d0f450dba","verdict":"correct","reason":"hoppscotch-kernel package.json depends on typescript 5.9.3","judge":"HC.3","kept_from":"007bcc954f586179"}
+{"id":"12e5383efadb3394","verdict":"correct","reason":"hoppscotch-desktop package.json depends on @iconify-json/lucide","judge":"HC.3","kept_from":"007ed84cd97954a9"}
+{"id":"dbab1edbf60e2b86","verdict":"correct","reason":"hoppscotch-backend package.json depends on @eslint/eslintrc","judge":"HC.3","kept_from":"00abc507f5bfb4c3"}
+{"id":"a26e71ccb060e922","verdict":"correct","reason":"the @ApiOperation on @Get(':slug/:version') documents that same route","judge":"HC.3","kept_from":"07c16e0e7da923fd"}
+{"id":"6c4c26d98966e412","verdict":"correct","reason":"package.json bin hopp -> bin/hopp.js, the CLI entry module","judge":"HC.3","kept_from":"2d96f4be0556d10f"}
+{"id":"d95aed71decd742b","verdict":"correct","reason":"the aio stage (tini ENTRYPOINT) runs CMD [\"node\", \"/usr/src/app/aio_run.mjs\"], copied from the repo's aio_run.mjs","judge":"HC.3","kept_from":"2e146d2d8347d77f"}
+{"id":"b6b9dd8e9eec100d","verdict":"correct","reason":"@Controller path site, @Get('setup') decorates fetchSetupInfo","judge":"HC.3","kept_from":"019128855b4ac3ea"}
+{"id":"a3ed7081a05bef47","verdict":"correct","reason":".route(\"/registration\", get(controller::registration)) names controller.rs's registration fn","judge":"HC.3","kept_from":"5bd2e3b3b23e71cd"}
+{"id":"ef01b121cf584966","verdict":"correct","reason":"BundleNotFound is a variant of the StorageError enum","judge":"HC.3","kept_from":"003b9af40c356d76"}
+{"id":"4c422416693204c8","verdict":"correct","reason":"axios.post(`${VITE_BACKEND_API_URL}/auth/signin`) reaches @Controller auth @Post('signin') on the backend","judge":"HC.3","kept_from":"09c0ad094665279f"}
+{"id":"5d68a7e673c77871","verdict":"correct","reason":"tab.ts TabService implements TabServiceInterface imported from \".\" (index.ts); getTabsRefTo implements its member","judge":"HC.3","kept_from":"00009d06a4542f4d"}
+{"id":"29ad396fa20faa87","verdict":"correct","reason":"WebInstanceService implements InstancePlatformDef imported from @hoppscotch/common/src/platform/instance","judge":"HC.3","kept_from":"1b8f7e94a7fc0c2c"}
+{"id":"803f4b1b39cc1443","verdict":"correct","reason":"import { useToast } from \"@composables/toast\" resolves to common's src/composables/toast.ts","judge":"HC.3","kept_from":"00027d9b41a6ee99"}
+{"id":"0e40fd956a06d604","verdict":"correct","reason":"import from \"~/newstore/settings\" resolves to common's src/newstore/settings.ts","judge":"HC.3","kept_from":"0007f8b2afa578f0"}
+{"id":"b44809a59dcd4018","verdict":"correct","reason":"type Body = HoppRESTReqBody & {..} extends HoppRESTReqBody, the z.infer type of the zod const of that name in v/10/body.ts","judge":"HC.3","kept_from":"01219ecc13d1c430"}
+{"id":"7b57d99ead17719d","verdict":"correct","reason":"FetchAllUsersV2Args extends OffsetPaginationArgs imported from src/types/input-types.args","judge":"HC.3","kept_from":"1523bf00bea307ce"}
+{"id":"8e1297e3231c5486","verdict":"correct","reason":"AdminResolver's constructor injects AdminService","judge":"HC.3","kept_from":"008069238bb7395d"}
+{"id":"d594cebc65a3208e","verdict":"correct","reason":"UserCollectionResolver injects PubSubService imported from src/pubsub/pubsub.service","judge":"HC.3","kept_from":"01d95e4804ef615d"}
+{"id":"78a7a4ad268946a7","verdict":"correct","reason":"r/_id.vue calls router.push({ path: \"/\" })","judge":"HC.3","kept_from":"1d7bc24be9a4d7ab"}
+{"id":"badd4b252d455d3f","verdict":"correct","reason":"oauth.vue calls router.push(\"/\")","judge":"HC.3","kept_from":"4e6b6215ffa3a485"}
+{"id":"6f1897de06aac133","verdict":"correct","reason":"UserDelete.vue calls router.push(`/`)","judge":"HC.3","kept_from":"56a86bf121c8944d"}
+{"id":"560a8db15e85188d","verdict":"correct","reason":"vite.config.ts reads process.env.HOPP_ALLOW_RUNTIME_ENV","judge":"HC.3","kept_from":"02764cc260e50ff7"}
+{"id":"df62d0fcdfd9d628","verdict":"correct","reason":"posthog.service declares @Cron(CronExpression.EVERY_WEEK) on handleCron","judge":"HC.3","kept_from":"ffc230b4e0890624"}
+{"id":"1d6117673c7e40a1","verdict":"correct","reason":"infra-config.service.spec imports and tests InfraConfigService from ./infra-config.service","judge":"HC.3","kept_from":"05f5dc9764efcc74"}
+{"id":"397f00e4ce6e991a","verdict":"correct","reason":"const KERNEL_JS = include_str!(\"kernel.js\") embeds src/kernel.js","judge":"HC.3","kept_from":"cd5df4a9b36b1f88"}
+{"id":"2c7122a0e948b745","verdict":"correct","reason":"useConfigHandler passes PROXY_URL_CONFIGS, imported from helpers/configs","judge":"HC.3","kept_from":"0006b9dd269d36f4"}
+{"id":"a3ce8567565e5e6d","verdict":"correct","reason":"unsetEnv's parameter envs: SandboxEnvs names the type from types/index.ts","judge":"HC.3","kept_from":"0016280223c06a7c"}
+{"id":"ec232476729d5b46","verdict":"correct","reason":"RegisterTables passes system.SysIgnoreApi{} to the AutoMigrate table list","judge":"HC.3","kept_from":"020b291aad756db6"}
+{"id":"3437c1effea69f06","verdict":"correct","reason":"runAnalysis (from line 2155) awaits sendChat({...}) at 2168, sendChat defined in the same file","judge":"HC.3","kept_from":"000a800433220448"}
+{"id":"ef72f4f3e73625b3","verdict":"correct","reason":"layout/index.vue line 91 registers emitter.on('reload', reload): the module holds that handler","judge":"HC.3","kept_from":"1a02939f45f6721b"}
+{"id":"1ab372d22d882290","verdict":"correct","reason":"sysParams.vue declares const setOptions = async () => {}","judge":"HC.3","kept_from":"002af3466ff3afde"}
+{"id":"861536075be13b77","verdict":"correct","reason":"web/.env.production line 5 defines VITE_FILE_API = /api","judge":"HC.3","kept_from":"051c3c6d83ae785f"}
+{"id":"7e53acf37376d227","verdict":"correct","reason":"server/go.mod requires github.com/remyoudompheng/bigfft (indirect)","judge":"HC.3","kept_from":"00ed9da8c86c66a1"}
+{"id":"f43e5bba36706eeb","verdict":"correct","reason":"swagger path /fileUploadAndDownload/importURL post documents the POST importURL route under Group(\"fileUploadAndDownload\")","judge":"HC.3","kept_from":"000de595d9311bc7"}
+{"id":"6cb07a1bf4ecc0c8","verdict":"correct","reason":"swagger /info/updateInfo put documents the announcement plugin's group \"info\" PUT updateInfo","judge":"HC.3","kept_from":"0062e29a4581efdf"}
+{"id":"517b7802b797f2dd","verdict":"correct","reason":"swag @Router /authorityBtn/getAuthorityBtn [post] on GetAuthorityBtn, the route POST getAuthorityBtn under Group(\"authorityBtn\")","judge":"HC.3","kept_from":"019320095cafa81f"}
+{"id":"eb44ecdb29b6842f","verdict":"correct","reason":"tools.vue emits 'reload' on the shared mitt emitter; iframe.vue registers emitter.on('reload')","judge":"HC.3","kept_from":"21f31413866c6045"}
+{"id":"ae0ea031e3586d62","verdict":"correct","reason":"tabs emit 'setKeepAlive' on the emitter; pinia router module listens emitter.on('setKeepAlive')","judge":"HC.3","kept_from":"248d6ebc578efe48"}
+{"id":"4c2f04b7ba9e2d5c","verdict":"correct","reason":"request.js emits 'show-error'; application/index.vue listens emitter.on('show-error')","judge":"HC.3","kept_from":"dea485c063a832f7"}
+{"id":"3baf6305528b1b73","verdict":"correct","reason":"server Dockerfile builds `go build -o server .` and ENTRYPOINT ./server runs main.main","judge":"HC.3","kept_from":"50fe1452d6f01331"}
+{"id":"baea2adfb8137abe","verdict":"correct","reason":"the closeThisPage handler is an arrow defined inside initPage, the enclosing callable runs it","judge":"HC.3","kept_from":"9e4ca26539c219ed"}
+{"id":"6b09f8cd56665407","verdict":"correct","reason":"autoCodePluginApi = SystemApiGroup.AutoCodePluginApi; route pubPlug -> AutoCodePluginApi.Packaged","judge":"HC.3","kept_from":"01768346304f7ac4"}
+{"id":"eb0a5e0bc97e1e59","verdict":"correct","reason":"plugin router skillsApi = api.ApiGroupApp.SystemApiGroup.SkillsApi; DeleteSkill is that type's method","judge":"HC.3","kept_from":"02b5a42d8b521a02"}
+{"id":"99448d2c0547d2a0","verdict":"correct","reason":"authorityApi.GetAuthorityList is AuthorityApi.GetAuthorityList in api/v1/system","judge":"HC.3","kept_from":"0335fb1e747302d5"}
+{"id":"b0d7a4031d71c161","verdict":"correct","reason":"client url /api/deleteApisByIds method delete; server apiRouter (Group api) DELETE deleteApisByIds","judge":"HC.3","kept_from":"0031e6815b21f3f9"}
+{"id":"f4067371ccf7c9c6","verdict":"correct","reason":"client GET /api/freshCasbin; server apiPublicRouterWithoutRecord GET freshCasbin under api","judge":"HC.3","kept_from":"01796b4d32b67c25"}
+{"id":"801738237d0f0f58","verdict":"correct","reason":"TencentCOS declares UploadFile and DeleteFile with OSS's signatures","judge":"HC.3","kept_from":"00cba655663736f9"}
+{"id":"d4b297542cb0a22f","verdict":"correct","reason":"initAuthority defines MigrateTable, TableCreated, InitializerName, InitializeData, DataInserted: SubInitializer's set","judge":"HC.3","kept_from":"03a828c7256a5c83"}
+{"id":"2bbf14d3bfc24ec6","verdict":"correct","reason":"initExcelTemplate.MigrateTable matches SubInitializer.MigrateTable; initExcelTemplate is registered as a SubInitializer","judge":"HC.3","kept_from":"0490caf3ae1372c9"}
+{"id":"76decdaa9dd32ea2","verdict":"correct","reason":"RequirementAnalyzer.New() mcp.Tool implements McpTool.New","judge":"HC.3","kept_from":"0653c1a6b7885e08"}
+{"id":"df27863b1cfddc72","verdict":"correct","reason":"PackageEnter.Injection(file *ast.File) error implements Ast.Injection","judge":"HC.3","kept_from":"06d106be139190d9"}
+{"id":"5bec7c140d7f6baa","verdict":"correct","reason":"Import.Rollback(file *ast.File) error implements Ast.Rollback","judge":"HC.3","kept_from":"07cf7ccdff588462"}
+{"id":"0931a2e1f6b9d1ee","verdict":"correct","reason":"PluginInitializeGorm.Format matches Ast.Format's signature","judge":"HC.3","kept_from":"09d6b43bdbf56aaf"}
+{"id":"97df0e99a25fb324","verdict":"correct","reason":"initExaFileMysql.TableCreated(ctx) bool implements SubInitializer.TableCreated","judge":"HC.3","kept_from":"09d796e01cb38283"}
+{"id":"9c26eed222c8afa2","verdict":"correct","reason":"SysUser.GetUserInfo() any implements the Login interface's GetUserInfo() any in the same file","judge":"HC.3","kept_from":"0b3f73426cbd5392"}
+{"id":"f6043ea246597e71","verdict":"correct","reason":"MysqlInitHandler.InitTables matches TypedDBInitHandler.InitTables","judge":"HC.3","kept_from":"0bf0009d6f4802ce"}
+{"id":"3dcaa2498fcfc552","verdict":"correct","reason":"email.go imports .../server/plugin/email/global, whose package file is gloabl.go","judge":"HC.3","kept_from":"00075734402bb0ca"}
+{"id":"0da0365f8df1f782","verdict":"correct","reason":"ServiceGroup embeds CasbinService, the struct in sys_casbin.go of the same package","judge":"HC.3","kept_from":"0274491c2ce5e6ba"}
+{"id":"340ee4208ad0f37a","verdict":"correct","reason":"vue-router route '/' redirect: '/login'","judge":"HC.3","kept_from":"07315084b7d3d40b"}
+{"id":"8f8344b436ab4b5f","verdict":"correct","reason":"the header's @click does router.push({ path: '/' }) and the router declares path '/'","judge":"HP.7"}
+{"id":"8f2285817d945ae6","verdict":"correct","reason":"registerIcons reads import.meta.env.MODE","judge":"HC.3","kept_from":"0c407fa826dec12f"}
+{"id":"6ec4dca1f1a05a7c","verdict":"correct","reason":"swagger delete /sysOperationRecord/deleteSysOperationRecord and the @Router annotation name one operation","judge":"HC.3","kept_from":"00ca03dd5115ed2a"}
+{"id":"4cb4fb572b85bd01","verdict":"correct","reason":"swagger post /api/ignoreApi and @Router /api/ignoreApi [post] are one route","judge":"HC.3","kept_from":"01b955e49c08eb71"}
+{"id":"f1645d467caee466","verdict":"correct","reason":"swagger post /user/changePassword and @Router /user/changePassword [post] are one operation","judge":"HC.3","kept_from":"05deb47b866c4643"}
+{"id":"04abb399a17630a9","verdict":"correct","reason":"swagger post /authority/copyAuthority and @Router on CopyAuthority are one route","judge":"HC.3","kept_from":"06320e67793a8aca"}
+{"id":"0ac3459e3be3b679","verdict":"correct","reason":"swagger post /fileUploadAndDownload/removeChunk and @Router on RemoveChunk are one operation","judge":"HC.3","kept_from":"072aabec4b99dd3a"}
+{"id":"dc617b180b11726c","verdict":"correct","reason":"swagger post /user/setUserAuthority and @Router on SetUserAuthority are one operation","judge":"HC.3","kept_from":"07bc28bf73afd569"}
+{"id":"50f9dd66e482803d","verdict":"correct","reason":"swagger post /init/initdb and @Router /init/initdb [post] are one operation","judge":"HC.3","kept_from":"0848663110aec9b4"}
+{"id":"eab19c5db819b9b9","verdict":"correct","reason":"@Router /info/findInfo [get] and swagger get /info/findInfo are one route","judge":"HC.3","kept_from":"0c8e9481f0402320"}
+{"id":"f3331117524aeaed","verdict":"correct","reason":"swagger delete /sysDictionaryDetail/deleteSysDictionaryDetail and its @Router are one route","judge":"HC.3","kept_from":"0cef1c61d905d34b"}
+{"id":"5253e446d49e8585","verdict":"correct","reason":"TestVerify calls Verify(testInfo, PageInfoVerify) from utils.Verify","judge":"HC.3","kept_from":"012c04eeabbf7aa9"}
+{"id":"40de3744b270c4f1","verdict":"correct","reason":"Handle builds &MenuCreateResponse{...} composite literal of the struct at line 45","judge":"HC.3","kept_from":"002f1ac36403dda7"}
+{"id":"52106d365eeaf491","verdict":"correct","reason":"initOAuthLink calls privyAuthPost(\"/api/v1/oauth/init\", ..), which fetches `${authBase}${path}` with POST","judge":"HC.3","kept_from":"0169e3ad2ee8ae90"}
+{"id":"f3da1e4d00533c3c","verdict":"correct","reason":"linkEmailWithCode calls privyAuthPost(\"/api/v1/passwordless/link\", ..), a POST to `${authBase}${path}`","judge":"HC.3","kept_from":"25925ae54e68adcb"}
+{"id":"aaca3e69843ca100","verdict":"correct","reason":"sendEmailCode calls privyAuthPost(\"/api/v1/passwordless/init\", ..), a POST to `${authBase}${path}`","judge":"HC.3","kept_from":"80c091215ecb8da7"}
+{"id":"623ab947f0b9e215","verdict":"correct","reason":"linkOAuthWithCode calls privyAuthPost(\"/api/v1/oauth/link\", ..), a POST to `${authBase}${path}`","judge":"HC.3","kept_from":"c196febd89e601e2"}
+{"id":"143e3f664560218b","verdict":"correct","reason":"refreshPrivySession calls privyAuthPost(\"/api/v1/sessions\", ..), a POST to `${authBase}${path}`","judge":"HC.3","kept_from":"d69c1cffe210d1a7"}
+{"id":"d05fdbd96a5b90fd","verdict":"correct","reason":"the test calls createProgram(exploreCommand) imported from ../test/create-program","judge":"HC.3","kept_from":"0000ab562d37973b"}
+{"id":"d1273a22524dbc9d","verdict":"correct","reason":"the test holds the readContract({abi: zoraCreator1155ImplABI, functionName: \"balanceOfBatch\"}) call","judge":"HC.3","kept_from":"04c069e2aff81ed2"}
+{"id":"a745a589f3a32eb4","verdict":"correct","reason":"submit.ts declares export interface SubmittedUserOp","judge":"HC.3","kept_from":"001244285af58d1c"}
+{"id":"88ce6765817c0023","verdict":"correct","reason":"coins-deployments .env.example defines TURNKEY_TARGET_ADDRESS","judge":"HC.3","kept_from":"0442c207168ba6d2"}
+{"id":"be16d4f6243de3c6","verdict":"correct","reason":"limit-orders package.json depends on ds-test (git url)","judge":"HC.3","kept_from":"00604e1b54bed08d"}
+{"id":"d183b68c38d0d320","verdict":"correct","reason":"the 0.3.3 entry is about the httpClient (IHttpClient) MintAPIClient takes, whose default is this const's fetch / post / retries","judge":"HC.3","kept_from":"003110bf9fc211e9"}
+{"id":"f938ca6a2a0a95fd","verdict":"correct","reason":"the test emits TokenCreated (line 101), the event its contract declares at line 41","judge":"HC.3","kept_from":"052a5fc2afbcaf48"}
+{"id":"ac3aa2f1d0b2556f","verdict":"correct","reason":"ERC1155 is IERC1155; _burnBatch emits TransferBatch, IERC1155's event in the same file","judge":"HP.7"}
+{"id":"bec58ff298ee4efa","verdict":"correct","reason":"__MultiOwnable_init emits OwnerUpdated (line 51), declared at line 12","judge":"HC.3","kept_from":"0706890b3c88d16f"}
+{"id":"457bf405faf80cec","verdict":"correct","reason":"ERC1155 is IERC1155; _setApprovalForAll emits ApprovalForAll, IERC1155's event in the same file","judge":"HP.7"}
+{"id":"7822db3771040bb8","verdict":"correct","reason":"test_emitsPremint_whenNewContract emits PremintedV2 (line 535), the test contract's own event","judge":"HP.7"}
+{"id":"30d9f85753c13d53","verdict":"correct","reason":"test_ERC20SetRewardRecipientPercentage emits ERC20MinterConfigSet (line 505), the test contract's own event","judge":"HP.7"}
+{"id":"7862db8f7346ea0c","verdict":"correct","reason":"testZoraNFTEmitsContractURI emits ContractURIUpdated() (line 72), the test contract's own event","judge":"HP.7"}
+{"id":"0ae7440331e3a635","verdict":"correct","reason":"resetSale emits SaleSet (line 149), declared in the same contract","judge":"HP.7"}
+{"id":"161dd3816bdd6f5d","verdict":"correct","reason":"test_SetCreatorRewardRecipientForToken emits RewardsDeposit (line 1147), the test contract's own event","judge":"HP.7"}
+{"id":"a4fdb993cd6e6bef","verdict":"correct","reason":"the test emits TransferBatchWithData (line 183), the test contract's own event","judge":"HP.7"}
+{"id":"c69b66142002d5af","verdict":"correct","reason":"emit IComments.BackfilledComment({..}) names IComments' event","judge":"HP.7"}
+{"id":"39b957171c44ce67","verdict":"correct","reason":"emit IZoraLimitOrderBook.MakerBalanceUpdated(..) names that interface's event","judge":"HP.7"}
+{"id":"6b0ca3dbda7d342e","verdict":"correct","reason":"HookUpgradeGate is IHooksUpgradeGate; emit UpgradeRegistered is that interface's event","judge":"HP.7"}
+{"id":"ff2fb79a7bdf3b9c","verdict":"correct","reason":"CallerAndCommenterImpl is ICallerAndCommenter; emit SwappedOnSecondaryAndCommented is that interface's event","judge":"HP.7"}
+{"id":"9563b7b620fcea2d","verdict":"correct","reason":"BaseCoin is ICoin; emit NameAndSymbolUpdated is ICoin's event","judge":"HP.7"}
+{"id":"e27bc4b0b3ea9ee6","verdict":"correct","reason":"emit IZoraV4CoinHook.CoinMarketRewardsV4(..) names that interface's event","judge":"HP.7"}
+{"id":"a2edb41a63141ea5","verdict":"correct","reason":"ZoraSparks1155 is IUpdateableTokenURI; emit URIsUpdated is that interface's event","judge":"HP.7"}
+{"id":"b033ff3d37895489","verdict":"correct","reason":"CallerAndCommenterImpl is ICallerAndCommenter; emit SwappedOnSecondaryAndCommented is that interface's event","judge":"HP.7"}
+{"id":"ecff241717493483","verdict":"correct","reason":"emit IZoraLimitOrderBook.LimitOrderUpdated(..) names that interface's event","judge":"HP.7"}
+{"id":"0acebcf8531bc68c","verdict":"correct","reason":"emit IComments.SparkedComment(..) names IComments' event","judge":"HP.7"}
+{"id":"14c29a42762d1ae8","verdict":"correct","reason":"package.json bin generate-fork-tests -> ./src/generateForkTests.ts","judge":"HC.3","kept_from":"33f4eeaa94d0a462"}
+{"id":"66523ce121ac9b1d","verdict":"correct","reason":"package.json bin bundle-abis -> ./src/bundle-abis.ts","judge":"HC.3","kept_from":"931ea6d58a3d6e82"}
+{"id":"214ede8cf91d098a","verdict":"correct","reason":"package.json bin update-contract-version -> ./src/update-contract-version.ts","judge":"HC.3","kept_from":"9c3116d2bbde07b9"}
+{"id":"8a12a1e8f85aabe5","verdict":"correct","reason":"package.json bin rename-generated-abi-casing -> ./src/renameGeneratedAbiCasing.ts","judge":"HC.3","kept_from":"ab1de5bc43b8ab07"}
+{"id":"d28a6fb322f3cc4e","verdict":"correct","reason":"the public test_mstoreArrayLength procedure is the function declared at the site","judge":"HC.3","kept_from":"00108582af923039"}
+{"id":"d702840a55bba701","verdict":"correct","reason":"the public test_hook_version procedure is the function declared at the site","judge":"HC.3","kept_from":"0017c48f59b9917b"}
+{"id":"c1aabb0077a24808","verdict":"correct","reason":"the public constant PERMISSION_BIT_SALES of contract Zora1155 (this mock file) is its getter's declaration","judge":"HP.7"}
+{"id":"403e5e8379d9e068","verdict":"correct","reason":"the external onERC1155Received procedure is the function declared at the site","judge":"HC.3","kept_from":"00bd12c18751fab0"}
+{"id":"b87d9ced3ddcf4eb","verdict":"correct","reason":"the public test_getClaimableAmount_after_vesting_period_ends procedure is the function declared at the site","judge":"HC.3","kept_from":"00d441c013cd5133"}
+{"id":"8966483b8161c90c","verdict":"correct","reason":"the public function testPermitSparkCommentCrossChain of CommentsPermitTest is the procedure's declaration","judge":"HP.7"}
+{"id":"e126742ccd8182ab","verdict":"correct","reason":"PremintConfigVersion enum declares V2","judge":"HC.3","kept_from":"03e62edfda646bc7"}
+{"id":"2529f5fa75ee332d","verdict":"correct","reason":"ERC1155.setApprovalForAll implements IERC1155.setApprovalForAll declared in the same file","judge":"HC.3","kept_from":"000200e804de2007"}
+{"id":"1bd65694f73d8634","verdict":"correct","reason":"IZoraCreator1155PremintExecutor is IGetContractAddress, imported from @zoralabs/shared-contracts/interfaces/IGetContractAddress.sol","judge":"HC.3","kept_from":"0328440f4558d1e1"}
+{"id":"f8cc3ddac1080ebd","verdict":"correct","reason":"interface IZoraCreator1155 is .. IMintWithRewardsRecipients, the only interface of that name","judge":"HP.7"}
+{"id":"bc17b1e4d9070719","verdict":"correct","reason":"the factory is IVersionedContract, imported from @zoralabs/shared-contracts/interfaces/IVersionedContract.sol","judge":"HP.7"}
+{"id":"feb78367249c01dd","verdict":"correct","reason":"interface ICoinbaseSmartWallet is .. IUUPSUpgradeable, the interface in the same directory","judge":"HP.7"}
+{"id":"fc4c0393ad1546f4","verdict":"correct","reason":"import from \"@zoralabs/protocol-sdk\", the workspace package whose source entry is src/index.ts","judge":"HC.3","kept_from":"00190517c3443966"}
+{"id":"6a899a31e6998f30","verdict":"correct","reason":"AllowListParamType = SaleStartAndEnd & {..}","judge":"HC.3","kept_from":"093c01f026849ec2"}
+{"id":"2de29e1849106e93","verdict":"correct","reason":"DeployAllDevContracts is CoinsDeployerBase, imported from ../src/deployment/CoinsDeployerBase.sol","judge":"HC.3","kept_from":"0149437ba10de097"}
+{"id":"44361bd1f2210500","verdict":"correct","reason":"DeployPreminterImpl is ZoraDeployerBase, imported from ../src/deployment/ZoraDeployerBase.sol","judge":"HC.3","kept_from":"0203f01cfb022188"}
+{"id":"4b626fdfc478ef64","verdict":"correct","reason":"main reads process.env.TURNKEY_API_PUBLIC_KEY","judge":"HC.3","kept_from":"036fd0c925b13412"}
+{"id":"fa43ded8be65f01f","verdict":"correct","reason":"fixedPriceMinter is getContractFactory(\"FixedPriceAllowedMintersStrategy\").deploy(); setSale calls that contract's setSale","judge":"HC.3","kept_from":"06eafb3a75413bd3"}
+{"id":"fb69abc93039357c","verdict":"correct","reason":"writeContract({abi: CREATOR_COIN_VESTING_ABI, functionName: \"claimVesting\"}) on a creator coin address calls CreatorCoin.claimVesting","judge":"HC.3","kept_from":"1b9a4cff648fc92e"}
+{"id":"286e163cedcd9d15","verdict":"correct","reason":"readContract({abi: uniswapQuoterABI, functionName: \"quoteExactInputSingle\"}) calls IQuoterV2.quoteExactInputSingle","judge":"HC.3","kept_from":"1d2f83bb855d282f"}
+{"id":"dc063c476995be7b","verdict":"correct","reason":"readContract({abi: uniswapQuoterABI, functionName: \"quoteExactOutputSingle\"}) calls IQuoterV2.quoteExactOutputSingle","judge":"HC.3","kept_from":"38a28436144c5af6"}
+{"id":"f6e9f0eed2d86d59","verdict":"correct","reason":"readContract({abi: SMART_WALLET_ABI, functionName: \"nextOwnerIndex\"}) calls IMultiOwnable.nextOwnerIndex","judge":"HC.3","kept_from":"513c2496e507568a"}
+{"id":"89ea6df5eb62d3f4","verdict":"correct","reason":"readContract({abi: SMART_WALLET_ABI, functionName: \"ownerAtIndex\"}) calls IMultiOwnable.ownerAtIndex","judge":"HC.3","kept_from":"9c0ce7071111f21b"}
+{"id":"7da359ec9592ac36","verdict":"correct","reason":"simulateContract with the DeterministicUUPSProxyDeployer ABI (out/ json) calls safeCreate2AndUpgradeToAndCall","judge":"HC.3","kept_from":"ac78c8b6fb26f552"}
+{"id":"33a5f113d6d4bd90","verdict":"correct","reason":"readContract({abi: CREATOR_COIN_VESTING_ABI, functionName: \"getClaimableAmount\"}) calls CreatorCoin.getClaimableAmount","judge":"HC.3","kept_from":"d66501df5c41276c"}
+{"id":"6905a3f6f7b668be","verdict":"correct","reason":"encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"setupNewTokenWithCreateReferral\"}) targets ZoraCreator1155Impl's function","judge":"HC.3","kept_from":"04c926a2fe5439a2"}
+{"id":"6fdede6b21574ee4","verdict":"correct","reason":"encodeFunctionData({abi: erc20MinterABI, functionName: \"setSale\"}) targets ERC20Minter.setSale","judge":"HC.3","kept_from":"0a01199b016d2ae2"}
+{"id":"7266e907d5020e31","verdict":"correct","reason":"simulateContract on the IMMUTABLE_CREATE2_FACTORY with its ABI calls safeCreate2, the function the ImmutableCreate2Factory interface declares","judge":"HC.3","kept_from":"0aed5546f817fafd"}
+{"id":"d6cd0ecc5eae688c","verdict":"correct","reason":"encodeFunctionData({abi: zoraCreatorFixedPriceSaleStrategyABI, functionName: \"setSale\"}) targets ZoraCreatorFixedPriceSaleStrategy.setSale","judge":"HC.3","kept_from":"0b061a1777b897ba"}
+{"id":"75acbff0b54459c3","verdict":"correct","reason":"encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"adminMint\"}) targets ZoraCreator1155Impl.adminMint","judge":"HC.3","kept_from":"0cf5a5d681771509"}
+{"id":"acf83ee4801d2d13","verdict":"correct","reason":"writeContract({abi: commentsImplABI, functionName: \"comment\"}) calls CommentsImpl.comment","judge":"HC.3","kept_from":"0e23f493713422d5"}
+{"id":"d1f698d9e635132d","verdict":"correct","reason":"simulateContract({abi: sponsoredSparksSpenderABI, functionName: \"setVerifierStatus\"}) calls SponsoredSparksSpender.setVerifierStatus","judge":"HC.3","kept_from":"1b694cac6d21af6c"}
+{"id":"aae4849ef32a5c6d","verdict":"correct","reason":"encodeFunctionData({abi: upgradeGateAbi, functionName: \"initialize\"}) targets UpgradeGate.initialize","judge":"HC.3","kept_from":"1fd831c85c5d340b"}
+{"id":"7650ba1612d2592a","verdict":"correct","reason":"encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"setupNewToken\"}) targets ZoraCreator1155Impl.setupNewToken","judge":"HC.3","kept_from":"21c89a733584e109"}
+{"id":"b815d2fec1936128","verdict":"correct","reason":"encodeFunctionData({abi: zoraSparksManagerImplABI, functionName: \"initialize\"}) targets ZoraSparksManagerImpl.initialize","judge":"HC.3","kept_from":"25d4ca750667b950"}
+{"id":"f85d7bd23ee31800","verdict":"correct","reason":"setup.test exercises the setup command in setup.tsx","judge":"HC.3","kept_from":"0664ce9ce1db825e"}
+{"id":"6d65af9ca8a8b759","verdict":"correct","reason":"getProfile's options: Options<GetProfileData, ..> names the type from types.gen.ts","judge":"HC.3","kept_from":"0037846b37d4cfb6"}

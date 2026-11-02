@@ -4,21 +4,36 @@
 # since FD.3d (ruling FD-2), the cohort's cross-service repo microservices-demo). Since 0.5.7 (HC.2) the
 # rows marked `"panel": "heldout"` are the calibrated-confidence held-out panel (seven cohort repos the
 # fit never saw), sampled into their own file and judged against the fit by the rule in
-# dev-notes/confidence-gate-0.5.7.md.
+# dev-notes/confidence-gate-0.5.7.md. Since HP.7 the same seven rows are re-drawn with the release
+# candidate's build as the panel `heldout_rc` (bench/edge-audit/RULE-0.5.7b.md); `heldout` stays as HC.3
+# judged it (the calibration's input).
 #
 #   bash scripts/edge-audit.sh sample              fetch the rank-gate snapshots, extract glia and the cohort rows,
 #                                                  sample every fit row into bench/edge-audit/samples/audit.jsonl
 #   bash scripts/edge-audit.sh sample-heldout      extract the held-out rows, sample them (n 10 per pooled stratum)
 #                                                  into bench/edge-audit/samples/heldout.jsonl; the fit is not re-drawn
-#   bash scripts/edge-audit.sh show <label> [--id <hex>]   print samples with live source excerpts from the snapshot copy
-#   bash scripts/edge-audit.sh report [--check] [--judge <name>]   bench/edge-audit/report.{json,md} from the fit panel's
-#                                                  samples + verdicts (held-out files beside them never enter it)
+#   bash scripts/edge-audit.sh sample-heldout-rc   build edge_audit from a git archive of CANDIDATE_REV (plus this
+#                                                  checkout's engine/examples/edge_audit.rs) in an isolated target,
+#                                                  re-draw the held-out rows into samples/heldout_rc.jsonl
+#                                                  (`--panel heldout_rc`), then keep-heldout-rc
+#   bash scripts/edge-audit.sh keep-heldout-rc     verdicts/heldout_rc.jsonl: HC.3's verdict on every re-drawn row
+#                                                  that states a claim HC.3 judged (`kept_from`), the fresh rows'
+#                                                  verdicts already there; prints the fresh ids still unjudged
+#   bash scripts/edge-audit.sh show <label> [--panel heldout_rc] [--id <hex>]   print samples with live source
+#                                                  excerpts from the snapshot copy
+#   bash scripts/edge-audit.sh report [--check] [--judge <name>] [--panel all|fit|heldout|heldout_rc|all_rc]
+#                                                  bench/edge-audit/report.{json,md}, `--panel all` by default (the
+#                                                  0.5.7 rule's panel); with RULE-0.5.7b.md beside the plan it also
+#                                                  prints that rule's lines over `--panel all_rc` (fit + heldout_rc),
+#                                                  computed in the same run and written nowhere
 #   bash scripts/edge-audit.sh calibrate [--check] bench/edge-audit/calibration.{json,md}: the held-out panel against
 #                                                  the fit report at FIT_REV, by the committed rule
 #
 # Env: GLIA_RANK_GATE_DIR (default ~/.cache/glia-rank-gate; shared with the rank gate, never deleted),
 # GLIA_COHORT_DIR (default ~/.cache/glia-cohort; the cohort's bare clones, read only, never fetched here),
-# CARGO_TARGET_DIR (default <this checkout>/target). GLIA_RANK_PRIVATE is unset: only public snapshots are audited.
+# CARGO_TARGET_DIR (default <this checkout>/target), GLIA_EDGE_AUDIT_CANDIDATE_DIR (default
+# $GLIA_RANK_GATE_DIR/edge-audit/candidate@<rev12>: the candidate's archive and isolated build; its target dir is
+# removed once the binary is copied out). GLIA_RANK_PRIVATE is unset: only public snapshots are audited.
 # Every line this script prints starts `[edge-audit]`.
 set -uo pipefail
 unset GLIA_RANK_PRIVATE
@@ -31,6 +46,10 @@ GATE_SNAP=$HERE/bench/rank-gate/snapshots.json
 COHORT_REPOS=$HERE/bench/cohort/repos.json
 SAMPLES=$AD/samples/audit.jsonl
 HELDOUT=$AD/samples/heldout.jsonl
+HELDOUT_RC=$AD/samples/heldout_rc.jsonl
+# The release candidate RULE-0.5.7b.md draws `heldout_rc` with (HP.7): the HEAD that run started from, every
+# graph-changing 0.5.7 packet landed (graph-identical to the fit's 558fa992).
+CANDIDATE_REV=54978e17b8dd2f9bc9aedfa0a99f4ed497bd1efc
 # The calibration's fit (dev-notes/confidence-gate-0.5.7.md): the 0.5.6 audit (GP.14) as committed at this
 # sha, read with `git show`, never from the working tree, so a later re-audit moves no calibration number.
 FIT_REV=cd541240355e9d238bebcbdf0eb8ac269ec29557
@@ -40,6 +59,7 @@ DIR=${GLIA_RANK_GATE_DIR:-$HOME/.cache/glia-rank-gate}
 COHORT=${GLIA_COHORT_DIR:-$HOME/.cache/glia-cohort}
 TARGET=${CARGO_TARGET_DIR:-$HERE/target}
 BIN=$TARGET/release/examples/edge_audit
+CAND=${GLIA_EDGE_AUDIT_CANDIDATE_DIR:-$DIR/edge-audit/candidate@${CANDIDATE_REV:0:12}}
 say() { echo "[edge-audit] $*"; }
 
 # The audited trees of one panel (`fit`, `heldout` or `all`) as `name source panel dir label rev skip..`
@@ -122,9 +142,31 @@ archive_copy() {
     || { rm -rf "$tmp"; say "FAILED (archive $what $rev)"; exit 2; }
 }
 
-# Extract one panel's copies and sample them into `out` (`--panel heldout` for the held-out panel).
+# edge_audit built from a `git archive` of CANDIDATE_REV with this checkout's engine/examples/edge_audit.rs
+# (an example, not hashed: the graph is the candidate's), in an isolated release target under $CAND with
+# CARGO_INCREMENTAL=0; the binary is copied to $CAND/edge_audit and the target dir removed. Sets BIN.
+build_candidate() {
+  local src=$CAND/src tgt=$CAND/target
+  if [ ! -f "$src/.complete" ]; then
+    rm -rf "$src" && mkdir -p "$src" \
+      && git -C "$HERE" archive "$CANDIDATE_REV" | tar -x -C "$src" && touch "$src/.complete" \
+      || { say "FAILED (archive candidate $CANDIDATE_REV)"; exit 2; }
+  fi
+  cp "$HERE/engine/examples/edge_audit.rs" "$src/engine/examples/edge_audit.rs" \
+    || { say "FAILED (copy edge_audit.rs into the candidate)"; exit 2; }
+  say "build edge_audit (release) at candidate ${CANDIDATE_REV:0:12} in $tgt"
+  (cd "$src" && CARGO_TARGET_DIR=$tgt CARGO_INCREMENTAL=0 cargo build --release --quiet -p glia-engine \
+    --example edge_audit > "$CAND/build.log" 2>&1) \
+    || { tail -20 "$CAND/build.log"; say "FAILED (build candidate edge_audit)"; exit 2; }
+  cp "$tgt/release/examples/edge_audit" "$CAND/edge_audit" && rm -rf "$tgt" \
+    || { say "FAILED (copy the candidate binary)"; exit 2; }
+  BIN=$CAND/edge_audit
+}
+
+# Extract one panel's copies and sample them into `out` as panel `draw` (default: the rows' panel;
+# `heldout_rc` re-draws the held-out rows with the candidate's build, HP.7).
 sample_panel() {
-  local panel=$1 out=$2 t0 r name source pn dir label rev skips args=() s gd
+  local panel=$1 out=$2 draw=${3:-$1} t0 r name source pn dir label rev skips args=() s gd
   t0=$(date +%s)
   r=$(rows "$panel") || exit 2
   [ -n "$r" ] || { say "FAILED (no $panel rows in $SNAP)"; exit 2; }
@@ -145,28 +187,46 @@ sample_panel() {
     args+=(--repo "$dir" --label "$label" --rev "$rev")
     for s in $skips; do args+=(--skip "$s"); done
   done <<< "$r"
-  build
+  if [ "$draw" = heldout_rc ]; then build_candidate; else build; fi
   mkdir -p "$AD/samples"
-  GLIA_NO_PERSIST=1 "$BIN" sample "${args[@]}" --plan "$PLAN" --panel "$panel" --out "$out" \
-    2> "$DIR/edge-audit/sample-$panel.log"
+  GLIA_NO_PERSIST=1 "$BIN" sample "${args[@]}" --plan "$PLAN" --panel "$draw" --out "$out" \
+    2> "$DIR/edge-audit/sample-$draw.log"
   local rc=$?
-  grep '^\[edge-audit\]' "$DIR/edge-audit/sample-$panel.log"
-  [ $rc -eq 0 ] || { tail -5 "$DIR/edge-audit/sample-$panel.log"; say "FAILED (sample, exit $rc)"; exit 2; }
-  say "sample: wrote $out panel=$panel s=$(( $(date +%s) - t0 ))"
+  grep '^\[edge-audit\]' "$DIR/edge-audit/sample-$draw.log"
+  [ $rc -eq 0 ] || { tail -5 "$DIR/edge-audit/sample-$draw.log"; say "FAILED (sample, exit $rc)"; exit 2; }
+  say "sample: wrote $out panel=$draw s=$(( $(date +%s) - t0 ))"
 }
 
 do_sample() { sample_panel fit "$SAMPLES"; }
 do_sample_heldout() { sample_panel heldout "$HELDOUT"; }
+do_sample_heldout_rc() { sample_panel heldout "$HELDOUT_RC" heldout_rc; do_keep_heldout_rc; }
+
+# HC.3's verdicts kept onto the re-drawn held-out panel (RULE-0.5.7b.md): the fresh ids still unjudged on
+# stdout, `[edge-audit] keep ..` on stderr. Uses the candidate binary when sample-heldout-rc just built it.
+do_keep_heldout_rc() {
+  [ -f "$HELDOUT_RC" ] || { say "FAILED (no $HELDOUT_RC: run sample-heldout-rc first)"; exit 2; }
+  [ "$BIN" = "$CAND/edge_audit" ] || build
+  "$BIN" keep --samples "$HELDOUT_RC" --from-samples "$HELDOUT" --from-verdicts "$AD/verdicts/heldout.jsonl" \
+    --judge HC.3 --out "$AD/verdicts/heldout_rc.jsonl"
+}
 
 do_show() {
-  local label=${1:-} r name source pn dir lab rev skips root="" file=$SAMPLES
-  [ -n "$label" ] || { echo "usage: $0 show <label> [--id <hex>]" >&2; exit 2; }
+  local label=${1:-} r name source pn dir lab rev skips root="" file=$SAMPLES want="" rest=()
+  [ -n "$label" ] || { echo "usage: $0 show <label> [--panel heldout_rc] [--id <hex>]" >&2; exit 2; }
   shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = --panel ]; then want=${2:-}; shift 2; else rest+=("$1"); shift; fi
+  done
+  case "$want" in
+    ""|heldout|heldout_rc) ;;
+    *) say "FAILED (show --panel $want: only heldout_rc picks a file)"; exit 2 ;;
+  esac
   r=$(rows all) || exit 2
   while read -r name source pn dir lab rev skips; do
     if [ "$lab" = "$label" ]; then
       root=$dir
       [ "$pn" = heldout ] && file=$HELDOUT
+      [ "$pn" = heldout ] && [ "$want" = heldout_rc ] && file=$HELDOUT_RC
     fi
   done <<< "$r"
   [ -n "$root" ] || { say "FAILED (no snapshot labelled $label)"; exit 2; }
@@ -180,7 +240,7 @@ for l in open(sys.argv[1]):
     root=$DIR/glia@${rev:0:12}
   fi
   build
-  "$BIN" show "$file" --root "$root" --label "$label" "$@"
+  "$BIN" show "$file" --root "$root" --label "$label" "${rest[@]}"
 }
 
 do_report() {
@@ -221,8 +281,10 @@ do_calibrate() {
 case "${1:-}" in
   sample) do_sample ;;
   sample-heldout) do_sample_heldout ;;
+  sample-heldout-rc) do_sample_heldout_rc ;;
+  keep-heldout-rc) do_keep_heldout_rc ;;
   show) shift; do_show "$@" ;;
   report) shift; do_report "$@" ;;
   calibrate) shift; do_calibrate "$@" ;;
-  *) echo "usage: $0 sample|sample-heldout|show <label> [--id <hex>]|report [--check] [--judge <name>]|calibrate [--check]" >&2; exit 2 ;;
+  *) echo "usage: $0 sample|sample-heldout|sample-heldout-rc|keep-heldout-rc|show <label> [--panel heldout_rc] [--id <hex>]|report [--check] [--judge <name>] [--panel <p>]|calibrate [--check]" >&2; exit 2 ;;
 esac

@@ -158,3 +158,42 @@ A re-judge pair is a self pair when its re-judge name, less one trailing `r`, is
 judge's (GP.14r / GP.14, HC.3r / HC.3); the rule's kappa is over the independent pairs only.
 HP.5's re-judge (`HP.5x`) is a separate, blinded `claude -p` process per snapshot. The write-up
 is `dev-notes/edge-precision-0.5.7.md`.
+
+## The re-measure (HP.7 / HP.8): the held-out panel re-drawn at the release candidate
+
+HP.5's FAIL came from the held-out panel, which HC.2 drew and HC.3 judged at 221f9c84, before the
+twelve HQ precision fixes. `RULE-0.5.7b.md`, committed before this draw, re-measures the same claim
+on a new panel `heldout_rc`; `RULE-0.5.7.md`, its verdict and the `heldout` files stay as written.
+
+- **Draw.** `bash scripts/edge-audit.sh sample-heldout-rc` builds `edge_audit` from a `git archive`
+  of `CANDIDATE_REV` (54978e17, graph-identical to the fit's 558fa992) plus this checkout's
+  `engine/examples/edge_audit.rs`, in an isolated release target (`GLIA_EDGE_AUDIT_CANDIDATE_DIR`,
+  removed once the binary is copied out), and runs `edge_audit sample --panel heldout_rc` over the
+  seven `"panel": "heldout"` rows: HC.2's key, seed and n (10 per pooled stratum), each header
+  marked `"panel":"heldout_rc"`, into `samples/heldout_rc.jsonl`. A `heldout_rc` row's id is the
+  xxh64 of the panel name and its key's 16 hex digits, so it never equals the `heldout` id of the
+  same edge; selection and order stay by the key. A row's panel is its samples file's header's, so
+  the two held-out panels share their labels.
+- **Keep.** `bash scripts/edge-audit.sh keep-heldout-rc` (`edge_audit keep`) writes
+  `verdicts/heldout_rc.jsonl` in sample order: a re-drawn row that states the same claim as a
+  `heldout` row HC.3 judged (same label, rev, category, tier, emitter, rule, site and both ends)
+  keeps HC.3's verdict and reason, with judge `HC.3` and `kept_from` naming the `heldout` id; every
+  other row is fresh and keeps the verdict rows already written for it. It prints the fresh ids
+  still unjudged and `[edge-audit] keep panel=heldout_rc sampled=<n> kept=<k> fresh=<f>
+  judged=<j> pending=<p> dropped=<d> from_judge=HC.3`. Re-running it over its own output changes
+  nothing.
+- **Judging.** Fresh ids are judged from source under `RUBRIC.md` (`show <label> --panel heldout_rc
+  [--id <hex>]`), judge `HP.7`; the matched blind re-judge (GP.13's rule over the `heldout_rc`
+  family) is HP.8's, a separate agent, appended to `verdicts/rejudge.jsonl`.
+- **Report.** `report --panel all_rc` reads the fit plus `heldout_rc` (`--panel heldout_rc` the
+  re-draw alone). The default `report` (`--panel all`, which still writes report.json / report.md
+  byte for byte as HP.5 left them) also computes the `all_rc` report in the same run, writes it
+  nowhere, and prints, with `RULE-0.5.7b.md` beside the plan,
+
+  ```
+  [edge-audit] rule 0.5.7b verdict=<PASS|FAIL> under_floor=<list|none> fact=<p> derived=<p> heuristic=<p> kappa=<k>
+  [edge-audit] rule 0.5.7b rejudge independent=<i> self=<s>
+  ```
+
+  beside the 0.5.7 lines. `calibrate` reads `heldout` only: calibration.json / .md and
+  `engine/src/confidence/table.json` are unchanged by the re-draw.
