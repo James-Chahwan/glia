@@ -25,6 +25,13 @@
 //! derived` (exit 1), with the engine's `[model-breaks] base=..` line before
 //! `[review] base=`; a rule's coverage caveats print once per rule
 //! (`[review] caveats rules=<r> lines=<l> folded=<f>`).
+//!
+//! HT.8: over engine/tests/data/targets (bazelbuild/examples' cpp / go
+//! stage3, Apache-2.0) a review with no targets snapshot prints exactly what
+//! it printed before HT.8 (no `### Build targets`, no `targets` key, no
+//! `[targets]` line); synced `--from` snapshots/tests/data/bazel/, the same
+//! review gains the section, appended last, and the key, and nothing else
+//! moves (`[targets] answer kind=affected rows=<r> tests=<t> surface=review`).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -843,4 +850,116 @@ fn a_change_under_a_convention_lists_it_and_keeps_the_exit_code() {
     let v = json(&o);
     assert_eq!(v["conventions"][0]["id"], "api-pure");
     assert_eq!(v["conventions"][0]["files"][0], "services/api/internal.py");
+}
+
+/// HT.8: CC.6a's scratch harness over the bazel fixture: its `cpp` / `go`
+/// workspaces committed as `base`, then `cpp/lib/hello-time.cc` edited.
+fn bazel_scratch(name: &str) -> Scratch {
+    let s = Scratch::plain(name);
+    s.git(&["init", "-q"]);
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/tests/data/targets");
+    let mut files = Vec::new();
+    for ws in ["cpp", "go"] {
+        files_under(&data, &data.join(ws), &mut files);
+    }
+    for rel in &files {
+        let text = std::fs::read_to_string(data.join(rel))
+            .unwrap_or_else(|e| panic!("read fixture {rel}: {e}"));
+        s.write(rel, &text);
+    }
+    s.commit("base");
+    let cc = s.top.join("cpp/lib/hello-time.cc");
+    let mut text = std::fs::read_to_string(&cc).expect("hello-time.cc");
+    text.push_str("\n// edited\n");
+    std::fs::write(&cc, text).expect("edit");
+    s
+}
+
+/// `glia targets sync` of workspace `ws` from snapshots/tests/data/bazel/'s
+/// query output, its `/WORKSPACE` prefix the copy's workspace dir.
+fn sync_targets(s: &Scratch, ws: &str) {
+    let raw = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../snapshots/tests/data/bazel/{ws}-stage3.jsonl")),
+    )
+    .expect("read query output");
+    let abs = std::fs::canonicalize(s.top.join(ws)).expect("canonical workspace");
+    let from = s.root.join(format!("{ws}.jsonl"));
+    std::fs::write(&from, raw.replace("/WORKSPACE", &abs.display().to_string()))
+        .expect("write query output");
+    let o = s.glia(&[
+        "targets",
+        "sync",
+        s.path(),
+        "--workspace",
+        ws,
+        "--from",
+        from.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+}
+
+/// HT.8: without a targets snapshot the review is what it was before HT.8;
+/// with one, the same review gains `### Build targets` last (before the
+/// CLI's `ranking:` line) and the JSON its `targets` key, nothing else.
+#[test]
+fn build_targets_appear_only_with_a_snapshot() {
+    let s = bazel_scratch("targets");
+    let before = s.review(&["--no-precision"]);
+    assert_eq!(before.status.code(), Some(0), "{}", show(&before));
+    let before_md = stdout(&before);
+    assert!(!before_md.contains("Build targets"), "{}", show(&before));
+    assert!(
+        !stderr(&before).contains("[targets] "),
+        "no snapshot, no [targets] line\n{}",
+        show(&before)
+    );
+    let before_json = s.review(&["--json", "--no-precision"]);
+    let got = top_level_keys(&stdout(&before_json));
+    assert!(
+        !got.iter().any(|k| k == "targets"),
+        "{}",
+        show(&before_json)
+    );
+
+    for ws in ["cpp", "go"] {
+        sync_targets(&s, ws);
+    }
+    let after = s.review(&["--no-precision"]);
+    assert_eq!(after.status.code(), Some(0), "{}", show(&after));
+    let after_md = stdout(&after);
+    let tail_at = before_md.rfind("\nranking: ").unwrap_or(before_md.len());
+    let (report, tail) = before_md.split_at(tail_at);
+    assert!(
+        after_md.starts_with(report) && after_md.ends_with(tail),
+        "the pre-HT.8 report is unchanged around the new section\nbefore:\n{before_md}\nafter:\n{after_md}"
+    );
+    let section = &after_md[report.len()..after_md.len() - tail.len()];
+    assert_eq!(
+        section,
+        "\n### Build targets\n\n| target | rule | role | at |\n|---|---|---|---|\n\
+| `//lib:hello-time` | cc_library | library | cpp/lib/BUILD:3 |\n\
+| `//main:hello-world` | cc_binary | binary | cpp/main/BUILD:10 |\n\n\
+#### Test targets\n\n_(none)_\n",
+        "{}",
+        show(&after)
+    );
+    assert!(
+        stderr(&after).contains("[targets] answer kind=affected rows=2 tests=0 surface=review"),
+        "{}",
+        show(&after)
+    );
+
+    let after_json = s.review(&["--json", "--no-precision"]);
+    let mut want = got.clone();
+    want.push("targets".to_string());
+    assert_eq!(
+        top_level_keys(&stdout(&after_json)),
+        want,
+        "`targets` is appended last"
+    );
+    let mut a = json(&after_json);
+    assert_eq!(a["targets"]["targets"][0]["label"], "//lib:hello-time");
+    a.as_object_mut().expect("object").remove("targets");
+    assert_eq!(a, json(&before_json), "nothing else moved");
 }

@@ -5,6 +5,12 @@
 //! `cpp` and `go`, and the targets snapshot the snapshot step writes for them
 //! (the rows of snapshots/tests/data/bazel/, normalised as HT.3's
 //! `targets_sync` does, written inline as HT.5's parser test writes them).
+//!
+//! HT.8: the change answers over the same repo committed with its snapshot:
+//! `review` gains `targets` and a `### Build targets` section appended last
+//! (both render paths), `diff_impact` its `targets` block in rev and pasted
+//! mode, and a repo with no snapshot neither (`[targets] answer
+//! kind=affected rows=<r> tests=<t> surface=review|diff_impact`).
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +23,13 @@ use glia_engine::targets::{
     Affected, BUILD_FILES_CAVEAT, TARGETS_GMAP, TargetHit, affected_vs_rev, load_or_build,
     sidecar_path,
 };
+
+use std::sync::Arc;
+
+use glia_engine::BlastOptions;
+use glia_engine::diff_impact::{diff_impact_from_diff, diff_impact_vs_rev};
+use glia_engine::rank::RankCache;
+use glia_engine::review::{MarkdownOptions, ReviewArgs, render_markdown, review_vs_rev};
 
 use crate::git_fixture;
 use git_fixture::GitRepo;
@@ -490,4 +503,183 @@ fn affected_vs_rev_reads_the_work_tree_against_a_rev() {
     assert_eq!(labels(&a.tests), ["//fortune:fortune_test"]);
     assert_eq!(a.caveats, [BUILD_FILES_CAVEAT]);
     assert!(affected_vs_rev(repo.root(), "no-such-rev").is_err());
+}
+
+// ============================================================================
+// HT.8: build targets in the change answers
+// ============================================================================
+
+/// Both workspaces' sources and their snapshot, committed as `base`.
+fn committed_bazel() -> GitRepo {
+    let repo = GitRepo::init();
+    write_sources(repo.root());
+    let mut rows = cpp();
+    rows.extend(go());
+    write_snapshot(repo.root(), &rows);
+    repo.commit("base");
+    repo
+}
+
+/// `tail` appended to the repo-relative `rel`. Not staged.
+fn append(repo: &GitRepo, rel: &str, tail: &str) {
+    let mut text = std::fs::read_to_string(repo.root().join(rel)).expect("read source");
+    text.push_str(tail);
+    repo.write(rel, &text);
+}
+
+/// The markdown after `### Build targets`, which must be the last section.
+fn build_targets_md(md: &str) -> &str {
+    let (_, section) = md
+        .split_once("\n\n### Build targets\n\n")
+        .unwrap_or_else(|| panic!("no Build targets section:\n{md}"));
+    assert!(
+        !section.contains("\n### "),
+        "Build targets is the last section:\n{md}"
+    );
+    section
+}
+
+#[test]
+fn review_of_a_cpp_change_lists_its_targets_last() {
+    let repo = committed_bazel();
+    append(&repo, "cpp/lib/hello-time.cc", "\n// edited\n");
+    repo.commit("edit hello-time");
+    let r = review_vs_rev(repo.path(), "HEAD~1", &ReviewArgs::default()).expect("review");
+    let t = r.targets.as_ref().expect("a snapshot: targets");
+    assert_eq!(t.changed, ["cpp/lib/hello-time.cc"]);
+    assert_eq!(
+        labels(&t.targets),
+        ["//lib:hello-time", "//main:hello-world"]
+    );
+    assert!(t.tests.is_empty());
+    assert!(!r.changed.is_empty(), "the graph changed: the full report");
+
+    let md = render_markdown(&r, &MarkdownOptions::default());
+    assert!(md.contains("\n### Changed nodes\n"), "{md}");
+    assert_eq!(
+        build_targets_md(&md),
+        "| target | rule | role | at |\n|---|---|---|---|\n\
+| `//lib:hello-time` | cc_library | library | cpp/lib/BUILD:3 |\n\
+| `//main:hello-world` | cc_binary | binary | cpp/main/BUILD:10 |\n\n\
+#### Test targets\n\n_(none)_\n"
+    );
+    // max_rows cuts both tables.
+    let mut cut = MarkdownOptions::default();
+    cut.max_rows = 1;
+    let md = render_markdown(&r, &cut);
+    assert!(
+        build_targets_md(&md).contains("| `//lib:hello-time` | cc_library | library | cpp/lib/BUILD:3 |\n\n_(1 of 2)_\n\n#### Test targets"),
+        "{md}"
+    );
+
+    let v = serde_json::to_value(&r).expect("json");
+    assert_eq!(
+        v["targets"]["changed"],
+        serde_json::json!(["cpp/lib/hello-time.cc"])
+    );
+    assert_eq!(v["targets"]["targets"][1]["label"], "//main:hello-world");
+}
+
+#[test]
+fn review_of_a_go_change_lists_its_test_target() {
+    let repo = committed_bazel();
+    append(&repo, "go/fortune/fortune.go", "\n// edited\n");
+    repo.commit("edit fortune");
+    let r = review_vs_rev(repo.path(), "HEAD~1", &ReviewArgs::default()).expect("review");
+    let t = r.targets.as_ref().expect("targets");
+    assert_eq!(labels(&t.tests), ["//fortune:fortune_test"]);
+    let md = render_markdown(&r, &MarkdownOptions::default());
+    assert_eq!(
+        build_targets_md(&md),
+        "| target | rule | role | at |\n|---|---|---|---|\n\
+| `//:print_fortune` | go_binary | binary | go/BUILD:3 |\n\
+| `//fortune:fortune` | go_library | library | go/fortune/BUILD:3 |\n\
+| `//fortune:fortune_test` | go_test | test | go/fortune/BUILD:10 |\n\n\
+#### Test targets\n\n\
+| target | rule | role | at |\n|---|---|---|---|\n\
+| `//fortune:fortune_test` | go_test | test | go/fortune/BUILD:10 |\n",
+        "rows by (workspace, label)"
+    );
+}
+
+#[test]
+fn review_with_no_graph_change_still_lists_the_build_change() {
+    let repo = committed_bazel();
+    append(&repo, "cpp/lib/BUILD", "\n# edited\n");
+    let r = review_vs_rev(repo.path(), "HEAD", &ReviewArgs::default()).expect("review");
+    assert!(
+        r.changed.is_empty() && r.edges.is_empty(),
+        "no graph change"
+    );
+    let t = r.targets.as_ref().expect("targets");
+    assert_eq!(t.caveats, [BUILD_FILES_CAVEAT]);
+    let md = render_markdown(&r, &MarkdownOptions::default());
+    assert!(
+        md.contains("\n\nNo graph change vs HEAD.\n\n### Build targets\n\n"),
+        "{md}"
+    );
+    assert_eq!(
+        build_targets_md(&md),
+        "_BUILD files changed; re-run glia targets sync for exact owners_\n\n\
+_(no target of the snapshot names a changed file)_\n\n\
+#### Test targets\n\n_(none)_\n"
+    );
+}
+
+#[test]
+fn diff_impact_carries_targets_in_rev_and_pasted_mode() {
+    let repo = committed_bazel();
+    append(&repo, "go/fortune/fortune.go", "\n// edited\n");
+    let d = diff_impact_vs_rev(repo.path(), "HEAD", &BlastOptions::default()).expect("diff impact");
+    let t = d.targets.as_ref().expect("rev mode: targets");
+    assert_eq!(t.changed, ["go/fortune/fortune.go"]);
+    assert_eq!(labels(&t.tests), ["//fortune:fortune_test"]);
+    let v = serde_json::to_value(&d).expect("json");
+    assert_eq!(v["targets"]["tests"][0]["label"], "//fortune:fortune_test");
+
+    let built = glia_engine::generate_one(repo.path()).expect("build");
+    let diff = "--- a/go/fortune/fortune.go\n+++ b/go/fortune/fortune.go\n@@ -1,1 +1,2 @@\n package fortune\n+// edited\n\
+--- a/cpp/lib/hello-time.h\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-#pragma once\n";
+    let mut opts = BlastOptions::default();
+    opts.rank_cache = Some(Arc::new(RankCache::new(
+        "answer",
+        &built.repo_roots,
+        &built.repo_labels,
+    )));
+    let p = diff_impact_from_diff(&built.merged, diff, &opts);
+    let t = p.targets.as_ref().expect("pasted mode: targets");
+    assert_eq!(
+        t.changed,
+        ["cpp/lib/hello-time.h", "go/fortune/fortune.go"],
+        "the diff's paths, a deleted file's too"
+    );
+    assert_eq!(labels(&t.owners), ["//lib:hello-time", "//fortune:fortune"]);
+    assert_eq!(labels(&t.tests), ["//fortune:fortune_test"]);
+
+    // No rank cache, no root: no targets.
+    let bare = diff_impact_from_diff(&built.merged, diff, &BlastOptions::default());
+    assert!(bare.targets.is_none());
+}
+
+#[test]
+fn no_snapshot_adds_no_targets_key_or_section() {
+    let repo = GitRepo::init();
+    write_sources(repo.root());
+    repo.commit("base");
+    append(&repo, "go/fortune/fortune.go", "\n// edited\n");
+    let r = review_vs_rev(repo.path(), "HEAD", &ReviewArgs::default()).expect("review");
+    assert!(r.targets.is_none());
+    let v = serde_json::to_value(&r).expect("json");
+    assert!(v.get("targets").is_none(), "{v}");
+    let md = render_markdown(&r, &MarkdownOptions::default());
+    assert!(!md.contains("Build targets"), "{md}");
+    let d = diff_impact_vs_rev(repo.path(), "HEAD", &BlastOptions::default()).expect("diff impact");
+    assert!(d.targets.is_none());
+    assert!(
+        serde_json::to_value(&d)
+            .expect("json")
+            .get("targets")
+            .is_none()
+    );
+    assert!(!sidecar_path(repo.root()).exists(), "nothing written");
 }

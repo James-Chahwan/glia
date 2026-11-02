@@ -76,11 +76,32 @@
 //! that only removes nodes or touches structural edges, or `the diff resolved
 //! to no node` naming the files it could not place.
 //!
+//! # Build targets (HT.8)
+//!
+//! With a targets snapshot (`glia targets sync`, `.glia/targets-snapshot/`)
+//! under the answer's repo root, `targets` is the build-target graph's
+//! [`Affected`] for the change's files (`crate::targets`): the targets
+//! naming a changed file, every target reaching one, and the test targets
+//! among them. Rev mode reads git's changed files against the base
+//! (`targets::affected_vs_rev`), pasted mode the diff's files (a deleted
+//! file's path included). The root is the first entry of the answer's
+//! `RankCache::repo_roots()` (rev mode always has one; pasted mode only when
+//! the caller passes `opts.rank_cache`): a merge reads its first root's
+//! snapshot only. No snapshot, no root, or an error (one `[targets] answer
+//! error=<e> surface=<s>` line, the answer never fails on it): `None`, and
+//! the JSON has no `targets` key, so a repo without bazel answers byte for
+//! byte as before. Nothing ranks by it and no row moves. fired_on, once per
+//! answer that read a snapshot: `[targets] answer kind=affected rows=<r>
+//! tests=<t> surface=diff_impact|review` (after the view's own `[targets]
+//! answer kind=affected rows=<r> tests=<t>`) - grep `^\[targets\] answer
+//! kind=affected .* surface=`.
+//!
 //! fired_on marker, one line per answer:
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`
 //! — grep `^\[diff-impact\] mode=`.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use glia_code_domain::node_kind;
@@ -97,6 +118,7 @@ use crate::health;
 use crate::identity::Collapse;
 use crate::profile::CODE_PROFILE;
 use crate::rank::RankCache;
+use crate::targets::{self, Affected};
 use crate::tests_for::CodeText;
 
 /// The primitive name in the `[absence]` marker.
@@ -219,6 +241,11 @@ pub struct DiffImpact {
     /// empty, and not serialized, otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+    /// HT.8: the build targets the change's files affect (module docs
+    /// "Build targets"), from the targets snapshot of the answer's first
+    /// repo root. `None`, and not serialized, without a snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Affected>,
 }
 
 impl SizedAnswer for DiffImpact {
@@ -357,6 +384,7 @@ pub(crate) fn diff_impact_from_delta_on(
     }
     fold_seed_rows(&mut changed, &impact);
     let changed_truncated = cap_changed(&mut changed, opts);
+    let targets = change_targets(opts, surface, |root| targets::affected_vs_rev(root, &given));
     let answer = DiffImpact {
         base: Some(given),
         changed,
@@ -366,9 +394,40 @@ pub(crate) fn diff_impact_from_delta_on(
         impact,
         unresolved_diff_files: Vec::new(),
         blind: Vec::new(),
+        targets,
     };
     marker("rev", &answer, seeds.len());
     answer
+}
+
+/// HT.8 (module docs "Build targets"): `affected` of the first repo root of
+/// `opts.rank_cache`, reported once. `None` without a cache, a root or a
+/// snapshot; an `Err` is one `[targets] answer error=..` line and `None`.
+fn change_targets(
+    opts: &BlastOptions,
+    surface: &str,
+    affected: impl FnOnce(&Path) -> Result<Option<Affected>, String>,
+) -> Option<Affected> {
+    let cache = opts.rank_cache.as_deref()?;
+    let root = cache.repo_roots().values().next()?;
+    match affected(Path::new(root)) {
+        Ok(Some(a)) => {
+            eprintln!(
+                "[targets] answer kind=affected rows={} tests={} surface={surface}",
+                a.targets.len(),
+                a.tests.len()
+            );
+            Some(a)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!(
+                "[targets] answer error={} surface={surface}",
+                e.replace('\n', " ")
+            );
+            None
+        }
+    }
 }
 
 /// The impact of a pasted unified diff, or a changed-file list, over
@@ -441,6 +500,10 @@ pub fn diff_impact_from_diff(
     };
     fold_seed_rows(&mut changed, &impact);
     let changed_truncated = cap_changed(&mut changed, opts);
+    let diff_files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+    let targets = change_targets(opts, "diff_impact", |root| {
+        Ok(targets::load_or_build(root)?.map(|view| view.affected(&diff_files)))
+    });
     let answer = DiffImpact {
         base: None,
         changed,
@@ -450,6 +513,7 @@ pub fn diff_impact_from_diff(
         blind: health::blind_caveats(merged, "diff_impact", &health::blast_mechanisms(&impact)),
         impact,
         unresolved_diff_files,
+        targets,
     };
     marker("diff", &answer, seeds.len());
     answer

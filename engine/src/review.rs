@@ -262,8 +262,9 @@
 //! `### Conventions` (FB.12b, when one governs a changed file: `| convention
 //! | scope | files changed | source |`, the source `<source>/<id> (<tier>)`
 //! then ` at <decl>` for an overlay one), `### Edge changes`
-//! (grouped by tier, facts first), `### Changed nodes` and `### Resolved
-//! violations` (when any). A rule or forbid_path violation renders its
+//! (grouped by tier, facts first), `### Changed nodes`, `### Resolved
+//! violations` (when any) and, last in both paths, `### Build targets`
+//! (HT.8, with a targets snapshot: "Build targets" above). A rule or forbid_path violation renders its
 //! identity first, ``_subject: `<a>`, `<b>` - tier <t> at <file:line>_`` (no
 //! ` at` when the subject is unlocated), then its witness table when it has
 //! rows. A rule's coverage caveats print ONCE per section (DT.8a's fold,
@@ -286,6 +287,25 @@
 //! fence past any backtick run; a line break is a space. A review with no
 //! graph change renders the impact absence's note as a sentence: `No graph
 //! change vs <base>.`
+//!
+//! # Build targets (HT.8)
+//!
+//! With a targets snapshot (`glia targets sync`) under the working tree's
+//! first repo root, [`Review::targets`] is `diff_impact`'s `targets`
+//! (`crate::diff_impact`, "Build targets"): the targets naming a changed
+//! file, every target reaching one and the test targets among them. The
+//! markdown appends `### Build targets` LAST in both render paths (after
+//! `### Resolved violations`, or after a no-graph-change review's sentence,
+//! intent, check errors and unanchored rules), so no other section moves:
+//! the BUILD-file caveat once (`_BUILD files changed; .._`), the affected
+//! targets as `| target | rule | role | at |` (the label as code, the rule
+//! class, the role, the BUILD file's `file:line`) by (workspace, label), or
+//! `_(no target of the snapshot names a changed file)_`, then `#### Test
+//! targets` the same way (`_(none)_` for none); each table cut at
+//! [`MarkdownOptions::max_rows`]. A merge reads its first root's snapshot
+//! only. Without a snapshot there is no key and no section: the review is
+//! byte-identical to one before HT.8. fired_on: `[targets] answer
+//! kind=affected rows=<r> tests=<t> surface=review`.
 //!
 //! # Precision (HC.4)
 //!
@@ -381,6 +401,7 @@ use crate::intent::ids::IdVocab;
 use crate::intent::paths::{PathResolver, rename_pairs};
 use crate::intent::text::{Candidates, TextAbsent, TextIndex, exclude_range, subject};
 use crate::rank::{FileIndex, RankCache, Ranking, rank_files};
+use crate::targets::{Affected, TargetHit};
 use crate::tests_for::{TestsFor, TestsForArgs, tests_for_delta};
 use crate::why::tier_of;
 
@@ -588,6 +609,12 @@ pub struct Review {
     /// otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+    /// HT.8: the build targets the change's files affect (module docs
+    /// "Build targets"): `diff_impact`'s, from the targets snapshot of the
+    /// working tree's first repo root. `None`, and not serialized, without
+    /// a snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Affected>,
 }
 
 impl Annotated for Review {
@@ -923,6 +950,7 @@ fn review_with_intent(
         selection_intent: intent.as_ref().map(|i| i.selection.clone()),
         intent,
         blind,
+        targets: di.targets,
     };
     marker(&answer);
     if let Some(line) = intent_line {
@@ -1881,6 +1909,7 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         intent_md(&mut blocks, r, max);
         check_errors_md(&mut blocks, r, max);
         unanchored_md(&mut blocks, r);
+        build_targets_md(&mut blocks, r, max);
         return finish(blocks);
     }
     if !blocking.is_empty() {
@@ -1987,7 +2016,52 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         let resolved: Vec<&Violation> = r.resolved_violations.iter().collect();
         violations_md(&mut blocks, &resolved, max, Some(&r.base));
     }
+    build_targets_md(&mut blocks, r, max);
     finish(blocks)
+}
+
+/// HT.8: `### Build targets` (module docs "Build targets"; only with a
+/// targets snapshot), the last section of both render paths: the BUILD-file
+/// caveat once, then the affected targets, then `#### Test targets`, each a
+/// `| target | rule | role | at |` table by (workspace, label), cut at `max`.
+fn build_targets_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    let Some(t) = r.targets.as_ref() else {
+        return;
+    };
+    blocks.push("### Build targets".to_string());
+    for caveat in &t.caveats {
+        blocks.push(format!("_{}_", text(caveat)));
+    }
+    if t.targets.is_empty() {
+        blocks.push(none(Some("no target of the snapshot names a changed file")));
+    }
+    target_table(blocks, &t.targets, max);
+    blocks.push("#### Test targets".to_string());
+    if t.tests.is_empty() {
+        blocks.push(none(None));
+    }
+    target_table(blocks, &t.tests, max);
+}
+
+/// One target table of [`build_targets_md`]: rows by (workspace, label).
+fn target_table(blocks: &mut Vec<String>, rows: &[TargetHit], max: usize) {
+    let mut sorted: Vec<&TargetHit> = rows.iter().collect();
+    sorted.sort_by(|a, b| (&a.workspace, &a.label).cmp(&(&b.workspace, &b.label)));
+    let dash = |v: Option<&String>| v.map_or_else(|| DASH.to_string(), |s| text(s));
+    push_table(
+        blocks,
+        &["target", "rule", "role", "at"],
+        sorted.iter().map(|h| {
+            vec![
+                code(&h.label),
+                dash(h.rule_class.as_ref()),
+                dash(h.role.as_ref()),
+                at(h.file.as_deref(), h.line.map(i64::from)),
+            ]
+        }),
+        rows.len(),
+        max,
+    );
 }
 
 /// What the markdown's caveat fold (module docs "Markdown", DT.8a's after
