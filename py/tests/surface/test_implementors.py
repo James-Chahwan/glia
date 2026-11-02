@@ -38,9 +38,9 @@ def main() -> int:
 
         a, err = stderr_of(lambda: g.implementors("Shop::IRepo"))
         c.check("marker",
-                "[implementors] target=Shop::IRepo direction=Down transitive=true found=2 fact=0 derived=0 heuristic=2"
+                "[implementors] target=Shop::IRepo direction=Down transitive=true found=2 fact=2 derived=0 heuristic=0"
                 in err
-                and "[implementors] tiers fact=0 derived=0 heuristic=2 source=evidence" in err, err[-400:])
+                and "[implementors] tiers fact=2 derived=0 heuristic=0 source=evidence" in err, err[-400:])
         c.check("implementors -> dict", type(a) is dict, type(a))
         c.check("envelope keys", type(a) is dict and list(a) == ["results", "absence"],
                 type(a) is dict and list(a))
@@ -50,12 +50,13 @@ def main() -> int:
                 [(r["qname"], r["depth"], r["relation"], r["via"]) for r in rows]
                 == [("Shop::IUserRepo", 1, "IMPLEMENTS", None),
                     ("Shop::PgUserRepo", 2, "IMPLEMENTS", "Shop::IUserRepo")], rows)
-        # C# heritage binds its base by name alone (graph:refs global_unique):
-        # read from evidence, as `glia why` reads it, that is heuristic (FD.7b).
-        c.check("name-bound heritage is heuristic, lowercase",
-                [r["tier"] for r in rows] == ["heuristic", "heuristic"], rows)
+        # C# heritage binds its base through the enclosing `namespace Shop`
+        # (HQ.13, rule enclosing_namespace): read from evidence, as `glia why`
+        # reads it, that is fact (FD.7b).
+        c.check("namespace-bound heritage is fact, lowercase",
+                [r["tier"] for r in rows] == ["fact", "fact"], rows)
         c.check("HC.4: each row's precision is its path's weakest heritage stratum",
-                all(str((r.get("precision") or {}).get("stratum", "")).startswith("IMPLEMENTS|heuristic")
+                all(str((r.get("precision") or {}).get("stratum", "")).startswith("IMPLEMENTS|fact")
                     for r in rows), rows)
         bare = g.implementors("Shop::IRepo", precision=False)
         c.check("HC.4: precision=False drops the key and nothing else",

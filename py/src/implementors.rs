@@ -129,9 +129,9 @@ mod tests {
         let json = serde_json::to_string(&down).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["results"][0]["qname"], "Shop::IUserRepo", "{json}");
-        // C# heritage binds `IRepo` by name alone (graph:refs global_unique),
-        // so its evidence tier is heuristic (FD.7b), whatever its confidence.
-        assert_eq!(v["results"][0]["tier"], "heuristic", "{json}");
+        // C# heritage binds `IRepo` through the enclosing `namespace Shop`
+        // (HQ.13, rule enclosing_namespace), so its evidence tier is fact (FD.7b).
+        assert_eq!(v["results"][0]["tier"], "fact", "{json}");
         assert_eq!(v["results"][1]["via"], "Shop::IUserRepo", "{json}");
         assert!(v["absence"].is_null(), "{json}");
 
