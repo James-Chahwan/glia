@@ -1459,8 +1459,16 @@ fn collect_client_endpoints_in(
 //
 //   get/post/put/patch/delete/match '/path'[, to: 'ctrl#act']
 //   root 'ctrl#index'
-//   resources :users      → emits ANY /users
+//   resources :users      → emits ANY /users and ANY /users/:id
 //   resource :profile     → emits ANY /profile
+//
+// HF.5: a `resources :r do .. end` body nests under `/r/:<singular(r)>_id`
+// (a `resource :r` body under `/r`), `member do .. end` / `on: :member` verbs
+// land at `/r/:id`, `collection do .. end` / `on: :collection` at `/r`, a
+// symbol verb names a segment (`post :snooze`), and `only:` / `except:` drop
+// `/r/:id` when they leave none of show / update / destroy / edit. Every
+// resource route stays method-agnostic `ANY`. Not read: `shallow: true`,
+// `concerns` and `draw(:file)`.
 //
 // `namespace :api do ... end` and `scope :v1 do ... end` compose a path prefix
 // onto every route declared inside them (`/api/v1/users/:id`); `scope path:`
@@ -1478,12 +1486,62 @@ fn is_rails_routes_file(rel_path: &str) -> bool {
 }
 
 /// Running tally for the `[ruby-routes]` fired-on marker: how many routes were
-/// emitted with a non-empty scope prefix, and how many `namespace` / `scope`
-/// blocks actually contributed a path segment.
+/// emitted with a non-empty scope prefix, how many `namespace` / `scope`
+/// blocks actually contributed a path segment, and (HF.5) how many routes sat
+/// inside a `resources` / `resource` body, a `member` / `collection` block (or
+/// carried `on: :member` / `on: :collection`), and how many `/:id` member paths
+/// a plural `resources` added.
 #[derive(Default)]
 struct RailsScopeStats {
     routes: usize,
     scopes: usize,
+    nested: usize,
+    member: usize,
+    collection: usize,
+    id_routes: usize,
+}
+
+/// Which block of a resource body a route sits in (HF.5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RailsBlockKind {
+    /// A resource body, a scope or the top level.
+    Plain,
+    /// A `member do .. end` block.
+    Member,
+    /// A `collection do .. end` block.
+    Collection,
+}
+
+/// The innermost enclosing `resources` / `resource` (HF.5): its collection
+/// path (`<p>/r`) and its member path (`<p>/r/:id` for a plural resource,
+/// `<p>/r` for a singular one).
+#[derive(Clone)]
+struct RailsResource {
+    base: String,
+    member: String,
+}
+
+/// What a routes.rb walk carries down to every emit site: the path prefix a
+/// verb or a nested resource lands under, the innermost enclosing resource
+/// (for `member` / `collection` / `on:`), whether any resource body encloses
+/// the node, and which block kind it sits in.
+#[derive(Clone)]
+struct RailsCtx {
+    prefix: String,
+    resource: Option<RailsResource>,
+    in_resource: bool,
+    block: RailsBlockKind,
+}
+
+impl RailsCtx {
+    fn top() -> Self {
+        RailsCtx {
+            prefix: String::new(),
+            resource: None,
+            in_resource: false,
+            block: RailsBlockKind::Plain,
+        }
+    }
 }
 
 fn scan_rails_routes(
@@ -1495,11 +1553,24 @@ fn scan_rails_routes(
     acc: &mut Acc,
 ) {
     let mut stats = RailsScopeStats::default();
-    walk_rails(root, src, "", module_id, repo, acc, &mut stats);
-    if stats.routes > 0 {
+    walk_rails(
+        root,
+        src,
+        &RailsCtx::top(),
+        module_id,
+        repo,
+        acc,
+        &mut stats,
+    );
+    if stats.routes > 0 || stats.nested > 0 || stats.id_routes > 0 {
         eprintln!(
-            "[ruby-routes] composed {} rails routes under {} scopes in {file_rel}",
-            stats.routes, stats.scopes
+            "[ruby-routes] composed {} rails routes under {} scopes nested={} member={} collection={} id_routes={} in {file_rel}",
+            stats.routes,
+            stats.scopes,
+            stats.nested,
+            stats.member,
+            stats.collection,
+            stats.id_routes
         );
     }
 }
@@ -1513,12 +1584,18 @@ fn scan_rails_routes(
 /// recurses into its block with the extended prefix and is deliberately NOT
 /// also offered to `try_emit_rails_route` (it declares no route of its own,
 /// and passing it on would double-count). Every other node recurses with the
-/// prefix unchanged, which is what keeps a sibling route declared outside the
+/// context unchanged, which is what keeps a sibling route declared outside the
 /// blocks un-prefixed.
+///
+/// HF.5: `resources` / `resource` nest their bodies (`resources :accounts do
+/// resources :notifications end` is `/accounts/:account_id/notifications`),
+/// and inside a resource body `member do .. end` / `collection do .. end`
+/// re-root their verbs at the member / collection path
+/// ([`walk_rails_resources`]).
 fn walk_rails(
     n: TsNode,
     src: &[u8],
-    prefix: &str,
+    ctx: &RailsCtx,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
@@ -1529,31 +1606,251 @@ fn walk_rails(
             .child_by_field_name("method")
             .map(|m| text_of(m, src))
             .unwrap_or("");
-        if matches!(method, "namespace" | "scope") {
-            let seg = rails_scope_segment(n, src);
-            let inner = if seg.is_empty() {
-                // `scope module: "admin"` / `scope as: :v1` scope the controller
-                // module or the route helper name, never the path.
-                prefix.to_string()
-            } else {
-                stats.scopes += 1;
-                join_path(prefix, &seg)
-            };
-            if let Some(block) = rails_block_child(n) {
-                walk_rails(block, src, &inner, module_id, repo, acc, stats);
+        match method {
+            "namespace" | "scope" => {
+                let seg = rails_scope_segment(n, src);
+                let inner = if seg.is_empty() {
+                    // `scope module: "admin"` / `scope as: :v1` scope the
+                    // controller module or the route helper name, never the
+                    // path, so the resource context passes through untouched.
+                    ctx.clone()
+                } else {
+                    stats.scopes += 1;
+                    RailsCtx {
+                        prefix: join_path(&ctx.prefix, &seg),
+                        resource: None,
+                        in_resource: ctx.in_resource,
+                        block: RailsBlockKind::Plain,
+                    }
+                };
+                if let Some(block) = rails_block_child(n) {
+                    walk_rails(block, src, &inner, module_id, repo, acc, stats);
+                }
+                return;
             }
-            return;
+            "resources" | "resource" => {
+                walk_rails_resources(n, src, ctx, module_id, repo, acc, stats);
+                return;
+            }
+            "member" | "collection" => {
+                if let (Some(res), Some(block)) = (&ctx.resource, rails_block_child(n)) {
+                    let (prefix, kind) = if method == "member" {
+                        (res.member.clone(), RailsBlockKind::Member)
+                    } else {
+                        (res.base.clone(), RailsBlockKind::Collection)
+                    };
+                    let inner = RailsCtx {
+                        prefix,
+                        resource: ctx.resource.clone(),
+                        in_resource: true,
+                        block: kind,
+                    };
+                    walk_rails(block, src, &inner, module_id, repo, acc, stats);
+                    return;
+                }
+            }
+            _ => {}
         }
-        let before = acc.nodes.len();
-        try_emit_rails_route(n, src, prefix, module_id, repo, acc);
-        if !prefix.is_empty() {
-            stats.routes += acc.nodes.len() - before;
-        }
+        try_emit_rails_route(n, src, ctx, module_id, repo, acc, stats);
     }
     let mut cursor = n.walk();
     for c in n.named_children(&mut cursor) {
-        walk_rails(c, src, prefix, module_id, repo, acc, stats);
+        walk_rails(c, src, ctx, module_id, repo, acc, stats);
     }
+}
+
+/// Tally one emitted route against the marker's counters.
+fn count_rails_route(ctx_prefix: &str, in_resource: bool, stats: &mut RailsScopeStats) {
+    if !ctx_prefix.is_empty() {
+        stats.routes += 1;
+    }
+    if in_resource {
+        stats.nested += 1;
+    }
+}
+
+/// `resources :r[, :s ..][, opts] [do <body> end]` / `resource :r ..` (HF.5).
+///
+/// Each named resource emits `ANY <p>/r` (`path:` replaces the segment;
+/// `module:` / `as:` / `controller:` add no path). A plural `resources` also
+/// emits `ANY <p>/r/:id` (`param:` renames `:id`) unless `only:` / `except:`
+/// leave none of show / update / destroy / edit. The body is walked with the
+/// nesting prefix: `<p>/r/:<singular(r)>_<param>` for a plural resource,
+/// `<p>/r` for a singular one; `member` / `collection` blocks and `on:` verbs
+/// inside it read the resource's member / collection path from the context.
+/// Every route stays method-agnostic `ANY` (per-action verbs are a backlog
+/// item); a `resources` route carries no handler (no convention lookup).
+fn walk_rails_resources(
+    call: TsNode,
+    src: &[u8],
+    ctx: &RailsCtx,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+    stats: &mut RailsScopeStats,
+) {
+    let plural = call
+        .child_by_field_name("method")
+        .is_some_and(|m| text_of(m, src) == "resources");
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut names: Vec<String> = Vec::new();
+    let mut path_kw: Option<String> = None;
+    let mut param = "id".to_string();
+    let mut only: Option<Option<Vec<String>>> = None;
+    let mut except: Option<Option<Vec<String>>> = None;
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        match arg.kind() {
+            "simple_symbol" | "string" => {
+                let name = scope_literal(arg, src);
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+            "pair" => {
+                let key = arg
+                    .child_by_field_name("key")
+                    .map(|k| text_of(k, src).trim_matches(|c| c == ':' || c == ' '))
+                    .unwrap_or("");
+                let Some(value) = arg.child_by_field_name("value") else {
+                    continue;
+                };
+                match key {
+                    "path" => path_kw = Some(scope_literal(value, src)),
+                    "param" => {
+                        let p = scope_literal(value, src);
+                        if !p.is_empty() {
+                            param = p;
+                        }
+                    }
+                    "only" => only = Some(rails_action_list(value, src)),
+                    "except" => except = Some(rails_action_list(value, src)),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let has_member_action = rails_has_member_action(only.as_ref(), except.as_ref());
+    let block = rails_block_child(call);
+    let line = line_at(call);
+    for name in &names {
+        let seg = path_kw
+            .as_deref()
+            .unwrap_or(name)
+            .trim()
+            .trim_matches('/')
+            .to_string();
+        let base = if seg.is_empty() {
+            ctx.prefix.clone()
+        } else {
+            join_path(&ctx.prefix, &seg)
+        };
+        emit_rails_route("ANY", &abs_path(&base), None, module_id, repo, line, acc);
+        count_rails_route(&ctx.prefix, ctx.in_resource, stats);
+        let (member, nested) = if plural {
+            let member = join_path(&base, &format!(":{param}"));
+            if has_member_action {
+                emit_rails_route("ANY", &abs_path(&member), None, module_id, repo, line, acc);
+                count_rails_route(&ctx.prefix, ctx.in_resource, stats);
+                stats.id_routes += 1;
+            }
+            let nested = join_path(&base, &format!(":{}_{param}", rails_singular(name)));
+            (member, nested)
+        } else {
+            (base.clone(), base.clone())
+        };
+        if let Some(block) = block {
+            let inner = RailsCtx {
+                prefix: nested,
+                resource: Some(RailsResource { base, member }),
+                in_resource: true,
+                block: RailsBlockKind::Plain,
+            };
+            walk_rails(block, src, &inner, module_id, repo, acc, stats);
+        }
+    }
+}
+
+/// An `only:` / `except:` value as action names: `[:index, :show]`,
+/// `%i[index show]`, `:show` or `"show"`. `None` when the value is not a
+/// literal (a constant, a method call): the caller then assumes every action.
+fn rails_action_list(value: TsNode, src: &[u8]) -> Option<Vec<String>> {
+    let lit = |n: TsNode| -> Option<String> {
+        match n.kind() {
+            "simple_symbol" | "string" => Some(scope_literal(n, src)),
+            "bare_symbol" | "bare_string" => Some(
+                text_of(n, src)
+                    .trim_start_matches(':')
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .trim()
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    };
+    match value.kind() {
+        "array" | "symbol_array" | "string_array" => {
+            let mut out = Vec::new();
+            let mut cursor = value.walk();
+            for el in value.named_children(&mut cursor) {
+                out.push(lit(el)?);
+            }
+            Some(out)
+        }
+        _ => lit(value).map(|a| vec![a]),
+    }
+}
+
+/// The member actions a plural `resources` routes at `/<r>/:id`.
+const RAILS_MEMBER_ACTIONS: [&str; 4] = ["show", "update", "destroy", "edit"];
+
+/// Whether `only:` / `except:` leave a member action (show / update / destroy /
+/// edit), so the resource answers at `/<r>/:id`. A non-literal list leaves
+/// every action.
+fn rails_has_member_action(
+    only: Option<&Option<Vec<String>>>,
+    except: Option<&Option<Vec<String>>>,
+) -> bool {
+    RAILS_MEMBER_ACTIONS.iter().any(|a| {
+        let kept = match only {
+            Some(Some(list)) => list.iter().any(|x| x == a),
+            Some(None) | None => true,
+        };
+        let dropped = match except {
+            Some(Some(list)) => list.iter().any(|x| x == a),
+            Some(None) | None => false,
+        };
+        kept && !dropped
+    })
+}
+
+/// The singular of a resource name for its nested `:<singular>_id` segment
+/// (HF.5): `ies` -> `y`, `(s|x|z|ch|sh)es` -> drop `es`, a trailing `s`
+/// dropped, else unchanged. The placeholder's name only shapes the ROUTE qname
+/// text; the HTTP resolver folds every `:x` alike.
+fn rails_singular(name: &str) -> String {
+    if let Some(stem) = name.strip_suffix("ies")
+        && !stem.is_empty()
+    {
+        return format!("{stem}y");
+    }
+    if let Some(stem) = name.strip_suffix("es")
+        && ["s", "x", "z", "ch", "sh"]
+            .iter()
+            .any(|e| stem.ends_with(e))
+    {
+        return stem.to_string();
+    }
+    if let Some(stem) = name.strip_suffix('s')
+        && !stem.is_empty()
+        && !stem.ends_with('s')
+    {
+        return stem.to_string();
+    }
+    name.to_string()
 }
 
 /// The `do ... end` / `{ ... }` body of a scope-forming call.
@@ -1619,10 +1916,11 @@ fn scope_literal(n: TsNode, src: &[u8]) -> String {
 fn try_emit_rails_route(
     call: TsNode,
     src: &[u8],
-    prefix: &str,
+    ctx: &RailsCtx,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
+    stats: &mut RailsScopeStats,
 ) {
     let method = call
         .child_by_field_name("method")
@@ -1650,29 +1948,17 @@ fn try_emit_rails_route(
             let h = handler.as_deref().and_then(parse_handler);
             // Under a namespace the root IS the namespace path; with no prefix
             // `join_path("", "/")` is a pass-through and `abs_path` keeps "/".
-            let path = abs_path(&join_path(prefix, "/"));
+            let path = abs_path(&join_path(&ctx.prefix, "/"));
             emit_rails_route("GET", &path, h, module_id, repo, line_at(call), acc);
-            return;
-        }
-        "resources" | "resource" => {
-            // `resources :users` — convention-mapped, no explicit handler string.
-            let mut cursor = args.walk();
-            let Some(first) = args.named_children(&mut cursor).next() else {
-                return;
-            };
-            let name = text_of(first, src).trim_start_matches(':').trim();
-            if name.is_empty() {
-                return;
-            }
-            let path = abs_path(&join_path(prefix, &format!("/{name}")));
-            emit_rails_route("ANY", &path, None, module_id, repo, line_at(call), acc);
+            count_rails_route(&ctx.prefix, ctx.in_resource, stats);
             return;
         }
         _ => return,
     };
 
-    // get/post/put/patch/delete/match: `<verb> "/path"[, to: "ctrl#act"]`
-    // or the hash-rocket form `<verb> "/path" => "ctrl#act"`.
+    // get/post/put/patch/delete/match: `<verb> "/path"[, to: "ctrl#act"]`,
+    // the hash-rocket form `<verb> "/path" => "ctrl#act"`, or (HF.5) a symbol
+    // naming a path segment, `<verb> :preview[, on: :member][, to: ..]`.
     let mut cursor = args.walk();
     let Some(first) = args.named_children(&mut cursor).next() else {
         return;
@@ -1692,6 +1978,9 @@ fn try_emit_rails_route(
     } else if first.kind() == "string" {
         // Path string, optional trailing `to: "ctrl#act"` pair.
         (Some(string_inner(first, src)), find_to_handler(args, src))
+    } else if first.kind() == "simple_symbol" {
+        // `get :preview` names the segment `preview` under the prefix.
+        (Some(scope_literal(first, src)), find_to_handler(args, src))
     } else {
         return;
     };
@@ -1700,9 +1989,45 @@ fn try_emit_rails_route(
     if path.is_empty() {
         return;
     }
+    // `on: :member` / `on: :collection` / `on: :new` re-root the verb at the
+    // enclosing resource's member / collection / new path; anything else
+    // lands under the context prefix (a resource body's nesting prefix).
+    let on = rails_on_option(args, src);
+    let (prefix, block) = match (on.as_deref(), &ctx.resource) {
+        (Some("member"), Some(res)) => (res.member.clone(), RailsBlockKind::Member),
+        (Some("collection"), Some(res)) => (res.base.clone(), RailsBlockKind::Collection),
+        (Some("new"), Some(res)) => (join_path(&res.base, "new"), RailsBlockKind::Collection),
+        _ => (ctx.prefix.clone(), ctx.block),
+    };
     let handler = handler_spec.as_deref().and_then(parse_handler);
-    let path = abs_path(&join_path(prefix, &path));
+    let path = abs_path(&join_path(&prefix, &path));
     emit_rails_route(verb, &path, handler, module_id, repo, line_at(call), acc);
+    count_rails_route(&prefix, ctx.in_resource, stats);
+    match block {
+        RailsBlockKind::Member => stats.member += 1,
+        RailsBlockKind::Collection => stats.collection += 1,
+        RailsBlockKind::Plain => {}
+    }
+}
+
+/// The `on:` option of a routes.rb verb (`post :approve, on: :member`).
+fn rails_on_option(args: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if arg.kind() != "pair" {
+            continue;
+        }
+        let is_on = arg
+            .child_by_field_name("key")
+            .is_some_and(|k| text_of(k, src).trim_matches(|c| c == ':' || c == ' ') == "on");
+        if is_on && let Some(v) = arg.child_by_field_name("value") {
+            let on = scope_literal(v, src);
+            if !on.is_empty() {
+                return Some(on);
+            }
+        }
+    }
+    None
 }
 
 /// Trim the surrounding quotes off a tree-sitter `string` node's text.
@@ -2298,6 +2623,247 @@ end
         let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/admin")));
         assert!(has_handled_by(&fp, "DashboardController", "index"));
+    }
+
+    fn has_route(fp: &FileParse, method: &str, path: &str) -> bool {
+        fp.nodes.iter().any(|n| n.id == route_id(method, path))
+    }
+
+    #[test]
+    fn rails_resources_nest_two_deep() {
+        // HF.5: a `resources` body nests its children under `/<r>/:<singular>_id`,
+        // and a plural `resources` adds its `/:id` member path.
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    resources :accounts, only: [:show] do
+      resources :conversations do
+        resources :messages, only: [:index, :create]
+      end
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(&fp, "ANY", "/api/accounts"));
+        assert!(has_route(&fp, "ANY", "/api/accounts/:id"));
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/accounts/:account_id/conversations"
+        ));
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/accounts/:account_id/conversations/:id"
+        ));
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/accounts/:account_id/conversations/:conversation_id/messages"
+        ));
+        // only: [:index, :create] names no member action: no `/:id`.
+        assert!(!has_route(
+            &fp,
+            "ANY",
+            "/api/accounts/:account_id/conversations/:conversation_id/messages/:id"
+        ));
+        // The flattened forms are gone.
+        assert!(!has_route(&fp, "ANY", "/api/conversations"));
+        assert!(!has_route(&fp, "ANY", "/api/messages"));
+    }
+
+    #[test]
+    fn rails_singular_resource_body_nests_without_id() {
+        let source = r#"
+Rails.application.routes.draw do
+  resource :profile do
+    get :avatar
+    resources :sessions, only: [:index]
+    member do
+      post :refresh
+    end
+    collection do
+      get :history
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(&fp, "ANY", "/profile"));
+        assert!(!has_route(&fp, "ANY", "/profile/:id"));
+        assert!(has_route(&fp, "GET", "/profile/avatar"));
+        assert!(has_route(&fp, "ANY", "/profile/sessions"));
+        assert!(has_route(&fp, "POST", "/profile/refresh"));
+        assert!(has_route(&fp, "GET", "/profile/history"));
+    }
+
+    #[test]
+    fn rails_member_collection_and_on_options() {
+        let source = r#"
+Rails.application.routes.draw do
+  resources :notifications, only: [:index, :destroy] do
+    member do
+      post :snooze
+    end
+    collection do
+      post :read_all
+      get 'preview/:token', action: :preview_status
+    end
+    post :approve, on: :member
+    get :search, on: :collection
+    post :clone
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(&fp, "ANY", "/notifications"));
+        assert!(has_route(&fp, "ANY", "/notifications/:id"));
+        assert!(has_route(&fp, "POST", "/notifications/:id/snooze"));
+        assert!(has_route(&fp, "POST", "/notifications/read_all"));
+        assert!(has_route(&fp, "GET", "/notifications/preview/:token"));
+        assert!(has_route(&fp, "POST", "/notifications/:id/approve"));
+        assert!(has_route(&fp, "GET", "/notifications/search"));
+        // A verb with no `on:` nests under the parent's `:<singular>_id`.
+        assert!(has_route(
+            &fp,
+            "POST",
+            "/notifications/:notification_id/clone"
+        ));
+        assert!(!has_route(&fp, "POST", "/snooze"));
+        assert!(!has_route(&fp, "POST", "/notifications/snooze"));
+    }
+
+    #[test]
+    fn rails_only_and_except_gate_the_id_route() {
+        let source = r#"
+Rails.application.routes.draw do
+  resources :alpha, only: [:index]
+  resources :beta, only: %i[index create]
+  resources :gamma, except: [:show, :update, :destroy, :edit]
+  resources :delta, only: :show
+  resources :epsilon, except: [:index]
+  resources :zeta, only: []
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        for r in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"] {
+            assert!(has_route(&fp, "ANY", &format!("/{r}")), "{r} collection");
+        }
+        assert!(!has_route(&fp, "ANY", "/alpha/:id"));
+        assert!(!has_route(&fp, "ANY", "/beta/:id"));
+        assert!(!has_route(&fp, "ANY", "/gamma/:id"));
+        assert!(has_route(&fp, "ANY", "/delta/:id"));
+        assert!(has_route(&fp, "ANY", "/epsilon/:id"));
+        assert!(!has_route(&fp, "ANY", "/zeta/:id"));
+    }
+
+    #[test]
+    fn rails_symbol_and_relative_verbs_name_a_segment() {
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    get :status
+    post :resend, to: 'auth/resends#create'
+    resources :campaigns, only: [:index] do
+      get 'analytics/metrics', to: 'campaigns/analytics#metrics'
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(&fp, "GET", "/api/status"));
+        assert!(has_route(&fp, "POST", "/api/resend"));
+        assert!(has_handled_by(&fp, "Auth::ResendsController", "create"));
+        assert!(has_route(
+            &fp,
+            "GET",
+            "/api/campaigns/:campaign_id/analytics/metrics"
+        ));
+        assert!(has_handled_by(
+            &fp,
+            "Campaigns::AnalyticsController",
+            "metrics"
+        ));
+    }
+
+    #[test]
+    fn rails_namespace_inside_resources_composes_after_nesting() {
+        // chatwoot's shape: `namespace :captain` and `scope module:` inside the
+        // accounts body keep the `:account_id` nesting.
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    namespace :v1 do
+      resources :accounts, only: [:show] do
+        scope module: :accounts do
+          if ChatwootApp.enterprise?
+            resources :monitors, only: [:index]
+          end
+          namespace :captain do
+            resources :assistants
+          end
+        end
+      end
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/v1/accounts/:account_id/captain/assistants"
+        ));
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/v1/accounts/:account_id/captain/assistants/:id"
+        ));
+        assert!(has_route(
+            &fp,
+            "ANY",
+            "/api/v1/accounts/:account_id/monitors"
+        ));
+        assert!(!has_route(&fp, "ANY", "/api/v1/captain/assistants"));
+        assert!(!has_route(&fp, "ANY", "/api/v1/monitors"));
+    }
+
+    #[test]
+    fn rails_resources_path_and_param_options() {
+        let source = r#"
+Rails.application.routes.draw do
+  resources :inboxes, param: :inbox_id do
+    resources :members, only: [:index]
+  end
+  resources :categories, path: 'cats' do
+    get :tree, on: :member
+  end
+  resources :photos, :books
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(has_route(&fp, "ANY", "/inboxes/:inbox_id"));
+        assert!(has_route(&fp, "ANY", "/inboxes/:inbox_inbox_id/members"));
+        assert!(has_route(&fp, "ANY", "/cats"));
+        assert!(has_route(&fp, "ANY", "/cats/:id"));
+        assert!(has_route(&fp, "GET", "/cats/:id/tree"));
+        assert!(!has_route(&fp, "ANY", "/categories"));
+        assert!(has_route(&fp, "ANY", "/photos"));
+        assert!(has_route(&fp, "ANY", "/books"));
+        assert!(has_route(&fp, "ANY", "/books/:id"));
+    }
+
+    #[test]
+    fn rails_singularize_rules() {
+        assert_eq!(rails_singular("accounts"), "account");
+        assert_eq!(rails_singular("categories"), "category");
+        assert_eq!(rails_singular("boxes"), "box");
+        assert_eq!(rails_singular("matches"), "match");
+        assert_eq!(rails_singular("wishes"), "wish");
+        assert_eq!(rails_singular("statuses"), "status");
+        assert_eq!(rails_singular("campaign_history"), "campaign_history");
+        assert_eq!(rails_singular("data"), "data");
     }
 
     #[test]

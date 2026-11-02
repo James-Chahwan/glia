@@ -1,0 +1,30 @@
+{
+  "framework": "ruby-rails-nested-resources",
+  "language": "javascript+ruby",
+  "dirs": ["server", "client"],
+  "cells": ["ruby/http_server"],
+  "mechanism": "http_server",
+  "note": "HF.5: Rails `resources` / `resource` blocks nest their children (`/accounts/:account_id/notifications`), `member` / `collection` blocks and `on:` re-root their verbs, symbol verbs name a path segment, and a plural `resources` adds its `/:id` member path unless `only:` / `except:` leave no member action. Before HF.5 (glia 0.5.6, release CLI) the route reader flattened every nested resource to `ANY /api/v1/<r>` and read no symbol verb, so chatwoot's 301 account-scoped client ENDPOINTs had no route to pair (`[http] routes=223 endpoints=334 paired=5`). After (debug CLI on this fixture): `[ruby-routes] composed 12 rails routes under 3 scopes nested=10 member=1 collection=1 id_routes=4` and `[http] routes=12 endpoints=6 paired=6`.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "ANY /api/v1/accounts/:account_id/notifications", "exact": true, "note": "resources :notifications nested under resources :accounts (through a module-only scope)"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/accounts/:account_id/notifications/:id", "exact": true, "note": "only: [:index, :destroy] keeps destroy, so the member path exists"},
+    {"kind": "ROUTE", "name": "POST /api/v1/accounts/:account_id/notifications/:id/snooze", "exact": true, "note": "member do post :snooze end"},
+    {"kind": "ROUTE", "name": "POST /api/v1/accounts/:account_id/notifications/read_all", "exact": true, "note": "collection do post :read_all end"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/accounts/:account_id/conversations/:conversation_id/messages", "exact": true, "note": "nesting two deep: the parent's :<singular>_id"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/accounts/:account_id/captain/assistants", "exact": true, "note": "a namespace inside a resources body composes after the nesting prefix"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/v1/accounts/${…}/notifications", "to": "ANY /api/v1/accounts/:account_id/notifications", "category": "HTTP_CALLS", "exact": true, "note": "the collection path"},
+    {"from": "endpoint:DELETE:/api/v1/accounts/${…}/notifications/${…}", "to": "ANY /api/v1/accounts/:account_id/notifications/:id", "category": "HTTP_CALLS", "exact": true, "note": "the /:id member path"},
+    {"from": "endpoint:POST:/api/v1/accounts/${…}/notifications/${…}/snooze", "to": "POST /api/v1/accounts/:account_id/notifications/:id/snooze", "category": "HTTP_CALLS", "exact": true, "note": "a member action"},
+    {"from": "endpoint:POST:/api/v1/accounts/${…}/notifications/read_all", "to": "POST /api/v1/accounts/:account_id/notifications/read_all", "category": "HTTP_CALLS", "exact": true, "note": "a collection action"},
+    {"from": "endpoint:GET:/api/v1/accounts/${…}/conversations/${…}/messages", "to": "ANY /api/v1/accounts/:account_id/conversations/:conversation_id/messages", "category": "HTTP_CALLS", "exact": true, "note": "two-deep nesting"},
+    {"from": "endpoint:GET:/api/v1/accounts/${…}/captain/assistants", "to": "ANY /api/v1/accounts/:account_id/captain/assistants", "category": "HTTP_CALLS", "exact": true, "note": "namespace inside the accounts body"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "ANY /api/v1/notifications", "note": "PRECISION: the flattened form the reader emitted before HF.5"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/messages", "note": "PRECISION: the flattened nested-nested form"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/accounts/:account_id/labels/:id", "note": "PRECISION: only: [:index] names no member action, so no /:id path"},
+    {"kind": "ROUTE", "name": "POST /api/v1/snooze", "note": "PRECISION: a member verb never loses its resource"}
+  ]
+}
