@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Should the next wave start now, given the 5-hour usage limit?
+"""Should the next wave start now, given the account's usage limit?
 
 Claude Code passes the account's rate limits to the status line on every
 refresh; ~/.claude/statusline-command.sh persists them to
 ~/.claude/rate-limits.json. This reads that file.
+
+Which window gates (2026-11-02): the 5-hour window when the reading has one,
+else the 7-day window. Claude Code stopped sending a 5-hour figure around
+2026-11-01 (the plan shows weekly limits only), and the status line then
+stopped writing the file, so this read a 39-hour-old 32% while the account
+stood at 60% (James: "Lol not sure about that 32 %"). A reading older than
+--max-age-min is UNKNOWN, never GO.
 
     python3 usage_gate.py                    # GO / HOLD / UNKNOWN for the next wave
     python3 usage_gate.py --start W7         # ...and record the 5h % at launch
@@ -17,8 +24,11 @@ the window resets within --near-reset-min minutes, in which case a limit hit
 only pauses the wave briefly. The measured cost comes from usage-log.jsonl
 (--start / --end pairs); until a wave has been measured, only --max-pct applies.
 
-Exit codes: 0 GO, 2 HOLD, 3 UNKNOWN (no data yet — open a Claude Code session
-so the status line renders once). The numbers are as fresh as the last status
+For the 7-day window, "near the reset" is --near-reset-week-min (6 h): a limit
+hit then pauses the release for hours, not days.
+
+Exit codes: 0 GO, 2 HOLD, 3 UNKNOWN (no reading, or a stale one — open a Claude
+Code session so the status line renders once). The numbers are as fresh as the last status
 line render; other sessions on the account can have used more since.
 """
 import argparse
@@ -39,12 +49,14 @@ def load_limits():
         return None
 
 
-def wave_cost():
-    """Average 5h-% a wave consumed, from --start / --end pairs in one window."""
+def wave_cost(window):
+    """Average %-of-window a wave consumed, from --start / --end pairs in one window
+    (rows before 2026-11-02 carry no `window`: they are 5-hour readings)."""
     try:
         rows = [json.loads(l) for l in LOG.read_text().splitlines() if l.strip()]
     except OSError:
         return None, 0
+    rows = [r for r in rows if r.get("window", "five_hour") == window]
     starts = {r["wave"]: r for r in rows if r.get("event") == "start"}
     costs = []
     for r in rows:
@@ -64,6 +76,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-pct", type=float, default=80.0)
     ap.add_argument("--near-reset-min", type=int, default=60)
+    ap.add_argument("--near-reset-week-min", type=int, default=360)
+    ap.add_argument("--max-age-min", type=int, default=120)
     ap.add_argument("--start", metavar="WAVE")
     ap.add_argument("--end", metavar="WAVE")
     ap.add_argument("--min-free-gb", type=float, default=60.0)
@@ -77,35 +91,42 @@ def main():
         print(f"HOLD: {free_gb:.0f} GB free on /home; clean target/ first (rm -rf target/debug/incremental, or cargo clean)")
         sys.exit(2)
 
-    lim = load_limits()
-    five = (lim or {}).get("five_hour") or {}
-    pct, resets = five.get("used_percentage"), five.get("resets_at")
+    lim = load_limits() or {}
+    window = "five_hour" if ((lim.get("five_hour") or {}).get("used_percentage") is not None) else "seven_day"
+    name = {"five_hour": "5-hour", "seven_day": "7-day"}[window]
+    cur = lim.get(window) or {}
+    pct, resets = cur.get("used_percentage"), cur.get("resets_at")
     if pct is None:
-        print(f"UNKNOWN: no 5-hour usage in {LIMITS} yet (open a Claude Code session so the status line renders)")
+        print(f"UNKNOWN: no usage reading in {LIMITS} yet (open a Claude Code session so the status line renders)")
         sys.exit(3)
     now = int(time.time())
     age = now - int(lim.get("updated", now))
+    if age > a.max_age_min * 60 and not a.end:
+        print(f"UNKNOWN: the last reading ({name} {pct:.0f}%) is {fmt_mins(age // 60)} old; check the usage page, "
+              f"or open a Claude Code session so the status line writes {LIMITS}")
+        sys.exit(3)
     if resets and int(resets) <= now:
         # The window this reading belongs to has already reset: a fresh window.
         print(f"(last reading {pct:.0f}% was for a window that reset {fmt_mins((now - int(resets)) // 60)} ago; treating usage as 0%)")
         pct, resets = 0, None
     mins_left = max(0, (int(resets) - now) // 60) if resets else None
-    week = (lim.get("seven_day") or {}).get("used_percentage")
+    week = (lim.get("seven_day") or {}).get("used_percentage") if window == "five_hour" else None
 
     if a.start or a.end:
         with LOG.open("a") as f:
             f.write(json.dumps({"wave": a.start or a.end, "event": "start" if a.start else "end",
-                                "pct": pct, "resets_at": resets, "ts": now}) + "\n")
+                                "pct": pct, "resets_at": resets, "ts": now, "window": window}) + "\n")
 
-    cost, n = wave_cost()
+    cost, n = wave_cost(window)
     reset_txt = (f"resets in {fmt_mins(mins_left)} (at {time.strftime('%H:%M', time.localtime(int(resets)))})"
                  if mins_left is not None else "reset time unknown")
     stale = f"; data is {fmt_mins(age // 60)} old" if age >= 600 else ""
     cost_txt = f"; an average wave costs {cost:.0f}% ({n} measured)" if cost is not None else "; no wave measured yet"
     week_txt = f"; 7-day {week:.0f}%" if week is not None else ""
-    print(f"5-hour usage {pct:.0f}%, {reset_txt}{cost_txt}{week_txt}{stale}")
+    print(f"{name} usage {pct:.0f}%, {reset_txt}{cost_txt}{week_txt}{stale}")
 
-    near_reset = mins_left is not None and mins_left <= a.near_reset_min
+    near_min = a.near_reset_min if window == "five_hour" else a.near_reset_week_min
+    near_reset = mins_left is not None and mins_left <= near_min
     too_high = pct >= a.max_pct
     wont_fit = cost is not None and pct + cost >= 100
     if (too_high or wont_fit) and not near_reset:
