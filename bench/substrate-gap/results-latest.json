@@ -9583,7 +9583,7 @@
       "unknown_graded": 0
     }
   },
-  "engine": "0.5.5",
+  "engine": "0.5.6",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/angular-inline-template-bindings",

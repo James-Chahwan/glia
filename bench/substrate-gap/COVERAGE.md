@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.5` · vocabulary digest `f31e7dc48404` · schema 3
+Engine `0.5.6` · vocabulary digest `f31e7dc48404` · schema 3
 
 Columns, left to right (the review's own abbreviations):
 
