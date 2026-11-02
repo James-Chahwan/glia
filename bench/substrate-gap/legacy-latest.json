@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 521,
+  "fixtures": 522,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -395,6 +395,14 @@
       "framework": "csharp-heritage-not-namespace",
       "language": "csharp",
       "per_category": {
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "csharp-heritage-using-scope": {
+      "framework": "csharp-heritage-using-scope",
+      "language": "csharp",
+      "per_category": {
+        "IMPORTS": 1.0,
         "INHERITS_FROM": 1.0
       }
     },

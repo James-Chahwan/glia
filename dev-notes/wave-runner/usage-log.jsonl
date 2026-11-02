@@ -342,3 +342,7 @@
 {"wave": "R057-W8", "event": "start", "pct": 72, "resets_at": 1793883600, "ts": 1793622234, "window": "seven_day"}
 {"wave": "R057-W8", "event": "end", "pct": 73, "resets_at": 1793883600, "ts": 1793623153, "window": "seven_day"}
 {"wave": "R057-W8", "event": "end", "pct": 74, "resets_at": 1793883600, "ts": 1793624117, "window": "seven_day"}
+{"wave": "R057-W9", "event": "start", "pct": 74, "resets_at": 1793883600, "ts": 1793624345, "window": "seven_day"}
+{"wave": "R057-W9", "event": "end", "pct": 77, "resets_at": 1793883600, "ts": 1793626455, "window": "seven_day"}
+{"wave": "R057-W9", "event": "end", "pct": 78, "resets_at": 1793883600, "ts": 1793627377, "window": "seven_day"}
+{"wave": "R057-W9", "event": "end", "pct": 78, "resets_at": 1793883600, "ts": 1793627731, "window": "seven_day"}

@@ -9628,6 +9628,7 @@
     "fixtures/csharp-env-override-setting",
     "fixtures/csharp-file-local-types",
     "fixtures/csharp-heritage-not-namespace",
+    "fixtures/csharp-heritage-using-scope",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/csharp-namespace-qnames",
