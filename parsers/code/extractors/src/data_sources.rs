@@ -62,12 +62,15 @@ pub struct DataSourceNodes {
 
 /// Scan `source` (read from `path`, which picks the CJ.1c guard; `""` = no
 /// guard) for data-source client usage and emit nodes + edges anchored to
-/// `module_id`. Dedups by provider within a single file.
+/// `module_id`. Dedups by provider within a single file. `test_file` (the
+/// caller's test-path rule) turns on HQ.8's test-double rules; `false` reads
+/// exactly as before.
 pub fn extract_data_source_nodes(
     source: &str,
     path: &str,
     module_id: NodeId,
     repo: RepoId,
+    test_file: bool,
 ) -> DataSourceNodes {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -78,11 +81,21 @@ pub fn extract_data_source_nodes(
         .rsplit_once('.')
         .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("rs"));
     let (mut refused_descriptor, mut refused_word) = (0usize, 0usize);
+    let (mut test_camel, mut test_quoted) = (0usize, 0usize);
+    let go = path
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("go"));
+    // HQ.8: the providers a test file mocks, in PATTERNS order.
+    let mocked = if test_file {
+        mocked_providers(source)
+    } else {
+        Vec::new()
+    };
 
     for (pattern, kind, provider) in PATTERNS {
         // A provider already emitted takes nothing more from this file, so
         // its later patterns are never scanned (or counted as refusals).
-        if seen.contains(provider) {
+        if seen.contains(provider) || mocked.contains(provider) {
             continue;
         }
         // The first occurrence the guard admits counts; the scan stops there.
@@ -102,6 +115,14 @@ pub fn extract_data_source_nodes(
             }
             if !word_tail_ok(source, at, pattern) {
                 refused_word += 1;
+                return false;
+            }
+            if test_file && camel_middle(source, at, pattern) {
+                test_camel += 1;
+                return false;
+            }
+            if test_file && in_quoted_prose(source, at, go) {
+                test_quoted += 1;
                 return false;
             }
             let reads = !rust
@@ -137,9 +158,11 @@ pub fn extract_data_source_nodes(
         });
     }
     guard.report("data_sources");
-    if refused_descriptor > 0 || refused_word > 0 {
+    let test_mocked = mocked.len();
+    if refused_descriptor + refused_word + test_mocked + test_camel + test_quoted > 0 {
         eprintln!(
-            "[data-sources] refused jvm_descriptor={refused_descriptor} word_tail={refused_word} path={path}"
+            "[data-sources] refused jvm_descriptor={refused_descriptor} word_tail={refused_word} \
+             test_mocked={test_mocked} test_camel={test_camel} test_quoted={test_quoted} path={path}"
         );
     }
 
@@ -247,14 +270,247 @@ fn in_jvm_descriptor(source: &str, at: usize) -> bool {
 /// space) ends the word. Lowercase, dotted, `::` and path needles are
 /// unchanged, so `memcache` still reads `memcached` and `psycopg` `psycopg2`.
 fn word_tail_ok(source: &str, at: usize, pattern: &str) -> bool {
-    let p = pattern.as_bytes();
-    let word = p.first().is_some_and(u8::is_ascii_uppercase)
-        && p.last().is_some_and(u8::is_ascii_alphabetic);
-    !word
+    !is_word_needle(pattern)
         || !source
             .as_bytes()
-            .get(at + p.len())
+            .get(at + pattern.len())
             .is_some_and(u8::is_ascii_lowercase)
+}
+
+/// FD.73's word-needle class: first byte ASCII uppercase, last an ASCII
+/// letter (`Redis`, `Prisma`, `MongoClient`).
+fn is_word_needle(pattern: &str) -> bool {
+    let p = pattern.as_bytes();
+    p.first().is_some_and(u8::is_ascii_uppercase) && p.last().is_some_and(u8::is_ascii_alphabetic)
+}
+
+/// HQ.8 (test files): true when a word needle's occurrence at `at` follows an
+/// ASCII alphanumeric byte, a camel middle (`ProcessStaleRedisKeysJob`,
+/// `mockPrisma`): the test names its own type or local, not the client.
+fn camel_middle(source: &str, at: usize, pattern: &str) -> bool {
+    is_word_needle(pattern) && at > 0 && source.as_bytes()[at - 1].is_ascii_alphanumeric()
+}
+
+/// HQ.8: the starts of a line that imports (its quoted text names a library).
+const IMPORT_LINE_PREFIXES: &[&str] = &[
+    "import ", "import{", "from ", "require", "use ", "using ", "@import", "#include",
+];
+
+/// HQ.8: text anywhere on a line that makes it an import line (a CommonJS
+/// `require(..)`, a dynamic `import(..)`, the `} from '..'` tail of a
+/// multi-line import).
+const IMPORT_LINE_INFIXES: &[&str] = &[
+    "require(",
+    "require '",
+    "require \"",
+    "import(",
+    " from '",
+    " from \"",
+];
+
+/// HQ.8 (test files): true when the occurrence at `at` sits inside quoted
+/// text (an odd count of one unescaped `'`, `"` or `` ` `` before it on its
+/// line) on a line that imports nothing: a test title, a Kotlin backtick
+/// name, an assertion message. A per-line count, not a lexer. In a Go file a
+/// line holding only an optional alias and one string is an import-block line.
+fn in_quoted_prose(source: &str, at: usize, go: bool) -> bool {
+    let b = source.as_bytes();
+    let start = b[..at]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |i| i + 1);
+    let end = b[at..]
+        .iter()
+        .position(|&c| c == b'\n')
+        .map_or(b.len(), |i| at + i);
+    let line = &source[start..end];
+    let trimmed = line.trim_start();
+    if IMPORT_LINE_PREFIXES.iter().any(|p| trimmed.starts_with(p))
+        || IMPORT_LINE_INFIXES.iter().any(|p| line.contains(p))
+        || (go && go_import_spec(trimmed))
+    {
+        return false;
+    }
+    let before = &b[start..at];
+    [b'\'', b'"', b'`'].iter().any(|&q| {
+        before
+            .iter()
+            .enumerate()
+            .filter(|&(i, &c)| {
+                c == q
+                    && before[..i]
+                        .iter()
+                        .rev()
+                        .take_while(|&&p| p == b'\\')
+                        .count()
+                        % 2
+                        == 0
+            })
+            .count()
+            % 2
+            == 1
+    })
+}
+
+/// A Go import-block line: an optional alias (`_`, `.` or an identifier) and
+/// one double-quoted or raw string, nothing else (a trailing comment allowed).
+fn go_import_spec(line: &str) -> bool {
+    let line = line.split("//").next().unwrap_or_default().trim_end();
+    let rest = line
+        .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        .trim_start();
+    let q = match rest.as_bytes().first() {
+        Some(&c @ (b'"' | b'`')) => c,
+        _ => return false,
+    };
+    rest.len() >= 2
+        && rest.as_bytes()[rest.len() - 1] == q
+        && !rest[1..rest.len() - 1].contains(q as char)
+}
+
+/// The argument span a mock opener takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockSpan {
+    /// Up to the matching `>`.
+    Generic,
+    /// Up to the matching `)`.
+    Call,
+    /// The rest of the declaration: to `;` or the end of the line, the next
+    /// line too when the annotation stands alone on its line.
+    Annotation,
+}
+
+/// HQ.8: the mock constructs a test file builds a double with, per language.
+/// An opener counts at an identifier boundary only (`double(` not
+/// `toDouble(`; an annotation also ends at one, so `@Mock` is not `@MockBean`).
+const MOCK_OPENERS: &[(&str, MockSpan)] = &[
+    // TypeScript / JavaScript
+    ("mockDeep<", MockSpan::Generic),
+    ("mock<", MockSpan::Generic),
+    ("createMock<", MockSpan::Generic),
+    ("DeepMockProxy<", MockSpan::Generic),
+    ("Mocked<", MockSpan::Generic),
+    ("jest.mock(", MockSpan::Call),
+    ("vi.mock(", MockSpan::Call),
+    ("jest.mocked(", MockSpan::Call),
+    ("vi.mocked(", MockSpan::Call),
+    // Python
+    ("MagicMock(", MockSpan::Call),
+    ("AsyncMock(", MockSpan::Call),
+    ("create_autospec(", MockSpan::Call),
+    ("patch(", MockSpan::Call),
+    ("patch.object(", MockSpan::Call),
+    ("mocker.patch(", MockSpan::Call),
+    // Ruby
+    ("instance_double(", MockSpan::Call),
+    ("class_double(", MockSpan::Call),
+    ("object_double(", MockSpan::Call),
+    ("double(", MockSpan::Call),
+    ("spy(", MockSpan::Call),
+    // JVM
+    ("mock(", MockSpan::Call),
+    ("Mockito.mock(", MockSpan::Call),
+    ("mockk<", MockSpan::Generic),
+    ("mockk(", MockSpan::Call),
+    ("spyk(", MockSpan::Call),
+    ("@Mock", MockSpan::Annotation),
+    ("@MockBean", MockSpan::Annotation),
+    ("@MockK", MockSpan::Annotation),
+    ("@SpyBean", MockSpan::Annotation),
+    // C#
+    ("new Mock<", MockSpan::Generic),
+    ("Substitute.For<", MockSpan::Generic),
+    ("A.Fake<", MockSpan::Generic),
+];
+
+/// Longest argument span a mock opener takes, in bytes.
+const MOCK_SPAN_CAP: usize = 256;
+
+/// HQ.8: the byte ranges of `source` inside a mock construct's argument span,
+/// in source order (overlaps kept).
+fn mock_spans(source: &str) -> Vec<(usize, usize)> {
+    let b = source.as_bytes();
+    let mut spans = Vec::new();
+    for &(opener, shape) in MOCK_OPENERS {
+        for (at, _) in source.match_indices(opener) {
+            if at > 0 && is_ident_byte(b[at - 1]) {
+                continue;
+            }
+            let body = at + opener.len();
+            if shape == MockSpan::Annotation && b.get(body).is_some_and(|&c| is_ident_byte(c)) {
+                continue;
+            }
+            let cap = (body + MOCK_SPAN_CAP).min(b.len());
+            let end = match shape {
+                MockSpan::Generic => matching_close(b, body, cap, b'<', b'>'),
+                MockSpan::Call => matching_close(b, body, cap, b'(', b')'),
+                MockSpan::Annotation => annotation_end(b, body, cap),
+            };
+            spans.push((body, end));
+        }
+    }
+    spans.sort_unstable();
+    spans
+}
+
+/// The byte after `open`'s opener whose `close` balances it (depth one at
+/// `from`), or `cap` when none does within it.
+fn matching_close(b: &[u8], from: usize, cap: usize, open: u8, close: u8) -> usize {
+    let mut depth = 1usize;
+    for (i, &c) in b[from..cap].iter().enumerate() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return from + i;
+            }
+        }
+    }
+    cap
+}
+
+/// An annotation's declaration: to `;` or the end of its line; when nothing
+/// but blanks follows the annotation on its line, the next line to `;` / its end.
+fn annotation_end(b: &[u8], from: usize, cap: usize) -> usize {
+    let line_end = |s: usize| {
+        b[s..cap]
+            .iter()
+            .position(|&c| c == b'\n' || c == b';')
+            .map_or(cap, |i| s + i)
+    };
+    let end = line_end(from);
+    let alone = b[from..end].iter().all(u8::is_ascii_whitespace);
+    if alone && b.get(end) == Some(&b'\n') && end + 1 < cap {
+        line_end(end + 1)
+    } else {
+        end
+    }
+}
+
+/// HQ.8: the providers a test file mocks, deduplicated in PATTERNS order: a
+/// provider whose needle occurs inside a mock span (FD.73's descriptor and
+/// word-tail rules as for any occurrence).
+fn mocked_providers(source: &str) -> Vec<&'static str> {
+    let spans = mock_spans(source);
+    let mut out: Vec<&'static str> = Vec::new();
+    if spans.is_empty() {
+        return out;
+    }
+    for &(pattern, _, provider) in PATTERNS {
+        if out.contains(&provider) {
+            continue;
+        }
+        let hit = source.match_indices(pattern).any(|(at, _)| {
+            spans.iter().any(|&(s, e)| s <= at && at < e)
+                && !in_jvm_descriptor(source, at)
+                && word_tail_ok(source, at, pattern)
+        });
+        if hit {
+            out.push(provider);
+        }
+    }
+    out
 }
 
 const PATTERNS: &[(&str, DataSourceKind, &str)] = &[
@@ -318,7 +574,8 @@ mod tests {
     fn detects_database_node_and_edge() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out = extract_data_source_nodes("const db = new MongoClient(url);", "", mid, repo);
+        let out =
+            extract_data_source_nodes("const db = new MongoClient(url);", "", mid, repo, false);
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].from, mid);
@@ -334,7 +591,7 @@ mod tests {
         let repo = RepoId(1);
         let mid = module_id(repo);
         let source = "import Redis from 'redis';\nconst es = new Elasticsearch();";
-        let out = extract_data_source_nodes(source, "", mid, repo);
+        let out = extract_data_source_nodes(source, "", mid, repo, false);
         let kinds: Vec<_> = out
             .nodes
             .iter()
@@ -348,7 +605,13 @@ mod tests {
     fn dedupes_provider_within_file() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out = extract_data_source_nodes("redis.set(k, v);\nRedis.Client.new();", "", mid, repo);
+        let out = extract_data_source_nodes(
+            "redis.set(k, v);\nRedis.Client.new();",
+            "",
+            mid,
+            repo,
+            false,
+        );
         assert_eq!(out.nodes.len(), 1, "same provider deduped once");
     }
 
@@ -356,14 +619,18 @@ mod tests {
     fn node_qname_is_global() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out = extract_data_source_nodes("use diesel::prelude::*;", "", mid, repo);
+        let out = extract_data_source_nodes("use diesel::prelude::*;", "", mid, repo, false);
         let qname = out.nav.qname_by_id.get(&out.nodes[0].id).unwrap();
         assert_eq!(qname, "data_source:diesel");
     }
 
     fn providers(src: &str, path: &str) -> Vec<String> {
+        providers_in(src, path, false)
+    }
+
+    fn providers_in(src: &str, path: &str, test_file: bool) -> Vec<String> {
         let repo = RepoId(1);
-        let out = extract_data_source_nodes(src, path, module_id(repo), repo);
+        let out = extract_data_source_nodes(src, path, module_id(repo), repo, test_file);
         let mut q: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
         q.sort();
         q
@@ -573,5 +840,141 @@ mod tests {
         assert!(ok("redis.get", "redis."));
         assert!(ok("Ecto.Repo.insert", "Ecto.Repo"));
         assert!(!ok("S3Clients", "S3Client"));
+    }
+
+    /// HQ.8: the three held-out wrong shapes (a mocked client, a camel-middle
+    /// job name, a backtick test name) mint nothing in a test file and keep
+    /// their BASE edge outside one; a real client and an import in a test keep
+    /// theirs.
+    const HOPP: &str = "import { mockDeep } from 'jest-mock-extended';\n\
+        import { PrismaService } from '../prisma/prisma.service';\n\
+        const mockPrisma = mockDeep<PrismaService>();\n\
+        mockPrisma.order.findMany.mockResolvedValue([]);\n";
+    const RSPEC: &str = "require 'rails_helper'\n\nRSpec.describe Internal::RemoveStaleRedisKeysJob do\n  \
+        it 'enqueues' do\n    expect(Internal::ProcessStaleRedisKeysJob).to receive(:perform_later)\n  end\nend\n";
+    const KT: &str = "import org.redisson.codec.Kryo5Codec\n\nclass NameCodecTest {\n    @Test\n    \
+        fun `keeps writing names when Redisson rebinds the codec to a classloader`() {\n        \
+        Kryo5Codec().valueEncoder.encode(\"x\")\n    }\n}\n";
+
+    #[test]
+    fn test_doubles_are_no_data_access() {
+        assert!(providers_in(HOPP, "src/m.service.spec.ts", true).is_empty());
+        assert!(providers_in(RSPEC, "spec/jobs/r_spec.rb", true).is_empty());
+        assert!(providers_in(KT, "src/test/kotlin/C.kt", true).is_empty());
+        // Outside a test file: unchanged from BASE.
+        assert_eq!(
+            providers_in(HOPP, "src/m.service.spec.ts", false),
+            ["data_source:prisma"]
+        );
+        assert_eq!(
+            providers_in(RSPEC, "spec/jobs/r_spec.rb", false),
+            ["data_source:redis"]
+        );
+        assert_eq!(
+            providers_in(KT, "src/test/kotlin/C.kt", false),
+            ["data_source:redis"]
+        );
+    }
+
+    #[test]
+    fn real_clients_in_tests_still_read() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "redis = Redis.new\nredis.set('warm', '1')\n",
+                "spec/jobs/w_spec.rb",
+            ),
+            ("import 'package:redis/redis.dart';\n", "test/r_test.dart"),
+            ("const Redis = require('ioredis');\n", "src/a.spec.ts"),
+            ("import { Redis } from 'ioredis';\n", "src/b.spec.ts"),
+            ("import {\n  Redis,\n} from 'ioredis';\n", "src/c.spec.ts"),
+            (
+                "package r\n\nimport (\n\t\"database/sql\"\n)\n",
+                "r/x_test.go",
+            ),
+        ];
+        let want = |p: &str| {
+            if p.ends_with(".go") {
+                vec!["data_source:database_sql".to_string()]
+            } else {
+                vec!["data_source:redis".to_string()]
+            }
+        };
+        for (src, path) in cases {
+            assert_eq!(providers_in(src, path, true), want(path), "{path}: {src}");
+        }
+        assert_eq!(
+            providers_in(
+                "import sqlalchemy as sa\n\ndef test_x(s):\n    s.execute(sa.select(sa.func.count()))\n",
+                "tests/test_x.py",
+                true
+            ),
+            ["data_source:sqlalchemy"]
+        );
+    }
+
+    #[test]
+    fn mock_openers_per_language() {
+        let mocked: &[(&str, &str)] = &[
+            ("r = MagicMock(spec=Redis)\n", "tests/test_a.py"),
+            (
+                "@patch('app.cache.redis.get')\ndef test_x(m): pass\n",
+                "tests/test_b.py",
+            ),
+            (
+                "let(:r) { instance_double(Redis) }\nRedis.new\n",
+                "spec/a_spec.rb",
+            ),
+            ("val r = mockk<RedissonClient>()\n", "src/test/A.kt"),
+            (
+                "@MockBean\nprivate RedisTemplate t;\nRedis x;\n",
+                "src/test/B.java",
+            ),
+            ("@Mock lateinit var r: RedissonClient\n", "src/test/C.kt"),
+            (
+                "var r = new Mock<IRedisClient>();\nvar c = new Redis();\n",
+                "tests/D.cs",
+            ),
+            ("var r = Substitute.For<Redis>();\n", "tests/E.cs"),
+            ("jest.mock('ioredis', () => Redis);\n", "src/f.spec.ts"),
+        ];
+        for (src, path) in mocked {
+            assert!(
+                providers_in(src, path, true).is_empty(),
+                "{path}: {src}: {:?}",
+                providers_in(src, path, true)
+            );
+        }
+        // An opener counts at an identifier boundary only.
+        assert_eq!(
+            providers_in("x.toDouble(Redis.n)\nRedis.new\n", "spec/b_spec.rb", true),
+            ["data_source:redis"]
+        );
+        // `@Mock` alone is no `@MockitoSettings`.
+        assert_eq!(
+            providers_in("@MockitoSettings Redis r;\n", "src/test/F.java", true),
+            ["data_source:redis"]
+        );
+    }
+
+    #[test]
+    fn quoted_and_camel_shapes() {
+        let q = |s: &str| in_quoted_prose(s, s.find("Redis").unwrap(), false);
+        assert!(q("it('drops Redis keys', () => {"));
+        assert!(q("fun `when Redis rebinds`() {"));
+        assert!(q("assert x, \"Redis down\""));
+        assert!(!q("const c = Redis.create('a');"));
+        assert!(!q("x = 'a'; Redis.new"));
+        assert!(!q("s = 'it\\'s'; Redis.new"));
+        assert!(!q("import Redis from 'redis';"));
+        assert!(!q("  } from 'Redis';"));
+        assert!(in_quoted_prose("\t\"x/sqlite\"\n", 4, false));
+        assert!(!in_quoted_prose("\t\"x/sqlite\"\n", 4, true));
+        assert!(!in_quoted_prose("\tdb \"x/sqlite\" // driver\n", 7, true));
+        let c = |s: &str, p: &str| camel_middle(s, s.find(p).unwrap(), p);
+        assert!(c("ProcessStaleRedisKeysJob", "Redis"));
+        assert!(c("mockPrisma", "Prisma"));
+        assert!(!c("Redis.new", "Redis"));
+        assert!(!c("<PrismaService>", "Prisma"));
+        assert!(!c("app_redis.get", "redis."));
     }
 }

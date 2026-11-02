@@ -1,0 +1,8 @@
+{
+  "name": "data-source-test-doubles",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "jest-mock-extended": "^3.0.0"
+  }
+}

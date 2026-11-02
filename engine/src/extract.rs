@@ -402,7 +402,15 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(evm);
     run_with_edges!(
         "data_sources",
-        data_sources::extract_data_source_nodes(source, path, module_id, repo)
+        // HQ.8: a test file's mocked clients, camel-middle and quoted names
+        // are no data access (CG.2a's path rule).
+        data_sources::extract_data_source_nodes(
+            source,
+            path,
+            module_id,
+            repo,
+            crate::passes::is_test_file(path),
+        )
     );
     // LE.4a: the extractor's statement sites (0-indexed lines here) and the
     // entities a declaration named, kept for the re-home below.

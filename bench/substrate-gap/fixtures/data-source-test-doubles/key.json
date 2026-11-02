@@ -1,0 +1,42 @@
+{
+  "framework": "data-source-test-doubles",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "HQ.8 (HC.3's confidence gate, cluster 1: ACCESSES_DATA|fact 7/10 held out, all three wrong rows extractor:data_sources on a test module). In a test file a store client the file mocks is no data access (mockDeep<PrismaService>()), and a capitalised needle in a camel middle (PurgeStaleRedisKeysJob) or inside quoted text off an import line (a Kotlin backtick test name) names no client. Baseline HEAD 1a33f0e8: all five edges exist, forbid violations 3. The controls keep theirs: a spec that really calls Redis.new, a pytest module that imports sqlalchemy.",
+  "expect_edges": [
+    {
+      "from": "spec::jobs::cache_warm_spec",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "redis = Redis.new; redis.set(..): a real client in a spec"
+    },
+    {
+      "from": "tests::test_repo",
+      "to": "data_source:sqlalchemy",
+      "category": "ACCESSES_DATA",
+      "note": "import sqlalchemy as sa; sa.select(..) through the test session"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::orders::orders.service.spec",
+      "to": "data_source:prisma",
+      "category": "ACCESSES_DATA",
+      "note": "mockDeep<PrismaService>(): the spec mocks the client (test_mocked)"
+    },
+    {
+      "from": "spec::jobs::purge_stale_redis_keys_job_spec",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "Redis only inside PurgeStaleRedisKeysJob / FlushRedisKeysJob (test_camel)"
+    },
+    {
+      "from": "src::test::kotlin::shop::NameCodecTest",
+      "to": "data_source:redis",
+      "category": "ACCESSES_DATA",
+      "note": "Redisson only in a backtick test name (test_quoted)"
+    }
+  ]
+}
