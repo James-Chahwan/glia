@@ -221,3 +221,74 @@ panel re-drawn at the candidate is what would measure them.
   with an npm / cargo / maven org that routes through a sibling's manifest name is needed.
 - The first judge (HP.5) is one agent; the independent re-judge covers the 16 ids the matched rule
   named, one fresh process per snapshot of the same model family.
+
+## The re-measure (RULE-0.5.7b, HP.7 / HP.8)
+
+James 2026-11-03 ("option b yeah pointless fail"): the same claim, re-measured on the held-out
+panel re-drawn with the release candidate's build, by `bench/edge-audit/RULE-0.5.7b.md`
+(commit 2641e330, before any `heldout_rc` sample was drawn). HP.5's FAIL above stays as written.
+`bash scripts/edge-audit.sh report` prints these lines over `--panel all_rc` (fit +
+`heldout_rc`), computed in the same run as the 0.5.7 lines and written nowhere; `report.json` /
+`report.md` stay the `--panel all` report, and `report --check` / `calibrate --check` exit 0:
+
+```
+[edge-audit] rule 0.5.7b verdict=FAIL under_floor=ACCESSES_DATA|fact fact=0.999 derived=0.991 heuristic=1.000 kappa=1.000
+[edge-audit] rule 0.5.7b rejudge independent=64 self=3
+```
+
+The `all_rc` report itself (`edge_audit report --panel all_rc`, to a scratch file):
+`[edge-audit] report strata=40 judged=912 unsure=0 under_floor=1 insufficient=0 kappa=1.000
+ci_method=stratified_wilson`.
+
+**Verdict: FAIL by the committed rule**, on condition 1 alone: one stratum under floor.
+Conditions 2-4 hold.
+
+- **The panel.** The fit panel as HP.5 drew and judged it, and `heldout_rc`: 371 rows over the
+  same seven public repos as HC.2 (mealie 50, chatwoot 55, squidex 62, tolgee 55, hoppscotch 32,
+  gin-vue-admin 45, zora-protocol 72), drawn by HC.2's key, seed and n (10 per pooled stratum)
+  with `edge_audit` built from a `git archive` of 54978e17 (graph-identical to the fit's
+  558fa992).
+- **Kept and fresh (HP.7).** 300 rows state a claim HC.3 judged and keep its verdict (judge
+  `HC.3`, `kept_from`, all 300 `correct`); 71 are fresh, judged from source by HP.7: 70
+  `correct`, 1 `wrong`, none `unsure`.
+- **Tiers** (stratified over every judged (stratum, panel) part, Wilson bounds): fact 0.999
+  (n 512, [0.996, 1.000]), derived 0.991 (n 276, [0.981, 0.996]), heuristic 1.000 (n 124,
+  [0.725, 1.000]); each at or above its floor (0.95 / 0.90 / 0.70).
+- **Under floor.** ACCESSES_DATA|fact: 14 / 15 judged, p 0.900 [0.597, 0.982] < 0.95. The fit's
+  part is 5 / 5 (N 5); the `heldout_rc` part is 9 / 10 over N 3520, so post-stratification puts
+  almost all the weight on the held-out part and one wrong in ten sets the stratum's p. Every
+  other stratum is at or above floor or a census.
+- **The re-judge (HP.8).** GP.13's matched rule over `heldout_rc` picks 20 ids (its one first
+  `wrong` plus 19 `correct`, topped up to the minimum of 20). HP.8, a separate workflow agent
+  from both first judges (HC.3 for 13 of them, HP.7 for 7), re-judged all 20 from `show` output
+  and source alone, reading only the rule and the rubric before its verdicts were written: 20 /
+  20 agree with the first verdicts (19 `correct`, 1 `wrong`), so no disagreement needed
+  adjudication and `adjudication.jsonl` is unchanged. Kappa over the 64 independent pairs
+  (HP.8 20, FD.3c 28, HP.5x 16) is 1.000; the 3 self pairs are GP.14r's, inherited, and stay out
+  of condition 3. No model process was started.
+
+### The under-floor stratum's wrong cluster
+
+One edge, tolgee ACCESSES_DATA|fact (emitter `extractor:data_entities`):
+`ProjectRepository::findAllPermitted -> data_entity:sql:fetch`. The site is a Spring Data
+`@Query` in JPQL, `select r, p, o, role from Project r left join fetch Permission p on .. left
+join fetch Organization o on ..`: the raw SQL reader takes the word after JOIN as the joined
+table, so `JOIN FETCH <Entity>` names `fetch`, a keyword, instead of the entity (Permission,
+Organization, OrganizationRole). Both judges read it `wrong`.
+
+Follow-up (precision backlog, public fixture idea): a Spring Data repository with
+`@Query("select u from User u left join fetch Permission p on p.user = u")` and a `join fetch
+u.roles` path form; expect ACCESSES_DATA to the joined entity (`permission`), forbid
+`data_entity:sql:fetch`, and keep a plain `join roles r` and an `ORDER BY .. FETCH FIRST 10 ROWS
+ONLY` unchanged. It is already planned as 0.5.7's HQ.14 (commit de12bd07, fixture
+`bench/substrate-gap/fixtures/sql-jpql-join-fetch`). The stratum's p moves only when a later
+panel re-draws it: this rule reads `heldout_rc` as drawn, so the FAIL stands for 0.5.7.
+
+### Limits of the re-measure
+
+- n 10 per pooled held-out stratum against floors of 0.95 / 0.90 means a single wrong edge in a
+  large held-out stratum (N in the thousands) is enough to put it under floor: the verdict is
+  sensitive to one sample, as here.
+- The 300 kept verdicts are HC.3's, of the same edges at an older build; the claim is unchanged
+  for each (same id), so the verdict carries over by the rule.
+- The re-judge covers 20 of the 371 `heldout_rc` ids, as GP.13's matched rule sets it.
