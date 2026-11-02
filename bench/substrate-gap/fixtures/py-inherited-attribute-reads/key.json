@@ -1,0 +1,63 @@
+{
+  "framework": "py-inherited-attribute-reads",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "HQ.9 (HC.3 held-out verdict on mealie, wrong HAS_ATTRIBUTE): a `self.X` read declares no ATTRIBUTE when X is the class's own METHOD / property, or when the class names a base and never assigns X (an inherited member); an assignment to the class's own property is a setter call. An assignment declares (`self.last_status = ..` in a subclass), and a read-only name in a base-less class still declares (the metaclass-attached `Schema.opts`, marshmallow's shape).",
+  "expect_edges": [
+    {
+      "from": "shop::base::BaseController",
+      "to": "shop::base::BaseController::session",
+      "category": "HAS_ATTRIBUTE",
+      "exact": true
+    },
+    {
+      "from": "shop::base::BaseController",
+      "to": "shop::base::BaseController::_repos",
+      "category": "HAS_ATTRIBUTE",
+      "exact": true
+    },
+    {
+      "from": "shop::orders::OrdersController",
+      "to": "shop::orders::OrdersController::last_status",
+      "category": "HAS_ATTRIBUTE",
+      "exact": true,
+      "note": "a subclass's own assignment declares"
+    },
+    {
+      "from": "shop::orders::Price",
+      "to": "shop::orders::Price::_amount",
+      "category": "HAS_ATTRIBUTE",
+      "exact": true,
+      "note": "the setter's backing field"
+    },
+    {
+      "from": "shop::schema::Schema",
+      "to": "shop::schema::Schema::opts",
+      "category": "HAS_ATTRIBUTE",
+      "exact": true,
+      "note": "read-only in a base-less class: set by the metaclass"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "shop::orders::OrdersController",
+      "to": "shop::orders::OrdersController::repos",
+      "category": "HAS_ATTRIBUTE",
+      "note": "self.repos reads BaseController's property (the audit's shape)"
+    },
+    {
+      "from": "shop::orders::OrdersController",
+      "to": "shop::orders::OrdersController::render",
+      "category": "HAS_ATTRIBUTE",
+      "note": "self.render(..) is the class's own METHOD"
+    },
+    {
+      "from": "shop::orders::Price",
+      "to": "shop::orders::Price::amount",
+      "category": "HAS_ATTRIBUTE",
+      "note": "self.amount = .. calls Price's own property setter"
+    }
+  ]
+}

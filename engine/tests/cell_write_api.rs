@@ -36,9 +36,11 @@ use serde_json::json;
 
 const SOURCE: &str = "def charge(order_id):\n    return order_id\n\n\ndef refund(order_id):\n    return charge(order_id)\n";
 const VECTOR: [u8; 8] = [0, 0, 128, 63, 0, 0, 0, 64];
-/// A Python METHOD and the ATTRIBUTE `self.total` mints share
-/// `app::Cart::total` (the DT.12b measured twin).
-const CART: &str = "class Cart:\n    def total(self): return sum(item.price * item.quantity for item in self.items)\n    def summary(self): handler = self.total; return handler()\n";
+/// A Python METHOD and a class-level ATTRIBUTE share `app::Cart::total` (the
+/// DT.12b measured twin). Since HQ.9 a `self.total` read of the class's own
+/// METHOD mints no ATTRIBUTE, so the twin is a class-level `total = 0`
+/// shadowed by `def total`, which the parser still mints.
+const CART: &str = "class Cart:\n    total = 0\n    def total(self): return sum(item.price * item.quantity for item in self.items)\n    def summary(self): handler = self.total; return handler()\n";
 
 /// `<tmp>/<name>` holding `a.py`.
 fn repo(tmp: &Path, name: &str) -> PathBuf {

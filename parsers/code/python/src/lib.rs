@@ -378,6 +378,25 @@ struct ShapeStats {
     rejected_urls: usize,
 }
 
+/// HQ.9 — one `self.<attr>` access in a method body, pending until its class
+/// body is read.
+struct SelfAttrAccess {
+    class_id: NodeId,
+    name: String,
+    is_write: bool,
+    at: usize,
+}
+
+/// HQ.9 — `[py-attrs] declared=<d> own_member=<m> inherited_read=<i>`: the
+/// `self.X` names a file's classes declared, the ones that are the class's own
+/// METHOD / property, and the read-only ones a class with a base inherits.
+#[derive(Default)]
+struct AttrStats {
+    declared: usize,
+    own_member: usize,
+    inherited_read: usize,
+}
+
 #[derive(Default)]
 struct Acc {
     /// FH.4a: the `[endpoint-shape]` counters.
@@ -406,6 +425,16 @@ struct Acc {
     /// Dedupe set so `self.x` in `__init__` + `x: int = ...` class-level both
     /// observing the same attribute produce one node, one HAS_ATTRIBUTE edge.
     class_attrs: HashMap<NodeId, std::collections::HashSet<String>>,
+    /// HQ.9 — every `self.<attr>` access a method body makes, settled by
+    /// [`settle_self_attrs`] once the class body is read (its own methods and
+    /// bases known): (class id, name, is_write, source byte).
+    self_attr_pending: Vec<SelfAttrAccess>,
+    /// HQ.9 — the ATTRIBUTE ids a `self.X` write to the class's own METHOD /
+    /// property would have named; their RHS-constructor USES refs are dropped
+    /// at the end of the file (no node holds them).
+    dropped_attrs: std::collections::HashSet<NodeId>,
+    /// HQ.9 — the `[py-attrs]` counters.
+    attr_stats: AttrStats,
     /// v0.4.13b — method ids with `@property` decorator. Read as `self.x`
     /// (valid attribute access) rather than `self.x()`. Lets composition-path
     /// synth filter method→class hops to only syntactically valid reads.
@@ -804,6 +833,98 @@ fn visit_class(
             _ => {}
         }
     }
+    let class = AttrClass {
+        class_id,
+        class_qname: &class_qname,
+        file_rel,
+        module_id,
+        repo,
+    };
+    settle_self_attrs(&class, acc);
+}
+
+/// Base names that make no class inherit a member: `class X(object)`,
+/// `class X(ABC)`, `class X(Protocol)` are base-less for HQ.9's rule 4.
+const NON_INHERITING_BASES: [&str; 3] = ["object", "ABC", "Protocol"];
+
+/// HQ.9 — settle the class's pending `self.<attr>` accesses once its body is
+/// read, in source order, one decision per name (a write if any access
+/// writes):
+///   1. an assignment (`self.X = ..`, augmented, a tuple / list target,
+///      `for self.X in`) declares X;
+///   2. a class-level `X = ..` / `X: T` already declared X (unchanged);
+///   3. neither declares when X is a METHOD of the class itself: a property's
+///      assignment calls its setter, a read of a method is the method;
+///   4. a read-only X declares X only when the class names no base but
+///      `object` / `ABC` / `Protocol`: with a real base the name is presumed
+///      inherited (or set by the base's metaclass) and belongs to its
+///      declarer. A base-less class keeps the read (marshmallow's
+///      metaclass-attached `Schema.opts`).
+///
+/// A write to a property an ancestor in another file declares stays an
+/// ATTRIBUTE: the parser cannot see the ancestor.
+fn settle_self_attrs(class: &AttrClass<'_>, acc: &mut Acc) {
+    let class_id = class.class_id;
+    let (mut mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut acc.self_attr_pending)
+        .into_iter()
+        .partition(|a| a.class_id == class_id);
+    acc.self_attr_pending = rest;
+    mine.sort_by_key(|a| a.at);
+    // Fold by name in first-occurrence order; a write anywhere wins.
+    let mut order: Vec<(String, bool)> = Vec::new();
+    let mut slot: HashMap<String, usize> = HashMap::new();
+    for a in mine {
+        match slot.get(&a.name) {
+            Some(&i) => order[i].1 |= a.is_write,
+            None => {
+                slot.insert(a.name.clone(), order.len());
+                order.push((a.name, a.is_write));
+            }
+        }
+    }
+    let has_base = acc.class_bases.get(&class_id).is_some_and(|bases| {
+        bases
+            .iter()
+            .any(|b| !NON_INHERITING_BASES.contains(&b.as_str()))
+    });
+    for (name, is_write) in order {
+        if name.starts_with("__") && name.ends_with("__") {
+            continue;
+        }
+        if acc
+            .class_attrs
+            .get(&class_id)
+            .is_some_and(|set| set.contains(&name))
+        {
+            // Rule 2: declared at class level already (one node).
+            continue;
+        }
+        if acc.class_methods.contains_key(&(class_id, name.clone())) {
+            acc.attr_stats.own_member += 1;
+            let attr_qname = format!("{}::{name}", class.class_qname);
+            acc.dropped_attrs.insert(NodeId::from_parts(
+                GRAPH_TYPE,
+                class.repo,
+                node_kind::ATTRIBUTE,
+                &attr_qname,
+            ));
+            continue;
+        }
+        if !is_write && has_base {
+            acc.attr_stats.inherited_read += 1;
+            continue;
+        }
+        acc.attr_stats.declared += 1;
+        emit_class_attribute(
+            class_id,
+            class.class_qname,
+            &name,
+            class.file_rel,
+            class.module_id,
+            class.repo,
+            acc,
+        );
+    }
 }
 
 /// v0.4.13 — create an ATTRIBUTE node + HAS_ATTRIBUTE edge for a class
@@ -865,8 +986,8 @@ fn emit_class_attribute(
     let _ = module_id;
 }
 
-/// The class whose `self.<attr>` accesses [`collect_self_attr_assignments`]
-/// turns into ATTRIBUTE nodes, and where it is declared.
+/// The class whose `self.<attr>` accesses [`settle_self_attrs`] turns into
+/// ATTRIBUTE nodes, and where it is declared.
 #[derive(Clone, Copy)]
 struct AttrClass<'a> {
     class_id: NodeId,
@@ -876,27 +997,17 @@ struct AttrClass<'a> {
     repo: RepoId,
 }
 
-/// v0.4.13 — walk a method body scanning for every `self.<attr>` access
-/// (assignment LHS or plain read), and for each, emit ATTRIBUTE + HAS_ATTRIBUTE
-/// via `emit_class_attribute`. Dedupe is handled downstream.
+/// v0.4.13 — walk a method body for every `self.<attr>` access (assignment
+/// target or plain read) and queue it on `acc.self_attr_pending`; HQ.9's
+/// [`settle_self_attrs`] decides which ones declare an ATTRIBUTE once the
+/// class body is read.
 ///
-/// Scanning reads, not just assignments, catches two important patterns:
-///   1. `__init__`-style: `self.opts = SchemaOpts(meta)` — assignment.
-///   2. **Metaclass-attached attributes**: marshmallow's `Schema.opts` is set
-///      via `klass.opts = ...` inside `SchemaMeta.__new__` (line 112 of
-///      schema.py), never through `self.`. But every Schema method reads
-///      `self.opts.X` — so scanning reads surfaces the attribute on Schema.
-///
-/// The read-based signal matches what any reader (human or LLM) infers:
-/// if a class's methods read `self.foo`, the class has an attribute `foo`.
-fn collect_self_attr_assignments(body: TsNode, src: &[u8], class: &AttrClass<'_>, acc: &mut Acc) {
-    let AttrClass {
-        class_id,
-        class_qname,
-        file_rel,
-        module_id,
-        repo,
-    } = *class;
+/// Reads are kept, not just assignments, for the **metaclass-attached
+/// attribute**: marshmallow's `Schema.opts` is set via `klass.opts = ...`
+/// inside `SchemaMeta.__new__`, never through `self.`, but every Schema method
+/// reads `self.opts.X`, so the read surfaces the attribute on a base-less
+/// Schema.
+fn collect_self_attr_accesses(body: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
     let mut stack = vec![body];
     while let Some(node) = stack.pop() {
         // Don't descend into nested function/class bodies — `self` there is a
@@ -913,22 +1024,42 @@ fn collect_self_attr_assignments(body: TsNode, src: &[u8], class: &AttrClass<'_>
             && text(obj, src) == "self"
             && let Some(attr) = node.child_by_field_name("attribute")
         {
-            let attr_name = text(attr, src);
-            emit_class_attribute(
+            acc.self_attr_pending.push(SelfAttrAccess {
                 class_id,
-                class_qname,
-                attr_name,
-                file_rel,
-                module_id,
-                repo,
-                acc,
-            );
+                name: text(attr, src).to_string(),
+                is_write: is_assignment_target(node),
+                at: node.start_byte(),
+            });
         }
         let mut c = node.walk();
         for child in node.named_children(&mut c) {
             stack.push(child);
         }
     }
+}
+
+/// HQ.9 — whether an expression node is stored to: the `left` of an
+/// `assignment` / `augmented_assignment` / `for_statement` / comprehension
+/// `for_in_clause`, or an element of a `pattern_list` / `tuple_pattern` /
+/// `list_pattern` / starred pattern that is one. `self.a.b = v` stores `b` on
+/// `self.a`'s value and `self.x[i] = v` stores into `self.x`'s value, so the
+/// inner `self.a` / `self.x` stay reads (neither is the target itself).
+fn is_assignment_target(node: TsNode) -> bool {
+    let mut cur = node;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "pattern_list" | "tuple_pattern" | "list_pattern" | "list_splat_pattern" => {
+                cur = parent;
+            }
+            "assignment" | "augmented_assignment" | "for_statement" | "for_in_clause" => {
+                return parent
+                    .child_by_field_name("left")
+                    .is_some_and(|l| l.id() == cur.id());
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1000,14 +1131,7 @@ fn visit_method(
         collect_calls_in(body, src, method_id, Some(class_id), repo, file_rel, acc);
         // v0.4.13 — scan for `self.<attr> = …` assignments that define class
         // attributes via instance-side `__init__`-style initialisation.
-        let class = AttrClass {
-            class_id,
-            class_qname,
-            file_rel,
-            module_id,
-            repo,
-        };
-        collect_self_attr_assignments(body, src, &class, acc);
+        collect_self_attr_accesses(body, src, class_id, acc);
         // v0.4.13b — RHS constructor inference: `self.<attr> = Target(...)`
         // emits USES ref from ATTRIBUTE to Target so PPR can surface the
         // concrete type when the attribute is activated.
@@ -3080,7 +3204,27 @@ fn is_type_noise(s: &str) -> bool {
 ///
 /// fired_on marker, once per file that binds one (DT.5l):
 ///   `[py-nested] nested-def calls bound=<n> file=<file>`
+///
+/// and once per file whose classes' `self.X` accesses HQ.9 settled to no
+/// ATTRIBUTE (an own METHOD / property, or an inherited read):
+///   `[py-attrs] declared=<d> own_member=<m> inherited_read=<i> file=<file>`
 fn resolve_intra_file(mut acc: Acc, file_rel: &str) -> Result<FileParse, ParseError> {
+    // HQ.9 — a `self.X = Target()` whose X is the class's own property mints
+    // no ATTRIBUTE, so the RHS-constructor USES ref from it has no node.
+    if !acc.dropped_attrs.is_empty() {
+        let dropped = std::mem::take(&mut acc.dropped_attrs);
+        acc.refs.retain(|r| !dropped.contains(&r.from));
+    }
+    let AttrStats {
+        declared,
+        own_member,
+        inherited_read,
+    } = acc.attr_stats;
+    if own_member + inherited_read > 0 {
+        eprintln!(
+            "[py-attrs] declared={declared} own_member={own_member} inherited_read={inherited_read} file={file_rel}"
+        );
+    }
     let mut out = FileParse {
         nodes: std::mem::take(&mut acc.nodes),
         edges: std::mem::take(&mut acc.edges),
@@ -6846,6 +6990,91 @@ def update(id):
             })
             .count();
         assert_eq!(dunder_count, 0, "dunder attributes should be skipped");
+    }
+
+    /// HQ.9 — whether `parse` holds ATTRIBUTE `qname` with its HAS_ATTRIBUTE
+    /// edge from CLASS `class`.
+    fn has_attr(parse: &FileParse, class: &str, qname: &str) -> bool {
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, class);
+        let attr_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, qname);
+        let node = parse.nodes.iter().any(|n| n.id == attr_id);
+        let edge = has_edge(parse, class_id, attr_id, edge_category::HAS_ATTRIBUTE);
+        assert_eq!(node, edge, "{qname}: node and edge disagree");
+        node
+    }
+
+    // HQ.9 (b) — a subclass reading an inherited `@property` and calling an
+    // inherited method declares neither.
+    #[test]
+    fn inherited_reads_declare_no_attribute() {
+        let src = "from base import Base\n\nclass Child(Base):\n    def go(self):\n        rows = self.repos['x']\n        self.helper(rows)\n        return self.request.user\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        for attr in ["repos", "helper", "request"] {
+            assert!(
+                !has_attr(&parse, "m::Child", &format!("m::Child::{attr}")),
+                "inherited {attr} must not be a Child ATTRIBUTE"
+            );
+        }
+        // `object` / `ABC` / `Protocol` are no real base: the read declares.
+        let src = "from abc import ABC\n\nclass Plain(ABC):\n    def go(self):\n        return self.opts\n\nclass Obj(object):\n    def go(self):\n        return self.opts\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert!(has_attr(&parse, "m::Plain", "m::Plain::opts"));
+        assert!(has_attr(&parse, "m::Obj", "m::Obj::opts"));
+    }
+
+    // HQ.9 (c) — `self.helper()` beside `def helper` is the METHOD, no
+    // ATTRIBUTE twin (in a base-less class too).
+    #[test]
+    fn own_method_read_declares_no_attribute() {
+        let src = "class Cart:\n    def helper(self):\n        return 1\n    def go(self):\n        return self.helper() + self.count\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert!(!has_attr(&parse, "m::Cart", "m::Cart::helper"));
+        // A read-only name of a base-less class still declares (rule 4).
+        assert!(has_attr(&parse, "m::Cart", "m::Cart::count"));
+    }
+
+    // HQ.9 (d) — `self.amount = Money(v)` through the class's own property
+    // setter is a setter call: no ATTRIBUTE `amount` and no USES ref from its
+    // would-be id; the setter's backing `self._amount` declares.
+    #[test]
+    fn own_property_assignment_is_a_setter_call() {
+        let src = "class Price:\n    def __init__(self, v):\n        self.amount = Money(v)\n    @property\n    def amount(self):\n        return self._amount\n    @amount.setter\n    def amount(self, value):\n        self._amount = value\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert!(!has_attr(&parse, "m::Price", "m::Price::amount"));
+        assert!(has_attr(&parse, "m::Price", "m::Price::_amount"));
+        let dropped =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Price::amount");
+        assert!(
+            !parse.refs.iter().any(|r| r.from == dropped),
+            "no ref may start at the dropped ATTRIBUTE id: {:?}",
+            parse.refs
+        );
+    }
+
+    // HQ.9 (e) — a subclass ASSIGNING `self.last = x` declares `last`; a
+    // subscript store `self.cache[k] = v` is a read of `cache`.
+    #[test]
+    fn subclass_assignment_declares_attribute() {
+        let src = "class Child(Base):\n    def go(self, x):\n        self.last = x\n        self.cache[x] = 1\n        self.conf.mode = x\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert!(has_attr(&parse, "m::Child", "m::Child::last"));
+        assert!(!has_attr(&parse, "m::Child", "m::Child::cache"));
+        assert!(!has_attr(&parse, "m::Child", "m::Child::conf"));
+    }
+
+    // HQ.9 (f) — tuple / list targets, augmented assignment and `for self.i
+    // in` are writes.
+    #[test]
+    fn tuple_for_and_augmented_targets_are_writes() {
+        let src = "class Child(Base):\n    def go(self, xs):\n        self.a, self.b = 1, 2\n        [self.c, *self.d] = xs\n        self.n += 1\n        for self.i in xs:\n            pass\n        return self.e\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        for attr in ["a", "b", "c", "d", "n", "i"] {
+            assert!(
+                has_attr(&parse, "m::Child", &format!("m::Child::{attr}")),
+                "{attr} is assigned, so it declares"
+            );
+        }
+        assert!(!has_attr(&parse, "m::Child", "m::Child::e"));
     }
 
     // v0.4.13 — RETURNS_TYPE ref from explicit return-type annotation.
