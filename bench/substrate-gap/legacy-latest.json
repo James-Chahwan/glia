@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 516,
+  "fixtures": 518,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1838,6 +1838,14 @@
         "NAVIGATES_TO": 1.0
       }
     },
+    "nav-vue-computed-parent": {
+      "framework": "nav-vue-computed-parent",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
+      }
+    },
     "nav-vue-links": {
       "framework": "nav-vue-links",
       "language": "typescript",
@@ -2620,6 +2628,13 @@
       "framework": "solidity-state_var",
       "language": "solidity",
       "per_category": {}
+    },
+    "solidity-twin-contracts": {
+      "framework": "solidity-twin-contracts",
+      "language": "solidity",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
     },
     "sql-migration-ddl": {
       "framework": "sql-migration-ddl",
