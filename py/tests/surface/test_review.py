@@ -64,6 +64,7 @@ ADVISORY = "### Model breaks (advisory: an inferred client <-> server pairing be
 MARKER_TAIL = " edges +2 -0 (fact=2 derived=0 heuristic=0) violations new=1 resolved=0 blocking=true"
 # HC.4: review's pyo3 markdown always carries the measured precision beside the tier.
 ROW = "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact (>= 0.91 on IMPORTS\\|fact, n=41) |"
+OLD_ROW = "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |"
 
 
 def git(top: pathlib.Path, *args: str) -> None:
@@ -133,6 +134,15 @@ def main() -> int:
         c.check("markdown blocking section", "### New violations (blocking)" in md, md)
         c.check("markdown violation row", ROW in md, md)
         c.check("markdown surface marker", "[review] surface=py format=markdown" in err, err[-400:])
+        c.check("HC.4: the dict carries precision_by_tier", bool((d.get("counts") or {}).get("precision_by_tier")),
+                d.get("counts"))
+        plain_md = rg.review_vs_rev(str(top), format="markdown", precision=False)
+        c.check("HC.4: precision=False drops the precision cell", OLD_ROW in plain_md and ROW not in plain_md,
+                plain_md)
+        plain = rg.review_vs_rev(str(top), precision=False)
+        c.check("HC.4: precision=False drops precision_by_tier and row precision",
+                "precision_by_tier" not in (plain.get("counts") or {})
+                and all("precision" not in v for v in plain.get("new_violations", [])), plain.get("counts"))
         cut = rg.review_vs_rev(str(top), format="markdown", markdown_rows=1)
         c.check("markdown_rows cuts the tables",
                 [line for line in cut.splitlines() if line.startswith("_(")] == ["_(1 of 2)_", "_(1 of 2)_",

@@ -38,6 +38,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::confidence;
 use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, Review,
@@ -121,6 +122,7 @@ struct Kw<'a> {
     title: Option<&'a str>,
     full: bool,
     offset: usize,
+    precision: bool,
 }
 
 impl Default for Kw<'_> {
@@ -138,6 +140,7 @@ impl Default for Kw<'_> {
             title: None,
             full: false,
             offset: 0,
+            precision: true,
         }
     }
 }
@@ -174,7 +177,9 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
         lift_caps(&mut args);
     }
     args.offset = kw.offset;
-    let review = review_vs_rev(repo_path, base, &args)?;
+    let mut review = review_vs_rev(repo_path, base, &args)?;
+    // HC.4: `precision=False` drops the audited precision, as `--no-precision` does.
+    confidence::finish(&mut review, kw.precision, "py");
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
         return Ok(Answer::Dict(Box::new(review)));
@@ -263,8 +268,12 @@ fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String
 /// FH.8d: `max_tests` defaults to 25 (it was 50) and `name_breaks` keeps 25
 /// rows, folded rows first (`counts.name_breaks` uncut,
 /// `name_breaks_truncated` the rest); `full=True` keeps every name row.
+///
+/// HC.4: `counts.precision_by_tier` and each violation's `precision` (the
+/// audited precision of its edge's stratum) ride beside the tiers;
+/// `precision=False` leaves them out, as the CLI's `--no-precision` does.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=25, max_impact=25, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false, offset=0))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=25, max_impact=25, models_min_tier="fact", ranking=None, cochange=true, title=None, full=false, offset=0, precision=true))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -281,6 +290,7 @@ fn review_vs_rev_py(
     title: Option<&str>,
     full: bool,
     offset: usize,
+    precision: bool,
 ) -> PyResult<Py<PyAny>> {
     let kw = Kw {
         format,
@@ -294,6 +304,7 @@ fn review_vs_rev_py(
         title,
         full,
         offset,
+        precision,
     };
     let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
