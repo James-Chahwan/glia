@@ -1753,14 +1753,16 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   path; a drop fails it, and only `baseline` / `baseline-add` / `ratchet` write the baselines.
   Since 0.5.4 gate.json may hold `accepted` rows (row, floor, packet, ruling): a ruled drop
   passes while it stays at or above its floor, printed `[rank-gate] base=<b> accepted <row>
-  <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted`. Six rows at 0.5.6:
-  FD.79's four glia impact rows (`glia/single/ANS:impact/r10` 0.254, `../mrr` 0.4556,
-  `glia/single/ANS:impact@sel/r10` 0.2536, `../mrr` 0.4542), which docs as a second graph was to
-  retire, but 0.5.6's GP.9 measured it FAIL (`[doc-ties] verdict=FAIL glia r10=0.2551 mrr=0.4566
-  drops=0 snapshots=6`), so they stay (James 2026-10-31, "okay fine") and section-level doc ties
-  are parked for 0.5.7 (`dev-notes/next-leap-0.5.7.md` §3); `shell/single/PT*/mrr` at 0.593 (GD.2,
-  James 2026-10-31) and `websocket/single/B0/mrr` at 0.581 (GD.34, James 2026-11-01 "Accept with a
-  floor"), each a calibrated candidate, not a default ranker. The gate measures the shipped
+  <base>-><new> floor=<f> (<packet>)`, and the check line gains `, <n> accepted`. Two rows at 0.5.7:
+  `shell/single/PT*/mrr` at 0.593 (GD.2, James 2026-10-31) and `websocket/single/B0/mrr` at 0.581
+  (GD.34, James 2026-11-01 "Accept with a floor"), each a calibrated candidate, not a default
+  ranker. FD.79's four glia impact rows (`glia/single/ANS:impact/r10` 0.254, `../mrr` 0.4556,
+  `glia/single/ANS:impact@sel/r10` 0.2536, `../mrr` 0.4542) were retired in 0.5.7 (HP.6, James
+  2026-11-02 "go with recommend"): docs as a second graph, which was to retire them, measured FAIL
+  in 0.5.6's GP.9 (`[doc-ties] verdict=FAIL glia r10=0.2551 mrr=0.4566 drops=0 snapshots=6`), but
+  the 0.5.6 release check (960da266) passed glia's impact rows as a gain over 0.5.2 (r10 0.2595 ->
+  0.2640) with only the websocket row accepted, so a glia impact drop now fails the gate and needs
+  its own ruling; the section-level doc-tie measurement (DOCTIE.2-4) is not built. The gate measures the shipped
   fused `find --files` (FB.7c): `check` builds rank_eval with `--features sem-eval` and a
   `glia-embed-worker` (gpu-webgpu), and needs `~/.cache/glia/fastembed` and
   `$GLIA_RANK_GATE_DIR/sem` to persist (a cold cache re-embeds all six snapshots; glia ~500 s).
