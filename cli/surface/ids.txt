@@ -1,0 +1,15 @@
+# CLI surface of `glia ids`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia ids hidden subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+cmd glia ids ls
+  arg domain pos=- long=domain short=- required=false num_args=1 action=Set default=- value_names=DOMAIN global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+cmd glia ids next
+  arg domain pos=- long=domain short=- required=true num_args=1 action=Set default=- value_names=DOMAIN global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg private pos=- long=private short=- required=false num_args=0 action=SetTrue default=false value_names=PRIVATE global=false hidden=false
+  arg table pos=- long=table short=- required=true num_args=1 action=Set default=- value_names=TABLE global=false hidden=false

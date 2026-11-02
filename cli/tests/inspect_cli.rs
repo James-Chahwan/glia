@@ -89,6 +89,14 @@ fn inspect_names_kinds_from_the_file() {
     assert!(count_of(kinds, "MODULE") > 0, "no MODULE in {kinds}");
     assert!(count_of(kinds, "FUNCTION") > 0, "no FUNCTION in {kinds}");
     assert_eq!(json["totals"]["unregistered"], 0, "{json}");
+    // HT.2: every row names its id block; a code layout's are all `code`.
+    for table in ["kinds", "categories", "node_cells", "edge_cells"] {
+        let rows = json["totals"][table].as_array().expect("rows");
+        assert!(
+            rows.iter().all(|r| r["block"] == "code"),
+            "{table}: {rows:?}"
+        );
+    }
     assert_eq!(
         json["totals"]["nodes"].as_u64(),
         Some(
@@ -119,6 +127,95 @@ fn inspect_names_kinds_from_the_file() {
     let table = String::from_utf8_lossy(&out.stdout);
     assert!(table.contains("| MODULE |"), "{table}");
     assert!(table.contains("single file"), "{table}");
+    // HT.2: a code layout's ids are all below 0x10000, so its id cells stay
+    // decimal (the pre-HT.2 text, byte for byte): no hex, no block label.
+    assert!(table.contains("| 1 | MODULE |"), "{table}");
+    assert!(!table.contains("| 0x"), "{table}");
+}
+
+/// HT.2: a file whose ids sit outside the code block prints each such id as
+/// `0x<8 hex> [<block>]` in the tables, and every JSON row carries `block`.
+#[test]
+fn inspect_names_the_block_of_an_id_outside_code() {
+    use glia_core::ids::{BUILD, id_in};
+    use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+
+    let s = Scratch::new("blocks");
+    let target = id_in(BUILD, 1);
+    let depends = id_in(BUILD, 1);
+    let header = glia_store::Header::for_domain(
+        "build-targets",
+        &[(target, "TARGET"), (1, "MODULE")],
+        &[(depends, "DEPENDS_ON")],
+        &[],
+    )
+    .expect("header");
+    let repo = RepoId::from_canonical("test://ht2-blocks");
+    let node = |id: u64| Node {
+        id: NodeId(id),
+        repo,
+        confidence: Confidence::Strong,
+        cells: vec![],
+    };
+    let mut core = glia_store::Container {
+        header,
+        repo,
+        nodes: vec![node(10), node(20), node(30)],
+        edges: vec![Edge {
+            from: NodeId(10),
+            to: NodeId(20),
+            category: EdgeCategoryId(depends),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        }],
+        node_kinds: vec![
+            (NodeId(10), NodeKindId(target)),
+            (NodeId(20), NodeKindId(target)),
+            (NodeId(30), NodeKindId(1)),
+        ],
+        sections: Vec::new(),
+    };
+    let path = s.0.join("targets.gmap");
+    glia_store::write_container(&path, &mut core, &[]).expect("write");
+    let arg = path.to_str().expect("utf-8 path");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(["inspect", arg])
+        .output()
+        .expect("run glia");
+    assert_eq!(out.status.code(), Some(0));
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        table.contains("| 0x00020001 [build] | TARGET | 2 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 0x00020001 [build] | DEPENDS_ON | 1 |"),
+        "{table}"
+    );
+    assert!(table.contains("| 1 | MODULE | 1 |"), "{table}");
+
+    let (code, json, stderr) = glia(&["inspect", arg, "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let kinds = json["totals"]["kinds"].as_array().expect("kinds");
+    let rows: Vec<(u64, &str, &str)> = kinds
+        .iter()
+        .map(|k| {
+            (
+                k["id"].as_u64().unwrap_or_default(),
+                k["name"].as_str().unwrap_or_default(),
+                k["block"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "MODULE", "code"),
+            (u64::from(target), "TARGET", "build")
+        ]
+    );
+    assert_eq!(json["totals"]["categories"][0]["block"], "build", "{json}");
 }
 
 #[test]

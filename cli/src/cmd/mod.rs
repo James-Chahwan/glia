@@ -22,6 +22,8 @@ pub(crate) mod docs;
 pub(crate) mod docs_for;
 // FB.14: the hidden GPU embedding worker, intercepted in main before clap.
 pub(crate) mod embed_worker;
+// HT.2: the hidden `glia ids ls|next`.
+pub(crate) mod ids;
 pub(crate) mod impact;
 pub(crate) mod merge;
 pub(crate) mod projects;

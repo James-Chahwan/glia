@@ -26,6 +26,24 @@ pub struct NamedCount {
     /// registers none.
     pub name: String,
     pub count: u64,
+    /// The id block `id` sits in (HT.2): `code`, `build`, `private`, .., or
+    /// `0x0004?` for an unassigned block (`glia_core::ids::block_name`). A
+    /// pure function of the id, so a file from any build or domain is
+    /// labelled the same way.
+    pub block: String,
+}
+
+impl NamedCount {
+    /// The id as a table cell: decimal for an id below `0x10000` (the code
+    /// block, every id a code layout holds, so its tables print as before),
+    /// else `0x<8 hex> [<block>]` (`0x00020001 [build]`).
+    pub fn id_label(&self) -> String {
+        if self.id < 0x1_0000 {
+            self.id.to_string()
+        } else {
+            format!("0x{:08x} [{}]", self.id, self.block)
+        }
+    }
 }
 
 /// What one `.gmap` file holds, named from its own header.
@@ -261,6 +279,7 @@ impl Table {
                     id: *id,
                     name,
                     count: *count,
+                    block: glia_core::ids::block_name(*id),
                 }
             })
             .collect();
@@ -331,5 +350,57 @@ impl Tables {
             edge_cells,
             unregistered: uk + uc + un + ue,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_rows_carry_their_block() {
+        let mut t = Table::default();
+        for id in [3, 3, 0x0002_0001, 0x8000_0002, 0x0004_0001] {
+            t.count(id);
+        }
+        let (rows, unregistered) = t.named();
+        assert_eq!(unregistered, 4);
+        let got: Vec<(u32, &str, u64, String)> = rows
+            .iter()
+            .map(|r| (r.id, r.block.as_str(), r.count, r.id_label()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (3, "code", 2, "3".to_string()),
+                (0x0002_0001, "build", 1, "0x00020001 [build]".to_string()),
+                (
+                    0x0004_0001,
+                    "0x0004?",
+                    1,
+                    "0x00040001 [0x0004?]".to_string()
+                ),
+                (
+                    0x8000_0002,
+                    "private",
+                    1,
+                    "0x80000002 [private]".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn block_serializes_last() {
+        let r = NamedCount {
+            id: 0x0002_0001,
+            name: "TARGET".into(),
+            count: 6,
+            block: glia_core::ids::block_name(0x0002_0001),
+        };
+        assert_eq!(
+            serde_json::to_string(&r).unwrap_or_default(),
+            r#"{"id":131073,"name":"TARGET","count":6,"block":"build"}"#
+        );
     }
 }

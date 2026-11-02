@@ -102,6 +102,11 @@ enum Cmd {
     /// rebuild latency on big repos can be noticeable. `--pair <sibling>` adds
     /// the cross-repo branch-pair lock (`pre-commit` + `commit-msg`, G8 / u151).
     InstallHooks(hooks::InstallArgs),
+    /// Id blocks (HT.2): `ls` lists the blocks and every linked domain's ids
+    /// with their block; `next` prints the next free id of a (domain, table)
+    /// as a Rust const line. Read-only; for contributors adding an id.
+    #[command(hide = true)]
+    Ids(cmd::ids::Args),
     #[command(flatten)]
     Query(cmd::query::QueryCmd),
     #[command(flatten)]
@@ -141,6 +146,7 @@ fn main() {
         Cmd::Build(a) => cmd::build::run(a),
         Cmd::Docs(a) => cmd::docs::run(a),
         Cmd::InstallHooks(a) => hooks::run(a),
+        Cmd::Ids(a) => cmd::ids::run(a),
         Cmd::Query(c) => cmd::query::run(c),
         Cmd::Change(c) => cmd::change::run(c),
         Cmd::Rules(c) => cmd::rules::run(c),

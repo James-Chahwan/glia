@@ -105,6 +105,6 @@ fn table(title: &str, rows: &[NamedCount]) {
     println!("| id | name | count |");
     println!("|---|---|---|");
     for r in rows {
-        println!("| {} | {} | {} |", r.id, r.name, r.count);
+        println!("| {} | {} | {} |", r.id_label(), r.name, r.count);
     }
 }
