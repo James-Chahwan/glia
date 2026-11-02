@@ -611,6 +611,17 @@ pub(crate) fn fill_evidence_sites_split(
 /// the doc's repo holding its file) wins before DE.1's least qname. Still a
 /// pure function of repo-relative content. `[doclink] precision:` counts the
 /// refusals per reason and the ties the project root decided.
+///
+/// HP.4 (edge audit 0.5.6, DOCUMENTS|derived clusters D4-D6): a bare mention
+/// (tiers 2 / 3; a qualified one is unchanged) also binds nothing when it
+/// sits in a rule / key / kind position ([`mention_position`]: after `rule`,
+/// `key`, `kind`, `gains`, .., on a line holding a `[[stanza]]` before it,
+/// inside a JSON-shaped span, or followed by `key`, `field`, `rule`, ..), or
+/// is one key of a chord (`` `Alt` + `Tab` ``); a private Rust fn (a bare
+/// `fn`, no `pub` / `pub(..)`) binds only from a doc under its own deepest project root;
+/// and a doc under a sub-project's root binds only a candidate under that
+/// root. The marker gains `position=`, `private=`, `other_project=` and
+/// `chord=`.
 pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     use glia_code_domain::cell_type;
     use glia_core::CellPayload;
@@ -618,17 +629,28 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     let mut idx = DocSymbolIndex::new();
     // FD.79: every PROJECT root, as (repo, repo-relative path, "" = `.`).
     let mut roots: Vec<(RepoId, String)> = Vec::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::PROJECT)
+                && let Some(path) = project_root_path(&n.cells, g.nav.qname_by_id.get(&n.id))
+            {
+                roots.push((n.repo, path));
+            }
+        }
+    }
+    // The deepest project root of `repo` holding `file`, as a prefix of `file`.
+    let deepest_root = |repo: RepoId, file: &str| -> Option<usize> {
+        roots
+            .iter()
+            .filter(|(r, path)| *r == repo && path_under(file, path))
+            .map(|(_, path)| path.len())
+            .max()
+    };
     for (graph, g) in merged.graphs.iter().enumerate() {
         for n in &g.nodes {
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
                 continue;
             };
-            if kind == node_kind::PROJECT {
-                if let Some(path) = project_root_path(&n.cells, g.nav.qname_by_id.get(&n.id)) {
-                    roots.push((n.repo, path));
-                }
-                continue;
-            }
             if !is_doc_linkable_symbol(kind) {
                 continue;
             }
@@ -637,6 +659,25 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             };
             let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
             let file = position_file_str(&n.cells);
+            // HP.4: a Rust fn / method declared without `pub` (a trait's own
+            // members excepted: their visibility is the trait's).
+            let trait_member = g
+                .nav
+                .parent_of
+                .get(&n.id)
+                .and_then(|p| g.nav.kind_by_id.get(p))
+                == Some(&node_kind::INTERFACE);
+            let private = (kind == node_kind::FUNCTION || kind == node_kind::METHOD)
+                && file.is_some_and(|f| f.ends_with(".rs"))
+                && !trait_member
+                && n.cells
+                    .iter()
+                    .find_map(|c| match &c.payload {
+                        CellPayload::Text(s) if c.kind == cell_type::CODE => Some(s.as_str()),
+                        _ => None,
+                    })
+                    .is_some_and(is_rust_private);
+            let root = file.and_then(|f| deepest_root(n.repo, f).map(|len| &f[..len]));
             idx.add(
                 name,
                 DocCand {
@@ -647,6 +688,8 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                     repo: n.repo,
                     file,
                     tree: doc_tree(file, qname),
+                    private,
+                    root,
                 },
             );
         }
@@ -664,6 +707,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     // FD.79: mentions refused per reason, and ties the project root decided.
     let (mut unshaped, mut registry, mut placeholder, mut test_tree, mut project_root) =
         (0usize, 0usize, 0usize, 0usize, 0usize);
+    // HP.4: mentions refused per reason.
+    let (mut position, mut private, mut other_project, mut chord) =
+        (0usize, 0usize, 0usize, 0usize);
     // CG.3: sections whose links stopped at MAX_LINKS_PER_DOC. A section's CODE
     // is its whole text now (not its first 500 bytes), so the cap can bind.
     let mut capped = 0usize;
@@ -681,13 +727,7 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             };
             let file = position_file_str(&n.cells);
             // The deepest project root of the doc's repo holding its file.
-            let root = file.and_then(|f| {
-                roots
-                    .iter()
-                    .filter(|(repo, path)| *repo == n.repo && path_under(f, path))
-                    .map(|(_, path)| path.as_str())
-                    .max_by_key(|path| path.len())
-            });
+            let root = file.and_then(|f| deepest_root(n.repo, f).map(|len| &f[..len]));
             let doc = DocCtx {
                 repo: n.repo,
                 file,
@@ -696,14 +736,14 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             // Iterate RAW spans: `identifier_from_span` would throw away the
             // qualifier the doc author supplied, which is the whole signal.
-            for span in backtick_spans(text) {
+            for (at, span) in backtick_spans(text) {
                 // CG.3: an inline mention is one line. A multi-line span is a
                 // fenced block's body (its three backticks leave it at an odd
                 // split index) or a runaway span, and its tail is no mention.
                 if span.contains('\n') {
                     continue;
                 }
-                let bind = match resolve_doc_mention(span, text, &idx, &doc) {
+                let bind = match resolve_doc_mention(span, text, Some(at), &idx, &doc) {
                     Ok(bind) => bind,
                     Err(refusal) => {
                         match refusal {
@@ -711,6 +751,10 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                             Some(DocRefusal::Registry) => registry += 1,
                             Some(DocRefusal::Placeholder) => placeholder += 1,
                             Some(DocRefusal::TestTree) => test_tree += 1,
+                            Some(DocRefusal::Position) => position += 1,
+                            Some(DocRefusal::Private) => private += 1,
+                            Some(DocRefusal::OtherProject) => other_project += 1,
+                            Some(DocRefusal::Chord) => chord += 1,
                             None => {}
                         }
                         continue;
@@ -757,7 +801,8 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
         );
         eprintln!(
             "[doclink] precision: unshaped={unshaped} registry={registry} \
-             placeholder={placeholder} test_tree={test_tree} project_root={project_root}"
+             placeholder={placeholder} test_tree={test_tree} project_root={project_root} \
+             position={position} private={private} other_project={other_project} chord={chord}"
         );
     }
     if tie_qualified + tie_bare > 0 {
@@ -1323,6 +1368,11 @@ struct DocCand<'a> {
     repo: RepoId,
     file: Option<&'a str>,
     tree: DocTree<'a>,
+    /// HP.4: a Rust FUNCTION / METHOD declared with no visibility ([`is_rust_private`]).
+    private: bool,
+    /// HP.4: the deepest project root of its repo holding its file (a prefix
+    /// of `file`; `""` for the repo root `.`), `None` when no PROJECT holds it.
+    root: Option<&'a str>,
 }
 
 impl<'a> DocCand<'a> {
@@ -1357,6 +1407,13 @@ impl<'a> DocCand<'a> {
         doc.root.is_some_and(|root| {
             self.repo == doc.repo && self.file.is_some_and(|f| path_under(f, root))
         })
+    }
+
+    /// HP.4: may a bare mention in `doc` name this candidate's visibility?
+    /// A public one always; a private Rust fn only from a doc of its repo
+    /// whose deepest project root is the candidate's own.
+    fn visible_from(&self, doc: &DocCtx<'_>) -> bool {
+        !self.private || (self.repo == doc.repo && self.root == doc.root)
     }
 }
 
@@ -1472,6 +1529,17 @@ enum DocRefusal {
     Placeholder,
     /// Every candidate is test / fixture / bench code outside the doc's tree.
     TestTree,
+    /// HP.4: the span sits in a rule / key / kind position ([`mention_position`])
+    /// or is JSON-shaped.
+    Position,
+    /// HP.4: every remaining candidate is a private Rust fn of another project.
+    Private,
+    /// HP.4: the doc sits under a sub-project's root and every remaining
+    /// candidate is outside it.
+    OtherProject,
+    /// HP.4: the span is one key of a chord, joined to a neighbouring span by
+    /// `+` (`` `Alt` + `Tab` ``).
+    Chord,
 }
 
 /// One bound mention: target, confidence, EVIDENCE rule, and whether the
@@ -1500,6 +1568,136 @@ fn pick_doc_cand(cands: &[DocCand<'_>], doc: &DocCtx<'_>) -> Option<(NodeId, usi
     }
     let pick = rooted.unwrap_or(first);
     Some((pick.id, n, pick.id != first.id))
+}
+
+/// HP.4: the bare-name pick. FD.79's eligible candidates (none:
+/// [`DocRefusal::TestTree`]), less the private Rust fns of another project
+/// (none left: [`DocRefusal::Private`]), and for a doc under a sub-project's
+/// root (not the repo root `""`) only those under that root (none:
+/// [`DocRefusal::OtherProject`]); then FD.79's pick among them: the least
+/// under the doc's root, else the least. Returns the FD.79 eligible count
+/// and whether the root decided against the least visible candidate.
+fn pick_bare_cand(
+    cands: &[DocCand<'_>],
+    doc: &DocCtx<'_>,
+) -> Result<(NodeId, usize, bool), Option<DocRefusal>> {
+    let eligible = cands.iter().filter(|c| c.eligible(doc)).count();
+    if eligible == 0 {
+        return Err(Some(DocRefusal::TestTree));
+    }
+    let mut visible = cands
+        .iter()
+        .filter(|c| c.eligible(doc) && c.visible_from(doc));
+    let least = visible.next().ok_or(Some(DocRefusal::Private))?;
+    let sub_root = doc.root.is_some_and(|r| !r.is_empty());
+    let pick = std::iter::once(least)
+        .chain(visible)
+        .find(|c| c.under_root(doc))
+        .or((!sub_root).then_some(least))
+        .ok_or(Some(DocRefusal::OtherProject))?;
+    Ok((pick.id, eligible, pick.id != least.id))
+}
+
+/// HP.4: a Rust fn's CODE text (leading `#[..]` attributes, `///` / `//!` doc
+/// lines and blank lines skipped) declares no visibility at all: neither
+/// `pub ` nor a restricted `pub(..)`. A `pub(crate)` / `pub(super)` fn is the
+/// crate's internal API, which the repo's own architecture docs name (the
+/// 0.5.6 audit judged three such binds correct, two of them `pub(crate)`);
+/// a bare `fn` is a module-local helper.
+fn is_rust_private(code: &str) -> bool {
+    let mut depth = 0i32;
+    for line in code.lines() {
+        let t = line.trim();
+        if depth > 0 || t.starts_with('#') {
+            depth += t.matches('[').count() as i32 - t.matches(']').count() as i32;
+            depth = depth.max(0);
+            continue;
+        }
+        if t.is_empty() || t.starts_with("///") || t.starts_with("//!") {
+            continue;
+        }
+        return !(t.starts_with("pub ") || t.starts_with("pub("));
+    }
+    false
+}
+
+/// HP.4: the words before a span (its line's last 24 bytes before the
+/// opening backtick, lowercased and trimmed) that put it in a rule / key /
+/// kind position: "the rule `x`", "the dict gains `x`", "kinds: `x`".
+const POSITION_WORDS_BEFORE: [&str; 15] = [
+    "rule", "rules", "key", "keys", "field", "fields", "kind", "kinds", "kinds:", "gains", "flag",
+    "column", "marker", "emitter", "variant",
+];
+
+/// HP.4: the word right after a span that does the same: "`x` key".
+const POSITION_WORDS_AFTER: [&str; 7] = ["key", "field", "rule", "kind", "cell", "flag", "column"];
+
+/// HP.4: why a bare span is no symbol mention by where it sits, or `None`.
+/// [`DocRefusal::Position`] for a JSON-shaped span (holding `": ` or `{`), a
+/// span after one of [`POSITION_WORDS_BEFORE`], on a line holding a
+/// `[[word]]` stanza name before it, or followed by one of
+/// [`POSITION_WORDS_AFTER`]; [`DocRefusal::Chord`] for a span joined to a
+/// neighbouring span by `+` (`` `Alt` + `Tab` ``, `` `Ctrl`+`K` ``). The line
+/// readings need `at`, the span's offset in `section`.
+fn mention_position(span: &str, section: &str, at: Option<usize>) -> Option<DocRefusal> {
+    if span.contains("\": ") || span.contains('{') {
+        return Some(DocRefusal::Position);
+    }
+    let at = at.filter(|&at| {
+        at >= 1
+            && section.get(at..at + span.len()) == Some(span)
+            && section.get(at - 1..at) == Some("`")
+    })?;
+    let open = at - 1;
+    let line_start = section[..open].rfind('\n').map_or(0, |i| i + 1);
+    let before = &section[line_start..open];
+    let rest = section.get(at + span.len() + 1..).unwrap_or("");
+    let after = &rest[..rest.find('\n').unwrap_or(rest.len())];
+
+    let mut from = before.len().saturating_sub(24);
+    while !before.is_char_boundary(from) {
+        from += 1;
+    }
+    let tail = before[from..].trim().to_ascii_lowercase();
+    let word_before = POSITION_WORDS_BEFORE.iter().any(|w| {
+        tail.strip_suffix(w).is_some_and(|head| {
+            head.chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
+    });
+    let next: String = after
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if word_before || has_stanza_name(before) || POSITION_WORDS_AFTER.contains(&next.as_str()) {
+        return Some(DocRefusal::Position);
+    }
+    let chord_after = after
+        .trim_start()
+        .strip_prefix('+')
+        .is_some_and(|r| r.trim_start().starts_with('`'));
+    let chord_before = before
+        .trim_end()
+        .strip_suffix('+')
+        .is_some_and(|r| r.trim_end().ends_with('`'));
+    (chord_after || chord_before).then_some(DocRefusal::Chord)
+}
+
+/// HP.4: `text` holds a `[[word]]` stanza name (`[[constraint]]`,
+/// `[[ids.tracker]]`).
+fn has_stanza_name(text: &str) -> bool {
+    text.match_indices("[[").any(|(i, _)| {
+        let inner = &text[i + 2..];
+        inner.find("]]").is_some_and(|end| {
+            end > 0
+                && inner[..end]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        })
+    })
 }
 
 /// FD.79: a bare mention is identifier-shaped: the raw span is a call
@@ -1537,13 +1735,17 @@ fn is_placeholder(ident: &str, section: &str) -> bool {
 }
 
 /// The bind for one inline-code span of `section`, resolved for the doc
-/// `doc`. `Err(None)` when it names nothing in the graph, `Err(Some(r))` when
-/// it names something FD.79 refuses. The rule is the tier that matched:
-/// `qualified` (tier 1), `unique` / `ambiguous` (the bare-name tiers 2 / 3);
-/// the counts are of the candidates ELIGIBLE for the doc.
+/// `doc`; `at` is the span's byte offset in `section` (just after its opening
+/// backtick), `None` when unknown (no position or chord reading). `Err(None)`
+/// when it names nothing in the graph, `Err(Some(r))` when it names something
+/// FD.79 or HP.4 refuses. The rule is the tier that matched: `qualified`
+/// (tier 1), `unique` / `ambiguous` (the bare-name tiers 2 / 3); the counts
+/// are of the candidates FD.79 deems ELIGIBLE for the doc (HP.4's filters
+/// refuse or narrow the pick, never move a kept bind's confidence).
 fn resolve_doc_mention(
     span: &str,
     section: &str,
+    at: Option<usize>,
     idx: &DocSymbolIndex<'_>,
     doc: &DocCtx<'_>,
 ) -> Result<DocBind, Option<DocRefusal>> {
@@ -1594,7 +1796,11 @@ fn resolve_doc_mention(
     if is_placeholder(&ident, section) {
         return Err(Some(DocRefusal::Placeholder));
     }
-    let (id, n, root_decided) = pick_doc_cand(cands, doc).ok_or(Some(DocRefusal::TestTree))?;
+    // HP.4: the span's position on its line, and a key chord.
+    if let Some(refusal) = mention_position(span, section, at) {
+        return Err(Some(refusal));
+    }
+    let (id, n, root_decided) = pick_bare_cand(cands, doc)?;
     let (confidence, rule) = if n == 1 {
         (Confidence::Medium, "unique")
     } else {
@@ -1624,14 +1830,20 @@ fn is_doc_linkable_symbol(kind: glia_core::NodeKindId) -> bool {
 }
 
 /// Contents of single-backtick inline-code spans in markdown, unreduced: the
-/// odd segments of a split on `` ` ``. A triple-backtick fenced block's body
-/// also lands on an odd segment, as one multi-line span; `link_doc_sections`
-/// skips every span holding a `\n` (CG.3).
-fn backtick_spans(text: &str) -> Vec<&str> {
-    text.split('`')
-        .enumerate()
-        .filter_map(|(i, seg)| (i % 2 == 1).then_some(seg))
-        .collect()
+/// odd segments of a split on `` ` ``, each with its byte offset in `text`
+/// (HP.4). A triple-backtick fenced block's body also lands on an odd
+/// segment, as one multi-line span; `link_doc_sections` skips every span
+/// holding a `\n` (CG.3).
+fn backtick_spans(text: &str) -> Vec<(usize, &str)> {
+    let mut at = 0;
+    let mut out = Vec::new();
+    for (i, seg) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            out.push((at, seg));
+        }
+        at += seg.len() + 1;
+    }
+    out
 }
 
 /// Bare identifiers inside inline-code spans — the pre-A16.3 reduction, kept as
@@ -1640,7 +1852,7 @@ fn backtick_spans(text: &str) -> Vec<&str> {
 fn backtick_identifiers(text: &str) -> Vec<String> {
     backtick_spans(text)
         .into_iter()
-        .filter_map(identifier_from_span)
+        .filter_map(|(_, span)| identifier_from_span(span))
         .collect()
 }
 
@@ -3325,6 +3537,8 @@ mod passes_tests {
             repo: UT_REPO,
             file: None,
             tree: DocTree::Any,
+            private: false,
+            root: None,
         }
     }
 
@@ -3344,7 +3558,7 @@ mod passes_tests {
     /// `resolve_doc_mention` for [`UT_DOC`], with the span as the section
     /// text, as `(target, confidence, rule)`.
     fn resolve(span: &str, idx: &DocSymbolIndex<'_>) -> Option<(NodeId, Confidence, &'static str)> {
-        resolve_doc_mention(span, span, idx, &UT_DOC)
+        resolve_doc_mention(span, span, None, idx, &UT_DOC)
             .ok()
             .map(|b| (b.id, b.confidence, b.rule))
     }
@@ -3396,7 +3610,7 @@ mod passes_tests {
             Some((NodeId(7), Confidence::Medium, "unique"))
         );
         assert_eq!(
-            resolve_doc_mention("charge", "charge", &idx, &UT_DOC),
+            resolve_doc_mention("charge", "charge", None, &idx, &UT_DOC),
             Err(Some(DocRefusal::Unshaped))
         );
     }
@@ -3448,6 +3662,8 @@ mod passes_tests {
             repo: UT_REPO,
             file: None,
             tree: DocTree::Any,
+            private: false,
+            root: None,
         };
         let component = DocCand {
             kind: node_kind::COMPONENT.0,
@@ -3501,7 +3717,7 @@ mod passes_tests {
         assert_eq!(resolve("--flag", &idx), None);
         assert_eq!(resolve("nothing_here", &idx), None);
         assert_eq!(
-            resolve_doc_mention("nothing_here", "", &idx, &UT_DOC),
+            resolve_doc_mention("nothing_here", "", None, &idx, &UT_DOC),
             Err(None),
             "a name the graph lacks is no refusal"
         );
@@ -3607,7 +3823,7 @@ mod passes_tests {
         idx.add("make_registry", helper);
         idx.finish();
         assert_eq!(
-            resolve_doc_mention("make_registry", "", &idx, &UT_DOC),
+            resolve_doc_mention("make_registry", "", None, &idx, &UT_DOC),
             Err(Some(DocRefusal::TestTree))
         );
         let in_tree = DocCtx {
@@ -3615,7 +3831,7 @@ mod passes_tests {
             ..UT_DOC
         };
         assert_eq!(
-            resolve_doc_mention("make_registry", "", &idx, &in_tree).map(|b| b.rule),
+            resolve_doc_mention("make_registry", "", None, &idx, &in_tree).map(|b| b.rule),
             Ok("unique")
         );
         let other_repo = DocCtx {
@@ -3623,7 +3839,7 @@ mod passes_tests {
             ..in_tree
         };
         assert_eq!(
-            resolve_doc_mention("make_registry", "", &idx, &other_repo),
+            resolve_doc_mention("make_registry", "", None, &idx, &other_repo),
             Err(Some(DocRefusal::TestTree)),
             "a tree is repo-relative: another repo's tests/ is not it"
         );
@@ -3639,7 +3855,7 @@ mod passes_tests {
         idx.finish();
         for name in ["SAME_AS", "HTTP_CALLS"] {
             assert_eq!(
-                resolve_doc_mention(name, "", &idx, &UT_DOC),
+                resolve_doc_mention(name, "", None, &idx, &UT_DOC),
                 Err(Some(DocRefusal::Registry)),
                 "{name}"
             );
@@ -3671,7 +3887,7 @@ mod passes_tests {
             root: Some("samples/maps"),
         };
         assert_eq!(
-            resolve_doc_mention("MapMarker", "", &idx, &doc),
+            resolve_doc_mention("MapMarker", "", None, &idx, &doc),
             Ok(DocBind {
                 id: NodeId(2),
                 confidence: Confidence::Weak,
@@ -3685,7 +3901,7 @@ mod passes_tests {
             ..doc
         };
         assert_eq!(
-            resolve_doc_mention("MapMarker", "", &idx, &at_top),
+            resolve_doc_mention("MapMarker", "", None, &idx, &at_top),
             Ok(DocBind {
                 id: NodeId(1),
                 confidence: Confidence::Weak,
@@ -3693,6 +3909,260 @@ mod passes_tests {
                 root_decided: false,
             }),
             "both copies sit under `.`: the least qname decides"
+        );
+    }
+
+    /// HP.4: `resolve_doc_mention` for `span`'s first backticked occurrence in
+    /// `section`, read at its offset.
+    fn resolve_at(
+        span: &str,
+        section: &str,
+        idx: &DocSymbolIndex<'_>,
+        doc: &DocCtx<'_>,
+    ) -> Result<DocBind, Option<DocRefusal>> {
+        let at = section
+            .find(&format!("`{span}`"))
+            .map(|i| i + 1)
+            .expect("span in section");
+        resolve_doc_mention(span, section, Some(at), idx, doc)
+    }
+
+    /// HP.4: the spans and their offsets just after each opening backtick.
+    #[test]
+    fn doclink_backtick_span_offsets() {
+        let text = "a `x` b `yy()` c";
+        let spans = backtick_spans(text);
+        assert_eq!(spans, vec![(3, "x"), (9, "yy()")]);
+        for (at, span) in spans {
+            assert_eq!(&text[at..at + span.len()], span);
+        }
+    }
+
+    /// HP.4 (D4): a token in a rule / key / kind position names no symbol.
+    #[test]
+    fn doclink_position_refused() {
+        let mut idx = DocSymbolIndex::new();
+        idx.add("name_breaks", method(1, "pkg::src::lib::name_breaks"));
+        idx.add(
+            "receiver_return",
+            method(2, "pkg::src::lib::receiver_return"),
+        );
+        idx.add("forbid_edge", method(3, "pkg::src::lib::forbid_edge"));
+        idx.add("empty_scopes", method(4, "engine::check::empty_scopes"));
+        idx.finish();
+        for (span, section) in [
+            (
+                "receiver_return",
+                "A returned call is the rule `receiver_return`.",
+            ),
+            ("receiver_return", "Rules: the Rules `receiver_return`."),
+            (
+                "forbid_edge",
+                "Overlay `[[constraint]]` kinds: `forbid_edge`, `forbid_path`.",
+            ),
+            ("forbid_edge", "[[constraint]] with `forbid_edge` set."),
+            (
+                "name_breaks",
+                "The review dict gains `name_breaks` when names drift.",
+            ),
+            ("name_breaks", "Its marker `name_breaks` fires."),
+            (
+                "empty_scopes",
+                "The report's `empty_scopes` key lists them.",
+            ),
+            ("empty_scopes", "the `empty_scopes` Field"),
+            ("name_breaks", "the emitter `name_breaks`"),
+        ] {
+            assert_eq!(
+                resolve_at(span, section, &idx, &UT_DOC),
+                Err(Some(DocRefusal::Position)),
+                "{section}"
+            );
+        }
+        assert_eq!(
+            mention_position("{\"abi_ref\": 1}", "", None),
+            Some(DocRefusal::Position),
+            "a JSON-shaped span"
+        );
+        // Kept: prose around a call, a word that only ends in `rule`, and a
+        // position word further back than the 24 bytes before the span.
+        for (span, section) in [
+            (
+                "name_breaks()",
+                "Call `name_breaks()` to list the names a change broke.",
+            ),
+            ("name_breaks", "See overrule `name_breaks` here."),
+            (
+                "name_breaks",
+                "The rule set stays loaded while you call `name_breaks`.",
+            ),
+        ] {
+            let mut ids = DocSymbolIndex::new();
+            ids.add("name_breaks", method(1, "pkg::src::lib::name_breaks"));
+            ids.finish();
+            assert_eq!(
+                resolve_at(span, section, &ids, &UT_DOC).map(|b| (b.id, b.rule)),
+                Ok((NodeId(1), "unique")),
+                "{section}"
+            );
+        }
+        // A qualified mention is read as before, whatever its position.
+        assert_eq!(
+            resolve_at(
+                "lib::forbid_edge",
+                "the rule `lib::forbid_edge`",
+                &idx,
+                &UT_DOC
+            )
+            .map(|b| b.rule),
+            Ok("qualified")
+        );
+    }
+
+    /// HP.4 (D6): a key chord names keys, never a symbol.
+    #[test]
+    fn doclink_chord_refused() {
+        let mut idx = DocSymbolIndex::new();
+        idx.add("Tab", method(1, "web::src::stack::Tab"));
+        idx.add("KeyMap", method(2, "web::src::keys::KeyMap"));
+        idx.finish();
+        for (span, section) in [
+            ("Tab", "Switch windows with `Alt` + `Tab`."),
+            ("Tab", "Press `Tab`+`Shift` to go back."),
+            ("KeyMap", "Open it with `Ctrl` +  `KeyMap`."),
+        ] {
+            assert_eq!(
+                resolve_at(span, section, &idx, &UT_DOC),
+                Err(Some(DocRefusal::Chord)),
+                "{section}"
+            );
+        }
+        assert_eq!(
+            resolve_at(
+                "Tab",
+                "A `Tab` holds a title; 1 + 2 is three.",
+                &idx,
+                &UT_DOC
+            )
+            .map(|b| b.id),
+            Ok(NodeId(1)),
+            "a `+` with no span beside it joins nothing"
+        );
+    }
+
+    /// HP.4 (D4): a private Rust fn binds only from its own project's docs.
+    #[test]
+    fn doclink_private_rust_fn() {
+        assert!(is_rust_private("fn forbid_edge(a: u32) {}"));
+        assert!(!is_rust_private("pub(crate) fn f() {}"));
+        assert!(!is_rust_private("pub(super) fn f() {}"));
+        assert!(!is_rust_private("pub(in crate::a) fn f() {}"));
+        assert!(is_rust_private("#[inline]\nconst fn f() {}"));
+        assert!(is_rust_private(
+            "#[pyfunction]\n#[pyo3(\n    name = \"do_thing\"\n)]\nfn do_thing_py() {}"
+        ));
+        assert!(!is_rust_private("pub fn name_breaks() {}"));
+        assert!(!is_rust_private(
+            "/// Docs.\n#[must_use]\npub async fn f() {}"
+        ));
+        assert!(!is_rust_private(""), "no text reads public");
+
+        let private = DocCand {
+            file: Some("pkg/src/lib.rs"),
+            private: true,
+            root: Some("pkg"),
+            ..method(2, "pkg::src::lib::receiver_return")
+        };
+        let mut idx = DocSymbolIndex::new();
+        idx.add("receiver_return", private);
+        idx.finish();
+        let notes = DocCtx {
+            file: Some("docs/notes.md"),
+            root: Some(""),
+            ..UT_DOC
+        };
+        assert_eq!(
+            resolve_doc_mention("receiver_return", "", None, &idx, &notes),
+            Err(Some(DocRefusal::Private))
+        );
+        assert_eq!(
+            resolve_doc_mention("receiver_return", "", None, &idx, &UT_DOC),
+            Err(Some(DocRefusal::Private)),
+            "a doc under no project is outside the crate too"
+        );
+        let own = DocCtx {
+            file: Some("pkg/README.md"),
+            root: Some("pkg"),
+            ..UT_DOC
+        };
+        assert_eq!(
+            resolve_doc_mention("receiver_return()", "", None, &idx, &own).map(|b| b.rule),
+            Ok("unique"),
+            "its own crate's README binds it"
+        );
+        // A public twin elsewhere is picked over the private fn, and keeps
+        // FD.79's count (two eligible: ambiguous).
+        let public = DocCand {
+            file: Some("app/src/lib.rs"),
+            root: Some("app"),
+            ..method(5, "app::src::lib::receiver_return")
+        };
+        idx.add("receiver_return", public);
+        idx.finish();
+        assert_eq!(
+            resolve_doc_mention("receiver_return", "", None, &idx, &notes),
+            Ok(DocBind {
+                id: NodeId(5),
+                confidence: Confidence::Weak,
+                rule: "ambiguous",
+                root_decided: false,
+            })
+        );
+    }
+
+    /// HP.4 (D5): a sub-project's doc binds a bare mention only under its root.
+    #[test]
+    fn doclink_other_project_refused() {
+        let core_fn = DocCand {
+            file: Some("core/src/engine.rs"),
+            root: Some("core"),
+            ..method(1, "core::src::engine::do_thing")
+        };
+        let mut idx = DocSymbolIndex::new();
+        idx.add("do_thing", core_fn);
+        idx.finish();
+        let pkg_readme = DocCtx {
+            file: Some("pkg/README.md"),
+            root: Some("pkg"),
+            ..UT_DOC
+        };
+        assert_eq!(
+            resolve_doc_mention("do_thing()", "", None, &idx, &pkg_readme),
+            Err(Some(DocRefusal::OtherProject))
+        );
+        assert_eq!(
+            resolve_doc_mention("core::engine::do_thing", "", None, &idx, &pkg_readme),
+            Ok(DocBind {
+                id: NodeId(1),
+                confidence: Confidence::Strong,
+                rule: "qualified",
+                root_decided: false,
+            }),
+            "a qualified mention still crosses projects"
+        );
+        let root_readme = DocCtx {
+            root: Some(""),
+            ..UT_DOC
+        };
+        assert_eq!(
+            resolve_doc_mention("do_thing()", "", None, &idx, &root_readme).map(|b| b.rule),
+            Ok("unique"),
+            "a root-level doc keeps FD.79's reading"
+        );
+        assert_eq!(
+            resolve_doc_mention("do_thing()", "", None, &idx, &UT_DOC).map(|b| b.rule),
+            Ok("unique"),
+            "so does a doc under no project"
         );
     }
 

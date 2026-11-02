@@ -1,0 +1,60 @@
+{
+  "framework": "doclink-mention-positions",
+  "language": "rust+typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "HP.4 (edge audit 0.5.6, DOCUMENTS|derived clusters D4-D6). docs/notes.md names a rule (`the rule receiver_return`), an overlay stanza kind (`[[constraint]] kinds: forbid_edge`) and a dict key (`gains name_breaks`): a token in a rule / key / kind position is no symbol mention, and pkg's private `fn receiver_return` / `fn forbid_edge` bind only from pkg's own docs. pkg/README.md (a pyo3-style crate whose `do_thing` is `#[pyo3(name)]` on `do_thing_py`) names `do_thing()` bare: a sub-project doc binds a bare mention only under its own project, so core's `pub fn do_thing` is refused there, while its qualified `core::engine::do_thing` binds. web/README.md's key chord `Alt` + `Tab` names a key, never `interface Tab`. The root README's prose `name_breaks()` and pkg's own README's `receiver_return()` still bind. Baseline HEAD 9b644161 (debug CLI, glia query): all 5 forbid rows fire, [doclink] 8 DOCUMENTS edges.",
+  "expect_edges": [
+    {
+      "from": "docs::README::usage",
+      "to": "pkg::src::lib::name_breaks",
+      "category": "DOCUMENTS",
+      "note": "a pub fn named in prose from the root README: unique"
+    },
+    {
+      "from": "docs::pkg::README::internals",
+      "to": "core::src::engine::do_thing",
+      "category": "DOCUMENTS",
+      "note": "qualified (tier 1): a sub-project doc may name another project's symbol by path"
+    },
+    {
+      "from": "docs::pkg::README::internals",
+      "to": "pkg::src::lib::receiver_return",
+      "category": "DOCUMENTS",
+      "note": "a private fn named from its own crate's README"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "docs::docs::notes::rules",
+      "to": "pkg::src::lib::receiver_return",
+      "category": "DOCUMENTS",
+      "note": "D4: `the rule receiver_return` names a rule; and a private fn from a doc outside its crate"
+    },
+    {
+      "from": "docs::docs::notes::rules",
+      "to": "pkg::src::lib::forbid_edge",
+      "category": "DOCUMENTS",
+      "note": "D4: a `[[constraint]]` kind; and a private fn from a doc outside its crate"
+    },
+    {
+      "from": "docs::docs::notes::rules",
+      "to": "pkg::src::lib::name_breaks",
+      "category": "DOCUMENTS",
+      "note": "D4: `the dict gains name_breaks` names a dict key"
+    },
+    {
+      "from": "docs::pkg::README::usage",
+      "to": "core::src::engine::do_thing",
+      "category": "DOCUMENTS",
+      "note": "D5: a bare mention from a sub-project's doc binding another project's symbol"
+    },
+    {
+      "from": "docs::web::README::keys",
+      "to": "web::src::stack::Tab",
+      "category": "DOCUMENTS",
+      "note": "D6: a key chord `Alt` + `Tab`"
+    }
+  ]
+}

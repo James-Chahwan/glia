@@ -1,0 +1,3 @@
+[workspace]
+members = ["pkg", "core"]
+resolver = "2"
