@@ -4,6 +4,13 @@
   {"name": "shell", "source": "rank-gate", "skips": []},
   {"name": "websocket", "source": "rank-gate", "skips": []},
   {"name": "samples", "source": "rank-gate", "skips": []},
-  {"name": "microservices-demo", "source": "cohort", "skips": []}
+  {"name": "microservices-demo", "source": "cohort", "skips": []},
+  {"name": "mealie", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "chatwoot", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "squidex", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "tolgee", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "hoppscotch", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "gin-vue-admin", "source": "cohort", "panel": "heldout", "skips": []},
+  {"name": "zora-protocol", "source": "cohort", "panel": "heldout", "skips": []}
  ]
 }

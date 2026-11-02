@@ -6,12 +6,27 @@
 //! ```text
 //! edge_audit sample --repo <dir> --label <l> --rev <sha> [--skip <prefix>].. [--repo ..]..
 //!                   --plan bench/edge-audit/floors.json --out <samples.jsonl>
+//!                   [--panel fit|heldout]
 //! edge_audit show   <samples.jsonl> --root <dir> [--label <l>] [--id <hex>]
 //! edge_audit report --samples <glob>.. --verdicts <glob>.. --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--judge <name>] [--check]
 //!                   [--rejudge <glob>].. [--adjudication <file>]
 //!                   [--ci stratified_wilson|plugin] [--rejudge-rule matched|fd3c]
+//! edge_audit report --calibration --fit <report.json> [--fit-samples <glob>]..
+//!                   [--fit-verdicts <glob>].. [--fit-adjudication <file>]
+//!                   --samples <glob>.. --verdicts <glob>.. [--adjudication <file>]
+//!                   [--cohort-tasks <tasks.jsonl>] --plan <floors.json>
+//!                   --out-json <f> --out-md <f> [--check]
 //! ```
+//!
+//! Calibrated confidence (HC.2): `sample --panel heldout` draws the held-out
+//! panel with the fit's key, seed and exclusions at [`HELDOUT_N`] per pooled
+//! stratum, every header marked `"panel":"heldout"`; the fit report reads the
+//! fit panel only ([`split_panel`], [`resolve_verdicts_scoped`]), so held-out
+//! samples and verdicts beside it never move it. `report --calibration` judges
+//! the held-out strata against the fit report by the rule committed in
+//! [`CAL_RULE`] ([`compare_strata`]: K, R1, R2, R3) and prints
+//! `[edge-audit] calibration ..` and `CONFIDENCE: .. -> PASS|FAIL|INSUFFICIENT`.
 //!
 //! The report's agreement check (FD.3c): a verdict file named `rejudge.jsonl`
 //! (or any `--rejudge` file) is a second, blind judge over a fixed subset
@@ -55,6 +70,10 @@ const Z: f64 = 1.959964;
 const MIN_JUDGED: u64 = 10;
 /// A stratum whose unsure share of its verdicts exceeds this is NOISY.
 const NOISY_SHARE: f64 = 0.10;
+/// The held-out panel's name in a samples header (HC.2).
+const PANEL_HELDOUT: &str = "heldout";
+/// The held-out sample's n per pooled (category, tier) stratum (HC.2).
+const HELDOUT_N: u64 = 10;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Plan {
@@ -117,6 +136,11 @@ struct Header {
     stratum_sizes: BTreeMap<String, u64>,
     unjudgeable: BTreeMap<String, u64>,
     excluded: BTreeMap<String, u64>,
+    /// The panel the label belongs to (HC.2): absent for the fit panel (so the
+    /// fit's committed samples keep their bytes), [`PANEL_HELDOUT`] for the
+    /// calibration's held-out repos. A label belongs to one panel only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    panel: Option<String>,
 }
 
 /// One tree to sample: `--repo` with its `--label`, `--rev` and `--skip`s.
@@ -221,6 +245,7 @@ fn population(spec: &RepoSpec, seed: &str) -> Result<Population, String> {
         stratum_sizes: BTreeMap::new(),
         unjudgeable: BTreeMap::new(),
         excluded: BTreeMap::new(),
+        panel: None,
     };
     let mut cands: Vec<(u64, String, SampleRow)> = Vec::new();
     let all = merged
@@ -334,11 +359,19 @@ fn allocate(n: u64, sizes: &[(String, u64)]) -> Vec<u64> {
 }
 
 /// Sample every spec into one JSONL text (per label: its header line, then its
-/// rows sorted by (category, tier, key)) and the per-repo marker lines.
-fn sample_text(specs: &[RepoSpec], plan: &Plan) -> Result<(String, Vec<String>), String> {
+/// rows sorted by (category, tier, key)) and the per-repo marker lines. A
+/// `panel` (HC.2: [`PANEL_HELDOUT`]) is written into every header and named on
+/// every marker; the fit panel writes none, so its bytes are FD.2's.
+fn sample_text(
+    specs: &[RepoSpec],
+    plan: &Plan,
+    panel: Option<&str>,
+) -> Result<(String, Vec<String>), String> {
     let mut pops = Vec::with_capacity(specs.len());
     for spec in specs {
-        pops.push(population(spec, &plan.seed)?);
+        let mut pop = population(spec, &plan.seed)?;
+        pop.header.panel = panel.map(str::to_string);
+        pops.push(pop);
     }
     let strata: BTreeSet<String> = pops
         .iter()
@@ -378,14 +411,15 @@ fn sample_text(specs: &[RepoSpec], plan: &Plan) -> Result<(String, Vec<String>),
             out.push('\n');
         }
         markers.push(format!(
-            "[edge-audit] sample label={} edges={} strata={} sampled={} unjudgeable={} excluded={} seed={}",
+            "[edge-audit] sample label={} edges={} strata={} sampled={} unjudgeable={} excluded={} seed={}{}",
             p.header.label,
             p.header.edges,
             p.header.stratum_sizes.len(),
             rows.len(),
             p.header.unjudgeable.values().sum::<u64>(),
             p.header.excluded.values().sum::<u64>(),
-            plan.seed
+            plan.seed,
+            panel.map_or(String::new(), |p| format!(" panel={p}"))
         ));
     }
     Ok((out, markers))
@@ -1027,11 +1061,17 @@ fn shared(per: &BTreeMap<String, String>) -> String {
 /// `final`, else `unsure`. An id with two verdicts from one judge, a re-judged
 /// id with no first verdict, or an adjudication row that does not name a real
 /// disagreement is an error naming the id.
-fn resolve_verdicts(
+///
+/// Scoped to one panel (HC.2): every verdict and adjudication row must name a
+/// `known` id (any panel's), and only the rows whose id is in `scope` are read,
+/// so one verdict directory serves the fit report and the held-out calibration
+/// without either seeing the other's ids.
+fn resolve_verdicts_scoped(
     first_paths: &[PathBuf],
     rejudge_paths: &[PathBuf],
     adjudication: &[Adjudication],
-    ids: &BTreeSet<String>,
+    known: &BTreeSet<String>,
+    scope: &BTreeSet<String>,
     judge: Option<&str>,
     rule: RejudgeRule,
 ) -> Result<Resolved, String> {
@@ -1050,8 +1090,8 @@ fn resolve_verdicts(
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        for v in read_verdicts(p, ids)? {
-            if judge.is_some_and(|j| j != v.judge) {
+        for v in read_verdicts(p, known)? {
+            if !scope.contains(&v.id) || judge.is_some_and(|j| j != v.judge) {
                 continue;
             }
             if !seen.insert((v.id.clone(), v.judge.clone())) {
@@ -1087,6 +1127,9 @@ fn resolve_verdicts(
     }
     let mut adj: BTreeMap<&str, &Adjudication> = BTreeMap::new();
     for a in adjudication {
+        if known.contains(&a.id) && !scope.contains(&a.id) {
+            continue;
+        }
         let (Some(f), Some(s)) = (verdicts.get(&a.id), second.get(&a.id)) else {
             return Err(format!(
                 "adjudication {}: id has no first and re-judge verdict",
@@ -1575,6 +1618,7 @@ fn value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
 
 fn run_sample(args: &[String]) -> Result<ExitCode, String> {
     let (mut specs, mut plan, mut out) = (Vec::<RepoSpec>::new(), None, None);
+    let mut panel: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -1596,16 +1640,32 @@ fn run_sample(args: &[String]) -> Result<ExitCode, String> {
             }
             "--plan" => plan = Some(value(args, &mut i, flag)?),
             "--out" => out = Some(value(args, &mut i, flag)?),
+            "--panel" => {
+                let v = value(args, &mut i, flag)?;
+                panel = match v.as_str() {
+                    "fit" => None,
+                    PANEL_HELDOUT => Some(v),
+                    other => {
+                        return Err(format!("sample: --panel `{other}` is not fit|heldout"));
+                    }
+                };
+            }
             other => return Err(format!("sample: unknown argument {other}")),
         }
         i += 1;
     }
-    let plan = Plan::read(&plan.ok_or("sample: --plan is required")?)?;
+    let mut plan = Plan::read(&plan.ok_or("sample: --plan is required")?)?;
+    if panel.is_some() {
+        // The held-out panel (HC.2): HELDOUT_N per pooled stratum, structural
+        // categories too; key, seed and exclusions are the fit's.
+        plan.n_per_stratum = HELDOUT_N;
+        plan.n_structural = HELDOUT_N;
+    }
     let out = out.ok_or("sample: --out is required")?;
     if specs.is_empty() || specs.iter().any(|s| s.label.is_empty() || s.rev.is_empty()) {
         return Err("sample: every --repo needs --label and --rev".to_string());
     }
-    let (text, markers) = sample_text(&specs, &plan)?;
+    let (text, markers) = sample_text(&specs, &plan, panel.as_deref())?;
     if let Some(dir) = Path::new(&out)
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -1644,6 +1704,9 @@ fn run_show(args: &[String]) -> Result<ExitCode, String> {
 }
 
 fn run_report(args: &[String]) -> Result<ExitCode, String> {
+    if args.iter().any(|a| a == "--calibration") {
+        return run_calibration(args);
+    }
     let (mut samples, mut verdicts, mut rejudge) = (Vec::new(), Vec::new(), Vec::new());
     let (mut plan, mut out_json, mut out_md, mut judge, mut check) =
         (None, None, None, None, false);
@@ -1745,18 +1808,17 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
         return Err("report: no samples file matched".to_string());
     }
     let (headers, rows) = read_samples(&inp.samples)?;
-    let mut ids = BTreeSet::new();
-    for r in &rows {
-        if !ids.insert(r.id.clone()) {
-            return Err(format!("sample {}: id appears twice", r.id));
-        }
-    }
+    // The fit report reads the fit panel only (HC.2): held-out samples and
+    // their verdicts may sit beside it, and never enter it.
+    let split = split_panel(headers, rows, None)?;
+    let (headers, rows) = (split.headers, split.rows);
     let adjudication = read_adjudication(&inp.adjudication)?;
-    let resolved = resolve_verdicts(
+    let resolved = resolve_verdicts_scoped(
         &inp.verdicts,
         &inp.rejudge,
         &adjudication,
-        &ids,
+        &split.known,
+        &split.scope,
         inp.judge.as_deref(),
         inp.rule,
     )?;
@@ -1765,6 +1827,55 @@ fn report_texts(mut inp: ReportInputs, plan: &Plan) -> Result<(ReportOut, String
     let json = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())? + "\n";
     let md = render_md(&report);
     Ok((report, json, md))
+}
+
+/// One panel's samples out of every samples file read.
+#[derive(Debug)]
+struct PanelSplit {
+    /// The panel's headers and rows.
+    headers: Vec<Header>,
+    rows: Vec<SampleRow>,
+    /// Every sampled id of any panel: a verdict naming one is no error.
+    known: BTreeSet<String>,
+    /// The panel's ids: the verdicts read.
+    scope: BTreeSet<String>,
+}
+
+/// The headers and rows of one panel (`None` = the fit panel, a header with
+/// no `panel`), every id checked unique across all panels; a row belongs to
+/// its label's panel, and a label with headers in two panels is an error.
+fn split_panel(
+    headers: Vec<Header>,
+    rows: Vec<SampleRow>,
+    want: Option<&str>,
+) -> Result<PanelSplit, String> {
+    let mut panel_of: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for h in &headers {
+        if let Some(prev) = panel_of.insert(h.label.clone(), h.panel.clone())
+            && prev != h.panel
+        {
+            return Err(format!("sample label {}: headers in two panels", h.label));
+        }
+    }
+    let mut known = BTreeSet::new();
+    for r in &rows {
+        if !known.insert(r.id.clone()) {
+            return Err(format!("sample {}: id appears twice", r.id));
+        }
+    }
+    let in_panel = |label: &str| panel_of.get(label).cloned().flatten().as_deref() == want;
+    let headers: Vec<Header> = headers
+        .into_iter()
+        .filter(|h| h.panel.as_deref() == want)
+        .collect();
+    let rows: Vec<SampleRow> = rows.into_iter().filter(|r| in_panel(&r.label)).collect();
+    let scope = rows.iter().map(|r| r.id.clone()).collect();
+    Ok(PanelSplit {
+        headers,
+        rows,
+        known,
+        scope,
+    })
 }
 
 /// The report's fired_on line.
@@ -1788,6 +1899,891 @@ fn report_marker(report: &ReportOut) -> String {
     )
 }
 
+// ------------------------------------------------------- calibration (HC.2)
+
+/// The rule the calibration judges by, committed before any held-out id was
+/// sampled or judged.
+const CAL_RULE: &str = "dev-notes/confidence-gate-0.5.7.md";
+/// R1: the held-out Wilson upper bound reaches the fit's Wilson lower bound
+/// on at least `CAL_R1_NUM / CAL_R1_DEN` of K (compared in integers).
+const CAL_R1_NUM: usize = 9;
+const CAL_R1_DEN: usize = 10;
+/// R2: the ceiling on the held-out-weighted calibration error.
+const CAL_MAX_ERROR: f64 = 0.05;
+/// R3: K holds at least this many strata, else INSUFFICIENT.
+const CAL_MIN_STRATA: usize = 15;
+/// A stratum enters K, and a sub-stratum the comparison, with this many
+/// judged ids on its held-out side (a sub-stratum on its fit side too).
+const CAL_MIN_JUDGED: u64 = 10;
+/// The largest |p_fit - p_held| strata of K the report names.
+const CAL_GAPS: usize = 5;
+
+/// The fit report's rows the calibration reads (report.json, any version).
+#[derive(Debug, Clone, Deserialize)]
+struct FitStratum {
+    category: String,
+    tier: String,
+    n: u64,
+    correct: u64,
+}
+
+/// A fit report's per-tier estimate, re-printed beside the held-out one.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct FitAgg {
+    name: String,
+    n: u64,
+    p: Option<f64>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FitReport {
+    strata: Vec<FitStratum>,
+    #[serde(default)]
+    tiers: Vec<FitAgg>,
+}
+
+/// One side's judged ids of a stratum: `n` = correct + wrong.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Judged {
+    correct: u64,
+    n: u64,
+}
+
+impl Judged {
+    fn add(&mut self, verdict: Option<&str>) {
+        match verdict {
+            Some("correct") => {
+                self.correct += 1;
+                self.n += 1;
+            }
+            Some("wrong") => self.n += 1,
+            _ => {}
+        }
+    }
+    fn p(self) -> Option<f64> {
+        (self.n > 0).then(|| self.correct as f64 / self.n as f64)
+    }
+    /// The Wilson 95% interval, a census included (`None` when unjudged).
+    fn interval(self) -> Option<(f64, f64)> {
+        (self.n > 0).then(|| wilson(self.correct, self.n))
+    }
+}
+
+/// One stratum's comparison input: its key, the held-out pooled population
+/// `N_h` (None for a sub-stratum), the fit side (None when the fit never saw
+/// it) and the held-out side.
+#[derive(Debug, Clone)]
+struct CalIn {
+    key: String,
+    big_n: Option<u64>,
+    fit: Option<Judged>,
+    held: Judged,
+}
+
+/// One compared stratum (or sub-stratum) of the calibration.
+#[derive(Debug, Clone, Serialize)]
+struct CalRow {
+    stratum: String,
+    /// The held-out pooled population; absent for a sub-stratum.
+    #[serde(rename = "N", skip_serializing_if = "Option::is_none")]
+    big_n: Option<u64>,
+    fit_n: u64,
+    fit_correct: u64,
+    fit_p: Option<f64>,
+    fit_lo: Option<f64>,
+    fit_hi: Option<f64>,
+    heldout_n: u64,
+    heldout_correct: u64,
+    heldout_p: Option<f64>,
+    heldout_lo: Option<f64>,
+    heldout_hi: Option<f64>,
+    /// In K (a stratum) or compared (a sub-stratum: both sides n >= 10).
+    compared: bool,
+    /// R1 on this row: the held-out upper bound reaches the fit's lower bound.
+    holds: Option<bool>,
+    /// |p_fit - p_held|.
+    diff: Option<f64>,
+    /// w_h = N_h / sum over K of N_h (strata of K only).
+    weight: Option<f64>,
+}
+
+/// The rule's reading of K.
+#[derive(Debug, Clone, Serialize)]
+struct GateOut {
+    k: usize,
+    covered: usize,
+    fit_n: u64,
+    heldout_n: u64,
+    cal_error: f64,
+    r1: bool,
+    r2: bool,
+    r3: bool,
+    verdict: &'static str,
+}
+
+/// Compare `ins` (strata when `gated`, else sub-strata) and, for strata,
+/// judge K by R1-R3. A stratum is in K with >= [`CAL_MIN_JUDGED`] held-out
+/// judged ids and a fit p; a sub-stratum is compared with >= that many on
+/// both sides. Rows keep `ins`' order; the gate reads full precision, the
+/// rows print 4 decimals.
+fn compare_strata(ins: &[CalIn], gated: bool) -> (Vec<CalRow>, GateOut) {
+    let min_fit = if gated { 1 } else { CAL_MIN_JUDGED };
+    let in_k = |c: &CalIn| c.held.n >= CAL_MIN_JUDGED && c.fit.is_some_and(|f| f.n >= min_fit);
+    let mass: u64 = ins.iter().filter(|c| in_k(c)).filter_map(|c| c.big_n).sum();
+    let (mut k, mut covered, mut fit_n, mut held_n, mut err) = (0usize, 0usize, 0u64, 0u64, 0.0);
+    let mut rows = Vec::with_capacity(ins.len());
+    for c in ins {
+        let fit = c.fit.unwrap_or_default();
+        let (flo, fhi) = fit.interval().unzip();
+        let (hlo, hhi) = c.held.interval().unzip();
+        let compared = in_k(c);
+        let (mut holds, mut diff, mut weight) = (None, None, None);
+        if compared
+            && let (Some(pf), Some(ph), Some(lo), Some(hi)) = (fit.p(), c.held.p(), flo, hhi)
+        {
+            let d = (pf - ph).abs();
+            holds = Some(hi >= lo);
+            diff = Some(r4(d));
+            if gated {
+                let w = match c.big_n {
+                    Some(nh) if mass > 0 => nh as f64 / mass as f64,
+                    _ => 0.0,
+                };
+                weight = Some(r4(w));
+                err += w * d;
+                k += 1;
+                covered += usize::from(hi >= lo);
+                fit_n += fit.n;
+                held_n += c.held.n;
+            }
+        }
+        rows.push(CalRow {
+            stratum: c.key.clone(),
+            big_n: c.big_n,
+            fit_n: fit.n,
+            fit_correct: fit.correct,
+            fit_p: fit.p().map(r4),
+            fit_lo: flo.map(r4),
+            fit_hi: fhi.map(r4),
+            heldout_n: c.held.n,
+            heldout_correct: c.held.correct,
+            heldout_p: c.held.p().map(r4),
+            heldout_lo: hlo.map(r4),
+            heldout_hi: hhi.map(r4),
+            compared,
+            holds,
+            diff,
+            weight,
+        });
+    }
+    let r1 = covered * CAL_R1_DEN >= CAL_R1_NUM * k;
+    let r2 = err <= CAL_MAX_ERROR;
+    let r3 = k >= CAL_MIN_STRATA;
+    let verdict = if !r3 {
+        "INSUFFICIENT"
+    } else if r1 && r2 {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let gate = GateOut {
+        k,
+        covered,
+        fit_n,
+        heldout_n: held_n,
+        cal_error: err,
+        r1,
+        r2,
+        r3,
+        verdict,
+    };
+    (rows, gate)
+}
+
+/// The two fired_on lines of a calibration.
+fn calibration_markers(g: &GateOut) -> [String; 2] {
+    let yn = |b: bool| if b { "yes" } else { "no" };
+    [
+        format!(
+            "[edge-audit] calibration strata={} fit_n={} heldout_n={} covered={}/{} cal_error={:.4}",
+            g.k, g.fit_n, g.heldout_n, g.covered, g.k, g.cal_error
+        ),
+        format!(
+            "CONFIDENCE: R1={} ({}/{}) R2={} ({:.4}) R3={} ({}) -> {}",
+            yn(g.r1),
+            g.covered,
+            g.k,
+            yn(g.r2),
+            g.cal_error,
+            yn(g.r3),
+            g.k,
+            g.verdict
+        ),
+    ]
+}
+
+/// A sub-stratum's key: `CATEGORY|tier|emitter/rule` (`-` for a missing one).
+fn sub_key(r: &SampleRow) -> String {
+    format!(
+        "{}|{}|{}/{}",
+        r.category,
+        r.tier,
+        r.emitter.as_deref().unwrap_or("-"),
+        r.rule.as_deref().unwrap_or("-")
+    )
+}
+
+/// Judged counts by stratum or sub-stratum key.
+type JudgedBy = BTreeMap<String, Judged>;
+
+/// Judged counts per (category, tier) and per sub-stratum.
+fn judged_by(rows: &[SampleRow], verdicts: &BTreeMap<String, String>) -> (JudgedBy, JudgedBy) {
+    let (mut strata, mut subs) = (JudgedBy::new(), JudgedBy::new());
+    for r in rows {
+        let v = verdicts.get(&r.id).map(String::as_str);
+        strata
+            .entry(stratum_key(&r.category, &r.tier))
+            .or_default()
+            .add(v);
+        subs.entry(sub_key(r)).or_default().add(v);
+    }
+    (strata, subs)
+}
+
+/// One repo's answer-level precision for the cohort's name-drift rows.
+#[derive(Debug, Clone, Serialize)]
+struct DriftRow {
+    repo: String,
+    heldout: bool,
+    tasks: u64,
+    flagged: u64,
+    truth: u64,
+    p: Option<f64>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+}
+
+/// The cohort's name-drift answer precision from its tasks file: per repo,
+/// over the drift tasks whose start state ran the names probe (`S.names`
+/// with `flagged`), flagged files that are truth files / flagged files; the
+/// repos sorted, then one `all` row.
+fn name_drift(text: &str, heldout: &BTreeSet<String>) -> Result<Vec<DriftRow>, String> {
+    let mut per: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("cohort tasks:{}: {e}", i + 1))?;
+        if v.get("shape").and_then(|s| s.as_str()) != Some("drift") {
+            continue;
+        }
+        let names = v.get("S").and_then(|s| s.get("names"));
+        let Some(flagged) = names
+            .and_then(|n| n.get("flagged"))
+            .and_then(|f| f.as_u64())
+        else {
+            continue;
+        };
+        let truth = names
+            .and_then(|n| n.get("flagged_truth"))
+            .and_then(|t| t.as_array())
+            .map_or(0, |t| t.len() as u64);
+        let repo = v
+            .get("repo")
+            .and_then(|r| r.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let e = per.entry(repo).or_default();
+        *e = (e.0 + 1, e.1 + flagged, e.2 + truth);
+    }
+    let row = |repo: &str, (tasks, flagged, truth): (u64, u64, u64)| {
+        let j = Judged {
+            correct: truth,
+            n: flagged,
+        };
+        let (lo, hi) = j.interval().unzip();
+        DriftRow {
+            repo: repo.to_string(),
+            heldout: heldout.contains(repo),
+            tasks,
+            flagged,
+            truth,
+            p: j.p().map(r4),
+            lo: lo.map(r4),
+            hi: hi.map(r4),
+        }
+    };
+    let mut out: Vec<DriftRow> = per.iter().map(|(r, c)| row(r, *c)).collect();
+    let all = per
+        .values()
+        .fold((0, 0, 0), |a, c| (a.0 + c.0, a.1 + c.1, a.2 + c.2));
+    out.push(row("all", all));
+    Ok(out)
+}
+
+/// One held-out repo's line.
+#[derive(Debug, Serialize)]
+struct RepoCal {
+    edges: u64,
+    unjudgeable: u64,
+    sampled: u64,
+    n: u64,
+    correct: u64,
+    wrong: u64,
+    unsure: u64,
+    p: Option<f64>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct FitSummary {
+    /// The fit report's strata and judged ids.
+    strata: usize,
+    judged: u64,
+    tiers: Vec<FitAgg>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeldSummary {
+    repos: Vec<String>,
+    strata: usize,
+    sampled: u64,
+    judged: u64,
+    unsure: u64,
+    pending: u64,
+    tiers: Vec<AggOut>,
+    /// Held-out strata under their tier's floor (each a precision-backlog
+    /// follow-up on any verdict).
+    under_floor: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CalOut {
+    rule: &'static str,
+    seed: String,
+    heldout_n_per_stratum: u64,
+    fit: FitSummary,
+    heldout: HeldSummary,
+    gate: GateOut,
+    strata: Vec<CalRow>,
+    /// Strata of K whose held-out upper bound misses the fit's lower bound.
+    not_transferred: Vec<String>,
+    /// The strata of K with the largest |p_fit - p_held| (ties by key).
+    largest_gaps: Vec<String>,
+    repos: BTreeMap<String, RepoCal>,
+    sub_strata: Vec<CalRow>,
+    /// The held-out panel's re-judge agreement (None without a re-judge file).
+    agreement: Option<AgreementOut>,
+    name_drift: Option<Vec<DriftRow>>,
+}
+
+/// What `report --calibration` reads, its files expanded.
+struct CalInputs {
+    /// The fit report (report.json at the rule's sha).
+    fit: PathBuf,
+    /// The fit's samples, verdicts and adjudication at that sha, for the
+    /// sub-strata (they must reproduce the fit report's strata).
+    fit_samples: Vec<PathBuf>,
+    fit_verdicts: Vec<PathBuf>,
+    fit_adjudication: Option<PathBuf>,
+    /// Every samples file of the tree (the held-out panel is read from it).
+    samples: Vec<PathBuf>,
+    verdicts: Vec<PathBuf>,
+    adjudication: PathBuf,
+    cohort_tasks: Option<PathBuf>,
+}
+
+fn sorted(mut v: Vec<PathBuf>) -> Vec<PathBuf> {
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Verdict files split into first verdicts and the blind re-judge.
+fn split_rejudge(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (second, first): (Vec<PathBuf>, Vec<PathBuf>) = paths
+        .into_iter()
+        .partition(|p| p.file_name().is_some_and(|n| n == REJUDGE_FILE));
+    (first, second)
+}
+
+/// The calibration and its JSON and markdown texts.
+fn calibration_texts(inp: CalInputs, plan: &Plan) -> Result<(CalOut, String, String), String> {
+    let fit_text = std::fs::read_to_string(&inp.fit)
+        .map_err(|e| format!("calibration: fit {}: {e}", inp.fit.display()))?;
+    let fit: FitReport = serde_json::from_str(&fit_text)
+        .map_err(|e| format!("calibration: fit {}: {e}", inp.fit.display()))?;
+    let fit_strata: JudgedBy = fit
+        .strata
+        .iter()
+        .map(|s| {
+            (
+                stratum_key(&s.category, &s.tier),
+                Judged {
+                    correct: s.correct,
+                    n: s.n,
+                },
+            )
+        })
+        .collect();
+
+    // The fit's sub-strata, from its own samples and verdicts, checked to
+    // reproduce the fit report's strata.
+    let mut fit_subs = JudgedBy::new();
+    let fit_samples = sorted(inp.fit_samples);
+    if !fit_samples.is_empty() {
+        let (h, r) = read_samples(&fit_samples)?;
+        let split = split_panel(h, r, None)?;
+        let (first, second) = split_rejudge(sorted(inp.fit_verdicts));
+        let adj = match &inp.fit_adjudication {
+            Some(p) => read_adjudication(p)?,
+            None => Vec::new(),
+        };
+        let resolved = resolve_verdicts_scoped(
+            &first,
+            &second,
+            &adj,
+            &split.known,
+            &split.scope,
+            None,
+            RejudgeRule::Matched,
+        )?;
+        let (strata, subs) = judged_by(&split.rows, &resolved.verdicts);
+        for (key, want) in &fit_strata {
+            let have = strata.get(key).copied().unwrap_or_default();
+            if have != *want {
+                return Err(format!(
+                    "calibration: the fit samples + verdicts do not reproduce the fit report at {key}: {}/{} judged correct, the report {}/{}",
+                    have.correct, have.n, want.correct, want.n
+                ));
+            }
+        }
+        if let Some(extra) = strata
+            .iter()
+            .find(|(k, j)| j.n > 0 && !fit_strata.contains_key(*k))
+        {
+            return Err(format!(
+                "calibration: the fit samples judge {} the fit report does not hold",
+                extra.0
+            ));
+        }
+        fit_subs = subs;
+    }
+
+    // The held-out panel, out of every samples file of the tree.
+    let samples = sorted(inp.samples);
+    if samples.is_empty() {
+        return Err("calibration: no samples file matched".to_string());
+    }
+    let (h, r) = read_samples(&samples)?;
+    let split = split_panel(h, r, Some(PANEL_HELDOUT))?;
+    if split.headers.is_empty() {
+        return Err(
+            "calibration: no held-out samples (run `scripts/edge-audit.sh sample-heldout`)"
+                .to_string(),
+        );
+    }
+    let (first, second) = split_rejudge(sorted(inp.verdicts));
+    let adj = read_adjudication(&inp.adjudication)?;
+    let resolved = resolve_verdicts_scoped(
+        &first,
+        &second,
+        &adj,
+        &split.known,
+        &split.scope,
+        None,
+        RejudgeRule::Matched,
+    )?;
+    let held = build_report(
+        &split.headers,
+        &split.rows,
+        &resolved.verdicts,
+        plan,
+        CiMethod::StratifiedWilson,
+    );
+    let (held_strata, held_subs) = judged_by(&split.rows, &resolved.verdicts);
+
+    // Strata: every key either side holds, by key.
+    let mut keys: BTreeSet<String> = fit_strata.keys().cloned().collect();
+    let held_n: BTreeMap<String, u64> = held
+        .strata
+        .iter()
+        .map(|s| (stratum_key(&s.category, &s.tier), s.big_n))
+        .collect();
+    keys.extend(held_n.keys().cloned());
+    let ins: Vec<CalIn> = keys
+        .iter()
+        .map(|k| CalIn {
+            key: k.clone(),
+            big_n: Some(held_n.get(k).copied().unwrap_or(0)),
+            fit: fit_strata.get(k).copied(),
+            held: held_strata.get(k).copied().unwrap_or_default(),
+        })
+        .collect();
+    let (strata, gate) = compare_strata(&ins, true);
+    let not_transferred = strata
+        .iter()
+        .filter(|r| r.holds == Some(false))
+        .map(|r| r.stratum.clone())
+        .collect();
+    let mut gaps: Vec<&CalRow> = strata.iter().filter(|r| r.compared).collect();
+    gaps.sort_by(|a, b| {
+        b.diff
+            .unwrap_or(0.0)
+            .total_cmp(&a.diff.unwrap_or(0.0))
+            .then(a.stratum.cmp(&b.stratum))
+    });
+    let largest_gaps = gaps
+        .iter()
+        .take(CAL_GAPS)
+        .filter(|r| r.diff.is_some_and(|d| d > 0.0))
+        .map(|r| r.stratum.clone())
+        .collect();
+
+    // Sub-strata compared where both sides hold n >= 10.
+    let sub_keys: BTreeSet<&String> = fit_subs.keys().chain(held_subs.keys()).collect();
+    let sub_ins: Vec<CalIn> = sub_keys
+        .into_iter()
+        .map(|k| CalIn {
+            key: k.clone(),
+            big_n: None,
+            fit: fit_subs.get(k).copied(),
+            held: held_subs.get(k).copied().unwrap_or_default(),
+        })
+        .collect();
+    let (subs, _) = compare_strata(&sub_ins, false);
+    let sub_strata = subs.into_iter().filter(|r| r.compared).collect();
+
+    let heldout_labels: BTreeSet<String> = split.headers.iter().map(|h| h.label.clone()).collect();
+    let repos = held
+        .repos
+        .iter()
+        .map(|(label, r)| {
+            let sum = |f: fn(&StratumOut) -> u64| r.strata.iter().map(f).sum::<u64>();
+            (
+                label.clone(),
+                RepoCal {
+                    edges: r.edges,
+                    unjudgeable: r.unjudgeable,
+                    sampled: sum(|s| s.sampled),
+                    n: sum(|s| s.n),
+                    correct: sum(|s| s.correct),
+                    wrong: sum(|s| s.wrong),
+                    unsure: sum(|s| s.unsure),
+                    p: r.overall.p,
+                    lo: r.overall.lo,
+                    hi: r.overall.hi,
+                },
+            )
+        })
+        .collect();
+    let name_drift = match &inp.cohort_tasks {
+        Some(p) => {
+            let text = std::fs::read_to_string(p)
+                .map_err(|e| format!("calibration: cohort tasks {}: {e}", p.display()))?;
+            Some(name_drift(&text, &heldout_labels)?)
+        }
+        None => None,
+    };
+    let out = CalOut {
+        rule: CAL_RULE,
+        seed: plan.seed.clone(),
+        heldout_n_per_stratum: HELDOUT_N,
+        fit: FitSummary {
+            strata: fit.strata.len(),
+            judged: fit.strata.iter().map(|s| s.n).sum(),
+            tiers: fit.tiers.clone(),
+        },
+        heldout: HeldSummary {
+            repos: heldout_labels.into_iter().collect(),
+            strata: held.strata.len(),
+            sampled: held.strata.iter().map(|s| s.sampled).sum(),
+            judged: held.strata.iter().map(|s| s.n).sum(),
+            unsure: held.strata.iter().map(|s| s.unsure).sum(),
+            pending: held.strata.iter().map(|s| s.pending).sum(),
+            tiers: held.tiers,
+            under_floor: held.under_floor,
+        },
+        gate: GateOut {
+            cal_error: r4(gate.cal_error),
+            ..gate.clone()
+        },
+        strata,
+        not_transferred,
+        largest_gaps,
+        repos,
+        sub_strata,
+        agreement: resolved.agreement,
+        name_drift,
+    };
+    let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())? + "\n";
+    let md = render_cal_md(&out, &gate);
+    Ok((CalOut { gate, ..out }, json, md))
+}
+
+fn yes_no(b: Option<bool>) -> &'static str {
+    match b {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "-",
+    }
+}
+
+fn cal_table(md: &mut String, rows: &[CalRow], population: bool) {
+    md.push_str(if population {
+        "| stratum | N held-out | fit k/n | fit p [lo, hi] | held-out k/n | held-out p [lo, hi] | in K | R1 holds | abs diff | w |\n|---|---:|---:|---|---:|---|---|---|---:|---:|\n"
+    } else {
+        "| sub-stratum | fit k/n | fit p [lo, hi] | held-out k/n | held-out p [lo, hi] | R1 holds | abs diff |\n|---|---:|---|---:|---|---|---:|\n"
+    });
+    for r in rows {
+        let iv = |p, lo, hi| format!("{} [{}, {}]", f3(p), f3(lo), f3(hi));
+        let fit = iv(r.fit_p, r.fit_lo, r.fit_hi);
+        let held = iv(r.heldout_p, r.heldout_lo, r.heldout_hi);
+        // A stratum key's `|` would split the cell.
+        let key = r.stratum.replace('|', "\\|");
+        if population {
+            md.push_str(&format!(
+                "| {} | {} | {}/{} | {} | {}/{} | {} | {} | {} | {} | {} |\n",
+                key,
+                r.big_n.unwrap_or(0),
+                r.fit_correct,
+                r.fit_n,
+                fit,
+                r.heldout_correct,
+                r.heldout_n,
+                held,
+                if r.compared { "yes" } else { "no" },
+                yes_no(r.holds),
+                f3(r.diff),
+                f3(r.weight)
+            ));
+        } else {
+            md.push_str(&format!(
+                "| {} | {}/{} | {} | {}/{} | {} | {} | {} |\n",
+                key,
+                r.fit_correct,
+                r.fit_n,
+                fit,
+                r.heldout_correct,
+                r.heldout_n,
+                held,
+                yes_no(r.holds),
+                f3(r.diff)
+            ));
+        }
+    }
+}
+
+/// calibration.md: the verdict, the strata, the information rows.
+fn render_cal_md(c: &CalOut, g: &GateOut) -> String {
+    let [marker, verdict] = calibration_markers(g);
+    let mut md = String::new();
+    md.push_str("# Calibrated confidence: the held-out calibration (HC.2 / HC.3)\n\n");
+    md.push_str(&format!(
+        "Rule: `{}` (committed before any held-out id was judged). Fit: the 0.5.6 audit, {} strata, {} judged. Held-out: {} ({} strata, {} sampled at n {} per stratum, {} judged, {} unsure, {} pending). Seed `{}`.\n\n",
+        c.rule,
+        c.fit.strata,
+        c.fit.judged,
+        c.heldout.repos.join(", "),
+        c.heldout.strata,
+        c.heldout.sampled,
+        c.heldout_n_per_stratum,
+        c.heldout.judged,
+        c.heldout.unsure,
+        c.heldout.pending,
+        c.seed
+    ));
+    md.push_str(&format!("```\n{marker}\n{verdict}\n```\n\n"));
+    md.push_str(&format!(
+        "K = {} strata with >= {CAL_MIN_JUDGED} held-out judged ids and a fit p. R1: the held-out Wilson upper bound reaches the fit's Wilson lower bound on {}/{} (needs >= {CAL_R1_NUM}/{CAL_R1_DEN}). R2: the held-out-weighted mean |p_fit - p_held| is {:.4} (needs <= {CAL_MAX_ERROR}). R3: |K| = {} (needs >= {CAL_MIN_STRATA}).\n\n",
+        g.k, g.covered, g.k, g.cal_error, g.k
+    ));
+    md.push_str("## Strata\n\n");
+    cal_table(&mut md, &c.strata, true);
+    md.push_str(&format!(
+        "\nNot transferred (R1 fails): {}.\nLargest gaps in K: {}.\nHeld-out strata under their tier floor: {}.\n\n",
+        list_or_none(&c.not_transferred),
+        list_or_none(&c.largest_gaps),
+        list_or_none(&c.heldout.under_floor)
+    ));
+    md.push_str("## Per tier (information)\n\n| tier | fit n | fit p [lo, hi] | held-out n | held-out p [lo, hi] |\n|---|---:|---|---:|---|\n");
+    let tiers: BTreeSet<&str> = c
+        .fit
+        .tiers
+        .iter()
+        .map(|t| t.name.as_str())
+        .chain(c.heldout.tiers.iter().map(|t| t.name.as_str()))
+        .collect();
+    for t in tiers {
+        let f = c.fit.tiers.iter().find(|x| x.name == t);
+        let h = c.heldout.tiers.iter().find(|x| x.name == t);
+        md.push_str(&format!(
+            "| {t} | {} | {} [{}, {}] | {} | {} [{}, {}] |\n",
+            f.map_or(0, |x| x.n),
+            f3(f.and_then(|x| x.p)),
+            f3(f.and_then(|x| x.lo)),
+            f3(f.and_then(|x| x.hi)),
+            h.map_or(0, |x| x.n),
+            f3(h.and_then(|x| x.p)),
+            f3(h.and_then(|x| x.lo)),
+            f3(h.and_then(|x| x.hi)),
+        ));
+    }
+    md.push_str("\n## Per held-out repo (information)\n\n| repo | edges | unjudgeable | sampled | judged | wrong | unsure | p [lo, hi] |\n|---|---:|---:|---:|---:|---:|---:|---|\n");
+    for (label, r) in &c.repos {
+        md.push_str(&format!(
+            "| {label} | {} | {} | {} | {} | {} | {} | {} [{}, {}] |\n",
+            r.edges,
+            r.unjudgeable,
+            r.sampled,
+            r.n,
+            r.wrong,
+            r.unsure,
+            f3(r.p),
+            f3(r.lo),
+            f3(r.hi)
+        ));
+    }
+    md.push_str(&format!(
+        "\n## Sub-strata by emitter / rule (information: both sides n >= {CAL_MIN_JUDGED})\n\n"
+    ));
+    if c.sub_strata.is_empty() {
+        md.push_str("None compared.\n");
+    } else {
+        cal_table(&mut md, &c.sub_strata, false);
+    }
+    md.push_str("\n## Held-out re-judge agreement (information)\n\n");
+    match &c.agreement {
+        Some(a) => {
+            md.push_str(&format!(
+                "Overall: {} ({} re-judged of {} expected, {} missing); disagreements {}, adjudicated {}, unadjudicated {}.\n",
+                kappa_text(&a.overall),
+                a.overall.rejudged,
+                a.overall.expected,
+                a.overall.missing,
+                a.disagreements,
+                a.adjudicated,
+                a.unadjudicated
+            ));
+            for k in &a.families {
+                md.push_str(&format!(
+                    "- {}: {} ({} re-judged of {} expected)\n",
+                    k.name,
+                    kappa_text(k),
+                    k.rejudged,
+                    k.expected
+                ));
+            }
+        }
+        None => md.push_str("No re-judge file read.\n"),
+    }
+    if let Some(rows) = &c.name_drift {
+        md.push_str("\n## Name-drift answer precision (information: the cohort's names probe)\n\nFlagged files that are truth files / flagged files, over the drift tasks whose start ran the names probe.\n\n| repo | held-out | tasks | flagged | truth | p [lo, hi] |\n|---|---|---:|---:|---:|---|\n");
+        for r in rows {
+            md.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} [{}, {}] |\n",
+                r.repo,
+                if r.heldout { "yes" } else { "no" },
+                r.tasks,
+                r.flagged,
+                r.truth,
+                f3(r.p),
+                f3(r.lo),
+                f3(r.hi)
+            ));
+        }
+    }
+    md
+}
+
+fn list_or_none(v: &[String]) -> String {
+    if v.is_empty() {
+        "none".to_string()
+    } else {
+        v.join(", ")
+    }
+}
+
+/// `report --calibration`: the held-out panel judged against the fit by the
+/// committed rule ([`CAL_RULE`]).
+fn run_calibration(args: &[String]) -> Result<ExitCode, String> {
+    let (mut fit, mut fit_samples, mut fit_verdicts, mut fit_adjudication) =
+        (None, Vec::new(), Vec::new(), None);
+    let (mut samples, mut verdicts, mut adjudication) = (Vec::new(), Vec::new(), None);
+    let (mut plan, mut out_json, mut out_md, mut cohort_tasks, mut check) =
+        (None, None, None, None, false);
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            "--calibration" => {}
+            "--fit" => fit = Some(PathBuf::from(value(args, &mut i, flag)?)),
+            "--fit-samples" => fit_samples.extend(expand(&value(args, &mut i, flag)?)?),
+            "--fit-verdicts" => fit_verdicts.extend(expand(&value(args, &mut i, flag)?)?),
+            "--fit-adjudication" => {
+                fit_adjudication = Some(PathBuf::from(value(args, &mut i, flag)?))
+            }
+            "--samples" | "--heldout" => samples.extend(expand(&value(args, &mut i, flag)?)?),
+            "--verdicts" => verdicts.extend(expand(&value(args, &mut i, flag)?)?),
+            "--adjudication" => adjudication = Some(value(args, &mut i, flag)?),
+            "--cohort-tasks" => cohort_tasks = Some(PathBuf::from(value(args, &mut i, flag)?)),
+            "--plan" => plan = Some(value(args, &mut i, flag)?),
+            "--out-json" => out_json = Some(value(args, &mut i, flag)?),
+            "--out-md" => out_md = Some(value(args, &mut i, flag)?),
+            "--check" => check = true,
+            other => return Err(format!("report --calibration: unknown argument {other}")),
+        }
+        i += 1;
+    }
+    let plan_path = plan.ok_or("report --calibration: --plan is required")?;
+    let plan = Plan::read(&plan_path)?;
+    let adjudication = adjudication.map(PathBuf::from).unwrap_or_else(|| {
+        Path::new(&plan_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(ADJUDICATION_FILE)
+    });
+    let (out_json, out_md) = (
+        out_json.ok_or("report --calibration: --out-json is required")?,
+        out_md.ok_or("report --calibration: --out-md is required")?,
+    );
+    let inputs = CalInputs {
+        fit: fit.ok_or("report --calibration: --fit is required")?,
+        fit_samples,
+        fit_verdicts,
+        fit_adjudication,
+        samples,
+        verdicts,
+        adjudication,
+        cohort_tasks,
+    };
+    let (cal, json, md) = calibration_texts(inputs, &plan)?;
+    for m in calibration_markers(&cal.gate) {
+        eprintln!("{m}");
+    }
+    if check {
+        for (path, want) in [(&out_json, &json), (&out_md, &md)] {
+            let have = std::fs::read_to_string(path).unwrap_or_default();
+            if have != *want {
+                eprintln!(
+                    "[edge-audit] calibration check: FAILED ({path} differs from the fit, samples and verdicts)"
+                );
+                return Ok(ExitCode::from(1));
+            }
+        }
+        eprintln!("[edge-audit] calibration check: ok");
+        return Ok(ExitCode::SUCCESS);
+    }
+    print!("{md}");
+    std::fs::write(&out_json, json).map_err(|e| format!("{out_json}: {e}"))?;
+    std::fs::write(&out_md, md).map_err(|e| format!("{out_md}: {e}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest = args.get(1..).unwrap_or(&[]);
@@ -1809,6 +2805,26 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`resolve_verdicts_scoped`] over one panel holding every id.
+    fn resolve_verdicts(
+        first_paths: &[PathBuf],
+        rejudge_paths: &[PathBuf],
+        adjudication: &[Adjudication],
+        ids: &BTreeSet<String>,
+        judge: Option<&str>,
+        rule: RejudgeRule,
+    ) -> Result<Resolved, String> {
+        resolve_verdicts_scoped(
+            first_paths,
+            rejudge_paths,
+            adjudication,
+            ids,
+            ids,
+            judge,
+            rule,
+        )
+    }
 
     fn plan() -> Plan {
         Plan {
@@ -1922,6 +2938,7 @@ mod tests {
             ]),
             unjudgeable: BTreeMap::new(),
             excluded: BTreeMap::new(),
+            panel: None,
         };
         let rows = vec![
             row("01", "CALLS", "fact"),
@@ -2033,8 +3050,8 @@ mod tests {
             rev: "0".repeat(40),
             skips: vec!["bench/".to_string()],
         };
-        let (a, ma) = sample_text(std::slice::from_ref(&spec), &plan()).unwrap();
-        let (b, mb) = sample_text(std::slice::from_ref(&spec), &plan()).unwrap();
+        let (a, ma) = sample_text(std::slice::from_ref(&spec), &plan(), None).unwrap();
+        let (b, mb) = sample_text(std::slice::from_ref(&spec), &plan(), None).unwrap();
         assert_eq!(a, b);
         assert_eq!(ma, mb);
         assert!(
@@ -2345,22 +3362,28 @@ mod tests {
     }
 
     #[test]
-    fn plugin_fd3c_reproduces_the_committed_report() {
+    fn default_reproduces_the_committed_report() {
+        // GP.14 (cd541240) re-drew the sample and wrote report.{json,md} with
+        // the defaults; FD.3c's plugin / fd3c report is no longer committed,
+        // so `--ci plugin --rejudge-rule fd3c` is read here only for its marker.
         let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
-        let (report, json, md) = committed(CiMethod::Plugin, RejudgeRule::Fd3c);
+        let (report, json, md) = committed(CiMethod::StratifiedWilson, RejudgeRule::Matched);
         assert!(
             json == std::fs::read_to_string(ad.join("report.json")).unwrap(),
-            "report.json drifted under --ci plugin --rejudge-rule fd3c"
+            "report.json drifted under the defaults"
         );
         assert!(
             md == std::fs::read_to_string(ad.join("report.md")).unwrap(),
-            "report.md drifted under --ci plugin --rejudge-rule fd3c"
+            "report.md drifted under the defaults"
         );
         assert!(
-            report_marker(&report).ends_with(" kappa=1.000 ci_method=plugin"),
+            report_marker(&report).ends_with(" kappa=1.000 ci_method=stratified_wilson"),
             "{}",
             report_marker(&report)
         );
+        let (plugin, json, _) = committed(CiMethod::Plugin, RejudgeRule::Fd3c);
+        assert!(report_marker(&plugin).ends_with(" ci_method=plugin"));
+        assert!(!json.contains("\"ci_method\""));
     }
 
     #[test]
@@ -2372,7 +3395,7 @@ mod tests {
             .find(|c| c.name == "CALLS")
             .unwrap();
         assert_eq!((calls.p, calls.hi), (Some(1.0), Some(1.0)));
-        assert_eq!(calls.lo, Some(0.8928));
+        assert_eq!(calls.lo, Some(0.8897));
         // Every sampled (not census) category reads a lower bound below 1; a
         // census category (INJECTS, GRPC_CALLS, ..) is exact.
         let sampled: Vec<&AggOut> = report.categories.iter().filter(|c| c.n < c.big_n).collect();
@@ -2382,13 +3405,480 @@ mod tests {
         assert!(json.contains("\"rule\": \"matched\""));
         assert!(md.contains("ci_method=stratified_wilson"));
         assert!(report_marker(&report).ends_with(" ci_method=stratified_wilson"));
-        // Structure's first judge found 14 wrong edges: the matched set takes
-        // all of them and 14 corrects, so the re-judge it names is 28 ids.
+        // GP.14's first judges found fewer than 10 wrong edges per family:
+        // the matched set takes all of them and tops up with corrects to
+        // MIN_REJUDGE, so each family's re-judge names 20 ids.
         let a = report.agreement.unwrap();
         let s = a.families.iter().find(|k| k.name == "structure").unwrap();
-        assert_eq!(s.expected, 28);
+        assert_eq!(s.expected, 20);
         assert_eq!(s.missing, s.missing_ids.len() as u64);
         let m = a.families.iter().find(|k| k.name == "mechanism").unwrap();
-        assert_eq!(m.expected, 102);
+        assert_eq!(m.expected, 20);
+    }
+
+    // ------------------------------------------------- calibration (HC.2)
+
+    fn cin(key: &str, big_n: u64, fit: (u64, u64), held: (u64, u64)) -> CalIn {
+        CalIn {
+            key: key.to_string(),
+            big_n: Some(big_n),
+            fit: Some(Judged {
+                correct: fit.0,
+                n: fit.1,
+            }),
+            held: Judged {
+                correct: held.0,
+                n: held.1,
+            },
+        }
+    }
+
+    /// 15 strata at fit 30/30 and held-out 10/10 over N 100 each.
+    fn transferring(n: usize) -> Vec<CalIn> {
+        (0..n)
+            .map(|i| cin(&format!("C{i:02}|fact"), 100, (30, 30), (10, 10)))
+            .collect()
+    }
+
+    #[test]
+    fn calibration_k_takes_ten_held_out_judged_and_a_fit_p() {
+        let mut ins = transferring(15);
+        // A census of 12 (N = n): in K, read by Wilson like any sample.
+        ins.push(cin("CENSUS12|derived", 12, (18, 18), (12, 12)));
+        // A census of 6: below 10 held-out judged, out of K.
+        ins.push(cin("CENSUS6|derived", 6, (6, 6), (6, 6)));
+        // No fit p: out of K whatever the held-out side holds.
+        ins.push(CalIn {
+            key: "NEW|heuristic".to_string(),
+            big_n: Some(40),
+            fit: None,
+            held: Judged { correct: 2, n: 10 },
+        });
+        let (rows, g) = compare_strata(&ins, true);
+        assert_eq!((g.k, g.covered, g.verdict), (16, 16, "PASS"));
+        assert_eq!(g.fit_n, 15 * 30 + 18);
+        assert_eq!(g.heldout_n, 15 * 10 + 12);
+        assert!(g.cal_error.abs() < 1e-12);
+        let census = rows
+            .iter()
+            .find(|r| r.stratum == "CENSUS12|derived")
+            .unwrap();
+        assert!(census.compared);
+        // Wilson at 12/12 (0.7575), never the census's exact 1.
+        assert_eq!(census.heldout_lo, Some(0.7575));
+        assert_eq!(census.weight, Some(r4(12.0 / 1512.0)));
+        let small = rows
+            .iter()
+            .find(|r| r.stratum == "CENSUS6|derived")
+            .unwrap();
+        assert!(!small.compared && small.holds.is_none() && small.weight.is_none());
+        let new = rows.iter().find(|r| r.stratum == "NEW|heuristic").unwrap();
+        assert!(!new.compared);
+        let [m, v] = calibration_markers(&g);
+        assert_eq!(
+            m,
+            "[edge-audit] calibration strata=16 fit_n=468 heldout_n=162 covered=16/16 cal_error=0.0000"
+        );
+        assert_eq!(
+            v,
+            "CONFIDENCE: R1=yes (16/16) R2=yes (0.0000) R3=yes (16) -> PASS"
+        );
+    }
+
+    #[test]
+    fn calibration_r1_needs_nine_tenths_of_k() {
+        // 20 strata, 2 not transferred (held-out 5/10: hi 0.763 < fit lo
+        // 0.886): 18/20 = 90% holds; a third drops it to 17/20.
+        let mut ins = transferring(18);
+        ins.push(cin("BAD1|derived", 1, (30, 30), (5, 10)));
+        ins.push(cin("BAD2|derived", 1, (30, 30), (5, 10)));
+        let (rows, g) = compare_strata(&ins, true);
+        assert_eq!((g.k, g.covered, g.r1), (20, 18, true));
+        assert_eq!(
+            rows.iter().filter(|r| r.holds == Some(false)).count(),
+            2,
+            "both BAD strata fail R1"
+        );
+        // R2 weights the two small strata by their tiny held-out share.
+        let want = 2.0 * (1.0 / 1802.0) * 0.5;
+        assert!((g.cal_error - want).abs() < 1e-12, "{}", g.cal_error);
+        assert_eq!(g.verdict, "PASS");
+        ins.push(cin("BAD3|derived", 1, (30, 30), (5, 10)));
+        let (_, g) = compare_strata(&ins, true);
+        assert_eq!((g.k, g.covered, g.r1, g.verdict), (21, 18, false, "FAIL"));
+    }
+
+    #[test]
+    fn calibration_r2_is_the_held_out_weighted_gap() {
+        // 15 strata; one big stratum (N 900 of 2300) at fit 30/30 vs held-out
+        // 8/10: its interval still overlaps (hi 0.943 >= lo 0.886), so R1
+        // holds, but its 0.2 gap at weight 900/2300 is 0.078 > 0.05.
+        let mut ins = transferring(14);
+        ins.push(cin("BIG|fact", 900, (30, 30), (8, 10)));
+        let (rows, g) = compare_strata(&ins, true);
+        let big = rows.iter().find(|r| r.stratum == "BIG|fact").unwrap();
+        assert_eq!(big.holds, Some(true));
+        assert_eq!(big.diff, Some(0.2));
+        assert!((g.cal_error - 0.2 * 900.0 / 2300.0).abs() < 1e-12);
+        assert_eq!((g.r1, g.r2, g.r3, g.verdict), (true, false, true, "FAIL"));
+        assert!(calibration_markers(&g)[1].ends_with("R2=no (0.0783) R3=yes (15) -> FAIL"));
+    }
+
+    #[test]
+    fn calibration_under_fifteen_strata_is_insufficient() {
+        let (_, g) = compare_strata(&transferring(14), true);
+        assert_eq!(
+            (g.r1, g.r2, g.r3, g.verdict),
+            (true, true, false, "INSUFFICIENT")
+        );
+        let (_, g) = compare_strata(&[], true);
+        assert_eq!((g.k, g.verdict), (0, "INSUFFICIENT"));
+        assert_eq!(
+            calibration_markers(&g)[1],
+            "CONFIDENCE: R1=yes (0/0) R2=yes (0.0000) R3=no (0) -> INSUFFICIENT"
+        );
+    }
+
+    #[test]
+    fn sub_strata_compare_only_with_ten_on_both_sides() {
+        let mut a = cin("CALLS|fact|graph:calls/x", 0, (12, 12), (10, 10));
+        a.big_n = None;
+        let mut b = cin("CALLS|fact|graph:calls/y", 0, (9, 9), (10, 10));
+        b.big_n = None;
+        let (rows, g) = compare_strata(&[a, b], false);
+        assert!(rows[0].compared && !rows[1].compared);
+        assert_eq!(rows[0].weight, None);
+        assert_eq!(g.k, 0, "sub-strata never enter K");
+    }
+
+    fn sample_row(id: &str, label: &str, cat: &str, tier: &str, rule: &str) -> SampleRow {
+        SampleRow {
+            id: id.to_string(),
+            label: label.to_string(),
+            rev: "r".to_string(),
+            category: cat.to_string(),
+            tier: tier.to_string(),
+            tier_note: None,
+            emitter: Some("graph:calls".to_string()),
+            rule: Some(rule.to_string()),
+            site: Site {
+                file: Some("a.py".to_string()),
+                line: Some(1),
+            },
+            from: End {
+                qname: "a".to_string(),
+                kind: "FUNCTION".to_string(),
+                file: Some("a.py".to_string()),
+                line: Some(1),
+            },
+            to: End {
+                qname: "b".to_string(),
+                kind: "FUNCTION".to_string(),
+                file: Some("a.py".to_string()),
+                line: Some(2),
+            },
+        }
+    }
+
+    fn header(label: &str, sizes: &[(&str, u64)], panel: Option<&str>) -> Header {
+        Header {
+            label: label.to_string(),
+            rev: "r".to_string(),
+            seed: "s".to_string(),
+            edges: 100,
+            stratum_sizes: sizes.iter().map(|(k, n)| (k.to_string(), *n)).collect(),
+            unjudgeable: BTreeMap::new(),
+            excluded: BTreeMap::new(),
+            panel: panel.map(str::to_string),
+        }
+    }
+
+    fn jsonl<T: Serialize>(items: &[T]) -> String {
+        items
+            .iter()
+            .map(|i| serde_json::to_string(i).unwrap() + "\n")
+            .collect()
+    }
+
+    fn verdict_line(id: &str, v: &str, judge: &str) -> String {
+        format!("{{\"id\":\"{id}\",\"verdict\":\"{v}\",\"reason\":\"\",\"judge\":\"{judge}\"}}\n")
+    }
+
+    #[test]
+    fn panels_split_by_header_and_scope_the_verdicts() {
+        let headers = vec![
+            header("fit", &[("CALLS|fact", 5)], None),
+            header("held", &[("CALLS|fact", 5)], Some(PANEL_HELDOUT)),
+        ];
+        let rows = vec![
+            sample_row("f1", "fit", "CALLS", "fact", "x"),
+            sample_row("h1", "held", "CALLS", "fact", "x"),
+        ];
+        let fit = split_panel(headers.clone(), rows.clone(), None).unwrap();
+        assert_eq!(fit.headers.len(), 1);
+        assert_eq!(fit.scope, BTreeSet::from(["f1".to_string()]));
+        assert_eq!(fit.known.len(), 2);
+        let held = split_panel(headers.clone(), rows.clone(), Some(PANEL_HELDOUT)).unwrap();
+        assert_eq!(held.scope, BTreeSet::from(["h1".to_string()]));
+        // The held-out panel's first verdict and its re-judge never reach the
+        // fit's resolution; an unknown id still errors.
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("heldout.jsonl");
+        let fitv = dir.path().join("structure.jsonl");
+        let second = dir.path().join(REJUDGE_FILE);
+        std::fs::write(&first, verdict_line("h1", "wrong", "a")).unwrap();
+        std::fs::write(&fitv, verdict_line("f1", "correct", "a")).unwrap();
+        std::fs::write(&second, verdict_line("h1", "correct", "b")).unwrap();
+        let adj = vec![Adjudication {
+            id: "h1".to_string(),
+            first: "wrong".to_string(),
+            second: "correct".to_string(),
+            final_verdict: "correct".to_string(),
+        }];
+        let firsts = [first.clone(), fitv.clone()];
+        let r = resolve_verdicts_scoped(
+            &firsts,
+            std::slice::from_ref(&second),
+            &adj,
+            &fit.known,
+            &fit.scope,
+            None,
+            RejudgeRule::Matched,
+        )
+        .unwrap();
+        assert_eq!(r.verdicts.len(), 1);
+        assert_eq!(r.verdicts["f1"], "correct");
+        let a = r.agreement.unwrap();
+        assert_eq!(a.families.len(), 1);
+        assert_eq!((a.overall.rejudged, a.disagreements), (0, 0));
+        let r = resolve_verdicts_scoped(
+            &firsts,
+            std::slice::from_ref(&second),
+            &adj,
+            &held.known,
+            &held.scope,
+            None,
+            RejudgeRule::Matched,
+        )
+        .unwrap();
+        assert_eq!(r.verdicts.len(), 1);
+        assert_eq!(r.verdicts["h1"], "correct", "the adjudication's final");
+        std::fs::write(&first, verdict_line("zz", "wrong", "a")).unwrap();
+        assert!(
+            resolve_verdicts_scoped(
+                &firsts,
+                &[],
+                &[],
+                &held.known,
+                &held.scope,
+                None,
+                RejudgeRule::Matched,
+            )
+            .unwrap_err()
+            .contains("zz")
+        );
+        // One label in two panels is an error.
+        let mut two = headers;
+        two.push(header("fit", &[], Some(PANEL_HELDOUT)));
+        assert!(
+            split_panel(two, rows, None)
+                .unwrap_err()
+                .contains("two panels")
+        );
+    }
+
+    #[test]
+    fn name_drift_counts_flagged_truth_over_flagged() {
+        let text = [
+            r#"{"repo":"a","shape":"drift","S":{"names":{"flagged":4,"flagged_truth":["x"]}}}"#,
+            r#"{"repo":"a","shape":"drift","S":{"names":{"flagged":0,"flagged_truth":[]}}}"#,
+            r#"{"repo":"b","shape":"drift","S":{"names":{"error":"boom"}}}"#,
+            r#"{"repo":"b","shape":"ripple","S":{"names":{"flagged":9,"flagged_truth":["y"]}}}"#,
+            r#"{"repo":"c","shape":"drift","S":{"names":{"flagged":6,"flagged_truth":["p","q","r"]}}}"#,
+        ]
+        .join("\n");
+        let rows = name_drift(&text, &BTreeSet::from(["c".to_string()])).unwrap();
+        let got: Vec<(&str, bool, u64, u64, u64)> = rows
+            .iter()
+            .map(|r| (r.repo.as_str(), r.heldout, r.tasks, r.flagged, r.truth))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a", false, 2, 4, 1),
+                ("c", true, 1, 6, 3),
+                ("all", false, 3, 10, 4)
+            ]
+        );
+        assert_eq!(rows[2].p, Some(0.4));
+    }
+
+    #[test]
+    fn calibration_end_to_end_is_derived_and_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        // The fit: 16 CALLS-like strata at 12/12 judged, from fit samples.
+        let (mut fit_rows, mut held_rows) = (Vec::new(), Vec::new());
+        let (mut fit_v, mut held_v) = (String::new(), String::new());
+        let mut fit_sizes = Vec::new();
+        let mut held_sizes = Vec::new();
+        let mut strata_json = Vec::new();
+        for s in 0..16 {
+            let cat = format!("C{s:02}");
+            for i in 0..12 {
+                let id = format!("f{s:02}{i:02}");
+                fit_rows.push(sample_row(&id, "fit", &cat, "fact", "r"));
+                fit_v.push_str(&verdict_line(&id, "correct", "a"));
+                let id = format!("h{s:02}{i:02}");
+                held_rows.push(sample_row(&id, "held", &cat, "fact", "r"));
+                // One wrong edge in the last stratum.
+                let v = if s == 15 && i == 0 {
+                    "wrong"
+                } else {
+                    "correct"
+                };
+                held_v.push_str(&verdict_line(&id, v, "a"));
+            }
+            fit_sizes.push((format!("{cat}|fact"), 50u64));
+            held_sizes.push((format!("{cat}|fact"), 40u64));
+            strata_json.push(format!(
+                "{{\"category\":\"{cat}\",\"tier\":\"fact\",\"N\":50,\"n\":12,\"correct\":12}}"
+            ));
+        }
+        let fit_report = d.join("report.json");
+        std::fs::write(
+            &fit_report,
+            format!(
+                "{{\"strata\":[{}],\"tiers\":[{{\"name\":\"fact\",\"n\":192,\"p\":1.0,\"lo\":0.98,\"hi\":1.0}}]}}",
+                strata_json.join(",")
+            ),
+        )
+        .unwrap();
+        fn sizes(v: &[(String, u64)]) -> Vec<(&str, u64)> {
+            v.iter().map(|(k, n)| (k.as_str(), *n)).collect()
+        }
+        std::fs::create_dir_all(d.join("fit/samples")).unwrap();
+        std::fs::create_dir_all(d.join("samples")).unwrap();
+        std::fs::create_dir_all(d.join("verdicts")).unwrap();
+        let fit_samples = d.join("fit/samples/audit.jsonl");
+        std::fs::write(
+            &fit_samples,
+            jsonl(&[header("fit", &sizes(&fit_sizes), None)]) + &jsonl(&fit_rows),
+        )
+        .unwrap();
+        std::fs::write(d.join("fit/structure.jsonl"), &fit_v).unwrap();
+        // The tree: the fit samples beside the held-out ones.
+        std::fs::copy(&fit_samples, d.join("samples/audit.jsonl")).unwrap();
+        std::fs::write(
+            d.join("samples/heldout.jsonl"),
+            jsonl(&[header("held", &sizes(&held_sizes), Some(PANEL_HELDOUT))]) + &jsonl(&held_rows),
+        )
+        .unwrap();
+        std::fs::write(d.join("verdicts/structure.jsonl"), &fit_v).unwrap();
+        std::fs::write(d.join("verdicts/heldout.jsonl"), &held_v).unwrap();
+        let tasks = d.join("tasks.jsonl");
+        std::fs::write(
+            &tasks,
+            r#"{"repo":"held","shape":"drift","S":{"names":{"flagged":2,"flagged_truth":["x"]}}}"#,
+        )
+        .unwrap();
+        let inputs = || CalInputs {
+            fit: fit_report.clone(),
+            fit_samples: vec![fit_samples.clone()],
+            fit_verdicts: vec![d.join("fit/structure.jsonl")],
+            fit_adjudication: None,
+            samples: expand(&d.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+            verdicts: expand(&d.join("verdicts/*.jsonl").to_string_lossy()).unwrap(),
+            adjudication: d.join(ADJUDICATION_FILE),
+            cohort_tasks: Some(tasks.clone()),
+        };
+        let (cal, json, md) = calibration_texts(inputs(), &plan()).unwrap();
+        let (_, json2, md2) = calibration_texts(inputs(), &plan()).unwrap();
+        assert_eq!((&json, &md), (&json2, &md2));
+        assert_eq!((cal.gate.k, cal.gate.covered), (16, 16));
+        assert_eq!(cal.gate.verdict, "PASS");
+        // 1/12 off in one stratum of 16 equal shares.
+        assert!((cal.gate.cal_error - (1.0 / 12.0) / 16.0).abs() < 1e-12);
+        assert_eq!(cal.heldout.repos, vec!["held".to_string()]);
+        assert_eq!(cal.sub_strata.len(), 16);
+        assert_eq!(cal.largest_gaps, vec!["C15|fact".to_string()]);
+        assert_eq!(cal.repos["held"].wrong, 1);
+        assert!(md.contains("CONFIDENCE: R1=yes (16/16) R2=yes (0.0052) R3=yes (16) -> PASS"));
+        assert!(json.contains("\"rule\": \"dev-notes/confidence-gate-0.5.7.md\""));
+        assert_eq!(cal.name_drift.as_ref().unwrap()[0].truth, 1);
+
+        // The fit report of the same tree never sees the held-out panel.
+        let (first, second) =
+            split_rejudge(expand(&d.join("verdicts/*.jsonl").to_string_lossy()).unwrap());
+        let (fit_only, _, _) = report_texts(
+            ReportInputs {
+                samples: expand(&d.join("samples/*.jsonl").to_string_lossy()).unwrap(),
+                verdicts: first,
+                rejudge: second,
+                adjudication: d.join(ADJUDICATION_FILE),
+                judge: None,
+                ci: CiMethod::StratifiedWilson,
+                rule: RejudgeRule::Matched,
+            },
+            &plan(),
+        )
+        .unwrap();
+        assert_eq!(fit_only.repos.keys().collect::<Vec<_>>(), vec!["fit"]);
+        assert_eq!(fit_only.strata.iter().map(|s| s.n).sum::<u64>(), 192);
+
+        // Fit samples that do not reproduce the fit report are refused.
+        std::fs::write(
+            d.join("fit/structure.jsonl"),
+            fit_v.replacen("\"correct\"", "\"wrong\"", 1),
+        )
+        .unwrap();
+        assert!(
+            calibration_texts(inputs(), &plan())
+                .unwrap_err()
+                .contains("do not reproduce the fit report")
+        );
+    }
+
+    #[test]
+    fn committed_fit_report_ignores_a_held_out_panel_beside_it() {
+        // The committed samples and verdicts plus a held-out samples file, its
+        // first verdicts and re-judge rows: the fit report is byte for byte
+        // the committed one.
+        let ad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/edge-audit");
+        let dir = tempfile::tempdir().unwrap();
+        let held = dir.path().join("heldout.jsonl");
+        std::fs::write(
+            &held,
+            jsonl(&[header("held", &[("CALLS|fact", 3)], Some(PANEL_HELDOUT))])
+                + &jsonl(&[sample_row("ffffffffffffff01", "held", "CALLS", "fact", "x")]),
+        )
+        .unwrap();
+        let hv = dir.path().join("heldout-verdicts.jsonl");
+        std::fs::write(&hv, verdict_line("ffffffffffffff01", "wrong", "a")).unwrap();
+        let rj = dir.path().join(REJUDGE_FILE);
+        let mut rejudge_text = std::fs::read_to_string(ad.join("verdicts/rejudge.jsonl")).unwrap();
+        rejudge_text.push_str(&verdict_line("ffffffffffffff01", "correct", "b"));
+        std::fs::write(&rj, rejudge_text).unwrap();
+        let all = expand(&ad.join("verdicts/*.jsonl").to_string_lossy()).unwrap();
+        let (mut verdicts, _) = split_rejudge(all);
+        verdicts.push(hv);
+        let mut samples = expand(&ad.join("samples/*.jsonl").to_string_lossy()).unwrap();
+        samples.push(held);
+        let plan = Plan::read(&ad.join("floors.json").to_string_lossy()).unwrap();
+        let (_, json, md) = report_texts(
+            ReportInputs {
+                samples,
+                verdicts,
+                rejudge: vec![rj],
+                adjudication: ad.join(ADJUDICATION_FILE),
+                judge: None,
+                ci: CiMethod::StratifiedWilson,
+                rule: RejudgeRule::Matched,
+            },
+            &plan,
+        )
+        .unwrap();
+        assert!(json == std::fs::read_to_string(ad.join("report.json")).unwrap());
+        assert!(md == std::fs::read_to_string(ad.join("report.md")).unwrap());
     }
 }

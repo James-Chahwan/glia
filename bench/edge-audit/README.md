@@ -95,3 +95,38 @@ under_floor=<f> insufficient=<i> kappa=<k>` on stderr.
 - `insufficient`: fewer than 10 judged rows after unsure, unless the stratum is a census.
 - `noisy` (a flag): unsure is over 10% of the stratum's verdicts.
 - `unjudged`: no verdict yet.
+
+## The held-out panel and the calibration (0.5.7, HC.2)
+
+A precision measured on the fit panel above is a confidence for a row of another repo only if it
+transfers. The calibrated-confidence gate (`dev-notes/confidence-gate-0.5.7.md`, its rule committed
+before any held-out id was sampled or judged) measures that on repos the fit never saw.
+
+- **Panel.** The `snapshots.json` rows marked `"panel": "heldout"`: seven public cohort repos (mealie,
+  chatwoot, squidex, tolgee, hoppscotch, gin-vue-admin, zora-protocol), read by label from
+  `bench/cohort/repos.json` and archived from the cohort's bare clones like any cohort row. A row
+  without `panel` is the fit; a name appears once.
+- **Sample.** `bash scripts/edge-audit.sh sample-heldout` runs `edge_audit sample --panel heldout`: the
+  fit's population, exclusions, strata, key and seed, n 10 per pooled (category, tier) stratum
+  (structural categories too; a pooled stratum of at most 10 is censused), into
+  `samples/heldout.jsonl`, each header carrying `"panel":"heldout"`. The fit's `samples/audit.jsonl`
+  is never re-drawn by it, and two runs write the same bytes.
+- **Judging.** As the fit: `show <label>` (it picks the held-out file for a held-out label), first
+  verdicts in `verdicts/heldout.jsonl`, the matched blind re-judge appended to `verdicts/rejudge.jsonl`,
+  disagreements in `adjudication.jsonl`.
+- **Panels never mix.** `report` reads only the fit panel's samples and the verdicts of their ids
+  (a verdict or adjudication row of a held-out id is known and skipped), so `report --check` holds
+  with held-out files beside the fit's; `calibrate` reads only the held-out panel's.
+- **Calibration.** `bash scripts/edge-audit.sh calibrate [--check]` runs `edge_audit report
+  --calibration`: the fit is `report.json` and the fit's samples, verdicts and adjudication as committed
+  at `FIT_REV` (cd541240, the 0.5.6 audit; extracted with `git show`, so a later re-audit moves no
+  calibration number). Per stratum it compares the fit's (correct, judged) with the held-out's, both
+  with Wilson 95% intervals; K is the strata with >= 10 held-out judged ids and a fit p; R1 (the
+  held-out upper bound reaches the fit's lower bound on >= 90% of K), R2 (the held-out-weighted mean
+  |p_fit - p_held| <= 0.05) and R3 (|K| >= 15, else INSUFFICIENT) give the verdict. Information rows:
+  the comparison per (category, tier, emitter, rule) where both sides hold n >= 10, the per-repo and
+  per-tier held-out estimates, the held-out re-judge's kappa, and the cohort's name-drift answer
+  precision (flagged files that are truth files / flagged files, `bench/cohort/results/baseline/
+  tasks.jsonl` at `COHORT_REV`). It writes `calibration.json` / `calibration.md` and prints
+  `[edge-audit] calibration strata=<k> fit_n=<a> heldout_n=<b> covered=<c>/<k> cal_error=<e>` and
+  `CONFIDENCE: R1=<yes|no> (<c>/<k>) R2=<yes|no> (<e>) R3=<yes|no> (<k>) -> PASS|FAIL|INSUFFICIENT`.
