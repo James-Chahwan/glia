@@ -1676,6 +1676,11 @@ can fold a client model into its server model.
 
 If the language needs routes (HTTP, gRPC, queues, etc.), the extractor belongs in `parsers/code/extractors/` as a cross-cutting module, not inside the language parser.
 
+The contributor's form of this checklist, with every touch point by symbol (the build group in `lang_build`'s
+`build_solo`, `glia_graph::build_<lang>`, health's `CODE_LIKE_EXTS`, the matrix row), is `docs/seams.md`'s language
+seam; `engine/tests/seams.rs` (HT.9, `[seams] languages=<n> groups=<g> matrix_rows=<m> exempt=<e>`) fails when a tag
+`detect_language` returns misses one.
+
 ## Adding a New Cross-Graph Resolver
 
 Create **`graph/src/resolvers/<name>.rs`** and implement `CrossGraphResolver` there, then

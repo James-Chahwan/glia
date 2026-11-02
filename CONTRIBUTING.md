@@ -23,12 +23,23 @@ contributions are unwelcome:
 
 ## What works today
 
+Five **seams** are documented in [docs/seams.md](docs/seams.md), each with the exact files and symbols it touches and
+the check that proves it complete: a fixture, a matrix or pattern cell, a host-table row (with its fixture), a language
+parser crate and a domain crate. The first three can be merged as pull requests once their checks pass; a parser or a
+domain is read as a design (below). `engine/tests/seams.rs` fails when a language misses one of its seam points.
+
 - **Issues**: a bug, a missing language or framework, a repo glia reads wrong, a use case. A short example repo helps
   most.
 - **Example fixtures**: a directory under `bench/substrate-gap/fixtures/` (source files plus a `key.json` naming the
   nodes and edges glia should find; `bench/substrate-gap/README.md`) changes no engine code and can be merged almost any
   time. A fixture glia fails is a useful contribution in itself.
-- **Code PRs are read as designs.** A pull request is read (never run unreviewed), and the idea is rebuilt into the next
+- **Matrix and pattern cells**: `bench/substrate-gap/matrix/<language>/<mechanism>/` (stamped by
+  `bench/substrate-gap/scaffold.py`) and `bench/substrate-gap/patterns/<language>/<pattern>/`
+  ([docs/seams.md](docs/seams.md#2-a-matrix-or-pattern-cell)).
+- **Host-table rows**: one `code_domain::hosts::HOSTS` row with the fixture that shows it, when the row fits the
+  table's existing shapes ([docs/seams.md](docs/seams.md#3-a-host-table-row)).
+- **Code PRs are read as designs.** Everything outside those seams, a language parser and a domain crate included. A
+  pull request is read (never run unreviewed), and the idea is rebuilt into the next
   release on top of the current tree, with you credited as `Co-authored-by` on the commits that use it. glia 0.5.5's Lua
   support came this way, from glia PR #3.
 - **Take ids from the private range** in a PR: number from `0x8000_0001` up (or use no new id), and say in the issue
