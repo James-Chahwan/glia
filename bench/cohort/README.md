@@ -122,6 +122,7 @@ probe row or a repo with no health row (`[cohort] check release=<r> ok - ..`).
 
     bash scripts/cohort-gate.sh check [--glia <bin>] [--only <label>,..] [--jobs 4]
     bash scripts/cohort-gate.sh baseline | ratchet | run | compare <base> <new> | selftest
+    bash scripts/cohort-gate.sh recheck [--only <label>,..]
 
 The release check beside the rank gate (`scripts/rank-gate.sh`): where that one blocks a
 ranking regression, this one blocks glia going blind on a real repo or on a client / server
@@ -174,6 +175,19 @@ green it runs `ratchet`, which copies the check's results over the baseline only
 compared value moved (wall times excluded), the check was full and made at HEAD and no decline is pending. Only
 `baseline` (James's or a close-out's explicit call) and `ratchet` write `results/baseline/`.
 `selftest` checks the compare rules on seeded results with no glia and no network.
+
+`recheck` (HP.2) judges the last run's results again against `results/baseline/` as it is now, with no
+build and no run: for a close-out whose only moved input is the baseline (a ratchet commit, a ruled
+re-record). Every clean run writes `run/run-meta.json` last (the head that measured, its `only`, the sha256
+of every file under `run/results/baseline/`; outside the results, so no baseline ever copies it). `recheck`
+refuses (`[cohort-gate] check: FAILED (no run to recheck: <why>)`, exit 2) unless run-meta.json and the
+results' `gate.json` agree on the head, every listed file is unchanged and none was added, and the run covers
+the request (a full run covers any `--only`; a partial run only a subset of its own labels). Its `check:`
+line ends ` (rejudged run of <head12>)`; `last-check.json` records the measured head and `"rejudged": true`,
+and `ratchet` refuses it (`the last check was a re-judge`). The close-out runs it as `[closeout] rejudge
+cohort from <commit12> (judge inputs moved: ..)` when the cohort's measure inputs and env are those of its
+last run. `selftest`'s `recheck` case re-judges the seeded results against an edited base (one task check
+and one reach value moved), then checks the ratchet's refusal and a refused re-judge of a changed run.
 
 The first baseline (a glia built at `5727c57d`, 21 repos, 200 tasks, `--jobs 4`) took 6136 s
 with other builds loading the machine; a full `check` of the same binary against it read `ok

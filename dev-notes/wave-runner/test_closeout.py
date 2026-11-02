@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """HP.1's tests for closeout.py's gate reuse: digests, input sets, the decision, the record, TMPDIR and the
-ratchet / release-set / [gate-asks] rules. Stdlib unittest; each test builds its own throwaway git repo under
+ratchet / release-set / [gate-asks] rules; HP.2's re-judge (the decision table, the run-files check, the marker
+and cohort-gate.sh's selftest with its recheck case). Stdlib unittest; each test builds its own throwaway git repo under
 tempfile with a synthetic `cargo metadata` (no cargo, no glia). One test reads this checkout: every path literal
 a tracked *.rs names must lie inside the workspace tests' input set.
 
@@ -334,7 +335,7 @@ class DecisionTests(unittest.TestCase):
         st = {g: {"how": "fresh", "tier": "full", "ok": True, "commit": "c" * 40} for g in C.RECORDED_GATES}
         st["rank"] = {"how": "reused", "tier": "full", "ok": True, "commit": "abcdef0123456789"}
         line, per, missing = C.release_set(st, "f" * 40)
-        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=7 reused=1 full=8/8")
+        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=7 reused=1 rejudged=0 full=8/8")
         self.assertIn("   rank=reused abcdef012345", per)
         self.assertEqual(missing, [])
         st["cohort"] = {"how": "fresh", "tier": C.partial_tier(C.COHORT_FAST), "ok": True, "commit": "c"}
@@ -347,6 +348,130 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(C.line_tier("[rank-gate] check: ok - 5 rows (partial: only shell,websocket)", "full"),
                          "partial:shell,websocket")
         self.assertEqual(C.line_tier("[rank-gate] check: ok - 6 rows", "full"), "full")
+
+
+class RejudgeTests(unittest.TestCase):
+    """HP.2: a gate whose judge inputs alone moved re-judges its last measurement instead of re-measuring."""
+    OLD = {"digest": "d0", "measure": "m1", "judge": "j0", "env": {"closeout": "c"}, "env_digest": "e1"}
+    NEW = {"digest": "d1", "measure": "m1", "judge": "j1", "env": {"closeout": "c"}, "env_digest": "e1"}
+    OK = staticmethod(lambda e: None)
+
+    def last(self, **kw):
+        kw.setdefault("run_meta_sha", "s" * 64)
+        return entry(self.OLD, **kw)
+
+    def test_decision_table(self):
+        # judge-only move -> rejudge, from a green or a failed last result
+        for ok in (True, False):
+            e = self.last(ok=ok)
+            rec = record_with(("cohort", e))
+            self.assertEqual(C.decide("cohort", "full", self.NEW, rec, intact=self.OK), ("rejudge", e, "judge inputs moved"))
+        # measure move -> run
+        rec = record_with(("cohort", self.last()))
+        moved = dict(self.NEW, measure="m2")
+        self.assertEqual(C.decide("cohort", "full", moved, rec, intact=self.OK)[::2], ("run", "inputs moved"))
+        # env_fail last -> run
+        rec = record_with(("cohort", self.last(env_fail=True)))
+        self.assertEqual(C.decide("cohort", "full", self.NEW, rec, intact=self.OK)[::2], ("run", "inputs moved"))
+        # missing run files -> run, saying why there was no re-judge
+        e = self.last()
+        rec = record_with(("rank", e))
+        self.assertEqual(C.decide("rank", "full", self.NEW, rec, intact=lambda _: "no run-meta.json"),
+                         ("run", e, "judge inputs moved; no rejudge: no run-meta.json"))
+        # env moved -> run
+        self.assertEqual(C.decide("rank", "full", dict(self.NEW, env_digest="e2", env={"closeout": "d"}), rec,
+                                  intact=self.OK)[::2], ("run", "inputs moved"))
+        # a gate with no run files to re-judge (no `intact`) -> run
+        self.assertEqual(C.decide("tests", "full", self.NEW, record_with(("tests", self.last())))[0], "run")
+        # a partial measurement never serves a full need; it serves its own labels
+        need = C.partial_tier(C.COHORT_FAST)
+        rec = record_with(("cohort", self.last(tier=need)))
+        self.assertEqual(C.decide("cohort", "full", self.NEW, rec, intact=self.OK)[0], "run")
+        self.assertEqual(C.decide("cohort", need, self.NEW, rec, intact=self.OK)[0], "rejudge")
+        # forced and dirty still run; a green at HEAD's digest is still reused first
+        self.assertEqual(C.decide("cohort", "full", self.NEW, rec, {"cohort"}, intact=self.OK)[2], "forced")
+        self.assertEqual(C.decide("cohort", "full", self.NEW, rec, dirty=True, intact=self.OK)[2], "dirty tree")
+        rec = record_with(("cohort", entry(self.NEW)), ("cohort", self.last()))
+        self.assertEqual(C.decide("cohort", "full", self.NEW, rec, intact=self.OK)[0], "reuse")
+
+    def test_run_files_check(self):
+        with tempfile.TemporaryDirectory() as t:
+            env = {"GLIA_RANK_GATE_DIR": t, "GLIA_COHORT_GATE_DIR": str(Path(t) / "cg")}
+            run = Path(t) / "run"
+            run.mkdir()
+            (run / "la.json").write_text('{"v": 1}')
+            meta = {"glia_head": "a" * 40, "files": {"la.json": C.sha256_file(run / "la.json")}}
+            (run / "run-meta.json").write_text(json.dumps(meta))
+            self.assertEqual(C.gate_run_dir("rank", env), run)
+            self.assertIsNone(C.run_meta_sha("rank", "b" * 40, env), "measured at another head")
+            sha = C.run_meta_sha("rank", "a" * 40, env)
+            self.assertEqual(sha, C.sha256_file(run / "run-meta.json"))
+            e = {"run_meta_sha": sha, "commit": "a" * 40}
+            self.assertIsNone(C.run_intact("rank", e, env))
+            self.assertEqual(C.run_intact("rank", {"commit": "a" * 40}, env), "run files not recorded")
+            self.assertEqual(C.run_intact("cohort", e, env), "no run-meta.json")
+            (run / "la.json").write_text('{"v": 2}')
+            self.assertEqual(C.run_intact("rank", e, env), "run/la.json changed")
+            (run / "run-meta.json").write_text(json.dumps(dict(meta, glia_head="c" * 40)))
+            self.assertEqual(C.run_intact("rank", e, env), "another run since")
+
+    def test_marker_and_measured_commit(self):
+        fresh = {"commit": "f" * 40}
+        rejudged = {"commit": "f" * 40, "measured_at": "0123456789abcdef" + "0" * 24}
+        self.assertEqual(C.measured_commit(fresh), "f" * 40)
+        self.assertEqual(C.measured_commit(rejudged)[:12], "0123456789ab")
+        self.assertEqual(C.rejudge_line("cohort", rejudged, ["a", "b", "c", "d"]),
+                         "[closeout] rejudge cohort from 0123456789ab (judge inputs moved: a, b, c)")
+        self.assertEqual(C.rejudge_line("rank", fresh, []), f"[closeout] rejudge rank from {'f' * 12} "
+                                                             "(judge inputs moved: the set changed)")
+        self.assertEqual(C.tier_only("full"), "")
+        self.assertEqual(C.tier_only(C.partial_tier("b,a")), "a,b")
+
+    def test_gate_asks_line_carries_rejudged_from(self):
+        line, _ = C.gate_attribution("cohort", "[cohort-gate] check: ok - 21 repos (rejudged run of 0123456789ab)",
+                                     [], {}, rejudged_from="0123456789abcdef")
+        self.assertEqual(line, "== [gate-asks] cohort result=ok rejudged_from=0123456789ab asked_by=0 (-) "
+                               "touched_by=0 (-)")
+
+    def test_release_set_counts_a_rejudge_and_the_ratchet_never_runs(self):
+        st = {g: {"how": "fresh", "tier": "full", "ok": True, "commit": "c" * 40} for g in C.RECORDED_GATES}
+        st["cohort"] = {"how": "rejudged", "tier": "full", "ok": True, "commit": "abcdef0123456789"}
+        line, per, missing = C.release_set(st, "f" * 40)
+        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=7 reused=0 rejudged=1 full=8/8")
+        self.assertIn("   cohort=rejudged abcdef012345", per)
+        self.assertEqual(missing, [])
+        self.assertFalse(C.ratchet_due(st["cohort"], True))
+
+    def test_judge_move_in_a_repo(self):
+        repo = Repo()
+        try:
+            before = repo.inputs().digest("cohort")
+            e = entry(before, commit=git(repo.root, "rev-parse", "HEAD"), run_meta_sha="s" * 64)
+            rec = record_with(("cohort", e))
+            repo.change("bench/cohort/results/baseline/summary.json", '{"repos": 3}\n')
+            inp = repo.inputs()
+            d = inp.digest("cohort")
+            self.assertEqual(C.decide("cohort", "full", d, rec, intact=self.OK)[0], "rejudge")
+            self.assertEqual(C.judge_moved_paths(e, d, inp.tracked, root=repo.root),
+                             ["bench/cohort/results/baseline/summary.json"])
+            repo.change("bench/cohort/cohort.py", "import os\n")
+            d2 = repo.inputs().digest("cohort")
+            self.assertEqual(C.decide("cohort", "full", d2, rec, intact=self.OK)[::2], ("run", "inputs moved"))
+        finally:
+            repo.close()
+
+    def test_cohort_gate_selftest_with_its_recheck_case(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = subprocess.run(["bash", str(C.ROOT / "scripts/cohort-gate.sh"), "selftest"], capture_output=True,
+                               text=True, env=dict(os.environ, GLIA_COHORT_GATE_DIR=t))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("selftest recheck: ok", r.stdout)
+
+    def test_gate_scripts_parse_and_name_recheck(self):
+        for script in ("scripts/rank-gate.sh", "scripts/cohort-gate.sh"):
+            r = subprocess.run(["bash", "-n", str(C.ROOT / script)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("recheck)", (C.ROOT / script).read_text())
 
 
 class RecordTests(unittest.TestCase):

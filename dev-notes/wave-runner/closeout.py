@@ -37,6 +37,12 @@ outside the tree (~/.cache/glia-closeout/gate-record.json, GLIA_CLOSEOUT_RECORD 
 digest matches a green entry is reused (`[closeout] reuse <gate> from <commit12> ..`), else it runs
 (`[closeout] run <gate> (<reason>)`). GLIA_CLOSEOUT_FRESH=all|<gate,..> or `--fresh <gate,..>` forces a run.
 
+Re-judge (HP.2, James 2026-11-02): when only what the rank or cohort gate judges against moved (its baselines, gate.json
+`accepted`) and its last result measured exactly HEAD's measure inputs, at the same env, with its run files intact on
+disk, the close-out judges that measurement again (`rank-gate.sh recheck` / `cohort-gate.sh recheck`) instead of
+re-measuring: `[closeout] rejudge <gate> from <commit12> (judge inputs moved: <first 3 paths>)`. A re-judged green
+counts for reuse and for the release set, never for a ratchet.
+
     python3 closeout.py --digests                      print each gate's digest at HEAD, run nothing
     python3 closeout.py --release 057 <wave> --plan-only   the wave's packets plus each gate's decision
 """
@@ -137,12 +143,14 @@ def gate_result(line):
     return "skipped" if "check: skipped" in line else "FAILED"
 
 
-def gate_attribution(gate, line, asked, touched_by, reused_from=None):
+def gate_attribution(gate, line, asked, touched_by, reused_from=None, rejudged_from=None):
     """GP.12: (the `[gate-asks]` line, the suffix a failed gate's entry carries). HP.1: a reused gate's line
-    reads `result=<r> reused_from=<commit12>`: an ask never forces a run, the gate's inputs decide."""
+    reads `result=<r> reused_from=<commit12>`: an ask never forces a run, the gate's inputs decide. HP.2: a
+    re-judged gate's reads `result=<r> rejudged_from=<commit12>`, the commit whose run it judged again."""
     moved = sorted(i for i, ps in touched_by.items() if any(p.startswith(GATE_PATHS[gate]) for p in ps))
     ids = lambda xs: ",".join(xs) or "-"
-    reused = f" reused_from={reused_from[:12]}" if reused_from else ""
+    reused = (f" reused_from={reused_from[:12]}" if reused_from else "") + \
+        (f" rejudged_from={rejudged_from[:12]}" if rejudged_from else "")
     return (f"== [gate-asks] {gate} result={gate_result(line)}{reused} asked_by={len(asked)} ({ids(asked)}) "
             f"touched_by={len(moved)} ({ids(moved)})",
             f" (asked by {ids(asked)}; touched by {ids(moved)})")
@@ -427,6 +435,64 @@ def usable(entry):
     return bool(entry) and bool(entry.get("ok")) and not entry.get("env_fail")
 
 
+# HP.2: the gates that judge a measurement against committed baselines, and where each keeps its last run
+# (<dir>/run/run-meta.json vouches for the run's files; the scripts' `recheck` judges only what it vouches for).
+GATE_RUN_DIRS = {"rank": ("GLIA_RANK_GATE_DIR", "~/.cache/glia-rank-gate"),
+                 "cohort": ("GLIA_COHORT_GATE_DIR", "~/.cache/glia-cohort-gate")}
+REJUDGE_TIMEOUT = 1800   # seconds: a re-judge reads files (the rank one may rebuild rank_eval first)
+
+
+def gate_run_dir(gate, environ=None):
+    environ = os.environ if environ is None else environ
+    var, default = GATE_RUN_DIRS[gate]
+    return Path(environ.get(var) or default).expanduser() / "run"
+
+
+def run_meta_sha(gate, head, environ=None):
+    """HP.2: the sha256 of the gate's run/run-meta.json when the run it describes was measured at `head`, else
+    None (no run-meta: the run failed before its end, or the script predates HP.2)."""
+    path = gate_run_dir(gate, environ) / "run-meta.json"
+    try:
+        raw = path.read_bytes()
+        meta = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    return sha256_bytes(raw) if isinstance(meta, dict) and meta.get("glia_head") == head else None
+
+
+def measured_commit(entry):
+    """The commit whose run an entry judged: its own for a fresh run, the measured one for a re-judge."""
+    return (entry or {}).get("measured_at") or (entry or {}).get("commit") or ""
+
+
+def run_intact(gate, entry, environ=None):
+    """HP.2: None when the run an entry recorded is still on disk as it was (run-meta.json at its recorded sha256,
+    every file it lists at its own); else why not."""
+    want = (entry or {}).get("run_meta_sha")
+    if not want:
+        return "run files not recorded"
+    run = gate_run_dir(gate, environ)
+    try:
+        raw = (run / "run-meta.json").read_bytes()
+    except OSError:
+        return "no run-meta.json"
+    if sha256_bytes(raw) != want:
+        return "another run since"
+    try:
+        files = json.loads(raw).get("files") or {}
+    except (ValueError, AttributeError):
+        return "run-meta.json unreadable"
+    for rel, sha in sorted(files.items()):
+        if sha256_file(run / rel) != sha:
+            return f"run/{rel} changed"
+    return None
+
+
+def tier_only(tier):
+    """The labels a partial tier names (`partial:a,b` -> `a,b`), or "" for full."""
+    return tier.split(":", 1)[1] if tier and tier.startswith("partial:") else ""
+
+
 def record_result(rec, gate, entry):
     """Every result becomes the gate's `last`; a usable one also joins `green` (the newest GREEN_KEEP)."""
     g = rec.setdefault("gates", {}).setdefault(gate, {"green": [], "last": None})
@@ -465,10 +531,13 @@ def fresh_gates(*specs):
     return out
 
 
-def decide(gate, need, d, rec, fresh=(), dirty=False, extra=None):
-    """One gate's decision: ('reuse', entry, None) or ('run', reference entry or None, reason). `d` is HEAD's
-    digest (None when it could not be read); `extra(entry)` names what else moved (the installed wheel, the
-    bench outputs) or returns None."""
+def decide(gate, need, d, rec, fresh=(), dirty=False, extra=None, intact=None):
+    """One gate's decision: ('reuse', entry, None), ('rejudge', the last entry, reason) or ('run', reference entry
+    or None, reason). `d` is HEAD's digest (None when it could not be read); `extra(entry)` names what else moved
+    (the installed wheel, the bench outputs) or returns None. HP.2: `intact(entry)` (rank and cohort only) says why
+    the run behind an entry is no longer on disk, or None; with it, a gate whose last result (ok or failed, never
+    an environment failure) measured HEAD's measure inputs at HEAD's env, at a tier covering the need, and whose
+    judge inputs alone moved, is re-judged."""
     if gate in fresh:
         return "run", None, "forced"
     if d is None:
@@ -493,9 +562,18 @@ def decide(gate, need, d, rec, fresh=(), dirty=False, extra=None):
         extra_reason = extra_reason or why
     if extra_reason:
         return "run", same[0], f"env moved: {extra_reason}"
+    no_rejudge = None
+    if (intact and last and not last.get("env_fail") and last.get("measure") == d["measure"]
+            and last.get("judge") != d["judge"] and last.get("env_digest") == d["env_digest"]
+            and covers(last.get("tier", "full"), need)):
+        no_rejudge = intact(last)
+        if no_rejudge is None:
+            return "rejudge", last, "judge inputs moved"
     if same:
         tier = same[0].get("tier", "full")
         return "run", same[0], ("need full, record partial" if need == "full" else f"need {need}, record {tier}")
+    if no_rejudge:
+        return "run", last, f"judge inputs moved; no rejudge: {no_rejudge}"
     ref = greens[-1] if greens else last
     if ref.get("measure") != d["measure"] or ref.get("judge") != d["judge"]:
         return "run", ref, "inputs moved"
@@ -512,19 +590,20 @@ def ratchet_due(status, all_green):
 
 def release_set(statuses, tree):
     """HP.1 (5): the release's last close-out needs every recorded gate fresh-full or reused-full at HEAD's
-    digest. Returns (the `[closeout] set` line, one line per gate, the gates missing from the set)."""
-    fresh, reused, missing, per = [], [], [], []
+    digest (HP.2: or re-judged full). Returns (the `[closeout] set` line, one line per gate, the gates missing
+    from the set)."""
+    fresh, reused, rejudged, missing, per = [], [], [], [], []
     for g in RECORDED_GATES:
         s = statuses.get(g) or {}
-        if s.get("ok") and s.get("tier") == "full" and s.get("how") in ("fresh", "reused"):
-            (fresh if s["how"] == "fresh" else reused).append(g)
-            per.append(f"   {g}=" + ("fresh" if s["how"] == "fresh" else f"reused {s['commit'][:12]}"))
+        if s.get("ok") and s.get("tier") == "full" and s.get("how") in ("fresh", "reused", "rejudged"):
+            {"fresh": fresh, "reused": reused, "rejudged": rejudged}[s["how"]].append(g)
+            per.append(f"   {g}=" + ("fresh" if s["how"] == "fresh" else f"{s['how']} {s['commit'][:12]}"))
         else:
             missing.append(g)
             why = ("not run" if not s else "failed" if not s.get("ok") else f"{s.get('how')} {s.get('tier')}")
             per.append(f"   {g}=missing ({why})")
-    line = (f"[closeout] set tree={tree[:12]} fresh={len(fresh)} reused={len(reused)} "
-            f"full={len(fresh) + len(reused)}/{len(RECORDED_GATES)}")
+    line = (f"[closeout] set tree={tree[:12]} fresh={len(fresh)} reused={len(reused)} rejudged={len(rejudged)} "
+            f"full={len(fresh) + len(reused) + len(rejudged)}/{len(RECORDED_GATES)}")
     return line, per, missing
 
 
@@ -826,7 +905,8 @@ class Inputs:
             self._digests[gate] = {
                 "measure": md, "judge": jd, "env": env, "env_digest": ed,
                 "digest": lines_digest([f"measure {md}", f"judge {jd}", f"env {ed}"]),
-                "files": len(m) + len(j), "paths": {p.split("#")[0] for p in (*m, *j) if not p.startswith("<")}}
+                "files": len(m) + len(j), "paths": {p.split("#")[0] for p in (*m, *j) if not p.startswith("<")},
+                "judge_paths": {p.split("#")[0] for p in j}}
         return self._digests[gate]
 
 
@@ -839,6 +919,23 @@ def inputs_moved_reason(ref, d, tracked):
     dirs = {posixpath.dirname(p) for p in d["paths"]}
     ps = [p for p in out.splitlines() if p in d["paths"] or (p not in tracked and posixpath.dirname(p) in dirs)]
     return f"inputs moved: {len(ps)} paths ({', '.join(ps[:3])})" if ps else "inputs moved: 0 paths (the set changed)"
+
+
+def judge_moved_paths(ref, d, tracked, root=ROOT):
+    """HP.2: the paths of the gate's judge set that `git diff --name-only <ref's commit> HEAD` names (a deleted
+    path counts when a sibling in its directory is judged), or None when the commit is unreadable."""
+    out, rc = sh(f"git diff --name-only {ref.get('commit', '')} HEAD", cwd=root)
+    if rc:
+        return None
+    jp = d.get("judge_paths") or set()
+    dirs = {posixpath.dirname(p) for p in jp}
+    return [p for p in out.splitlines() if p in jp or (p not in tracked and posixpath.dirname(p) in dirs)]
+
+
+def rejudge_line(gate, ref, moved):
+    """HP.2's marker: `[closeout] rejudge <gate> from <commit12> (judge inputs moved: <first 3 paths>)`."""
+    what = "unreadable" if moved is None else ", ".join(moved[:3]) or "the set changed"
+    return f"[closeout] rejudge {gate} from {measured_commit(ref)[:12]} (judge inputs moved: {what})"
 
 
 def gate_needs(remaining, full_due, touched, environ=None, rustdoc_crates=None):
@@ -959,10 +1056,14 @@ def main():
                 extra = lambda e, cur=cur: None if (e.get("so_sha256"), e.get("stamp")) == cur[1:] else "installed-wheel"
             elif g == "bench":
                 extra = lambda e: None if outputs_now() == (e.get("outputs") or {}) else "outputs"
-            action, ref, reason = decide(g, needs[g], d, record, fresh, dirty, extra)
+            intact = (lambda e, g=g: run_intact(g, e)) if g in GATE_RUN_DIRS else None
+            action, ref, reason = decide(g, needs[g], d, record, fresh, dirty, extra, intact)
             if action == "reuse":
                 print(f"[closeout] plan reuse {g} from {ref['commit'][:12]} (wave {ref.get('wave')}, {ref.get('tier')}, "
                       f"digest {ref['digest'][:12]})")
+            elif action == "rejudge":
+                print(rejudge_line(g, ref, judge_moved_paths(ref, d, inputs.tracked)).replace(
+                    "[closeout] rejudge", "[closeout] plan rejudge", 1))
             else:
                 if reason == "inputs moved" and ref:
                     reason = inputs_moved_reason(ref, d, inputs.tracked)
@@ -1070,12 +1171,14 @@ def main():
     def digest_of(gate):
         return inputs.digest(gate) if inputs else None
 
-    def gate(name, need, runner, extra=None, recordable=True, env_scan=None):
-        """Decide one recorded gate, then reuse it (re-print its recorded lines) or run it and record the result.
-        `runner(gsay)` returns {ok, line, data, log, tier, more}; it may append to `gates`. Returns
+    def gate(name, need, runner, extra=None, recordable=True, env_scan=None, rejudger=None):
+        """Decide one recorded gate, then reuse it (re-print its recorded lines), re-judge it (HP.2: `rejudger(gsay,
+        last entry)` judges the last run again, rank and cohort only) or run it, and record the result.
+        `runner(gsay)` / `rejudger` return {ok, line, data, log, tier, more}; either may append to `gates`. Returns
         (data, reused entry or None)."""
         d = digest_of(name)
-        action, ref, reason = decide(name, need, d, record, fresh, bool(dirty), extra)
+        intact = (lambda e: run_intact(name, e)) if rejudger else None
+        action, ref, reason = decide(name, need, d, record, fresh, bool(dirty), extra, intact)
         if action == "reuse":
             c12 = ref["commit"][:12]
             say(f"[closeout] reuse {name} from {c12} (wave {ref.get('wave')}, {ref.get('tier')}, digest {ref['digest'][:12]})")
@@ -1084,23 +1187,36 @@ def main():
             statuses[name] = {"how": "reused", "tier": ref.get("tier"), "ok": True, "commit": ref["commit"],
                               "line": ref.get("line", "")}
             return ref.get("data") or {}, ref
-        if reason == "inputs moved" and ref and inputs:
-            reason = inputs_moved_reason(ref, d, inputs.tracked)
-        say(f"[closeout] run {name} ({reason})")
+        rejudge = action == "rejudge"
+        if rejudge:
+            say(rejudge_line(name, ref, judge_moved_paths(ref, d, inputs.tracked) if inputs else None))
+        else:
+            if reason == "inputs moved" and ref and inputs:
+                reason = inputs_moved_reason(ref, d, inputs.tracked)
+            say(f"[closeout] run {name} ({reason})")
         glines, n0, started = [], len(gates), time.time()
 
         def gsay(s):
             say(s)
             glines.append(s)
-        r = runner(gsay)
+        r = rejudger(gsay, ref) if rejudge else runner(gsay)
         ok = bool(r.get("ok")) and len(gates) == n0
-        sig = env_fail_signature(r.get("log", ""), *(env_scan(started) if env_scan else ()))
+        sig = env_fail_signature(r.get("log", ""), *(env_scan(started) if env_scan and not rejudge else ()))
         if sig:
             gl = r.get("line") or f"[{name}]"
             say(f"{gl if gl.startswith('==') else '== ' + gl} (environment: {sig})")
             gates.append(f"{name} (environment: {sig})")
-        tier = r.get("tier", need)
-        statuses[name] = {"how": "fresh", "tier": tier, "ok": ok and not sig, "commit": head, "line": r.get("line", "")}
+        tier = r.get("tier", ref.get("tier", need) if rejudge else need)
+        # HP.2: a fresh rank / cohort run keeps the sha256 of the run-meta.json it wrote, so a later re-judge knows
+        # the run on disk is this one; a re-judge carries its measured run's forward.
+        more = {}
+        if rejudge:
+            more = {"rejudged": True, "rejudged_from": measured_commit(ref), "measured_at": measured_commit(ref),
+                    "run_meta_sha": ref.get("run_meta_sha")}
+        elif name in GATE_RUN_DIRS:
+            more = {"measured_at": head, "run_meta_sha": run_meta_sha(name, head)}
+        statuses[name] = {"how": "rejudged" if rejudge else "fresh", "tier": tier, "ok": ok and not sig,
+                          "commit": measured_commit(ref) if rejudge else head, "line": r.get("line", "")}
         if d and recordable and not r.get("skip_record") and (tier == "full" or name in ("rank", "cohort")):
             log = ""
             if r.get("log"):
@@ -1112,6 +1228,7 @@ def main():
                      "lines": glines, "commit": head, "tree": tree, "wave": wave, "release": release,
                      "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "log": log, "outputs": {}, "so_sha256": None,
                      "stamp": None, "env_fail": bool(sig), "data": r.get("data") or {}}
+            entry.update(more)
             entry.update(r.get("more") or {})
             record_result(record, name, entry)
             save_record(rec_path, record)
@@ -1195,14 +1312,16 @@ def main():
 
     def check_reuse_touch(gname, entry):
         """HP.1 (7): a reused rank / cohort gate whose packets touched its paths must have been recorded at a
-        commit that already holds those packet commits; anything else is a digest-set defect."""
+        commit that already holds those packet commits; anything else is a digest-set defect. HP.2: a touched
+        judge path must be in the entry's own commit, a touched measure path in the commit it measured at (the
+        same commit but for a re-judge, whose judge inputs moved after its run)."""
+        judge_paths = (digest_of(gname) or {}).get("judge_paths") or set()
         bad = []
         for pid, ps in touched_by.items():
-            if any(p.startswith(GATE_PATHS[gname]) for p in ps):
-                for c in commits_by.get(pid, ()):
-                    if sh(f"git merge-base --is-ancestor {c} {entry['commit']}")[1]:
-                        bad.append(pid)
-                        break
+            mine = [p for p in ps if p.startswith(GATE_PATHS[gname])]
+            anchors = {entry["commit"] if p in judge_paths else measured_commit(entry) for p in mine}
+            if any(sh(f"git merge-base --is-ancestor {c} {a}")[1] for c in commits_by.get(pid, ()) for a in anchors):
+                bad.append(pid)
         if bad:
             gates.append(f"{gname} gate: reuse with touched paths ({','.join(sorted(set(bad)))})")
 
@@ -1241,11 +1360,35 @@ def main():
                     if not ok:
                         gates.append("rank gate" + gate_attribution("rank", line, asks["rank"], touched_by)[1])
                     return {"ok": ok, "line": line, "tier": line_tier(line, needs["rank"]), "log": out}
-                _, rank_reused = gate("rank", needs["rank"], run_rank)
+
+                def rejudge_rank(gsay, ref):
+                    # HP.2: the last run judged again at the tier it measured (a full run is re-judged in full)
+                    only = tier_only(ref.get("tier", "full"))
+                    env = f"GLIA_RANK_GATE_ONLY={only} " if only else ""
+                    try:
+                        out, _ = sh(f"{env}bash scripts/rank-gate.sh recheck 2>&1", timeout=REJUDGE_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        line = f"[rank-gate] check: FAILED (re-judge timeout after {REJUDGE_TIMEOUT}s)"
+                        gsay(f"== {line}")
+                        gates.append("rank gate (re-judge timeout)"
+                                     + gate_attribution("rank", line, asks["rank"], touched_by)[1])
+                        return {"ok": False, "line": line, "tier": ref.get("tier", "full")}
+                    WF.mkdir(parents=True, exist_ok=True)
+                    (WF / f"rank-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+                    line = (out.strip().splitlines() or [""])[-1]
+                    gsay(f"== {line}")
+                    ok = line.startswith("[rank-gate] check: ok")
+                    if not ok:
+                        gates.append("rank gate (re-judged)"
+                                     + gate_attribution("rank", line, asks["rank"], touched_by)[1])
+                    return {"ok": ok, "line": line, "tier": line_tier(line, "full"), "log": out}
+                _, rank_reused = gate("rank", needs["rank"], run_rank, rejudger=rejudge_rank)
                 rank_line = (rank_reused or {}).get("line") or statuses.get("rank", {}).get("line", "")
-                if rank_reused:
-                    check_reuse_touch("rank", rank_reused)
-                    if needs["rank"] == "full" and rank_reused.get("tier") == "full":
+                rank_rejudged = statuses.get("rank", {}).get("how") == "rejudged"
+                if rank_reused or rank_rejudged:
+                    st = rank_reused or record["gates"]["rank"]["last"]
+                    check_reuse_touch("rank", st)
+                    if needs["rank"] == "full" and st.get("tier") == "full":
                         last_full["rank"] = wave
             if not remaining:
                 out, _ = sh("bash scripts/rank-gate.sh coverage 2>&1")
@@ -1253,8 +1396,10 @@ def main():
                 say(f"== {last}")
                 if not last.startswith("[rank-gate] coverage: ok"):
                     gates.append("rank gate coverage")
+    rank_st = statuses.get("rank", {})
     say(gate_attribution("rank", rank_line, asks["rank"], touched_by,
-                         reused_from=rank_reused["commit"] if rank_reused else None)[0])
+                         reused_from=rank_reused["commit"] if rank_reused else None,
+                         rejudged_from=rank_st["commit"] if rank_st.get("how") == "rejudged" else None)[0])
 
     cohort_dir = Path(os.environ.get("GLIA_COHORT_GATE_DIR") or Path.home() / ".cache/glia-cohort-gate")
     cohort_reused = None
@@ -1273,17 +1418,43 @@ def main():
                 # A skip (GLIA_COHORT_GATE_SKIP, no script) checked nothing: never recorded.
                 return {"ok": ok and not skipped, "line": line[3:] if line.startswith("== ") else line,
                         "tier": line_tier(line, needs["cohort"]), "log": out, "skip_record": skipped}
+            def rejudge_cohort(gsay, ref):
+                # HP.2: the last run judged again at the tier it measured (a full run is re-judged in full)
+                only = tier_only(ref.get("tier", "full"))
+                try:
+                    out, _ = sh(f"bash scripts/cohort-gate.sh recheck{f' --only {only}' if only else ''} 2>&1",
+                                timeout=REJUDGE_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    out = ""
+                    last = f"[cohort-gate] check: FAILED (re-judge timeout after {REJUDGE_TIMEOUT}s)"
+                else:
+                    WF.mkdir(parents=True, exist_ok=True)
+                    (WF / f"cohort-gate-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+                    last = (out.strip().splitlines() or [""])[-1]
+                if only and "(partial: only" not in last:
+                    last += f" (partial: only {only})"
+                gsay(f"== {last}")
+                ok = last.startswith("[cohort-gate] check: ok")
+                if not ok:
+                    gates.append("cohort gate (re-judged)"
+                                 + gate_attribution("cohort", last, asks["cohort"], touched_by)[1])
+                return {"ok": ok, "line": last, "tier": line_tier(last, "full"), "log": out}
             _, cohort_reused = gate("cohort", needs["cohort"], run_cohort,
-                                    env_scan=lambda since: recent_texts(cohort_dir / "run", since))
+                                    env_scan=lambda since: recent_texts(cohort_dir / "run", since),
+                                    rejudger=rejudge_cohort)
             cohort_line = "== " + ((cohort_reused or {}).get("line") or statuses.get("cohort", {}).get("line", ""))
-            if cohort_reused:
-                check_reuse_touch("cohort", cohort_reused)
-                if needs["cohort"] == "full" and cohort_reused.get("tier") == "full":
+            cohort_rejudged = statuses.get("cohort", {}).get("how") == "rejudged"
+            if cohort_reused or cohort_rejudged:
+                st = cohort_reused or record["gates"]["cohort"]["last"]
+                check_reuse_touch("cohort", st)
+                if needs["cohort"] == "full" and st.get("tier") == "full":
                     last_full["cohort"] = wave
             elif "(partial: only" not in cohort_line and "skipped" not in cohort_line:
                 last_full["cohort"] = wave
+    cohort_st = statuses.get("cohort", {})
     say(gate_attribution("cohort", cohort_line, asks["cohort"], touched_by,
-                         reused_from=cohort_reused["commit"] if cohort_reused else None)[0])
+                         reused_from=cohort_reused["commit"] if cohort_reused else None,
+                         rejudged_from=cohort_st["commit"] if cohort_st.get("how") == "rejudged" else None)[0])
 
     # --- the wheel: rebuild + install + its surface checks ------------------------------------------------------
     def run_wheel(gsay):
@@ -1518,6 +1689,10 @@ def main():
                 gates.append(f"{gname} gate ratchet")
         elif st and st.get("how") == "reused" and st.get("tier") == "full" and not gates:
             say(f"== [{label}] ratchet: skipped - reused from {st['commit'][:12]}; GLIA_CLOSEOUT_FRESH={gname} to ratchet")
+        elif st and st.get("how") == "rejudged" and not gates:
+            # HP.2: a re-judge measured nothing at HEAD, so it never moves a baseline (the scripts refuse it too)
+            say(f"== [{label}] ratchet: skipped - re-judged run of {st['commit'][:12]}; "
+                f"GLIA_CLOSEOUT_FRESH={gname} to ratchet")
     # GP.7: where the close-out's time went, one line on stdout, in the WF log and in the commit body.
     say("[closeout] timing " + " ".join(f"{k}={int(timing[k]) if k in timing else '-'}" for k in TIMING_STEPS)
         + f" total={int(time.time() - t0)}")

@@ -11,6 +11,10 @@
 #   bash scripts/cohort-gate.sh ratchet            the last green full check's results over the baseline
 #                                                  (HEAD must match; held while any decline is in tolerance)
 #   bash scripts/cohort-gate.sh run [opts]         run everything into the scratch dir, compare nothing
+#   bash scripts/cohort-gate.sh recheck [--only l,..]  judge the last run's results again against the baseline as it
+#                                                  is now (HP.2): no build, no run; refused unless run/run-meta.json
+#                                                  vouches for the results and covers the request; its check line ends
+#                                                  ` (rejudged run of <head12>)`, and ratchet refuses it
 #   bash scripts/cohort-gate.sh compare <base> <new> [--only l,..]   compare two results dirs (read-only)
 #   bash scripts/cohort-gate.sh selftest           the compare rules on seeded results (no glia, no network)
 #
@@ -43,6 +47,7 @@
 #   [cohort-gate] check: FAILED (<n> drops: <key> <old>-><new>, ..)                     exit 1
 #   [cohort-gate] check: FAILED (<reason>)                                               exit 2
 #   [cohort-gate] check: skipped - <reason>                                              exit 3
+#   [cohort-gate] check: FAILED (no run to recheck: <why>)                                exit 2 (recheck)
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -74,11 +79,12 @@ case "$DIR" in
 esac
 
 # --- compare ------------------------------------------------------------------------------------------
-# compare <base> <new> <out.json> <only>: prints the drop / gain / decline lines and the verdict line.
+# compare <base> <new> <out.json> <only> [<verb> [<suffix>]]: prints the drop / gain / decline lines and the verdict
+# line (`<verb>: ..`, ending <suffix>: recheck's ` (rejudged run of <head12>)`).
 do_compare() {
-  python3 -I - "$1" "$2" "$3" "$4" "$TOL" "${5:-check}" <<'PY'
+  python3 -I - "$1" "$2" "$3" "$4" "$TOL" "${5:-check}" "${6:-}" <<'PY'
 import json, os, sys
-base_d, new_d, out, only, tol, verb = sys.argv[1:7]
+base_d, new_d, out, only, tol, verb, suffix = sys.argv[1:8]
 tol = float(tol)
 only = [x for x in only.split(",") if x]
 LEVEL = {"none": 0, "partial": 1, "full": 2}
@@ -259,14 +265,14 @@ json.dump({"ok": not (drops or drift), "only": only, "repos": repos, "tasks": ta
            "cases": cases, "gains": gains, "drops": drops, "declines": declines, "drift": drift,
            "tolerance": tol}, open(out, "w"), indent=1, sort_keys=True)
 if drift:
-    print(f"[cohort-gate] {verb}: FAILED ({'; '.join(drift[:6])}{'; ..' if len(drift) > 6 else ''})")
+    print(f"[cohort-gate] {verb}: FAILED ({'; '.join(drift[:6])}{'; ..' if len(drift) > 6 else ''}){suffix}")
     sys.exit(2)
 if drops:
     shown = ", ".join(drops[:12]) + (", .." if len(drops) > 12 else "")
-    print(f"[cohort-gate] {verb}: FAILED ({len(drops)} drops: {shown}){partial}")
+    print(f"[cohort-gate] {verb}: FAILED ({len(drops)} drops: {shown}){partial}{suffix}")
     sys.exit(1)
 print(f"[cohort-gate] {verb}: ok - {repos} repos, {tasks} tasks, {cells} cells, {len(gains)} gains, "
-      f"0 drops{partial}")
+      f"0 drops{partial}{suffix}")
 PY
 }
 
@@ -387,7 +393,87 @@ json.dump({"glia": glia, "glia_head": head, "glia_source": source, "only": [x fo
            "tolerance": {"reach": float(tol)}}, open(out, "w"), indent=1, sort_keys=True)
 open(out, "a").write("\n")
 PY
+  write_run_meta "$RUN" "$GLIA_COHORT_GATE_HEAD" "$ONLY" || { say "$CMD: FAILED (write run/run-meta.json)"; exit 2; }
   say "run done s=$(( $(date +%s) - t0 ))"
+}
+
+# HP.2: <run>/run-meta.json, written last by a clean run (do_run removes <run> first): the head that measured, its
+# `only` and the sha256 of every file under <run>/results/baseline/. `recheck` judges only results it vouches for,
+# and dev-notes/wave-runner/closeout.py keeps its sha256 to know the run on disk is the one it recorded. It lies
+# outside results/baseline/, so no baseline or ratchet ever copies it.
+write_run_meta() {
+  python3 -I - "$1" "$2" "$3" <<'PY'
+import hashlib, json, os, sys
+run, head, only = sys.argv[1:4]
+res = os.path.join(run, "results", "baseline")
+files = {}
+for dirpath, dirs, names in os.walk(res):
+    dirs.sort()
+    for n in sorted(names):
+        p = os.path.join(dirpath, n)
+        files[os.path.relpath(p, run)] = hashlib.sha256(open(p, "rb").read()).hexdigest()
+tmp = os.path.join(run, "run-meta.json.part")
+json.dump({"glia_head": head, "only": [x for x in only.split(",") if x], "files": files}, open(tmp, "w"),
+          indent=1, sort_keys=True)
+os.replace(tmp, os.path.join(run, "run-meta.json"))
+PY
+}
+
+# HP.2: verify_run <run> <only requested>: prints the head that measured <run>, or the refusal line (exit 2): a
+# run-meta.json and a gate.json that agree on the head, every file run-meta.json lists unchanged and no file beside
+# them, and a run that covers the request (a full run covers any --only; a partial run only a subset of its own).
+verify_run() {
+  python3 -I - "$1" "$2" <<'PY'
+import hashlib, json, os, re, sys
+run, only = sys.argv[1], [x for x in sys.argv[2].split(",") if x]
+
+
+def refuse(why):
+    print(f"[cohort-gate] check: FAILED (no run to recheck: {why})")
+    sys.exit(2)
+
+
+try:
+    meta = json.load(open(os.path.join(run, "run-meta.json")))
+except (OSError, ValueError):
+    refuse("no run/run-meta.json")
+try:
+    gate = json.load(open(os.path.join(run, "results", "baseline", "gate.json")))
+except (OSError, ValueError):
+    refuse("no run/results/baseline/gate.json")
+head = str(meta.get("glia_head") or "")
+if not re.fullmatch(r"[0-9a-f]{40}", head) or gate.get("glia_head") != head:
+    refuse(f"run-meta.json and gate.json disagree on the head ({head[:12] or '-'} vs {str(gate.get('glia_head'))[:12]})")
+ran = meta.get("only") or []
+if ran and (not only or not set(only) <= set(ran)):
+    refuse(f"the run covered only {','.join(ran)}, asked {','.join(only) or 'the whole cohort'}")
+files = meta.get("files") or {}
+res = os.path.join(run, "results", "baseline")
+for dirpath, _, names in os.walk(res):
+    for n in names:
+        rel = os.path.relpath(os.path.join(dirpath, n), run)
+        if rel not in files:
+            refuse(f"run/{rel} appeared since the run")
+for rel, want in sorted(files.items()):
+    try:
+        got = hashlib.sha256(open(os.path.join(run, rel), "rb").read()).hexdigest()
+    except OSError:
+        refuse(f"run/{rel} is gone")
+    if got != want:
+        refuse(f"run/{rel} changed since the run")
+print(head)
+PY
+}
+
+# write_last_check <compare.json> <last-check.json> <head> <rejudged 0|1>
+write_last_check() {
+  python3 -I - "$1" "$2" "$3" "$4" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["glia_head"] = sys.argv[3]
+c["rejudged"] = sys.argv[4] == "1"
+json.dump(c, open(sys.argv[2], "w"), indent=1, sort_keys=True)
+PY
 }
 
 do_check() {
@@ -396,13 +482,22 @@ do_check() {
   do_run
   do_compare "$BASE" "$NEW" "$RUN/compare.json" "$ONLY" check
   local rc=$?
-  python3 -I - "$RUN/compare.json" "$DIR/last-check.json" "$GLIA_COHORT_GATE_HEAD" <<'PY'
-import json, sys
-c = json.load(open(sys.argv[1]))
-c["glia_head"] = sys.argv[3]
-json.dump(c, open(sys.argv[2], "w"), indent=1, sort_keys=True)
-PY
+  write_last_check "$RUN/compare.json" "$DIR/last-check.json" "$GLIA_COHORT_GATE_HEAD" 0
   exit $rc
+}
+
+# HP.2: recheck_in <base> <run> <last-check.json>: judge <run>'s results again against <base> as it is now, with no
+# build and no run (a close-out whose only moved input is the baseline: a ratchet commit, a ruled re-record). The
+# check line ends ` (rejudged run of <head12>)`; last-check.json records the head that measured and `rejudged`.
+recheck_in() {
+  local base=$1 run=$2 last=$3 head rc
+  rm -f "$last"
+  [ -f "$base/summary.json" ] || { say "check: FAILED (no baseline at $base)"; return 2; }
+  head=$(verify_run "$run" "$ONLY") || { echo "$head"; return 2; }
+  do_compare "$base" "$run/results/baseline" "$run/compare.json" "$ONLY" check " (rejudged run of ${head:0:12})"
+  rc=$?
+  write_last_check "$run/compare.json" "$last" "$head" 1 || return 2
+  return $rc
 }
 
 # The baseline files: cohort.py's results dir plus boundary.jsonl, sibyl/ and gate.json.
@@ -425,8 +520,10 @@ do_baseline() {
   say "baseline: ok - $(python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1])); print(len(s["repos"]), "repos,", len(s["tasks"]), "tasks")' "$BASE/summary.json") -> bench/cohort/results/baseline/ (head ${GLIA_COHORT_GATE_HEAD:0:12})"
 }
 
-do_ratchet() {
-  python3 -I - "$DIR/last-check.json" "$(git -C "$HERE" rev-parse HEAD)" "$BASE" "$NEW" "${FILES[@]}" <<'PY'
+# ratchet_judge <last-check.json> <head> <base> <new>: exit 10 when the baseline should move, 0 when it is kept or
+# held, 2 when refused (selftest calls it on its own seeded files).
+ratchet_judge() {
+  python3 -I - "$1" "$2" "$3" "$4" "${FILES[@]}" <<'PY'
 import json, os, sys
 last, head, base, new, files = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
 try:
@@ -435,6 +532,9 @@ except (OSError, ValueError):
     print("[cohort-gate] ratchet: FAILED (no last check recorded)"); sys.exit(2)
 if not c.get("ok"):
     print("[cohort-gate] ratchet: FAILED (the last check was not ok)"); sys.exit(2)
+if c.get("rejudged"):
+    # HP.2: a re-judge measured nothing at this HEAD; only a fresh check moves the baseline
+    print("[cohort-gate] ratchet: FAILED (the last check was a re-judge)"); sys.exit(2)
 if c.get("only"):
     print("[cohort-gate] ratchet: FAILED (the last check was partial)"); sys.exit(2)
 if c.get("glia_head") != head:
@@ -478,6 +578,10 @@ print(f"[cohort-gate] ratchet: {'moved' if moved else 'kept'} - {len(moved)} of 
       f"{': ' + ', '.join(moved) if moved else ''}")
 sys.exit(10 if moved else 0)
 PY
+}
+
+do_ratchet() {
+  ratchet_judge "$DIR/last-check.json" "$(git -C "$HERE" rev-parse HEAD)" "$BASE" "$NEW"
   local rc=$?
   if [ "$rc" = 10 ]; then copy_baseline; say "ratchet: ok - bench/cohort/results/baseline/ moved to head $(git -C "$HERE" rev-parse --short HEAD)"; exit 0; fi
   exit $rc
@@ -569,9 +673,54 @@ PY
     "edit('summary.json', lambda s: s['tasks'].pop('gin-vue-admin-bbbbbbbbbbbb'))"
   ONLY_T=immich expect only 0 "check: ok - 1 repos, 1 tasks, 2 cells, 0 gains, 0 drops (partial: only immich)" \
     "edit('summary.json', lambda s: s['tasks']['gin-vue-admin-bbbbbbbbbbbb'].update(locate='miss'))"
+  # HP.2: a re-judge of the seeded results (as a run left them) against an edited base: the edited cell is reported,
+  # the line ends ` (rejudged run of <head12>)`, the ratchet refuses it, and a changed result file refuses the re-judge
+  recheck_case
   rm -rf "$st"
   if [ "$fails" = 0 ]; then say "selftest: ok - $n cases"; exit 0; fi
   say "selftest: FAILED ($fails of $n cases)"; exit 1
+}
+
+# The selftest's recheck case: $st/base stands as a run's results (run/results/baseline/ + gate.json + run-meta.json),
+# $st/edited as the baseline after a ruled re-record (one task check and one reach value moved).
+recheck_case() {
+  local run=$st/run head=0123456789abcdef0123456789abcdef01234567 out rc
+  n=$((n + 1))
+  rm -rf "$run" "$st/edited" && mkdir -p "$run/results" && cp -r "$st/base" "$run/results/baseline" \
+    && cp -r "$st/base" "$st/edited" || exit 2
+  python3 -I - "$run/results/baseline/gate.json" "$head" "$st/edited" <<'PY' || { echo "selftest recheck: seeding failed"; exit 2; }
+import json, os, sys
+json.dump({"glia": "glia x", "glia_head": sys.argv[2], "glia_source": "built", "only": [],
+           "tolerance": {"reach": 0.05}}, open(sys.argv[1], "w"), indent=1, sort_keys=True)
+p = os.path.join(sys.argv[3], "summary.json")
+s = json.load(open(p))
+s["tasks"]["immich-aaaaaaaaaaaa"]["rest"] = "pass"           # the run's miss is now a drop against the base
+s["repos"]["gin-vue-admin"]["health"]["client_reach"] = 0.8  # and its 0.9 a gain
+json.dump(s, open(p, "w"), indent=1, sort_keys=True)
+PY
+  write_run_meta "$run" "$head" "" || exit 2
+  out=$(recheck_in "$st/edited" "$run" "$st/last-check.json")
+  rc=$?
+  local want="check: FAILED (1 drops: immich-aaaaaaaaaaaa/rest pass->miss) (rejudged run of ${head:0:12})"
+  if [ "$rc" = 1 ] && grep -qF -- "$want" <<< "$out" && grep -qF "gain gin-vue-admin/cohort/client_reach 0.8->0.9" <<< "$out" \
+     && python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if c["rejudged"] and c["glia_head"]==sys.argv[2] else 1)' \
+          "$st/last-check.json" "$head"; then
+    # the ratchet refuses a re-judge, even a green one at HEAD
+    python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); c.update(ok=True, drops=[]); json.dump(c, open(sys.argv[1], "w"))' \
+      "$st/last-check.json"
+    out=$(ratchet_judge "$st/last-check.json" "$head" "$st/edited" "$run/results/baseline")
+    rc=$?
+    if [ "$rc" = 2 ] && grep -qF "ratchet: FAILED (the last check was a re-judge)" <<< "$out"; then
+      echo '{}' > "$run/results/baseline/sibyl/results.md"
+      out=$(recheck_in "$st/edited" "$run" "$st/last-check.json")
+      rc=$?
+      if [ "$rc" = 2 ] && grep -qF "check: FAILED (no run to recheck: run/results/baseline/sibyl/results.md appeared since the run)" <<< "$out"; then
+        echo "selftest recheck: ok"
+        return
+      fi
+    fi
+  fi
+  fails=$((fails + 1)); echo "selftest recheck: FAILED (rc=$rc)"; echo "$out" | tail -3
 }
 
 lock() { mkdir -p "$DIR" && exec 9>"$DIR/.run.lock" && flock 9; }   # run/ and the work dirs are shared
@@ -583,11 +732,12 @@ case "$CMD" in
     lock; do_check ;;
   baseline) lock; do_baseline ;;
   ratchet) lock; do_ratchet ;;
+  recheck) lock; recheck_in "$BASE" "$RUN" "$DIR/last-check.json"; exit $? ;;
   run) lock; do_run ;;
   compare)
     [ "${#POS[@]}" = 2 ] || { say "compare: FAILED (usage: compare <base> <new> [--only l,..])"; exit 2; }
     mkdir -p "$DIR" && do_compare "${POS[0]}" "${POS[1]}" "$DIR/compare.json" "$ONLY" compare ;;
   selftest) do_selftest ;;
-  *) echo "usage: $0 check|baseline|ratchet|run [--glia <bin>] [--only <l,..>] [--jobs <n>] | compare <base> <new> | selftest" >&2
+  *) echo "usage: $0 check|baseline|ratchet|run [--glia <bin>] [--only <l,..>] [--jobs <n>] | recheck [--only <l,..>] | compare <base> <new> | selftest" >&2
      exit 2 ;;
 esac

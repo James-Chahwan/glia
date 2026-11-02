@@ -74,10 +74,25 @@ listing (rank). engram and `rank-gate.sh coverage` always run.
 - **Forcing**: `GLIA_CLOSEOUT_FRESH=all` (or `rank,cohort`, ..) or `--fresh <gates>`.
 - **Mid-release**: the touched-path skips are gone: a gate whose inputs moved runs, whoever moved them (an
   out-of-packet fix between waves included); with no record at all the old skip applies once, `(no record yet)`.
-- **The release set**: the last close-out needs every recorded gate fresh-full or reused-full at HEAD's
-  digest, `[closeout] set tree=<12> fresh=<a> reused=<b> full=<k>/<n>` and one `<gate>=fresh|reused <c>` line each.
+- **Re-judge (HP.2, James 2026-11-02)**: rank and cohort keep each entry's `measure` and `judge` digests apart.
+  When the gate's `last` entry (ok or failed, never `env_fail`) measured exactly HEAD's measure inputs at HEAD's
+  env, at a tier covering the need, and only its judge inputs moved (a ratchet commit's baselines, gate.json
+  `accepted`, a ruled re-record), and the run behind it is still on disk as recorded (each fresh entry keeps the
+  sha256 of the `run/run-meta.json` its run wrote; every file that lists must still match), the close-out runs
+  `rank-gate.sh recheck` / `cohort-gate.sh recheck [--only <labels>]` at the measured tier instead of
+  re-measuring: `[closeout] rejudge <gate> from <commit12> (judge inputs moved: <first 3 paths>)`, then the
+  script's `check:` line ending ` (rejudged run of <head12>)`. The result is recorded with `rejudged: true`,
+  `rejudged_from` / `measured_at` (the measured commit) and the same `run_meta_sha`; a green one counts for
+  reuse and for the release set, never for a ratchet. When the run files are gone the gate runs:
+  `[closeout] run <gate> (judge inputs moved; no rejudge: <why>)`. `[gate-asks]` reads `result=<r>
+  rejudged_from=<commit12>`. A measurement that failed inside the tool (a crashed task) is re-judged as it
+  stands and fails again the same way: force a fresh run with `GLIA_CLOSEOUT_FRESH=<gate>`.
+- **The release set**: the last close-out needs every recorded gate fresh-full, reused-full or re-judged-full at
+  HEAD's digest, `[closeout] set tree=<12> fresh=<a> reused=<b> rejudged=<c> full=<k>/<n>` and one
+  `<gate>=fresh|reused <c>|rejudged <c>` line each.
 - **Ratchets** run only after a FRESH, FULL, green check in the same close-out: a reused gate prints
-  `ratchet: skipped - reused from <c>; GLIA_CLOSEOUT_FRESH=<gate> to ratchet`.
+  `ratchet: skipped - reused from <c>; GLIA_CLOSEOUT_FRESH=<gate> to ratchet`, a re-judged one `ratchet:
+  skipped - re-judged run of <c>; ..` (the scripts' own ratchets refuse a re-judged check too).
 - **A failed close-out** writes no baseline.json, LANDED or next wave, and puts the bench outputs back.
 - **TMPDIR**: every gate runs with `$GLIA_CLOSEOUT_TMP` or `~/.cache/glia-tmp` unless the caller's TMPDIR is
   outside /tmp (`[closeout] tmpdir=<dir> free_gb=<f>`); a log showing `Disk quota exceeded` / `No space left on

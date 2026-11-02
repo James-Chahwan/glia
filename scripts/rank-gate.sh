@@ -8,6 +8,10 @@
 #   bash scripts/rank-gate.sh baseline <release>  run, then write the trims to baseline/<release>/ (a declared re-baseline)
 #   bash scripts/rank-gate.sh baseline-add        merge the last check's `new` gated rankers into baseline/0.5.2 and current
 #   bash scripts/rank-gate.sh ratchet             copy the last green check's trims over baseline/current (HEAD must match)
+#   bash scripts/rank-gate.sh recheck             judge the last run's measurements again against the baselines as they
+#                                                 are now (HP.2): no fetch, no rank_eval run; refused unless run/run-meta.json
+#                                                 vouches for every judged run/<label>.json. Its check line ends
+#                                                 ` (rejudged run of <head12>)`, and ratchet / baseline-add refuse it
 #   gate.json `accepted`: [{row: <label>/<shape>/<ranker>/<metric>, floor, packet, ruling}] - a drop James ruled acceptable
 #                 passes (printed `accepted`) while the row stays at or above its floor; baselines stay as measured
 #   bash scripts/rank-gate.sh coverage            every scope item of gate.json `items` is measured or exempt
@@ -35,6 +39,7 @@
 #   [rank-gate] check: FAILED (<k> drops: <label>/<shape>/<ranker>/<metric>, ..)      exit 1
 #   [rank-gate] check: FAILED (drift <label>/<shape>, ..)                             exit 2
 #   [rank-gate] check: FAILED (<other reason>)                                        exit 2
+#   [rank-gate] check: FAILED (no run to recheck: <why>)                              exit 2 (recheck)
 set -uo pipefail
 unset GLIA_RANK_PRIVATE
 
@@ -164,7 +169,7 @@ do_run() {
     q=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["stats"].get("queries", "?"))' "$RUN/$label.json")
     say "run label=$label queries=$q s=$(( $(date +%s) - t0 ))"
   }
-  rm -f "$RUN/.failed"
+  rm -f "$RUN/.failed" "$RUN/run-meta.json"
   # The queue: the FIRST label's row, then every other row in snapshots.json order.
   local queue order="" wall0
   queue=$(while read -r name url rev label flags; do
@@ -181,15 +186,41 @@ do_run() {
   wait
   say "run wall s=$(( $(date +%s) - wall0 )) jobs=$JOBS order=$order"
   [ ! -f "$RUN/.failed" ] || exit 2
+  write_run_meta || { say "check: FAILED (write run/run-meta.json)"; exit 2; }
+}
+
+# HP.2: run/run-meta.json, written only after a clean run: the head that measured, its `only`, each snapshot's
+# pinned rev and the sha256 of every run/<label>.json it wrote. `recheck` judges only what it vouches for, and
+# dev-notes/wave-runner/closeout.py keeps its sha256 to know the run on disk is the one it recorded.
+write_run_meta() {
+  local name url rev label flags revs=()
+  while read -r name url rev label flags; do revs+=("$label=$rev"); done <<< "$ROWS"
+  python3 -I - "$RUN" "$GLIA_RANK_GATE_HEAD" "$ONLY" "${revs[@]}" <<'PY'
+import hashlib, json, os, sys
+run, head, only, revs = sys.argv[1], sys.argv[2], sys.argv[3], dict(a.split("=", 1) for a in sys.argv[4:])
+files = {f"{lab}.json": hashlib.sha256(open(os.path.join(run, f"{lab}.json"), "rb").read()).hexdigest() for lab in revs}
+tmp = os.path.join(run, "run-meta.json.part")
+json.dump({"glia_head": head, "only": [x for x in only.split(",") if x], "labels": list(revs), "revs": revs,
+           "files": files}, open(tmp, "w"), indent=1, sort_keys=True)
+os.replace(tmp, os.path.join(run, "run-meta.json"))
+PY
 }
 
 labels() { while read -r _ _ _ label _; do echo "$label"; done <<< "$ROWS"; }
 
 do_check() {
-  local label base out rc verdicts=()
   rm -f "$RUN/last-check.json"
   do_fetch
   do_run
+  judge_run "$GLIA_RANK_GATE_HEAD" ""
+  exit $?
+}
+
+# judge_run <measured head> <rejudged head12 or empty>: --gate-check of every judged run/<label>.json against
+# baseline/0.5.2 and baseline/current, then the verdict and last-check.json. `check` judges the run it just made;
+# `recheck` (HP.2) judges the last run again, its lines ending ` (rejudged run of <head12>)`.
+judge_run() {
+  local head=$1 rejudged=$2 label base out rc verdicts=()
   for label in $(labels); do
     for base in 0.5.2 current; do
       out=$RUN/$label.$base.verdict
@@ -202,9 +233,10 @@ do_check() {
       verdicts+=("$base=$out.json:$rc")
     done
   done
-  python3 -I - "$RUN/last-check.json" "$GLIA_RANK_GATE_HEAD" "$ONLY" "$GATE" "${verdicts[@]}" <<'PY'
+  python3 -I - "$RUN/last-check.json" "$head" "$ONLY" "$GATE" "$rejudged" "${verdicts[@]}" <<'PY'
 import json, sys
-dest, head, only, gate, items = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
+dest, head, only, gate, rejudged, items = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6:]
+rj = f" (rejudged run of {rejudged})" if rejudged else ""
 # gate.json `accepted`: a drop James ruled acceptable, per row with a floor: the row passes as
 # `accepted` while its new value stays at or above the floor, and drops again below it
 accepted = {a["row"]: a for a in json.load(open(gate)).get("accepted", [])}
@@ -250,16 +282,66 @@ for it in items:
         other.append(f"{lab} vs {base} exit {rc}")
 ok = not (drops or drift or missing or other)
 json.dump({"ok": ok, "partial": bool(only), "glia_head": head, "labels": labels, "rows": rows, "gains": len(gain_rows),
-           "drops": drops, "accepted": taken, "drift": drift, "missing": missing, "new": new}, open(dest, "w"), indent=1, sort_keys=True)
+           "drops": drops, "accepted": taken, "drift": drift, "missing": missing, "new": new, "rejudged": bool(rejudged)},
+          open(dest, "w"), indent=1, sort_keys=True)
 if drift:
-    print(f"[rank-gate] check: FAILED (drift {', '.join(drift)})"); sys.exit(2)
+    print(f"[rank-gate] check: FAILED (drift {', '.join(drift)}){rj}"); sys.exit(2)
 if missing or other:
-    print(f"[rank-gate] check: FAILED (missing {', '.join(missing + other)})"); sys.exit(2)
+    print(f"[rank-gate] check: FAILED (missing {', '.join(missing + other)}){rj}"); sys.exit(2)
 if drops:
-    print(f"[rank-gate] check: FAILED ({len(drops)} drops: {', '.join(drops)}){partial}"); sys.exit(1)
+    print(f"[rank-gate] check: FAILED ({len(drops)} drops: {', '.join(drops)}){partial}{rj}"); sys.exit(1)
 acc = f", {len(taken)} accepted" if taken else ""
-print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops{acc} on {len(labels)} snapshots{partial}")
+print(f"[rank-gate] check: ok - {rows} rows, {len(gain_rows)} gains, 0 drops{acc} on {len(labels)} snapshots{partial}{rj}")
 PY
+}
+
+# HP.2: `recheck` judges the last run's measurements again, against the baselines and gate.json `accepted` as they
+# are now, without fetching or running a snapshot: for a close-out whose only moved inputs are what the gate judges
+# against (a ratchet commit, a ruled re-record). It judges the labels GLIA_RANK_GATE_ONLY names, else every snapshot,
+# and refuses unless run/run-meta.json vouches for each: measured at the pinned rev, run/<label>.json unchanged since.
+# rank_eval is rebuilt first (a no-op when the target is current), so the judge is this checkout's --gate-check.
+do_recheck() {
+  local name url rev label flags revs=() head
+  rm -f "$RUN/last-check.json"
+  while read -r name url rev label flags; do revs+=("$label=$rev"); done <<< "$ROWS"
+  head=$(python3 -I - "$RUN" "${revs[@]}" <<'PY'
+import hashlib, json, os, re, sys
+run, revs = sys.argv[1], dict(a.split("=", 1) for a in sys.argv[2:])
+
+
+def refuse(why):
+    print(f"[rank-gate] check: FAILED (no run to recheck: {why})")
+    sys.exit(2)
+
+
+try:
+    meta = json.load(open(os.path.join(run, "run-meta.json")))
+except (OSError, ValueError):
+    refuse("no run/run-meta.json")
+files, mrevs = meta.get("files") or {}, meta.get("revs") or {}
+ran = f" (it ran only {','.join(meta['only'])})" if meta.get("only") else ""
+for lab, rev in revs.items():
+    f = f"{lab}.json"
+    if f not in files:
+        refuse(f"the run did not measure {lab}{ran}")
+    if mrevs.get(lab) != rev:
+        refuse(f"{lab} was measured at {str(mrevs.get(lab))[:12]}, snapshots.json pins {rev[:12]}")
+    try:
+        got = hashlib.sha256(open(os.path.join(run, f), "rb").read()).hexdigest()
+    except OSError:
+        refuse(f"run/{f} is gone")
+    if got != files[f]:
+        refuse(f"run/{f} changed since the run")
+head = str(meta.get("glia_head") or "")
+if not re.fullmatch(r"[0-9a-f]{40}", head):
+    refuse("run/run-meta.json names no glia_head")
+print(head)
+PY
+  ) || { echo "$head"; exit 2; }
+  (cd "$HERE" && cargo build --release --quiet -p glia-engine --example rank_eval --features sem-eval \
+      > "$RUN/recheck-build.log" 2>&1) \
+    || { tail -20 "$RUN/recheck-build.log"; say "check: FAILED (build rank_eval)"; exit 2; }
+  judge_run "$head" "${head:0:12}"
   exit $?
 }
 
@@ -273,7 +355,7 @@ do_baseline() {
   say "baseline: ok - $(labels | wc -l) snapshots -> bench/rank-gate/baseline/$rel/ (head $GLIA_RANK_GATE_HEAD)"
 }
 
-# The last check, refused unless it was green and made at this HEAD.
+# The last check, refused unless it was green, made at this HEAD and not a re-judge.
 last_green() {
   python3 -I - "$RUN/last-check.json" "$(git -C "$HERE" rev-parse HEAD)" "$1" <<'PY'
 import json, sys
@@ -283,6 +365,9 @@ except (OSError, ValueError):
     print(f"[rank-gate] {sys.argv[3]}: FAILED (no last check recorded)"); sys.exit(2)
 if not c.get("ok"):
     print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check was not ok)"); sys.exit(2)
+if c.get("rejudged"):
+    # HP.2: a re-judge measured nothing at this HEAD; only a fresh check moves a baseline
+    print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check was a re-judge)"); sys.exit(2)
 if c.get("partial"):
     print(f"[rank-gate] {sys.argv[3]}: FAILED (the last check was partial)"); sys.exit(2)
 if c.get("glia_head") != sys.argv[2]:
@@ -375,6 +460,7 @@ case "${1:-}" in
   baseline) exec 9>"$DIR/.run.lock"; flock 9; do_baseline "${2:-}" ;;
   baseline-add) exec 9>"$DIR/.run.lock"; flock 9; do_baseline_add ;;
   ratchet) exec 9>"$DIR/.run.lock"; flock 9; do_ratchet ;;
+  recheck) exec 9>"$DIR/.run.lock"; flock 9; do_recheck ;;
   coverage) do_coverage ;;
-  *) echo "usage: $0 fetch|run|check|baseline <release>|baseline-add|ratchet|coverage|flags" >&2; exit 2 ;;
+  *) echo "usage: $0 fetch|run|check|recheck|baseline <release>|baseline-add|ratchet|coverage|flags" >&2; exit 2 ;;
 esac

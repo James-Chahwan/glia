@@ -288,6 +288,16 @@ default on each of the six snapshots, and pack@sel - pack r10 (single) glia -0.0
     bash scripts/rank-gate.sh run            # build rank_eval (release, sem-eval) and run + trim every snapshot
     bash scripts/rank-gate.sh check          # fetch + run + judge; the close-out gates on its last line
     bash scripts/rank-gate.sh coverage       # every scope item measured or exempt
+    bash scripts/rank-gate.sh recheck        # judge the last run again against the baselines as they are now
+
+`recheck` (HP.2) re-judges without measuring: no fetch and no snapshot run (it rebuilds rank_eval, a no-op when
+the target is current, so the judge is this checkout's `--gate-check`). Every clean `run` writes
+`run/run-meta.json` last: the head that measured, its `only`, each snapshot's pinned rev and the sha256 of every
+`run/<label>.json`. `recheck` judges the labels `GLIA_RANK_GATE_ONLY` names, else every snapshot, and refuses
+(`[rank-gate] check: FAILED (no run to recheck: <why>)`, exit 2) unless run-meta.json measured each at its
+pinned rev and the file is unchanged. Its `check:` line is the usual one with ` (rejudged run of <head12>)`
+appended, and `last-check.json` records the measured head and `"rejudged": true`, so `ratchet` and
+`baseline-add` refuse it (`the last check was a re-judge`): only a fresh check moves a baseline.
 
 Everything is written under `GLIA_RANK_GATE_DIR` (default `~/.cache/glia-rank-gate`): `<name>.git`
 (bare clones), `<name>@<rev12>/` (the copies; the directory name is part of the build identity, never
@@ -338,3 +348,6 @@ release that has `bench/rank-gate/gate.json`, unless no packet commit of the wav
 `scripts/rank-gate.sh` (`[rank-gate] check: skipped - wave touched no ranked path`). A timeout is a
 failed gate (`rank gate (timeout)`). When every gate is clean it runs `ratchet` and commits
 `bench/rank-gate/baseline/current`. The release's last close-out always checks, then runs `coverage`.
+Since HP.1 the gate's input digest decides whether it runs; since HP.2, when only the baselines or gate.json
+`accepted` moved since the last run and that run is intact, the close-out runs `recheck` instead
+(`[closeout] rejudge rank from <commit12> (judge inputs moved: ..)`), and a re-judged check never ratchets.
