@@ -5894,26 +5894,27 @@
     },
     "ruby/http_server": {
       "extract": [
-        2,
-        2
+        8,
+        8
       ],
       "fixtures": [
         "fixtures/http-any-method",
-        "fixtures/ruby-rails-handled_by"
+        "fixtures/ruby-rails-handled_by",
+        "fixtures/ruby-rails-nested-resources"
       ],
       "forbid": [
-        0,
-        0
+        4,
+        4
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        8,
+        8
       ],
       "reasons": [],
       "route": [
-        3,
-        3
+        9,
+        9
       ],
       "via": "http"
     },
@@ -9644,6 +9645,7 @@
     "fixtures/docker-image-identity",
     "fixtures/docker-starts",
     "fixtures/doclink-identifier-mentions",
+    "fixtures/doclink-mention-positions",
     "fixtures/docs-adr-decision",
     "fixtures/docs-link-past-cap",
     "fixtures/docs-md-section-lines",
@@ -10281,25 +10283,25 @@
       },
       "python/host_command": {
         "extract": [
-          1,
-          1
+          4,
+          4
         ],
         "fixtures": [
           "patterns/python/host_command"
         ],
         "forbid": [
-          1,
-          1
+          2,
+          2
         ],
         "level": "full",
         "literal": [
-          1,
-          1
+          4,
+          4
         ],
         "reasons": [],
         "route": [
-          1,
-          1
+          5,
+          5
         ],
         "via": "host_command"
       },

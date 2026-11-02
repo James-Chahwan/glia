@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 507,
+  "fixtures": 509,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -619,6 +619,13 @@
     "doclink-identifier-mentions": {
       "framework": "doclink-identifier-mentions",
       "language": "python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "doclink-mention-positions": {
+      "framework": "doclink-mention-positions",
+      "language": "rust+typescript",
       "per_category": {
         "DOCUMENTS": 1.0
       }
@@ -2294,6 +2301,13 @@
       "language": "ruby",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "ruby-rails-nested-resources": {
+      "framework": "ruby-rails-nested-resources",
+      "language": "javascript+ruby",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "ruby-rails-scope": {
