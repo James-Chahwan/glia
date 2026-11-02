@@ -1,0 +1,363 @@
+{"id": "004403066c9a7db8", "verdict": "correct", "reason": "the test builds sa.select(...) statements and runs them through user.repos.session.execute against the test database", "judge": "HC.3"}
+{"id": "97944dc9d77bddd4", "verdict": "correct", "reason": "main calls time_request(url), which does requests.get(url) on /api/recipes", "judge": "HC.3"}
+{"id": "000049c92db26f6d", "verdict": "correct", "reason": "the test calls random_email() imported from tests.utils.factories", "judge": "HC.3"}
+{"id": "0010cb6a758c3bed", "verdict": "correct", "reason": "tandoor.py declares def parse_times at module level", "judge": "HC.3"}
+{"id": "0db7c4d964e55a5e", "verdict": "correct", "reason": "the e2e docker-compose.yml sets LDAP_USER_FILTER in the service environment", "judge": "HC.3"}
+{"id": "01936bab7e0392d9", "verdict": "correct", "reason": "frontend/package.json depends on nuxt ^4.4.6", "judge": "HC.3"}
+{"id": "0b3147313c64b35b", "verdict": "correct", "reason": "the section's settings rule names AppSettings itself (\"Never instantiate AppSettings() directly\"), the class in core/settings/settings.py", "judge": "HC.3"}
+{"id": "268e6ff0940ab08a", "verdict": "correct", "reason": "the image ENTRYPOINT is docker/entry.sh (copied as run.sh), whose exec mealie runs the console script mealie.main:main", "judge": "HC.3"}
+{"id": "b8fc3ab641deff88", "verdict": "correct", "reason": "[project.scripts] mealie = \"mealie.main:main\"", "judge": "HC.3"}
+{"id": "01c514507171a26b", "verdict": "correct", "reason": "@router.post(\"\") on start_data_migration under the groups migrations router", "judge": "HC.3"}
+{"id": "002f749b0111487e", "verdict": "correct", "reason": "Household declares preferences: Mapped[HouseholdPreferencesModel] = orm.relationship(..)", "judge": "HC.3"}
+{"id": "00378bb623cebf6d", "verdict": "wrong", "reason": "RecipeCommentsController declares no repos; it reads self.repos, a property of BaseUserController", "judge": "HC.3"}
+{"id": "0060e31142d2caa4", "verdict": "correct", "reason": "SaveInviteToken declares household_id: UUID", "judge": "HC.3"}
+{"id": "006c9097732a5e96", "verdict": "correct", "reason": "ImagePosition enum declares member left", "judge": "HC.3"}
+{"id": "007d1e4e883a3a27", "verdict": "correct", "reason": "UserBase declares admin: bool = False", "judge": "HC.3"}
+{"id": "00954bfdf7ccaa23", "verdict": "correct", "reason": "AIPromptOverrideUpdate declares content: str = Field(..)", "judge": "HC.3"}
+{"id": "009ab4331b710bea", "verdict": "correct", "reason": "GroupRecipeAction declares title mapped_column", "judge": "HC.3"}
+{"id": "00c882a1ae379998", "verdict": "correct", "reason": "PlanRulesDay declares wednesday = \"wednesday\"", "judge": "HC.3"}
+{"id": "00d01cb22aa7f3e6", "verdict": "correct", "reason": "RecipeController holds the member _create_recipe_from_html_or_json (a def at line 380)", "judge": "HC.3"}
+{"id": "068891695139a3e8", "verdict": "correct", "reason": "requests.get(f\"http://localhost:9000/api/recipes/{name}\") reaches @router.get(\"/{slug}\") under /api/recipes", "judge": "HC.3"}
+{"id": "45080ffb3eed51fa", "verdict": "correct", "reason": "BaseCRUDAPI implements CrudAPIInterface declared in the same file", "judge": "HC.3"}
+{"id": "0022549085c1f101", "verdict": "correct", "reason": "from tests.utils.factories import random_string", "judge": "HC.3"}
+{"id": "004119f539af2590", "verdict": "correct", "reason": "from mealie.core.security.providers.reverse_proxy_provider import ReverseProxyProvider", "judge": "HC.3"}
+{"id": "0061d944e8084ad8", "verdict": "correct", "reason": "from mealie.schema._mealie import MealieModel: the package __init__ re-exports MealieModel from mealie_model.py", "judge": "HC.3"}
+{"id": "000489b30a44a8db", "verdict": "correct", "reason": "ShoppingList(SqlAlchemyBase) with SqlAlchemyBase declared in the same migration file", "judge": "HC.3"}
+{"id": "0077df2f20ee5da2", "verdict": "correct", "reason": "Event(MealieModel), MealieModel imported from mealie.schema._mealie", "judge": "HC.3"}
+{"id": "00918d4d2c97dd30", "verdict": "correct", "reason": "TagIn(CategoryIn) in the same module", "judge": "HC.3"}
+{"id": "05241b5280a753cc", "verdict": "correct", "reason": "get_all takes q: PaginationQuery = Depends(PaginationQuery)", "judge": "HC.3"}
+{"id": "105ce29ed0907371", "verdict": "correct", "reason": "nuxt.config.ts reads process.env.THEME_DARK_ERROR", "judge": "HC.3"}
+{"id": "028b6c4256987706", "verdict": "correct", "reason": "resolve_substitutions returns list[tuple[GUID | None, str | None]], GUID the TypeDecorator class", "judge": "HC.3"}
+{"id": "037566a50c8a981f", "verdict": "correct", "reason": "calculate_group_storage(..) -> GroupStorage", "judge": "HC.3"}
+{"id": "03f96c8a3fc4fe47", "verdict": "correct", "reason": "get_all returns PaginationBase[RecipeSummary]", "judge": "HC.3"}
+{"id": "04a27a2fb6a7cf01", "verdict": "correct", "reason": "recipe_share_tokens returns GroupRepositoryGeneric[..]", "judge": "HC.3"}
+{"id": "04b6e00925aeef78", "verdict": "correct", "reason": "test_ai_provider(..) -> AIProviderTestResult", "judge": "HC.3"}
+{"id": "053f7b0b6643a5a1", "verdict": "correct", "reason": "mock_resilient_fetch(url) -> FetchResult, imported from mealie.pkgs.safehttp.fetch", "judge": "HC.3"}
+{"id": "0645bbe86318c5d7", "verdict": "correct", "reason": "get_all returns PaginationBase[ReadCookBook]", "judge": "HC.3"}
+{"id": "07cfc2b69a00fd46", "verdict": "correct", "reason": "update_many returns list[GroupInDB]", "judge": "HC.3"}
+{"id": "07f52e3d178623ec", "verdict": "correct", "reason": "get_logging_settings() -> AppLoggingSettings", "judge": "HC.3"}
+{"id": "083d162557924b10", "verdict": "correct", "reason": "foods_by_alias returns dict[str, IngredientFood]", "judge": "HC.3"}
+{"id": "08f2b8dd4810a89b", "verdict": "correct", "reason": "stale.yml schedules cron '30 1 * * *'", "judge": "HC.3"}
+{"id": "0028360a6fcde3cc", "verdict": "correct", "reason": "the test module imports and exercises delete_old_checked_shopping_list_items", "judge": "HC.3"}
+{"id": "0007ff10e60fea4e", "verdict": "correct", "reason": "the test calls _create_recipe(api_client, unique_user)", "judge": "HC.3"}
+{"id": "0046134907ca7ab9", "verdict": "correct", "reason": "the test calls random_string()", "judge": "HC.3"}
+{"id": "005326fef07bd778", "verdict": "correct", "reason": "the test constructs Recipe(..)", "judge": "HC.3"}
+{"id": "00709c5f135194bf", "verdict": "correct", "reason": "the test calls _patch_fetch(monkeypatch, ..)", "judge": "HC.3"}
+{"id": "00995d491d2844bf", "verdict": "correct", "reason": "the test calls _migration()", "judge": "HC.3"}
+{"id": "0099ca5708fa2c63", "verdict": "correct", "reason": "the test calls _create_food(..)", "judge": "HC.3"}
+{"id": "009dad722f1c5c66", "verdict": "correct", "reason": "the test constructs StubContext(url=..)", "judge": "HC.3"}
+{"id": "00c8d334847ff56e", "verdict": "correct", "reason": "the test calls random_string()", "judge": "HC.3"}
+{"id": "0117aea447e36fd5", "verdict": "correct", "reason": "the test constructs ShoppingListSave(..)", "judge": "HC.3"}
+{"id": "013a10303f047ca1", "verdict": "correct", "reason": "test_no_mealplans calls create_mealplan_timeline_events()", "judge": "HC.3"}
+{"id": "00167089d4873925", "verdict": "correct", "reason": "document_type: EventDocumentType = EventDocumentType.cookbook names the enum", "judge": "HC.3"}
+{"id": "0025bf85d44673c0", "verdict": "correct", "reason": "report_entries: list[ReportEntryCreate] names the class", "judge": "HC.3"}
+{"id": "0029181fe878eb1d", "verdict": "wrong", "reason": "the spec only expects ProcessStaleRedisKeysJob.perform_later; nothing in it reads or writes redis", "judge": "HC.3"}
+{"id": "0032537679d22aaf", "verdict": "correct", "reason": "set_account runs Account.find(params[:account_id])", "judge": "HC.3"}
+{"id": "00c612368605a3b1", "verdict": "correct", "reason": "the migration create_table :companies", "judge": "HC.3"}
+{"id": "00039c70a3fb4710", "verdict": "correct", "reason": "the spec calls removeQueryParamsFromUrl('theme') imported from portalThemeHelper", "judge": "HC.3"}
+{"id": "0002a5fd02f6649e", "verdict": "correct", "reason": "the file declares module Concerns::TwilioVoiceCredentials", "judge": "HC.3"}
+{"id": "00015bbf7ff1e648", "verdict": "correct", "reason": "RecoverRunsJob declares def perform", "judge": "HC.3"}
+{"id": "008abcc209b4ac27", "verdict": "correct", "reason": "docker/Dockerfile ARG/ENV RAILS_SERVE_STATIC_FILES", "judge": "HC.3"}
+{"id": "0046e1497c716cf1", "verdict": "correct", "reason": "package.json depends on @chatwoot/ninja-keys 1.2.3", "judge": "HC.3"}
+{"id": "0381bde6dbd1e4af", "verdict": "correct", "reason": "swagger post .../inbox_members documents the accounts-scoped resources :inbox_members (only create, show) route", "judge": "HC.3"}
+{"id": "0779d35f19cd03ac", "verdict": "correct", "reason": "the section's finding is about the User model itself (app/models/user.rb alias_attribute :conversations)", "judge": "HC.3"}
+{"id": "07aca4705aade069", "verdict": "correct", "reason": "widget conversation action emits ON_CONVERSATION_CREATED; PreChatForm listens on the same constant", "judge": "HC.3"}
+{"id": "2ecb17d5943977be", "verdict": "correct", "reason": "MfaSettings emits BUS_EVENTS.MFA_STATE_CHANGED; LowBackupCodesBanner listens on it", "judge": "HC.3"}
+{"id": "3e3b2cc160445ead", "verdict": "correct", "reason": "widget actionCable emits ON_AGENT_MESSAGE_RECEIVED; widget App.vue listens on it", "judge": "HC.3"}
+{"id": "484a2094e1466c9f", "verdict": "correct", "reason": "Message.vue emits BUS_EVENTS.TOGGLE_REPLY_TO_MESSAGE; ReplyBox listens on it", "judge": "HC.3"}
+{"id": "50d95987472ea323", "verdict": "correct", "reason": "conversations store emits BUS_EVENTS.SCROLL_TO_MESSAGE; MessagesView listens on it", "judge": "HC.3"}
+{"id": "5782262f0bf089ad", "verdict": "correct", "reason": "widget ChatAttachment emits BUS_EVENTS.SHOW_ALERT; widget Banner listens on it", "judge": "HC.3"}
+{"id": "5fe7f3ee00159754", "verdict": "correct", "reason": "mitt.spec subscribes emitter.on('event') and emits emitter.emit('event') on the same emitter", "judge": "HC.3"}
+{"id": "439621157d06ca98", "verdict": "correct", "reason": "the ANALYTICS_IDENTITY handler is an arrow defined inside initializeAnalyticsEvents", "judge": "HC.3"}
+{"id": "00b0c78d6deaf9d1", "verdict": "correct", "reason": "widget router path /campaigns component: () => import('./views/Campaigns.vue')", "judge": "HC.3"}
+{"id": "013998dbd736d929", "verdict": "correct", "reason": "route path 'slack' component: Slack, imported from ./Slack.vue in the integrations dir", "judge": "HC.3"}
+{"id": "07246439ed382809", "verdict": "correct", "reason": "route path 'csat' component: CsatResponses imported from ./CsatResponses.vue", "judge": "HC.3"}
+{"id": "0a1893b47dfc838a", "verdict": "correct", "reason": "route path 'labels/:label' component: ContactManageView imported from ./pages/ContactManageView.vue", "judge": "HC.3"}
+{"id": "0043d3fe9debeb99", "verdict": "correct", "reason": "EnterpriseAccountAPI (accountScoped, enterprise) GETs billing_summary; enterprise routes declare get :billing_summary", "judge": "HC.3"}
+{"id": "016191e55a898993", "verdict": "correct", "reason": "assistants API GETs /{id}/faq_stats; routes declare get :faq_stats on captain assistants members", "judge": "HC.3"}
+{"id": "01b25c2017622b47", "verdict": "correct", "reason": "inboxes API POSTs /{id}/set_inbound_calls; routes declare post :set_inbound_calls, on: :member", "judge": "HC.3"}
+{"id": "0082e74cc5d2335a", "verdict": "correct", "reason": "UserNotificationSettings extends ApiClient and overrides update", "judge": "HC.3"}
+{"id": "008a24ae3fafaca1", "verdict": "correct", "reason": "import { getConversationAPI } from '../../api/conversation' resolves to widget/api/conversation.js", "judge": "HC.3"}
+{"id": "03658a700af008d9", "verdict": "correct", "reason": "NotionOAuthClient extends ApiClient imported from ./ApiClient", "judge": "HC.3"}
+{"id": "0030192e866b5835", "verdict": "correct", "reason": "Folder < ApplicationRecord, app/models/application_record.rb", "judge": "HC.3"}
+{"id": "00ef61ebabf5cf3d", "verdict": "correct", "reason": "class Contacts::FilterService < FilterService: the compact form resolves FilterService at top level, app/services/filter_service.rb", "judge": "HC.3"}
+{"id": "fbae39d93d88ef62", "verdict": "correct", "reason": "the spec's router declares /accounts/:accountId/reports and router.push({ path: '/accounts/1/reports' }) navigates to it", "judge": "HC.3"}
+{"id": "f65c793cc0899f27", "verdict": "wrong", "reason": "the '' -> 'list' redirect is a child of settings/custom-roles; page:/ and page:/list name the app root and a top-level /list, neither is that route", "judge": "HC.3"}
+{"id": "0195629f898c6678", "verdict": "correct", "reason": "frontend_url = ENV.fetch('FRONTEND_URL', '')", "judge": "HC.3"}
+{"id": "01c696bc5e154ef3", "verdict": "correct", "reason": "linear_redirect_uri reads ENV.fetch('FRONTEND_URL', nil)", "judge": "HC.3"}
+{"id": "02943524e53e65b7", "verdict": "correct", "reason": "rack_attack reads ENV.fetch('RATE_LIMIT_AGENT_CREATE', '100')", "judge": "HC.3"}
+{"id": "0385dc0ea6f2611e", "verdict": "correct", "reason": "Redis::Config reads ENV.fetch('REDIS_SENTINEL_MASTER_NAME', 'mymaster')", "judge": "HC.3"}
+{"id": "b0049cbd2ba4dde7", "verdict": "correct", "reason": "GET .../reports/conversations and .../conversations/ are one route once the trailing slash is normalised (two documented operations, diverged)", "judge": "HC.3"}
+{"id": "0690ec9d5f82e32e", "verdict": "correct", "reason": "schedule.yml cron '0 * * * *' class Internal::TriggerHourlyScheduledItemsJob", "judge": "HC.3"}
+{"id": "388535a037ddfa69", "verdict": "correct", "reason": "schedule.yml cron '*/30 * * * * *' class Internal::CheckRingingTimeoutsJob", "judge": "HC.3"}
+{"id": "500b6268ca834627", "verdict": "correct", "reason": "schedule.yml cron '*/30 * * * *' class AutoAssignment::PeriodicAssignmentJob", "judge": "HC.3"}
+{"id": "58ff4969d89e125c", "verdict": "correct", "reason": "schedule.yml cron '*/1 * * * *' class Inboxes::FetchImapEmailInboxesJob", "judge": "HC.3"}
+{"id": "5af3d6723aa87ef2", "verdict": "correct", "reason": "schedule.yml cron '* * * * *' class Internal::DispatchConversationMonitorsJob", "judge": "HC.3"}
+{"id": "69b76ea5a32a5f05", "verdict": "correct", "reason": "lock.yml schedules cron '0 * * * *'", "judge": "HC.3"}
+{"id": "6a048ecdb47c39bc", "verdict": "correct", "reason": "stale.yml schedules cron '28 3 * * *'", "judge": "HC.3"}
+{"id": "0006027c5fb37d31", "verdict": "correct", "reason": "settingsHelper.spec imports and tests getI18nKey from ../settingsHelper", "judge": "HC.3"}
+{"id": "001a2399709be903", "verdict": "correct", "reason": "the spec describes ContactIdentifyAction from app/actions/contact_identify_action.rb", "judge": "HC.3"}
+{"id": "0059248ff6b13263", "verdict": "correct", "reason": "the spec describes Captain::Llm::MessageTranslationService", "judge": "HC.3"}
+{"id": "006073f089e88b00", "verdict": "wrong", "reason": "the spec tests the Stripe OAuth callback (app/controllers/stripe/callbacks_controller.rb), not Google::CallbacksController", "judge": "HC.3"}
+{"id": "001690945ade0b90", "verdict": "correct", "reason": "getters.spec reads customRoleList imported from ./fixtures", "judge": "HC.3"}
+{"id": "17b3daa4e2c71b66", "verdict": "correct", "reason": "the consumer subscribes channel 'RoomChannel', served by app/channels/room_channel.rb", "judge": "HC.3"}
+{"id": "004d2ffd56bb3212", "verdict": "correct", "reason": "the MySQL Initial migration creates the States_UISettings table", "judge": "HC.3"}
+{"id": "000438748ed181e8", "verdict": "correct", "reason": "UpdateRuleDto.init calls this.cleanup(this), the method of the same class", "judge": "HC.3"}
+{"id": "000ff7b6e1fad619", "verdict": "correct", "reason": "postAssetFile maps the response through AssetDto.fromJSON(event.body)", "judge": "HC.3"}
+{"id": "000a98e229eeb2a3", "verdict": "correct", "reason": "the MakeAssetPropertiesNullable migration file declares namespace Squidex.Providers.MySql.App.Migrations", "judge": "HC.3"}
+{"id": "000c45c5365de57c", "verdict": "correct", "reason": "RemoveContributor.cs declares namespace Squidex.Domain.Apps.Entities.Teams.Commands", "judge": "HC.3"}
+{"id": "006008ce217b337f", "verdict": "correct", "reason": "UIController.cs declares namespace Squidex.Areas.Api.Controllers.UI", "judge": "HC.3"}
+{"id": "00874116bca53278", "verdict": "correct", "reason": "QueryModelDto.cs declares namespace Squidex.Areas.Api.Controllers.Schemas.Models", "judge": "HC.3"}
+{"id": "008bcdd2ad1f4360", "verdict": "correct", "reason": "SearchResult.cs declares namespace Squidex.Domain.Apps.Entities.Search", "judge": "HC.3"}
+{"id": "00c920d56a7b2231", "verdict": "correct", "reason": "TextIndexTestBase.cs declares namespace Squidex.Domain.Apps.Entities.Contents.Text", "judge": "HC.3"}
+{"id": "00c9fd4059eeac05", "verdict": "correct", "reason": "Run.cs declares namespace TestSuite.LoadTests", "judge": "HC.3"}
+{"id": "00e25bc92474492f", "verdict": "correct", "reason": "AsyncLock.cs declares namespace Squidex.Infrastructure.Tasks", "judge": "HC.3"}
+{"id": "000582d38fa970ff", "verdict": "correct", "reason": "the file declares class ContentCleanupTests", "judge": "HC.3"}
+{"id": "0005a0e23d88d498", "verdict": "correct", "reason": "the file declares class DynamicUserContextBuilder", "judge": "HC.3"}
+{"id": "0018870f25d63272", "verdict": "correct", "reason": "appsettings.json defines messaging.type = \"MongoDb\"", "judge": "HC.3"}
+{"id": "005e42692e1a5510", "verdict": "correct", "reason": "the test appSettings.json defines eventStore.configuration", "judge": "HC.3"}
+{"id": "01915e70d2f9ec34", "verdict": "correct", "reason": "appsettings.json defines scripting.logs.enabled", "judge": "HC.3"}
+{"id": "0245935c33106b45", "verdict": "correct", "reason": "appsettings.json defines graphQL.maxComplexity", "judge": "HC.3"}
+{"id": "026418cbdc75abe5", "verdict": "correct", "reason": "docker-compose-base.yml sets IDENTITY__ADMINEMAIL, the .NET override of IDENTITY:ADMINEMAIL", "judge": "HC.3"}
+{"id": "0119ed50da4127f7", "verdict": "correct", "reason": "Squidex.Web.Tests.csproj PackageReference Meziantou.Analyzer", "judge": "HC.3"}
+{"id": "01e3b63b106e50d2", "verdict": "correct", "reason": "Squidex.Domain.Apps.Core.Model.csproj PackageReference Microsoft.Extensions.Configuration.UserSecrets", "judge": "HC.3"}
+{"id": "04097a63a4032f75", "verdict": "correct", "reason": "the 7.8.0 entry names ErrorDto (the one ErrorDto class, Squidex.Web) as the shared OpenAPI model it changed", "judge": "HC.3"}
+{"id": "d334fc6b10210b72", "verdict": "correct", "reason": "ENTRYPOINT [\"dotnet\", \"Squidex.dll\"] runs the Squidex project's Program.Main", "judge": "HC.3"}
+{"id": "00b4588f57e712b5", "verdict": "wrong", "reason": "GetPreviewUrlsCompletion serves GET api/apps/{app}/schemas/{schema}/completion/prview-urls ([Route] beside [HttpGet]); no GET / route exists", "judge": "HC.3"}
+{"id": "01beee55da2cde04", "verdict": "wrong", "reason": "the GET /api/apps/{name} call is served by [HttpGet][Route(\"apps/{app}\")] GetApp; the apps/{app}/ template paired here carries only the PUT and DELETE actions", "judge": "HC.3"}
+{"id": "0006dd4cda444d99", "verdict": "correct", "reason": "ContributorsMetadataDto implements IContributorsMetadataDto in the same file", "judge": "HC.3"}
+{"id": "00178642e318ef8e", "verdict": "correct", "reason": "FieldDefaultValue implements FieldPropertiesVisitor<any> and defines visitDateTime", "judge": "HC.3"}
+{"id": "002473b8e926daa8", "verdict": "correct", "reason": "DynamicRuleDto extends ResourceDto and redeclares the static fromJSON ResourceDto declares", "judge": "HC.3"}
+{"id": "003c12ad77876eec", "verdict": "correct", "reason": "ContentRestored : IMigrated<IEvent> implements Migrate()", "judge": "HC.3"}
+{"id": "00492ae87d02e902", "verdict": "correct", "reason": "WorkflowTransitionDto implements IWorkflowTransitionDto", "judge": "HC.3"}
+{"id": "00041a69ec63a9c3", "verdict": "correct", "reason": "ClientUser : IUser in the same namespace", "judge": "HC.3"}
+{"id": "02065772e04057d9", "verdict": "correct", "reason": "EFAssetEntity : IVersionedEntity<DomainId>, using Squidex.Infrastructure", "judge": "HC.3"}
+{"id": "02a494bca6bed4e0", "verdict": "correct", "reason": "AssetsSearchSource : ISearchSource, using Squidex.Domain.Apps.Entities.Search", "judge": "HC.3"}
+{"id": "02d1699721ba3d31", "verdict": "correct", "reason": "ConvertOldSnapshotStores : IMigration, using Squidex.Infrastructure.Migrations", "judge": "HC.3"}
+{"id": "0300ff2ec9d418f6", "verdict": "correct", "reason": "RebuildSnapshots : IMigration, using Squidex.Infrastructure.Migrations", "judge": "HC.3"}
+{"id": "0311e324cf3d212d", "verdict": "correct", "reason": "SearchManager : ISearchManager in the same namespace", "judge": "HC.3"}
+{"id": "0336cd105d78d7ae", "verdict": "correct", "reason": "DropIndexJob : IJobRunner, using Squidex.Domain.Apps.Entities.Jobs", "judge": "HC.3"}
+{"id": "000906678ef77207", "verdict": "correct", "reason": "import { AppsState } from '@app/shared/internal' resolves to shared/internal.ts", "judge": "HC.3"}
+{"id": "0046160e1c5e2195", "verdict": "correct", "reason": "using Squidex.Infrastructure.Security names that namespace", "judge": "HC.3"}
+{"id": "030e3b897811f160", "verdict": "correct", "reason": "IRuleEventDto extends IResourceDto", "judge": "HC.3"}
+{"id": "04776b3e806f123a", "verdict": "wrong", "reason": "DomainObject<Team> is the generic base class DomainObject<T> of Squidex.Infrastructure, not the TeamDomainObject's own namespace Teams.DomainObject", "judge": "HC.3"}
+{"id": "00c69bcdbb58726f", "verdict": "correct", "reason": "SchemaDomainObjectTests : HandlerTestBase<Schema>, using Squidex.Domain.Apps.Entities.TestHelpers", "judge": "HC.3"}
+{"id": "00efd26aeb251fdf", "verdict": "wrong", "reason": "Initial : Migration is EF Core's Microsoft.EntityFrameworkCore.Migrations.Migration, not the Contents.Migration namespace", "judge": "HC.3"}
+{"id": "011c3b394df2b847", "verdict": "correct", "reason": "MongoTeamRepository : MongoSnapshotStoreBase<..>, using Squidex.Infrastructure.States", "judge": "HC.3"}
+{"id": "01aee02c72ddb0c7", "verdict": "correct", "reason": "ConvertEventStore : MongoBase<BsonDocument>, using Squidex.Infrastructure", "judge": "HC.3"}
+{"id": "026372e1e6d11f68", "verdict": "correct", "reason": "the component's constructor injects ContentsService", "judge": "HC.3"}
+{"id": "0022d0454a4aa721", "verdict": "correct", "reason": "AppWorkflowsController's primary constructor takes ICommandBus commandBus", "judge": "HC.3"}
+{"id": "0089ecb1f4e89394", "verdict": "correct", "reason": "AppsController's primary constructor takes ICommandBus commandBus", "judge": "HC.3"}
+{"id": "00bc11fa20b36801", "verdict": "correct", "reason": "AssetChangedTriggerHandler's primary constructor takes IAssetRepository", "judge": "HC.3"}
+{"id": "0180d175bb25e625", "verdict": "correct", "reason": "AppPlansController's primary constructor takes IUsageGate", "judge": "HC.3"}
+{"id": "009e4fda1c63735a", "verdict": "correct", "reason": "team.component.html [routerLink]=\"['/app/teams', team.id]\"", "judge": "HC.3"}
+{"id": "0c5a7119e6259247", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :schemaName page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "186fa29f86bd0cba", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :ruleId page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "188ae620e7ebb4a6", "verdict": "wrong", "reason": "router.navigate(['/404']) goes to the '**' not-found route, not a :schemaName page", "judge": "HC.3"}
+{"id": "1d4bca79e7737117", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :schemaName page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "22f572894030b882", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :schemaName page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "26d93ad533effcc8", "verdict": "wrong", "reason": "router.navigate(['/404']) goes to the '**' not-found route, not a :ruleId page", "judge": "HC.3"}
+{"id": "289cba57c93cdf51", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :ruleId page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "29bf653677a532fc", "verdict": "wrong", "reason": "navigate(['/404']) goes to the '**' not-found route, not a :ruleId page (and the spec only verifies a mock)", "judge": "HC.3"}
+{"id": "189a538fe7cd1865", "verdict": "correct", "reason": "HomePageComponent calls router.navigate(['/'])", "judge": "HC.3"}
+{"id": "24c86c8ec1ccef57", "verdict": "correct", "reason": "apps-menu.component.html has routerLink=\"/app\"", "judge": "HC.3"}
+{"id": "3111605e16d6c57c", "verdict": "correct", "reason": "LogoutPageComponent calls router.navigate(['/'])", "judge": "HC.3"}
+{"id": "3ecfe5413c1d67c4", "verdict": "correct", "reason": "LoginPageComponent calls navigateByUrl(path || '/app')", "judge": "HC.3"}
+{"id": "42c3035b01b4723c", "verdict": "correct", "reason": "the auth interceptor calls router.navigate(['/forbidden'])", "judge": "HC.3"}
+{"id": "07bc9f0b2746ff95", "verdict": "correct", "reason": "the fixture reads TestConfig.Configuration[\"azureText:serviceEndpoint\"]", "judge": "HC.3"}
+{"id": "000055e3c941c3fa", "verdict": "wrong", "reason": "ExtensionsTests tests Squidex.Domain.Apps.Entities.Contents.Operations.Extensions (aliased ExtensionSut), not the CodeGenerator's Extensions", "judge": "HC.3"}
+{"id": "0004378046a4f8d6", "verdict": "correct", "reason": "the test calls sut.RunAsync on MigrateContentsJob", "judge": "HC.3"}
+{"id": "000f160b48c326cc", "verdict": "correct", "reason": "ContentsJintExtensionTests tests ContentsJintExtension", "judge": "HC.3"}
+{"id": "000fcff977ad0d3a", "verdict": "correct", "reason": "APP_ROUTES uses canActivate: [mustBeNotAuthenticatedGuard]", "judge": "HC.3"}
+{"id": "0025fe532ad0abee", "verdict": "correct", "reason": "postAssetFolder returns Observable<AssetFolderDto>", "judge": "HC.3"}
+{"id": "00843c915bb51e3d", "verdict": "correct", "reason": "NotificationSettingRepository : JpaRepository<NotificationSetting, Long> reads and writes NotificationSetting rows", "judge": "HC.3"}
+{"id": "00be3f5736ad00e1", "verdict": "wrong", "reason": "the test only round-trips values through a Redisson Kryo5Codec in memory; it opens no redis connection", "judge": "HC.3"}
+{"id": "00e17844d074a91e", "verdict": "correct", "reason": "createJobWithStatus runs the native query UPDATE tolgee_batch_job through the test's EntityManager", "judge": "HC.3"}
+{"id": "000158f7fdc9fbad", "verdict": "correct", "reason": "requireClientForTokenRequest throws OAuth2Error(..), constructing the class in io.tolgee.security.oauth2", "judge": "HC.3"}
+{"id": "0001d8866d8a0073", "verdict": "correct", "reason": "the cypress spec calls getAndFocusRow(0), declared at line 166 of the same file", "judge": "HC.3"}
+{"id": "00053b4f72fa8a4a", "verdict": "correct", "reason": "the test calls parked(budget, ..), the private method of the same class", "judge": "HC.3"}
+{"id": "3a8445c103547127", "verdict": "wrong", "reason": "WebsocketClient is a STOMP-over-SockJS client (client.subscribe on a stomp channel); the test holds no redis pubsub consumer", "judge": "HC.3"}
+{"id": "0001b3b7df16c16e", "verdict": "correct", "reason": "the file declares type Props = {..}", "judge": "HC.3"}
+{"id": "00034e1dcbd75dec", "verdict": "correct", "reason": "the file declares export const PrefilterTask = (..) =>", "judge": "HC.3"}
+{"id": "00044e5a14df8495", "verdict": "correct", "reason": "ImportNamespaceSelectionTestData declares var userAccount: UserAccount", "judge": "HC.3"}
+{"id": "057f4dfa677f8d89", "verdict": "correct", "reason": "the observability compose file sets GF_AUTH_ANONYMOUS_ENABLED=true", "judge": "HC.3"}
+{"id": "003d9ab8eea96582", "verdict": "correct", "reason": "backend/app/build.gradle implementation spring-boot-starter-batch-jdbc", "judge": "HC.3"}
+{"id": "01202e0061770f9d", "verdict": "correct", "reason": "section 3 introduces QueryTranslationFiltering as one of its two subject classes", "judge": "HC.3"}
+{"id": "003f4cb6e45220a3", "verdict": "correct", "reason": "@PutMapping projects/{projectId}/ai-prompt-customization under @RequestMapping /v2/ on setPromptProjectCustomization", "judge": "HC.3"}
+{"id": "02d885bbd023c301", "verdict": "correct", "reason": "the PARAMS enum declares ORGANIZATION_SLUG = 'slug'", "judge": "HC.3"}
+{"id": "008dcf952823c23d", "verdict": "correct", "reason": "DELETE /v2/projects/{projectId}/branches/{branchId} reaches BranchController (/v2/projects/{projectId}/branches) @DeleteMapping /{branchId}", "judge": "HC.3"}
+{"id": "02f30af3a0b6a975", "verdict": "correct", "reason": "POST .../content-storages/{id}/test reaches ContentStorageController @PostMapping /{id}/test", "judge": "HC.3"}
+{"id": "0351054f2318d831", "verdict": "correct", "reason": "GET /v2/projects/{projectId}/ai-prompt-customization reaches @GetMapping under /v2/", "judge": "HC.3"}
+{"id": "002c79ae1fb170a8", "verdict": "correct", "reason": "LabelServiceOssStub : LabelService overrides deleteLabelsByProjectId", "judge": "HC.3"}
+{"id": "006f5ddc1b4dcfc7", "verdict": "correct", "reason": "CimdMetadataFetcher : Logging, imported io.tolgee.util.Logging, an interface", "judge": "HC.3"}
+{"id": "0170547a81152129", "verdict": "correct", "reason": "OnEntityPreUpdate implements EntityPreCommitEvent<T> from the same package", "judge": "HC.3"}
+{"id": "0005b4224fec0819", "verdict": "correct", "reason": "import { HOST } from '../../common/constants' resolves to e2e/cypress/common/constants.ts", "judge": "HC.3"}
+{"id": "0006b53575a517a0", "verdict": "correct", "reason": "import io.tolgee.AbstractMcpTest names the class in backend/testing package io.tolgee", "judge": "HC.3"}
+{"id": "000bbc2077e2ba74", "verdict": "correct", "reason": "import io.tolgee.batch.AbstractChunkProcessor names that class", "judge": "HC.3"}
+{"id": "001654b4266049c5", "verdict": "correct", "reason": "import io.tolgee.ee.service.qa.LanguageToolCategory names that data class", "judge": "HC.3"}
+{"id": "001c1b996d9116cf", "verdict": "correct", "reason": "import io.tolgee.security.authentication.JwtService names the class in that package", "judge": "HC.3"}
+{"id": "001e7fc2e83005af", "verdict": "correct", "reason": "import io.tolgee.formats.genericTable.TableEntry names the data class in TableModel.kt of that package", "judge": "HC.3"}
+{"id": "00256acb65a51372", "verdict": "correct", "reason": "import io.tolgee.dtos.PromptResult names that class", "judge": "HC.3"}
+{"id": "0026a187a3483d26", "verdict": "correct", "reason": "import io.tolgee.service.key.TagService names that class", "judge": "HC.3"}
+{"id": "0031a575438b6c19", "verdict": "correct", "reason": "import io.tolgee.repository.oauth2.OAuth2ClientDocumentCheckRepository names that interface", "judge": "HC.3"}
+{"id": "01dfb83cc29cd7e2", "verdict": "correct", "reason": "TaskControllerBranchingTest : ProjectAuthControllerTest(\"/v2/projects/\")", "judge": "HC.3"}
+{"id": "02400ac78726abf0", "verdict": "correct", "reason": "TranslationsBranchModificationTest : BranchModificationTestBase()", "judge": "HC.3"}
+{"id": "00108fc1331af301", "verdict": "correct", "reason": "BranchServiceOssStub : AbstractBranchService(..) from the same package", "judge": "HC.3"}
+{"id": "000f3425c4e322c9", "verdict": "correct", "reason": "constructor parameter mtProviderCatching: MtProviderCatching", "judge": "HC.3"}
+{"id": "00636a5fdc66bfc9", "verdict": "correct", "reason": "constructor parameter emailVerificationService: EmailVerificationService", "judge": "HC.3"}
+{"id": "009b392e27dd5b77", "verdict": "correct", "reason": "constructor parameter branchMergeChangeModelAssembler: BranchMergeChangeModelAssembler", "judge": "HC.3"}
+{"id": "009eecb8a2ed40fd", "verdict": "correct", "reason": "constructor parameter projectHolder: ProjectHolder", "judge": "HC.3"}
+{"id": "00bd2bf0a28a5d68", "verdict": "correct", "reason": "constructor parameter promptService: PromptServiceEeImpl", "judge": "HC.3"}
+{"id": "013ca0c1191d7f73", "verdict": "correct", "reason": "@Autowired lateinit var enabledFeaturesProvider: PublicEnabledFeaturesProvider", "judge": "HC.3"}
+{"id": "01a81baf40763cb1", "verdict": "correct", "reason": "constructor parameter rateLimitService: RateLimitService", "judge": "HC.3"}
+{"id": "014d70602fd90902", "verdict": "correct", "reason": "@Autowired lateinit var asyncMethodConfiguration: AsyncMethodConfiguration", "judge": "HC.3"}
+{"id": "0167a75195ee9533", "verdict": "correct", "reason": "constructor parameter userAccountService: UserAccountService (same package)", "judge": "HC.3"}
+{"id": "01bb18b7688f48de", "verdict": "correct", "reason": "constructor parameter oauth2AuthorizationService: OAuth2AuthorizationService (same package)", "judge": "HC.3"}
+{"id": "0273dc83413d562a", "verdict": "correct", "reason": "@Autowired @MockitoSpyBean lateinit var batchJobProjectLockingManager: BatchJobProjectLockingManager", "judge": "HC.3"}
+{"id": "04f2067d2f9d4886", "verdict": "correct", "reason": "constructor parameter selfHostedLimitsProvider: SelfHostedLimitsProvider (same package)", "judge": "HC.3"}
+{"id": "08d8e4e07d74d8ce", "verdict": "correct", "reason": "index.tsx reads import.meta.env.VITE_APP_TOLGEE_API_KEY", "judge": "HC.3"}
+{"id": "68554486c946e0d7", "verdict": "correct", "reason": "inactive-issues.yml schedules cron \"30 1 * * *\"", "judge": "HC.3"}
+{"id": "0016166a3b930e18", "verdict": "correct", "reason": "ProjectStatsServiceTest imports and tests io.tolgee.service.project.ProjectStatsService", "judge": "HC.3"}
+{"id": "005657816f029c4d", "verdict": "correct", "reason": "TranslationVisual renders <TranslationPlurals ..>, the component in TranslationPlurals.tsx", "judge": "HC.3"}
+{"id": "52cbf278c55b543f", "verdict": "correct", "reason": "new WebSocket(`${protocol}//${host}/ws/qa-preview`) reaches the handler registered at /ws/qa-preview", "judge": "HC.3"}
+{"id": "02ca1dcdf5ce8cc9", "verdict": "wrong", "reason": "the spec only imports the PrismaService type and drives mockDeep<PrismaService>(); it never reaches a prisma database", "judge": "HC.3"}
+{"id": "0005433ed584ecec", "verdict": "correct", "reason": "bearer.ts imports parseTemplateString from @hoppscotch/data and calls it at line 13", "judge": "HC.3"}
+{"id": "0339b169c1fd8350", "verdict": "correct", "reason": "team-invitation.resolver declares @Query fields, so the module holds part of the shared Query root resolver", "judge": "HC.3"}
+{"id": "00172c03a0b5ca16", "verdict": "correct", "reason": "InfraConfigResolver declares its constructor", "judge": "HC.3"}
+{"id": "0a76932309db846b", "verdict": "correct", "reason": "prod.Dockerfile line 8 ENV GOLANG_VERSION=1.26.7", "judge": "HC.3"}
+{"id": "007bcc954f586179", "verdict": "correct", "reason": "hoppscotch-kernel package.json depends on typescript 5.9.3", "judge": "HC.3"}
+{"id": "007ed84cd97954a9", "verdict": "correct", "reason": "hoppscotch-desktop package.json depends on @iconify-json/lucide", "judge": "HC.3"}
+{"id": "00abc507f5bfb4c3", "verdict": "correct", "reason": "hoppscotch-backend package.json depends on @eslint/eslintrc", "judge": "HC.3"}
+{"id": "07c16e0e7da923fd", "verdict": "correct", "reason": "the @ApiOperation on @Get(':slug/:version') documents that same route", "judge": "HC.3"}
+{"id": "2d96f4be0556d10f", "verdict": "correct", "reason": "package.json bin hopp -> bin/hopp.js, the CLI entry module", "judge": "HC.3"}
+{"id": "2e146d2d8347d77f", "verdict": "correct", "reason": "the aio stage (tini ENTRYPOINT) runs CMD [\"node\", \"/usr/src/app/aio_run.mjs\"], copied from the repo's aio_run.mjs", "judge": "HC.3"}
+{"id": "019128855b4ac3ea", "verdict": "correct", "reason": "@Controller path site, @Get('setup') decorates fetchSetupInfo", "judge": "HC.3"}
+{"id": "5bd2e3b3b23e71cd", "verdict": "correct", "reason": ".route(\"/registration\", get(controller::registration)) names controller.rs's registration fn", "judge": "HC.3"}
+{"id": "003b9af40c356d76", "verdict": "correct", "reason": "BundleNotFound is a variant of the StorageError enum", "judge": "HC.3"}
+{"id": "09c0ad094665279f", "verdict": "correct", "reason": "axios.post(`${VITE_BACKEND_API_URL}/auth/signin`) reaches @Controller auth @Post('signin') on the backend", "judge": "HC.3"}
+{"id": "00009d06a4542f4d", "verdict": "correct", "reason": "tab.ts TabService implements TabServiceInterface imported from \".\" (index.ts); getTabsRefTo implements its member", "judge": "HC.3"}
+{"id": "1b8f7e94a7fc0c2c", "verdict": "correct", "reason": "WebInstanceService implements InstancePlatformDef imported from @hoppscotch/common/src/platform/instance", "judge": "HC.3"}
+{"id": "00027d9b41a6ee99", "verdict": "correct", "reason": "import { useToast } from \"@composables/toast\" resolves to common's src/composables/toast.ts", "judge": "HC.3"}
+{"id": "0007f8b2afa578f0", "verdict": "correct", "reason": "import from \"~/newstore/settings\" resolves to common's src/newstore/settings.ts", "judge": "HC.3"}
+{"id": "000d7d4226a60e4c", "verdict": "correct", "reason": "the spec imports applySetting etc. from \"~/newstore/settings\"", "judge": "HC.3"}
+{"id": "01219ecc13d1c430", "verdict": "correct", "reason": "type Body = HoppRESTReqBody & {..} extends HoppRESTReqBody, the z.infer type of the zod const of that name in v/10/body.ts", "judge": "HC.3"}
+{"id": "1523bf00bea307ce", "verdict": "correct", "reason": "FetchAllUsersV2Args extends OffsetPaginationArgs imported from src/types/input-types.args", "judge": "HC.3"}
+{"id": "008069238bb7395d", "verdict": "correct", "reason": "AdminResolver's constructor injects AdminService", "judge": "HC.3"}
+{"id": "01d95e4804ef615d", "verdict": "correct", "reason": "UserCollectionResolver injects PubSubService imported from src/pubsub/pubsub.service", "judge": "HC.3"}
+{"id": "1d7bc24be9a4d7ab", "verdict": "correct", "reason": "r/_id.vue calls router.push({ path: \"/\" })", "judge": "HC.3"}
+{"id": "4e6b6215ffa3a485", "verdict": "correct", "reason": "oauth.vue calls router.push(\"/\")", "judge": "HC.3"}
+{"id": "56a86bf121c8944d", "verdict": "correct", "reason": "UserDelete.vue calls router.push(`/`)", "judge": "HC.3"}
+{"id": "02764cc260e50ff7", "verdict": "correct", "reason": "vite.config.ts reads process.env.HOPP_ALLOW_RUNTIME_ENV", "judge": "HC.3"}
+{"id": "ffc230b4e0890624", "verdict": "correct", "reason": "posthog.service declares @Cron(CronExpression.EVERY_WEEK) on handleCron", "judge": "HC.3"}
+{"id": "05f5dc9764efcc74", "verdict": "correct", "reason": "infra-config.service.spec imports and tests InfraConfigService from ./infra-config.service", "judge": "HC.3"}
+{"id": "cd5df4a9b36b1f88", "verdict": "correct", "reason": "const KERNEL_JS = include_str!(\"kernel.js\") embeds src/kernel.js", "judge": "HC.3"}
+{"id": "0006b9dd269d36f4", "verdict": "correct", "reason": "useConfigHandler passes PROXY_URL_CONFIGS, imported from helpers/configs", "judge": "HC.3"}
+{"id": "0016280223c06a7c", "verdict": "correct", "reason": "unsetEnv's parameter envs: SandboxEnvs names the type from types/index.ts", "judge": "HC.3"}
+{"id": "020b291aad756db6", "verdict": "correct", "reason": "RegisterTables passes system.SysIgnoreApi{} to the AutoMigrate table list", "judge": "HC.3"}
+{"id": "000a800433220448", "verdict": "correct", "reason": "runAnalysis (from line 2155) awaits sendChat({...}) at 2168, sendChat defined in the same file", "judge": "HC.3"}
+{"id": "1a02939f45f6721b", "verdict": "correct", "reason": "layout/index.vue line 91 registers emitter.on('reload', reload): the module holds that handler", "judge": "HC.3"}
+{"id": "002af3466ff3afde", "verdict": "correct", "reason": "sysParams.vue declares const setOptions = async () => {}", "judge": "HC.3"}
+{"id": "051c3c6d83ae785f", "verdict": "correct", "reason": "web/.env.production line 5 defines VITE_FILE_API = /api", "judge": "HC.3"}
+{"id": "00ed9da8c86c66a1", "verdict": "correct", "reason": "server/go.mod requires github.com/remyoudompheng/bigfft (indirect)", "judge": "HC.3"}
+{"id": "000de595d9311bc7", "verdict": "correct", "reason": "swagger path /fileUploadAndDownload/importURL post documents the POST importURL route under Group(\"fileUploadAndDownload\")", "judge": "HC.3"}
+{"id": "0062e29a4581efdf", "verdict": "correct", "reason": "swagger /info/updateInfo put documents the announcement plugin's group \"info\" PUT updateInfo", "judge": "HC.3"}
+{"id": "019320095cafa81f", "verdict": "correct", "reason": "swag @Router /authorityBtn/getAuthorityBtn [post] on GetAuthorityBtn, the route POST getAuthorityBtn under Group(\"authorityBtn\")", "judge": "HC.3"}
+{"id": "21f31413866c6045", "verdict": "correct", "reason": "tools.vue emits 'reload' on the shared mitt emitter; iframe.vue registers emitter.on('reload')", "judge": "HC.3"}
+{"id": "248d6ebc578efe48", "verdict": "correct", "reason": "tabs emit 'setKeepAlive' on the emitter; pinia router module listens emitter.on('setKeepAlive')", "judge": "HC.3"}
+{"id": "dea485c063a832f7", "verdict": "correct", "reason": "request.js emits 'show-error'; application/index.vue listens emitter.on('show-error')", "judge": "HC.3"}
+{"id": "50fe1452d6f01331", "verdict": "correct", "reason": "server Dockerfile builds `go build -o server .` and ENTRYPOINT ./server runs main.main", "judge": "HC.3"}
+{"id": "9e4ca26539c219ed", "verdict": "correct", "reason": "the closeThisPage handler is an arrow defined inside initPage, the enclosing callable runs it", "judge": "HC.3"}
+{"id": "01768346304f7ac4", "verdict": "correct", "reason": "autoCodePluginApi = SystemApiGroup.AutoCodePluginApi; route pubPlug -> AutoCodePluginApi.Packaged", "judge": "HC.3"}
+{"id": "02b5a42d8b521a02", "verdict": "correct", "reason": "plugin router skillsApi = api.ApiGroupApp.SystemApiGroup.SkillsApi; DeleteSkill is that type's method", "judge": "HC.3"}
+{"id": "0335fb1e747302d5", "verdict": "correct", "reason": "authorityApi.GetAuthorityList is AuthorityApi.GetAuthorityList in api/v1/system", "judge": "HC.3"}
+{"id": "0d6bf238dec73c54", "verdict": "correct", "reason": "apiRouterApi.GetApiList is SystemApiApi.GetApiList", "judge": "HC.3"}
+{"id": "116be977898d527b", "verdict": "correct", "reason": "autoCodeTemplateApi.MCPList is AutoCodeTemplateApi.MCPList in auto_code_mcp.go", "judge": "HC.3"}
+{"id": "0031e6815b21f3f9", "verdict": "correct", "reason": "client url /api/deleteApisByIds method delete; server apiRouter (Group api) DELETE deleteApisByIds", "judge": "HC.3"}
+{"id": "01796b4d32b67c25", "verdict": "correct", "reason": "client GET /api/freshCasbin; server apiPublicRouterWithoutRecord GET freshCasbin under api", "judge": "HC.3"}
+{"id": "00cba655663736f9", "verdict": "correct", "reason": "TencentCOS declares UploadFile and DeleteFile with OSS's signatures", "judge": "HC.3"}
+{"id": "03a828c7256a5c83", "verdict": "correct", "reason": "initAuthority defines MigrateTable, TableCreated, InitializerName, InitializeData, DataInserted: SubInitializer's set", "judge": "HC.3"}
+{"id": "0490caf3ae1372c9", "verdict": "correct", "reason": "initExcelTemplate.MigrateTable matches SubInitializer.MigrateTable; initExcelTemplate is registered as a SubInitializer", "judge": "HC.3"}
+{"id": "0653c1a6b7885e08", "verdict": "correct", "reason": "RequirementAnalyzer.New() mcp.Tool implements McpTool.New", "judge": "HC.3"}
+{"id": "06d106be139190d9", "verdict": "correct", "reason": "PackageEnter.Injection(file *ast.File) error implements Ast.Injection", "judge": "HC.3"}
+{"id": "07cf7ccdff588462", "verdict": "correct", "reason": "Import.Rollback(file *ast.File) error implements Ast.Rollback", "judge": "HC.3"}
+{"id": "09d6b43bdbf56aaf", "verdict": "correct", "reason": "PluginInitializeGorm.Format matches Ast.Format's signature", "judge": "HC.3"}
+{"id": "09d796e01cb38283", "verdict": "correct", "reason": "initExaFileMysql.TableCreated(ctx) bool implements SubInitializer.TableCreated", "judge": "HC.3"}
+{"id": "0b3f73426cbd5392", "verdict": "correct", "reason": "SysUser.GetUserInfo() any implements the Login interface's GetUserInfo() any in the same file", "judge": "HC.3"}
+{"id": "0bf0009d6f4802ce", "verdict": "correct", "reason": "MysqlInitHandler.InitTables matches TypedDBInitHandler.InitTables", "judge": "HC.3"}
+{"id": "00075734402bb0ca", "verdict": "correct", "reason": "email.go imports .../server/plugin/email/global, whose package file is gloabl.go", "judge": "HC.3"}
+{"id": "0274491c2ce5e6ba", "verdict": "correct", "reason": "ServiceGroup embeds CasbinService, the struct in sys_casbin.go of the same package", "judge": "HC.3"}
+{"id": "07315084b7d3d40b", "verdict": "correct", "reason": "vue-router route '/' redirect: '/login'", "judge": "HC.3"}
+{"id": "0c407fa826dec12f", "verdict": "correct", "reason": "registerIcons reads import.meta.env.MODE", "judge": "HC.3"}
+{"id": "00ca03dd5115ed2a", "verdict": "correct", "reason": "swagger delete /sysOperationRecord/deleteSysOperationRecord and the @Router annotation name one operation", "judge": "HC.3"}
+{"id": "01b955e49c08eb71", "verdict": "correct", "reason": "swagger post /api/ignoreApi and @Router /api/ignoreApi [post] are one route", "judge": "HC.3"}
+{"id": "05deb47b866c4643", "verdict": "correct", "reason": "swagger post /user/changePassword and @Router /user/changePassword [post] are one operation", "judge": "HC.3"}
+{"id": "06320e67793a8aca", "verdict": "correct", "reason": "swagger post /authority/copyAuthority and @Router on CopyAuthority are one route", "judge": "HC.3"}
+{"id": "072aabec4b99dd3a", "verdict": "correct", "reason": "swagger post /fileUploadAndDownload/removeChunk and @Router on RemoveChunk are one operation", "judge": "HC.3"}
+{"id": "07bc28bf73afd569", "verdict": "correct", "reason": "swagger post /user/setUserAuthority and @Router on SetUserAuthority are one operation", "judge": "HC.3"}
+{"id": "0848663110aec9b4", "verdict": "correct", "reason": "swagger post /init/initdb and @Router /init/initdb [post] are one operation", "judge": "HC.3"}
+{"id": "0c8e9481f0402320", "verdict": "correct", "reason": "@Router /info/findInfo [get] and swagger get /info/findInfo are one route", "judge": "HC.3"}
+{"id": "0cef1c61d905d34b", "verdict": "correct", "reason": "swagger delete /sysDictionaryDetail/deleteSysDictionaryDetail and its @Router are one route", "judge": "HC.3"}
+{"id": "012c04eeabbf7aa9", "verdict": "correct", "reason": "TestVerify calls Verify(testInfo, PageInfoVerify) from utils.Verify", "judge": "HC.3"}
+{"id": "002f1ac36403dda7", "verdict": "correct", "reason": "Handle builds &MenuCreateResponse{...} composite literal of the struct at line 45", "judge": "HC.3"}
+{"id": "0169e3ad2ee8ae90", "verdict": "correct", "reason": "initOAuthLink calls privyAuthPost(\"/api/v1/oauth/init\", ..), which fetches `${authBase}${path}` with POST", "judge": "HC.3"}
+{"id": "25925ae54e68adcb", "verdict": "correct", "reason": "linkEmailWithCode calls privyAuthPost(\"/api/v1/passwordless/link\", ..), a POST to `${authBase}${path}`", "judge": "HC.3"}
+{"id": "80c091215ecb8da7", "verdict": "correct", "reason": "sendEmailCode calls privyAuthPost(\"/api/v1/passwordless/init\", ..), a POST to `${authBase}${path}`", "judge": "HC.3"}
+{"id": "c196febd89e601e2", "verdict": "correct", "reason": "linkOAuthWithCode calls privyAuthPost(\"/api/v1/oauth/link\", ..), a POST to `${authBase}${path}`", "judge": "HC.3"}
+{"id": "d69c1cffe210d1a7", "verdict": "correct", "reason": "refreshPrivySession calls privyAuthPost(\"/api/v1/sessions\", ..), a POST to `${authBase}${path}`", "judge": "HC.3"}
+{"id": "0000ab562d37973b", "verdict": "correct", "reason": "the test calls createProgram(exploreCommand) imported from ../test/create-program", "judge": "HC.3"}
+{"id": "04c069e2aff81ed2", "verdict": "correct", "reason": "the test holds the readContract({abi: zoraCreator1155ImplABI, functionName: \"balanceOfBatch\"}) call", "judge": "HC.3"}
+{"id": "001244285af58d1c", "verdict": "correct", "reason": "submit.ts declares export interface SubmittedUserOp", "judge": "HC.3"}
+{"id": "0442c207168ba6d2", "verdict": "correct", "reason": "coins-deployments .env.example defines TURNKEY_TARGET_ADDRESS", "judge": "HC.3"}
+{"id": "00604e1b54bed08d", "verdict": "correct", "reason": "limit-orders package.json depends on ds-test (git url)", "judge": "HC.3"}
+{"id": "003110bf9fc211e9", "verdict": "correct", "reason": "the 0.3.3 entry is about the httpClient (IHttpClient) MintAPIClient takes, whose default is this const's fetch / post / retries", "judge": "HC.3"}
+{"id": "002056463deb4820", "verdict": "wrong", "reason": "the function emits TransferSingleWithData, declared in-repo in IZoraSparks1155Managed; the edge's target is an unresolved placeholder, not that event", "judge": "HC.3"}
+{"id": "02fa30a5ac67d073", "verdict": "unsure", "reason": "the function emits SetupNewToken (declared in the same contract) and URI; the unresolved target can only be URI, declared by OpenZeppelin's ERC1155, outside the snapshot", "judge": "HC.3"}
+{"id": "03a8eb401f8a7f6f", "verdict": "wrong", "reason": "the test emits IComments.Commented and ICallerAndCommenter.SwappedOnSecondaryAndCommented, both declared in-repo; the target is an unresolved placeholder, not either event", "judge": "HC.3"}
+{"id": "03de56984c72151a", "verdict": "wrong", "reason": "_burn emits Transfer, declared by IERC721 in the same file; the target is an unresolved placeholder, not that event", "judge": "HC.3"}
+{"id": "03fd3333c73ab314", "verdict": "wrong", "reason": "the function emits ContractMetadataUpdated (IZoraCreator1155) and ContractURIUpdated (IERC7572), both in-repo; the target is an unresolved placeholder, not either event", "judge": "HC.3"}
+{"id": "045e6efec4e080df", "verdict": "wrong", "reason": "resetSale emits SaleSet, declared in-repo in IERC20Minter; the target is an unresolved placeholder, not that event", "judge": "HC.3"}
+{"id": "04f6b1670744a00f", "verdict": "wrong", "reason": "depositBatch emits Deposit, declared in-repo in shared-contracts IProtocolRewards; the target is an unresolved placeholder, not that event", "judge": "HC.3"}
+{"id": "052a5fc2afbcaf48", "verdict": "correct", "reason": "the test emits TokenCreated (line 101), the event its contract declares at line 41", "judge": "HC.3"}
+{"id": "0706890b3c88d16f", "verdict": "correct", "reason": "__MultiOwnable_init emits OwnerUpdated (line 51), declared at line 12", "judge": "HC.3"}
+{"id": "0720b7fd897b8325", "verdict": "unsure", "reason": "the test only emits forge-std's log_named_uint, declared outside the snapshot", "judge": "HC.3"}
+{"id": "bca6c5f1fad7a78e", "verdict": "correct", "reason": "decodeEventLog({abi: commentsImplABI, eventName: \"Commented\"}) reads the Commented event IComments declares", "judge": "HC.3"}
+{"id": "dc7ccbde1767d288", "verdict": "correct", "reason": "decodeEventLog({abi: zoraCreator1155PremintExecutorImplABI, eventName: \"PremintedV2\"}) reads PremintedV2", "judge": "HC.3"}
+{"id": "ef34682a0d6d6a5d", "verdict": "correct", "reason": "decodeEventLog({abi: zoraCreator1155FactoryImplABI, eventName: \"SetupNewContract\"}) reads SetupNewContract", "judge": "HC.3"}
+{"id": "33f4eeaa94d0a462", "verdict": "correct", "reason": "package.json bin generate-fork-tests -> ./src/generateForkTests.ts", "judge": "HC.3"}
+{"id": "931ea6d58a3d6e82", "verdict": "correct", "reason": "package.json bin bundle-abis -> ./src/bundle-abis.ts", "judge": "HC.3"}
+{"id": "9c3116d2bbde07b9", "verdict": "correct", "reason": "package.json bin update-contract-version -> ./src/update-contract-version.ts", "judge": "HC.3"}
+{"id": "ab1de5bc43b8ab07", "verdict": "correct", "reason": "package.json bin rename-generated-abi-casing -> ./src/renameGeneratedAbiCasing.ts", "judge": "HC.3"}
+{"id": "00108582af923039", "verdict": "correct", "reason": "the public test_mstoreArrayLength procedure is the function declared at the site", "judge": "HC.3"}
+{"id": "0017c48f59b9917b", "verdict": "correct", "reason": "the public test_hook_version procedure is the function declared at the site", "judge": "HC.3"}
+{"id": "0058c6def80871ca", "verdict": "wrong", "reason": "the site is setUp of ZoraCreator1155PreminterTest in ZoraCreator1155PremintExecutor.t.sol; the edge binds the same-named contract's setUp in the _aa.t.sol file", "judge": "HC.3"}
+{"id": "00bd12c18751fab0", "verdict": "correct", "reason": "the external onERC1155Received procedure is the function declared at the site", "judge": "HC.3"}
+{"id": "00d441c013cd5133", "verdict": "correct", "reason": "the public test_getClaimableAmount_after_vesting_period_ends procedure is the function declared at the site", "judge": "HC.3"}
+{"id": "0115d1c037b1e4d3", "verdict": "wrong", "reason": "the site declares transferFrom in packages/coins' INonfungiblePositionManager; the edge binds the same-named interface's copy in shared-contracts", "judge": "HC.3"}
+{"id": "03e62edfda646bc7", "verdict": "correct", "reason": "PremintConfigVersion enum declares V2", "judge": "HC.3"}
+{"id": "000200e804de2007", "verdict": "correct", "reason": "ERC1155.setApprovalForAll implements IERC1155.setApprovalForAll declared in the same file", "judge": "HC.3"}
+{"id": "0328440f4558d1e1", "verdict": "correct", "reason": "IZoraCreator1155PremintExecutor is IGetContractAddress, imported from @zoralabs/shared-contracts/interfaces/IGetContractAddress.sol", "judge": "HC.3"}
+{"id": "00190517c3443966", "verdict": "correct", "reason": "import from \"@zoralabs/protocol-sdk\", the workspace package whose source entry is src/index.ts", "judge": "HC.3"}
+{"id": "093c01f026849ec2", "verdict": "correct", "reason": "AllowListParamType = SaleStartAndEnd & {..}", "judge": "HC.3"}
+{"id": "0149437ba10de097", "verdict": "correct", "reason": "DeployAllDevContracts is CoinsDeployerBase, imported from ../src/deployment/CoinsDeployerBase.sol", "judge": "HC.3"}
+{"id": "0203f01cfb022188", "verdict": "correct", "reason": "DeployPreminterImpl is ZoraDeployerBase, imported from ../src/deployment/ZoraDeployerBase.sol", "judge": "HC.3"}
+{"id": "036fd0c925b13412", "verdict": "correct", "reason": "main reads process.env.TURNKEY_API_PUBLIC_KEY", "judge": "HC.3"}
+{"id": "06eafb3a75413bd3", "verdict": "correct", "reason": "fixedPriceMinter is getContractFactory(\"FixedPriceAllowedMintersStrategy\").deploy(); setSale calls that contract's setSale", "judge": "HC.3"}
+{"id": "1b9a4cff648fc92e", "verdict": "correct", "reason": "writeContract({abi: CREATOR_COIN_VESTING_ABI, functionName: \"claimVesting\"}) on a creator coin address calls CreatorCoin.claimVesting", "judge": "HC.3"}
+{"id": "1d2f83bb855d282f", "verdict": "correct", "reason": "readContract({abi: uniswapQuoterABI, functionName: \"quoteExactInputSingle\"}) calls IQuoterV2.quoteExactInputSingle", "judge": "HC.3"}
+{"id": "38a28436144c5af6", "verdict": "correct", "reason": "readContract({abi: uniswapQuoterABI, functionName: \"quoteExactOutputSingle\"}) calls IQuoterV2.quoteExactOutputSingle", "judge": "HC.3"}
+{"id": "513c2496e507568a", "verdict": "correct", "reason": "readContract({abi: SMART_WALLET_ABI, functionName: \"nextOwnerIndex\"}) calls IMultiOwnable.nextOwnerIndex", "judge": "HC.3"}
+{"id": "9c0ce7071111f21b", "verdict": "correct", "reason": "readContract({abi: SMART_WALLET_ABI, functionName: \"ownerAtIndex\"}) calls IMultiOwnable.ownerAtIndex", "judge": "HC.3"}
+{"id": "ac78c8b6fb26f552", "verdict": "correct", "reason": "simulateContract with the DeterministicUUPSProxyDeployer ABI (out/ json) calls safeCreate2AndUpgradeToAndCall", "judge": "HC.3"}
+{"id": "d66501df5c41276c", "verdict": "correct", "reason": "readContract({abi: CREATOR_COIN_VESTING_ABI, functionName: \"getClaimableAmount\"}) calls CreatorCoin.getClaimableAmount", "judge": "HC.3"}
+{"id": "04c926a2fe5439a2", "verdict": "correct", "reason": "encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"setupNewTokenWithCreateReferral\"}) targets ZoraCreator1155Impl's function", "judge": "HC.3"}
+{"id": "0a01199b016d2ae2", "verdict": "correct", "reason": "encodeFunctionData({abi: erc20MinterABI, functionName: \"setSale\"}) targets ERC20Minter.setSale", "judge": "HC.3"}
+{"id": "0aed5546f817fafd", "verdict": "correct", "reason": "simulateContract on the IMMUTABLE_CREATE2_FACTORY with its ABI calls safeCreate2, the function the ImmutableCreate2Factory interface declares", "judge": "HC.3"}
+{"id": "0b061a1777b897ba", "verdict": "correct", "reason": "encodeFunctionData({abi: zoraCreatorFixedPriceSaleStrategyABI, functionName: \"setSale\"}) targets ZoraCreatorFixedPriceSaleStrategy.setSale", "judge": "HC.3"}
+{"id": "0cf5a5d681771509", "verdict": "correct", "reason": "encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"adminMint\"}) targets ZoraCreator1155Impl.adminMint", "judge": "HC.3"}
+{"id": "0e23f493713422d5", "verdict": "correct", "reason": "writeContract({abi: commentsImplABI, functionName: \"comment\"}) calls CommentsImpl.comment", "judge": "HC.3"}
+{"id": "1b694cac6d21af6c", "verdict": "correct", "reason": "simulateContract({abi: sponsoredSparksSpenderABI, functionName: \"setVerifierStatus\"}) calls SponsoredSparksSpender.setVerifierStatus", "judge": "HC.3"}
+{"id": "1fd831c85c5d340b", "verdict": "correct", "reason": "encodeFunctionData({abi: upgradeGateAbi, functionName: \"initialize\"}) targets UpgradeGate.initialize", "judge": "HC.3"}
+{"id": "21c89a733584e109", "verdict": "correct", "reason": "encodeFunctionData({abi: zoraCreator1155ImplABI, functionName: \"setupNewToken\"}) targets ZoraCreator1155Impl.setupNewToken", "judge": "HC.3"}
+{"id": "25d4ca750667b950", "verdict": "correct", "reason": "encodeFunctionData({abi: zoraSparksManagerImplABI, functionName: \"initialize\"}) targets ZoraSparksManagerImpl.initialize", "judge": "HC.3"}
+{"id": "0664ce9ce1db825e", "verdict": "correct", "reason": "setup.test exercises the setup command in setup.tsx", "judge": "HC.3"}
+{"id": "0037846b37d4cfb6", "verdict": "correct", "reason": "getProfile's options: Options<GetProfileData, ..> names the type from types.gen.ts", "judge": "HC.3"}

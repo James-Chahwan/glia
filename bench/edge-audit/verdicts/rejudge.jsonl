@@ -52,3 +52,59 @@
 {"id": "37f3fb4864c76e5d", "verdict": "wrong", "reason": "\"encoding/json\" is the Go standard library package, not the repo's json.go", "judge": "GP.14r"}
 {"id": "531c330eaaaa9cb9", "verdict": "wrong", "reason": "import java.util.ArrayList names the JDK class, not an in-repo event emitter", "judge": "GP.14r"}
 {"id": "a6194887876b42ae", "verdict": "wrong", "reason": "Tab in this section is the Alt+Tab key, not the Tab interface of stack.ts", "judge": "GP.14r"}
+{"id": "000049c92db26f6d", "verdict": "correct", "reason": "random_email() at line 255 is the factories.py function the test imports", "judge": "HC.3r"}
+{"id": "000055e3c941c3fa", "verdict": "wrong", "reason": "the test's subject is the Contents.Operations Extensions class (alias ExtensionSut), not CodeGenerator/Extensions.cs", "judge": "HC.3r"}
+{"id": "00009d06a4542f4d", "verdict": "correct", "reason": "tab.ts's TabService implements the TabService interface from index.ts, whose member getTabsRefTo it defines", "judge": "HC.3r"}
+{"id": "0000ab562d37973b", "verdict": "correct", "reason": "createProgram(exploreCommand) calls the helper from src/test/create-program.ts", "judge": "HC.3r"}
+{"id": "000158f7fdc9fbad", "verdict": "correct", "reason": "throw OAuth2Error(..) constructs the OAuth2Error class", "judge": "HC.3r"}
+{"id": "00015bbf7ff1e648", "verdict": "correct", "reason": "def perform sits inside RecoverRunsJob", "judge": "HC.3r"}
+{"id": "0001b3b7df16c16e", "verdict": "correct", "reason": "type Props is declared at module level in the file", "judge": "HC.3r"}
+{"id": "0001d8866d8a0073", "verdict": "correct", "reason": "getAndFocusRow(0) calls the arrow declared at line 166 of the same spec", "judge": "HC.3r"}
+{"id": "000200e804de2007", "verdict": "correct", "reason": "the override of setApprovalForAll implements IERC1155's declaration in the same file", "judge": "HC.3r"}
+{"id": "00027d9b41a6ee99", "verdict": "correct", "reason": "@composables/toast is the alias for src/composables/toast.ts, which exports useToast", "judge": "HC.3r"}
+{"id": "0002a5fd02f6649e", "verdict": "correct", "reason": "the file's only top-level declaration is module Concerns::TwilioVoiceCredentials", "judge": "HC.3r"}
+{"id": "00034e1dcbd75dec", "verdict": "correct", "reason": "PrefilterTask is declared as an exported arrow in its own file", "judge": "HC.3r"}
+{"id": "00039c70a3fb4710", "verdict": "correct", "reason": "removeQueryParamsFromUrl('theme') calls the exported helper of portalThemeHelper.js", "judge": "HC.3r"}
+{"id": "00041a69ec63a9c3", "verdict": "correct", "reason": "ClientUser : IUser, both in Squidex.Shared.Users", "judge": "HC.3r"}
+{"id": "0004378046a4f8d6", "verdict": "correct", "reason": "sut.RunAsync(..) exercises MigrateContentsJob.RunAsync", "judge": "HC.3r"}
+{"id": "000438748ed181e8", "verdict": "correct", "reason": "this.cleanup(this) inside init calls the class's protected cleanup", "judge": "HC.3r"}
+{"id": "00044e5a14df8495", "verdict": "correct", "reason": "userAccount is a property declared in the class body", "judge": "HC.3r"}
+{"id": "000489b30a44a8db", "verdict": "correct", "reason": "ShoppingList subclasses the SqlAlchemyBase declared four lines above", "judge": "HC.3r"}
+{"id": "00053b4f72fa8a4a", "verdict": "correct", "reason": "parked(..) is the test class's own private helper", "judge": "HC.3r"}
+{"id": "0005433ed584ecec", "verdict": "correct", "reason": "parseTemplateString is called at line 13 and imported from @hoppscotch/data", "judge": "HC.3r"}
+{"id": "000582d38fa970ff", "verdict": "correct", "reason": "ContentCleanupTests is declared in its file", "judge": "HC.3r"}
+{"id": "0005a0e23d88d498", "verdict": "correct", "reason": "DynamicUserContextBuilder is declared in its file", "judge": "HC.3r"}
+{"id": "0005b4224fec0819", "verdict": "correct", "reason": "'../../common/constants' from e2e/tasks resolves to cypress/common/constants.ts", "judge": "HC.3r"}
+{"id": "0006027c5fb37d31", "verdict": "correct", "reason": "the spec imports getI18nKey from ../settingsHelper and tests it", "judge": "HC.3r"}
+{"id": "0006b53575a517a0", "verdict": "correct", "reason": "io.tolgee.AbstractMcpTest is the testing module's class in package io.tolgee", "judge": "HC.3r"}
+{"id": "0006b9dd269d36f4", "verdict": "correct", "reason": "PROXY_URL_CONFIGS is read by value from helpers/configs", "judge": "HC.3r"}
+{"id": "0006dd4cda444d99", "verdict": "correct", "reason": "the class declares implements IContributorsMetadataDto", "judge": "HC.3r"}
+{"id": "00075734402bb0ca", "verdict": "correct", "reason": "the Go import path names the plugin/email/global package, file gloabl.go", "judge": "HC.3r"}
+{"id": "0007f8b2afa578f0", "verdict": "correct", "reason": "\"~/newstore/settings\" resolves to src/newstore/settings.ts", "judge": "HC.3r"}
+{"id": "002056463deb4820", "verdict": "wrong", "reason": "TransferSingleWithData is declared in-repo (IZoraSparks1155Managed); the edge ends at an unresolved placeholder instead", "judge": "HC.3r"}
+{"id": "0029181fe878eb1d", "verdict": "wrong", "reason": "the job spec stubs perform_later and never touches redis", "judge": "HC.3r"}
+{"id": "00378bb623cebf6d", "verdict": "wrong", "reason": "no repos is declared in RecipeCommentsController; self.repos is the base controller's property", "judge": "HC.3r"}
+{"id": "0058c6def80871ca", "verdict": "wrong", "reason": "the evidence is the .t.sol contract's setUp, the target the _aa.t.sol contract's same-named setUp", "judge": "HC.3r"}
+{"id": "006073f089e88b00", "verdict": "wrong", "reason": "a Stripe callback request spec does not test Google::CallbacksController (stripe/callbacks_controller.rb exists)", "judge": "HC.3r"}
+{"id": "00b4588f57e712b5", "verdict": "wrong", "reason": "the action's route is the [Route] template apps/{app}/schemas/{schema}/completion/prview-urls, not GET /", "judge": "HC.3r"}
+{"id": "00be3f5736ad00e1", "verdict": "wrong", "reason": "the codec test encodes and decodes in memory; no redis is reached", "judge": "HC.3r"}
+{"id": "00efd26aeb251fdf", "verdict": "wrong", "reason": "the migration's base Migration is EF Core's class, not a Squidex namespace", "judge": "HC.3r"}
+{"id": "0115d1c037b1e4d3", "verdict": "wrong", "reason": "the evidence is coins' interface copy; the target is the shared-contracts copy of the same-named interface", "judge": "HC.3r"}
+{"id": "01beee55da2cde04", "verdict": "wrong", "reason": "GET /api/apps/{name} is GetApp's [HttpGet][Route(\"apps/{app}\")]; the apps/{app}/ template serves only PUT and DELETE", "judge": "HC.3r"}
+{"id": "02ca1dcdf5ce8cc9", "verdict": "wrong", "reason": "the spec mocks PrismaService (mockDeep) and never reaches the database", "judge": "HC.3r"}
+{"id": "03a8eb401f8a7f6f", "verdict": "wrong", "reason": "the emitted IComments.Commented / SwappedOnSecondaryAndCommented are in-repo events; the edge ends at an unresolved placeholder", "judge": "HC.3r"}
+{"id": "03de56984c72151a", "verdict": "wrong", "reason": "Transfer is declared by IERC721 in the same file; the edge ends at an unresolved placeholder", "judge": "HC.3r"}
+{"id": "03fd3333c73ab314", "verdict": "wrong", "reason": "ContractMetadataUpdated and ContractURIUpdated are in-repo events; the edge ends at an unresolved placeholder", "judge": "HC.3r"}
+{"id": "045e6efec4e080df", "verdict": "wrong", "reason": "SaleSet is declared in-repo (IERC20Minter); the edge ends at an unresolved placeholder", "judge": "HC.3r"}
+{"id": "04776b3e806f123a", "verdict": "wrong", "reason": "the base DomainObject<Team> is the infrastructure generic class, not the Teams.DomainObject namespace", "judge": "HC.3r"}
+{"id": "04f6b1670744a00f", "verdict": "wrong", "reason": "Deposit is declared in-repo (shared-contracts IProtocolRewards); the edge ends at an unresolved placeholder", "judge": "HC.3r"}
+{"id": "0c5a7119e6259247", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :schemaName page is unrelated", "judge": "HC.3r"}
+{"id": "186fa29f86bd0cba", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :ruleId page is unrelated", "judge": "HC.3r"}
+{"id": "188ae620e7ebb4a6", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :schemaName page is unrelated", "judge": "HC.3r"}
+{"id": "1d4bca79e7737117", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :schemaName page is unrelated", "judge": "HC.3r"}
+{"id": "22f572894030b882", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :schemaName page is unrelated", "judge": "HC.3r"}
+{"id": "26d93ad533effcc8", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :ruleId page is unrelated", "judge": "HC.3r"}
+{"id": "289cba57c93cdf51", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :ruleId page is unrelated", "judge": "HC.3r"}
+{"id": "29bf653677a532fc", "verdict": "wrong", "reason": "'/404' is served by the '**' route; the :ruleId page is unrelated", "judge": "HC.3r"}
+{"id": "3a8445c103547127", "verdict": "wrong", "reason": "the subscribe is a STOMP websocket subscription, not a redis pubsub consumer", "judge": "HC.3r"}
+{"id": "f65c793cc0899f27", "verdict": "wrong", "reason": "the redirect belongs to the nested custom-roles route; page:/ and page:/list are not those pages", "judge": "HC.3r"}
