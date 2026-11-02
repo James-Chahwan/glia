@@ -1,0 +1,167 @@
+{
+ "fingerprint": "16 cores, AMD Ryzen 7 3700X 8-Core Processor",
+ "glia": "glia 0.5.6 (build 0.5.6+pe220807d11422cb2)",
+ "glia_head": "c237dffe14bc18ca1d02243207832546799be973",
+ "glia_source": "given",
+ "measured_at": "2026-11-02T18:34:29+1100",
+ "only": [],
+ "repos": {
+  "photoprism": {
+   "cpu_ms_runs": [
+    20065.4,
+    19954.5,
+    19865.9
+   ],
+   "median": {
+    "cpu_ms": 19954.5,
+    "phases": {
+     "const_scan": 10.1,
+     "encode": 88.6,
+     "finalize": 34.4,
+     "grafts": 106.3,
+     "language_build": 949.8,
+     "parse": 1031.1,
+     "persist": 307.8,
+     "post": 166.7,
+     "resolve": 66.0,
+     "spans": 106.4,
+     "total": 2489.7,
+     "walk": 88.4,
+     "write": 69.3
+    },
+    "rss_mb": 468.3,
+    "slowest_pass": "tag_synthetic_provenance:53.0ms",
+    "wall_ms": 2946.3
+   },
+   "rss_mb_runs": [
+    462.9,
+    478.6,
+    468.3
+   ],
+   "sha": "70e20b5e033f29e4d53b0eb34de44856806637d1",
+   "wall_ms_runs": [
+    2977.6,
+    2925.5,
+    2946.3
+   ]
+  },
+  "prefect": {
+   "cpu_ms_runs": [
+    22373.6,
+    22137.1,
+    22322.1
+   ],
+   "median": {
+    "cpu_ms": 22322.1,
+    "phases": {
+     "const_scan": 9.9,
+     "encode": 124.5,
+     "finalize": 33.9,
+     "grafts": 215.2,
+     "language_build": 621.7,
+     "parse": 1260.8,
+     "persist": 378.6,
+     "post": 239.9,
+     "resolve": 280.6,
+     "spans": 126.7,
+     "total": 2764.4,
+     "walk": 91.3,
+     "write": 71.2
+    },
+    "rss_mb": 579.1,
+    "slowest_pass": "org_packages:109.6ms",
+    "wall_ms": 3293.4
+   },
+   "rss_mb_runs": [
+    577.0,
+    579.1,
+    584.0
+   ],
+   "sha": "fa93ba2569274e61a5dd9d39c5b91824475a8521",
+   "wall_ms_runs": [
+    3285.0,
+    3653.0,
+    3293.4
+   ]
+  },
+  "tolgee": {
+   "cpu_ms_runs": [
+    14430.1,
+    14390.1,
+    14796.6
+   ],
+   "median": {
+    "cpu_ms": 14430.1,
+    "phases": {
+     "const_scan": 8.6,
+     "encode": 81.1,
+     "finalize": 22.8,
+     "grafts": 189.4,
+     "language_build": 325.7,
+     "parse": 1011.2,
+     "persist": 287.6,
+     "post": 172.5,
+     "resolve": 110.0,
+     "spans": 98.7,
+     "total": 1960.0,
+     "walk": 106.9,
+     "write": 71.0
+    },
+    "rss_mb": 370.1,
+    "slowest_pass": "tag_synthetic_provenance:82.2ms",
+    "wall_ms": 2358.9
+   },
+   "rss_mb_runs": [
+    365.6,
+    370.8,
+    370.1
+   ],
+   "sha": "43e6654422b1ab9b5d5dccbeb40244e0c586c6b1",
+   "wall_ms_runs": [
+    2358.9,
+    2362.7,
+    2195.2
+   ]
+  },
+  "twenty": {
+   "cpu_ms_runs": [
+    83533.5,
+    83275.4,
+    83379.7
+   ],
+   "median": {
+    "cpu_ms": 83379.7,
+    "phases": {
+     "const_scan": 79.3,
+     "encode": 391.8,
+     "finalize": 157.5,
+     "grafts": 1105.0,
+     "language_build": 3727.6,
+     "parse": 6264.4,
+     "persist": 1291.6,
+     "post": 866.1,
+     "resolve": 836.3,
+     "spans": 584.2,
+     "total": 13969.5,
+     "walk": 867.0,
+     "write": 150.5
+    },
+    "rss_mb": 1793.0,
+    "slowest_pass": "tag_synthetic_provenance:474.4ms",
+    "wall_ms": 15784.9
+   },
+   "rss_mb_runs": [
+    1794.8,
+    1793.0,
+    1783.2
+   ],
+   "sha": "8fd53a835fd5b968a5fe858d9439dae6070867f6",
+   "wall_ms_runs": [
+    15909.3,
+    15749.9,
+    15784.9
+   ]
+  }
+ },
+ "runs": 3
+}

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """HP.1's tests for closeout.py's gate reuse: digests, input sets, the decision, the record, TMPDIR and the
 ratchet / release-set / [gate-asks] rules; HP.2's re-judge (the decision table, the run-files check, the marker
-and cohort-gate.sh's selftest with its recheck case). Stdlib unittest; each test builds its own throwaway git repo under
+and cohort-gate.sh's selftest with its recheck case); HP.3's timing gate (its input set, the advisory / release-gating
+decision, build-timing.sh's selftest). Stdlib unittest; each test builds its own throwaway git repo under
 tempfile with a synthetic `cargo metadata` (no cargo, no glia). One test reads this checkout: every path literal
 a tracked *.rs names must lie inside the workspace tests' input set.
 
@@ -88,6 +89,13 @@ FILES = {
     "bench/rank-gate/baseline/current/shell.json": '{"r10": 0.5}\n',
     "scripts/rank-gate.sh": "true\n",
     "scripts/cohort-gate.sh": "true\n",
+    "scripts/build-timing.sh": "true\n",
+    "bench/build-timing/RULE.md": "rule\n",
+    "bench/build-timing/repos.json": json.dumps({"repos": [{"label": "twenty"}], "runs": 3}) + "\n",
+    "bench/build-timing/baseline.json": '{"repos": {}}\n',
+    "bench/cohort/repos.json": json.dumps({"repos": [
+        {"label": "twenty", "url": "https://github.com/x/twenty.git", "sha": "a" * 40},
+        {"label": "shell", "url": "https://github.com/x/shell.git", "sha": "b" * 40}]}) + "\n",
 }
 
 
@@ -335,13 +343,13 @@ class DecisionTests(unittest.TestCase):
         st = {g: {"how": "fresh", "tier": "full", "ok": True, "commit": "c" * 40} for g in C.RECORDED_GATES}
         st["rank"] = {"how": "reused", "tier": "full", "ok": True, "commit": "abcdef0123456789"}
         line, per, missing = C.release_set(st, "f" * 40)
-        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=7 reused=1 rejudged=0 full=8/8")
+        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=8 reused=1 rejudged=0 full=9/9")
         self.assertIn("   rank=reused abcdef012345", per)
         self.assertEqual(missing, [])
         st["cohort"] = {"how": "fresh", "tier": C.partial_tier(C.COHORT_FAST), "ok": True, "commit": "c"}
         del st["clippy"]
         line, _, missing = C.release_set(st, "f" * 40)
-        self.assertTrue(line.endswith("full=6/8"))
+        self.assertTrue(line.endswith("full=7/9"))
         self.assertEqual(missing, ["clippy", "cohort"])
 
     def test_line_tier(self):
@@ -437,7 +445,7 @@ class RejudgeTests(unittest.TestCase):
         st = {g: {"how": "fresh", "tier": "full", "ok": True, "commit": "c" * 40} for g in C.RECORDED_GATES}
         st["cohort"] = {"how": "rejudged", "tier": "full", "ok": True, "commit": "abcdef0123456789"}
         line, per, missing = C.release_set(st, "f" * 40)
-        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=7 reused=0 rejudged=1 full=8/8")
+        self.assertEqual(line, f"[closeout] set tree={'f' * 12} fresh=8 reused=0 rejudged=1 full=9/9")
         self.assertIn("   cohort=rejudged abcdef012345", per)
         self.assertEqual(missing, [])
         self.assertFalse(C.ratchet_due(st["cohort"], True))
@@ -472,6 +480,101 @@ class RejudgeTests(unittest.TestCase):
             r = subprocess.run(["bash", "-n", str(C.ROOT / script)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("recheck)", (C.ROOT / script).read_text())
+
+
+class TimingTests(unittest.TestCase):
+    """HP.3: the `timing` gate (scripts/build-timing.sh check): recorded and reused like the others, advisory per
+    wave, gating at the release."""
+
+    def test_input_set(self):
+        repo = Repo()
+        try:
+            before = repo.inputs().digest("timing")
+            measure, judge = repo.inputs().gate_sets("timing")
+            self.assertEqual(judge, {})
+            for p in ("scripts/build-timing.sh", "bench/build-timing/RULE.md", "bench/build-timing/baseline.json",
+                      "cli/src/main.rs", "core/src/lib.rs", "Cargo.lock", "bench/cohort/repos.json#pins"):
+                self.assertIn(p, measure, p)
+            self.assertNotIn("bench/cohort/repos.json", measure, "only the measured rows of the cohort's repos.json")
+            self.assertNotIn("testkit/src/lib.rs", measure, "engine's dev-dep is not the CLI's")
+            self.assertEqual(repo.inputs().timing_pins(), [["twenty", "https://github.com/x/twenty.git", "a" * 40]])
+            # another cohort row, dev-notes/ and the cohort baseline move nothing
+            rows = json.loads(FILES["bench/cohort/repos.json"])
+            rows["repos"][1]["sha"] = "c" * 40
+            repo.change("bench/cohort/repos.json", json.dumps(rows) + "\n")
+            repo.change("dev-notes/x.md", "notes v2\n")
+            repo.change("bench/cohort/results/baseline/summary.json", '{"repos": 3}\n')
+            self.assertEqual(repo.inputs().digest("timing")["digest"], before["digest"])
+            # a measured pin, the baseline and the CLI's code each move it
+            rows["repos"][0]["sha"] = "d" * 40
+            repo.change("bench/cohort/repos.json", json.dumps(rows) + "\n")
+            pinned = repo.inputs().digest("timing")
+            self.assertNotEqual(pinned["measure"], before["measure"])
+            repo.change("bench/build-timing/baseline.json", '{"repos": {"twenty": {}}}\n')
+            based = repo.inputs().digest("timing")
+            self.assertNotEqual(based["measure"], pinned["measure"])
+            repo.change("cli/src/main.rs", "fn main() { }\n")
+            self.assertNotEqual(repo.inputs().digest("timing")["measure"], based["measure"])
+            # the machine is an env line: another box runs it again, naming why
+            d = repo.inputs().digest("timing")
+            rec = record_with(("timing", entry(d)))
+            self.assertEqual(C.decide("timing", "full", d, rec)[0], "reuse")
+            repo.probes[C.ENV_PROBES["machine"]] = "8 cores, Other CPU"
+            self.assertEqual(C.decide("timing", "full", repo.inputs().digest("timing"), rec)[2],
+                             "env moved: machine")
+            self.assertEqual(C.GATE_ENV["timing"], ("rustc", "machine"))
+        finally:
+            repo.close()
+
+    def test_needs_and_steps(self):
+        self.assertIn("timing", C.RECORDED_GATES)
+        for remaining in ([], [["X.1"]]):
+            self.assertEqual(C.gate_needs(remaining, {"rank": False, "cohort": False}, set(), environ={})["timing"],
+                             "full")
+        steps = list(C.TIMING_STEPS)
+        self.assertEqual(steps.index("build_timing"), steps.index("cohort_gate") + 1)
+
+    def test_advisory_per_wave_gating_at_release(self):
+        ok = "[build-timing] check: ok - 4 repos, 52 phases, 0 gains, 0 regressions"
+        failed = "[build-timing] check: FAILED (1 regressions: twenty/language_build 3728->5900)"
+        load = "[build-timing] check: skipped - load 12.40 on 16 cores"
+        machine = "[build-timing] check: skipped - machine differs (16 cores, A vs 8 cores, B)"
+        # per wave: printed, never a failed gate
+        self.assertEqual(C.timing_verdict(ok, True), (True, None, f"== {ok}"))
+        self.assertEqual(C.timing_verdict(failed, True), (False, None, f"== {failed} (advisory)"))
+        self.assertEqual(C.timing_verdict(load, True), (False, None, f"== {load} (advisory)"))
+        self.assertEqual(C.timing_verdict("", True)[:2], (False, None))
+        # the release's last close-out: a regression and any skip fail it
+        self.assertEqual(C.timing_verdict(ok, False), (True, None, f"== {ok}"))
+        self.assertEqual(C.timing_verdict(failed, False), (False, "build timing", f"== {failed}"))
+        for skip in (load, machine):
+            self.assertEqual(C.timing_verdict(skip, False)[1], "build timing (skipped at the release's last close-out)")
+        self.assertEqual(C.timing_verdict("", False)[1], "build timing")
+        # a failed or skipped timing gate leaves the release set incomplete; a reused green one completes it
+        st = {g: {"how": "fresh", "tier": "full", "ok": True, "commit": "c" * 40} for g in C.RECORDED_GATES}
+        st["timing"] = {"how": "fresh", "tier": "full", "ok": False, "commit": "c" * 40}
+        self.assertEqual(C.release_set(st, "f" * 40)[2], ["timing"])
+        st["timing"] = {"how": "reused", "tier": "full", "ok": True, "commit": "abcdef0123456789"}
+        self.assertEqual(C.release_set(st, "f" * 40)[2], [])
+
+    def test_a_reuse_on_repeat(self):
+        """A green check at a digest is reused by the next close-out at that digest (`[closeout] reuse timing`); a
+        per-wave advisory FAILED is recorded as failed, so the repeat runs it again."""
+        d = {"digest": "d1", "measure": "m1", "judge": "j1", "env": {"closeout": "c"}, "env_digest": "e1"}
+        self.assertEqual(C.decide("timing", "full", d, record_with(("timing", entry(d))))[0], "reuse")
+        self.assertEqual(C.decide("timing", "full", d, record_with(("timing", entry(d, ok=False))))[::2],
+                         ("run", "last result FAILED"))
+
+    def test_build_timing_selftest(self):
+        r = subprocess.run(["bash", "-n", str(C.ROOT / "scripts/build-timing.sh")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with tempfile.TemporaryDirectory() as t:
+            r = subprocess.run(["bash", str(C.ROOT / "scripts/build-timing.sh"), "selftest"], capture_output=True,
+                               text=True, env=dict(os.environ, GLIA_BUILD_TIMING_DIR=t))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for case in ("language_build+60%: ok", "parse-30%: ok", "load-skip: ok"):
+            self.assertIn(f"selftest {case}", r.stdout)
+        self.assertIn("[build-timing] selftest: ok", r.stdout)
 
 
 class RecordTests(unittest.TestCase):

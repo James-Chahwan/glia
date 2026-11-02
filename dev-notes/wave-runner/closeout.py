@@ -15,7 +15,8 @@ leap-corrections.json (ids A*.* and L*.*), and records LANDED in leap_schedule.p
 Steps (README order): commits + per-packet status from the workflow journal,
 workspace tests + byte_identical, fmt (F0.5), clippy (HP.1), rustdoc (FD.23b), the out-of-workspace engram-export check
 (scripts/check-engram-export.sh), the rank gate (EG.3), the cohort gate (FH.12:
-scripts/cohort-gate.sh check, then its ratchet when every gate is green), each gate's `[gate-asks]` line (GP.12: the
+scripts/cohort-gate.sh check, then its ratchet when every gate is green), the build timings (HP.3:
+scripts/build-timing.sh check, advisory per wave, gating at the release), each gate's `[gate-asks]` line (GP.12: the
 packets whose acceptance named it and those whose commits touched its paths; `--plan-only` prints the asks), wheel
 rebuild + staleness check, run.py,
 matrix --emit/--check, python suites, fold the wave's followups into every
@@ -27,11 +28,11 @@ partial, forbid violation or missing cell is visible instead of buried.
 
 Every line it prints ends `[t+<n>s, step <m>s]` (elapsed, and since the line before), on stdout, in the
 recorded log (WF/closeout-<tag>w<wave>.log) and in the commit body, and the close-out ends on
-`[closeout] timing fmt=<s> clippy=<s> tests=<s> rustdoc=<s> rank_gate=<s> cohort_gate=<s> wheel=<s>
-bench=<s> engram=<s> total=<s>` (GP.7; a step that did not run reads `-`).
+`[closeout] timing fmt=<s> clippy=<s> tests=<s> rustdoc=<s> rank_gate=<s> cohort_gate=<s> build_timing=<s>
+wheel=<s> bench=<s> engram=<s> total=<s>` (GP.7; HP.3's build_timing; a step that did not run reads `-`).
 
 Gate reuse (HP.1, 0.5.7 §4b, James 2026-11-01): every recorded gate (tests, fmt, clippy, rustdoc, rank,
-cohort, wheel, bench) keys its result by a digest of exactly what it reads at HEAD (`git ls-tree` blobs of
+cohort, wheel, bench, and HP.3's timing) keys its result by a digest of exactly what it reads at HEAD (`git ls-tree` blobs of
 its input set, derived from `cargo metadata` and an include_str! scan, plus its env lines); the record lives
 outside the tree (~/.cache/glia-closeout/gate-record.json, GLIA_CLOSEOUT_RECORD overrides) and a gate whose
 digest matches a green entry is reused (`[closeout] reuse <gate> from <commit12> ..`), else it runs
@@ -90,13 +91,20 @@ RANK_FAST = "shell,websocket,samples,commons-lang,commons-io"
 RANK_GATE_JOBS = "3"
 # GP.7: the `[closeout] timing` steps, in the order the line prints them. clippy runs since HP.1 (James
 # 2026-11-02: `cargo clippy --workspace --all-targets -- -D warnings`, a recorded, reusable gate).
-TIMING_STEPS = ("fmt", "clippy", "tests", "rustdoc", "rank_gate", "cohort_gate", "wheel", "bench", "engram")
+# HP.3: build_timing, after cohort_gate (scripts/build-timing.sh check runs on the cohort gate's binary).
+TIMING_STEPS = ("fmt", "clippy", "tests", "rustdoc", "rank_gate", "cohort_gate", "build_timing", "wheel", "bench",
+                "engram")
 # James 2026-10-30 ("it's not small repos all the time ... we've built enough waves we might wanna do the full"):
 # the fast tiers are per wave, but every FULL_GATES_EVERY waves since a gate's last full check it runs in full,
 # so a big-repo regression surfaces within a few waves of its cause. baseline.json `gates_last_full` holds
 # the wave each gate last ran in full (the release's last close-out is always full).
 FULL_GATES_EVERY = 4
 RANK_GATE_TIMEOUT = 7200   # seconds: EG.3 measured a whole check at 313 s (6 snapshots); 2x that, at least 7200
+# HP.3: scripts/build-timing.sh check builds four big repos 3 times each (about 75 s on a quiet box), waiting up to 120 s
+# for a quiet load before each build; with the archive copies made once and a cold cargo build, at least 3600.
+BUILD_TIMING_TIMEOUT = 3600
+BUILD_TIMING_REPOS = "bench/build-timing/repos.json"
+COHORT_REPOS = "bench/cohort/repos.json"
 # FH.12: a wave whose packet commits touch one of these runs the cohort gate (scripts/cohort-gate.sh check)
 # after the rank gate: engine / graph / parser / code-domain changes, and the gate's own inputs.
 COHORT_PATHS = ("engine/", "graph/", "parsers/", "code-domain/", "bench/cohort/", "bench/sibyl/",
@@ -325,7 +333,9 @@ def cohort_gate(touched, remaining, wave, release, full_due=False, cmd="bash scr
 # commit or an out-of-packet fix between waves) runs it. Input sets are derived (cargo metadata, an include!
 # scan, a python import scan), never hand lists; closeout.py's own sha256 is an env line of every gate.
 # ---------------------------------------------------------------------------------------------------------------
-RECORDED_GATES = ("tests", "fmt", "clippy", "rustdoc", "rank", "cohort", "wheel", "bench")
+# HP.3: `timing` is scripts/build-timing.sh check (bench/build-timing/RULE.md): recorded like the others, so a close-out
+# whose glia, script, baseline, pins, rustc and machine did not move reuses its last green check.
+RECORDED_GATES = ("tests", "fmt", "clippy", "rustdoc", "rank", "cohort", "wheel", "bench", "timing")
 RECORD_SCHEMA = 1
 GREEN_KEEP = 8   # green entries kept per gate
 # bench/substrate-gap's outputs: the bench step writes them, so no gate reads them as an input.
@@ -339,7 +349,9 @@ GATE_JSON = "bench/rank-gate/gate.json"
 # 25.6 GB user quota): never a green entry, never re-judged.
 ENV_FAIL_RE = re.compile(r"Disk quota exceeded|os error 122\b|No space left on device|os error 28\b")
 ENV_PROBES = {"rustc": "rustc -Vv", "cargo": "cargo -V", "rustfmt": "rustfmt --version",
-              "clippy": "cargo clippy -V", "maturin": "maturin -V", "python": f"{LEAP_PY} -V"}
+              "clippy": "cargo clippy -V", "maturin": "maturin -V", "python": f"{LEAP_PY} -V",
+              # HP.3: the machine a timing baseline belongs to (`<cores> cores, <cpuinfo model name>`)
+              "machine": "bash scripts/build-timing.sh fingerprint"}
 # Each gate's env lines (beside `closeout`, every gate's): the tools and local config its result depends on.
 GATE_ENV = {
     "tests": ("rustc", "cargo", "cargo-config"),
@@ -350,6 +362,7 @@ GATE_ENV = {
     "cohort": ("rustc", "cargo"),
     "wheel": ("rustc", "cargo", "cargo-config", "maturin", "python"),
     "bench": ("python",),
+    "timing": ("rustc", "machine"),
 }
 INSTALLED_PROBE = (f"{LEAP_PY} -c \"import glia_py,glob,os;"
                    f"print(glob.glob(os.path.join(os.path.dirname(glia_py.__file__),'*.so'))[0]);"
@@ -861,6 +874,12 @@ class Inputs:
         elif gate == "bench":
             measure = pick({p for p in T if p.startswith("bench/substrate-gap/") and p not in SG_OUTPUTS})
             measure["<installed glia_py>"] = self.installed()[1]
+        elif gate == "timing":
+            # HP.3: the glia it builds, the script, its own bench dir (rule, repos, baseline) and, of
+            # bench/cohort/repos.json, only the rows it measures (label, url, sha): another cohort row moves nothing.
+            measure = pick(self.code(["glia-cli"]) | {"scripts/build-timing.sh"}
+                           | {p for p in T if p.startswith("bench/build-timing/")})
+            measure[COHORT_REPOS + "#pins"] = sha256_bytes(canonical_json(self.timing_pins()).encode())
         else:
             raise KeyError(gate)
         if gate in GATE_PATHS:
@@ -870,6 +889,14 @@ class Inputs:
                 if p.startswith(GATE_PATHS[gate]) and p not in measure and p not in judge and p != GATE_JSON:
                     measure[p] = T[p]
         return measure, judge
+
+    def timing_pins(self):
+        """HP.3: [label, url, sha] of every repo bench/build-timing/repos.json names, read from bench/cohort/repos.json
+        at HEAD (None for a label that file lacks)."""
+        mine, cohort = self.json_at(BUILD_TIMING_REPOS), self.json_at(COHORT_REPOS)
+        labels = [r.get("label") for r in (mine.get("repos") or [])] if isinstance(mine, dict) else []
+        rows = {r.get("label"): r for r in (cohort.get("repos") or [])} if isinstance(cohort, dict) else {}
+        return [[lab, (rows.get(lab) or {}).get("url"), (rows.get(lab) or {}).get("sha")] for lab in labels]
 
     def env_value(self, name):
         if name not in self._env:
@@ -950,7 +977,22 @@ def gate_needs(remaining, full_due, touched, environ=None, rustdoc_crates=None):
     return {"tests": "full", "fmt": "full", "clippy": "full", "rustdoc": rustdoc,
             "rank": "full" if rank_full else partial_tier(RANK_FAST),
             "cohort": "full" if cohort_full else partial_tier(COHORT_FAST),
-            "wheel": "full", "bench": "full"}
+            "wheel": "full", "bench": "full", "timing": "full"}
+
+
+def timing_verdict(line, remaining):
+    """HP.3: what one `scripts/build-timing.sh check` last line means here. Returns (ok, the failed gate or None, the
+    line to print). Per wave (`remaining` true) the check is advisory: a FAILED or skipped line is printed with
+    ` (advisory)` and fails nothing (James 2026-11-02, the accepted default). At the release's last close-out it
+    gates: a FAILED line fails it, and so does any skip (load, machine, GLIA_BUILD_TIMING_SKIP): the box must be
+    quiet."""
+    last = (line or "").strip() or "[build-timing] check: FAILED (no output)"
+    if last.startswith("[build-timing] check: ok"):
+        return True, None, f"== {last}"
+    if remaining:
+        return False, None, f"== {last} (advisory)"
+    skipped = last.startswith("[build-timing] check: skipped")
+    return False, "build timing" + (" (skipped at the release's last close-out)" if skipped else ""), f"== {last}"
 
 
 def dirty_paths():
@@ -1455,6 +1497,30 @@ def main():
     say(gate_attribution("cohort", cohort_line, asks["cohort"], touched_by,
                          reused_from=cohort_reused["commit"] if cohort_reused else None,
                          rejudged_from=cohort_st["commit"] if cohort_st.get("how") == "rejudged" else None)[0])
+
+    # --- HP.3: the build timings (scripts/build-timing.sh, bench/build-timing/RULE.md) ---------------------------------
+    # After the cohort gate, on its binary: the script's own `cargo build --release -p glia-cli` is the cohort gate's
+    # (a no-op when that just ran). Advisory per wave, gating at the release (timing_verdict); a skip is never
+    # recorded, a per-wave FAILED is recorded as failed (so the next close-out runs it again).
+    def run_timing(gsay):
+        if not (ROOT / "scripts/build-timing.sh").exists():
+            line, out = "[build-timing] check: skipped - no scripts/build-timing.sh", ""
+        else:
+            try:
+                out, _ = sh("bash scripts/build-timing.sh check 2>&1", timeout=BUILD_TIMING_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                out, line = "", f"[build-timing] check: FAILED (timeout after {BUILD_TIMING_TIMEOUT}s)"
+            else:
+                WF.mkdir(parents=True, exist_ok=True)
+                (WF / f"build-timing-{f'r{release}-' if release else ''}w{wave}.log").write_text(out)
+                line = (out.strip().splitlines() or [""])[-1]
+        ok, fail, shown = timing_verdict(line, bool(remaining))
+        gsay(shown)
+        if fail:
+            gates.append(fail)
+        return {"ok": ok, "line": line, "log": out, "skip_record": "] check: skipped" in line}
+    with step("build_timing"):
+        gate("timing", needs["timing"], run_timing)
 
     # --- the wheel: rebuild + install + its surface checks ------------------------------------------------------
     def run_wheel(gsay):
