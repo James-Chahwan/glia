@@ -17,7 +17,7 @@ contributions are unwelcome:
   allocated id and only grows; `engine/tests/id_blocks.rs` fails on an id that moved, an id two domains share or a
   private id in a shipped table.
 - **The gates are heavy.** A release runs the full test suite, a rank gate on six pinned public snapshots and a cohort
-  gate on 21 public repos, about an hour in all.
+  gate on 21 public repos, about an hour in all. Those are release-only; a pull request runs the fast gate below.
 - **The graph work is moving.** The next releases add more graph layers, stacking and new domains, so the shape a
   contribution would plug into is still changing.
 
@@ -46,6 +46,46 @@ domain is read as a design (below). `engine/tests/seams.rs` fails when a languag
   what you need. A shipped table never holds a private id, so the release that merges the idea promotes them into the
   domain's block; a renumber is safe only because a private id never shipped.
 - **Start a big feature as an issue** (a new language, a new kind of edge), so it can be lined up with a release.
+
+## Before you open a PR
+
+```bash
+bash scripts/pr-check.sh                 # against origin/main (else main)
+bash scripts/pr-check.sh --base <rev>    # against another base
+```
+
+It reads the paths your change touches (`git diff --name-only <base>...HEAD` plus the working tree) and runs only the
+checks those paths need; the path table at the top of the script is the one list of which path needs which step:
+
+- always `cargo fmt --all --check`;
+- for each touched workspace crate, `cargo clippy -p <crate> --all-targets -- -D warnings` and `cargo test -p <crate>`;
+- `core/`, `code-domain/`, `build-domain/`, `activation/`: the id lock (`engine_tests id_blocks::`);
+- `parsers/`, `graph/`, `engine/`: the language seams (`engine_tests seams::`) and the self-scan (`self_scan::`);
+- `cli/`, `README.md`, `skills/`: the CLI surface snapshots, the README `## CLI` usage lines, the skills' invocations;
+- `py/`: the pyo3 surface, over a freshly built wheel;
+- a fixture, a matrix or pattern cell, or a language parser crate: the `glia_py` wheel built into a venv
+  (`~/.cache/glia/pr-check/venv`, `GLIA_PR_CHECK_VENV`; never your user site), `grade.py` on each touched fixture or
+  cell, and `matrix.py --language <lang> --fail-on-error` for its row. A missed expectation is reported, not failed:
+  a fixture glia does not read yet is still a contribution. `--no-wheel` skips the build and grades with a `glia_py`
+  you already have (`GLIA_PR_CHECK_PY`).
+
+Every step prints `[pr-check] step=<name> <ok|FAILED|skipped> <s>s`; the last line is
+`[pr-check] ok - <n> steps in <s>s (base <rev12>)` (exit 0) or `[pr-check] FAILED (<steps>)` (exit 1). It respects
+`GLIA_THREADS`, `CARGO_BUILD_JOBS` and `TMPDIR`, needs bash 4.3 or newer, and on a glibc older than 2.38 builds `glia-cli`
+with `--no-default-features --features embed` (the WebGPU prebuilt needs 2.38).
+
+Measured warm (target/ already built, 16 cores, `CARGO_BUILD_JOBS=8`, `CARGO_INCREMENTAL=0`), at 0.5.7: a docs-only
+change 6 s (fmt); a fixture's `key.json` 30 to 60 s (fmt, the wheel relinked and installed, the grade, the matrix
+row); a one-line Lua parser change 132 s (fmt 5, clippy 1, the crate's tests 1, `seams::` 49 and `self_scan::` 22 for
+relinking the engine's test binary, the wheel 50, the matrix row 4). A first run compiles the workspace and, for a
+fixture or parser change, the wheel: the parser change took 199 s from an empty target/ on that machine, and takes
+longer on a laptop.
+
+**Release-only, never run by pr-check:** the full workspace test suite (pr-check runs it only when a root
+`Cargo.toml`, `Cargo.lock` or lint config moved), the rank gate (`scripts/rank-gate.sh`, six
+pinned snapshots) and the cohort gate (`scripts/cohort-gate.sh`, 21 repos). pr-check prints which of them your change
+will meet at the release (`release gates this change will run: rank, cohort`). `--rank-fast` opts into the rank gate's
+five small snapshots, a few minutes after they are fetched; it never writes a baseline.
 
 ## Licence
 

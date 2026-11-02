@@ -15,7 +15,9 @@ Which seams can merge as a pull request (James 2026-11-02, the 0.5.7 rulings):
 | [A language parser](#4-a-language-parser) | read as a design and rebuilt into a release, with credit ([CONTRIBUTING.md](../CONTRIBUTING.md)) |
 | [A domain crate](#5-a-domain-crate) | read as a design and rebuilt into a release, with credit |
 
-A change outside every seam is read as a design too. The language seam is documented here and pinned by a
+Before a pull request, `bash scripts/pr-check.sh` runs every seam's checks that the change's paths need, in minutes
+on a warm target/; the rank and cohort gates are the release's, never a PR's. A change outside every seam is read as a
+design too. The language seam is documented here and pinned by a
 completeness test, `engine/tests/seams.rs`; there is no single table of languages to edit.
 
 ## 1. A fixture
@@ -31,6 +33,8 @@ find. It changes no engine code.
 
 **Checks**
 
+- `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
+  the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
 - `python3 bench/substrate-gap/grade.py fixtures/<name>` grades the one fixture (`--dump` lists everything the build
   emitted, to author the key against reality). It needs the `glia_py` wheel.
 - `python3 bench/substrate-gap/run.py --no-log` grades every fixture. A fixture glia fails is still a contribution: it
@@ -59,6 +63,8 @@ A cell is a fixture filed under the matrix's layout.
 
 **Checks**
 
+- `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
+  the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
 - `python3 bench/substrate-gap/matrix.py --check` (exit 0) and `python3 bench/substrate-gap/test_matrix.py`.
 - `python3 bench/substrate-gap/grade.py matrix/<language>/<mechanism>` (or `patterns/..`) for the one cell.
 - A pull request never regenerates `bench/substrate-gap/COVERAGE.md`, `results-latest.json` or `legacy-latest.json`
@@ -95,6 +101,8 @@ as a design.
 
 **Checks**
 
+- `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
+  the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
 - `cargo test -p glia-code-domain hosts::` (`the_table_is_valid` runs `hosts::validate()` over every row: a duplicate
   or reserved name, a missing `lang` / `exts`, an empty or malformed gate, a callee not rooted at its gate's global, a
   callee and shape that do not go together, a manifest another row claims).
@@ -143,6 +151,8 @@ version bump.
 
 **Checks**
 
+- `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
+  the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
 - `cargo test -p glia-engine --test engine_tests seams::` prints
   `[seams] languages=<n> groups=<g> matrix_rows=<m> exempt=<e>` and fails when a tag `detect_language` returns misses
   any of: a row in the test's tables, a `parse_one` that parses a one-line sample, the parser directory, its workspace
@@ -180,6 +190,8 @@ cell types and tables. Code is the first domain; build targets (0.5.7) the secon
 
 **Checks**
 
+- `bash scripts/pr-check.sh [--base <rev>]`, the one fast command: it runs, for the paths the change touches,
+  the checks below and fmt / clippy / the touched crates' tests ([CONTRIBUTING.md](../CONTRIBUTING.md#before-you-open-a-pr)).
 - `cargo test -p glia-engine --test engine_tests id_blocks::` (`[ids] blocks domains=<d> ..`): every shipped id in its
   domain's block, none in two domains, `core/ids.lock` equal to the shipped tables, the lock append-only.
 - The domain crate's own round-trip test (`build-domain/tests/round_trip.rs`), and `toy-domain/`'s proof that the
