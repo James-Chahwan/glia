@@ -329,3 +329,7 @@
 {"wave": "R057-W4", "event": "end", "pct": 66, "resets_at": 1793883600, "ts": 1793612445, "window": "seven_day"}
 {"wave": "R057-W4", "event": "end", "pct": 66, "resets_at": 1793883600, "ts": 1793614457, "window": "seven_day"}
 {"wave": "R057-W4", "event": "end", "pct": 66, "resets_at": 1793883600, "ts": 1793614531, "window": "seven_day"}
+{"wave": "R057-W5", "event": "start", "pct": 66, "resets_at": 1793883600, "ts": 1793614537, "window": "seven_day"}
+{"wave": "R057-W5", "event": "end", "pct": 68, "resets_at": 1793883600, "ts": 1793616162, "window": "seven_day"}
+{"wave": "R057-W5", "event": "end", "pct": 68, "resets_at": 1793883600, "ts": 1793617190, "window": "seven_day"}
+{"wave": "R057-W5", "event": "end", "pct": 68, "resets_at": 1793883600, "ts": 1793617594, "window": "seven_day"}

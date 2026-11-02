@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 509,
+  "fixtures": 515,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -317,6 +317,14 @@
     },
     "csharp-aspnet-composed": {
       "framework": "csharp-aspnet-composed",
+      "language": "csharp",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-aspnet-verb-route-split": {
+      "framework": "csharp-aspnet-verb-route-split",
       "language": "csharp",
       "per_category": {
         "HANDLED_BY": 1.0,
@@ -1779,6 +1787,14 @@
         "DEFINES_CONFIG": 1.0
       }
     },
+    "nav-angular-lazy-children": {
+      "framework": "nav-angular-lazy-children",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
+      }
+    },
     "nav-angular-links": {
       "framework": "nav-angular-links",
       "language": "typescript",
@@ -2153,6 +2169,13 @@
         "IMPORTS": 1.0
       }
     },
+    "py-inherited-attribute-reads": {
+      "framework": "py-inherited-attribute-reads",
+      "language": "python",
+      "per_category": {
+        "HAS_ATTRIBUTE": 1.0
+      }
+    },
     "py-inherits": {
       "framework": "py-inherits",
       "language": "python",
@@ -2201,6 +2224,13 @@
       "framework": "python-requirements-roots",
       "language": "python",
       "per_category": {}
+    },
+    "queue-stomp-not-redis": {
+      "framework": "queue-stomp-not-redis",
+      "language": "typescript",
+      "per_category": {
+        "CONTAINS": 1.0
+      }
     },
     "react-hook": {
       "framework": "react-hook",
@@ -2714,6 +2744,13 @@
       "framework": "test-reports-fail",
       "language": "python",
       "per_category": {}
+    },
+    "tests-name-match-nearest": {
+      "framework": "tests-name-match-nearest",
+      "language": "ruby",
+      "per_category": {
+        "TESTS": 1.0
+      }
     },
     "tests-name-match-scope": {
       "framework": "tests-name-match-scope",
@@ -3353,6 +3390,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "xcut-overlay-llm-model-identity": {
+      "framework": "xcut-overlay-llm-model-identity",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0,
+        "SAME_AS": 1.0
       }
     },
     "xcut-overlay-wrapper": {
