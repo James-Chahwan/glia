@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 
 use glia_engine::check::{CheckOptions, check_with_roots};
+use glia_engine::confidence;
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -16,10 +17,22 @@ use crate::graph::PyGraph;
 /// `cargo test -p glia-py` covers it (see the crate doc). `repo_roots` is the
 /// graph's (DT.7b: each root's `.glia/overlay.toml` is bound again, as
 /// `gaps` reads it).
+#[cfg(test)]
 fn check_json(
     merged: &MergedGraph,
     repo_roots: &BTreeMap<u64, String>,
     strict: bool,
+) -> Result<String, serde_json::Error> {
+    check_json_with(merged, repo_roots, strict, true)
+}
+
+/// [`check_json`] with `precision=` (HC.4): false leaves every `precision`
+/// out, true prints `[confidence] surface=py ..` when a row carries one.
+fn check_json_with(
+    merged: &MergedGraph,
+    repo_roots: &BTreeMap<u64, String>,
+    strict: bool,
+    precision: bool,
 ) -> Result<String, serde_json::Error> {
     let roots: Vec<(u64, PathBuf)> = repo_roots
         .iter()
@@ -27,7 +40,9 @@ fn check_json(
         .collect();
     let mut opts = CheckOptions::default();
     opts.strict = strict;
-    serde_json::to_string(&check_with_roots(merged, &roots, &opts))
+    let mut report = check_with_roots(merged, &roots, &opts);
+    confidence::finish(&mut report, precision, "py");
+    serde_json::to_string(&report)
 }
 
 #[pymethods]
@@ -119,9 +134,19 @@ impl PyGraph {
     /// `count` and evidence as forbid_edge's, `blocking` under the default
     /// `min_tier` (the model has no per-rule gate). `glia check` renders the
     /// model as its `## reflexion model` section (CC.5c).
-    #[pyo3(signature = (strict=false))]
-    fn check(&self, py: Python<'_>, strict: bool) -> PyResult<Py<PyAny>> {
-        to_py(py, check_json(&self.merged, &self.repo_roots, strict))
+    ///
+    /// HC.4: every evidence row carries `precision` `{lo, p, hi, n, stratum,
+    /// audit}` (plus `census` / `under_floor` / `unmeasured` when true), the
+    /// audited precision of its edge's stratum, and every violation the one
+    /// its tier rests on (a forbid_edge's or divergence's strongest row of
+    /// its tier, a cycle's, path's or rule row's weakest link). It never
+    /// changes a row, a tier or `blocking`; `precision=False` leaves it out.
+    #[pyo3(signature = (strict=false, precision=true))]
+    fn check(&self, py: Python<'_>, strict: bool, precision: bool) -> PyResult<Py<PyAny>> {
+        to_py(
+            py,
+            check_json_with(&self.merged, &self.repo_roots, strict, precision),
+        )
     }
 }
 

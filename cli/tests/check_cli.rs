@@ -135,6 +135,8 @@ fn glia(args: &[&str]) -> (i32, String, Vec<String>) {
     )
 }
 
+/// The tier cells below are pinned with `--no-precision` (HC.4): the
+/// precision beside each tier is pinned by confidence_cli.rs.
 #[test]
 fn violations_exit_1_with_located_tables() {
     let fx = Fixture::new(
@@ -147,7 +149,7 @@ fn violations_exit_1_with_located_tables() {
             (".glia/overlay.toml", RULES),
         ],
     );
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 1, "{stdout}");
     assert_eq!(
         markers,
@@ -727,7 +729,7 @@ fn reflexion_section_and_exit_code() {
     // No allow: web -> store skips a layer below a strict one - a divergence,
     // which is a violation.
     let fx = model_fixture("reflexion-divergent", MODEL);
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 1, "{stdout}");
     assert_eq!(
         markers,
@@ -932,7 +934,7 @@ rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handle
 #[test]
 fn rule_violation_section_and_exit_1() {
     let fx = db3a_fixture("rule-section", RULE_INVARIANTS);
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 1, "{stdout}");
     assert_eq!(
         markers.iter().take(3).collect::<Vec<_>>(),
@@ -1001,7 +1003,7 @@ rule = \"violation(a, b) :- calls(a, b), in_scope(a, \\\"scripts\\\"), in_scope(
 "
     );
     let fx = db3a_fixture("advisory-rule", &overlay);
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 0, "a heuristic violation never fails CI: {stdout}");
     assert_eq!(
         markers.last().map(String::as_str),
@@ -1031,7 +1033,7 @@ to = \"store\"
 "
     );
     let fx = db3a_fixture("advisory-forbid", &overlay);
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         markers.last().map(String::as_str),
@@ -1077,7 +1079,7 @@ categories = [\"HTTP_CALLS\"]
 #[test]
 fn min_tier_fact_derived_is_advisory() {
     let fx = http_fixture("min-tier-fact", "min_tier = \"fact\"\n");
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         markers.last().map(String::as_str),
@@ -1093,7 +1095,7 @@ fn min_tier_fact_derived_is_advisory() {
     }
 
     let fx = http_fixture("min-tier-default", "");
-    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 1, "the default min_tier is derived: {stdout}");
     assert_eq!(
         markers.last().map(String::as_str),
@@ -1146,7 +1148,7 @@ via = [\"services/api/public\"]
             (".glia/overlay.toml", overlay),
         ],
     );
-    let (code, stdout, mut markers) = glia(&["check", &fx.path()]);
+    let (code, stdout, mut markers) = glia(&["check", &fx.path(), "--no-precision"]);
     assert_eq!(code, 1, "{stdout}");
     // FD.27: one shared level vector line per check with a transitive rule,
     // last; its length is the fixture's edge count.

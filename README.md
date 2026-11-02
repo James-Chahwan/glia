@@ -288,10 +288,10 @@ glia trace <REPO> <FEATURE> [--depth <DEPTH>] [--json] [--max-paths <MAX_PATHS>]
     shows its best member and an `(also in: ..)` cell. A feature that names nothing may
     seed from the top `semantic` flow of glia flows --concept (resolved_by
     concept_semantic, heuristic); --no-semantic never reads the vectors.
-glia why <REPO> <FROM> <TO> [--category <CATEGORY>] [--json] [--with <WITH>]...
+glia why <REPO> <FROM> <TO> [--category <CATEGORY>] [--json] [--no-precision] [--with <WITH>]...
     Every edge between two nodes with its emitter, rule, call site, confidence and
     FACT / DERIVED / HEURISTIC tier; with none, a witness path. Exits 1 when not found.
-glia implementors <REPO> <QNAME> [--direct] [--json] [--up] [--with <WITH>]...
+glia implementors <REPO> <QNAME> [--direct] [--json] [--no-precision] [--up] [--with <WITH>]...
     Who implements or extends a type, or overrides a method (--up: its supertypes),
     each row tiered by the weakest heritage edge on its path.
 glia serves <REPO> <CHANNEL> [--json] [--mechanism auto|http|queue] [--no-collapse] [--with <WITH>]...
@@ -327,7 +327,7 @@ glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN
     blended order), each the file's best match, marked heuristic, with find's absence
     kept as `seed_absence`; --no-semantic never reads the vectors. Exits 1 when the
     pack is empty (the absence says why).
-glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-mb <MB>] [--max-rows <N>] [--output <PRED>]... [--with <WITH>]...
+glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-mb <MB>] [--max-rows <N>] [--no-precision] [--output <PRED>]... [--with <WITH>]...
     A Datalog program from <FILE>, -e or stdin (with --gql, a GQL read query: MATCH ...
     WHERE ... RETURN) over the code graph, the predicate prelude merged in
     (docs/rules.md). One table per output (the program's sinks, or each --output, cut
@@ -370,7 +370,7 @@ glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min
     --min-support sighted handlers is the convention, and every handler off it a
     located DIVERGENCE. Blind handlers are listed, never counted. Counts, not rules;
     --base keeps the divergences the change touched.
-glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--offset <N>] [--ranking ppr|ppr-wide|bfs] [--title <TEXT>]
+glia review <REPO> [--base <REV>] [--depth <N>] [--full] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived] [--no-cochange] [--no-precision] [--offset <N>] [--ranking ppr|ppr-wide|bfs] [--title <TEXT>]
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, the declared rules checked on both sides, and the inferred-model
@@ -442,7 +442,7 @@ glia watch <REPO> [--debounce-ms <N>] [--embed] [--embed-model bge-small|test-ha
     write starts no update. Another model's sidecar exits 2 before listening.
 
 # Rules
-glia check <REPO> [--json] [--strict] [--with <WITH>]...
+glia check <REPO> [--json] [--no-precision] [--strict] [--with <WITH>]...
     Evaluate .glia/overlay.toml's [[constraint]] rules (forbid_edge, transitive
     forbid_edge with `via` facades, no_cycle, and version 2's `invariant` with a
     Datalog `rule`) and its reflexion model ([[component]], [[layer]], `allow` rules:

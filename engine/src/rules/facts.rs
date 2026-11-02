@@ -526,6 +526,13 @@ pub(crate) fn located_edge(
             .map(|file| (Some(file), e.line.map(|l| i64::from(l) + 1)))
     });
     let (file, line) = site.unwrap_or((f.file, f.line));
+    // HC.4: the audited precision of the edge's stratum, beside its tier.
+    let precision = crate::confidence::lookup(
+        edge_category::name(category),
+        tier,
+        ev.map(|e| e.emitter.as_str()),
+        ev.and_then(|e| e.rule.as_deref()),
+    );
     ViolationEdge {
         from_qname: f.qname,
         to_qname: loc.locate(to).qname,
@@ -535,6 +542,7 @@ pub(crate) fn located_edge(
         emitter: ev.map(|e| e.emitter.clone()),
         tier: tier.as_str(),
         note,
+        precision: Some(precision),
     }
 }
 

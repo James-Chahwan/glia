@@ -321,12 +321,14 @@ fn top_level_keys(text: &str) -> Vec<String> {
 }
 
 /// A new violation in the working tree fails the gate: exit 1, the markdown
-/// report on stdout, the engine's marker saying `blocking=true`.
+/// report on stdout, the engine's marker saying `blocking=true`. The tier
+/// cells are pinned with `--no-precision` (HC.4; confidence_cli.rs pins the
+/// precision text).
 #[test]
 fn a_new_violation_exits_1_with_the_markdown_report() {
     let s = Scratch::committed("new", WEB_APP_CLEAN);
     s.write("web/app.py", WEB_APP);
-    let o = s.review(&[]);
+    let o = s.review(&["--no-precision"]);
     assert_eq!(o.status.code(), Some(1), "{}", show(&o));
     let out = stdout(&o);
     assert!(

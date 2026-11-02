@@ -8,6 +8,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::confidence;
 use glia_engine::memory::MemoryBudget;
 use glia_engine::rules::{QueryAnswer, QueryOptions, RuleError, query, query_gql};
 use glia_graph::MergedGraph;
@@ -48,36 +49,66 @@ fn options(
 
 /// An engine answer as JSON text, its absence counting the build's
 /// `unparsed_files`, or the error's rendered diagnostics.
+/// With `precision` false every row's `precision` (HC.4) is left out, else
+/// the `[confidence] surface=py ..` marker prints when a row carries one.
 fn answer_json(
     answer: Result<QueryAnswer, RuleError>,
     unparsed_files: usize,
+    precision: bool,
 ) -> Result<String, String> {
     let mut a = answer.map_err(|e| e.rendered)?;
     if let Some(absence) = a.absence.as_mut() {
         absence.unparsed_files = unparsed_files;
     }
+    confidence::finish(&mut a, precision, SURFACE);
     serde_json::to_string(&a).map_err(|e| e.to_string())
 }
 
 /// The whole body of [`PyGraph::query`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p glia-py` covers it (see the crate doc).
+/// `cargo test -p glia-py` covers it (see the crate doc). Rows keep their
+/// `precision`.
+#[cfg(test)]
 fn query_json(
     merged: &MergedGraph,
     program: &str,
     opts: &QueryOptions,
     unparsed_files: usize,
 ) -> Result<String, String> {
-    answer_json(query(merged, program, opts), unparsed_files)
+    query_json_with(merged, program, opts, unparsed_files, true)
 }
 
-/// The whole body of [`PyGraph::query_gql`], minus pyo3.
+/// [`query_json`] with `precision=` (HC.4).
+fn query_json_with(
+    merged: &MergedGraph,
+    program: &str,
+    opts: &QueryOptions,
+    unparsed_files: usize,
+    precision: bool,
+) -> Result<String, String> {
+    answer_json(query(merged, program, opts), unparsed_files, precision)
+}
+
+/// The whole body of [`PyGraph::query_gql`], minus pyo3. Rows keep their
+/// `precision`.
+#[cfg(test)]
 fn query_gql_json(
     merged: &MergedGraph,
     text: &str,
     opts: &QueryOptions,
     unparsed_files: usize,
 ) -> Result<String, String> {
-    answer_json(query_gql(merged, text, opts), unparsed_files)
+    query_gql_json_with(merged, text, opts, unparsed_files, true)
+}
+
+/// [`query_gql_json`] with `precision=` (HC.4).
+fn query_gql_json_with(
+    merged: &MergedGraph,
+    text: &str,
+    opts: &QueryOptions,
+    unparsed_files: usize,
+    precision: bool,
+) -> Result<String, String> {
+    answer_json(query_gql(merged, text, opts), unparsed_files, precision)
 }
 
 #[pymethods]
@@ -122,6 +153,12 @@ impl PyGraph {
     /// the FACT-tier absence dict (`reason` `no_match`, the edge categories
     /// the outputs read as its `mechanisms`).
     ///
+    /// HC.4: each witness edge, and each row with a whole witness (its
+    /// weakest link), carries `precision` `{lo, p, hi, n, stratum, audit}`
+    /// (plus `census` / `under_floor` / `unmeasured` when true): the audited
+    /// precision of the edge stratum its tier rests on, never a sort key or a
+    /// tier. `precision=False` leaves it out.
+    ///
     /// Raises ValueError with the rendered diagnostics,
     /// `<query>:<line>:<col>: error: ...` one per line: a parse error, an
     /// analysis error (an unknown node kind / edge category / cell type /
@@ -130,7 +167,7 @@ impl PyGraph {
     /// defines), the row budget (naming `max_rows=<n>`), the memory budget
     /// (naming `max_mb=<n>`) or an evaluation error. Prints `[query] lang=datalog outputs=<o> rows=<r> fact=<f>
     /// derived=<d> heuristic=<h> caveated=<c> surface=py` on stderr.
-    #[pyo3(signature = (program, outputs=None, limit=None, explain=false, max_rows=None, max_mb=None))]
+    #[pyo3(signature = (program, outputs=None, limit=None, explain=false, max_rows=None, max_mb=None, precision=true))]
     #[allow(clippy::too_many_arguments)]
     fn query(
         &self,
@@ -141,10 +178,17 @@ impl PyGraph {
         explain: bool,
         max_rows: Option<usize>,
         max_mb: Option<u64>,
+        precision: bool,
     ) -> PyResult<Py<PyAny>> {
         let opts = options(outputs, limit, explain, max_rows, max_mb);
-        let json = query_json(&self.merged, program, &opts, self.parse_errors.len())
-            .map_err(PyValueError::new_err)?;
+        let json = query_json_with(
+            &self.merged,
+            program,
+            &opts,
+            self.parse_errors.len(),
+            precision,
+        )
+        .map_err(PyValueError::new_err)?;
         to_py(py, Ok(json))
     }
 
@@ -170,8 +214,8 @@ impl PyGraph {
     /// (`a -CALLS-> b`), its witness kept. ORDER BY sorts by rendered values
     /// (DESC flips a key; ties keep the rendered order), the query's LIMIT
     /// cuts them, then `limit` cuts again; `total` keeps the uncut count.
-    /// `explain`, `max_rows` and `max_mb` are `query`'s; tiers, caveats and the absence
-    /// are as there.
+    /// `explain`, `max_rows`, `max_mb` and `precision` are `query`'s; tiers,
+    /// caveats, precisions and the absence are as there.
     ///
     /// Raises ValueError with the rendered diagnostics,
     /// `<gql>:<line>:<col>: error: ...`: a GQL construct outside the subset, an
@@ -179,7 +223,8 @@ impl PyGraph {
     /// `max_rows=<n>`), the memory budget (naming `max_mb=<n>`) or an
     /// evaluation error. Prints `[query] lang=gql ...
     /// surface=py` on stderr.
-    #[pyo3(signature = (query, limit=None, explain=false, max_rows=None, max_mb=None))]
+    #[pyo3(signature = (query, limit=None, explain=false, max_rows=None, max_mb=None, precision=true))]
+    #[allow(clippy::too_many_arguments)]
     fn query_gql(
         &self,
         py: Python<'_>,
@@ -188,10 +233,17 @@ impl PyGraph {
         explain: bool,
         max_rows: Option<usize>,
         max_mb: Option<u64>,
+        precision: bool,
     ) -> PyResult<Py<PyAny>> {
         let opts = options(None, limit, explain, max_rows, max_mb);
-        let json = query_gql_json(&self.merged, query, &opts, self.parse_errors.len())
-            .map_err(PyValueError::new_err)?;
+        let json = query_gql_json_with(
+            &self.merged,
+            query,
+            &opts,
+            self.parse_errors.len(),
+            precision,
+        )
+        .map_err(PyValueError::new_err)?;
         to_py(py, Ok(json))
     }
 }

@@ -57,9 +57,13 @@ REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations", "reflexi
 # `unanchored` is serialised only when it holds a row (DT.7b).
 UNANCHORED_REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "unanchored", "violations", "reflexion"]
 UNANCHORED_KEYS = ["rule_id", "section", "decl", "repo", "status", "reason", "fix", "blocking"]
-VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "blocking", "count", "evidence"]
-RULE_VIOLATION_KEYS = VIOLATION_KEYS + ["subject", "file", "line", "caveats"]
-EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
+BASE_VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "blocking", "count", "evidence"]
+# HC.4: a violation on edges carries `precision` last; a rule row whose witness
+# holds no edge (node facts and a negation) carries none.
+VIOLATION_KEYS = BASE_VIOLATION_KEYS + ["precision"]
+RULE_VIOLATION_KEYS = BASE_VIOLATION_KEYS + ["subject", "file", "line", "caveats"]
+EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note", "precision"]
+PRECISION_KEYS = ["lo", "p", "hi", "n", "stratum", "audit"]
 
 
 def write_tree(root: pathlib.Path, files) -> None:
@@ -70,7 +74,8 @@ def write_tree(root: pathlib.Path, files) -> None:
 
 def main() -> int:
     c = Checks("check")
-    c.check("check signature", params(rg.PyGraph.check) == [("strict", False)], params(rg.PyGraph.check))
+    c.check("check signature", params(rg.PyGraph.check) == [("strict", False), ("precision", True)],
+            params(rg.PyGraph.check))
     with tempfile.TemporaryDirectory(prefix="glia-surface-check-") as tmp:
         root = pathlib.Path(tmp) / "shop"
         write_tree(root, FILES)
@@ -105,6 +110,16 @@ def main() -> int:
                 [(h["from_qname"], h["to_qname"]) for h in w]
                 == [("services::api::a", "services::api::b"), ("services::api::b", "services::api::a")], w)
         c.check("edge keys in engine field order", w and list(w[0]) == EDGE_KEYS, w and list(w[0]))
+        p0 = (w[0].get("precision") or {}) if w else {}
+        c.check("HC.4: an edge row's precision names its stratum and audit",
+                [k for k in PRECISION_KEYS if k in p0] == PRECISION_KEYS
+                and str(p0.get("stratum", "")).startswith(w[0].get("category", "?") + "|"), p0)
+        bare, bare_err = stderr_of(lambda: g.check(precision=False))
+        c.check("HC.4: precision=False drops every precision key, nothing else",
+                "precision" not in str(bare) and "[confidence]" not in bare_err
+                and [v["tier"] for v in bare["violations"]] == [v["tier"] for v in rows]
+                and [v["blocking"] for v in bare["violations"]] == [v["blocking"] for v in rows], bare)
+        c.check("HC.4: the confidence marker", "[confidence] surface=py rows=" in err, err[-400:])
         fe = rows[1] if len(rows) > 1 else {}
         c.check("forbid tier fact, count 2", fe.get("tier") == "fact" and fe.get("count") == 2, fe)
         c.check("forbidden edges located, 1-based int lines",

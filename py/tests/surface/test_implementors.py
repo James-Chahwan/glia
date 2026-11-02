@@ -21,13 +21,14 @@ REPOS_CS = (
     "        public string ByEmail(string email) { return email; }\n    }\n}\n"
 )
 
-ROW_KEYS = ["id", "qname", "name", "kind", "file", "line", "live", "relation", "depth", "via", "tier"]
+ROW_KEYS = ["id", "qname", "name", "kind", "file", "line", "live", "relation", "depth", "via", "tier", "precision"]
 
 
 def main() -> int:
     c = Checks("implementors")
     c.check("implementors signature",
-            params(rg.PyGraph.implementors) == [("qname", None), ("direction", "down"), ("transitive", True)],
+            params(rg.PyGraph.implementors) == [("qname", None), ("direction", "down"), ("transitive", True),
+                                                ("precision", True)],
             params(rg.PyGraph.implementors))
     with tempfile.TemporaryDirectory(prefix="glia-surface-implementors-") as tmp:
         root = pathlib.Path(tmp) / "shop"
@@ -53,6 +54,12 @@ def main() -> int:
         # read from evidence, as `glia why` reads it, that is heuristic (FD.7b).
         c.check("name-bound heritage is heuristic, lowercase",
                 [r["tier"] for r in rows] == ["heuristic", "heuristic"], rows)
+        c.check("HC.4: each row's precision is its path's weakest heritage stratum",
+                all(str((r.get("precision") or {}).get("stratum", "")).startswith("IMPLEMENTS|heuristic")
+                    for r in rows), rows)
+        bare = g.implementors("Shop::IRepo", precision=False)
+        c.check("HC.4: precision=False drops the key and nothing else",
+                [{k: v for k, v in r.items() if k != "precision"} for r in rows] == bare["results"], bare)
         ids = node_ids(g)
         c.check("ids are ints of the graph, live a bool",
                 all(type(r["id"]) is int and r["id"] in ids and type(r["live"]) is bool for r in rows), rows)

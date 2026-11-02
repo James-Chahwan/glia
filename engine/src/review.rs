@@ -287,6 +287,15 @@
 //! graph change renders the impact absence's note as a sentence: `No graph
 //! change vs <base>.`
 //!
+//! # Precision (HC.4)
+//!
+//! `counts.precision_by_tier` holds, for each tier of `edges_by_tier`, the
+//! audit's per-tier precision estimate ([`crate::confidence`]), printed beside
+//! the count (`_by tier: fact 3 (>= 0.84 on fact, n=314), .._`); every new
+//! or resolved violation and its rows carry `precision` as `glia check`'s
+//! do, stamped after the reduction's tier and gate. Nothing reads it for an
+//! order, a gate or the exit code; `--no-precision` drops it.
+//!
 //! # Markers
 //!
 //! Once per review:
@@ -352,6 +361,7 @@ use crate::check::{
     NO_CYCLE, RULE, RuleMdOptions, Unanchored, Violation, ViolationEdge, check_rules_gated,
     default_forbid_categories,
 };
+use crate::confidence::{self, Annotated, Precision, Table, Tally};
 use crate::contract_breaks::{
     MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, NameBreak, check_models_min_tier,
     model_breaks_of, name_breaks_of,
@@ -495,6 +505,12 @@ pub struct ReviewCounts {
     pub name_breaks: usize,
     /// Every edge row by tier; a tier no row has is absent.
     pub edges_by_tier: BTreeMap<&'static str, usize>,
+    /// HC.4: for each tier of `edges_by_tier`, the audit's per-tier precision
+    /// estimate ([`crate::confidence`], the fit report's stratified
+    /// estimate), beside the count; never read by an order or the gate. Not
+    /// serialised when empty (no edge row, or a surface dropped it).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub precision_by_tier: BTreeMap<&'static str, Precision>,
 }
 
 /// The review of the working tree's change against `base` (module docs).
@@ -572,6 +588,33 @@ pub struct Review {
     /// otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blind: Vec<BlindCaveat>,
+}
+
+impl Annotated for Review {
+    fn drop_precision(&mut self) {
+        self.counts.precision_by_tier.clear();
+        for v in self
+            .new_violations
+            .iter_mut()
+            .chain(self.resolved_violations.iter_mut())
+        {
+            v.drop_precision();
+        }
+    }
+
+    fn precision_tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for p in self.counts.precision_by_tier.values() {
+            t.add(Some(p));
+        }
+        for v in self.new_violations.iter().chain(&self.resolved_violations) {
+            t.add(v.precision.as_ref());
+            for e in &v.evidence {
+                t.add(e.precision.as_ref());
+            }
+        }
+        t
+    }
 }
 
 impl SizedAnswer for Review {
@@ -836,6 +879,11 @@ fn review_with_intent(
     for e in &edges {
         *edges_by_tier.entry(e.tier).or_insert(0) += 1;
     }
+    // HC.4: the audit's per-tier estimate beside each count.
+    let precision_by_tier: BTreeMap<&'static str, Precision> = edges_by_tier
+        .keys()
+        .filter_map(|t| Some((*t, Table::shipped().of_tier(t)?)))
+        .collect();
     let conventions = review_conventions(before, after, &di.changed);
     let nodes_changed = di.changed.len();
     // FH.8c: `changed` cut with the seeds (`counts.nodes_changed` uncut).
@@ -853,6 +901,7 @@ fn review_with_intent(
         model_breaks: model_breaks.len(),
         name_breaks: names_total,
         edges_by_tier,
+        precision_by_tier,
     };
     let answer = Review {
         base: rev.answer.base.clone(),
@@ -2386,7 +2435,11 @@ fn edges_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
     tiers.sort_by_key(|(t, _)| (tier_rank(t), *t));
     let by_tier: Vec<String> = tiers
         .iter()
-        .map(|(t, n)| format!("{} {n}", text(t)))
+        .map(|(t, n)| {
+            // HC.4: `fact 3 (>= 0.84 on fact, n=314)`.
+            let beside = confidence::tier_text(t, r.counts.precision_by_tier.get(t));
+            format!("{} {n}{}", text(t), text(&beside[t.len()..]))
+        })
         .collect();
     blocks.push(format!("_by tier: {}_", by_tier.join(", ")));
     let shown = &r.edges[..r.edges.len().min(max)];
@@ -2768,6 +2821,8 @@ fn reduced(
     out.blocking = check::is_blocking(out.tier, min_tier);
     out.count = count;
     out.evidence = rows;
+    // HC.4: the reduced rows' precision, after the tier and gate.
+    check::stamp_precision(&mut out);
     out
 }
 
@@ -2997,6 +3052,13 @@ fn violation_row(loc: &Locator<'_>, e: &Edge, ev: Option<&Evidence>) -> Violatio
     });
     let (file, line) = site.unwrap_or((f.file, f.line));
     let (tier, note) = tier_of(ev, e);
+    // HC.4: the audited precision of the edge's stratum, beside its tier.
+    let precision = crate::confidence::lookup(
+        edge_category::name(e.category),
+        tier,
+        ev.map(|x| x.emitter.as_str()),
+        ev.and_then(|x| x.rule.as_deref()),
+    );
     let tier = tier.as_str();
     ViolationEdge {
         from_qname: f.qname,
@@ -3007,6 +3069,7 @@ fn violation_row(loc: &Locator<'_>, e: &Edge, ev: Option<&Evidence>) -> Violatio
         emitter: ev.map(|x| x.emitter.clone()),
         tier,
         note,
+        precision: Some(precision),
     }
 }
 

@@ -253,8 +253,9 @@ fn rule_row_is_a_located_violation_with_its_witness() {
             "subject",
             "file",
             "line",
+            "precision",
         ],
-        "JSON key order; empty caveats are not serialised"
+        "JSON key order; empty caveats are not serialised; HC.4's precision last"
     );
 }
 
@@ -343,9 +344,10 @@ fn min_tier_fact_makes_a_derived_violation_advisory() {
             "tier",
             "blocking",
             "count",
-            "evidence"
+            "evidence",
+            "precision"
         ],
-        "a forbid_edge violation serialises no subject"
+        "a forbid_edge violation serialises no subject; HC.4's precision last"
     );
 }
 

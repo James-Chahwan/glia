@@ -440,12 +440,15 @@ fn unknown_via_is_an_error() {
     assert!(msg.contains("via scope `services/api/nope`"), "{msg}");
 }
 
-/// (6) A direct rule keeps its function and output, byte for byte.
+/// (6) A direct rule keeps its function and output, byte for byte (HC.4's
+/// `precision` dropped: engine/tests/confidence.rs pins it).
 #[test]
 fn direct_forbid_is_unchanged() {
     let r = report(DIRECT);
     assert_eq!(r.violations.len(), 1, "{r:#?}");
-    let got = serde_json::to_string(&r.violations[0]).expect("serialises");
+    let mut v = r.violations[0].clone();
+    v.drop_precision();
+    let got = serde_json::to_string(&v).expect("serialises");
     assert_eq!(got, DIRECT_AT_HEAD);
 }
 

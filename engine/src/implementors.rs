@@ -58,6 +58,14 @@
 //! not exist. No exact match is `unknown_symbol`, with find's nearest rows as
 //! the suggestions.
 //!
+//! # Precision (HC.4)
+//!
+//! Each row carries `precision`: the audited precision ([`crate::confidence`])
+//! of the weakest link of its path, each heritage edge looked up by the
+//! first edge in `all_edges` order with its `(from, to, category)`, as its
+//! tier is; named by that edge's stratum, never a product. A METHOD
+//! target's rows take their owner row's. It never moves a row or a tier.
+//!
 //! fired_on marker, once per call:
 //! `[implementors] target=<q> direction=<Down|Up> transitive=<b> found=<n> fact=<f> derived=<d> heuristic=<h>`
 //! — grep token `[implementors] target=` — then
@@ -79,6 +87,7 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
 use crate::answers::{Locator, entrypoint_reachable, live_marker};
+use crate::confidence::{self, Annotated, Precision, Tally};
 use crate::find::{self, FindOptions, FoundNode};
 use crate::why;
 
@@ -134,17 +143,27 @@ pub struct Implementor {
     /// `fact` | `derived` | `heuristic` ([`Tier::as_str`]): the weakest
     /// edge on the path, each edge read from its EVIDENCE (module doc).
     pub tier: &'static str,
+    /// HC.4: the audited precision of the path's weakest link (module doc
+    /// "Precision"); never read by the walk, the order or the tier. Not
+    /// serialised once a surface drops it (`--no-precision`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<Precision>,
 }
 
 /// A walked row before it is located.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Row {
     id: NodeId,
     depth: usize,
     relation: EdgeCategoryId,
     parent: NodeId,
     tier: Tier,
+    /// The weakest link of the path's audited precisions (HC.4).
+    precision: Option<Precision>,
 }
+
+/// An edge's tier and audited precision, keyed by `(from, to, category)`.
+type Tiers = HashMap<(NodeId, NodeId, EdgeCategoryId), (Tier, Precision)>;
 
 /// Who implements or extends `qname` ([`HierarchyDirection::Down`]), or what
 /// it implements or extends (`Up`); every level when `transitive`, else the
@@ -256,14 +275,14 @@ fn walk(
     };
     let max_depth = if transitive { usize::MAX } else { 1 };
 
-    let mut tier: HashMap<(NodeId, NodeId, EdgeCategoryId), Tier> = HashMap::new();
+    let mut tier: Tiers = HashMap::new();
     let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
     let mut methods_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let target_kind = kind_of(merged, target);
     for e in merged.all_edges() {
         if heritage.contains(&e.category) {
             tier.entry((e.from, e.to, e.category))
-                .or_insert_with(|| why::edge_tier(e).0);
+                .or_insert_with(|| (why::edge_tier(e).0, confidence::of_edge(e)));
         } else if target_kind == Some(node_kind::METHOD)
             && e.category == edge_category::DEFINES
             && kind_of(merged, e.to) == Some(node_kind::METHOD)
@@ -284,7 +303,7 @@ fn walk(
         for r in hierarchy(owner) {
             for &m in methods_of.get(&r.id).into_iter().flatten() {
                 if m != target && name_of(merged, m) == Some(name) {
-                    found.push(Row { id: m, ..r });
+                    found.push(Row { id: m, ..r.clone() });
                 }
             }
         }
@@ -320,6 +339,7 @@ fn walk(
                 depth: r.depth,
                 via,
                 tier: r.tier.as_str(),
+                precision: r.precision,
             })
         })
         .collect();
@@ -363,14 +383,9 @@ fn walk(
 /// The BFS rows from `seed`, in discovery order, each tiered by the weakest
 /// edge on its path: its parent's tier (the seed's is fact) and the entering
 /// edge's evidence tier.
-fn rows(
-    adj: &Adjacency,
-    tiers: &HashMap<(NodeId, NodeId, EdgeCategoryId), Tier>,
-    seed: NodeId,
-    dir: Walk,
-    max_depth: usize,
-) -> Vec<Row> {
+fn rows(adj: &Adjacency, tiers: &Tiers, seed: NodeId, dir: Walk, max_depth: usize) -> Vec<Row> {
     let mut tier_of: HashMap<NodeId, Tier> = HashMap::from([(seed, Tier::Fact)]);
+    let mut prec_of: HashMap<NodeId, Precision> = HashMap::new();
     bfs(adj, &[seed], dir, max_depth)
         .reached
         .into_iter()
@@ -381,19 +396,45 @@ fn rows(
                 Walk::Backward => (r.id, r.parent, r.via),
                 _ => (r.parent, r.id, r.via),
             };
-            let edge = tiers.get(&key).copied().unwrap_or(Tier::Heuristic);
+            let found = tiers.get(&key);
+            let edge = found.map_or(Tier::Heuristic, |(t, _)| *t);
             let parent = tier_of.get(&r.parent).copied().unwrap_or(Tier::Fact);
             let tier = parent.weakest(edge);
             tier_of.insert(r.id, tier);
+            // HC.4: the weakest link of the parent's path and this edge; an
+            // edge the map misses has no stratum, so the path reads none.
+            let precision = found.and_then(|(_, p)| {
+                confidence::weakest(prec_of.get(&r.parent).into_iter().chain([p]))
+            });
+            if let Some(p) = &precision {
+                prec_of.insert(r.id, p.clone());
+            }
             Row {
                 id: r.id,
                 depth: r.depth,
                 relation: r.via,
                 parent: r.parent,
                 tier,
+                precision,
             }
         })
         .collect()
+}
+
+impl Annotated for Answer<Implementor> {
+    fn drop_precision(&mut self) {
+        for r in &mut self.results {
+            r.precision = None;
+        }
+    }
+
+    fn precision_tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for r in &self.results {
+            t.add(r.precision.as_ref());
+        }
+        t
+    }
 }
 
 /// The kind the first graph (in `merged.graphs` order) naming `id` records.

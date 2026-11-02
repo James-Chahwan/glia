@@ -20,13 +20,14 @@ SHOP = (
 
 ANSWER_KEYS = ["found", "edges", "path", "from_nodes", "to_nodes", "note", "absence"]
 ROW_KEYS = ["from_id", "from_qname", "to_id", "to_qname", "category", "confidence", "tier",
-            "emitter", "rule", "basis", "site", "cross_repo", "note"]
+            "emitter", "rule", "basis", "site", "cross_repo", "note", "precision"]
 
 
 def main() -> int:
     c = Checks("why")
     c.check("why signature",
-            params(rg.PyGraph.why) == [("from_qname", None), ("to_qname", None), ("category", None)],
+            params(rg.PyGraph.why) == [("from_qname", None), ("to_qname", None), ("category", None),
+                                       ("precision", True)],
             params(rg.PyGraph.why))
     with tempfile.TemporaryDirectory(prefix="glia-surface-why-") as tmp:
         root = pathlib.Path(tmp) / "repo"
@@ -48,6 +49,14 @@ def main() -> int:
         c.check("emitter names the stage",
                 str(r.get("emitter", "")).startswith(("graph:", "parser:")) and r.get("basis") == "site", r)
         c.check("site is the call, 1-based", r.get("site") == {"file": "shop/a.py", "line": 6}, r)
+        p = r.get("precision") or {}
+        c.check("HC.4: a CALLS|fact row reads its audited stratum",
+                str(p.get("stratum", "")).startswith("CALLS|fact") and type(p.get("lo")) is float
+                and type(p.get("n")) is int and len(str(p.get("audit", ""))) == 12, p)
+        c.check("HC.4: the confidence marker", "[confidence] surface=py rows=1 measured=1" in err, err[-400:])
+        bare = g.why("shop::a::place", "shop::a::price", precision=False)
+        c.check("HC.4: precision=False drops the key and nothing else",
+                [{k: v for k, v in x.items() if k != "precision"} for x in rows] == bare["edges"], bare)
         ids = node_ids(g)
         c.check("ids are ints of the graph",
                 type(r.get("from_id")) is int and r.get("from_id") in ids and r.get("to_id") in ids, r)

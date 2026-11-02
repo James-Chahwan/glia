@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 
 use git_fixture::GitRepo;
 use glia_engine::check::Violation;
+use glia_engine::confidence::{AUDIT, Annotated};
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::identity::Collapse;
 use glia_engine::review::{
@@ -72,8 +73,40 @@ fn committed(web_app: &str) -> GitRepo {
     repo
 }
 
+/// The review with HC.4's `precision` dropped: the pins below are the
+/// pre-HC.4 report, which `--no-precision` keeps byte for byte;
+/// `precision_sits_beside_the_tiers` pins the precision.
 fn run(repo: &GitRepo) -> Review {
-    review_vs_rev(repo.path(), "HEAD", &ReviewArgs::default()).expect("review")
+    let mut r = review_vs_rev(repo.path(), "HEAD", &ReviewArgs::default()).expect("review");
+    r.drop_precision();
+    r
+}
+
+/// HC.4: the per-tier estimates beside `edges_by_tier`, and every new
+/// violation row's precision, in JSON and markdown; dropped, the report is
+/// the pre-HC.4 one.
+#[test]
+fn precision_sits_beside_the_tiers() {
+    let repo = committed(WEB_APP_CLEAN);
+    repo.write("web/app.py", WEB_APP);
+    let r = review_vs_rev(repo.path(), "HEAD", &ReviewArgs::default()).expect("review");
+    let tiers: Vec<&str> = r.counts.precision_by_tier.keys().copied().collect();
+    let counted: Vec<&str> = r.counts.edges_by_tier.keys().copied().collect();
+    assert_eq!(tiers, counted, "{:?}", r.counts);
+    let fact = &r.counts.precision_by_tier["fact"];
+    assert_eq!((fact.stratum.as_str(), fact.audit), ("fact", AUDIT));
+    let v = &r.new_violations[0];
+    assert!(v.precision.is_some() && v.evidence.iter().all(|e| e.precision.is_some()));
+    let text = render_markdown(&r, &MarkdownOptions::default());
+    assert!(text.contains("_by tier: fact 2 (>= "), "{text}");
+    assert!(text.contains(" on IMPORTS\\|fact, n="), "{text}");
+    let mut dropped = r.clone();
+    dropped.drop_precision();
+    assert_eq!(
+        render_markdown(&dropped, &MarkdownOptions::default()),
+        md(&run(&repo))
+    );
+    assert!(dropped.counts.precision_by_tier.is_empty());
 }
 
 /// `(category, file:line, tier)` of each evidence row, in report order.
@@ -260,7 +293,8 @@ fn one_delta_for_everything() {
     let repo = committed(WEB_APP_CLEAN);
     repo.write("web/app.py", WEB_APP);
     let rev = graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
-    let from_delta = review(&rev, &ReviewArgs::default()).expect("review of the delta");
+    let mut from_delta = review(&rev, &ReviewArgs::default()).expect("review of the delta");
+    from_delta.drop_precision();
     assert_eq!(json(&from_delta), json(&run(&repo)));
 }
 
@@ -422,7 +456,8 @@ fn caps_cut_rows_not_counts() {
     let mut args = ReviewArgs::default();
     args.max_impact = 0;
     args.max_tests = 0;
-    let cut = review_vs_rev(repo.path(), "HEAD", &args).expect("review");
+    let mut cut = review_vs_rev(repo.path(), "HEAD", &args).expect("review");
+    cut.drop_precision();
     assert_eq!((full.counts.impact, full.counts.tests), (1, 1), "{full:#?}");
     assert_eq!(full.tests.test_files, ["tests/test_pay.py"]);
     assert!(cut.impact.results.is_empty(), "{:#?}", cut.impact);

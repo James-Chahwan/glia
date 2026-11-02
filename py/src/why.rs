@@ -6,6 +6,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::confidence;
 use glia_engine::why::{WhyAnswer, why_edge};
 use glia_graph::MergedGraph;
 
@@ -48,15 +49,22 @@ impl PyGraph {
     /// `path` is a shortest carry path explained hop by hop (empty when none
     /// is within 6 hops) and `absence` the FACT-tier `no_edges` dict with
     /// `unparsed_files` set. An unknown node or category raises ValueError.
-    #[pyo3(signature = (from_qname, to_qname, category=None))]
+    ///
+    /// HC.4: every row also carries `precision` `{lo, p, hi, n, stratum,
+    /// audit}` (plus `census` / `under_floor` / `unmeasured` when true): the
+    /// audited precision of its (category, tier[, emitter/rule]) stratum on
+    /// the edge audit's panel, beside `tier`, never a sort key or a tier.
+    /// `precision=False` leaves it out.
+    #[pyo3(signature = (from_qname, to_qname, category=None, precision=true))]
     fn why(
         &self,
         py: Python<'_>,
         from_qname: &str,
         to_qname: &str,
         category: Option<&str>,
+        precision: bool,
     ) -> PyResult<Py<PyAny>> {
-        let answer = why_answer(
+        let mut answer = why_answer(
             &self.merged,
             from_qname,
             to_qname,
@@ -64,6 +72,7 @@ impl PyGraph {
             self.parse_errors.len(),
         )
         .map_err(PyValueError::new_err)?;
+        confidence::finish(&mut answer, precision, "py");
         to_py(py, serde_json::to_string(&answer))
     }
 }

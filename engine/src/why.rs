@@ -75,6 +75,12 @@
 //! reached as `glia_engine::why::<item>`, never flattened into the
 //! crate root.
 //!
+//! # Precision (HC.4)
+//!
+//! Each row (an edge or a path hop) carries `precision`, the audited
+//! precision of its (category, tier[, emitter/rule]) stratum
+//! ([`crate::confidence`]), beside its tier; it never moves a row or a tier.
+//!
 //! fired_on marker, one line per answered call:
 //! `[why] edges=<N> path_hops=<H> found=<true|false> tiers fact=<F> derived=<D> heuristic=<H2>`
 //! — grep `^\[why\] edges=`.
@@ -90,6 +96,7 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence, plural};
 use crate::answers::Locator;
+use crate::confidence::{self, Annotated, Precision, Tally};
 use crate::find::{self, FindOptions};
 use crate::profile::CODE_PROFILE;
 
@@ -171,6 +178,11 @@ pub struct EdgeWhy {
     /// Why the tier is not the stage's plain one, or where an overlay edge
     /// was declared.
     pub note: Option<String>,
+    /// HC.4: the audited precision of the edge's stratum, beside `tier`
+    /// (`confidence`); never read by an order, a filter or a tier. Not
+    /// serialised once a surface drops it (`--no-precision`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<Precision>,
 }
 
 /// [`why_edge`]'s answer: the direct edges, or — when there are none — the
@@ -489,6 +501,12 @@ fn explain_edge(
             line: ev.line.map(|l| i64::from(l) + 1),
         })
     });
+    let precision = confidence::lookup(
+        edge_category::name(e.category),
+        tier,
+        ev.as_ref().map(|ev| ev.emitter.as_str()),
+        ev.as_ref().and_then(|ev| ev.rule.as_deref()),
+    );
     EdgeWhy {
         from_id: e.from.0,
         from_qname: qname(e.from),
@@ -503,6 +521,23 @@ fn explain_edge(
         site,
         cross_repo: cross_repo(merged, e.from, e.to),
         note,
+        precision: Some(precision),
+    }
+}
+
+impl Annotated for WhyAnswer {
+    fn drop_precision(&mut self) {
+        for r in self.edges.iter_mut().chain(self.path.iter_mut()) {
+            r.precision = None;
+        }
+    }
+
+    fn precision_tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for r in self.edges.iter().chain(&self.path) {
+            t.add(r.precision.as_ref());
+        }
+        t
     }
 }
 

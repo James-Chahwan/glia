@@ -324,6 +324,19 @@
 //! options hold only what one surface needs that the other does not: check's
 //! group heading, detailed witness columns, kind lead lines, advisory marks
 //! and per-rule cap; review's per-violation headings and resolved rev.
+//!
+//! # Precision (HC.4)
+//!
+//! Every evidence row carries `precision`, the audited precision of its
+//! edge's stratum ([`crate::confidence`]), and every violation the one its
+//! tier rests on (`stamp_precision`): a forbid_edge rule's or a
+//! divergence's strongest row of the violation's tier (one edge proves it,
+//! as its tier is its strongest row's), a cycle's, a forbid_path hit's and a
+//! rule row's weakest link (every edge is needed), none for a cut witness.
+//! It is stamped after every tier, row and `blocking` is final, so it never
+//! moves an order, a gate or an exit code. Markdown prints it beside the
+//! tier (`fact (>= 0.88 on CALLS|fact, n=31)`, [`confidence::tier_text`]);
+//! `--no-precision` drops it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -340,6 +353,7 @@ use glia_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 use glia_rules::value::Tier;
 
+use crate::confidence::{self, Annotated, Precision, Tally};
 use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::{ModuleImports, module_import_graph};
 use crate::external::declared::{declared_constraints, declared_misses};
@@ -414,6 +428,11 @@ pub struct ViolationEdge {
     /// Why the tier is not the emitter stage's plain one, or where an overlay
     /// edge was declared; `why`'s row note.
     pub note: Option<String>,
+    /// HC.4: the audited precision of the edge's stratum, beside `tier`
+    /// ([`crate::confidence`]); never read by an order, a gate or a tier. Not
+    /// serialised once a surface drops it (`--no-precision`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<Precision>,
 }
 
 /// One broken rule: all of a forbid_edge rule's edges, one hit of a
@@ -468,6 +487,13 @@ pub struct Violation {
     /// read (Q5). Empty (not serialised) otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub caveats: Vec<CoverageNote>,
+    /// HC.4: the audited precision the row's tier rests on (module doc
+    /// "Precision"): a forbid_edge rule's or a divergence's strongest
+    /// evidence row of its tier, a cycle's, path's or rule row's weakest link;
+    /// `None` (not serialised) with no evidence, a cut witness or once a
+    /// surface drops it. Never read by an order, the gate or a tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<Precision>,
 }
 
 /// Every declared rule, evaluated.
@@ -884,6 +910,10 @@ fn run_check(
         }
         report.unanchored.extend(gate.misses);
     }
+    // HC.4: every tier, row and gate is final; the precision only annotates.
+    for v in &mut report.violations {
+        stamp_precision(v);
+    }
     // Stable: a rule's cycles keep their order.
     report.violations.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
     let of = |k: &str| {
@@ -1217,6 +1247,65 @@ fn violation(
         file: None,
         line: None,
         caveats: Vec::new(),
+        precision: None,
+    }
+}
+
+/// HC.4: stamp `v.precision` from its evidence rows (module doc
+/// "Precision"), after its tier and evidence are final: a per-edge kind
+/// (forbid_edge, divergence), which any one edge proves, reads the strongest
+/// row of its own tier; every other kind needs every row, so it reads the
+/// weakest link, and none when its witness was cut (`count` beyond the
+/// rows). Called last by every check surface and by review's reduction.
+pub(crate) fn stamp_precision(v: &mut Violation) {
+    let rows: Vec<&Precision> = v
+        .evidence
+        .iter()
+        .filter_map(|e| e.precision.as_ref())
+        .collect();
+    v.precision = if rows.len() < v.evidence.len() || rows.is_empty() {
+        None
+    } else if per_edge(v.rule_kind) {
+        confidence::strongest(
+            v.evidence
+                .iter()
+                .filter(|e| e.tier == v.tier)
+                .filter_map(|e| e.precision.as_ref()),
+        )
+        .or_else(|| confidence::strongest(rows))
+    } else if v.rule_kind != NO_CYCLE && v.count > v.evidence.len() {
+        None
+    } else {
+        confidence::weakest(rows)
+    };
+}
+
+impl Annotated for CheckReport {
+    fn drop_precision(&mut self) {
+        for v in &mut self.violations {
+            v.drop_precision();
+        }
+    }
+
+    fn precision_tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for v in &self.violations {
+            t.add(v.precision.as_ref());
+            for e in &v.evidence {
+                t.add(e.precision.as_ref());
+            }
+        }
+        t
+    }
+}
+
+impl Violation {
+    /// Remove the row's and its evidence rows' `precision` (HC.4).
+    pub fn drop_precision(&mut self) {
+        self.precision = None;
+        for e in &mut self.evidence {
+            e.precision = None;
+        }
     }
 }
 
@@ -2545,7 +2634,10 @@ fn violation_lead(blocks: &mut Vec<String>, k: usize, v: &Violation, opts: &Rule
     } else {
         ""
     };
-    let tier = format!("{}{mark}", md::text(v.tier));
+    let tier = format!(
+        "{}{mark}",
+        md::text(&confidence::tier_text(v.tier, v.precision.as_ref()))
+    );
     if by_subject(v) {
         let subject: Vec<String> = v.subject.iter().map(|s| md::code(s)).collect();
         let mut line = format!(
@@ -2617,9 +2709,10 @@ fn witness_md(blocks: &mut Vec<String>, v: &Violation, total: usize, opts: &Rule
             blocks,
             &["#", "category", "from", "to", "at", "emitter", "tier"],
             v.evidence.iter().enumerate().map(|(i, e)| {
+                let tier = confidence::tier_text(e.tier, e.precision.as_ref());
                 let tier = match e.note.as_deref() {
-                    Some(n) => format!("{} ({n})", e.tier),
-                    None => e.tier.to_string(),
+                    Some(n) => format!("{tier} ({n})"),
+                    None => tier,
                 };
                 vec![
                     (i + 1).to_string(),
@@ -2646,7 +2739,7 @@ fn witness_md(blocks: &mut Vec<String>, v: &Violation, total: usize, opts: &Rule
                     md::code(&e.from_qname),
                     md::code(&e.to_qname),
                     loc(e),
-                    md::text(e.tier),
+                    md::text(&confidence::tier_text(e.tier, e.precision.as_ref())),
                 ]
             }),
             total,
@@ -2839,6 +2932,7 @@ rule = \"violation(r) :- unhandled_route(r).\"
                     emitter: None,
                     tier: FACT,
                     note: None,
+                    precision: None,
                 })
                 .collect(),
         };

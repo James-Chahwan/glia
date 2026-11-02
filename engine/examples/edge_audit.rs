@@ -17,6 +17,7 @@
 //!                   --samples <glob>.. --verdicts <glob>.. [--adjudication <file>]
 //!                   [--cohort-tasks <tasks.jsonl>] --plan <floors.json>
 //!                   --out-json <f> --out-md <f> [--check]
+//!                   [--emit-table [<table.json>]]
 //! ```
 //!
 //! Calibrated confidence (HC.2): `sample --panel heldout` draws the held-out
@@ -27,6 +28,20 @@
 //! the held-out strata against the fit report by the rule committed in
 //! [`CAL_RULE`] ([`compare_strata`]: K, R1, R2, R3) and prints
 //! `[edge-audit] calibration ..` and `CONFIDENCE: .. -> PASS|FAIL|INSUFFICIENT`.
+//!
+//! HC.4: on that rule's PASS, `report --calibration --emit-table [<path>]`
+//! (default `engine/src/confidence/table.json` beside the plan's checkout)
+//! writes the precision table `glia_engine::confidence` reads at query time
+//! ([`precision_table`]): every (category, tier) stratum and every
+//! (category, tier, emitter/rule) sub-stratum pooled over the fit and the
+//! held-out panel's judged ids, kept when it holds at least [`CAL_MIN_JUDGED`]
+//! of them or is a census, each with its Wilson 95% interval and an
+//! `under_floor` flag (pooled p below its tier's floor), plus the fit
+//! report's per-tier estimates; `audit` is the first 12 hex of the blake3 of
+//! the calibration.json text it was generated with. With `--check` the
+//! committed table must equal what the inputs generate, as calibration.json
+//! and .md must. `[edge-audit] table strata=<s> sub_strata=<b> tiers=<t>
+//! under_floor=<f> audit=<12 hex> path=<p>`.
 //!
 //! The report's agreement check (FD.3c): a verdict file named `rejudge.jsonl`
 //! (or any `--rejudge` file) is a second, blind judge over a fixed subset
@@ -1923,6 +1938,10 @@ const CAL_GAPS: usize = 5;
 struct FitStratum {
     category: String,
     tier: String,
+    /// The fit panel's population of the stratum (HC.4: a census reads
+    /// `n == N`); absent in a report that predates the field.
+    #[serde(rename = "N", default)]
+    big_n: Option<u64>,
     n: u64,
     correct: u64,
 }
@@ -2279,6 +2298,160 @@ struct CalOut {
     /// The held-out panel's re-judge agreement (None without a re-judge file).
     agreement: Option<AgreementOut>,
     name_drift: Option<Vec<DriftRow>>,
+    /// HC.4: the fit and held-out judged ids per stratum and sub-stratum,
+    /// the input of [`precision_table`]; never in calibration.json.
+    #[serde(skip)]
+    pooled: Pooled,
+}
+
+/// One stratum's (or sub-stratum's) judged ids on both panels, and whether
+/// each panel judged every edge of it (HC.4).
+#[derive(Debug, Clone, Default)]
+struct PoolIn {
+    key: String,
+    tier: String,
+    fit: Judged,
+    held: Judged,
+    census: bool,
+}
+
+/// [`precision_table`]'s input, gathered by [`calibration_texts`].
+#[derive(Debug, Clone, Default)]
+struct Pooled {
+    strata: Vec<PoolIn>,
+    subs: Vec<PoolIn>,
+    fit_tiers: Vec<FitAgg>,
+}
+
+/// One row of the precision table (HC.4).
+#[derive(Debug, Serialize)]
+struct TableRow {
+    stratum: String,
+    n: u64,
+    correct: u64,
+    p: f64,
+    lo: f64,
+    hi: f64,
+    census: bool,
+    under_floor: bool,
+    fit_n: u64,
+    heldout_n: u64,
+}
+
+/// One tier's estimate in the precision table: the fit report's.
+#[derive(Debug, Serialize)]
+struct TableTier {
+    tier: String,
+    n: u64,
+    p: Option<f64>,
+    lo: Option<f64>,
+    hi: Option<f64>,
+    under_floor: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TableOut {
+    audit: String,
+    source: &'static str,
+    rule: &'static str,
+    seed: String,
+    min_judged: u64,
+    floors: BTreeMap<String, f64>,
+    tiers: Vec<TableTier>,
+    strata: Vec<TableRow>,
+    sub_strata: Vec<TableRow>,
+}
+
+/// The calibration.json path the table's `audit` digest names.
+const TABLE_SOURCE: &str = "bench/edge-audit/calibration.json";
+/// Where `--emit-table` writes by default, relative to the checkout that
+/// holds the plan (`<root>/bench/edge-audit/floors.json`).
+const TABLE_PATH: &str = "engine/src/confidence/table.json";
+
+/// The first 12 hex of the blake3 of `calibration_json`: the audit a
+/// precision row names.
+fn audit_digest(calibration_json: &str) -> String {
+    blake3::hash(calibration_json.as_bytes()).to_hex()[..12].to_string()
+}
+
+/// One pooled row, when it holds [`CAL_MIN_JUDGED`] judged ids or is a census.
+fn table_row(p: &PoolIn, plan: &Plan) -> Option<TableRow> {
+    let correct = p.fit.correct + p.held.correct;
+    let n = p.fit.n + p.held.n;
+    if n == 0 || (n < CAL_MIN_JUDGED && !p.census) {
+        return None;
+    }
+    let (lo, hi) = wilson(correct, n);
+    let pr = correct as f64 / n as f64;
+    let under_floor = plan
+        .floors
+        .get(&p.tier.to_ascii_lowercase())
+        .is_some_and(|f| pr < *f);
+    Some(TableRow {
+        stratum: p.key.clone(),
+        n,
+        correct,
+        p: r4(pr),
+        lo: r4(lo),
+        hi: r4(hi),
+        census: p.census,
+        under_floor,
+        fit_n: p.fit.n,
+        heldout_n: p.held.n,
+    })
+}
+
+/// The precision table's text (HC.4; module doc): the pooled strata and
+/// sub-strata by key, the fit report's tiers, the audit digest of
+/// `calibration_json`.
+fn precision_table(cal: &CalOut, calibration_json: &str, plan: &Plan) -> Result<String, String> {
+    let rows = |v: &[PoolIn]| v.iter().filter_map(|p| table_row(p, plan)).collect();
+    let tiers = cal
+        .pooled
+        .fit_tiers
+        .iter()
+        .map(|t| TableTier {
+            tier: t.name.clone(),
+            n: t.n,
+            p: t.p,
+            lo: t.lo,
+            hi: t.hi,
+            under_floor: match (t.p, plan.floors.get(&t.name)) {
+                (Some(p), Some(f)) => p < *f,
+                _ => false,
+            },
+        })
+        .collect();
+    let out = TableOut {
+        audit: audit_digest(calibration_json),
+        source: TABLE_SOURCE,
+        rule: CAL_RULE,
+        seed: plan.seed.clone(),
+        min_judged: CAL_MIN_JUDGED,
+        floors: plan.floors.clone(),
+        tiers,
+        strata: rows(&cal.pooled.strata),
+        sub_strata: rows(&cal.pooled.subs),
+    };
+    Ok(serde_json::to_string_pretty(&out).map_err(|e| e.to_string())? + "\n")
+}
+
+/// The table's fired_on line.
+fn table_marker(table: &str, path: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(table).unwrap_or_default();
+    let len = |k: &str| v[k].as_array().map_or(0, Vec::len);
+    let under = ["strata", "sub_strata"]
+        .iter()
+        .flat_map(|k| v[*k].as_array().into_iter().flatten())
+        .filter(|r| r["under_floor"] == true)
+        .count();
+    format!(
+        "[edge-audit] table strata={} sub_strata={} tiers={} under_floor={under} audit={} path={path}",
+        len("strata"),
+        len("sub_strata"),
+        len("tiers"),
+        v["audit"].as_str().unwrap_or("-"),
+    )
 }
 
 /// What `report --calibration` reads, its files expanded.
@@ -2458,6 +2631,45 @@ fn calibration_texts(inp: CalInputs, plan: &Plan) -> Result<(CalOut, String, Str
     let (subs, _) = compare_strata(&sub_ins, false);
     let sub_strata = subs.into_iter().filter(|r| r.compared).collect();
 
+    // HC.4: both panels' judged ids per key, for the precision table. A panel
+    // censuses a stratum when it judged every edge of it (a panel without the
+    // stratum holds none to judge); a sub-stratum is a census when its
+    // stratum is.
+    let fit_census: BTreeMap<String, bool> = fit
+        .strata
+        .iter()
+        .map(|s| (stratum_key(&s.category, &s.tier), s.big_n == Some(s.n)))
+        .collect();
+    let census_of = |k: &str| {
+        let held = held_strata.get(k).copied().unwrap_or_default();
+        fit_census.get(k).copied().unwrap_or(true) && held_n.get(k).copied().unwrap_or(0) == held.n
+    };
+    let tier_of = |k: &str| k.split('|').nth(1).unwrap_or("").to_string();
+    let parent = |k: &str| k.splitn(3, '|').take(2).collect::<Vec<_>>().join("|");
+    let pooled = Pooled {
+        strata: keys
+            .iter()
+            .map(|k| PoolIn {
+                key: k.clone(),
+                tier: tier_of(k),
+                fit: fit_strata.get(k).copied().unwrap_or_default(),
+                held: held_strata.get(k).copied().unwrap_or_default(),
+                census: census_of(k),
+            })
+            .collect(),
+        subs: sub_ins
+            .iter()
+            .map(|c| PoolIn {
+                key: c.key.clone(),
+                tier: tier_of(&c.key),
+                fit: c.fit.unwrap_or_default(),
+                held: c.held,
+                census: census_of(&parent(&c.key)),
+            })
+            .collect(),
+        fit_tiers: fit.tiers.clone(),
+    };
+
     let heldout_labels: BTreeSet<String> = split.headers.iter().map(|h| h.label.clone()).collect();
     let repos = held
         .repos
@@ -2519,6 +2731,7 @@ fn calibration_texts(inp: CalInputs, plan: &Plan) -> Result<(CalOut, String, Str
         sub_strata,
         agreement: resolved.agreement,
         name_drift,
+        pooled,
     };
     let json = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())? + "\n";
     let md = render_cal_md(&out, &gate);
@@ -2716,6 +2929,7 @@ fn run_calibration(args: &[String]) -> Result<ExitCode, String> {
     let (mut samples, mut verdicts, mut adjudication) = (Vec::new(), Vec::new(), None);
     let (mut plan, mut out_json, mut out_md, mut cohort_tasks, mut check) =
         (None, None, None, None, false);
+    let mut emit_table: Option<Option<String>> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -2735,6 +2949,15 @@ fn run_calibration(args: &[String]) -> Result<ExitCode, String> {
             "--out-json" => out_json = Some(value(args, &mut i, flag)?),
             "--out-md" => out_md = Some(value(args, &mut i, flag)?),
             "--check" => check = true,
+            "--emit-table" => {
+                emit_table = Some(match args.get(i + 1).filter(|a| !a.starts_with("--")) {
+                    Some(p) => {
+                        i += 1;
+                        Some(p.clone())
+                    }
+                    None => None,
+                })
+            }
             other => return Err(format!("report --calibration: unknown argument {other}")),
         }
         i += 1;
@@ -2765,8 +2988,36 @@ fn run_calibration(args: &[String]) -> Result<ExitCode, String> {
     for m in calibration_markers(&cal.gate) {
         eprintln!("{m}");
     }
+    // HC.4: the precision table, only from a PASS.
+    let table = match emit_table {
+        Some(path) => {
+            if cal.gate.verdict != "PASS" {
+                return Err(format!(
+                    "report --calibration: --emit-table needs the rule's PASS; the calibration reads {}",
+                    cal.gate.verdict
+                ));
+            }
+            let path = path.unwrap_or_else(|| {
+                Path::new(&plan_path)
+                    .ancestors()
+                    .nth(3)
+                    .unwrap_or(Path::new("."))
+                    .join(TABLE_PATH)
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            let text = precision_table(&cal, &json, &plan)?;
+            eprintln!("{}", table_marker(&text, &path));
+            Some((path, text))
+        }
+        None => None,
+    };
     if check {
-        for (path, want) in [(&out_json, &json), (&out_md, &md)] {
+        let table_check = table.as_ref().map(|(p, t)| (p, t));
+        for (path, want) in [(&out_json, &json), (&out_md, &md)]
+            .into_iter()
+            .chain(table_check)
+        {
             let have = std::fs::read_to_string(path).unwrap_or_default();
             if have != *want {
                 eprintln!(
@@ -2781,6 +3032,9 @@ fn run_calibration(args: &[String]) -> Result<ExitCode, String> {
     print!("{md}");
     std::fs::write(&out_json, json).map_err(|e| format!("{out_json}: {e}"))?;
     std::fs::write(&out_md, md).map_err(|e| format!("{out_md}: {e}"))?;
+    if let Some((path, text)) = table {
+        std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))?;
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2842,6 +3096,34 @@ mod tests {
             ],
             seed: "glia-edge-audit-0.5.4".to_string(),
         }
+    }
+
+    /// HC.4: a pooled row needs 10 judged ids or a census, pools both
+    /// panels, and is under floor below its tier's floor.
+    #[test]
+    fn table_rows_pool_both_panels() {
+        let p = |key: &str, fit: (u64, u64), held: (u64, u64), census| PoolIn {
+            key: key.to_string(),
+            tier: key.split('|').nth(1).unwrap_or("").to_string(),
+            fit: Judged {
+                correct: fit.0,
+                n: fit.1,
+            },
+            held: Judged {
+                correct: held.0,
+                n: held.1,
+            },
+            census,
+        };
+        let r = table_row(&p("CALLS|fact", (30, 30), (9, 10), false), &plan()).unwrap();
+        assert_eq!((r.n, r.correct, r.fit_n, r.heldout_n), (40, 39, 30, 10));
+        assert_eq!(r.p, r4(39.0 / 40.0));
+        assert!(!r.under_floor, "0.975 >= 0.95");
+        assert!(table_row(&p("USES|derived", (0, 0), (4, 5), false), &plan()).is_none());
+        let census = table_row(&p("USES|derived", (0, 0), (4, 5), true), &plan()).unwrap();
+        assert!(census.census && census.under_floor, "0.8 < 0.90");
+        assert!(table_row(&p("X|fact", (0, 0), (0, 0), true), &plan()).is_none());
+        assert_eq!(audit_digest("{}\n").len(), 12);
     }
 
     #[test]

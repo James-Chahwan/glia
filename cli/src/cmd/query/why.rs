@@ -5,8 +5,11 @@
 //! each hop explained the same way) and the LD.8a absence block. `--json` is
 //! the whole `WhyAnswer`. Exit 0 when an edge was found, 1 when none was
 //! (path or not), 2 on a build failure, an unknown node or an unknown
-//! category.
+//! category. Each row's tier cell carries its `precision` (HC.4,
+//! `glia_engine::confidence`: `fact (>= 0.91 on CALLS|fact, n=41)`), the
+//! JSON its `precision` key; `--no-precision` leaves both out.
 
+use glia_engine::confidence;
 use glia_engine::why::{EdgeWhy, why_edge};
 
 use crate::cmd::resolve::print_absence;
@@ -31,6 +34,10 @@ pub(crate) struct Args {
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
+    /// Leave out each row's `precision`, the audited precision of the edge
+    /// stratum its tier rests on (HC.4), for byte-stable consumers.
+    #[arg(long)]
+    no_precision: bool,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -57,6 +64,7 @@ pub(crate) fn run(args: Args) -> i32 {
         a.unparsed_files = result.parse_errors.len();
     }
     let code = if answer.found { 0 } else { 1 };
+    confidence::finish(&mut answer, !args.no_precision, "cli");
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
         return code;
@@ -126,7 +134,7 @@ fn print_rows(rows: &[EdgeWhy], ends: bool, hops: bool) {
             " {} | {} | {} | {} | {} | {site} | {} |",
             r.category,
             r.confidence,
-            r.tier,
+            confidence::tier_text(r.tier, r.precision.as_ref()).replace('|', "\\|"),
             r.emitter.as_deref().unwrap_or("—"),
             r.rule.as_deref().unwrap_or("—"),
             r.note.as_deref().unwrap_or("")

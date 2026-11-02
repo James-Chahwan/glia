@@ -10,6 +10,7 @@ cmd glia query
   arg max_mb pos=- long=max-mb short=- required=false num_args=1 action=Set default=- value_names=MB global=false hidden=false
   arg max_rows pos=- long=max-rows short=- required=false num_args=1 action=Set default=- value_names=N global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg no_precision pos=- long=no-precision short=- required=false num_args=0 action=SetTrue default=false value_names=NO_PRECISION global=false hidden=false
   arg output pos=- long=output short=- required=false num_args=1 action=Append default=- value_names=PRED global=false hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg with pos=- long=with short=- required=false num_args=1 action=Append default=- value_names=WITH global=false hidden=false

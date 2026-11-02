@@ -98,6 +98,10 @@ pub mod targets;
 // 0.5.4 FH batch public slot (F0.7): health (FH.2a), reached by module path.
 pub mod health;
 
+// 0.5.7 public slot (HC.4): confidence, the audited precision beside a row's
+// tier, reached by module path (`glia_engine::confidence::Precision`).
+pub mod confidence;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{

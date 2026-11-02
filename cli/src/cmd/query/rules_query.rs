@@ -29,6 +29,12 @@
 //! **`--json`** is the engine's `QueryAnswer` (keys `language`, `outputs`,
 //! `results`, `absence`), same exit codes.
 //!
+//! **Precision (HC.4).** A row with a whole witness, and each witness edge,
+//! carries `precision` (`glia_engine::confidence`), printed beside its tier
+//! (`fact (>= 0.91 on CALLS|fact, n=41)`); `--no-precision` leaves it out.
+//! It never changes a row, the order or the exit code. fired_on:
+//! `[confidence] surface=cli rows=<r> ..` when a row carries one.
+//!
 //! **Exit**: 0 with rows, 1 with none (the absence says why; a `--limit 0` of a
 //! non-empty answer is 0), 2 on a usage, read, build, parse, analysis, budget
 //! (rows or memory) or evaluation error (the engine's rendered text on stderr, one diagnostic per
@@ -42,6 +48,7 @@ use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read};
 
 use glia_engine::check::{MAX_EVIDENCE, ViolationEdge};
+use glia_engine::confidence;
 use glia_engine::memory::MemoryBudget;
 use glia_engine::rules::{
     QueryAnswer, QueryOptions, QueryOutput, QueryRow, QueryValue, query, query_gql,
@@ -96,6 +103,10 @@ pub(crate) struct Args {
     /// Emit the answer as JSON instead of tables (same exit codes).
     #[arg(long)]
     json: bool,
+    /// Leave out each row's `precision`, the audited precision of the edge
+    /// stratum its tier rests on (HC.4), for byte-stable consumers.
+    #[arg(long)]
+    no_precision: bool,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -150,6 +161,7 @@ fn answer(args: &Args) -> i32 {
         a.unparsed_files = result.parse_errors.len();
     }
     let code = if answer.absence.is_some() { 1 } else { 0 };
+    confidence::finish(&mut answer, !args.no_precision, SURFACE);
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
     } else {
@@ -263,7 +275,11 @@ fn print_row(n: usize, r: &QueryRow) {
     for v in &r.values {
         line.push_str(&format!(" {} |", value(v)));
     }
-    println!("{line} {} | {} |", r.tier, at(r.file.as_deref(), r.line));
+    println!(
+        "{line} {} | {} |",
+        cell(&confidence::tier_text(r.tier, r.precision.as_ref())),
+        at(r.file.as_deref(), r.line)
+    );
 }
 
 /// A value's cell: a node `` `qname` ``, a string as is, an integer in decimal.
@@ -322,9 +338,10 @@ fn print_witness(r: &QueryRow) {
 
 /// An edge's tier, with its note in parentheses when it has one.
 fn edge_tier(e: &ViolationEdge) -> String {
+    let tier = cell(&confidence::tier_text(e.tier, e.precision.as_ref()));
     match e.note.as_deref() {
-        Some(n) => format!("{} ({})", e.tier, cell(n)),
-        None => e.tier.to_string(),
+        Some(n) => format!("{tier} ({})", cell(n)),
+        None => tier,
     }
 }
 

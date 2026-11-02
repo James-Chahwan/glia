@@ -4,8 +4,11 @@
 //! `--json` is the LD.8a envelope `{results, absence}`; an empty table prints
 //! the absence block (the FACT, the heritage caveat rows of the target's
 //! language, the suggestions). An absence is an answer, so it exits 0; exit 2
-//! is a build failure.
+//! is a build failure. Each row's tier carries its path's weakest-link
+//! `precision` (HC.4, `glia_engine::confidence`); `--no-precision` leaves it
+//! out.
 
+use glia_engine::confidence;
 use glia_engine::implementors::{HierarchyDirection, implementors};
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -30,6 +33,10 @@ pub(crate) struct Args {
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
+    /// Leave out each row's `precision`, the audited precision of the edge
+    /// stratum its tier rests on (HC.4), for byte-stable consumers.
+    #[arg(long)]
+    no_precision: bool,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -49,6 +56,7 @@ pub(crate) fn run(args: Args) -> i32 {
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
     }
+    confidence::finish(&mut answer, !args.no_precision, "cli");
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
         return 0;
@@ -81,7 +89,7 @@ pub(crate) fn run(args: Args) -> i32 {
             "| {} | {} | {} | {} | {} | `{}` | {via} | {at} |",
             r.depth,
             r.relation,
-            r.tier,
+            confidence::tier_text(r.tier, r.precision.as_ref()).replace('|', "\\|"),
             live_glyph(r.live),
             r.kind,
             r.qname

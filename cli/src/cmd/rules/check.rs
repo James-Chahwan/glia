@@ -56,6 +56,10 @@
 //! row (printed under `## rule errors (not evaluated)` with its `fix:` line,
 //! not under the heading above), so it exits 2. The summary line gains `,
 //! checking nothing <n>` (the non-blocking ones) only when there is one.
+//!
+//! Precision (HC.4): each violation and evidence row carries `precision`
+//! (`glia_engine::confidence`), printed beside its tier; it never moves the
+//! exit code. `--no-precision` leaves it out.
 
 use std::path::PathBuf;
 
@@ -64,6 +68,7 @@ use glia_engine::check::{
     CONVERGENCE, CheckOptions, CheckReport, DIVERGENCE, MAX_UNMAPPED_SAMPLE, Reflexion,
     RuleMdOptions, Unanchored, Violation, check_with_roots, render_rule_md,
 };
+use glia_engine::confidence;
 use glia_engine::review::CaveatFold;
 
 use crate::common::generate_for;
@@ -85,6 +90,10 @@ pub(crate) struct Args {
     /// failure.
     #[arg(long)]
     strict: bool,
+    /// Leave out each row's `precision`, the audited precision of the edge
+    /// stratum its tier rests on (HC.4), for byte-stable consumers.
+    #[arg(long)]
+    no_precision: bool,
 }
 
 /// Exit code: 2 when a rule could not be evaluated, else 1 when any
@@ -267,8 +276,9 @@ pub(crate) fn run(args: Args) -> i32 {
         .collect();
     let mut opts = CheckOptions::default();
     opts.strict = args.strict;
-    let report = check_with_roots(&result.merged, &roots, &opts);
+    let mut report = check_with_roots(&result.merged, &roots, &opts);
     let code = exit_code(&report);
+    confidence::finish(&mut report, !args.no_precision, "cli");
     if args.json {
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
         return code;

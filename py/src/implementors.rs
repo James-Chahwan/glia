@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 
 use glia_core::NodeId;
 use glia_engine::absence::Answer;
+use glia_engine::confidence;
 use glia_engine::implementors::{HierarchyDirection, Implementor, implementors_with_live};
 use glia_graph::MergedGraph;
 
@@ -67,15 +68,22 @@ impl PyGraph {
     /// (`unknown_symbol` with suggestions, or `no_edges` with the heritage
     /// caveat rows of the target's language) with `unparsed_files` set to
     /// `len(parse_errors)`.
-    #[pyo3(signature = (qname, direction="down", transitive=true))]
+    ///
+    /// HC.4: each row also carries `precision` `{lo, p, hi, n, stratum,
+    /// audit}` (plus `census` / `under_floor` / `unmeasured` when true): the
+    /// audited precision of its path's weakest heritage edge, named by that
+    /// edge's stratum, never a sort key or a tier. `precision=False` leaves
+    /// it out.
+    #[pyo3(signature = (qname, direction="down", transitive=true, precision=true))]
     fn implementors(
         &self,
         py: Python<'_>,
         qname: &str,
         direction: &str,
         transitive: bool,
+        precision: bool,
     ) -> PyResult<Py<PyAny>> {
-        let answer = implementors_answer(
+        let mut answer = implementors_answer(
             &self.merged,
             self.live(),
             qname,
@@ -84,6 +92,7 @@ impl PyGraph {
             self.parse_errors.len(),
         )
         .map_err(PyValueError::new_err)?;
+        confidence::finish(&mut answer, precision, "py");
         to_py(py, serde_json::to_string(&answer))
     }
 }

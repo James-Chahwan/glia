@@ -35,7 +35,7 @@ ANSWER_KEYS = ["language", "outputs", "results", "absence"]
 OUTPUT_KEYS = ["predicate", "arity", "columns", "total", "shown"]
 ROW_KEYS = ["predicate", "values", "tier", "file", "line"]
 NODE_KEYS = ["qname", "kind", "file", "line"]
-EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
+EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note", "precision"]
 
 
 def write_tree(root: pathlib.Path, files) -> None:
@@ -53,11 +53,12 @@ def main() -> int:
     c.check("query signature",
             params(rg.PyGraph.query)
             == [("program", None), ("outputs", None), ("limit", None), ("explain", False), ("max_rows", None),
-                ("max_mb", None)],
+                ("max_mb", None), ("precision", True)],
             params(rg.PyGraph.query))
     c.check("query_gql signature",
             params(rg.PyGraph.query_gql)
-            == [("query", None), ("limit", None), ("explain", False), ("max_rows", None), ("max_mb", None)],
+            == [("query", None), ("limit", None), ("explain", False), ("max_rows", None), ("max_mb", None),
+                ("precision", True)],
             params(rg.PyGraph.query_gql))
     with tempfile.TemporaryDirectory(prefix="glia-surface-query-") as tmp:
         root = pathlib.Path(tmp) / "fx1"
@@ -123,6 +124,12 @@ def main() -> int:
                  type(w0.get("line")) is int, w0.get("tier"))
                 == ("web::app::other", "services::api::public::facade::get", "CALLS", "web/app.py", True, "fact"),
                 w0)
+        r0p = ex.get("results", [{}])[0].get("precision")
+        c.check("HC.4: a row with a whole witness carries its weakest link's precision",
+                r0p is not None and r0p == w0.get("precision"), (r0p, w0.get("precision")))
+        bare = g.query(WEB_CALLS, explain=True, precision=False)
+        c.check("HC.4: precision=False drops every precision key",
+                "precision" not in str(bare), bare)
 
         none = g.query('x(a) :- node(a, "ROUTE").')
         ab = none.get("absence") or {}

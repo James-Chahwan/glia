@@ -372,7 +372,11 @@ fn updating() -> bool {
 /// `report` against the golden at `path` (pretty JSON, one trailing newline), or
 /// written there when updating.
 fn against_golden(report: &CheckReport, path: &std::path::Path) -> Option<String> {
-    let pretty = serde_json::to_string_pretty(report).expect("a report serialises") + "\n";
+    // HC.4: the goldens pin the reflexion semantics; the audited precision
+    // beside each tier is the confidence table's (engine/tests/confidence.rs).
+    let mut report = report.clone();
+    crate::confidence::Annotated::drop_precision(&mut report);
+    let pretty = serde_json::to_string_pretty(&report).expect("a report serialises") + "\n";
     if updating() {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("mkdir golden dir");

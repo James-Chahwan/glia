@@ -119,6 +119,11 @@
 //!
 //! The evaluator reads structure only: nodes, kinds, locations, edges and cells
 //! (SECURITY.md); docs/rules.md is the language reference.
+//!
+//! HC.4: each witness edge carries `precision`, its stratum's audited
+//! precision ([`crate::confidence`]), and a row with a whole witness carries
+//! the weakest link's (`QueryRow::precision`); a cut witness or no witness
+//! carries none. It is stamped after the rows, order and limit are final.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -141,6 +146,7 @@ use super::facts::{CodeFacts, located_edge};
 use super::prelude::{self, PreludeFacts};
 use crate::absence::{self, Absence};
 use crate::check::{MAX_EVIDENCE, ViolationEdge};
+use crate::confidence::{self, Annotated, Precision, Tally};
 use crate::coverage::{CoverageNote, caveats_for};
 use crate::memory::MemoryBudget;
 use crate::profile::CODE_PROFILE;
@@ -245,6 +251,12 @@ pub struct QueryRow {
     /// at most `check::MAX_EVIDENCE`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub witness: Vec<ViolationEdge>,
+    /// HC.4: with a whole witness, its weakest link's audited precision
+    /// (`confidence::weakest`), each witness edge carrying its own; `None`
+    /// (not serialised) with no witness, a witness cut by the leaf cap, or
+    /// once a surface drops it. Never read by an order, a limit or a tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<Precision>,
 }
 
 /// One rendered value. JSON: `{"node": {..}}`, `{"str": ".."}`, `{"int": n}`.
@@ -1257,6 +1269,40 @@ impl<'m> Caveats<'m> {
     }
 }
 
+/// The weakest link of `witness` when every edge carries a precision.
+fn weakest_of(witness: &[ViolationEdge]) -> Option<Precision> {
+    let rows: Vec<&Precision> = witness
+        .iter()
+        .filter_map(|e| e.precision.as_ref())
+        .collect();
+    if rows.len() < witness.len() {
+        return None;
+    }
+    confidence::weakest(rows)
+}
+
+impl Annotated for QueryAnswer {
+    fn drop_precision(&mut self) {
+        for r in &mut self.results {
+            r.precision = None;
+            for e in &mut r.witness {
+                e.precision = None;
+            }
+        }
+    }
+
+    fn precision_tally(&self) -> Tally {
+        let mut t = Tally::default();
+        for r in &self.results {
+            t.add(r.precision.as_ref());
+            for e in &r.witness {
+                t.add(e.precision.as_ref());
+            }
+        }
+        t
+    }
+}
+
 /// The answer of an evaluated program, and its `[query]` marker.
 fn answer(
     merged: &MergedGraph,
@@ -1288,6 +1334,9 @@ fn answer(
                 Some(id) => nodes.first_location(&[Value::Node(id)]),
                 None => nodes.first_location(&r.values),
             };
+            // HC.4: the rows are final; the precision only annotates them.
+            let whole = !r.witness.is_empty() && r.witness_edges <= r.witness.len();
+            let precision = whole.then(|| weakest_of(&r.witness)).flatten();
             results.push(QueryRow {
                 predicate: o.name.clone(),
                 values: r.values.iter().map(|v| nodes.value(v)).collect(),
@@ -1296,6 +1345,7 @@ fn answer(
                 line,
                 caveats: caveats.get(&r.negated),
                 witness: r.witness,
+                precision,
             });
         }
     }

@@ -105,7 +105,13 @@
 //! report: `[review] caveats rules=<r> lines=<l> folded=<f>` (`r` the blocks,
 //! `l` their `⚠` lines, `f` the lines a block per violation would have
 //! printed beyond `l`).
+//!
+//! Precision (HC.4): `counts.precision_by_tier` and every violation row's
+//! `precision` (`glia_engine::confidence`) print beside the tiers; they never
+//! move the exit code. `--no-precision` leaves them out; `[confidence]
+//! surface=cli ..` on stderr when any printed.
 
+use glia_engine::confidence;
 use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, ReviewArgs,
@@ -166,6 +172,10 @@ pub(crate) struct Args {
     /// <base>..HEAD
     #[arg(long, value_name = "TEXT")]
     title: Option<String>,
+    /// Leave out each row's `precision`, the audited precision of the edge
+    /// stratum its tier rests on (HC.4), for byte-stable consumers.
+    #[arg(long)]
+    no_precision: bool,
     #[command(flatten)]
     ranking: CalibratedRankingArgs,
 }
@@ -239,7 +249,7 @@ pub(crate) fn run(args: Args) -> i32 {
     if args.full {
         lift_caps(&mut engine);
     }
-    let review = match review_vs_rev(&args.repo, &args.base, &engine) {
+    let mut review = match review_vs_rev(&args.repo, &args.base, &engine) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -247,6 +257,7 @@ pub(crate) fn run(args: Args) -> i32 {
         }
     };
     let exit = i32::from(review.blocking);
+    confidence::finish(&mut review, !args.no_precision, "cli");
     let format = if args.json { "json" } else { "markdown" };
     eprintln!("[review] surface=cli format={format} exit={exit}");
     if args.json {
