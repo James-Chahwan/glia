@@ -47,8 +47,9 @@ const SKILLS_REL: &str = "skills";
 /// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added, 0.5.2's `query` /
 /// `identity`, DZ.1, the tweaks' `contracts --fields` model drift, DT.13, 0.5.3's
 /// `history calibrate`, EZ.1, and 0.5.4's `health`, `embed` and `vocab sync`,
-/// FZ.1, and 0.5.6's two answer modes, `flows --concept` and `find --flows`,
-/// GZ.1), `glia-overlay` (CE.3f) and the six task skills (FE.7).
+/// FZ.1, 0.5.6's two answer modes, `flows --concept` and `find --flows`,
+/// GZ.1, and 0.5.7's five `targets` subcommands, HZ.1), `glia-overlay` (CE.3f)
+/// and the six task skills (FE.7).
 /// A subcommand is its surface section path, `overlay propose`; a mode is the
 /// path then its flags, `flows --concept`. glia-init's one
 /// `--json` command is `history calibrate`: `build`, `history sync`, `install-hooks`
@@ -102,6 +103,13 @@ const EXAMPLED: [(&str, &[&str]); 8] = [
             // the flows through each find hit (GB.2), modes of `flows` / `find`.
             "flows --concept",
             "find --flows",
+            // 0.5.7 (HZ.1): the build-target answers over a bazel snapshot (HT.3,
+            // HT.6, HT.7) and the snapshot step that feeds them.
+            "targets sync",
+            "targets owners",
+            "targets deps",
+            "targets rdeps",
+            "targets affected",
         ],
     ),
     (

@@ -50,6 +50,69 @@ records its `device`, and stderr names the device on one `[embed] device=..
 backend=.. driver=.. fallback=.. batch=..` line. The devices, fallbacks and
 measured speeds are in docs/embeddings.md.
 
+## What's new in 0.5.7
+
+**Pin exactly: `glia-py==0.5.7`.**
+
+```bash
+pip install glia-py==0.5.7
+```
+
+0.5.7 adds build-target answers, the audited precision beside each tier and entry flows from
+declared entries, and fixes the false edges its precision run found. The store format is
+unchanged (format 3) and no code id moves (the build-target domain's ids live in their own
+block), but graph content moves (below), so rebuild, and calibrate again after upgrading. Every
+new keyword is appended last, so positional calls keep working.
+
+- **Build targets.** `glia_py.targets_sync(repo, bazel="bazel", workspace="", expr="//...:*",
+  from_file=None)` asks bazel once (`bazel query --output=streamed_jsonproto`), or reads a saved
+  query output, into `<repo>/.glia/targets-snapshot/`, replacing that workspace's rows; a build
+  never runs it. Over the graph's first repo root, `PyGraph.targets_owners(files)` returns
+  `[{file, owners}]`, `targets_deps(label, depth=3, workspace=None)` / `targets_rdeps(..)` return
+  `{results, absence}` (an unknown label is a fact `unknown_symbol` absence), and
+  `targets_affected(files=None, base="HEAD")` the targets and test targets the files (else the
+  work tree's changes against `base`) reach, with a caveat when a BUILD / `.bzl` / MODULE /
+  WORKSPACE file changed. Every row is tier `fact`. The answers read `.glia/graph/targets.gmap`,
+  written by the first answer after a sync. GIL released; errors are ValueError.
+- **`targets` on the change answers.** With a targets snapshot, the `diff_impact`,
+  `diff_impact_vs_rev` and `review_vs_rev` dicts gain `targets` (last key) and review's markdown
+  ends with `### Build targets`; without one nothing changes. A merged graph reads the snapshot
+  of its first repo root only.
+- **`precision=True`** on `PyGraph.why`, `check`, `query`, `query_gql`, `implementors` and
+  `review_vs_rev`: each row (each witness edge; a whole witness its weakest link) gains
+  `precision` `{lo, p, hi, n, stratum, audit, ..}`, the audited precision of its (category, tier)
+  stratum from the committed edge audit, and review's `counts` gains `precision_by_tier`.
+  It never moves a row, a tier or a gate; `precision=False` returns the 0.5.6 dicts. The
+  calibration gate passed before this shipped (dev-notes/confidence-gate-0.5.7.md, `CONFIDENCE:
+  R1=yes (25/25) R2=yes (0.0218) R3=yes (25) -> PASS`).
+- **Declared entries are flow entries.** A node carrying an ENTRYPOINT cell (a host start or
+  callback, a plugin unit, a `__main__` guard, an overlay `[entrypoints]` stanza) seeds
+  `entry_flows`, `find_flows`, `concept_flows`, `cross_stack_trace`'s entry tier and
+  `duplicate_flows`, as it already seeded liveness; `nodes_json`'s `entry` is true for it. A repo
+  with no ENTRYPOINT cell answers as before.
+- **Tiers.** A pairing that rests on a model-written (`origin = "llm"`, or unmarked) overlay
+  `[[wrapper]]` / `[constants]` / `[[route_prefix]]` stanza has the EVIDENCE rule
+  `<rule>/overlay_llm` and tier `heuristic` (was derived), and no `http_model` identity class
+  rests on such a pairing any more.
+- **Graph content.** MCP servers (Python `@mcp.tool()` / `.prompt()` / `.resource(..)` and the
+  low-level `Server` handlers; TypeScript `McpServer`) mint `host_cmd:mcp:tool|prompt:<name>` and
+  `host_event:mcp:resource:<uri>` nodes HANDLED_BY their functions, so those functions are live.
+  Rails routes under `resources` re-key to their nested path (`ANY /api/v1/notifications` ->
+  `ANY /api/v1/accounts/:account_id/notifications`) and gain `/:id` and member / collection
+  routes. ASP.NET `[HttpGet][Route("t")]` is one `GET /t` route. C# usings are read: heritage
+  binds by C# name lookup (fact), a namespace using IMPORTS its PACKAGE, IMPORT_BINDINGS rows
+  gain `form` / `global`. No INHERITS_FROM / IMPLEMENTS edge ends at a PACKAGE or MODULE.
+  Solidity emits of inherited or qualified events bind the declaring event (no edge to a missing
+  node) and a procedure's HANDLED_BY is sited in each copy's own file. Angular lazy child routes
+  gain their parent prefix, and a route under a computed parent path reads `page:/~<head>/..`.
+  Python `self.X` reads of a class's own method or an inherited member mint no ATTRIBUTE. A test
+  that mocks a store, or names one only inside a longer identifier or a quoted title, has no
+  ACCESSES_DATA; a file naming `redis` only inside a longer word mints no Redis queue node; JPQL
+  `join fetch E` names E. TESTS `name_match` prefers the candidate the test imports and refuses a
+  tie wider than three. The doc linker binds fewer DOCUMENTS edges (no rule / key / kind
+  positions, key chords, private Rust fns from outside their project or bare mentions across
+  projects).
+
 ## What's new in 0.5.6
 
 **Pin exactly: `glia-py==0.5.6`.**

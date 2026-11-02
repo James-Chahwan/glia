@@ -8,12 +8,16 @@ This file provides guidance to Claude Code when working in the Rust workspace. T
 
 **glia** is the Rust engine behind repo-graph. It parses source, builds a unified cross-language graph, stores it in a zero-copy `.gmap` file (rkyv + mmap), runs Personalised PageRank activation over it, and projects it to dense text or structured forms.
 
-Designed to be domain-agnostic: code is the first primitive, but other domains (video, molecules, policy, climate) slot in via the same registry model. See `dev-notes/glia-memory/project_050_domain_agnostic.md` for the direction, and `docs/dpg.md` (0.5.6, GP.16) for the model as it stands: a DPG, a Domain-Parameterised Graph, a property graph whose domain profile supplies entry rules, carry edges, ranking weights and identity rules.
+Designed to be domain-agnostic: code is the first primitive, but other domains (video, molecules, policy, climate) slot in via the same registry model. See `dev-notes/glia-memory/project_050_domain_agnostic.md` for the direction, and `docs/dpg.md` (0.5.6, GP.16) for the model as it stands: a DPG, a Domain-Parameterised Graph, a property graph whose domain profile supplies entry rules, carry edges, ranking weights and identity rules. 0.5.7 ships the first domain beside code, build targets (`build-domain/`, its ids in their own block: "Code-Domain Registries" below), and `docs/seams.md` names the five seams a contribution can touch.
 
 ## Workspace Layout
 
 ```
-core/               Node, Edge, QName, shared primitives (no domain assumptions)
+core/               Node, Edge, QName, shared primitives (no domain assumptions); 0.5.7
+                    (HT.1): `ids`, the id blocks (BLOCK_SHIFT 16, block_of / position_of /
+                    id_in, BLOCKS: 0x0000 code, 0x0001 core, 0x0002 build, 0x0003 goal
+                    reserved, 0x8000-0xFFFE private, 0xFFFF never; check_table) and
+                    core/ids.lock, the append-only lock of every shipped id
 code-domain/        Code-specific registries: NodeKind, EdgeCategory, CellType (u32 IDs)
                     + the code DomainTables (profile.rs) + the host table (hosts.rs, 0.5.6)
 graph/              Per-repo graph builder, universal resolver, cross-graph resolvers
@@ -28,9 +32,13 @@ doc-sources/        Tier-4 doc ingestion: Confluence REST, Notion, MediaWiki, a 
                     + the local snapshot
 snapshots/          External-input snapshot writers (git history, test reports, SCIP
                     indexes); a build never runs them and reads their output through
-                    code-domain::snapshots
+                    code-domain::snapshots; 0.5.7 (HT.3): bazel.rs, `targets_sync`
+                    (TargetsOptions, TargetsSummary): `bazel query --output=streamed_jsonproto`
+                    (or `--from` a saved output) -> .glia/targets-snapshot/ (`[targets] sync ..`)
 store/              .gmap binary format — rkyv + mmap, sharded layout (format 3), and the
-                    timeline.gmap sidecar
+                    timeline.gmap sidecar; 0.5.7 (HT.2): inspect's NamedCount gains `block`
+                    (glia_core::ids::block_name) and `id_label` (decimal below 0x10000, else
+                    `0x<8 hex> [<block>]`)
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights;
                     also the domain-free build-pass registry (`passes`: Stage, PassSpec,
@@ -61,7 +69,10 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
                     IdentityRule / IdentityTier and `DomainTables.identity_rules`, DD.3;
                     the close-out's `NamedEntry.exts` / `accepts_ext`, a named entry row
                     limited to some file extensions, and `EntryRule::is_entry_at`, which
-                    reads a node's extension lazily, DT.5l)
+                    reads a node's extension lazily, DT.5l); 0.5.7 (HT.1):
+                    `DomainTables::validate_blocks(shipped)`, every registry row through
+                    glia_core::ids::check_table and no private id when shipped, kept apart
+                    from validate() (toy-domain numbers from 1 on purpose)
 rules/              glia-rules (0.5.2, DA): the Datalog evaluator. Depends on glia-core and
                     glia-activation ONLY (the `dependency_guard` test in rules/tests/toy.rs
                     pins it), and is query-time: not a HASHED_ROOTS entry, so a rules change
@@ -115,9 +126,21 @@ embed/              glia-embed (0.5.4, FB.1, FB.14): the Embedder trait, HashEmb
                     opt-in); a GPU failure finishes on an in-process CPU session. The engine reaches the
                     model only through feature `sem-eval` (gate harnesses), py through `embed` (on in
                     the published wheels), the CLI through its default `embed`. docs/embeddings.md
-build-domain/       glia-build-domain (0.5.4 wave 0, F0.2): reserved for 0.5.7's build-target graphs
-                    (track T9); doc-only in 0.5.4, a stamp HASHED_ROOTS entry
-parsers/build/bazel/ glia-parser-bazel (F0.2): reserved for 0.5.7 (track T9); doc-only in 0.5.4
+build-domain/       glia-build-domain (F0.2's slot, filled in 0.5.7, track T9): the build-target
+                    domain on the domain-free crates only (core, activation, store), a stamp
+                    HASHED_ROOTS entry, publish = false. registry.rs (HT.4: TARGET / PACKAGE /
+                    SOURCE / EXTERNAL, DEPENDS_ON / RUNTIME_DEP / HAS_SRC / IN_PACKAGE, LOCATION /
+                    ATTRS / ROLE / VIA, each `id_in(BUILD, n)`), profile.rs (BUILD_TABLES,
+                    graph_type `build-targets`; BUILD_PASSES: Post role_cells, Finalize
+                    sort_edges; BUILD_PROFILE), graph.rs (BuildGraph, a GraphSource;
+                    write_gmap / read_gmap of targets.gmap, one `build-targets.labels`
+                    section), snapshot.rs (HT.3: TargetRow, TargetsMeta, write_targets /
+                    read_targets of .glia/targets-snapshot/, TARGETS_VERSION 1)
+parsers/build/bazel/ glia-parser-bazel (F0.2's slot, filled in 0.5.7, HT.5): parse_targets /
+                    parse(repo, rows) -> BuildGraph, ParseStats, ATTR_EDGES (deps / embed /
+                    actual / exports / runtime_deps / implementation_deps -> DEPENDS_ON, data
+                    -> RUNTIME_DEP, srcs / hdrs / textual_hdrs -> HAS_SRC); an `@` / `@@` label
+                    is an EXTERNAL (`[bazel] parsed workspaces= targets= ..`)
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
                     (the rules layer's own toy proof is inline in rules/tests/toy.rs, so this list is unchanged)
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
@@ -183,6 +206,16 @@ The facade rules:
    GD.31), graph build.rs's `mod partial;` (GA.3) and `mod route_mounts;` (GD.40), resolvers/mod.rs's
    `mod host_scripts; mod host_start;` with `pub use host_scripts::HostResolver;` (GH.6, GH.18) and
    the extractors' `pub mod nginx;` (GH.6); no engine, graph or py facade line moved.
+   0.5.7's wave 0 was HP.1 alone (closeout.py, no facade), and no Cargo.toml or Cargo.lock moved
+   (F0.2 had declared every dependency of the T9 crates). Each packet that made a module added only
+   its own lines: core/src/lib.rs `pub mod ids;` (HT.1), engine/src/lib.rs `pub mod confidence;`
+   (HC.4, a 0.5.7 public slot), graph/src/lib.rs `mod cs_scope;` (HQ.13), graph build.rs `mod
+   solidity;` (HQ.3), code-domain lib.rs's appended `NavFact::CsUsing` with `CsUsingForm`,
+   `csharp_using_bindings` and `ImportBinding.{form, global}` (HQ.13), snapshots/src/lib.rs `mod
+   bazel;` + its `pub use` (HT.3), build-domain/src/lib.rs (its own slot: HT.4's modules, HT.3's
+   snapshot re-exports), cli/src/main.rs + cmd/mod.rs for the hidden `ids` (HT.2) and the inputs
+   area's `mod targets;` (HT.7); py/src/lib.rs did not move (py's `targets` registers through the
+   inventory).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
@@ -200,6 +233,12 @@ The facade rules:
    `engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs`, `engine/src/targets.rs`,
    `parsers/build/bazel/src/lib.rs` and `py/src/{clarify,goal,targets}.rs`, each ending
    `//! Reserved for 0.5.7 (track T6|T9); empty in 0.5.4 to 0.5.6.` (FZ.1's scan exempts exactly these).
+   At 0.5.7 the four T9 slots have code (build-domain/src/lib.rs HT.4, parsers/build/bazel/src/lib.rs
+   HT.5, engine/src/targets.rs HT.6, py/src/targets.rs HT.7), and every tracked `.rs` has code except
+   exactly the 12 T6 slots: `code-domain/src/goal.rs`, `engine/src/clarify/{answer,questions}.rs`,
+   `engine/src/goal/{check,drift,extract,impact,join,resolve,why}.rs` and `py/src/{clarify,goal}.rs`,
+   still ending `//! Reserved for 0.5.7 (track T6); empty in 0.5.4 to 0.5.6.` although the goal layer
+   moved again (0.5.8 is `glia explain`, the goal layer 0.5.9); HZ.1's scan exempts exactly these 12.
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -406,7 +445,8 @@ engine/src/   lib.rs        facade (rules above)
                        health rates BLIND or DEGRADED (FH.9, `BlastRadius.blind`)
               goal/ clarify/ targets.rs   F0.3 slots reserved for 0.5.7 (T6: goal/, clarify/;
                        T9: targets.rs): goal/mod.rs and clarify/mod.rs declare their children,
-                       every child file is doc-only (`Reserved for 0.5.7`)
+                       every child file is doc-only (`Reserved for 0.5.7`); targets.rs is filled
+                       in 0.5.7 (below), goal/ and clarify/ wait for the goal layer (0.5.9)
   0.5.6 additions (no new slot; each extends the module named):
               trace     GB.1 (+GB.3): concept_flows / concept_flows_with_live, ConceptOptions
                        (`semantic`, `rank_cache`), ConceptHit (`similarity`), ConceptTier (entry,
@@ -436,6 +476,77 @@ engine/src/   lib.rs        facade (rules above)
               persist   GP.4: EnginePersistPool, the engine's rayon pool handed to
                        glia_store::write_merged_sharded_pooled
               engine/examples/surface_replay.rs  GA.1's replay harness (not hashed)
+  0.5.7 public slots, owner (+ extenders):
+              confidence HC.4 (a new slot, `pub mod confidence;`) — the audited precision beside
+                       a row's tier: Precision {lo, p, hi, n, stratum, audit, census, under_floor,
+                       unmeasured} (#[non_exhaustive]), Table (shipped / empty / lookup / of_edge /
+                       of_tier), of_edge, lookup, weakest, strongest, tier_text (`fact (>= 0.91 on
+                       CALLS|fact, n=41)`, `.., under floor)`, `derived (unmeasured stratum)`),
+                       Tally, the Annotated trait (drop_precision / precision_tally), finish,
+                       report, AUDIT, MIN_SPECIFIC 30 (a sub-stratum `CATEGORY|tier|emitter/rule`
+                       is read at n >= 30 or a census). confidence/table.json is generated by
+                       `scripts/edge-audit.sh calibrate --emit-table` (38 strata + 38 sub-strata,
+                       fit FIT_REV cd541240 pooled with the held-out panel; a .json, so PARSER_STAMP
+                       does not hash it). Stamped after rows, order, tiers and gates are final:
+                       why EdgeWhy.precision, check ViolationEdge / Violation.precision
+                       (check::stamp_precision: forbid_edge / divergence the strongest edge of the
+                       violation's tier, cycle / forbid_path / rule rows the weakest link),
+                       QueryRow.precision, Implementor.precision, review counts.precision_by_tier;
+                       `--no-precision` / `precision=False` drop it (docs/rules.md "Precision
+                       beside the tier")
+              targets  HT.6 (+HT.7, HT.8) — F0.3's T9 slot: load_or_build(root) reads
+                       .glia/targets-snapshot/ (none -> Ok(None)) and reuses
+                       <root>/.glia/graph/targets.gmap when its meta holds the snapshot's data_hash
+                       and this BUILD_STAMP, else parses (glia_parser_bazel::parse +
+                       BUILD_PROFILE.run_passes) and writes it: only an answer writes it, never
+                       generate / persist, and persist's sweep keeps it; node ids hash the fixed
+                       repo `build-targets`, so two checkouts write the same bytes. TargetsView:
+                       owners(files) (HAS_SRC predecessors of the SOURCE at that path), deps /
+                       rdeps(label, depth) (activation::algo::reach::bfs over the carry Adjacency;
+                       rows by (depth, workspace, label) with the reaching edge's VIA; `<ws>|<label>`
+                       picks a workspace; an unknown label a fact `unknown_symbol` absence, a known
+                       one reaching nothing `no_edges`), affected(changed) -> Affected { changed,
+                       owners, targets, tests, unowned, caveats } (a changed BUILD / *.bzl /
+                       MODULE.bazel / WORKSPACE* adds the re-sync caveat), affected_since,
+                       workspaces, code_modules(merged, label); affected_vs_rev(root, base); `pub
+                       use` BUILD_TABLES and targets_dir (so the CLI reaches the build domain with
+                       no glia-build-domain dependency). TargetHit / Affected / TargetsView are
+                       #[non_exhaustive]; every row is tier fact
+  0.5.7 additions (each extends the module named):
+              trace     HF.1: `entries`, the one flow entry set, admits every node carrying an
+                       ENTRYPOINT cell beside the entry table (graph then node order, each id
+                       once), so flows, find --flows, concept search, trace's entry tier and
+                       duplicate-flows walk declared entries; nodes_json `entry` reads the same
+              diff_impact / review  HT.8: DiffImpact.targets / Review.targets
+                       (Option<targets::Affected>, skipped when None), filled by change_targets
+                       from the first entry of the answer's RankCache::repo_roots() (rev mode
+                       affected_vs_rev, pasted mode affected over the diff's files); an Err is one
+                       `[targets] answer error=..` line, never a failed answer; review's markdown
+                       ends with `### Build targets` / `#### Test targets`
+              why       HC.1: a `<rule>/overlay_llm` EVIDENCE rule tiers heuristic (note `rests on a
+                       model-written overlay stanza (<base rule>)`); HQ.3: NAME_ONLY_RULES gains
+                       graph:solidity inherited_event_by_name / qualified_event_by_name
+              passes    HP.4: resolve_doc_mention refuses a bare mention (tiers 2 / 3) in a rule /
+                       key / kind / field position, a `+` key chord, a bare-`fn` Rust FUNCTION /
+                       METHOD from a doc outside its deepest project root (a `pub(..)` fn reads
+                       visible: the crate's internal API the repo's docs name), and a sub-project
+                       doc's mention of a candidate outside that root; HQ.10: select_test_targets
+                       keys same-stem candidates by import rank, shared directory names, their
+                       trailing run, then the common prefix, and refuses a tie wider than
+                       MAX_TEST_TARGETS (3); HQ.13 deleted HQ.10's `csharp_usings` stopgap (TESTS
+                       reads the C# IMPORT_BINDINGS cell)
+              coverage  HF.3 / HF.4: the Python and TypeScript host notes name the MCP rows; HQ.3: a
+                       solidity EVENT_FLOWS row; HQ.5 / HQ.6: the typescript NAVIGATES_TO caveat
+                       names lazy mounts and opaque heads; HQ.11: a ruby HANDLED_BY row for Rails
+                       routes (`shallow:`, concerns, `draw`, `mount` not read)
+              endpoint_fold  HC.1: an ENDPOINT an llm [[wrapper]] minted gains `"overlay":
+                       "wrapper#<n>"` last on every hit
+              build/grafts.rs  HQ.13: writes a .cs MODULE's IMPORT_BINDINGS cell from its CsUsing
+                       facts; cache.rs surface_class reads CsUsing as Surface
+              engine/examples/edge_audit.rs  HC.2 (`sample --panel heldout`, `report
+                       --calibration`), HC.4 (`precision_table`), HP.5 (`report --panel
+                       all|fit|heldout`, the RULE-0.5.7 lines), HP.7 (panel `heldout_rc`, `keep`, the
+                       RULE-0.5.7b lines); not hashed
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -505,6 +616,7 @@ graph/src/    lib.rs        facade (rules above)
   private slots (items pub(crate)):
               go_mounts CB.20 (Go group mounts)   swift_scope CB.18 (SwiftModuleTypes, the
               Swift call hook)   cpp_scope CB.25 (CppScope, C++ name lookup)
+              cs_scope HQ.13 (0.5.7: C# name lookup for heritage bases, below)
   flat 0.5.2 additions: blast_radius_over (blast radius over any GraphSource, so an
               answer walks the identity Quotient, DD.10) and cross_links_with (the service
               links with SAME_AS classes one link per service pair and collapse classes
@@ -551,6 +663,49 @@ graph/src/    lib.rs        facade (rules above)
                             resolve_imports_ts' decide and the Go / dotted import tail fallbacks
               GA.2: every RepoGraph's intra edges and unresolved lists sorted canonically at
                             the end of its group build (`[canonical] ..` once per build)
+  0.5.7 additions:
+              cs_scope.rs   (HQ.13, private slot, `mod cs_scope;` in lib.rs) C# simple-name lookup
+                            for a Bare heritage base: nested types of the enclosing types, own and
+                            enclosing namespaces, the file's usings plus the group's global usings;
+                            two hits bind nothing, and a file opening an undeclared namespace
+                            refuses the repo-unique name guess (`refused_external`). calls.rs asks
+                            it before the heritage fallback; Branch gains nested_type /
+                            enclosing_namespace / using_namespace / using_static (fact)
+              build/solidity.rs  (HQ.3) a child of build.rs, called from build_ts_like after the
+                            stitch: an EVENT_FLOWS ref `Bare(E)` walks the contract's CLASS /
+                            INTERFACE bases level by level (the first level declaring E decides,
+                            two events are ambiguous), `Attribute{I, E}` reads the contract, then a
+                            base named I, then the one type named I; emitter graph:solidity, rules
+                            inherited_event / qualified_event (`_by_name` heuristic when a crossed
+                            heritage edge or I was a name-only binding)
+              calls.rs      HQ.1: a heritage ref never binds a PACKAGE / MODULE: a namespace hit is
+                            refused and looked up again in the lazily built GlobalNames::heritage_base
+                            (no namespace kinds), and a belt refuses any other heritage result on a
+                            namespace (NamespaceRefusals, merged across FH.21's chunks); HQ.3: an
+                            EVENT_FLOWS ref binds only an EVENT_EMITTER, MAX_INHERIT_LEVELS pub(crate)
+              imports.rs    HQ.13: a .cs `using` goes through the namespace index only: an in-repo
+                            namespace IMPORTS its PACKAGE (rule using_namespace, fact) and binds no
+                            local name, an alias binds its alias, a static / alias type binds as
+                            before (rule namespace), an undeclared path draws nothing (no tail guess)
+              build/route_mounts.rs  HQ.5: bind_nav_mounts (after GD.42's bind_ts_mounts, before
+                            the stitch) composes Angular `loadChildren` tables (NavFact::IncludeMount
+                            vias `nav_lazy:<X>` / `nav_lazy_string:<X>`) through CB.20's fixpoint:
+                            each provisional `page:<mount:module:<q>#nav>/<path>` page is re-keyed
+                            once per prefix and redirects rewritten; a table no mount reaches is a
+                            root and keeps its qnames; partial.rs refuses a body-only re-stitch of a
+                            file holding route tables (`page navigation`)
+              nav.rs        HQ.6: a path with a `~` segment is Shape::Opaque { head, tail }: never an
+                            exact / param target; a `~` link (a redirect inside the table) matches
+                            only an opaque page of the same head and tail, any other link only in
+                            the suffix tier (Weak); an unmatched `~` link is never dead
+              resolvers/http.rs, queue.rs  HC.1: a pairing whose client end (or ROUTE mount)
+                            rests on an `origin = "llm"` overlay stanza gets the EVIDENCE rule
+                            `<tier rule>/overlay_llm` (MatchTier::model_rule)
+              resolvers/models.rs  HQ.12: ModelJoin gains `rule` (the pairing's full HTTP rule) and
+                            `model_rested()`; a ModelPair whose every join is model-rested makes no
+                            http_model class (counted `model_rested`), and a `suffix/overlay_llm`
+                            pairing counts weak_pairing; each wire's RouteSide carries its own
+                            endpoint's pairing rule
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
@@ -576,7 +731,7 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     0.5.4: lib.rs's IMPORT_BINDINGS writers and readers (import_bindings_cell /
                     import_bindings_json, IMPORT_BINDINGS_CAP 256, FA.21; read_import_bindings,
                     ImportBinding, import_default_binding, FA.22); goal F0.1, reserved for 0.5.7
-                    (T6); same_as keys four more ecosystems (FD.31: maven `groupId:artifactId`
+                    (T6; the goal layer is 0.5.9's now); same_as keys four more ecosystems (FD.31: maven `groupId:artifactId`
                     lowercase, pub, hex, nuget; PROJECT ecosystems dart -> pub, elixir -> hex,
                     dotnet -> nuget, maven / gradle -> maven); glia_config gains ConventionDecl
                     (`[[convention]]`, FB.12a); external_inputs validates a CONV `kind`
@@ -590,6 +745,19 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     table the start rules read; validate() pins the rows. walk_gating gains
                     gate_dir_in / is_build_output_home / is_build_or_out and
                     GateCounts.build_source (GD.25), and `.yarn` in always_region (a11ec18d)
+                    0.5.7: lib.rs's three RESERVED blocks name id block 0x0000 (HT.1; no constant
+                    moved); hosts gains the `mcp` rows, Python (HF.3: decorator shapes with
+                    `Shape::Decorator.literal_name`, a name / URI given as a variable is unread;
+                    decorator_registration_for(lang, method, held) returns the first row whose
+                    gate the file holds) and TypeScript (HF.4: `HostRow.instances` (McpServer),
+                    `Shape::Prefixed` and `HandlerAt`, host_for_import matching a gate module's
+                    subpath; a host name is unique per language, so both rows mint
+                    `host_cmd:mcp:..`); lib.rs appends `NavFact::CsUsing { form, path, alias,
+                    global, line }` with `CsUsingForm` (Namespace / Static / Alias),
+                    `csharp_using_bindings` and `ImportBinding.{form, global}` (HQ.13); endpoint
+                    gains page_qname, nav_mount_link / parse_nav_mount_link and
+                    nav_mount_route_qname / parse_nav_mount_route_qname (HQ.5's provisional nav
+                    pages); evidence docs name the emitter graph:solidity (HQ.3)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
@@ -615,12 +783,21 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               graph.rs: a PyGraph drop calls memory::release_freed_memory (DE.10)
   0.5.4 private slots (F0.4, F0.7): embed FB.5c (glia_py.embed; the process-wide bge-small
               session; the wheel's `glia-embed-worker` found beside the interpreter, FB.14)
-              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.7 (T6, T9)
+              health FH.2b (PyGraph.health)   clarify, goal, targets: reserved for 0.5.7 (T6, T9;
+              targets filled in 0.5.7, clarify / goal wait for the goal layer, 0.5.9)
               vocab_sync (FB.13b) lives in snapshots.rs beside history_sync
   0.5.6: trace.rs PyGraph.concept_flows (GB.1, GB.3), find.rs PyGraph.find_flows (GB.2),
               query.rs `max_mb=` (GA.14), watch.rs WatchSession(.., memory_budget_mb=,
               with_repos=, out=), `.memory()`, `.roots` and the `body_only` key (GA.4, GA.11,
               GA.12)
+  0.5.7: targets.rs fills F0.4's slot (HT.7): `targets_sync(repo, bazel="bazel",
+              workspace="", expr="//...:*", from_file=None)`, `PyGraph.targets_owners(files)`,
+              `targets_deps` / `targets_rdeps(label, depth=3, workspace=None)`,
+              `targets_affected(files=None, base="HEAD")` over the graph's first repo root (GIL
+              released, ValueError on error, `[targets] surface=py ..`); `precision=True` on
+              PyGraph.why / check / query / query_gql / implementors (HC.4) and review_vs_rev
+              (cf64d1af); the diff_impact / diff_impact_vs_rev / review_vs_rev dicts gain
+              `targets` with a targets snapshot (HT.8)
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
@@ -649,6 +826,13 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
                           (--no-semantic), find (--flows, --depth), query (--max-mb), watch
                           (--with, --out, --max-latency-ms, --memory-budget-mb, --embed,
                           --embed-model) and install-hooks (--embed)
+                  inputs  0.5.7: targets HT.7 (cmd/inputs/targets.rs: `glia targets
+                          sync|owners|deps|rdeps|affected`)
+                  0.5.7 also adds the hidden `ids` (HT.2, cmd/ids.rs, no README line: `glia ids
+                          ls [--domain <g>] [--json]` and `glia ids next --domain <g> --table
+                          node_kind|edge_category|cell_type [--private]`; LINKED holds CODE_TABLES
+                          and, through glia_engine::targets, BUILD_TABLES) and `--no-precision` on
+                          why, check, query, implementors and review (HC.4)
 ```
 
 - **py:** pyo3 `multiple-pymethods` lets each module carry its own
@@ -712,10 +896,14 @@ snapshot steps (CLI / pyo3, never a build, never a .gmap):
      FB.3 took VECTOR out of the build, so editing it stales nothing)
    one commit's tracked files -> `glia vocab sync` (0.5.4, FB.13b) -> .glia/vocab-snapshot/
      (identifiers and the files they occur in; self-gitignored)
+   one bazel workspace -> `glia targets sync` (0.5.7, HT.3) -> .glia/targets-snapshot/ (targets.jsonl,
+     meta.json written last with its data_hash; gitignored); the first targets answer after it builds
+     .glia/graph/targets.gmap (HT.6), which no build or persist writes
 ```
 
 0.5.4 adds no graph beside the region / project / docs graphs: the goal graph (GOAL_UNIT /
-TRACES) and the build-target graph (targets.gmap) moved to 0.5.7 with tracks T6 and T9.
+TRACES) and the build-target graph (targets.gmap) moved to 0.5.7 with tracks T6 and T9. 0.5.7
+ships the build-target graph (below) and moves the goal graph again, to 0.5.9.
 
 **The host graph (0.5.6, GH).** No new graph and no new id: a host is read into the code graph
 with existing kinds, categories and cells. `code_domain::hosts` is one table of hosts, and a row
@@ -763,6 +951,40 @@ ranks (tier `semantic`, heuristic, each row's `similarity`; released by GB.6's c
 `dev-notes/concept-gate-0.5.6.md`). `trace` falls back to it when a feature names nothing or only
 a dead end; `find::find_flows` lists the flows through each find hit. A similarity still never
 seeds a walk or creates a fact / derived row: it only picks which existing flows to show.
+
+**Declared entries are flow entries (0.5.7, HF.1).** `trace::entries`, the one flow entry set, read
+only the entry table (kind, name, roles) while liveness also seeded every node carrying an ENTRYPOINT
+cell. It now admits both (graph then node order, each id once), so `flows`, `find --flows`, concept
+search, trace's entry tier and `duplicate-flows` walk host starts and callbacks, plugin units, MCP
+tools (HF.3, HF.4), `__main__` guards and overlay `[entrypoints]` declarations; a repo with no
+ENTRYPOINT cell answers byte for byte as before (`[flows] declared entries=<d> new=<n> sources=(..)`).
+The concept gate re-ran under GB.6's rule and read PASS again (HF.2,
+`dev-notes/concept-gate-0.5.7.md`: `CONCEPT: C1=yes (4/5) C2=yes (4/5) -> PASS`; n=5 is the rule's
+minimum, so a later change to Java / Kotlin / C / Swift flows re-runs `scripts/embedding-gate.sh
+concept-verdict`).
+
+**Build targets, the first domain beside code (0.5.7, HT).** A second DPG profile on the
+domain-free crates: `glia_build_domain::BUILD_TABLES` (graph_type `build-targets`; entries are TARGETs
+whose ROLE is binary / test; carry DEPENDS_ON, RUNTIME_DEP, HAS_SRC; weights 3.0 / 1.0 / 2.0 /
+IN_PACKAGE 0.5; no presets, effects or identity rules) and `BUILD_PASSES` (`[passes] domain=build-targets
+resolve=0 post=1 finalize=1`). Its flow: `glia targets sync` runs `bazel query '<expr>'
+--output=streamed_jsonproto --keep_going` once in the workspace (a label / label-list attribute kept
+only when the BUILD file set it, select() branches unioned; `@@//` reads `//`) and writes TargetRows;
+`glia_parser_bazel::parse` turns rows into a BuildGraph (a rule row a TARGET, a source / generated
+file a SOURCE, each main-workspace node IN_PACKAGE its PACKAGE, an `@` label an EXTERNAL, one edge per
+(from, to, category) with its VIA attributes); `engine::targets` reuses or rebuilds the targets.gmap
+sidecar and answers owners / deps / rdeps / affected, and `review` / `diff-impact` carry the affected
+block. No code graph edge joins the two graphs: `code_modules` maps a target to the code MODULEs at its
+source paths at query time. A build never runs bazel; the answers never run it either.
+
+**Calibrated confidence (0.5.7, HC).** A tier says what kind of evidence an edge rests on; 0.5.7 adds
+how often that kind was right. The edge audit (`bench/edge-audit/`) judged sampled edges per
+(category, tier) stratum on the 0.5.6 fit panel and, under a rule committed first
+(`dev-notes/confidence-gate-0.5.7.md`), on seven held-out cohort repos (HC.2, HC.3): `CONFIDENCE:
+R1=yes (25/25) R2=yes (0.0218) R3=yes (25) -> PASS`, so HC.4 ships the pooled table
+(`engine/src/confidence/table.json`) and stamps each row's stratum precision after the answer is
+final. A model never decides a derived row: a pairing that rests on a model-written overlay stanza
+tiers heuristic (HC.1, `<rule>/overlay_llm`), and no http_model identity class rests on one (HQ.12).
 
 Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
 mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
@@ -877,7 +1099,7 @@ only slows the lone build (`parallel::threads` documents the table).
   server_unknown_status=<k> open=<o> weak_pairing=<w>` (DT.1g), `[models] pairs=<p> response=<r>
   request=<q> model_pairs=<m> changes=<c> breaking=<b> ambiguous_server=<a> open=<o>` (DT.1m),
   `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a> ambiguous_project=<p>
-  embed_reduced=<r>` (DT.1h), `[models] graphql results=<r> documents_resolved=<d>
+  embed_reduced=<r> model_rested=<m>` (DT.1h; ` model_rested=` 0.5.7, HQ.12), `[models] graphql results=<r> documents_resolved=<d>
   generated_models=<g> classes=<c>` (DT.1k) and `[evidence-rules] resolver=models http_model=<h>
   graphql_model=<g>`; `[models] graphql pairs=<g> undefined_fields=<u> open=<o> refused=<r>`
   (DT.1n). The answers: `[contract-fields] pairs=.. unknown=<n> http_model=<n> client_contract=<n>
@@ -1051,14 +1273,17 @@ only slows the lone build (`parallel::threads` documents the table).
   jobs=<j>`, `[cron] celery value rejected=<n>`, `[rust-routes] literal_skipped=<n>`, `[ws] needle
   boundary rejected=<n>` / `[ws] ratchet routes=..` (FD.4a, FD.4c, FD.4d); `[data-entity] sink-args
   refused write=<w> in_process=<p>` (FD.4b, FD.74); `[data-sources] refused jvm_descriptor=<j>
-  word_tail=<w>` (FD.73); `[config] env-writes skipped=<s> deleted=<d>` and `[secrets] vault-client gate
+  word_tail=<w> test_mocked=<m> test_camel=<c> test_quoted=<q> path=<p>` (FD.73; the three test_ fields
+  0.5.7, HQ.8); `[config] env-writes skipped=<s> deleted=<d>` and `[secrets] vault-client gate
   refused=<n>` (FD.75); `[config] yaml environment not_env=<reason> keys=<k>` (FD.76); `[packages]
   eco=<maven|pub|hex|nuget|cargo|pypi> deps=<n> ..` (FD.31; TOML ones gain ` array_tables=<a>`, FD.77,
   Gradle ` catalog_refs=<c>`); `[walk] symlinks root=<r> in_repo_dirs=<i> out_of_repo_dirs=<o> cycles=<c>
   dangling=<d> file_links=<f>` (FD.78); `[grpc-server-impl] .. register=<n> (typed= handlers= foreign=
   unread= elsewhere= deferred_bound=)` (FD.80); `[iface] go implicit filtered: .. cross_module=<c>`
   (FD.81); `[doclink] precision: unshaped=<u> registry=<r> placeholder=<p> test_tree=<t>
-  project_root=<j>` (FD.79); `[contract-breaks] moved_files=<n> paired_ops=<p>` (FD.25);
+  project_root=<j> position=<o> private=<v> other_project=<x> chord=<c>` (FD.79; the last four 0.5.7,
+  HP.4: a bare mention in a rule / key / kind position, a bare-`fn` Rust fn from outside its project
+  (a `pub(..)` fn reads visible), a sub-project doc's mention outside its root, a `+` key chord); `[contract-breaks] moved_files=<n> paired_ops=<p>` (FD.25);
   `[implementors] tiers fact=<f> derived=<d> heuristic=<h> source=evidence` (FD.7b); `[check] transitive
   edge_levels=<e> rules=<r>` (FD.27); `[engram-export] v6 since refusals: hint_refused=<n> (..)`
   (FD.34); `[body-hash] timing ..` (FD.34b). The close-out gates: `[fmt] check: ok` (F0.5), `[rustdoc]
@@ -1204,7 +1429,7 @@ only slows the lone build (`parallel::threads` documents the table).
   elixir app_env=<a> path=<p>` (GD.21); `[packages] eco=<e> deps=<n> ..` counts the new tables (GD.37);
   `[imports] tail refused kind=<k> stdlib=<s> foreign_module=<f> platform=<p> undeclared_ns=<u>
   self=<x> repo=<l>` (GD.34); `[tests] module TESTS edges: <n> (snake= camel= declared=) own_dir=<o>
-  drive_hosts=<d>` (GD.36); `[walk] collapsed <n> regions (always= gitignore= bundle= dotnet= nested=
+  drive_hosts=<d> nearest=<k> ambiguous=<a>` (GD.36; ` nearest= ambiguous=` 0.5.7, HQ.10); `[walk] collapsed <n> regions (always= gitignore= bundle= dotnet= nested=
   config= build_source=<b>)` and the self-scan's `[self-scan] pipeline functions=<f>/<n>` (GD.25).
 - *Build speed, the gates and hygiene (GP).* `[resolve-pool] ..` and `[timing] persist ..` above
   (GP.2-GP.4); `[calibrate] text .. threads=<t>`, `[idr] replay .. threads=<t>` and `[calibrate] ppr
@@ -1216,10 +1441,76 @@ only slows the lone build (`parallel::threads` documents the table).
   (GP.13, GP.14); scripts/rank-gate.sh's `[rank-gate] run wall s=<s> jobs=<n> order=<labels>` (GP.7).
   The close-out's own lines (dev-notes/wave-runner/closeout.py, stdout, in the close-out log and
   commit body): `[closeout] timing fmt=<s> clippy=<s> tests=<s> rustdoc=<s> rank_gate=<s>
-  cohort_gate=<s> wheel=<s> bench=<s> engram=<s> total=<s>` (GP.7) and, per gate, `== [gate-asks]
+  cohort_gate=<s> build_timing=<s> wheel=<s> bench=<s> engram=<s> total=<s>` (GP.7; ` build_timing=` 0.5.7,
+  HP.3) and, per gate, `== [gate-asks]
   <rank|cohort> result=<ok|ok-partial|skipped|FAILED|not-run> asked_by=<n> (<ids>) touched_by=<m>
   (<ids>)` (GP.12); since 2b86bb55 a NEW blind, forbid, missing-node or missing-cell fixture row
   fails the close-out. The release docs' check: `[release] docs=ok` (GZ.1).
+
+**The 0.5.7 markers (HP, HF, HT, HC, HQ; waves W0-W12)**, each on stderr unless noted, grouped by what they watch:
+- *The close-out (HP.1-HP.3; dev-notes/wave-runner/closeout.py, stdout).* Per recorded gate (tests + byte_identical,
+  fmt, clippy, rustdoc, rank, cohort, timing, wheel, bench), keyed by a sha256 of exactly what it reads:
+  `[closeout] reuse <gate> from <commit12> (wave <w>, <tier>, digest <12>)` and the recorded lines re-printed with
+  ` (reused <commit12>)`, else `[closeout] run <gate> (<reason>)`; `[closeout] rejudge <gate> from <commit12> (judge
+  inputs moved: <paths>)` when only its baselines moved (HP.2; the scripts' `recheck` lines end ` (rejudged run of
+  <head12>)`); `[clippy] check: ok|FAILED (<n> diagnostics)` (a recorded gate since HP.1, James 2026-11-02);
+  `[closeout] set tree=<12> fresh=<a> reused=<b> full=<k>/<n>[ rejudged=<c>]` at the release (every recorded gate
+  fresh-full or reused-full); `[closeout] tmpdir=<dir> free_gb=<f>`; read-only `closeout.py --digests`
+  (`[closeout] digest <gate> measure= judge= files= env=`) and `--plan-only` (`[closeout] plan reuse|run <gate> (..)`);
+  `[gate-asks] ..` gains ` reused_from=<commit12>` / ` rejudged_from=<commit12>`. The ninth gate, `timing` (HP.3,
+  scripts/build-timing.sh, rule bench/build-timing/RULE.md): `[build-timing] run label=<l> run=<i> wall_ms=<w>
+  cpu_ms=<c> rss_mb=<r> load=<x>` per build and `[build-timing] check: ok - <r> repos, <p> phases, <g> gains, 0
+  regressions` / `check: FAILED (..)` / `check: skipped - ..`; advisory per wave, a gate at the release's last
+  close-out, where a skip fails it; a toolchain, machine or profile change re-baselines by hand (`bash
+  scripts/build-timing.sh baseline`).
+- *Flows and hosts (HF).* `[flows] declared entries=<d> new=<n> sources=(config=<c> main_guard=<m> host=<h>
+  script=<s> other=<o>)` after `[flows] entries=` when d > 0 (HF.1); `[host] lang=python|typescript .. hosts=mcp:<n>
+  ..` for an MCP server (HF.3, HF.4); `[ruby-routes] composed <r> rails routes under <s> scopes nested=<n>
+  member=<m> collection=<c> id_routes=<i> in <file>` (HF.5; printed when r, n or i is non-zero).
+- *Build targets (HT).* `[ids] blocks domains=<d> ids=<i> lock=<l> next=(<block>:<table>=<id> ..)` from the
+  id_blocks test (HT.1); `[ids] ls domains=<d> blocks=<b> surface=cli` and `[ids] next domain=<g> table=<t>
+  id=<0x..> block=<b>` (HT.2); `[targets] sync workspace=<w|.> rows=<n> rules=<r> source_files=<s> external=<x>
+  skipped=<k> bazel=<version|from-file> -> <repo>/.glia/targets-snapshot/` and `[targets] snapshot incomplete
+  dir=<d> reason=<r>` (HT.3); `[passes] domain=build-targets resolve=0 post=1 finalize=1`, `[build-targets] gmap
+  wrote nodes=<n> edges=<e> bytes=<b>` / `gmap read nodes=<n> edges=<e>` (HT.4); `[bazel] parsed workspaces=<w>
+  targets=<t> packages=<p> sources=<s> externals=<x> edges=<e> dangling=<d> other_label_attrs=<o>` (HT.5);
+  `[targets] sidecar built|reused nodes=<n> edges=<e> data_hash=<h> path=<p>`, `[targets] answer
+  kind=<owners|deps|rdeps|affected|code_modules> rows=<r> tests=<t>` and `[absence] primitive=targets_<deps|rdeps>
+  ..` (HT.6); `[targets] surface=cli|py cmd=<sync|owners|deps|rdeps|affected> ..` (HT.7); `[targets] answer
+  kind=affected rows=<r> tests=<t> surface=review|diff_impact` and `[targets] answer error=<e> surface=<s>` (HT.8);
+  `[seams] languages=<n> groups=<g> matrix_rows=<m> exempt=<e>` (HT.9, engine/tests/seams.rs); scripts/pr-check.sh's
+  stdout `[pr-check] step=<name> <ok|FAILED|skipped> <s>s` per step and last `[pr-check] ok - <n> steps in <s>s
+  (base <rev12>)` / `[pr-check] FAILED (<steps>)` (HT.10).
+- *Confidence and precision (HC, HP.4-HP.8).* `[overlay-tier] model_rested=<n> (http=<h> queue=<q>)` once per
+  build that wrote an `/overlay_llm` pairing, and `[evidence-rules] resolver=http|queue` gains `<rule>/overlay_llm=<n>`
+  slots (HC.1); engine/examples/edge_audit.rs's `[edge-audit] calibration strata=<s> fit_n=<f> heldout_n=<h>
+  covered=<c>/<k> cal_error=<e>` and `CONFIDENCE: R1=<yes|no> (<c>/<k>) R2=<yes|no> (<e>) R3=<yes|no> (<k>) ->
+  PASS|FAIL|INSUFFICIENT` (HC.2), `[edge-audit] table strata=<s> sub_strata=<u> tiers=<t> under_floor=<f>
+  audit=<12 hex> path=<p>` (HC.4's `calibrate --emit-table`), and with a rule file beside the plan `[edge-audit]
+  rule 0.5.7 verdict=<PASS|FAIL> under_floor=<list|none> fact=<p> derived=<p> heuristic=<p> kappa=<k>` / `[edge-audit]
+  rule 0.5.7 rejudge independent=<i> self=<s>` (HP.5) and the same two for `rule 0.5.7b` (HP.7); per answer that
+  printed a precision, `[confidence] surface=<cli|py> rows=<r> measured=<m> unmeasured=<u> under_floor=<f>
+  audit=<12 hex>` (HC.4); the `[doclink] precision:` fields above (HP.4).
+- *The confidence run's false edges (HQ).* `[heritage] namespace targets refused=<n> (module_symbol=<m>
+  global_unique=<g> other=<o>) rebound=<r>` beside `[heritage] self-loops refused=`, and `[php-heritage]
+  namespace-named bases skipped=` is gone (HQ.1); `[csharp-routes] verb constraints applied=<v>
+  route_templates=<t> in <file>` (HQ.2); `[sol-events] own=<o> refs=<r> (bare=<b> qualified=<q>) path=<f>` per
+  file and `[sol-events] bound=<b> (inherited=<i> qualified=<q> by_name=<n>) ambiguous=<a> unbound=<u>` per graph
+  (HQ.3); `[sol-abi] .. handled_sited=<h> path=<f>` (HQ.4); `[nav-mounts] lazy=<l> (import=<i> string=<s>
+  ngmodule_hop=<h> dynamic=<d>) unresolved=<u> no_table=<t> tables=<n> routes=<r> mounted=<m> copies=<c> roots=<o>
+  capped=<x> links_rewritten=<w>` once per TS-family graph holding a provisional nav page (HQ.5); `[extract]
+  nav-routes marked: <n> (page-qnamed <p>) (bound= redirects= children= rejected= catchall= opaque_parents=<o>
+  opaque_children=<k>)` and `[nav] ..` gaining ` opaque_unmatched=<u>` when non-zero (HQ.6); `[queues] gate word
+  refused framework=RedisPubSub side=<consumer|producer> signal=redis path=<p>` (HQ.7); the `[data-sources]
+  refused` test fields above (HQ.8); `[py-attrs] declared=<d> own_member=<m> inherited_read=<i> file=<p>` per
+  Python file where m + i > 0 (HQ.9); the `[tests] module TESTS edges:` fields above (HQ.10); `[coverage] ruby:
+  residual rows declared for rails routes` (HQ.11); the `[models] classes=` field above (HQ.12); `[cs-scope]
+  heritage refs=<n> nested=<k> enclosing=<e> using=<u> static=<s> ambiguous=<a> refused_external=<x>
+  fallback=<f>` and `[imports] csharp usings namespace=<n> bound=<b> undeclared_refused=<r> alias=<a> static=<s>
+  global=<g>` (HQ.13); `[data-entity] jpql join fetch skipped=<n> path=<p>` per file (HQ.14).
+- *The release docs.* HZ.1's check prints `[release] docs=ok` when every check passes (the 12 T6 slots the only
+  doc-only `.rs`, no new private name, the next free ids as core/ids.lock has them, each experiment's verdict line
+  quoted from its report, every CLI command named here, the skill and README surface tests green).
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
@@ -1478,6 +1769,40 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   - **Hosts.** The host readers (the host graph, above) live in the Lua, TypeScript and Python parsers
     and `parsers/code/extractors/src/{nginx,iac,cli}.rs`; `[py-scripts]` in the Python parser and
     `[rust-include]` in the Rust parser record the script refs resolver:host binds.
+- 0.5.7 (HF, HQ; each HQ packet fixes a false-edge pattern HC.3's held-out panel found, on its public
+  cohort repo):
+  - **Hosts.** MCP servers: the Python parser reads `@<server>.tool()` / `.prompt()` (bare `@<r>.tool` too)
+    as CLI_COMMAND `host_cmd:mcp:tool|prompt:<name>` (a positional or `name=` string literal, else the
+    function's name), `@<r>.resource("<uri>")` as EVENT_HANDLER `host_event:mcp:resource:<uri>` and the
+    low-level `Server`'s list_tools / call_tool / read_resource / get_prompt / .. as
+    `host_event:mcp:<handler>`, each HANDLED_BY the def (rule host_decorator), gated on an `mcp` / `fastmcp`
+    import and a FastMCP / MCPServer / Server receiver (HF.3); the TypeScript parser reads `tool` / `prompt`
+    / `resource` / `register*` on a `new McpServer(..)` local or field from `@modelcontextprotocol/sdk`
+    (an inline handler becomes its own FUNCTION `<module>::command tool:<name>`; resources keyed by a
+    literal URI, else by name; `Server.setRequestHandler` is not read, HF.4).
+  - **Ruby.** Rails `resources :r do .. end` emits `ANY <p>/r` and `ANY <p>/r/:id` (unless only / except
+    leave no member action; `param:` renames :id) and walks its body under `<p>/r/:<singular>_id`;
+    `resource` walks under `<p>/r`; `member` / `collection` / `on:` re-root, a symbol verb's first argument
+    is its path; routes stay method-agnostic ANY (per-action verbs are a backlog row; HF.5).
+  - **C#.** A template-less `[HttpX]` beside `[Route(t)]` constrains that template's verb instead of
+    minting `<VERB> <prefix>` (HQ.2). Every `using` is a `NavFact::CsUsing`, IMPORT_BINDINGS records each
+    (form, global), a heritage base binds by C# name lookup (graph `cs_scope`, fact), an alias using
+    IMPORTS and binds (HQ.13).
+  - **Heritage.** A heritage base never binds a PACKAGE / MODULE; DH.14's PHP stopgap is gone (HQ.1).
+  - **Solidity.** An `emit E(..)` of an event the contract does not declare is an EVENT_FLOWS
+    UnresolvedRef (`Bare(E)`, or `Attribute{I, E}` for `emit I.E(..)`) the graph's build/solidity.rs binds
+    through the bases (HQ.3); each procedure HANDLED_BY carries an EVIDENCE cell at its own copy's file and
+    line (HQ.4).
+  - **Router tables.** Angular `loadChildren` (the import, the NgModule hop, the legacy string) is a
+    NavFact::IncludeMount and its table's pages are minted on a provisional slot the graph composes (HQ.5);
+    a record whose `path` is computed (a call, an identifier, a `${..}` template) is an opaque parent
+    `/~<head><tail>` its children and redirects compose onto (HQ.6).
+  - **Extractors.** Redis pub/sub's generic verbs need `redis` as a word (HQ.7); in a test file a store
+    client inside a mock construct, a camel-middle name or a quoted title is no data access (HQ.8); JPQL /
+    HQL `join fetch E` names E, and a dotted `join fetch a.b` names no table (HQ.14).
+  - **Python.** `self.X` accesses are settled after the class body: an assignment declares X, a read of the
+    class's own METHOD / property or (in a class with a real base) an inherited member declares nothing
+    (HQ.9).
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
@@ -1547,6 +1872,24 @@ package.json MODULEs; ORIGIN keys `coordinate` (Maven / Gradle PROJECTs, GD.32) 
 ROUTE qnames with their mount prefixes (GD.28, GD.40-GD.42) and OpenAPI ops with their `servers:`
 base (GD.16). Eight NavFact variants are appended (parse cache only, never a layout).
 
+0.5.7 keeps the format too (FORMAT_VERSION 3, MANIFEST_VERSION 2; the id blocks write nothing new,
+James 2026-11-02). The layout directory gains one optional file, `<repo>/.glia/graph/targets.gmap`
+(HT.4, HT.6): the build-target graph in the same preamble'd container, its header naming the build
+domain's registries (`Header::for_domain`, graph type `build-targets`) and one section,
+`build-targets.labels` (JSON: version, meta with the snapshot's `data_hash` and the writing
+BUILD_STAMP, each node's kind, workspace and label); the reader refuses a foreign graph type, a
+missing section or an id its header does not name. Only a targets answer writes it (never `glia
+build`, generate or persist, whose sweep keeps it), and it is reused while the snapshot's data_hash
+and this BUILD_STAMP match. `.glia/targets-snapshot/` (targets.jsonl + meta.json) is the new snapshot
+directory, in `.glia/.gitignore`. One NavFact variant is appended, CsUsing (parse cache only). Content
+moves: Rails ROUTE qnames under `resources` re-key to their nested path (HF.5); MCP host nodes (HF.3,
+HF.4); fewer DOCUMENTS edges (HP.4); `/overlay_llm` EVIDENCE rules and an ENDPOINT_HIT `overlay` key
+(HC.1); C# ROUTE qnames (HQ.2), C# heritage rules, IMPORTS and IMPORT_BINDINGS rows (HQ.13); no
+heritage edge to a namespace (HQ.1); Solidity EVENT_FLOWS through bases and sited HANDLED_BY (HQ.3,
+HQ.4); nav ROUTE qnames under lazy mounts and opaque heads (HQ.5, HQ.6); fewer Redis queue nodes,
+test-file ACCESSES_DATA edges and Python ATTRIBUTE nodes (HQ.7-HQ.9); TESTS pairs (HQ.10); fewer
+http_model classes (HQ.12); JPQL entities (HQ.14).
+
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
 - **Dense text** — sigil-based projection with prefix/default/module dedup and scope collapse
@@ -1558,7 +1901,8 @@ See `dev-notes/glia-memory/reference_format_spec.md` and `reference_rkyv_design.
 
 Locked `u32` IDs for `NodeKind`, `EdgeCategory`, `CellType`. Qualified names use `::` as the separator. Extraction vs. resolution split is enforced across all code parsers so the graph builder sees a uniform shape.
 
-**IDs are allocated in `code-domain/src/lib.rs` and nowhere else.** Each registry has a
+**Code IDs are allocated in `code-domain/src/lib.rs` and nowhere else** (another domain's in its own
+registry, in its own id block: "Id blocks" below). Each registry has a
 `RESERVED ids` block; take the next free value there, in the same commit as the emitter,
 and never pick one inline in a parser. An id is **locked once allocated** — it is baked
 into every `.gmap` on disk, so reusing or renumbering one silently corrupts old stores.
@@ -1577,6 +1921,26 @@ SHARES_DEPENDENCY, in no carry, community, entry or embed list.
 The next free ids are node 51 / edge 39 / cell 28.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
 old layout still decodes it.
+
+**Id blocks (0.5.7, HT.1, HT.2, HT.4).** Each u32 id is a block (the high 16 bits) and a position,
+65,536 per block, like port ranges (James 2026-11-02: *"lol code being 0 is such a funny happen
+stance"*): `0x0000` code (every id through 0.5.6 stays exactly where it is), `0x0001` core (shared,
+none allocated yet), `0x0002` build (the build-target domain), `0x0003` goal (reserved; GOAL_UNIT 50 /
+TRACES 38 / UNIT 26 stay in block 0 and get their emitter with the goal layer, now 0.5.9),
+`0x8000`-`0xFFFE` private (never shipped: a pull request numbers from `0x8000_0001` and the release
+promotes it, CONTRIBUTING.md), `0xFFFF` never. `glia_core::ids` names them; `DomainTables::validate_blocks`
+checks a shipped domain's rows (no id 0, no position 0, no unassigned, reserved or other domain's
+block, no private id); `core/ids.lock` lists every shipped id, `<table> 0x<id> <block> <graph_type>
+<NAME>`, append-only (`GLIA_UPDATE_IDS=1 cargo test -p glia-engine --test engine_tests id_blocks::` adds
+rows and refuses a changed or dropped one). Code ids are still allocated in `code-domain/src/lib.rs`
+and build ids in `build-domain/src/registry.rs`, each by name, in the commit that writes the lock row.
+0.5.7 allocates the build domain's twelve, block 2, positions 1-4 per table: node kinds TARGET
+`0x00020001`, PACKAGE, SOURCE, EXTERNAL; edge categories DEPENDS_ON `0x00020001`, RUNTIME_DEP, HAS_SRC,
+IN_PACKAGE; cells LOCATION `0x00020001`, ATTRS, ROLE, VIA (no build id equals a code id). The lock
+holds 127 rows. The next free id per block, as core/ids.lock has them: code node 51 / edge 39 / cell 28
+(`0x00000033` / `0x00000027` / `0x0000001c`); build node / edge / cell `0x00020005` each; core
+`0x00010001` in each table. `glia ids next --domain <graph_type> --table <t>` prints it as a Rust
+const line (`--private` from `0x8000`), and `glia ids ls` lists both linked domains.
 
 IDs ref: `dev-notes/glia-memory/reference_kind_category_ids.md` and `reference_code_domain_registries.md`.
 
@@ -1663,6 +2027,13 @@ one node in blast radius, trace / flows and tests-for walks and their PPR (DD.10
 class forms inside one repo too (a monorepo's TS interface and Go struct), so a single-repo answer
 can fold a client model into its server model.
 
+0.5.7 keeps every code dial and adds a second shipped profile, `glia_build_domain::BUILD_TABLES`
+(Data Flow, "Build targets"): its carry edges drive `engine::targets`' deps / rdeps / affected walks
+(`Adjacency::carry(&BUILD_TABLES)`, `algo::reach::bfs`), and `id_blocks` checks it beside
+CODE_TABLES. Tiers gain a measured companion, never a dial: `engine::confidence` reads the audited
+precision of a row's (category, tier) stratum after the answer is final; no PPR weight, ranking,
+filter or gate reads it.
+
 ## Adding a New Language Parser
 
 1. Create `parsers/code/<language>/` with a `Cargo.toml`
@@ -1680,6 +2051,9 @@ The contributor's form of this checklist, with every touch point by symbol (the 
 `build_solo`, `glia_graph::build_<lang>`, health's `CODE_LIKE_EXTS`, the matrix row), is `docs/seams.md`'s language
 seam; `engine/tests/seams.rs` (HT.9, `[seams] languages=<n> groups=<g> matrix_rows=<m> exempt=<e>`) fails when a tag
 `detect_language` returns misses one.
+Before a pull request, `bash scripts/pr-check.sh [--base <rev>]` (HT.10) runs the checks the change's paths need
+(fmt; clippy and tests per touched crate; id_blocks, seams and self_scan; the CLI / README / skill surfaces; the wheel,
+grade.py per touched fixture and `matrix.py --language <lang> --fail-on-error`), never the rank or cohort gate.
 
 ## Adding a New Cross-Graph Resolver
 
@@ -1799,8 +2173,24 @@ its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves S
   names is read for its start / `exec` line only (SECURITY.md).
 - **Publish gate.** Only `py/` (as `glia-py`, imported as `glia_py`, `.github/workflows/wheels-py.yml`) and, since 0.5.4, the `glia` binary (as `glia-cli`, a maturin bin wheel, `cli/pyproject.toml`, `.github/workflows/wheels-cli.yml`, artifacts prefixed `cli-wheels-`; FE.5, FE.6) publish to PyPI. Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
+- **Precision beside the tier, never instead of it (0.5.7, HC).** A row's precision is a property of its
+  (category, tier) stratum measured on other repos, stamped after rows, order, tiers and gates are final;
+  it never sorts, filters, ranks, blends, gates or changes an exit code (`confidence::` tests assert a
+  dropped answer equals a stripped one). It shipped only because its held-out gate passed (HC.3, rule
+  committed first); `--no-precision` / `precision=False` return the 0.5.6 bytes. A model never decides a
+  derived row: a pairing resting on a model-written (`origin = "llm"` or unmarked) overlay stanza tiers
+  heuristic (HC.1) and forms no walking identity class (HQ.12).
+- **A domain owns an id block (0.5.7, HT.1).** A new domain takes the next registered block, never a
+  code id; a pull request takes private ids (`0x8000_0001` up) and the release promotes them; the
+  append-only `core/ids.lock` and the id_blocks test pin every shipped id. Block 0 is code because code
+  came first.
+- **The close-out reuses what did not move (0.5.7, HP.1, HP.2).** Each recorded gate is keyed by a digest
+  of exactly what it reads (its crates' closure from `cargo metadata`, the include! targets, its scripts,
+  baselines and environment); an unchanged digest reuses the last green run, a moved judge digest alone
+  re-judges the stored run, and the release's last close-out needs every gate fresh-full or reused-full.
+  clippy (`-D warnings`) and the big-repo build timings (`bench/build-timing/`) are recorded gates.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3, 0.5.4, 0.5.6)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2, 0.5.3, 0.5.4, 0.5.6, 0.5.7)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -1874,6 +2264,23 @@ Stored edge order is canonical (GA.2), so traversal rows (`neighbours`, `bfs`, `
 `.mjs` / `.cjs` / `.mts` / `.cts` (`CODE_LIKE_EXTS` 36 -> 32). Not shipped: `glia place` /
 `PyGraph.place` (placement measured FAIL, `dev-notes/place-eval-2026-11.md`) and doc-tie rows in
 the impact answers (GP.9 FAIL).
+
+0.5.7 (HC, HF, HT). Precision beside the tier (HC.4): `why` (EdgeWhy), `check` (each violation and
+witness edge), `query` (QueryRow, a whole witness's weakest link), `implementors` (the weakest heritage
+edge of the path) and `review` (its violations, and `counts.precision_by_tier`: the audit's per-tier
+estimates) carry `precision` `{lo, p, hi, n, stratum, audit, census?, under_floor?, unmeasured?}`, the
+markdown tier cell reads `fact (>= 0.91 on CALLS|fact, n=41)`, `derived (unmeasured stratum)` or `..,
+under floor)`, and review's tier line `_by tier: fact 2 (>= 0.84 on fact, n=314)_`; `--no-precision` /
+`precision=False` print the 0.5.6 bytes; nothing reads it to order, filter or gate. Build targets
+(HT.6-HT.8): `glia targets owners|deps|rdeps|affected` / `PyGraph.targets_*` (every row tier fact, rows
+`<label>  <rule_class>  <role>  <file>:<line>  depth=<d>  via=<attrs>`, `[<workspace>] `-prefixed with
+several workspaces; an empty answer is a fact absence, `unknown_symbol` or `no_edges`); with a targets
+snapshot `review` ends with `### Build targets` (`| target | rule | role | at |`, then `#### Test
+targets`, each cut at `--markdown-rows`) and review / diff-impact JSON gain `targets` (last key; a merge
+reads its first repo root's snapshot only); without one every answer is byte for byte 0.5.6's. Entry
+flows (HF.1): `flows`, `find --flows`, concept search, trace's entry tier and `duplicate-flows` also
+start at nodes carrying an ENTRYPOINT cell. Coverage (HQ.11): a `ruby` HANDLED_BY caveat row on a repo
+with `.rb` files. `glia inspect` names each id's block (HT.2).
 
 Identity (0.5.2, DD.8-DD.15, Q17). `find`, `blast-radius`, `trace`, `flows`, `tests-for`,
 `serves` and `arch` collapse every FACT / DERIVED identity class to one row, the class's best
@@ -2128,6 +2535,14 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   [--check] [--rekey] [--writer <ns>]` (FB.2: `--check` audits the vector file and exits 1 on an
   issue; FB.11: `--rekey` leaves another writer's namespaced rows unless `--writer` names it);
   `gaps --category` and `overlay propose --category` accept `named_not_modelled` (FB.13c).
+- 0.5.7: inputs `targets sync <repo> [--workspace <dir>] [--bazel <bin>] [--expr <query>] [--from
+  <file>] [--json]` (HT.7; `bazel query '<expr>' --output=streamed_jsonproto`, default `//...:*`, in
+  `<repo>/<workspace>`, or a saved output, into `.glia/targets-snapshot/`, replacing that workspace's
+  rows; exits 0, 2 on a failed sync), `targets owners <repo> <file>..`, `targets deps|rdeps <repo>
+  <label> [--workspace <w>] [--depth 3]` and `targets affected <repo> [<file>..] [--base <rev>]`
+  (`## targets` / `## tests`), each with `--json`, exit 0 with rows, 1 with none, 2 with no snapshot or on
+  an error. `--no-precision` on `why`, `check`, `query`, `implementors` and `review` (HC.4). Hidden:
+  `ids ls|next` (HT.2).
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
@@ -2190,7 +2605,12 @@ semantic=None)` (FB.7b, FB.8, FB.7d); `blast_radius` / `diff_impact` / `diff_imp
 full=False, offset=0)` and `review_vs_rev(.., max_tests=25, max_impact=25, .., full=False,
 offset=0)` (FH.8-FH.8d); `contract_breaks_vs_rev(.., models_min_tier=)` takes `"heuristic"`
 (FH.7b); `node_cells` / `node_cell_bytes` return no VECTOR and a VECTOR write reports
-`write_through="sidecar_only"` (FB.3).
+`write_through="sidecar_only"` (FB.3). 0.5.7: `glia_py.targets_sync(repo, bazel="bazel",
+workspace="", expr="//...:*", from_file=None)`, `PyGraph.targets_owners(files)`,
+`targets_deps(label, depth=3, workspace=None)`, `targets_rdeps(..)`, `targets_affected(files=None,
+base="HEAD")` (HT.7); `precision=True` last on `PyGraph.why`, `check(strict=False, precision=True)`,
+`query`, `query_gql`, `implementors` and `review_vs_rev` (HC.4, cf64d1af); `diff_impact` /
+`diff_impact_vs_rev` / `review_vs_rev` dicts gain `targets` with a snapshot (HT.8).
 Classes: `PyGraph`, and 0.5.2's `WatchSession(repo, overlay=True)` (DC.9: `apply(paths)` /
 `poll()` return a WatchUpdate dict (`poll` None when nothing changed), `snapshot()` a PyGraph of
 the current build, `persist()` writes the layout and cache; the GIL is released while the engine
@@ -2257,6 +2677,15 @@ NameBreaks, NameBreakArgs, ChangedName, NAME_MIN_TIERS}`; `find::FIND_FILES_FUSE
 name_breaks_truncated}`, `ReviewArgs.max_names`; `Absence.named_in`; `BlastRadius.{areas,
 truncated, blind}`; `calibrate::sets::{FIND_CANDIDATES_SEM, specs_with, FindSem}`; on the graph
 facade `OrgPackageResolver`, `ResolvePool` / `with_resolve_pool` and `MergedGraph::tie_cmp`.
+0.5.7, by module path: `confidence::{Precision, Table, of_edge, lookup, weakest, strongest,
+tier_text, Tally, Annotated, finish, report, AUDIT, MIN_SPECIFIC}`; `targets::{load_or_build,
+affected_vs_rev, sidecar_path, targets_repo, TargetsView, TargetHit, Affected, BUILD_TABLES,
+targets_dir}`; the `precision` field
+on `why::EdgeWhy`, `check::{Violation, ViolationEdge}`, `rules::QueryRow`, `implementors::Implementor`
+and `ReviewCounts.precision_by_tier`; `DiffImpact.targets`, `Review.targets`; outside the engine
+`glia_core::ids`, `glia_build_domain::{BUILD_TABLES, BUILD_PASSES, BUILD_PROFILE, BuildGraph,
+read_gmap, TargetRow, read_targets, write_targets}`, `glia_parser_bazel::{parse, parse_targets}`,
+`glia_snapshots::targets_sync` and `glia_store::NamedCount.block`.
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -2507,6 +2936,51 @@ questions over one graph computes `entrypoint_reachable` once.
   James asks. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
   security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated" items stay
   out (`SECURITY.md`).
+- **0.5.7 — build targets, proof and process: complete on `main` (waves W0-W12, the release docs and
+  handoffs in W13: HZ.1, HZ.2), awaiting the release close-out, the version bump and the tag.** James
+  2026-11-02 split the 0.5.7 scope in two either side of the weekly usage reset (*"we could make 0.5.7 2
+  releases due weekly cutoff reset"*; the split: *"Fine"*). Scope `dev-notes/next-leap-0.5.7.md` (§6 the
+  split and its rulings), packets `dev-notes/leap-057-packets.json` (each with its `decisions`),
+  overrides and re-verify notes `leap-057-corrections.json`, schedule and LANDED waves
+  `dev-notes/wave-runner/schedule_057.py` (runner `--release 057`, ids H*), the shared brief
+  `shared_brief_057.md`. 43 packets: the 27 specced (HP.1-HP.6 proof and process, HF.1-HF.5 flows and
+  hosts, HT.1-HT.10 build targets, HC.1-HC.4 calibrated confidence, HZ.1-HZ.2), the 14 HQ fixes of the
+  false edges HC.3's held-out panel found (James 2026-11-02: *"Oh we should fix now since we added it
+  now"*) and the re-measure HP.7 / HP.8 (James 2026-11-03: *"option b yeah pointless fail"*). Measured,
+  each against a rule committed before its run: the concept gate re-run `CONCEPT: C1=yes (4/5) C2=yes
+  (4/5) -> PASS` (HF.2, `dev-notes/concept-gate-0.5.7.md`); calibrated confidence `CONFIDENCE: R1=yes
+  (25/25) R2=yes (0.0218) R3=yes (25) -> PASS` (HC.3, `dev-notes/confidence-gate-0.5.7.md`; caveats:
+  a self-consistency re-judge, 13 of 38 held-out strata outside the test, R2's weight mostly CALLS|fact
+  and DEFINES|fact), so HC.4 shipped; the precision claim (`dev-notes/edge-precision-0.5.7.md`)
+  `[edge-audit] rule 0.5.7 verdict=FAIL under_floor=ACCESSES_DATA|fact,CONTAINS|fact,EVENT_FLOWS|fact,HANDLED_BY|fact,HAS_ATTRIBUTE|fact,INHERITS_FROM|fact,NAVIGATES_TO|derived,NAVIGATES_TO|fact,TESTS|derived fact=0.993 derived=0.878 heuristic=0.990 kappa=1.000`
+  (HP.5: every under-floor stratum under through held-out verdicts judged before the HQ fixes; at the
+  candidate 26 of their 28 wrong edges no longer exist and 2 were re-sited; the fit panel alone reads
+  fact 1.000, derived 0.936, heuristic 1.000, DOCUMENTS|derived 0.833 its one stratum under floor), then
+  re-measured on a held-out panel re-drawn at the candidate
+  `[edge-audit] rule 0.5.7b verdict=FAIL under_floor=ACCESSES_DATA|fact fact=0.999 derived=0.991 heuristic=1.000 kappa=1.000`,
+  `[edge-audit] rule 0.5.7b rejudge independent=64 self=3` (HP.7, HP.8): the one under-floor stratum is
+  a single wrong edge, tolgee's JPQL `left join fetch Permission` read as `data_entity:sql:fetch`, whose
+  cause HQ.14 fixed after the draw. Both FAIL verdicts stand as written. The build-timing baseline at W1
+  `[build-timing] check: ok - 4 repos, 52 phases, 0 gains, 0 regressions` (HP.3,
+  `dev-notes/build-timing-0.5.7.md`; the release candidate's row is the close-out's). Not built, by
+  ruling: section-level doc ties (James 2026-11-02, *"go with recommend"*); the four FD.79 accepted rows
+  retired instead (HP.6). At W12's close-out: 7887 workspace tests, 523 graded fixtures (none blind),
+  the matrix 354 full / 158 unknown / 28 n/a of 512, the use-pattern grid 21 full / 105 unknown of 126,
+  the partial rank and cohort gates 0 drops, build timing 0 regressions. No code-block id, no
+  FORMAT_VERSION / MANIFEST_VERSION change, no Cargo.toml or Cargo.lock move; the build domain's twelve
+  ids sit in block 2. The leftovers are precision-backlog rows (a3af9bed). Handoffs
+  `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.7.md` (0.5.6 -> 0.5.7), pin `=0.5.7` /
+  `glia-py==0.5.7`; the version bump is the release step after the docs.
+- **After 0.5.7 (James 2026-11-03: *"nah just make it a small release after this one it's kind a
+  seperate thing"*).** **0.5.8** is `glia explain`, its own small release right after the 0.5.7 tag
+  (branch `explainer`, worktree `../glia-explainer`, plan `dev-notes/explainers-plan.md`). **0.5.9** is
+  the second half of the 0.5.7 scope, specced as the J* packets (`dev-notes/leap-058-packets.json`,
+  `leap-058-corrections.json`, `wave-runner/schedule_058.py`; the files keep their 058 names until the
+  integrator renames them after the tag): JG the goal layer, the clarification queue and PR intent (T6,
+  FC.19 / FC.20; it fills the 12 reserved T6 slots and GOAL_UNIT / TRACES / UNIT, block 0), JR the repair
+  loop (glia calls no model), JD `decide/` and `glia judge`, JP.1 the agent before / after (a pilot first,
+  then James decides), JZ docs and handoffs; its brief is written at its kickoff, after a re-verify
+  against the release before it.
 
 ## Memory
 

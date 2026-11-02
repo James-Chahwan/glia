@@ -240,6 +240,18 @@ Python's five, TypeScript's six, and process_entry for C#, Go, Java and Rust bes
 partial, 0 none, 105 unknown: `[matrix] patterns: 18 languages x 7 use patterns, 21 full, 0 partial, 0 none, 105
 unknown`.
 
+0.5.7 adds no pattern and moves no pattern grade: the MCP-server host fixtures (HF.3's
+`patterns/python/host_command/mcp_server.py`, HF.4's `patterns/typescript/host_command/src/mcp.ts`, each with its
+key.json rows and a forbid) join cells that were already full. At 0.5.7's last wave (W12) the grid still reads
+`[matrix] patterns: 18 languages x 7 use patterns, 21 full, 0 partial, 0 none, 105 unknown`, the mechanism grid
+`[matrix] 18 languages x 30 mechanisms, 354 full, 0 partial, 0 none, 158 unknown, 28 n/a`, over 523 fixtures.
+
+A contribution that adds a fixture or a cell (docs/seams.md, seams 1 and 2) runs `bash scripts/pr-check.sh` (HT.10)
+before its PR: it builds the wheel into its own venv (`~/.cache/glia/pr-check/venv`), grades each touched fixture with
+`grade.py` and runs `matrix.py --language <lang> --fail-on-error`. A missed expectation is reported, not failed; a
+grader error is. `matrix.py --check` is not the contributor's check: a new cell moves the committed `COVERAGE.md` /
+`results-latest.json` until the release re-emits them.
+
 ## Two grades per cell: fixture / cohort (FH.10)
 
 Every `COVERAGE.md` cell reads `fixture/cohort`. The first glyph is the fixture grade
