@@ -62,7 +62,8 @@ TAG = '`json:"customerName"`'
 RENAMED = '`json:"customer_name"`'
 ADVISORY = "### Model breaks (advisory: an inferred client <-> server pairing below the models min tier)"
 MARKER_TAIL = " edges +2 -0 (fact=2 derived=0 heuristic=0) violations new=1 resolved=0 blocking=true"
-ROW = "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |"
+# HC.4: review's pyo3 markdown always carries the measured precision beside the tier.
+ROW = "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact (>= 0.91 on IMPORTS\\|fact, n=41) |"
 
 
 def git(top: pathlib.Path, *args: str) -> None:
