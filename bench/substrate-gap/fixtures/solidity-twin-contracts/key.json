@@ -1,0 +1,62 @@
+{
+  "framework": "solidity-twin-contracts",
+  "language": "solidity",
+  "dirs": [
+    "."
+  ],
+  "note": "HQ.4. One interface name copied into two packages, as zora-protocol's shared and per-package interface copies are: one ABI member is one procedure (DT.10a) HANDLED_BY each copy, and each edge is sited at its own copy's declaration. BASE d50142cb (debug CLI): both HANDLED_BY edges sat at lending/src/IPriceOracle.sol:8, the file whose declaration won the node merge, so the vault forbid fired.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:IPriceOracle.latestPrice",
+      "exact": true,
+      "note": "one procedure for both copies (DT.10a: an EVM client names a contract, never a file)"
+    },
+    {
+      "kind": "METHOD",
+      "name": "vault::src::IPriceOracle::IPriceOracle::latestPrice",
+      "exact": true
+    },
+    {
+      "kind": "METHOD",
+      "name": "lending::src::IPriceOracle::IPriceOracle::latestPrice",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm:IPriceOracle.latestPrice",
+      "to": "vault::src::IPriceOracle::IPriceOracle::latestPrice",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm:IPriceOracle.latestPrice",
+      "to": "lending::src::IPriceOracle::IPriceOracle::latestPrice",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm:IPriceOracle.decimals",
+      "to": "lending::src::IPriceOracle::IPriceOracle::decimals",
+      "category": "HANDLED_BY",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm:IPriceOracle.latestPrice",
+      "to": "vault::src::IPriceOracle::IPriceOracle::latestPrice",
+      "category": "HANDLED_BY",
+      "site": "lending/src/IPriceOracle.sol",
+      "note": "the vault copy's edge is asserted in vault/src, never in the lending copy's file"
+    },
+    {
+      "from": "evm:IPriceOracle.latestPrice",
+      "to": "lending::src::IPriceOracle::IPriceOracle::latestPrice",
+      "category": "HANDLED_BY",
+      "site": "vault/src/IPriceOracle.sol",
+      "note": "the mirror: whichever file the node merge keeps, one of these two fires on the BASE"
+    }
+  ]
+}

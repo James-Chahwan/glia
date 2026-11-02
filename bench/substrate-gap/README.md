@@ -70,7 +70,11 @@ The eleven fields below are the **complete and only** vocabulary:
     {"kind": "ROUTE", "name": "/users", "max_nodes": 1},  // at most N such nodes
     {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}, // no such edge
     {"from": "Fleet::Get", "to": "Problem", "category": "USES",
-     "rule": "json_response"}  // only an edge whose EVIDENCE rule is this (FD.24)
+     "rule": "json_response"},  // only an edge whose EVIDENCE rule is this (FD.24)
+    {"from": "evm:IPriceOracle.latestPrice",
+     "to": "vault::src::IPriceOracle::IPriceOracle::latestPrice",
+     "category": "HANDLED_BY",
+     "site": "lending/src/IPriceOracle.sol"}  // only an edge asserted in this file (HQ.4)
   ],
 
   // ---- files git refuses to track, copied in for the grade only ----
@@ -130,6 +134,18 @@ Semantics:
   have no cap. Violations are reported per fixture as `FORBID VIOLATIONS: n` and
   do **not** move the recall matrix — a fixture can read `1.00` and still be
   violating, which is precisely why the section is printed separately.
+- **`rule` and `site` on a `forbid` edge row** narrow it to the matching edges
+  whose evidence agrees, read through `PyGraph.why` (whose direct-edge rows
+  carry each edge's EVIDENCE rule and `site {file, line}`), filtered back to
+  the two node ids. `rule` (FD.24) fires only on an edge whose EVIDENCE rule
+  equals it, so one mechanism's edge can be forbidden while another's between
+  the same two nodes stays legal. `site` (HQ.4) is a repo-relative file and
+  fires only on an edge whose `why` site file equals it, so an edge asserted in
+  the wrong file is forbidden while the same pair asserted in its own file stays
+  legal (`solidity-twin-contracts`: one procedure, two copies, each HANDLED_BY
+  sited at its own declaration). The two combine with AND; each must be a
+  non-empty string, and a row with either raises when no graph is given. A
+  violation row prints `forbid rule=<r>` / `forbid site=<file>` in its label.
 - **`expect_cells`** asserts a node of `kind` leniently matching `node` carries a
   cell of type `cell`, optionally containing `contains`. `contains` is a
   case-folded **plain** substring of the cell payload (not the `_norm` identity

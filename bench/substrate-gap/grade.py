@@ -111,7 +111,7 @@ TOP_FIELDS = {
 NODE_FIELDS = {"kind", "name", "exact", "note"}
 EDGE_FIELDS = {"from", "to", "category", "exact", "note"}
 FORBID_NODE_FIELDS = {"kind", "name", "max_nodes", "note"}
-FORBID_EDGE_FIELDS = {"from", "to", "category", "rule", "note"}
+FORBID_EDGE_FIELDS = {"from", "to", "category", "rule", "site", "note"}
 CELL_FIELDS = {"kind", "node", "cell", "contains", "note"}
 
 
@@ -287,16 +287,18 @@ def _recall_edge_hit(fixture, where, edges, by_id, cat_id, exp):
     return False
 
 
-def _evidence_rules(g, fr, to, category):
-    """The EVIDENCE rule of every `category` edge fr -> to, as `why` reads it.
+def _evidence_rows(g, fr, to, category):
+    """The (EVIDENCE rule, site file) of every `category` edge fr -> to, as `why` reads it.
 
-    `edges_json()` carries no edge cells, so the rule comes from
+    `edges_json()` carries no edge cells, so the rule and the site come from
     `PyGraph.why(from_qname, to_qname, category)`, whose direct-edge rows hold
-    each edge's EVIDENCE emitter and rule. Rows are filtered back to the two
-    node ids, so a second node sharing a qname never lends its edge's rule.
+    each edge's EVIDENCE emitter, rule and `site {file, line}`. Rows are
+    filtered back to the two node ids, so a second node sharing a qname never
+    lends its edge's rule or site. A row with no site reads `None` there.
     """
     ans = g.why(fr["qname"], to["qname"], category)
-    return [r.get("rule") for r in (ans or {}).get("edges", [])
+    return [(r.get("rule"), (r.get("site") or {}).get("file"))
+            for r in (ans or {}).get("edges", [])
             if r.get("from_id") == fr["id"] and r.get("to_id") == to["id"]]
 
 
@@ -308,7 +310,10 @@ def _grade_forbid(fixture, key, nodes, edges, by_id, g=None):
     they are everywhere. An edge row with `rule` fires only on a matching edge
     whose EVIDENCE cell's rule equals it (FD.24), read through `g.why`, so a
     key can forbid one mechanism's edge while another mechanism's edge between
-    the same two nodes stays legal.
+    the same two nodes stays legal. An edge row with `site` (HQ.4) fires only
+    on a matching edge whose `why` site file (repo-relative) equals it, so a
+    key can forbid an edge asserted in the wrong file while the same pair
+    asserted in its own file stays legal; `rule` and `site` combine with AND.
     """
     results = []
     for i, exp in enumerate(key.get("forbid", [])):
@@ -319,11 +324,14 @@ def _grade_forbid(fixture, key, nodes, edges, by_id, g=None):
             cat_id = _CAT_BY_NAME.get(exp["category"])
             if cat_id is None:
                 raise ValueError(f"{fixture}: unknown category {exp['category']!r}")
-            rule = exp.get("rule")
-            if "rule" in exp and (not isinstance(rule, str) or not rule):
-                raise ValueError(f"{fixture}: {where} field 'rule' must be a non-empty string, got {rule!r}")
-            if rule is not None and g is None:
-                raise ValueError(f"{fixture}: {where} filters by rule but no graph was given")
+            rule, site = exp.get("rule"), exp.get("site")
+            for field, val in (("rule", rule), ("site", site)):
+                if field in exp and (not isinstance(val, str) or not val):
+                    raise ValueError(f"{fixture}: {where} field {field!r} must be a non-empty string, got {val!r}")
+            filtered = rule is not None or site is not None
+            if filtered and g is None:
+                what = " and ".join(f for f in ("rule", "site") if f in exp)
+                raise ValueError(f"{fixture}: {where} filters by {what} but no graph was given")
             count = 0
             pairs = set()
             for e in edges:
@@ -331,13 +339,13 @@ def _grade_forbid(fixture, key, nodes, edges, by_id, g=None):
                     continue
                 fr, to = by_id.get(e["from"]), by_id.get(e["to"])
                 if fr and to and _node_matches_exact(fr, exp["from"]) and _node_matches_exact(to, exp["to"]):
-                    if rule is None:
+                    if not filtered:
                         count += 1
                     else:
                         pairs.add((e["from"], e["to"]))
             for f_id, t_id in sorted(pairs):
-                count += sum(1 for r in _evidence_rules(g, by_id[f_id], by_id[t_id], exp["category"])
-                             if r == rule)
+                count += sum(1 for r, f in _evidence_rows(g, by_id[f_id], by_id[t_id], exp["category"])
+                             if (rule is None or r == rule) and (site is None or f == site))
             limit = 0
         else:  # --- node form ---
             _reject_unknown(fixture, exp, FORBID_NODE_FIELDS, f"key.json field in {where}")
@@ -522,6 +530,7 @@ def _print_verbose(res):
             mark = "XX " if r["violated"] else "OK "
             what = (f"{r['category']:<14} {r['from']!r} -> {r['to']!r}"
                     + (f" forbid rule={r['rule']}" if r.get("rule") else "")
+                    + (f" forbid site={r['site']}" if r.get("site") else "")
                     if "category" in r else
                     f"{r['kind']:<14} {r.get('name', '*')!r}")
             print(f"    {mark} {what}  matched={r['matched']} "

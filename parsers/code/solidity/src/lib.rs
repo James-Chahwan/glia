@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
+use glia_code_domain::evidence::Evidence;
 use glia_code_domain::evm;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use glia_doc::DocTag;
@@ -9,6 +10,10 @@ pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+
+/// The emitter the engine stamps on every Solidity parser edge
+/// (`parser:<lang>`); a HANDLED_BY that records its own site names it too.
+const SOLIDITY_EMITTER: &str = "parser:solidity";
 
 pub fn parse_file(
     source: &str,
@@ -107,13 +112,14 @@ fn abi_marker(abi: &AbiStats, file_rel_path: &str) -> Option<String> {
     (abi.procedures > 0 || abi.literal_constants > 0).then(|| {
         format!(
             "[sol-abi] procedures={} (functions={} getters={} abstract={}) contracts={} \
-             literal_constants={} path={}",
+             literal_constants={} handled_sited={} path={}",
             abi.procedures,
             abi.functions,
             abi.getters,
             abi.abstract_,
             abi.contracts,
             abi.literal_constants,
+            abi.handled_sited,
             file_rel_path
         )
     })
@@ -161,7 +167,8 @@ impl EmitStats {
 /// emitted, split into functions and getters, the abstract ones among them,
 /// and the contracts / interfaces holding at least one; and (GD.23) the state
 /// variables the noise gate dropped, undocumented and initialised by a
-/// literal primitive, public or not.
+/// literal primitive, public or not; and (HQ.4) the HANDLED_BY edges sited at
+/// their handler's own declaration.
 #[derive(Default)]
 struct AbiStats {
     procedures: usize,
@@ -170,6 +177,7 @@ struct AbiStats {
     abstract_: usize,
     contracts: usize,
     literal_constants: usize,
+    handled_sited: usize,
 }
 
 /// One contract member an ABI client can reach, gathered while the contract
@@ -181,6 +189,9 @@ struct ProcEntry {
     handler: Option<NodeId>,
     /// The first declaration's POSITION.
     position: Cell,
+    /// The first declaration's 0-based start row (its POSITION's row), where
+    /// the HANDLED_BY edge is sited (HQ.4).
+    row: u32,
 }
 
 /// A contract's ABI-visible members by name: overloads collapse onto one
@@ -346,7 +357,7 @@ fn visit_contract(
             }
         }
     }
-    emit_procedures(&abi, owner, id, module_id, repo, acc);
+    emit_procedures(&abi, owner, id, module_id, file_rel, repo, acc);
 }
 
 /// Emit one RPC_PROCEDURE `evm:<Contract>.<member>` per ABI-visible member of
@@ -357,11 +368,19 @@ fn visit_contract(
 /// name `<Contract>.<member>`, so a by-name lookup among the contract's
 /// children (SelfMethod) never finds it. No DEFINES: a procedure is not a
 /// declaration of the contract body.
+///
+/// HQ.4: each HANDLED_BY carries its own EVIDENCE site, `file_rel` at the
+/// handler declaration's row. Two files declaring one contract name give one
+/// procedure node (its first-merged POSITION) HANDLED_BY each copy, and a
+/// from-node fill would site both edges in the merged node's file; a recorded
+/// site is never overwritten by the fill, so each copy's edge stays in its own
+/// file.
 fn emit_procedures(
     abi: &ContractAbi,
     owner: Owner<'_>,
     contract_id: NodeId,
     module_id: NodeId,
+    file_rel: &str,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -387,13 +406,20 @@ fn emit_procedures(
             Some(contract_id),
         );
         let edge = match entry.handler {
-            Some(handler) => Edge {
-                from: id,
-                to: handler,
-                category: edge_category::HANDLED_BY,
-                confidence: Confidence::Strong,
-                cells: Vec::new(),
-            },
+            Some(handler) => {
+                acc.abi.handled_sited += 1;
+                Edge {
+                    from: id,
+                    to: handler,
+                    category: edge_category::HANDLED_BY,
+                    confidence: Confidence::Strong,
+                    cells: vec![
+                        Evidence::emitter(SOLIDITY_EMITTER)
+                            .at(file_rel, entry.row)
+                            .to_cell(),
+                    ],
+                }
+            }
             None => Edge {
                 from: module_id,
                 to: id,
@@ -416,13 +442,14 @@ fn emit_procedures(
 }
 
 /// The first declaration of a member: its mutability, getter flag, abstract
-/// flag, handler and POSITION.
+/// flag, handler, POSITION and 0-based start row.
 struct FirstDecl {
     mutability: String,
     getter: bool,
     abstract_: bool,
     handler: Option<NodeId>,
     position: Cell,
+    row: u32,
 }
 
 /// Record one ABI-visible declaration of `member` with `arity` parameters.
@@ -450,6 +477,7 @@ fn record_member(
             },
             handler: d.handler,
             position: d.position,
+            row: d.row,
         },
     );
 }
@@ -561,6 +589,7 @@ fn visit_function(
                     .find(|c| c.kind == cell_type::POSITION)
                     .cloned()
                     .unwrap_or_else(|| position_cell(&node, file_rel)),
+                row: line_at(node),
             }
         });
     }
@@ -853,6 +882,7 @@ fn visit_state_variable(
             abstract_: false,
             handler: (!gated).then_some(id),
             position: position_cell(&node, file_rel),
+            row: line_at(node),
         });
     }
     if gated {
@@ -2500,7 +2530,105 @@ contract Fee {
             abi_marker(&stats, "contracts/Fee.sol").as_deref(),
             Some(
                 "[sol-abi] procedures=7 (functions=0 getters=7 abstract=0) contracts=1 \
-                 literal_constants=5 path=contracts/Fee.sol"
+                 literal_constants=5 handled_sited=3 path=contracts/Fee.sol"
+            )
+        );
+    }
+
+    /// HQ.4: the evidence site of the one HANDLED_BY from `proc_qname`, as
+    /// (file, 0-based line); its basis is `site`.
+    fn handled_by_site(fp: &FileParse, proc_qname: &str) -> (String, u32) {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, proc_qname);
+        let edges: Vec<&Edge> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY && e.from == id)
+            .collect();
+        assert_eq!(edges.len(), 1, "one HANDLED_BY from {proc_qname}");
+        let ev = Evidence::of(edges[0]).expect("a HANDLED_BY carries its evidence");
+        assert_eq!(ev.emitter, SOLIDITY_EMITTER);
+        assert_eq!(ev.rule, None);
+        assert_eq!(ev.basis, glia_code_domain::evidence::Basis::Site);
+        (
+            ev.file.expect("sited in a file"),
+            ev.line.expect("sited at a line"),
+        )
+    }
+
+    /// HQ.4: one contract name declared in two files is one procedure
+    /// (DT.10a), but each file's HANDLED_BY is sited at its own declaration,
+    /// so the engine's from-node fill never moves one copy's edge into the
+    /// other copy's file; a public getter is sited at its state variable.
+    #[test]
+    fn twin_contracts_site_each_handled_by_in_its_own_file() {
+        let vault = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/// @notice The price feed the vault reads.
+interface IPriceOracle {
+    function latestPrice(address asset) external view returns (uint256);
+}
+";
+        let lending = "// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/// @notice The price feed the lending pool reads.
+interface IPriceOracle {
+    function decimals() external view returns (uint8);
+
+    function latestPrice(address asset) external view returns (uint256);
+}
+";
+        let fv = parse_file(
+            vault,
+            "vault/src/IPriceOracle.sol",
+            "vault::src::IPriceOracle",
+            repo(),
+        )
+        .unwrap();
+        let fl = parse_file(
+            lending,
+            "lending/src/IPriceOracle.sol",
+            "lending::src::IPriceOracle",
+            repo(),
+        )
+        .unwrap();
+        let p = "evm:IPriceOracle.latestPrice";
+        assert_eq!(
+            handled_by_site(&fv, p),
+            ("vault/src/IPriceOracle.sol".to_string(), 5)
+        );
+        assert_eq!(
+            handled_by_site(&fl, p),
+            ("lending/src/IPriceOracle.sol".to_string(), 7)
+        );
+        assert_eq!(
+            handled_by_site(&fl, "evm:IPriceOracle.decimals"),
+            ("lending/src/IPriceOracle.sol".to_string(), 5)
+        );
+        // One ABI member, one procedure id in both files.
+        let pid = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, p);
+        assert!(fv.nodes.iter().any(|n| n.id == pid));
+        assert!(fl.nodes.iter().any(|n| n.id == pid));
+
+        let getter = "pragma solidity ^0.8.20;
+contract Vault {
+    /// @notice The vault's owner.
+    address public owner;
+}
+";
+        let fg = parse_file(getter, "src/Vault.sol", "src::Vault", repo()).unwrap();
+        assert_eq!(
+            handled_by_site(&fg, "evm:Vault.owner"),
+            ("src/Vault.sol".to_string(), 3)
+        );
+        let (_, stats) =
+            parse_with_stats(lending, "lending/src/IPriceOracle.sol", "m", repo()).unwrap();
+        assert_eq!(
+            abi_marker(&stats, "lending/src/IPriceOracle.sol").as_deref(),
+            Some(
+                "[sol-abi] procedures=2 (functions=2 getters=0 abstract=2) contracts=1 \
+                 literal_constants=0 handled_sited=2 path=lending/src/IPriceOracle.sol"
             )
         );
     }

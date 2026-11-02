@@ -20,6 +20,13 @@ EVIDENCE rule equals it (read through `PyGraph.why`). The checks below pin that
 a json_response USES edge fires such a row while a composite_literal one between
 the same two nodes does not, and that models-go-wire's real build both holds the
 restored json_response guard and fires a composite_literal row.
+
+HQ.4 added `site` on forbid edge rows: the row fires only on an edge whose `why`
+site file equals it. The checks below pin that a site row fires on the edge
+sited there and not on the same pair sited elsewhere, that `rule` and `site`
+combine with AND, that a non-string `site` raises, that a key with no `site`
+grades as before, and that solidity-twin-contracts' real build sites each
+copy's HANDLED_BY in its own file.
 """
 import contextlib
 import io
@@ -246,6 +253,84 @@ with tempfile.TemporaryDirectory(prefix="fd24-rule-") as tmp:
         _print_verbose(res)
     check("a rule row prints `forbid rule=<r>` in its label",
           "'models::vehicle::Problem' forbid rule=json_response  matched=0" in out.getvalue())
+
+# ---- HQ.4: forbid edge rows filtered by the edge's site file ----------------
+class _FakeWhySites:
+    """A graph stand-in: `why` answers direct edges with a rule and a site file."""
+
+    def __init__(self, rows):
+        self.rows = rows  # (from_id, to_id) -> [(rule, file), ..]
+
+    def why(self, from_qname, to_qname, category):
+        return {"edges": [{"from_id": f, "to_id": t, "rule": r,
+                           "site": None if fl is None else {"file": fl, "line": 8}}
+                          for (f, t), rs in sorted(self.rows.items()) for r, fl in rs]}
+
+
+PROC = {"id": 10, "name": "evm:IPriceOracle.latestPrice", "qname": "evm:IPriceOracle.latestPrice"}
+VAULT = {"id": 11, "name": "latestPrice",
+         "qname": "vault::src::IPriceOracle::IPriceOracle::latestPrice"}
+HANDLED_BY = _CAT_BY_NAME["HANDLED_BY"]
+HQ4_NODES = [PROC, VAULT]
+HQ4_EDGES = [{"from": 10, "to": 11, "category": HANDLED_BY}]
+HQ4_BY_ID = {10: PROC, 11: VAULT}
+SITE_ROW = {"from": PROC["qname"], "to": VAULT["qname"], "category": "HANDLED_BY",
+            "site": "lending/src/IPriceOracle.sol"}
+
+check("FORBID_EDGE_FIELDS admits `site`", "site" in FORBID_EDGE_FIELDS)
+wrong = _grade_forbid("hq4", {"forbid": [SITE_ROW]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID,
+                      _FakeWhySites({(10, 11): [(None, "lending/src/IPriceOracle.sol")]}))
+check("a site row fires on the edge sited in that file",
+      wrong[0]["violated"] and wrong[0]["matched"] == 1)
+own = _grade_forbid("hq4", {"forbid": [SITE_ROW]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID,
+                    _FakeWhySites({(10, 11): [(None, "vault/src/IPriceOracle.sol")]}))
+check("a site row does not fire on the same pair sited elsewhere",
+      not own[0]["violated"] and own[0]["matched"] == 0)
+unsited = _grade_forbid("hq4", {"forbid": [SITE_ROW]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID,
+                        _FakeWhySites({(10, 11): [(None, None)]}))
+check("a site row does not fire on an edge with no site", not unsited[0]["violated"])
+both = {**SITE_ROW, "rule": "abi_member"}
+and_rule = _grade_forbid("hq4", {"forbid": [both]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID,
+                         _FakeWhySites({(10, 11): [("other", "lending/src/IPriceOracle.sol"),
+                                                   ("abi_member", "vault/src/IPriceOracle.sol")]}))
+check("rule and site combine with AND (each matches a different edge: no fire)",
+      not and_rule[0]["violated"])
+and_hit = _grade_forbid("hq4", {"forbid": [both]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID,
+                        _FakeWhySites({(10, 11): [("abi_member", "lending/src/IPriceOracle.sol")]}))
+check("rule and site both matching one edge fire", and_hit[0]["violated"])
+no_site = {k: v for k, v in SITE_ROW.items() if k != "site"}
+plain_hit = _grade_forbid("hq4", {"forbid": [no_site]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID)
+check("a row without `site` grades as before (fires on any matching edge, no graph needed)",
+      plain_hit[0]["violated"] and plain_hit[0]["matched"] == 1)
+for bad in ("", 1, None, ["lending/src/IPriceOracle.sol"]):
+    try:
+        _grade_forbid("hq4", {"forbid": [{**SITE_ROW, "site": bad}]}, HQ4_NODES,
+                      HQ4_EDGES, HQ4_BY_ID, _FakeWhySites({}))
+        ok = False
+    except ValueError:
+        ok = True
+    check(f"forbid site={bad!r} is rejected (a site is a non-empty string)", ok)
+try:
+    _grade_forbid("hq4", {"forbid": [SITE_ROW]}, HQ4_NODES, HQ4_EDGES, HQ4_BY_ID)
+    check("a site row with no graph raises", False)
+except ValueError:
+    check("a site row with no graph raises", True)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    _print_verbose({"framework": "hq4", "language": "solidity", "node_count": 2,
+                    "edge_count": 1, "node_recall": [], "edge_recall": [],
+                    "cell_recall": [], "forbid_results": [wrong[0]],
+                    "forbid_violations": 1, "per_category": {}, "per_cell": {}})
+check("a site row prints `forbid site=<file>` in its label",
+      "forbid site=lending/src/IPriceOracle.sol  matched=1" in out.getvalue())
+# End to end on solidity-twin-contracts' real build: each copy's HANDLED_BY is
+# sited in its own file, so neither mirror forbid fires.
+with contextlib.redirect_stderr(io.StringIO()):
+    res = grade_fixture(Path(__file__).parent / "fixtures" / "solidity-twin-contracts")
+site_rows = [r for r in res["forbid_results"] if r.get("site")]
+check("solidity-twin-contracts carries two site rows", len(site_rows) == 2)
+check("solidity-twin-contracts: no HANDLED_BY sited in the other copy's file",
+      not any(r["violated"] for r in site_rows))
 
 print(f"\n{len(FAILED)} failed" if FAILED else "\nall passed")
 sys.exit(1 if FAILED else 0)
