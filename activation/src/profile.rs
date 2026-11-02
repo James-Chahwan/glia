@@ -689,6 +689,54 @@ impl DomainTables {
             Err(errors)
         }
     }
+
+    /// Every id-block problem with the registries (HT.1), or `Ok`: each row
+    /// through [`glia_core::ids::check_table`] for this domain's
+    /// `graph_type` (id 0, block `0xFFFF`, an unassigned or reserved block,
+    /// another domain's registered block), and, when `shipped`, no id in a
+    /// private block (`0x8000-0xFFFE`: a branch's or a prototype's, promoted
+    /// into the domain's block by the release that ships it).
+    ///
+    /// Kept apart from [`DomainTables::validate`]: a test-only domain may
+    /// number from 1 like the code domain does (its file header names its
+    /// registries), and calls only `validate`.
+    pub fn validate_blocks(&self, shipped: bool) -> Result<(), Vec<String>> {
+        let r = &self.registries;
+        let tables: [(&str, Vec<(u32, &str)>); 3] = [
+            (
+                "node kind",
+                r.node_kinds.iter().map(|(i, n)| (i.0, *n)).collect(),
+            ),
+            (
+                "edge category",
+                r.edge_categories.iter().map(|(i, n)| (i.0, *n)).collect(),
+            ),
+            (
+                "cell type",
+                r.cell_types.iter().map(|(i, n)| (i.0, *n)).collect(),
+            ),
+        ];
+        let mut errors = Vec::new();
+        for (table, rows) in &tables {
+            errors.extend(glia_core::ids::check_table(self.graph_type, table, rows));
+            if shipped {
+                for (id, name) in rows
+                    .iter()
+                    .filter(|(id, _)| glia_core::ids::is_private(*id))
+                {
+                    errors.push(format!(
+                        "{table} 0x{id:08x} {name}: block private is never shipped (promote it into the {} domain's block)",
+                        self.graph_type
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 // ============================================================================
@@ -841,6 +889,45 @@ mod tests {
         tier: Tier::Derived,
         walk: true,
     };
+
+    /// HT.1: the block rules through a domain's tables. The toy table here
+    /// numbers from 1, inside the code block, so it fails as a shipped
+    /// non-code domain would; as "code" it passes; a private id passes until
+    /// the tables ship.
+    #[test]
+    fn validate_blocks_reads_every_registry() {
+        let errors = TABLES.validate_blocks(false).unwrap_err();
+        assert_eq!(errors.len(), 10, "{errors:#?}");
+        assert_eq!(
+            errors[0],
+            "node kind 0x00000001 ROUTE: block code belongs to graph_type code, not toy"
+        );
+        assert!(errors[5].starts_with("edge category 0x00000001 CALLS: "));
+        assert!(errors[9].starts_with("cell type 0x00000002 ROLE: "));
+        let code = DomainTables {
+            graph_type: "code",
+            ..TABLES
+        };
+        assert_eq!(code.validate_blocks(true), Ok(()));
+
+        const PROTO: NodeKindId = NodeKindId(glia_core::ids::id_in(0x8000, 1));
+        let private = DomainTables {
+            graph_type: "code",
+            registries: Registries {
+                node_kinds: &[(ROUTE, "ROUTE"), (PROTO, "PROTO")],
+                ..TABLES.registries
+            },
+            ..TABLES
+        };
+        assert_eq!(private.validate_blocks(false), Ok(()));
+        assert_eq!(
+            private.validate_blocks(true),
+            Err(vec![
+                "node kind 0x80000001 PROTO: block private is never shipped (promote it into the code domain's block)"
+                    .to_string()
+            ])
+        );
+    }
 
     #[test]
     fn entry_rule_kind_exact_and_prefix() {

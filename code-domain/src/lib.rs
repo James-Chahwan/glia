@@ -212,6 +212,9 @@ pub mod node_kind {
     //   49 RPC_CALL       — A10.9
     // 50 allocated centrally by F0.1, for the 0.5.4 release:
     //   50 GOAL_UNIT      — F0.1 for FC (0.5.4): written by FC.4 / FC.5b
+    // Ids here are block 0x0000 (code) of glia_core::ids (HT.1): a new code
+    // id is still the next free in 1..=len; another domain takes its own block,
+    // and core/ids.lock (engine/tests/id_blocks.rs) records every allocation.
     // ------------------------------------------------------------------
 
     /// RESERVED (A8.4) — a build/workspace project unit: an MSBuild `.csproj`,
@@ -453,6 +456,9 @@ pub mod edge_category {
     //   37 SAME_AS            — D0.1 for DD (0.5.2): identity stars, IdentityResolver (DD.5)
     // 38 allocated centrally by F0.1, for the 0.5.4 release:
     //   38 TRACES             — F0.1 for FC (0.5.4): goal-layer links, the join pass (FC.5b)
+    // Ids here are block 0x0000 (code) of glia_core::ids (HT.1): a new code
+    // id is still the next free in 1..=len; another domain takes its own block,
+    // and core/ids.lock (engine/tests/id_blocks.rs) records every allocation.
     // ------------------------------------------------------------------
 
     /// Cross-repo pairing: two nodes reach the same external data source
@@ -664,6 +670,9 @@ pub mod cell_type {
     // for 26 too; F0.1 ordered them):
     //   26 UNIT            — F0.1 for FC (0.5.4): the goal-layer unit payload (FC.1)
     //   27 IMPORT_BINDINGS — F0.1 for FA.21 (0.5.4): an import's bound names
+    // Ids here are block 0x0000 (code) of glia_core::ids (HT.1): a new code
+    // id is still the next free in 1..=len; another domain takes its own block,
+    // and core/ids.lock (engine/tests/id_blocks.rs) records every allocation.
     // ------------------------------------------------------------------
 
     /// RESERVED (A12.1) — the message / payload schema type a node sends or

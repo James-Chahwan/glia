@@ -35,6 +35,8 @@
 //! let _ = glia_core::GraphType::code();
 //! ```
 
+pub mod ids;
+
 use core::hash::Hasher;
 use twox_hash::XxHash64;
 
