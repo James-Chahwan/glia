@@ -537,3 +537,99 @@ fn an_unresolved_word_seeds_from_the_fused_semantic_flow() {
     assert_eq!(off.stdout, before.stdout);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// HF.1: a declared entry (an ENTRYPOINT cell) seeds a flow. The
+/// process_entry shape (bench/substrate-gap/patterns/python/process_entry): a
+/// Dockerfile `CMD ["python", "worker.py"]` starts the worker MODULE, which
+/// runs `loop -> process`; compose's `gunicorn app:app` declares app, which
+/// reaches nothing. Before HF.1 `glia flows` listed `GET /health` alone
+/// (`[flows] entries=1 flows=1`), `find process --flows` read `with_flows=0`
+/// and `flows --concept loop` was a no_match absence.
+#[test]
+fn a_host_started_module_seeds_a_flow() {
+    let root = std::env::temp_dir().join(format!("glia-trace-cli-{}-declared", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (rel, text) in [
+        (
+            "svc-py/app.py",
+            "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/health\")\ndef health():\n    return \"ok\"\n",
+        ),
+        (
+            "svc-py/worker.py",
+            "import time\n\n\ndef process(item):\n    return item * 2\n\n\ndef loop():\n    while True:\n        process(1)\n        time.sleep(1)\n\n\nloop()\n",
+        ),
+        (
+            "svc-py/docker-compose.yml",
+            "services:\n  api:\n    build: .\n    command: gunicorn app:app\n    ports:\n      - \"8000:8000\"\n",
+        ),
+        (
+            "svc-py/Dockerfile",
+            "FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"worker.py\"]\n",
+        ),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("a parent dir")).expect("mkdir");
+        std::fs::write(p, text).expect("write fixture file");
+    }
+    let path = root.to_string_lossy().into_owned();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+            .args(args)
+            .env("GLIA_NO_PERSIST", "1")
+            .output()
+            .expect("glia runs");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "glia {args:?}: {:?}\n{err}",
+            out.status
+        );
+        (stdout(&out), err)
+    };
+
+    let (text, err) = run(&["flows", &path]);
+    let lines: Vec<&str> = err.lines().filter(|l| l.starts_with("[flows] ")).collect();
+    for l in &lines {
+        eprintln!("{l}");
+    }
+    assert_eq!(
+        lines,
+        [
+            // GET /health, worker and app: app is an entry that reaches
+            // nothing, so it is counted and has no flow.
+            "[flows] entries=3 flows=2 cross_service=0 depth<=6",
+            "[flows] declared entries=2 new=2 sources=(config=0 main_guard=0 host=2 script=0 other=0)",
+        ],
+        "{err}"
+    );
+    assert!(
+        text.contains("| `worker` | MODULE | `svc-py::worker` | 2 |  | CALLS | svc-py/worker.py:"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| `get_/health` | ROUTE | `GET /health` | 1 |"),
+        "{text}"
+    );
+
+    let (_, err) = run(&["find", &path, "process", "--flows"]);
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("[find-flows] query=process hits=1 flows=2 with_flows=1 ")),
+        "{err}"
+    );
+
+    let (out, err) = run(&[
+        "flows",
+        &path,
+        "--concept",
+        "loop",
+        "--no-semantic",
+        "--json",
+    ]);
+    let v: serde_json::Value = serde_json::from_str(&out).expect("concept JSON");
+    let rows = v["results"].as_array().expect("concept rows");
+    assert_eq!(rows.len(), 1, "{v}\n{err}");
+    assert_eq!(rows[0]["key"], "worker");
+    assert_eq!(rows[0]["tier"], "hop_name");
+    let _ = std::fs::remove_dir_all(&root);
+}

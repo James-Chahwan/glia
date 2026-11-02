@@ -98,8 +98,9 @@
 //! # Entry flows
 //!
 //! [`entry_flows`] (LD.4b, the wrapper's `_build_flows`): one [`EntryFlow`]
-//! per entry point (`CODE_PROFILE.tables.entry`, roles included — the set
-//! liveness seeds from) that reaches anything: its forward BFS tree over the
+//! per entry point (`CODE_PROFILE.tables.entry`, roles included, and since
+//! HF.1 every node carrying an ENTRYPOINT cell — exactly the set liveness
+//! seeds from) that reaches anything: its forward BFS tree over the
 //! carry edges within `depth`, as the same located [`TraceHop`]s `hops` holds,
 //! the services it touches and the mechanisms it uses. One carry index and one
 //! [`Locator`] per call serve every entry. Structural edges (DEFINES,
@@ -114,6 +115,12 @@
 //! fired_on marker, one line per [`entry_flows`] call:
 //! `[flows] entries=<n> flows=<kept> cross_service=<n> depth<=<d>` — grep
 //! `[flows] entries=`. It follows LD.6's `[live] annotate surface=flows` line.
+//! HF.1: when an entry carries an ENTRYPOINT cell, the next line is
+//! `[flows] declared entries=<d> new=<n> sources=(config=<c> main_guard=<m>
+//! host=<h> script=<s> other=<o>)`: `d` declared entries, `n` of them the
+//! entry table alone would not admit, by the cell's `source` (`config` an
+//! overlay `[entrypoints]` pattern, `host:*` a host, `shebang` / `script_arg`
+//! a script) — grep `[flows] declared entries=`.
 //!
 //! # Concept search
 //!
@@ -245,8 +252,8 @@ use std::sync::Arc;
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::profile::node_ext;
-use glia_code_domain::{edge_category, endpoint, node_kind};
-use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
+use glia_code_domain::{cell_type, edge_category, endpoint, node_kind};
+use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::roles::roles_in;
 use glia_graph::{MergedGraph, Reach};
 
@@ -914,6 +921,7 @@ fn walk_flows(
             flows.len(),
             flows.iter().filter(|w| w.flow.cross_service).count()
         );
+        declared_marker(&entries);
         view.collapse_marker("flows", rows + folded, rows);
     }
     flows
@@ -1655,11 +1663,82 @@ pub(crate) struct Entry<'a> {
     pub(crate) id: NodeId,
     pub(crate) name: &'a str,
     pub(crate) qname: &'a str,
+    /// HF.1: the entry table admits it (kind, name, roles).
+    table: bool,
+    /// HF.1: it carries an ENTRYPOINT cell, by the cell's `source` class.
+    declared: Option<DeclSource>,
 }
 
-/// Every entry point of `merged` — `CODE_PROFILE.tables.entry` over kind,
-/// name and roles, the rule liveness seeds from — in graph then node order,
-/// each id once.
+/// HF.1: what declared an entry, from its ENTRYPOINT cell's `source` key
+/// (the `[flows] declared entries=` marker's `sources=(..)`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclSource {
+    /// `config`: an overlay `[entrypoints]` pattern (LF.3b).
+    Config,
+    /// `main_guard`: a script's `if __name__ == "__main__":` guard.
+    MainGuard,
+    /// `host:<h>`: a host callback, plugin unit or host start (GH.2-GH.20).
+    Host,
+    /// `shebang` / `script_arg`: a script run by its interpreter (GH.4).
+    Script,
+    /// Any other or no `source`.
+    Other,
+}
+
+/// The [`DeclSource`] of the first ENTRYPOINT cell in `cells`, `None`
+/// when there is none.
+fn decl_source(cells: &[Cell]) -> Option<DeclSource> {
+    let c = cells.iter().find(|c| c.kind == cell_type::ENTRYPOINT)?;
+    let text = match &c.payload {
+        CellPayload::Json(s) | CellPayload::Text(s) => s.as_str(),
+        CellPayload::Bytes(_) => return Some(DeclSource::Other),
+    };
+    let value: Option<serde_json::Value> = serde_json::from_str(text).ok();
+    let source = value
+        .as_ref()
+        .and_then(|v| v.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    Some(match source {
+        "config" => DeclSource::Config,
+        "main_guard" => DeclSource::MainGuard,
+        "shebang" | "script_arg" => DeclSource::Script,
+        s if s.starts_with("host:") => DeclSource::Host,
+        _ => DeclSource::Other,
+    })
+}
+
+/// The `[flows] declared entries=<d> new=<n> sources=(..)` line (HF.1),
+/// printed after `[flows] entries=` when an entry carries an ENTRYPOINT
+/// cell: `d` such entries, `n` of them the entry table alone would not
+/// admit, by [`DeclSource`].
+fn declared_marker(entries: &[Entry<'_>]) {
+    let declared: Vec<(bool, DeclSource)> = entries
+        .iter()
+        .filter_map(|e| e.declared.map(|s| (e.table, s)))
+        .collect();
+    if declared.is_empty() {
+        return;
+    }
+    let count = |s: DeclSource| declared.iter().filter(|(_, d)| *d == s).count();
+    eprintln!(
+        "[flows] declared entries={} new={} sources=(config={} main_guard={} host={} script={} other={})",
+        declared.len(),
+        declared.iter().filter(|(table, _)| !table).count(),
+        count(DeclSource::Config),
+        count(DeclSource::MainGuard),
+        count(DeclSource::Host),
+        count(DeclSource::Script),
+        count(DeclSource::Other),
+    );
+}
+
+/// Every entry point of `merged`, the set liveness seeds from
+/// (`entrypoint_reachable`): `CODE_PROFILE.tables.entry` over kind, name
+/// and roles, and (HF.1) every node carrying an ENTRYPOINT cell (an overlay
+/// `[entrypoints]` declaration, a `__main__` guard, a host callback, plugin
+/// unit or start, a shebang / script_arg script) — in graph then node
+/// order, each id once.
 pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
     let rule = &CODE_PROFILE.tables.entry;
     let mut seen: HashSet<NodeId> = HashSet::new();
@@ -1674,9 +1753,10 @@ pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
                 .map(String::as_str)
                 .unwrap_or("");
             let ext = || node_ext(&n.cells);
-            let entry = rule.is_entry_at(kind, name, &[], ext)
+            let table = rule.is_entry_at(kind, name, &[], ext)
                 || rule.is_entry_at(kind, name, &roles_in(kind, &n.cells), ext);
-            if entry && seen.insert(n.id) {
+            let declared = decl_source(&n.cells);
+            if (table || declared.is_some()) && seen.insert(n.id) {
                 let qname = g
                     .nav
                     .qname_by_id
@@ -1687,6 +1767,8 @@ pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
                     id: n.id,
                     name,
                     qname,
+                    table,
+                    declared,
                 });
             }
         }

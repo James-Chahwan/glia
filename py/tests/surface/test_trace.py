@@ -18,6 +18,8 @@ and no row carries `similarity` (the semantic tier itself is pinned by the
 engine's flows_semantic tests). Shared helpers: test_build.py."""
 from __future__ import annotations
 
+import json
+import pathlib
 import sys
 import tempfile
 
@@ -146,6 +148,27 @@ def main() -> int:
                 and g.concept_flows("helper", semantic=False) == hits)
         c.check("no sidecar: no row carries similarity",
                 all("similarity" not in r for r in rows))
+
+    # HF.1: a declared entry (here a `__main__` guard's ENTRYPOINT cell,
+    # source main_guard) seeds a flow, and nodes_json marks it an entry, as
+    # its `live` and dense text already read it.
+    with tempfile.TemporaryDirectory(prefix="glia-surface-trace-decl-") as tmp:
+        root = pathlib.Path(tmp) / "hf1script"
+        root.mkdir()
+        (root / "report.py").write_text(
+            "def summarize():\n    return 1\n\n\nif __name__ == \"__main__\":\n    summarize()\n")
+        g = rg.generate(str(root))
+        flows, err = stderr_of(lambda: g.entry_flows())
+        script = [f for f in flows if f["entry"]["qname"] == "report"]
+        c.check("a main_guard script MODULE has a flow",
+                len(script) == 1 and script[0]["entry"]["kind"] == "MODULE"
+                and [h["to_qname"] for h in script[0]["hops"]] == ["report::summarize"], flows)
+        c.check("declared entries marker",
+                "[flows] declared entries=1 new=1 sources=(config=0 main_guard=1 host=0 script=0 other=0)"
+                in err, err[-400:])
+        mod = [n for n in json.loads(g.nodes_json()) if n["qname"] == "report"]
+        c.check("nodes_json marks the declared MODULE an entry",
+                len(mod) == 1 and mod[0]["entry"] is True and mod[0]["live"] is True, mod)
     return c.done()
 
 

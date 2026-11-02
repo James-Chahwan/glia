@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 
 use std::collections::HashSet;
 
-use glia_code_domain::node_kind;
 use glia_code_domain::profile::node_ext;
+use glia_code_domain::{cell_type, node_kind};
 use glia_core::{Confidence, Node, NodeId};
 use glia_engine::profile::CODE_PROFILE;
 use glia_graph::roles::roles_in;
@@ -121,10 +121,15 @@ fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
         None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
     };
     let role_kinds = roles_in(kind, &n.cells);
+    // HF.1: a declared entry (an ENTRYPOINT cell: overlay `[entrypoints]`,
+    // a `__main__` guard, a host callback, plugin unit or start, a script)
+    // is an entry too, as liveness seeds it, `trace::entries` walks it and
+    // dense text marks it — so `entry` agrees with this record's `live`.
     let entry = CODE_PROFILE
         .tables
         .entry
-        .is_entry_at(kind, name, &role_kinds, || node_ext(&n.cells));
+        .is_entry_at(kind, name, &role_kinds, || node_ext(&n.cells))
+        || n.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT);
     let roles: Vec<String> = role_kinds
         .into_iter()
         .map(|r| format!("\"{}\"", escape_json(node_kind::name(r))))
@@ -207,6 +212,50 @@ mod tests {
         assert_eq!(v["kind"], node_kind::CLASS.0);
         assert_eq!(v["qname"], "svc::Api");
         assert_eq!(v["roles"], serde_json::json!(["SERVICE"]));
+    }
+
+    /// HF.1: a node carrying an ENTRYPOINT cell (here a `__main__` script
+    /// MODULE, `source` `main_guard`) is an `entry`, as dense text and
+    /// liveness read it; the same MODULE without the cell is none.
+    #[test]
+    fn a_declared_node_is_an_entry() {
+        let repo = RepoId::from_canonical("test://records-declared");
+        let module = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "tools::report");
+        let mut nav = CodeNav::default();
+        nav.record(module, "report", "tools::report", node_kind::MODULE, None);
+        let decl = Cell {
+            kind: cell_type::ENTRYPOINT,
+            payload: CellPayload::Json(
+                r#"{"decl":"tools/report.py:5","source":"main_guard"}"#.into(),
+            ),
+        };
+        let graph = |cells: Vec<Cell>| RepoGraph {
+            repo,
+            nodes: vec![Node {
+                id: module,
+                repo,
+                confidence: Confidence::Strong,
+                cells,
+            }],
+            edges: vec![],
+            nav: nav.clone(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let declared = graph(vec![decl]);
+        let plain = graph(vec![]);
+        let rec = node_record_json(&declared, &declared.nodes[0], true);
+        assert!(
+            rec.ends_with(r#","roles":[],"entry":true,"live":true}"#),
+            "{rec}"
+        );
+        let rec = node_record_json(&plain, &plain.nodes[0], false);
+        assert!(
+            rec.ends_with(r#","roles":[],"entry":false,"live":false}"#),
+            "{rec}"
+        );
     }
 
     /// LD.1: `nodes_json` and every answer record share ONE line base. Before
