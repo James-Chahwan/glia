@@ -58,16 +58,27 @@
 //! Deterministic: route slots and facts in `g.nodes` order of their MODULE
 //! (facts in record order), roots by slot, BTree slots; the clones append in
 //! provisional order.
+//!
+//! HQ.5, client-router pages ([`bind_nav_mounts`]): every object route table
+//! of a TS-family file mints its pages on the file's provisional nav slot
+//! (`page:<mount:module:<module>#nav>/<path>`,
+//! [`glia_code_domain::endpoint::nav_mount_route_qname`]) and records each
+//! Angular `loadChildren` as a [`NavFact::IncludeMount`] (`via` `nav_lazy:..`
+//! / `nav_lazy_string:..`, prefix the loading record's own path); the same
+//! fixpoint composes each lazily loaded table under its parent's path, and
+//! a table no mount reaches keeps its own.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::endpoint::{
-    abs_path, join_path, mount_route_qname, parse_mount_route_qname, split_owner, with_owner,
+    abs_path, join_path, mount_route_qname, page_qname, parse_mount_route_qname,
+    parse_nav_mount_link, parse_nav_mount_route_qname, split_owner, with_owner,
 };
 use glia_code_domain::{
-    GRAPH_TYPE, ImportStmt, ImportTarget, IncludeTarget, Mount, NavFact, UnresolvedRef, node_kind,
+    CallQualifier, GRAPH_TYPE, ImportStmt, ImportTarget, IncludeTarget, Mount, NavFact,
+    UnresolvedRef, edge_category, node_kind,
 };
-use glia_core::NodeId;
+use glia_core::{Cell, Confidence, Edge, NodeId};
 
 use crate::go_mounts::{self, Final, Flow, Slot, collect_provisionals, fixpoint, rekey};
 use crate::types::RepoGraph;
@@ -1262,6 +1273,494 @@ enum Bound {
     Name(SlotKey),
 }
 
+// ============================================================================
+// HQ.5: client-router lazy child tables
+// ============================================================================
+
+/// The router variable of a file's one nav mount slot.
+const NAV_VAR: &str = "nav";
+
+/// The `via` of an Angular `loadChildren: () => import(..)` mount fact (a
+/// dynamic one included).
+const VIA_NAV_LAZY: &str = "nav_lazy:";
+
+/// The `via` of a legacy `loadChildren: '<spec>#<export>'` mount fact.
+const VIA_NAV_LAZY_STRING: &str = "nav_lazy_string:";
+
+/// What [`bind_nav_mounts`] did to one TS-family graph; [`Self::marker`]
+/// prints it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct NavMountStats {
+    /// `loadChildren` mount facts read (`import + string + dynamic`).
+    pub(crate) lazy: usize,
+    /// Of those, the `() => import('<spec>')` form.
+    pub(crate) import: usize,
+    /// The legacy `'<spec>#<export>'` string form.
+    pub(crate) string: usize,
+    /// Resolved through the NgModule one import hop on (`x.module` ->
+    /// `x-routing.module`).
+    pub(crate) ngmodule_hop: usize,
+    /// A spec held in a variable or a template: mount nothing.
+    pub(crate) dynamic: usize,
+    /// A spec no MODULE of the graph answers: mounts nothing.
+    pub(crate) unresolved: usize,
+    /// A resolved module holding no route table, and no unique imported
+    /// module holding one: mounts nothing.
+    pub(crate) no_table: usize,
+    /// Files holding a provisional nav page.
+    pub(crate) tables: usize,
+    /// Provisional nav pages found.
+    pub(crate) routes: usize,
+    /// Of those, the ones whose file a resolved mount reaches.
+    pub(crate) mounted: usize,
+    /// Pages cloned for a slot's second and later prefixes.
+    pub(crate) copies: usize,
+    /// Nav slots no resolved mount reaches: each holds the prefix `""`.
+    pub(crate) roots: usize,
+    /// Slots the fixpoint's caps stopped.
+    pub(crate) capped: usize,
+    /// Provisional redirect links rewritten to their final path.
+    pub(crate) links_rewritten: usize,
+}
+
+impl NavMountStats {
+    /// `[nav-mounts] lazy=<l> (import=<i> string=<s> ngmodule_hop=<h>
+    /// dynamic=<d>) unresolved=<u> no_table=<t> tables=<n> routes=<r>
+    /// mounted=<m> copies=<c> roots=<o> capped=<x> links_rewritten=<w>`, once
+    /// per graph holding a provisional nav page.
+    pub(crate) fn marker(&self) -> Option<String> {
+        (self.routes > 0).then(|| {
+            format!(
+                "[nav-mounts] lazy={} (import={} string={} ngmodule_hop={} dynamic={}) \
+                 unresolved={} no_table={} tables={} routes={} mounted={} copies={} \
+                 roots={} capped={} links_rewritten={}",
+                self.lazy,
+                self.import,
+                self.string,
+                self.ngmodule_hop,
+                self.dynamic,
+                self.unresolved,
+                self.no_table,
+                self.tables,
+                self.routes,
+                self.mounted,
+                self.copies,
+                self.roots,
+                self.capped,
+                self.links_rewritten
+            )
+        })
+    }
+}
+
+/// A provisional nav page: its slot's module, its path within the file's
+/// tables, and what each clone copies (cells, incident edges, refs, as they
+/// were before any re-key).
+struct NavProvisional {
+    id: NodeId,
+    module: String,
+    path: String,
+    owner: Option<String>,
+    confidence: Confidence,
+    cells: Vec<Cell>,
+    edges: Vec<Edge>,
+    refs: Vec<UnresolvedRef>,
+}
+
+/// One final page of a provisional, and the prefix it was mounted at.
+struct NavFinal {
+    id: NodeId,
+    qname: String,
+    name: String,
+    prefix: String,
+}
+
+impl NavFinal {
+    fn new(g: &RepoGraph, path: String, prefix: String, owner: Option<&str>) -> NavFinal {
+        let qname = with_owner(&page_qname(&path), owner.unwrap_or(""));
+        let id = NodeId::from_parts(GRAPH_TYPE, g.repo, node_kind::ROUTE, &qname);
+        NavFinal {
+            id,
+            qname,
+            name: path,
+            prefix,
+        }
+    }
+}
+
+/// A page path `path` (composed by its file's tables) under the mount prefix
+/// `prefix` (no leading `/`; `""` for a root, which keeps `path` byte for
+/// byte).
+fn nav_join(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        path.to_string()
+    } else {
+        abs_path(&join_path(prefix, path))
+    }
+}
+
+/// HQ.5: re-key every provisional nav page of a TypeScript-family graph (see
+/// the module doc) and rewrite every provisional redirect link:
+///
+/// 1. the provisional pages, in `g.nodes` order, with their incident edges
+///    and pending refs;
+/// 2. each `nav_lazy` / `nav_lazy_string` [`NavFact::IncludeMount`] of a
+///    MODULE (`g.nodes` order, record order): its spec resolved like a GD.42
+///    `require(..)` (the builder's `resolve_source`, then `<q>::index`); a
+///    module holding no page reads one hop on, the unique module its import
+///    statements resolve to that holds one (the NgModule form, `x.module`
+///    importing `x-routing.module`), else `no_table`;
+/// 3. each resolved mount flows the includer slot's prefixes joined with its
+///    own prefix into the target's slot; a slot no resolved mount reaches is
+///    a root holding `""`, so a repo without `loadChildren` keeps every page;
+///    the fixpoint and its caps are CB.20's;
+/// 4. each page re-keyed to `page:/<prefix>/<path>` once per prefix of its
+///    slot (the first by rename, a page another file also minted absorbing
+///    it as two same-path pages merge, each further prefix a clone); one no
+///    root reaches keeps its own path;
+/// 5. every NAVIGATES_TO ref whose link is a provisional
+///    [`glia_code_domain::endpoint::nav_mount_link`] to `/<prefix><path>`: the
+///    prefix its own page was mounted at when the link names that page's
+///    slot, else the slot's first prefix, else none. No provisional link
+///    reaches the link resolver (`crate::nav`).
+///
+/// Run between the TS surface and the stitch, after GD.42's
+/// [`bind_ts_mounts`], so the HANDLED_BY and NAVIGATES_TO refs resolve from
+/// the final pages.
+pub(crate) fn bind_nav_mounts<R>(
+    g: &mut RepoGraph,
+    refs: &mut Vec<UnresolvedRef>,
+    imports: &[ImportStmt],
+    resolve_source: &R,
+) -> NavMountStats
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let mut stats = NavMountStats::default();
+    let provisionals = collect_nav_provisionals(g, refs);
+    if provisionals.is_empty() {
+        return stats;
+    }
+    let tables: BTreeSet<String> = provisionals.iter().map(|p| p.module.clone()).collect();
+    stats.tables = tables.len();
+    stats.routes = provisionals.len();
+
+    // The mounts, resolved to flows between nav slots.
+    let mut slot_modules: BTreeSet<String> = tables.clone();
+    let mut includes: Vec<Flow> = Vec::new();
+    let mut included: BTreeSet<String> = BTreeSet::new();
+    {
+        let no_facts = TsFacts::default();
+        let resolver = TsResolver {
+            g,
+            imports,
+            resolve_source,
+            facts: &no_facts,
+        };
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
+                continue;
+            }
+            let (Some(m), Some(fs)) = (g.nav.qname_by_id.get(&n.id), g.nav.nav_facts.get(&n.id))
+            else {
+                continue;
+            };
+            for f in fs {
+                let NavFact::IncludeMount {
+                    target,
+                    prefix,
+                    via,
+                    ..
+                } = f
+                else {
+                    continue;
+                };
+                let legacy = if via.starts_with(VIA_NAV_LAZY_STRING) {
+                    true
+                } else if via.starts_with(VIA_NAV_LAZY) {
+                    false
+                } else {
+                    continue;
+                };
+                stats.lazy += 1;
+                slot_modules.insert(m.clone());
+                let IncludeTarget::Spec(spec) = target else {
+                    stats.dynamic += 1;
+                    continue;
+                };
+                if legacy {
+                    stats.string += 1;
+                } else {
+                    stats.import += 1;
+                }
+                let Some(module) = resolver.spec_module(m, spec) else {
+                    stats.unresolved += 1;
+                    continue;
+                };
+                let target = if tables.contains(&module) {
+                    module
+                } else if let Some(hop) = ngmodule_hop(&resolver, &module, &tables) {
+                    stats.ngmodule_hop += 1;
+                    hop
+                } else {
+                    stats.no_table += 1;
+                    continue;
+                };
+                if &target != m {
+                    included.insert(target.clone());
+                }
+                includes.push(Flow {
+                    target: Slot::Module(target, NAV_VAR.to_string()),
+                    mount: Mount::Module {
+                        module: m.clone(),
+                        var: NAV_VAR.to_string(),
+                        suffix: prefix.clone(),
+                    },
+                });
+            }
+        }
+    }
+
+    // Roots first (by module), then the mounts in fact order.
+    let mut flows: Vec<Flow> = slot_modules
+        .iter()
+        .filter(|m| !included.contains(*m))
+        .map(|m| Flow {
+            target: Slot::Module(m.clone(), NAV_VAR.to_string()),
+            mount: Mount::Const(String::new()),
+        })
+        .collect();
+    stats.roots = flows.len();
+    flows.extend(includes);
+    let (slots, capped) = fixpoint(&flows, &BTreeMap::new());
+    stats.capped = capped;
+    let prefixes_of = |module: &str| {
+        slots
+            .get(&Slot::Module(module.to_string(), NAV_VAR.to_string()))
+            .filter(|s| !s.is_empty())
+    };
+
+    // Each provisional's finals: a path per prefix, sorted, the first
+    // prefix kept for a path two prefixes reach.
+    let mut plans: Vec<Vec<NavFinal>> = Vec::with_capacity(provisionals.len());
+    for p in &provisionals {
+        let mut paths: BTreeMap<String, String> = BTreeMap::new();
+        match prefixes_of(&p.module) {
+            Some(set) => {
+                if included.contains(&p.module) {
+                    stats.mounted += 1;
+                }
+                for prefix in set {
+                    paths
+                        .entry(nav_join(prefix, &p.path))
+                        .or_insert_with(|| prefix.clone());
+                }
+            }
+            None => {
+                paths.insert(p.path.clone(), String::new());
+            }
+        }
+        stats.copies += paths.len().saturating_sub(1);
+        plans.push(
+            paths
+                .into_iter()
+                .map(|(path, prefix)| NavFinal::new(g, path, prefix, p.owner.as_deref()))
+                .collect(),
+        );
+    }
+
+    // Rename each to its first final, then clone the rest.
+    let renames: Vec<(NodeId, NodeId)> = provisionals
+        .iter()
+        .zip(&plans)
+        .filter_map(|(p, finals)| finals.first().map(|f| (p.id, f.id)))
+        .collect();
+    let absorbed = super::rename_nodes(g, &mut [], refs, &renames);
+    let remap: HashMap<NodeId, NodeId> = renames.iter().copied().collect();
+    // Final page -> (its slot's module, the prefix it was mounted at): the
+    // first provisional that reached it.
+    let mut mounted_at: HashMap<NodeId, (String, String)> = HashMap::new();
+    for (p, finals) in provisionals.iter().zip(&plans) {
+        for f in finals {
+            mounted_at
+                .entry(f.id)
+                .or_insert_with(|| (p.module.clone(), f.prefix.clone()));
+        }
+        if let Some(f) = finals.first()
+            && !absorbed.contains(&p.id)
+        {
+            g.nav.qname_by_id.insert(f.id, f.qname.clone());
+            g.nav.name_by_id.insert(f.id, f.name.clone());
+        }
+    }
+    let mut at: HashMap<NodeId, usize> =
+        g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+    for (p, finals) in provisionals.iter().zip(&plans) {
+        for f in finals.iter().skip(1) {
+            clone_nav_page(g, refs, &mut at, &remap, p, f);
+        }
+    }
+
+    // The provisional redirect links.
+    for r in refs.iter_mut().chain(g.unresolved_refs.iter_mut()) {
+        if r.category != edge_category::NAVIGATES_TO {
+            continue;
+        }
+        let CallQualifier::Bare(link) = &mut r.qualifier else {
+            continue;
+        };
+        let Some((module, path)) = parse_nav_mount_link(link) else {
+            continue;
+        };
+        let prefix = match mounted_at.get(&r.from) {
+            Some((own, prefix)) if own == module => prefix.clone(),
+            _ => prefixes_of(module)
+                .and_then(|set| set.iter().next())
+                .cloned()
+                .unwrap_or_default(),
+        };
+        *link = nav_join(&prefix, path);
+        stats.links_rewritten += 1;
+    }
+    debug_assert!(
+        g.nodes.iter().all(|n| g
+            .nav
+            .qname_by_id
+            .get(&n.id)
+            .is_none_or(|q| parse_nav_mount_route_qname(split_owner(q).0).is_none())),
+        "a provisional nav page survived the nav mount pass"
+    );
+    stats
+}
+
+/// The unique module `module`'s own import statements resolve to that holds
+/// a provisional nav page (the NgModule form: `items.module` imports
+/// `items-routing.module`, which declares the table); `None` for none or two.
+fn ngmodule_hop<R>(
+    resolver: &TsResolver<'_, R>,
+    module: &str,
+    tables: &BTreeSet<String>,
+) -> Option<String>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for s in resolver.imports.iter().filter(|s| s.from_module == module) {
+        let spec = match &s.target {
+            ImportTarget::Module { path, .. } => path,
+            ImportTarget::Symbol { module: m, .. } => m,
+        };
+        if let Some(t) = resolver.spec_module(module, spec)
+            && t != module
+            && tables.contains(&t)
+        {
+            found.insert(t);
+        }
+    }
+    let mut picks = found.into_iter();
+    match (picks.next(), picks.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
+/// Every ROUTE whose qname (owner stripped) is a provisional nav page, in
+/// `g.nodes` order, with its cells, incident edges and pending refs.
+fn collect_nav_provisionals(g: &RepoGraph, refs: &[UnresolvedRef]) -> Vec<NavProvisional> {
+    let mut out: Vec<NavProvisional> = Vec::new();
+    for n in &g.nodes {
+        if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
+            continue;
+        }
+        let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+            continue;
+        };
+        let (bare, owner) = split_owner(qname);
+        let Some((module, path)) = parse_nav_mount_route_qname(bare) else {
+            continue;
+        };
+        out.push(NavProvisional {
+            id: n.id,
+            module: module.to_string(),
+            path: path.to_string(),
+            owner: owner.map(str::to_string),
+            confidence: n.confidence,
+            cells: n.cells.clone(),
+            edges: Vec::new(),
+            refs: Vec::new(),
+        });
+    }
+    if out.is_empty() {
+        return out;
+    }
+    let index: HashMap<NodeId, usize> = out.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
+    for e in &g.edges {
+        let from = index.get(&e.from).copied();
+        let to = index.get(&e.to).copied();
+        if let Some(i) = from {
+            out[i].edges.push(e.clone());
+        }
+        if let Some(i) = to
+            && Some(i) != from
+        {
+            out[i].edges.push(e.clone());
+        }
+    }
+    for r in refs {
+        if let Some(&i) = index.get(&r.from) {
+            out[i].refs.push(r.clone());
+        }
+    }
+    out
+}
+
+/// Add final `f` of provisional `p` as its own page (CB.20's clone rule,
+/// `go_mounts`): `p`'s cells and a nav record (no parent), a copy of each of
+/// `p`'s edges with `f` for `p` (the other end through `remap`), a copy of
+/// each of its refs from `f`. An id already in the graph takes the cells and
+/// keeps its nav record.
+fn clone_nav_page(
+    g: &mut RepoGraph,
+    refs: &mut Vec<UnresolvedRef>,
+    at: &mut HashMap<NodeId, usize>,
+    remap: &HashMap<NodeId, NodeId>,
+    p: &NavProvisional,
+    f: &NavFinal,
+) {
+    match at.get(&f.id) {
+        Some(&i) => g.nodes[i].cells.extend(p.cells.iter().cloned()),
+        None => {
+            at.insert(f.id, g.nodes.len());
+            g.nodes.push(glia_core::Node {
+                id: f.id,
+                repo: g.repo,
+                confidence: p.confidence,
+                cells: p.cells.clone(),
+            });
+            g.nav
+                .record(f.id, &f.name, &f.qname, node_kind::ROUTE, None);
+        }
+    }
+    let end = |id: NodeId| {
+        if id == p.id {
+            f.id
+        } else {
+            remap.get(&id).copied().unwrap_or(id)
+        }
+    };
+    for e in &p.edges {
+        let mut copy = e.clone();
+        copy.from = end(e.from);
+        copy.to = end(e.to);
+        g.edges.push(copy);
+    }
+    for r in &p.refs {
+        let mut copy = r.clone();
+        copy.from = f.id;
+        refs.push(copy);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Python graphs built from parsed urlconfs (the Python parser records
@@ -1835,5 +2334,407 @@ mod tests {
         );
         assert!(got.is_err(), "{got:?}");
         assert!(routes(&g).contains(&"GET /api/users/list".to_string()));
+    }
+
+    // ---- HQ.5: client-router lazy child tables ---------------------------
+
+    /// A TS-family file parsed, then its route tables and link sites
+    /// extracted onto it as the engine does: the pages on the MODULE's
+    /// provisional nav slot (`final_pages` mints them on their final qnames,
+    /// the BASE shape) and each `loadChildren` as a mount fact.
+    fn nav_parse_with(rel: &str, src: &str, final_pages: bool) -> glia_code_domain::FileParse {
+        let q = ts_qname(rel);
+        let mut fp = glia_parser_typescript::parse_file(src, rel, &q, repo()).expect("parse");
+        let module =
+            NodeId::from_parts(glia_code_domain::GRAPH_TYPE, repo(), node_kind::MODULE, &q);
+        let slot = if final_pages { "" } else { q.as_str() };
+        let tables =
+            glia_code_extractors::nav_routes::extract_route_tables(src, module, slot, repo());
+        fp.nodes.extend(tables.nodes);
+        fp.refs.extend(tables.refs);
+        fp.nav.name_by_id.extend(tables.nav.name_by_id);
+        fp.nav.qname_by_id.extend(tables.nav.qname_by_id);
+        fp.nav.kind_by_id.extend(tables.nav.kind_by_id);
+        for f in tables.mounts {
+            fp.nav.record_fact(module, f);
+        }
+        let links = glia_code_extractors::nav_links::extract_nav_links(src, "typescript", module);
+        fp.refs.extend(links.refs);
+        fp
+    }
+
+    fn nav_build_with(files: &[(&str, &str)], final_pages: bool) -> RepoGraph {
+        crate::build::build_typescript_family(
+            repo(),
+            files
+                .iter()
+                .map(|(r, s)| nav_parse_with(r, s, final_pages))
+                .collect(),
+            ts_source,
+        )
+        .expect("build")
+    }
+
+    fn nav_build(files: &[(&str, &str)]) -> RepoGraph {
+        nav_build_with(files, false)
+    }
+
+    /// The pass alone over the TS surface, as `build_ts_like` runs it.
+    fn nav_stats(files: &[(&str, &str)]) -> NavMountStats {
+        let parses: Vec<_> = files
+            .iter()
+            .map(|(r, s)| nav_parse_with(r, s, false))
+            .collect();
+        let (mut g, mut body, stmts) = crate::build::ts_surface(repo(), parses, &ts_source);
+        bind_nav_mounts(&mut g, &mut body.refs, &stmts, &ts_source)
+    }
+
+    fn qname_of(g: &RepoGraph, id: NodeId) -> String {
+        g.nav.qname_by_id.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// `(from qname, to qname, rule)` of every edge of `category`, sorted.
+    fn nav_edges(
+        g: &RepoGraph,
+        category: glia_core::EdgeCategoryId,
+    ) -> Vec<(String, String, String)> {
+        let mut out: Vec<(String, String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == category)
+            .map(|e| {
+                let rule = e
+                    .cells
+                    .iter()
+                    .find_map(|c| match &c.payload {
+                        glia_core::CellPayload::Json(j)
+                            if c.kind == glia_code_domain::cell_type::EVIDENCE =>
+                        {
+                            j.split("\"rule\":\"")
+                                .nth(1)
+                                .and_then(|r| r.split('"').next())
+                                .map(str::to_string)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (qname_of(g, e.from), qname_of(g, e.to), rule)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The NAVIGATES_TO links left unresolved (the dead links), sorted.
+    fn dead_links(g: &RepoGraph) -> Vec<String> {
+        let mut out: Vec<String> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == glia_code_domain::edge_category::NAVIGATES_TO)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(l) => Some(l.clone()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    // The fixture nav-angular-lazy-children (squidex's public shape), read
+    // from bench/substrate-gap so the unit test and the graded key share it.
+    const NAV_APP: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/app.routes.ts"
+    );
+    const NAV_PAGES: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/pages.ts"
+    );
+    const NAV_ITEMS: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/routes.ts"
+    );
+    const NAV_ITEMS_PAGE: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/items-page.component.ts"
+    );
+    const NAV_ITEM_PAGE: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/features/items/item-page.component.ts"
+    );
+    const NAV_GUARD: &str = include_str!(
+        "../../../bench/substrate-gap/fixtures/nav-angular-lazy-children/src/app/shared/item-must-exist.guard.ts"
+    );
+
+    fn nav_fixture() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("src/app/app.routes.ts", NAV_APP),
+            ("src/app/pages.ts", NAV_PAGES),
+            ("src/app/features/items/routes.ts", NAV_ITEMS),
+            (
+                "src/app/features/items/items-page.component.ts",
+                NAV_ITEMS_PAGE,
+            ),
+            (
+                "src/app/features/items/item-page.component.ts",
+                NAV_ITEM_PAGE,
+            ),
+            ("src/app/shared/item-must-exist.guard.ts", NAV_GUARD),
+        ]
+    }
+
+    /// The fixture, then a two-level chain, a relative redirect in a lazy
+    /// table and an unresolved spec: every lazy page composes under its
+    /// parent's path, the literal `/404` is a dead link, the true deep link
+    /// binds.
+    #[test]
+    fn nav_lazy_tables_compose() {
+        let g = nav_build(&nav_fixture());
+        assert_eq!(
+            routes(&g),
+            [
+                "page:/",
+                "page:/**",
+                "page:/app",
+                "page:/app/items",
+                "page:/app/items/:itemId"
+            ]
+        );
+        let handled = nav_edges(&g, glia_code_domain::edge_category::HANDLED_BY);
+        let h = |route: &str, to: &str| handled.iter().any(|(f, t, _)| f == route && t == to);
+        assert!(h("page:/", "src::app::pages::HomeComponent"), "{handled:?}");
+        assert!(
+            h(
+                "page:/app/items",
+                "src::app::features::items::items-page.component::ItemsPageComponent"
+            ),
+            "{handled:?}"
+        );
+        assert!(
+            h(
+                "page:/app/items/:itemId",
+                "src::app::features::items::item-page.component::ItemPageComponent"
+            ),
+            "{handled:?}"
+        );
+        // The lazy `''` page no longer merges into the root.
+        assert!(
+            !handled
+                .iter()
+                .any(|(f, t, _)| f == "page:/" && t.ends_with("ItemsPageComponent"))
+        );
+        let nav = nav_edges(&g, glia_code_domain::edge_category::NAVIGATES_TO);
+        assert_eq!(
+            nav,
+            // The link sits on the MODULE: these parses run no component
+            // extractor, so the page lift has no COMPONENT to move it to.
+            [(
+                "src::app::features::items::items-page.component".to_string(),
+                "page:/app/items/:itemId".to_string(),
+                "param".to_string()
+            )]
+        );
+        assert_eq!(dead_links(&g), ["/404"]);
+        assert_eq!(
+            nav_stats(&nav_fixture()).marker().as_deref(),
+            Some(
+                "[nav-mounts] lazy=1 (import=1 string=0 ngmodule_hop=0 dynamic=0) \
+                 unresolved=0 no_table=0 tables=2 routes=6 mounted=2 copies=0 roots=1 \
+                 capped=0 links_rewritten=0"
+            )
+        );
+
+        // A second level, a relative redirect inside a lazy table, and a spec
+        // nothing in the graph answers.
+        let app = NAV_APP.replace(
+            "  { path: '**'",
+            "  { path: 'ext', loadChildren: () => import('@scope/ext').then(m => m.EXT_ROUTES) },\n  { path: '**'",
+        );
+        let items = NAV_ITEMS.replace(
+            "];",
+            "  { path: ':itemId/notes', loadChildren: () => import('./notes/routes').then(m => m.NOTE_ROUTES) },\n  { path: 'old', redirectTo: '' },\n];",
+        );
+        let notes = "export const NOTE_ROUTES = [\n  { path: '', component: NotesComponent },\n  { path: ':noteId', component: NoteComponent },\n];\n";
+        let mut files = nav_fixture();
+        files[0].1 = &app;
+        files[2].1 = &items;
+        files.push(("src/app/features/items/notes/routes.ts", notes));
+        let g = nav_build(&files);
+        assert_eq!(
+            routes(&g),
+            [
+                "page:/",
+                "page:/**",
+                "page:/app",
+                "page:/app/items",
+                "page:/app/items/:itemId",
+                "page:/app/items/:itemId/notes",
+                "page:/app/items/:itemId/notes/:noteId",
+                "page:/app/items/old",
+                "page:/ext",
+            ]
+        );
+        let nav = nav_edges(&g, glia_code_domain::edge_category::NAVIGATES_TO);
+        assert!(
+            nav.contains(&(
+                "page:/app/items/old".to_string(),
+                "page:/app/items".to_string(),
+                "exact".to_string()
+            )),
+            "{nav:?}"
+        );
+        assert_eq!(
+            nav_stats(&files).marker().as_deref(),
+            Some(
+                "[nav-mounts] lazy=3 (import=3 string=0 ngmodule_hop=0 dynamic=0) \
+                 unresolved=1 no_table=0 tables=3 routes=11 mounted=6 copies=0 roots=1 \
+                 capped=0 links_rewritten=1"
+            )
+        );
+    }
+
+    /// The NgModule form (`items.module` importing its routing module, which
+    /// holds the table) and the legacy `'<spec>#<export>'` string.
+    #[test]
+    fn nav_ngmodule_hop_and_legacy_string() {
+        let app = "export const routes = [\n  { path: 'items', loadChildren: () => import('./items/items.module').then(m => m.ItemsModule) },\n  { path: 'old', loadChildren: './old/old.module#OldModule' },\n];\n";
+        let module = "import { NgModule } from '@angular/core';\nimport { RouterModule } from '@angular/router';\nimport { ItemsRoutingModule } from './items-routing.module';\n\n@NgModule({ imports: [ItemsRoutingModule] })\nexport class ItemsModule {}\n";
+        let routing = "import { NgModule } from '@angular/core';\nimport { RouterModule } from '@angular/router';\n\nconst routes = [{ path: ':id', component: ItemComponent }];\n\n@NgModule({ imports: [RouterModule.forChild(routes)] })\nexport class ItemsRoutingModule {}\n";
+        let old = "const routes = [{ path: 'list', component: OldListComponent }];\n";
+        let files = [
+            ("src/app.routes.ts", app),
+            ("src/items/items.module.ts", module),
+            ("src/items/items-routing.module.ts", routing),
+            ("src/old/old.module.ts", old),
+        ];
+        let g = nav_build(&files);
+        assert_eq!(
+            routes(&g),
+            [
+                "page:/items",
+                "page:/items/:id",
+                "page:/old",
+                "page:/old/list"
+            ]
+        );
+        assert_eq!(
+            nav_stats(&files).marker().as_deref(),
+            Some(
+                "[nav-mounts] lazy=2 (import=1 string=1 ngmodule_hop=1 dynamic=0) \
+                 unresolved=0 no_table=0 tables=3 routes=4 mounted=2 copies=0 roots=1 \
+                 capped=0 links_rewritten=0"
+            )
+        );
+    }
+
+    /// One table mounted twice is cloned under each prefix; a mount cycle
+    /// reaches no root and keeps every page at its own path.
+    #[test]
+    fn nav_two_mounts_clone_and_cycles_keep_paths() {
+        let app = "export const routes = [\n  { path: 'a', loadChildren: () => import('./shared/routes').then(m => m.R) },\n  { path: 'b', loadChildren: () => import('./shared/routes').then(m => m.R) },\n];\n";
+        let shared = "export const R = [{ path: 'x', component: X }];\n";
+        let g = nav_build(&[("src/app.ts", app), ("src/shared/routes.ts", shared)]);
+        assert_eq!(routes(&g), ["page:/a", "page:/a/x", "page:/b", "page:/b/x"]);
+        let one = "export const A = [{ path: 'p', component: P }, { path: 'two', loadChildren: () => import('./two').then(m => m.B) }];\n";
+        let two = "export const B = [{ path: 'q', component: Q }, { path: 'one', loadChildren: () => import('./one').then(m => m.A) }];\n";
+        let g = nav_build(&[("src/one.ts", one), ("src/two.ts", two)]);
+        assert_eq!(routes(&g), ["page:/one", "page:/p", "page:/q", "page:/two"]);
+    }
+
+    /// The existing nav fixtures' sources hold no `loadChildren`: built with
+    /// the provisional slot and the pass, every page qname, node, edge and
+    /// dead link is byte-equal to the BASE build that minted them final.
+    #[test]
+    fn nav_root_tables_keep_their_paths() {
+        let angular = [
+            (
+                "src/app/app.routes.ts",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-angular-routes/src/app/app.routes.ts"
+                ),
+            ),
+            (
+                "src/app/home.component.ts",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-angular-routes/src/app/home.component.ts"
+                ),
+            ),
+            (
+                "src/app/admin-users.component.ts",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-angular-routes/src/app/admin-users.component.ts"
+                ),
+            ),
+            (
+                "src/util.ts",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-angular-routes/src/util.ts"
+                ),
+            ),
+            (
+                "src/app/login.component.ts",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-angular-links/src/app/login.component.ts"
+                ),
+            ),
+        ];
+        let react = [
+            (
+                "src/router.tsx",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-react-routes/src/router.tsx"
+                ),
+            ),
+            (
+                "src/App.tsx",
+                include_str!("../../../bench/substrate-gap/fixtures/nav-react-routes/src/App.tsx"),
+            ),
+            (
+                "src/pages.tsx",
+                include_str!(
+                    "../../../bench/substrate-gap/fixtures/nav-react-routes/src/pages.tsx"
+                ),
+            ),
+        ];
+        let vue = [(
+            "src/router.ts",
+            include_str!("../../../bench/substrate-gap/fixtures/nav-vue-links/src/router.ts"),
+        )];
+        for files in [&angular[..], &react[..], &vue[..]] {
+            let base = nav_build_with(files, true);
+            let now = nav_build(files);
+            assert!(!routes(&now).is_empty());
+            assert_eq!(routes(&now), routes(&base));
+            assert_eq!(now.nodes, base.nodes);
+            assert_eq!(now.edges, base.edges);
+            assert_eq!(now.unresolved_refs, base.unresolved_refs);
+            for n in &now.nodes {
+                assert_eq!(
+                    now.nav.qname_by_id.get(&n.id),
+                    base.nav.qname_by_id.get(&n.id)
+                );
+                assert_eq!(
+                    now.nav.name_by_id.get(&n.id),
+                    base.nav.name_by_id.get(&n.id)
+                );
+            }
+        }
+    }
+
+    /// A body-only re-stitch of a file holding route tables is refused: its
+    /// fresh parse mints the provisional pages the nav mount pass re-keyed.
+    #[test]
+    fn a_rebody_of_a_lazy_routes_file_is_refused() {
+        let mut g = nav_build(&nav_fixture());
+        let edited = NAV_ITEMS.replace("ItemsPageComponent }", "ItemsPageComponent, title: 'x' }");
+        let got = crate::build::rebuild_ts_bodies(
+            &mut g,
+            vec![crate::build::BodyEdit::new(nav_parse_with(
+                "src/app/features/items/routes.ts",
+                &edited,
+                false,
+            ))],
+            ts_source,
+        );
+        assert_eq!(
+            got.err(),
+            Some(crate::build::Refused::Unsupported("page navigation"))
+        );
+        assert!(routes(&g).contains(&"page:/app/items/:itemId".to_string()));
     }
 }

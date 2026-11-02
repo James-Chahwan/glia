@@ -201,7 +201,7 @@ mod tests {
         // extractor itself mints no ROUTE any more.
         let own = extract_react_nodes(src, "test", module_id(), repo());
         assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
-        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), "", repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id
@@ -269,7 +269,7 @@ createBrowserRouter([
         // extractor itself mints no ROUTE any more.
         let own = extract_react_nodes(src, "test", module_id(), repo());
         assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
-        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), "", repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id

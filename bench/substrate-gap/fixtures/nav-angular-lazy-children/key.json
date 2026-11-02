@@ -1,0 +1,55 @@
+{
+  "framework": "nav-angular-lazy-children",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "page:/app/items/:itemId",
+      "exact": true,
+      "note": "features/items/routes.ts `:itemId` composed under the `app` > `items` record that lazily loads it (`loadChildren: () => import('./features/items/routes').then(m => m.ITEM_ROUTES)`)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/app/items/:itemId",
+      "to": "ItemPageComponent",
+      "category": "HANDLED_BY",
+      "note": "the lazy table's `:itemId` page renders ItemPageComponent at its full path"
+    },
+    {
+      "from": "ItemsPageComponent",
+      "to": "/app/items/:itemId",
+      "category": "NAVIGATES_TO",
+      "note": "this.router.navigate(['/app/items', id]): a true deep link into the lazy table, dead while the page lacked its prefix"
+    },
+    {
+      "from": "page:/",
+      "to": "HomeComponent",
+      "category": "HANDLED_BY",
+      "note": "the app root keeps its own page"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "page:/:itemId",
+      "note": "the lazy child page without its parent prefix"
+    },
+    {
+      "from": "src::app::shared::item-must-exist.guard",
+      "to": "page:/:itemId",
+      "category": "NAVIGATES_TO",
+      "note": "router.navigate(['/404']) goes to the `**` not-found route; it param-bound the prefix-less one-segment page"
+    },
+    {
+      "from": "page:/",
+      "to": "ItemsPageComponent",
+      "category": "HANDLED_BY",
+      "note": "ITEM_ROUTES' `''` page is /app/items, not the app root it merged into"
+    }
+  ],
+  "note": "HQ.5. squidex's public shape: app.routes.ts mounts a feature table lazily with `loadChildren`, the feature table's paths are relative to that record, a guard navigates to the literal `/404` and a page deep-links into the feature. Baseline HEAD (d508414e): ROUTEs page:/, page:/**, page:/:itemId, page:/app, page:/app/items; the guard's `/404` binds page:/:itemId (rule param), the true `/app/items/${..}` link is dead, and ItemsPageComponent handles page:/ beside HomeComponent."
+}

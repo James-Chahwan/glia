@@ -41,11 +41,35 @@
 //! fallback, which returns None on a tie). A redirect becomes a
 //! `NAVIGATES_TO` ref from the ROUTE, its target made absolute: LA.6a's link
 //! contract (graph/src/nav.rs).
+//!
+//! # Lazy child tables (HQ.5)
+//!
+//! An Angular route table often mounts another file's table lazily:
+//! `{ path: 'schemas', loadChildren: () => import('./features/schemas/routes')
+//! .then(m => m.SCHEMAS_ROUTES) }` (the NgModule form `.then(m => m.XModule)`
+//! and the legacy string `'./x/x.module#XModule'` alike). The child file's
+//! paths are relative to that record's composed path, which only the build
+//! knows across files. So every OBJECT-table record of a file is minted on a
+//! provisional page qname, [`glia_code_domain::endpoint::nav_mount_route_qname`]
+//! (`page:<mount:module:<module qname>#nav>/<path>`, one slot per file), and a
+//! redirect the tables make relative to themselves is written as the same
+//! provisional link; each `loadChildren` becomes one
+//! [`NavFact::IncludeMount`] on the file MODULE (target
+//! [`IncludeTarget::Spec`], prefix the record's own composed path without its
+//! leading `/`, `via` `nav_lazy:<export>`, or `nav_lazy_string:<export>` for
+//! the legacy string; a spec held in a variable or template is
+//! [`IncludeTarget::Dynamic`]). The graph's nav mount pass
+//! (`graph/src/build/route_mounts.rs`, `bind_nav_mounts`) re-keys every
+//! provisional page under each prefix its file is mounted at; a file no mount
+//! reaches keeps its own paths. JSX `<Route>` trees and Next.js pages are
+//! minted final.
 
 use std::collections::HashSet;
 
+use glia_code_domain::endpoint::{nav_mount_link, nav_mount_route_qname, page_qname};
 use glia_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of, node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, IncludeTarget, NavFact, UnresolvedRef, cell_type,
+    edge_category, line_of, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, RepoId};
 
@@ -106,42 +130,87 @@ pub struct NavRouteOut {
     pub rejected: usize,
     /// Nav ROUTE nodes whose path ends in a wildcard.
     pub catchalls: usize,
+    /// HQ.5: the file's lazy `loadChildren` mounts, each a
+    /// [`NavFact::IncludeMount`] the engine records on the file MODULE, in
+    /// source order.
+    pub mounts: Vec<NavFact>,
 }
 
 /// The ONE builder for a client-router page qname (LB.4c): `page:<path>`,
 /// its own namespace so a page never shares a NodeId with a same-repo server
 /// route `GET <path>`. The display name is the bare path.
 pub fn nav_route_qname(path: &str) -> String {
-    format!("page:{path}")
+    page_qname(path)
 }
 
 /// Every route table in one TS-family file (`.ts` / `.tsx` / `.js` / `.jsx` /
 /// `.vue`, whole source): object tables always, JSX `<Route>` trees when the
-/// source holds `<Route`.
-pub fn extract_route_tables(source: &str, module_id: NodeId, repo: RepoId) -> NavRouteOut {
+/// source holds `<Route`. `module_qname` is the file MODULE's qname: the
+/// object tables' pages are minted on its provisional nav slot (HQ.5, the
+/// module doc); an empty one mints them final, as a JSX tree's are.
+pub fn extract_route_tables(
+    source: &str,
+    module_id: NodeId,
+    module_qname: &str,
+    repo: RepoId,
+) -> NavRouteOut {
     let mut scan = scan_route_records(source);
+    let objects = scan.records.len();
     if source.contains("<Route") {
         let jsx = scan_jsx_routes(source);
         scan.records.extend(jsx.records);
         scan.children += jsx.children;
         scan.rejected += jsx.rejected;
     }
-    let mut out = emit_nav_routes(&scan.records, module_id, repo);
+    let slots = scan.records.iter().enumerate().map(|(i, rec)| {
+        let slot = (i < objects && !module_qname.is_empty()).then(|| NavSlot {
+            module: module_qname,
+            relative_redirect: scan.relative_redirect.get(i).copied().unwrap_or(false),
+        });
+        (rec, slot)
+    });
+    let mut out = emit(slots, module_id, repo);
     out.children = scan.children;
     out.rejected = scan.rejected;
+    out.mounts = scan.mounts.into_iter().map(LazyMount::fact).collect();
     out
 }
 
 /// Mint the ROUTE nodes and the HANDLED_BY / NAVIGATES_TO refs for `recs`
-/// (see the module doc). `pub` so Next.js pages (LA.6d) graft through it.
+/// (see the module doc), each on its final page qname. `pub` so Next.js
+/// pages (LA.6d) graft through it.
 pub fn emit_nav_routes(recs: &[RouteRecord], module_id: NodeId, repo: RepoId) -> NavRouteOut {
+    emit(recs.iter().map(|r| (r, None)), module_id, repo)
+}
+
+/// HQ.5: the provisional nav slot an object-table record is minted on.
+#[derive(Clone, Copy)]
+struct NavSlot<'m> {
+    /// The file MODULE's qname.
+    module: &'m str,
+    /// The record's redirect target was relative to the tables (composed),
+    /// so it is written as a provisional link too.
+    relative_redirect: bool,
+}
+
+/// [`emit_nav_routes`] with a per-record slot: `Some` mints the page on the
+/// provisional qname [`nav_mount_route_qname`], `None` on its final one. One
+/// node per unique qname, first-seen order.
+fn emit<'r, 'm>(
+    recs: impl IntoIterator<Item = (&'r RouteRecord, Option<NavSlot<'m>>)>,
+    module_id: NodeId,
+    repo: RepoId,
+) -> NavRouteOut {
     let mut out = NavRouteOut::default();
-    let mut seen_paths: HashSet<&str> = HashSet::new();
-    let mut seen_refs: HashSet<(NodeId, &str, EdgeCategoryId)> = HashSet::new();
-    for rec in recs {
-        let qname = nav_route_qname(&rec.path);
+    let mut seen_qnames: HashSet<String> = HashSet::new();
+    let mut seen_refs: HashSet<(NodeId, String, EdgeCategoryId)> = HashSet::new();
+    for (rec, slot) in recs {
+        let qname = match slot {
+            Some(s) => nav_mount_route_qname(s.module, &rec.path),
+            None => nav_route_qname(&rec.path),
+        };
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
-        if seen_paths.insert(rec.path.as_str()) {
+        if seen_qnames.insert(qname.clone()) {
             out.nodes.push(Node {
                 id,
                 repo,
@@ -162,7 +231,7 @@ pub fn emit_nav_routes(recs: &[RouteRecord], module_id: NodeId, repo: RepoId) ->
             }
         }
         if let Some(h) = rec.handler.as_deref()
-            && seen_refs.insert((id, h, edge_category::HANDLED_BY))
+            && seen_refs.insert((id, h.to_string(), edge_category::HANDLED_BY))
         {
             out.refs.push(UnresolvedRef {
                 from: id,
@@ -173,13 +242,17 @@ pub fn emit_nav_routes(recs: &[RouteRecord], module_id: NodeId, repo: RepoId) ->
             });
             out.bound += 1;
         }
-        if let Some(t) = rec.redirect.as_deref()
-            && seen_refs.insert((id, t, edge_category::NAVIGATES_TO))
+        let redirect = rec.redirect.as_deref().map(|t| match slot {
+            Some(s) if s.relative_redirect => nav_mount_link(s.module, t),
+            _ => t.to_string(),
+        });
+        if let Some(t) = redirect
+            && seen_refs.insert((id, t.clone(), edge_category::NAVIGATES_TO))
         {
             out.refs.push(UnresolvedRef {
                 from: id,
                 from_module: module_id,
-                qualifier: CallQualifier::Bare(t.to_string()),
+                qualifier: CallQualifier::Bare(t),
                 category: edge_category::NAVIGATES_TO,
                 line: rec.line,
             });
@@ -207,8 +280,62 @@ fn handler_qualifier(h: &str) -> CallQualifier {
 #[derive(Debug, Default)]
 struct Scan {
     records: Vec<RouteRecord>,
+    /// HQ.5, the object walker only: per record, whether its redirect target
+    /// was relative to the tables (`redirectTo: 'home'`, composed onto the
+    /// parent path) rather than absolute (`/login`).
+    relative_redirect: Vec<bool>,
+    /// HQ.5, the object walker only: the `loadChildren` mounts.
+    mounts: Vec<LazyMount>,
     children: usize,
     rejected: usize,
+}
+
+/// HQ.5: what a route record's `loadChildren` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Lazy {
+    /// `() => import('<spec>').then(m => m.<export>)` (`default` without a
+    /// `.then` naming one).
+    Import { spec: String, export: String },
+    /// The legacy string `'<spec>#<export>'`.
+    Legacy { spec: String, export: String },
+    /// Anything else: a variable, a template spec. The value text, clipped.
+    Dynamic(String),
+}
+
+/// HQ.5: one `loadChildren` record: its own composed path and what it loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LazyMount {
+    /// The record's composed path, leading `/` stripped (`app/:appName/schemas`;
+    /// `""` for a record at the root).
+    prefix: String,
+    lazy: Lazy,
+    /// 0-based row of the record's `{`.
+    line: u32,
+}
+
+/// Byte cap on a dynamic `loadChildren` value's recorded text.
+const MAX_DYNAMIC: usize = 160;
+
+impl LazyMount {
+    /// The [`NavFact::IncludeMount`] it records on its file MODULE.
+    fn fact(self) -> NavFact {
+        let (target, via) = match self.lazy {
+            Lazy::Import { spec, export } => {
+                (IncludeTarget::Spec(spec), format!("nav_lazy:{export}"))
+            }
+            Lazy::Legacy { spec, export } => (
+                IncludeTarget::Spec(spec),
+                format!("nav_lazy_string:{export}"),
+            ),
+            Lazy::Dynamic(text) => (IncludeTarget::Dynamic(text), "nav_lazy:".to_string()),
+        };
+        NavFact::IncludeMount {
+            line: self.line,
+            target,
+            prefix: self.prefix,
+            via,
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -371,10 +498,9 @@ fn ident_path(v: &str) -> Option<String> {
     ok.then(|| v.to_string())
 }
 
-/// The component a lazy import names: `.then(m => m.X)` / `.then(({ X }) =>
-/// X)` gives `X`; otherwise the imported file's stem ([`stem_name`]).
-fn lazy_import_handler(v: &str) -> Option<String> {
-    let v = clip(v, MAX_VALUE);
+/// The spec of the first `import('<spec>')` in `v`, a plain string literal
+/// (`None` for a computed or template one holding `${`).
+fn import_spec(v: &str) -> Option<String> {
     let at = v.find("import(")?;
     let arg = v.get(at + "import(".len()..)?.trim_start();
     let quote = *arg.as_bytes().first()?;
@@ -383,28 +509,69 @@ fn lazy_import_handler(v: &str) -> Option<String> {
     }
     let end = skip_quoted(arg.as_bytes(), 0);
     let spec = literal(arg.get(..end)?)?;
-    if let Some(then) = v.find(".then(")
-        && let Some(arrow) = v.get(then..).and_then(|t| t.find("=>"))
-        && let Some(body) = v.get(then + arrow + 2..)
-    {
-        let body = body.trim_start();
-        let tok_len = body
-            .bytes()
-            .take_while(|&c| is_ident_byte(c) || c == b'.')
-            .count();
-        let tok = body.get(..tok_len).unwrap_or("");
-        // `m => m.X` names the export; a bare `X` counts only when it is a
-        // component name (`({ X }) => X`), never the parameter itself.
-        let name = match tok.rsplit_once('.') {
-            Some((_, n)) => n,
-            None if tok.as_bytes().first().is_some_and(u8::is_ascii_uppercase) => tok,
-            None => "",
-        };
-        if !name.is_empty() && name != "default" {
-            return Some(name.to_string());
+    (!spec.is_empty() && !spec.contains("${")).then_some(spec)
+}
+
+/// The export a lazy import's `.then(m => m.X)` / `.then(({ X }) => X)`
+/// names: `X` (`m => m.default` and a bare lowercase name name none; a bare
+/// `X` counts only when it starts upper-case, never the parameter itself).
+fn then_export(v: &str) -> Option<String> {
+    let then = v.find(".then(")?;
+    let arrow = v.get(then..).and_then(|t| t.find("=>"))?;
+    let body = v.get(then + arrow + 2..)?.trim_start();
+    let tok_len = body
+        .bytes()
+        .take_while(|&c| is_ident_byte(c) || c == b'.')
+        .count();
+    let tok = body.get(..tok_len).unwrap_or("");
+    let name = match tok.rsplit_once('.') {
+        Some((_, n)) => n,
+        None if tok.as_bytes().first().is_some_and(u8::is_ascii_uppercase) => tok,
+        None => "",
+    };
+    (!name.is_empty() && name != "default").then(|| name.to_string())
+}
+
+/// The component a lazy import names: `.then(m => m.X)` / `.then(({ X }) =>
+/// X)` gives `X`; otherwise the imported file's stem ([`stem_name`]).
+fn lazy_import_handler(v: &str) -> Option<String> {
+    let v = clip(v, MAX_VALUE);
+    let spec = import_spec(v)?;
+    then_export(v).or_else(|| stem_name(&spec))
+}
+
+/// HQ.5: the module a lazy `loadChildren` import loads and the export its
+/// `.then` names: `() => import('./x/routes').then(m => m.X_ROUTES)` gives
+/// `("./x/routes", "X_ROUTES")`, `import('./x/routes')` alone `default`.
+/// `None` when the value holds no literal `import('<spec>')`.
+fn lazy_import_target(v: &str) -> Option<(String, String)> {
+    let v = clip(v, MAX_VALUE);
+    let spec = import_spec(v)?;
+    let export = then_export(v).unwrap_or_else(|| "default".to_string());
+    Some((spec, export))
+}
+
+/// HQ.5: what a `loadChildren` value loads ([`Lazy`]): a literal dynamic
+/// import, the legacy `'<spec>#<export>'` string, else dynamic.
+fn lazy_children(v: &str) -> Lazy {
+    let v = clip(v, MAX_VALUE);
+    if let Some(s) = literal(v) {
+        if let Some((spec, export)) = s.split_once('#')
+            && !spec.is_empty()
+            && !export.is_empty()
+            && !s.contains("${")
+        {
+            return Lazy::Legacy {
+                spec: spec.to_string(),
+                export: export.to_string(),
+            };
         }
+        return Lazy::Dynamic(clip(v.trim(), MAX_DYNAMIC).to_string());
     }
-    stem_name(&spec)
+    match lazy_import_target(v) {
+        Some((spec, export)) => Lazy::Import { spec, export },
+        None => Lazy::Dynamic(clip(v.trim(), MAX_DYNAMIC).to_string()),
+    }
 }
 
 /// `./views/Home.vue` -> `Home`, `./pages/Reports` -> `Reports`,
@@ -1093,6 +1260,8 @@ struct Found {
     redirect_rel_parent: Option<String>,
     /// Raw `<Navigate to>` target (relative to the route's OWN path).
     redirect_rel_own: Option<String>,
+    /// HQ.5: what its `loadChildren` loads.
+    lazy: Option<Lazy>,
 }
 
 /// Object-literal route tables (see the module doc).
@@ -1140,6 +1309,7 @@ fn scan_route_records(source: &str) -> Scan {
             handler: None,
             redirect_rel_parent: None,
             redirect_rel_own: None,
+            lazy: None,
         };
         for k in &o.keys {
             let v = clip(value(k), MAX_VALUE);
@@ -1164,6 +1334,7 @@ fn scan_route_records(source: &str) -> Scan {
                         f.redirect_rel_parent = Some(t);
                     }
                 }
+                "loadChildren" => f.lazy = Some(lazy_children(v)),
                 _ => {}
             }
         }
@@ -1200,22 +1371,38 @@ fn scan_route_records(source: &str) -> Scan {
         if parent_path.is_some() && !f.path.as_deref().is_some_and(|p| p.starts_with('/')) {
             scan.children += 1;
         }
-        let redirect = f
+        let relative = |t: &str| !t.trim_start().starts_with('/');
+        let (redirect, relative_redirect) = match f
             .redirect_rel_parent
             .as_deref()
-            .and_then(|t| absolute_link(base, t))
-            .or_else(|| {
-                f.redirect_rel_own
-                    .as_deref()
-                    .and_then(|t| absolute_link(&own, t))
+            .and_then(|t| absolute_link(base, t).map(|l| (l, relative(t))))
+        {
+            Some((l, rel)) => (Some(l), rel),
+            None => match f
+                .redirect_rel_own
+                .as_deref()
+                .and_then(|t| absolute_link(&own, t).map(|l| (l, relative(t))))
+            {
+                Some((l, rel)) => (Some(l), rel),
+                None => (None, false),
+            },
+        };
+        let line = line_of(source, f.open);
+        if let Some(lazy) = &f.lazy {
+            scan.mounts.push(LazyMount {
+                prefix: own.trim_start_matches('/').to_string(),
+                lazy: lazy.clone(),
+                line,
             });
+        }
         scan.records.push(RouteRecord {
             catchall: is_catchall(&own),
             path: own.clone(),
             handler: f.handler.clone(),
             redirect,
-            line: line_of(source, f.open),
+            line,
         });
+        scan.relative_redirect.push(relative_redirect);
         composed.push(Some(own));
     }
     scan
@@ -1293,7 +1480,7 @@ export const routes: Routes = [
 
     #[test]
     fn angular_child_composition() {
-        let out = extract_route_tables(ANGULAR, module_id(), repo());
+        let out = extract_route_tables(ANGULAR, module_id(), "", repo());
         let p = paths(&out);
         assert!(p.contains(&"/admin/users".to_string()), "{p:?}");
         assert!(
@@ -1316,7 +1503,7 @@ export const routes: Routes = [
 
     #[test]
     fn empty_child_path_takes_parent_path() {
-        let out = extract_route_tables(ANGULAR, module_id(), repo());
+        let out = extract_route_tables(ANGULAR, module_id(), "", repo());
         // `/admin` is one node carrying both the shell and the '' child's page.
         assert_eq!(paths(&out).iter().filter(|p| *p == "/admin").count(), 1);
         assert!(has_ref(&out, "/admin", "AdminHomeComponent", "HANDLED_BY"));
@@ -1324,7 +1511,7 @@ export const routes: Routes = [
 
     #[test]
     fn load_component_handler() {
-        let out = extract_route_tables(ANGULAR, module_id(), repo());
+        let out = extract_route_tables(ANGULAR, module_id(), "", repo());
         assert!(has_ref(&out, "/profile", "ProfileComponent", "HANDLED_BY"));
         // No `.then`: the Angular CLI file-name convention names the class.
         assert!(has_ref(&out, "/lazy", "UserListComponent", "HANDLED_BY"));
@@ -1332,7 +1519,7 @@ export const routes: Routes = [
 
     #[test]
     fn redirect_relative_and_absolute() {
-        let out = extract_route_tables(ANGULAR, module_id(), repo());
+        let out = extract_route_tables(ANGULAR, module_id(), "", repo());
         assert!(has_ref(&out, "/chat", "/home", "NAVIGATES_TO"));
         // Relative `redirectTo: 'home'` resolves against the parent (root).
         assert!(has_ref(&out, "/old", "/home", "NAVIGATES_TO"));
@@ -1342,7 +1529,7 @@ const routes = [
                                { path: 'users', component: Users } ] },
 ];
 "#;
-        let out = extract_route_tables(nested, module_id(), repo());
+        let out = extract_route_tables(nested, module_id(), "", repo());
         assert!(
             has_ref(&out, "/admin", "/admin/users", "NAVIGATES_TO"),
             "{:?}",
@@ -1360,12 +1547,12 @@ const routes = [
 
     #[test]
     fn catchall_route() {
-        let out = extract_route_tables(ANGULAR, module_id(), repo());
+        let out = extract_route_tables(ANGULAR, module_id(), "", repo());
         assert!(paths(&out).contains(&"/**".to_string()));
         assert!(has_ref(&out, "/**", "/login", "NAVIGATES_TO"));
         assert_eq!(out.catchalls, 1);
         let vue = "const routes = [{ path: '/:pathMatch(.*)*', component: NotFound }];";
-        let out = extract_route_tables(vue, module_id(), repo());
+        let out = extract_route_tables(vue, module_id(), "", repo());
         assert_eq!(paths(&out), ["/:pathMatch(.*)*"]);
         assert_eq!(out.catchalls, 1);
     }
@@ -1377,7 +1564,7 @@ export const exportCfg = { path: 'tmp/out.txt', mode: 1 };
 server.route({ method: 'GET', path: '/users', handler: listUsers });
 User.find().populate({ path: 'author', select: 'name' });
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert!(out.nodes.is_empty(), "{:?}", paths(&out));
         assert!(out.refs.is_empty());
         assert_eq!(out.rejected, 3);
@@ -1386,7 +1573,7 @@ User.find().populate({ path: 'author', select: 'name' });
     #[test]
     fn mongoose_index_option_is_not_a_route() {
         let src = "const s = new Schema({ email: { type: String, index: true, unique: true } });";
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert!(out.nodes.is_empty());
         assert_eq!(out.rejected, 0);
     }
@@ -1409,7 +1596,7 @@ export function App() {
   );
 }
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         let p = paths(&out);
         assert_eq!(p, ["/", "/settings", "/settings/profile", "/old", "/lazy"]);
         assert!(!p.contains(&"/profile".to_string()));
@@ -1446,7 +1633,7 @@ export const router = createBrowserRouter([
   { path: '/gone', element: <Navigate to="../reports" replace /> },
 ]);
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert_eq!(paths(&out), ["/reports", "/admin", "/admin/audit", "/gone"]);
         assert!(has_ref(&out, "/reports", "Reports", "HANDLED_BY"));
         assert!(has_ref(&out, "/admin", "AdminHome", "HANDLED_BY"));
@@ -1470,7 +1657,7 @@ const routes = [
   { path: '/old', redirect: '/users' },
 ];
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert_eq!(paths(&out), ["/", "/users", "/users/:id", "/old"]);
         assert!(has_ref(&out, "/", "Home", "HANDLED_BY"));
         assert!(has_ref(&out, "/users/:id", "UserDetail", "HANDLED_BY"));
@@ -1480,7 +1667,7 @@ const routes = [
     #[test]
     fn one_literal_in_plain_ts_emits_one_node() {
         let src = "export const routes = [{ path: 'home', component: HomeComponent }];";
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.nav_routes, 1);
         let node = &out.nodes[0];
@@ -1506,7 +1693,7 @@ const s = "{ path: 'in-string', component: Z }";
 const t = `${ { a: 1 }.a } { path: 'in-template', component: W }`;
 const routes = [{ path: 'real', component: Real, title: `x${y}z` }];
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert_eq!(paths(&out), ["/real"]);
         assert!(has_ref(&out, "/real", "Real", "HANDLED_BY"));
     }
@@ -1514,7 +1701,7 @@ const routes = [{ path: 'real', component: Real, title: `x${y}z` }];
     #[test]
     fn multibyte_source_never_panics() {
         let src = "const r = [{ path: 'café', component: Ünï, t: 'ü\\'' }, { path: '日本', children: [{ path: 'ä', component: X }] }]; <Route path=\"é\" element={<Ö />} />";
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert!(
             paths(&out).contains(&"/日本/ä".to_string()),
             "{:?}",
@@ -1522,7 +1709,7 @@ const routes = [{ path: 'real', component: Real, title: `x${y}z` }];
         );
         for cut in 0..src.len() {
             if src.is_char_boundary(cut) {
-                let _ = extract_route_tables(&src[..cut], module_id(), repo());
+                let _ = extract_route_tables(&src[..cut], module_id(), "", repo());
             }
         }
     }
@@ -1533,7 +1720,7 @@ const routes = [{ path: 'real', component: Real, title: `x${y}z` }];
 const saved: Array<Route> = [];
 <Routes><Route path="/a" element={<A />} /></Routes>
 "#;
-        let out = extract_route_tables(src, module_id(), repo());
+        let out = extract_route_tables(src, module_id(), "", repo());
         assert_eq!(paths(&out), ["/a"]);
     }
 
@@ -1546,6 +1733,158 @@ const saved: Array<Route> = [];
             stem_name("./user-list.component").as_deref(),
             Some("UserListComponent")
         );
+    }
+
+    /// HQ.5: the squidex shape. Every `loadChildren` form records one mount
+    /// on the file MODULE with the record's own composed path as its prefix.
+    const LAZY: &str = r#"
+export const APP_ROUTES: Routes = [
+  { path: '', component: HomeComponent },
+  { path: 'app', component: ShellComponent, children: [
+      { path: 'items', loadChildren: () => import('./features/items/routes').then(m => m.ITEM_ROUTES) },
+      { path: '', loadChildren: () => import("./features/apps/routes").then(({ APPS_ROUTES }) => APPS_ROUTES) },
+      { path: 'legacy', loadChildren: './legacy/legacy.module#LegacyModule' },
+      { path: 'def', loadChildren: () => import('./def/routes') },
+      { path: 'var', loadChildren: FEATURE_LOADER },
+      { path: 'tpl', loadChildren: () => import(`./x/${name}`).then(m => m.R) },
+      { path: 'old', redirectTo: 'items' },
+      { path: 'abs', redirectTo: '/login' },
+  ] },
+  { path: '**', component: NotFoundComponent },
+];
+"#;
+
+    fn mounts(out: &NavRouteOut) -> Vec<(String, String, String, u32)> {
+        out.mounts
+            .iter()
+            .map(|f| match f {
+                NavFact::IncludeMount {
+                    line,
+                    target,
+                    prefix,
+                    via,
+                } => {
+                    let t = match target {
+                        IncludeTarget::Spec(s) => format!("spec:{s}"),
+                        IncludeTarget::Dynamic(d) => format!("dynamic:{d}"),
+                        IncludeTarget::Import { local } => format!("import:{local}"),
+                    };
+                    (t, prefix.clone(), via.clone(), *line)
+                }
+                other => panic!("not a mount: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn load_children_import_string_and_dynamic() {
+        let out = extract_route_tables(LAZY, module_id(), "src::app::app.routes", repo());
+        let got = mounts(&out);
+        let row = |needle: &str| {
+            u32::try_from(
+                LAZY.lines()
+                    .position(|l| l.contains(needle))
+                    .expect("needle"),
+            )
+            .expect("row")
+        };
+        assert_eq!(
+            got,
+            [
+                (
+                    "spec:./features/items/routes".to_string(),
+                    "app/items".to_string(),
+                    "nav_lazy:ITEM_ROUTES".to_string(),
+                    row("path: 'items'"),
+                ),
+                (
+                    "spec:./features/apps/routes".to_string(),
+                    "app".to_string(),
+                    "nav_lazy:APPS_ROUTES".to_string(),
+                    row("APPS_ROUTES"),
+                ),
+                (
+                    "spec:./legacy/legacy.module".to_string(),
+                    "app/legacy".to_string(),
+                    "nav_lazy_string:LegacyModule".to_string(),
+                    row("path: 'legacy'"),
+                ),
+                (
+                    "spec:./def/routes".to_string(),
+                    "app/def".to_string(),
+                    "nav_lazy:default".to_string(),
+                    row("path: 'def'"),
+                ),
+                (
+                    "dynamic:FEATURE_LOADER".to_string(),
+                    "app/var".to_string(),
+                    "nav_lazy:".to_string(),
+                    row("path: 'var'"),
+                ),
+                (
+                    "dynamic:() => import(`./x/${name}`).then(m => m.R)".to_string(),
+                    "app/tpl".to_string(),
+                    "nav_lazy:".to_string(),
+                    row("path: 'tpl'"),
+                ),
+            ]
+        );
+        // A loadChildren record is still a page of its own (no handler).
+        assert!(paths(&out).contains(&"/app/items".to_string()));
+        assert!(!has_ref(&out, "/app/items", "ITEM_ROUTES", "HANDLED_BY"));
+    }
+
+    #[test]
+    fn object_tables_mint_provisional_pages_and_links() {
+        let module = "src::app::app.routes";
+        let out = extract_route_tables(LAZY, module_id(), module, repo());
+        let mut qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .filter_map(|n| out.nav.qname_by_id.get(&n.id).map(String::as_str))
+            .collect();
+        qnames.sort_unstable();
+        assert!(
+            qnames
+                .iter()
+                .all(|q| q.starts_with("page:<mount:module:src::app::app.routes#nav>/")),
+            "{qnames:?}"
+        );
+        assert!(qnames.contains(&"page:<mount:module:src::app::app.routes#nav>/app/items"));
+        // The display name stays the composed path.
+        assert!(paths(&out).contains(&"/app/items".to_string()));
+        // A relative redirect is a provisional link; an absolute one is kept.
+        assert!(has_ref(
+            &out,
+            "/app/old",
+            "<mount:module:src::app::app.routes#nav>/app/items",
+            "NAVIGATES_TO"
+        ));
+        assert!(has_ref(&out, "/app/abs", "/login", "NAVIGATES_TO"));
+        // The same table without a module qname mints final pages.
+        let fin = extract_route_tables(LAZY, module_id(), "", repo());
+        assert!(fin.nodes.iter().any(|n| n.id == route_id("/app/items")));
+        assert!(has_ref(&fin, "/app/old", "/app/items", "NAVIGATES_TO"));
+    }
+
+    /// HQ.5: JSX `<Route>` trees stay final beside a provisional object table,
+    /// and one path in both is two nodes, never a dangling ref.
+    #[test]
+    fn jsx_trees_stay_final_beside_object_tables() {
+        let src = r#"
+const routes = [{ path: '/a', element: <A /> }];
+<Routes><Route path="/a" element={<B />} /></Routes>
+"#;
+        let out = extract_route_tables(src, module_id(), "m", repo());
+        let qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .filter_map(|n| out.nav.qname_by_id.get(&n.id).map(String::as_str))
+            .collect();
+        assert_eq!(qnames, ["page:<mount:module:m#nav>/a", "page:/a"]);
+        let ids: HashSet<NodeId> = out.nodes.iter().map(|n| n.id).collect();
+        assert!(out.refs.iter().all(|r| ids.contains(&r.from)));
+        assert!(out.nodes.iter().any(|n| n.id == route_id("/a")));
     }
 
     #[test]

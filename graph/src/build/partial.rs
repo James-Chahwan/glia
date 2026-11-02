@@ -410,6 +410,20 @@ fn prepare(g: &RepoGraph, ctx: &Ctx, edit: BodyEdit) -> Result<Prepared, Refused
     {
         return Err(Refused::UnknownFile(path));
     }
+    // HQ.5: a file's object route tables mint provisional nav pages the
+    // build's nav mount pass re-keyed under the path a `loadChildren` mounts
+    // the file at; the fresh parse cannot be placed without that pass.
+    if mini.nodes.iter().any(|n| {
+        mini.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE)
+            && mini.nav.qname_by_id.get(&n.id).is_some_and(|q| {
+                glia_code_domain::endpoint::parse_nav_mount_route_qname(
+                    glia_code_domain::endpoint::split_owner(q).0,
+                )
+                .is_some()
+            })
+    }) {
+        return Err(Refused::Unsupported("page navigation"));
+    }
     let moved = || Refused::SurfaceMoved(path.clone());
     // GA.7: a method this file declares under another file's type sits there
     // in the merged parse too, as the build re-parented it.

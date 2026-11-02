@@ -221,7 +221,7 @@ createRouter({ history: createWebHistory(), routes });
         // itself mints no ROUTE any more.
         let own = extract_vue_nodes(src, "src/router.ts", "test", module_id(), repo());
         assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
-        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), "", repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id

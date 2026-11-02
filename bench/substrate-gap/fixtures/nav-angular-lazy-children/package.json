@@ -1,0 +1,8 @@
+{
+  "name": "nav-angular-lazy-children",
+  "private": true,
+  "dependencies": {
+    "@angular/core": "^17.0.0",
+    "@angular/router": "^17.0.0"
+  }
+}

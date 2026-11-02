@@ -745,7 +745,11 @@ where
 /// `require(..)`d), and with a NestJS `setGlobalPrefix` or `RouterModule` each
 /// controller route to its module's and the app's prefixes, so the stitch and
 /// every later pass see the final ROUTEs; `[route-mounts] lang=typescript ..`
-/// prints what it did, once per graph with a route module.
+/// prints what it did, once per graph with a route module. HQ.5: then the
+/// client-router pages (`bind_nav_mounts`): every object route table's page
+/// re-keyed under the path an Angular `loadChildren` mounts its file at (a
+/// file no mount reaches keeps its own paths), its relative redirects with
+/// it; `[nav-mounts] ..` once per graph holding such a page.
 fn build_ts_like<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -758,6 +762,10 @@ where
     let (mut g, mut body, stmts, front) = ts_surface_timed(repo, parses, &resolve_source);
     let mounts = route_mounts::bind_ts_mounts(&mut g, &mut body.refs, &stmts, &resolve_source);
     if let Some(line) = mounts.marker() {
+        eprintln!("{line}");
+    }
+    let nav_mounts = route_mounts::bind_nav_mounts(&mut g, &mut body.refs, &stmts, &resolve_source);
+    if let Some(line) = nav_mounts.marker() {
         eprintln!("{line}");
     }
     let mut tally = EvidenceTally::default();

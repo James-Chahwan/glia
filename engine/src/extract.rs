@@ -564,8 +564,18 @@ pub(crate) fn apply_cross_cutting_extractors(
         // each, minting one literal up to three times on a plain `.ts`). Not
         // `run!`: the routes carry HANDLED_BY (route -> component) and
         // NAVIGATES_TO (redirect) refs, bound by the graph builder's
-        // `resolve_refs`.
-        let tables = nav_routes::extract_route_tables(source, module_id, repo);
+        // `resolve_refs`. HQ.5: the object tables' pages are minted on the
+        // file MODULE's provisional nav slot and each `loadChildren` recorded
+        // as a NavFact::IncludeMount on it, which the graph's nav mount pass
+        // (glia_graph route_mounts, `bind_nav_mounts`) composes into each
+        // page's full path.
+        let nav_module = fp
+            .nav
+            .qname_by_id
+            .get(&module_id)
+            .cloned()
+            .unwrap_or_default();
+        let tables = nav_routes::extract_route_tables(source, module_id, &nav_module, repo);
         stats.nav_routes += tables.nav_routes;
         stats.nav_bound += tables.bound;
         stats.nav_redirects += tables.redirects;
@@ -575,6 +585,9 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.refs.extend(tables.refs);
         fp.nodes.extend(tables.nodes);
         merge_nav(&mut fp.nav, tables.nav);
+        for mount in tables.mounts {
+            fp.nav.record_fact(module_id, mount);
+        }
         // LA.6c: the file's navigation link sites (router APIs, link
         // components, anchors, origin share links) as NAVIGATES_TO refs from
         // its MODULE, LA.6a's link contract. A `.component.html` template's

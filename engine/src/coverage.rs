@@ -240,7 +240,7 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "typescript",
         edge_category: "NAVIGATES_TO",
-        note: "navigations built from variables (navigate([path]), navigateByUrl(url), router.push(url)), guard redirects (router.createUrlTree / parseUrl), Vue named-route pushes and Angular relative navigations are not resolved, so a page reached only through one is listed unlinked; lazily loaded child tables in another file match only by path suffix (Weak); plain <a href> links bind but are never reported dead",
+        note: "navigations built from variables (navigate([path]), navigateByUrl(url), router.push(url)), guard redirects (router.createUrlTree / parseUrl), Vue named-route pushes and Angular relative navigations are not resolved, so a page reached only through one is listed unlinked; Angular `loadChildren` tables compose their parent's path (an import that resolves to no module, a `loadChildren` naming a variable, React Router `lazy` / `children` from another file and Vue route spreads do not: those tables keep their own path and match only by path suffix (Weak)); plain <a href> links bind but are never reported dead",
         verify: "grep -rnE 'navigate\\(|navigateByUrl|createUrlTree|parseUrl|router\\.push|routerLink' src",
     },
     // LA.1b: with crate paths (LA.1a), macro-argument calls (LA.2), inline

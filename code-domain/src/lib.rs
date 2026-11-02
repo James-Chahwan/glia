@@ -2798,6 +2798,64 @@ pub mod endpoint {
         Some((method.to_string(), mount, path.to_string()))
     }
 
+    /// LB.4c: the qname of a client-router page, `page:<path>`: its own
+    /// namespace, so a page never shares a NodeId with a same-repo server
+    /// route `GET <path>`. The extractors' `nav_route_qname` and the graph's
+    /// nav mount pass both build it here.
+    pub fn page_qname(path: &str) -> String {
+        format!("page:{path}")
+    }
+
+    /// Closes the module token of a nav mount slot ([`nav_mount_link`]): every
+    /// object route table of one file mounts through the one slot `nav`.
+    const NAV_SLOT_CLOSE: &str = "#nav>";
+
+    /// HQ.5: a page path inside a file's route tables, before the build's nav
+    /// mount pass knows the prefix a lazy `loadChildren` mounts the file
+    /// under: `<mount:module:<module qname>#nav><path>`, `path` the path the
+    /// file's own tables compose (`/:schemaName`). A provisional nav page's
+    /// qname is [`nav_mount_route_qname`]; a redirect the tables make relative
+    /// to themselves is written as this link. The graph's nav mount pass
+    /// (`graph/src/build/route_mounts.rs`, `bind_nav_mounts`) rewrites every
+    /// one before the links resolve.
+    ///
+    /// ```text
+    /// nav_mount_link("src::app::routes", "/:id") == "<mount:module:src::app::routes#nav>/:id"
+    /// ```
+    pub fn nav_mount_link(module: &str, path: &str) -> String {
+        format!("{MOUNT_OPEN}module:{module}{NAV_SLOT_CLOSE}{path}")
+    }
+
+    /// The inverse of [`nav_mount_link`]: `(module qname, path)`. `None` for
+    /// anything else: an absolute link, a GD.40 module mount qname (its token
+    /// ends in the router variable, never `#nav`), an empty module, a path
+    /// that does not start with `/`.
+    pub fn parse_nav_mount_link(link: &str) -> Option<(&str, &str)> {
+        let rest = link.strip_prefix(MOUNT_OPEN)?.strip_prefix("module:")?;
+        let at = rest.find(NAV_SLOT_CLOSE)?;
+        let module = rest.get(..at)?;
+        let path = rest.get(at + NAV_SLOT_CLOSE.len()..)?;
+        (!module.is_empty() && path.starts_with('/')).then_some((module, path))
+    }
+
+    /// HQ.5: the provisional qname of a page an object route table of module
+    /// `module` declares at `path`: `page:` + [`nav_mount_link`]. No final
+    /// page qname starts `page:<` (a composed path starts with `/`), so none
+    /// collides with one.
+    ///
+    /// ```text
+    /// nav_mount_route_qname("src::app::routes", "/:id") == "page:<mount:module:src::app::routes#nav>/:id"
+    /// ```
+    pub fn nav_mount_route_qname(module: &str, path: &str) -> String {
+        page_qname(&nav_mount_link(module, path))
+    }
+
+    /// The inverse of [`nav_mount_route_qname`]: `(module qname, path)`. The
+    /// caller strips an LB.4a owner first with [`split_owner`].
+    pub fn parse_nav_mount_route_qname(q: &str) -> Option<(&str, &str)> {
+        parse_nav_mount_link(q.strip_prefix("page:")?)
+    }
+
     /// Opens a [`const_placeholder`].
     const CONST_OPEN: &str = "${const:";
 
@@ -5032,6 +5090,51 @@ mod tests {
         nav.record_fact(func, at(4));
         nav.record_fact(func, at(9));
         assert_eq!(nav.nav_facts[&func][1..], [at(4), at(9)]);
+    }
+
+    /// HQ.5: a provisional nav page qname and a provisional redirect link
+    /// read back as the module and the path; nothing else parses as one.
+    #[test]
+    fn nav_mount_route_qname_round_trips() {
+        use crate::endpoint::{
+            nav_mount_link, nav_mount_route_qname, parse_mount_route_qname, parse_nav_mount_link,
+            parse_nav_mount_route_qname, split_owner,
+        };
+        let q = nav_mount_route_qname("src::app::features::items::routes", "/:itemId");
+        assert_eq!(
+            q,
+            "page:<mount:module:src::app::features::items::routes#nav>/:itemId"
+        );
+        assert_eq!(
+            parse_nav_mount_route_qname(&q),
+            Some(("src::app::features::items::routes", "/:itemId"))
+        );
+        // An LB.4a owner is split off first; the module may hold dots.
+        let owned = format!("{} @frontend", nav_mount_route_qname("a::b.routes", "/"));
+        let (bare, owner) = split_owner(&owned);
+        assert_eq!(owner, Some("frontend"));
+        assert_eq!(
+            parse_nav_mount_route_qname(bare),
+            Some(("a::b.routes", "/"))
+        );
+        // The redirect link is the same head without `page:`.
+        let link = nav_mount_link("a::routes", "/x/y");
+        assert_eq!(parse_nav_mount_link(&link), Some(("a::routes", "/x/y")));
+        assert_eq!(parse_nav_mount_route_qname(&link), None);
+        // Never a CB.6 / GD.40 provisional, and those are never a nav one.
+        assert_eq!(parse_mount_route_qname(&q), None);
+        assert_eq!(
+            parse_nav_mount_route_qname("ANY <mount:module:app::urls#urlpatterns>/x/"),
+            None
+        );
+        for other in [
+            "page:/x",
+            "page:<mount:module:#nav>/x",
+            "/x",
+            "page:<mount:module:m#nav>x",
+        ] {
+            assert_eq!(parse_nav_mount_route_qname(other), None, "{other}");
+        }
     }
 
     /// CB.6: a provisional mount ROUTE qname reads back as the method, the
