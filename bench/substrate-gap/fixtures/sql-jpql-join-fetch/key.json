@@ -1,0 +1,22 @@
+{
+  "framework": "sql-jpql-join-fetch",
+  "language": "java",
+  "dirs": ["."],
+  "cells": ["java/db"],
+  "note": "HQ.14. A JPQL / HQL `JOIN FETCH` names the entity (or association path) after FETCH. At HEAD the raw-SQL scan skipped only ONLY / LATERAL after JOIN, so `fetch` itself became the table: tolgee's `left join fetch Permission p` minted ACCESSES_DATA -> data_entity:sql:fetch (HP.7's one wrong held-out edge). `join fetch u.roles` is an association path, never a table.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:User", "exact": true, "note": "FROM User u"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:Permission", "exact": true, "note": "left join fetch Permission p"}
+  ],
+  "expect_edges": [
+    {"from": "findAllWithPermissions", "to": "data_entity:sql:Permission", "category": "ACCESSES_DATA", "note": "the entity after `join fetch`"},
+    {"from": "findAllWithPermissions", "to": "data_entity:sql:User", "category": "ACCESSES_DATA", "note": "the FROM entity"},
+    {"from": "findActiveWithRoles", "to": "data_entity:sql:User", "category": "ACCESSES_DATA", "note": "the FROM entity of the association-path fetch"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:fetch", "note": "the JPQL FETCH keyword is no entity"},
+    {"from": "findAllWithPermissions", "to": "data_entity:sql:fetch", "category": "ACCESSES_DATA", "note": "left join fetch Permission p"},
+    {"from": "findActiveWithRoles", "to": "data_entity:sql:fetch", "category": "ACCESSES_DATA", "note": "join fetch u.roles"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:roles", "note": "u.roles is an association path, not a table"}
+  ]
+}

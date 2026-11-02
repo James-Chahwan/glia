@@ -81,6 +81,12 @@
 //! A statement in a Rust file under `tests/` / `benches/` (a Cargo test or
 //! bench target) is refused by the code guard and counts in the
 //! `[code-guard] data-entities` line.
+//!
+//! HQ.14, always on, once per file whose statements hold a JPQL / HQL
+//! `JOIN FETCH` (the name after FETCH is read; an association path names
+//! nothing; `fetch` is never a table):
+//!   `... 2>&1 | grep '\[data-entity\] jpql join fetch '`
+//!   `[data-entity] jpql join fetch skipped=<n> path=<p>`
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -315,10 +321,12 @@ pub fn extract_data_entity_access(
         rejected_fmt: lit.rejected_fmt,
         ..ScanStats::default()
     };
+    let mut jpql_fetch = 0;
     for stmt in &lit.statements {
         let scan = statement_tables(&stmt.scan);
         stats.ctes += scan.ctes;
         stats.rejected_fn += scan.rejected_fn;
+        jpql_fetch += scan.jpql_fetch;
         for (name, pos) in scan.tables {
             let at = stmt.to_source(pos);
             stats.note_table(&name, at);
@@ -326,6 +334,10 @@ pub fn extract_data_entity_access(
             let verb = sql_clause_verb(&stmt.scan, pos);
             sink.emit_site(DataEntityFlavor::Sql, &name, at, verb);
         }
+    }
+    // HQ.14: always on when a JPQL / HQL `JOIN FETCH` was read past.
+    if jpql_fetch > 0 {
+        eprintln!("[data-entity] jpql join fetch skipped={jpql_fetch} path={path}");
     }
     // A13.9: the DDL phrase names its table. After the FROM scan, so a
     // statement the DDL scan adds nothing to keeps its node order. LE.4a:
@@ -1529,6 +1541,8 @@ pub(crate) struct SqlScan {
     pub(crate) tables: Vec<(String, usize)>,
     pub(crate) ctes: usize,
     pub(crate) rejected_fn: usize,
+    /// HQ.14: JPQL / HQL `FETCH` words read past after a JOIN.
+    pub(crate) jpql_fetch: usize,
 }
 
 /// The tables one statement's text names ([`scan_sql_tables`]), minus the
@@ -1536,7 +1550,8 @@ pub(crate) struct SqlScan {
 pub(crate) fn statement_tables(sql: &str) -> SqlScan {
     let ctes = cte_names(sql);
     let mut rejected_fn = 0;
-    let tables = scan_sql_tables(sql, &mut rejected_fn)
+    let mut jpql_fetch = 0;
+    let tables = scan_sql_tables(sql, &mut rejected_fn, &mut jpql_fetch)
         .into_iter()
         .filter(|(name, _)| !ctes.contains(&name.to_ascii_lowercase()))
         .collect();
@@ -1544,6 +1559,7 @@ pub(crate) fn statement_tables(sql: &str) -> SqlScan {
         tables,
         ctes: ctes.len(),
         rejected_fn,
+        jpql_fetch,
     }
 }
 
@@ -1655,10 +1671,16 @@ enum Clause {
 /// `JOIN LATERAL jsonb_array_elements(`), a FROM that is a function argument
 /// (`EXTRACT(YEAR FROM ts)`, `SUBSTRING(x FROM 2)`: inside a paren that holds
 /// no SELECT / DELETE / UPDATE; `IS DISTINCT FROM x`), the `ONLY` / `LATERAL`
-/// modifiers (the name after them is read instead), and the SQL keywords
-/// [`canonical_sql_name`] rejects. Each function-shaped reject adds one to
-/// `rejected_fn`.
-pub(crate) fn scan_sql_tables(sql: &str, rejected_fn: &mut usize) -> Vec<(String, usize)> {
+/// modifiers (the name after them is read instead), JPQL / HQL's `FETCH`
+/// after a JOIN (HQ.14: the entity after it is read instead, and an
+/// association path such as `join fetch u.roles` names nothing; each FETCH
+/// adds one to `jpql_fetch`), and the SQL keywords [`canonical_sql_name`]
+/// rejects. Each function-shaped reject adds one to `rejected_fn`.
+pub(crate) fn scan_sql_tables(
+    sql: &str,
+    rejected_fn: &mut usize,
+    jpql_fetch: &mut usize,
+) -> Vec<(String, usize)> {
     let b = sql.as_bytes();
     let mut out = Vec::new();
     // One frame per open paren: true once it holds a query verb, so a FROM in
@@ -1713,7 +1735,7 @@ pub(crate) fn scan_sql_tables(sql: &str, rejected_fn: &mut usize) -> Vec<(String
                 && (frames.last() == Some(&false) || word_is(b, prev_word, "DISTINCT"));
             if fn_arg {
                 *rejected_fn += 1;
-            } else if let Some(hit) = clause_table(sql, i, clause, rejected_fn) {
+            } else if let Some(hit) = clause_table(sql, i, clause, rejected_fn, jpql_fetch) {
                 out.push(hit);
             }
         }
@@ -1728,11 +1750,28 @@ fn clause_table(
     after_kw: usize,
     clause: Clause,
     rejected_fn: &mut usize,
+    jpql_fetch: &mut usize,
 ) -> Option<(String, usize)> {
     let b = sql.as_bytes();
     let (mut raw, mut end) = read_sql_ident(sql, after_kw)?;
     if raw.eq_ignore_ascii_case("ONLY") || raw.eq_ignore_ascii_case("LATERAL") {
         (raw, end) = read_sql_ident(sql, end)?;
+    } else if clause == Clause::Join && raw.eq_ignore_ascii_case("FETCH") {
+        // HQ.14: JPQL / HQL `JOIN FETCH <entity> <alias>` or `JOIN FETCH
+        // <alias>.<association>`. SQL has no FETCH after a JOIN, so a dotted
+        // name here is a path through a FROM alias, never `schema.table`
+        // (canonical_sql_name would read it as one): it names no table.
+        *jpql_fetch += 1;
+        let start = end
+            + b[end..]
+                .iter()
+                .take_while(|c| c.is_ascii_whitespace())
+                .count();
+        (raw, end) = read_sql_ident(sql, end)?;
+        let raw_end = raw.as_ptr() as usize - sql.as_ptr() as usize + raw.len();
+        if b[start..raw_end].contains(&b'.') {
+            return None;
+        }
     }
     if matches!(clause, Clause::From | Clause::Join) {
         let mut j = end;
@@ -1753,8 +1792,8 @@ fn clause_table(
 /// LE.4a: the verb of the FROM / JOIN / INTO / UPDATE clause whose table name
 /// starts at `name_pos` in `sql` (the blanked statement text
 /// [`scan_sql_tables`] read it from). Read backwards from the name, past its
-/// qualifier (`public.`, `"db".`, `[dbo].`) and an `ONLY` / `LATERAL`
-/// modifier, to the keyword: `FROM` reads, unless `DELETE` precedes it;
+/// qualifier (`public.`, `"db".`, `[dbo].`) and an `ONLY` / `LATERAL` /
+/// JPQL `FETCH` modifier (HQ.14), to the keyword: `FROM` reads, unless `DELETE` precedes it;
 /// `JOIN` reads; `INTO` (INSERT / MERGE / REPLACE / SELECT INTO) and `UPDATE`
 /// write. ASCII-only look-behind: every step is on a byte that is ASCII, so no
 /// slice is taken inside a multibyte char.
@@ -1768,7 +1807,7 @@ pub(crate) fn sql_clause_verb(sql: &str, name_pos: usize) -> AccessVerb {
         k -= 1;
     }
     let mut kw = word_before(b, k);
-    if word_is(b, kw, "ONLY") || word_is(b, kw, "LATERAL") {
+    if word_is(b, kw, "ONLY") || word_is(b, kw, "LATERAL") || word_is(b, kw, "FETCH") {
         kw = word_before(b, kw.0);
     }
     if word_is(b, kw, "FROM") {
@@ -2232,9 +2271,9 @@ pub(crate) fn canonical_sql_name(raw: &str) -> Option<String> {
 const SQL_NAME_KEYWORDS: &[&str] = &[
     "SELECT", "WHERE", "AND", "OR", "IF", "EXISTS", "NULL", "TRUE", "FALSE", "FROM", "JOIN",
     "INTO", "LATERAL", "SET", "ONLY", "VALUES", "UNNEST", "DUAL", "TABLE", "ALL", "ANY", "AS",
-    "CASCADE", "CASE", "CROSS", "DEFAULT", "DISTINCT", "EACH", "FOR", "FULL", "INNER", "LEFT",
-    "NATURAL", "NO", "NOT", "NOWAIT", "OF", "ON", "OUTER", "RESTRICT", "RIGHT", "ROW", "SKIP",
-    "STRICT", "USING", "WITH",
+    "CASCADE", "CASE", "CROSS", "DEFAULT", "DISTINCT", "EACH", "FETCH", "FOR", "FULL", "INNER",
+    "LEFT", "NATURAL", "NO", "NOT", "NOWAIT", "OF", "ON", "OUTER", "RESTRICT", "RIGHT", "ROW",
+    "SKIP", "STRICT", "USING", "WITH",
 ];
 
 // ----------------------------------------------------------------------------
@@ -4340,12 +4379,71 @@ const series = "SELECT g FROM generate_series(1, 10) g FOR UPDATE SKIP LOCKED"
         let got: Vec<String> = scan_sql_tables(
             "SELECT EXTRACT(EPOCH FROM ts) FROM unnest($1) u JOIN users x ON true",
             &mut rejected_fn,
+            &mut 0,
         )
         .into_iter()
         .map(|(t, _)| t)
         .collect();
         assert_eq!(got, ["users"]);
         assert_eq!(rejected_fn, 2);
+    }
+
+    /// HQ.14: the entity after a JPQL / HQL `JOIN FETCH`, never `fetch`.
+    fn jpql_tables(sql_text: &str) -> (Vec<String>, usize) {
+        let mut rejected_fn = 0;
+        let mut jpql_fetch = 0;
+        let got = scan_sql_tables(sql_text, &mut rejected_fn, &mut jpql_fetch)
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        (got, jpql_fetch)
+    }
+
+    #[test]
+    fn jpql_join_fetch_names_the_entity_after_fetch() {
+        assert_eq!(
+            jpql_tables("select u from User u left join fetch Permission p where p.user = u"),
+            (vec!["User".to_string(), "Permission".to_string()], 1)
+        );
+        assert_eq!(
+            jpql_tables("SELECT u FROM User u INNER JOIN FETCH Permission p"),
+            (vec!["User".to_string(), "Permission".to_string()], 1)
+        );
+        // The verb of the name after FETCH is the JOIN's: a read.
+        let s = "select u from User u left join fetch Permission p";
+        let at = s.find("Permission").unwrap_or(0);
+        assert_eq!(sql_clause_verb(s, at), AccessVerb::Read);
+        // Through the literal scan, end to end.
+        let src = r#"@Query("select u from User u left join fetch Permission p where p.user = u")"#;
+        assert_eq!(sorted_qnames(src), sql(&["Permission", "User"]));
+    }
+
+    #[test]
+    fn jpql_join_fetch_of_an_association_path_names_nothing() {
+        // `u.roles` is a path through the FROM alias, not an entity.
+        assert_eq!(
+            jpql_tables("select u from User u join fetch u.roles"),
+            (vec!["User".to_string()], 1)
+        );
+        let src =
+            r#"@Query("select distinct u from User u join fetch u.roles where u.active = true")"#;
+        assert_eq!(sorted_qnames(src), sql(&["User"]));
+    }
+
+    #[test]
+    fn plain_join_and_fetch_first_are_unchanged() {
+        assert_eq!(
+            jpql_tables("select u from users u join roles r on r.uid = u.id"),
+            (vec!["users".to_string(), "roles".to_string()], 0)
+        );
+        // `FETCH FIRST .. ROWS ONLY` follows ORDER BY / OFFSET, never a JOIN.
+        assert_eq!(
+            jpql_tables("SELECT id FROM orders ORDER BY id OFFSET 5 ROWS FETCH FIRST 10 ROWS ONLY"),
+            (vec!["orders".to_string()], 0)
+        );
+        // No path ever names a table `fetch`.
+        assert_eq!(canonical_sql_name("fetch"), None);
+        assert_eq!(canonical_sql_name("app.FETCH"), None);
     }
 
     #[test]
