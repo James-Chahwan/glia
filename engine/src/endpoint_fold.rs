@@ -52,6 +52,18 @@
 //! confidence ([`pin_confidence`], Weak), so every pairing it makes is at most
 //! Weak. An entry no pin reached is untouched.
 //!
+//! MODEL-WRITTEN SITES (HC.1). The ENDPOINT_HIT `overlay` key means "this
+//! call site rests on a model-written overlay stanza", and the `http`
+//! resolver reads it so (a pairing whose every site carries it names its rule
+//! `<tier>/overlay_llm`, which `why` tiers heuristic). A `[constants]` pin
+//! has no per-key origin, so every pin is the default `llm` and its
+//! `const:<KEY>` value already says so. After the fold, every ENDPOINT_HIT of
+//! a node an `origin = "llm"` `[[wrapper]]` stanza minted (its ORIGIN cell
+//! `{"provenance":"overlay:llm","rule":"wrapper#<n>"}`, written by
+//! `external::wrappers` before this pass) gains `"overlay":"wrapper#<n>"`
+//! last, unless a pin already wrote the key ([`mark_model_wrapper_hits`]).
+//! A `human` stanza's site, and an inferred wrapper's, are left alone.
+//!
 //! EXTERNAL CALL SITES (CG.4a). After every parse of the repo is folded,
 //! [`mark_external`] appends `"external":true` to the ENDPOINT_HIT of a call
 //! site whose host (1) is recorded, (2) is written in the call's own literal
@@ -280,10 +292,69 @@ pub(crate) fn fold_repo<'a>(
     };
     for fp in parses.iter_mut() {
         stats.add(fold_endpoint_paths_with(fp, consts, repo, &ctx));
+        mark_model_wrapper_hits(fp);
     }
     stats.add(mark_external(&mut parses, consts));
     stats
 }
+
+/// HC.1: the stanza rule (`wrapper#<n>`) of a node an `origin = "llm"`
+/// overlay stanza minted: its ORIGIN cell's `rule` when the provenance is
+/// `Origin::Llm.provenance()`, else `None`.
+fn llm_stanza_of(node: &Node) -> Option<String> {
+    let provenance = Origin::Llm.provenance();
+    node.cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ORIGIN)
+        .find_map(|c| {
+            let CellPayload::Json(json) = &c.payload else {
+                return None;
+            };
+            let v: Value = serde_json::from_str(json).ok()?;
+            (v.get("provenance")?.as_str()? == provenance)
+                .then(|| v.get("rule")?.as_str().map(str::to_string))
+                .flatten()
+        })
+}
+
+/// HC.1: append `"overlay":"<stanza rule>"` to every ENDPOINT_HIT of an
+/// ENDPOINT an llm `[[wrapper]]` stanza minted in `fp` (module doc), unless
+/// the hit already carries the key (a pinned fold's `const:<KEY>`).
+fn mark_model_wrapper_hits(fp: &mut FileParse) {
+    for node in fp.nodes.iter_mut() {
+        if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::ENDPOINT) {
+            continue;
+        }
+        let Some(rule) = llm_stanza_of(node) else {
+            continue;
+        };
+        let Ok(value) = serde_json::to_string(&rule) else {
+            continue;
+        };
+        for cell in node
+            .cells
+            .iter_mut()
+            .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+        {
+            if let CellPayload::Json(json) = &mut cell.payload
+                && !json.contains(OVERLAY_KEY)
+                && json.ends_with('}')
+            {
+                json.pop();
+                if !json.ends_with('{') {
+                    json.push(',');
+                }
+                json.push_str(OVERLAY_KEY);
+                json.push_str(&value);
+                json.push('}');
+            }
+        }
+    }
+}
+
+/// HC.1: the ENDPOINT_HIT key of a site that rests on a model-written stanza
+/// (the `http` resolver's `MODEL_HIT_MARK`).
+const OVERLAY_KEY: &str = "\"overlay\":";
 
 // ============================================================================
 // CH.5b: URL builders that read a configured API prefix
@@ -2691,6 +2762,36 @@ mod tests {
         );
         assert_eq!(fp.nodes[1].confidence, Confidence::Medium);
         assert!(!payload(&fp, 1).contains("overlay"));
+    }
+
+    /// HC.1: an ENDPOINT an llm `[[wrapper]]` minted gains the stanza's
+    /// `overlay` key on every hit; a human stanza's and an inferred wrapper's
+    /// do not, and a pinned hit keeps its `const:` value.
+    #[test]
+    fn llm_wrapper_hits_are_marked() {
+        let origin = |prov: &str| glia_core::Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(format!(r#"{{"provenance":"{prov}","rule":"wrapper#2"}}"#)),
+        };
+        let hit = r#"{"method":"GET","path":"/users","file":"a.ts","line":9}"#;
+        let mark = |prov: Option<&str>, json: &str| {
+            let mut fp = file();
+            push_call(&mut fp, "/users", json);
+            if let Some(p) = prov {
+                fp.nodes[1].cells.push(origin(p));
+            }
+            mark_model_wrapper_hits(&mut fp);
+            payload(&fp, 1).to_string()
+        };
+        assert_eq!(
+            mark(Some("overlay:llm"), hit),
+            r#"{"method":"GET","path":"/users","file":"a.ts","line":9,"overlay":"wrapper#2"}"#
+        );
+        assert_eq!(mark(Some("overlay:human"), hit), hit);
+        assert_eq!(mark(Some("inferred:wrapper"), hit), hit);
+        assert_eq!(mark(None, hit), hit);
+        let pinned = r#"{"path":"/users","overlay":"const:GATEWAY"}"#;
+        assert_eq!(mark(Some("overlay:llm"), pinned), pinned);
     }
 
     /// The source table plus an unrelated pin: a pin the template never reads

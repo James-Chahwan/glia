@@ -39,6 +39,17 @@ stanza (the default) gets `overlay:llm` and `Weak` confidence; an `origin = "hum
 `overlay:human` and `Medium`. Nothing from the overlay is ever `Strong`. Primitives can hide
 overlay results, and `--no-overlay` builds without them.
 
+A model's stanza stays heuristic downstream too (HC.1): a pairing the `http` or `queue` resolver
+makes through an `origin = "llm"` stanza (an ENDPOINT or queue node an llm `[[wrapper]]` minted,
+an ENDPOINT whose path a `[constants]` pin folded, a gateway path an llm `[[route_prefix]]`
+mounted) names its rule `<rule>/overlay_llm` (`exact/overlay_llm`), and `glia why`, `check`,
+`review` and `glia query` tier it `heuristic` with the note `rests on a model-written overlay
+stanza (<rule>)`, so a violation through it is advisory. A client end rests on the model only
+when every one of its call sites does: one site the extractor read on its own keeps the pairing
+`derived`. `[constants]` keys carry no origin, so every pin counts as `llm`. A stanza a person
+wrote should say `origin = "human"`: its pairings stay `derived`. Every build that marks one prints
+`[overlay-tier] model_rested=<n> (http=<h> queue=<q>)`.
+
 ## Example
 
 ```toml

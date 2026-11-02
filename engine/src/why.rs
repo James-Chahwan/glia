@@ -29,6 +29,7 @@
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //! | `resolver:evm` rules `abi_hint` / `name_hint` | heuristic — a contract identified by its name key, not by the site or a covering ABI (DT.10b); note `name-matched contract (<rule>)` |
 //! | `resolver:evm` rule `abi_partial` | heuristic — a contract identified by a strict majority of a drifted ABI's entries, not by a covering one (FH.23); note `majority-ABI contract (abi_partial)` |
+//! | `resolver` / `pass` rule `<base>/overlay_llm` | heuristic — the pairing rests on a model-written overlay stanza (HC.1: an `origin = "llm"` `[[wrapper]]`, `[constants]` pin or `[[route_prefix]]`); note `rests on a model-written overlay stanza (<base>)` |
 //!
 //! Two emitters are tiered by their rule, not their stage: a SAME_AS edge of
 //! the identity resolver (`resolver:identity`, DD.5) or of the models
@@ -119,6 +120,16 @@ const HEURISTIC_PAIRING_RULES: &[(&str, &str, &str)] = &[
     ("resolver:evm", "abi_partial", "majority-ABI contract"),
     ("resolver:evm", "name_hint", "name-matched contract"),
 ];
+
+/// HC.1: the EVIDENCE rule suffix a resolver writes on a pairing that rests
+/// on a model-written overlay stanza (`origin = "llm"`, the loader's default):
+/// `resolver:http`'s `<tier>/overlay_llm` when an llm `[[wrapper]]` minted the
+/// client ENDPOINT, an overlay `[constants]` pin folded its path or an llm
+/// `[[route_prefix]]` mounted the gateway path it reached, and
+/// `resolver:queue`'s when an llm `[[wrapper]]` minted a side
+/// (`graph/src/resolvers/http.rs` `MODEL_RESTED_SUFFIX`, the same literal).
+/// A model step never decides a derived row: such an edge tiers heuristic.
+const MODEL_RESTED_SUFFIX: &str = "/overlay_llm";
 
 /// Where an edge was asserted: repo-relative `file` and its 1-based `line`
 /// (LD.1), `None` when the evidence names the file only.
@@ -563,6 +574,14 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (Tier, Option<String>)
         return (Tier::Heuristic, Some(format!("name-only binding ({rule})")));
     }
     if tier == Tier::Derived
+        && let Some(base) = rule.and_then(|r| r.strip_suffix(MODEL_RESTED_SUFFIX))
+    {
+        return (
+            Tier::Heuristic,
+            Some(format!("rests on a model-written overlay stanza ({base})")),
+        );
+    }
+    if tier == Tier::Derived
         && let Some(rule) = rule
         && let Some(&(_, _, note)) = HEURISTIC_PAIRING_RULES
             .iter()
@@ -741,6 +760,48 @@ mod tests {
         );
         let ev = Evidence::emitter("resolver:evm").rule("name_hint");
         assert_eq!(tier_of(Some(&ev), &flows).0, Tier::Heuristic);
+    }
+
+    /// HC.1: a resolver / pass pairing whose rule ends `/overlay_llm` rests
+    /// on a model-written stanza: heuristic, the note naming the base rule.
+    /// The bare rule, and the suffix on a fact stage, are untouched.
+    #[test]
+    fn overlay_llm_suffix_is_heuristic() {
+        let edge = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::HTTP_CALLS,
+            Confidence::Weak,
+        );
+        for (emitter, rule, base) in [
+            ("resolver:http", "exact/overlay_llm", "exact"),
+            ("resolver:http", "base_fold/overlay_llm", "base_fold"),
+            ("resolver:queue", "pattern/overlay_llm", "pattern"),
+        ] {
+            let ev = Evidence::emitter(emitter).rule(rule).at("web/src/a.ts", 3);
+            assert_eq!(
+                tier_of(Some(&ev), &edge),
+                (
+                    Tier::Heuristic,
+                    Some(format!("rests on a model-written overlay stanza ({base})"))
+                ),
+                "{rule}"
+            );
+        }
+        let plain = Evidence::emitter("resolver:http")
+            .rule("exact")
+            .at("web/src/a.ts", 3);
+        assert_eq!(tier_of(Some(&plain), &edge), (Tier::Derived, None));
+        let fact = Evidence::emitter("graph:calls")
+            .rule("x/overlay_llm")
+            .at("a.ts", 1);
+        let strong = Edge::new(
+            NodeId(1),
+            NodeId(2),
+            edge_category::CALLS,
+            Confidence::Strong,
+        );
+        assert_eq!(tier_of(Some(&fact), &strong).0, Tier::Fact);
     }
 
     /// FH.23: a pairing by a strict majority of a drifted ABI is heuristic,

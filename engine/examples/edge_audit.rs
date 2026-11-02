@@ -27,7 +27,10 @@
 //! for byte.
 //!
 //! The tier is [`glia_engine::why::edge_tier`], the reading `glia why`, `check`
-//! and `glia query` print. Selection is deterministic: each candidate edge's
+//! and `glia query` print, so a pairing that rests on a model-written overlay
+//! stanza (HC.1: rule `<base>/overlay_llm`) is sampled in its category's
+//! heuristic stratum, its row naming the full rule; the audited snapshots
+//! carry no overlay, so no committed sample moves. Selection is deterministic: each candidate edge's
 //! key is xxh64 over (seed, label, category, from qname, to qname, evidence
 //! rule, file, line); a stratum takes its smallest keys. No HashMap is iterated
 //! into an output; every output map is a BTreeMap and every list is sorted.

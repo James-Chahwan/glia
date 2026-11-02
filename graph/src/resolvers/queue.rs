@@ -12,6 +12,7 @@ use glia_code_extractors::queue_topic::SUBJECT_PLACEHOLDER;
 use glia_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
+use super::http::MODEL_RESTED_SUFFIX;
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -69,6 +70,16 @@ impl CrossGraphResolver for QueueStackResolver {
     ///   `... 2>&1 | grep '^\[queues\] resolver paired='`
     /// and (DT.2c), once per build with a placeholder producer:
     ///   `[queues] resolver placeholder producers=<p> paired=<q>`
+    ///
+    /// HC.1: a pairing whose producer or consumer rests on a model-written
+    /// overlay stanza (`rests_on_model`: every site of the node was minted
+    /// by an `origin = "llm"` `[[wrapper]]`) names its rule with
+    /// `/overlay_llm` (`exact/overlay_llm`, `pattern/overlay_llm`,
+    /// `binding/overlay_llm`), which `glia_engine::why` tiers heuristic. This
+    /// pass runs after `http` in the code profile's pass order, so it also
+    /// counts the HTTP_CALLS edges `http` marked the same way and prints, once
+    /// per build that wrote one:
+    ///   `[overlay-tier] model_rested=<n> (http=<h> queue=<q>)`
     fn resolve(&self, merged: &mut MergedGraph) {
         let bindings = pubsub_bindings(&merged.graphs);
         let index = build_queue_index(&merged.graphs, &bindings);
@@ -81,6 +92,8 @@ impl CrossGraphResolver for QueueStackResolver {
         // `pattern` for a compiled wildcard subscription that covers it,
         // `binding` (DF.14) for a Pub/Sub subscription bound to it.
         let mut rules = RuleTally::new("queue", &["exact", "pattern", "binding"]);
+        // HC.1: the pairings that rest on a model-written stanza.
+        let mut model_rested = 0usize;
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::QUEUE_PRODUCER) {
@@ -99,6 +112,7 @@ impl CrossGraphResolver for QueueStackResolver {
                     continue;
                 }
                 let families = node_families(&n.cells);
+                let model = rests_on_model(&n.cells);
                 let placeholder = is_placeholder_topic(topic, &families);
                 placeholders += usize::from(placeholder);
                 let exact = if placeholder {
@@ -112,12 +126,20 @@ impl CrossGraphResolver for QueueStackResolver {
                         continue;
                     }
                     let mut confidence = weakest(n.confidence, t.confidence);
-                    let rule = if t.via_binding {
-                        confidence = weakest(confidence, Confidence::Medium);
-                        binding += 1;
-                        "binding"
-                    } else {
-                        "exact"
+                    let rested = model || t.model;
+                    model_rested += usize::from(rested);
+                    let rule = match (t.via_binding, rested) {
+                        (true, rested) => {
+                            confidence = weakest(confidence, Confidence::Medium);
+                            binding += 1;
+                            if rested {
+                                "binding/overlay_llm"
+                            } else {
+                                "binding"
+                            }
+                        }
+                        (false, true) => "exact/overlay_llm",
+                        (false, false) => "exact",
                     };
                     merged.cross_edges.push(
                         Edge::new(n.id, t.id, edge_category::QUEUE_FLOWS, confidence)
@@ -145,9 +167,16 @@ impl CrossGraphResolver for QueueStackResolver {
                         family_mismatch += 1;
                         continue;
                     }
+                    let rested = model || w.model;
+                    model_rested += usize::from(rested);
+                    let rule = if rested {
+                        "pattern/overlay_llm"
+                    } else {
+                        "pattern"
+                    };
                     merged.cross_edges.push(
                         Edge::new(n.id, w.id, edge_category::QUEUE_FLOWS, Confidence::Weak)
-                            .with_cell(rules.cell("pattern")),
+                            .with_cell(rules.cell(rule)),
                     );
                     paired += 1;
                     wildcard += 1;
@@ -173,7 +202,57 @@ impl CrossGraphResolver for QueueStackResolver {
             );
         }
         rules.report();
+        let http = model_rested_http(merged);
+        if http + model_rested > 0 {
+            eprintln!(
+                "[overlay-tier] model_rested={} (http={http} queue={model_rested})",
+                http + model_rested
+            );
+        }
     }
+}
+
+/// HC.1: the provenance an `origin = "llm"` stanza's node carries (the
+/// engine's overlay wrapper stage writes it on its ORIGIN cell,
+/// `Origin::provenance`).
+const LLM_PROVENANCE: &str = "\"provenance\":\"overlay:llm\"";
+
+/// HC.1: every site of a queue node rests on a model-written stanza. Each
+/// file that mints the node gives it one POSITION cell (a multi-file node is
+/// one node with its files' cells stacked), and an llm `[[wrapper]]` site's
+/// entry also carries an ORIGIN `overlay:llm`; so the node rests on the model
+/// when it has an llm ORIGIN for every POSITION. One file the queue scanner
+/// (or a person's stanza) minted it in vouches for the topic.
+fn rests_on_model(cells: &[Cell]) -> bool {
+    let (mut positions, mut llm) = (0usize, 0usize);
+    for c in cells {
+        if c.kind == cell_type::POSITION {
+            positions += 1;
+        } else if c.kind == cell_type::ORIGIN
+            && let CellPayload::Json(json) = &c.payload
+            && json.contains(LLM_PROVENANCE)
+        {
+            llm += 1;
+        }
+    }
+    llm > 0 && llm >= positions
+}
+
+/// HC.1: the HTTP_CALLS cross edges `resolver:http` wrote with a
+/// `/overlay_llm` rule (the `http` pass runs before this one).
+fn model_rested_http(merged: &MergedGraph) -> usize {
+    let marker = format!("{MODEL_RESTED_SUFFIX}\"");
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::HTTP_CALLS)
+        .filter(|e| {
+            e.cells.iter().any(|c| {
+                c.kind == cell_type::EVIDENCE
+                    && matches!(&c.payload, CellPayload::Json(j) | CellPayload::Text(j) if j.contains(&marker))
+            })
+        })
+        .count()
 }
 
 /// DT.2c: is the producer `topic` a NATS subject the extractor folded to a
@@ -199,6 +278,8 @@ struct Consumer<'a> {
     /// DF.14: indexed under the topic its Pub/Sub subscription is bound to,
     /// not under its own topic string (rule `binding`).
     via_binding: bool,
+    /// HC.1: [`rests_on_model`].
+    model: bool,
 }
 
 struct WildcardConsumer<'a> {
@@ -206,6 +287,8 @@ struct WildcardConsumer<'a> {
     topic: &'a str,
     /// One arm per family under whose dialect `topic` is a pattern.
     arms: Vec<(&'a str, Pattern)>,
+    /// HC.1: [`rests_on_model`].
+    model: bool,
 }
 
 struct QueueIndex<'a> {
@@ -250,6 +333,7 @@ fn build_queue_index<'a>(
                 continue;
             }
             let families = node_families(&n.cells);
+            let model = rests_on_model(&n.cells);
             let mut arms = Vec::new();
             let mut catchall = false;
             for fam in &families {
@@ -265,6 +349,7 @@ fn build_queue_index<'a>(
                     id: n.id,
                     topic,
                     arms,
+                    model,
                 });
             }
             if let Some(&bound) = bindings.get(topic)
@@ -276,6 +361,7 @@ fn build_queue_index<'a>(
                     confidence: n.confidence,
                     families: families.clone(),
                     via_binding: true,
+                    model,
                 });
             }
             ix.exact.entry(topic).or_default().push(Consumer {
@@ -283,6 +369,7 @@ fn build_queue_index<'a>(
                 confidence: n.confidence,
                 families,
                 via_binding: false,
+                model,
             });
         }
     }
@@ -757,6 +844,82 @@ mod tests {
                 Confidence::Strong,
                 Some("exact".to_string()),
             )]
+        );
+    }
+
+    fn cell(kind: glia_core::CellTypeId, json: &str) -> Cell {
+        Cell {
+            kind,
+            payload: CellPayload::Json(json.to_string()),
+        }
+    }
+
+    fn origin(provenance: &str) -> Cell {
+        cell(
+            cell_type::ORIGIN,
+            &format!(r#"{{"provenance":"{provenance}","rule":"wrapper#1"}}"#),
+        )
+    }
+
+    fn position() -> Cell {
+        cell(
+            cell_type::POSITION,
+            r#"{"file":"a.ts","start":[3,0],"end":[3,9]}"#,
+        )
+    }
+
+    /// HC.1: a node rests on the model when an llm ORIGIN stands for each of
+    /// its files' POSITIONs; a person's stanza or a scanner file vouches.
+    #[test]
+    fn rests_on_model_needs_an_llm_origin_per_site() {
+        let llm = origin("overlay:llm");
+        assert!(rests_on_model(&[position(), llm.clone()]));
+        assert!(!rests_on_model(&[position(), origin("overlay:human")]));
+        assert!(!rests_on_model(&[position(), llm.clone(), position()]));
+        assert!(!rests_on_model(&[position()]));
+        assert!(rests_on_model(&[position(), llm.clone(), position(), llm]));
+    }
+
+    /// HC.1: a pairing through an llm wrapper's producer names
+    /// `exact/overlay_llm`; a human wrapper's keeps `exact`.
+    #[test]
+    fn llm_wrapper_nodes_mark_their_pairings() {
+        let mut g = channel_graph(
+            "queue-llm",
+            &[
+                (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created"),
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created"),
+                (node_kind::QUEUE_PRODUCER, "queue_producer:audit.created"),
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:audit.created"),
+            ],
+        );
+        for n in &mut g.nodes {
+            n.cells.push(position());
+        }
+        let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+        for n in &mut g.nodes {
+            if n.id == ids[0] {
+                n.cells.push(origin("overlay:llm"));
+            } else if n.id == ids[2] {
+                n.cells.push(origin("overlay:human"));
+            }
+        }
+        let mut m = MergedGraph::new(vec![g]);
+        QueueStackResolver.resolve(&mut m);
+        let rules: Vec<(String, Option<String>)> =
+            flows(&m).into_iter().map(|(f, _, _, r)| (f, r)).collect();
+        assert_eq!(
+            rules,
+            [
+                (
+                    "queue_producer:audit.created".to_string(),
+                    Some("exact".to_string())
+                ),
+                (
+                    "queue_producer:orders.created".to_string(),
+                    Some("exact/overlay_llm".to_string())
+                ),
+            ]
         );
     }
 }

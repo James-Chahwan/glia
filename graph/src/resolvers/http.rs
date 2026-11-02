@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::{is_canonical_http_path, split_owner};
+use glia_code_domain::glia_config::Origin;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
@@ -84,7 +85,31 @@ use crate::types::RepoGraph;
 /// `[http] endpoints=` count, like `<unresolved>`. fired_on, when one was:
 /// `[http-external] <n> endpoints left unpaired: every call site names a host outside the build (hosts=<k>)`.
 /// The engine's `tag_synthetic_provenance` then stamps it ORIGIN `external`.
+///
+/// HC.1: a pairing that rests on a model-written overlay stanza (an
+/// `origin = "llm"` stanza, the loader's default) names its tier's rule with
+/// the suffix `/overlay_llm` (`exact/overlay_llm`), which
+/// `glia_engine::why` reads as heuristic: the client end's every call site
+/// rests on such a stanza (every ENDPOINT_HIT carries the `overlay`
+/// key: an llm `[[wrapper]]` minted it, or an overlay `[constants]` pin folded
+/// its path, both written by the engine's endpoint fold), or the ROUTE end
+/// was reached only through a gateway path an llm `[[route_prefix]]` mounted
+/// (a [`RouteMounts`] mount at the llm stanza confidence). A person's stanza
+/// (`origin = "human"`) leaves the rule as it was.
 pub struct HttpStackResolver;
+
+/// HC.1: the EVIDENCE rule suffix of a pairing that rests on a model-written
+/// overlay stanza (`<tier rule>/overlay_llm`). `glia_engine::why` spells the
+/// same literal; `engine/tests/overlay_llm_tier.rs` checks they agree.
+pub(crate) const MODEL_RESTED_SUFFIX: &str = "/overlay_llm";
+
+/// HC.1: the ENDPOINT_HIT key the engine's endpoint fold
+/// (`engine/src/endpoint_fold.rs`) writes on a call site that rests on a
+/// model-written stanza: `"overlay":"const:<KEY>"` for a `[constants]` pin
+/// (every pin is the default `llm` origin) and `"overlay":"wrapper#<n>"` for
+/// a site an llm `[[wrapper]]` stanza minted. A key written by the engine, so
+/// its quotes are never escaped inside a string value.
+const MODEL_HIT_MARK: &str = "\"overlay\":\"";
 
 impl CrossGraphResolver for HttpStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
@@ -105,7 +130,10 @@ impl CrossGraphResolver for HttpStackResolver {
 /// the build's overlays; empty (the default) is the plain resolver.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RouteMounts {
-    /// `NodeId.0` -> `(prefix, confidence)`, first declaration first.
+    /// `NodeId.0` -> `(prefix, confidence)`, first declaration first. The
+    /// confidence is the declaring stanza's `Origin::confidence`, so a mount
+    /// at [`Origin::Llm`]'s (Weak) was declared by model-written stanzas only
+    /// (HC.1: [`RouteMounts::add`] keeps the stronger of two declarations).
     by_route: BTreeMap<u64, Vec<(String, Confidence)>>,
 }
 
@@ -351,6 +379,13 @@ impl HttpStackResolver {
                 // floor it so a consumer can tell a principled pairing from a
                 // guessed one. LC.3c: the edge's evidence names the tier.
                 let confidence = weakest(weakest(ep.confidence, target.confidence), tier.ceiling());
+                // HC.1: a pairing a model-written stanza made possible says so.
+                let model = ep.model || target.model;
+                let rule = if model {
+                    tier.model_rule()
+                } else {
+                    tier.rule()
+                };
                 edges.push(
                     Edge::new(
                         ep.id,
@@ -358,7 +393,7 @@ impl HttpStackResolver {
                         edge_category::HTTP_CALLS,
                         confidence,
                     )
-                    .with_cell(rules.cell(tier.rule())),
+                    .with_cell(rules.cell(rule)),
                 );
             }
         }
@@ -479,6 +514,25 @@ struct EndpointNode<'g> {
     confidence: Confidence,
     /// Every entry's cells, so host narrowing reads every call site.
     cells: Vec<&'g Cell>,
+    /// HC.1: every call site rests on a model-written overlay stanza
+    /// ([`all_sites_model`]).
+    model: bool,
+}
+
+/// HC.1: every ENDPOINT_HIT among `cells` carries [`MODEL_HIT_MARK`], and
+/// there is one: each call site of the endpoint was minted by an llm
+/// `[[wrapper]]` or folded through an overlay `[constants]` pin. One site an
+/// extractor read on its own (or a person's stanza minted) vouches for the
+/// path, and the pairing is the resolver's as before.
+fn all_sites_model(cells: &[&Cell]) -> bool {
+    let mut seen = false;
+    for c in cells.iter().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
+        match &c.payload {
+            CellPayload::Json(json) if json.contains(MODEL_HIT_MARK) => seen = true,
+            _ => return false,
+        }
+    }
+    seen
 }
 
 /// FH.17: the key the engine's inferred HTTP wrapper stage
@@ -534,8 +588,12 @@ fn collect_endpoints(graphs: &[RepoGraph]) -> Vec<EndpointNode<'_>> {
                 qname,
                 confidence: n.confidence,
                 cells: n.cells.iter().collect(),
+                model: false,
             });
         }
+    }
+    for e in &mut out {
+        e.model = all_sites_model(&e.cells);
     }
     out
 }
@@ -612,6 +670,19 @@ impl MatchTier {
             MatchTier::RoutePrefix => "route_prefix",
             MatchTier::BaseFold => "base_fold",
             MatchTier::Suffix => "suffix",
+        }
+    }
+
+    /// HC.1: [`MatchTier::rule`] with [`MODEL_RESTED_SUFFIX`], for a pairing
+    /// that rests on a model-written overlay stanza.
+    fn model_rule(self) -> &'static str {
+        match self {
+            MatchTier::Exact => "exact/overlay_llm",
+            MatchTier::EndpointPrefix => "endpoint_prefix/overlay_llm",
+            MatchTier::Any => "any/overlay_llm",
+            MatchTier::RoutePrefix => "route_prefix/overlay_llm",
+            MatchTier::BaseFold => "base_fold/overlay_llm",
+            MatchTier::Suffix => "suffix/overlay_llm",
         }
     }
 
@@ -985,6 +1056,10 @@ struct RouteTarget {
     owner: Option<u32>,
     /// LF.2d: registered under a [`RouteMounts`] gateway path, not its own.
     mounted: bool,
+    /// HC.1: registered under a gateway path only model-written
+    /// `[[route_prefix]]` stanzas declared (a mount at [`Origin::Llm`]'s
+    /// confidence).
+    model: bool,
 }
 
 /// Host narrowing (A11.4 / LB.4b) reads a target's repo and owner; the
@@ -1086,6 +1161,7 @@ fn build_route_index(
                 repo: g.repo,
                 owner: owner.and_then(|o| owners.intern(o)),
                 mounted: false,
+                model: false,
             };
             // Every entry is indexed (another graph's entry can stack a verb
             // the first did not), but counted once.
@@ -1101,6 +1177,7 @@ fn build_route_index(
                 let mounted = RouteTarget {
                     confidence: weakest(n.confidence, *conf),
                     mounted: true,
+                    model: *conf == Origin::Llm.confidence(),
                     ..target
                 };
                 let keys = index_mounted(&mut index, qname, &n.cells, mounted, prefix);
@@ -2719,6 +2796,7 @@ mod tests {
                 repo: RepoId(repo),
                 owner,
                 mounted: false,
+                model: false,
             },
             MatchTier::Exact,
         )
@@ -3324,7 +3402,8 @@ mod tests {
                     "endpoint:GET:/orders-svc/users".to_string(),
                     o[0],
                     Confidence::Weak,
-                    exact.clone()
+                    // HC.1: only the llm (Weak) mount reaches it.
+                    Some("exact/overlay_llm".to_string())
                 ),
                 (
                     "endpoint:GET:/users".to_string(),
@@ -3339,8 +3418,8 @@ mod tests {
                     exact
                 ),
             ],
-            "the mounted keys pair the orders routes only, at the mount's confidence; \
-             the routes' own keys are untouched"
+            "the mounted keys pair the orders routes only, at the mount's confidence \
+             (an llm-only mount marks its rule); the routes' own keys are untouched"
         );
 
         // The mounted index: keys land in the strong index only, counted.
@@ -3370,6 +3449,81 @@ mod tests {
                 .lookup("GET", "/orders-svc/users")
                 .is_empty()
         );
+    }
+
+    /// HC.1: every tier's model rule is its rule plus the shared suffix, and
+    /// the llm / human stanza confidences differ, so a Weak mount is an llm
+    /// stanza's alone.
+    #[test]
+    fn model_rules_are_the_tier_rules_with_the_suffix() {
+        for (i, tier) in [
+            MatchTier::Exact,
+            MatchTier::EndpointPrefix,
+            MatchTier::Any,
+            MatchTier::RoutePrefix,
+            MatchTier::BaseFold,
+            MatchTier::Suffix,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(tier.rule(), MatchTier::RULES[i]);
+            assert_eq!(
+                tier.model_rule(),
+                format!("{}{MODEL_RESTED_SUFFIX}", tier.rule())
+            );
+        }
+        assert_ne!(Origin::Llm.confidence(), Origin::Human.confidence());
+        assert_eq!(Origin::Llm.confidence(), Confidence::Weak);
+    }
+
+    /// HC.1: an endpoint whose every call site carries the overlay mark (an
+    /// llm wrapper's site, a pinned fold) pairs with the model rule; one
+    /// unmarked site (an extractor read the path itself) keeps the plain rule.
+    #[test]
+    fn model_marked_endpoints_name_the_model_rule() {
+        let pinned = r#"{"path":"/users","overlay":"const:GATEWAY"}"#;
+        let wrapped = r#"{"path":"/orders","overlay":"wrapper#1"}"#;
+        let (web, _) = repo_graph(
+            RepoId(601),
+            vec![
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/users",
+                    vec![hit(pinned)],
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/orders",
+                    vec![hit(wrapped), hit(wrapped)],
+                ),
+                (
+                    node_kind::ENDPOINT,
+                    "endpoint:GET:/items",
+                    vec![hit(r#"{"overlay":"const:GATEWAY"}"#), hit("{}")],
+                ),
+            ],
+        );
+        let (api, r) = repo_graph(
+            RepoId(602),
+            vec![
+                (node_kind::ROUTE, "GET /users", vec![]),
+                (node_kind::ROUTE, "GET /orders", vec![]),
+                (node_kind::ROUTE, "GET /items", vec![]),
+            ],
+        );
+        let mut merged = MergedGraph::new(vec![web, api]);
+        HttpStackResolver.resolve(&mut merged);
+        let rule_to = |to: NodeId| {
+            merged
+                .cross_edges
+                .iter()
+                .find(|e| e.category == edge_category::HTTP_CALLS && e.to == to)
+                .and_then(|e| glia_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule))
+        };
+        assert_eq!(rule_to(r[0]).as_deref(), Some("exact/overlay_llm"));
+        assert_eq!(rule_to(r[1]).as_deref(), Some("exact/overlay_llm"));
+        assert_eq!(rule_to(r[2]).as_deref(), Some("exact"));
     }
 
     // ---- CB.23 mount-segment fold ----------------------------------------
