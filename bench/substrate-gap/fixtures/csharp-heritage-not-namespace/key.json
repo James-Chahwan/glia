@@ -1,0 +1,36 @@
+{
+  "framework": "csharp-heritage-not-namespace",
+  "language": "csharp",
+  "dirs": ["."],
+  "note": "HQ.1. A heritage base binds a type, never a namespace. TeamDomainObject.cs declares the file-scoped namespace Shop.Teams.DomainObject, whose PACKAGE sits in the file's symbol table under its last segment `DomainObject`, so `TeamDomainObject : DomainObject<Team>` bound that PACKAGE (rule module_symbol, fact) instead of the generic base class Shop.Core.Commands.DomainObject<T>; `Initial : Migration` (EF Core's base, outside the repo) bound the one PACKAGE named Migration, Shop.Contents.Migration (rule global_unique, heuristic). Baseline HEAD 1a33f0e8 (debug CLI): both forbids fire and the exact expect misses (`implementors TeamDomainObject --up` -> PACKAGE Shop::Teams::DomainObject; `implementors Initial --up` -> PACKAGE Shop::Contents::Migration).",
+  "expect_edges": [
+    {
+      "from": "Shop::Teams::DomainObject::TeamDomainObject",
+      "to": "Shop::Core::Commands::DomainObject",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "the generic base class, the one non-namespace node named DomainObject (rule global_unique); exact, since the lenient matcher would also accept the PACKAGE of that name"
+    },
+    {
+      "from": "Shop::Teams::DomainObject::Team",
+      "to": "Shop::Teams::DomainObject::TeamEntity",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "positive control: a base the file itself declares still binds through the file's symbols (rule module_symbol)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Shop::Teams::DomainObject::TeamDomainObject",
+      "to": "Shop::Teams::DomainObject",
+      "category": "INHERITS_FROM",
+      "note": "the class's own namespace PACKAGE is no supertype"
+    },
+    {
+      "from": "Shop::Data::Migrations::Initial",
+      "to": "Shop::Contents::Migration",
+      "category": "INHERITS_FROM",
+      "note": "EF Core's Migration base is not the Shop.Contents.Migration namespace; with no in-repo type named Migration the base stays unresolved"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "framework": "php-heritage-namespace-named",
+  "language": "php",
+  "dirs": ["."],
+  "note": "HQ.1. Slim's shape: `namespace App\\Domain\\DomainException; class DomainRecordNotFoundException extends DomainException` names the in-repo abstract class DomainException of the same namespace. DH.14's parser stopgap dropped every Bare base named like the last segment of a namespace its file declares (the graph would have bound the namespace PACKAGE); the graph now refuses a namespace target and binds the type instead, so the stopgap is gone. Baseline HEAD 1a33f0e8 (debug CLI): `[php-heritage] namespace-named bases skipped=1 path=src/Domain/DomainException/DomainRecordNotFoundException.php`, `implementors DomainRecordNotFoundException --up` -> no supertypes (the expect misses).",
+  "expect_edges": [
+    {
+      "from": "src::Domain::DomainException::DomainRecordNotFoundException",
+      "to": "src::Domain::DomainException::DomainException",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "the CLASS (its file MODULE shares the qname; a type never binds a MODULE either)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::Domain::DomainException::DomainRecordNotFoundException",
+      "to": "App::Domain::DomainException",
+      "category": "INHERITS_FROM",
+      "note": "the namespace PACKAGE is no supertype"
+    }
+  ]
+}

@@ -220,6 +220,10 @@ pub(crate) struct GlobalNames<'g> {
     /// registrations disagree or the value names no class; looked up, never
     /// iterated.
     containers: OnceLock<HashMap<&'g str, Option<&'g str>>>,
+    /// HQ.1: [`unique_names`] over every node that is no namespace or file
+    /// ([`is_namespace_kind`]), for a Bare heritage base's repo-unique
+    /// fallback; looked up, never iterated.
+    heritage_bases: OnceLock<HashMap<&'g str, Option<NodeId>>>,
     /// GD.18: every PACKAGE by its simple name, for a Ruby mixin
     /// ([`NavFact::Mixin`]); looked up, never iterated.
     packages_by_name: OnceLock<HashMap<&'g str, Vec<NodeId>>>,
@@ -239,6 +243,7 @@ impl<'g> GlobalNames<'g> {
             g,
             functions: OnceLock::new(),
             types: OnceLock::new(),
+            heritage_bases: OnceLock::new(),
             types_by_name: OnceLock::new(),
             php: OnceLock::new(),
             containers: OnceLock::new(),
@@ -265,6 +270,20 @@ impl<'g> GlobalNames<'g> {
         self.module_tails
             .get_or_init(|| self.timed(|| module_tails(self.g)))
             .get(tail)
+            .copied()
+            .flatten()
+    }
+
+    /// HQ.1: the repo-unique node named `name` that is no PACKAGE or MODULE
+    /// ([`is_namespace_kind`]): a Bare heritage base's name-only fallback, so
+    /// a namespace of the base's name neither binds nor makes the type of
+    /// that name ambiguous.
+    fn heritage_base(&self, name: &str) -> Option<NodeId> {
+        self.heritage_bases
+            .get_or_init(|| {
+                self.timed(|| unique_names(self.g, |id| !is_namespace_kind(self.g, id)))
+            })
+            .get(name)
             .copied()
             .flatten()
     }
@@ -430,6 +449,17 @@ pub(crate) fn unique_global_types(g: &RepoGraph) -> HashMap<String, Option<NodeI
         .into_iter()
         .map(|(name, hit)| (name.to_string(), hit))
         .collect()
+}
+
+/// HQ.1: true for a PACKAGE (a C# / PHP / C++ namespace, a Solidity library,
+/// a Ruby / Elixir module, a Rust mod) or a MODULE (a file): the nodes a
+/// heritage base never binds. A supertype is a type (A6.3 already looks
+/// through a MODULE binding, [`heritage_through_module`]).
+fn is_namespace_kind(g: &RepoGraph, id: &NodeId) -> bool {
+    matches!(
+        g.nav.kind_by_id.get(id).copied(),
+        Some(k) if k == node_kind::PACKAGE || k == node_kind::MODULE
+    )
 }
 
 /// True for a STRUCT / CLASS / INTERFACE / ENUM: the kinds
@@ -1733,6 +1763,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         qualified,
         self_refused,
         type_refs,
+        namespace_refused,
     } = counts;
     // GD.27 fired_on, once per TS-family graph build that read an imported
     // type name:
@@ -1757,6 +1788,12 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     }
     if self_refused > 0 {
         eprintln!("[heritage] self-loops refused={self_refused}");
+    }
+    // HQ.1 fired_on, once per graph build that refused one:
+    //   `[heritage] namespace targets refused=N (module_symbol=M
+    //   global_unique=G other=O) rebound=R`
+    if let Some(line) = namespace_refused.marker() {
+        eprintln!("{line}");
     }
     // GD.18 fired_on, once per graph build that bound one:
     //   `[ruby-di] injects bound container_key=<n>`
@@ -1825,6 +1862,46 @@ struct RefCounts {
     self_refused: usize,
     /// GD.27: the imported type references, by outcome.
     type_refs: TypeRefCounts,
+    /// HQ.1: heritage refs whose lookup answered a namespace (PACKAGE) or a
+    /// file (MODULE), refused there.
+    namespace_refused: NamespaceRefusals,
+}
+
+/// HQ.1: the heritage refs [`decide_ref`] refused at a namespace target, by
+/// the lookup that answered it (the `[heritage] namespace targets refused=`
+/// marker). Each ref counts once, at its first refusal.
+#[derive(Default, Clone, Copy, Debug)]
+struct NamespaceRefusals {
+    /// The ref's own module's symbol table held a PACKAGE / MODULE under the
+    /// base's name (a C# file-scoped namespace's last segment).
+    module_symbol: usize,
+    /// The repo-unique name fallback over every kind answered a PACKAGE /
+    /// MODULE.
+    global_unique: usize,
+    /// An import binding or a qualified / attribute lookup answered one.
+    other: usize,
+    /// Refused refs the non-namespace lookup then bound to a type.
+    rebound: usize,
+}
+
+impl NamespaceRefusals {
+    fn merge(&mut self, other: NamespaceRefusals) {
+        self.module_symbol += other.module_symbol;
+        self.global_unique += other.global_unique;
+        self.other += other.other;
+        self.rebound += other.rebound;
+    }
+
+    /// The fired_on line, `None` when nothing was refused.
+    fn marker(&self) -> Option<String> {
+        let n = self.module_symbol + self.global_unique + self.other;
+        (n > 0).then(|| {
+            format!(
+                "[heritage] namespace targets refused={n} (module_symbol={} global_unique={} other={}) rebound={}",
+                self.module_symbol, self.global_unique, self.other, self.rebound
+            )
+        })
+    }
 }
 
 /// GD.27: what [`decide_ref`] made of the TS-family imported type references
@@ -1861,6 +1938,7 @@ impl RefCounts {
         self.type_refs.bound += other.type_refs.bound;
         self.type_refs.unbound += other.type_refs.unbound;
         self.type_refs.non_type += other.type_refs.non_type;
+        self.namespace_refused.merge(other.namespace_refused);
     }
 }
 
@@ -1893,51 +1971,85 @@ fn decide_ref(
                 heritage_through_module(g, id, name).map(|to| (to, Branch::ImportBinding))
             }
             Some(id) => Some((id, Branch::ImportBinding)),
-            None => g
-                .symbols
-                .module_symbols
-                .get(&r.from_module)
-                .and_then(|s| s.get(name).copied())
-                .map(|to| (to, Branch::ModuleSymbol))
-                // Global fallback for HANDLED_BY refs: a route registers
-                // `r.GET("/p", handler)` where `handler` is a top-level fn
-                // in the same package — but `bindings` doesn't see local
-                // package symbols. Scan all module_symbols for a unique
-                // match. Same-name collisions across the repo skip
-                // (better unresolved than wrong).
-                .or_else(|| {
-                    // Global-by-name fallback. HANDLED_BY: route handler is a
-                    // same-package fn (import binding can't see it). INJECTS
-                    // (Pattern E): the injected service TYPE is resolved by its
-                    // unique class name across the repo — DI param types are
-                    // often unresolvable via imports (TS/dotted imports are a
-                    // separate gap), and `module_symbols` registers top-level
-                    // classes by name, so a uniquely-named service binds here.
-                    // DT.5k: an inline `inject(T)` ref (from a function,
-                    // method or field of a TS-family file; A7.1's and
-                    // constructor DI's are the CLASS's) names a named
-                    // import, and one the graph left unbound is
-                    // third-party: no repo-unique name stands in for it.
-                    if r.category == edge_category::INJECTS
-                        && files.is_ts_family(r)
-                        && g.nav.kind_by_id.get(&r.from) != Some(&node_kind::CLASS)
-                    {
-                        return None;
-                    }
-                    if r.category == edge_category::HANDLED_BY
-                        || r.category == edge_category::INJECTS
-                        || r.category == edge_category::INHERITS_FROM
-                        || r.category == edge_category::IMPLEMENTS
-                    {
-                        // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
-                        // type by its bare name; resolve to the uniquely-named class/
-                        // interface across the repo (module_symbols indexes them,
-                        // incl. namespace/PACKAGE members). Ambiguity → None.
-                        names.function(name).map(|to| (to, Branch::GlobalUnique))
-                    } else {
-                        None
-                    }
-                }),
+            None => {
+                // HQ.1: a supertype is a type, never a namespace or a file.
+                // The module's own table holds its namespace PACKAGE under
+                // the namespace's last segment (C#'s file-scoped
+                // `namespace Shop.Teams.DomainObject;`), so a heritage hit
+                // there is refused and looked up again among non-namespace
+                // nodes, exactly as a miss is.
+                let heritage = is_heritage(r.category);
+                let mut refused = false;
+                g.symbols
+                    .module_symbols
+                    .get(&r.from_module)
+                    .and_then(|s| s.get(name).copied())
+                    .filter(|to| {
+                        let namespace = heritage && is_namespace_kind(g, to);
+                        if namespace {
+                            counts.namespace_refused.module_symbol += 1;
+                            refused = true;
+                        }
+                        !namespace
+                    })
+                    .map(|to| (to, Branch::ModuleSymbol))
+                    // Global fallback for HANDLED_BY refs: a route registers
+                    // `r.GET("/p", handler)` where `handler` is a top-level fn
+                    // in the same package — but `bindings` doesn't see local
+                    // package symbols. Scan all module_symbols for a unique
+                    // match. Same-name collisions across the repo skip
+                    // (better unresolved than wrong).
+                    .or_else(|| {
+                        // Global-by-name fallback. HANDLED_BY: route handler is a
+                        // same-package fn (import binding can't see it). INJECTS
+                        // (Pattern E): the injected service TYPE is resolved by its
+                        // unique class name across the repo — DI param types are
+                        // often unresolvable via imports (TS/dotted imports are a
+                        // separate gap), and `module_symbols` registers top-level
+                        // classes by name, so a uniquely-named service binds here.
+                        // DT.5k: an inline `inject(T)` ref (from a function,
+                        // method or field of a TS-family file; A7.1's and
+                        // constructor DI's are the CLASS's) names a named
+                        // import, and one the graph left unbound is
+                        // third-party: no repo-unique name stands in for it.
+                        if r.category == edge_category::INJECTS
+                            && files.is_ts_family(r)
+                            && g.nav.kind_by_id.get(&r.from) != Some(&node_kind::CLASS)
+                        {
+                            return None;
+                        }
+                        if heritage {
+                            // Heritage (INHERITS_FROM/IMPLEMENTS) names a type by
+                            // its bare name: the uniquely-named node across the
+                            // repo that is no namespace or file (HQ.1). Ambiguity
+                            // → None. A name the every-kind index answers with a
+                            // PACKAGE / MODULE is counted as refused there.
+                            if !refused
+                                && names
+                                    .function(name)
+                                    .is_some_and(|id| is_namespace_kind(g, &id))
+                            {
+                                counts.namespace_refused.global_unique += 1;
+                                refused = true;
+                            }
+                            let hit = names.heritage_base(name);
+                            if refused && hit.is_some() {
+                                counts.namespace_refused.rebound += 1;
+                            }
+                            hit.map(|to| (to, Branch::GlobalUnique))
+                        } else if r.category == edge_category::HANDLED_BY
+                            || r.category == edge_category::INJECTS
+                        {
+                            // DI (INJECTS) names a type by its bare name; resolve
+                            // to the uniquely-named class / interface across the
+                            // repo (module_symbols indexes them, incl.
+                            // namespace / PACKAGE members). Ambiguity → None.
+                            names.function(name).map(|to| (to, Branch::GlobalUnique))
+                        } else {
+                            None
+                        }
+                    })
+            }
         },
         // GD.27: a TS-family import binding read in a type position
         // (`getUser(): Promise<UserDto>` after `import { UserDto } from
@@ -2107,6 +2219,16 @@ fn decide_ref(
         r.category != edge_category::EVENT_FLOWS
             || g.nav.kind_by_id.get(to) == Some(&node_kind::EVENT_EMITTER)
     });
+    // HQ.1's belt: no heritage lookup (an import binding, a qualified or
+    // attribute base) binds a namespace or a file; the Bare arm above already
+    // refused its own.
+    let resolved = match resolved {
+        Some((to, _)) if is_heritage(r.category) && is_namespace_kind(g, &to) => {
+            counts.namespace_refused.other += 1;
+            None
+        }
+        other => other,
+    };
     // GD.7: a type never extends or implements itself; a lookup that answers
     // the declaring type (a same-named base read in its own scope) binds
     // nothing.
@@ -5917,6 +6039,214 @@ mod tests {
             ]
         );
         assert!(g.unresolved_refs.is_empty());
+    }
+
+    // ---- HQ.1: a heritage base binds a type, never a namespace ---------------
+
+    /// The C# shape HQ.1 was found on (squidex): three files, each a MODULE
+    /// holding its file-scoped namespace PACKAGE and its types side by side
+    /// (the C# parser's nav). `teams` declares `namespace Shop.Teams.DomainObject`
+    /// with `class TeamEntity`, `class Team : TeamEntity` and `class
+    /// TeamDomainObject : DomainObject<Team>`; `core` declares the generic base
+    /// class `Shop.Core.Commands.DomainObject<T>`; `contents` declares
+    /// `namespace Shop.Contents.Migration`; `data` declares `class Initial :
+    /// Migration` (EF Core's base, outside the repo). Returns the files, the
+    /// ids (team_domain_object, team, team_entity, base_class, initial,
+    /// teams_ns, migration_ns) and the three refs.
+    fn namespace_named_heritage() -> (Vec<FileParse>, [NodeId; 7], Vec<UnresolvedRef>) {
+        let inherits = edge_category::INHERITS_FROM;
+        let mut core = Shape::new();
+        let mc = core.add(node_kind::MODULE, "Core::Commands::DomainObject", None);
+        core.add(node_kind::PACKAGE, "Shop::Core::Commands", Some(mc));
+        let base_class = core.add(
+            node_kind::CLASS,
+            "Shop::Core::Commands::DomainObject",
+            Some(mc),
+        );
+        let mut core = core.file(vec![], vec![], vec![]);
+        place(&mut core, mc, "Core/Commands/DomainObject.cs");
+
+        let mut teams = Shape::new();
+        let mt = teams.add(
+            node_kind::MODULE,
+            "Teams::DomainObject::TeamDomainObject",
+            None,
+        );
+        let teams_ns = teams.add(node_kind::PACKAGE, "Shop::Teams::DomainObject", Some(mt));
+        let team_entity = teams.add(
+            node_kind::CLASS,
+            "Shop::Teams::DomainObject::TeamEntity",
+            Some(mt),
+        );
+        let team = teams.add(
+            node_kind::CLASS,
+            "Shop::Teams::DomainObject::Team",
+            Some(mt),
+        );
+        let tdo = teams.add(
+            node_kind::CLASS,
+            "Shop::Teams::DomainObject::TeamDomainObject",
+            Some(mt),
+        );
+        let teams_refs = vec![
+            heritage_ref(team, mt, "TeamEntity", inherits),
+            heritage_ref(tdo, mt, "DomainObject", inherits),
+        ];
+        let mut teams = teams.file(vec![], vec![], teams_refs.clone());
+        place(&mut teams, mt, "Teams/DomainObject/TeamDomainObject.cs");
+
+        let mut contents = Shape::new();
+        let mm = contents.add(
+            node_kind::MODULE,
+            "Contents::Migration::MigrateContentsJob",
+            None,
+        );
+        let migration_ns = contents.add(node_kind::PACKAGE, "Shop::Contents::Migration", Some(mm));
+        contents.add(
+            node_kind::CLASS,
+            "Shop::Contents::Migration::MigrateContentsJob",
+            Some(mm),
+        );
+        let mut contents = contents.file(vec![], vec![], vec![]);
+        place(
+            &mut contents,
+            mm,
+            "Contents/Migration/MigrateContentsJob.cs",
+        );
+
+        let mut data = Shape::new();
+        let md = data.add(node_kind::MODULE, "Data::Migrations::Initial", None);
+        data.add(node_kind::PACKAGE, "Shop::Data::Migrations", Some(md));
+        let initial = data.add(
+            node_kind::CLASS,
+            "Shop::Data::Migrations::Initial",
+            Some(md),
+        );
+        let data_ref = heritage_ref(initial, md, "Migration", inherits);
+        let mut data = data.file(vec![], vec![], vec![data_ref.clone()]);
+        place(&mut data, md, "Data/Migrations/Initial.cs");
+
+        let mut refs = teams_refs;
+        refs.push(data_ref);
+        (
+            vec![core, teams, contents, data],
+            [
+                tdo,
+                team,
+                team_entity,
+                base_class,
+                initial,
+                teams_ns,
+                migration_ns,
+            ],
+            refs,
+        )
+    }
+
+    /// HQ.1: `TeamDomainObject : DomainObject<Team>` refuses its own
+    /// namespace PACKAGE (the file's symbol table holds it under
+    /// `DomainObject`) and binds the repo's one non-namespace `DomainObject`,
+    /// the base class (rule global_unique); `Initial : Migration`, which only a
+    /// PACKAGE carries, stays unresolved; `Team : TeamEntity`, a CLASS of the
+    /// file, still binds module_symbol.
+    #[test]
+    fn a_heritage_base_binds_a_type_never_a_namespace() {
+        let (files, ids, _) = namespace_named_heritage();
+        let [
+            tdo,
+            team,
+            team_entity,
+            base_class,
+            initial,
+            teams_ns,
+            migration_ns,
+        ] = ids;
+        let g = build_dotted(repo(), files).unwrap();
+        let q = |id: NodeId| g.nav.qname_by_id.get(&id).cloned().unwrap_or_default();
+        assert_eq!(
+            heritage_rules(&g),
+            vec![
+                (q(team), q(team_entity), "module_symbol".to_string()),
+                (q(tdo), q(base_class), "global_unique".to_string()),
+            ]
+        );
+        assert!(
+            !g.edges
+                .iter()
+                .any(|e| is_heritage(e.category) && (e.to == teams_ns || e.to == migration_ns))
+        );
+        let unresolved: Vec<NodeId> = g.unresolved_refs.iter().map(|r| r.from).collect();
+        assert_eq!(unresolved, vec![initial]);
+    }
+
+    /// HQ.1's counters, ref by ref: the own-namespace hit is a module_symbol
+    /// refusal that rebinds, the PACKAGE-only `Migration` a global_unique
+    /// refusal that binds nothing, the in-file base neither.
+    #[test]
+    fn namespace_refusals_are_counted_per_site() {
+        let (files, ids, refs) = namespace_named_heritage();
+        let [tdo, _, _, base_class, ..] = ids;
+        let files: Vec<FileParse> = files
+            .into_iter()
+            .map(|mut f| {
+                f.refs.clear();
+                f
+            })
+            .collect();
+        let g = build_dotted(repo(), files).unwrap();
+        let site_files = SiteFiles::of(&g);
+        let names = GlobalNames::new(&g);
+        let mut counts = RefCounts::default();
+        let decided: Vec<Option<NodeId>> = refs
+            .iter()
+            .map(|r| decide_ref(&g, r, &site_files, &names, &mut counts).map(|(to, _)| to))
+            .collect();
+        assert!(decided[0].is_some());
+        assert_eq!(decided[1], Some(base_class));
+        assert_eq!(decided[2], None);
+        assert_eq!(refs[1].from, tdo);
+        let n = counts.namespace_refused;
+        assert_eq!(
+            (n.module_symbol, n.global_unique, n.other, n.rebound),
+            (1, 1, 0, 1)
+        );
+        assert_eq!(
+            n.marker().as_deref(),
+            Some(
+                "[heritage] namespace targets refused=2 (module_symbol=1 global_unique=1 other=0) rebound=1"
+            )
+        );
+        assert_eq!(NamespaceRefusals::default().marker(), None);
+    }
+
+    /// HQ.1's belt: a heritage ref whose import binding names a PACKAGE (an
+    /// imported namespace, not a type) binds nothing, counted `other`.
+    #[test]
+    fn an_import_bound_namespace_is_no_supertype() {
+        let mut ns = Shape::new();
+        let mn = ns.add(node_kind::MODULE, "lib::ns", None);
+        let pkg = ns.add(node_kind::PACKAGE, "lib::ns::Base", Some(mn));
+        let ns = ns.file(vec![], vec![], vec![]);
+        let mut user = Shape::new();
+        let mu = user.add(node_kind::MODULE, "app::user", None);
+        let x = user.add(node_kind::CLASS, "app::user::X", Some(mu));
+        let r = heritage_ref(x, mu, "Base", edge_category::INHERITS_FROM);
+        let user = user.file(vec![], vec![], vec![]);
+        let mut g = build_dotted(repo(), vec![ns, user]).unwrap();
+        g.symbols
+            .module_import_bindings
+            .entry(mu)
+            .or_default()
+            .insert("Base".to_string(), pkg);
+        let site_files = SiteFiles::of(&g);
+        let names = GlobalNames::new(&g);
+        let mut counts = RefCounts::default();
+        assert!(decide_ref(&g, &r, &site_files, &names, &mut counts).is_none());
+        let n = counts.namespace_refused;
+        assert_eq!(
+            (n.module_symbol, n.global_unique, n.other, n.rebound),
+            (0, 0, 1, 0)
+        );
     }
 
     // ---- GD.7: qualified heritage bases -------------------------------------

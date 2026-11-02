@@ -46,7 +46,6 @@ pub fn parse_file(
         eloquent: Eloquent::prescan(root, src),
         module_qname: module_qname.to_string(),
         own_types: declared_types(root, src),
-        namespace_tails: namespace_tails(root, src),
         class_uses: class_uses(root, src),
         ..Acc::default()
     };
@@ -103,12 +102,6 @@ pub fn parse_file(
 
     if let Some(line) = HeritageCounts::of(&acc.refs, &acc.nav).marker(file_rel_path) {
         eprintln!("{line}");
-    }
-    if acc.namespace_named_bases > 0 {
-        eprintln!(
-            "[php-heritage] namespace-named bases skipped={} path={file_rel_path}",
-            acc.namespace_named_bases
-        );
     }
 
     scan_laravel_routes(source, file_rel_path, module_id, repo, &mut acc);
@@ -306,16 +299,10 @@ struct Acc {
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Eloquent model / query-site state for this file (`[orm-eloquent]`).
     eloquent: Eloquent,
-    /// DH.14: the last `\` segment of every namespace this file declares
-    /// ([`namespace_tails`]), read up front for [`heritage_refs`]' stopgap.
-    namespace_tails: Vec<String>,
     /// GD.7: every class `use` of the file as (local name, full `\` path),
     /// read up front ([`class_uses`]) so [`heritage_refs`] resolves a short or
     /// relative base to its full name.
     class_uses: Vec<(String, String)>,
-    /// DH.14: heritage names [`heritage_refs`] skipped because they equal one
-    /// of `namespace_tails` — the `[php-heritage] namespace-named` count.
-    namespace_named_bases: usize,
 }
 
 /// `parent_qname` scopes functions; `type_scope` scopes classes / interfaces /
@@ -648,19 +635,13 @@ fn heritage_clause<'a>(decl: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
 /// braced namespace's PACKAGE). Each ref's line is its name's own row (LC.3b),
 /// the clause's row unless the list wraps.
 ///
-/// STOPGAP (DH.14): a Bare name equal to the last segment of a namespace this
-/// file declares is skipped too (`namespace App\Command; class SyncCommand
-/// extends Command`, Laravel's `namespace App\Http\Middleware; class
-/// TrimStrings extends Middleware`). `resolve_refs` binds a Bare heritage name
-/// through the file MODULE's `module_symbols`, then `unique_global_function`,
-/// and both index the file's namespace PACKAGE by that segment, so the class
-/// would INHERITS_FROM its own namespace (C# `namespace App.Command { class X
-/// : Command }` binds so at HEAD). The cost: an in-repo base of that same
-/// short name is not linked either (Slim's `DomainRecordNotFoundException
-/// extends DomainException` inside `namespace App\Domain\DomainException`).
-/// Removal: once `resolve_refs` restricts a Bare heritage target to a type
-/// kind (CLASS / INTERFACE / ENUM / STRUCT / TRAIT), delete this check,
-/// `Acc::namespace_tails`, `Acc::namespace_named_bases` and its marker line.
+/// A Bare name equal to the last segment of a namespace this file declares
+/// (`namespace App\Command; class SyncCommand extends Command`) stays a Bare
+/// ref: the graph never binds a heritage base to a namespace PACKAGE or a
+/// file MODULE (HQ.1, which retired DH.14's skip here), so it binds the
+/// in-repo type of that name (Slim's `DomainRecordNotFoundException extends
+/// DomainException` inside `namespace App\Domain\DomainException`) or
+/// nothing.
 fn heritage_refs(
     clause: TsNode,
     src: &[u8],
@@ -697,14 +678,6 @@ fn heritage_refs(
             }
         } else {
             if last.eq_ignore_ascii_case(own) {
-                continue;
-            }
-            if acc
-                .namespace_tails
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(last))
-            {
-                acc.namespace_named_bases += 1;
                 continue;
             }
             CallQualifier::Bare(last.to_string())
@@ -786,21 +759,6 @@ fn class_uses(root: TsNode, src: &[u8]) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// DH.14: the last `\` segment of every namespace a file declares (statement
-/// and braced form), for [`heritage_refs`]' stopgap.
-fn namespace_tails(root: TsNode, src: &[u8]) -> Vec<String> {
-    let mut cursor = root.walk();
-    root.named_children(&mut cursor)
-        .filter(|c| c.kind() == "namespace_definition")
-        .filter_map(|c| c.child_by_field_name("name"))
-        .filter_map(|n| {
-            let text = text_of(n, src).trim();
-            let last = text.rsplit('\\').next().unwrap_or(text).trim();
-            (!last.is_empty()).then(|| last.to_string())
-        })
-        .collect()
 }
 
 /// DH.14: the heritage refs one PHP file emitted, by clause: a class's
@@ -5070,12 +5028,12 @@ class AuditService
     }
 
     #[test]
-    fn a_base_named_like_a_namespace_of_the_file_is_skipped() {
-        // DH.14's stopgap, for an unqualified base no `use` imports: the
-        // graph's Bare heritage lookup would bind it to the file's own
-        // namespace PACKAGE (`App::Command`); the other clause names are
-        // unaffected. An imported base of that name keeps its full name
-        // (GD.7), so it no longer needs the stopgap.
+    fn a_base_named_like_a_namespace_of_the_file_is_a_bare_ref() {
+        // HQ.1 retired DH.14's stopgap: an unqualified base no `use` imports
+        // is a Bare ref even when it equals the last segment of the file's
+        // namespace (`App\Command`); the graph refuses a namespace target and
+        // binds a type of that name, or nothing. An imported base of that name
+        // keeps its full name (GD.7).
         let bare = "<?php\nnamespace App\\Command;\n\nclass SyncCommand extends Command implements Audited {}\n";
         let fp = parse_file(
             bare,
@@ -5086,7 +5044,10 @@ class AuditService
         .unwrap();
         assert_eq!(
             heritage_of(&fp),
-            [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 3)]
+            [
+                h("src::Command::SyncCommand", INHERITS, "Command", 3),
+                h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 3)
+            ]
         );
         let laravel = "<?php\n\nnamespace App\\Http\\Middleware;\n\nuse Illuminate\\Foundation\\Http\\Middleware\\TrimStrings as Middleware;\n\nclass TrimStrings extends Middleware\n{\n}\n";
         let fp = parse_file(
@@ -5105,18 +5066,6 @@ class AuditService
                 6
             )]
         );
-        assert_eq!(
-            namespace_tails(tree_root(laravel).root_node(), laravel.as_bytes()),
-            ["Middleware"]
-        );
-    }
-
-    /// A tree-sitter-php parse of `source`, for the helpers that read a root.
-    fn tree_root(source: &str) -> tree_sitter::Tree {
-        let mut parser = Parser::new();
-        let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
-        parser.set_language(&lang).unwrap();
-        parser.parse(source, None).unwrap()
     }
 
     #[test]
