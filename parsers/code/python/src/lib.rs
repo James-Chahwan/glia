@@ -4946,18 +4946,19 @@ fn read_py_host_function(
                 child_text(callee, "attribute", src),
             )
             && object.kind() == "identifier"
-            && let Some((host, reg)) = hosts::decorator_registration_for("python", method)
-            && acc.py_hosts.holds(host)
+            && let Some((host, reg)) =
+                hosts::decorator_registration_for("python", method, |h| acc.py_hosts.holds(h))
             && let hosts::Shape::Decorator {
                 receivers,
                 name_arg,
+                literal_name,
                 ..
             } = reg.shape
             && acc.py_hosts.admits(host, receivers, text(object, src))
         {
             acc.py_hosts.tally.hit(host.name);
             let positional = args.map(positional_args).unwrap_or_default();
-            let keyword_name = args.and_then(|a| {
+            let keyword_name = args.filter(|_| name_arg.is_some()).and_then(|a| {
                 let mut c = a.walk();
                 a.named_children(&mut c)
                     .filter(|k| k.kind() == "keyword_argument")
@@ -4968,7 +4969,11 @@ fn read_py_host_function(
                 .and_then(|i| i.checked_sub(1))
                 .and_then(|i| positional.get(i).copied())
                 .or(keyword_name);
-            let arg_text = arg.and_then(|a| event_argument(a, src));
+            // A literal-only name (an MCP tool name or resource URI) read
+            // from a name or number is a run-time value: unread.
+            let arg_text = arg
+                .filter(|a| !literal_name || a.kind() == "string")
+                .and_then(|a| event_argument(a, src));
             // An argument written but unreadable names no event.
             let event = if arg.is_some() && arg_text.is_none() {
                 None
@@ -5085,7 +5090,9 @@ fn try_py_host_call(
     if object.kind() != "identifier" {
         return;
     }
-    let Some((host, reg)) = hosts::decorator_registration_for("python", method) else {
+    let Some((host, reg)) =
+        hosts::decorator_registration_for("python", method, |h| acc.py_hosts.holds(h))
+    else {
         return;
     };
     let hosts::Shape::Decorator {
@@ -5096,7 +5103,7 @@ fn try_py_host_call(
     else {
         return;
     };
-    if !acc.py_hosts.holds(host) || !acc.py_hosts.admits(host, receivers, text(object, src)) {
+    if !acc.py_hosts.admits(host, receivers, text(object, src)) {
         return;
     }
     acc.py_hosts.tally.hit(host.name);
@@ -5516,6 +5523,260 @@ def init(web2: flask.Flask):
             ["host_event:flask:teardown_appcontext"],
             "an annotated parameter is admitted; cache and an unread argument are not"
         );
+    }
+
+    /// HF.3: the qnames of the CLI_COMMANDs a parse minted, sorted.
+    fn host_commands(parse: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::CLI_COMMAND))
+            .filter_map(|n| parse.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// HF.3: the CLI_COMMAND `host_cmd:<host>:<name>` id.
+    fn host_command_id(host: &str, name: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLI_COMMAND,
+            &glia_code_domain::hosts::host_command_qname(host, name),
+        )
+    }
+
+    #[test]
+    fn fastmcp_tools_prompts_and_resources_are_host_registrations() {
+        let src = r#"from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("notes")
+
+
+def save(note):
+    return note
+
+
+@mcp.tool()
+def add_note(text: str) -> str:
+    return save(text)
+
+
+@mcp.tool(name="search")
+def find_notes(query: str) -> list:
+    return []
+
+
+@mcp.tool
+async def bare_tool() -> int:
+    return 1
+
+
+@mcp.prompt()
+def summarize(topic: str) -> str:
+    return topic
+
+
+@mcp.resource("notes://all")
+def all_notes() -> str:
+    return ""
+
+
+@mcp.resource(NOTES_URI)
+def dynamic_notes() -> str:
+    return ""
+
+
+@mcp.tool(name=TOOL_NAME)
+def dynamic_tool() -> str:
+    return ""
+
+
+@mcp.custom_route("/health", methods=["GET"])
+def health(request):
+    return None
+"#;
+        let parse = parse_file(src, "notes/server.py", "notes::server", repo()).unwrap();
+        assert_eq!(
+            host_commands(&parse),
+            [
+                "host_cmd:mcp:prompt:summarize",
+                "host_cmd:mcp:tool:add_note",
+                "host_cmd:mcp:tool:bare_tool",
+                "host_cmd:mcp:tool:search",
+            ]
+        );
+        assert_eq!(
+            host_events(&parse),
+            ["host_event:mcp:resource:notes://all"],
+            "a resource without a URI literal, a run-time tool name and custom_route read nothing"
+        );
+        let f = |q: &str| fid(&format!("notes::server::{q}"));
+        let cmd = |n: &str| host_command_id("mcp", n);
+        assert_eq!(
+            handled_rule(&parse, cmd("tool:add_note"), f("add_note")).as_deref(),
+            Some("host_decorator")
+        );
+        assert!(handled_rule(&parse, cmd("tool:search"), f("find_notes")).is_some());
+        assert!(handled_rule(&parse, cmd("tool:bare_tool"), f("bare_tool")).is_some());
+        assert!(handled_rule(&parse, cmd("prompt:summarize"), f("summarize")).is_some());
+        assert!(
+            handled_rule(
+                &parse,
+                host_event_id("mcp", "resource:notes://all"),
+                f("all_notes")
+            )
+            .is_some()
+        );
+        // The undecorated helper is no command, and a tool named by a
+        // run-time value mints none (neither by its name nor the function's).
+        assert!(!host_commands(&parse).iter().any(|q| q.ends_with(":save")));
+        assert!(
+            !host_commands(&parse)
+                .iter()
+                .any(|q| q.contains("TOOL_NAME"))
+        );
+    }
+
+    #[test]
+    fn mcpserver_and_lowlevel_server_registrations_are_read() {
+        // The SDK's MCPServer with keyword-only decorator arguments.
+        let src = r#"from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+
+srv = MCPServer("rg", instructions="x")
+
+
+@srv.tool(annotations=ToolAnnotations(title="Orient", read_only_hint=True))
+def orient() -> str:
+    return ""
+"#;
+        let parse = parse_file(src, "rg/server.py", "rg::server", repo()).unwrap();
+        assert_eq!(host_commands(&parse), ["host_cmd:mcp:tool:orient"]);
+        assert!(
+            handled_rule(
+                &parse,
+                host_command_id("mcp", "tool:orient"),
+                fid("rg::server::orient")
+            )
+            .is_some()
+        );
+        // The low-level Server's request handlers, named by the method.
+        let src = r#"import mcp.types as types
+from mcp.server.lowlevel import Server
+
+server = Server("example")
+
+
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    return []
+
+
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict):
+    return []
+
+
+@server.read_resource()
+async def handle_read(uri):
+    return ""
+"#;
+        let parse = parse_file(src, "ll/server.py", "ll::server", repo()).unwrap();
+        assert!(host_commands(&parse).is_empty());
+        assert_eq!(
+            host_events(&parse),
+            [
+                "host_event:mcp:call_tool",
+                "host_event:mcp:list_tools",
+                "host_event:mcp:read_resource",
+            ]
+        );
+        assert_eq!(
+            handled_rule(
+                &parse,
+                host_event_id("mcp", "call_tool"),
+                fid("ll::server::handle_call_tool")
+            )
+            .as_deref(),
+            Some("host_decorator")
+        );
+    }
+
+    #[test]
+    fn mcp_registrations_need_the_import_and_an_admitted_receiver() {
+        // No mcp / fastmcp import: an object named mcp registers nothing.
+        let src = r#"from .app import mcp
+
+
+@mcp.tool()
+def orient() -> str:
+    return ""
+"#;
+        let parse = parse_file(src, "tools.py", "tools", repo()).unwrap();
+        assert!(host_commands(&parse).is_empty() && host_events(&parse).is_empty());
+        // The same imported server object in a file importing mcp.types is
+        // admitted by its name; another object's `.tool` is not, unless it
+        // is bound to one of the server constructors.
+        let src = r#"from mcp.types import ToolAnnotations
+from fastmcp import FastMCP as Hub
+
+from .app import mcp
+
+server = Toolbox()
+hub = Hub("x")
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Orient"))
+def orient() -> str:
+    return ""
+
+
+@server.tool()
+def not_mcp() -> str:
+    return ""
+
+
+@hub.prompt("greet")
+def greeting() -> str:
+    return ""
+"#;
+        let parse = parse_file(src, "tools.py", "tools", repo()).unwrap();
+        assert_eq!(
+            host_commands(&parse),
+            ["host_cmd:mcp:prompt:greet", "host_cmd:mcp:tool:orient"]
+        );
+    }
+
+    #[test]
+    fn a_file_holding_flask_and_mcp_reads_each_hosts_decorators() {
+        // HF.3: each decorator is looked up among the hosts the file holds,
+        // so flask's hooks and MCP's tools are both read and kept apart.
+        let src = r#"from flask import Flask
+from mcp.server.fastmcp import FastMCP
+
+app = Flask(__name__)
+mcp = FastMCP("both")
+
+
+@app.before_request
+def load():
+    return None
+
+
+@mcp.tool()
+def lookup() -> str:
+    return ""
+
+
+@app.tool()
+def not_a_flask_hook() -> str:
+    return ""
+"#;
+        let parse = parse_file(src, "both.py", "both", repo()).unwrap();
+        assert_eq!(host_events(&parse), ["host_event:flask:before_request"]);
+        assert_eq!(host_commands(&parse), ["host_cmd:mcp:tool:lookup"]);
     }
 
     #[test]

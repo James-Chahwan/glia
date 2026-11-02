@@ -83,6 +83,22 @@
 //! | a module-level function named one of pytest 8's hookspecs; in a `conftest.py`, any `pytest_<x>` ([`Callback::open_head`](crate::hosts::Callback::open_head), [`open_callback_for`](crate::hosts::open_callback_for)) | the FUNCTION's ENTRYPOINT cell, source `host:pytest` |
 //! | `@pytest.fixture` / `@pytest_asyncio.fixture` / `@fixture` (imported from pytest) on a module-level function outside a test module ([`Callback::decorators`](crate::hosts::Callback::decorators), [`decorator_callback_for`](crate::hosts::decorator_callback_for)) | the same ENTRYPOINT cell |
 //!
+//! **Python (HF.3): MCP servers.** Gated on the file importing `mcp` or
+//! `fastmcp` (a submodule too: `mcp.server.fastmcp`, `mcp.server.mcpserver`,
+//! `mcp.server.lowlevel`, `mcp.types`), on a receiver bound in the file to
+//! `FastMCP(..)` / `MCPServer(..)` / `Server(..)` (or a parameter annotated
+//! with one) or named `mcp`:
+//!
+//! | Reading | Node |
+//! |---|---|
+//! | `@<r>.tool()` / `@<r>.prompt()` above a `def` (`@<r>.tool` bare too), named by the positional or `name=` literal, else the function's name | CLI_COMMAND `host_cmd:mcp:tool:<name>` / `host_cmd:mcp:prompt:<name>` HANDLED_BY the function |
+//! | `@<r>.resource("<uri>")` (no URI literal reads nothing, counted `unread=`) | EVENT_HANDLER `host_event:mcp:resource:<uri>` HANDLED_BY the function |
+//! | the low-level server's `@<r>.list_tools()` / `call_tool` / `list_resources` / `list_resource_templates` / `read_resource` / `list_prompts` / `get_prompt` / `completion` / `set_logging_level` / `subscribe_resource` / `unsubscribe_resource` | EVENT_HANDLER `host_event:mcp:<handler>` HANDLED_BY the function |
+//!
+//! [`decorator_registration_for`](crate::hosts::decorator_registration_for)
+//! reads a method name only among the rows the file holds the gate of, so a
+//! method two Python hosts share is each one's where its own gate holds.
+//!
 //! Other `maki.api.register_*` calls match the Maki row but mint nothing
 //! (counted `aux=`, PR #3's ruling). Neovim keymaps are not commands (James
 //! 2026-10-31): `vim.keymap.set` matches no row.
@@ -511,11 +527,15 @@ pub enum Shape {
     /// Flask's own default), else the decorator registers nothing. With
     /// `call_form` (only without `name_arg`) the call `<r>.<method>(f)`, `f` a
     /// named function, registers `f` too (`app.teardown_appcontext(close_db)`).
+    /// With `literal_name` (HF.3, MCP; only with `name_arg`) the argument
+    /// names the event only as a string literal (a tool name, a resource
+    /// URI): a name or number written there is a run-time value, unread.
     Decorator {
         receivers: &'static Receivers,
         name_arg: Option<usize>,
         or_handler: bool,
         call_form: bool,
+        literal_name: bool,
     },
     /// The name is the hook a [`Callee::Hook`] matched (GH.10, webpack:
     /// `compiler.hooks.done.tap('P', h)` names `done`); the handler is the
@@ -1125,6 +1145,40 @@ pub static HOSTS: &[HostRow] = &[
         config: &[],
         manifest: None,
     },
+    // HF.3: MCP servers (the Python SDK's FastMCP / MCPServer, the low-level
+    // Server, and the standalone fastmcp package). A server object registers
+    // its tools, prompts and resources by decorator, in a file that imports
+    // mcp or fastmcp; the client calls a tool or prompt by name, so each is a
+    // command, and a resource is read by its URI, an event.
+    HostRow {
+        name: "mcp",
+        lang: "python",
+        exts: &["py"],
+        gate: Gate::Imports {
+            modules: &["mcp", "fastmcp"],
+            files: &[],
+        },
+        loads: &[],
+        registrations: &[
+            mcp_registration("tool", Pattern::Command, MCP_NAMED),
+            mcp_registration("prompt", Pattern::Command, MCP_NAMED),
+            mcp_registration("resource", Pattern::Event, MCP_URI),
+            mcp_registration("list_tools", Pattern::Event, MCP_HANDLER),
+            mcp_registration("call_tool", Pattern::Event, MCP_HANDLER),
+            mcp_registration("list_resources", Pattern::Event, MCP_HANDLER),
+            mcp_registration("list_resource_templates", Pattern::Event, MCP_HANDLER),
+            mcp_registration("read_resource", Pattern::Event, MCP_HANDLER),
+            mcp_registration("list_prompts", Pattern::Event, MCP_HANDLER),
+            mcp_registration("get_prompt", Pattern::Event, MCP_HANDLER),
+            mcp_registration("completion", Pattern::Event, MCP_HANDLER),
+            mcp_registration("set_logging_level", Pattern::Event, MCP_HANDLER),
+            mcp_registration("subscribe_resource", Pattern::Event, MCP_HANDLER),
+            mcp_registration("unsubscribe_resource", Pattern::Event, MCP_HANDLER),
+        ],
+        callbacks: &[],
+        config: &[],
+        manifest: None,
+    },
     // GH.10: Obsidian. A plugin's default export extends `Plugin` (imported
     // from 'obsidian'); Obsidian calls its `onload` / `onunload`, a settings
     // tab's `display` and a modal's or view's `onOpen` / `onClose` by name,
@@ -1249,6 +1303,7 @@ const FLASK_PLAIN: Shape = Shape::Decorator {
     name_arg: None,
     or_handler: false,
     call_form: true,
+    literal_name: false,
 };
 
 /// A Flask hook named by its argument (`@app.errorhandler(404)`).
@@ -1257,6 +1312,7 @@ const FLASK_ARG: Shape = Shape::Decorator {
     name_arg: Some(1),
     or_handler: false,
     call_form: false,
+    literal_name: false,
 };
 
 /// A Flask template helper named by its argument, else by the function
@@ -1266,6 +1322,7 @@ const FLASK_NAMED: Shape = Shape::Decorator {
     name_arg: Some(1),
     or_handler: true,
     call_form: false,
+    literal_name: false,
 };
 
 /// One Flask hook: an event registration of `method` on the hook receivers.
@@ -1273,6 +1330,54 @@ const fn flask_hook(method: &'static str, shape: Shape) -> Registration {
     Registration {
         callee: Callee::Method(method),
         pattern: Pattern::Event,
+        shape,
+    }
+}
+
+/// The receivers of an MCP server's registrations (HF.3): a `FastMCP(..)` /
+/// `MCPServer(..)` / low-level `Server(..)` binding (or a parameter annotated
+/// with one), or the name a server object goes by when it is imported from
+/// another module (`from .app import mcp`).
+const MCP_RECEIVERS: Receivers = Receivers {
+    constructors: &["FastMCP", "MCPServer", "Server"],
+    names: &["mcp"],
+};
+
+/// A tool or prompt, named by its argument (positional or `name=`), else by
+/// the function (`@mcp.tool()` on `def orient` is `tool:orient`).
+const MCP_NAMED: Shape = Shape::Decorator {
+    receivers: &MCP_RECEIVERS,
+    name_arg: Some(1),
+    or_handler: true,
+    call_form: false,
+    literal_name: true,
+};
+
+/// A resource, named by its URI literal only (`@mcp.resource("notes://all")`
+/// is `resource:notes://all`); without one it registers nothing.
+const MCP_URI: Shape = Shape::Decorator {
+    receivers: &MCP_RECEIVERS,
+    name_arg: Some(1),
+    or_handler: false,
+    call_form: false,
+    literal_name: true,
+};
+
+/// A low-level server's request handler, named by its method alone
+/// (`@server.call_tool()` is `call_tool`).
+const MCP_HANDLER: Shape = Shape::Decorator {
+    receivers: &MCP_RECEIVERS,
+    name_arg: None,
+    or_handler: false,
+    call_form: false,
+    literal_name: false,
+};
+
+/// One MCP registration: `pattern` by decorator `@<r>.<method>(..)`.
+const fn mcp_registration(method: &'static str, pattern: Pattern, shape: Shape) -> Registration {
+    Registration {
+        callee: Callee::Method(method),
+        pattern,
         shape,
     }
 }
@@ -1464,20 +1569,24 @@ pub fn joined_for(lang: &str, method: &str) -> Option<JoinedMatch> {
 }
 
 /// The [`Shape::Decorator`] registration of `lang` whose [`Callee::Method`]
-/// is `method` (GH.8: Flask's `before_request`), the first in table order;
-/// `None` for any other method. The caller checks the row's gate and the
-/// shape's receivers.
+/// is `method` (GH.8: Flask's `before_request`; HF.3: MCP's `tool`), the
+/// first in table order among the rows `held` says the file holds the gate
+/// of, so two hosts sharing a method name are each read where their own gate
+/// holds; `None` for any other method. The caller checks the shape's
+/// receivers.
 pub fn decorator_registration_for(
     lang: &str,
     method: &str,
+    held: impl Fn(&'static HostRow) -> bool,
 ) -> Option<(&'static HostRow, &'static Registration)> {
     HOSTS
         .iter()
         .filter(|h| h.lang == lang)
         .flat_map(|h| h.registrations.iter().map(move |r| (h, r)))
-        .find(|(_, r)| {
+        .find(|(h, r)| {
             matches!(r.shape, Shape::Decorator { .. })
                 && matches!(r.callee, Callee::Method(m) if m == method)
+                && held(h)
         })
 }
 
@@ -2318,6 +2427,7 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     name_arg,
                     or_handler,
                     call_form,
+                    literal_name,
                 } => {
                     let admits = receivers.constructors.len() + receivers.names.len();
                     if admits == 0
@@ -2329,10 +2439,11 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                         || name_arg == Some(0)
                         || (call_form && name_arg.is_some())
                         || (or_handler && name_arg.is_none())
+                        || (literal_name && name_arg.is_none())
                         || !matches!(row.gate, Gate::Imports { .. })
                     {
                         problems.push(format!(
-                            "{at}: decorator shape of {callee:?} needs identifier receivers, an imports gate, a 1-based name argument for or_handler and none for call_form"
+                            "{at}: decorator shape of {callee:?} needs identifier receivers, an imports gate, a 1-based name argument for or_handler and literal_name and none for call_form"
                         ));
                     }
                 }
@@ -4020,7 +4131,7 @@ mod tests {
             names,
             [
                 "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome", "flask", "pytest",
-                "obsidian", "webpack"
+                "mcp", "obsidian", "webpack"
             ]
         );
     }
@@ -4711,23 +4822,142 @@ mod tests {
     }
 
     #[test]
+    fn the_mcp_row_reads_tools_prompts_resources_and_handlers() {
+        // HF.3: an MCP server's decorators, gated on mcp / fastmcp.
+        let mcp = HOSTS.iter().find(|h| h.name == "mcp").expect("mcp row");
+        assert_eq!(
+            validate_rows(std::slice::from_ref(mcp)),
+            Vec::<String>::new()
+        );
+        for module in [
+            "mcp",
+            "fastmcp",
+            "mcp.server.fastmcp",
+            "mcp.server.mcpserver",
+            "mcp.server.lowlevel",
+            "mcp.types",
+            "fastmcp.server",
+        ] {
+            assert_eq!(
+                hosts_imported("python", module)
+                    .map(|h| h.name)
+                    .collect::<Vec<_>>(),
+                ["mcp"],
+                "{module}"
+            );
+        }
+        assert!(hosts_imported("python", "mcpx").next().is_none());
+        let is_mcp = |h: &'static HostRow| h.name == "mcp";
+        let (host, tool) = decorator_registration_for("python", "tool", is_mcp).expect("tool");
+        assert_eq!(host.name, "mcp");
+        assert_eq!(tool.pattern, Pattern::Command);
+        assert_eq!(
+            tool.shape.decorator_event("tool", None, Some("orient")),
+            Some("tool:orient".into())
+        );
+        // A positional or `name=` literal wins over the function's name.
+        assert_eq!(
+            tool.shape
+                .decorator_event("tool", Some("search"), Some("find_notes")),
+            Some("tool:search".into())
+        );
+        assert_eq!(
+            host_command_qname("mcp", "tool:orient"),
+            "host_cmd:mcp:tool:orient"
+        );
+        let (_, prompt) = decorator_registration_for("python", "prompt", is_mcp).expect("prompt");
+        assert_eq!(prompt.pattern, Pattern::Command);
+        assert_eq!(
+            prompt
+                .shape
+                .decorator_event("prompt", None, Some("summarize")),
+            Some("prompt:summarize".into())
+        );
+        let (_, resource) =
+            decorator_registration_for("python", "resource", is_mcp).expect("resource");
+        assert_eq!(resource.pattern, Pattern::Event);
+        assert_eq!(
+            resource
+                .shape
+                .decorator_event("resource", Some("notes://all"), Some("all_notes")),
+            Some("resource:notes://all".into())
+        );
+        // No URI literal names no resource.
+        assert_eq!(
+            resource
+                .shape
+                .decorator_event("resource", None, Some("all_notes")),
+            None
+        );
+        assert_eq!(
+            host_event_qname("mcp", "resource:notes://all"),
+            "host_event:mcp:resource:notes://all"
+        );
+        let (_, call) =
+            decorator_registration_for("python", "call_tool", is_mcp).expect("call_tool");
+        assert_eq!(call.pattern, Pattern::Event);
+        assert_eq!(
+            call.shape
+                .decorator_event("call_tool", None, Some("handle")),
+            Some("call_tool".into())
+        );
+        // Only a decorator: no call form registers a handler.
+        assert!(mcp.registrations.iter().all(|r| matches!(
+            r.shape,
+            Shape::Decorator {
+                call_form: false,
+                ..
+            }
+        )));
+        // The gate decides: a file holding only flask reads no MCP `tool`,
+        // and no host is read where none is held.
+        let is_flask = |h: &'static HostRow| h.name == "flask";
+        assert!(decorator_registration_for("python", "tool", is_flask).is_none());
+        assert!(decorator_registration_for("python", "tool", |_| false).is_none());
+        assert!(decorator_registration_for("python", "before_request", is_mcp).is_none());
+        // A literal-only name needs a name argument.
+        let bad = [HostRow {
+            registrations: &[Registration {
+                callee: Callee::Method("tool"),
+                pattern: Pattern::Command,
+                shape: Shape::Decorator {
+                    receivers: &MCP_RECEIVERS,
+                    name_arg: None,
+                    or_handler: false,
+                    call_form: false,
+                    literal_name: true,
+                },
+            }],
+            ..*mcp
+        }];
+        assert!(
+            validate_rows(&bad)
+                .iter()
+                .any(|p| p.contains("decorator shape of \"tool\"")),
+            "{:?}",
+            validate_rows(&bad)
+        );
+    }
+
+    #[test]
     fn the_python_rows_read_hooks_hookspecs_and_fixtures() {
         // GH.8: Flask's hooks are decorator registrations; pytest's
         // hookspecs, open conftest heads and fixtures are callbacks.
-        let (flask, hook) =
-            decorator_registration_for("python", "before_app_request").expect("flask hook");
+        let (flask, hook) = decorator_registration_for("python", "before_app_request", |_| true)
+            .expect("flask hook");
         assert_eq!(flask.name, "flask");
         assert_eq!(hook.pattern, Pattern::Event);
-        assert!(decorator_registration_for("python", "route").is_none());
-        assert!(decorator_registration_for("lua", "before_request").is_none());
+        assert!(decorator_registration_for("python", "route", |_| true).is_none());
+        assert!(decorator_registration_for("lua", "before_request", |_| true).is_none());
         // WoW's joined method is no decorator registration.
-        assert!(decorator_registration_for("lua", "RegisterEvent").is_none());
+        assert!(decorator_registration_for("lua", "RegisterEvent", |_| true).is_none());
         let plain = hook.shape;
         assert_eq!(
             plain.decorator_event("before_app_request", None, Some("load")),
             Some("before_app_request".into())
         );
-        let (_, err) = decorator_registration_for("python", "errorhandler").expect("errorhandler");
+        let (_, err) =
+            decorator_registration_for("python", "errorhandler", |_| true).expect("errorhandler");
         assert_eq!(
             err.shape
                 .decorator_event("errorhandler", Some("404"), Some("nf")),
@@ -4737,7 +4967,8 @@ mod tests {
             err.shape.decorator_event("errorhandler", None, Some("nf")),
             None
         );
-        let (_, filt) = decorator_registration_for("python", "template_filter").expect("filter");
+        let (_, filt) =
+            decorator_registration_for("python", "template_filter", |_| true).expect("filter");
         assert_eq!(
             filt.shape
                 .decorator_event("template_filter", None, Some("reverse")),
@@ -4820,6 +5051,7 @@ mod tests {
                         name_arg: Some(1),
                         or_handler: false,
                         call_form: true,
+                        literal_name: false,
                     },
                 }],
                 callbacks: &[Callback {
@@ -4847,6 +5079,7 @@ mod tests {
                         name_arg: None,
                         or_handler: false,
                         call_form: true,
+                        literal_name: false,
                     },
                 }],
                 callbacks: &[Callback {

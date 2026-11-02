@@ -12,6 +12,26 @@
     {
       "kind": "CLI_COMMAND",
       "name": "seed-db"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "host_cmd:mcp:tool:add_note",
+      "exact": true
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "host_cmd:mcp:tool:search",
+      "exact": true
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "host_cmd:mcp:prompt:summarize",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "host_event:mcp:resource:notes://all",
+      "exact": true
     }
   ],
   "expect_edges": [
@@ -20,6 +40,34 @@
       "to": "seed_db",
       "category": "HANDLED_BY",
       "note": "the command -> its decorated handler"
+    },
+    {
+      "from": "host_cmd:mcp:tool:add_note",
+      "to": "mcp_server::add_note",
+      "category": "HANDLED_BY",
+      "exact": true,
+      "note": "HF.3: @mcp.tool() on a FastMCP(..) binding, named by the function"
+    },
+    {
+      "from": "host_cmd:mcp:tool:search",
+      "to": "mcp_server::find_notes",
+      "category": "HANDLED_BY",
+      "exact": true,
+      "note": "HF.3: @mcp.tool(name=\"search\"), named by the name= literal"
+    },
+    {
+      "from": "host_cmd:mcp:prompt:summarize",
+      "to": "mcp_server::summarize",
+      "category": "HANDLED_BY",
+      "exact": true,
+      "note": "HF.3: @mcp.prompt()"
+    },
+    {
+      "from": "host_event:mcp:resource:notes://all",
+      "to": "mcp_server::all_notes",
+      "category": "HANDLED_BY",
+      "exact": true,
+      "note": "HF.3: @mcp.resource(\"notes://all\"), named by its URI"
     }
   ],
   "expect_cells": [],
@@ -29,7 +77,13 @@
       "name": "count",
       "max_nodes": 0,
       "note": "a click.argument is no command"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "save",
+      "max_nodes": 0,
+      "note": "HF.3: the undecorated helper save() is no MCP tool"
     }
   ],
-  "note": "0.5.6 use pattern (GH.1): a Flask app registers a CLI command with its host (@app.cli.command on a click-decorated fn). Read since LA.20b (click); host_command here is the flask CLI host: one CLI_COMMAND HANDLED_BY the decorated function. Passed at authoring (AUTHORING.md: a fixture that passes at once is a finding, reported by GH.1)."
+  "note": "0.5.6 use pattern (GH.1): a Flask app registers a CLI command with its host (@app.cli.command on a click-decorated fn). Read since LA.20b (click); host_command here is the flask CLI host: one CLI_COMMAND HANDLED_BY the decorated function. Passed at authoring (AUTHORING.md: a fixture that passes at once is a finding, reported by GH.1). HF.3 (0.5.7) adds mcp_server.py: an MCP server (FastMCP, the MCP quickstart's shape) registers tools and prompts (CLI_COMMAND host_cmd:mcp:tool|prompt:<name>) and a resource (EVENT_HANDLER host_event:mcp:resource:<uri>), each HANDLED_BY its decorated def, gated on the mcp import. At HEAD a0c1bf1a: none of the four nodes (the cell read partial until HF.3)."
 }
