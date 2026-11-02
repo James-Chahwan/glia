@@ -45,6 +45,47 @@ The same tools run the leap (`dev-notes/next-leap-0.5.0.md` §7) with `--leap`:
 | `usage_gate.py` | before launching a leap wave: `python3 usage_gate.py --start W<N>` prints GO / HOLD / UNKNOWN from the account's 5-hour usage (exit 0 / 2 / 3) and records the launch reading; `closeout.py --leap` records the end reading, so the gate learns what a wave costs. HOLD at >= 80% or when usage + an average wave passes 100%, unless the window resets within an hour. Data comes from `~/.claude/rate-limits.json`, written by the status line script on every render; it also HOLDs with under 60 GB free on /home (`--min-free-gb`) |
 | `watchdog.py` | anything we started that is stuck (over 5 min old, under 1% CPU), in disk wait (D), or a /home under 60 GB free; one report, exit 1 when something is flagged. Run it when a background job passes ~2x its expected wall time and before a long run. Every close-out also drops `target/debug/incremental` and prints target/ size and free space |
 
+### Gate reuse (HP.1, 0.5.7)
+
+`closeout.py` keys every recorded gate (tests + byte_identical, fmt, clippy, rustdoc, rank, cohort, wheel,
+bench) by a digest of exactly what the gate reads at HEAD: sha256 over the `<path> <blob>` lines of its input
+set from one `git ls-tree -r -z --full-tree HEAD`, then its env lines. The sets are derived, never listed by
+hand: CODE(root) is the dirs of the workspace members in `root`'s dependency closure (`cargo metadata --locked
+--offline --all-features`: normal + build deps, the root's own dev-deps) + Cargo.toml + Cargo.lock + every
+tracked path an `include!` / `include_str!` / `include_bytes!` in those dirs names. tests = the whole tree but
+`dev-notes/` and every `bench/` dir except substrate-gap (minus its outputs), doc-link and edge-audit; fmt =
+every tracked `*.rs` + rustfmt.toml; clippy / rustdoc = CODE of every member; rank = CODE(glia-engine) +
+rank-gate.sh + snapshots.json + gate.json without `accepted` (its judge: `baseline/**` + `accepted`); cohort =
+CODE(glia-cli) + cohort-gate.sh + bench/cohort (minus results/) + bench/sibyl + the python modules they import
+(its judge: `results/baseline/**`); wheel = CODE(glia-py) + CODE(glia-cli) + bench/message-contracts; bench =
+bench/substrate-gap (minus its outputs) + the installed glia_py `.so`. Every tracked path under a gate's
+GP.12 `GATE_PATHS` is in its digest. Env lines: closeout.py's own sha256 (every gate), rustc / cargo /
+rustfmt / clippy / maturin / the leap python versions, the untracked `.cargo/config.toml`, the fastembed cache
+listing (rank). engram and `rank-gate.sh coverage` always run.
+
+- **Record**: `~/.cache/glia-closeout/gate-record.json` (`GLIA_CLOSEOUT_RECORD` overrides), logs in
+  `logs/<gate>-<digest12>.log` beside it; written after each gate, so a later gate's failure keeps an earlier
+  gate's green. A gate reuses the newest green entry at HEAD's digest whose tier covers the need (a full entry
+  serves a fast-tier need, never the reverse): `[closeout] reuse <gate> from <commit12> (wave <w>, <tier>,
+  digest <12>)`, then its recorded lines with ` (reused <commit12>)`. Else `[closeout] run <gate> (<reason>)`:
+  `forced`, `no record`, `dirty tree`, `inputs moved: <n> paths (..)`, `env moved: <what>`, `need full,
+  record partial`, `last result FAILED`. A wheel reuse also needs the installed `.so` and `build_stamp()` to be
+  the recorded ones; a bench reuse needs HEAD's bench outputs to be the ones its run wrote.
+- **Forcing**: `GLIA_CLOSEOUT_FRESH=all` (or `rank,cohort`, ..) or `--fresh <gates>`.
+- **Mid-release**: the touched-path skips are gone: a gate whose inputs moved runs, whoever moved them (an
+  out-of-packet fix between waves included); with no record at all the old skip applies once, `(no record yet)`.
+- **The release set**: the last close-out needs every recorded gate fresh-full or reused-full at HEAD's
+  digest, `[closeout] set tree=<12> fresh=<a> reused=<b> full=<k>/<n>` and one `<gate>=fresh|reused <c>` line each.
+- **Ratchets** run only after a FRESH, FULL, green check in the same close-out: a reused gate prints
+  `ratchet: skipped - reused from <c>; GLIA_CLOSEOUT_FRESH=<gate> to ratchet`.
+- **A failed close-out** writes no baseline.json, LANDED or next wave, and puts the bench outputs back.
+- **TMPDIR**: every gate runs with `$GLIA_CLOSEOUT_TMP` or `~/.cache/glia-tmp` unless the caller's TMPDIR is
+  outside /tmp (`[closeout] tmpdir=<dir> free_gb=<f>`); a log showing `Disk quota exceeded` / `No space left on
+  device` (os error 122 / 28) marks the result an environment failure, never green.
+- **Read-only**: `closeout.py --digests` prints `[closeout] digest <gate> measure= judge= files= env=` per gate;
+  `--plan-only` adds each gate's `plan reuse` / `plan run` decision. Tests: `python3 -m unittest
+  dev-notes/wave-runner/test_closeout.py`.
+
 ### Two wheels side by side (from LD.11b, W33)
 
 The Python package is `glia-py` / `import glia_py` from W33 on (dist and module
