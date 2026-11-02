@@ -27,7 +27,13 @@
 //! (`git ls-tree` + one `git cat-file --batch`) and writes the identifier
 //! vocabulary to `<repo>/.glia/vocab-snapshot/`, a query-time input no build
 //! reads (`glia_code_domain::snapshots::read_vocab` reads it back).
+//!
+//! [`targets_sync`] (HT.3) runs `bazel query --output=streamed_jsonproto` in
+//! one bazel workspace of the repo (or reads a saved query output) and writes
+//! its targets to `<repo>/.glia/targets-snapshot/` in the build domain's shape
+//! (`glia_build_domain::snapshot::read_targets` reads it back).
 
+mod bazel;
 mod ci_log;
 mod git_history;
 mod junit;
@@ -44,6 +50,9 @@ use glia_code_domain::snapshots::{
 use glia_code_domain::walk_gating::CONTROL_DIR;
 use serde::Serialize;
 
+pub use bazel::{
+    DEFAULT_EXPR, FROM_FILE, MAX_QUERY_BYTES, TargetsOptions, TargetsSummary, targets_sync,
+};
 pub use ci_log::parse_ci_log;
 pub use git_history::{HistoryOptions, HistorySummary};
 pub use junit::{JunitCounts, parse_junit};
@@ -64,7 +73,7 @@ pub(crate) const MAX_REPORT_BYTES: usize = 50 << 20;
 /// SCIP snapshot dir also ignores itself, since a repo whose `.gitignore`
 /// predates it never gets this line. An existing `.glia/.gitignore` is never
 /// rewritten, so a repo whose file predates FB.13a should add
-/// `vocab-snapshot/` to it by hand.
+/// `vocab-snapshot/` (and, from HT.3, `targets-snapshot/`) to it by hand.
 const GLIA_GITIGNORE: &str = "\
 # Local, regenerable glia inputs (written by glia; safe to delete).
 vectors.jsonl
@@ -73,6 +82,7 @@ history-snapshot/
 test-snapshot/
 scip-snapshot/
 vocab-snapshot/
+targets-snapshot/
 ";
 
 /// Read the git history of the repo at `repo_root` and write it to
@@ -579,7 +589,8 @@ mod tests {
                 "history-snapshot/",
                 "test-snapshot/",
                 "scip-snapshot/",
-                "vocab-snapshot/"
+                "vocab-snapshot/",
+                "targets-snapshot/"
             ]
         );
     }

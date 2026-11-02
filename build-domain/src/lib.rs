@@ -18,16 +18,24 @@
 //! - [`profile`]: [`BUILD_TABLES`] (entries, carry edges, weights),
 //!   [`BUILD_PASSES`] and [`BUILD_PROFILE`];
 //! - [`graph`]: [`BuildGraph`] (a `GraphSource`), its node ids, and the
-//!   header-described `targets.gmap` round trip.
+//!   header-described `targets.gmap` round trip;
+//! - [`snapshot`]: [`TargetRow`] and the `.glia/targets-snapshot/` the
+//!   snapshot step writes ([`write_targets`]) and a build reads
+//!   ([`read_targets`]) (HT.3).
 //!
 //! It is a stamp HASHED_ROOTS entry, so a change here moves PARSER_STAMP.
 
 pub mod graph;
 pub mod profile;
 pub mod registry;
+pub mod snapshot;
 
 pub use graph::{
     BuildGraph, GRAPH_TYPE, LABELS_SECTION, NodeLabel, ReadBack, node_id, node_key, read_gmap,
 };
 pub use profile::{BUILD_PASSES, BUILD_PROFILE, BUILD_TABLES, ROLES, role_of};
 pub use registry::{cell_type, edge_category, node_kind};
+pub use snapshot::{
+    TARGETS_DIR, TARGETS_FILE, TARGETS_VERSION, TargetRow, TargetsMeta, TargetsSnapshot,
+    WorkspaceMeta, read_targets, targets_dir, write_targets,
+};
