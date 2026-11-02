@@ -17,10 +17,11 @@ use glia_code_domain::profile::CODE_TABLES;
 use glia_core::NodeKindId;
 use glia_core::ids::{self, BlockStatus};
 
-/// Every domain a released glia ships. toy-domain is never here: it numbers
-/// from 1 on purpose (its overlap with code proves decoding is header-driven)
-/// and is never published.
-const SHIPPED: &[&DomainTables] = &[&CODE_TABLES];
+/// Every domain a released glia ships: code (block 0) and the build-target
+/// graph (block 2, HT.4). toy-domain is never here: it numbers from 1 on
+/// purpose (its overlap with code proves decoding is header-driven) and is
+/// never published.
+const SHIPPED: &[&DomainTables] = &[&CODE_TABLES, &glia_build_domain::profile::BUILD_TABLES];
 
 /// The three registries, in the order the lock's `next=` reads them: the
 /// lock's table key and the display word `check_table` names.

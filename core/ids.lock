@@ -30,6 +30,10 @@ cell_type 0x00000018 code code ENTRYPOINT
 cell_type 0x00000019 code code ACCESS_MODE
 cell_type 0x0000001a code code UNIT
 cell_type 0x0000001b code code IMPORT_BINDINGS
+cell_type 0x00020001 build build-targets LOCATION
+cell_type 0x00020002 build build-targets ATTRS
+cell_type 0x00020003 build build-targets ROLE
+cell_type 0x00020004 build build-targets VIA
 edge_category 0x00000001 code code DEFINES
 edge_category 0x00000002 code code CONTAINS
 edge_category 0x00000003 code code IMPORTS
@@ -68,6 +72,10 @@ edge_category 0x00000023 code code NAVIGATES_TO
 edge_category 0x00000024 code code CO_CHANGES
 edge_category 0x00000025 code code SAME_AS
 edge_category 0x00000026 code code TRACES
+edge_category 0x00020001 build build-targets DEPENDS_ON
+edge_category 0x00020002 build build-targets RUNTIME_DEP
+edge_category 0x00020003 build build-targets HAS_SRC
+edge_category 0x00020004 build build-targets IN_PACKAGE
 node_kind 0x00000001 code code MODULE
 node_kind 0x00000002 code code CLASS
 node_kind 0x00000003 code code FUNCTION
@@ -118,3 +126,7 @@ node_kind 0x0000002f code code GRPC_SERVER
 node_kind 0x00000030 code code RPC_PROCEDURE
 node_kind 0x00000031 code code RPC_CALL
 node_kind 0x00000032 code code GOAL_UNIT
+node_kind 0x00020001 build build-targets TARGET
+node_kind 0x00020002 build build-targets PACKAGE
+node_kind 0x00020003 build build-targets SOURCE
+node_kind 0x00020004 build build-targets EXTERNAL

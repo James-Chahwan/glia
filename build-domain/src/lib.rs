@@ -1,8 +1,33 @@
-//! glia-build-domain: the build-target domain (0.5.4, owners FA.16, FA.15).
+//! glia-build-domain: the build-target domain (0.5.7, HT.4), the first
+//! shipped domain beside code.
 //!
-//! A second domain beside code: the node kinds, edge categories and domain
-//! tables of a build-target graph, stored as `targets.gmap`. It knows nothing
-//! of code and depends on no code crate (core, activation and store only). It
-//! is a stamp HASHED_ROOTS entry, so a change here moves PARSER_STAMP.
+//! A build-target graph holds what a build system says about a repo: its
+//! targets (rules: libraries, binaries, tests, aliases), their packages, the
+//! source files they compile and the labels outside the workspace they name,
+//! joined by the attributes that declared each link (`deps`, `data`, `srcs`,
+//! ...). It is read from a snapshot of `bazel query` output, never by running
+//! the build system inside a glia build: the query needs the build system,
+//! its toolchains and network, so a snapshot step takes it once and the graph
+//! is rebuilt from that file alone, the way the history snapshot feeds
+//! co-change.
 //!
-//! Reserved for 0.5.7 (track T9); empty in 0.5.4 to 0.5.6.
+//! Nothing here knows code. The crate depends on the domain-free layers only
+//! (core, activation, store) and goes through the same seam toy-domain proves:
+//! - [`registry`]: its node kinds, edge categories and cell types, allocated
+//!   in the `build` id block (`0x0002`), so no id equals a code id;
+//! - [`profile`]: [`BUILD_TABLES`] (entries, carry edges, weights),
+//!   [`BUILD_PASSES`] and [`BUILD_PROFILE`];
+//! - [`graph`]: [`BuildGraph`] (a `GraphSource`), its node ids, and the
+//!   header-described `targets.gmap` round trip.
+//!
+//! It is a stamp HASHED_ROOTS entry, so a change here moves PARSER_STAMP.
+
+pub mod graph;
+pub mod profile;
+pub mod registry;
+
+pub use graph::{
+    BuildGraph, GRAPH_TYPE, LABELS_SECTION, NodeLabel, ReadBack, node_id, node_key, read_gmap,
+};
+pub use profile::{BUILD_PASSES, BUILD_PROFILE, BUILD_TABLES, ROLES, role_of};
+pub use registry::{cell_type, edge_category, node_kind};
