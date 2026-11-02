@@ -135,7 +135,8 @@ pub fn extract_queue_consumers(source: &str, from: NodeId) -> Vec<QueueConsumer>
     // [`signals_present`] for why the gate reads a lowercased copy.
     let lower = source.to_ascii_lowercase();
     for (pattern, framework, signals, _rule) in CONSUMER_PATTERNS {
-        if source.contains(pattern) && signals_present(&lower, signals) {
+        if source.contains(pattern) && row_gate_passes(source, &lower, pattern, framework, signals)
+        {
             consumers.push(QueueConsumer {
                 from,
                 framework: framework.clone(),
@@ -3326,6 +3327,46 @@ fn signals_present(lower_source: &str, signals: &[&str]) -> bool {
     signals.is_empty() || signals.iter().any(|s| lower_source.contains(s))
 }
 
+/// HQ.7: some occurrence of `signal` in `lower` ENDS a word: the byte after it
+/// in `source` (the same offset, as ASCII lowercasing keeps byte offsets) is
+/// absent or no ASCII lowercase letter. `ioredis'`, `'redis'`, `go-redis`,
+/// `redis-py`, `StackExchange.Redis;`, `RedisClient` (next byte `C`),
+/// `this.redis.` and `Predis\` pass; `fireDisconnected` (`firedisconnected`,
+/// next byte `c`) does not.
+///
+/// Only the generic Redis pub/sub verb rows read it ([`row_gate_passes`]):
+/// the word may still sit at the END of a longer name (`ioredis`, `Predis`), so a
+/// subscriber whose client is injected (`this.redis.subscribe('ch')`) keeps
+/// passing, while a name that merely spells the letters inside it does not.
+fn signal_word_present(source: &str, lower: &str, signal: &str) -> bool {
+    let bytes = source.as_bytes();
+    lower
+        .match_indices(signal)
+        .any(|(at, s)| !bytes.get(at + s.len()).is_some_and(u8::is_ascii_lowercase))
+}
+
+/// HQ.7: a row's library gate. A generic Redis pub/sub verb row
+/// ([`is_generic_verb_row`]: `.subscribe(` / `.psubscribe(` / `.publish(` and
+/// the `->` spellings) needs a signal that ends a word
+/// ([`signal_word_present`]); every other row, the MQTT verb rows included
+/// (rust's `rumqttc` spells `mqtt` inside a word), keeps the substring gate.
+fn row_gate_passes(
+    source: &str,
+    lower: &str,
+    pattern: &str,
+    framework: &QueueFramework,
+    signals: &[&str],
+) -> bool {
+    if *framework == QueueFramework::RedisPubSub && is_generic_verb_row(pattern, framework) {
+        signals.is_empty()
+            || signals
+                .iter()
+                .any(|s| signal_word_present(source, lower, s))
+    } else {
+        signals_present(lower, signals)
+    }
+}
+
 /// A2.9: true for a message BROKER, false for a task queue. Exhaustive on
 /// purpose — a new variant must decide which side of eventbus.rs's broker
 /// gate its signals belong on.
@@ -4061,6 +4102,9 @@ fn emit_queue_nodes(
     let mut go_nats: Option<GoNatsFile> = None;
     // DT.2c: what the NATS subject reading read, for the subject-fold marker.
     let mut subjects = SubjectTally::default();
+    // HQ.7: the first generic-verb row whose substring gate passed and whose
+    // word gate refused, (framework, signal), for the once-per-file marker.
+    let mut word_refused: Option<(String, &str)> = None;
     let side = if kind == node_kind::QUEUE_CONSUMER {
         "consumer"
     } else {
@@ -4073,7 +4117,17 @@ fn emit_queue_nodes(
         }
         // CL.1: a Python file that fails an import-gated row's library gate
         // still fires on a task it imports by name.
-        let import_gated = if signals_present(&lower, signals) {
+        let gated = row_gate_passes(source, &lower, pattern, framework, signals);
+        if !gated && word_refused.is_none() && signals_present(&lower, signals) {
+            // HQ.7: the substring gate passed, the word gate did not: the
+            // file names the signal only inside a longer word.
+            word_refused = signals
+                .iter()
+                .copied()
+                .find(|s| lower.contains(s))
+                .map(|s| (format!("{framework:?}"), s));
+        }
+        let import_gated = if gated {
             false
         } else if IMPORT_GATED_ROWS.contains(pattern) && is_python_path(path) {
             true
@@ -4520,6 +4574,12 @@ fn emit_queue_nodes(
         // DT.2c: what the NATS subject reading folded, per side.
         if let Some(line) = subjects.marker(side, path) {
             eprintln!("{line}");
+        }
+        // HQ.7: a generic Redis verb row the word gate refused, once per side.
+        if let Some((framework, signal)) = &word_refused {
+            eprintln!(
+                "[queues] gate word refused framework={framework} side={side} signal={signal} path={path}"
+            );
         }
     }
 
@@ -13297,5 +13357,83 @@ await myconsumer.run({ eachMessage: notMine });\n";
             t.add(&h);
         }
         assert_eq!(t, SubjectTally::default());
+    }
+
+    #[test]
+    fn redis_gate_needs_a_word() {
+        // HQ.7: a STOMP-over-SockJS client whose only `redis` is inside
+        // `fireDisconnected` (`firedisconnected` once lowercased).
+        let live = "import { Client } from '@stomp/stompjs';\nfunction fireDisconnected(cb) { cb(); }\nexport function watch(client: Client, id: number, cb) {\n  client.subscribe(`/projects/${id}/changes`, cb);\n  client.subscribe('/user/notifications', cb);\n  client.publish({ destination: '/app/ping', body: 'x' });\n}\n";
+        let test = "import { vi } from 'vitest';\nconst CHANNEL = '/projects/1/changes';\nconst fireDisconnected = vi.fn();\nclient.subscribe(CHANNEL, () => {});\nclient.publish('/app/ping');\n";
+        for (src, path) in [(live, "src/live.ts"), (test, "src/live.test.ts")] {
+            let c = extract_queue_consumer_nodes(src, path, module_id(), repo());
+            assert!(c.nodes.is_empty(), "{path}: {:?}", qnames(&c));
+            let p = extract_queue_producer_nodes(src, path, module_id(), repo());
+            assert!(p.nodes.is_empty(), "{path}: {:?}", qnames(&p));
+        }
+        // Every true Redis spelling still passes: the word ends at punctuation,
+        // an upper-case letter, or the end of the file.
+        let cases = [
+            (
+                "import Redis from 'ioredis';\nconst sub = new Redis();\nsub.subscribe('ch');\nsub.publish('ch', m);\n",
+                "src/a.ts",
+            ),
+            (
+                "const redis = require('redis');\nconst s = redis.createClient();\ns.subscribe('ch');\ns.publish('ch', m);\n",
+                "src/b.js",
+            ),
+            (
+                "export class Feed {\n  constructor(private readonly redis: Client) {}\n  start() { this.redis.subscribe('ch'); this.redis.publish('ch', m); }\n}\n",
+                "src/c.ts",
+            ),
+            (
+                "const c: RedisClient = make();\nc.subscribe('ch');\nc.publish('ch', m);\n",
+                "src/d.ts",
+            ),
+            (
+                "<?php\n$r = new Redis();\n$r->subscribe(['ch'], fn ($a, $b, $m) => 1);\n$r->publish('ch', $m);\n",
+                "src/e.php",
+            ),
+        ];
+        for (src, path) in cases {
+            let c = extract_queue_consumer_nodes(src, path, module_id(), repo());
+            assert_eq!(qnames(&c), strs(&["queue_consumer:ch"]), "{path}");
+            assert!(
+                framework_of(&c).contains(r#""framework":"RedisPubSub""#),
+                "{path}"
+            );
+            let p = extract_queue_producer_nodes(src, path, module_id(), repo());
+            assert_eq!(qnames(&p), strs(&["queue_producer:ch"]), "{path}");
+        }
+    }
+
+    #[test]
+    fn signal_word_ends_at_a_non_lowercase_byte() {
+        let word = |src: &str| {
+            let lower = src.to_ascii_lowercase();
+            signal_word_present(src, &lower, "redis")
+        };
+        for yes in [
+            "from 'ioredis'",
+            "require('redis')",
+            "github.com/go-redis/redis",
+            "import redis-py",
+            "using StackExchange.Redis;",
+            "RedisClient c",
+            "this.redis.subscribe",
+            "use Predis\\Client;",
+            "redis",
+            "a redis_url and a firedisconnected",
+        ] {
+            assert!(word(yes), "{yes}");
+        }
+        for no in [
+            "fireDisconnected()",
+            "firedisconnected",
+            "redisearch",
+            "Redisson",
+        ] {
+            assert!(!word(no), "{no}");
+        }
     }
 }

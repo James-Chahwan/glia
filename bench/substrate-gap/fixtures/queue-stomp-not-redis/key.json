@@ -1,0 +1,20 @@
+{
+  "framework": "queue-stomp-not-redis",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "HQ.7. A STOMP-over-SockJS client (`@stomp/stompjs`) subscribes with `client.subscribe(..)`, the bare verb A2.9's generic Redis pub/sub rows read, and its files name `redis` only inside `fireDisconnected` (`firedisconnected` once lowercased). The generic RedisPubSub rows now read their `redis` gate only where the word ends (the next source byte is no ASCII lowercase letter). Baseline at HEAD 237342b8 with the debug CLI: `src::live -> queue_consumer:/projects/${id}/changes`, `src::live -> queue_consumer:/user/notifications` and `src::live.test -> queue_consumer:unresolved:redispubsub` exist (three forbid nodes and three forbid edges violated); the ioredis subscriber in orders.ts is the positive control. Deliberately bound to no matrix cell: typescript/redis is scored by matrix/typescript/redis.",
+  "expect_nodes": [
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "exact": true, "note": "ioredis `sub.subscribe('orders', ..)`: `ioredis'` ends the word, so the generic RedisPubSub row still reads it"}
+  ],
+  "expect_edges": [
+    {"from": "src::orders", "to": "queue_consumer:orders", "category": "CONTAINS", "exact": true, "note": "the subscriber MODULE holds its consumer"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:/user/notifications", "note": "a STOMP destination, not a Redis channel: the file's only `redis` is inside fireDisconnected"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:/projects/${id}/changes", "note": "a STOMP destination template, not a Redis channel"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:redispubsub", "note": "the test's `client.subscribe(CHANNEL, ..)` is STOMP; `const fireDisconnected = vi.fn()` is no Redis client"},
+    {"from": "src::live", "to": "queue_consumer:/user/notifications", "category": "CONTAINS", "note": "no Redis consumer in the STOMP client module"},
+    {"from": "src::live", "to": "queue_consumer:/projects/${id}/changes", "category": "CONTAINS", "note": "no Redis consumer in the STOMP client module"},
+    {"from": "src::live.test", "to": "queue_consumer:unresolved:redispubsub", "category": "CONTAINS", "note": "no Redis consumer in the STOMP client's test"}
+  ]
+}
