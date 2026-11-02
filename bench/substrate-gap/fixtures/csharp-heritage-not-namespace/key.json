@@ -9,7 +9,7 @@
       "to": "Shop::Core::Commands::DomainObject",
       "category": "INHERITS_FROM",
       "exact": true,
-      "note": "the generic base class, the one non-namespace node named DomainObject (rule global_unique); exact, since the lenient matcher would also accept the PACKAGE of that name"
+      "note": "the generic base class, the one non-namespace node named DomainObject; exact, since the lenient matcher would also accept the PACKAGE of that name. HQ.13: named by the file's `using Shop.Core.Commands;`, rule using_namespace (fact; HQ.1 bound it global_unique, heuristic)"
     },
     {
       "from": "Shop::Teams::DomainObject::Team",

@@ -14,6 +14,7 @@ use glia_code_domain::{
 };
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
+use crate::cs_scope::{CsLookup, CsRule, CsScopeCounts, CsScopes};
 use crate::types::RepoGraph;
 
 // ============================================================================
@@ -231,6 +232,9 @@ pub(crate) struct GlobalNames<'g> {
     /// module ([`unique_global_module`]'s answer), for the dotted import
     /// tail fallback; looked up, never iterated.
     module_tails: OnceLock<HashMap<&'g str, Option<NodeId>>>,
+    /// HQ.13: the C# scopes ([`CsScopes`]) a C# heritage base is looked up
+    /// in, built on the first C# heritage ref.
+    cs: OnceLock<CsScopes>,
     /// GA.3: nanoseconds spent building the two indexes, for the `[rebody]`
     /// line's `names_ms=` (a per-file stitch builds them only when a site
     /// falls back to a repo-unique name).
@@ -249,6 +253,7 @@ impl<'g> GlobalNames<'g> {
             containers: OnceLock::new(),
             packages_by_name: OnceLock::new(),
             module_tails: OnceLock::new(),
+            cs: OnceLock::new(),
             built_ns: AtomicU64::new(0),
         }
     }
@@ -278,7 +283,7 @@ impl<'g> GlobalNames<'g> {
     /// ([`is_namespace_kind`]): a Bare heritage base's name-only fallback, so
     /// a namespace of the base's name neither binds nor makes the type of
     /// that name ambiguous.
-    fn heritage_base(&self, name: &str) -> Option<NodeId> {
+    pub(crate) fn heritage_base(&self, name: &str) -> Option<NodeId> {
         self.heritage_bases
             .get_or_init(|| {
                 self.timed(|| unique_names(self.g, |id| !is_namespace_kind(self.g, id)))
@@ -286,6 +291,12 @@ impl<'g> GlobalNames<'g> {
             .get(name)
             .copied()
             .flatten()
+    }
+
+    /// HQ.13: the graph's C# scopes, built (and timed) on first use.
+    fn cs_scopes(&self) -> &CsScopes {
+        self.cs
+            .get_or_init(|| self.timed(|| CsScopes::build(self.g)))
     }
 
     /// `unique_global_type` of `name`.
@@ -510,6 +521,11 @@ impl SiteFiles {
         SiteFiles(files)
     }
 
+    /// HQ.13: true when `r` was read in a C# file (`.cs`).
+    pub(crate) fn is_csharp(&self, r: &UnresolvedRef) -> bool {
+        self.ext(r).as_deref() == Some("cs")
+    }
+
     /// DT.5k: true when `r` was read in a TypeScript / JavaScript file (its
     /// `from_module`'s, else its `from`'s, by extension: [`is_ts_family`]).
     pub(crate) fn is_ts_family(&self, r: &UnresolvedRef) -> bool {
@@ -596,10 +612,22 @@ enum Branch {
     /// position (the parser's USES `Attribute { <local>, TYPE_REF_MARK }`)
     /// binds the INTERFACE / CLASS / ENUM it imports ([`type_ref_target`]).
     TypeRef,
+    /// HQ.13: a C# heritage base that is a nested type of an enclosing type
+    /// ([`CsScopes::lookup`]).
+    NestedType,
+    /// HQ.13: a C# heritage base that is a member of the declaring type's
+    /// own or an enclosing namespace.
+    EnclosingNamespace,
+    /// HQ.13: a C# heritage base that is a member of a namespace a `using`
+    /// of the file (or a `global using`) opens.
+    UsingNamespace,
+    /// HQ.13: a C# heritage base that is a nested type of a `using static`
+    /// type.
+    UsingStatic,
 }
 
 impl Branch {
-    const COUNT: usize = 18;
+    const COUNT: usize = 22;
 
     fn rule(self) -> &'static str {
         match self {
@@ -621,6 +649,10 @@ impl Branch {
             Branch::ContainerKey => "container_key",
             Branch::MixinMethod => "mixin_method",
             Branch::TypeRef => "type_ref",
+            Branch::NestedType => "nested_type",
+            Branch::EnclosingNamespace => "enclosing_namespace",
+            Branch::UsingNamespace => "using_namespace",
+            Branch::UsingStatic => "using_static",
         }
     }
 }
@@ -1764,6 +1796,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         self_refused,
         type_refs,
         namespace_refused,
+        cs_scope,
     } = counts;
     // GD.27 fired_on, once per TS-family graph build that read an imported
     // type name:
@@ -1793,6 +1826,13 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     //   `[heritage] namespace targets refused=N (module_symbol=M
     //   global_unique=G other=O) rebound=R`
     if let Some(line) = namespace_refused.marker() {
+        eprintln!("{line}");
+    }
+    // HQ.13 fired_on, once per graph build with a C# heritage ref that
+    // reached the C# scope lookup:
+    //   `[cs-scope] heritage refs=N nested=K enclosing=E using=U static=S
+    //   ambiguous=A refused_external=X fallback=F`
+    if let Some(line) = cs_scope.marker() {
         eprintln!("{line}");
     }
     // GD.18 fired_on, once per graph build that bound one:
@@ -1865,6 +1905,8 @@ struct RefCounts {
     /// HQ.1: heritage refs whose lookup answered a namespace (PACKAGE) or a
     /// file (MODULE), refused there.
     namespace_refused: NamespaceRefusals,
+    /// HQ.13: the C# heritage refs the C# scope lookup answered.
+    cs_scope: CsScopeCounts,
 }
 
 /// HQ.1: the heritage refs [`decide_ref`] refused at a namespace target, by
@@ -1939,6 +1981,7 @@ impl RefCounts {
         self.type_refs.unbound += other.type_refs.unbound;
         self.type_refs.non_type += other.type_refs.non_type;
         self.namespace_refused.merge(other.namespace_refused);
+        self.cs_scope.merge(other.cs_scope);
     }
 }
 
@@ -2031,6 +2074,38 @@ fn decide_ref(
                             {
                                 counts.namespace_refused.global_unique += 1;
                                 refused = true;
+                            }
+                            // HQ.13: a C# base is looked up as C# does (nested
+                            // types, own and enclosing namespaces, usings);
+                            // only a name no scope holds reaches the
+                            // repo-unique guess, and not even that in a file
+                            // opening an external namespace when the guess is
+                            // a declared namespace's type.
+                            if files.is_csharp(r) {
+                                let found = names
+                                    .cs_scopes()
+                                    .lookup(g, r, name, |n| names.heritage_base(n));
+                                counts.cs_scope.note(found);
+                                match found {
+                                    CsLookup::Bound(to, rule) => {
+                                        if refused {
+                                            counts.namespace_refused.rebound += 1;
+                                        }
+                                        let branch = match rule {
+                                            CsRule::NestedType => Branch::NestedType,
+                                            CsRule::EnclosingNamespace => {
+                                                Branch::EnclosingNamespace
+                                            }
+                                            CsRule::UsingNamespace => Branch::UsingNamespace,
+                                            CsRule::UsingStatic => Branch::UsingStatic,
+                                        };
+                                        return Some((to, branch));
+                                    }
+                                    CsLookup::Ambiguous | CsLookup::RefusedExternal => {
+                                        return None;
+                                    }
+                                    CsLookup::NotFound => {}
+                                }
                             }
                             let hit = names.heritage_base(name);
                             if refused && hit.is_some() {
@@ -6177,6 +6252,119 @@ mod tests {
         );
         let unresolved: Vec<NodeId> = g.unresolved_refs.iter().map(|r| r.from).collect();
         assert_eq!(unresolved, vec![initial]);
+    }
+
+    /// HQ.13: one C# file (`module` at `path`) opening namespace `ns`
+    /// (MODULE -CONTAINS-> PACKAGE, as the parser writes it) with the types
+    /// `types` under it and the namespace usings `usings`.
+    fn cs_file(
+        module: &str,
+        path: &str,
+        ns: &str,
+        types: &[&str],
+        usings: &[&str],
+        refs: Vec<UnresolvedRef>,
+    ) -> FileParse {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, module, None);
+        let pkg = s.add(node_kind::PACKAGE, ns, Some(m));
+        for t in types {
+            s.add(node_kind::CLASS, &format!("{ns}::{t}"), Some(m));
+        }
+        for (line, u) in usings.iter().enumerate() {
+            s.nav.record_fact(
+                m,
+                glia_code_domain::NavFact::CsUsing {
+                    form: glia_code_domain::CsUsingForm::Namespace,
+                    path: u.to_string(),
+                    alias: None,
+                    global: false,
+                    line: line as u32,
+                },
+            );
+        }
+        let mut f = s.file(vec![], vec![], refs);
+        f.edges.push(glia_core::Edge {
+            from: m,
+            to: pkg,
+            category: edge_category::CONTAINS,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        place(&mut f, m, path);
+        f
+    }
+
+    /// HQ.13: a C# heritage base the file's `using` opens binds fact
+    /// (`using_namespace`), never the repo-unique guess; one only an
+    /// external namespace can hold stays unresolved; both are counted.
+    #[test]
+    fn csharp_heritage_reads_the_files_usings() {
+        let inherits = edge_category::INHERITS_FROM;
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), kind, q);
+        let enriched = id(node_kind::CLASS, "Shop::Domain::EnrichedContent");
+        let news = id(node_kind::CLASS, "Shop::Api::NewsEntity");
+        let files = vec![
+            cs_file(
+                "Core::Content",
+                "Core/Content.cs",
+                "Shop::Core::Model",
+                &["Content"],
+                &[],
+                vec![],
+            ),
+            cs_file(
+                "Domain::Enriched",
+                "Domain/Enriched.cs",
+                "Shop::Domain",
+                &["EnrichedContent"],
+                &["Shop::Core::Model"],
+                vec![heritage_ref(
+                    enriched,
+                    id(node_kind::MODULE, "Domain::Enriched"),
+                    "Content",
+                    inherits,
+                )],
+            ),
+            cs_file(
+                "Api::News",
+                "Api/News.cs",
+                "Shop::Api",
+                &["NewsEntity"],
+                &["Vendor::ClientLibrary"],
+                vec![heritage_ref(
+                    news,
+                    id(node_kind::MODULE, "Api::News"),
+                    "Content",
+                    inherits,
+                )],
+            ),
+        ];
+        let refs: Vec<UnresolvedRef> = files.iter().flat_map(|f| f.refs.clone()).collect();
+        let g = build_dotted(repo(), files.clone()).unwrap();
+        assert_eq!(
+            heritage_rules(&g),
+            vec![(
+                "Shop::Domain::EnrichedContent".to_string(),
+                "Shop::Core::Model::Content".to_string(),
+                "using_namespace".to_string()
+            )]
+        );
+        let unresolved: Vec<NodeId> = g.unresolved_refs.iter().map(|r| r.from).collect();
+        assert_eq!(unresolved, vec![news]);
+        let site_files = SiteFiles::of(&g);
+        let names = GlobalNames::new(&g);
+        let mut counts = RefCounts::default();
+        for r in &refs {
+            decide_ref(&g, r, &site_files, &names, &mut counts);
+        }
+        assert_eq!(
+            counts.cs_scope.marker().as_deref(),
+            Some(
+                "[cs-scope] heritage refs=2 nested=0 enclosing=0 using=1 static=0 ambiguous=0 \
+                 refused_external=1 fallback=0"
+            )
+        );
     }
 
     /// HQ.1's counters, ref by ref: the own-namespace hit is a module_symbol

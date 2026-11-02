@@ -1798,8 +1798,10 @@ impl BaseFiles<'_> {
     /// `(bound names, spec)` of the base file's external imports: the file at
     /// the base rev, parsed by its language parser, read through
     /// [`glia_code_domain::import_bindings_json`] with no local index (the
-    /// IMPORTS cell's library list decides what is external). Empty when the
-    /// file is new at the base or does not parse.
+    /// IMPORTS cell's library list decides what is external), or, for a C#
+    /// file, [`glia_code_domain::csharp_using_bindings`] (every `using`, as
+    /// the worktree's cell lists them, HQ.13). Empty when the file is new at
+    /// the base or does not parse.
     fn bindings(&self, path: &str, lang: &str, provider: u64) -> Vec<(Vec<String>, String)> {
         let Some(text) = git_text(self.repo, &["show", &format!("{}:./{path}", self.sha)])
             .ok()
@@ -1811,9 +1813,15 @@ impl BaseFiles<'_> {
         else {
             return Vec::new();
         };
-        let local = glia_code_domain::LocalModuleIndex::default();
-        glia_code_domain::import_bindings_json(&fp.imports, lang, &local)
-            .map(|cell| binding_rows(&cell, lang))
+        // HQ.13: a C# file's cell is every `using` with its form, written
+        // from the parser's facts, as the worktree's MODULE carries it.
+        let cell = if lang == "csharp" {
+            glia_code_domain::csharp_using_bindings(&fp).map(|(json, _, _)| json)
+        } else {
+            let local = glia_code_domain::LocalModuleIndex::default();
+            glia_code_domain::import_bindings_json(&fp.imports, lang, &local)
+        };
+        cell.map(|cell| binding_rows(&cell, lang))
             .unwrap_or_default()
     }
 }
@@ -2959,6 +2967,42 @@ mod tests {
         assert_eq!(rs[1].0, vec!["sync"]);
         assert!(rs[2].0.is_empty(), "a glob binds no one name");
         assert!(binding_rows("not json", "go").is_empty());
+        // HQ.13: a C# cell lists every using: a namespace row still binds
+        // its last segment, a static row its type, an alias row its name
+        // and its alias.
+        let cs = binding_rows(
+            r#"[{"spec":"Acme::Ops","name":"Helpers","alias":null,"line":1,"form":"static"},{"spec":"Acme::Store","name":"Repo","alias":"R","line":2,"form":"alias"},{"spec":"Vendor::ClientLibrary","name":null,"alias":null,"line":0,"form":"namespace","global":true}]"#,
+            "csharp",
+        );
+        assert_eq!(
+            cs.iter().map(|(n, _)| n.join(",")).collect::<Vec<_>>(),
+            vec!["Helpers", "Repo,R", "ClientLibrary"]
+        );
+    }
+
+    /// HQ.13: the base side of a C# file reads its usings as the worktree's
+    /// cell lists them: every using, its form on each row.
+    #[test]
+    fn a_csharp_base_file_lists_every_using() {
+        let fp = crate::extract::parse_one(
+            "using Shop.Core;\nusing Vendor.ClientLibrary;\nnamespace Shop.Api;\npublic class A {}\n",
+            "Api/A.cs",
+            "csharp",
+            glia_core::RepoId(1),
+        )
+        .unwrap();
+        let (cell, rows, _) = glia_code_domain::csharp_using_bindings(&fp).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(
+            binding_rows(&cell, "csharp"),
+            vec![
+                (vec!["Core".to_string()], "Shop::Core".to_string()),
+                (
+                    vec!["ClientLibrary".to_string()],
+                    "Vendor::ClientLibrary".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

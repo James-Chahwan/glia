@@ -2927,54 +2927,38 @@ impl TestImports {
     }
 }
 
-/// HQ.10 stopgap: the `using` directives of a C# file, read from its test
-/// MODULE's CODE text, as (namespaces, types) in `::` form: `using A.B;` is
-/// the namespace `A::B`; `using static A.B.C;` the type `A::B::C`; `using X =
-/// A.B.C;` both (an alias names a type or a namespace). `global using` reads
-/// as `using`; a `using (..)` / `using var ..` statement, a generic alias and
-/// anything not a dotted name are skipped.
-///
-/// The C# parser keeps an in-repo `using` as no edge and an alias not at all
-/// (`collect_using` in parsers/code/csharp skips `=`), and that parser was
-/// another 0.5.7 packet's file in HQ.10's wave. Removal path: once the C#
-/// parser records each `using` (aliases included) in the module's
-/// IMPORT_BINDINGS cell, read them from there in `tests_module_edges` and
-/// delete this function.
-fn csharp_usings(code: &str) -> (Vec<String>, Vec<String>) {
-    let dotted = |p: &str| {
-        let p = p.trim();
-        let p = p.strip_prefix("global::").unwrap_or(p);
-        (!p.is_empty()
-            && p.split('.').all(|seg| {
-                !seg.is_empty()
-                    && seg
-                        .chars()
-                        .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '@')
-            }))
-        .then(|| p.replace('.', "::"))
-    };
+/// HQ.10's import key of a C# test module, read from its MODULE's
+/// IMPORT_BINDINGS cell (HQ.13: the C# parser lists every `using` there with
+/// its form, `glia_code_domain::csharp_using_bindings`), as (namespaces,
+/// types) in `::` form: a `namespace` row is the namespace `spec`; a
+/// `static` row the type `spec::name`; an `alias` row both (an alias names a
+/// type or a namespace, which look alike). A row with no form (another
+/// language's) is not read.
+fn csharp_test_reads(cells: &[Cell]) -> (Vec<String>, Vec<String>) {
     let mut namespaces = Vec::new();
     let mut types = Vec::new();
-    for line in code.lines() {
-        let t = line.trim();
-        let t = t.strip_prefix("global ").map_or(t, str::trim_start);
-        let Some(rest) = t.strip_prefix("using ") else {
+    for c in cells
+        .iter()
+        .filter(|c| c.kind == cell_type::IMPORT_BINDINGS)
+    {
+        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
             continue;
         };
-        let Some(rest) = rest.trim().strip_suffix(';') else {
-            continue;
-        };
-        if let Some(path) = rest.strip_prefix("static ") {
-            types.extend(dotted(path));
-        } else if let Some((alias, path)) = rest.split_once('=') {
-            if dotted(alias).is_some_and(|a| !a.contains("::"))
-                && let Some(path) = dotted(path)
-            {
-                namespaces.push(path.clone());
-                types.push(path);
+        for b in glia_code_domain::read_import_bindings(s) {
+            let full = || match &b.name {
+                Some(name) if b.spec.is_empty() => name.clone(),
+                Some(name) => format!("{}::{name}", b.spec),
+                None => b.spec.clone(),
+            };
+            match b.form.as_deref() {
+                Some("namespace") => namespaces.push(b.spec.clone()),
+                Some("static") => types.push(full()),
+                Some("alias") => {
+                    namespaces.push(full());
+                    types.push(full());
+                }
+                _ => {}
             }
-        } else {
-            namespaces.extend(dotted(rest));
         }
     }
     (namespaces, types)
@@ -3103,13 +3087,7 @@ fn tests_module_edges(
             let drive_host = is_drive_host(ext.as_deref(), driver_dir, &n.cells);
             let reads = if ext.as_deref() == Some("cs") && (declared || is_test_module_qname(&key))
             {
-                n.cells
-                    .iter()
-                    .find_map(|c| match (&c.payload, c.kind == cell_type::CODE) {
-                        (CellPayload::Text(code), true) => Some(csharp_usings(code)),
-                        _ => None,
-                    })
-                    .unwrap_or_default()
+                csharp_test_reads(&n.cells)
             } else {
                 Default::default()
             };
@@ -6843,7 +6821,9 @@ mod passes_tests {
         // The directory key alone: the Store/Contents twin.
         assert_eq!(pick(&TestImports::default()).targets, [near.id]);
         // `using Sut = Acme.Ops.Extensions;` names the Ops type.
-        let (namespaces, types) = csharp_usings("using Xunit;\nusing Sut = Acme.Ops.Extensions;\n");
+        let (namespaces, types) = csharp_test_reads(&[bindings_cell(
+            r#"[{"spec":"Acme::Ops","name":"Extensions","alias":"Sut","line":1,"form":"alias"},{"spec":"Xunit","name":null,"alias":null,"line":0,"form":"namespace"}]"#,
+        )]);
         let aliased = TestImports {
             modules: Vec::new(),
             namespaces,
@@ -6873,20 +6853,35 @@ mod passes_tests {
         assert_eq!(pick(&imported).targets, [tools.id]);
     }
 
-    /// HQ.10 stopgap: the C# `using` forms read from a file's text.
+    fn bindings_cell(json: &str) -> Cell {
+        Cell {
+            kind: cell_type::IMPORT_BINDINGS,
+            payload: CellPayload::Json(json.to_string()),
+        }
+    }
+
+    /// HQ.13: a C# test module's usings, read from its IMPORT_BINDINGS cell
+    /// (what HQ.10's text stopgap read): a namespace row is a namespace, a
+    /// static row a type, an alias row both; a row with no form (another
+    /// language's) and any other cell are not read.
     #[test]
-    fn csharp_usings_reads_namespaces_types_and_aliases() {
-        let code = "// using Not.This;\nusing System;\nglobal using Acme.Core;\nusing static Acme.Ops.Extensions;\n\
-            using ExtensionSut = Squidex.Domain.Contents.Operations.Extensions;\n\
-            using Map = System.Collections.Generic.Dictionary<string, int>;\n\
-            namespace Acme.Tests\n{\n    void F() { using (var s = Open()) { } using var t = Open(); }\n}\n";
-        let (namespaces, types) = csharp_usings(code);
+    fn csharp_test_reads_namespaces_types_and_aliases() {
+        let cells = [
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text("using Not.Read;".to_string()),
+            },
+            bindings_cell(
+                r#"[{"spec":"Acme::Core","name":null,"alias":null,"line":2,"form":"namespace","global":true},{"spec":"Acme::Ops","name":"Extensions","alias":null,"line":3,"form":"static"},{"spec":"Squidex::Domain::Contents::Operations","name":"Extensions","alias":"ExtensionSut","line":4,"form":"alias"},{"spec":"System","name":null,"alias":null,"line":1,"form":"namespace"},{"spec":"lodash","name":null,"alias":null,"line":0}]"#,
+            ),
+        ];
+        let (namespaces, types) = csharp_test_reads(&cells);
         assert_eq!(
             namespaces,
             [
-                "System",
                 "Acme::Core",
-                "Squidex::Domain::Contents::Operations::Extensions"
+                "Squidex::Domain::Contents::Operations::Extensions",
+                "System"
             ]
         );
         assert_eq!(

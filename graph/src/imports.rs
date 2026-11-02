@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 
 use glia_code_domain::{
-    ImportStmt, ImportTarget, bare_module_qname, edge_category, evidence, node_kind,
-    same_stem_order,
+    CsUsingForm, ImportStmt, ImportTarget, NavFact, bare_module_qname, edge_category, evidence,
+    node_kind, same_stem_order,
 };
 use glia_core::{Confidence, Edge, NodeId, NodeKindId};
 
@@ -323,6 +323,10 @@ pub(crate) struct NamespaceIndex {
     /// The first `::` segment of every PACKAGE qname (`App`): the root
     /// namespaces the repo owns.
     roots: BTreeSet<String>,
+    /// HQ.13: every PACKAGE qname to its node (one id per qname in a graph),
+    /// the target of a C# namespace using's IMPORTS edge; looked up, and a
+    /// BTree, so order never shows.
+    packages: BTreeMap<String, NodeId>,
 }
 
 /// What [`NamespaceIndex::member`] found for `ns` + `name`.
@@ -373,6 +377,7 @@ impl NamespaceIndex {
             };
             let root = qname.split("::").next().unwrap_or(qname);
             idx.roots.insert(root.to_string());
+            idx.packages.entry(qname.clone()).or_insert(package);
             let members = idx.members.entry(qname.clone()).or_default();
             let Some(symbols) = g.symbols.module_symbols.get(&scope) else {
                 continue;
@@ -415,6 +420,34 @@ impl NamespaceIndex {
             _ if self.members.contains_key(&nested) => NsHit::Namespace,
             _ => NsHit::Missing,
         }
+    }
+
+    /// HQ.13: the PACKAGE whose qname is exactly `ns`.
+    pub(crate) fn package(&self, ns: &str) -> Option<NodeId> {
+        self.packages.get(ns).copied()
+    }
+
+    /// HQ.13: whether the repo declares namespace `ns`: a PACKAGE qname, or
+    /// a `::`-prefix of one (C# namespaces exist implicitly above a declared
+    /// one: `Shop::Data` when `Shop::Data::Store` is declared).
+    pub(crate) fn declares(&self, ns: &str) -> bool {
+        if ns.is_empty() {
+            return false;
+        }
+        if self.members.contains_key(ns) {
+            return true;
+        }
+        let prefix = format!("{ns}::");
+        self.members
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|(k, _)| k.starts_with(&prefix))
+    }
+
+    /// HQ.13: whether `ns` is a PACKAGE qname of the graph (a namespace some
+    /// file opens), as opposed to a directory scope.
+    pub(crate) fn is_package(&self, ns: &str) -> bool {
+        self.members.contains_key(ns)
     }
 
     /// Whether `ns` lies under a root namespace some file of the repo
@@ -465,9 +498,154 @@ struct Namespaces {
     stats: NamespaceStats,
     /// GD.34: the `tail_unique` guesses this pass refused.
     tail: TailRefused,
+    /// HQ.13: what the C# using step read and drew.
+    cs: CsUsingStats,
+}
+
+/// HQ.13: the IMPORTS rule of a C# using that names an in-repo namespace:
+/// the importer -> that namespace's PACKAGE, exactly (fact).
+pub(crate) const RULE_USING_NAMESPACE: &str = "using_namespace";
+
+/// HQ.13: what [`Namespaces::cs_using`] did in one import pass, the
+/// `[imports] csharp usings ..` marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CsUsingStats {
+    /// Namespace-form usings read (`using A.B;`).
+    pub(crate) namespace: usize,
+    /// IMPORTS edges drawn: a namespace to its PACKAGE (rule
+    /// `using_namespace`), a static / alias type to its type (rule
+    /// `namespace`).
+    pub(crate) bound: usize,
+    /// Usings naming a namespace (or a type of one) the repo does not
+    /// declare: no edge and no tail guess.
+    pub(crate) undeclared_refused: usize,
+    /// Alias usings read (`using X = A.B;`).
+    pub(crate) alias: usize,
+    /// Static usings read (`using static A.B.T;`).
+    pub(crate) static_: usize,
+    /// `global using` directives read.
+    pub(crate) global: usize,
+}
+
+impl CsUsingStats {
+    /// HQ.13 fired_on, once per import pass that read a C# using:
+    ///   `[imports] csharp usings namespace=<n> bound=<b> undeclared_refused=<r> alias=<a> static=<s> global=<g>`
+    fn marker(&self) -> Option<String> {
+        let CsUsingStats {
+            namespace,
+            bound,
+            undeclared_refused,
+            alias,
+            static_,
+            global,
+        } = *self;
+        (namespace + alias + static_ + bound + undeclared_refused > 0).then(|| {
+            format!(
+                "[imports] csharp usings namespace={namespace} bound={bound} \
+                 undeclared_refused={undeclared_refused} alias={alias} static={static_} \
+                 global={global}"
+            )
+        })
+    }
 }
 
 impl Namespaces {
+    /// HQ.13: one C# `using` statement of `importer` (a `.cs` MODULE), read
+    /// by the namespace index alone, never a tail guess and never a file:
+    /// a using that names an in-repo namespace PACKAGE exactly IMPORTS that
+    /// PACKAGE (rule [`RULE_USING_NAMESPACE`]) and binds no local name (a C#
+    /// namespace using brings the namespace's members into scope, not its
+    /// last segment), except an alias using, which binds its alias to the
+    /// PACKAGE; a static or alias using that names the one member type of a
+    /// declared namespace IMPORTS and binds it (rule `namespace`), as the
+    /// DF.2 step did; anything else binds nothing (an ambiguous or missing
+    /// member, a namespace only implied above a declared one) and a path
+    /// the repo does not declare at all is counted `undeclared_refused`.
+    /// The form and `global` flag are read from the importer's
+    /// [`NavFact::CsUsing`] at the statement's row.
+    fn cs_using(
+        &mut self,
+        g: &RepoGraph,
+        stmt: &ImportStmt,
+        importer: NodeId,
+        out: &mut DottedImports,
+    ) {
+        let (full, member, alias) = match &stmt.target {
+            ImportTarget::Module { path, alias } => (path.clone(), None, alias.clone()),
+            ImportTarget::Symbol {
+                module,
+                name,
+                alias,
+                ..
+            } => (
+                if module.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{module}::{name}")
+                },
+                Some((module.as_str(), name.as_str())),
+                alias.clone(),
+            ),
+        };
+        let fact = g.nav.nav_facts.get(&importer).and_then(|facts| {
+            facts.iter().find_map(|f| match f {
+                NavFact::CsUsing {
+                    form,
+                    path,
+                    global,
+                    line,
+                    ..
+                } if *line == stmt.line && *path == full => Some((*form, *global)),
+                _ => None,
+            })
+        });
+        match fact {
+            Some((CsUsingForm::Namespace, _)) => self.cs.namespace += 1,
+            Some((CsUsingForm::Static, _)) => self.cs.static_ += 1,
+            Some((CsUsingForm::Alias, _)) => self.cs.alias += 1,
+            None if alias.is_some() => self.cs.alias += 1,
+            None => self.cs.namespace += 1,
+        }
+        if fact.is_some_and(|(_, global)| global) {
+            self.cs.global += 1;
+        }
+        let idx = self.index.get_or_insert_with(|| NamespaceIndex::build(g));
+        if let Some(pkg) = idx.package(&full) {
+            self.cs.bound += 1;
+            out.edge(importer, pkg, RULE_USING_NAMESPACE, stmt.line);
+            if let Some(alias) = alias {
+                out.bind(importer, alias, pkg);
+            }
+            return;
+        }
+        if let Some((module, name)) = member {
+            match idx.member(module, name) {
+                NsHit::Unique(id) => {
+                    self.cs.bound += 1;
+                    self.stats.bound += 1;
+                    self.stats.exts.insert("cs".to_string());
+                    out.edge(importer, id, "namespace", stmt.line);
+                    out.bind(importer, alias.unwrap_or_else(|| name.to_string()), id);
+                    return;
+                }
+                NsHit::Ambiguous => {
+                    self.stats.ambiguous += 1;
+                    self.stats.exts.insert("cs".to_string());
+                    return;
+                }
+                NsHit::Missing => {
+                    self.stats.missing += 1;
+                    self.stats.exts.insert("cs".to_string());
+                    return;
+                }
+                NsHit::Namespace | NsHit::NotDeclared => {}
+            }
+        }
+        if !idx.declares(&full) && member.is_none_or(|(module, _)| !idx.declares(module)) {
+            self.cs.undeclared_refused += 1;
+        }
+    }
+
     /// GD.34: whether `ns` lies under a root namespace some file of the
     /// repo declares ([`NamespaceIndex::owns_root`]).
     fn owns_root(&mut self, g: &RepoGraph, ns: &str) -> bool {
@@ -817,6 +995,9 @@ pub(crate) fn python_import_bindings(
     if let Some(line) = ns.tail.marker(g.repo) {
         eprintln!("{line}");
     }
+    if let Some(line) = ns.cs.marker() {
+        eprintln!("{line}");
+    }
     if let Some(line) = stars.marker() {
         eprintln!("{line}");
     }
@@ -904,6 +1085,9 @@ fn resolve_imports_dotted(
     if let Some(line) = ns.tail.marker(g.repo) {
         eprintln!("{line}");
     }
+    if let Some(line) = ns.cs.marker() {
+        eprintln!("{line}");
+    }
     stars
 }
 
@@ -983,6 +1167,12 @@ fn decide_imports_dotted(
         let Some(from_mod_id) = g.symbols.module_by_qname.get(&stmt.from_module).copied() else {
             continue;
         };
+        // HQ.13: a C# using names a namespace or a type of one, never a
+        // file, and is read by the namespace index alone.
+        if same.importer_ext(g, from_mod_id).as_deref() == Some("cs") {
+            ns.cs_using(g, stmt, from_mod_id, &mut out);
+            continue;
+        }
 
         match &stmt.target {
             ImportTarget::Module { path, alias } => {
@@ -5760,13 +5950,151 @@ mod tests {
         let parses = vec![fp, store_fp];
         let imports = all_imports(&parses);
         let g = build_dotted(repo(), parses).expect("build");
-        assert_eq!(imports_of(&g, svc), [(store_ns, "tail_unique".to_string())]);
+        // HQ.13: the in-repo namespace using IMPORTS its PACKAGE exactly (no
+        // tail guess), the undeclared one is refused before any guess.
         assert_eq!(
-            dotted_tail(&g, &imports),
-            TailRefused {
-                undeclared_ns: 1,
-                ..TailRefused::default()
-            }
+            imports_of(&g, svc),
+            [(store_ns, RULE_USING_NAMESPACE.to_string())]
+        );
+        assert_eq!(dotted_tail(&g, &imports), TailRefused::default());
+        let cs = cs_stats(&g, &imports);
+        assert_eq!((cs.bound, cs.undeclared_refused), (1, 1));
+        assert!(
+            g.symbols
+                .module_import_bindings
+                .get(&module(svc))
+                .is_none_or(|b| b.is_empty()),
+            "a namespace using binds no local name"
+        );
+    }
+
+    fn cs_stats(g: &RepoGraph, imports: &[ImportStmt]) -> CsUsingStats {
+        let mut same = same_stem_table(g);
+        let mut stars = PyStars::read(g, imports);
+        decide_imports_dotted(g, imports, &mut same, &mut stars)
+            .1
+            .cs
+    }
+
+    fn using(
+        fp: &mut FileParse,
+        from: &str,
+        module: &str,
+        name: &str,
+        alias: Option<&str>,
+        line: u32,
+    ) {
+        fp.imports.push(ImportStmt {
+            from_module: from.to_string(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: name.to_string(),
+                alias: alias.map(str::to_string),
+                level: 0,
+            },
+            line,
+        });
+    }
+
+    /// HQ.13, the csharp-heritage-using-scope shape: `using Shop.Data.Store;`
+    /// (whose tail `Store` is no repo-unique name) IMPORTS the PACKAGE
+    /// exactly; `using Shop.Flows.Utils;` names an undeclared namespace and
+    /// draws nothing (HEAD's tail guess bound the PACKAGE Shop::Tests::Utils);
+    /// an alias of a type binds the alias to the type (rule `namespace`), an
+    /// alias of a namespace binds it to the PACKAGE; the marker counts each.
+    #[test]
+    fn csharp_usings_import_their_namespace_exactly() {
+        let mut store = file(
+            "Data/Store/Repository.cs",
+            "Data::Store::Repository",
+            "Repository",
+            &[],
+        );
+        let store_ns = opens(
+            &mut store,
+            module("Data::Store::Repository"),
+            "Shop::Data::Store",
+        );
+        let repo_class = child(
+            &mut store,
+            "Data::Store::Repository",
+            node_kind::CLASS,
+            "Repository",
+            "Shop::Data::Store::Repository",
+        );
+        let mut storage = file(
+            "Core/Storage/Store.cs",
+            "Core::Storage::Store",
+            "Store",
+            &[],
+        );
+        opens(
+            &mut storage,
+            module("Core::Storage::Store"),
+            "Shop::Core::Storage",
+        );
+        let store_class = child(
+            &mut storage,
+            "Core::Storage::Store",
+            node_kind::CLASS,
+            "Store",
+            "Shop::Core::Storage::Store",
+        );
+        let mut utils = file(
+            "Tests/Utils/TestClock.cs",
+            "Tests::Utils::TestClock",
+            "TestClock",
+            &[],
+        );
+        opens(
+            &mut utils,
+            module("Tests::Utils::TestClock"),
+            "Shop::Tests::Utils",
+        );
+        let user = "Domain::Contents::ContentRepository";
+        let mut fp = file(
+            "Domain/Contents/ContentRepository.cs",
+            user,
+            "ContentRepository",
+            &[],
+        );
+        using(&mut fp, user, "Shop::Data", "Store", None, 0);
+        using(&mut fp, user, "Shop::Flows", "Utils", None, 1);
+        using(
+            &mut fp,
+            user,
+            "Shop::Core::Storage",
+            "Store",
+            Some("StoreBase"),
+            2,
+        );
+        using(&mut fp, user, "Shop::Data", "Store", Some("Data"), 3);
+        let parses = vec![store, storage, utils, fp];
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        let mut got = imports_of(&g, user);
+        got.sort_by_key(|(_, rule)| rule.clone());
+        assert_eq!(
+            got,
+            [
+                (store_class, "namespace".to_string()),
+                (store_ns, RULE_USING_NAMESPACE.to_string()),
+                (store_ns, RULE_USING_NAMESPACE.to_string()),
+            ]
+        );
+        let bound = &g.symbols.module_import_bindings[&module(user)];
+        assert_eq!(bound.get("StoreBase"), Some(&store_class));
+        assert_eq!(bound.get("Data"), Some(&store_ns));
+        assert_eq!(bound.get("Store"), None);
+        assert_eq!(bound.get("Utils"), None);
+        assert_ne!(bound.get("Repository"), Some(&repo_class));
+        let cs = cs_stats(&g, &imports);
+        assert_eq!(
+            cs.marker().as_deref(),
+            Some(
+                "[imports] csharp usings namespace=2 bound=3 undeclared_refused=1 alias=2 \
+                 static=0 global=0"
+            )
         );
     }
 

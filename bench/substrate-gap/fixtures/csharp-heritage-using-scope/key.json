@@ -1,0 +1,90 @@
+{
+  "framework": "csharp-heritage-using-scope",
+  "language": "csharp",
+  "dirs": ["."],
+  "note": "HQ.13. C# usings are read, not guessed. A Bare heritage base binds by C# name lookup (nested types of the enclosing types, the file's own and enclosing namespaces, its usings) at fact tier; a base none of them holds, in a file that imports a namespace the repo does not declare, binds nothing by name; a namespace using IMPORTS its PACKAGE exactly (rule using_namespace), never a tail guess. Written in squidex's shape (f828dd717edc: Content<T> from the external Squidex.ClientLibrary bound the in-repo Content by repo-unique name; MongoFieldTests.Inherited : Entity bound Squidex.Infrastructure.Commands.Entity instead of its nested sibling). Baseline HEAD b383c243 (debug CLI): expect 2/6, FORBID VIOLATIONS 5.",
+  "expect_edges": [
+    {
+      "from": "Shop::Domain::Contents::EnrichedContent",
+      "to": "Shop::Core::Model::Content",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "named by the file's `using Shop.Core.Model;` (rule using_namespace, fact); BASE bound it by repo-unique name (global_unique, heuristic)"
+    },
+    {
+      "from": "Shop::Domain::Teams::TeamDomainObject",
+      "to": "Shop::Core::Commands::DomainObject",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "the generic base through `using Shop.Core.Commands;` (rule using_namespace); BASE global_unique"
+    },
+    {
+      "from": "Shop::Domain::Contents::ContentRepository",
+      "to": "Shop::Data::Store::Repository",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "two in-repo classes are named Repository; the file's `using Shop.Data.Store;` picks one. BASE: unresolved"
+    },
+    {
+      "from": "Shop::Domain::Contents::SnapshotStore",
+      "to": "Shop::Core::Storage::Store",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "`using StoreBase = Shop.Core.Storage.Store;` binds the alias (import_binding). BASE: the alias using was skipped, unresolved"
+    },
+    {
+      "from": "Shop::Tests::Store::FieldTests::Inherited",
+      "to": "Shop::Tests::Store::FieldTests::Entity",
+      "category": "INHERITS_FROM",
+      "exact": true,
+      "note": "the private nested sibling type (rule nested_type). BASE bound Shop::Core::Commands::Entity by repo-unique name"
+    },
+    {
+      "from": "Domain::Contents::ContentRepository",
+      "to": "Shop::Data::Store",
+      "category": "IMPORTS",
+      "exact": true,
+      "note": "the namespace using IMPORTS its PACKAGE (rule using_namespace). BASE: the tail `Store` is no repo-unique name, no edge"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Shop::Api::News::NewsEntity",
+      "to": "Shop::Core::Model::Content",
+      "category": "INHERITS_FROM",
+      "note": "Content<NewsDto> is the external Vendor.ClientLibrary type: the file's scope holds no in-repo Content, and it imports an undeclared namespace"
+    },
+    {
+      "from": "Shop::Tests::Store::FieldTests::Inherited",
+      "to": "Shop::Core::Commands::Entity",
+      "category": "INHERITS_FROM",
+      "note": "the nested FieldTests.Entity hides every other Entity"
+    },
+    {
+      "from": "Shop::Domain::Contents::EnrichedContent",
+      "to": "Shop::Core::Model::Content",
+      "category": "INHERITS_FROM",
+      "rule": "global_unique",
+      "note": "pins the fact rule: the using names the base, no name-only guess"
+    },
+    {
+      "from": "Shop::Domain::Teams::TeamDomainObject",
+      "to": "Shop::Core::Commands::DomainObject",
+      "category": "INHERITS_FROM",
+      "rule": "global_unique",
+      "note": "pins the fact rule"
+    },
+    {
+      "from": "Api::News::NewsService",
+      "to": "Shop::Tests::Utils",
+      "category": "IMPORTS",
+      "note": "`using Shop.Flows.Utils;` names a namespace the repo does not declare: no tail guess of another Utils"
+    },
+    {
+      "from": "Shop::Domain::Contents::ContentRepository",
+      "to": "Shop::Data::Cache::Repository",
+      "category": "INHERITS_FROM",
+      "note": "guard: the Repository the file does not open"
+    }
+  ]
+}

@@ -231,7 +231,7 @@ fn visit_children(
                 if !at_root {
                     acc.scoped_usings += 1;
                 }
-                collect_using(child, src, acc);
+                collect_using(child, src, module_id, acc);
             }
             "file_scoped_namespace_declaration" => {
                 let ns = visit_namespace(child, src, file_rel, parent_id, module_id, repo, acc);
@@ -2221,53 +2221,101 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
 /// namespace qname would be a PACKAGE, which the graph's import pass
 /// (`module_by_qname`, MODULE qnames only) drops. Two blocks of one file
 /// binding one name differently resolve last-write-wins in source order.
-fn collect_using(node: TsNode, src: &[u8], acc: &mut Acc) {
-    let text = text_of(node, src).trim().to_string();
-    let path = text
-        .trim_start_matches("using ")
-        .trim_start_matches("static ")
-        .trim_start_matches("global ")
-        .trim_end_matches(';')
-        .trim();
-
-    if path.contains('=') {
-        return; // using alias directive — skip for now
-    }
-
-    if let Some(last_dot) = path.rfind('.') {
-        let module_part = &path[..last_dot];
-        let name = &path[last_dot + 1..];
-        if name == "*" {
-            acc.imports.push(ImportStmt {
-                from_module: acc.module_qname.clone(),
-                target: ImportTarget::Module {
-                    path: module_part.replace('.', "::"),
-                    alias: None,
-                },
-                line: line_at(node),
-            });
-        } else {
-            acc.imports.push(ImportStmt {
-                from_module: acc.module_qname.clone(),
-                target: ImportTarget::Symbol {
-                    module: module_part.replace('.', "::"),
-                    name: name.to_string(),
-                    alias: None,
-                    level: 0,
-                },
-                line: line_at(node),
-            });
+///
+/// HQ.13: the directive is read from the grammar (tree-sitter-c-sharp 0.23
+/// `using_directive`: the alias in field `name`, the target the other named
+/// child, anonymous `global` / `static` tokens), and every one whose target
+/// is a dotted name is also a [`NavFact::CsUsing`](glia_code_domain::NavFact)
+/// on the file MODULE `module_id`: its form (alias when `name` is present,
+/// static on a `static` token, else namespace), `global` on a `global` token,
+/// the path in `::` form with `global::` stripped, its 0-based row. A
+/// namespace or static using keeps the ImportStmt it always had (`Symbol {
+/// module: parent, name: last }`, or `Module` for one segment); an alias
+/// using, skipped before HQ.13, is `Symbol { .., alias }` so the import pass
+/// binds the alias. A target that is no dotted name (a generic or tuple
+/// alias) records nothing.
+fn collect_using(node: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let alias_node = node.child_by_field_name("name");
+    let (mut global, mut is_static) = (false, false);
+    let mut target = None;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "global" if !child.is_named() => global = true,
+            "static" if !child.is_named() => is_static = true,
+            _ if child.is_named()
+                && Some(child.id()) != alias_node.map(|a| a.id())
+                && child.kind() != "comment" =>
+            {
+                target = Some(child);
+            }
+            _ => {}
         }
-    } else {
-        acc.imports.push(ImportStmt {
-            from_module: acc.module_qname.clone(),
-            target: ImportTarget::Module {
-                path: path.replace('.', "::"),
-                alias: None,
-            },
-            line: line_at(node),
-        });
     }
+    let Some(target) = target else {
+        return;
+    };
+    let raw: String = text_of(target, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let raw = raw.strip_prefix("global::").unwrap_or(&raw);
+    let alias = alias_node.map(|a| text_of(a, src).trim().to_string());
+    let dotted = cs_dotted_path(raw);
+    let line = line_at(node);
+    if let Some(path) = &dotted {
+        let form = match (&alias, is_static) {
+            (Some(_), _) => glia_code_domain::CsUsingForm::Alias,
+            (None, true) => glia_code_domain::CsUsingForm::Static,
+            (None, false) => glia_code_domain::CsUsingForm::Namespace,
+        };
+        acc.nav.record_fact(
+            module_id,
+            glia_code_domain::NavFact::CsUsing {
+                form,
+                path: path.clone(),
+                alias: alias.clone(),
+                global,
+                line,
+            },
+        );
+    }
+    if alias.is_some() && dotted.is_none() {
+        return;
+    }
+    let path = dotted.unwrap_or_else(|| raw.replace('.', "::"));
+    let target = match path.rsplit_once("::") {
+        Some((module, name)) => ImportTarget::Symbol {
+            module: module.to_string(),
+            name: name.to_string(),
+            alias,
+            level: 0,
+        },
+        None => ImportTarget::Module { path, alias },
+    };
+    acc.imports.push(ImportStmt {
+        from_module: acc.module_qname.clone(),
+        target,
+        line,
+    });
+}
+
+/// HQ.13: a using target written as a dotted name (`A.B.C`, verbatim
+/// `@`-identifiers allowed, the `@` dropped), in `::` form; `None` for
+/// anything else (a generic, tuple, array or pointer type).
+fn cs_dotted_path(raw: &str) -> Option<String> {
+    let segs: Vec<&str> = raw
+        .split('.')
+        .map(|seg| seg.strip_prefix('@').unwrap_or(seg))
+        .collect();
+    segs.iter()
+        .all(|seg| {
+            seg.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+        })
+        .then(|| segs.join("::"))
 }
 
 fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
@@ -2612,6 +2660,137 @@ public class Api {}
                 ("Api::Api", "Shop::Services::Billing".to_string()),
             ]
         );
+    }
+
+    /// HQ.13: the file MODULE's CsUsing facts, in record order.
+    fn cs_usings(fp: &FileParse, module: &str) -> Vec<glia_code_domain::NavFact> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
+        fp.nav
+            .nav_facts
+            .get(&id)
+            .map(|f| {
+                f.iter()
+                    .filter(|f| matches!(f, glia_code_domain::NavFact::CsUsing { .. }))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn cs_using(
+        form: glia_code_domain::CsUsingForm,
+        path: &str,
+        alias: Option<&str>,
+        global: bool,
+        line: u32,
+    ) -> glia_code_domain::NavFact {
+        glia_code_domain::NavFact::CsUsing {
+            form,
+            path: path.to_string(),
+            alias: alias.map(str::to_string),
+            global,
+            line,
+        }
+    }
+
+    /// HQ.13: every using form is read from the grammar, not trimmed text:
+    /// a namespace, a static, an alias (BASE skipped it) and a global using,
+    /// each a CsUsing fact on the file MODULE with its 0-based row.
+    #[test]
+    fn using_forms_are_recorded_on_the_module() {
+        use glia_code_domain::CsUsingForm::{Alias, Namespace, Static};
+        let source = r#"using Shop.Core.Commands;
+using static Shop.Core.Helpers;
+using StoreBase = Shop.Core.Storage.Store;
+global using Vendor.ClientLibrary;
+using System;
+"#;
+        let fp = parse_file(source, "Api/A.cs", "Api::A", repo()).unwrap();
+        assert_eq!(
+            cs_usings(&fp, "Api::A"),
+            vec![
+                cs_using(Namespace, "Shop::Core::Commands", None, false, 0),
+                cs_using(Static, "Shop::Core::Helpers", None, false, 1),
+                cs_using(
+                    Alias,
+                    "Shop::Core::Storage::Store",
+                    Some("StoreBase"),
+                    false,
+                    2
+                ),
+                cs_using(Namespace, "Vendor::ClientLibrary", None, true, 3),
+                cs_using(Namespace, "System", None, false, 4),
+            ]
+        );
+        // The ImportStmts: namespace and static as before, the alias binds
+        // its alias, the global one is a plain namespace statement.
+        let stmts: Vec<(String, Option<String>)> = fp
+            .imports
+            .iter()
+            .map(|i| match &i.target {
+                ImportTarget::Module { path, alias } => (path.clone(), alias.clone()),
+                ImportTarget::Symbol {
+                    module,
+                    name,
+                    alias,
+                    ..
+                } => (format!("{module}::{name}"), alias.clone()),
+            })
+            .collect();
+        assert_eq!(
+            stmts,
+            vec![
+                ("Shop::Core::Commands".to_string(), None),
+                ("Shop::Core::Helpers".to_string(), None),
+                (
+                    "Shop::Core::Storage::Store".to_string(),
+                    Some("StoreBase".to_string())
+                ),
+                ("Vendor::ClientLibrary".to_string(), None),
+                ("System".to_string(), None),
+            ]
+        );
+    }
+
+    /// HQ.13: a block-namespace using is the file's fact too (LA.40a), and
+    /// `global::` is stripped from the path.
+    #[test]
+    fn block_namespace_and_global_qualified_usings() {
+        use glia_code_domain::CsUsingForm::{Alias, Namespace};
+        let source = r#"using global::Shop.Models;
+namespace Shop.Controllers
+{
+    using Shop.Services.Billing;
+    using Bill = global::Shop.Services.Billing;
+
+    public class C {}
+}
+"#;
+        let fp = parse_file(source, "Controllers/C.cs", "Controllers::C", repo()).unwrap();
+        assert_eq!(
+            cs_usings(&fp, "Controllers::C"),
+            vec![
+                cs_using(Namespace, "Shop::Models", None, false, 0),
+                cs_using(Namespace, "Shop::Services::Billing", None, false, 3),
+                cs_using(Alias, "Shop::Services::Billing", Some("Bill"), false, 4),
+            ]
+        );
+        assert_eq!(
+            import_rows(&fp)[0],
+            ("Controllers::C", "Shop::Models".to_string())
+        );
+    }
+
+    /// HQ.13: a generic or tuple alias names no dotted path: no fact and no
+    /// import.
+    #[test]
+    fn generic_alias_records_nothing() {
+        let source = r#"using Ints = System.Collections.Generic.List<int>;
+using Pair = (int, string);
+"#;
+        let fp = parse_file(source, "A.cs", "A", repo()).unwrap();
+        assert!(cs_usings(&fp, "A").is_empty());
+        assert!(fp.imports.is_empty());
     }
 
     #[test]

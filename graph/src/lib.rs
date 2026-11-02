@@ -35,6 +35,7 @@ pub mod rust_paths;
 
 // 0.5.1 internals: crate-private slots, items pub(crate).
 mod cpp_scope;
+mod cs_scope;
 mod go_mounts;
 mod swift_scope;
 

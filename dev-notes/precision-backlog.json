@@ -1713,6 +1713,38 @@
    "depends_on": [],
    "risks": "More ROUTE nodes per resource (up to 8); a client verb a custom route (`match via:`) serves must still pair through that route. Rails `resources` with a block of `member` verbs keeps those verbs as written.",
    "note": "HF.5 ruling (dev-notes/leap-057-corrections.json): default accepted, keep ANY in 0.5.7; this entry is the deferred half."
+  },
+  {
+   "from": "0.5.7 HQ.13 follow-up (ruling: \".csproj <Using Include> not read (default (a)); add a precision-backlog row for it\")",
+   "spec_pass": "hq13",
+   "class": "precision_backlog",
+   "title": "C# project-level usings: MSBuild `<Using Include=\"Ns\" />` (a .csproj or Directory.Build.props) and `<ImplicitUsings>` open namespaces for every file of the project, read into the C# heritage lookup as global usings",
+   "area": "graph/src/cs_scope.rs (CsScopes globals), the walk's .csproj reading (FD.31 reads .NET project files as manifests)",
+   "loc": 250,
+   "rationale": "HQ.13 reads every `using` directive of a .cs file and every `global using` of the build group (graph::cs_scope), but not the usings an MSBuild project declares. A file that names an in-repo base only through a project-level `<Using Include>` of an in-repo namespace AND writes a `using` of a namespace the repo does not declare loses its heuristic heritage edge (CsLookup::RefusedExternal). On squidex@f828dd717edc every csproj Using names an external package (FakeItEasy, FluentAssertions, Xunit) and ImplicitUsings adds only System.*, so 0 edges at HQ.13; no public example yet.",
+   "entry_points": [
+    "graph/src/cs_scope.rs `CsScopes::build` (`globals`): add the project's declared usings, scoped to the files under the project's directory",
+    "the .csproj / Directory.Build.props reader (FD.31's .NET manifest path): `<Using Include=\"..\" />`, `<Using Remove>`, `<Using Static=\"true\">`, `<Using Alias>`, and `<ImplicitUsings>enable</ImplicitUsings>`'s SDK set"
+   ],
+   "files_touched": [
+    "graph/src/cs_scope.rs"
+   ],
+   "implementation": "Record each project's declared usings (from the manifest the walk already routes) as facts on the project's files, or on its PROJECT node, and read them in CsScopes beside the file's own usings; an implicit SDK using is external (it never makes a base in-repo). Tests: an in-repo namespace opened only by a csproj Using binds `using_namespace`; one removed by `<Using Remove>` does not.",
+   "fixtures": [],
+   "acceptance": "PRE-FIX: a fixture whose only path to an in-repo base is a csproj `<Using Include>` of its namespace, in a file that also uses an external namespace, leaves the base unresolved at HEAD; AFTER it binds (rule using_namespace).",
+   "fired_on_marker": "`[cs-scope] heritage ..` gains ` project_usings=<n>`",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "graph_content"
+    ],
+    "what_changes": "C# heritage edges a project-level using opens bind fact."
+   },
+   "depends_on": [
+    "HQ.13"
+   ],
+   "risks": "A Directory.Build.props applies to every project below it; read the nearest one per project as MSBuild does.",
+   "note": "Added by HQ.13 per its ruling; no example yet."
   }
  ]
 }

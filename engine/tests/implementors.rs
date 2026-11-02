@@ -91,17 +91,18 @@ fn csharp_interface_chain_down_up_and_direct() {
     assert_eq!(
         rows(&down.results),
         [
-            ("Shop::IUserRepo", 1, "IMPLEMENTS", "heuristic", None),
+            ("Shop::IUserRepo", 1, "IMPLEMENTS", "fact", None),
             (
                 "Shop::PgUserRepo",
                 2,
                 "IMPLEMENTS",
-                "heuristic",
+                "fact",
                 Some("Shop::IUserRepo")
             ),
         ],
-        "C# emits interface-to-interface heritage as IMPLEMENTS; both bases bind by name alone \
-         (graph:refs global_unique), heuristic as `glia why` reads them (FD.7b)"
+        "C# emits interface-to-interface heritage as IMPLEMENTS; both bases are members of the \
+         declaring type's own namespace (graph:refs enclosing_namespace, HQ.13), fact as \
+         `glia why` reads them (FD.7b)"
     );
     let pg = &down.results[1];
     assert_eq!(
@@ -130,7 +131,7 @@ fn csharp_method_target_walks_its_owner_hierarchy() {
             "Shop::PgUserRepo::Get",
             2,
             "IMPLEMENTS",
-            "heuristic",
+            "fact",
             Some("Shop::IUserRepo")
         )]
     );

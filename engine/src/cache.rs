@@ -482,6 +482,9 @@ pub fn surface_class(f: &NavFact) -> Part {
         // evm_abi (GD.31): this file's own accesses, read by the post-cache
         // graft (re-run every update); no group resolution reads them.
         NavFact::EvmImportSite { .. } => Part::Body,
+        // cs_scope / imports (HQ.13): a using decides this file's IMPORTS,
+        // and a `global using` opens a namespace for every file of the group.
+        NavFact::CsUsing { .. } => Part::Surface,
     }
 }
 

@@ -1503,6 +1503,11 @@ pub struct ImportBinding {
     pub name: Option<String>,
     pub alias: Option<String>,
     pub line: u32,
+    /// HQ.13: a C# row's using form (`namespace`, `static` or `alias`,
+    /// [`CsUsingForm::as_str`]); `None` for every other language's row.
+    pub form: Option<String>,
+    /// HQ.13: a C# `global using` (applies to every file of its project).
+    pub global: bool,
 }
 
 /// FA.22: the rows of an IMPORT_BINDINGS payload, in the order the cell
@@ -1522,9 +1527,99 @@ pub fn read_import_bindings(payload: &str) -> Vec<ImportBinding> {
                 name: field(r, "name"),
                 alias: field(r, "alias"),
                 line: u32::try_from(r.get("line")?.as_u64()?).ok()?,
+                form: field(r, "form"),
+                global: r
+                    .get("global")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             })
         })
         .collect()
+}
+
+/// HQ.13: the IMPORT_BINDINGS payload of one C# file, from the
+/// [`NavFact::CsUsing`] facts of its MODULE (the MODULE with the least
+/// (qname length, qname), as the engine places the cell): every `using`,
+/// in-repo or external, as rows
+/// `{"spec","name","alias","line","form"[,"global":true]}`. A namespace
+/// using lists the whole namespace as `spec` with `name` null (so
+/// [`import_default_binding`] still reads its last segment); a static or
+/// alias using lists the type's parent as `spec` and its last segment as
+/// `name`, an alias its `alias`. Locality is never judged here: which
+/// namespaces the repo declares is the graph's question, and a C# namespace
+/// is no library root ([`library_name`]'s rule calls a repo's own
+/// `Company.Product.*` namespaces and the vendor's alike).
+///
+/// Rows are deduped and sorted by (spec, name, alias, line, form), null
+/// first, capped at [`IMPORT_BINDINGS_CAP`] with the trailing
+/// `{"capped":<n>}` row. Returns `(payload, rows written, rows capped)`, or
+/// `None` for a file with no using.
+pub fn csharp_using_bindings(fp: &FileParse) -> Option<(String, usize, usize)> {
+    let module = fp
+        .nodes
+        .iter()
+        .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+        .filter_map(|n| Some((fp.nav.qname_by_id.get(&n.id)?, n.id)))
+        .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+        .map(|(_, id)| id)?;
+    type Row<'a> = (
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        u32,
+        CsUsingForm,
+        bool,
+    );
+    let rows: std::collections::BTreeSet<Row<'_>> = fp
+        .nav
+        .nav_facts
+        .get(&module)?
+        .iter()
+        .filter_map(|f| match f {
+            NavFact::CsUsing {
+                form,
+                path,
+                alias,
+                global,
+                line,
+            } => {
+                let (spec, name) = match form {
+                    CsUsingForm::Namespace => (path.as_str(), None),
+                    CsUsingForm::Static | CsUsingForm::Alias => match path.rsplit_once("::") {
+                        Some((parent, last)) => (parent, Some(last)),
+                        None => ("", Some(path.as_str())),
+                    },
+                };
+                Some((spec, name, alias.as_deref(), *line, *form, *global))
+            }
+            _ => None,
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let string = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let opt = |s: Option<&str>| s.map_or_else(|| "null".to_string(), string);
+    let mut out: Vec<String> = rows
+        .iter()
+        .take(IMPORT_BINDINGS_CAP)
+        .map(|(spec, name, alias, line, form, global)| {
+            format!(
+                "{{\"spec\":{},\"name\":{},\"alias\":{},\"line\":{line},\"form\":\"{}\"{}}}",
+                string(spec),
+                opt(*name),
+                opt(*alias),
+                form.as_str(),
+                if *global { ",\"global\":true" } else { "" }
+            )
+        })
+        .collect();
+    let capped = rows.len().saturating_sub(IMPORT_BINDINGS_CAP);
+    let written = out.len();
+    if capped > 0 {
+        out.push(format!("{{\"capped\":{capped}}}"));
+    }
+    Some((format!("[{}]", out.join(",")), written, capped))
 }
 
 /// The name a whole-module import binds when it names no alias (an
@@ -2137,6 +2232,50 @@ pub enum NavFact {
         line: u32,
         reassigned: bool,
     },
+    /// C# (HQ.13), recorded by the C# parser on the file MODULE, every
+    /// `using` directive of the file (a block-namespace one included: glia's
+    /// import scope is the file, LA.40a): its `form`, its target `path` in
+    /// `::` form with any `global::` prefix stripped (`A::B` for `using
+    /// A.B;`, the type for `using static A.B.T;` and `using X = A.B.T;`), the
+    /// alias of an alias directive, whether it is a `global using`, and its
+    /// 0-based row. A target that is no dotted name (a generic or tuple
+    /// alias) records nothing. Read by the graph's C# heritage lookup
+    /// (`graph::cs_scope`) and written to the MODULE's IMPORT_BINDINGS cell
+    /// by [`csharp_using_bindings`]; build-time only.
+    CsUsing {
+        form: CsUsingForm,
+        path: String,
+        alias: Option<String>,
+        global: bool,
+        line: u32,
+    },
+}
+
+/// HQ.13: the form of a C# `using` directive ([`NavFact::CsUsing`]). C#
+/// only; read by `graph::cs_scope` and the C# IMPORT_BINDINGS writer
+/// ([`csharp_using_bindings`]).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub enum CsUsingForm {
+    /// `using A.B;`: the namespace's members are in scope.
+    Namespace,
+    /// `using static A.B.T;`: the static members and nested types of `T`.
+    Static,
+    /// `using X = A.B.T;`: `X` names the type or namespace `A.B.T`.
+    Alias,
+}
+
+impl CsUsingForm {
+    /// The IMPORT_BINDINGS row's `form` value: `namespace`, `static` or
+    /// `alias`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CsUsingForm::Namespace => "namespace",
+            CsUsingForm::Static => "static",
+            CsUsingForm::Alias => "alias",
+        }
+    }
 }
 
 /// GD.40: what a [`NavFact::IncludeMount`] names.
@@ -4514,6 +4653,8 @@ mod tests {
                 name: Some("n".to_string()),
                 alias: None,
                 line: 0,
+                form: None,
+                global: false,
             }]
         );
         let capped = r#"[{"spec":"a::b","name":null,"alias":"c","line":7},{"capped":4}]"#;
@@ -4521,6 +4662,127 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].alias.as_deref(), rows[0].line), (Some("c"), 7));
         assert!(read_import_bindings("not json").is_empty());
+    }
+
+    /// HQ.13: a C# file's every `using`, from its MODULE's CsUsing facts:
+    /// a namespace row lists the whole namespace with name null, a static or
+    /// alias row the type's parent and last segment, `form` on every row and
+    /// `global` only when set; sorted, deduped, null first. In-repo and
+    /// external namespaces alike (no local filter), and `None` without a using.
+    #[test]
+    fn csharp_using_bindings_list_every_using_with_its_form() {
+        let repo = glia_core::RepoId(1);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "Api::News");
+        let class = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, "Api::News::Dto");
+        let mut fp = FileParse::default();
+        for (id, kind, qname) in [
+            (class, node_kind::CLASS, "Api::News::Dto"),
+            (module, node_kind::MODULE, "Api::News"),
+        ] {
+            fp.nodes.push(Node {
+                id,
+                repo,
+                confidence: glia_core::Confidence::Strong,
+                cells: Vec::new(),
+            });
+            fp.nav.record(id, qname, qname, kind, None);
+        }
+        assert_eq!(csharp_using_bindings(&fp), None);
+        let using = |form, path: &str, alias: Option<&str>, global, line| NavFact::CsUsing {
+            form,
+            path: path.to_string(),
+            alias: alias.map(str::to_string),
+            global,
+            line,
+        };
+        for fact in [
+            using(
+                CsUsingForm::Namespace,
+                "Vendor::ClientLibrary",
+                None,
+                false,
+                2,
+            ),
+            using(
+                CsUsingForm::Alias,
+                "Shop::Core::Storage::Store",
+                Some("StoreBase"),
+                false,
+                3,
+            ),
+            using(CsUsingForm::Static, "Shop::Core::Helpers", None, false, 1),
+            using(CsUsingForm::Namespace, "Shop::Core", None, true, 0),
+            using(
+                CsUsingForm::Namespace,
+                "Vendor::ClientLibrary",
+                None,
+                false,
+                2,
+            ),
+        ] {
+            fp.nav.record_fact(module, fact);
+        }
+        // A fact on another scope is not the file's.
+        fp.nav.record_fact(
+            class,
+            using(CsUsingForm::Namespace, "Other", None, false, 9),
+        );
+        let (json, rows, capped) = csharp_using_bindings(&fp).unwrap();
+        assert_eq!((rows, capped), (4, 0));
+        assert_eq!(
+            json,
+            r#"[{"spec":"Shop::Core","name":null,"alias":null,"line":0,"form":"namespace","global":true},{"spec":"Shop::Core","name":"Helpers","alias":null,"line":1,"form":"static"},{"spec":"Shop::Core::Storage","name":"Store","alias":"StoreBase","line":3,"form":"alias"},{"spec":"Vendor::ClientLibrary","name":null,"alias":null,"line":2,"form":"namespace"}]"#
+        );
+        let read = read_import_bindings(&json);
+        assert_eq!(
+            read.iter()
+                .map(|b| (b.form.as_deref(), b.global))
+                .collect::<Vec<_>>(),
+            [
+                (Some("namespace"), true),
+                (Some("static"), false),
+                (Some("alias"), false),
+                (Some("namespace"), false)
+            ]
+        );
+        // The namespace row's default bound name is still its last segment.
+        assert_eq!(
+            import_default_binding(&read[3].spec, "csharp").as_deref(),
+            Some("ClientLibrary")
+        );
+        // A pre-HQ.13 row reads no form and no global.
+        let old = read_import_bindings(r#"[{"spec":"a","name":null,"alias":null,"line":0}]"#);
+        assert_eq!((old[0].form.as_deref(), old[0].global), (None, false));
+    }
+
+    /// HQ.13: past the cap the rows stop and a `capped` row counts the rest.
+    #[test]
+    fn csharp_using_bindings_cap() {
+        let repo = glia_core::RepoId(1);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "M");
+        let mut fp = FileParse::default();
+        fp.nodes.push(Node {
+            id: module,
+            repo,
+            confidence: glia_core::Confidence::Strong,
+            cells: Vec::new(),
+        });
+        fp.nav.record(module, "M", "M", node_kind::MODULE, None);
+        for i in 0..(IMPORT_BINDINGS_CAP as u32 + 3) {
+            fp.nav.record_fact(
+                module,
+                NavFact::CsUsing {
+                    form: CsUsingForm::Namespace,
+                    path: format!("Ns{i:04}"),
+                    alias: None,
+                    global: false,
+                    line: i,
+                },
+            );
+        }
+        let (json, rows, capped) = csharp_using_bindings(&fp).unwrap();
+        assert_eq!((rows, capped), (IMPORT_BINDINGS_CAP, 3));
+        assert!(json.ends_with(r#"{"capped":3}]"#));
     }
 
     /// The default bound name of a whole-module import, per language (the

@@ -13,7 +13,7 @@ use glia_code_domain::glia_config::LoadedConfig;
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{
     CodeNav, FileParse, ImportTarget, LocalModuleIndex, NavFact, attach_imports_cell_filtered,
-    cell_type, import_bindings_cell, node_kind,
+    cell_type, csharp_using_bindings, import_bindings_cell, node_kind,
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
@@ -2516,10 +2516,17 @@ fn filter_imports_cells(
                 key.lang == *lang && key.index == index && key.imports == fp.imports
             });
             let (key, out) = match replay {
-                Some((key, out)) => {
+                Some((key, mut out)) => {
                     hits += 1;
                     if let Some(json) = &out.imports_json {
                         write_imports_cell(fp, json);
+                    }
+                    // HQ.13: a C# file's bindings are its usings' facts, which
+                    // the key's ImportStmts do not pin (`using A.B.C;` and
+                    // `using static A.B.C;` write one statement): recomputed,
+                    // never replayed.
+                    if *lang == "csharp" {
+                        out.bindings = csharp_using_bindings(fp);
                     }
                     (key, out)
                 }
@@ -2689,11 +2696,19 @@ fn filter_file(fp: &mut FileParse, lang: &str, local: &LocalModuleIndex) -> Impo
             _ => None,
         })
     });
+    // HQ.13: a C# file lists every `using` with its form, from the parser's
+    // facts: the library-root rule cannot tell a repo's namespaces from a
+    // vendor's.
+    let bindings = if lang == "csharp" {
+        csharp_using_bindings(fp)
+    } else {
+        import_bindings_cell(&fp.imports, lang, local)
+    };
     ImportsOut {
         imports_json,
         kept,
         dropped,
-        bindings: import_bindings_cell(&fp.imports, lang, local),
+        bindings,
     }
 }
 
@@ -4334,6 +4349,60 @@ mod imports_memo_tests {
             let k = n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS);
             assert_eq!(k.count(), 1);
         }
+    }
+
+    /// HQ.13: a C# file's bindings come from its CsUsing facts, fresh and
+    /// replayed alike: the memo key (its ImportStmts) cannot tell `using
+    /// A.B.C;` from `using static A.B.C;`, so a replay recomputes them.
+    #[test]
+    fn a_csharp_files_bindings_are_its_usings_fresh_or_replayed() {
+        use glia_code_domain::{CsUsingForm, NavFact};
+        let mut fp = file("Api::News", &["Vendor"]);
+        let module = fp.nodes[0].id;
+        let using = |form| NavFact::CsUsing {
+            form,
+            path: "Vendor::ClientLibrary".to_string(),
+            alias: None,
+            global: false,
+            line: 0,
+        };
+        fp.nav.record_fact(module, using(CsUsingForm::Namespace));
+        let by_lang = HashMap::from([("csharp", vec![fp.clone()])]);
+        let cell = |nodes: &[Node]| -> Option<String> {
+            nodes.iter().find_map(|n| {
+                n.cells.iter().find_map(|c| match (&c.kind, &c.payload) {
+                    (&cell_type::IMPORT_BINDINGS, CellPayload::Json(j)) => Some(j.clone()),
+                    _ => None,
+                })
+            })
+        };
+        fn run_cs(
+            by_lang: &HashMap<&'static str, Vec<FileParse>>,
+            memo: Option<&mut BuildMemo>,
+        ) -> Vec<Node> {
+            let mut by_lang = by_lang.clone();
+            filter_imports_cells(&mut by_lang, &[], &TsAliasSet::default(), memo, "r");
+            by_lang["csharp"][0].nodes.clone()
+        }
+        let fresh = run_cs(&by_lang, None);
+        assert_eq!(
+            cell(&fresh).as_deref(),
+            Some(
+                r#"[{"spec":"Vendor::ClientLibrary","name":null,"alias":null,"line":0,"form":"namespace"}]"#
+            )
+        );
+        let mut memo = BuildMemo::default();
+        assert_eq!(run_cs(&by_lang, Some(&mut memo)), fresh);
+        // Same ImportStmts, another form: the replay recomputes the cell.
+        let mut staticky = fp.clone();
+        staticky.nav.nav_facts.clear();
+        staticky.nav.record_fact(module, using(CsUsingForm::Static));
+        let by_lang = HashMap::from([("csharp", vec![staticky])]);
+        let replayed = run_cs(&by_lang, Some(&mut memo));
+        let hits = memo.stats.imports_hit;
+        assert_eq!(hits, 1);
+        assert_eq!(replayed, run_cs(&by_lang, None));
+        assert!(cell(&replayed).is_some_and(|c| c.contains(r#""form":"static""#)));
     }
 
     #[test]
