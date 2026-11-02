@@ -20,10 +20,12 @@ use glia_activation::profile::DomainTables;
 use glia_code_domain::profile::CODE_TABLES;
 use glia_core::ids::{self, Block};
 
-/// Every domain this binary links, by graph type. A domain crate the CLI
-/// links later (the build-target domain) adds its `DomainTables` here; the
-/// list is the CLI's own so the engine facade stays untouched.
-const LINKED: &[&DomainTables] = &[&CODE_TABLES];
+/// Every domain this binary links, by graph type: the code domain and the
+/// build-target domain (HT.7: its tables reach the CLI through
+/// `glia_engine::targets`, so the CLI takes no `glia-build-domain`
+/// dependency). The list is the CLI's own so the engine facade stays
+/// untouched.
+const LINKED: &[&DomainTables] = &[&CODE_TABLES, &glia_engine::targets::BUILD_TABLES];
 
 /// The three registries: the table key (`--table`, the lock's key) and the
 /// Rust id type a const of that table has.

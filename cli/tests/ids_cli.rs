@@ -30,7 +30,7 @@ fn ls_json_lists_the_blocks_and_the_code_ids() {
         .lines()
         .find(|l| l.starts_with("[ids] ls "))
         .unwrap_or_else(|| panic!("no [ids] ls marker: {stderr}"));
-    assert_eq!(marker, "[ids] ls domains=1 blocks=5 surface=cli");
+    assert_eq!(marker, "[ids] ls domains=2 blocks=5 surface=cli");
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("ls --json is JSON");
 
     let blocks: Vec<(&str, &str, &str)> = json["blocks"]
@@ -90,6 +90,27 @@ fn ls_json_lists_the_blocks_and_the_code_ids() {
         let mut sorted = numbers.clone();
         sorted.sort_unstable();
         assert_eq!(numbers, sorted, "ids sorted by id");
+    }
+    // HT.7: the build-target domain is linked too (through
+    // glia_engine::targets), its ids in block 2.
+    let graph_types: Vec<&str> = domains
+        .iter()
+        .filter_map(|d| d["graph_type"].as_str())
+        .collect();
+    assert_eq!(graph_types, ["code", "build-targets"]);
+    let build = &domains[1];
+    assert_eq!(build["block"], "build");
+    for t in build["tables"].as_array().expect("tables") {
+        assert_eq!(t["count"], 4, "{t}");
+        assert_eq!(t["next"], 0x0002_0005, "{t}");
+        assert!(
+            t["ids"]
+                .as_array()
+                .expect("ids")
+                .iter()
+                .all(|i| i["block"] == "build"),
+            "{t}"
+        );
     }
     let modules = code_domain["tables"][0]["ids"][0].clone();
     assert_eq!(modules["id"], 1);
@@ -156,6 +177,31 @@ fn next_prints_a_const_line() {
          // 0x80000001, block private"
     );
     assert!(stderr.contains("block=private"), "{stderr}");
+}
+
+#[test]
+fn next_in_the_build_block() {
+    let (code, stdout, stderr) = glia(&[
+        "ids",
+        "next",
+        "--domain",
+        "build-targets",
+        "--table",
+        "node_kind",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        "pub const NAME: NodeKindId = NodeKindId(glia_core::ids::id_in(BUILD, 5)); \
+         // 0x00020005, block build"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l
+                == "[ids] next domain=build-targets table=node_kind id=0x00020005 block=build"),
+        "{stderr}"
+    );
 }
 
 #[test]

@@ -519,6 +519,28 @@ glia vocab sync <REPO> [--json] [--rev <REV>]
     <repo>/.glia/vocab-snapshot/: every identifier-like token with the files it
     occurs in. find's absence and gaps read it; the build never does. Exits 1 when
     the sync fails (nothing written).
+glia targets sync <REPO> [--bazel <BIN>] [--expr <QUERY>] [--from <FILE>] [--json] [--workspace <DIR>]
+    Ask bazel once for one workspace's targets (`bazel query '<expr>'
+    --output=streamed_jsonproto`, default `//...:*`, run in <repo>/<workspace>), or read
+    a saved query output with --from, into <repo>/.glia/targets-snapshot/, replacing only
+    that workspace's rows. A build never runs it; the answers below read it (through the
+    .glia/graph/targets.gmap sidecar) and never run bazel. Exits 2 when the sync fails
+    (nothing written).
+glia targets owners <REPO> <FILES>... [--json]
+    The targets naming each file in srcs / hdrs / textual_hdrs, one `<file> -> <label>`
+    line each. Every targets row is tier fact; rows carry a `[<workspace>]` prefix when the
+    snapshot holds several. The targets answers exit 0 with rows, 1 with none (the
+    absence), 2 with no snapshot or on an error.
+glia targets deps <REPO> <LABEL> [--depth <N>] [--json] [--workspace <DIR>]
+    What a target reaches over its deps, runtime deps and sources, at most --depth (3)
+    hops: `<label>  <rule_class>  <role>  <file>:<line>  depth=<d>  via=<attrs>`.
+    --workspace picks one workspace's label; an unknown label is a fact absence.
+glia targets rdeps <REPO> <LABEL> [--depth <N>] [--json] [--workspace <DIR>]
+    What reaches a target, as deps.
+glia targets affected <REPO> [<FILES>...] [--base <REV>] [--json]
+    The targets (## targets) and test targets (## tests) the changed files reach, at any
+    depth; with no files the work tree's changes against --base (HEAD). A changed BUILD /
+    .bzl / MODULE / WORKSPACE file adds a caveat: re-sync for exact owners.
 glia embed <REPO> [--check] [--json] [--limit <N>] [--model bge-small|test-hash] [--recipe t1|t2] [--replace]
     Embed each node's text (name, qname, leading doc, imports; code last under
     --recipe t2) with a local model (default bge-small, cached under the user cache,

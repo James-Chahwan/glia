@@ -1,0 +1,6 @@
+# pyo3 surface of py/src/targets.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.targets_affected(files: Option<Vec<String>> = None, base: &str = "HEAD") -> PyResult<Py<PyAny>>
+method PyGraph.targets_deps(label: &str, depth: usize = 3, workspace: Option<String> = None) -> PyResult<Py<PyAny>>
+method PyGraph.targets_owners(files: Vec<String>) -> PyResult<Py<PyAny>>
+method PyGraph.targets_rdeps(label: &str, depth: usize = 3, workspace: Option<String> = None) -> PyResult<Py<PyAny>>
+fn targets_sync(repo: &str, bazel: &str = "bazel", workspace: &str = "", expr: &str = "//...:*", from_file: Option<PathBuf> = None) -> PyResult<Py<PyAny>>

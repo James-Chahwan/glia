@@ -49,10 +49,17 @@ use std::path::{Path, PathBuf};
 use glia_activation::algo::reach::bfs;
 use glia_activation::algo::{Adjacency, Walk};
 use glia_activation::profile::Tier;
+/// The build-target domain's tables, re-exported so a crate that links the
+/// engine but not `glia-build-domain` (the CLI's `glia ids`, HT.7) can list
+/// them without a new dependency.
+pub use glia_build_domain::BUILD_TABLES;
 use glia_build_domain::cell_type::{ATTRS, LOCATION};
 use glia_build_domain::edge_category::{self as bec, HAS_SRC};
 use glia_build_domain::node_kind::{self as bnk, SOURCE, TARGET};
-use glia_build_domain::{BUILD_PROFILE, BUILD_TABLES, BuildGraph, GRAPH_TYPE, read_targets};
+/// `<root>/.glia/targets-snapshot/`, the snapshot [`load_or_build`] reads
+/// (re-exported for the surfaces' messages, HT.7).
+pub use glia_build_domain::snapshot::targets_dir;
+use glia_build_domain::{BUILD_PROFILE, BuildGraph, GRAPH_TYPE, read_targets};
 use glia_code_domain::node_kind;
 use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
@@ -226,9 +233,7 @@ pub fn affected_vs_rev(root: &Path, base: &str) -> Result<Option<Affected>, Stri
     let Some(view) = load_or_build(root)? else {
         return Ok(None);
     };
-    let rev = resolve_rev(root, base)?;
-    let changed = changed_files(root, &rev)?;
-    Ok(Some(view.affected(&changed)))
+    view.affected_since(root, base).map(Some)
 }
 
 /// `//pkg:name` -> (`pkg`, `name`); `//pkg` is `//pkg:<last segment>`.
@@ -654,5 +659,21 @@ impl TargetsView {
     /// Every SOURCE file the view knows as a repo path, sorted.
     pub fn files(&self) -> Vec<&str> {
         self.files.keys().map(String::as_str).collect()
+    }
+
+    /// The snapshot's workspaces (repo-relative dirs, `""` the repo root),
+    /// in snapshot order: a surface prefixes rows with theirs when there
+    /// are several (HT.7).
+    pub fn workspaces(&self) -> &[String] {
+        &self.workspaces
+    }
+
+    /// What `root`'s changes since `base` (the working tree against the rev,
+    /// untracked files included) affect, over this view: [`affected_vs_rev`]
+    /// for a caller that already holds the view.
+    pub fn affected_since(&self, root: &Path, base: &str) -> Result<Affected, String> {
+        let rev = resolve_rev(root, base)?;
+        let changed = changed_files(root, &rev)?;
+        Ok(self.affected(&changed))
     }
 }

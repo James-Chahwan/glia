@@ -1,5 +1,5 @@
 //! `inputs` area: non-code inputs — gaps (LF.2c), history (LF.5d), tests (LF.6d),
-//! overlay (CE.3e), scip (CE.1c), vocab (FB.13b), embed (FB.5b).
+//! overlay (CE.3e), scip (CE.1c), vocab (FB.13b), embed (FB.5b), targets (HT.7).
 //!
 //! Each command is a variant of `InputsCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -13,6 +13,7 @@ mod gaps;
 mod history;
 mod overlay;
 mod scip;
+mod targets;
 mod tests;
 mod vocab;
 
@@ -61,6 +62,13 @@ pub(crate) enum InputsCmd {
     /// sidecar. Exits 1 under --check when nodes need embedding, 2 on an
     /// error.
     Embed(embed::Args),
+    /// Build-target graphs (HT.7): `targets sync` asks bazel once for one
+    /// workspace's targets (or reads a saved query output) and writes
+    /// `<repo>/.glia/targets-snapshot/`; `owners`, `deps`, `rdeps` and
+    /// `affected` answer from it (the `.glia/graph/targets.gmap` sidecar)
+    /// and never run bazel. Every row is tier fact. Exits 0 with rows, 1 with
+    /// none (the absence), 2 on an error (a failed sync, no snapshot).
+    Targets(targets::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
@@ -72,5 +80,6 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::Scip(a) => scip::run(a),
         InputsCmd::Vocab(a) => vocab::run(a),
         InputsCmd::Embed(a) => embed::run(a),
+        InputsCmd::Targets(a) => targets::run(a),
     }
 }
