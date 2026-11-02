@@ -10451,25 +10451,25 @@
       },
       "typescript/host_command": {
         "extract": [
-          4,
-          4
+          7,
+          7
         ],
         "fixtures": [
           "patterns/typescript/host_command"
         ],
         "forbid": [
-          3,
-          3
+          5,
+          5
         ],
         "level": "full",
         "literal": [
-          4,
-          4
+          7,
+          7
         ],
         "reasons": [],
         "route": [
-          6,
-          6
+          10,
+          10
         ],
         "via": "host_command"
       },

@@ -28,6 +28,7 @@ EXCLUSIVE = set()
 LANDED = {
     0: "HP.1",
     1: "HP.2 HP.4 HF.1 HF.3 HF.5 HT.1 HC.1",
+    2: "HP.3 HF.2 HF.4 HT.2 HT.4 HT.9 HC.2",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = True
