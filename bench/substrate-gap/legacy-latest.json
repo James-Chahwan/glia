@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 515,
+  "fixtures": 516,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2595,6 +2595,13 @@
       "per_category": {
         "IMPORTS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "solidity-inherited-events": {
+      "framework": "solidity-inherited-events",
+      "language": "solidity",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
       }
     },
     "solidity-inherits_from": {

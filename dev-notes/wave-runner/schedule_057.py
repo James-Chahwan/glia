@@ -32,6 +32,7 @@ LANDED = {
     3: "HP.6 HT.3 HT.10 HC.3",
     4: "HT.5 HC.4",
     5: "HT.6 HQ.2 HQ.5 HQ.7 HQ.9 HQ.10 HQ.12",
+    6: "HT.7 HQ.3",
 }
 # Tracks chosen for building (tracks_054.py --select appends; T0 is wave 0 and always in).
 WAVE0_SERIAL = True

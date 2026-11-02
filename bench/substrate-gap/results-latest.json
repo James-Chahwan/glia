@@ -9822,6 +9822,7 @@
     "fixtures/self-scan-literal-schedules",
     "fixtures/self-scan-literal-sql",
     "fixtures/solidity-abi-procedures",
+    "fixtures/solidity-inherited-events",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
