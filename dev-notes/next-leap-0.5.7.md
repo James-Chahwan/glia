@@ -99,3 +99,37 @@ reused and fresh results over the same tree. A ratchet runs only from a fresh fu
   James 2026-10-31, on why glia-cli is a PyPI package: *"okay sure go for it we will do the rust part later then"*:
   glia-cli ships on PyPI with 0.5.4; the Rust channel comes later.
 - An image-embedding space for visual domains (2026-10-24; arrives with the first visual domain; VectorRow already fits).
+
+## 6. Packets and the split (spec pass 2026-11-02 at c1a37f86)
+
+James, 2026-11-02: *"All the specced work should come and spec everything but distribution for 0.5.7. That should land
+smaller then 0.5.6 and we could make 0.5.7 2 releases due weekly cutoff reset"*. Seven read-only agents re-verified the
+29 moved packets (all rewritten against the 0.5.6 tree, none already done) and specced the rest: 61 packets, ~26,100 LOC.
+The split (James: *"Fine"*):
+
+| release | ids | packets | LOC | file |
+|---|---|---|---|---|
+| 0.5.7 | H* | 27 | 10,360 | `leap-057-packets.json`, `leap-057-corrections.json`, `wave-runner/schedule_057.py` (W0-W9), `shared_brief_057.md` |
+| 0.5.8 | J* | 35 | 15,570 | `leap-058-packets.json`, `leap-058-corrections.json`, `wave-runner/schedule_058.py` (W0-W15); its brief is written at its kickoff, after a re-verify against 0.5.7 |
+
+- **0.5.7.** HP proof and process: HP.1 the close-out's gate reuse (§4b), wave 0 alone, with clippy as a recorded gate
+  (James: *"Yeap sounds good"*; clean at c1a37f86, 0 warnings), HP.2 re-judging when only a baseline moved, HP.3 build
+  timings, HP.4 the doc linker's DOCUMENTS|derived floor, HP.5 the precision run, HP.6 retiring the rank gate's four
+  FD.79 accepted rows. HF entry flows from declared entries with the concept gate re-run (§3), MCP servers as a Python
+  and a TypeScript host (§3), Rails nested resources (the chatwoot decline). HT build targets (T9) with the id blocks,
+  `glia ids`, contribution seams and `scripts/pr-check.sh` (§4). HC calibrated confidence (§2 D): a model-written
+  overlay stanza's pairings tier heuristic, the held-out audit panel, the run, per-row confidence only on PASS. HZ docs
+  and handoffs.
+- **0.5.8.** JG the goal layer, the clarification queue and PR intent (T6, FC.19 / FC.20), JR the repair loop (§2 C),
+  JD `decide/` and `glia judge`, JP.1 the agent before / after, JZ docs and handoffs.
+- **Id blocks** (James: *"5 [is] fine"*, *"lol code being 0 is such a funny happen stance"*): the high 16 bits of an id
+  name its domain's block, 65,536 per block: 0 code (every existing id unchanged), 1 core, 2 build, 3 goal (reserved),
+  0x8000-0xFFFE private. Nothing new on disk. GOAL_UNIT / TRACES / UNIT stay in block 0.
+- **Doc ties** (James: *"go with recommend"*): the four FD.79 rows did not bind at the 0.5.6 release (glia ANS:impact
+  r10 0.2640 vs 0.5.2's 0.2595; only `websocket/single/B0/mrr` was used), so HP.6 retires them; the section-level
+  measurement is not built (probe: section ties reach 13 code files vs 18 for file ties, best case +0.0078 vs +0.0149
+  r10).
+- **Other rulings**: the goal graph is built for every repo (*"yeah recommended"*); glia never calls a language model in
+  the repair loop (*"Sounds good"*); the agent before / after runs a pilot first, then James decides (*"Okay"*); Laya's
+  own Python runs once in podman for the port check (*"Yes sounds fine"*). Every other spec question takes its default;
+  all are listed with their answers in `leap-057-packets.json` `decisions`.
