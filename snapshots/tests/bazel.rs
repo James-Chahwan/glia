@@ -100,7 +100,8 @@ fn cpp_fixture_reads_rules_source_files_and_outputs() {
     assert_eq!(summary.targets, 12);
     assert_eq!(summary.rules, 3);
     assert_eq!(summary.source_files, 7);
-    assert_eq!(summary.external_labels, 0);
+    // bazel 9's rules_cc cc_binary sets `@rules_cc//:link_extra_lib` in deps.
+    assert_eq!(summary.external_labels, 1);
     assert_eq!(summary.skipped, 0);
     assert_eq!(summary.bazel_version, "from-file");
 
@@ -117,7 +118,14 @@ fn cpp_fixture_reads_rules_source_files_and_outputs() {
     assert_eq!(
         world.labels,
         labels(&[
-            ("deps", &["//lib:hello-time", "//main:hello-greet"]),
+            (
+                "deps",
+                &[
+                    "//lib:hello-time",
+                    "//main:hello-greet",
+                    "@rules_cc//:link_extra_lib",
+                ],
+            ),
             ("srcs", &["//main:hello-world.cc"]),
         ])
     );

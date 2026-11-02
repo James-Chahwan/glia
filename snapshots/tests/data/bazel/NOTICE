@@ -5,14 +5,8 @@ go-tutorial/stage3. That repository is licensed under the Apache License,
 Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0); glia's own licence
 is separate and does not apply to it.
 
-They are `bazel query '//...:*' --output=streamed_jsonproto` output in the
-shape of bazel's build.proto `Target` message printed by protobuf's JsonFormat
-(src/main/protobuf/build.proto and query2/query/output/
-StreamedJSONProtoOutputFormatter.java at bazel 7.4.0, the version
-go-tutorial/stage3/.bazelversion pins), one target per line. They were written
-by hand from the two workspaces' BUILD files: no bazel could be run when they
-were made (glia 0.5.7, packet HT.3), so the targets, labels, attributes and
-locations follow those BUILD files and build.proto, and the attribute sets of
-each rule class are an approximation of what bazel prints. Absolute paths read
-`/WORKSPACE/..`, the workspace root, which the tests replace with a temporary
-directory.
+They are real `bazel query '//...:*' --output=streamed_jsonproto --keep_going`
+output, one target per line, captured 2026-11-02 (glia 0.5.7, packet HT.3): cpp-tutorial/stage3 under
+bazel 9.3.1 (bazelisk's default; that workspace pins no version) and go-tutorial/stage3 under bazel
+7.4.0 (its .bazelversion). The only edit is the workspace root: absolute paths read `/WORKSPACE/..`,
+which the tests replace with a temporary directory.
