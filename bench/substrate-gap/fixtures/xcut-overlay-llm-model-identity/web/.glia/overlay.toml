@@ -1,0 +1,6 @@
+version = 1
+
+# The gateway base the web client reads from the environment at runtime.
+# No `origin`: a stanza is model-written (`llm`) unless marked `human`.
+[constants]
+GATEWAY = "/api"

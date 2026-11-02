@@ -1,0 +1,14 @@
+{
+  "framework": "xcut-overlay-llm-model-identity",
+  "language": "typescript",
+  "dirs": ["web", "api"],
+  "note": "HQ.12: an http_model SAME_AS class never rests on a model-written pairing. web's .glia/overlay.toml [constants] pins GATEWAY = \"/api\" with no `origin` (model-written, `llm`, HC.1's default), so `${GATEWAY}/users` re-keys to endpoint:GET:/api/users and pairs GET /api/users under rule `exact/overlay_llm` (heuristic); '/api/accounts' is a literal path and pairs under plain `exact` (derived). Both exchanges confirm a client <-> server model (User / main.User, Account / main.Account), but only the literal one may form a walking, derived http_model class: the User pair rests on the model's pin alone (`[models] classes=1 .. model_rested=1`). Baseline 2026-11-02 (HEAD 237342b8, debug CLI): both SAME_AS edges emitted (`[models] classes=2 .. embed_reduced=0`), the User one derived over a heuristic pairing. engine/tests/overlay_llm_tier.rs pins the same split.",
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/users", "to": "GET /api/users", "category": "HTTP_CALLS", "exact": true, "note": "HC.1: rule exact/overlay_llm, heuristic"},
+    {"from": "endpoint:GET:/api/accounts", "to": "GET /api/accounts", "category": "HTTP_CALLS", "exact": true, "note": "a literal path: rule exact, derived"},
+    {"from": "src::client::Account", "to": "main::Account", "category": "SAME_AS", "exact": true, "note": "DT.1h http_model over the literal pairing: the positive control"}
+  ],
+  "forbid": [
+    {"from": "src::client::User", "to": "main::User", "category": "SAME_AS", "note": "HQ.12: its only join rests on the model-written [constants] pin"}
+  ]
+}

@@ -12,6 +12,12 @@
 //! carries the suffix). `[constants]` has no per-key origin (every pin is
 //! `llm`), so its control is the no-overlay build only.
 //!
+//! HQ.12: the models pass forms no `http_model` SAME_AS class from a client
+//! <-> server model pair whose every join rests on such a pairing (a walking,
+//! derived class must not stand on a heuristic edge); a literal-path pairing
+//! in the same build keeps its class, and so does the pinned exchange once
+//! its path is written out (no overlay).
+//!
 //! Probe (HEAD a0c1bf1a, before the fix): an unmarked
 //! `[[wrapper]] call="request" kind="http" method_arg=0 path_arg=1` over
 //! `fetch(String(path))` and a flask `GET /users`:
@@ -253,4 +259,90 @@ fn human_route_prefix_pairing_stays_derived() {
 fn no_mount_carries_no_suffix() {
     let r = build("mount_none", MOUNTED_CLIENT_TS, None, None);
     assert_no_suffix(&r);
+}
+
+// ---- HQ.12: http_model identity over a model-rested pairing ---------------
+
+/// A gin api: `GET /api/users` writes `[]User`, `GET /api/accounts`
+/// writes `[]Account`.
+const GIN_MOD: &str =
+    "module example.com/accounts/api\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.9.1\n";
+const GIN_MAIN: &str = "package main\n\nimport \"github.com/gin-gonic/gin\"\n\ntype User struct {\n\tID   int    `json:\"id\"`\n\tName string `json:\"name\"`\n}\n\ntype Account struct {\n\tID   int    `json:\"id\"`\n\tPlan string `json:\"plan\"`\n}\n\nfunc listUsers(c *gin.Context) {\n\tusers := []User{{ID: 1, Name: \"ada\"}}\n\tc.JSON(200, users)\n}\n\nfunc listAccounts(c *gin.Context) {\n\taccounts := []Account{{ID: 1, Plan: \"pro\"}}\n\tc.JSON(200, accounts)\n}\n\nfunc main() {\n\tr := gin.Default()\n\tr.GET(\"/api/users\", listUsers)\n\tr.GET(\"/api/accounts\", listAccounts)\n\tr.Run()\n}\n";
+
+/// A typed axios client: `User[]` through the env base, `Account[]` through
+/// a literal path. `users_path` is the users call's template.
+fn typed_client(users_path: &str) -> String {
+    format!(
+        "import axios from 'axios';\n\nexport interface User {{\n  id: number;\n  name: string;\n}}\n\nexport interface Account {{\n  id: number;\n  plan: string;\n}}\n\nconst GATEWAY = process.env.GATEWAY_URL;\n\nexport async function listUsers() {{\n  return axios.get<User[]>(`{users_path}`);\n}}\n\nexport async function listAccounts() {{\n  return axios.get<Account[]>('/api/accounts');\n}}\n"
+    )
+}
+
+/// `web/src/client.ts = client` with `web_overlay`, the gin api, as two repos.
+fn build_gin(tag: &str, client: &str, web_overlay: Option<&str>) -> GenerateResult {
+    let root = tmp(tag);
+    write(&root, "web/src/client.ts", client);
+    write(&root, "api/go.mod", GIN_MOD);
+    write(&root, "api/main.go", GIN_MAIN);
+    if let Some(o) = web_overlay {
+        write(&root, "web/.glia/overlay.toml", o);
+    }
+    let dirs = [root.join("web"), root.join("api")].map(|d| d.to_string_lossy().into_owned());
+    let built = generate_many_opts(&dirs, false, &BuildOptions::default());
+    std::fs::remove_dir_all(&root).ok();
+    built.expect("build")
+}
+
+/// `(from, to, rule)` of every SAME_AS cross edge, sorted.
+fn same_as(r: &GenerateResult) -> Vec<(String, String, Option<String>)> {
+    let mut out: Vec<_> = r
+        .merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .map(|e| (qname(r, e.from), qname(r, e.to), rule(e)))
+        .collect();
+    out.sort();
+    out
+}
+
+fn class(from: &str, to: &str) -> (String, String, Option<String>) {
+    (
+        from.to_string(),
+        to.to_string(),
+        Some("http_model".to_string()),
+    )
+}
+
+#[test]
+fn model_rested_pairing_forms_no_http_model_class() {
+    let r = build_gin(
+        "model_pin_llm",
+        &typed_client("${GATEWAY}/users"),
+        Some(PIN_STANZA),
+    );
+    assert_model_rested(&r, "endpoint:GET:/api/users", "GET /api/users", "exact");
+    assert_derived(
+        &r,
+        "endpoint:GET:/api/accounts",
+        "GET /api/accounts",
+        "exact",
+    );
+    assert_eq!(
+        same_as(&r),
+        vec![class("src::client::Account", "main::Account")],
+        "only the literal-path exchange makes a class"
+    );
+}
+
+#[test]
+fn literal_pairing_keeps_its_http_model_class() {
+    let r = build_gin("model_pin_none", &typed_client("/api/users"), None);
+    assert_no_suffix(&r);
+    assert_eq!(
+        same_as(&r),
+        vec![
+            class("src::client::Account", "main::Account"),
+            class("src::client::User", "main::User"),
+        ]
+    );
 }

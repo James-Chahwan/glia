@@ -21,7 +21,9 @@
 //! an overlay `[[edge]]` lands in Post and is not read, so the result does
 //! not depend on when it is asked). The `suffix` tier is the weakest
 //! pairing the resolver emits and is no ground for identity: such a pair is
-//! skipped and counted `weak_pairing`. A route's handlers are its HANDLED_BY
+//! skipped and counted `weak_pairing`, whether or not it rests on a
+//! model-written overlay stanza (`suffix/overlay_llm`, HC.1: the base rule is
+//! compared, HQ.12). A route's handlers are its HANDLED_BY
 //! targets, sorted by qname, and a handler's [`ServerSite`]s are its
 //! [`ServerWire`] MESSAGE_TYPE cells (DT.1e): for a response, the
 //! json_response sites whose status is known and 2xx ([`ServerWire::known_2xx`]);
@@ -179,6 +181,7 @@ use glia_code_extractors::generated::{Generated, generated_by_banner, generated_
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
 use super::host::str_field;
+use super::http::MODEL_RESTED_SUFFIX;
 use super::{CrossGraphResolver, RuleTally, rule_evidence};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -195,7 +198,8 @@ pub(crate) const MAX_EXTENDS: usize = 4;
 const HTTP_EMITTER: &str = "resolver:http";
 
 /// The HTTP tier that is no pairing to build identity on
-/// (graph/src/resolvers/http.rs `MatchTier::Suffix`).
+/// (graph/src/resolvers/http.rs `MatchTier::Suffix`), compared against a
+/// pairing's base rule (its `/overlay_llm` suffix stripped, HQ.12).
 const WEAK_RULE: &str = "suffix";
 
 /// The node kinds a model can be: a client's INTERFACE / CLASS, a server's
@@ -330,7 +334,9 @@ pub struct RouteSide {
     pub route: NodeId,
     pub route_qname: String,
     /// The HTTP tier the pairing's EVIDENCE names (`exact`, `base_fold`, ..;
-    /// never `suffix`). Empty when the edge carries no evidence.
+    /// `<tier>/overlay_llm` when it rests on a model-written overlay stanza,
+    /// HC.1; never a `suffix` base) for this wire's own endpoint. Empty when
+    /// the edge carries no evidence.
     pub rule: String,
     /// The route's HANDLED_BY targets, sorted by qname.
     pub handlers: Vec<RouteHandler>,
@@ -472,7 +478,8 @@ fn wires_in(merged: &MergedGraph, ctx: &Ctx<'_>, hits: Vec<Hit>) -> ClientWires 
         }
         let rule = ev.and_then(|ev| ev.rule).unwrap_or_default();
         let key = (e.from.0, e.to.0);
-        if rule == WEAK_RULE {
+        let base = rule.strip_suffix(MODEL_RESTED_SUFFIX).unwrap_or(&rule);
+        if base == WEAK_RULE {
             weak.insert(key);
         } else {
             pairs.entry(key).or_insert((e.to, rule));
@@ -518,7 +525,12 @@ fn wires_in(merged: &MergedGraph, ctx: &Ctx<'_>, hits: Vec<Hit>) -> ClientWires 
             let side = sides
                 .entry(*route)
                 .or_insert_with(|| ctx.route_side(*route, rule, &mut handlers, &mut stats));
-            routes.push(side.clone());
+            // The side's handlers are the route's; its rule is this
+            // endpoint's pairing (two endpoints of one route may pair it
+            // under different rules, one of them model-rested: HQ.12).
+            let mut side = side.clone();
+            side.rule.clone_from(rule);
+            routes.push(side);
         }
         routes.sort_by(|a, b| a.route_qname.cmp(&b.route_qname));
         let qname = ctx.qname(h.graph, h.endpoint).to_string();
@@ -1537,6 +1549,18 @@ pub struct ModelJoin {
     pub server_fields: usize,
     /// A change at this model's level (not inside a nested model level).
     pub diverged: bool,
+    /// The pairing's full HTTP rule ([`WirePair::rule`]: `exact`,
+    /// `base_fold`, .., or `<tier>/overlay_llm` when it rests on a
+    /// model-written overlay stanza, HC.1); empty for a GraphQL join.
+    pub rule: String,
+}
+
+impl ModelJoin {
+    /// The join's pairing rests on a model-written overlay stanza (HC.1's
+    /// `/overlay_llm` suffix): no ground for an `http_model` class (HQ.12).
+    pub fn model_rested(&self) -> bool {
+        self.rule.ends_with(MODEL_RESTED_SUFFIX)
+    }
 }
 
 /// A client model and a server model the exchanges confirm are one model.
@@ -1552,7 +1576,7 @@ pub struct ModelPair {
     /// Any join diverged.
     pub diverged: bool,
     /// Every position joining the two, sorted by (route qname, direction,
-    /// hit file, line, handler qname, path).
+    /// hit file, line, handler qname, path, rule).
     pub joins: Vec<ModelJoin>,
 }
 
@@ -1672,6 +1696,7 @@ fn pairs_of(merged: &MergedGraph, cw: &ClientWires) -> WirePairs {
                             client_fields: m.client_fields,
                             server_fields: m.server_fields,
                             diverged: m.diverged,
+                            rule: pair.rule.clone(),
                         };
                         found.push((m, join));
                     }
@@ -1720,6 +1745,7 @@ fn pairs_of(merged: &MergedGraph, cw: &ClientWires) -> WirePairs {
             j.line,
             j.handler_qname.clone(),
             j.path.clone(),
+            j.rule.clone(),
         )
     };
     for mp in &mut model_pairs {
@@ -2424,9 +2450,11 @@ const PASS: &str = "models";
 /// classes=<c>`; LC.3c's `[evidence-rules] resolver=models http_model=<h>
 /// graphql_model=<g>` (only with an edge); then, with the HTTP pair,
 /// `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a>
-/// ambiguous_project=<b> embed_reduced=<r>` (the `http_model` classes; `d`
-/// the classes with a diverged edge; `a`, `b` and `r` count client models,
-/// see `model_stars`).
+/// ambiguous_project=<b> embed_reduced=<r> model_rested=<m>` (the `http_model`
+/// classes; `d` the classes with a diverged edge; `a`, `b` and `r` count
+/// client models, see `model_stars`; `m` the model pairs whose every join
+/// rests on a model-written overlay stanza, HC.1's `/overlay_llm` pairing:
+/// such a pair makes no class, HQ.12).
 /// grep: `... 2>&1 | grep '^\[models\] \(classes\|graphql results\)='`
 pub struct ModelResolver;
 
@@ -2642,19 +2670,23 @@ struct ModelReport {
     edges: usize,
     diverged: usize,
     stars: StarStats,
+    /// Model pairs the rule's kinds admit whose every join rests on a
+    /// model-written overlay stanza: no class (HQ.12).
+    model_rested: usize,
 }
 
 impl ModelReport {
     fn line(&self) -> String {
         format!(
             "[models] classes={} edges={} diverged={} ambiguous_client={} ambiguous_project={} \
-             embed_reduced={}",
+             embed_reduced={} model_rested={}",
             self.classes,
             self.edges,
             self.diverged,
             self.stars.ambiguous_client,
             self.stars.ambiguous_project,
             self.stars.embed_reduced,
+            self.model_rested,
         )
     }
 }
@@ -2706,13 +2738,23 @@ fn model_identity_in<'m>(
         edges: 0,
         diverged: 0,
         stars: StarStats::default(),
+        model_rested: 0,
     };
     let Some(rule) = CODE_TABLES.identity_rule(same_as::RULE_HTTP_MODEL) else {
         return (edges, Some(report));
     };
     let confidence = tier_confidence(rule.tier);
     let projects = ProjectPaths::of(m);
-    let takes = |p: &ModelPair| ctx.takes(rule, p.client, p.server);
+    // HQ.12: a pair whose every join rests on a model-written overlay stanza
+    // (HC.1's `/overlay_llm` pairing, heuristic) is no ground for a walking,
+    // derived class: there is no heuristic `http_model` variant to write.
+    let rested = |p: &ModelPair| p.joins.iter().all(ModelJoin::model_rested);
+    report.model_rested = wp
+        .model_pairs
+        .iter()
+        .filter(|p| ctx.takes(rule, p.client, p.server) && rested(p))
+        .count();
+    let takes = |p: &ModelPair| ctx.takes(rule, p.client, p.server) && !rested(p);
     let mut bases: HashMap<NodeId, BTreeSet<u64>> = HashMap::new();
     for p in wp.model_pairs.iter().filter(|p| takes(p)) {
         bases
@@ -2729,7 +2771,11 @@ fn model_identity_in<'m>(
         for p in &star.clients {
             diverged_class |= p.diverged;
             let mut ev = rule_evidence(PASS, &ev_rule(p.diverged));
-            if let Some(j) = p.joins.first() {
+            // Located at the first join that does not rest on the model (a
+            // taken pair has one, HQ.12). `p.diverged` reads every join, so
+            // a class kept through a plain join still reads `/diverged` when
+            // only its model-rested join diverged.
+            if let Some(j) = p.joins.iter().find(|j| !j.model_rested()) {
                 ev = match j.line.checked_sub(1) {
                     Some(line) => ev.at(j.file.clone(), line),
                     None => Evidence {
@@ -3791,6 +3837,7 @@ fn graphql_model_identity_in<'m>(
                     client_fields: client_names.len(),
                     server_fields: server.len(),
                     diverged,
+                    rule: String::new(),
                 },
             });
         }
@@ -5887,6 +5934,7 @@ mod tests {
             client_fields: 2,
             server_fields: 2,
             diverged,
+            rule: "exact".to_string(),
         }
     }
 
@@ -6085,7 +6133,7 @@ mod tests {
         assert_eq!(
             report.line(),
             "[models] classes=1 edges=1 diverged=1 ambiguous_client=0 ambiguous_project=0 \
-             embed_reduced=0"
+             embed_reduced=0 model_rested=0"
         );
         assert_eq!(report.wire_pairs, wire_pairs(&m).marker());
         assert_eq!(report.client_wires, client_wires(&m).marker());
@@ -6114,7 +6162,7 @@ mod tests {
         assert_eq!(
             report.line(),
             "[models] classes=1 edges=1 diverged=1 ambiguous_client=0 ambiguous_project=0 \
-             embed_reduced=1"
+             embed_reduced=1 model_rested=0"
         );
         ModelResolver.resolve(&mut m);
         let rows = same_as_rows(&m);
@@ -6136,6 +6184,135 @@ mod tests {
         let mut flipped = exchange_with_base(false);
         ModelResolver.resolve(&mut flipped);
         assert_eq!(same_as_rows(&flipped), rows, "graph order changes nothing");
+    }
+
+    // ---- HQ.12: http_model over a model-rested pairing ---------------------
+
+    /// `m` with the `resolver:http` HTTP_CALLS edge `from -> to` (qnames)
+    /// re-ruled `rule`.
+    fn reruled(mut m: MergedGraph, from: &str, to: &str, rule: &str) -> MergedGraph {
+        let at = m
+            .cross_edges
+            .iter()
+            .position(|e| {
+                e.category == edge_category::HTTP_CALLS
+                    && Evidence::of(e).is_some_and(|ev| ev.emitter == HTTP_EMITTER)
+                    && qname_in(&m, e.from) == from
+                    && qname_in(&m, e.to) == to
+            })
+            .expect("the edge");
+        let (a, b) = (m.cross_edges[at].from, m.cross_edges[at].to);
+        m.cross_edges[at] = http_edge(a, b, HTTP_EMITTER, rule);
+        m
+    }
+
+    /// `exchange()`'s only confirmed pair (Order / Wide over GET /orders),
+    /// its pairing resting on a model-written overlay stanza: no class, the
+    /// pair counted `model_rested`; wire_pairs keeps the pair, rule and all.
+    #[test]
+    fn a_model_rested_pairing_alone_forms_no_class() {
+        let (w, s) = exchange();
+        let llm = "exact/overlay_llm";
+        let mut m = reruled(
+            merged_of(w, s, true),
+            "endpoint:GET:/orders",
+            "GET /orders",
+            llm,
+        );
+        let (edges, report) = model_identity(&m);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!(
+            report.expect("markers").line(),
+            "[models] classes=0 edges=0 diverged=0 ambiguous_client=0 ambiguous_project=0 \
+             embed_reduced=0 model_rested=1"
+        );
+        let wp = wire_pairs(&m);
+        assert_eq!(wp.model_pairs.len(), 1);
+        let joins = &wp.model_pairs[0].joins;
+        assert!(joins.iter().all(|j| j.rule == llm && j.model_rested()));
+        ModelResolver.resolve(&mut m);
+        assert!(same_as_rows(&m).is_empty());
+    }
+
+    /// The same model-rested exchange plus a second call site pairing the
+    /// same route plainly: the class forms, located at the plain join (a.ts
+    /// line 20, 0-based 19) though the model-rested join sorts first.
+    #[test]
+    fn a_plain_join_keeps_the_class_located_at_it() {
+        let (mut w, s) = exchange();
+        w.node(
+            node_kind::ENDPOINT,
+            "endpoint:GET:/orders @admin",
+            None,
+            vec![hit("a.ts", 20, Some(Shape::named("Order")), None)],
+        );
+        let m = merged_of(w, s, true);
+        let id = |q: &str| {
+            m.graphs
+                .iter()
+                .find_map(|g| {
+                    g.nav
+                        .qname_by_id
+                        .iter()
+                        .find_map(|(id, n)| (n == q).then_some(*id))
+                })
+                .expect(q)
+        };
+        let plain = http_edge(
+            id("endpoint:GET:/orders @admin"),
+            id("GET /orders"),
+            HTTP_EMITTER,
+            "exact",
+        );
+        let mut m = reruled(
+            m,
+            "endpoint:GET:/orders",
+            "GET /orders",
+            "exact/overlay_llm",
+        );
+        m.cross_edges.push(plain);
+        let wp = wire_pairs(&m);
+        let rules: Vec<(u32, &str)> = wp.model_pairs[0]
+            .joins
+            .iter()
+            .map(|j| (j.line, j.rule.as_str()))
+            .collect();
+        assert_eq!(rules, [(7, "exact/overlay_llm"), (20, "exact")]);
+        let (_, report) = model_identity(&m);
+        assert_eq!(
+            report.expect("markers").line(),
+            "[models] classes=1 edges=1 diverged=1 ambiguous_client=0 ambiguous_project=0 \
+             embed_reduced=0 model_rested=0"
+        );
+        ModelResolver.resolve(&mut m);
+        assert_eq!(
+            same_as_rows(&m),
+            [(
+                "m::Order".to_string(),
+                "models::m::Wide".to_string(),
+                r#"{"emitter":"resolver:models","rule":"http_model/diverged","file":"a.ts","line":19,"basis":"site"}"#
+                    .to_string(),
+                Confidence::Medium,
+            )]
+        );
+    }
+
+    /// A `suffix` pairing resting on the model is still the weakest tier:
+    /// skipped and counted `weak_pairing`, exactly as plain `suffix`.
+    #[test]
+    fn a_model_rested_suffix_pairing_is_weak() {
+        let (w, s) = exchange();
+        let plain = client_wires(&merged_of(w, s, true)).marker();
+        let (w, s) = exchange();
+        let m = reruled(
+            merged_of(w, s, true),
+            "endpoint:GET:/other",
+            "GET /other",
+            "suffix/overlay_llm",
+        );
+        let cw = client_wires(&m);
+        assert_eq!(cw.stats.weak_pairing, 1);
+        assert_eq!(cw.marker(), plain);
     }
 
     /// No HTTP_CALLS pair, or no shaped hit: no edge and no marker.
