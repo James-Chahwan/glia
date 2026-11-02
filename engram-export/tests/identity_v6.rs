@@ -29,6 +29,8 @@ class OrderService:
 
     def validate(self, sku):
         return bool(json.dumps(sku))
+
+    validate = validate
 "#;
 
 const README_MD: &str = "# Orders
@@ -244,7 +246,8 @@ fn fixture_validate_is_the_located_method() {
         validate.identity_hint.as_deref(),
         Some(format!("svc/orders.py:{}:1", node_kind::METHOD.0).as_str())
     );
-    // The ATTRIBUTE twin (the `self.validate` read) is the loser, and counted.
+    // The ATTRIBUTE twin (the class-level `validate = validate` after the def;
+    // before HQ.9 the `self.validate` read minted it) is the loser, and counted.
     assert!(identity_line(&a_err).contains("duplicate key(s) resolved to the located node"));
     assert!(
         !identity_line(&a_err).contains(" 0 duplicate key(s)"),

@@ -49,10 +49,13 @@ class Ledger:
         return sum(e.amount for e in entries if e.posted)
 ";
 
-/// The METHOD / ATTRIBUTE twin: the `self.total` read mints an ATTRIBUTE with
-/// the METHOD's qname `svc::cart::Cart::total`, so the qname alone is
-/// ambiguous to a cell write and the export's key winner is the METHOD.
+/// The METHOD / ATTRIBUTE twin: a class-level `total = 0` ATTRIBUTE shadowed by
+/// `def total` shares the METHOD's qname `svc::cart::Cart::total`, so the qname
+/// alone is ambiguous to a cell write and the export's key winner is the METHOD.
+/// (Before HQ.9 the twin came from the `self.total` read, which now mints no
+/// ATTRIBUTE for the class's own METHOD.)
 const CART_PY: &str = "class Cart:
+    total = 0
     def total(self): return sum(item.price * item.quantity for item in self.items)
     def summary(self): handler = self.total; return handler()
 ";
