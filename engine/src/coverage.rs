@@ -282,6 +282,16 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`) or a package-level string constant - of the same file, another file of the package or an imported package, alone or joined to literals (`r.Group(apiPrefix)`, `r.Group(AdminPrefix + \"/x\")`, `r.Group(paths.Shared)`) -, held in a struct field (of its own package or an imported one) assigned it, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a variable, a constant declared inside a function body, or one built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
         verify: "grep .Group( / .Route( / .Mount( and follow the group, and the variable its prefix is read from, to its registrations",
     },
+    // HQ.11: HF.5's Rails route reader (parsers/code/ruby `walk_rails` /
+    // `walk_rails_resources`), measured on a probe with a concern, a shallow
+    // resource and a drawn route file. A `constraints` block is walked with
+    // its routes kept (only the constraint is unread), so it is not named.
+    CoverageCaveat {
+        language: "ruby",
+        edge_category: "HANDLED_BY",
+        note: "Rails routes are read from files named routes.rb only. `resources :r` is `ANY /r` plus `ANY /r/:id` (dropped when only: / except: leave none of show / update / destroy / edit; `resource :r` is `ANY /r`), method-agnostic and with no handler: a client verb the controller has no action for still pairs (rule any); nested resources, namespace / scope prefixes, member / collection blocks, `on:` and symbol verbs compose their paths. Not read: `shallow: true` (shallow member routes keep the nested path), `concern` / `concerns:` (a concern's routes are read once where the concern is declared, never under each resource that names it), `draw(:file)` (config/routes/<file>.rb is never read) and `mount`ed engines (no route at the mount point)",
+        verify: "read config/routes.rb and config/routes/*.rb for shallow, concern / concerns, draw and mount, and `bin/rails routes` when it runs",
+    },
     // DH.14: `extends` / `implements` (classes, interfaces, enums) are
     // extracted; the row keeps the trait residual and the name binding.
     CoverageCaveat {
@@ -477,6 +487,10 @@ pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     // its INHERITS_FROM one).
     if langs.contains("c_cpp") {
         eprintln!("[coverage] c_cpp: residual rows declared for calls/heritage/imports");
+    }
+    // HQ.11: a Ruby repo is told what the Rails route reader leaves out.
+    if langs.contains("ruby") {
+        eprintln!("[coverage] ruby: residual rows declared for rails routes");
     }
     notes(merged, |c| c.language == "*" || langs.contains(c.language))
 }
@@ -1101,6 +1115,28 @@ mod tests {
             assert!(note.contains(part), "{part}: {note}");
         }
         assert!(lang_rows("src/app.py", "solidity").is_empty());
+    }
+
+    #[test]
+    fn ruby_files_get_the_rails_route_row() {
+        // HQ.11: a Ruby repo is told what the Rails route reader leaves out:
+        // resource routes are method-agnostic ANY, and shallow nesting,
+        // concerns and drawn route files are not read.
+        assert_eq!(
+            lang_rows("config/routes.rb", "ruby"),
+            [("ruby", "HANDLED_BY")]
+        );
+        let note = row_note("config/routes.rb", "ruby", "HANDLED_BY");
+        for part in [
+            "`ANY /r`",
+            "`shallow: true`",
+            "`concerns:`",
+            "`draw(:file)`",
+            "`mount`",
+        ] {
+            assert!(note.contains(part), "{part}: {note}");
+        }
+        assert!(lang_rows("app/main.py", "ruby").is_empty());
     }
 
     #[test]
