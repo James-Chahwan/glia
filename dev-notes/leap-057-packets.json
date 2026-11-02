@@ -382,6 +382,12 @@
    "question": "MSBuild project-level usings (`<Using Include=\"Ns\" />` in a .csproj, ImplicitUsings) are not visible to the parser. Should HQ.13 read them, so a base reached only through one is never refused?",
    "answer": "default: (a)",
    "by": "default (James 2026-11-02: \"Oh we should fix now since we added it now\"; spec questions take their defaults)"
+  },
+  {
+   "agent": "integrator",
+   "question": "HP.5's committed rule computed FAIL because its held-out panel was judged before the HQ fixes (26 of 28 wrong edges no longer exist). Report FAIL as is, or re-draw and re-judge the held-out panel at the release candidate under a new rule committed first?",
+   "answer": "re-measure (HP.7 / HP.8)",
+   "by": "James 2026-11-03: \"option b yeah pointless fail\""
   }
  ],
  "packets": [
@@ -1455,6 +1461,8 @@
     "HP.4",
     "HP.5",
     "HP.6",
+    "HP.7",
+    "HP.8",
     "HQ.1",
     "HQ.10",
     "HQ.11",
@@ -1520,6 +1528,8 @@
     "HP.4",
     "HP.5",
     "HP.6",
+    "HP.7",
+    "HP.8",
     "HQ.1",
     "HQ.10",
     "HQ.11",
@@ -2144,6 +2154,72 @@
     "HQ.10"
    ],
    "risks": "MSBuild global usings (`<Using Include=\"Ns\" />` in a .csproj / Directory.Build.props, and `<ImplicitUsings>`) are not read: a file that names an in-repo base only through a project-level using of an in-repo namespace AND imports some external namespace loses its heuristic edge (RefusedExternal). On squidex every csproj Using names an external package (FakeItEasy, FluentAssertions, Xunit) and ImplicitUsings adds only System.*, so 0 edges; the refusal requires an explicit external using in the file, which bounds it (see question 2). A namespace split between the repo and an assembly (`Microsoft.Extensions.DependencyInjection` extension classes) is read as in-repo: a using of it never counts as external, and a type of that name in the repo binds fact even if the author meant the assembly's - the same exposure as any import binding. Generic arity is not compared (`Content<T>` vs an in-repo non-generic `Content` in a using'd namespace would still bind): the parser drops type arguments from a Bare base; on squidex all such cases are outside scope, so the refusal catches them. Block-namespace usings stay file-scoped (LA.40a): two `namespace X {}` blocks of one file with different usings read as one set, which can only widen scope. Global usings are applied graph-wide (a C# build group may hold several projects): widens scope, never refuses. IMPORTS volume: squidex +~5.6k fact IMPORTS edges to PACKAGEs: blast radius / PPR over IMPORTS and the rank / cohort gates move on C# repos (squidex is in the cohort); a check `forbid_edge` / `depends` rule over IMPORTS can start firing on a C# repo (correctly: the using is a dependency). The C# IMPORT_BINDINGS change is read by org_packages (no nuget ecosystem: no effect), names.rs (bound names: a namespace row still binds its last segment, as before; alias rows add the alias), answers GD.10 `aliased_by` (no C# INVOKED_MEMBERS row today) and passes `is_drive_host` (Dart only)."
+  },
+  {
+   "id": "HP.7",
+   "from": "new (HP.5 follow-up, James 2026-11-03: \"option b yeah pointless fail\")",
+   "spec_pass": "integrator",
+   "class": "proof",
+   "batch": "HP",
+   "loc": 320,
+   "area": "HP proof: the held-out panel re-drawn at the release candidate",
+   "title": "The precision claim's held-out panel re-drawn at the 0.5.7 release candidate as its own panel `heldout_rc` (the seven HC.2 repos at their pinned revs, the candidate build), its pass rule RULE-0.5.7b.md committed alone first, every fresh id judged from source; HC.2 / HC.3's `heldout` panel and the calibration untouched",
+   "rationale": "HP.5 (528c7e4c) computed `[edge-audit] rule 0.5.7 verdict=FAIL` and every one of its 9 under-floor strata came from the held-out panel, which HC.2 drew and HC.3 judged at 221f9c84, before the twelve HQ precision fixes. HP.5's census of the release candidate: 26 of the held-out panel's 28 wrong edges are in no stratum of the candidate's build, the other 2 (zora-protocol HANDLED_BY|fact) are now sited at their own file as HQ.4 intended. The fit panel, drawn at the candidate, has only DOCUMENTS|derived under floor (0.833) and fact 1.000 / derived 0.936 / heuristic 1.000. James chose to re-measure (\"option b yeah pointless fail\"): re-draw the held-out repos at the candidate under a rule committed before the draw, so the release's claim describes the release's graph.",
+   "entry_points": [
+    "engine/examples/edge_audit.rs: PANEL_HELDOUT and the panel parse in `sample` (`--panel fit|heldout`) and `report` (ReportPanel, `--panel all|fit|heldout`); split_panel; the keep logic HP.5 used for the fit re-draw (an id whose edge still exists keeps its row and verdict)",
+    "scripts/edge-audit.sh: sample_panel, do_sample_heldout, do_show (the `heldout` file pick), do_report, rows",
+    "bench/edge-audit/RULE-0.5.7.md (HP.5's rule: its conditions are copied, its panel line is the change)",
+    "bench/edge-audit/README.md (the panels section), bench/edge-audit/snapshots.json (the seven heldout rows and their revs)"
+   ],
+   "files_touched": [
+    "bench/edge-audit/RULE-0.5.7b.md",
+    "engine/examples/edge_audit.rs",
+    "scripts/edge-audit.sh",
+    "bench/edge-audit/README.md",
+    "bench/edge-audit/samples/heldout_rc.jsonl",
+    "bench/edge-audit/verdicts/heldout_rc.jsonl"
+   ],
+   "implementation": "1. FIRST COMMIT, ALONE: bench/edge-audit/RULE-0.5.7b.md. Copy RULE-0.5.7.md's four PASS conditions and its floors verbatim; change only the panel the claim reads: the fit panel (samples/audit.jsonl, as HP.5 drew it at the candidate) plus a NEW held-out panel `heldout_rc` (samples/heldout_rc.jsonl): the same seven repos (mealie, chatwoot, squidex, tolgee, hoppscotch, gin-vue-admin, zora-protocol) at their snapshots.json revs, drawn with the candidate build (state its sha: the HEAD this packet starts from, every graph-changing 0.5.7 packet landed), the same sampler key, seed and n as HC.2's draw. State that `heldout` (HC.2 / HC.3) stays as committed: it is the calibration's input and is not read by this rule. State that the verdict is computed and printed `[edge-audit] rule 0.5.7b verdict=<PASS|FAIL> under_floor=<..> fact=<p> derived=<p> heuristic=<p> kappa=<k>` and `[edge-audit] rule 0.5.7b rejudge independent=<i> self=<s>`, and that condition 3's independent pairs for `heldout_rc` come from HP.8, a separate packet's agent. Commit it before any sample is drawn.\n2. edge_audit.rs: a third panel name `heldout_rc` (PANEL_HELDOUT_RC): `sample --panel heldout_rc` writes headers marked `\"panel\":\"heldout_rc\"`; `report --panel` gains `all_rc` (fit + heldout_rc), and when RULE-0.5.7b.md sits beside the plan, the report prints the 0.5.7b rule lines over `all_rc` beside the 0.5.7 ones (which keep reading `all` = fit + heldout, unchanged byte for byte). `calibrate` never reads `heldout_rc` (pin it with a test: calibration.json and engine/src/confidence/table.json are byte-identical before and after).\n3. Keep, as HP.5 did for the fit panel: an id of the re-draw whose (label, category, from, to, rule) matched an id HC.3 judged keeps HC.3's verdict, copied into verdicts/heldout_rc.jsonl with its original judge name (HC.3) and a `kept_from` field; every other id is fresh.\n4. scripts/edge-audit.sh: `sample-heldout-rc` (sample_panel heldout_rc into samples/heldout_rc.jsonl, built from a `git archive` of the candidate in an isolated target as HP.5 did), `show` picks samples/heldout_rc.jsonl for `--panel heldout_rc`, `report` passes `--panel all_rc` for the 0.5.7b lines.\n5. Draw, then judge every fresh id from source under RUBRIC.md, judge name `HP.7`, blinded to calibration.json, report.json's strata and any earlier verdict of the same edge. Split the judging into structure / mechanism families as FD.3a / FD.3b did.\n6. Do NOT run the independent re-judge here and do NOT print the 0.5.7b verdict as final: HP.8 does both. Leave the report as `report --check` reproduces it.",
+   "fixtures": "",
+   "acceptance": "`git log --format='%H %ci' -- bench/edge-audit/RULE-0.5.7b.md` is older than `git log -1 --format='%H %ci' -- bench/edge-audit/samples/heldout_rc.jsonl`. `cargo test -p glia-engine --example edge_audit` passes (new tests: a heldout_rc header round-trips; `calibrate` reads no heldout_rc file; `report --panel all` output is byte-identical to HP.5's committed report.json / report.md). `bash scripts/edge-audit.sh calibrate --check` and `calibrate --emit-table engine/src/confidence/table.json --check` exit 0 (nothing in the calibration moved). Every id in samples/heldout_rc.jsonl has a verdict in verdicts/heldout_rc.jsonl (kept or fresh, judge HC.3 or HP.7). `git grep -n -i -E 'kina|quokka' bench/edge-audit` prints nothing new.",
+   "fired_on_marker": "[edge-audit] sample label=<l> .. panel=heldout_rc (one per repo) and, from `report`, `[edge-audit] rule 0.5.7b verdict=..` / `[edge-audit] rule 0.5.7b rejudge independent=<i> self=<s>`; grep `bash scripts/edge-audit.sh report 2>&1 | grep '^\\[edge-audit\\] rule 0.5.7b'`",
+   "breaking": "none. bench data, a script and an example (engine/examples is not hashed, PARSER_STAMP does not move). The 0.5.7 rule lines and the calibration are byte-identical.",
+   "depends_on": [
+    "HP.5"
+   ],
+   "risks": "Judging load: the re-draw keeps HC.3's verdicts for edges that still exist, so only fresh ids are judged; if the fresh count is high (the HQ fixes moved many C# / nav / Solidity edges), split the judging across the two families and say the count. NEVER start a `claude`, `claude -p` or any other model process: HP.5 did, unasked; the independent re-judge is HP.8, a separate packet the runner launches."
+  },
+  {
+   "id": "HP.8",
+   "from": "new (HP.5 follow-up, James 2026-11-03: \"option b yeah pointless fail\")",
+   "spec_pass": "integrator",
+   "class": "proof",
+   "batch": "HP",
+   "loc": 120,
+   "area": "HP proof: the independent re-judge and the 0.5.7b verdict",
+   "title": "The independent re-judge of the `heldout_rc` panel (GP.13's matched rule, a different agent from its first judges, blinded), then the computed RULE-0.5.7b verdict written into dev-notes/edge-precision-0.5.7.md beside HP.5's",
+   "rationale": "RULE-0.5.7b's condition 4 needs every id this run re-judges re-judged by a different agent from its first judge, blinded to the first verdict. HP.7 is the first judge of the fresh ids; this packet is a separate workflow agent, so its pairs are independent without starting any other model process (HP.5 used `claude -p` subprocesses, which the runner forbids from now on).",
+   "entry_points": [
+    "bench/edge-audit/RULE-0.5.7b.md (HP.7, the committed rule)",
+    "scripts/edge-audit.sh show / report; engine/examples/edge_audit.rs GP.13's matched rule (the ids a family's re-judge takes: every first `wrong` plus as many `correct`, at least 20)",
+    "dev-notes/edge-precision-0.5.7.md (HP.5's write-up)"
+   ],
+   "files_touched": [
+    "bench/edge-audit/verdicts/rejudge.jsonl",
+    "bench/edge-audit/adjudication.jsonl",
+    "bench/edge-audit/report.json",
+    "bench/edge-audit/report.md",
+    "dev-notes/edge-precision-0.5.7.md"
+   ],
+   "implementation": "1. Read RULE-0.5.7b.md and RUBRIC.md ONLY. Do not open verdicts/heldout_rc.jsonl, verdicts/heldout.jsonl, report.json / report.md, calibration.json or dev-notes/edge-precision-0.5.7.md before step 3 is done. Get the matched id list from the tool (the rule's GP.13 selection over heldout_rc's families; if the tool can only print it with verdicts, have it print ids only, a small edge_audit.rs flag is in scope).\n2. Judge each matched id from source with `bash scripts/edge-audit.sh show <label> --id <hex>`, judge name `HP.8`, appended to verdicts/rejudge.jsonl. If HP.8's matched set includes an id HP.8 itself never first-judged, fine; the pair is independent iff its first judge (HC.3 or HP.7) is not HP.8.\n3. Adjudicate disagreements in adjudication.jsonl as today (both reasons quoted, the source line re-read).\n4. Run `bash scripts/edge-audit.sh report` and paste its `[edge-audit] rule 0.5.7b ..` lines verbatim into dev-notes/edge-precision-0.5.7.md under a new section `## The re-measure (RULE-0.5.7b, HP.7 / HP.8)`, beside HP.5's FAIL which stays as written: the panel, the kept / fresh counts, the per-tier and under-floor results, kappa over the independent pairs, and, on FAIL, each under-floor stratum's wrong cluster as a precision-backlog follow-up with a public fixture idea. The verdict is computed, never typed.\n5. Never start a `claude` / `claude -p` or any model process.",
+   "fixtures": "",
+   "acceptance": "`bash scripts/edge-audit.sh report --check` exits 0 and prints `[edge-audit] rule 0.5.7b verdict=..` and `[edge-audit] rule 0.5.7b rejudge independent=<i> self=0` with i >= 20; the 0.5.7 rule lines are unchanged from HP.5's commit; `calibrate --check` exits 0; dev-notes/edge-precision-0.5.7.md quotes the 0.5.7b lines verbatim; `git grep -n -i -E 'kina|quokka' bench/edge-audit dev-notes/edge-precision-0.5.7.md` prints nothing.",
+   "fired_on_marker": "[edge-audit] rule 0.5.7b verdict=<PASS|FAIL> .. and [edge-audit] rule 0.5.7b rejudge independent=<i> self=0 (grep `bash scripts/edge-audit.sh report 2>&1 | grep '^\\[edge-audit\\] rule 0.5.7b'`)",
+   "breaking": "none (bench data and a note).",
+   "depends_on": [
+    "HP.7"
+   ],
+   "risks": "The re-judge must not see the first verdicts: it reads the rule, the rubric and `show` output only. If the matched set is under 20 for a family, take the rule's minimum as the rule states."
   }
  ]
 }
