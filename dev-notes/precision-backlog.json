@@ -1745,6 +1745,158 @@
    ],
    "risks": "A Directory.Build.props applies to every project below it; read the nearest one per project as MSBuild does.",
    "note": "Added by HQ.13 per its ruling; no example yet."
+  },
+  {
+   "from": "0.5.7 HQ.3 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "Solidity: a base contract / interface named by two in-repo declarations binds no heritage (and so no inherited-event EVENT_FLOWS): read `import {I} from \"./I.sol\"` / `import \"./I.sol\"` bindings to pick the imported one",
+   "area": "Solidity recall",
+   "loc": 250,
+   "rationale": "HQ.3 (d50142cb) on zora-protocol: 46 inherited emits stay unbound because the interface name is declared twice in the repo and Solidity heritage binds by repo-unique name; the file's import names which one.",
+   "entry_points": [
+    "parsers/code/solidity/src/lib.rs (import directives)",
+    "graph/src/build/solidity.rs (HQ.3's base-chain event lookup)",
+    "graph/src/calls.rs heritage binding"
+   ],
+   "files_touched": [],
+   "implementation": "Record Solidity import directives (named and whole-file) per file; bind a heritage base through the file's imports before the repo-unique name; inherited events then follow.",
+   "fixtures": "Two interfaces IX in two files, a contract importing one and emitting its event: expect the edge to the imported one, forbid the other.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.3 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "Solidity: `emit E(..)` inside a constructor or a modifier body is never visited (visit_contract walks only function_definition bodies)",
+   "area": "Solidity recall",
+   "loc": 80,
+   "rationale": "HQ.3's coverage row states it; no measured count.",
+   "entry_points": [
+    "parsers/code/solidity/src/lib.rs visit_contract"
+   ],
+   "files_touched": [],
+   "implementation": "Walk constructor_definition and modifier_definition bodies with the function-body visitor; the emit's owner is the constructor / modifier node.",
+   "fixtures": "A contract emitting an event in its constructor and in a modifier: expect both EVENT_FLOWS.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.9 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "Python: `self.X = v` where an ancestor in ANOTHER file declares X as a @property is a setter call, still minted as an ATTRIBUTE (the parser cannot see the ancestor): a graph-side prune after INHERITS_FROM binds",
+   "area": "Python precision",
+   "loc": 150,
+   "rationale": "HQ.9 (9d779ba9) fixed the same-file and own-member cases; this residual needs the bound heritage. Default ruled at spec time: parser-only fix, residual noted.",
+   "entry_points": [
+    "parsers/code/python/src/lib.rs settle_self_attrs",
+    "graph/src/build/partial.rs (the GA.3 rebody path must run the prune too)"
+   ],
+   "files_touched": [],
+   "implementation": "After INHERITS_FROM binds, drop an ATTRIBUTE whose name an ancestor declares as a property METHOD; the watch body-only path runs the same prune.",
+   "fixtures": "base.py declares @property repos; orders.py subclasses it and assigns self.repos: forbid the ATTRIBUTE.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.5 / HQ.6 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "Nav routes not composed yet: React Router `lazy` / `children` imported from another file, Vue route spreads (`...childRoutes`), Angular `loadChildren` naming a variable, and lazy specs that resolve to no module (each named in the nav coverage caveat)",
+   "area": "Nav recall",
+   "loc": 300,
+   "rationale": "HQ.5 (e0d19816) and HQ.6 (77a64cc1) composed Angular lazy tables and Vue computed parents; these forms were left with a coverage caveat for want of public examples.",
+   "entry_points": [
+    "graph/src/build/route_mounts.rs (bind_nav_mounts, NavProvisional)",
+    "parsers/code/extractors/src/nav_routes.rs"
+   ],
+   "files_touched": [],
+   "implementation": "One packet per form once a public repo shows it; compose through the same nav mount pass.",
+   "fixtures": "Per form, a fixture with the parent prefix expected on the child page qname.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.11 probe (QC.3)",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "Rails: a `concern :x do resources :comments end` block mints `ANY /comments` at the root, a route Rails does not serve (it serves /<parent>/:<parent>_id/comments under each `concerns: :x`)",
+   "area": "Ruby precision",
+   "loc": 180,
+   "rationale": "Found by HQ.11's spec probe; the coverage row now names `concerns` as not read, but the phantom root route is still minted.",
+   "entry_points": [
+    "parsers/code/ruby/src/lib.rs walk_rails / try_emit_rails_route"
+   ],
+   "files_touched": [],
+   "implementation": "Record concern blocks without emitting; expand them under each `resources .. concerns: :x` at that resource's member path.",
+   "fixtures": "A routes.rb with a concern and two resources using it: expect two nested routes, forbid ANY /comments.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.7 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "MQTT generic queue rows keep a substring gate on purpose (rust `rumqttc`), so an in-word collision like HQ.7's redis one is still possible there",
+   "area": "Queues precision",
+   "loc": 60,
+   "rationale": "HQ.7 (f1b7e38d) made the redis gate a whole word; MQTT was left as is. No example yet.",
+   "entry_points": [
+    "parsers/code/extractors/src/queues.rs row_gate_passes"
+   ],
+   "files_touched": [],
+   "implementation": "When an example appears: a word or import gate per MQTT client crate / package.",
+   "fixtures": "A file naming `mqtt` only inside a longer identifier with a .subscribe call: forbid the consumer.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
+  },
+  {
+   "from": "0.5.7 HQ.8 follow-up",
+   "spec_pass": "0.5.7 integrator",
+   "class": "precision_backlog",
+   "title": "hoppscotch's mocked-Prisma spec still carries `-> data_entity:sql:users` from extractor:data_entities (a test double's table name), not judged by HC.3",
+   "area": "Data precision",
+   "loc": 100,
+   "rationale": "HQ.8 (e0222291) removed the ACCESSES_DATA data_source edge from mocked store clients; the data_entities reader still reads the mock's table literal.",
+   "entry_points": [
+    "parsers/code/extractors/src/data_entities.rs",
+    "HQ.8's mocked-client test (data_sources.rs)"
+   ],
+   "files_touched": [],
+   "implementation": "Apply HQ.8's mocked-client rule to data_entities in test files.",
+   "fixtures": "A NestJS spec with mockDeep<PrismaService> and prisma.users.findMany: forbid data_entity:sql:users.",
+   "acceptance": "Re-verify at the pulling release's HEAD; the fixture fails before and passes after; grade.py shows no other fixture move.",
+   "fired_on_marker": "to be named by the pulling packet",
+   "breaking": "graph_content",
+   "depends_on": [],
+   "risks": "",
+   "note": "Written at the 0.5.7 close (2026-11-03) from a landed packet's follow-up; a recall gap or a case with no public example yet. Probe at the pulling release's HEAD before speccing."
   }
  ]
 }
