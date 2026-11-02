@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "77a64cc1",
-  "after_wave": 7,
+  "measured_at_head": "b383c243",
+  "after_wave": 8,
   "cargo_test_workspace": {
-    "passed": 7858,
+    "passed": 7865,
     "failed": 0
   },
   "history_passed": [
@@ -187,10 +187,11 @@
     7772,
     7817,
     7841,
-    7858
+    7858,
+    7865
   ],
   "run_py": {
-    "fixtures": 518,
+    "fixtures": 521,
     "blind_spots": 0,
     "blind_spot_detail": "blind: []; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,

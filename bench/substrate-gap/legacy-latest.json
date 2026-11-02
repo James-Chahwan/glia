@@ -1,6 +1,6 @@
 {
   "engine": "0.5.6",
-  "fixtures": 518,
+  "fixtures": 521,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -391,6 +391,13 @@
         "INJECTS": 1.0
       }
     },
+    "csharp-heritage-not-namespace": {
+      "framework": "csharp-heritage-not-namespace",
+      "language": "csharp",
+      "per_category": {
+        "INHERITS_FROM": 1.0
+      }
+    },
     "csharp-httpclient-http": {
       "framework": "csharp-httpclient-http",
       "language": "csharp",
@@ -604,6 +611,13 @@
     "data-source-jni-descriptor-words": {
       "framework": "data-source-jni-descriptor-words",
       "language": "dart",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "data-source-test-doubles": {
+      "framework": "data-source-test-doubles",
+      "language": "typescript",
       "per_category": {
         "ACCESSES_DATA": 1.0
       }
@@ -1982,6 +1996,13 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "php-heritage-namespace-named": {
+      "framework": "php-heritage-namespace-named",
+      "language": "php",
+      "per_category": {
+        "INHERITS_FROM": 1.0
       }
     },
     "php-http": {
