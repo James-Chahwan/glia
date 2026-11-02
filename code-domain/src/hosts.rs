@@ -157,9 +157,45 @@ pub struct HostRow {
     /// `package.json` with `engines.vscode`), read by the manifest route
     /// through [`manifest_host_for`]; `None` for a host with no such file.
     pub manifest: Option<HostManifest>,
+    /// HF.4: the classes of a [`Gate::Import`] module whose instances
+    /// register with the host (`McpServer`), as member names under the
+    /// gate's root. In a file whose import binds one of them, a local or a
+    /// class field bound by `new <Class>(..)` roots `<root>.<Class>.`
+    /// (`server.tool` is `@modelcontextprotocol/sdk.McpServer.tool`); a
+    /// registration rooted there is read on such an instance only, never
+    /// through the import alone ([`HostRow::is_instance_path`]). Empty for
+    /// every other row.
+    pub instances: &'static [&'static str],
 }
 
 impl HostRow {
+    /// HF.4: the instance class `path` names: `path` is exactly
+    /// `<gate root>.<class>` for one of the row's [`HostRow::instances`]
+    /// (`@modelcontextprotocol/sdk.McpServer`); `None` for any other path.
+    pub fn instance_class(&self, path: &str) -> Option<&'static str> {
+        let rest = path
+            .strip_prefix(self.gate.root())
+            .and_then(|r| r.strip_prefix('.'))?;
+        self.instances.iter().copied().find(|c| *c == rest)
+    }
+
+    /// HF.4: true when `dotted` is a member path of one of the row's
+    /// [`HostRow::instances`] (`@modelcontextprotocol/sdk.McpServer.tool`):
+    /// a registration rooted there is read on an instance only (a static
+    /// `McpServer.tool(..)` registers nothing).
+    pub fn is_instance_path(&self, dotted: &str) -> bool {
+        let Some(rest) = dotted
+            .strip_prefix(self.gate.root())
+            .and_then(|r| r.strip_prefix('.'))
+        else {
+            return false;
+        };
+        self.instances.iter().any(|c| {
+            rest.strip_prefix(c)
+                .is_some_and(|tail| tail.starts_with('.'))
+        })
+    }
+
     /// The METHOD names the host calls on a subclass of the host class at
     /// the dotted `base` (GH.10: `onload` / `onunload` of a subclass of
     /// `obsidian.Plugin`, the heritage already expanded through the file's
@@ -561,6 +597,47 @@ pub enum Shape {
         name_arg: usize,
         handler_arg: usize,
     },
+    /// Positional arguments, the name under a fixed head (HF.4, MCP's
+    /// TypeScript SDK: `server.tool("add", schema, h)` names `tool:add`): the
+    /// name is `<head>:<string literal at name_arg>`, or with `uri_arg`
+    /// `<head>:<uri>` when the argument there is a string literal or a
+    /// `new <uri_template>(<literal>, ..)` of the gate's module (an MCP
+    /// resource is keyed by its URI, else by its name). The handler is the
+    /// argument [`HandlerAt`] names, after every name argument; a
+    /// registration with no handler there registers nothing (counted
+    /// `unread=`). An inline function handler is minted as its own FUNCTION
+    /// under [`Pattern::handler_key`] (the registration's name), which owns
+    /// its calls.
+    Prefixed {
+        head: &'static str,
+        name_arg: usize,
+        uri_arg: Option<usize>,
+        uri_template: Option<&'static str>,
+        handler: HandlerAt,
+    },
+}
+
+/// Where a [`Shape::Prefixed`] registration's handler is (HF.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HandlerAt {
+    /// The argument at this 1-based position.
+    Arg(usize),
+    /// The last argument, whatever the overload (MCP's `tool(name, cb)` to
+    /// `tool(name, description, schema, annotations, cb)`).
+    Last,
+}
+
+impl HandlerAt {
+    /// The 0-based index of the handler among `count` arguments; `None`
+    /// when the call has no argument there.
+    pub fn index(self, count: usize) -> Option<usize> {
+        let at = match self {
+            HandlerAt::Arg(n) => n.checked_sub(1)?,
+            HandlerAt::Last => count.checked_sub(1)?,
+        };
+        (at < count).then_some(at)
+    }
 }
 
 /// The receivers a [`Shape::Decorator`] registration is read on (GH.8): a
@@ -612,6 +689,19 @@ impl Shape {
         arg.filter(|a| !a.is_empty())
             .or(fallback.filter(|h| !h.is_empty()))
             .map(|a| format!("{method}:{a}"))
+    }
+
+    /// The name a [`Shape::Prefixed`] registration reads: `<head>:<uri>`
+    /// when the shape has a URI argument and `uri` holds its literal, else
+    /// `<head>:<name>`; `None` when neither is a non-empty literal, or for
+    /// every other shape.
+    pub fn prefixed_name(self, name: Option<&str>, uri: Option<&str>) -> Option<String> {
+        let Shape::Prefixed { head, uri_arg, .. } = self else {
+            return None;
+        };
+        let uri = uri_arg.and(uri).filter(|u| !u.is_empty());
+        uri.or(name.filter(|n| !n.is_empty()))
+            .map(|key| format!("{head}:{key}"))
     }
 
     /// The registration's name a [`Shape::CalleeSegment`] reads from the
@@ -818,6 +908,7 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     HostRow {
         name: "neovim",
@@ -890,6 +981,7 @@ pub static HOSTS: &[HostRow] = &[
             namespaced: &["vim.g"],
         }],
         manifest: None,
+        instances: &[],
     },
     HostRow {
         name: "wezterm",
@@ -914,6 +1006,7 @@ pub static HOSTS: &[HostRow] = &[
             namespaced: &[],
         }],
         manifest: None,
+        instances: &[],
     },
     // GH.4: LOVE registers nothing; it calls `love.<callback>` by name and
     // runs `main.lua` / `conf.lua` from the game's root.
@@ -943,6 +1036,7 @@ pub static HOSTS: &[HostRow] = &[
         }],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.9: VS Code, the first TypeScript host. Gated on an import of the
     // module `vscode`; commands and the workspace / window / languages event
@@ -1026,6 +1120,7 @@ pub static HOSTS: &[HostRow] = &[
             file: "package.json",
             engine: "vscode",
         }),
+        instances: &[],
     },
     // GH.3: World of Warcraft. A frame registers for events by name and
     // receives every one of them in its one OnEvent script; the file calls
@@ -1049,6 +1144,7 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.3: AwesomeWM. Its class globals emit signals; the globals' names
     // are common, so a file must require awful or gears for them to be the
@@ -1087,6 +1183,7 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.8: Flask, the first Python host. An app or blueprint registers the
     // functions its request lifecycle calls, by decorator or by call, in a
@@ -1121,6 +1218,7 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.8: pytest calls its hooks by name in a conftest.py or a module that
     // imports it, and its fixtures by parameter name.
@@ -1144,6 +1242,7 @@ pub static HOSTS: &[HostRow] = &[
         }],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // HF.3: MCP servers (the Python SDK's FastMCP / MCPServer, the low-level
     // Server, and the standalone fastmcp package). A server object registers
@@ -1178,6 +1277,7 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.10: Obsidian. A plugin's default export extends `Plugin` (imported
     // from 'obsidian'); Obsidian calls its `onload` / `onunload`, a settings
@@ -1251,6 +1351,7 @@ pub static HOSTS: &[HostRow] = &[
         ],
         config: &[],
         manifest: None,
+        instances: &[],
     },
     // GH.10: webpack (and any tapable host: rspack, a plugin's own hooks).
     // A plugin is an object whose `apply(compiler)` taps the compiler's
@@ -1286,8 +1387,123 @@ pub static HOSTS: &[HostRow] = &[
         callbacks: &[],
         config: &[],
         manifest: None,
+        instances: &[],
+    },
+    // HF.4: MCP servers in TypeScript (@modelcontextprotocol/sdk). A
+    // `new McpServer(..)` registers its tools and prompts (commands the
+    // client calls by name) and its resources (events, read by URI) with
+    // `tool` / `prompt` / `resource` (the handler last, whatever the
+    // overload) or `registerTool` / `registerPrompt` / `registerResource`
+    // (the handler at a fixed position). One host name with the Python row:
+    // `host_cmd:mcp:tool:<name>` in both languages.
+    HostRow {
+        name: "mcp",
+        lang: "typescript",
+        exts: TS_EXTS,
+        gate: Gate::Import("@modelcontextprotocol/sdk"),
+        loads: &[],
+        registrations: &[
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.tool",
+                Pattern::Command,
+                MCP_TS_TOOL,
+            ),
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.registerTool",
+                Pattern::Command,
+                MCP_TS_REGISTER_TOOL,
+            ),
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.prompt",
+                Pattern::Command,
+                MCP_TS_PROMPT,
+            ),
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.registerPrompt",
+                Pattern::Command,
+                MCP_TS_REGISTER_PROMPT,
+            ),
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.resource",
+                Pattern::Event,
+                MCP_TS_RESOURCE,
+            ),
+            mcp_ts(
+                "@modelcontextprotocol/sdk.McpServer.registerResource",
+                Pattern::Event,
+                MCP_TS_REGISTER_RESOURCE,
+            ),
+        ],
+        callbacks: &[],
+        config: &[],
+        manifest: None,
+        instances: &["McpServer"],
     },
 ];
+
+/// One TypeScript MCP registration (HF.4): `pattern` by the exact call.
+const fn mcp_ts(callee: &'static str, pattern: Pattern, shape: Shape) -> Registration {
+    Registration {
+        callee: Callee::Exact(callee),
+        pattern,
+        shape,
+    }
+}
+
+/// `server.tool(name, .., cb)`: `tool:<name>`, the handler last.
+const MCP_TS_TOOL: Shape = Shape::Prefixed {
+    head: "tool",
+    name_arg: 1,
+    uri_arg: None,
+    uri_template: None,
+    handler: HandlerAt::Last,
+};
+
+/// `server.registerTool(name, config, cb)`.
+const MCP_TS_REGISTER_TOOL: Shape = Shape::Prefixed {
+    head: "tool",
+    name_arg: 1,
+    uri_arg: None,
+    uri_template: None,
+    handler: HandlerAt::Arg(3),
+};
+
+/// `server.prompt(name, .., cb)`: `prompt:<name>`, the handler last.
+const MCP_TS_PROMPT: Shape = Shape::Prefixed {
+    head: "prompt",
+    name_arg: 1,
+    uri_arg: None,
+    uri_template: None,
+    handler: HandlerAt::Last,
+};
+
+/// `server.registerPrompt(name, config, cb)`.
+const MCP_TS_REGISTER_PROMPT: Shape = Shape::Prefixed {
+    head: "prompt",
+    name_arg: 1,
+    uri_arg: None,
+    uri_template: None,
+    handler: HandlerAt::Arg(3),
+};
+
+/// `server.resource(name, uri | new ResourceTemplate(uri, ..), .., cb)`:
+/// `resource:<uri>` (as the Python row keys it), else `resource:<name>`.
+const MCP_TS_RESOURCE: Shape = Shape::Prefixed {
+    head: "resource",
+    name_arg: 1,
+    uri_arg: Some(2),
+    uri_template: Some("ResourceTemplate"),
+    handler: HandlerAt::Last,
+};
+
+/// `server.registerResource(name, uri | template, metadata, cb)`.
+const MCP_TS_REGISTER_RESOURCE: Shape = Shape::Prefixed {
+    head: "resource",
+    name_arg: 1,
+    uri_arg: Some(2),
+    uri_template: Some("ResourceTemplate"),
+    handler: HandlerAt::Arg(4),
+};
 
 /// The receivers of Flask's hooks (GH.8): a `Flask(..)` / `Blueprint(..)`
 /// binding, or the names an app or blueprint goes by.
@@ -1637,11 +1853,16 @@ pub fn decorator_callback_for(
 
 /// The row of `lang` gated on importing the module `spec` (GH.9:
 /// `import * as vscode from 'vscode'`): a local bound to the import roots
-/// the row's paths under the module's name.
+/// the row's paths under the module's name. HF.4: a subpath of the module
+/// (`@modelcontextprotocol/sdk/server/mcp.js`) holds the gate too, its
+/// bindings still rooted at the module's name (`McpServer` imported from it
+/// is `@modelcontextprotocol/sdk.McpServer`).
 pub fn host_for_import(lang: &str, spec: &str) -> Option<&'static HostRow> {
-    HOSTS
-        .iter()
-        .find(|h| h.lang == lang && matches!(h.gate, Gate::Import(m) if m == spec))
+    HOSTS.iter().find(|h| {
+        h.lang == lang
+            && matches!(h.gate, Gate::Import(m) if m == spec
+                || spec.strip_prefix(m).is_some_and(|rest| rest.starts_with('/')))
+    })
 }
 
 /// The host that calls a function its plugin module exports as `name` (GH.9:
@@ -2216,8 +2437,31 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
         if RESERVED_NAMES.contains(&row.name) {
             problems.push(format!("{at}: name is reserved"));
         }
-        if rows[..i].iter().any(|r| r.name == row.name) {
+        // HF.4: one host may have a row per language (MCP's Python and
+        // TypeScript SDKs): a name is unique per language.
+        if rows[..i]
+            .iter()
+            .any(|r| r.name == row.name && r.lang == row.lang)
+        {
             problems.push(format!("{at}: duplicate name"));
+        }
+        if !row.instances.is_empty() {
+            let rooted = |c: &str| {
+                let path = format!("{}.{c}.", row.gate.root());
+                row.registrations
+                    .iter()
+                    .any(|r| r.callee.text().starts_with(&path))
+            };
+            if !matches!(row.gate, Gate::Import(_))
+                || row
+                    .instances
+                    .iter()
+                    .any(|c| !is_identifier_tail(c) || !rooted(c))
+            {
+                problems.push(format!(
+                    "{at}: instances need an import gate, identifier classes and a registration rooted at each"
+                ));
+            }
         }
         if row.lang.is_empty()
             || row.exts.is_empty()
@@ -2419,6 +2663,30 @@ pub fn validate_rows(rows: &[HostRow]) -> Vec<String> {
                     {
                         problems.push(format!(
                             "{at}: targeted shape of {callee:?} needs distinct 1-based arguments"
+                        ));
+                    }
+                }
+                Shape::Prefixed {
+                    head,
+                    name_arg,
+                    uri_arg,
+                    uri_template,
+                    handler,
+                } => {
+                    let names = name_arg.max(uri_arg.unwrap_or(0));
+                    let handler_ok = match handler {
+                        HandlerAt::Arg(n) => n > names,
+                        HandlerAt::Last => true,
+                    };
+                    if !is_identifier_tail(head)
+                        || name_arg == 0
+                        || uri_arg.is_some_and(|u| u == 0 || u == name_arg)
+                        || (uri_template.is_some() && uri_arg.is_none())
+                        || uri_template.is_some_and(|t| !is_identifier_tail(t))
+                        || !handler_ok
+                    {
+                        problems.push(format!(
+                            "{at}: prefixed shape of {callee:?} needs an identifier head, distinct 1-based name arguments, a template only with a URI and the handler after them"
                         ));
                     }
                 }
@@ -4131,7 +4399,7 @@ mod tests {
             names,
             [
                 "maki", "neovim", "wezterm", "love", "vscode", "wow", "awesome", "flask", "pytest",
-                "mcp", "obsidian", "webpack"
+                "mcp", "obsidian", "webpack", "mcp"
             ]
         );
     }
@@ -4191,6 +4459,7 @@ mod tests {
                     },
                 ],
                 manifest: None,
+                instances: &[],
             },
             HOSTS[0],
             HOSTS[0],
@@ -4285,6 +4554,7 @@ mod tests {
                 callbacks: &[],
                 config: &[],
                 manifest: None,
+                instances: &[],
             },
             HostRow {
                 name: "b",
@@ -4306,6 +4576,7 @@ mod tests {
                 callbacks: &[],
                 config: &[],
                 manifest: None,
+                instances: &[],
             },
         ];
         let problems = validate_rows(&bad);
@@ -4697,6 +4968,7 @@ mod tests {
             }],
             config: &[],
             manifest: None,
+            instances: &[],
         }];
         let problems = validate_rows(&bad);
         assert!(
@@ -5064,6 +5336,7 @@ mod tests {
                 }],
                 config: &[],
                 manifest: None,
+                instances: &[],
             },
             HostRow {
                 name: "q",
@@ -5092,6 +5365,7 @@ mod tests {
                 }],
                 config: &[],
                 manifest: None,
+                instances: &[],
             },
         ];
         let problems = validate_rows(&bad);
@@ -5148,6 +5422,7 @@ mod tests {
                 file: "a/package.json",
                 engine: "",
             }),
+            instances: &[],
         }];
         let problems = validate_rows(&bad);
         let has = |s: &str| problems.iter().any(|p| p.contains(s));
@@ -5316,6 +5591,7 @@ mod tests {
             }],
             config: &[],
             manifest: None,
+            instances: &[],
         }];
         let problems = validate_rows(&bad);
         let has = |s: &str| problems.iter().any(|p| p.contains(s));
@@ -6034,5 +6310,195 @@ mod launchers {
             ]
         );
         assert_eq!(Refusal::Depth.as_str(), "depth");
+    }
+
+    #[test]
+    fn mcp_typescript_row_reads_subpaths_instances_and_prefixed_names() {
+        assert!(validate().is_empty(), "{:?}", validate());
+        // A subpath of the gate's module holds it; another module does not.
+        for spec in [
+            "@modelcontextprotocol/sdk",
+            "@modelcontextprotocol/sdk/server/mcp.js",
+            "@modelcontextprotocol/sdk/client/index.js",
+        ] {
+            assert_eq!(
+                host_for_import("typescript", spec).map(|h| (h.name, h.lang)),
+                Some(("mcp", "typescript")),
+                "{spec}"
+            );
+        }
+        for spec in [
+            "@modelcontextprotocol/sdk-extra",
+            "@modelcontextprotocol",
+            "vscode-x",
+        ] {
+            let found = host_for_import("typescript", spec);
+            assert!(found.is_none_or(|h| h.name != "mcp"), "{spec}");
+        }
+        assert_eq!(
+            host_for_import("typescript", "vscode").map(|h| h.name),
+            Some("vscode")
+        );
+        assert!(host_for_import("python", "@modelcontextprotocol/sdk").is_none());
+        let ts = HOSTS
+            .iter()
+            .find(|h| h.name == "mcp" && h.lang == "typescript")
+            .expect("mcp typescript row");
+        assert_eq!(
+            ts.instance_class("@modelcontextprotocol/sdk.McpServer"),
+            Some("McpServer")
+        );
+        assert_eq!(ts.instance_class("@modelcontextprotocol/sdk.Client"), None);
+        assert!(ts.is_instance_path("@modelcontextprotocol/sdk.McpServer.tool"));
+        assert!(!ts.is_instance_path("@modelcontextprotocol/sdk.McpServerX.tool"));
+        assert!(!ts.is_instance_path("@modelcontextprotocol/sdk.McpServer"));
+        let m = registration_for("typescript", "@modelcontextprotocol/sdk.McpServer.tool")
+            .expect("tool");
+        assert!(std::ptr::eq(m.host, ts));
+        assert_eq!(m.registration.pattern, Pattern::Command);
+        assert_eq!(
+            m.registration.shape.prefixed_name(Some("add"), None),
+            Some("tool:add".to_string())
+        );
+        let r = registration_for(
+            "typescript",
+            "@modelcontextprotocol/sdk.McpServer.registerResource",
+        )
+        .expect("registerResource");
+        assert_eq!(r.registration.pattern, Pattern::Event);
+        // A resource is keyed by its URI, else by its name.
+        assert_eq!(
+            r.registration
+                .shape
+                .prefixed_name(Some("all"), Some("notes://all")),
+            Some("resource:notes://all".to_string())
+        );
+        assert_eq!(
+            r.registration.shape.prefixed_name(Some("all"), None),
+            Some("resource:all".to_string())
+        );
+        assert_eq!(r.registration.shape.prefixed_name(None, Some("")), None);
+        let Shape::Prefixed { handler, .. } = r.registration.shape else {
+            panic!("prefixed");
+        };
+        assert_eq!(handler, HandlerAt::Arg(4));
+        assert_eq!(handler.index(4), Some(3));
+        assert_eq!(handler.index(3), None);
+        assert_eq!(HandlerAt::Last.index(5), Some(4));
+        assert_eq!(HandlerAt::Last.index(0), None);
+        // Another shape names nothing through prefixed_name.
+        assert_eq!(
+            Shape::HookName { handler_arg: 1 }.prefixed_name(Some("a"), None),
+            None
+        );
+        // The Python row keeps its own name; one name per language.
+        assert_eq!(HOSTS.iter().filter(|h| h.name == "mcp").count(), 2);
+        let twice = [*ts, *ts];
+        assert!(
+            validate_rows(&twice)
+                .iter()
+                .any(|p| p.contains("duplicate name")),
+            "one name twice in one language"
+        );
+    }
+
+    #[test]
+    fn validate_names_the_hf4_problems() {
+        let ts = HOSTS
+            .iter()
+            .find(|h| h.name == "mcp" && h.lang == "typescript")
+            .expect("row");
+        let bad_shape = |shape: Shape| HostRow {
+            registrations: Box::leak(Box::new([Registration {
+                callee: Callee::Exact("@modelcontextprotocol/sdk.McpServer.tool"),
+                pattern: Pattern::Command,
+                shape,
+            }])),
+            ..*ts
+        };
+        for (shape, why) in [
+            (
+                Shape::Prefixed {
+                    head: "",
+                    name_arg: 1,
+                    uri_arg: None,
+                    uri_template: None,
+                    handler: HandlerAt::Last,
+                },
+                "empty head",
+            ),
+            (
+                Shape::Prefixed {
+                    head: "tool",
+                    name_arg: 0,
+                    uri_arg: None,
+                    uri_template: None,
+                    handler: HandlerAt::Last,
+                },
+                "0 name",
+            ),
+            (
+                Shape::Prefixed {
+                    head: "tool",
+                    name_arg: 1,
+                    uri_arg: Some(1),
+                    uri_template: None,
+                    handler: HandlerAt::Last,
+                },
+                "uri on the name",
+            ),
+            (
+                Shape::Prefixed {
+                    head: "tool",
+                    name_arg: 1,
+                    uri_arg: None,
+                    uri_template: Some("T"),
+                    handler: HandlerAt::Last,
+                },
+                "template without a uri",
+            ),
+            (
+                Shape::Prefixed {
+                    head: "tool",
+                    name_arg: 1,
+                    uri_arg: Some(2),
+                    uri_template: None,
+                    handler: HandlerAt::Arg(2),
+                },
+                "handler on the uri",
+            ),
+        ] {
+            assert!(
+                validate_rows(&[bad_shape(shape)])
+                    .iter()
+                    .any(|p| p.contains("prefixed shape")),
+                "{why}"
+            );
+        }
+        // Instances need an import gate, identifiers and a registration each.
+        for (instances, why) in [
+            (&["Client"][..], "no registration rooted at Client"),
+            (&["Mcp-Server"][..], "no identifier"),
+        ] {
+            let row = HostRow { instances, ..*ts };
+            assert!(
+                validate_rows(&[row])
+                    .iter()
+                    .any(|p| p.contains("instances need")),
+                "{why}"
+            );
+        }
+        let vscode = HOSTS.iter().find(|h| h.name == "vscode").expect("vscode");
+        let row = HostRow {
+            instances: &["commands"],
+            gate: Gate::Global("vscode"),
+            ..*vscode
+        };
+        assert!(
+            validate_rows(&[row])
+                .iter()
+                .any(|p| p.contains("instances need")),
+            "a global gate holds no instances"
+        );
     }
 }

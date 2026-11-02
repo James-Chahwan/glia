@@ -189,6 +189,9 @@ fn parse_file_stats(
     // GH.9: the host modules the file imports (VS Code), before any call is
     // read: a registration is read only under one.
     acc.host = host_import_bindings(root, src);
+    // HF.4: the locals and fields an instance of a host class holds.
+    host_instances(root, src, &mut acc.host);
+    acc.host.module_qname = module_qname.to_string();
 
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -4652,6 +4655,15 @@ fn collect_calls_in(
     let mut stack = vec![(n, enclosing_class, false)];
     while let Some((node, enclosing_class, nested)) = stack.pop() {
         let kind = node.kind();
+        // HF.4: an inline host handler minted as its own FUNCTION was walked
+        // from it.
+        if matches!(
+            kind,
+            "arrow_function" | "function_expression" | "generator_function"
+        ) && acc.host.hoisted.contains(&node.start_byte())
+        {
+            continue;
+        }
         // Named-declaration/class bodies own their own from-node (emitted as
         // separate Function/Method/Class nodes) — walked separately, so skip.
         //
@@ -11469,6 +11481,9 @@ enum HostHandler {
     Scope(NodeId),
     /// `a.b`: an attribute ref for the graph.
     Attribute(String, String),
+    /// HF.4: an inline function minted as its own FUNCTION
+    /// ([`mint_host_inline`]), which owns its calls.
+    Minted(NodeId),
 }
 
 /// GH.9: a `<local>.get('<k>')` read whose local may hold a host settings
@@ -11481,6 +11496,14 @@ struct PendingSectionRead {
     row: u32,
     cells: Vec<Cell>,
 }
+
+/// HF.4: the host instance a local or field holds: the instance class's
+/// dotted path and its host.
+type HeldInstance = Option<(String, &'static hosts::HostRow)>;
+
+/// HF.4: a [`HostScan::instances`] key: the declaring scope's start, end and
+/// kind, and the name.
+type ScopeKey = (usize, usize, u16, String);
 
 /// GH.9: one file's host reading: the bindings its imports of a host module
 /// make, the registrations read, and the `[host]` tally.
@@ -11510,6 +11533,23 @@ struct HostScan {
     /// `apply(compiler)` tapping the compiler's hooks), as `(METHOD, host,
     /// the first parameter's local name)`, walk order.
     param_methods: Vec<(NodeId, &'static hosts::HostRow, String)>,
+    /// HF.4: the file MODULE's qname, the prefix of a minted inline handler.
+    module_qname: String,
+    /// HF.4: `(scope start, scope end, scope kind, name)` -> the host
+    /// instance a declaration of `name` in that scope holds (`const server =
+    /// new McpServer(..)`: `@modelcontextprotocol/sdk.McpServer`), `None`
+    /// for any other declaration, a second one or a reassignment. Only names
+    /// some `new <instance class>` binds are keyed. Looked up, never iterated.
+    instances: HashMap<ScopeKey, HeldInstance>,
+    /// HF.4: `(class start, field)` -> the instance every write of
+    /// `this.<field>` in that class holds (a field initialiser or a `this.x =
+    /// new McpServer(..)`), `None` when one write holds anything else.
+    instance_fields: HashMap<(usize, String), HeldInstance>,
+    /// HF.4: the start bytes of the inline handlers minted as FUNCTIONs: the
+    /// enclosing walk skips them (their calls are the FUNCTION's).
+    hoisted: HashSet<usize>,
+    /// HF.4: the keys of the inline handlers minted in the file.
+    minted_keys: HashSet<String>,
 }
 
 impl HostScan {
@@ -11764,6 +11804,8 @@ fn try_detect_host(
         (d, Some(h))
     } else if let Some((d, h)) = host_param_dotted(callee, src, from, &acc.host) {
         (d, Some(h))
+    } else if let Some((d, h)) = host_instance_dotted(callee, src, &acc.host) {
+        (d, Some(h))
     } else {
         return;
     };
@@ -11771,9 +11813,12 @@ fn try_detect_host(
         return;
     };
     match only {
-        Some(h) if h.name != found.host.name => return,
-        // An owner class's member is read on `this` only (GH.10).
-        None if found.host.is_owner_path(&dotted) => return,
+        Some(h) if !std::ptr::eq(h, found.host) => return,
+        // An owner class's member is read on `this` only (GH.10), an
+        // instance class's on an instance only (HF.4).
+        None if found.host.is_owner_path(&dotted) || found.host.is_instance_path(&dotted) => {
+            return;
+        }
         _ => {}
     }
     let host = found.host.name;
@@ -11789,7 +11834,45 @@ fn try_detect_host(
     }
     let handler_of =
         |a: Option<TsNode>| a.and_then(|a| host_handler(a, src, from, enclosing_class));
+    // HF.4: a prefixed registration's inline handler, minted once the name
+    // is read; such a registration needs a handler.
+    let mut inline: Option<TsNode> = None;
+    let mut needs_handler = false;
     let (name, handlers): (Option<String>, Vec<HostHandler>) = match found.registration.shape {
+        // HF.4: `server.tool('add', schema, h)`: `tool:add`.
+        hosts::Shape::Prefixed {
+            name_arg,
+            uri_arg,
+            uri_template,
+            handler,
+            ..
+        } => {
+            needs_handler = true;
+            let literal = arg(name_arg, &args).and_then(|a| literal_string(a, src));
+            let uri = uri_arg
+                .and_then(|u| arg(u, &args))
+                .and_then(|a| host_uri(a, uri_template, src, &acc.host, found.host));
+            let after = name_arg.max(uri_arg.unwrap_or(0));
+            let target = handler
+                .index(args.len())
+                .filter(|i| *i >= after)
+                .and_then(|i| args.get(i).copied())
+                .map(unparenthesized_expr);
+            let handlers = match target {
+                Some(t) if is_inline_function(t) => {
+                    inline = Some(t);
+                    Vec::new()
+                }
+                t => handler_of(t).into_iter().collect(),
+            };
+            (
+                found
+                    .registration
+                    .shape
+                    .prefixed_name(literal.as_deref(), uri.as_deref()),
+                handlers,
+            )
+        }
         hosts::Shape::Positional {
             name_arg,
             handler_arg,
@@ -11868,6 +11951,10 @@ fn try_detect_host(
         acc.host.tally.unread += 1;
         return;
     };
+    if needs_handler && handlers.is_empty() && inline.is_none() {
+        acc.host.tally.unread += 1;
+        return;
+    }
     let Some(module_id) = acc.module_id else {
         return;
     };
@@ -11887,7 +11974,114 @@ fn try_detect_host(
     for h in handlers {
         acc.host.handlers.push((id, h, row));
     }
+    if let Some(func) = inline {
+        let class = (func.kind() == "arrow_function")
+            .then_some(enclosing_class)
+            .flatten();
+        let key = pattern.handler_key(&name, None);
+        let minted = mint_host_inline(func, key, src, module_id, repo, class, acc);
+        acc.host
+            .handlers
+            .push((id, HostHandler::Minted(minted), row));
+    }
     acc.host.tally.registered(pattern);
+}
+
+/// HF.4: `n` without the parentheses around it.
+fn unparenthesized_expr(n: TsNode) -> TsNode {
+    let mut at = n;
+    while at.kind() == "parenthesized_expression" {
+        match sole_named(at) {
+            Some(inner) => at = inner,
+            None => break,
+        }
+    }
+    at
+}
+
+/// HF.4: an arrow function, function expression or generator.
+fn is_inline_function(n: TsNode) -> bool {
+    matches!(
+        n.kind(),
+        "arrow_function" | "function_expression" | "generator_function"
+    )
+}
+
+/// HF.4: the URI a [`hosts::Shape::Prefixed`] registration's URI argument
+/// names: a string literal, or `new <template>(<literal>, ..)` where
+/// `<template>` is the class of `host`'s module the shape names (MCP's
+/// `ResourceTemplate`, through the file's import). `None` for anything
+/// else (a run-time value).
+fn host_uri(
+    a: TsNode,
+    template: Option<&str>,
+    src: &[u8],
+    scan: &HostScan,
+    host: &'static hosts::HostRow,
+) -> Option<String> {
+    let a = unparenthesized_expr(a);
+    if let Some(lit) = literal_string(a, src) {
+        return Some(lit);
+    }
+    let template = template?;
+    if a.kind() != "new_expression" {
+        return None;
+    }
+    let path = host_dotted(a.child_by_field_name("constructor")?, src, scan)?;
+    if path != format!("{}.{template}", host.gate.root()) {
+        return None;
+    }
+    let first = a
+        .child_by_field_name("arguments")
+        .map(|_| call_args(a))?
+        .into_iter()
+        .next()?;
+    literal_string(first, src)
+}
+
+/// HF.4: mint the inline handler `func` of a registration as the FUNCTION
+/// `<module>::<key>` (`command tool:add`; `@<row>` appended to a key the file
+/// already minted), DEFINES-d by the MODULE, and walk its body from it (its
+/// parameters type its receivers); the enclosing walk skips it.
+fn mint_host_inline(
+    func: TsNode,
+    key: String,
+    src: &[u8],
+    module_id: NodeId,
+    repo: RepoId,
+    enclosing_class: Option<NodeId>,
+    acc: &mut Acc,
+) -> NodeId {
+    let key = if acc.host.minted_keys.contains(&key) {
+        format!("{key}@{}", func.start_position().row + 1)
+    } else {
+        key
+    };
+    acc.host.minted_keys.insert(key.clone());
+    let qname = format!("{}::{key}", acc.host.module_qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: build_cells(&func, src, &acc.file_rel),
+    });
+    acc.edges.push(Edge {
+        from: module_id,
+        to: id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.nav
+        .record(id, &key, &qname, node_kind::FUNCTION, Some(module_id));
+    acc.host.hoisted.insert(func.start_byte());
+    acc.host.tally.minted += 1;
+    record_param_types(func, src, id, acc);
+    if let Some(body) = func.child_by_field_name("body") {
+        collect_calls_in(body, src, id, enclosing_class, acc);
+    }
+    id
 }
 
 /// GH.10: the handler a registration table names under `key`: a pair's value
@@ -12039,6 +12233,323 @@ fn param_dotted(
     } else {
         None
     }
+}
+
+/// HF.4: the scopes a `let` / `const` / class / function declaration binds
+/// a name in.
+const BLOCK_SCOPES: &[&str] = &[
+    "statement_block",
+    "program",
+    "for_statement",
+    "for_in_statement",
+    "switch_body",
+    "class_static_block",
+];
+
+/// HF.4: the scopes a `var` and a parameter bind a name in.
+const FUNCTION_SCOPES: &[&str] = &[
+    "function_declaration",
+    "function_expression",
+    "function",
+    "arrow_function",
+    "method_definition",
+    "generator_function",
+    "generator_function_declaration",
+    "class_static_block",
+    "program",
+];
+
+/// HF.4: the nearest ancestor of `n` (itself excluded) of one of `kinds`.
+fn enclosing_scope<'t>(n: TsNode<'t>, kinds: &[&str]) -> Option<TsNode<'t>> {
+    let mut at = n.parent();
+    while let Some(p) = at {
+        if kinds.contains(&p.kind()) {
+            return Some(p);
+        }
+        at = p.parent();
+    }
+    None
+}
+
+/// HF.4: the key [`HostScan::instances`] holds a declaration of `name` in
+/// `scope` under.
+fn scope_key(scope: TsNode, name: &str) -> ScopeKey {
+    (
+        scope.start_byte(),
+        scope.end_byte(),
+        scope.kind_id(),
+        name.to_string(),
+    )
+}
+
+/// HF.4: the host instance `value` constructs: `new <C>(..)` where `<C>`,
+/// expanded through the file's imports, is an instance class of a host the
+/// file imports (`new McpServer(..)`: `@modelcontextprotocol/sdk.McpServer`).
+fn new_host_instance(value: TsNode, src: &[u8], scan: &HostScan) -> HeldInstance {
+    let value = unparenthesized_expr(value);
+    if value.kind() != "new_expression" {
+        return None;
+    }
+    let path = host_dotted(value.child_by_field_name("constructor")?, src, scan)?;
+    let host = scan
+        .present
+        .iter()
+        .copied()
+        .find(|h| h.instance_class(&path).is_some())?;
+    Some((path, host))
+}
+
+/// HF.4: an instance write of a field: a first `Some` stays, the same
+/// instance again keeps it, anything else makes the field hold nothing.
+fn merge_instance(slot: &mut Option<HeldInstance>, write: HeldInstance) {
+    *slot = Some(match (slot.take(), write) {
+        (None, w) => w,
+        (Some(Some(old)), Some(w)) if old.0 == w.0 => Some(old),
+        _ => None,
+    });
+}
+
+/// HF.4: the locals and class fields of the file that hold an instance of a
+/// host class ([`hosts::HostRow::instances`]): `const|let|var x = new
+/// <C>(..)` in the scope that declares it, and `this.x` in a class whose
+/// every write of `x` (a field initialiser, `this.x = ..`) is `new <C>(..)`.
+/// Every other declaration of such a name (a parameter, a second
+/// declaration, a nested function, a catch or loop variable) is recorded
+/// too, holding nothing, so a nested scope that shadows the name roots
+/// nothing; a reassignment `x = ..` makes the binding hold nothing.
+fn host_instances(root: TsNode, src: &[u8], scan: &mut HostScan) {
+    if !scan.present.iter().any(|h| !h.instances.is_empty()) {
+        return;
+    }
+    let mut nodes = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        nodes.push(n);
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
+    // The names an instance local may go by, and the class fields.
+    let mut names: HashSet<&str> = HashSet::new();
+    let mut fields: HashMap<(usize, String), Option<HeldInstance>> = HashMap::new();
+    for n in &nodes {
+        match n.kind() {
+            "variable_declarator" => {
+                if let (Some(name), Some(value)) = (
+                    n.child_by_field_name("name"),
+                    n.child_by_field_name("value"),
+                ) && name.kind() == "identifier"
+                    && new_host_instance(value, src, scan).is_some()
+                {
+                    names.insert(text(name, src));
+                }
+            }
+            "public_field_definition" => {
+                let (Some(name), Some(class)) = (
+                    n.child_by_field_name("name"),
+                    n.parent()
+                        .filter(|b| b.kind() == "class_body")
+                        .and_then(|b| b.parent()),
+                ) else {
+                    continue;
+                };
+                let Some(value) = n.child_by_field_name("value") else {
+                    continue;
+                };
+                let write = new_host_instance(value, src, scan);
+                let slot = fields
+                    .entry((class.start_byte(), text(name, src).to_string()))
+                    .or_default();
+                merge_instance(slot, write);
+            }
+            "assignment_expression" => {
+                let (Some(left), Some(right)) = (
+                    n.child_by_field_name("left"),
+                    n.child_by_field_name("right"),
+                ) else {
+                    continue;
+                };
+                if left.kind() != "member_expression"
+                    || left
+                        .child_by_field_name("object")
+                        .is_none_or(|o| o.kind() != "this")
+                {
+                    continue;
+                }
+                let (Some(field), Some(class)) =
+                    (child_text(left, "property", src), this_class_start(left))
+                else {
+                    continue;
+                };
+                let write = new_host_instance(right, src, scan);
+                let slot = fields.entry((class, field.to_string())).or_default();
+                merge_instance(slot, write);
+            }
+            _ => {}
+        }
+    }
+    scan.instance_fields = fields
+        .into_iter()
+        .filter_map(|(k, v)| v.map(|v| (k, v)))
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let mut instances: HashMap<ScopeKey, HeldInstance> = HashMap::new();
+    let mut declare =
+        |scope: Option<TsNode>, name: &str, held: Option<(String, &'static hosts::HostRow)>| {
+            let Some(scope) = scope else {
+                return;
+            };
+            if !names.contains(name) {
+                return;
+            }
+            instances
+                .entry(scope_key(scope, name))
+                .and_modify(|v| *v = None)
+                .or_insert(held);
+        };
+    for n in &nodes {
+        let n = *n;
+        match n.kind() {
+            "variable_declarator" => {
+                let Some(name) = n.child_by_field_name("name") else {
+                    continue;
+                };
+                let kinds = match n.parent().map(|p| p.kind()) {
+                    Some("variable_declaration") => FUNCTION_SCOPES,
+                    _ => BLOCK_SCOPES,
+                };
+                let scope = enclosing_scope(n, kinds);
+                if name.kind() == "identifier" {
+                    let held = n
+                        .child_by_field_name("value")
+                        .and_then(|v| new_host_instance(v, src, scan));
+                    declare(scope, text(name, src), held);
+                } else {
+                    for nm in pattern_names(name, src) {
+                        declare(scope, nm, None);
+                    }
+                }
+            }
+            "formal_parameters" => {
+                let scope = n.parent();
+                let mut c = n.walk();
+                for p in n.named_children(&mut c) {
+                    // `x: T`, `x?: T`: the pattern is the binding.
+                    let p = match p.kind() {
+                        "required_parameter" | "optional_parameter" => {
+                            match p.child_by_field_name("pattern") {
+                                Some(pat) => pat,
+                                None => continue,
+                            }
+                        }
+                        _ => p,
+                    };
+                    for nm in pattern_names(p, src) {
+                        declare(scope, nm, None);
+                    }
+                }
+            }
+            "arrow_function" => {
+                if let Some(p) = n.child_by_field_name("parameter") {
+                    declare(Some(n), text(p, src), None);
+                }
+            }
+            "function_declaration"
+            | "generator_function_declaration"
+            | "class_declaration"
+            | "abstract_class_declaration" => {
+                if let Some(name) = child_text(n, "name", src) {
+                    declare(enclosing_scope(n, BLOCK_SCOPES), name, None);
+                }
+            }
+            "catch_clause" | "for_in_statement" => {
+                let field = if n.kind() == "catch_clause" {
+                    "parameter"
+                } else {
+                    "left"
+                };
+                if let Some(p) = n.child_by_field_name(field) {
+                    for nm in pattern_names(p, src) {
+                        declare(Some(n), nm, None);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // A reassignment of an instance local: the binding it resolves to holds
+    // nothing.
+    for n in &nodes {
+        if n.kind() != "assignment_expression" {
+            continue;
+        }
+        let Some(left) = n
+            .child_by_field_name("left")
+            .filter(|l| l.kind() == "identifier")
+        else {
+            continue;
+        };
+        let name = text(left, src);
+        if !names.contains(name) {
+            continue;
+        }
+        let mut at = left.parent();
+        while let Some(p) = at {
+            if let Some(slot) = instances.get_mut(&scope_key(p, name)) {
+                *slot = None;
+                break;
+            }
+            at = p.parent();
+        }
+    }
+    scan.instances = instances;
+}
+
+/// HF.4: a `<local>.<a>` / `this.<field>.<a>` callee whose local or field
+/// holds a host instance ([`host_instances`]), expanded to `<class path>.<a>`
+/// (`server.tool` is `@modelcontextprotocol/sdk.McpServer.tool`), with the
+/// instance's host. The local resolves to the nearest scope declaring its
+/// name, so a parameter or a nested declaration of that name roots nothing.
+fn host_instance_dotted(
+    callee: TsNode,
+    src: &[u8],
+    scan: &HostScan,
+) -> Option<(String, &'static hosts::HostRow)> {
+    if callee.kind() != "member_expression"
+        || (scan.instances.is_empty() && scan.instance_fields.is_empty())
+    {
+        return None;
+    }
+    let raw: String = text(callee, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if !raw.split('.').all(host_ident) {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix("this.") {
+        let (field, tail) = rest.split_once('.')?;
+        if !host_ident(field) || !tail.split('.').all(host_ident) {
+            return None;
+        }
+        let class = this_class_start(callee)?;
+        let (path, host) = scan
+            .instance_fields
+            .get(&(class, field.to_string()))?
+            .as_ref()?;
+        return Some((format!("{path}.{tail}"), *host));
+    }
+    let (root, tail) = raw.split_once('.')?;
+    let mut at = callee.parent();
+    while let Some(p) = at {
+        if let Some(held) = scan.instances.get(&scope_key(p, root)) {
+            let (path, host) = held.as_ref()?;
+            return Some((format!("{path}.{tail}"), *host));
+        }
+        at = p.parent();
+    }
+    None
 }
 
 /// GH.10: a class whose `extends` clause names a member path of a host
@@ -12284,6 +12795,7 @@ fn settle_host(acc: &mut Acc) {
             HostHandler::Name(n) => acc.module_functions.get(n).copied(),
             HostHandler::Method(cid, m) => acc.class_methods.get(&(*cid, m.clone())).copied(),
             HostHandler::Scope(scope) => Some(*scope),
+            HostHandler::Minted(minted) => Some(*minted),
             HostHandler::Attribute(..) => None,
         };
         if let Some(to) = direct {
@@ -12309,7 +12821,7 @@ fn settle_host(acc: &mut Acc) {
         let qualifier = match handler {
             HostHandler::Name(n) => CallQualifier::Bare(n),
             HostHandler::Attribute(base, name) => CallQualifier::Attribute { base, name },
-            HostHandler::Method(..) | HostHandler::Scope(_) => continue,
+            HostHandler::Method(..) | HostHandler::Scope(_) | HostHandler::Minted(_) => continue,
         };
         acc.refs.push(UnresolvedRef {
             from: id,
@@ -22104,5 +22616,230 @@ function apply(compiler) {
         assert!(qnames(&p, node_kind::EVENT_HANDLER).is_empty());
         assert_eq!(entry(&p, method("lib::m::Mixin::apply")), None);
         assert_eq!(entry(&p, method("lib::m::Other::apply")), None);
+    }
+}
+
+#[cfg(test)]
+mod host_tests_hf4 {
+    //! HF.4: MCP servers as a TypeScript host: `tool` / `prompt` /
+    //! `resource` and `register*` on a `new McpServer(..)` from
+    //! `@modelcontextprotocol/sdk`.
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-hosts-hf4")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn cmd(name: &str) -> NodeId {
+        id(node_kind::CLI_COMMAND, &format!("host_cmd:mcp:{name}"))
+    }
+
+    fn event(name: &str) -> NodeId {
+        id(node_kind::EVENT_HANDLER, &format!("host_event:mcp:{name}"))
+    }
+
+    fn func(qname: &str) -> NodeId {
+        id(node_kind::FUNCTION, qname)
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/server.ts", "src::server", repo()).expect("parse")
+    }
+
+    fn handled_by(p: &FileParse, from: NodeId, to: NodeId) -> Option<String> {
+        p.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::HANDLED_BY)
+            .map(|e| Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default())
+    }
+
+    /// A CALLS edge from `from` to the file's FUNCTION `name`, or a call
+    /// site of `from` naming it.
+    fn calls(p: &FileParse, from: NodeId, name: &str) -> bool {
+        let to = func(&format!("src::server::{name}"));
+        p.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+            || p.calls.iter().any(|c| {
+                c.from == from && matches!(&c.qualifier, CallQualifier::Bare(n) if n == name)
+            })
+    }
+
+    fn host_qnames(p: &FileParse) -> Vec<String> {
+        let mut q: Vec<String> = p
+            .nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    p.nav.kind_by_id.get(&n.id),
+                    Some(&node_kind::CLI_COMMAND) | Some(&node_kind::EVENT_HANDLER)
+                )
+            })
+            .filter_map(|n| p.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        q.sort();
+        q
+    }
+
+    const HEAD: &str = "import { McpServer, ResourceTemplate } from \"@modelcontextprotocol/sdk/server/mcp.js\";\nimport { z } from \"zod\";\n";
+
+    #[test]
+    fn every_tool_overload_reads_its_last_argument() {
+        let src = format!(
+            "{HEAD}const server = new McpServer({{ name: \"n\", version: \"1\" }});\n\
+             function h() {{}}\n\
+             server.tool(\"a\", h);\n\
+             server.tool(\"b\", \"desc\", h);\n\
+             server.tool(\"c\", {{ x: z.string() }}, h);\n\
+             server.tool(\"d\", \"desc\", {{ x: z.string() }}, h);\n\
+             server.tool(\"e\", {{ x: z.string() }}, {{ readOnlyHint: true }}, h);\n\
+             server.tool(\"f\", \"desc\", {{ x: z.string() }}, {{ title: \"t\" }}, h);\n\
+             export function setup() {{ server.tool(\"g\", h); }}\n"
+        );
+        let p = parse(&src);
+        for t in ["a", "b", "c", "d", "e", "f", "g"] {
+            assert_eq!(
+                handled_by(&p, cmd(&format!("tool:{t}")), func("src::server::h")).as_deref(),
+                Some("host_handler"),
+                "tool {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn register_forms_and_prompts_and_resources() {
+        let src = format!(
+            "{HEAD}const server = new McpServer({{ name: \"n\", version: \"1\" }});\n\
+             function a() {{}}\nfunction b() {{}}\nfunction c() {{}}\nfunction d() {{}}\nfunction e() {{}}\nfunction g() {{}}\n\
+             server.registerTool(\"search\", {{ description: \"s\" }}, a);\n\
+             server.registerPrompt(\"review\", {{ argsSchema: {{}} }}, b);\n\
+             server.prompt(\"sum\", {{ code: z.string() }}, c);\n\
+             server.resource(\"cfg\", \"config://app\", d);\n\
+             server.registerResource(\"user\", new ResourceTemplate(\"users://{{id}}\", {{ list: undefined }}), {{}}, e);\n\
+             const uri = pick();\n\
+             server.resource(\"dyn\", uri, {{ mimeType: \"text/plain\" }}, g);\n"
+        );
+        let p = parse(&src);
+        assert_eq!(
+            host_qnames(&p),
+            [
+                "host_cmd:mcp:prompt:review",
+                "host_cmd:mcp:prompt:sum",
+                "host_cmd:mcp:tool:search",
+                "host_event:mcp:resource:config://app",
+                "host_event:mcp:resource:dyn",
+                "host_event:mcp:resource:users://{id}",
+            ]
+        );
+        for (from, to) in [
+            (cmd("tool:search"), "a"),
+            (cmd("prompt:review"), "b"),
+            (cmd("prompt:sum"), "c"),
+            (event("resource:config://app"), "d"),
+            (event("resource:users://{id}"), "e"),
+            (event("resource:dyn"), "g"),
+        ] {
+            assert!(
+                handled_by(&p, from, func(&format!("src::server::{to}"))).is_some(),
+                "{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_handler_is_its_own_function() {
+        let src = format!(
+            "{HEAD}function save(t: string) {{}}\n\
+             const server = new McpServer({{ name: \"n\", version: \"1\" }});\n\
+             server.tool(\"add\", {{ text: z.string() }}, async ({{ text }}) => {{\n  save(text);\n  return {{}};\n}});\n\
+             server.resource(\"all\", \"notes://all\", async (uri) => ({{ contents: [] }}));\n"
+        );
+        let p = parse(&src);
+        let tool = func("src::server::command tool:add");
+        assert_eq!(
+            handled_by(&p, cmd("tool:add"), tool).as_deref(),
+            Some("host_handler")
+        );
+        assert!(
+            calls(&p, tool, "save"),
+            "the minted FUNCTION owns its calls"
+        );
+        let module = id(node_kind::MODULE, "src::server");
+        assert!(!calls(&p, module, "save"), "the MODULE does not");
+        assert!(
+            handled_by(
+                &p,
+                event("resource:notes://all"),
+                func("src::server::on resource:notes://all")
+            )
+            .is_some()
+        );
+        assert!(
+            p.edges
+                .iter()
+                .any(|e| e.from == module && e.to == tool && e.category == edge_category::DEFINES)
+        );
+    }
+
+    #[test]
+    fn a_class_field_instance_roots_this() {
+        let src = format!(
+            "{HEAD}class Notes {{\n\
+               private server: McpServer;\n\
+               private other = new McpServer({{ name: \"o\", version: \"1\" }});\n\
+               constructor() {{\n    this.server = new McpServer({{ name: \"n\", version: \"1\" }});\n  }}\n\
+               start() {{\n    this.server.tool(\"list\", this.list.bind(this));\n    this.other.prompt(\"p\", () => {{}});\n  }}\n\
+               list() {{}}\n\
+             }}\n"
+        );
+        let p = parse(&src);
+        assert_eq!(
+            handled_by(
+                &p,
+                cmd("tool:list"),
+                id(node_kind::METHOD, "src::server::Notes::list")
+            )
+            .as_deref(),
+            Some("host_handler")
+        );
+        assert!(host_qnames(&p).contains(&"host_cmd:mcp:prompt:p".to_string()));
+    }
+
+    #[test]
+    fn shadowed_or_reassigned_locals_and_other_receivers_read_nothing() {
+        let src = format!(
+            "{HEAD}import {{ Client }} from \"@modelcontextprotocol/sdk/client/index.js\";\n\
+             import http from \"http\";\n\
+             const server = new McpServer({{ name: \"n\", version: \"1\" }});\n\
+             function h() {{}}\n\
+             function viaParam(server: any) {{ server.tool(\"p\", h); }}\n\
+             function viaLocal() {{ const server = http.createServer(); server.tool(\"l\", h); }}\n\
+             let later = new McpServer({{ name: \"m\", version: \"1\" }});\n\
+             later = makeOther();\n\
+             later.tool(\"r\", h);\n\
+             const client = new Client({{ name: \"c\", version: \"1\" }});\n\
+             client.tool(\"c\", h);\n\
+             McpServer.tool(\"s\", h);\n\
+             server.tool(computeName(), h);\n\
+             server.tool(\"nohandler\", {{ x: z.string() }});\n\
+             server.tool(\"ok\", h);\n"
+        );
+        let p = parse(&src);
+        assert_eq!(host_qnames(&p), ["host_cmd:mcp:tool:ok"]);
+    }
+
+    #[test]
+    fn a_client_only_file_reads_nothing() {
+        let src = "import { Client } from \"@modelcontextprotocol/sdk/client/index.js\";\n\
+                   const server = new Client({ name: \"c\", version: \"1\" });\n\
+                   function h() {}\n\
+                   server.tool(\"t\", h);\n";
+        let p = parse(src);
+        assert!(host_qnames(&p).is_empty(), "{:?}", host_qnames(&p));
     }
 }

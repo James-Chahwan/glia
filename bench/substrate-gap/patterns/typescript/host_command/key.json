@@ -10,7 +10,11 @@
     {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:open-sample-modal", "exact": true},
     {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:toggle-sample", "exact": true},
     {"kind": "EVENT_HANDLER", "name": "host_event:obsidian:vault.create", "exact": true},
-    {"kind": "EVENT_HANDLER", "name": "host_event:obsidian:document.click", "exact": true}
+    {"kind": "EVENT_HANDLER", "name": "host_event:obsidian:document.click", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:mcp:tool:add_note", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:mcp:tool:search", "exact": true},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:mcp:prompt:summarize", "exact": true},
+    {"kind": "EVENT_HANDLER", "name": "host_event:mcp:resource:notes://all", "exact": true}
   ],
   "expect_edges": [
     {"from": "host_cmd:vscode:extension.helloWorld", "to": "src::extension::sayHello", "category": "HANDLED_BY", "exact": true, "note": "registerCommand(id, sayHello): the command -> its named handler"},
@@ -19,7 +23,12 @@
     {"from": "host_cmd:obsidian:open-sample-modal", "to": "src::main::SamplePlugin::onload", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.addCommand({id, callback: () => ..}) in a Plugin subclass: an inline arrow binds the method that registers it"},
     {"from": "host_cmd:obsidian:toggle-sample", "to": "src::main::SamplePlugin::toggleSample", "category": "HANDLED_BY", "exact": true, "note": "GH.10: checkCallback: this.toggleSample.bind(this) binds the METHOD"},
     {"from": "host_event:obsidian:vault.create", "to": "src::main::SamplePlugin::onCreate", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.registerEvent(this.app.vault.on('create', h)): the event is <target tail>.<name>"},
-    {"from": "host_event:obsidian:document.click", "to": "src::main::SamplePlugin::onload", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.registerDomEvent(document, 'click', arrow)"}
+    {"from": "host_event:obsidian:document.click", "to": "src::main::SamplePlugin::onload", "category": "HANDLED_BY", "exact": true, "note": "GH.10: this.registerDomEvent(document, 'click', arrow)"},
+    {"from": "host_cmd:mcp:tool:add_note", "to": "src::mcp::addNote", "category": "HANDLED_BY", "exact": true, "note": "HF.4: server.tool(name, schema, h) on a new McpServer(..): the handler is the last argument"},
+    {"from": "host_cmd:mcp:tool:search", "to": "src::mcp::findNotes", "category": "HANDLED_BY", "exact": true, "note": "HF.4: server.registerTool(name, config, h)"},
+    {"from": "host_cmd:mcp:prompt:summarize", "to": "src::mcp::summarize", "category": "HANDLED_BY", "exact": true, "note": "HF.4: server.prompt(name, h)"},
+    {"from": "host_event:mcp:resource:notes://all", "to": "src::mcp::allNotes", "category": "HANDLED_BY", "exact": true, "note": "HF.4: server.registerResource(name, uri, metadata, h): a resource is keyed by its URI literal, as the Python row keys it"},
+    {"from": "src::mcp::addNote", "to": "src::mcp::save", "category": "CALLS", "exact": true, "note": "the tool's handler calls save: live through the command"}
   ],
   "expect_cells": [
     {"kind": "METHOD", "node": "src::main::SamplePlugin::onload", "cell": "ENTRYPOINT", "contains": "host:obsidian"},
@@ -30,7 +39,9 @@
   "forbid": [
     {"kind": "CLI_COMMAND", "name": "Hello World", "max_nodes": 0, "note": "a command's title is no command"},
     {"kind": "CLI_COMMAND", "name": "host_cmd:vscode:Hello World!", "max_nodes": 0, "note": "showInformationMessage's text is no command"},
-    {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:Open sample modal", "max_nodes": 0, "note": "an Obsidian command's `name` is its title, never its id"}
+    {"kind": "CLI_COMMAND", "name": "host_cmd:obsidian:Open sample modal", "max_nodes": 0, "note": "an Obsidian command's `name` is its title, never its id"},
+    {"kind": "CLI_COMMAND", "name": "host_cmd:mcp:tool:remote_add", "max_nodes": 0, "note": "HF.4: client.tool(..) on a new Client(..) from the SDK's client module registers nothing: only an McpServer instance roots the registrations"},
+    {"kind": "CLI_COMMAND", "name": "remote_add", "max_nodes": 0, "note": "HF.4: a client's call names no command"}
   ],
-  "note": "0.5.6 use pattern (GH.9): a VS Code extension (the shape of microsoft/vscode-extension-samples helloworld-sample) registers commands with vscode.commands.registerCommand and declares them in package.json contributes.commands (engines.vscode). INTENDED: one CLI_COMMAND host_cmd:vscode:<id> per command, HANDLED_BY its handler (an inline arrow binds the named function that registers it), DEFINES-d from package.json. At HEAD 067b3b5c: none (the FUNCTIONs only; activate dead). GH.10 adds src/main.ts, an Obsidian plugin (obsidianmd/obsidian-sample-plugin's shape, its second host): in a class extending Plugin imported from 'obsidian', this.addCommand({id, callback | checkCallback | ..}) is CLI_COMMAND host_cmd:obsidian:<id>, this.registerEvent(<x>.on('<e>', h)) / this.registerDomEvent(<el>, '<e>', h) EVENT_HANDLER host_event:obsidian:<x tail>.<e>, and onload / onunload (Plugin), display (PluginSettingTab), onOpen / onClose (Modal, ItemView) carry an ENTRYPOINT host:obsidian. At HEAD 56616f6e: none (`glia gaps` dead_symbol SamplePlugin, onload, onunload on the probe)."
+  "note": "0.5.6 use pattern (GH.9): a VS Code extension (the shape of microsoft/vscode-extension-samples helloworld-sample) registers commands with vscode.commands.registerCommand and declares them in package.json contributes.commands (engines.vscode). INTENDED: one CLI_COMMAND host_cmd:vscode:<id> per command, HANDLED_BY its handler (an inline arrow binds the named function that registers it), DEFINES-d from package.json. At HEAD 067b3b5c: none (the FUNCTIONs only; activate dead). GH.10 adds src/main.ts, an Obsidian plugin (obsidianmd/obsidian-sample-plugin's shape, its second host): in a class extending Plugin imported from 'obsidian', this.addCommand({id, callback | checkCallback | ..}) is CLI_COMMAND host_cmd:obsidian:<id>, this.registerEvent(<x>.on('<e>', h)) / this.registerDomEvent(<el>, '<e>', h) EVENT_HANDLER host_event:obsidian:<x tail>.<e>, and onload / onunload (Plugin), display (PluginSettingTab), onOpen / onClose (Modal, ItemView) carry an ENTRYPOINT host:obsidian. At HEAD 56616f6e: none (`glia gaps` dead_symbol SamplePlugin, onload, onunload on the probe). HF.4 adds src/mcp.ts, an MCP server in the TypeScript SDK README's shape: in a file importing McpServer from '@modelcontextprotocol/sdk/server/mcp.js' (a subpath of the gate's module), a local bound by `new McpServer(..)` roots its registrations; tool / prompt (handler last) and registerTool / registerPrompt are CLI_COMMAND host_cmd:mcp:tool:<name> / prompt:<name>, resource / registerResource EVENT_HANDLER host_event:mcp:resource:<uri literal> (else :<name>), each HANDLED_BY its named function (an inline one is minted as its own FUNCTION). At HEAD cd3e04a3: none (no [host] line for src/mcp.ts; save, addNote, findNotes, summarize, allNotes dead)."
 }
