@@ -2549,17 +2549,31 @@ struct TestsEdgeStats {
     /// GD.36: Dart flutter drive hosts ([`is_drive_host`]) that paired
     /// nothing by name.
     drive_hosts: usize,
+    /// HQ.10: test modules whose import / directory key
+    /// ([`select_test_targets`]) dropped a candidate the old common-prefix
+    /// rule kept.
+    nearest: usize,
+    /// HQ.10: test modules refused as ambiguous: more than
+    /// [`MAX_TEST_TARGETS`] candidates tied on the whole key.
+    ambiguous: usize,
 }
 
 impl TestsEdgeStats {
     /// `[tests] module TESTS edges: <n> (snake=<s> camel=<c> declared=<d>)
-    /// own_dir=<o> drive_hosts=<h>`, when `n + o + h > 0`.
+    /// own_dir=<o> drive_hosts=<h> nearest=<k> ambiguous=<a>`, when
+    /// `n + o + h + k + a > 0`.
     fn marker(&self) -> Option<String> {
         let n = self.snake + self.camel + self.declared;
-        (n + self.own_dir + self.drive_hosts > 0).then(|| {
+        (n + self.own_dir + self.drive_hosts + self.nearest + self.ambiguous > 0).then(|| {
             format!(
-                "[tests] module TESTS edges: {n} (snake={} camel={} declared={}) own_dir={} drive_hosts={}",
-                self.snake, self.camel, self.declared, self.own_dir, self.drive_hosts
+                "[tests] module TESTS edges: {n} (snake={} camel={} declared={}) own_dir={} drive_hosts={} nearest={} ambiguous={}",
+                self.snake,
+                self.camel,
+                self.declared,
+                self.own_dir,
+                self.drive_hosts,
+                self.nearest,
+                self.ambiguous
             )
         })
     }
@@ -2867,6 +2881,103 @@ struct TestsModule {
     driver_dir: bool,
     /// GD.36: a Dart flutter drive host ([`is_drive_host`]).
     drive_host: bool,
+    /// HQ.10: the namespaces it declares (`::` form): the qnames of the
+    /// PACKAGE nodes it CONTAINS (a C# `namespace`, a Java `package`), in
+    /// edge order, each once. Empty for a language with none.
+    namespaces: Vec<String>,
+}
+
+/// HQ.10: what a test module says it reads, for the import key of
+/// [`select_test_targets`]. Empty (the default) leaves the key to the
+/// directory names.
+#[derive(Debug, Default)]
+struct TestImports {
+    /// The MODULEs it IMPORTS (its intra and cross IMPORTS edges).
+    modules: Vec<NodeId>,
+    /// Namespaces it imports or sits in (`::` form): its own
+    /// [`TestsModule::namespaces`] and a C# `using <ns>;`.
+    namespaces: Vec<String>,
+    /// Types it names by their full path (`::` form): a C# `using static
+    /// <type>;` or `using <alias> = <type>;`.
+    types: Vec<String>,
+}
+
+impl TestImports {
+    /// 2 when the test names `c` itself (an IMPORTS edge to it, or a type
+    /// path naming one of its namespaces plus its stem), 1 when it reads one
+    /// of `c`'s namespaces, else 0.
+    fn rank(&self, c: &TestsModule) -> u8 {
+        let stem = c.key.rsplit("::").next().unwrap_or(&c.key);
+        let names_type = || {
+            c.namespaces.iter().any(|ns| {
+                self.types.iter().any(|t| {
+                    t.strip_prefix(ns.as_str())
+                        .and_then(|rest| rest.strip_prefix("::"))
+                        == Some(stem)
+                })
+            })
+        };
+        if self.modules.contains(&c.id) || names_type() {
+            2
+        } else if c.namespaces.iter().any(|ns| self.namespaces.contains(ns)) {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// HQ.10 stopgap: the `using` directives of a C# file, read from its test
+/// MODULE's CODE text, as (namespaces, types) in `::` form: `using A.B;` is
+/// the namespace `A::B`; `using static A.B.C;` the type `A::B::C`; `using X =
+/// A.B.C;` both (an alias names a type or a namespace). `global using` reads
+/// as `using`; a `using (..)` / `using var ..` statement, a generic alias and
+/// anything not a dotted name are skipped.
+///
+/// The C# parser keeps an in-repo `using` as no edge and an alias not at all
+/// (`collect_using` in parsers/code/csharp skips `=`), and that parser was
+/// another 0.5.7 packet's file in HQ.10's wave. Removal path: once the C#
+/// parser records each `using` (aliases included) in the module's
+/// IMPORT_BINDINGS cell, read them from there in `tests_module_edges` and
+/// delete this function.
+fn csharp_usings(code: &str) -> (Vec<String>, Vec<String>) {
+    let dotted = |p: &str| {
+        let p = p.trim();
+        let p = p.strip_prefix("global::").unwrap_or(p);
+        (!p.is_empty()
+            && p.split('.').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '@')
+            }))
+        .then(|| p.replace('.', "::"))
+    };
+    let mut namespaces = Vec::new();
+    let mut types = Vec::new();
+    for line in code.lines() {
+        let t = line.trim();
+        let t = t.strip_prefix("global ").map_or(t, str::trim_start);
+        let Some(rest) = t.strip_prefix("using ") else {
+            continue;
+        };
+        let Some(rest) = rest.trim().strip_suffix(';') else {
+            continue;
+        };
+        if let Some(path) = rest.strip_prefix("static ") {
+            types.extend(dotted(path));
+        } else if let Some((alias, path)) = rest.split_once('=') {
+            if dotted(alias).is_some_and(|a| !a.contains("::"))
+                && let Some(path) = dotted(path)
+            {
+                namespaces.push(path.clone());
+                types.push(path);
+            }
+        } else {
+            namespaces.extend(dotted(rest));
+        }
+    }
+    (namespaces, types)
 }
 
 /// GD.36: the libraries a flutter drive host imports: the host side of a
@@ -2921,6 +3032,36 @@ fn tests_module_edges(
     let mut stats = TestsEdgeStats::default();
     let mut modules_by_tail: HashMap<String, Vec<usize>> = HashMap::new();
     let mut module_info: Vec<TestsModule> = Vec::new();
+    // HQ.10: each test module's own reading, in `module_info` order.
+    let mut module_reads: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+    // HQ.10: MODULE -> the MODULEs it IMPORTS and the PACKAGEs it CONTAINS
+    // (looked up, never iterated into an output).
+    let mut imports_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut namespaces_of: HashMap<NodeId, Vec<String>> = HashMap::new();
+    for g in &merged.graphs {
+        let kind = |id: &NodeId| g.nav.kind_by_id.get(id).copied();
+        for e in &g.edges {
+            if kind(&e.from) != Some(node_kind::MODULE) {
+                continue;
+            }
+            if e.category == edge_category::IMPORTS {
+                imports_of.entry(e.from).or_default().push(e.to);
+            } else if e.category == edge_category::CONTAINS
+                && kind(&e.to) == Some(node_kind::PACKAGE)
+                && let Some(q) = g.nav.qname_by_id.get(&e.to)
+            {
+                let seen = namespaces_of.entry(e.from).or_default();
+                if !seen.contains(q) {
+                    seen.push(q.clone());
+                }
+            }
+        }
+    }
+    for e in &merged.cross_edges {
+        if e.category == edge_category::IMPORTS {
+            imports_of.entry(e.from).or_default().push(e.to);
+        }
+    }
     for (graph, g) in merged.graphs.iter().enumerate() {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::MODULE) {
@@ -2960,6 +3101,19 @@ fn tests_module_edges(
                 .as_deref()
                 .is_some_and(|d| d.split('/').any(|seg| seg == "test_driver"));
             let drive_host = is_drive_host(ext.as_deref(), driver_dir, &n.cells);
+            let reads = if ext.as_deref() == Some("cs") && (declared || is_test_module_qname(&key))
+            {
+                n.cells
+                    .iter()
+                    .find_map(|c| match (&c.payload, c.kind == cell_type::CODE) {
+                        (CellPayload::Text(code), true) => Some(csharp_usings(code)),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            module_reads.push(reads);
             module_info.push(TestsModule {
                 id: n.id,
                 key,
@@ -2971,10 +3125,11 @@ fn tests_module_edges(
                 dir,
                 driver_dir,
                 drive_host,
+                namespaces: namespaces_of.get(&n.id).cloned().unwrap_or_default(),
             });
         }
     }
-    for test in &module_info {
+    for (test, reads) in module_info.iter().zip(&module_reads) {
         let qname = test.key.as_str();
         if !test.declared && !is_test_module_qname(qname) {
             continue;
@@ -3007,11 +3162,23 @@ fn tests_module_edges(
         } else {
             "name_match"
         };
-        let (targets, narrowed) = select_test_targets(test, &candidates);
-        if narrowed {
+        let mut imports = TestImports {
+            modules: imports_of.get(&test.id).cloned().unwrap_or_default(),
+            namespaces: test.namespaces.clone(),
+            types: reads.1.clone(),
+        };
+        imports.namespaces.extend(reads.0.iter().cloned());
+        let picked = select_test_targets(test, &candidates, &imports);
+        if picked.narrowed {
             stats.own_dir += 1;
         }
-        for to_id in targets {
+        if picked.nearest {
+            stats.nearest += 1;
+        }
+        if picked.ambiguous {
+            stats.ambiguous += 1;
+        }
+        for to_id in picked.targets {
             if test.declared {
                 stats.declared += 1;
             } else if snake {
@@ -3028,9 +3195,27 @@ fn tests_module_edges(
     (edges, stats)
 }
 
+/// Most modules one test module pairs by name: a wider tie is ambiguous
+/// (HQ.10).
+const MAX_TEST_TARGETS: usize = 3;
+
+/// What [`select_test_targets`] picked for one test module.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestSelection {
+    /// The modules it tests, in candidate order.
+    targets: Vec<NodeId>,
+    /// GD.36: the own-directory rule dropped a candidate.
+    narrowed: bool,
+    /// HQ.10: the import / directory key dropped a candidate the old
+    /// common-prefix score kept.
+    nearest: bool,
+    /// HQ.10: more than [`MAX_TEST_TARGETS`] candidates tied on the whole
+    /// key, so none is paired.
+    ambiguous: bool,
+}
+
 /// The modules a test module tests, among the same-tail `candidates`: the
-/// ones sharing the longest directory prefix with it, at most three. The
-/// second value is true when GD.36's own-directory rule dropped a candidate.
+/// best on the HQ.10 key, at most [`MAX_TEST_TARGETS`].
 ///
 /// GD.36: when a candidate sits in the test's own directory (same repo, same
 /// POSITION directory), only those are kept, before the score and the cap:
@@ -3039,7 +3224,19 @@ fn tests_module_edges(
 /// ever pairs its own directory's candidates (a `_test.go` file belongs to
 /// its directory's package), so with none it pairs nothing. A test with no
 /// own-directory candidate (`tests/test_foo.py` -> `src/pkg/foo.py`,
-/// `__tests__/foo.test.ts` -> `../foo.ts`) keeps the prefix score.
+/// `__tests__/foo.test.ts` -> `../foo.ts`) is scored.
+///
+/// HQ.10: the score is a key compared in order: (1) the import rank
+/// ([`TestImports::rank`]: the test IMPORTS the candidate or names its type,
+/// then reads its namespace); (2) how many of the test's directory names
+/// ([`pair_tokens`]) the candidate's hold; (3) the length of the shared
+/// trailing run of those names ([`trailing_run`], the nearest directory);
+/// (4) the qname parents' common prefix, the pre-HQ.10 score. So
+/// `spec/controllers/stripe/x_spec.rb` pairs `app/controllers/stripe/x.rb`,
+/// not `app/controllers/google/x.rb`. Every candidate with the best key is
+/// kept; when more than [`MAX_TEST_TARGETS`] remain after the LB.13 sibling
+/// pick, the pairing is ambiguous and none is drawn (before, the cap kept the
+/// first three in candidate order).
 ///
 /// LB.9b: a candidate named by its file name (`api::user.py` beside
 /// `api/user.ts`) is kept only when it sits in the test module's own graph:
@@ -3052,37 +3249,54 @@ fn tests_module_edges(
 /// breaks ties). A test language with no file-import order keeps them all
 /// (`FooTest.java` pairs `Foo.java` and `Foo.kt`). Every other pairing is
 /// unchanged.
-fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> (Vec<NodeId>, bool) {
-    const MAX_TEST_TARGETS: usize = 3;
+fn select_test_targets(
+    test: &TestsModule,
+    candidates: &[&TestsModule],
+    imports: &TestImports,
+) -> TestSelection {
     let test_parent: Vec<&str> = qname_parent_segments(&test.key);
+    let test_tokens = pair_tokens(&test.key);
     let mut pool: Vec<&TestsModule> = candidates
         .iter()
         .filter(|c| c.id != test.id)
         .filter(|c| !c.qualified || c.graph == test.graph)
         .copied()
         .collect();
-    let mut narrowed = false;
+    let mut picked = TestSelection::default();
     if let Some(dir) = test.dir.as_deref() {
         let own = |c: &TestsModule| c.repo == test.repo && c.dir.as_deref() == Some(dir);
         let go = test.ext.as_deref() == Some("go");
         if go || pool.iter().any(|c| own(c)) {
             let before = pool.len();
             pool.retain(|c| own(c));
-            narrowed = pool.len() < before;
+            picked.narrowed = pool.len() < before;
         }
     }
-    let mut scored: Vec<(usize, &TestsModule)> = pool
+    type Key = (u8, usize, usize, usize);
+    let mut scored: Vec<(Key, &TestsModule)> = pool
         .into_iter()
         .map(|c| {
             let cand_parent = qname_parent_segments(&c.key);
-            (common_prefix_len(&test_parent, &cand_parent), c)
+            let cand_tokens = pair_tokens(&c.key);
+            let shared = shared_tokens(&test_tokens, &cand_tokens);
+            let key = (
+                imports.rank(c),
+                shared,
+                trailing_run(&test_tokens, &cand_tokens),
+                common_prefix_len(&test_parent, &cand_parent),
+            );
+            (key, c)
         })
         .collect();
     if scored.is_empty() {
-        return (Vec::new(), narrowed);
+        return picked;
     }
-    let max_score = scored.iter().map(|(s, _)| *s).max().unwrap_or(0);
-    scored.retain(|(s, _)| *s == max_score);
+    let max_prefix = scored.iter().map(|(k, _)| k.3).max().unwrap_or(0);
+    let max_key = scored.iter().map(|(k, _)| *k).max().unwrap_or_default();
+    picked.nearest = scored
+        .iter()
+        .any(|(k, _)| k.3 == max_prefix && *k != max_key);
+    scored.retain(|(k, _)| *k == max_key);
     let order = test.ext.as_deref().map_or(&[][..], same_stem_order);
     let rank = |c: &TestsModule| {
         c.ext
@@ -3113,8 +3327,48 @@ fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> (Vec<
         }
         kept.push(c.id);
     }
-    kept.truncate(MAX_TEST_TARGETS);
-    (kept, narrowed)
+    if kept.len() > MAX_TEST_TARGETS {
+        picked.ambiguous = true;
+    } else {
+        picked.targets = kept;
+    }
+    picked
+}
+
+/// The test-tree words [`pair_tokens`] drops: they say where a test lives,
+/// not what it tests.
+const TEST_TREE_TOKENS: [&str; 6] = ["test", "tests", "spec", "specs", "__tests__", "testing"];
+
+/// HQ.10: the directory names of a TESTS pairing key: its qname parents
+/// ([`qname_parent_segments`]) each split on `.` (a C# project directory
+/// `Acme.Core.Tests` is three names), empty and test-tree names
+/// ([`TEST_TREE_TOKENS`], ASCII case-insensitive) dropped.
+fn pair_tokens(key: &str) -> Vec<&str> {
+    qname_parent_segments(key)
+        .into_iter()
+        .flat_map(|seg| seg.split('.'))
+        .filter(|t| !t.is_empty() && !TEST_TREE_TOKENS.iter().any(|w| t.eq_ignore_ascii_case(w)))
+        .collect()
+}
+
+/// HQ.10: how many distinct names of `test` the candidate's `cand` holds.
+fn shared_tokens(test: &[&str], cand: &[&str]) -> usize {
+    let mut seen: Vec<&str> = Vec::with_capacity(test.len());
+    for t in test {
+        if !seen.contains(t) && cand.contains(t) {
+            seen.push(t);
+        }
+    }
+    seen.len()
+}
+
+/// HQ.10: the length of the run of equal names at the end of `a` and `b`.
+fn trailing_run(a: &[&str], b: &[&str]) -> usize {
+    a.iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 fn qname_parent_segments(qname: &str) -> Vec<&str> {
@@ -6063,7 +6317,9 @@ mod passes_tests {
                 camel: 3,
                 declared: 0,
                 own_dir: 0,
-                drive_hosts: 0
+                drive_hosts: 0,
+                nearest: 0,
+                ambiguous: 0
             }
         );
     }
@@ -6150,13 +6406,15 @@ mod passes_tests {
                 camel: 0,
                 declared: 3,
                 own_dir: 0,
-                drive_hosts: 0
+                drive_hosts: 0,
+                nearest: 0,
+                ambiguous: 0
             }
         );
         assert_eq!(
             stats.marker().as_deref(),
             Some(
-                "[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3) own_dir=0 drive_hosts=0"
+                "[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3) own_dir=0 drive_hosts=0 nearest=0 ambiguous=0"
             )
         );
 
@@ -6164,23 +6422,20 @@ mod passes_tests {
         let elsewhere = RepoId::from_canonical("test://df11-other");
         for declared in [Vec::new(), vec![(elsewhere, matcher())]] {
             let (edges, stats) = tests_module_edges(&merged, &declared);
-            assert_eq!(
-                rules(&edges),
-                sorted(vec![
-                    (spec, checkout, "name_match"),
-                    (web, cart, "name_match"),
-                    (web, flow, "name_match"),
-                    (web, smoke, "name_match"),
-                ])
-            );
+            assert_eq!(rules(&edges), sorted(vec![(spec, checkout, "name_match"),]));
+            // HQ.10: `web::cart.test` ties four `cart` modules (src, tests,
+            // qa/flows, qa/smoke) on the whole key: wider than the 3-target
+            // cap, so it pairs none (before, the cap kept the first three).
             assert_eq!(
                 stats,
                 TestsEdgeStats {
-                    snake: 4,
+                    snake: 1,
                     camel: 0,
                     declared: 0,
                     own_dir: 0,
-                    drive_hosts: 0
+                    drive_hosts: 0,
+                    nearest: 0,
+                    ambiguous: 1
                 }
             );
         }
@@ -6286,13 +6541,15 @@ mod passes_tests {
                 camel: 0,
                 declared: 0,
                 own_dir: 1,
-                drive_hosts: 0
+                drive_hosts: 0,
+                nearest: 0,
+                ambiguous: 0
             }
         );
         assert_eq!(
             stats.marker().as_deref(),
             Some(
-                "[tests] module TESTS edges: 1 (snake=1 camel=0 declared=0) own_dir=1 drive_hosts=0"
+                "[tests] module TESTS edges: 1 (snake=1 camel=0 declared=0) own_dir=1 drive_hosts=0 nearest=0 ambiguous=0"
             )
         );
     }
@@ -6320,7 +6577,9 @@ mod passes_tests {
                 camel: 0,
                 declared: 0,
                 own_dir: 1,
-                drive_hosts: 0
+                drive_hosts: 0,
+                nearest: 0,
+                ambiguous: 0
             }
         );
     }
@@ -6400,9 +6659,259 @@ mod passes_tests {
                 camel: 0,
                 declared: 0,
                 own_dir: 0,
-                drive_hosts: 3
+                drive_hosts: 3,
+                nearest: 0,
+                ambiguous: 0
             }
         );
+    }
+
+    /// HQ.10: one hand-built repo of MODULEs at their POSITION files, run
+    /// through the pass; returns its pairs and stats.
+    fn hq10_run(files: &[(&str, &str)]) -> (Vec<NodeId>, Vec<(NodeId, NodeId)>, TestsEdgeStats) {
+        let mut h = Hand::new("test://hq10");
+        let ids: Vec<NodeId> = files
+            .iter()
+            .map(|(q, f)| gd36_module(&mut h, q, f, &[]))
+            .collect();
+        let merged = MergedGraph::new(vec![h.graph()]);
+        let (edges, stats) = tests_module_edges(&merged, &[]);
+        (ids, gd36_pairs(&edges), stats)
+    }
+
+    /// HQ.10 (a), chatwoot's shape: a Rails spec under `spec/` shares no
+    /// qname prefix with any `app/` controller, so every namespace tied at 0
+    /// and the cap kept three other namespaces; the shared directory names
+    /// now pick `stripe` alone.
+    #[test]
+    fn tests_spec_pairs_its_own_namespace_twin() {
+        let (ids, got, stats) = hq10_run(&[
+            (
+                "app::controllers::google::callbacks_controller",
+                "app/controllers/google/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::slack::callbacks_controller",
+                "app/controllers/slack/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::github::callbacks_controller",
+                "app/controllers/github/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::stripe::callbacks_controller",
+                "app/controllers/stripe/callbacks_controller.rb",
+            ),
+            (
+                "spec::controllers::stripe::callbacks_controller_spec",
+                "spec/controllers/stripe/callbacks_controller_spec.rb",
+            ),
+        ]);
+        assert_eq!(got, vec![(ids[4], ids[3])]);
+        assert_eq!(
+            stats,
+            TestsEdgeStats {
+                snake: 1,
+                camel: 0,
+                declared: 0,
+                own_dir: 0,
+                drive_hosts: 0,
+                nearest: 1,
+                ambiguous: 0
+            }
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[tests] module TESTS edges: 1 (snake=1 camel=0 declared=0) own_dir=0 drive_hosts=0 nearest=1 ambiguous=0"
+            )
+        );
+    }
+
+    /// HQ.10 (b): a twilio spec with four other namespaces' controllers of
+    /// its stem ties them all: wider than the cap, so it pairs nothing.
+    #[test]
+    fn tests_tie_wider_than_the_cap_pairs_nothing() {
+        let (_, got, stats) = hq10_run(&[
+            (
+                "app::controllers::google::callbacks_controller",
+                "app/controllers/google/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::slack::callbacks_controller",
+                "app/controllers/slack/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::github::callbacks_controller",
+                "app/controllers/github/callbacks_controller.rb",
+            ),
+            (
+                "app::controllers::stripe::callbacks_controller",
+                "app/controllers/stripe/callbacks_controller.rb",
+            ),
+            (
+                "spec::controllers::twilio::callbacks_controller_spec",
+                "spec/controllers/twilio/callbacks_controller_spec.rb",
+            ),
+        ]);
+        assert_eq!(got, Vec::new());
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[tests] module TESTS edges: 0 (snake=0 camel=0 declared=0) own_dir=0 drive_hosts=0 nearest=0 ambiguous=1"
+            )
+        );
+    }
+
+    /// HQ.10 (c), squidex's shape: the test project's `tests` segment no
+    /// longer out-scores `src`: `Acme.Core.Tests/Security` shares Acme, Core
+    /// and Security with `src/Acme.Core/Security`.
+    #[test]
+    fn tests_csharp_project_tokens_pick_the_namespace_twin() {
+        let (ids, got, _) = hq10_run(&[
+            (
+                "tests::Acme.Tests.Tools::Extensions",
+                "tests/Acme.Tests.Tools/Extensions.cs",
+            ),
+            (
+                "src::Acme.Core::Security::Extensions",
+                "src/Acme.Core/Security/Extensions.cs",
+            ),
+            (
+                "tests::Acme.Core.Tests::Security::ExtensionsTests",
+                "tests/Acme.Core.Tests/Security/ExtensionsTests.cs",
+            ),
+        ]);
+        assert_eq!(got, vec![(ids[2], ids[1])]);
+    }
+
+    /// HQ.10 (d), (e): the Maven layout pairs `src/main/java`, never a
+    /// `lib/` twin; a Python `tests/test_calc.py` with one candidate still
+    /// pairs it (no shared name, the prefix decides nothing).
+    #[test]
+    fn tests_maven_and_lone_python_candidate_unchanged() {
+        let (ids, got, _) = hq10_run(&[
+            ("lib::Foo", "lib/Foo.java"),
+            ("src::main::java::x::Foo", "src/main/java/x/Foo.java"),
+            (
+                "src::test::java::x::FooTest",
+                "src/test/java/x/FooTest.java",
+            ),
+            ("src::pkg::calc", "src/pkg/calc.py"),
+            ("tests::test_calc", "tests/test_calc.py"),
+        ]);
+        let mut want = vec![(ids[2], ids[1]), (ids[4], ids[3])];
+        want.sort_by_key(|(f, t)| (f.0, t.0));
+        assert_eq!(got, want);
+    }
+
+    /// HQ.10 import key (ruling "fix now"): a candidate the test IMPORTS, or
+    /// whose namespace plus stem a C# `using` alias names, ranks before the
+    /// directory key; a `using <ns>;` or the test's own namespace ranks
+    /// next.
+    #[test]
+    fn tests_import_key_ranks_first() {
+        let repo = RepoId::from_canonical("test://hq10-imports");
+        let module = |key: &str, namespaces: &[&str]| TestsModule {
+            id: NodeId::from_parts(glia_code_domain::GRAPH_TYPE, repo, node_kind::MODULE, key),
+            key: key.to_string(),
+            qualified: false,
+            graph: 0,
+            ext: Some("cs".to_string()),
+            declared: false,
+            repo,
+            dir: None,
+            driver_dir: false,
+            drive_host: false,
+            namespaces: namespaces.iter().map(|n| n.to_string()).collect(),
+        };
+        let near = module(
+            "src::Acme.Data::Store::Contents::Extensions",
+            &["Acme::Data::Store::Contents"],
+        );
+        let ops = module("src::Acme.Ops::Extensions", &["Acme::Ops"]);
+        let tools = module(
+            "tests::Acme.Tests.Tools::Extensions",
+            &["Acme::Tests::Tools"],
+        );
+        let test = module(
+            "tests::Acme.Data.Tests::Store::Contents::ExtensionsTests",
+            &["Acme::Data::Tests::Store::Contents"],
+        );
+        let candidates = [&near, &tools, &ops];
+        let pick = |imports: &TestImports| select_test_targets(&test, &candidates, imports);
+        // The directory key alone: the Store/Contents twin.
+        assert_eq!(pick(&TestImports::default()).targets, [near.id]);
+        // `using Sut = Acme.Ops.Extensions;` names the Ops type.
+        let (namespaces, types) = csharp_usings("using Xunit;\nusing Sut = Acme.Ops.Extensions;\n");
+        let aliased = TestImports {
+            modules: Vec::new(),
+            namespaces,
+            types,
+        };
+        let got = pick(&aliased);
+        assert_eq!(got.targets, [ops.id]);
+        assert!(got.nearest);
+        // A namespace import ranks below a named type but above the
+        // directory key.
+        let ns = TestImports {
+            namespaces: vec!["Acme::Tests::Tools".into()],
+            ..TestImports::default()
+        };
+        assert_eq!(pick(&ns).targets, [tools.id]);
+        let both = TestImports {
+            namespaces: vec!["Acme::Tests::Tools".into()],
+            types: vec!["Acme::Ops::Extensions".into()],
+            ..TestImports::default()
+        };
+        assert_eq!(pick(&both).targets, [ops.id]);
+        // An IMPORTS edge to a candidate names it.
+        let imported = TestImports {
+            modules: vec![tools.id],
+            ..TestImports::default()
+        };
+        assert_eq!(pick(&imported).targets, [tools.id]);
+    }
+
+    /// HQ.10 stopgap: the C# `using` forms read from a file's text.
+    #[test]
+    fn csharp_usings_reads_namespaces_types_and_aliases() {
+        let code = "// using Not.This;\nusing System;\nglobal using Acme.Core;\nusing static Acme.Ops.Extensions;\n\
+            using ExtensionSut = Squidex.Domain.Contents.Operations.Extensions;\n\
+            using Map = System.Collections.Generic.Dictionary<string, int>;\n\
+            namespace Acme.Tests\n{\n    void F() { using (var s = Open()) { } using var t = Open(); }\n}\n";
+        let (namespaces, types) = csharp_usings(code);
+        assert_eq!(
+            namespaces,
+            [
+                "System",
+                "Acme::Core",
+                "Squidex::Domain::Contents::Operations::Extensions"
+            ]
+        );
+        assert_eq!(
+            types,
+            [
+                "Acme::Ops::Extensions",
+                "Squidex::Domain::Contents::Operations::Extensions"
+            ]
+        );
+    }
+
+    /// HQ.10 tokens: `.`-split project directories, test-tree words dropped.
+    #[test]
+    fn pair_tokens_split_dots_and_drop_test_words() {
+        assert_eq!(
+            pair_tokens(
+                "backend::tests::Squidex.Data.Tests::MongoDb::Domain::Contents::ExtensionsTests"
+            ),
+            [
+                "backend", "Squidex", "Data", "MongoDb", "Domain", "Contents"
+            ]
+        );
+        assert_eq!(pair_tokens("spec::__tests__::Specs::x"), Vec::<&str>::new());
+        assert_eq!(trailing_run(&["a", "b", "c"], &["x", "b", "c"]), 2);
+        assert_eq!(shared_tokens(&["a", "a", "b"], &["a", "b"]), 2);
     }
 
     /// LB.13: a test pairs the one same-stem sibling its language loads; a
@@ -6424,12 +6933,15 @@ mod passes_tests {
             dir: None,
             driver_dir: false,
             drive_host: false,
+            namespaces: Vec::new(),
         };
         let ts = module("src::util.ts", "src::util", true, "ts");
         let js = module("src::util.js", "src::util", true, "js");
         let other = module("lib::util", "lib::util", false, "ts");
         let candidates = [&js, &ts, &other];
-        let pick = |test: &TestsModule| select_test_targets(test, &candidates).0;
+        let pick = |test: &TestsModule| {
+            select_test_targets(test, &candidates, &TestImports::default()).targets
+        };
         assert_eq!(
             pick(&module("src::util.test", "src::util.test", false, "ts")),
             [ts.id]

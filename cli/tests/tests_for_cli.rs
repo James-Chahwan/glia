@@ -580,9 +580,12 @@ fn identity_classes_collapse_unless_no_collapse() {
 
     let out = r.tests_for(&["--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // HQ.10: shop's `tests/test_money.py` imports `app.money`, so it pairs
+    // shop's money module alone (the import key); before, it also paired
+    // billing's `lib/money.py` by name, a fourth row.
     assert_eq!(
         identity_lines(&out),
-        ["[identity] collapse surface=tests_for classes=2 walk_classes=2 folded=0 rows=4"],
+        ["[identity] collapse surface=tests_for classes=2 walk_classes=2 folded=0 rows=3"],
         "{}",
         stderr(&out)
     );

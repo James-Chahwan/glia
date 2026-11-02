@@ -1,0 +1,33 @@
+{
+  "framework": "tests-name-match-nearest",
+  "language": "ruby",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "rb/app/controllers/stripe/callbacks_controller", "exact": true, "note": "the Stripe callbacks controller the stripe spec exercises"},
+    {"kind": "MODULE", "name": "rb/spec/controllers/stripe/callbacks_controller_spec", "exact": true, "note": "the stripe request spec"},
+    {"kind": "MODULE", "name": "cs/src/Acme.Core/Security/Extensions", "exact": true, "note": "the Security extensions the Security test exercises"},
+    {"kind": "MODULE", "name": "cs/src/Acme.Ops/Extensions", "exact": true, "note": "the Ops extensions the aliased test exercises"}
+  ],
+  "expect_edges": [
+    {"from": "rb/spec/controllers/stripe/callbacks_controller_spec", "to": "rb/app/controllers/stripe/callbacks_controller", "category": "TESTS", "exact": true,
+     "note": "HQ.10: among same-stem candidates a test pairs the one sharing most directory names with it (stripe), then the nearest. Before, a spec/ test shared no qname prefix with any app/ controller, every candidate tied at 0 and the 3-target cap kept three other namespaces in candidate order (chatwoot@3564ec1e spec/controllers/stripe/callbacks_controller_spec.rb, HC.3 held-out sample 006073f089e88b00)."},
+    {"from": "cs/tests/Acme.Core.Tests/Security/ExtensionsTests", "to": "cs/src/Acme.Core/Security/Extensions", "category": "TESTS", "exact": true,
+     "note": "HQ.10: the Security test shares Acme, Core and Security with src/Acme.Core/Security and only Acme with tests/Acme.Tests.Tools (test-tree words dropped); before, the shared `tests` prefix picked the tools file (squidex@f828dd71 Squidex.Infrastructure.Tests/Security/ExtensionsTests.cs, HC.3 held-out sample 000055e3c941c3fa)."},
+    {"from": "cs/tests/Acme.Data.Tests/Store/Contents/ExtensionsTests", "to": "cs/src/Acme.Ops/Extensions", "category": "TESTS", "exact": true,
+     "note": "HQ.10 (import key, ruling 'fix now'): `using Sut = Acme.Ops.Extensions;` names the type Extensions in namespace Acme.Ops, so the module declaring it ranks first, before the directory key that would pick src/Acme.Data/Store/Contents (squidex's MongoDb Contents/ExtensionsTests aliases ExtensionSut = ..Contents.Operations.Extensions)."}
+  ],
+  "forbid": [
+    {"from": "rb/spec/controllers/stripe/callbacks_controller_spec", "to": "rb/app/controllers/google/callbacks_controller", "category": "TESTS", "note": "HQ.10: the stripe spec never pairs another namespace's twin"},
+    {"from": "rb/spec/controllers/stripe/callbacks_controller_spec", "to": "rb/app/controllers/slack/callbacks_controller", "category": "TESTS", "note": "HQ.10: as above"},
+    {"from": "rb/spec/controllers/stripe/callbacks_controller_spec", "to": "rb/app/controllers/github/callbacks_controller", "category": "TESTS", "note": "HQ.10: as above"},
+    {"from": "rb/spec/controllers/twilio/callbacks_controller_spec", "to": "rb/app/controllers/stripe/callbacks_controller", "category": "TESTS", "note": "HQ.10: no twilio controller of that stem exists; four tied candidates are wider than the 3-target cap, so the pairing is ambiguous and none is drawn"},
+    {"from": "rb/spec/controllers/twilio/callbacks_controller_spec", "to": "rb/app/controllers/google/callbacks_controller", "category": "TESTS", "note": "HQ.10: as above"},
+    {"from": "rb/spec/controllers/twilio/callbacks_controller_spec", "to": "rb/app/controllers/slack/callbacks_controller", "category": "TESTS", "note": "HQ.10: as above"},
+    {"from": "rb/spec/controllers/twilio/callbacks_controller_spec", "to": "rb/app/controllers/github/callbacks_controller", "category": "TESTS", "note": "HQ.10: as above"},
+    {"from": "cs/tests/Acme.Core.Tests/Security/ExtensionsTests", "to": "cs/tests/Acme.Tests.Tools/Extensions", "category": "TESTS", "note": "HQ.10: a test-tree helper of the stem is not the Security test's subject"},
+    {"from": "cs/tests/Acme.Data.Tests/Store/Contents/ExtensionsTests", "to": "cs/src/Acme.Data/Store/Contents/Extensions", "category": "TESTS", "note": "HQ.10: the directory twin loses to the type the test's using alias names"},
+    {"from": "cs/tests/Acme.Data.Tests/Store/Contents/ExtensionsTests", "to": "cs/tests/Acme.Tests.Tools/Extensions", "category": "TESTS", "note": "HQ.10: as above"}
+  ],
+  "note": "HQ.10, TESTS name_match nearest (HC.3 held-out verdicts, TESTS|derived under its floor). Two trees: rb/ (four namespaced Rails callbacks controllers, a stripe spec and a twilio spec with no controller of its stem) and cs/ (five same-stem Extensions.cs files: a Security test that shares the Security directory and namespace, and a test whose `using Sut = Acme.Ops.Extensions;` alias names its subject)."
+}
