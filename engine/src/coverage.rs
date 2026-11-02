@@ -404,6 +404,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Kotlin client ENDPOINTs come from Retrofit interface methods, Spring RestTemplate / WebClient / RestClient calls and Ktor-client verb calls (`client.get(url)`, `client.request(url) { method = HttpMethod.Post }`, in a file importing io.ktor.client) with a literal or templated URL. OkHttp, java.net.http and Fuel calls emit no ENDPOINT; a Ktor builder call without a positional URL (`client.get { url(..) }`), a Ktor `request` whose `method =` is not an `HttpMethod.<X>` constant, and a URL held in a variable are not read; the Retrofit builder's `baseUrl(...)` is not read, so a Retrofit path is taken as root-relative and a base URL carrying a path prefix (`baseUrl(\"https://x/api/\")`) pairs only through the resolver's route-prefix fallback (Medium), or not at all for a prefix outside its API-prefix list",
         verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( / url( across *.kt",
     },
+    // HQ.3: Solidity emits of an event the emitting contract does not
+    // declare (graph::build::solidity), measured on the
+    // solidity-inherited-events fixture and the graph's solidity tests.
+    CoverageCaveat {
+        language: "solidity",
+        edge_category: "EVENT_FLOWS",
+        note: "A Solidity `emit E(..)` binds the event its own contract declares, else the event its bases declare, level by level up the contract's `is` list (contracts and interfaces in the repo; two bases at one level declaring E bind nothing); `emit I.E(..)` binds the event E of the contract itself, else of the base named I, else of the one contract / interface / library the repo names I. An emit of an event a base outside the repo declares (an OpenZeppelin ERC20 `Transfer`) has no edge, and one reached only through a name-matched heritage edge (a base in another file: a Solidity `import` binds no names) or a type found by its unique name is heuristic (rules `inherited_event_by_name` / `qualified_event_by_name`). Emits inside a constructor or a modifier body are not read",
+        verify: "grep `emit ` in the contract's .sol file and `event <E>` across *.sol",
+    },
     // GH.2: the host table's Lua rows (code_domain::hosts), measured on
     // patterns/lua/host_command and the Lua parser's host tests; GH.3 the
     // host events, on patterns/lua/host_event. GH.6: the
@@ -1077,6 +1086,21 @@ mod tests {
             .find(|n| n.language == lang && n.edge_category == category)
             .map(|n| n.note)
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn solidity_files_get_the_inherited_event_row() {
+        // HQ.3: a Solidity repo is told how an emit binds its event and which
+        // ones get no edge or a heuristic one.
+        assert_eq!(
+            lang_rows("src/Guestbook.sol", "solidity"),
+            [("solidity", "EVENT_FLOWS")]
+        );
+        let note = row_note("src/Guestbook.sol", "solidity", "EVENT_FLOWS");
+        for part in ["`emit I.E(..)`", "OpenZeppelin", "_by_name", "constructor"] {
+            assert!(note.contains(part), "{part}: {note}");
+        }
+        assert!(lang_rows("src/app.py", "solidity").is_empty());
     }
 
     #[test]

@@ -46,8 +46,9 @@
 //! each only on a fact-stage edge): a `graph` edge
 //! bound by a name-only guess (LC.3d: `graph:refs` `global_unique` /
 //! `global_unique_method`, `graph:imports` `tail_unique`, `graph:rust_paths`
-//! `unique_in_crate` / `tail_unique`, `graph:nav` `suffix` / `href_suffix`)
-//! is heuristic; a fact whose evidence has basis `none` is derived ("no
+//! `unique_in_crate` / `tail_unique`, `graph:nav` `suffix` / `href_suffix`,
+//! HQ.3's `graph:solidity` `inherited_event_by_name` /
+//! `qualified_event_by_name`) is heuristic; a fact whose evidence has basis `none` is derived ("no
 //! location recorded"); a `graph` edge emitted below Strong confidence is
 //! derived (`inferred binding (<rule>, <confidence> confidence)`, CC.3: Go
 //! implicit IMPLEMENTS by method set, `graph:nav` param / scoped links — the
@@ -115,6 +116,10 @@ const NAME_ONLY_RULES: &[(&str, &str)] = &[
     ("graph:rust_paths", "tail_unique"),
     ("graph:nav", "suffix"),
     ("graph:nav", "href_suffix"),
+    // HQ.3: a Solidity emit bound to an event reached through a name-only
+    // heritage edge, or to a qualified type found by its unique name.
+    ("graph:solidity", "inherited_event_by_name"),
+    ("graph:solidity", "qualified_event_by_name"),
 ];
 
 /// `(emitter, rule, note)` of a derived-stage resolver's pairings that
@@ -856,6 +861,80 @@ mod tests {
         }
     }
 
+    /// HQ.3: a Solidity build holds no EVENT_FLOWS edge to an id no node
+    /// has: an inherited emit binds the interface's event (heuristic, through
+    /// the name-only cross-file heritage edge), an own emit stays the
+    /// parser's fact edge, and an event a base outside the repo declares
+    /// gets no edge.
+    #[test]
+    fn solidity_emits_never_dangle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("book");
+        std::fs::create_dir_all(root.join("src/interfaces")).expect("dirs");
+        std::fs::write(
+            root.join("src/interfaces/IGuestbook.sol"),
+            "interface IGuestbook {\n    event Signed(address guest);\n}\n",
+        )
+        .expect("write interface");
+        std::fs::write(
+            root.join("src/Guestbook.sol"),
+            "import \"./interfaces/IGuestbook.sol\";\n\
+             contract Guestbook is IGuestbook, ERC20 {\n\
+             \x20   event Opened(address owner);\n\
+             \x20   function open() external { emit Opened(msg.sender); }\n\
+             \x20   function sign() external { emit Signed(msg.sender); }\n\
+             \x20   function pay() external { emit Transfer(msg.sender, msg.sender, 1); }\n\
+             }\n",
+        )
+        .expect("write contract");
+        let m = crate::build::generate_many(&[root.display().to_string()])
+            .expect("builds")
+            .merged;
+        let nodes: HashSet<NodeId> = m
+            .graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter().map(|n| n.id))
+            .collect();
+        let flows: Vec<&Edge> = m
+            .graphs
+            .iter()
+            .flat_map(|g| g.edges.iter())
+            .chain(m.cross_edges.iter())
+            .filter(|e| e.category == edge_category::EVENT_FLOWS)
+            .collect();
+        assert_eq!(flows.len(), 2, "{flows:?}");
+        assert!(flows.iter().all(|e| nodes.contains(&e.to)), "{flows:?}");
+
+        let sign = why_edge(
+            &m,
+            "src::Guestbook::Guestbook::sign",
+            "src::interfaces::IGuestbook::IGuestbook::Signed",
+            Some("EVENT_FLOWS"),
+        )
+        .expect("answers");
+        let row = sign.edges.first().expect("an edge");
+        assert_eq!(
+            (row.emitter.as_deref(), row.rule.as_deref(), row.tier),
+            (
+                Some("graph:solidity"),
+                Some("inherited_event_by_name"),
+                "heuristic"
+            )
+        );
+        let open = why_edge(
+            &m,
+            "src::Guestbook::Guestbook::open",
+            "src::Guestbook::Guestbook::Opened",
+            Some("EVENT_FLOWS"),
+        )
+        .expect("answers");
+        let row = open.edges.first().expect("an edge");
+        assert_eq!(
+            (row.emitter.as_deref(), row.tier),
+            (Some("parser:solidity"), "fact")
+        );
+    }
+
     /// DT.10b: a contract named at the site or the one covering an ABI stays
     /// derived; the hint rules of another emitter are not demoted.
     #[test]
@@ -920,6 +999,21 @@ mod tests {
                 Some("name-only binding (global_unique)".to_string())
             )
         );
+        // HQ.3: a Solidity emit bound through a name-only heritage edge, or
+        // to a type found by its unique name, is heuristic; one bound through
+        // a fact heritage edge stays fact.
+        for rule in ["inherited_event_by_name", "qualified_event_by_name"] {
+            assert_eq!(
+                tier(&at("graph:solidity", Some(rule)), Confidence::Strong),
+                (Tier::Heuristic, Some(format!("name-only binding ({rule})")))
+            );
+        }
+        for rule in ["inherited_event", "qualified_event"] {
+            assert_eq!(
+                tier(&at("graph:solidity", Some(rule)), Confidence::Strong),
+                (Tier::Fact, None)
+            );
+        }
         let unplaced = Evidence::emitter("graph:calls").rule("import_binding");
         assert_eq!(
             tier(&unplaced, Confidence::Medium),

@@ -81,6 +81,11 @@ fn parse_with_stats(
     if let Some(line) = abi_marker(&acc.abi, file_rel_path) {
         eprintln!("{line}");
     }
+    // HQ.3 fired_on marker, once per file with an emit the parser left to the
+    // graph's inherited / qualified event binding.
+    if let Some(line) = acc.emits.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
 
     Ok((
         FileParse {
@@ -124,6 +129,32 @@ struct Acc {
     nav: CodeNav,
     natspec: NatspecStats,
     abi: AbiStats,
+    emits: EmitStats,
+}
+
+/// HQ.3: per-file tallies behind the `[sol-events] own=` marker: the emits
+/// of an event their own contract declares (a direct EVENT_FLOWS edge) and
+/// the ones left as EVENT_FLOWS refs, unqualified (`emit E(..)`) or
+/// qualified (`emit I.E(..)`).
+#[derive(Default)]
+struct EmitStats {
+    own: usize,
+    bare: usize,
+    qualified: usize,
+}
+
+impl EmitStats {
+    /// `[sol-events] own=<o> refs=<r> (bare=<b> qualified=<q>) path=<f>`,
+    /// `None` when the file left no emit to the graph.
+    fn marker(&self, file_rel_path: &str) -> Option<String> {
+        let refs = self.bare + self.qualified;
+        (refs > 0).then(|| {
+            format!(
+                "[sol-events] own={} refs={refs} (bare={} qualified={}) path={file_rel_path}",
+                self.own, self.bare, self.qualified
+            )
+        })
+    }
 }
 
 /// Per-file tallies behind the `[sol-abi]` marker (DT.10a): procedures
@@ -157,11 +188,15 @@ struct ProcEntry {
 type ContractAbi = BTreeMap<String, ProcEntry>;
 
 /// The contract a member is declared in: its simple name and its kind
-/// (CLASS for a contract, INTERFACE, PACKAGE for a library).
+/// (CLASS for a contract, INTERFACE, PACKAGE for a library); HQ.3: the names
+/// of the events its own body declares (before or after any function) and
+/// the file MODULE an emit ref resolves from.
 #[derive(Clone, Copy)]
 struct Owner<'a> {
     name: &'a str,
     kind: glia_core::NodeKindId,
+    events: &'a HashSet<String>,
+    module_id: NodeId,
 }
 
 /// Visit the file root's declarations. `module_qname` / `module_id` are the
@@ -275,7 +310,16 @@ fn visit_contract(
     // its `inheritance_specifier` children appear directly under the contract.
     collect_heritage(node, src, id, module_id, local_interfaces, acc);
 
-    let owner = Owner { name, kind };
+    let events = node
+        .child_by_field_name("body")
+        .map(|body| own_events(body, src))
+        .unwrap_or_default();
+    let owner = Owner {
+        name,
+        kind,
+        events: &events,
+        module_id,
+    };
     let mut abi = ContractAbi::new();
     if let Some(body) = node.child_by_field_name("body") {
         let mut c = body.walk();
@@ -538,20 +582,68 @@ fn visit_function(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
-        collect_emits_in(body, src, parent_qname, id, repo, acc);
+        collect_emits_in(body, src, parent_qname, owner, id, repo, acc);
     }
 }
 
-/// Walk a function body for `emit Foo(...)` statements and wire an EVENT_FLOWS
-/// edge from the emitting function (`from`) to the event node. The event is
-/// declared in the same contract, so its NodeId is name-derived against the
-/// contract qname (`parent_qname`) using the EVENT_EMITTER kind — matching the
-/// node `visit_event` produces. Nested functions are not descended into (their
-/// own emits are wired when they are visited).
+/// HQ.3: the names of the events a contract body declares itself, read
+/// before its functions are visited, so an event declared after the function
+/// that emits it is still the contract's own.
+fn own_events(body: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|c| c.kind() == "event_definition")
+        .filter_map(|c| c.child_by_field_name("name"))
+        .map(|n| text_of(n, src).to_string())
+        .collect()
+}
+
+/// What an `emit` names: an event of the emitting contract's own body, or
+/// one the graph binds through the contract's bases or the named type.
+#[derive(Debug, PartialEq, Eq)]
+enum EmitTarget<'a> {
+    /// `emit E(..)` of an event the contract declares.
+    Own(&'a str),
+    /// `emit E(..)` of an event the contract does not declare: inherited,
+    /// or declared outside the repo.
+    Bare(&'a str),
+    /// `emit I.E(..)`: the event `E` of the type `I` (a deeper path keeps
+    /// its last two segments).
+    Qualified { base: &'a str, name: &'a str },
+}
+
+/// Classify an emit's event text against the contract's own `events`.
+fn emit_target<'a>(event: &'a str, events: &HashSet<String>) -> Option<EmitTarget<'a>> {
+    let event = event.trim();
+    if event.is_empty() {
+        return None;
+    }
+    match event.rsplit_once('.') {
+        Some((path, name)) => {
+            let base = path.rsplit('.').next().unwrap_or(path).trim();
+            let name = name.trim();
+            (!base.is_empty() && !name.is_empty()).then_some(EmitTarget::Qualified { base, name })
+        }
+        None if events.contains(event) => Some(EmitTarget::Own(event)),
+        None => Some(EmitTarget::Bare(event)),
+    }
+}
+
+/// Walk a function body for `emit Foo(...)` statements. An emit of an event
+/// the contract declares itself wires an EVENT_FLOWS edge from the emitting
+/// function (`from`) to the event node, its NodeId name-derived against the
+/// contract qname (`contract_qname`) with the EVENT_EMITTER kind, matching
+/// the node `visit_event` produces. HQ.3: any other emit (an event a base
+/// declares, `emit E(..)`, or one named through a type, `emit I.E(..)`) is
+/// an EVENT_FLOWS [`UnresolvedRef`] (`Bare(E)` / `Attribute { base: I, name:
+/// E }`, at the emit's row) the graph binds through the contract's bases or
+/// the named type, never an edge to an id no node has. Nested functions are
+/// not descended into (their own emits are wired when they are visited).
 fn collect_emits_in(
     node: TsNode,
     src: &[u8],
     contract_qname: &str,
+    owner: Owner<'_>,
     from: NodeId,
     repo: RepoId,
     acc: &mut Acc,
@@ -562,15 +654,41 @@ fn collect_emits_in(
             && let Some(name_node) = n.child_by_field_name("name")
         {
             let event = text_of(unwrap_expression(name_node), src);
-            if !event.is_empty() {
-                let to_qname = format!("{contract_qname}::{event}");
-                let to = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &to_qname);
-                acc.edges.push(Edge {
+            let qualifier = match emit_target(event, owner.events) {
+                Some(EmitTarget::Own(event)) => {
+                    acc.emits.own += 1;
+                    let to_qname = format!("{contract_qname}::{event}");
+                    let to =
+                        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &to_qname);
+                    acc.edges.push(Edge {
+                        from,
+                        to,
+                        category: edge_category::EVENT_FLOWS,
+                        confidence: Confidence::Strong,
+                        cells: Vec::new(),
+                    });
+                    None
+                }
+                Some(EmitTarget::Bare(event)) => {
+                    acc.emits.bare += 1;
+                    Some(CallQualifier::Bare(event.to_string()))
+                }
+                Some(EmitTarget::Qualified { base, name }) => {
+                    acc.emits.qualified += 1;
+                    Some(CallQualifier::Attribute {
+                        base: base.to_string(),
+                        name: name.to_string(),
+                    })
+                }
+                None => None,
+            };
+            if let Some(qualifier) = qualifier {
+                acc.refs.push(UnresolvedRef {
                     from,
-                    to,
+                    from_module: owner.module_id,
+                    qualifier,
                     category: edge_category::EVENT_FLOWS,
-                    confidence: Confidence::Strong,
-                    cells: Vec::new(),
+                    line: line_at(n),
                 });
             }
         }
@@ -1471,6 +1589,140 @@ contract Auction {
             "expected an EVENT_FLOWS edge bid -> BidPlaced, got {:?}",
             fp.edges
         );
+    }
+
+    /// HQ.3: the EVENT_FLOWS refs of a parse, as `(from name, qualifier, row)`.
+    fn emit_refs(fp: &FileParse) -> Vec<(String, CallQualifier, u32)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::EVENT_FLOWS)
+            .map(|r| {
+                (
+                    fp.nav.name_by_id.get(&r.from).cloned().unwrap_or_default(),
+                    r.qualifier.clone(),
+                    r.line,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inherited_and_qualified_emits_are_refs_own_emits_stay_edges() {
+        // HQ.3: an emit of the contract's own event (declared after the
+        // function that emits it) keeps the direct edge; an inherited
+        // `emit Signed(..)` and a qualified `emit IGuestbook.Cleared(..)` are
+        // EVENT_FLOWS refs at the emit's row, never an edge to a guessed id.
+        let source = r#"
+contract Guestbook is IGuestbook {
+    function open() external {
+        emit Opened(msg.sender);
+    }
+    function sign(string calldata note) external {
+        emit Signed(msg.sender, note);
+    }
+    function clear() external {
+        emit IGuestbook.Cleared(0);
+    }
+    function deep() external {
+        emit lib.IGuestbook.Cleared(1);
+    }
+    event Opened(address owner);
+}
+"#;
+        let fp = parse_file(source, "src/Guestbook.sol", "src::Guestbook", repo()).unwrap();
+        let flows = edge_qnames(&fp, edge_category::EVENT_FLOWS);
+        assert_eq!(
+            flows,
+            [(
+                "src::Guestbook::Guestbook::open".to_string(),
+                "src::Guestbook::Guestbook::Opened".to_string()
+            )]
+        );
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        };
+        let mut refs = emit_refs(&fp);
+        refs.sort_by_key(|r| r.2);
+        assert_eq!(
+            refs,
+            [
+                (
+                    "sign".to_string(),
+                    CallQualifier::Bare("Signed".to_string()),
+                    6
+                ),
+                ("clear".to_string(), attr("IGuestbook", "Cleared"), 9),
+                ("deep".to_string(), attr("IGuestbook", "Cleared"), 12),
+            ]
+        );
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::EVENT_FLOWS)
+                .all(|r| r.from_module
+                    == NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Guestbook")),
+            "an emit ref resolves from the file MODULE"
+        );
+        assert_eq!(
+            fp_emit_marker(source),
+            Some(
+                "[sol-events] own=1 refs=3 (bare=1 qualified=2) path=src/Guestbook.sol".to_string()
+            )
+        );
+    }
+
+    /// The `[sol-events] own=` line one source's parse prints.
+    fn fp_emit_marker(source: &str) -> Option<String> {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_solidity::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let src = source.as_bytes();
+        let mut acc = Acc::default();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Guestbook");
+        let locals = collect_local_interfaces(tree.root_node(), src);
+        visit_top(
+            tree.root_node(),
+            src,
+            "src/Guestbook.sol",
+            "src::Guestbook",
+            module_id,
+            repo(),
+            &locals,
+            &mut acc,
+        );
+        acc.emits.marker("src/Guestbook.sol")
+    }
+
+    #[test]
+    fn a_file_of_own_emits_prints_no_events_line() {
+        // HQ.3: the line counts only files that left an emit to the graph.
+        let source = r#"
+contract Auction {
+    event BidPlaced(uint256 amount);
+    function bid(uint256 amount) public { emit BidPlaced(amount); }
+}
+"#;
+        let fp = parse_file(source, "Auction.sol", "Auction", repo()).unwrap();
+        assert!(emit_refs(&fp).is_empty());
+        assert_eq!(fp_emit_marker(source), None);
+    }
+
+    #[test]
+    fn emit_target_splits_a_path_on_its_last_two_segments() {
+        let own: HashSet<String> = ["Mine".to_string()].into_iter().collect();
+        assert_eq!(emit_target("Mine", &own), Some(EmitTarget::Own("Mine")));
+        assert_eq!(emit_target("Other", &own), Some(EmitTarget::Bare("Other")));
+        assert_eq!(
+            emit_target("a.I.E", &own),
+            Some(EmitTarget::Qualified {
+                base: "I",
+                name: "E"
+            })
+        );
+        assert_eq!(emit_target("Mine.", &own), None);
+        assert_eq!(emit_target("  ", &own), None);
     }
 
     #[test]

@@ -2099,6 +2099,14 @@ fn decide_ref(
         | CallQualifier::ComplexReceiver { .. } => None,
     };
 
+    // HQ.3: an EVENT_FLOWS ref (a Solidity emit of an event its contract does
+    // not declare) binds only an EVENT_EMITTER; a same-named struct, function
+    // or type of the file is refused, and the ref is left to
+    // `build::solidity`'s inherited / qualified event binding.
+    let resolved = resolved.filter(|(to, _)| {
+        r.category != edge_category::EVENT_FLOWS
+            || g.nav.kind_by_id.get(to) == Some(&node_kind::EVENT_EMITTER)
+    });
     // GD.7: a type never extends or implements itself; a lookup that answers
     // the declaring type (a same-named base read in its own scope) binds
     // nothing.
@@ -3512,7 +3520,7 @@ fn method_level_implements(
 /// Deepest superclass chain [`resolve_inherited_calls`] and
 /// [`emit_override_implements`] climb; a longer one (or a cycle a bad merge
 /// left, `A extends B`, `B extends A`) is cut here and by the visited set.
-const MAX_INHERIT_LEVELS: usize = 16;
+pub(crate) const MAX_INHERIT_LEVELS: usize = 16;
 
 /// What one TS-family graph build bound along INHERITS_FROM (CH.1b): the
 /// `this.m()` / `super.m()` sites [`resolve_inherited_calls`] bound, the

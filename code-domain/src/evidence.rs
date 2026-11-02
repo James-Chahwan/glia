@@ -22,7 +22,10 @@
 //!     `graph:reads` (DT.5h: a Dart member read no call follows, a getter's
 //!     CALLS or a tear-off's / static field's USES), `graph:dart` (DT.5i: a
 //!     call on a Riverpod provider read, typed by the provider's declaration,
-//!     rule `provider_receiver`);
+//!     rule `provider_receiver`), `graph:solidity` (HQ.3: a Solidity emit of
+//!     an event a base declares, rule `inherited_event`, or of `I.E`, rule
+//!     `qualified_event`; `_by_name` when reached through a name-only
+//!     binding);
 //!     `graph:build` stamps whatever edge the build added without naming one;
 //!   - `resolver`  — a cross-graph resolver (`resolver:http`, ...);
 //!   - `pass`      — an engine post-pass (`pass:doclink`, `pass:tests`, ...);

@@ -1,0 +1,21 @@
+{
+  "framework": "solidity-inherited-events",
+  "language": "solidity",
+  "dirs": ["."],
+  "note": "HQ.3: events live in the interface (zora-protocol's shape). An emit of an event the emitting contract does not declare binds the event its base or the named type declares, never an EVENT_FLOWS edge to an id no node has. Cells not claimed: solidity/eventbus is graded by solidity-event_flows. Emits inside a constructor are not read (a recall gap), so the local control emits from a function.",
+  "expect_nodes": [
+    {"kind": "EVENT_EMITTER", "name": "src::interfaces::IGuestbook::IGuestbook::Signed", "exact": true, "note": "interface event, src/interfaces/IGuestbook.sol"},
+    {"kind": "EVENT_EMITTER", "name": "src::interfaces::IGuestbook::IGuestbook::Cleared", "exact": true, "note": "interface event, src/interfaces/IGuestbook.sol"},
+    {"kind": "EVENT_EMITTER", "name": "src::Guestbook::Guestbook::Opened", "exact": true, "note": "the contract's own event"}
+  ],
+  "expect_edges": [
+    {"from": "src::Guestbook::Guestbook::open", "to": "src::Guestbook::Guestbook::Opened", "category": "EVENT_FLOWS", "exact": true, "note": "positive control: emit Opened(..) of the contract's own event, the parser's direct edge"},
+    {"from": "src::Guestbook::Guestbook::sign", "to": "src::interfaces::IGuestbook::IGuestbook::Signed", "category": "EVENT_FLOWS", "exact": true, "note": "emit Signed(..) inherited from IGuestbook through `contract Guestbook is IGuestbook` (graph:solidity inherited_event_by_name: the heritage edge binds by unique name)"},
+    {"from": "src::Guestbook::Guestbook::clear", "to": "src::interfaces::IGuestbook::IGuestbook::Cleared", "category": "EVENT_FLOWS", "exact": true, "note": "emit IGuestbook.Cleared(..), qualified through the base (qualified_event_by_name)"},
+    {"from": "test::Guestbook.t::GuestbookTest::testSignEmits", "to": "src::interfaces::IGuestbook::IGuestbook::Signed", "category": "EVENT_FLOWS", "exact": true, "note": "emit IGuestbook.Signed(..) from a test contract with no heritage: the type by its unique name (qualified_event_by_name)"}
+  ],
+  "forbid": [
+    {"from": "src::Guestbook::Guestbook::sign", "to": "src::Guestbook::Guestbook::Signed", "category": "EVENT_FLOWS", "note": "the id the parser guessed before HQ.3 (no node carries it); a guard should a node ever be minted there"},
+    {"kind": "EVENT_EMITTER", "name": "src::Guestbook::Guestbook::Signed"}
+  ]
+}

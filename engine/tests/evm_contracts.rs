@@ -394,12 +394,19 @@ fn why_tiers_each_pairing_and_absences_carry_the_evm_caveats() {
     .expect("both sides name a node");
     assert!(!a.found, "{a:#?}");
     let absence = a.absence.expect("no edge, an absence");
+    // HQ.3: a Solidity repo's absence also carries the solidity EVENT_FLOWS
+    // row (how an emit binds its event), after the universal one.
     let ev: Vec<_> = absence
         .caveats
         .iter()
         .filter(|c| c.edge_category == "EVENT_FLOWS")
         .collect();
-    assert_eq!(ev.len(), 1, "{:#?}", absence.caveats);
+    assert_eq!(
+        ev.iter().map(|c| c.language).collect::<Vec<_>>(),
+        ["*", "solidity"],
+        "{:#?}",
+        absence.caveats
+    );
     assert!(
         ev[0].note.contains("contract event subscription"),
         "{}",

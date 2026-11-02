@@ -38,6 +38,7 @@ mod go_wire;
 mod lua;
 mod partial;
 mod route_mounts;
+mod solidity;
 
 pub use partial::{BodyEdit, RebodyStats, Refused};
 
@@ -772,6 +773,9 @@ where
     tally.note_front(front);
     let mut inh = InheritStats::default();
     ts_stitch(&mut g, &body, inherit.then_some(&mut inh), None, &mut tally);
+    // HQ.3: a Solidity emit of an inherited or qualified event, once the
+    // heritage edges are drawn (no other language writes an EVENT_FLOWS ref).
+    solidity::resolve_emit_refs(&mut g);
     if inherit {
         emit_override_implements(&mut g, &mut inh);
         inh.report();
